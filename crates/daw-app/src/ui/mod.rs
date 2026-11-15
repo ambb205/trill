@@ -29,6 +29,7 @@
 
 mod app;
 mod arrangement;
+mod brand;
 mod browser;
 mod colors;
 mod detail;
@@ -113,6 +114,7 @@ pub fn run(session: SharedSession, options: UiOptions) -> anyhow::Result<()> {
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("DAW")
+            .with_icon(brand::icon(64))
             .with_inner_size(options.window_size)
             .with_min_inner_size(MIN_WINDOW_SIZE),
         ..Default::default()

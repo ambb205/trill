@@ -28,3 +28,7 @@ rfd = "0.18"
 pollster = "1"
 # Encodes `--screenshot` output.
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[build-dependencies]
+# Embeds the icon in the Windows executable.
+winresource = "0.1"

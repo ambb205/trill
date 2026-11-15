@@ -3,13 +3,15 @@
 //! audio thread's load and the MCP address.
 
 use super::state::{Cx, DetailTab};
-use super::{arrangement, files, piano_roll, timeline};
+use super::{arrangement, brand, files, piano_roll, timeline};
 use daw_core::project::{MAX_TEMPO, MIN_TEMPO};
 use daw_noir::{Chip, Icon, MenuItem, NumberField, TextStyle, Theme, paint, text};
 use eframe::egui::{self, Align2, Id, Rect, Sense, Ui, pos2, vec2};
 
 pub const HEIGHT: f32 = 36.0;
 const EDGE: f32 = 10.0;
+/// Space between the mark and the wordmark.
+const MARK_GAP: f32 = 9.0;
 /// Space between unrelated groups.
 const GAP: f32 = 14.0;
 /// Height of the boxes in the bar: buttons, readouts.
@@ -56,6 +58,7 @@ fn project_group(ui: &mut Ui, cx: &mut Cx, bar: Rect) -> f32 {
     let mut x = bar.left() + EDGE;
     let row = |x: f32| Rect::from_min_max(pos2(x, bar.top()), bar.max);
 
+    x += brand::paint_centered(&painter, x, bar.center().y, 1.0).width() + MARK_GAP;
     x += text::paint(&painter, row(x), Align2::LEFT_CENTER, theme.text.brand, "DAW", theme.ink) + GAP;
 
     let name = &cx.snap.project.name;

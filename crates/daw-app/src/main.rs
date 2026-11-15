@@ -11,7 +11,7 @@ use anyhow::Context;
 use daw_core::device::{CompositeFactory, DeviceFactory};
 use daw_dsp::BuiltinFactory;
 use daw_engine::{Session, SharedSession};
-use daw_plugins::{ClapConfig, ClapFactory, ScanMode, Scanner};
+use daw_plugins::{PluginHost, ScanMode, Scanner};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
@@ -31,9 +31,9 @@ fn main() -> anyhow::Result<()> {
     // device factories
     let mut factories: Vec<Box<dyn DeviceFactory>> = vec![Box::new(BuiltinFactory)];
     if cli.plugins_enabled() {
-        let config = ClapConfig { scanner: Scanner::CurrentExecutable, ..ClapConfig::default() };
-        let plugins = ClapFactory::new(config).context("could not start the plugin host")?;
-        factories.push(Box::new(plugins.clone()));
+        // CLAP and VST3 plugins, each scanned in a process of its own.
+        let plugins = PluginHost::new(Scanner::CurrentExecutable).context("could not start the plugin host")?;
+        factories.extend(plugins.factories());
         // The first scan of a machine's plugins takes seconds. It runs in
         // the background; the window lists plugins once it is done.
         std::thread::Builder::new().name("plugin-scan".into()).spawn(move || {
