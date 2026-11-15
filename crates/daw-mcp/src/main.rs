@@ -66,23 +66,6 @@ fn parse_args() -> anyhow::Result<Option<Options>> {
     Ok(Some(options))
 }
 
-/// Logs to stderr: with the stdio transport, stdout belongs to the protocol.
-struct StderrLogger;
-
-impl log::Log for StderrLogger {
-    fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= log::Level::Info
-    }
-
-    fn log(&self, record: &log::Record) {
-        if self.enabled(record.metadata()) {
-            eprintln!("[{}] {}", record.level(), record.args());
-        }
-    }
-
-    fn flush(&self) {}
-}
-
 fn main() -> anyhow::Result<()> {
     // Plugin files are scanned in a child process of this same executable.
     daw_plugins::scan::run_as_scanner_if_requested();
@@ -91,8 +74,8 @@ fn main() -> anyhow::Result<()> {
         println!("{USAGE}");
         return Ok(());
     };
-    log::set_logger(&StderrLogger).ok();
-    log::set_max_level(log::LevelFilter::Info);
+    // To stderr: with the stdio transport, stdout belongs to the protocol.
+    daw_mcp::logging::init_stderr();
 
     // device factories
     let mut factories: Vec<Box<dyn DeviceFactory>> = vec![Box::new(BuiltinFactory)];

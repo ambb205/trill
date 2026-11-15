@@ -6,7 +6,7 @@ An open-source digital audio workstation written in Rust. The goals:
 
 - **It does not crash or stall.** The audio thread never allocates, locks or waits; plugins are scanned in a
   separate process; a device that panics produces a moment of silence instead of taking the app down.
-- **It hosts your plugins.** CLAP today; VST3 is in progress.
+- **It hosts your plugins.** CLAP and VST3.
 - **An AI can drive all of it.** Every operation is available over the
   [Model Context Protocol](https://modelcontextprotocol.io), so an assistant can compose, arrange, mix and render a
   song, and read back loudness and spectral measurements to judge its own work.
@@ -58,11 +58,13 @@ calls.
 brickwall), `chorus`, `filter` (resonant, with LFO), `pump` (sidechain-style ducking locked to the grid),
 `saturator`, `utility`.
 
-**Plugins**: installed CLAP plugins appear beside the built-in devices as `clap:<plugin id>`. Their state is saved
-in the project, and their parameters are automatable and reachable over MCP like any other device's.
+**Plugins**: installed CLAP and VST3 plugins appear beside the built-in devices as `clap:<plugin id>` and
+`vst3:<class id>`. Their state is saved in the project, and their parameters are automatable and reachable over
+MCP like any other device's.
 
-**Engine**: sample-accurate MIDI and audio clips, clip looping, automation of track volume/pan and any device
-parameter, sample-exact transport looping, mute/solo, undo/redo, offline rendering that is bit-identical to
+**Engine**: sample-accurate MIDI and audio clips, clip looping, non-destructive trimming and splitting, audio
+fades, automation of track and master volume, pan and any device parameter with straight, held or curved
+segments, sample-exact transport looping, mute/solo, undo/redo, offline rendering that is bit-identical to
 playback, and render analysis (peak, LUFS, stereo correlation, spectral balance, per-track levels).
 
 **Application**: arrangement view with clip editing, piano roll, device panels generated from each device's
@@ -75,9 +77,9 @@ parameters, mixer strips with meters, project files, WAV export.
 | Project | `get_project`, `set_project`, `new_project`, `save_project`, `load_project`, `history` |
 | Tracks | `create_track`, `update_track`, `delete_track` |
 | Devices | `list_devices`, `describe_device`, `add_device`, `get_device`, `update_device`, `delete_device` |
-| Clips | `create_clip`, `create_audio_clip`, `update_clip`, `duplicate_clip`, `delete_clip` |
+| Clips | `create_clip`, `create_audio_clip`, `update_clip`, `split_clip`, `duplicate_clip`, `delete_clip` |
 | Notes | `get_notes`, `add_notes`, `set_notes`, `remove_notes`, `transform_notes` |
-| Automation | `set_automation`, `get_automation` |
+| Automation | `set_automation`, `get_automation`, `set_markers` |
 | Playback | `transport`, `render` |
 
 Time is in beats. Pitches are MIDI numbers, note names (`"F#3"`) or drum names (`"kick"`). Notes can be written
@@ -91,7 +93,7 @@ crates/
   daw-core      Project model, edit operations, and the device API. No audio or UI dependencies.
   daw-dsp       Built-in instruments and effects.
   daw-engine    Realtime engine, offline renderer, analysis, and the Session.
-  daw-plugins   Plugin hosting: scanning in a child process, the plugin main thread, CLAP.
+  daw-plugins   Plugin hosting: scanning in a child process, the plugin main thread, CLAP and VST3.
   daw-mcp       MCP server (library) and the headless `daw-mcp` binary.
   daw-app       The desktop application (`daw`).
 ```
@@ -114,7 +116,7 @@ the graph is swapped on every block). The GUI is tested headlessly with simulate
 
 Working: everything listed above, with tests.
 
-Not yet: VST3 hosting (in progress), plugin editor windows, running plugins out of process (only scanning is
+Not yet: plugin editor windows, running plugins out of process (only scanning is
 isolated today, so a plugin that crashes while playing still takes the app with it), session (clip-launching)
 view, audio recording, time-stretching/warping, group and return tracks, MIDI input devices, plugin delay
 compensation, multi-core rendering, compressed audio formats (audio clips are WAV only). Only Windows has been

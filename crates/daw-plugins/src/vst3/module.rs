@@ -26,16 +26,34 @@ const GET_FACTORY: &[u8] = b"GetPluginFactory\0";
 /// and unloads its library; every object obtained from it must be gone by
 /// then.
 pub(crate) struct Module {
-    /// `None` only while the module is being loaded or dropped.
-    factory: Option<ComPtr<IPluginFactory>>,
-    /// Called once the factory is released, if the module has one.
+    /// Declared first: the factory is released before the module is shut
+    /// down, after which nothing of the module may be touched.
+    factory: ComPtr<IPluginFactory>,
+    _entered: Entered,
+}
+
+/// A library whose entry function has been called. Dropping it calls the
+/// exit function and then unloads the library.
+struct Entered {
     exit: Option<Exit>,
     /// Whatever the entry function needs kept for as long as the module
     /// is in use.
     _context: platform::Context,
-    /// `None` for a factory that did not come from a library. Declared
+    /// `None` for a module that did not come from a library. Declared
     /// last, so that the library is unloaded after everything else.
     _library: Option<Library>,
+}
+
+impl Drop for Entered {
+    fn drop(&mut self) {
+        if let Some(exit) = self.exit {
+            // SAFETY: the entry function succeeded, and the module's
+            // factory is released, which is when the exit function is to
+            // be called. The library is still loaded: the fields are
+            // dropped after this.
+            unsafe { exit() };
+        }
+    }
 }
 
 impl Module {
@@ -47,8 +65,9 @@ impl Module {
         // contained where it matters: scanning runs in its own process.
         let library = unsafe { Library::new(path) }.map_err(|error| error.to_string())?;
         let (context, exit) = platform::enter(&library, path)?;
-        // From here on, dropping `module` calls the exit function.
-        let mut module = Self { factory: None, exit, _context: context, _library: None };
+        // From here on, leaving this function early calls the exit
+        // function, and only then unloads the library.
+        let mut entered = Entered { exit, _context: context, _library: None };
         // SAFETY: a VST3 module exports `GetPluginFactory` with this
         // signature, and may be asked for its factory once entered.
         let factory = unsafe {
@@ -56,38 +75,21 @@ impl Module {
             let get_factory = get_factory.map_err(|_| "it is not a VST3 module (no GetPluginFactory)")?;
             ComPtr::from_raw(get_factory())
         };
-        module.factory = Some(factory.ok_or("the module provides no plugin factory")?);
-        module._library = Some(library);
-        Ok(module)
+        let factory = factory.ok_or("the module provides no plugin factory")?;
+        entered._library = Some(library);
+        Ok(Self { factory, _entered: entered })
     }
 
     /// Wraps a factory that is compiled into this program, as if it had
     /// been loaded from a library.
     #[cfg(test)]
     pub(crate) fn from_factory(factory: ComPtr<IPluginFactory>) -> Self {
-        Self { factory: Some(factory), exit: None, _context: Default::default(), _library: None }
+        Self { factory, _entered: Entered { exit: None, _context: Default::default(), _library: None } }
     }
 
     /// The module's class factory.
     pub(crate) fn factory(&self) -> &ComPtr<IPluginFactory> {
-        // Set for the whole time between `load` and `drop`.
-        self.factory.as_ref().expect("a loaded module has a factory")
-    }
-}
-
-impl Drop for Module {
-    fn drop(&mut self) {
-        // The factory goes first: after the exit function nothing of the
-        // module may be touched.
-        self.factory = None;
-        if let Some(exit) = self.exit {
-            // SAFETY: the entry function succeeded, and every object of
-            // the module is released, which is when the exit function is
-            // to be called.
-            unsafe { exit() };
-        }
-        // The fields are dropped next, in declaration order: the entry
-        // context, then the library.
+        &self.factory
     }
 }
 

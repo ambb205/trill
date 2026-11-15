@@ -236,6 +236,13 @@ pub fn descriptor_summary_json(descriptor: &DeviceDescriptor) -> Value {
     if descriptor.vendor != "Built-in" {
         out["vendor"] = json!(descriptor.vendor);
     }
+    // A plugin installed in two formats is listed twice under one name; the
+    // format tells the entries apart.
+    if let Some((scheme, _)) = daw_core::device::split_uri(&descriptor.uri)
+        && scheme != daw_core::device::BUILTIN_SCHEME
+    {
+        out["format"] = json!(scheme);
+    }
     if !descriptor.presets.is_empty() {
         out["presets"] = descriptor
             .presets

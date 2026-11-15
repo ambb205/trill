@@ -295,7 +295,8 @@ impl DawServer {
     }
 
     /// The catalog of instruments and effects that can be added, with their presets. Built-in devices have
-    /// `builtin:` URIs; installed plugins appear with `clap:` URIs.
+    /// `builtin:` URIs; installed plugins appear with `clap:` and `vst3:` URIs (a plugin installed in both
+    /// formats is listed once per format; either works).
     #[tool(annotations(title = "List devices", read_only_hint = true))]
     fn list_devices(&self, Parameters(request): Parameters<ListDevicesRequest>) -> CallToolResult {
         // Read outside the session lock: the first plugin scan can take
