@@ -39,7 +39,7 @@ const BLOCK: usize = 512;
 // ---- helpers -------------------------------------------------------------
 
 fn scanner_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_daw-plugin-scan"))
+    PathBuf::from(env!("CARGO_BIN_EXE_trill-plugin-scan"))
 }
 
 fn scanner() -> Scanner {

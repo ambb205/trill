@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 const INSTRUCTIONS: &str = "\
-This server controls a digital audio workstation. You compose, arrange and mix a song by calling tools; the \
+This server controls Trill, a digital audio workstation. You compose, arrange and mix a song by calling tools; the \
 user hears and sees every change live.
 
 Conventions
@@ -126,7 +126,7 @@ fn default_render_path(session: &Session) -> PathBuf {
         .unwrap_or_default();
     let folder = match session.path().and_then(Path::parent) {
         Some(parent) => parent.join("renders"),
-        None => std::env::temp_dir().join("daw-renders"),
+        None => std::env::temp_dir().join("trill-renders"),
     };
     folder.join(format!("{name}-{stamp}.wav"))
 }
@@ -1042,7 +1042,7 @@ fn add_range_warning(out: &mut Value, session: &Session, clip: ClipId) {
 impl ServerHandler for DawServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("daw", env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
             .with_instructions(INSTRUCTIONS)
     }
 }

@@ -113,7 +113,7 @@ impl Default for UiOptions {
 pub fn run(session: SharedSession, options: UiOptions) -> anyhow::Result<()> {
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("DAW")
+            .with_title("Trill")
             .with_icon(brand::icon(64))
             .with_inner_size(options.window_size)
             .with_min_inner_size(MIN_WINDOW_SIZE),
@@ -124,7 +124,7 @@ pub fn run(session: SharedSession, options: UiOptions) -> anyhow::Result<()> {
     let failure = Arc::new(Mutex::new(None));
     let app_failure = failure.clone();
     eframe::run_native(
-        "daw",
+        "trill",
         native,
         Box::new(move |creation| Ok(Box::new(app::DawApp::new(&creation.egui_ctx, session, options, app_failure)))),
     )

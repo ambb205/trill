@@ -6,7 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "daw-mcp"
+name = "trill-mcp"
 path = "src/main.rs"
 
 [dependencies]

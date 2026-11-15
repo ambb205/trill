@@ -1,4 +1,4 @@
-//! `daw-mcp`: the DAW without a window, driven entirely over MCP.
+//! `trill-mcp`: Trill without a window, driven entirely over MCP.
 //!
 //! An MCP client launches this binary and talks to it over stdio (the
 //! default), or it can listen on a local HTTP port. Sound plays through the
@@ -14,10 +14,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 const USAGE: &str = "\
-daw-mcp: headless DAW controlled over the Model Context Protocol
+trill-mcp: Trill without a window, controlled over the Model Context Protocol
 
 USAGE:
-    daw-mcp [OPTIONS]
+    trill-mcp [OPTIONS]
 
 OPTIONS:
     --stdio              Serve MCP over stdin/stdout (default)

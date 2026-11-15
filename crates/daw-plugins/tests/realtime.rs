@@ -74,7 +74,7 @@ fn the_counter_counts() {
 }
 
 fn scanner() -> Scanner {
-    Scanner::Executable(PathBuf::from(env!("CARGO_BIN_EXE_daw-plugin-scan")))
+    Scanner::Executable(PathBuf::from(env!("CARGO_BIN_EXE_trill-plugin-scan")))
 }
 
 fn scratch(format: &str) -> PathBuf {

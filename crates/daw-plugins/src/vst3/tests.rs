@@ -603,7 +603,7 @@ fn the_lifecycle_runs_in_order_through_to_destruction() {
     // message the host made.
     let seen = scripted::seen(serial);
     assert_eq!(seen.greeting, Some(("héllo".to_string(), vec![1, 2, 3])));
-    assert_eq!(seen.host, "DAW");
+    assert_eq!(seen.host, "Trill");
 
     let DeviceInstance { processor, mut controller, .. } = instance;
     drop(processor);

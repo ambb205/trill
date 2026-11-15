@@ -240,7 +240,7 @@ impl DawApp {
 
     fn update_title(&mut self, ctx: &egui::Context) {
         let marker = if self.snapshot.modified { " \u{2022}" } else { "" };
-        let title = format!("{}{marker} - DAW", self.snapshot.project.name);
+        let title = format!("{}{marker} - Trill", self.snapshot.project.name);
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.title = title;
@@ -290,7 +290,7 @@ impl DawApp {
                 // A smoke test has nothing else to go by, so say what
                 // happened: where playback got to, on what output.
                 eprintln!(
-                    "daw: closing after {:.1} s; {} at beat {:.2}; output: {}; {} audio fault(s)",
+                    "trill: closing after {:.1} s; {} at beat {:.2}; output: {}; {} audio fault(s)",
                     elapsed.as_secs_f32(),
                     if self.live.playing { "playing" } else { "stopped" },
                     self.live.position,

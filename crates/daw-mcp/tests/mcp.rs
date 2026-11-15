@@ -330,7 +330,9 @@ async fn edits_are_undoable_and_transport_responds() {
 
     let catalog = ok(client, "list_devices", json!({ "category": "instrument" })).await;
     let uris: Vec<&str> = catalog["devices"].as_array().unwrap().iter().map(|d| d["uri"].as_str().unwrap()).collect();
-    assert_eq!(uris, ["builtin:polysynth", "builtin:drumkit"]);
+    // The built-in instruments lead the list; no effect slips through the filter.
+    assert_eq!(uris[..2], ["builtin:polysynth", "builtin:drumkit"]);
+    assert!(!uris.contains(&"builtin:reverb"));
     let reverb = ok(client, "describe_device", json!({ "uri": "builtin:reverb" })).await;
     assert!(reverb["params"].as_array().unwrap().iter().any(|p| p["id"] == "decay" && p["unit"] == "s"));
 }

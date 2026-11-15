@@ -4,7 +4,7 @@
 //! Reading a plugin's descriptors means loading its library and running its
 //! initialization code, and a broken plugin can crash or hang while doing
 //! that. So each file is scanned in a throwaway child process (the
-//! `daw-plugin-scan` executable) under a timeout. A file whose scan fails is
+//! `trill-plugin-scan` executable) under a timeout. A file whose scan fails is
 //! reported and skipped; it can never take the DAW down.
 //!
 //! Results are cached on disk by path and modification time, so only new or
@@ -26,11 +26,11 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 /// File name of the scanner executable, without the platform's extension.
-pub const SCANNER_NAME: &str = "daw-plugin-scan";
+pub const SCANNER_NAME: &str = "trill-plugin-scan";
 /// Set in the environment of every scanner process. It is what tells an
 /// application run as its own scanner ([`Scanner::CurrentExecutable`]) apart
 /// from a normal start.
-pub const SCANNER_ENV: &str = "DAW_PLUGIN_SCAN";
+pub const SCANNER_ENV: &str = "TRILL_PLUGIN_SCAN";
 
 /// Upper bound on scanner processes running at once. Scanning is dominated
 /// by loading libraries from disk, so more does not help.
@@ -68,7 +68,7 @@ pub struct ScanFailure {
 /// Where plugin files are scanned.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Scanner {
-    /// In a `daw-plugin-scan` process, using the executable found next to
+    /// In a `trill-plugin-scan` process, using the executable found next to
     /// the running one. If there is none, plugins are scanned inside this
     /// process and a warning is logged.
     #[default]
@@ -148,7 +148,7 @@ pub fn probe_file(path: &Path) -> Result<Vec<PluginRecord>, String> {
     }
 }
 
-/// Entry point of the scanner executable: `daw-plugin-scan <plugin file>`.
+/// Entry point of the scanner executable: `trill-plugin-scan <plugin file>`.
 ///
 /// Prints a [`ScanOutput`] as one line of JSON on stdout and exits with
 /// success, or prints the reason on stderr and exits with failure. A plugin

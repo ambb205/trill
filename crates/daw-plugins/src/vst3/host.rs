@@ -23,7 +23,7 @@ use vst3::Steinberg::{FIDString, TUID, int32, int64, kInvalidArgument, kResultFa
 use vst3::{Class, ComWrapper, Interface};
 
 /// The name plugins know this host by.
-const HOST_NAME: &str = "DAW";
+const HOST_NAME: &str = "Trill";
 /// Longest string attribute read from a plugin, in UTF-16 units. The end
 /// of a string is wherever the plugin put a NUL; this keeps a missing one
 /// from being searched for indefinitely.

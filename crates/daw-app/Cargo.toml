@@ -1,12 +1,12 @@
 [package]
 name = "daw-app"
-description = "The DAW application"
+description = "The Trill application"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "daw"
+name = "trill"
 path = "src/main.rs"
 
 [dependencies]

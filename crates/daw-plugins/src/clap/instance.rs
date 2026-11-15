@@ -93,7 +93,7 @@ impl ThreadState for ClapThread {
     fn new() -> Self {
         let version = CString::new(env!("CARGO_PKG_VERSION")).unwrap_or_default();
         Self {
-            host_info: HostInfo::new_from_cstring(c"DAW".into(), c"DAW".into(), c"".into(), version),
+            host_info: HostInfo::new_from_cstring(c"Trill".into(), c"Trill".into(), c"".into(), version),
             entries: HashMap::new(),
             instances: HashMap::new(),
             next_id: 1,

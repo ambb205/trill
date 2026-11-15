@@ -59,7 +59,7 @@ fn project_group(ui: &mut Ui, cx: &mut Cx, bar: Rect) -> f32 {
     let row = |x: f32| Rect::from_min_max(pos2(x, bar.top()), bar.max);
 
     x += brand::paint_centered(&painter, x, bar.center().y, 1.0).width() + MARK_GAP;
-    x += text::paint(&painter, row(x), Align2::LEFT_CENTER, theme.text.brand, "DAW", theme.ink) + GAP;
+    x += text::paint(&painter, row(x), Align2::LEFT_CENTER, theme.text.brand, "TRILL", theme.ink) + GAP;
 
     let name = &cx.snap.project.name;
     let width = text::width(&painter, theme.text.body, name).min(NAME_MAX_WIDTH);

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 pub const USAGE: &str = "\
-Usage: daw [OPTIONS] [PROJECT.dawproj]
+Usage: trill [OPTIONS] [PROJECT.trill]
 
 Options:
   --demo                  Start with the built-in demo song
@@ -252,11 +252,11 @@ mod tests {
 
     #[test]
     fn a_bare_argument_is_the_project_to_open() {
-        let cli = run(&["songs/idea.dawproj", "--null-audio"]).unwrap();
-        assert_eq!(cli.project, Some(PathBuf::from("songs/idea.dawproj")));
+        let cli = run(&["songs/idea.trill", "--null-audio"]).unwrap();
+        assert_eq!(cli.project, Some(PathBuf::from("songs/idea.trill")));
         assert_eq!(cli.audio_backend(), AudioBackend::Null { sample_rate: 48_000 });
-        assert!(run(&["a.dawproj", "b.dawproj"]).is_err());
-        assert!(run(&["--demo", "a.dawproj"]).is_err());
+        assert!(run(&["a.trill", "b.trill"]).is_err());
+        assert!(run(&["--demo", "a.trill"]).is_err());
     }
 
     #[test]

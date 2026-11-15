@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
-pub const PROJECT_EXTENSION: &str = "dawproj";
+pub const PROJECT_EXTENSION: &str = "trill";
 
 /// What a helper thread reports back.
 enum Event {
@@ -228,7 +228,7 @@ fn render(session: &SharedSession, path: &Path) -> Result<RenderReport, String> 
 }
 
 fn project_dialog(title: &str, current: Option<&Path>) -> rfd::AsyncFileDialog {
-    let dialog = rfd::AsyncFileDialog::new().set_title(title).add_filter("DAW project", &[PROJECT_EXTENSION]);
+    let dialog = rfd::AsyncFileDialog::new().set_title(title).add_filter("Trill project", &[PROJECT_EXTENSION]);
     match current.and_then(Path::parent) {
         Some(folder) => dialog.set_directory(folder),
         None => dialog,
@@ -369,9 +369,9 @@ mod tests {
 
     #[test]
     fn extensions_are_added_only_when_missing() {
-        assert_eq!(with_extension(Path::new("song"), "dawproj"), PathBuf::from("song.dawproj"));
-        assert_eq!(with_extension(Path::new("song.dawproj"), "dawproj"), PathBuf::from("song.dawproj"));
-        assert_eq!(with_extension(Path::new("song.DAWPROJ"), "dawproj"), PathBuf::from("song.DAWPROJ"));
+        assert_eq!(with_extension(Path::new("song"), "trill"), PathBuf::from("song.trill"));
+        assert_eq!(with_extension(Path::new("song.trill"), "trill"), PathBuf::from("song.trill"));
+        assert_eq!(with_extension(Path::new("song.TRILL"), "trill"), PathBuf::from("song.TRILL"));
         // Dots in the name are part of the name, not an extension to replace.
         assert_eq!(with_extension(Path::new("mix v1.2"), "wav"), PathBuf::from("mix v1.2.wav"));
         assert_eq!(with_extension(Path::new("dir.d/song"), "wav"), PathBuf::from("dir.d/song.wav"));
@@ -443,7 +443,7 @@ mod tests {
         let saved = session.lock().project().clone();
         assert!(session.lock().is_modified());
 
-        let path = scratch.0.join("night drive.dawproj");
+        let path = scratch.0.join("night drive.trill");
         assert_eq!(write(&session, &path), Ok(path.clone()));
         assert!(!session.lock().is_modified(), "saving clears the modified mark");
 
@@ -453,8 +453,8 @@ mod tests {
         assert_eq!(*session.lock().project(), saved);
         assert_eq!(session.lock().path(), Some(path.as_path()));
 
-        let missing = load(&session, &scratch.0.join("nope.dawproj")).unwrap_err();
-        assert!(missing.contains("nope.dawproj"), "{missing}");
+        let missing = load(&session, &scratch.0.join("nope.trill")).unwrap_err();
+        assert!(missing.contains("nope.trill"), "{missing}");
         assert_eq!(*session.lock().project(), saved, "a failed open leaves the project alone");
     }
 
@@ -493,7 +493,7 @@ mod tests {
         assert!(!jobs.dialog_open);
 
         jobs.sender.send(Event::Exported(Err("disk full".into()))).unwrap();
-        jobs.sender.send(Event::Saved(Ok(PathBuf::from("a/song.dawproj")))).unwrap();
+        jobs.sender.send(Event::Saved(Ok(PathBuf::from("a/song.trill")))).unwrap();
         jobs.poll(&mut state);
         assert_eq!(jobs.exporting(), None);
         assert_eq!(state.toasts.len(), 2);

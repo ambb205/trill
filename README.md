@@ -1,8 +1,8 @@
-<img src="assets/icon.svg" width="64" height="64" alt="">
+<img src="assets/trill-logo.svg" width="420" alt="Trill">
 
-# DAW
+# Trill
 
-An open-source digital audio workstation written in Rust. The goals:
+Trill is an open-source digital audio workstation written in Rust. The goals:
 
 - **It does not crash or stall.** The audio thread never allocates, locks or waits; plugins are scanned in a
   separate process; a device that panics produces a moment of silence instead of taking the app down.
@@ -31,18 +31,18 @@ While the app is open it serves MCP on `http://127.0.0.1:7777/mcp` (`--mcp-port`
 it off), so you can watch and hear the edits happen and undo them like your own:
 
 ```sh
-claude mcp add --transport http daw http://127.0.0.1:7777/mcp
+claude mcp add --transport http trill http://127.0.0.1:7777/mcp
 ```
 
 Or run the DAW without a window, launched by the MCP client over stdio:
 
 ```sh
 cargo build -p daw-mcp
-claude mcp add daw -- /path/to/target/debug/daw-mcp
+claude mcp add trill -- /path/to/target/debug/trill-mcp
 ```
 
 Then ask for music: *"Write a slow, warm synthwave track in A minor, about a minute long. Render it and check the
-mix."* [`examples/first-light.dawproj`](examples/first-light.dawproj) was written this way, entirely through tool
+mix."* [`examples/first-light.trill`](examples/first-light.trill) was written this way, entirely through tool
 calls.
 
 ## What is in the box
@@ -94,9 +94,11 @@ crates/
   daw-dsp       Built-in instruments and effects.
   daw-engine    Realtime engine, offline renderer, analysis, and the Session.
   daw-plugins   Plugin hosting: scanning in a child process, the plugin main thread, CLAP and VST3.
-  daw-mcp       MCP server (library) and the headless `daw-mcp` binary.
-  daw-app       The desktop application (`daw`).
+  daw-mcp       MCP server (library) and the headless `trill-mcp` binary.
+  daw-app       The desktop application (`trill`).
 ```
+
+The crates still carry the project's working title, `daw-`.
 
 Three ideas hold it together:
 

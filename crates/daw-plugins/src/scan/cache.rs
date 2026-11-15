@@ -13,7 +13,7 @@ use std::time::UNIX_EPOCH;
 /// Bumped whenever the file layout changes; older caches are discarded.
 const FORMAT_VERSION: u32 = 1;
 /// Name of the application's directory below the user's cache directory.
-const APPLICATION_DIRECTORY: &str = "daw";
+const APPLICATION_DIRECTORY: &str = "trill";
 
 /// The directory for this application's caches, following each platform's
 /// convention. `None` if the environment does not say where the user's
@@ -171,11 +171,11 @@ mod tests {
             _ => None,
         };
         let expected = if cfg!(windows) {
-            Path::new("local").join("daw")
+            Path::new("local").join("trill")
         } else if cfg!(target_os = "macos") {
-            Path::new("home").join("Library").join("Caches").join("daw")
+            Path::new("home").join("Library").join("Caches").join("trill")
         } else {
-            Path::new("home").join(".cache").join("daw")
+            Path::new("home").join(".cache").join("trill")
         };
         assert_eq!(directory_from(env), Some(expected));
         assert_eq!(directory_from(|_| None), None);
