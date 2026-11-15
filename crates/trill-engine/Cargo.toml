@@ -1,0 +1,17 @@
+[package]
+name = "trill-engine"
+description = "Realtime audio engine, offline renderer and the session that drives them"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+trill-core.workspace = true
+trill-dsp.workspace = true
+cpal.workspace = true
+hound.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+rtrb.workspace = true
+serde.workspace = true
+thiserror.workspace = true

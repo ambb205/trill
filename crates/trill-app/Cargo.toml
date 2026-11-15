@@ -1,0 +1,34 @@
+[package]
+name = "trill-app"
+description = "The Trill application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "trill"
+path = "src/main.rs"
+
+[dependencies]
+trill-core.workspace = true
+trill-dsp.workspace = true
+trill-engine.workspace = true
+trill-mcp.workspace = true
+trill-noir.workspace = true
+trill-plugins.workspace = true
+
+anyhow.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+
+eframe = "0.37"
+# Native open/save dialogs. They are awaited on a helper thread (see
+# `ui::files`), which is what `pollster` is for.
+rfd = "0.18"
+pollster = "1"
+# Encodes `--screenshot` output.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[build-dependencies]
+# Embeds the icon in the Windows executable.
+winresource = "0.1"

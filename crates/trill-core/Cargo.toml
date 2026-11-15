@@ -1,0 +1,12 @@
+[package]
+name = "trill-core"
+description = "Project model, edit operations and the device API shared by every other crate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

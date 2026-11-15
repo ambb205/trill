@@ -1033,133 +1033,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
-name = "daw-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "daw-core",
- "daw-dsp",
- "daw-engine",
- "daw-mcp",
- "daw-noir",
- "daw-plugins",
- "eframe",
- "image",
- "log",
- "parking_lot",
- "pollster",
- "rfd",
- "winresource",
-]
-
-[[package]]
-name = "daw-core"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "daw-dsp"
-version = "0.1.0"
-dependencies = [
- "daw-core",
- "daw-engine",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "daw-engine"
-version = "0.1.0"
-dependencies = [
- "cpal",
- "daw-core",
- "daw-dsp",
- "hound",
- "log",
- "parking_lot",
- "rtrb",
- "serde",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "daw-library"
-version = "0.1.0"
-dependencies = [
- "daw-core",
- "daw-media",
- "log",
- "memchr",
- "parking_lot",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "daw-mcp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "daw-core",
- "daw-dsp",
- "daw-engine",
- "daw-plugins",
- "log",
- "parking_lot",
- "rmcp",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "daw-media"
-version = "0.1.0"
-dependencies = [
- "daw-core",
- "hound",
- "parking_lot",
- "symphonia",
- "tempfile",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "daw-noir"
-version = "0.1.0"
-dependencies = [
- "egui",
-]
-
-[[package]]
-name = "daw-plugins"
-version = "0.1.0"
-dependencies = [
- "clack-extensions",
- "clack-host",
- "clack-plugin",
- "daw-core",
- "daw-dsp",
- "daw-engine",
- "libloading",
- "log",
- "serde",
- "serde_json",
- "vst3",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "digest"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4867,6 +4740,133 @@ dependencies = [
  "memchr",
  "nom",
  "petgraph",
+]
+
+[[package]]
+name = "trill-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "eframe",
+ "image",
+ "log",
+ "parking_lot",
+ "pollster",
+ "rfd",
+ "trill-core",
+ "trill-dsp",
+ "trill-engine",
+ "trill-mcp",
+ "trill-noir",
+ "trill-plugins",
+ "winresource",
+]
+
+[[package]]
+name = "trill-core"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "trill-dsp"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "trill-core",
+ "trill-engine",
+]
+
+[[package]]
+name = "trill-engine"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "hound",
+ "log",
+ "parking_lot",
+ "rtrb",
+ "serde",
+ "thiserror 2.0.21",
+ "trill-core",
+ "trill-dsp",
+]
+
+[[package]]
+name = "trill-library"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "memchr",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "trill-core",
+ "trill-media",
+]
+
+[[package]]
+name = "trill-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "log",
+ "parking_lot",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "trill-core",
+ "trill-dsp",
+ "trill-engine",
+ "trill-plugins",
+]
+
+[[package]]
+name = "trill-media"
+version = "0.1.0"
+dependencies = [
+ "hound",
+ "parking_lot",
+ "symphonia",
+ "tempfile",
+ "thiserror 2.0.21",
+ "trill-core",
+]
+
+[[package]]
+name = "trill-noir"
+version = "0.1.0"
+dependencies = [
+ "egui",
+]
+
+[[package]]
+name = "trill-plugins"
+version = "0.1.0"
+dependencies = [
+ "clack-extensions",
+ "clack-host",
+ "clack-plugin",
+ "libloading",
+ "log",
+ "serde",
+ "serde_json",
+ "trill-core",
+ "trill-dsp",
+ "trill-engine",
+ "vst3",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

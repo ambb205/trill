@@ -8,14 +8,14 @@ edition = "2024"
 rust-version = "1.90"
 
 [workspace.dependencies]
-daw-core = { path = "crates/daw-core" }
-daw-dsp = { path = "crates/daw-dsp" }
-daw-engine = { path = "crates/daw-engine" }
-daw-library = { path = "crates/daw-library" }
-daw-plugins = { path = "crates/daw-plugins" }
-daw-mcp = { path = "crates/daw-mcp" }
-daw-media = { path = "crates/daw-media" }
-daw-noir = { path = "crates/daw-noir" }
+trill-core = { path = "crates/trill-core" }
+trill-dsp = { path = "crates/trill-dsp" }
+trill-engine = { path = "crates/trill-engine" }
+trill-library = { path = "crates/trill-library" }
+trill-plugins = { path = "crates/trill-plugins" }
+trill-mcp = { path = "crates/trill-mcp" }
+trill-media = { path = "crates/trill-media" }
+trill-noir = { path = "crates/trill-noir" }
 
 anyhow = "1"
 base64 = "0.22"

@@ -1,0 +1,21 @@
+[package]
+name = "trill-library"
+description = "The sound library (scanning, indexing, searching sample folders) and the program's persisted settings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+trill-media.workspace = true
+log.workspace = true
+# Substring search over the whole index at once; already in the dependency
+# tree through other crates.
+memchr = "2"
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+trill-core.workspace = true
+tempfile = "3"

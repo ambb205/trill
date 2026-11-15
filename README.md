@@ -11,15 +11,15 @@ Trill is an open-source digital audio workstation written in Rust. The goals:
   [Model Context Protocol](https://modelcontextprotocol.io), so an assistant can compose, arrange, mix and render a
   song, and read back loudness and spectral measurements to judge its own work.
 
-![The arrangement and piano roll, showing a song written through MCP](crates/daw-app/screenshots/first-light.png)
+![The arrangement and piano roll, showing a song written through MCP](crates/trill-app/screenshots/first-light.png)
 
 This is an early build. See [Status](#status) for what works and what does not yet.
 
 ## Quick start
 
 ```sh
-cargo run -p daw-app                 # the application
-cargo run -p daw-app -- --demo       # ...opening a demo song
+cargo run -p trill-app                 # the application
+cargo run -p trill-app -- --demo       # ...opening a demo song
 cargo test --workspace               # the test suite
 ```
 
@@ -37,7 +37,7 @@ claude mcp add --transport http trill http://127.0.0.1:7777/mcp
 Or run the DAW without a window, launched by the MCP client over stdio:
 
 ```sh
-cargo build -p daw-mcp
+cargo build -p trill-mcp
 claude mcp add trill -- /path/to/target/debug/trill-mcp
 ```
 
@@ -90,15 +90,13 @@ that exist, a bad note with its index and the reason.
 
 ```
 crates/
-  daw-core      Project model, edit operations, and the device API. No audio or UI dependencies.
-  daw-dsp       Built-in instruments and effects.
-  daw-engine    Realtime engine, offline renderer, analysis, and the Session.
-  daw-plugins   Plugin hosting: scanning in a child process, the plugin main thread, CLAP and VST3.
-  daw-mcp       MCP server (library) and the headless `trill-mcp` binary.
-  daw-app       The desktop application (`trill`).
+  trill-core      Project model, edit operations, and the device API. No audio or UI dependencies.
+  trill-dsp       Built-in instruments and effects.
+  trill-engine    Realtime engine, offline renderer, analysis, and the Session.
+  trill-plugins   Plugin hosting: scanning in a child process, the plugin main thread, CLAP and VST3.
+  trill-mcp       MCP server (library) and the headless `trill-mcp` binary.
+  trill-app       The desktop application (`trill`).
 ```
-
-The crates still carry the project's working title, `daw-`.
 
 Three ideas hold it together:
 

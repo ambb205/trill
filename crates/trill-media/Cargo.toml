@@ -1,0 +1,31 @@
+[package]
+name = "trill-media"
+description = "Audio file decoding and caching, waveform overviews, sample-rate conversion and WAV writing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+trill-core.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
+# Only the formats sample libraries are made of; the metadata readers are
+# needed to step over ID3 and APE tags in front of the audio.
+symphonia = { version = "0.6", default-features = false, features = [
+    "adpcm",
+    "aiff",
+    "ape",
+    "flac",
+    "id3v1",
+    "id3v2",
+    "mp3",
+    "ogg",
+    "opt-simd",
+    "pcm",
+    "vorbis",
+    "wav",
+] }
+
+[dev-dependencies]
+hound.workspace = true
+tempfile = "3"
