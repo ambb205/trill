@@ -1,0 +1,29 @@
+[package]
+name = "daw-app"
+description = "The DAW application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "daw"
+path = "src/main.rs"
+
+[dependencies]
+daw-core.workspace = true
+daw-dsp.workspace = true
+daw-engine.workspace = true
+daw-mcp.workspace = true
+daw-plugins.workspace = true
+
+anyhow.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+
+eframe = "0.37"
+# Native open/save dialogs. They are awaited on a helper thread (see
+# `ui::files`), which is what `pollster` is for.
+rfd = "0.18"
+pollster = "1"
+# Encodes `--screenshot` output.
+image = { version = "0.25", default-features = false, features = ["png"] }

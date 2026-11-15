@@ -1,0 +1,9 @@
+[package]
+name = "daw-dsp"
+description = "Built-in instruments and effects"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+daw-core.workspace = true

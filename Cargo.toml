@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+
+[workspace.dependencies]
+daw-core = { path = "crates/daw-core" }
+daw-dsp = { path = "crates/daw-dsp" }
+daw-engine = { path = "crates/daw-engine" }
+daw-plugins = { path = "crates/daw-plugins" }
+daw-mcp = { path = "crates/daw-mcp" }
+daw-noir = { path = "crates/daw-noir" }
+
+anyhow = "1"
+base64 = "0.22"
+cpal = "0.18"
+hound = "3.5"
+log = "0.4"
+parking_lot = "0.12"
+rtrb = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+# Audio DSP is unusable at opt-level 0, so even dev builds are optimized.
+[profile.dev]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 4

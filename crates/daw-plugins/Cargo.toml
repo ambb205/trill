@@ -1,0 +1,45 @@
+[package]
+name = "daw-plugins"
+description = "Hosting for third-party audio plugins (CLAP and VST3)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+daw-core.workspace = true
+clack-host = "0.2.0"
+clack-extensions = { version = "0.2.0", features = [
+    "clack-host",
+    "audio-ports",
+    "latency",
+    "log",
+    "note-ports",
+    "params",
+    "state",
+    "thread-check",
+] }
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Bindings to the VST 3 API, generated from the SDK headers. They ship
+# inside the crate, so building needs no copy of the SDK.
+vst3 = "0.3.0"
+# Loads VST3 modules. (clack loads CLAP libraries with it too.)
+libloading = "0.8"
+
+# The plugin main thread pumps the Win32 message queue, and the scanner
+# process turns off crash dialogs.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+daw-dsp.workspace = true
+daw-engine.workspace = true
+# The unit tests host plugins of their own, written with clack and compiled
+# into the test binary, to check the host exactly and against misbehavior.
+clack-plugin = "0.2.0"
+clack-extensions = { version = "0.2.0", features = ["clack-plugin"] }

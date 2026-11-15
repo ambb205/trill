@@ -1,0 +1,8 @@
+//! Built-in audio effects.
+
+pub mod delay;
+pub mod dynamics;
+pub mod eq;
+pub mod modulation;
+pub mod reverb;
+pub mod utility;

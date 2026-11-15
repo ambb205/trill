@@ -1,0 +1,28 @@
+[package]
+name = "daw-mcp"
+description = "Model Context Protocol server: lets AI agents drive the DAW"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "daw-mcp"
+path = "src/main.rs"
+
+[dependencies]
+daw-core.workspace = true
+daw-dsp.workspace = true
+daw-engine.workspace = true
+daw-plugins.workspace = true
+parking_lot.workspace = true
+anyhow.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+log.workspace = true
+rmcp = { version = "3.10", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-std"] }
+tokio-util = "0.7"
+
+[dev-dependencies]
+rmcp = { version = "3.10", features = ["client", "transport-streamable-http-client-reqwest", "reqwest"] }
