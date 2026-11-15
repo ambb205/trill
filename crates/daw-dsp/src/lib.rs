@@ -1,19 +1,57 @@
-//! The instruments and effects that ship with the DAW, and the factory that
-//! exposes them under `builtin:<key>` URIs.
+//! The instruments and effects that ship with the DAW, the factory that
+//! exposes them under `builtin:<key>` URIs, and offline audio processing
+//! (time-stretching, resampling).
+//!
+//! Most built-in devices are described entirely by their parameters. The
+//! sample players ([`sampler`], [`drumrack`]) also need audio files: which
+//! ones is stored in the device's state (see [`loading`]), and the files
+//! themselves come from an [`AudioLoader`] given to [`Builtins`].
 
+pub mod drumrack;
 pub mod drums;
 pub mod effects;
+pub mod fft;
+pub mod loading;
 pub mod params;
+pub mod playhead;
+pub mod resample;
+pub mod sample;
+pub mod sampler;
+pub mod stretch;
 pub mod synth;
 pub mod util;
+pub mod voice;
+
+#[cfg(test)]
+mod testing;
+
+pub use loading::{SampleRef, StateError};
 
 use daw_core::Device;
+use daw_core::audio::AudioLoader;
 use daw_core::device::{
-    BUILTIN_SCHEME, DeviceCategory, DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance, DeviceProcessor,
-    split_uri,
+    BUILTIN_SCHEME, DeviceCategory, DeviceController, DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance,
+    DeviceProcessor, split_uri,
 };
 use effects::{delay, dynamics, eq, modulation, reverb, utility};
+use loading::{SampleController, SampleSource, SampleStore};
 use params::{ParamDef, PresetDef};
+use std::sync::Arc;
+
+/// Makes a sample player from its stored state, loading its files. Fails
+/// only if there is no way to load files at all.
+type CreateSampled = fn(Option<&[u8]>, &SampleSource) -> Result<Box<dyn DeviceProcessor>, String>;
+/// Lists the files a stored state refers to.
+type ListSamples = fn(Option<&[u8]>) -> Result<Vec<SampleRef>, StateError>;
+
+/// How a built-in device is made.
+#[derive(Copy, Clone)]
+enum Create {
+    /// From its parameters alone.
+    Plain(fn() -> Box<dyn DeviceProcessor>),
+    /// From its state document, which names the audio files it plays.
+    Sampled { create: CreateSampled, references: ListSamples },
+}
 
 struct Builtin {
     key: &'static str,
@@ -22,7 +60,7 @@ struct Builtin {
     description: &'static str,
     params: &'static [ParamDef],
     presets: &'static [PresetDef],
-    create: fn() -> Box<dyn DeviceProcessor>,
+    create: Create,
 }
 
 const fn effect(
@@ -32,7 +70,8 @@ const fn effect(
     params: &'static [ParamDef],
     create: fn() -> Box<dyn DeviceProcessor>,
 ) -> Builtin {
-    Builtin { key, name, category: DeviceCategory::Effect, description, params, presets: &[], create }
+    let category = DeviceCategory::Effect;
+    Builtin { key, name, category, description, params, presets: &[], create: Create::Plain(create) }
 }
 
 static BUILTINS: &[Builtin] = &[
@@ -43,7 +82,7 @@ static BUILTINS: &[Builtin] = &[
         description: synth::DESCRIPTION,
         params: synth::PARAMS,
         presets: synth::PRESETS,
-        create: || Box::new(synth::PolySynth::new()),
+        create: Create::Plain(|| Box::new(synth::PolySynth::new())),
     },
     Builtin {
         key: "drumkit",
@@ -52,7 +91,25 @@ static BUILTINS: &[Builtin] = &[
         description: drums::DESCRIPTION,
         params: drums::PARAMS,
         presets: drums::PRESETS,
-        create: || Box::new(drums::DrumKit::new()),
+        create: Create::Plain(|| Box::new(drums::DrumKit::new())),
+    },
+    Builtin {
+        key: "sampler",
+        name: "Sampler",
+        category: DeviceCategory::Instrument,
+        description: sampler::DESCRIPTION,
+        params: sampler::PARAMS,
+        presets: sampler::PRESETS,
+        create: Create::Sampled { create: sampler::create, references: sampler::sample_refs },
+    },
+    Builtin {
+        key: "drumrack",
+        name: "Drum Rack",
+        category: DeviceCategory::Instrument,
+        description: drumrack::DESCRIPTION,
+        params: drumrack::PARAMS,
+        presets: &[],
+        create: Create::Sampled { create: drumrack::create, references: drumrack::sample_refs },
     },
     effect("reverb", "Reverb", reverb::DESCRIPTION, reverb::PARAMS, || Box::new(reverb::Reverb::new())),
     effect("delay", "Delay", delay::DESCRIPTION, delay::PARAMS, || Box::new(delay::Delay::new())),
@@ -90,7 +147,83 @@ fn describe(builtin: &Builtin) -> DeviceDescriptor {
     }
 }
 
-/// Creates the built-in devices.
+fn find(uri: &str) -> Option<&'static Builtin> {
+    match split_uri(uri) {
+        Some((BUILTIN_SCHEME, key)) => BUILTINS.iter().find(|builtin| builtin.key == key),
+        _ => None,
+    }
+}
+
+fn create(
+    device: &Device,
+    sample_rate: f64,
+    max_block: usize,
+    source: &SampleSource,
+) -> Result<DeviceInstance, DeviceError> {
+    let builtin = find(&device.uri).ok_or_else(|| DeviceError::Unknown(device.uri.clone()))?;
+    let (mut processor, controller) = match builtin.create {
+        Create::Plain(create) => (create(), None),
+        Create::Sampled { create, .. } => {
+            let processor = create(device.state.as_deref(), source)
+                .map_err(|reason| DeviceError::LoadFailed { uri: device.uri.clone(), reason })?;
+            let controller: Box<dyn DeviceController> = Box::new(SampleController { state: device.state.clone() });
+            (processor, Some(controller))
+        }
+    };
+    processor.prepare(sample_rate, max_block);
+    for (index, def) in builtin.params.iter().enumerate() {
+        if let Some(value) = device.params.get(def.id) {
+            processor.set_param(index, *value);
+        }
+    }
+    Ok(DeviceInstance { processor, params: builtin.params.iter().map(ParamDef::info).collect(), controller })
+}
+
+/// Creates the built-in devices, loading the audio files of the sample
+/// players through an [`AudioLoader`].
+///
+/// This is the factory an application should use. Share one instance (it is
+/// usually put in an `Arc`) between the session and its offline renders, so
+/// that each audio file is prepared for playback once however many devices
+/// and renders use it.
+#[derive(Default)]
+pub struct Builtins {
+    loader: Option<Arc<dyn AudioLoader>>,
+    samples: SampleStore,
+}
+
+impl Builtins {
+    /// A factory whose sample players load their files with `loader`.
+    pub fn with_loader(loader: Arc<dyn AudioLoader>) -> Self {
+        Self { loader: Some(loader), samples: SampleStore::default() }
+    }
+
+    /// What is wrong with the samples of `device`, as messages for the
+    /// user; empty when all is well. See [`sample_problems`].
+    pub fn sample_problems(&self, device: &Device) -> Vec<String> {
+        match &self.loader {
+            Some(loader) => sample_problems(device, loader.as_ref()),
+            None => Vec::new(),
+        }
+    }
+}
+
+impl DeviceFactory for Builtins {
+    fn descriptors(&self) -> Vec<DeviceDescriptor> {
+        BUILTINS.iter().map(describe).collect()
+    }
+
+    fn create(&self, device: &Device, sample_rate: f64, max_block: usize) -> Result<DeviceInstance, DeviceError> {
+        let source = SampleSource { loader: self.loader.as_deref(), store: Some(&self.samples) };
+        create(device, sample_rate, max_block, &source)
+    }
+}
+
+/// Creates the built-in devices without access to audio files.
+///
+/// Everything that needs no files works as with [`Builtins`], including a
+/// sampler or drum rack with nothing loaded. Creating one that does name a
+/// file fails with an error that says to use [`Builtins::with_loader`].
 pub struct BuiltinFactory;
 
 impl DeviceFactory for BuiltinFactory {
@@ -99,22 +232,49 @@ impl DeviceFactory for BuiltinFactory {
     }
 
     fn create(&self, device: &Device, sample_rate: f64, max_block: usize) -> Result<DeviceInstance, DeviceError> {
-        let unknown = || DeviceError::Unknown(device.uri.clone());
-        let key = match split_uri(&device.uri) {
-            Some((BUILTIN_SCHEME, key)) => key,
-            _ => return Err(unknown()),
-        };
-        let builtin = BUILTINS.iter().find(|b| b.key == key).ok_or_else(unknown)?;
-
-        let mut processor = (builtin.create)();
-        processor.prepare(sample_rate, max_block);
-        for (index, def) in builtin.params.iter().enumerate() {
-            if let Some(value) = device.params.get(def.id) {
-                processor.set_param(index, *value);
-            }
-        }
-        Ok(DeviceInstance { processor, params: builtin.params.iter().map(ParamDef::info).collect(), controller: None })
+        create(device, sample_rate, max_block, &SampleSource { loader: None, store: None })
     }
+}
+
+/// The audio files `device` plays, if it is a built-in sample player with a
+/// readable state. For collecting a project's files, or finding the devices
+/// that use one.
+pub fn sample_refs(device: &Device) -> Vec<SampleRef> {
+    match find(&device.uri).map(|builtin| builtin.create) {
+        Some(Create::Sampled { references, .. }) => references(device.state.as_deref()).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// What is wrong with the samples of `device`, as messages for the user:
+/// a state that cannot be read, files that cannot be loaded, entries for
+/// pads that do not exist. Empty when all is well, and for devices that are
+/// not built-in sample players.
+///
+/// None of these stop the device from being created: it loads and plays
+/// silence where a sample is missing. The engine calls this after creating
+/// a device to tell the user. Loaders cache what they load (failures
+/// included), so asking again costs little.
+pub fn sample_problems(device: &Device, loader: &dyn AudioLoader) -> Vec<String> {
+    let Some(Create::Sampled { references, .. }) = find(&device.uri).map(|builtin| builtin.create) else {
+        return Vec::new();
+    };
+    let references = match references(device.state.as_deref()) {
+        Ok(references) => references,
+        Err(error) => return vec![format!("{error}; the device is empty until its samples are set again")],
+    };
+    let mut problems = Vec::new();
+    for SampleRef { slot, path } in references {
+        // A drum rack entry for a note outside the pads is kept in the
+        // document but never played.
+        let pad = slot.strip_prefix("pad ").and_then(|note| note.parse::<u8>().ok());
+        if pad.is_some_and(|note| !drumrack::PAD_NOTES.contains(&note)) {
+            problems.push(format!("{slot} does not exist (pads are notes 36-51), so '{path}' is never played"));
+        } else if let Err(reason) = loader.load(&path) {
+            problems.push(format!("{slot}: cannot load '{path}': {reason}"));
+        }
+    }
+    problems
 }
 
 #[cfg(test)]
@@ -122,6 +282,7 @@ mod tests {
     use super::*;
     use daw_core::device::{Event, EventKind, ProcessInfo};
     use daw_core::{ChainRef, Project};
+    use testing::MemoryLoader;
 
     const SR: f64 = 48_000.0;
     const BLOCK: usize = 256;
@@ -137,14 +298,40 @@ mod tests {
         }
     }
 
-    fn make(key: &str, params: &[(&str, f64)]) -> Box<dyn DeviceProcessor> {
+    /// A device model for `builtin:<key>`. The sample players get a state
+    /// that puts `tone.wav` on the sampler and on every pad of the rack.
+    fn model(key: &str, params: &[(&str, f64)]) -> Device {
         let mut project = Project::new("t");
         let id = project.add_device(ChainRef::Master, format!("builtin:{key}"), key, None).unwrap();
         let device = project.device_mut(id).unwrap();
         for (name, value) in params {
             device.params.insert(name.to_string(), *value);
         }
-        BuiltinFactory.create(device, SR, BLOCK).unwrap().processor
+        device.state = match key {
+            "sampler" => Some(sampler::State::new("tone.wav").to_bytes()),
+            "drumrack" => {
+                Some(drumrack::State::with_pads(drumrack::PAD_NOTES.map(|note| (note, "tone.wav"))).unwrap().to_bytes())
+            }
+            _ => None,
+        };
+        device.clone()
+    }
+
+    /// A factory whose loader knows one file, `tone.wav`: a decaying 220 Hz
+    /// tone half a second long.
+    fn factory() -> Builtins {
+        let loader = MemoryLoader::default();
+        let tone = testing::sine(220.0, SR, 24_000);
+        loader.insert(
+            "tone.wav",
+            tone.iter().enumerate().map(|(i, s)| s * 0.5 * (-(i as f32) / 6_000.0).exp()).collect(),
+            SR,
+        );
+        Builtins::with_loader(Arc::new(loader))
+    }
+
+    fn make(key: &str, params: &[(&str, f64)]) -> Box<dyn DeviceProcessor> {
+        factory().create(&model(key, params), SR, BLOCK).unwrap().processor
     }
 
     /// Runs `blocks` blocks. `input` fills each block before processing and
@@ -370,6 +557,17 @@ mod tests {
     }
 
     #[test]
+    fn a_hard_knee_at_exactly_the_threshold_stays_finite() {
+        // The level sits exactly on the threshold: the one input for which
+        // a knee of zero used to produce 0/0 and silence the track for good.
+        let threshold = util::gain_to_db(0.5) as f64;
+        let mut device = make("compressor", &[("threshold", threshold), ("knee", 0.0), ("ratio", 4.0)]);
+        let (l, r) = run(device.as_mut(), 20, |_| 0.5, |_| vec![]);
+        assert!(l.iter().chain(&r).all(|sample| sample.is_finite()));
+        assert!((l[l.len() - 1] - 0.5).abs() < 1e-4, "nothing to reduce at the threshold: {}", l[l.len() - 1]);
+    }
+
+    #[test]
     fn pump_ducks_on_the_beat() {
         let mut device = make("pump", &[("depth", 1.0)]);
         // 120 BPM: a beat is 24000 samples.
@@ -382,6 +580,129 @@ mod tests {
     fn unknown_devices_are_reported() {
         let mut project = Project::new("t");
         let id = project.add_device(ChainRef::Master, "builtin:nope", "x", None).unwrap();
-        assert!(matches!(BuiltinFactory.create(project.device(id).unwrap(), SR, BLOCK), Err(DeviceError::Unknown(_))));
+        let device = project.device(id).unwrap();
+        assert!(matches!(BuiltinFactory.create(device, SR, BLOCK), Err(DeviceError::Unknown(_))));
+        assert!(matches!(factory().create(device, SR, BLOCK), Err(DeviceError::Unknown(_))));
+        assert!(matches!(
+            factory().create(&Device { uri: "clap:builtin:sampler".into(), ..device.clone() }, SR, BLOCK),
+            Err(DeviceError::Unknown(_))
+        ));
+    }
+
+    #[test]
+    fn both_factories_list_the_same_devices_including_the_sample_players() {
+        let listed = BuiltinFactory.descriptors();
+        assert_eq!(listed, Builtins::default().descriptors());
+        assert_eq!(listed, factory().descriptors());
+        assert_eq!(listed.len(), BUILTINS.len());
+        for (uri, pad_param) in [("builtin:sampler", "loop_mode"), ("builtin:drumrack", "pad36_level")] {
+            let descriptor = listed.iter().find(|d| d.uri == uri).unwrap_or_else(|| panic!("{uri} is not listed"));
+            assert_eq!(descriptor.category, DeviceCategory::Instrument);
+            assert!(descriptor.description.len() > 200 && descriptor.description.contains("device state"));
+            assert!(descriptor.params.iter().any(|param| param.id == pad_param));
+        }
+    }
+
+    /// `BuiltinFactory` is used as a unit struct all over the workspace and
+    /// has no loader. It must keep creating everything that needs no files.
+    #[test]
+    fn the_unit_factory_creates_every_device_that_names_no_file() {
+        for builtin in BUILTINS {
+            let device = Device { state: None, ..model(builtin.key, &[]) };
+            let instance = BuiltinFactory.create(&device, SR, BLOCK).unwrap_or_else(|e| panic!("{}: {e}", builtin.key));
+            assert_eq!(instance.params.len(), builtin.params.len());
+            let sampled = matches!(builtin.create, Create::Sampled { .. });
+            assert_eq!(instance.controller.is_some(), sampled, "{}", builtin.key);
+        }
+        // An empty sampler is silent, not broken.
+        let empty = Device { state: Some(sampler::State::default().to_bytes()), ..model("sampler", &[]) };
+        let mut device = BuiltinFactory.create(&empty, SR, BLOCK).unwrap().processor;
+        let (l, _) = run(device.as_mut(), 8, |_| 0.0, |b| if b == 0 { note_on(60) } else { vec![] });
+        assert_eq!(peak(&l), 0.0);
+    }
+
+    #[test]
+    fn the_unit_factory_says_how_to_load_samples() {
+        for key in ["sampler", "drumrack"] {
+            let Err(error) = BuiltinFactory.create(&model(key, &[]), SR, BLOCK) else {
+                panic!("{key}: created a device that needs a file without a loader")
+            };
+            let DeviceError::LoadFailed { uri, reason } = &error else { panic!("{key}: {error}") };
+            assert_eq!(uri, &format!("builtin:{key}"));
+            assert!(reason.contains("tone.wav") && reason.contains("Builtins::with_loader"), "{reason}");
+            // The same goes for a `Builtins` that was given no loader.
+            assert!(matches!(
+                Builtins::default().create(&model(key, &[]), SR, BLOCK),
+                Err(DeviceError::LoadFailed { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn missing_and_unreadable_samples_do_not_fail_creation_and_are_reported() {
+        let factory = factory();
+        // Device, state, the problems to expect, and whether note 36 sounds.
+        let gone = "sample: cannot load 'gone.wav': no such file";
+        let rack = drumrack::State::with_pads([(36, "tone.wav"), (38, "gone.wav"), (42, "lost.wav")]).unwrap();
+        let stray = br#"{"version": 1, "pads": [{"note": 36, "path": "tone.wav"}, {"note": 90, "path": "tone.wav"}]}"#;
+        type Case<'a> = (&'a str, Option<Vec<u8>>, &'a [&'a str], bool);
+        let cases: [Case; 8] = [
+            ("sampler", Some(sampler::State::new("tone.wav").to_bytes()), &[], true),
+            ("sampler", None, &[], false),
+            ("sampler", Some(sampler::State::new("gone.wav").to_bytes()), &[gone], false),
+            ("sampler", Some(b"{ not json".to_vec()), &["not a valid document"], false),
+            ("sampler", Some(br#"{"version": 99, "path": "tone.wav"}"#.to_vec()), &["newer version (format 99"], false),
+            // The pads whose files are there still play.
+            (
+                "drumrack",
+                Some(rack.to_bytes()),
+                &["pad 38: cannot load 'gone.wav'", "pad 42: cannot load 'lost.wav'"],
+                true,
+            ),
+            ("drumrack", Some(stray.to_vec()), &["pad 90 does not exist"], true),
+            ("drumrack", Some(b"[]".to_vec()), &["not a valid document"], false),
+        ];
+        for (key, state, expected, sounds) in cases {
+            let device = Device { state: state.clone(), ..model(key, &[]) };
+            let instance = factory.create(&device, SR, BLOCK).unwrap_or_else(|e| panic!("{key}: creation failed: {e}"));
+            let problems = factory.sample_problems(&device);
+            assert_eq!(problems.len(), expected.len(), "{key}: {problems:?}");
+            for (problem, expected) in problems.iter().zip(expected) {
+                assert!(problem.contains(expected), "{key}: '{problem}' should mention '{expected}'");
+            }
+            // Whatever the state was, it is handed back untouched on save,
+            // so a project with a problem loses nothing by being saved.
+            assert_eq!(instance.controller.unwrap().save_state(), state);
+
+            // The device runs: silent where its samples are missing.
+            let mut processor = instance.processor;
+            let (l, _) = run(processor.as_mut(), 8, |_| 0.0, |b| if b == 0 { note_on(36) } else { vec![] });
+            assert_eq!(peak(&l) > 0.01, sounds, "{key} with problems {expected:?}: peak {}", peak(&l));
+        }
+        // Devices that play no samples have nothing to report.
+        assert!(factory.sample_problems(&model("polysynth", &[])).is_empty());
+        assert!(sample_refs(&model("reverb", &[])).is_empty());
+        assert_eq!(sample_refs(&model("sampler", &[])), [SampleRef { slot: "sample".into(), path: "tone.wav".into() }]);
+        assert_eq!(sample_refs(&model("drumrack", &[])).len(), drumrack::PAD_COUNT);
+    }
+
+    #[test]
+    fn devices_playing_the_same_file_share_one_prepared_sample() {
+        let loader = Arc::new(MemoryLoader::default());
+        loader.insert("tone.wav", vec![0.25; 48_000], SR);
+        let factory = Builtins::with_loader(loader.clone());
+        let buffer = loader.load("tone.wav").unwrap();
+        let before = Arc::strong_count(&buffer);
+        // A sampler and a full rack, twice over (as a session and an
+        // offline render would): the file's audio is not copied per device
+        // by the loader, and the factory prepares it only once.
+        let devices: Vec<DeviceInstance> = ["sampler", "drumrack", "sampler", "drumrack"]
+            .iter()
+            .map(|key| factory.create(&model(key, &[]), SR, BLOCK).unwrap())
+            .collect();
+        assert_eq!(Arc::strong_count(&buffer), before, "devices keep the prepared sample, not the loader's buffer");
+        assert_eq!(factory.samples.holders(), [("tone.wav".to_string(), 2 + 2 * drumrack::PAD_COUNT)]);
+        drop(devices);
+        assert_eq!(factory.samples.holders(), [("tone.wav".to_string(), 0)]);
     }
 }

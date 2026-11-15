@@ -77,7 +77,9 @@ control; slow `attack` keeps transients punchy; add `makeup` to restore level.";
             let over = level_db - self.threshold;
             if 2.0 * over < -self.knee {
                 0.0
-            } else if 2.0 * over.abs() <= self.knee {
+            // A hard knee has no curve to be on; without this test a level
+            // exactly at the threshold would divide zero by zero.
+            } else if self.knee > 0.0 && 2.0 * over.abs() <= self.knee {
                 let x = over + self.knee * 0.5;
                 self.slope * x * x / (2.0 * self.knee)
             } else {

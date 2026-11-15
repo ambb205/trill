@@ -3,7 +3,8 @@
 
 use crate::define_params;
 use crate::params::{ParamValues, PresetDef, boolean, choice, float, int};
-use crate::util::{Rng, Svf, db_to_gain, decay_coef, midi_to_hz, pan_gains};
+use crate::util::{Rng, db_to_gain, midi_to_hz, pan_gains};
+use crate::voice::{EnvShape, Envelope, FILTER_MODES, FilterMode, Stage, VoiceFilter, resonance_to_q};
 use daw_core::device::{DeviceProcessor, Event, EventKind, ProcessInfo};
 use std::f32::consts::TAU;
 
@@ -16,7 +17,6 @@ const CONTROL_BLOCK: usize = 16;
 const VOICE_GAIN: f32 = 0.22;
 
 const WAVES: &[&str] = &["sine", "triangle", "saw", "square"];
-const FILTERS: &[&str] = &["lowpass", "lowpass24", "highpass", "bandpass"];
 
 define_params!(P, PARAMS, [
     Osc1Wave => choice("osc1_wave", "Osc 1 Wave", WAVES, 2),
@@ -31,7 +31,7 @@ define_params!(P, PARAMS, [
     Unison => int("unison", "Unison Voices", 1, MAX_UNISON as i32, 1, ""),
     UnisonDetune => float("unison_detune", "Unison Detune", 0.0, 100.0, 20.0, "cents"),
     UnisonSpread => float("unison_spread", "Unison Stereo Spread", 0.0, 1.0, 0.7, ""),
-    FilterType => choice("filter_type", "Filter Type", FILTERS, 0),
+    FilterType => choice("filter_type", "Filter Type", FILTER_MODES, 0),
     Cutoff => float("cutoff", "Filter Cutoff", 20.0, 20000.0, 20000.0, "Hz"),
     Resonance => float("resonance", "Filter Resonance", 0.0, 1.0, 0.1, ""),
     FilterEnv => float("filter_env", "Filter Envelope Amount", -8.0, 8.0, 0.0, "oct"),
@@ -355,76 +355,6 @@ pub const PRESETS: &[PresetDef] = &[
     },
 ];
 
-#[derive(Copy, Clone, PartialEq)]
-enum Stage {
-    Idle,
-    Attack,
-    Decay,
-    Release,
-}
-
-#[derive(Copy, Clone)]
-struct Envelope {
-    stage: Stage,
-    level: f32,
-}
-
-#[derive(Copy, Clone, Default)]
-struct EnvShape {
-    attack_step: f32,
-    decay_coef: f32,
-    sustain: f32,
-    release_coef: f32,
-}
-
-impl EnvShape {
-    fn new(attack: f32, decay: f32, sustain: f32, release: f32, sample_rate: f32) -> Self {
-        Self {
-            attack_step: 1.0 / (attack.max(0.0005) * sample_rate),
-            decay_coef: decay_coef(decay, sample_rate),
-            sustain,
-            release_coef: decay_coef(release, sample_rate),
-        }
-    }
-}
-
-impl Envelope {
-    const fn idle() -> Self {
-        Self { stage: Stage::Idle, level: 0.0 }
-    }
-
-    #[inline]
-    fn tick(&mut self, shape: &EnvShape) -> f32 {
-        match self.stage {
-            Stage::Idle => {}
-            Stage::Attack => {
-                self.level += shape.attack_step;
-                if self.level >= 1.0 {
-                    self.level = 1.0;
-                    self.stage = Stage::Decay;
-                }
-            }
-            Stage::Decay => {
-                self.level = shape.sustain + (self.level - shape.sustain) * shape.decay_coef;
-            }
-            Stage::Release => {
-                self.level *= shape.release_coef;
-                if self.level < 1e-4 {
-                    self.level = 0.0;
-                    self.stage = Stage::Idle;
-                }
-            }
-        }
-        self.level
-    }
-
-    fn release(&mut self) {
-        if self.stage != Stage::Idle {
-            self.stage = Stage::Release;
-        }
-    }
-}
-
 /// Everything derived from the parameters, refreshed when one changes.
 #[derive(Clone, Default)]
 struct Derived {
@@ -441,7 +371,7 @@ struct Derived {
     detune: [f32; MAX_UNISON],
     pan_l: [f32; MAX_UNISON],
     pan_r: [f32; MAX_UNISON],
-    filter_type: usize,
+    filter_type: FilterMode,
     cutoff: f32,
     q: f32,
     filter_env: f32,
@@ -473,8 +403,7 @@ struct Voice {
     phase1: [f32; MAX_UNISON],
     phase2: [f32; MAX_UNISON],
     sub_phase: f32,
-    /// `[stage][channel]`; the second stage is used by the 24 dB mode.
-    filters: [[Svf; 2]; 2],
+    filter: VoiceFilter,
 }
 
 impl Voice {
@@ -492,7 +421,7 @@ impl Voice {
             phase1: [0.0; MAX_UNISON],
             phase2: [0.0; MAX_UNISON],
             sub_phase: 0.0,
-            filters: [[Svf::default(); 2]; 2],
+            filter: VoiceFilter::default(),
         }
     }
 
@@ -514,10 +443,7 @@ impl Voice {
         let env = self.filt.level;
         let octaves = d.filter_env * env + d.lfo_cutoff * lfo + d.key_track * (self.note - 60.0) / 12.0;
         let cutoff = d.cutoff * 2f32.powf(octaves);
-        for channel in 0..2 {
-            self.filters[0][channel].set(cutoff, d.q, sample_rate);
-            self.filters[1][channel].set(cutoff, 0.6, sample_rate);
-        }
+        self.filter.set(cutoff, d.q, sample_rate);
         let fm = d.fm * (1.0 - d.fm_env + d.fm_env * env);
         let gain = self.velocity_gain * d.gain;
         let use_osc1 = d.mix1 > 0.0;
@@ -560,14 +486,7 @@ impl Voice {
                 r += noise;
             }
 
-            let [first, second] = &mut self.filters;
-            let (fl, fr) = (first[0].tick(l), first[1].tick(r));
-            let (l, r) = match d.filter_type {
-                0 => (fl.low, fr.low),
-                1 => (second[0].tick(fl.low).low, second[1].tick(fr.low).low),
-                2 => (fl.high, fr.high),
-                _ => (fl.band, fr.band),
-            };
+            let (l, r) = self.filter.tick(d.filter_type, l, r);
 
             let level = amp * gain;
             out_l[i] += l * level;
@@ -665,9 +584,9 @@ impl PolySynth {
             d.pan_r[u] = r * norm;
         }
 
-        d.filter_type = p.index(P::FilterType as usize);
+        d.filter_type = FilterMode::from_index(p.index(P::FilterType as usize));
         d.cutoff = p.get(P::Cutoff as usize);
-        d.q = 0.5 * 40f32.powf(p.get(P::Resonance as usize));
+        d.q = resonance_to_q(p.get(P::Resonance as usize));
         d.filter_env = p.get(P::FilterEnv as usize);
         d.key_track = p.get(P::KeyTrack as usize);
         d.amp = EnvShape::new(
@@ -724,11 +643,7 @@ impl PolySynth {
                 voice.phase1[u] = random;
                 voice.phase2[u] = random;
             }
-            for stage in &mut voice.filters {
-                for filter in stage {
-                    filter.reset();
-                }
-            }
+            voice.filter.reset();
         } else if !self.derived.mono {
             voice.note = pitch as f32;
         }
