@@ -1,5 +1,5 @@
 //! The Clip tab: properties of the selected clip and a piano roll for its
-//! notes.
+//! notes, with their velocities along the bottom.
 //!
 //! Notes have no ids, so selection and drags identify them by value. A drag
 //! keeps the notes as they were when it began and derives every step from
@@ -7,30 +7,36 @@
 
 use super::state::{AUDITION_LENGTH, Cx, FocusArea, NoteDrag};
 use super::timeline::{self, GridLevel, PitchView, Snap, SpanHit, TimeView};
-use super::widgets::{self, Icon};
-use super::{theme, units};
+use super::{colors, units, widgets};
 use daw_core::pitch::pitch_name;
 use daw_core::project::{ClipContent, MidiContent};
 use daw_core::{Beats, Clip, ClipId, Note, TimeSignature, Track};
+use daw_noir::{Bar, Chip, Icon, NumberField, Theme, fade, paint, text};
 use eframe::egui::{
-    self, Align2, Color32, CursorIcon, Mesh, PointerButton, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2,
-    vec2,
+    self, Align2, Color32, CursorIcon, Mesh, PointerButton, Pos2, Rangef, Rect, Sense, Shape, Ui, pos2, vec2,
 };
 use std::time::Instant;
 
 pub(super) const SIDEBAR_WIDTH: f32 = 204.0;
-pub(super) const KEYS_WIDTH: f32 = 64.0;
-pub(super) const RULER_HEIGHT: f32 = 20.0;
+/// Width of the piano keys.
+pub(super) const KEYS_WIDTH: f32 = 44.0;
+/// Width of the column on a drum track, which lists the kit's sounds by
+/// name instead.
+const DRUM_KEYS_WIDTH: f32 = 88.0;
+pub(super) const RULER_HEIGHT: f32 = 18.0;
+/// Height of the velocity lane under the notes.
+pub(super) const VELOCITY_LANE: f32 = 46.0;
+/// Space kept clear above the tallest stem and below every stem's foot.
+const STEM_HEADROOM: f32 = 8.0;
+const STEM_FOOT: f32 = 4.0;
+/// How close, in pixels, the pointer must be to a stem to grab it.
+const STEM_GRAB: f32 = 6.0;
 /// Width of the zone at a note's end that resizes it, in pixels.
 const RESIZE_HANDLE: f32 = 7.0;
-const DEFAULT_VELOCITY: u8 = 100;
 const SHORTEST_NOTE: Beats = 1.0 / 32.0;
+pub(super) const DEFAULT_VELOCITY: u8 = 100;
 const DRUM_KIT: &str = "builtin:drumkit";
-
-const WHITE_KEY: Color32 = Color32::from_rgb(0xD9, 0xDD, 0xE4);
-const BLACK_KEY: Color32 = Color32::from_rgb(0x24, 0x27, 0x2E);
-const ROW_LIGHT: Color32 = Color32::from_rgb(0x17, 0x1A, 0x1F);
-const ROW_DARK: Color32 = Color32::from_rgb(0x12, 0x14, 0x18);
+const SIDEBAR_PADDING: f32 = 10.0;
 
 // ---- note editing, as pure functions ---------------------------------------
 
@@ -66,6 +72,35 @@ fn moved_notes(originals: &[Note], beats: Beats, semitones: i32) -> Vec<Note> {
 /// `originals` lengthened by `beats`, none shorter than `shortest`.
 fn resized_notes(originals: &[Note], beats: Beats, shortest: Beats) -> Vec<Note> {
     originals.iter().map(|note| Note { length: (note.length + beats).max(shortest), ..*note }).collect()
+}
+
+/// `originals` with `change` added to every velocity, each kept in 1..=127.
+fn revoiced_notes(originals: &[Note], change: i32) -> Vec<Note> {
+    originals
+        .iter()
+        .map(|note| Note { velocity: (note.velocity as i32 + change).clamp(1, 127) as u8, ..*note })
+        .collect()
+}
+
+/// `notes` with their starts moved to the nearest line of the grid.
+fn quantized_notes(notes: &[Note], step: Beats) -> Vec<Note> {
+    notes.iter().map(|note| Note { start: timeline::snap_round(note.start, Some(step)), ..*note }).collect()
+}
+
+/// `notes` each held until the next one starts, so the line has no gaps.
+/// Notes that start together (a chord) are all held until the note after
+/// them; the last notes keep their length.
+fn legato_notes(notes: &[Note]) -> Vec<Note> {
+    let mut starts: Vec<Beats> = notes.iter().map(|note| note.start).collect();
+    starts.sort_by(f64::total_cmp);
+    starts.dedup();
+    notes
+        .iter()
+        .map(|note| match starts.iter().find(|start| **start > note.start + 1e-9) {
+            Some(next) => Note { length: next - note.start, ..*note },
+            None => *note,
+        })
+        .collect()
 }
 
 /// How far a move drag has carried the notes: the grabbed note follows the
@@ -126,6 +161,8 @@ struct Geometry {
     ruler: Rect,
     keys: Rect,
     grid: Rect,
+    /// The velocity lane, across the full width under keys and grid.
+    velocity: Rect,
     time: TimeView,
     pitch: PitchView,
     signature: TimeSignature,
@@ -134,14 +171,25 @@ struct Geometry {
 }
 
 impl Geometry {
-    fn new(area: Rect, time: TimeView, pitch: PitchView, signature: TimeSignature, snap: Snap) -> Self {
-        let split_x = area.left() + KEYS_WIDTH;
+    fn new(
+        area: Rect,
+        keys_width: f32,
+        time: TimeView,
+        pitch: PitchView,
+        signature: TimeSignature,
+        snap: Snap,
+    ) -> Self {
+        let split_x = area.left() + keys_width;
         let split_y = area.top() + RULER_HEIGHT;
+        // A panel dragged very short gives the lane up before the notes.
+        let lane = if area.height() >= RULER_HEIGHT + VELOCITY_LANE + 60.0 { VELOCITY_LANE } else { 0.0 };
+        let lane_top = area.bottom() - lane;
         Self {
             corner: Rect::from_min_max(area.min, pos2(split_x, split_y)),
             ruler: Rect::from_min_max(pos2(split_x, area.top()), pos2(area.right(), split_y)),
-            keys: Rect::from_min_max(pos2(area.left(), split_y), pos2(split_x, area.bottom())),
-            grid: Rect::from_min_max(pos2(split_x, split_y), area.max),
+            keys: Rect::from_min_max(pos2(area.left(), split_y), pos2(split_x, lane_top)),
+            grid: Rect::from_min_max(pos2(split_x, split_y), pos2(area.right(), lane_top)),
+            velocity: Rect::from_min_max(pos2(area.left(), lane_top), area.max),
             time,
             pitch,
             signature,
@@ -189,16 +237,46 @@ impl Geometry {
     fn handle_beats(&self) -> Beats {
         RESIZE_HANDLE as f64 / self.time.pixels_per_beat
     }
+
+    /// How far a stem of full velocity rises above its foot.
+    fn stem_travel(&self) -> f32 {
+        (self.velocity.height() - STEM_HEADROOM - STEM_FOOT).max(1.0)
+    }
+
+    /// Screen y of the top of a stem for `velocity`.
+    fn stem_top(&self, velocity: u8) -> f32 {
+        self.velocity.bottom() - STEM_FOOT - velocity as f32 / 127.0 * self.stem_travel()
+    }
+
+    /// The velocity whose stem would end at screen position `y`.
+    fn velocity_at(&self, y: f32) -> u8 {
+        let position = (self.velocity.bottom() - STEM_FOOT - y) / self.stem_travel();
+        (position * 127.0).round().clamp(1.0, 127.0) as u8
+    }
+
+    /// The note whose stem is nearest to screen position `x`, if one is
+    /// within reach. Among notes that start together the loudest wins: its
+    /// stem is the one whose head can be seen.
+    fn stem_at(&self, notes: &[Note], x: f32) -> Option<Note> {
+        let reach = |note: &&Note| (self.x(note.start) - x).abs() <= STEM_GRAB;
+        notes.iter().filter(reach).copied().min_by(|a, b| {
+            let distance = |note: &Note| (self.x(note.start) - x).abs();
+            distance(a).total_cmp(&distance(b)).then(b.velocity.cmp(&a.velocity))
+        })
+    }
 }
 
 // ---- the tab ---------------------------------------------------------------
 
 pub fn show(ui: &mut Ui, cx: &mut Cx) {
+    let theme = cx.theme;
     let area = ui.max_rect();
     let Some((track, clip)) = cx.state.selected_clip.and_then(|id| cx.snap.clip(id)) else {
         placeholder(
             ui,
+            theme,
             area,
+            theme.text.caps,
             "No clip selected",
             "Click a clip in the arrangement to edit it here, or double-click an empty lane to create one.",
         );
@@ -207,174 +285,281 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
 
     let sidebar_rect = Rect::from_min_max(area.min, pos2(area.left() + SIDEBAR_WIDTH, area.bottom()));
     let roll_rect = Rect::from_min_max(pos2(sidebar_rect.right(), area.top()), area.max);
-    ui.painter().vline(sidebar_rect.right() - 0.5, area.y_range(), theme::hairline(theme::BORDER));
-    sidebar(ui, cx, track, clip, sidebar_rect);
+    sidebar(ui, cx, clip, sidebar_rect);
 
     match &clip.content {
         ClipContent::Midi(midi) => roll(ui, cx, track, clip, midi, roll_rect),
         ClipContent::Audio(audio) => {
             let name = audio.path.rsplit(['/', '\\']).next().unwrap_or(&audio.path);
             let detail = format!(
-                "{}\nStarts {:.2} s into the file, gain {}. Audio clips have no notes to edit.",
+                "{} \u{00B7} starts {:.2} s into the file \u{00B7} gain {}. Audio clips have no notes to edit.",
                 audio.path,
                 audio.offset_seconds,
                 units::format_db(audio.gain_db)
             );
-            placeholder(ui, roll_rect, name, &detail);
+            // A file name keeps its case: it is a name, not a label.
+            placeholder(ui, theme, roll_rect, theme.text.body, name, &detail);
         }
     }
 }
 
-fn placeholder(ui: &Ui, area: Rect, title: &str, detail: &str) {
+/// A title and a line of explanation in the middle of `area`.
+fn placeholder(ui: &Ui, theme: &Theme, area: Rect, title_style: daw_noir::TextStyle, title: &str, detail: &str) {
     let painter = ui.painter_at(area);
-    painter.text(area.center() - vec2(0.0, 12.0), Align2::CENTER_BOTTOM, title, theme::strong(15.0), theme::TEXT_DIM);
-    let galley =
-        painter.layout(detail.to_owned(), theme::font(12.0), theme::TEXT_FAINT, (area.width() - 48.0).min(460.0));
-    painter.galley(pos2(area.center().x - galley.size().x / 2.0, area.center().y - 4.0), galley, theme::TEXT_FAINT);
+    let middle = area.center().y.round();
+    let upper = Rect::from_min_max(pos2(area.left() + 16.0, middle - 20.0), pos2(area.right() - 16.0, middle - 2.0));
+    text::paint(&painter, upper, Align2::CENTER_CENTER, title_style, title, theme.ink_dim);
+    let lower = Rect::from_min_max(pos2(area.left() + 16.0, middle + 2.0), pos2(area.right() - 16.0, middle + 22.0));
+    let quiet = daw_noir::TextStyle { size: 12.0, ..theme.text.body };
+    text::paint(&painter, lower, Align2::CENTER_CENTER, quiet, detail, theme.ink_faint);
 }
 
-/// Clip name, length, loop and the editing options.
-fn sidebar(ui: &mut Ui, cx: &mut Cx, track: &Track, clip: &Clip, rect: Rect) {
+/// Stacks the sidebar's controls from the top, each as wide as the column.
+struct Stack {
+    left: f32,
+    width: f32,
+    top: f32,
+    gap: f32,
+}
+
+impl Stack {
+    /// The next row, `height` tall.
+    fn row(&mut self, height: f32) -> Rect {
+        let rect = Rect::from_min_size(pos2(self.left, self.top), vec2(self.width, height));
+        self.top += height + self.gap;
+        rect
+    }
+
+    /// A section heading: micro caps over a rule.
+    fn heading(&mut self, ui: &Ui, theme: &Theme, title: &str, first: bool) {
+        if !first {
+            self.top += 4.0;
+        }
+        let rect = self.row(16.0);
+        text::paint(
+            ui.painter(),
+            rect.with_max_y(rect.bottom() - 2.0),
+            Align2::LEFT_CENTER,
+            theme.text.micro,
+            title,
+            theme.ink_faint,
+        );
+        paint::hline_above(ui.painter(), rect.x_range(), rect.bottom(), theme.hairline);
+        self.top += self.gap;
+    }
+}
+
+/// Clip name, start, length and loop; the grid; the selected notes.
+fn sidebar(ui: &mut Ui, cx: &mut Cx, clip: &Clip, rect: Rect) {
+    let theme = cx.theme;
     let signature = cx.snap.project.time_signature;
     let beats_per_bar = signature.beats_per_bar();
     let clip_id = clip.id;
+    let (bar, chip, gap) = (theme.metric.bar, theme.metric.chip, theme.metric.gap);
+    let id = ui.scope_id().with("clip-sidebar");
 
-    let layout = egui::Layout::top_down(egui::Align::Min);
-    widgets::place(ui, rect.shrink2(vec2(14.0, 10.0)), "clip-sidebar", layout, |ui| {
-        // Compact rows, so everything fits beside a short piano roll.
-        ui.spacing_mut().item_spacing = vec2(8.0, 5.0);
-        ui.spacing_mut().interact_size.y = 22.0;
-        ui.spacing_mut().button_padding = vec2(8.0, 2.0);
-        ui.horizontal(|ui| {
-            let (dot, _) = ui.allocate_exact_size(vec2(8.0, 16.0), Sense::hover());
-            ui.painter().circle_filled(dot.center(), 4.0, theme::track_color(track.color));
-            ui.add(
-                egui::Label::new(egui::RichText::new(&track.name).font(theme::font(12.0)).color(theme::TEXT_DIM))
-                    .truncate(),
-            );
+    ui.painter().rect_filled(rect, 0.0, theme.panel);
+    paint::vline_left_of(ui.painter(), rect.right(), rect.y_range(), theme.hairline);
+    let clip_rect = rect.intersect(ui.clip_rect());
+    let mut ui = ui.new_child(egui::UiBuilder::new().id_salt("clip-sidebar").max_rect(rect));
+    ui.set_clip_rect(clip_rect);
+    let ui = &mut ui;
+    let mut stack = Stack {
+        left: rect.left() + SIDEBAR_PADDING,
+        width: rect.width() - 2.0 * SIDEBAR_PADDING - 1.0,
+        top: rect.top() + 8.0,
+        gap,
+    };
+
+    stack.heading(ui, theme, "Clip", true);
+    let name_row = stack.row(22.0);
+    if let Some(name) = widgets::name_field(ui, theme, name_row, clip_id, &clip.name, &mut cx.state.renaming_clip) {
+        cx.edit(|project| {
+            project.clip_mut(clip_id)?.name = name;
+            Ok(())
         });
+    }
 
-        let width = ui.available_width() - 12.0;
-        if let Some(name) =
-            widgets::name_field(ui, clip_id, &clip.name, &mut cx.state.renaming_clip, theme::strong(13.0), width)
-        {
-            cx.edit(|project| {
-                project.clip_mut(clip_id)?.name = name;
-                Ok(())
-            });
+    // Where the clip starts is read here and changed by dragging the clip.
+    let start_row = stack.row(bar);
+    paint::frame(ui.painter(), start_row, theme.hairline);
+    let inner = start_row.shrink2(vec2(theme.metric.pad + 2.0, 0.0));
+    text::paint(ui.painter(), inner, Align2::LEFT_CENTER, theme.text.label, "Start", theme.ink_faint);
+    let start = timeline::format_position(clip.start, signature).replace('.', ". ");
+    text::paint(ui.painter(), inner, Align2::RIGHT_CENTER, theme.text.value, &start, theme.ink);
+    let response = ui.interact(start_row, id.with("start"), Sense::hover());
+    cx.hint(&response, "Where the clip starts: bar, beat, sixteenth \u{00B7} drag the clip to move it");
+
+    let step = cx.state.piano.snap.step();
+    let shown = format!("{:.2}", clip.length);
+    let field = length_field(theme, "Length", "Clip length", &shown, clip.length);
+    let output = daw_noir::number_field(ui, theme, stack.row(bar), id.with("length"), &field);
+    cx.hint(
+        &output.response,
+        format!("{} \u{00B7} drag, or double-click to type", timeline::format_length(clip.length, signature)),
+    );
+    if output.response.drag_started() {
+        cx.begin_gesture();
+    }
+    if let Some(length) = output.value {
+        let (start, length) = (clip.start, timeline::snap_round(length, step).max(step.unwrap_or(SHORTEST_NOTE)));
+        if length != clip.length {
+            cx.edit(|project| project.set_clip_span(clip_id, start, length));
         }
-        ui.add_space(2.0);
+    }
 
-        let label = |ui: &mut Ui, text: &str| {
-            ui.label(egui::RichText::new(text).font(theme::font(12.0)).color(theme::TEXT_DIM));
+    let toggles = stack.row(chip);
+    let mut x = toggles.left();
+    let mut toggle = |ui: &Ui, label: &str, on: bool| {
+        let spec = Chip::new(label, on);
+        let chip_rect = Rect::from_min_size(pos2(x, toggles.top()), vec2(spec.width(ui, theme), chip));
+        x = chip_rect.right() + gap - 1.0;
+        daw_noir::chip(ui, theme, chip_rect, id.with(("toggle", label)), &spec)
+    };
+    let looping = clip.midi().and_then(|midi| midi.loop_length);
+    if clip.midi().is_some() {
+        let response = toggle(ui, "Loop", looping.is_some());
+        cx.hint(&response, "Repeat the first part of the clip to fill its length");
+        if response.clicked() {
+            let loop_length = looping.is_none().then(|| default_loop_length(clip, beats_per_bar));
+            cx.edit(|project| project.clip_mut(clip_id)?.set_loop_length(loop_length));
+        }
+    }
+    let response = toggle(ui, "Mute", clip.muted);
+    cx.hint(&response, "Silence this clip without removing it");
+    if response.clicked() {
+        let muted = !clip.muted;
+        cx.edit(|project| {
+            project.clip_mut(clip_id)?.muted = muted;
+            Ok(())
+        });
+    }
+    if let Some(loop_length) = looping {
+        let shown = format!("{loop_length:.2}");
+        let field = length_field(theme, "Loop", "Loop length", &shown, loop_length);
+        let output = daw_noir::number_field(ui, theme, stack.row(bar), id.with("loop-length"), &field);
+        cx.hint(&output.response, "How much of the clip repeats \u{00B7} drag, or double-click to type");
+        if output.response.drag_started() {
+            cx.begin_gesture();
+        }
+        if let Some(length) = output.value {
+            let length = timeline::snap_round(length, step).max(step.unwrap_or(SHORTEST_NOTE));
+            if length != loop_length {
+                cx.edit(|project| project.clip_mut(clip_id)?.set_loop_length(Some(length)));
+            }
+        }
+    }
+
+    let Some(midi) = clip.midi() else { return };
+
+    stack.heading(ui, theme, "Grid", false);
+    // Straight note values on one line, triplets and "off" on the next.
+    for (line, snaps) in [&Snap::ALL[..4], &Snap::ALL[4..]].into_iter().enumerate() {
+        let labels: Vec<&str> = snaps.iter().map(|snap| snap.label()).collect();
+        let current = snaps.iter().position(|snap| *snap == cx.state.piano.snap);
+        let row = stack.row(chip);
+        let (clicked, _) =
+            daw_noir::chip_row(ui, theme, row.min, row.width(), id.with(("grid", line)), &labels, current, false);
+        if ui.rect_contains_pointer(row) {
+            cx.state.hint.set("The grid notes snap to \u{00B7} hold Alt while dragging to ignore it");
+        }
+        if let Some(index) = clicked {
+            cx.state.piano.snap = snaps[index];
+        }
+    }
+
+    let selected = cx.state.selected_notes.len();
+    let title = if selected > 0 { format!("Notes \u{00B7} {selected} selected") } else { "Notes".to_owned() };
+    stack.heading(ui, theme, &title, false);
+    // With notes selected the bar sets their velocity; without, the
+    // velocity the next note will be given.
+    let velocity = cx.state.selected_notes.first().map_or(cx.state.piano.note_velocity, |note| note.velocity);
+    let shown = velocity.to_string();
+    let default = (DEFAULT_VELOCITY as f32 - 1.0) / 126.0;
+    let bar_spec = Bar::new("Velocity", &shown, (velocity as f32 - 1.0) / 126.0).default(default);
+    let output = daw_noir::bar(ui, theme, stack.row(bar), id.with("velocity"), &bar_spec);
+    cx.hint(
+        &output.response,
+        if selected > 0 {
+            "Velocity of the selected notes"
+        } else {
+            "Velocity new notes are given \u{00B7} select notes to change theirs"
+        },
+    );
+    if output.pressed {
+        cx.begin_gesture();
+    }
+    if let Some(position) = output.frac {
+        let velocity = if output.reset { DEFAULT_VELOCITY } else { (1.0 + position * 126.0).round() as u8 };
+        cx.state.piano.note_velocity = velocity;
+        set_velocity(cx, clip_id, velocity);
+    }
+
+    let actions = stack.row(chip);
+    let mut x = actions.left();
+    let mut action = |ui: &Ui, label: &str| {
+        let spec = Chip::action(label);
+        let chip_rect = Rect::from_min_size(pos2(x, actions.top()), vec2(spec.width(ui, theme), chip));
+        x = chip_rect.right() + gap - 1.0;
+        daw_noir::chip(ui, theme, chip_rect, id.with(("action", label)), &spec)
+    };
+    let scope = if selected > 0 { "the selected notes" } else { "every note" };
+    let response = action(ui, "Quantize");
+    cx.hint(&response, format!("Move {scope} onto the grid"));
+    if response.clicked()
+        && let Some(step) = step
+    {
+        reshape_notes(cx, clip_id, &midi.notes, |notes| quantized_notes(notes, step));
+    }
+    let response = action(ui, "Legato");
+    cx.hint(&response, format!("Hold {scope} until the next one starts"));
+    if response.clicked() {
+        reshape_notes(cx, clip_id, &midi.notes, legato_notes);
+    }
+
+    // A summary at the foot of the column, when there is room for it.
+    let foot =
+        Rect::from_min_max(pos2(stack.left, rect.bottom() - 22.0), pos2(stack.left + stack.width, rect.bottom() - 6.0));
+    if foot.top() >= stack.top + 4.0 {
+        let summary = match timeline::pitch_range(&midi.notes) {
+            Some((low, high)) => {
+                format!("{} notes \u{00B7} {} \u{2013} {}", midi.notes.len(), pitch_name(low), pitch_name(high))
+            }
+            None => "No notes yet \u{00B7} click the grid to add one".to_owned(),
         };
-        egui::Grid::new("clip-properties").num_columns(2).spacing(vec2(12.0, 4.0)).show(ui, |ui| {
-            label(ui, "Start");
-            ui.label(timeline::format_position(clip.start, signature));
-            ui.end_row();
-
-            label(ui, "Length");
-            let step = cx.state.piano.snap.step();
-            let mut length = clip.length;
-            let response = ui.add(length_field(&mut length)).on_hover_text(format!(
-                "{}. Drag, or double-click to type.",
-                timeline::format_length(clip.length, signature)
-            ));
-            if response.drag_started() {
-                cx.begin_gesture();
-            }
-            if response.changed() {
-                let (start, length) =
-                    (clip.start, timeline::snap_round(length, step).max(step.unwrap_or(SHORTEST_NOTE)));
-                cx.edit(|project| project.set_clip_span(clip_id, start, length));
-            }
-            ui.end_row();
-
-            if let Some(midi) = clip.midi() {
-                label(ui, "Loop");
-                ui.horizontal(|ui| {
-                    let mut looping = midi.loop_length.is_some();
-                    if ui
-                        .checkbox(&mut looping, "")
-                        .on_hover_text("Repeat the first part of the clip to fill its length")
-                        .changed()
-                    {
-                        let loop_length = looping.then(|| default_loop_length(clip, beats_per_bar));
-                        cx.edit(|project| project.clip_mut(clip_id)?.set_loop_length(loop_length));
-                    }
-                    if let Some(mut loop_length) = midi.loop_length {
-                        let response = ui.add(length_field(&mut loop_length));
-                        if response.drag_started() {
-                            cx.begin_gesture();
-                        }
-                        if response.changed() {
-                            let loop_length =
-                                timeline::snap_round(loop_length, step).max(step.unwrap_or(SHORTEST_NOTE));
-                            cx.edit(|project| project.clip_mut(clip_id)?.set_loop_length(Some(loop_length)));
-                        }
-                    }
-                });
-                ui.end_row();
-
-                label(ui, "Snap");
-                egui::ComboBox::from_id_salt("snap").width(88.0).selected_text(cx.state.piano.snap.label()).show_ui(
-                    ui,
-                    |ui| {
-                        for snap in Snap::ALL {
-                            ui.selectable_value(&mut cx.state.piano.snap, snap, snap.label());
-                        }
-                    },
-                );
-                ui.end_row();
-
-                label(ui, "Notes");
-                let selected = cx.state.selected_notes.len();
-                let count = midi.notes.len();
-                ui.label(if selected > 0 { format!("{selected} of {count} selected") } else { count.to_string() });
-                ui.end_row();
-
-                if let Some(first) = cx.state.selected_notes.first() {
-                    label(ui, "Velocity");
-                    let mut velocity = first.velocity;
-                    let response = ui.add(egui::DragValue::new(&mut velocity).range(1..=127).speed(0.5));
-                    if response.drag_started() {
-                        cx.begin_gesture();
-                    }
-                    if response.changed() {
-                        set_velocity(cx, clip_id, velocity);
-                    }
-                    ui.end_row();
-                }
-            }
-        });
-
-        // The reminder is the first thing to go when the panel is short.
-        if clip.midi().is_some() && ui.available_height() >= 46.0 {
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                ui.label(
-                    egui::RichText::new("Click to add a note, drag to move or stretch it, right-click to delete.")
-                        .font(theme::font(11.0))
-                        .color(theme::TEXT_FAINT),
-                );
-            });
-        }
-    });
+        text::paint(ui.painter(), foot, Align2::LEFT_CENTER, theme.text.micro, &summary, theme.ink_faint);
+    }
 }
 
 /// A length in beats that can be dragged or typed.
-fn length_field(length: &mut Beats) -> egui::DragValue<'_> {
-    egui::DragValue::new(length)
-        .range(SHORTEST_NOTE..=100_000.0)
-        .speed(0.05)
-        .max_decimals(3)
-        .suffix(" beats")
-        .update_while_editing(false)
+fn length_field<'a>(theme: &Theme, label: &'a str, name: &'a str, shown: &'a str, value: Beats) -> NumberField<'a> {
+    NumberField {
+        label,
+        text: shown,
+        unit: "beats",
+        value,
+        range: SHORTEST_NOTE..=100_000.0,
+        per_point: 0.05,
+        style: theme.text.value,
+        name,
+    }
 }
 
 fn set_velocity(cx: &mut Cx, clip: ClipId, velocity: u8) {
     let before = cx.state.selected_notes.clone();
     let after: Vec<Note> = before.iter().map(|note| Note { velocity, ..*note }).collect();
-    if swap_notes(cx, clip, &before, &after) {
+    if after != before && swap_notes(cx, clip, &before, &after) {
+        cx.state.selected_notes = after;
+    }
+}
+
+/// Applies `reshape` to the selected notes, or to all of them when none is
+/// selected, as one edit.
+fn reshape_notes(cx: &mut Cx, clip: ClipId, all: &[Note], reshape: impl Fn(&[Note]) -> Vec<Note>) {
+    let selection = !cx.state.selected_notes.is_empty();
+    let before = if selection { cx.state.selected_notes.clone() } else { all.to_vec() };
+    let after = reshape(&before);
+    if after != before && swap_notes(cx, clip, &before, &after) && selection {
         cx.state.selected_notes = after;
     }
 }
@@ -419,8 +604,10 @@ pub fn nudge_selected_notes(cx: &mut Cx, steps: i32, semitones: i32) {
 
 fn roll(ui: &mut Ui, cx: &mut Cx, track: &Track, clip: &Clip, midi: &MidiContent, area: Rect) {
     let signature = cx.snap.project.time_signature;
+    let is_drums = track.devices.first().is_some_and(|device| device.uri == DRUM_KIT);
+    let keys_width = if is_drums { DRUM_KEYS_WIDTH } else { KEYS_WIDTH };
     let view = &mut cx.state.piano;
-    let inner = Geometry::new(area, view.time, view.pitch, signature, view.snap);
+    let inner = Geometry::new(area, keys_width, view.time, view.pitch, signature, view.snap);
 
     // Frame a newly selected clip once: all of it across, its notes
     // centered vertically. After that the user's zoom is left alone.
@@ -432,7 +619,7 @@ fn roll(ui: &mut Ui, cx: &mut Cx, track: &Track, clip: &Clip, midi: &MidiContent
         view.time.fit(0.0, phrase, inner.grid.width());
         let (low, high) = timeline::pitch_range(&midi.notes).unwrap_or((57, 69));
         let rows = (high - low) as f32 + 9.0;
-        view.pitch.row_height = (inner.grid.height() / rows).clamp(8.0, 16.0).round();
+        view.pitch.row_height = (inner.grid.height() / rows).clamp(8.0, 12.0).round();
         view.pitch.center_on(low, high, inner.grid.height());
     }
     view.pitch.clamp(inner.grid.height());
@@ -440,14 +627,17 @@ fn roll(ui: &mut Ui, cx: &mut Cx, track: &Track, clip: &Clip, midi: &MidiContent
 
     let view = &cx.state.piano;
     let geometry = Geometry { time: view.time, pitch: view.pitch, ..inner };
-    let is_drums = track.devices.first().is_some_and(|device| device.uri == DRUM_KIT);
+    let color = colors::track_color(cx.theme, track.color);
 
     let response = ui.interact(geometry.grid, ui.scope_id().with("notes"), Sense::click_and_drag());
-    paint_grid(ui, cx, &geometry, track, clip, midi);
-    paint_ruler(ui, &geometry, clip, midi);
-    keys(ui, cx, &geometry, track, is_drums);
+    paint_grid(ui, cx, &geometry, color, clip, midi);
+    paint_ruler(ui, cx, &geometry, clip, midi);
+    keys(ui, cx, &geometry, track, color, is_drums);
     corner(ui, cx, &geometry);
     grid_interaction(ui, cx, &geometry, track, clip, &midi.notes, &response);
+    if geometry.velocity.height() > 0.0 {
+        velocity_lane(ui, cx, &geometry, color, clip, midi);
+    }
 }
 
 /// Wheel scrolls pitches, Shift+wheel pans time, Ctrl+wheel zooms time and
@@ -474,46 +664,53 @@ fn scroll_and_zoom(ui: &Ui, cx: &mut Cx, geometry: &Geometry) {
 
 // ---- painting --------------------------------------------------------------
 
-fn paint_grid(ui: &Ui, cx: &Cx, geometry: &Geometry, track: &Track, clip: &Clip, midi: &MidiContent) {
+/// The fill of a note: the track's hue, more opaque the harder it is hit.
+fn note_fill(color: Color32, velocity: u8) -> Color32 {
+    fade(color, 0.45 + velocity as f32 / 230.0)
+}
+
+/// How much of the notes plays: up to the loop length if the clip loops,
+/// else up to the clip's end.
+fn sounding_length(clip: &Clip, midi: &MidiContent) -> Beats {
+    midi.loop_length.map_or(clip.length, |length| length.min(clip.length))
+}
+
+fn paint_grid(ui: &Ui, cx: &Cx, geometry: &Geometry, color: Color32, clip: &Clip, midi: &MidiContent) {
+    let theme = cx.theme;
     let grid = geometry.grid;
     let painter = ui.painter_at(grid);
-    painter.rect_filled(grid, 0.0, ROW_LIGHT);
+    painter.rect_filled(grid, 0.0, theme.bg);
 
     let (low, high) = geometry.visible_pitches();
     for pitch in low..=high {
         let top = geometry.y(pitch);
         if timeline::is_black_key(pitch) {
             let row = Rect::from_x_y_ranges(grid.x_range(), top..=top + geometry.pitch.row_height);
-            painter.rect_filled(row, 0.0, ROW_DARK);
+            painter.rect_filled(row, 0.0, theme.shade);
         }
         // Octaves are separated below each C; E/F, the other pair of
         // neighboring white keys, gets a fainter line.
         let separator = match pitch % 12 {
-            0 => Some(theme::GRID_BAR),
-            5 => Some(theme::GRID_BEAT),
+            0 => Some(theme.grid),
+            5 => Some(theme.grid_fine),
             _ => None,
         };
         if let Some(color) = separator {
-            painter.hline(grid.x_range(), top + geometry.pitch.row_height - 0.5, theme::hairline(color));
+            paint::hline_above(&painter, grid.x_range(), (top + geometry.pitch.row_height).round(), color);
         }
     }
 
     let (first_beat, last_beat) = geometry.time.visible(grid.width());
     timeline::for_each_grid_line(first_beat, last_beat, geometry.signature, geometry.line_step(), |beat, level| {
         let color = match level {
-            GridLevel::Bar => theme::BORDER_STRONG,
-            GridLevel::Beat => theme::GRID_BAR,
-            GridLevel::Subdivision => theme::GRID_BEAT,
+            GridLevel::Bar => theme.hairline,
+            GridLevel::Beat => theme.grid,
+            GridLevel::Subdivision => theme.grid_fine,
         };
-        painter.vline(geometry.x(beat).round() + 0.5, grid.y_range(), theme::hairline(color));
+        paint::vline(&painter, geometry.x(beat).round(), grid.y_range(), color);
     });
 
-    // Only the first `sounding` beats of the notes are played: up to the
-    // loop length if the clip loops, else up to the clip's end.
-    let sounding = midi.loop_length.map_or(clip.length, |length| length.min(clip.length));
-    let color = theme::track_color(track.color);
-    let quiet = theme::mix(theme::BG_INSET, color, 0.42);
-    let loud = theme::mix(color, Color32::WHITE, 0.12);
+    let sounding = sounding_length(clip, midi);
     let mut bodies = Mesh::default();
     let mut outlines = Vec::new();
     for note in &midi.notes {
@@ -525,96 +722,116 @@ fn paint_grid(ui: &Ui, cx: &Cx, geometry: &Geometry, track: &Track, clip: &Clip,
             continue;
         }
         let rect = geometry.note_rect(note);
-        let mut fill = theme::mix(quiet, loud, note.velocity as f32 / 127.0);
+        // A pixel of the grid shows between neighbors and between rows.
+        let body = Rect::from_min_max(rect.min + vec2(0.0, 1.0), rect.max - vec2(1.0, 0.0));
+        let mut fill = note_fill(color, note.velocity);
         if note.start >= sounding {
-            fill = theme::fade(fill, 0.35);
+            fill = fade(fill, 0.35);
         }
-        // Half a pixel of inset leaves a seam between neighbors.
-        bodies.add_colored_rect(rect.shrink(0.5).intersect(grid), fill);
+        bodies.add_colored_rect(body.intersect(grid), fill);
         if cx.state.selected_notes.contains(note) {
-            outlines.push(Shape::rect_stroke(rect, 2.0, Stroke::new(1.5, Color32::WHITE), StrokeKind::Inside));
+            outlines.push(body);
         }
     }
     painter.add(Shape::mesh(bodies));
-    painter.extend(outlines);
+    for outline in outlines {
+        paint::frame(&painter, outline, theme.ink);
+    }
 
     // Past the end of the clip (or of its loop) nothing new plays.
-    let end_x = geometry.x(sounding);
+    let end_x = geometry.x(sounding).round();
     if end_x < grid.right() {
         let beyond = Rect::from_min_max(pos2(end_x.max(grid.left()), grid.top()), grid.max);
-        painter.rect_filled(beyond, 0.0, theme::fade(Color32::BLACK, 0.34));
-        let edge = if midi.loop_length.is_some() { theme::ACCENT } else { theme::TEXT_FAINT };
-        painter.vline(end_x.round() + 0.5, grid.y_range(), theme::hairline(edge));
+        painter.rect_filled(beyond, 0.0, theme.shade);
+        paint::vline(
+            &painter,
+            end_x,
+            grid.y_range(),
+            if midi.loop_length.is_some() { theme.ink_faint } else { theme.hairline },
+        );
     }
 
     if let Some(NoteDrag::Marquee { origin, .. }) = &cx.state.piano.drag
         && let Some(pointer) = ui.input(|input| input.pointer.latest_pos())
     {
         let band = Rect::from_two_pos(*origin, pointer);
-        painter.rect_filled(band, 0.0, theme::fade(theme::ACCENT, 0.12));
-        painter.rect_stroke(band, 0.0, theme::hairline(theme::ACCENT), StrokeKind::Inside);
+        painter.rect_filled(band, 0.0, theme.selected);
+        paint::frame(&painter, band, theme.ink_dim);
     }
 
     // The song's playhead, mapped into the clip (and around its loop).
-    let position = cx.live.position - clip.start;
-    if position >= 0.0 && position < clip.length {
-        let x = geometry.x(position % sounding.max(SHORTEST_NOTE)).round() + 0.5;
-        painter.vline(x, grid.y_range(), theme::hairline(theme::PLAYHEAD));
+    if let Some(x) = playhead_x(cx, geometry, clip, sounding) {
+        paint::vline(&painter, x, grid.y_range(), theme.signal);
     }
 }
 
-fn paint_ruler(ui: &Ui, geometry: &Geometry, clip: &Clip, midi: &MidiContent) {
+/// Where the song's playhead falls in the clip's own time, if it is inside
+/// the clip.
+fn playhead_x(cx: &Cx, geometry: &Geometry, clip: &Clip, sounding: Beats) -> Option<f32> {
+    let position = cx.live.position - clip.start;
+    (position >= 0.0 && position < clip.length).then(|| geometry.x(position % sounding.max(SHORTEST_NOTE)).round())
+}
+
+fn paint_ruler(ui: &Ui, cx: &Cx, geometry: &Geometry, clip: &Clip, midi: &MidiContent) {
+    let theme = cx.theme;
     let ruler = geometry.ruler;
     let painter = ui.painter_at(ruler);
-    painter.rect_filled(ruler, 0.0, theme::BG_PANEL);
-    painter.hline(ruler.x_range(), ruler.bottom() - 0.5, theme::hairline(theme::BORDER));
+    painter.rect_filled(ruler, 0.0, theme.panel);
+    paint::hline_above(&painter, ruler.x_range(), ruler.bottom(), theme.hairline);
 
     // Bars are counted from the start of the clip.
     let signature = geometry.signature;
     let (first_beat, last_beat) = geometry.time.visible(ruler.width());
     let label_step = timeline::grid_step(geometry.time.pixels_per_beat, signature, 52.0);
+    let style = daw_noir::TextStyle { tracking: 0.4, ..theme.text.micro };
     timeline::for_each_grid_line(first_beat, last_beat, signature, label_step, |beat, level| {
-        let x = geometry.x(beat);
-        painter.vline(x.round() + 0.5, ruler.bottom() - 5.0..=ruler.bottom(), theme::hairline(theme::BORDER_STRONG));
-        let color = if level == GridLevel::Bar { theme::TEXT_DIM } else { theme::TEXT_FAINT };
-        painter.text(
-            pos2(x + 4.0, ruler.center().y),
+        let x = geometry.x(beat).round();
+        if level == GridLevel::Bar {
+            paint::vline(&painter, x, ruler.y_range(), theme.grid);
+        }
+        let room = Rect::from_min_max(pos2(x + 4.0, ruler.top()), ruler.max);
+        text::paint(
+            &painter,
+            room,
             Align2::LEFT_CENTER,
-            timeline::format_bar_beat(beat, signature),
-            theme::font(10.0),
-            color,
+            style,
+            &timeline::format_bar_beat(beat, signature),
+            theme.ink_faint,
         );
     });
 
-    // A bar under the ruler marks the part of the clip that plays.
-    let sounding = midi.loop_length.map_or(clip.length, |length| length.min(clip.length));
-    let span =
-        Rect::from_min_max(pos2(geometry.x(0.0), ruler.bottom() - 3.0), pos2(geometry.x(sounding), ruler.bottom()));
-    let color = if midi.loop_length.is_some() { theme::ACCENT } else { theme::TEXT_FAINT };
-    painter.rect_filled(span, 0.0, color);
+    // A line along the ruler's foot marks the part of the clip that plays.
+    let span = Rect::from_min_max(
+        pos2(geometry.x(0.0).round(), ruler.bottom() - 2.0),
+        pos2(geometry.x(sounding_length(clip, midi)).round(), ruler.bottom()),
+    );
+    painter.rect_filled(span, 0.0, if midi.loop_length.is_some() { theme.ink_dim } else { theme.ghost });
 }
 
 /// The keyboard down the left side. Press a key to hear it.
-fn keys(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, is_drums: bool) {
+fn keys(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, color: Color32, is_drums: bool) {
+    let theme = cx.theme;
     let keys = geometry.keys;
     let response = ui.interact(keys, ui.scope_id().with("keys"), Sense::click_and_drag());
     let held = cx.state.audition.map(|audition| audition.pitch);
     let hovered = response.hover_pos().map(|pointer| geometry.pitch_at(pointer.y));
+    cx.hint(&response, "Press a key to hear it \u{00B7} slide to play across keys");
 
     let painter = ui.painter_at(keys);
     let row_height = geometry.pitch.row_height;
-    painter.rect_filled(keys, 0.0, if is_drums { theme::BG_RAISED } else { WHITE_KEY });
+    painter.rect_filled(keys, 0.0, if is_drums { theme.panel } else { theme.key_white });
     let (low, high) = geometry.visible_pitches();
     for pitch in low..=high {
         let row = Rect::from_min_size(pos2(keys.left(), geometry.y(pitch)), vec2(keys.width(), row_height));
-        let lit = held == Some(pitch);
+        let named = row_height >= 10.0 && row.top() >= keys.top() - 0.5 && row.bottom() <= keys.bottom() + 0.5;
+        let state = KeyState { lit: held == Some(pitch), hovered: hovered == Some(pitch), named };
         if is_drums {
-            paint_drum_row(&painter, row, pitch, lit, hovered == Some(pitch));
+            paint_drum_row(&painter, theme, row, pitch, state, color);
         } else {
-            paint_key(&painter, row, pitch, lit, hovered == Some(pitch));
+            paint_key(&painter, theme, row, pitch, state, color);
         }
     }
-    painter.vline(keys.right() - 0.5, keys.y_range(), theme::hairline(theme::BORDER_STRONG));
+    paint::vline_left_of(&painter, keys.right(), keys.y_range(), theme.hairline);
 
     // Sliding along the keyboard with the button down plays each key.
     if response.is_pointer_button_down_on()
@@ -623,89 +840,177 @@ fn keys(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, is_drums: 
         cx.state.focus = FocusArea::PianoRoll;
         let pitch = geometry.pitch_at(pointer.y);
         if held != Some(pitch) {
-            cx.audition(track.id, pitch, DEFAULT_VELOCITY, None);
+            let velocity = cx.state.piano.note_velocity;
+            cx.audition(track.id, pitch, velocity, None);
         }
     }
 }
 
-fn paint_key(painter: &egui::Painter, row: Rect, pitch: u8, lit: bool, hovered: bool) {
+#[derive(Copy, Clone)]
+struct KeyState {
+    /// The key is sounding.
+    lit: bool,
+    hovered: bool,
+    /// The row is tall enough for its name and wholly in view: a name cut
+    /// in half by the ruler reads as a glitch.
+    named: bool,
+}
+
+fn paint_key(painter: &egui::Painter, theme: &Theme, row: Rect, pitch: u8, state: KeyState, color: Color32) {
     let black = timeline::is_black_key(pitch);
-    if black {
-        // A black key is shorter; the white keys on either side meet
-        // behind it, along the middle of its row.
-        let key = row.with_max_x(row.left() + row.width() * 0.62);
-        painter.hline(key.right()..=row.right(), row.center().y, theme::hairline(theme::fade(Color32::BLACK, 0.28)));
-        let fill = if lit {
-            theme::ACCENT
-        } else if hovered {
-            theme::BG_CONTROL_ACTIVE
-        } else {
-            BLACK_KEY
-        };
-        painter.rect_filled(key.shrink2(vec2(0.0, 0.5)), egui::CornerRadius { nw: 0, sw: 0, ne: 2, se: 2 }, fill);
-    } else {
-        if lit || hovered {
-            let tint = if lit { theme::fade(theme::ACCENT, 0.55) } else { theme::fade(Color32::BLACK, 0.1) };
-            painter.rect_filled(row, 0.0, tint);
-        }
-        // B/C and E/F are white keys side by side.
-        if matches!(pitch % 12, 0 | 5) {
-            painter.hline(row.x_range(), row.bottom() - 0.5, theme::hairline(theme::fade(Color32::BLACK, 0.28)));
-        }
+    let fill = match (state.lit, black) {
+        (true, _) => Some(color),
+        (false, true) => Some(theme.key_black),
+        (false, false) => None,
+    };
+    if let Some(fill) = fill {
+        painter.rect_filled(row, 0.0, fill);
     }
-    if pitch.is_multiple_of(12) && row.height() >= 8.0 {
-        painter.text(
-            row.right_center() - vec2(5.0, 0.0),
-            Align2::RIGHT_CENTER,
-            pitch_name(pitch),
-            theme::font(row.height().clamp(8.0, 10.0)),
-            theme::TEXT_ON_COLOR,
-        );
+    if state.hovered && !state.lit {
+        painter.rect_filled(row, 0.0, fade(if black { theme.key_white } else { theme.key_black }, 0.16));
+    }
+    // A line between every pair of keys, as the gaps of a real keyboard.
+    paint::hline(painter, row.x_range(), row.top().round(), fade(theme.key_ink, 0.35));
+    if pitch.is_multiple_of(12) && state.named {
+        let ink = if state.lit { theme.on_accent } else { theme.key_ink };
+        let label = Rect::from_min_max(row.min, pos2(row.right() - 4.0, row.bottom()));
+        let style = daw_noir::TextStyle { tracking: 0.0, ..theme.text.micro };
+        text::paint(painter, label, Align2::RIGHT_CENTER, style, &pitch_name(pitch), ink);
     }
 }
 
 /// Drum tracks list their sounds by name instead of showing piano keys.
-fn paint_drum_row(painter: &egui::Painter, row: Rect, pitch: u8, lit: bool, hovered: bool) {
+fn paint_drum_row(painter: &egui::Painter, theme: &Theme, row: Rect, pitch: u8, state: KeyState, color: Color32) {
     let name = drum_name(pitch);
-    let fill = match (lit, hovered, name.is_some()) {
-        (true, ..) => theme::fade(theme::ACCENT, 0.6),
-        (false, true, _) => theme::BG_CONTROL_HOVER,
-        (false, false, true) => theme::BG_CONTROL,
-        (false, false, false) => theme::BG_RAISED,
-    };
-    painter.rect_filled(row.shrink2(vec2(0.0, 0.5)), 0.0, fill);
+    if state.lit {
+        painter.rect_filled(row, 0.0, color);
+    } else if state.hovered {
+        painter.rect_filled(row, 0.0, theme.selected);
+    } else if name.is_some() {
+        painter.rect_filled(row, 0.0, theme.fill);
+    }
+    paint::hline(painter, row.x_range(), row.top().round(), theme.grid);
     if let Some(name) = name
-        && row.height() >= 9.0
+        && state.named
     {
-        let text_area = row.shrink2(vec2(6.0, 0.0));
-        let size = row.height().clamp(8.0, 10.5);
-        widgets::text_in(painter, text_area, Align2::LEFT_CENTER, name, theme::font(size), theme::TEXT);
+        let ink = match (state.lit, state.hovered) {
+            (true, _) => theme.on_accent,
+            (false, true) => theme.ink,
+            (false, false) => theme.ink_dim,
+        };
+        let style = daw_noir::TextStyle { upper: false, tracking: 0.2, ..theme.text.micro };
+        text::paint(painter, row.shrink2(vec2(6.0, 0.0)), Align2::LEFT_CENTER, style, name, ink);
     }
 }
 
 /// Vertical zoom buttons above the keyboard.
 fn corner(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry) {
+    let theme = cx.theme;
     let corner = geometry.corner;
     let painter = ui.painter_at(corner);
-    painter.rect_filled(corner, 0.0, theme::BG_PANEL);
-    painter.hline(corner.x_range(), corner.bottom() - 0.5, theme::hairline(theme::BORDER));
-    painter.vline(corner.right() - 0.5, corner.y_range(), theme::hairline(theme::BORDER));
+    painter.rect_filled(corner, 0.0, theme.panel);
+    paint::hline_above(&painter, corner.x_range(), corner.bottom(), theme.hairline);
+    paint::vline_left_of(&painter, corner.right(), corner.y_range(), theme.hairline);
 
-    let button = |index: f32| {
-        Rect::from_min_size(pos2(corner.left() + 6.0 + index * 26.0, corner.top() + 1.0), vec2(24.0, 17.0))
-    };
+    let button =
+        |index: f32| Rect::from_min_size(pos2(corner.left() + 1.0 + index * 21.0, corner.top()), vec2(21.0, 17.0));
     let height = geometry.grid.height();
     let middle = geometry.grid.center().y;
-    let mut zoom = |ui: &mut Ui, index: f32, icon: Icon, factor: f32, hint: &str| {
-        if widgets::icon_button_at(ui, button(index), ui.scope_id().with(("row-zoom", icon)), icon, None)
-            .on_hover_text(hint)
-            .clicked()
-        {
+    for (index, icon, factor, name) in
+        [(0.0, Icon::Minus, 1.0 / 1.25, "Shorter rows"), (1.0, Icon::Plus, 1.25, "Taller rows")]
+    {
+        let id = ui.scope_id().with(("row-zoom", icon));
+        let response = daw_noir::bare_icon_button(ui, theme, button(index), id, icon, name);
+        cx.hint(&response, format!("{name} \u{00B7} Alt+scroll"));
+        if response.clicked() {
             cx.state.piano.pitch.zoom_around(geometry.grid.top(), middle, factor, height);
         }
-    };
-    zoom(ui, 0.0, Icon::Minus, 1.0 / 1.25, "Shorter rows (Alt+scroll)");
-    zoom(ui, 1.0, Icon::Plus, 1.25, "Taller rows (Alt+scroll)");
+    }
+}
+
+// ---- the velocity lane -----------------------------------------------------
+
+/// One stem per note along the bottom, as tall as the note is loud. Drag a
+/// stem to change its note; selected notes follow.
+fn velocity_lane(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, color: Color32, clip: &Clip, midi: &MidiContent) {
+    let theme = cx.theme;
+    let lane = geometry.velocity;
+    let stems = lane.with_min_x(geometry.grid.left());
+    let response = ui.interact(stems, ui.scope_id().with("velocity"), Sense::click_and_drag());
+
+    let painter = ui.painter_at(lane);
+    painter.rect_filled(lane, 0.0, theme.panel);
+    paint::hline(&painter, lane.x_range(), lane.top(), theme.hairline);
+    let gutter = Rect::from_min_max(lane.min + vec2(6.0, 4.0), pos2(geometry.grid.left() - 4.0, lane.top() + 18.0));
+    text::paint(&painter, gutter, Align2::LEFT_CENTER, theme.text.micro, "Vel", theme.ink_faint);
+    paint::vline_left_of(&painter, geometry.grid.left(), lane.y_range(), theme.hairline);
+
+    let painter = painter.with_clip_rect(stems);
+    let (first_beat, last_beat) = geometry.time.visible(stems.width());
+    let sounding = sounding_length(clip, midi);
+    let foot = lane.bottom() - STEM_FOOT;
+    // Selected stems are drawn last, so they are not hidden by a neighbor
+    // that starts at the same time.
+    let visible = midi.notes.iter().filter(|note| note.start >= first_beat - 1.0 && note.start <= last_beat);
+    let (selected, plain): (Vec<&Note>, Vec<&Note>) = visible.partition(|note| cx.state.selected_notes.contains(note));
+    for (notes, lit) in [(plain, false), (selected, true)] {
+        for note in notes {
+            let x = geometry.x(note.start).round();
+            let top = geometry.stem_top(note.velocity).round();
+            let ink = match (lit, note.start >= sounding) {
+                (true, _) => theme.ink,
+                (false, false) => color,
+                (false, true) => fade(color, 0.35),
+            };
+            paint::vline(&painter, x, Rangef::new(top, foot), ink);
+            painter.rect_filled(Rect::from_min_size(pos2(x - 1.0, top - 2.0), vec2(4.0, 4.0)), 0.0, ink);
+        }
+    }
+    if let Some(x) = playhead_x(cx, geometry, clip, sounding) {
+        paint::vline(&painter, x, lane.y_range(), theme.signal);
+    }
+
+    let hovered = response.hover_pos().and_then(|pointer| geometry.stem_at(&midi.notes, pointer.x));
+    if cx.state.piano.drag.is_none() {
+        if let Some(note) = hovered {
+            ui.set_cursor_icon(CursorIcon::ResizeVertical);
+            cx.state
+                .hint
+                .set(format!("Velocity {} \u{00B7} drag to change \u{00B7} selected notes follow", note.velocity));
+        } else if response.hovered() {
+            cx.state.hint.set("How hard each note is hit \u{00B7} drag a stem to change it");
+        }
+    }
+
+    if response.drag_started_by(PointerButton::Primary)
+        && let Some(press) = ui.input(|input| input.pointer.press_origin())
+        && let Some(grabbed) = geometry.stem_at(&midi.notes, press.x)
+    {
+        cx.state.focus = FocusArea::PianoRoll;
+        if !cx.state.selected_notes.contains(&grabbed) {
+            cx.state.selected_notes = vec![grabbed];
+        }
+        let originals = cx.state.selected_notes.clone();
+        cx.begin_gesture();
+        cx.state.piano.drag = Some(NoteDrag::Velocity { current: originals.clone(), originals, grabbed });
+    }
+    if response.dragged_by(PointerButton::Primary)
+        && let Some(pointer) = response.interact_pointer_pos()
+        && let Some(NoteDrag::Velocity { originals, current, grabbed }) = cx.state.piano.drag.clone()
+    {
+        ui.set_cursor_icon(CursorIcon::ResizeVertical);
+        let change = geometry.velocity_at(pointer.y) as i32 - grabbed.velocity as i32;
+        let target = revoiced_notes(&originals, change);
+        if target != current && swap_notes(cx, clip.id, &current, &target) {
+            cx.state.selected_notes = target.clone();
+            cx.state.piano.drag = Some(NoteDrag::Velocity { originals, current: target, grabbed });
+        }
+    }
+    // Also ends a drag whose button was released outside the window.
+    if matches!(cx.state.piano.drag, Some(NoteDrag::Velocity { .. })) && !ui.input(|input| input.pointer.primary_down())
+    {
+        cx.state.piano.drag = None;
+    }
 }
 
 // ---- interaction -----------------------------------------------------------
@@ -728,9 +1033,20 @@ fn grid_interaction(
 
     if cx.state.piano.drag.is_none()
         && let Some(pointer) = response.hover_pos()
-        && let Some((_, SpanHit::End)) = hit(pointer)
     {
-        ui.set_cursor_icon(CursorIcon::ResizeHorizontal);
+        match hit(pointer) {
+            Some((_, SpanHit::End)) => {
+                ui.set_cursor_icon(CursorIcon::ResizeHorizontal);
+                cx.state.hint.set("Drag to change the note\u{2019}s length \u{00B7} Alt for no snapping");
+            }
+            Some(_) => cx
+                .state
+                .hint
+                .set("Drag to move \u{00B7} Shift-click adds to the selection \u{00B7} right-click deletes"),
+            None => {
+                cx.state.hint.set("Click to add a note \u{00B7} drag to select \u{00B7} scroll moves through the keys")
+            }
+        }
     }
 
     if response.secondary_clicked()
@@ -762,7 +1078,7 @@ fn grid_interaction(
                     pitch: geometry.pitch_at(pointer.y),
                     start: timeline::snap_floor(geometry.beat(pointer.x), step),
                     length: cx.state.piano.note_length,
-                    velocity: DEFAULT_VELOCITY,
+                    velocity: cx.state.piano.note_velocity,
                 };
                 if swap_notes(cx, clip.id, &[], &[note]) {
                     cx.state.selected_notes = vec![note];
@@ -849,11 +1165,14 @@ fn grid_interaction(
                 }
                 cx.state.selected_notes = selection;
             }
+            // Belongs to the velocity lane.
+            NoteDrag::Velocity { .. } => {}
         }
     }
 
     // Also ends a drag whose button was released outside the window.
-    if cx.state.piano.drag.is_some() && !ui.input(|input| input.pointer.primary_down()) {
+    let in_grid = !matches!(cx.state.piano.drag, Some(NoteDrag::Velocity { .. }) | None);
+    if in_grid && !ui.input(|input| input.pointer.primary_down()) {
         cx.state.piano.drag = None;
     }
 }
@@ -893,6 +1212,36 @@ mod tests {
         let notes = [note(60, 0.0, 1.0), note(62, 1.0, 0.25)];
         assert_eq!(resized_notes(&notes, 0.5, 0.25), [note(60, 0.0, 1.5), note(62, 1.0, 0.75)]);
         assert_eq!(resized_notes(&notes, -0.5, 0.25), [note(60, 0.0, 0.5), note(62, 1.0, 0.25)]);
+    }
+
+    #[test]
+    fn velocities_move_together_and_stay_in_range() {
+        let soft = Note { velocity: 20, ..note(60, 0.0, 1.0) };
+        let loud = Note { velocity: 120, ..note(64, 1.0, 1.0) };
+        let velocities = |notes: Vec<Note>| notes.iter().map(|note| note.velocity).collect::<Vec<_>>();
+        assert_eq!(velocities(revoiced_notes(&[soft, loud], 5)), [25, 125]);
+        assert_eq!(velocities(revoiced_notes(&[soft, loud], 30)), [50, 127], "the loud note stops at the top");
+        assert_eq!(velocities(revoiced_notes(&[soft, loud], -60)), [1, 60], "a note is never silent");
+        assert_eq!(revoiced_notes(&[soft], 0), [soft]);
+    }
+
+    #[test]
+    fn quantizing_moves_starts_onto_the_grid_and_keeps_lengths() {
+        let loose = [note(60, 0.07, 0.4), note(62, 0.9, 1.0), note(64, 1.5, 0.25)];
+        assert_eq!(quantized_notes(&loose, 0.25), [note(60, 0.0, 0.4), note(62, 1.0, 1.0), note(64, 1.5, 0.25)]);
+        assert_eq!(quantized_notes(&loose, 1.0)[2].start, 2.0);
+    }
+
+    #[test]
+    fn legato_closes_the_gaps_between_notes() {
+        let line = [note(60, 0.0, 0.25), note(62, 1.0, 0.25), note(64, 3.0, 0.5)];
+        assert_eq!(legato_notes(&line), [note(60, 0.0, 1.0), note(62, 1.0, 2.0), note(64, 3.0, 0.5)]);
+        // A chord is held as one, until whatever comes after it.
+        let chord = [note(60, 0.0, 0.25), note(64, 0.0, 0.5), note(67, 2.0, 1.0)];
+        assert_eq!(legato_notes(&chord), [note(60, 0.0, 2.0), note(64, 0.0, 2.0), note(67, 2.0, 1.0)]);
+        // Overlapping notes are shortened to meet the next one too.
+        assert_eq!(legato_notes(&[note(60, 0.0, 3.0), note(62, 1.0, 1.0)])[0].length, 1.0);
+        assert!(legato_notes(&[]).is_empty());
     }
 
     #[test]
@@ -938,10 +1287,12 @@ mod tests {
     }
 
     fn geometry() -> Geometry {
-        let area = Rect::from_min_size(pos2(200.0, 500.0), vec2(800.0, 260.0));
+        // Twenty rows of notes between the ruler and the velocity lane.
+        let area = Rect::from_min_size(pos2(200.0, 500.0), vec2(800.0, RULER_HEIGHT + 240.0 + VELOCITY_LANE));
         let pitch = PitchView { top: 72.0, row_height: 12.0 };
         Geometry::new(
             area,
+            KEYS_WIDTH,
             TimeView { origin: 0.0, pixels_per_beat: 40.0 },
             pitch,
             TimeSignature::default(),
@@ -963,6 +1314,43 @@ mod tests {
     }
 
     #[test]
+    fn the_velocity_lane_sits_under_keys_and_grid() {
+        let g = geometry();
+        assert_eq!(g.velocity.top(), g.grid.bottom());
+        assert_eq!(g.velocity.height(), VELOCITY_LANE);
+        assert_eq!((g.velocity.left(), g.velocity.right()), (g.keys.left(), g.grid.right()));
+        // A panel dragged very short keeps the notes and drops the lane.
+        let short = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 100.0));
+        let cramped = Geometry { ..Geometry::new(short, KEYS_WIDTH, g.time, g.pitch, g.signature, Snap::Sixteenth) };
+        assert_eq!(cramped.velocity.height(), 0.0);
+        assert_eq!(cramped.grid.bottom(), short.bottom());
+    }
+
+    #[test]
+    fn stems_map_velocities_to_heights_and_back() {
+        let g = geometry();
+        assert_eq!(g.stem_top(127), g.velocity.top() + STEM_HEADROOM);
+        assert!(g.stem_top(1) < g.velocity.bottom() - STEM_FOOT, "the quietest note still has a stem");
+        for velocity in [1u8, 37, 64, 100, 127] {
+            assert_eq!(g.velocity_at(g.stem_top(velocity)), velocity);
+        }
+        assert_eq!(g.velocity_at(g.velocity.top() - 500.0), 127);
+        assert_eq!(g.velocity_at(g.velocity.bottom() + 500.0), 1);
+    }
+
+    #[test]
+    fn the_nearest_stem_is_grabbed_and_the_loudest_of_a_chord() {
+        let g = geometry();
+        let soft = Note { velocity: 40, ..note(60, 1.0, 1.0) };
+        let loud = Note { velocity: 110, ..note(64, 1.0, 1.0) };
+        let later = note(67, 2.0, 1.0);
+        let notes = [soft, loud, later];
+        assert_eq!(g.stem_at(&notes, g.x(1.0) + 3.0), Some(loud), "of a chord, the stem whose head shows");
+        assert_eq!(g.stem_at(&notes, g.x(2.0) - 5.0), Some(later));
+        assert_eq!(g.stem_at(&notes, g.x(1.5)), None, "out of reach of both");
+    }
+
+    #[test]
     fn grid_lines_follow_snap_until_they_crowd() {
         let mut g = geometry();
         assert_eq!(g.line_step(), 0.25, "sixteenths are 10 px apart");
@@ -972,5 +1360,13 @@ mod tests {
         g.time.pixels_per_beat = 40.0;
         assert_eq!(g.line_step(), 0.5);
         assert_eq!(g.handle_beats(), RESIZE_HANDLE as f64 / 40.0);
+    }
+
+    #[test]
+    fn louder_notes_are_more_opaque() {
+        let color = Color32::from_rgb(222, 138, 164);
+        assert!(note_fill(color, 127).a() > note_fill(color, 64).a());
+        assert!(note_fill(color, 1).a() > 100, "the quietest note is still clearly there");
+        assert_eq!(note_fill(color, 127).a(), 255);
     }
 }

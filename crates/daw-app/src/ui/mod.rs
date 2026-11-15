@@ -12,25 +12,38 @@
 //!   meters). Idle, it polls the revision a few times a second so edits made
 //!   elsewhere still show up promptly.
 //!
-//! Modules: [`app`] is the shell (panels, shortcuts, repaint policy);
-//! [`transport`], [`arrangement`], [`detail`] (with [`piano_roll`] and
-//! [`devices`]) and [`master`] are the views; [`files`] runs dialogs and
-//! exports off the UI thread; [`timeline`] and [`units`] hold the pure math;
-//! [`widgets`] and [`theme`] the custom controls and the look.
+//! The look is Instrument Noir, from the `daw-noir` crate: its
+//! [`daw_noir::Theme`] holds every color, type size and metric, and its
+//! widgets (bars, chips, tabs, meters) are what the views are made of.
+//! Views place those widgets by hand, at exact rectangles, and never pick a
+//! color or a font size of their own.
+//!
+//! Modules: [`app`] is the shell (panels, shortcuts, repaint policy).
+//! [`top_bar`], [`status_bar`], [`browser`], [`arrangement`] and [`detail`]
+//! (with [`piano_roll`] and [`devices`]) are the views. [`device_layouts`]
+//! says how each built-in device arranges its parameters, and [`displays`]
+//! draws their small curves from the math in [`response`]. [`files`] runs
+//! dialogs and exports off the UI thread; [`timeline`] and [`units`] hold
+//! the pure math; [`colors`] maps stored track colors to palette hues; and
+//! [`widgets`] is the glue between the views and the kit.
 
 mod app;
 mod arrangement;
+mod browser;
+mod colors;
 mod detail;
+mod device_layouts;
 mod devices;
+mod displays;
 mod files;
-mod master;
 mod piano_roll;
+mod response;
 mod snapshot;
 mod state;
-mod theme;
+mod status_bar;
 mod timeline;
 mod toast;
-mod transport;
+mod top_bar;
 mod units;
 mod widgets;
 
@@ -48,6 +61,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The smallest the window can be made: every part of it still fits.
+const MIN_WINDOW_SIZE: [f32; 2] = [1060.0, 640.0];
+
+/// Names of the themes the window can be painted in, the default first.
+pub fn theme_names() -> Vec<&'static str> {
+    daw_noir::Theme::all().iter().map(|theme| theme.name).collect()
+}
+
 /// How the window starts up. The defaults are an ordinary interactive run.
 #[derive(Clone, Debug)]
 pub struct UiOptions {
@@ -57,6 +78,10 @@ pub struct UiOptions {
     pub select_clip: Option<ClipId>,
     /// Address of the MCP server AI assistants can connect to, if it runs.
     pub mcp_url: Option<String>,
+    /// Name of the theme to start in; one of [`theme_names`].
+    pub theme: &'static str,
+    /// Whether the device browser is open at startup.
+    pub browser: bool,
     /// Render a few frames, save the window to this PNG and exit.
     pub screenshot: Option<PathBuf>,
     /// Start playback as soon as the window opens.
@@ -73,6 +98,8 @@ impl Default for UiOptions {
             detail_tab: DetailTab::default(),
             select_clip: None,
             mcp_url: None,
+            theme: theme_names()[0],
+            browser: true,
             screenshot: None,
             autoplay: false,
             exit_after: None,
@@ -87,7 +114,7 @@ pub fn run(session: SharedSession, options: UiOptions) -> anyhow::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("DAW")
             .with_inner_size(options.window_size)
-            .with_min_inner_size([1060.0, 640.0]),
+            .with_min_inner_size(MIN_WINDOW_SIZE),
         ..Default::default()
     };
     // Failures inside the event loop (a screenshot that could not be saved)

@@ -1,8 +1,8 @@
 //! Transient messages: errors and confirmations appear in the corner of the
 //! window and fade on their own, so nothing ever blocks the user.
 
-use super::theme;
-use eframe::egui::{self, Align2, Color32};
+use daw_noir::{Theme, paint};
+use eframe::egui::{self, Align2};
 use std::time::{Duration, Instant};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -67,7 +67,7 @@ impl Toasts {
 
     /// Paints the messages, newest at the bottom, above `bottom_right`.
     /// Click a message to dismiss it.
-    pub fn show(&mut self, ctx: &egui::Context, bottom_right: egui::Pos2) {
+    pub fn show(&mut self, ctx: &egui::Context, theme: &Theme, bottom_right: egui::Pos2) {
         let now = Instant::now();
         self.items.retain(|toast| now.duration_since(toast.created) < toast.lifetime);
         if self.items.is_empty() {
@@ -79,10 +79,11 @@ impl Toasts {
         for (index, toast) in self.items.iter().enumerate().rev() {
             let remaining = toast.lifetime.saturating_sub(now.duration_since(toast.created));
             let opacity = (remaining.as_secs_f32() / FADE.as_secs_f32()).min(1.0);
-            let accent = match toast.kind {
-                ToastKind::Info => theme::ACCENT,
-                ToastKind::Success => theme::PLAY,
-                ToastKind::Error => theme::ERROR,
+            // A status dot says what kind of message this is.
+            let dot = match toast.kind {
+                ToastKind::Info => theme.info,
+                ToastKind::Success => theme.ok,
+                ToastKind::Error => theme.signal,
             };
             let area = egui::Area::new(egui::Id::unique(("toast", index)))
                 .order(egui::Order::Foreground)
@@ -91,34 +92,29 @@ impl Toasts {
                 .show(ctx, |ui| {
                     ui.set_opacity(opacity);
                     let frame = egui::Frame::NONE
-                        .fill(theme::BG_RAISED)
-                        .stroke(theme::hairline(theme::BORDER_STRONG))
-                        .corner_radius(theme::RADIUS)
-                        .shadow(egui::Shadow {
-                            offset: [0, 4],
-                            blur: 16,
-                            spread: 0,
-                            color: Color32::from_black_alpha(90),
-                        })
-                        .inner_margin(egui::Margin { left: 14, right: 12, top: 9, bottom: 9 });
+                        .fill(theme.raised)
+                        .stroke(egui::Stroke::new(1.0, theme.hairline))
+                        .inner_margin(egui::Margin { left: 23, right: 12, top: 8, bottom: 8 });
                     let response = frame
                         .show(ui, |ui| {
                             ui.set_max_width(380.0);
-                            ui.add(egui::Label::new(egui::RichText::new(&toast.text).color(theme::TEXT)).wrap());
+                            ui.add(egui::Label::new(egui::RichText::new(&toast.text).color(theme.ink)).wrap());
                         })
                         .response;
-                    // A colored edge says what kind of message this is.
-                    let edge = egui::Rect::from_min_max(
-                        response.rect.left_top() + egui::vec2(0.0, 5.0),
-                        response.rect.left_bottom() + egui::vec2(3.0, -5.0),
+                    // Level with the first line of the text.
+                    let first_line = response.rect.top() + 8.0 + theme.text.body.size * 0.62;
+                    paint::dot(
+                        ui.painter(),
+                        egui::pos2(response.rect.left() + 10.0, first_line),
+                        theme.metric.dot,
+                        dot,
                     );
-                    ui.painter().rect_filled(edge, 2.0, accent);
                     response.interact(egui::Sense::click())
                 });
             if area.inner.clicked() {
                 dismissed = Some(index);
             }
-            bottom = area.response.rect.top() - 8.0;
+            bottom = area.response.rect.top() - 6.0;
         }
         if let Some(index) = dismissed {
             self.items.remove(index);

@@ -106,6 +106,8 @@ pub struct PianoRollState {
     pub framed: Option<ClipId>,
     /// Length given to new notes: the last length the user drew or resized.
     pub note_length: Beats,
+    /// Velocity given to new notes: the last one set in the sidebar.
+    pub note_velocity: u8,
 }
 
 /// A note being auditioned through the selected track's instrument.
@@ -215,6 +217,7 @@ impl UiState {
                 drag: None,
                 framed: None,
                 note_length: 0.25,
+                note_velocity: super::piano_roll::DEFAULT_VELOCITY,
             },
             renaming_track: None,
             renaming_clip: None,
@@ -285,8 +288,14 @@ impl UiState {
         if self.selected_track.is_none() {
             self.selected_track = project.tracks.first().map(|track| track.id);
         }
-        // The selected device is always one of the shown chain; by default
-        // its first, which on a track is the instrument.
+        self.resolve_device(project);
+    }
+
+    /// Keeps the selected device one of the shown chain: by default its
+    /// first, which on a track is the instrument. Cheap, and called every
+    /// frame, because selecting another track changes the chain without
+    /// the project changing.
+    pub fn resolve_device(&mut self, project: &Project) {
         let chain = project.chain(self.shown_chain()).map(Vec::as_slice).unwrap_or_default();
         if !self.selected_device.is_some_and(|id| chain.iter().any(|device| device.id == id)) {
             self.selected_device = chain.first().map(|device| device.id);
@@ -460,10 +469,10 @@ mod tests {
         assert_eq!(state.selected_device, Some(delay), "a valid choice is kept");
 
         state.select_master();
-        state.reconcile(&project);
+        state.resolve_device(&project);
         assert_eq!((state.shown_chain(), state.selected_device), (ChainRef::Master, Some(limiter)));
         state.select_track(track);
-        state.reconcile(&project);
+        state.resolve_device(&project);
         assert_eq!((state.shown_chain(), state.selected_device), (ChainRef::Track(track), Some(synth)));
 
         project.remove_device(synth).unwrap();

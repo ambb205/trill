@@ -87,22 +87,25 @@ pub fn number_field(ui: &mut Ui, theme: &Theme, rect: Rect, id: Id, field: &Numb
 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter_at(rect);
-        if enabled && (response.hovered() || response.dragged()) {
+        let lit = enabled && (response.hovered() || response.dragged());
+        if lit {
             painter.rect_filled(rect, 0.0, theme.hover);
         }
         paint::frame(&painter, rect, theme.hairline);
+        // On the hover wash the faint ink would be too quiet.
+        let quiet = if lit { theme.ink_dim } else { theme.ink_faint };
         if field.label.is_empty() {
             // Value then unit, read left to right like a sentence.
             let used = text::paint(&painter, inner, Align2::LEFT_CENTER, field.style, field.text, theme.ink);
             let unit = Rect::from_min_max(pos2(inner.left() + used + 7.0, inner.top()), inner.max);
-            text::paint(&painter, unit, Align2::LEFT_CENTER, theme.text.micro, field.unit, theme.ink_faint);
+            text::paint(&painter, unit, Align2::LEFT_CENTER, theme.text.micro, field.unit, quiet);
         } else {
             let shown =
                 if field.unit.is_empty() { field.text.to_owned() } else { format!("{} {}", field.text, field.unit) };
             let galley = text::layout(&painter, field.style, &shown, theme.ink, inner.width());
             let label =
                 Rect::from_min_max(inner.min, pos2(inner.right() - galley.width() - theme.metric.pad, inner.bottom()));
-            text::paint(&painter, label, Align2::LEFT_CENTER, theme.text.label, field.label, theme.ink_faint);
+            text::paint(&painter, label, Align2::LEFT_CENTER, theme.text.label, field.label, quiet);
             text::place(&painter, inner, Align2::RIGHT_CENTER, galley);
         }
     }

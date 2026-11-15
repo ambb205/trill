@@ -9,7 +9,7 @@
 
 use crate::theme::{Theme, fade};
 use crate::{paint, text};
-use egui::{Align2, Color32, Id, Rangef, Rect, Response, Sense, Ui, WidgetInfo, pos2};
+use egui::{Align2, Id, Rangef, Rect, Response, Sense, Ui, WidgetInfo, pos2};
 
 /// How much slower a fine drag moves.
 const FINE: f32 = 0.1;
@@ -22,14 +22,21 @@ pub struct Bar<'a> {
     frac: f32,
     origin: Option<f32>,
     default: f32,
-    label_color: Option<Color32>,
     dimmed: bool,
+    compact: bool,
 }
 
 impl<'a> Bar<'a> {
     /// A bar reading `value`, filled from the left up to `frac` (0..=1).
     pub fn new(label: &'a str, value: &'a str, frac: f32) -> Self {
-        Self { label, value, frac, origin: None, default: 0.0, label_color: None, dimmed: false }
+        Self { label, value, frac, origin: None, default: 0.0, dimmed: false, compact: false }
+    }
+
+    /// A bar for a cell too narrow for a label: the value is centered and
+    /// the position is a tick on the bottom edge instead of a fill. `name`
+    /// is what assistive technology calls it.
+    pub fn compact(name: &'a str, value: &'a str, frac: f32) -> Self {
+        Self { compact: true, ..Self::new(name, value, frac) }
     }
 
     /// Fills outward from `origin` (0..=1) instead of from the left, and
@@ -42,13 +49,6 @@ impl<'a> Bar<'a> {
     /// The position a double-click restores.
     pub fn default(mut self, frac: f32) -> Self {
         self.default = frac;
-        self
-    }
-
-    /// Overrides the label's color: use [`Theme::quiet_on`] when the bar
-    /// sits on something lighter than a panel.
-    pub fn label_color(mut self, color: Color32) -> Self {
-        self.label_color = Some(color);
         self
     }
 
@@ -65,6 +65,10 @@ pub struct BarOutput {
     pub response: Response,
     /// The position the user asked for, when they did.
     pub frac: Option<f32>,
+    /// True when that position is the default, asked for by a double-click.
+    /// The caller can then restore the default value itself, exactly,
+    /// rather than whatever the position converts back to.
+    pub reset: bool,
     /// True on the frame the pointer went down on the bar: the moment to
     /// open an undo gesture, since the press itself already sets a value.
     pub pressed: bool,
@@ -84,7 +88,8 @@ pub fn bar(ui: &Ui, theme: &Theme, rect: Rect, id: Id, bar: &Bar) -> BarOutput {
     // The position while the button is down lives here rather than being
     // read back from the caller, whose value may lag a frame behind.
     let mut frac = None;
-    if response.double_clicked() || response.triple_clicked() {
+    let reset = response.double_clicked() || response.triple_clicked();
+    if reset {
         frac = Some(bar.default);
     } else if held
         && response.is_pointer_button_down_on()
@@ -107,29 +112,43 @@ pub fn bar(ui: &Ui, theme: &Theme, rect: Rect, id: Id, bar: &Bar) -> BarOutput {
         let active = enabled && (response.hovered() || response.is_pointer_button_down_on());
         paint_bar(ui, theme, rect, bar, frac.unwrap_or(bar.frac), active);
     }
-    BarOutput { response, frac, pressed }
+    BarOutput { response, frac, pressed, reset }
 }
 
 fn paint_bar(ui: &Ui, theme: &Theme, rect: Rect, bar: &Bar, frac: f32, active: bool) {
     let painter = ui.painter_at(rect);
     let frac = frac.clamp(0.0, 1.0);
-    let x_at = |frac: f32| rect.left() + (rect.width() * frac).round();
+    let hair = paint::hair(&painter);
+    let x_at = |frac: f32| paint::snap(&painter, rect.left() + rect.width() * frac);
     // The edge stays inside the frame at both ends of the range.
-    let edge = x_at(frac).clamp(rect.left(), rect.right() - 1.0);
+    let edge = x_at(frac).clamp(rect.left(), rect.right() - hair);
 
     let from = bar.origin.map_or(rect.left(), |origin| x_at(origin.clamp(0.0, 1.0)));
-    let fill = Rect::from_x_y_ranges(Rangef::new(from.min(edge), from.max(edge)), rect.y_range());
-    painter.rect_filled(fill, 0.0, theme.fill);
-    if bar.origin.is_some() {
-        paint::vline(&painter, from.min(rect.right() - 1.0), rect.y_range(), theme.selected);
+    if !bar.compact {
+        let fill = Rect::from_x_y_ranges(Rangef::new(from.min(edge), from.max(edge)), rect.y_range());
+        painter.rect_filled(fill, 0.0, theme.fill);
+        if bar.origin.is_some() {
+            paint::vline(&painter, from.min(rect.right() - hair), rect.y_range(), theme.selected);
+        }
     }
     if active {
         painter.rect_filled(rect, 0.0, theme.hover);
     }
     paint::frame(&painter, rect, theme.hairline);
 
-    let opacity = if bar.dimmed { 0.55 } else { 1.0 };
-    let label_color = fade(bar.label_color.unwrap_or(theme.ink_faint), opacity);
+    let opacity = if bar.dimmed { theme.disabled } else { 1.0 };
+    if bar.compact {
+        let inner = rect.shrink(1.0);
+        text::paint(&painter, inner, Align2::CENTER_CENTER, theme.text.value, bar.value, fade(theme.ink, opacity));
+        // Short enough to stay clear of the text's baseline.
+        let tick = paint::snap(&painter, inner.left() + (inner.width() - 2.0) * frac);
+        let mark = Rect::from_min_max(pos2(tick, inner.bottom() - 3.0), pos2(tick + 2.0, inner.bottom()));
+        painter.rect_filled(mark, 0.0, fade(theme.ink, opacity));
+        return;
+    }
+    // Secondary ink, not the faint one: the label sits on the fill wash,
+    // where faint text would drop below what is legible.
+    let label_color = fade(theme.ink_dim, opacity);
     let value_color = fade(theme.ink, opacity);
     let inner = rect.shrink2(egui::vec2(theme.metric.pad, 0.0));
     // The value is what matters; the label gets the room that is left.
@@ -142,7 +161,7 @@ fn paint_bar(ui: &Ui, theme: &Theme, rect: Rect, bar: &Bar, frac: f32, active: b
     // Where the edge would run through a glyph it is broken into stubs
     // above and below the text.
     let gap = theme.metric.gap;
-    let near = |left: f32, right: f32| right > left && edge + 1.0 > left - gap && edge < right + gap;
+    let near = |left: f32, right: f32| right > left && edge + hair > left - gap && edge < right + gap;
     let through_text = near(inner.left(), inner.left() + label_width) || near(value_left, inner.right());
     let line = fade(theme.ink, opacity);
     if through_text {

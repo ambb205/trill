@@ -100,11 +100,11 @@ pub fn tab(ui: &Ui, theme: &Theme, rect: Rect, id: Id, label: &str, active: bool
         let painter = ui.painter();
         if active {
             painter.rect_filled(rect, 0.0, theme.bg);
-            paint::hline(painter, rect.x_range(), rect.bottom() - 1.0, theme.ink);
+            paint::hline_above(painter, rect.x_range(), rect.bottom(), theme.ink);
         } else if response.hovered() {
             painter.rect_filled(rect, 0.0, theme.hover);
         }
-        paint::vline(painter, rect.right() - 1.0, rect.y_range(), theme.hairline);
+        paint::vline_left_of(painter, rect.right(), rect.y_range(), theme.hairline);
         let color = if active || response.hovered() { theme.ink } else { theme.ink_dim };
         text::paint(painter, rect, Align2::CENTER_CENTER, theme.text.caps, label, color);
     }

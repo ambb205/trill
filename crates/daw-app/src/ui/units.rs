@@ -1,8 +1,12 @@
 //! Value conversions and number formatting: decibels, fader and meter
 //! scales, and device parameter ranges. Pure functions, unit-tested.
+//!
+//! Numbers are set as the design asks: a real minus sign (U+2212), never a
+//! negative zero, and a space between a value and its unit.
 
 use daw_core::device::{ParamInfo, ParamKind};
 use daw_core::project::{MAX_VOLUME_DB, MIN_VOLUME_DB};
+use daw_noir::format::{fmt_val, fmt_val_signed, typeset};
 
 /// Bottom of the meter scale, dBFS. Anything quieter draws as empty. Meters
 /// share the faders' scale so a fader and the level beside it line up.
@@ -31,23 +35,28 @@ pub fn fader_to_db(position: f32) -> f32 {
     MIN_VOLUME_DB + position.clamp(0.0, 1.0).sqrt() * span
 }
 
-/// `"-6.0 dB"`, `"+1.5 dB"`, `"-inf dB"` at the bottom of the range.
+/// `"\u{2212}6.0 dB"`, `"+1.5 dB"`, `"0.0 dB"`, and `"\u{2212}\u{221E} dB"` at the bottom of
+/// the range, where a fader is silent.
 pub fn format_db(db: f32) -> String {
     if db <= MIN_VOLUME_DB + 0.05 {
-        return "-inf dB".to_owned();
+        return "\u{2212}\u{221E} dB".to_owned();
     }
-    // Avoid "-0.0".
-    let db = if db.abs() < 0.05 { 0.0 } else { db };
-    if db > 0.0 { format!("+{db:.1} dB") } else { format!("{db:.1} dB") }
+    if db >= 0.05 { fmt_val_signed(db as f64, 1, "dB") } else { fmt_val(db as f64, 1, "dB") }
 }
 
-/// `"C"`, `"L 50"`, `"R 100"` for a pan of -1..=1.
+/// A level for a peak readout: like [`format_db`] without the plus sign,
+/// since a level is a position on a scale rather than a change.
+pub fn format_level(db: f32) -> String {
+    if db <= METER_FLOOR_DB { "\u{2212}\u{221E} dB".to_owned() } else { fmt_val(db as f64, 1, "dB") }
+}
+
+/// `"C"`, `"L50"`, `"R100"` for a pan of -1..=1.
 pub fn format_pan(pan: f32) -> String {
     let percent = (pan.clamp(-1.0, 1.0) * 100.0).round() as i32;
     match percent {
         0 => "C".to_owned(),
-        p if p < 0 => format!("L {}", -p),
-        p => format!("R {p}"),
+        p if p < 0 => format!("L{}", -p),
+        p => format!("R{p}"),
     }
 }
 
@@ -100,39 +109,48 @@ pub fn short_param_name(name: &str) -> &str {
 }
 
 /// A parameter value with its unit, at a precision that suits its size:
-/// `"440 Hz"`, `"2.50 kHz"`, `"250 ms"`, `"-6.0 dB"`, `"50%"`, `"saw"`.
+/// `"440 Hz"`, `"2.50 kHz"`, `"250 ms"`, `"\u{2212}6.0 dB"`, `"50 %"`, `"saw"`.
 pub fn format_param(info: &ParamInfo, value: f64) -> String {
+    let unit = short_unit(&info.unit);
     match &info.kind {
         ParamKind::Bool => return if value >= 0.5 { "On" } else { "Off" }.to_owned(),
         ParamKind::Enum(choices) => {
             let index = value.round().max(0.0) as usize;
             return choices.get(index).cloned().unwrap_or_else(|| format!("{index}"));
         }
-        ParamKind::Int => {
-            let value = value.round() as i64;
-            return if info.unit.is_empty() { value.to_string() } else { format!("{value} {}", info.unit) };
-        }
+        ParamKind::Int => return fmt_val(value.round(), 0, unit),
         ParamKind::Float => {}
     }
-    match info.unit.as_str() {
+    let formatted = match unit {
         "Hz" if value >= 1000.0 => format!("{:.2} kHz", value / 1000.0),
         "Hz" => format!("{} Hz", adaptive(value)),
         "s" if value < 1.0 => format!("{} ms", adaptive(value * 1000.0)),
         "s" => format!("{value:.2} s"),
-        "dB" => format_signed(value, 1, "dB"),
+        "dB" => format_signed(value, "dB"),
         // Bipolar ranges read better with an explicit sign.
-        unit if info.min < 0.0 && !unit.is_empty() => format_signed(value, 1, unit),
-        "" if info.min == 0.0 && info.max == 1.0 => format!("{:.0}%", value * 100.0),
+        unit if info.min < 0.0 && !unit.is_empty() => format_signed(value, unit),
+        // Amounts: a feedback that stops at 0.95 is as much a share as a
+        // mix that reaches 1.
+        "" if info.min == 0.0 && info.max <= 1.0 => format!("{:.0} %", value * 100.0),
         "" => format!("{value:.2}"),
         // Ratios read as one word: "4.00:1".
         unit if unit.starts_with(':') => format!("{}{unit}", adaptive(value)),
         unit => format!("{} {unit}", adaptive(value)),
+    };
+    typeset(&formatted)
+}
+
+/// Units as they are set beside a value: the long ones abbreviated.
+fn short_unit(unit: &str) -> &str {
+    match unit {
+        "cents" => "ct",
+        other => other,
     }
 }
 
-fn format_signed(value: f64, decimals: usize, unit: &str) -> String {
-    let value = if value.abs() < 0.5 * 10f64.powi(-(decimals as i32)) { 0.0 } else { value };
-    if value > 0.0 { format!("+{value:.decimals$} {unit}") } else { format!("{value:.decimals$} {unit}") }
+/// One decimal with a plus on positive values; zero carries no sign.
+fn format_signed(value: f64, unit: &str) -> String {
+    if value >= 0.05 { fmt_val_signed(value, 1, unit) } else { fmt_val(value, 1, unit) }
 }
 
 /// Three significant figures or so: `5.00`, `44.1`, `440`.
@@ -162,9 +180,13 @@ mod tests {
         assert_eq!(gain_to_db(0.0), f32::NEG_INFINITY);
         assert_eq!(format_db(0.0), "0.0 dB");
         assert_eq!(format_db(-0.01), "0.0 dB");
-        assert_eq!(format_db(-6.04), "-6.0 dB");
+        assert_eq!(format_db(0.04), "0.0 dB", "a rounded zero carries no sign");
+        assert_eq!(format_db(-6.04), "\u{2212}6.0 dB", "a real minus sign, not a hyphen");
         assert_eq!(format_db(1.5), "+1.5 dB");
-        assert_eq!(format_db(MIN_VOLUME_DB), "-inf dB");
+        assert_eq!(format_db(MIN_VOLUME_DB), "\u{2212}\u{221E} dB");
+        assert_eq!(format_level(-1.04), "\u{2212}1.0 dB");
+        assert_eq!(format_level(0.3), "0.3 dB");
+        assert_eq!(format_level(f32::NEG_INFINITY), "\u{2212}\u{221E} dB");
     }
 
     #[test]
@@ -186,9 +208,9 @@ mod tests {
     fn pan_labels() {
         assert_eq!(format_pan(0.0), "C");
         assert_eq!(format_pan(0.004), "C");
-        assert_eq!(format_pan(-0.5), "L 50");
-        assert_eq!(format_pan(1.0), "R 100");
-        assert_eq!(format_pan(7.0), "R 100");
+        assert_eq!(format_pan(-0.5), "L50");
+        assert_eq!(format_pan(1.0), "R100");
+        assert_eq!(format_pan(7.0), "R100");
     }
 
     #[test]
@@ -236,17 +258,23 @@ mod tests {
         assert_eq!(format_param(&time, 0.25), "250 ms");
         assert_eq!(format_param(&time, 1.5), "1.50 s");
         let volume = param(-48.0, 12.0, "dB", ParamKind::Float);
-        assert_eq!(format_param(&volume, -6.0), "-6.0 dB");
+        assert_eq!(format_param(&volume, -6.0), "\u{2212}6.0 dB");
         assert_eq!(format_param(&volume, 3.0), "+3.0 dB");
         assert_eq!(format_param(&volume, -0.01), "0.0 dB");
         let amount = param(-8.0, 8.0, "oct", ParamKind::Float);
         assert_eq!(format_param(&amount, 2.0), "+2.0 oct");
+        assert_eq!(format_param(&amount, -1.5), "\u{2212}1.5 oct");
+        assert_eq!(format_param(&amount, 0.0), "0.0 oct");
         let mix = param(0.0, 1.0, "", ParamKind::Float);
-        assert_eq!(format_param(&mix, 0.5), "50%");
+        assert_eq!(format_param(&mix, 0.5), "50 %");
+        let feedback = param(0.0, 0.95, "", ParamKind::Float);
+        assert_eq!(format_param(&feedback, 0.4), "40 %");
         let level = param(0.0, 2.0, "", ParamKind::Float);
         assert_eq!(format_param(&level, 1.0), "1.00");
         let detune = param(0.0, 100.0, "cents", ParamKind::Float);
-        assert_eq!(format_param(&detune, 20.0), "20.0 cents");
+        assert_eq!(format_param(&detune, 20.0), "20.0 ct");
+        let bipolar_detune = param(-100.0, 100.0, "cents", ParamKind::Float);
+        assert_eq!(format_param(&bipolar_detune, 7.0), "+7.0 ct");
         let ratio = param(1.0, 20.0, ":1", ParamKind::Float);
         assert_eq!(format_param(&ratio, 4.0), "4.00:1");
     }
@@ -255,6 +283,8 @@ mod tests {
     fn discrete_values_are_formatted_by_kind() {
         let semitones = param(-24.0, 24.0, "st", ParamKind::Int);
         assert_eq!(format_param(&semitones, 7.0), "7 st");
+        assert_eq!(format_param(&semitones, -12.0), "\u{2212}12 st");
+        assert_eq!(format_param(&semitones, -0.2), "0 st");
         let voices = param(1.0, 7.0, "", ParamKind::Int);
         assert_eq!(format_param(&voices, 3.2), "3");
         let mono = param(0.0, 1.0, "", ParamKind::Bool);

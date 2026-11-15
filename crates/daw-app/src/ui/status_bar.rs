@@ -67,13 +67,15 @@ impl Row<'_, '_> {
     fn status(&mut self, color: Color32, word: &str) {
         let theme = self.cx.theme;
         self.x = paint::dot(self.painter, pos2(self.x, self.bar.center().y), theme.metric.dot, color) + 5.0;
-        self.x += text::paint(self.painter, self.rest(), Align2::LEFT_CENTER, theme.text.micro, word, theme.ink_faint) + GAP;
+        self.x +=
+            text::paint(self.painter, self.rest(), Align2::LEFT_CENTER, theme.text.micro, word, theme.ink_faint) + GAP;
     }
 
     /// A label and its value.
     fn readout(&mut self, label: &str, value: &str) {
         let theme = self.cx.theme;
-        self.x += text::paint(self.painter, self.rest(), Align2::LEFT_CENTER, theme.text.micro, label, theme.ink_faint) + 5.0;
+        self.x +=
+            text::paint(self.painter, self.rest(), Align2::LEFT_CENTER, theme.text.micro, label, theme.ink_faint) + 5.0;
         // Values in the bar are set like its labels, in capitals.
         let style = TextStyle { upper: true, ..theme.text.value };
         // A long device name gives way before it pushes the rest out.

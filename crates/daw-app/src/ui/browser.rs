@@ -1,0 +1,271 @@
+//! The browser down the left side: every device that can be added, and the
+//! presets of the device selected in the Devices tab.
+//!
+//! Double-clicking a device adds it to the chain the Devices tab shows.
+//! Clicking a preset applies it to the selected device.
+
+use super::state::Cx;
+use super::{arrangement, devices, widgets};
+use daw_core::ChainRef;
+use daw_core::device::{BUILTIN_SCHEME, DeviceCategory, DeviceDescriptor, split_uri};
+use daw_noir::{paint, text};
+use eframe::egui::{self, Align2, Rect, Role, Sense, Ui, WidgetInfo, pos2, vec2};
+
+pub const WIDTH: f32 = 204.0;
+const HEADER: f32 = 24.0;
+const EDGE: f32 = 10.0;
+const SEARCH_HEIGHT: f32 = 22.0;
+/// Height of the search field with the space around it.
+const SEARCH_BLOCK: f32 = 8.0 + SEARCH_HEIGHT + 4.0;
+const ROW: f32 = 22.0;
+const SECTION: f32 = 27.0;
+
+/// Which list a device belongs in.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Shelf {
+    Instruments,
+    Effects,
+    /// Third-party devices of either kind.
+    Plugins,
+}
+
+impl Shelf {
+    const ALL: [(Shelf, &str); 3] =
+        [(Shelf::Instruments, "Instruments"), (Shelf::Effects, "Effects"), (Shelf::Plugins, "Plugins")];
+
+    fn of(descriptor: &DeviceDescriptor) -> Self {
+        match (plugin_format(&descriptor.uri), descriptor.category) {
+            (Some(_), _) => Shelf::Plugins,
+            (None, DeviceCategory::Instrument) => Shelf::Instruments,
+            (None, DeviceCategory::Effect) => Shelf::Effects,
+        }
+    }
+}
+
+/// The format of a third-party device, from its URI scheme: `"CLAP"` for
+/// `clap:com.example.synth`. `None` for built-in devices.
+fn plugin_format(uri: &str) -> Option<String> {
+    split_uri(uri).filter(|(scheme, _)| *scheme != BUILTIN_SCHEME).map(|(scheme, _)| scheme.to_uppercase())
+}
+
+/// True if `name` matches what is typed in the search field.
+fn matches(name: &str, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    query.is_empty() || name.to_lowercase().contains(&query)
+}
+
+/// The devices of one shelf that match `query`.
+///
+/// Effects and plugins are listed by name, since that is how they are
+/// looked for. The built-in instruments are few and keep the catalog's
+/// order, which leads with the one new tracks are given.
+fn shelf<'a>(descriptors: &'a [DeviceDescriptor], which: Shelf, query: &str) -> Vec<&'a DeviceDescriptor> {
+    let mut found: Vec<&DeviceDescriptor> = descriptors
+        .iter()
+        .filter(|descriptor| Shelf::of(descriptor) == which && matches(&descriptor.name, query))
+        .collect();
+    if which != Shelf::Instruments {
+        found.sort_by_key(|descriptor| descriptor.name.to_lowercase());
+    }
+    found
+}
+
+pub fn show(ui: &mut Ui, cx: &mut Cx) {
+    let theme = cx.theme;
+    let area = ui.max_rect();
+    let painter = ui.painter().clone();
+    painter.rect_filled(area, 0.0, theme.panel);
+    paint::vline_left_of(&painter, area.right(), area.y_range(), theme.hairline);
+
+    let header = Rect::from_min_size(area.min, vec2(area.width(), HEADER));
+    paint::hline_above(&painter, header.x_range(), header.bottom(), theme.hairline);
+    let title = header.shrink2(vec2(EDGE, 0.0));
+    text::paint(&painter, title, Align2::LEFT_CENTER, theme.text.caps, "Browser", theme.ink_dim);
+
+    let search = Rect::from_min_size(
+        pos2(area.left() + EDGE, header.bottom() + 8.0),
+        vec2(area.width() - 2.0 * EDGE - 1.0, SEARCH_HEIGHT),
+    );
+    let id = ui.scope_id().with("search");
+    let response =
+        daw_noir::text_field(ui, theme, search, id, &mut cx.state.browser.search, "Search devices and plugins");
+    cx.hint(&response, "Type to narrow the lists below");
+
+    let lists =
+        Rect::from_min_max(pos2(area.left(), header.bottom() + SEARCH_BLOCK), pos2(area.right() - 1.0, area.bottom()));
+    widgets::place(ui, lists, "lists", egui::Layout::top_down(egui::Align::Min), |ui| {
+        ui.set_clip_rect(lists.intersect(ui.clip_rect()));
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            device_lists(ui, cx);
+            preset_list(ui, cx);
+            ui.add_space(8.0);
+        });
+    });
+}
+
+/// A caps heading with a rule under it.
+fn section(ui: &mut Ui, cx: &Cx, title: &str) {
+    let theme = cx.theme;
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), SECTION), Sense::hover());
+    let label =
+        Rect::from_min_max(pos2(rect.left() + EDGE, rect.top() + 8.0), pos2(rect.right() - EDGE, rect.bottom() - 3.0));
+    text::paint(ui.painter(), label, Align2::LEFT_CENTER, theme.text.caps, title, theme.ink_dim);
+    paint::hline_above(ui.painter(), rect.x_range(), rect.bottom(), theme.hairline);
+    ui.add_space(2.0);
+}
+
+/// One row of a list. `selected` marks the current choice.
+fn row(ui: &mut Ui, cx: &Cx, name: &str, badge: &str, selected: bool) -> egui::Response {
+    let theme = cx.theme;
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
+    response.widget_info(|| WidgetInfo::selected(Role::Button, true, selected, name));
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if selected {
+            painter.rect_filled(rect, 0.0, theme.selected);
+        } else if response.hovered() {
+            painter.rect_filled(rect, 0.0, theme.hover);
+        }
+        let color = if selected || response.hovered() { theme.ink } else { theme.ink_dim };
+        let mut content = rect.shrink2(vec2(EDGE, 0.0));
+        if !badge.is_empty() {
+            // On a lit row the quietest ink would drop below legibility.
+            let quiet = if selected || response.hovered() { theme.ink_dim } else { theme.ink_faint };
+            let width = text::paint(painter, content, Align2::RIGHT_CENTER, theme.text.micro, badge, quiet);
+            content.max.x -= width + 6.0;
+        }
+        text::paint(painter, content, Align2::LEFT_CENTER, theme.text.body, name, color);
+    }
+    response
+}
+
+/// Instruments, effects and plugins.
+fn device_lists(ui: &mut Ui, cx: &mut Cx) {
+    let chain = cx.state.shown_chain();
+    let devices = cx.snap.project.chain(chain).map(Vec::as_slice).unwrap_or_default();
+    let selected_uri = cx.state.selected_device.and_then(|id| devices.iter().find(|device| device.id == id));
+    let selected_uri = selected_uri.map(|device| device.uri.clone());
+    let target = match chain {
+        ChainRef::Track(track) => {
+            cx.snap.track(track).map_or_else(|| "the track".to_owned(), |track| track.name.clone())
+        }
+        ChainRef::Master => "the master".to_owned(),
+    };
+    let descriptors = cx.descriptors;
+    let query = cx.state.browser.search.clone();
+
+    for (which, title) in Shelf::ALL {
+        let found = shelf(descriptors, which, &query);
+        if found.is_empty() {
+            continue;
+        }
+        section(ui, cx, title);
+        for descriptor in found {
+            let badge = plugin_format(&descriptor.uri).unwrap_or_default();
+            let selected = selected_uri.as_deref() == Some(descriptor.uri.as_str());
+            let response = row(ui, cx, &descriptor.name, &badge, selected);
+            let instrument = descriptor.category == DeviceCategory::Instrument;
+            let action = match (chain, instrument) {
+                // The master carries no notes, so an instrument gets a
+                // track of its own.
+                (ChainRef::Master, true) => format!("Double-click for a new track with {}", descriptor.name),
+                (_, true) => format!("Double-click to make {} the instrument of {target}", descriptor.name),
+                (_, false) => format!("Double-click to add {} to {target}", descriptor.name),
+            };
+            cx.hint(&response, action);
+            if widgets::activated(ui, &response) {
+                match (chain, instrument) {
+                    (ChainRef::Master, true) => arrangement::add_track_with(cx, &descriptor.uri),
+                    _ => devices::add_device(cx, chain, descriptor),
+                }
+            }
+            if !descriptor.description.is_empty() {
+                response.on_hover_text(&descriptor.description);
+            }
+        }
+    }
+}
+
+/// The presets of the selected device, the current one marked.
+fn preset_list(ui: &mut Ui, cx: &mut Cx) {
+    let chain = cx.state.shown_chain();
+    let devices = cx.snap.project.chain(chain).map(Vec::as_slice).unwrap_or_default();
+    let Some(device) = cx.state.selected_device.and_then(|id| devices.iter().find(|device| device.id == id)) else {
+        return;
+    };
+    let Some(descriptor) = cx.descriptors.iter().find(|descriptor| descriptor.uri == device.uri) else { return };
+    let query = cx.state.browser.search.clone();
+    let presets: Vec<_> = descriptor.presets.iter().filter(|preset| matches(&preset.name, &query)).collect();
+    if presets.is_empty() {
+        return;
+    }
+
+    section(ui, cx, &format!("Presets \u{00B7} {}", descriptor.name));
+    let current = devices::current_preset(device, descriptor);
+    let device_id = device.id;
+    for preset in presets {
+        let response = row(ui, cx, &preset.name, "", current == Some(preset.name.as_str()));
+        cx.hint(
+            &response,
+            if preset.description.is_empty() { preset.name.clone() } else { preset.description.clone() },
+        );
+        if response.clicked() {
+            let name = preset.name.clone();
+            cx.try_session(|session| session.apply_preset(device_id, &name));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use daw_core::device::DeviceFactory;
+    use daw_dsp::BuiltinFactory;
+
+    fn plugin(uri: &str, name: &str, category: DeviceCategory) -> DeviceDescriptor {
+        DeviceDescriptor {
+            uri: uri.to_owned(),
+            name: name.to_owned(),
+            vendor: "Example".to_owned(),
+            category,
+            description: String::new(),
+            params: Vec::new(),
+            presets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_format_badge_comes_from_the_uri_scheme() {
+        assert_eq!(plugin_format("clap:com.example.synth"), Some("CLAP".to_owned()));
+        assert_eq!(plugin_format("vst3:ABCDEF"), Some("VST3".to_owned()));
+        assert_eq!(plugin_format("builtin:reverb"), None);
+        assert_eq!(plugin_format("no-scheme"), None);
+    }
+
+    #[test]
+    fn devices_are_shelved_by_origin_then_kind_and_sorted() {
+        let mut catalog = BuiltinFactory.descriptors();
+        catalog.push(plugin("clap:b", "wave Forge", DeviceCategory::Effect));
+        catalog.push(plugin("clap:a", "Surge XT", DeviceCategory::Instrument));
+
+        let names = |which| shelf(&catalog, which, "").iter().map(|d| d.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(Shelf::Instruments)[..2], ["Poly Synth", "Drum Kit"], "the catalog's order");
+        let effects = names(Shelf::Effects);
+        assert_eq!(effects.len(), 10);
+        assert_eq!(&effects[..3], ["Auto Filter", "Chorus", "Compressor"]);
+        assert_eq!(names(Shelf::Plugins), ["Surge XT", "wave Forge"], "plugins of both kinds, whatever their case");
+    }
+
+    #[test]
+    fn the_search_narrows_every_shelf() {
+        let mut catalog = BuiltinFactory.descriptors();
+        catalog.push(plugin("clap:a", "Surge XT Effects", DeviceCategory::Effect));
+        let names = |which, query| shelf(&catalog, which, query).iter().map(|d| d.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(Shelf::Effects, " REV "), ["Reverb"]);
+        assert_eq!(names(Shelf::Effects, "e"), ["Auto Filter", "Compressor", "Delay", "EQ", "Limiter", "Reverb"]);
+        assert_eq!(names(Shelf::Plugins, "eff"), ["Surge XT Effects"]);
+        assert!(names(Shelf::Instruments, "zzz").is_empty());
+        assert!(matches("Poly Synth", "") && matches("Poly Synth", "SYN") && !matches("Poly Synth", "drum"));
+    }
+}

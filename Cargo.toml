@@ -11,8 +11,10 @@ rust-version = "1.90"
 daw-core = { path = "crates/daw-core" }
 daw-dsp = { path = "crates/daw-dsp" }
 daw-engine = { path = "crates/daw-engine" }
+daw-library = { path = "crates/daw-library" }
 daw-plugins = { path = "crates/daw-plugins" }
 daw-mcp = { path = "crates/daw-mcp" }
+daw-media = { path = "crates/daw-media" }
 daw-noir = { path = "crates/daw-noir" }
 
 anyhow = "1"

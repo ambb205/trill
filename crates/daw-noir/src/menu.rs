@@ -4,7 +4,7 @@
 //! framed by the style [`crate::install`] sets. These are the rows inside.
 
 use crate::icon::{Icon, paint_icon};
-use crate::theme::Theme;
+use crate::theme::{Theme, fade};
 use crate::{paint, text};
 use egui::{Align2, Id, Rect, Response, Role, Sense, Ui, WidgetInfo, pos2, vec2};
 
@@ -80,15 +80,16 @@ impl<'a> MenuItem<'a> {
                 }
                 content.min.x += mark;
             }
+            // A disabled row keeps its ink at the disabled opacity, so it
+            // is dimmer than any enabled row and still says what it is.
+            let unavailable = fade(theme.ink_dim, theme.disabled);
             let color = match (self.enabled, lit || self.checked == Some(true)) {
-                (false, _) => theme.ghost,
+                (false, _) => unavailable,
                 (true, true) => theme.ink,
                 (true, false) => theme.ink_dim,
             };
-            // A disabled row is not text to be read; it marks what is
-            // unavailable, and ghost is the kit's color for that.
             text::paint(painter, content, Align2::LEFT_CENTER, theme.text.body, self.label, color);
-            let keys = if self.enabled { theme.ink_dim } else { theme.ghost };
+            let keys = if self.enabled { theme.ink_dim } else { unavailable };
             text::paint(painter, content, Align2::RIGHT_CENTER, theme.text.value, self.shortcut, keys);
         }
         let response = if self.detail.is_empty() { response } else { response.on_hover_text(self.detail) };
@@ -137,9 +138,13 @@ pub fn dropdown_width(ui: &Ui, theme: &Theme, value: &str) -> f32 {
 
 /// A chip showing the current choice and a caret. Open its popup with
 /// `egui::Popup::menu(&response)`.
-pub fn dropdown(ui: &Ui, theme: &Theme, rect: Rect, id: Id, value: &str, dimmed: bool) -> Response {
+///
+/// With a `label`, the chip reads like a Bar: the label on the left in the
+/// label style and the choice on the right, for a column of parameters.
+pub fn dropdown(ui: &Ui, theme: &Theme, rect: Rect, id: Id, label: &str, value: &str, dimmed: bool) -> Response {
     let response = ui.interact(rect, id, Sense::click());
-    response.widget_info(|| WidgetInfo::labeled(Role::ComboBox, true, value));
+    let name = if label.is_empty() { value.to_owned() } else { format!("{label}: {value}") };
+    response.widget_info(|| WidgetInfo::labeled(Role::ComboBox, true, &name));
     if ui.is_rect_visible(rect) {
         let painter = ui.painter_at(rect);
         let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
@@ -153,13 +158,20 @@ pub fn dropdown(ui: &Ui, theme: &Theme, rect: Rect, id: Id, value: &str, dimmed:
         let color = match (lit, dimmed) {
             (true, _) => theme.ink,
             (false, false) => theme.ink_dim,
-            (false, true) => crate::theme::fade(theme.ink_dim, 0.55),
+            (false, true) => fade(theme.ink_dim, theme.disabled),
         };
-        let label = Rect::from_min_max(
+        let content = Rect::from_min_max(
             pos2(rect.left() + theme.metric.chip_pad + 1.0, rect.top()),
             pos2(rect.right() - 13.0, rect.bottom()),
         );
-        text::paint(&painter, label, Align2::LEFT_CENTER, theme.text.micro, value, color);
+        if label.is_empty() {
+            text::paint(&painter, content, Align2::LEFT_CENTER, theme.text.micro, value, color);
+        } else {
+            let used = text::paint(&painter, content, Align2::RIGHT_CENTER, theme.text.micro, value, color);
+            let room = content.with_max_x(content.right() - used - theme.metric.pad);
+            let quiet = if lit { theme.ink_dim } else { theme.ink_faint };
+            text::paint(&painter, room, Align2::LEFT_CENTER, theme.text.label, label, quiet);
+        }
         paint_icon(&painter, pos2(rect.right() - 8.0, rect.center().y), Icon::CaretDown, color);
     }
     response

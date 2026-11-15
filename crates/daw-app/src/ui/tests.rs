@@ -4,7 +4,7 @@
 //! that each drag is a single undo step.
 
 use super::app::DawApp;
-use super::{DetailTab, UiOptions, arrangement, detail, devices, piano_roll, transport};
+use super::{DetailTab, UiOptions, arrangement, browser, detail, devices, piano_roll, status_bar, top_bar};
 use daw_core::device::CompositeFactory;
 use daw_core::{ChainRef, ClipId, DeviceId, Note, Project, TrackId};
 use daw_dsp::BuiltinFactory;
@@ -16,6 +16,9 @@ use std::time::{Duration, Instant};
 
 const SCREEN: Vec2 = vec2(1440.0, 900.0);
 const FRAME: f64 = 1.0 / 60.0;
+/// Height of a Bar and of the gap under it, in the default theme.
+const BAR: f32 = 18.0;
+const GAP: f32 = 3.0;
 
 struct Harness {
     ctx: egui::Context,
@@ -76,18 +79,34 @@ impl Harness {
         }
     }
 
-    /// Center of the `index`th widget, in reading order, whose label is
-    /// `label` (or starts with it: menu items append their shortcut).
-    fn labeled(&self, label: &str, index: usize) -> Pos2 {
+    /// Rectangles of the widgets whose label is `label` (or starts with it:
+    /// menu items append their shortcut), in reading order.
+    fn all_labeled(&self, label: &str) -> Vec<Rect> {
         let exact = self.labels.iter().filter(|(text, _)| text == label);
         let prefixed = self.labels.iter().filter(|(text, _)| text != label && text.starts_with(label));
-        match exact.chain(prefixed).nth(index) {
-            Some((_, rect)) => rect.center(),
+        exact.chain(prefixed).map(|(_, rect)| *rect).collect()
+    }
+
+    /// Center of the first widget, in reading order, labeled `label`.
+    fn labeled(&self, label: &str) -> Pos2 {
+        match self.all_labeled(label).first() {
+            Some(rect) => rect.center(),
             None => {
                 let known: Vec<&str> = self.labels.iter().map(|(text, _)| text.as_str()).collect();
-                panic!("nothing on screen is labeled '{label}' (#{index}); labels: {known:?}")
+                panic!("nothing on screen is labeled '{label}'; labels: {known:?}")
             }
         }
+    }
+
+    fn is_on_screen(&self, label: &str) -> bool {
+        !self.all_labeled(label).is_empty()
+    }
+
+    /// Center of the first widget labeled `label` that lies below `y`:
+    /// for telling a control in the detail panel from its namesake above.
+    fn labeled_below(&self, label: &str, y: f32) -> Pos2 {
+        let found = self.all_labeled(label).into_iter().find(|rect| rect.top() >= y);
+        found.unwrap_or_else(|| panic!("nothing below {y} is labeled '{label}'")).center()
     }
 
     /// Clicks the first button, menu item or other widget with this label.
@@ -95,8 +114,14 @@ impl Harness {
         // Menus and dialogs opened by the previous click take a few frames
         // to appear and settle into their final layout.
         self.idle(3);
-        let position = self.labeled(label, 0);
+        let position = self.labeled(label);
         self.click(position);
+    }
+
+    fn double_click_label(&mut self, label: &str) {
+        self.idle(3);
+        let position = self.labeled(label);
+        self.double_click(position);
     }
 
     fn idle(&mut self, frames: usize) {
@@ -153,6 +178,10 @@ impl Harness {
         self.idle(1);
     }
 
+    fn type_text(&mut self, text: &str) {
+        self.step(Modifiers::NONE, vec![Event::Text(text.to_owned())]);
+    }
+
     fn project(&self) -> Project {
         self.session.lock().project().clone()
     }
@@ -181,26 +210,88 @@ impl Harness {
 
     // ---- where things are on screen ---------------------------------------
 
+    /// Left edge of everything right of the browser.
+    fn work_left(&self) -> f32 {
+        if self.app.state().browser.open { browser::WIDTH } else { 0.0 }
+    }
+
+    /// Left edge of the arrangement's lanes.
+    fn lanes_left(&self) -> f32 {
+        self.work_left() + arrangement::HEADER_WIDTH
+    }
+
+    /// Top of the `row`th track.
+    fn row_top(&self, row: usize) -> f32 {
+        top_bar::HEIGHT + arrangement::RULER_HEIGHT + row as f32 * arrangement::TRACK_HEIGHT
+    }
+
     /// A point in the arrangement lanes: `beat` on track row `row`.
     fn lane(&self, beat: f64, row: usize) -> Pos2 {
         let time = self.app.state().arrangement.time;
-        let top = transport::HEIGHT + arrangement::RULER_HEIGHT;
-        pos2(time.beat_to_x(arrangement::HEADER_WIDTH, beat), top + (row as f32 + 0.6) * arrangement::TRACK_HEIGHT)
+        pos2(time.beat_to_x(self.lanes_left(), beat), self.row_top(row) + 0.6 * arrangement::TRACK_HEIGHT)
     }
 
-    /// A point on the ruler at `beat`: in the loop brace's strip at the
-    /// top, or in the part below it that seeks.
-    fn ruler(&self, beat: f64, brace: bool) -> Pos2 {
-        let y = transport::HEIGHT + if brace { 6.0 } else { arrangement::RULER_HEIGHT - 6.0 };
+    /// A point on the ruler at `beat`: on the loop bar along its top, or in
+    /// the part below it that seeks.
+    fn ruler(&self, beat: f64, loop_bar: bool) -> Pos2 {
+        let y = top_bar::HEIGHT + if loop_bar { 3.0 } else { arrangement::RULER_HEIGHT - 5.0 };
         pos2(self.lane(beat, 0).x, y)
+    }
+
+    /// A point in the header of track row `row`: `x` from the header's
+    /// left edge, `y` from its top.
+    fn header(&self, row: usize, x: f32, y: f32) -> Pos2 {
+        pos2(self.work_left() + x, self.row_top(row) + y)
+    }
+
+    /// A point on the volume bar of track row `row`, `fraction` along it.
+    fn volume_bar(&self, row: usize, fraction: f32) -> Pos2 {
+        let left = arrangement::HEADER_LEFT + arrangement::HEADER_INDEX;
+        let right = arrangement::HEADER_WIDTH - arrangement::HEADER_RIGHT - arrangement::HEADER_PAN_WIDTH - GAP;
+        self.header(row, left + (right - left) * fraction, arrangement::HEADER_CONTROLS_TOP + BAR / 2.0)
+    }
+
+    /// Center of the mute (0) or solo (1) chip of track row `row`.
+    fn header_chip(&self, row: usize, index: f32) -> Pos2 {
+        let right = arrangement::HEADER_WIDTH - arrangement::HEADER_RIGHT;
+        let chip = arrangement::HEADER_CHIP;
+        let left = right - (2.0 - index) * chip.x - (1.0 - index) * GAP;
+        self.header(row, left + chip.x / 2.0, arrangement::HEADER_NAME_TOP + chip.y / 2.0)
+    }
+
+    /// Top of the detail panel at its default height.
+    fn detail_top(&self) -> f32 {
+        SCREEN.y - status_bar::HEIGHT - detail::DEFAULT_HEIGHT
+    }
+
+    /// Top of the master row.
+    fn master_top(&self) -> f32 {
+        self.detail_top() - arrangement::MASTER_HEIGHT
     }
 
     /// A point in the piano roll's note grid.
     fn note_cell(&self, beat: f64, pitch: u8) -> Pos2 {
         let view = &self.app.state().piano;
-        let left = piano_roll::SIDEBAR_WIDTH + piano_roll::KEYS_WIDTH;
-        let top = SCREEN.y - detail::DEFAULT_HEIGHT + detail::TAB_BAR + piano_roll::RULER_HEIGHT;
+        let left = self.work_left() + piano_roll::SIDEBAR_WIDTH + piano_roll::KEYS_WIDTH;
+        let top = self.detail_top() + detail::TAB_BAR + piano_roll::RULER_HEIGHT;
         pos2(view.time.beat_to_x(left, beat), view.pitch.pitch_to_y(top, pitch) + view.pitch.row_height / 2.0)
+    }
+
+    /// A point in the velocity lane: at `beat`, `up` pixels above its floor.
+    fn velocity_lane(&self, beat: f64, up: f32) -> Pos2 {
+        pos2(self.note_cell(beat, 60).x, SCREEN.y - status_bar::HEIGHT - up)
+    }
+
+    /// The first panel of the device rack.
+    fn first_panel(&self) -> Pos2 {
+        pos2(self.work_left() + devices::RACK_PADDING, self.detail_top() + detail::TAB_BAR + devices::RACK_PADDING)
+    }
+
+    /// A point on the `row`th bar of the first panel's first section,
+    /// `fraction` along a column `width` wide.
+    fn first_panel_bar(&self, row: usize, width: f32, fraction: f32) -> Pos2 {
+        let top = devices::PANEL_HEADER + devices::BODY_TOP + devices::SECTION_HEADER + 2.0 * GAP;
+        self.first_panel() + vec2(devices::BODY_PADDING + width * fraction, top + row as f32 * (BAR + GAP) + BAR / 2.0)
     }
 }
 
@@ -222,6 +313,14 @@ fn with_two_tracks(options: UiOptions) -> (Harness, TrackId, TrackId, ClipId) {
     let harness = Harness::new(options, |session| ids = Some(two_tracks(session)));
     let (first, second, clip) = ids.unwrap();
     (harness, first, second, clip)
+}
+
+fn devices_tab() -> UiOptions {
+    UiOptions { detail_tab: DetailTab::Devices, ..Default::default() }
+}
+
+fn chain_uris(project: &Project, chain: ChainRef) -> Vec<String> {
+    project.chain(chain).unwrap().iter().map(|device| device.uri.clone()).collect()
 }
 
 #[test]
@@ -266,6 +365,7 @@ fn dragging_a_clip_moves_it_across_time_and_tracks_as_one_undo_step() {
     assert_eq!(project.clip(clip).unwrap().start, 12.0, "moved four beats, snapped to the grid");
     assert_eq!(project.clip(clip).unwrap().length, 4.0);
     assert_eq!(harness.app.state().selected_clip, Some(clip));
+    assert_eq!(harness.app.state().selected_track, Some(second), "the selection follows the clip to its new track");
     assert_eq!(harness.undo_depth(), before + 1, "the whole drag is one undo step");
 
     harness.key(Modifiers::COMMAND, Key::Z);
@@ -299,8 +399,7 @@ fn dragging_a_clips_right_edge_resizes_it() {
 
 #[test]
 fn double_clicking_an_empty_lane_creates_a_one_bar_clip() {
-    let (mut harness, _, second, _) =
-        with_two_tracks(UiOptions { detail_tab: DetailTab::Devices, ..Default::default() });
+    let (mut harness, _, second, _) = with_two_tracks(devices_tab());
     harness.double_click(harness.lane(21.5, 1));
     let project = harness.project();
     let created = &project.track(second).unwrap().clips[0];
@@ -351,7 +450,21 @@ fn the_ruler_seeks_and_space_plays() {
 }
 
 #[test]
-fn the_loop_brace_can_be_moved_stretched_and_toggled() {
+fn the_transport_buttons_play_stop_and_loop() {
+    let (mut harness, ..) = with_two_tracks(UiOptions::default());
+    harness.click_label("Play");
+    harness.wait_for("playback to start", |session| session.transport().playing);
+    harness.idle(1);
+    harness.click_label("Stop");
+    harness.wait_for("playback to stop", |session| !session.transport().playing);
+
+    assert!(!harness.project().loop_region.enabled);
+    harness.click_label("Loop");
+    assert!(harness.project().loop_region.enabled);
+}
+
+#[test]
+fn the_loop_bar_can_be_moved_stretched_and_toggled() {
     let (mut harness, ..) = with_two_tracks(UiOptions::default());
     assert_eq!(harness.project().loop_region.start, 0.0);
     assert_eq!(harness.project().loop_region.end, 16.0);
@@ -372,22 +485,33 @@ fn the_loop_brace_can_be_moved_stretched_and_toggled() {
 }
 
 #[test]
-fn a_track_fader_drag_is_one_undo_step() {
+fn a_track_volume_drag_is_one_undo_step() {
     let (mut harness, first, ..) = with_two_tracks(UiOptions::default());
     let before = harness.undo_depth();
-    let row_top = transport::HEIGHT + arrangement::RULER_HEIGHT;
-    // The handle sits at unity gain, about 85% along the fader.
-    let handle = pos2(
-        arrangement::HEADER_PADDING + arrangement::HEADER_FADER_WIDTH * 0.84,
-        row_top + arrangement::HEADER_CONTROLS_TOP + 11.0,
-    );
-    harness.drag(handle, handle - vec2(60.0, 0.0));
+    // The pointer is the value: pressing 40% along the bar sets the volume
+    // there, and dragging carries it along.
+    harness.drag(harness.volume_bar(0, 0.84), harness.volume_bar(0, 0.4));
     let volume = harness.project().track(first).unwrap().volume_db;
-    assert!((-32.0..-18.0).contains(&volume), "dragged well down from 0 dB: {volume}");
-    assert_eq!(harness.undo_depth(), before + 1);
+    assert!((-23.0..-21.0).contains(&volume), "40% of the way up the fader scale: {volume}");
+    assert_eq!(harness.undo_depth(), before + 1, "press and drag are one step");
 
-    harness.double_click(handle - vec2(60.0, 0.0));
+    harness.double_click(harness.volume_bar(0, 0.4));
     assert_eq!(harness.project().track(first).unwrap().volume_db, 0.0, "double-click resets to unity");
+}
+
+#[test]
+fn the_pan_cell_pans_and_recenters() {
+    let (mut harness, first, ..) = with_two_tracks(UiOptions::default());
+    let pan_left = arrangement::HEADER_WIDTH - arrangement::HEADER_RIGHT - arrangement::HEADER_PAN_WIDTH;
+    let at = |harness: &Harness, fraction: f32| {
+        let x = pan_left + arrangement::HEADER_PAN_WIDTH * fraction;
+        harness.header(0, x, arrangement::HEADER_CONTROLS_TOP + BAR / 2.0)
+    };
+    harness.click(at(&harness, 0.75));
+    let pan = harness.project().track(first).unwrap().pan;
+    assert!((pan - 0.5).abs() < 0.05, "three quarters across is half right: {pan}");
+    harness.double_click(at(&harness, 0.2));
+    assert_eq!(harness.project().track(first).unwrap().pan, 0.0, "double-click centers");
 }
 
 #[test]
@@ -397,8 +521,12 @@ fn ctrl_t_adds_a_track_that_can_make_sound() {
     let project = harness.project();
     assert_eq!(project.tracks.len(), 1);
     assert_eq!(project.tracks[0].devices[0].uri, "builtin:polysynth");
+    assert_eq!(project.tracks[0].color, 0xA87FD1, "new tracks take the palette's hues, violet first");
     assert_eq!(harness.app.state().selected_track, Some(project.tracks[0].id));
 
+    harness.key(Modifiers::COMMAND, Key::T);
+    assert_eq!(harness.project().tracks[1].color, 0x72A9D9, "then sky");
+    harness.key(Modifiers::COMMAND, Key::Z);
     harness.key(Modifiers::COMMAND, Key::Z);
     assert!(harness.project().tracks.is_empty(), "track and instrument are undone together");
 }
@@ -421,8 +549,11 @@ fn ctrl_scroll_zooms_the_timeline_around_the_pointer() {
     harness.idle(1);
     let after = harness.app.state().arrangement.time;
     assert!(after.pixels_per_beat > before.pixels_per_beat, "zoomed in");
-    let under_pointer = after.x_to_beat(arrangement::HEADER_WIDTH, pointer.x);
-    assert!((under_pointer - 12.0).abs() < 1e-6, "beat 12 stayed under the pointer, now {under_pointer}");
+    // Beat 12, to within the precision of a screen coordinate.
+    let was_under_pointer = before.x_to_beat(harness.lanes_left(), pointer.x);
+    let under_pointer = after.x_to_beat(harness.lanes_left(), pointer.x);
+    assert!((was_under_pointer - 12.0).abs() < 1e-4);
+    assert!((under_pointer - was_under_pointer).abs() < 1e-9, "the beat under the pointer stayed: {under_pointer}");
 
     // Without Ctrl the wheel pans instead.
     let wheel = Event::MouseWheel {
@@ -490,11 +621,83 @@ fn arrow_keys_nudge_the_selected_notes() {
     assert_eq!((note.pitch, note.start), (61, 1.25), "up a semitone, right one sixteenth");
 }
 
-/// A track holding only a reverb, whose first parameters are plain sliders.
+#[test]
+fn dragging_a_velocity_stem_changes_the_note_as_one_undo_step() {
+    let (mut harness, _, _, clip) = with_two_tracks(UiOptions::default());
+    harness
+        .session
+        .lock()
+        .edit(|project| {
+            let more = [Note { pitch: 64, start: 2.0, length: 1.0, velocity: 80 }];
+            project.clip_mut(clip)?.add_notes(&more)
+        })
+        .unwrap();
+    harness.click(harness.lane(10.0, 0));
+    harness.idle(2);
+    let velocities = |harness: &Harness| -> Vec<u8> {
+        harness.project().clip(clip).unwrap().notes().iter().map(|note| note.velocity).collect()
+    };
+    assert_eq!(velocities(&harness), [100, 80]);
+    let before = harness.undo_depth();
+
+    // The stem of the first note, dragged from near its top to near the
+    // floor of the lane.
+    harness.drag(harness.velocity_lane(1.0, 30.0), harness.velocity_lane(1.0, 10.0));
+    let after = velocities(&harness);
+    assert!(after[0] < 40, "dragged down: {after:?}");
+    assert_eq!(after[1], 80, "the other note is not selected, so it stays");
+    assert_eq!(harness.undo_depth(), before + 1, "the whole drag is one undo step");
+    assert_eq!(harness.app.state().selected_notes.len(), 1, "the dragged note becomes the selection");
+
+    // With both selected, the second follows the first by the same amount.
+    harness.key(Modifiers::COMMAND, Key::A);
+    assert_eq!(harness.app.state().selected_notes.len(), 2);
+    let first = after[0];
+    harness.drag(harness.velocity_lane(1.0, 10.0), harness.velocity_lane(1.0, 20.0));
+    let raised = velocities(&harness);
+    assert!(raised[0] > first);
+    assert_eq!(raised[1] as i32 - 80, raised[0] as i32 - first as i32, "{raised:?}");
+}
+
+#[test]
+fn the_clip_sidebar_sets_grid_velocity_and_quantizes() {
+    let (mut harness, _, _, clip) = with_two_tracks(UiOptions::default());
+    harness
+        .session
+        .lock()
+        .edit(|project| {
+            project.clip_mut(clip)?.set_notes(vec![Note { pitch: 60, start: 1.1, length: 1.0, velocity: 100 }])
+        })
+        .unwrap();
+    harness.click(harness.lane(10.0, 0));
+    harness.idle(2);
+
+    harness.click_label("1/8");
+    assert_eq!(harness.app.state().piano.snap.label(), "1/8");
+    harness.click_label("Quantize");
+    assert_eq!(harness.project().clip(clip).unwrap().notes()[0].start, 1.0, "onto the eighth-note grid");
+
+    harness.click_label("Mute");
+    assert!(harness.project().clip(clip).unwrap().muted, "the clip, not its track");
+    assert!(!harness.project().tracks[0].mute);
+    // The transport has a Loop button too; this is the clip's.
+    harness.click(harness.labeled_below("Loop", harness.detail_top()));
+    assert!(!harness.project().loop_region.enabled);
+    assert_eq!(harness.project().clip(clip).unwrap().midi().unwrap().loop_length, Some(4.0));
+
+    // With a note selected, the velocity bar sets its velocity.
+    harness.click(harness.note_cell(1.5, 60));
+    harness.idle(1);
+    let bar = harness.labeled("Velocity");
+    harness.click(bar);
+    let velocity = harness.project().clip(clip).unwrap().notes()[0].velocity;
+    assert!((60..=68).contains(&velocity), "the middle of the bar is the middle of the range: {velocity}");
+}
+
+/// A track holding only a reverb, whose first parameters are plain bars.
 fn with_reverb() -> (Harness, DeviceId) {
     let mut device = None;
-    let options = UiOptions { detail_tab: DetailTab::Devices, ..Default::default() };
-    let harness = Harness::new(options, |session| {
+    let harness = Harness::new(devices_tab(), |session| {
         let track = session.edit(|project| Ok(project.add_track("FX"))).unwrap();
         device = Some(session.add_device(ChainRef::Track(track), "builtin:reverb", None, None).unwrap());
     });
@@ -510,23 +713,17 @@ fn a_parameter_bar_sets_values_by_click_and_by_drag() {
     };
     assert_eq!(size(&harness), 0.6);
 
-    // The first card follows the chain heading; "size" is its first row.
-    let tab_top = SCREEN.y - detail::DEFAULT_HEIGHT + detail::TAB_BAR;
-    let card_left = devices::STRIP_MARGIN + devices::CHAIN_HEADER_WIDTH + devices::CARD_GAP;
-    let bar_left = card_left + devices::CARD_PADDING + devices::LABEL_WIDTH + 8.0;
-    let bar_right = card_left + devices::CARD_PADDING + devices::COLUMN_WIDTH - devices::VALUE_WIDTH - 8.0;
-    let y = tab_top + devices::STRIP_MARGIN + devices::CARD_HEADER + devices::CARD_PADDING + devices::ROW_HEIGHT / 2.0;
-    let at = |fraction: f32| pos2(bar_left + (bar_right - bar_left) * fraction, y);
-
+    // "Size" is the first bar of the reverb's first section.
+    let at = |harness: &Harness, fraction: f32| harness.first_panel_bar(0, 150.0, fraction);
     let before = harness.undo_depth();
-    harness.click(at(0.25));
+    harness.click(at(&harness, 0.25));
     assert!((size(&harness) - 0.25).abs() < 0.01, "clicked a quarter of the way along: {}", size(&harness));
-    harness.drag(at(0.25), at(0.8));
+    harness.drag(at(&harness, 0.25), at(&harness, 0.8));
     assert!((size(&harness) - 0.8).abs() < 0.01, "dragged to 80%: {}", size(&harness));
     assert_eq!(harness.undo_depth(), before + 2, "one step for the click, one for the whole drag");
 
     // Coming right after other clicks, this arrives as a triple-click.
-    harness.double_click(at(0.5));
+    harness.double_click(at(&harness, 0.5));
     assert_eq!(size(&harness), 0.6, "double-click restores the default");
 }
 
@@ -549,32 +746,31 @@ fn an_empty_project_offers_ways_to_start() {
 #[test]
 fn a_track_header_mutes_solos_renames_and_deletes() {
     let (mut harness, first, second, _) = with_two_tracks(UiOptions::default());
-    let row_top = transport::HEIGHT + arrangement::RULER_HEIGHT;
     let track = |harness: &Harness, id: TrackId| harness.project().track(id).unwrap().clone();
 
-    let chip = |index: f32| pos2(arrangement::HEADER_WIDTH - 62.0 + index * 28.0 + 12.0, row_top + 20.0);
-    harness.click(chip(0.0));
+    harness.click(harness.header_chip(0, 0.0));
     assert!(track(&harness, first).mute && !track(&harness, first).solo);
-    harness.click(chip(1.0));
+    harness.click(harness.header_chip(0, 1.0));
     assert!(track(&harness, first).solo);
-    harness.click(chip(0.0));
+    harness.click(harness.header_chip(0, 0.0));
     assert!(!track(&harness, first).mute, "a second click unmutes");
 
     // Double-click the name, replace it, confirm with Enter.
     let before = harness.undo_depth();
-    harness.double_click(pos2(arrangement::HEADER_PADDING + 30.0, row_top + 20.0));
+    let name = harness.header(0, 60.0, 14.0);
+    harness.double_click(name);
     harness.idle(2);
     harness.key(Modifiers::COMMAND, Key::A);
-    harness.step(Modifiers::NONE, vec![Event::Text("Lead".to_owned())]);
+    harness.type_text("Lead");
     assert_eq!(track(&harness, first).name, "One", "nothing is edited while typing");
     harness.key(Modifiers::NONE, Key::Enter);
     assert_eq!(track(&harness, first).name, "Lead");
     assert_eq!(harness.undo_depth(), before + 1, "a rename is one undo step");
 
     // Escape abandons a rename.
-    harness.double_click(pos2(arrangement::HEADER_PADDING + 30.0, row_top + 20.0));
+    harness.double_click(name);
     harness.idle(2);
-    harness.step(Modifiers::NONE, vec![Event::Text("zzz".to_owned())]);
+    harness.type_text("zzz");
     harness.key(Modifiers::NONE, Key::Escape);
     assert_eq!(track(&harness, first).name, "Lead");
 
@@ -582,8 +778,7 @@ fn a_track_header_mutes_solos_renames_and_deletes() {
     assert!(!harness.session.lock().transport().playing);
 
     // Right-click the second header and delete the track.
-    let header = pos2(arrangement::HEADER_PADDING + 150.0, row_top + arrangement::TRACK_HEIGHT + 20.0);
-    harness.click_with(header, PointerButton::Secondary);
+    harness.click_with(harness.header(1, 120.0, 14.0), PointerButton::Secondary);
     harness.click_label("Delete track");
     let project = harness.project();
     assert_eq!(project.tracks.len(), 1);
@@ -591,69 +786,190 @@ fn a_track_header_mutes_solos_renames_and_deletes() {
 }
 
 #[test]
-fn devices_can_be_added_swapped_and_given_presets() {
-    let options = UiOptions { detail_tab: DetailTab::Devices, ..Default::default() };
-    let mut harness = Harness::new(options, |_| {});
+fn the_browser_adds_and_swaps_devices_and_applies_presets() {
+    let mut harness = Harness::new(devices_tab(), |_| {});
     harness.key(Modifiers::COMMAND, Key::T);
     harness.idle(2);
-    let chain = |harness: &Harness| -> Vec<String> {
-        harness.project().tracks[0].devices.iter().map(|device| device.uri.clone()).collect()
-    };
+    let chain = |harness: &Harness| chain_uris(&harness.project(), ChainRef::Track(harness.project().tracks[0].id));
     assert_eq!(chain(&harness), ["builtin:polysynth"]);
 
-    harness.click_label("+  Add device");
+    // A single click only points at a device; a double-click adds it.
     harness.click_label("Delay");
+    assert_eq!(chain(&harness), ["builtin:polysynth"]);
+    harness.idle(30);
+    harness.double_click_label("Delay");
     assert_eq!(chain(&harness), ["builtin:polysynth", "builtin:delay"], "effects go after the instrument");
+
+    // Three quick clicks are one double-click, not two.
+    let reverb = harness.labeled("Reverb");
+    harness.double_click(reverb);
+    harness.click(reverb);
+    assert_eq!(chain(&harness).len(), 3, "one reverb: {:?}", chain(&harness));
+    harness.key(Modifiers::COMMAND, Key::Z);
 
     // A second instrument would never receive notes, so it replaces the
     // first, as one undo step.
-    harness.click_label("+  Add device");
-    harness.click_label("Drum Kit");
+    harness.double_click_label("Drum Kit");
     assert_eq!(chain(&harness), ["builtin:drumkit", "builtin:delay"]);
     harness.key(Modifiers::COMMAND, Key::Z);
     assert_eq!(chain(&harness), ["builtin:polysynth", "builtin:delay"]);
 
-    // The preset menu shows the current preset and applies another.
+    // The browser lists the presets of the selected device, the synth, and
+    // applies one on a click.
     assert!(harness.project().tracks[0].devices[0].params.is_empty());
-    harness.click_label("init");
     harness.click_label("bass");
     let params = harness.project().tracks[0].devices[0].params.clone();
     assert!(!params.is_empty(), "the preset's values were applied");
-    harness.idle(1);
-    harness.labeled("bass", 0);
+    harness.idle(2);
+    assert_eq!(harness.all_labeled("bass").len(), 2, "the browser's row and the chip in the device's header");
+
+    // Selecting another device lists its presets instead (the delay has
+    // none).
+    let delay = harness.project().tracks[0].devices[1].id;
+    // The synth's panel is 832 wide; the delay's follows after the gap.
+    let delay_name = harness.first_panel() + vec2(832.0 + devices::PANEL_GAP + 60.0, devices::PANEL_HEADER / 2.0);
+    harness.click(delay_name);
+    assert_eq!(harness.app.state().selected_device, Some(delay));
+    harness.idle(2);
+    assert!(!harness.is_on_screen("warm_pad"));
 }
 
 #[test]
-fn the_master_chain_takes_effects_ahead_of_its_limiter() {
-    let options = UiOptions { detail_tab: DetailTab::Devices, ..Default::default() };
-    let mut harness = Harness::new(options, |_| {});
-    harness.click_label("+  Add device");
+fn a_devices_preset_chip_opens_its_presets() {
+    let mut harness = Harness::new(devices_tab(), |_| {});
+    harness.key(Modifiers::COMMAND, Key::T);
+    harness.idle(2);
+    // The chip in the synth's header shows the current preset; the browser
+    // row of the same name comes first in reading order.
+    let chips = harness.all_labeled("init");
+    assert_eq!(chips.len(), 2);
+    harness.click(chips[1].center());
     harness.idle(3);
-    assert!(harness.labels.iter().any(|(label, _)| label == "Reverb"));
-    assert!(harness.labels.iter().all(|(label, _)| label != "Poly Synth"), "no instruments on the master");
-    harness.click_label("EQ");
-    let master: Vec<String> = harness.project().master.devices.iter().map(|device| device.uri.clone()).collect();
-    assert_eq!(master, ["builtin:eq", "builtin:limiter"], "the limiter stays last, guarding the output");
+    // The popup's rows are to the right of the browser's.
+    let rows = harness.all_labeled("supersaw");
+    let in_popup = rows.iter().find(|rect| rect.left() > harness.work_left()).expect("the popup lists presets");
+    harness.click(in_popup.center());
+    let device = &harness.project().tracks[0].devices[0];
+    assert_eq!(device.params.get("unison"), Some(&7.0), "supersaw stacks seven voices");
 }
 
 #[test]
-fn a_device_can_be_bypassed_and_removed_from_its_card() {
-    let (mut harness, device) = with_reverb();
-    let top = SCREEN.y - detail::DEFAULT_HEIGHT + detail::TAB_BAR + devices::STRIP_MARGIN;
-    let card_left = devices::STRIP_MARGIN + devices::CHAIN_HEADER_WIDTH + devices::CARD_GAP;
-    // The reverb's eight parameters fit one column.
-    let card_right = card_left + devices::COLUMN_WIDTH + devices::CARD_PADDING * 2.0;
-    let header_y = top + devices::CARD_HEADER / 2.0;
+fn the_browser_search_narrows_its_lists_and_ctrl_b_hides_it() {
+    let (mut harness, ..) = with_two_tracks(devices_tab());
+    assert!(harness.is_on_screen("Reverb") && harness.is_on_screen("Chorus"));
+    harness.click(pos2(browser::WIDTH / 2.0, top_bar::HEIGHT + 24.0 + 8.0 + 11.0));
+    harness.type_text("rev");
+    harness.idle(2);
+    assert!(harness.is_on_screen("Reverb"));
+    assert!(!harness.is_on_screen("Chorus") && !harness.is_on_screen("Poly Synth"));
 
-    harness.click(pos2(card_left + 20.0, header_y));
-    assert!(!harness.project().device(device).unwrap().enabled, "the power button bypasses");
-    harness.click(pos2(card_left + 20.0, header_y));
+    // Typing in the search field is not a shortcut.
+    harness.type_text(" ");
+    assert!(!harness.session.lock().transport().playing);
+    harness.key(Modifiers::NONE, Key::Escape);
+
+    let lanes_before = harness.lanes_left();
+    harness.key(Modifiers::COMMAND, Key::B);
+    assert!(!harness.app.state().browser.open);
+    assert_eq!(harness.lanes_left(), lanes_before - browser::WIDTH, "the arrangement takes the room");
+    assert!(!harness.is_on_screen("Reverb"));
+    harness.click_label("View");
+    harness.click_label("Browser");
+    assert!(harness.app.state().browser.open);
+}
+
+#[test]
+fn the_master_row_selects_the_master_and_takes_effects_ahead_of_its_limiter() {
+    let (mut harness, first, ..) = with_two_tracks(devices_tab());
+    assert_eq!(harness.app.state().shown_chain(), ChainRef::Track(first));
+
+    harness.click(pos2(harness.work_left() + 60.0, harness.master_top() + arrangement::MASTER_HEIGHT / 2.0));
+    assert_eq!(harness.app.state().shown_chain(), ChainRef::Master);
+    harness.double_click_label("EQ");
+    let project = harness.project();
+    assert_eq!(
+        chain_uris(&project, ChainRef::Master),
+        ["builtin:eq", "builtin:limiter"],
+        "the limiter stays last, guarding the output"
+    );
+    assert!(project.track(first).unwrap().devices.is_empty(), "the track was not touched");
+    harness.idle(2);
+    assert!(harness.is_on_screen("EQ on the master"), "the master row lists its devices");
+
+    // The master carries no notes: an instrument gets a track of its own.
+    harness.double_click_label("Drum Kit");
+    let project = harness.project();
+    assert_eq!(project.tracks.len(), 3);
+    assert_eq!(project.tracks[2].devices[0].uri, "builtin:drumkit");
+    assert_eq!(chain_uris(&project, ChainRef::Master).len(), 2);
+
+    // Clicking a track goes back to its chain.
+    harness.click(harness.header(0, 120.0, 14.0));
+    assert_eq!(harness.app.state().shown_chain(), ChainRef::Track(first));
+    harness.click_label("Limiter on the master");
+    assert_eq!(harness.app.state().shown_chain(), ChainRef::Master);
+    assert_eq!(harness.app.state().detail_tab, DetailTab::Devices);
+}
+
+#[test]
+fn the_master_volume_bar_is_one_undo_step() {
+    let (mut harness, ..) = with_two_tracks(UiOptions::default());
+    let before = harness.undo_depth();
+    let right = harness.work_left() + arrangement::HEADER_WIDTH - arrangement::HEADER_RIGHT;
+    let y = harness.master_top() + arrangement::MASTER_HEIGHT / 2.0;
+    let at = |fraction: f32| pos2(right - arrangement::MASTER_VOLUME_WIDTH * (1.0 - fraction), y);
+    harness.drag(at(0.8), at(0.5));
+    let volume = harness.project().master.volume_db;
+    assert!((-17.5..-15.0).contains(&volume), "halfway up the fader scale: {volume}");
+    assert_eq!(harness.undo_depth(), before + 1);
+}
+
+#[test]
+fn a_device_can_be_bypassed_and_removed_from_its_panel() {
+    let (mut harness, device) = with_reverb();
+    let panel = harness.first_panel();
+    let header_y = panel.y + devices::PANEL_HEADER / 2.0;
+    // The reverb's single column makes the narrowest panel there is.
+    let panel_right = panel.x + 150.0 + 2.0 * devices::BODY_PADDING;
+
+    harness.click(pos2(panel.x + 10.0, header_y));
+    assert!(!harness.project().device(device).unwrap().enabled, "the dot bypasses");
+    harness.click(pos2(panel.x + 10.0, header_y));
     assert!(harness.project().device(device).unwrap().enabled);
 
-    harness.click(pos2(card_right - 18.0, header_y));
-    assert!(harness.project().device(device).is_err(), "the close button removes the device");
+    harness.click(pos2(panel_right - 12.0, header_y));
+    assert!(harness.project().device(device).is_err(), "the cross removes the device");
     harness.key(Modifiers::COMMAND, Key::Z);
     assert!(harness.project().device(device).is_ok());
+}
+
+#[test]
+fn chips_set_choices_and_switches() {
+    let mut synth = None;
+    let mut harness = Harness::new(devices_tab(), |session| {
+        let track = session.edit(|project| Ok(project.add_track("Lead"))).unwrap();
+        synth = Some(session.add_device(ChainRef::Track(track), "builtin:polysynth", None, None).unwrap());
+    });
+    let value = |harness: &Harness, id: &str| {
+        let params = harness.session.lock().device_params(synth.unwrap()).unwrap();
+        params.iter().find(|param| param.info.id == id).unwrap().value
+    };
+    assert_eq!(value(&harness, "osc1_wave"), 2.0, "a saw by default");
+    // The first row of the first section is oscillator one's wave.
+    let sin = harness.all_labeled("Sin");
+    assert_eq!(sin.len(), 2, "one chip row per oscillator");
+    harness.click(sin[0].center());
+    assert_eq!(value(&harness, "osc1_wave"), 0.0);
+    assert_eq!(value(&harness, "osc2_wave"), 2.0, "the second oscillator has its own row");
+
+    assert_eq!(value(&harness, "mono"), 0.0);
+    harness.click_label("Mono");
+    assert_eq!(value(&harness, "mono"), 1.0);
+    harness.click_label("Poly");
+    assert_eq!(value(&harness, "mono"), 0.0);
+
+    harness.click_label("HP");
+    assert_eq!(value(&harness, "filter_type"), 2.0);
 }
 
 #[test]
@@ -674,29 +990,114 @@ fn starting_a_new_project_asks_before_discarding_changes() {
     // With nothing to lose there is no question to answer.
     harness.key(Modifiers::COMMAND, Key::N);
     harness.idle(3);
-    assert!(harness.labels.iter().all(|(label, _)| label != "Cancel"), "no dialog for an unmodified project");
+    assert!(!harness.is_on_screen("Cancel"), "no dialog for an unmodified project");
+}
+
+#[test]
+fn the_edit_menu_undoes_and_redoes() {
+    let (mut harness, ..) = with_two_tracks(UiOptions::default());
+    harness.click_label("Edit");
+    harness.click_label("Add track");
+    assert_eq!(harness.project().tracks.len(), 3);
+    harness.click_label("Edit");
+    harness.click_label("Undo");
+    assert_eq!(harness.project().tracks.len(), 2);
+    harness.click_label("Edit");
+    harness.click_label("Redo");
+    assert_eq!(harness.project().tracks.len(), 3);
 }
 
 #[test]
 fn the_detail_tabs_switch() {
     let (mut harness, ..) = with_two_tracks(UiOptions::default());
     assert_eq!(harness.app.state().detail_tab, DetailTab::Clip);
-    let tabs_y = SCREEN.y - detail::DEFAULT_HEIGHT + detail::TAB_BAR / 2.0;
-    harness.click(pos2(90.0, tabs_y));
+    harness.click_label("Devices");
     assert_eq!(harness.app.state().detail_tab, DetailTab::Devices);
-    harness.click(pos2(30.0, tabs_y));
+    harness.click_label("Clip");
     assert_eq!(harness.app.state().detail_tab, DetailTab::Clip);
 }
 
 #[test]
-fn the_add_track_button_below_the_headers_adds_a_track() {
+fn the_corner_button_adds_a_track() {
     let (mut harness, ..) = with_two_tracks(UiOptions::default());
-    let below_tracks = transport::HEIGHT + arrangement::RULER_HEIGHT + 2.0 * arrangement::TRACK_HEIGHT;
-    harness.click(pos2(arrangement::HEADER_WIDTH / 2.0, below_tracks + 24.0));
+    harness.click_label("New track");
     let project = harness.project();
     assert_eq!(project.tracks.len(), 3);
     assert_eq!(project.tracks[2].name, "Track 3");
     assert_eq!(harness.app.state().selected_track, Some(project.tracks[2].id));
+}
+
+#[test]
+fn the_tempo_can_be_dragged_and_typed() {
+    let (mut harness, ..) = with_two_tracks(UiOptions::default());
+    assert_eq!(harness.project().tempo, 120.0);
+    let before = harness.undo_depth();
+    let tempo = harness.labeled("Tempo");
+    harness.drag(tempo, tempo - vec2(0.0, 40.0));
+    assert_eq!(harness.project().tempo, 130.0, "a quarter of a BPM per pixel, upward");
+    assert_eq!(harness.undo_depth(), before + 1);
+
+    harness.double_click(tempo);
+    harness.idle(2);
+    harness.key(Modifiers::COMMAND, Key::A);
+    harness.type_text("96");
+    harness.key(Modifiers::NONE, Key::Enter);
+    assert_eq!(harness.project().tempo, 96.0);
+
+    // Escape leaves the tempo alone.
+    harness.double_click(tempo);
+    harness.idle(2);
+    harness.type_text("7");
+    harness.key(Modifiers::NONE, Key::Escape);
+    assert_eq!(harness.project().tempo, 96.0);
+}
+
+#[test]
+fn the_status_bar_explains_what_is_under_the_pointer() {
+    let (mut harness, ..) = with_two_tracks(UiOptions::default());
+    assert_eq!(harness.app.state().hint.text(), "", "nothing is hovered yet");
+    let play = harness.labeled("Play");
+    harness.move_to(play);
+    harness.idle(1);
+    assert!(harness.app.state().hint.text().starts_with("Play"), "{:?}", harness.app.state().hint.text());
+    harness.move_to(harness.volume_bar(0, 0.5));
+    harness.idle(1);
+    assert!(harness.app.state().hint.text().starts_with("Volume"), "{:?}", harness.app.state().hint.text());
+    harness.move_to(pos2(SCREEN.x - 300.0, SCREEN.y - 10.0));
+    harness.idle(2);
+    assert_eq!(harness.app.state().hint.text(), "", "over the status bar itself there is nothing to explain");
+}
+
+#[test]
+fn the_plugin_scan_is_reported_until_the_catalog_arrives() {
+    let mut harness = Harness::new(UiOptions::default(), |_| {});
+    // The catalog is read on a helper thread; with only built-in devices it
+    // arrives almost at once.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !harness.app.catalog_ready() {
+        assert!(Instant::now() < deadline, "the device catalog never arrived");
+        std::thread::sleep(Duration::from_millis(5));
+        harness.idle(1);
+    }
+    assert!(harness.is_on_screen("Poly Synth") && harness.is_on_screen("Utility"));
+}
+
+#[test]
+fn the_view_menu_switches_themes() {
+    let (mut harness, ..) = with_two_tracks(UiOptions::default());
+    assert_eq!(harness.app.theme().name, "noir");
+    harness.click_label("View");
+    harness.click_label("Graphite");
+    harness.idle(1);
+    assert_eq!(harness.app.theme().name, "graphite");
+    assert!(!harness.ctx.global_style().visuals.dark_mode);
+    harness.click_label("View");
+    harness.click_label("Noir");
+    harness.idle(1);
+    assert_eq!(harness.app.theme().name, "noir");
+
+    let graphite = Harness::new(UiOptions { theme: "graphite", ..Default::default() }, |_| {});
+    assert_eq!(graphite.app.theme().name, "graphite", "the command line can start in another theme");
 }
 
 #[test]

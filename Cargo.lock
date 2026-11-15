@@ -1041,6 +1041,7 @@ dependencies = [
  "daw-dsp",
  "daw-engine",
  "daw-mcp",
+ "daw-noir",
  "daw-plugins",
  "eframe",
  "image",
@@ -1065,6 +1066,10 @@ name = "daw-dsp"
 version = "0.1.0"
 dependencies = [
  "daw-core",
+ "daw-engine",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1079,6 +1084,21 @@ dependencies = [
  "parking_lot",
  "rtrb",
  "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "daw-library"
+version = "0.1.0"
+dependencies = [
+ "daw-core",
+ "daw-media",
+ "log",
+ "memchr",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 

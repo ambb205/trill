@@ -91,9 +91,9 @@ mod tests {
     #[test]
     fn a_track_keeps_its_palette_place_in_another_theme() {
         let (noir, graphite) = (Theme::noir(), Theme::graphite());
-        for index in 0..TRACK_HUES {
-            assert_eq!(track_color(&graphite, new_track_color(index)), graphite.tracks[index]);
-            assert_eq!(track_color(&graphite, POSITIONAL[index]), graphite.tracks[index]);
+        for (index, hue) in graphite.tracks.into_iter().enumerate() {
+            assert_eq!(track_color(&graphite, new_track_color(index)), hue);
+            assert_eq!(track_color(&graphite, POSITIONAL[index]), hue);
         }
         assert_eq!(track_color(&graphite, 0x00FF40), graphite.tracks[3], "nearest hue, then that hue's place");
         assert_ne!(noir.tracks, graphite.tracks);

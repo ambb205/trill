@@ -7,6 +7,7 @@ use super::state::TextEditState;
 use super::units::db_to_fader;
 use daw_noir::{Levels, Theme, Zones};
 use eframe::egui::{self, Id, Layout, Rect, Response, Ui, UiBuilder};
+use std::fmt::Debug;
 use std::hash::Hash;
 
 /// Runs `add` in a child `Ui` that covers `rect`.
@@ -34,6 +35,33 @@ pub fn double_clicked(response: &Response) -> bool {
     response.double_clicked() || response.triple_clicked()
 }
 
+/// True when a row of a list was clicked for the second time in a row:
+/// the gesture that acts on it, where a single click only points.
+///
+/// egui counts clicks wherever they land, so a double-click on one row soon
+/// after a click on another arrives as a triple-click, and a real
+/// triple-click would be two double-clicks. Clicks are paired per row here
+/// instead: the second click on a row within the double-click time acts,
+/// and the click after that starts a new pair.
+pub fn activated(ui: &Ui, response: &Response) -> bool {
+    if !response.clicked() {
+        return false;
+    }
+    let memory = Id::unique("row-activation");
+    let now = ui.input(|input| input.time);
+    let window = ui.ctx().options(|options| options.input_options.max_double_click_delay);
+    let armed: Option<(Id, f64)> = ui.data(|data| data.get_temp(memory));
+    let paired = armed.is_some_and(|(row, at)| row == response.id && now - at <= window);
+    ui.data_mut(|data| {
+        if paired {
+            data.remove::<(Id, f64)>(memory);
+        } else {
+            data.insert_temp(memory, (response.id, now));
+        }
+    });
+    paired
+}
+
 /// Where the colors of a level meter change. Meters share the faders'
 /// scale, so these are positions on it: amber above -6 dBFS, the signal
 /// color over full scale.
@@ -51,7 +79,7 @@ pub fn levels(meter: MeterState) -> Levels {
 /// only when the user commits it (Enter, or clicking elsewhere). Escape
 /// cancels. `edit` holds the text between frames while the field has focus;
 /// set it before calling to open the field for editing straight away.
-pub fn name_field<Target: Copy + PartialEq + Hash>(
+pub fn name_field<Target: Copy + PartialEq + Hash + Debug>(
     ui: &mut Ui,
     theme: &Theme,
     rect: Rect,
@@ -64,7 +92,7 @@ pub fn name_field<Target: Copy + PartialEq + Hash>(
     let awaiting_focus = editing.is_some_and(|state| !state.focused);
     let had_focus = editing.is_some_and(|state| state.focused);
 
-    let id = Id::unique(("name-field", target));
+    let id = Id::unique("name-field").with(target);
     let response = daw_noir::text_field(ui, theme, rect, id, &mut text, "");
     if awaiting_focus {
         response.request_focus();

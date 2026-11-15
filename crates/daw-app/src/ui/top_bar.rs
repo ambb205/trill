@@ -20,7 +20,8 @@ const NAME_MAX_WIDTH: f32 = 190.0;
 /// Where the transport starts when the window is wide enough to choose.
 const TRANSPORT_LEFT: f32 = 372.0;
 const POSITION_WIDTH: f32 = 140.0;
-const TEMPO_WIDTH: f32 = 92.0;
+/// Room for three digits before the point and the unit after.
+const TEMPO_WIDTH: f32 = 106.0;
 const SIGNATURE_WIDTH: f32 = 52.0;
 const TRANSPORT_WIDTH: f32 =
     3.0 * BUTTON_WIDTH + 2.0 * 4.0 + 10.0 + POSITION_WIDTH + 6.0 + TEMPO_WIDTH + 6.0 + SIGNATURE_WIDTH;
@@ -31,7 +32,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     let bar = ui.max_rect();
     let painter = ui.painter().clone();
     painter.rect_filled(bar, 0.0, theme.panel);
-    paint::hline(&painter, bar.x_range(), bar.bottom() - 1.0, theme.hairline);
+    paint::hline_above(&painter, bar.x_range(), bar.bottom(), theme.hairline);
 
     let left_end = project_group(ui, cx, bar);
     let right_start = status_group(ui, cx, bar);
@@ -164,7 +165,7 @@ fn transport_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, left: f32) {
     let theme = cx.theme;
     let id = ui.scope_id().with("transport");
     let mut x = left;
-    let mut button = |x: &mut f32| {
+    let button = |x: &mut f32| {
         let rect = boxed(bar, *x, BUTTON_WIDTH);
         *x += BUTTON_WIDTH + 4.0;
         rect
@@ -261,18 +262,26 @@ fn status_group(ui: &mut Ui, cx: &mut Cx, bar: Rect) -> f32 {
 
     if let Some(url) = cx.mcp_url {
         // The port is what tells two windows apart; the tooltip has the rest.
-        let port = url.split("://").last().and_then(|rest| rest.split(['/', '?']).next()).and_then(|host| host.rsplit(':').next());
+        let port = url
+            .split("://")
+            .last()
+            .and_then(|rest| rest.split(['/', '?']).next())
+            .and_then(|host| host.rsplit(':').next());
         let label = port.map_or_else(|| "MCP".to_owned(), |port| format!("MCP :{port}"));
         let chip = Chip::new(&label, true).dot(theme.ok).named("MCP address");
         let width = chip.width(ui, theme);
-        let rect = Rect::from_min_size(pos2(right - width, bar.center().y - theme.metric.chip / 2.0), vec2(width, theme.metric.chip));
+        let rect = Rect::from_min_size(
+            pos2(right - width, bar.center().y - theme.metric.chip / 2.0),
+            vec2(width, theme.metric.chip),
+        );
         let response = daw_noir::chip(ui, theme, rect, ui.scope_id().with("mcp"), &chip);
         cx.hint(&response, format!("AI assistants can connect at {url} \u{00B7} click to copy"));
         if response.clicked() {
             ui.ctx().copy_text(url.to_owned());
             cx.state.toasts.info("Copied the MCP address");
         }
-        response.on_hover_text(format!("AI assistants can connect to this session at\n{url}\nClick to copy the address."));
+        response
+            .on_hover_text(format!("AI assistants can connect to this session at\n{url}\nClick to copy the address."));
         right = rect.left() - GAP;
     }
 
@@ -287,10 +296,14 @@ fn status_group(ui: &mut Ui, cx: &mut Cx, bar: Rect) -> f32 {
     let value_width = text::width(&painter, theme.text.value, "100 %").ceil();
     let value = Rect::from_min_max(pos2(right - value_width, bar.top()), pos2(right, bar.bottom()));
     text::paint(&painter, value, Align2::RIGHT_CENTER, theme.text.value, &percent, theme.ink);
-    let meter = Rect::from_min_size(pos2(value.left() - 6.0 - CPU_METER_WIDTH, bar.center().y - 4.0), vec2(CPU_METER_WIDTH, 8.0));
+    let meter = Rect::from_min_size(
+        pos2(value.left() - 6.0 - CPU_METER_WIDTH, bar.center().y - 4.0),
+        vec2(CPU_METER_WIDTH, 8.0),
+    );
     daw_noir::mini_meter(&painter, theme, meter, load, color);
     let label_width = text::width(&painter, theme.text.micro, "CPU").ceil();
-    let label = Rect::from_min_max(pos2(meter.left() - 8.0 - label_width, bar.top()), pos2(meter.left() - 8.0, bar.bottom()));
+    let label =
+        Rect::from_min_max(pos2(meter.left() - 8.0 - label_width, bar.top()), pos2(meter.left() - 8.0, bar.bottom()));
     text::paint(&painter, label, Align2::LEFT_CENTER, theme.text.micro, "CPU", theme.ink_faint);
 
     let group = Rect::from_min_max(pos2(label.left(), bar.top()), pos2(right, bar.bottom()));

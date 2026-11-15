@@ -16,6 +16,8 @@ Options:
   --select <CLIP NAME>    Select the first clip with this name at startup
   --play                  Start playback when the window opens
   --size <WIDTHxHEIGHT>   Initial window size in points (default: 1440x900)
+  --theme <noir|graphite> Colors of the window (default: noir)
+  --no-browser            Start with the device browser hidden (Ctrl+B shows it)
   --null-audio            Run without an audio device
   --no-plugins            Offer only the built-in devices
   --mcp-port <PORT>       Port of the MCP server for AI assistants (default: 7777)
@@ -35,6 +37,9 @@ pub struct Cli {
     pub select: Option<String>,
     pub play: bool,
     pub size: Option<[f32; 2]>,
+    /// Name of the theme to start in.
+    pub theme: Option<&'static str>,
+    pub no_browser: bool,
     pub null_audio: bool,
     pub no_plugins: bool,
     pub no_mcp: bool,
@@ -62,6 +67,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
             "--null-audio" => cli.null_audio = true,
             "--no-plugins" => cli.no_plugins = true,
             "--no-mcp" => cli.no_mcp = true,
+            "--no-browser" => cli.no_browser = true,
             "--mcp-port" => {
                 let text = value("a port number")?;
                 cli.mcp_port = Some(text.parse().with_context(|| format!("'{text}' is not a port number"))?);
@@ -75,6 +81,13 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
             }
             "--select" => cli.select = Some(value("a clip name")?),
             "--size" => cli.size = Some(parse_size(&value("a size such as 1440x900")?)?),
+            "--theme" => {
+                let name = value("a theme name")?;
+                let known = crate::ui::theme_names();
+                let theme = known.iter().find(|theme| **theme == name);
+                cli.theme =
+                    Some(theme.with_context(|| format!("unknown theme '{name}' (expected {})", known.join(" or ")))?);
+            }
             "--screenshot" => cli.screenshot = Some(PathBuf::from(value("a file path")?)),
             "--exit-after" => {
                 let text = value("a number of seconds")?;
@@ -143,6 +156,8 @@ impl Cli {
             detail_tab: self.tab,
             select_clip: None,
             mcp_url: None,
+            theme: self.theme.unwrap_or(defaults.theme),
+            browser: !self.no_browser,
             screenshot: self.screenshot.clone(),
             autoplay: self.play,
             exit_after: self.exit_after,
@@ -225,6 +240,17 @@ mod tests {
     }
 
     #[test]
+    fn the_theme_is_noir_unless_another_is_named() {
+        assert_eq!(run(&[]).unwrap().ui_options().theme, "noir");
+        assert!(run(&[]).unwrap().ui_options().browser);
+        assert!(!run(&["--no-browser"]).unwrap().ui_options().browser);
+        assert_eq!(run(&["--theme", "noir"]).unwrap().ui_options().theme, "noir");
+        assert_eq!(run(&["--theme", "graphite"]).unwrap().ui_options().theme, "graphite");
+        let error = run(&["--theme", "neon"]).unwrap_err().to_string();
+        assert!(error.contains("neon") && error.contains("noir or graphite"), "{error}");
+    }
+
+    #[test]
     fn a_bare_argument_is_the_project_to_open() {
         let cli = run(&["songs/idea.dawproj", "--null-audio"]).unwrap();
         assert_eq!(cli.project, Some(PathBuf::from("songs/idea.dawproj")));
@@ -259,6 +285,7 @@ mod tests {
             &["--tab", "mixer"],
             &["--size", "big"],
             &["--size", "10x10"],
+            &["--theme"],
             &["--exit-after", "soon"],
             &["--exit-after", "-1"],
             &["--screenshot"],

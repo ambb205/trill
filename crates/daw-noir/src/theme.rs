@@ -126,6 +126,9 @@ pub struct Theme {
     pub tracks: [Color32; TRACK_HUES],
     /// Text on a track hue or another accent fill.
     pub on_accent: Color32,
+    /// Opacity of the text and marks of a control that is disabled, or
+    /// whose device is bypassed, so it stays dimmer than an enabled one.
+    pub disabled: f32,
 
     // ---- the piano -------------------------------------------------------
     pub key_white: Color32,
@@ -209,6 +212,7 @@ impl Theme {
             data: teal,
             tracks: [violet, sky, teal, sage, amber, rose, slate, clay, iris, aqua],
             on_accent: rgb(0x101013),
+            disabled: 0.6,
             key_white: rgb(0xC9C9D1),
             key_black: rgb(0x0B0B0D),
             key_ink: rgb(0x101013),
@@ -250,6 +254,7 @@ impl Theme {
             data: teal,
             tracks: [violet, sky, teal, sage, amber, rose, slate, clay, iris, aqua],
             on_accent: rgb(0xF4F4F6),
+            disabled: 0.6,
             key_white: rgb(0xE6E6E8),
             key_black: rgb(0x2A2A2E),
             key_ink: rgb(0x121214),
@@ -380,6 +385,25 @@ mod tests {
             for (name, surface) in [("bg", t.bg), ("panel", t.panel)] {
                 let ratio = contrast_ratio(t.ink_faint, surface);
                 assert!(ratio >= AA, "{}: ink_faint on {name} is {ratio:.2}:1", t.name);
+            }
+        });
+    }
+
+    #[test]
+    fn labels_inside_controls_stay_legible_on_the_washes() {
+        // A Bar's label sits on the fill wash, and on the hover wash over
+        // that while the pointer is on it; a lit chip's on the selected one.
+        each(|t| {
+            for surface in [t.bg, t.panel, t.raised] {
+                let filled = over(surface, t.fill);
+                for (name, backdrop) in [("fill", filled), ("hovered fill", over(filled, t.hover))] {
+                    let ratio = contrast_ratio(t.ink_dim, backdrop);
+                    assert!(ratio >= AA, "{}: a label on the {name} over {surface:?} is {ratio:.2}:1", t.name);
+                }
+            }
+            // The faint ink would not do there, which is why it is not used.
+            if t.dark {
+                assert!(contrast_ratio(t.ink_faint, over(t.panel, t.fill)) < AA);
             }
         });
     }

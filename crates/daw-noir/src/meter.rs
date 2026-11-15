@@ -29,9 +29,14 @@ pub struct Levels {
 /// Paints a vertical stereo meter: two columns a pixel apart, each filled
 /// from the bottom in the colors of the zones the level passes through.
 pub fn stereo_meter(painter: &Painter, theme: &Theme, rect: Rect, levels: Levels, zones: Zones) {
-    let column = ((rect.width() - 1.0) / 2.0).floor().max(1.0);
-    let columns = [(rect.left(), levels.left), (rect.left() + column + 1.0, levels.right)];
-    let y_at = |position: f32| rect.bottom() - (rect.height() * position.clamp(0.0, 1.0)).round();
+    // Columns and the gap between them are whole pixels, so both channels
+    // are the same width at any scale.
+    let scale = painter.pixels_per_point();
+    let gap = paint::hair(painter);
+    let column = (((rect.width() - gap) / 2.0 * scale).floor().max(1.0)) / scale;
+    let left = paint::snap(painter, rect.left());
+    let columns = [(left, levels.left), (left + column + gap, levels.right)];
+    let y_at = |position: f32| paint::snap(painter, rect.bottom() - rect.height() * position.clamp(0.0, 1.0));
     let bands = [(0.0, zones.hot, theme.ok), (zones.hot, zones.over, theme.warn), (zones.over, 1.0, theme.signal)];
 
     for (left, level) in columns {
@@ -45,9 +50,9 @@ pub fn stereo_meter(painter: &Painter, theme: &Theme, rect: Rect, levels: Levels
         }
     }
     if let Some(peak) = levels.peak.filter(|peak| *peak > 0.0) {
-        let y = y_at(peak).min(rect.bottom() - 1.0);
+        let y = y_at(peak).min(rect.bottom() - gap);
         let color = if peak > zones.over { theme.signal } else { theme.ink };
-        paint::hline(painter, Rangef::new(rect.left(), rect.left() + 2.0 * column + 1.0), y, color);
+        paint::hline(painter, Rangef::new(left, left + 2.0 * column + gap), y, color);
     }
 }
 

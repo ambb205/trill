@@ -4,10 +4,11 @@
 use super::files::{self, Confirm, Jobs};
 use super::snapshot::{Live, Snapshot};
 use super::state::{AudioSummary, Cx, FocusArea, UiState};
-use super::{UiOptions, arrangement, detail, master, piano_roll, theme, transport};
+use super::{UiOptions, arrangement, browser, detail, piano_roll, status_bar, top_bar};
 use daw_core::device::{DeviceDescriptor, DeviceFactory};
 use daw_dsp::BuiltinFactory;
 use daw_engine::SharedSession;
+use daw_noir::Theme;
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 use parking_lot::Mutex;
 use std::num::NonZeroUsize;
@@ -18,11 +19,9 @@ use std::time::{Duration, Instant};
 /// How often an idle window checks the session for edits made elsewhere.
 const IDLE_POLL: Duration = Duration::from_millis(100);
 const HOUSEKEEPING_INTERVAL: Duration = Duration::from_secs(1);
-/// Height the arrangement keeps however tall the detail panel is made.
+/// Height the arrangement keeps however tall the detail panel is made:
+/// the ruler, two tracks and the master.
 const MIN_ARRANGEMENT_HEIGHT: f32 = 180.0;
-/// Share of the space below the transport the detail panel starts with, up
-/// to its default height.
-const DETAIL_SHARE: f32 = 0.47;
 /// Frames to let the layout settle before taking a screenshot.
 const SCREENSHOT_SETTLE_FRAMES: u32 = 12;
 
@@ -53,6 +52,7 @@ enum Command {
     Duplicate,
     Delete,
     SelectAll,
+    ToggleBrowser,
     /// Move the selected notes by grid steps and semitones.
     Nudge(i32, i32),
 }
@@ -63,12 +63,16 @@ pub struct DawApp {
     live: Live,
     state: UiState,
     jobs: Jobs,
+    /// The colors, type and metrics the window is painted with.
+    theme: Theme,
     /// The devices that can be added. Starts as the built-in ones and is
     /// replaced when `catalog` delivers the full list.
     descriptors: Vec<DeviceDescriptor>,
     /// The full device catalog, plugins included, read on a helper thread:
     /// asking for it waits for the first plugin scan, which can take seconds.
     catalog: mpsc::Receiver<Vec<DeviceDescriptor>>,
+    /// True once `catalog` has delivered; until then the scan is running.
+    catalog_ready: bool,
     audio: AudioSummary,
     options: UiOptions,
     /// Receives the reason if the run fails in a way `ui::run` must report.
@@ -89,13 +93,15 @@ impl DawApp {
         options: UiOptions,
         failure: Arc<Mutex<Option<String>>>,
     ) -> Self {
-        theme::install(ctx);
+        let theme = Theme::named(options.theme).unwrap_or_else(Theme::noir);
+        daw_noir::install(ctx, &theme);
         // Edits are made from inside the UI pass. By default egui may run a
         // pass twice with the same input to hide a layout glitch, which
         // would apply a click's edit twice; one pass per frame rules it out.
         ctx.options_mut(|options| options.max_passes = NonZeroUsize::MIN);
 
         let mut state = UiState::new(options.detail_tab);
+        state.browser.open = options.browser;
         let (snapshot, factory, audio) = {
             let mut guard = session.lock();
             let first = Snapshot::capture(&guard, None);
@@ -107,7 +113,11 @@ impl DawApp {
                 guard.play();
             }
             let info = guard.audio_info();
-            let audio = AudioSummary { output: info.output.clone(), warning: info.warning.clone() };
+            let audio = AudioSummary {
+                output: info.output.clone(),
+                sample_rate: info.sample_rate,
+                warning: info.warning.clone(),
+            };
             // Captured again now that the selection is known, so it covers
             // the selected track's devices.
             (Snapshot::capture(&guard, state.selected_track), guard.factory(), audio)
@@ -132,8 +142,10 @@ impl DawApp {
             live: Live::default(),
             state,
             jobs,
+            theme,
             descriptors: BuiltinFactory.descriptors(),
             catalog,
+            catalog_ready: false,
             audio,
             options,
             failure,
@@ -154,6 +166,7 @@ impl DawApp {
         let now = Instant::now();
         if let Ok(descriptors) = self.catalog.try_recv() {
             self.descriptors = descriptors;
+            self.catalog_ready = true;
         }
         match self.session.try_lock() {
             Some(mut session) => {
@@ -179,6 +192,8 @@ impl DawApp {
             None => ctx.request_repaint_after(Duration::from_millis(8)),
         }
 
+        self.state.resolve_device(&self.snapshot.project);
+
         // Meters are read through their own handles; no lock involved.
         let elapsed = now.duration_since(self.last_meter_update).as_secs_f32().min(0.25);
         self.last_meter_update = now;
@@ -193,7 +208,9 @@ impl DawApp {
             session: &self.session,
             snap: &self.snapshot,
             live: &self.live,
+            theme: &self.theme,
             descriptors: &self.descriptors,
+            catalog_ready: self.catalog_ready,
             audio: &self.audio,
             mcp_url: self.options.mcp_url.as_deref(),
             state: &mut self.state,
@@ -311,34 +328,55 @@ impl DawApp {
             run_command(&ctx, &mut cx, command);
         }
 
-        egui::Panel::top("transport")
-            .exact_size(transport::HEIGHT)
+        // Panels are claimed from the outside in: the bars, the browser
+        // down the left, the detail panel under what is left, and the
+        // arrangement in the middle. Each paints its own surface.
+        let bare = egui::Frame::NONE;
+        egui::Panel::top("top-bar")
+            .exact_size(top_bar::HEIGHT)
             .show_separator_line(false)
-            .frame(theme::panel_frame(theme::BG_PANEL))
-            .show(ui, |ui| transport::show(ui, &mut cx));
-        egui::Panel::right("master")
-            .exact_size(master::WIDTH)
-            .resizable(false)
+            .frame(bare)
+            .show(ui, |ui| top_bar::show(ui, &mut cx));
+        egui::Panel::bottom("status-bar")
+            .exact_size(status_bar::HEIGHT)
             .show_separator_line(false)
-            .frame(theme::panel_frame(theme::BG_PANEL))
-            .show(ui, |ui| master::show(ui, &mut cx));
+            .frame(bare)
+            .show(ui, |ui| status_bar::show(ui, &mut cx));
+        if cx.state.browser.open {
+            egui::Panel::left("browser")
+                .exact_size(browser::WIDTH)
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(bare)
+                .show(ui, |ui| browser::show(ui, &mut cx));
+        }
         // The detail panel may take most of the window, but never so much
         // that the arrangement above it disappears.
-        let below_transport = ui.available_height();
-        let tallest = (below_transport - MIN_ARRANGEMENT_HEIGHT).clamp(detail::MIN_HEIGHT, detail::MAX_HEIGHT);
-        let default = (below_transport * DETAIL_SHARE).clamp(detail::MIN_HEIGHT, detail::DEFAULT_HEIGHT.min(tallest));
+        let between_bars = ui.available_height();
+        let tallest = (between_bars - MIN_ARRANGEMENT_HEIGHT).clamp(detail::MIN_HEIGHT, detail::MAX_HEIGHT);
         egui::Panel::bottom("detail")
             .resizable(true)
-            .default_size(default)
+            .default_size(detail::DEFAULT_HEIGHT.min(tallest))
             .size_range(detail::MIN_HEIGHT..=tallest)
             .show_separator_line(false)
-            .frame(theme::panel_frame(theme::BG_PANEL))
+            .frame(bare)
             .show(ui, |ui| detail::show(ui, &mut cx));
         egui::CentralPanel::no_frame().show(ui, |ui| arrangement::show(ui, &mut cx));
 
         files::confirm_modal(&ctx, &mut cx);
-        let corner = ctx.content_rect().right_bottom() - egui::vec2(master::WIDTH + 14.0, 14.0);
-        cx.state.toasts.show(&ctx, corner);
+        let corner = ctx.content_rect().right_bottom() - egui::vec2(12.0, status_bar::HEIGHT + 10.0);
+        cx.state.toasts.show(&ctx, cx.theme, corner);
+
+        // The status bar is laid out before the views that ask for hints,
+        // so a new hint is shown by the frame after this one.
+        if self.state.hint.end_frame() {
+            ctx.request_repaint();
+        }
+        if let Some(theme) = self.state.theme_request.take().and_then(Theme::named) {
+            daw_noir::install(&ctx, &theme);
+            self.theme = theme;
+            ctx.request_repaint();
+        }
 
         self.close_gesture(&ctx);
         // Moving things need every frame; everything else waits for input
@@ -358,6 +396,16 @@ impl DawApp {
     pub fn snapshot(&self) -> &Snapshot {
         &self.snapshot
     }
+
+    #[cfg(test)]
+    pub fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
+    #[cfg(test)]
+    pub fn catalog_ready(&self) -> bool {
+        self.catalog_ready
+    }
 }
 
 impl eframe::App for DawApp {
@@ -370,6 +418,28 @@ impl eframe::App for DawApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.frame(ui);
     }
+
+    /// A screenshot run sees no pointer, so the picture does not depend on
+    /// where the mouse happened to be: nothing in it is hovered.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if self.options.screenshot.is_some() {
+            raw_input.events.retain(|event| !is_pointer_event(event));
+        }
+    }
+}
+
+/// True for the events that say where the pointer is or what it does.
+fn is_pointer_event(event: &egui::Event) -> bool {
+    use egui::Event;
+    matches!(
+        event,
+        Event::PointerMoved(_)
+            | Event::MouseMoved(_)
+            | Event::PointerButton { .. }
+            | Event::PointerGone
+            | Event::MouseWheel { .. }
+            | Event::Touch { .. }
+    )
 }
 
 /// Collects the commands for the keys pressed this frame. Single keys and
@@ -391,6 +461,7 @@ fn read_shortcuts(ctx: &egui::Context, state: &UiState) -> Vec<Command> {
         (Modifiers::COMMAND, Key::Z, Command::Undo),
         (Modifiers::COMMAND, Key::T, Command::AddTrack),
         (Modifiers::COMMAND, Key::D, Command::Duplicate),
+        (Modifiers::COMMAND, Key::B, Command::ToggleBrowser),
         (Modifiers::NONE, Key::Space, Command::TogglePlay),
         (Modifiers::NONE, Key::L, Command::ToggleLoop),
         (Modifiers::NONE, Key::Home, Command::Rewind),
@@ -438,8 +509,8 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
         Command::Save => files::save(ctx, cx),
         Command::SaveAs => files::save_as(ctx, cx),
         Command::Export => files::export_wav(ctx, cx),
-        Command::TogglePlay => transport::toggle_play(cx),
-        Command::ToggleLoop => transport::toggle_loop(cx),
+        Command::TogglePlay => top_bar::toggle_play(cx),
+        Command::ToggleLoop => top_bar::toggle_loop(cx),
         Command::Rewind => cx.with_session(|session| session.seek(0.0)),
         Command::AddTrack => arrangement::add_track(cx),
         Command::Duplicate => arrangement::duplicate_selected_clip(cx),
@@ -453,6 +524,7 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
             }
         }
         Command::SelectAll => piano_roll::select_all_notes(cx),
+        Command::ToggleBrowser => cx.state.browser.open = !cx.state.browser.open,
         Command::Nudge(steps, semitones) => piano_roll::nudge_selected_notes(cx, steps, semitones),
     }
 }

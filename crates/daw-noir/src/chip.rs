@@ -108,10 +108,10 @@ pub fn chip(ui: &Ui, theme: &Theme, rect: Rect, id: Id, chip: &Chip) -> Response
         (None, true, _) | (None, false, true) => theme.ink,
         (None, false, false) => chip.quiet.unwrap_or(theme.ink_dim),
     };
-    let color = if chip.dimmed { fade(color, 0.55) } else { color };
+    let color = if chip.dimmed { fade(color, theme.disabled) } else { color };
     let mut content = rect.shrink2(vec2(theme.metric.chip_pad + 1.0, 0.0));
     if let Some(dot) = chip.dot {
-        let dot = if chip.dimmed { fade(dot, 0.55) } else { dot };
+        let dot = if chip.dimmed { fade(dot, theme.disabled) } else { dot };
         content.min.x = paint::dot(&painter, content.left_center(), theme.metric.dot, dot) + 5.0;
         text::paint(&painter, content, Align2::LEFT_CENTER, theme.text.micro, chip.label, color);
     } else {
@@ -154,19 +154,11 @@ pub fn chip_row(
     (clicked, cursor.y + height - origin.y)
 }
 
-/// The height [`chip_row`] takes for these labels, without placing them.
-pub fn chip_row_height(ui: &Ui, theme: &Theme, max_width: f32, labels: &[&str]) -> f32 {
-    let (height, gap) = (theme.metric.chip, theme.metric.gap - 1.0);
-    let (mut x, mut rows) = (0.0, 1.0);
-    for label in labels {
-        let width = Chip::new(label, false).width(ui, theme);
-        if x > 0.0 && x + width > max_width {
-            x = 0.0;
-            rows += 1.0;
-        }
-        x += width + gap;
-    }
-    rows * height + (rows - 1.0) * gap
+/// The width of these chips side by side on one line.
+pub fn chip_row_width(ui: &Ui, theme: &Theme, labels: &[&str]) -> f32 {
+    let gap = theme.metric.gap - 1.0;
+    let chips: f32 = labels.iter().map(|label| Chip::new(label, false).width(ui, theme)).sum();
+    chips + gap * labels.len().saturating_sub(1) as f32
 }
 
 #[cfg(test)]
@@ -198,7 +190,6 @@ mod tests {
             time += 1.0 / 60.0;
             frame(&ctx, time, events, |ui, theme| {
                 let (clicked, rows) = chip_row(ui, theme, origin, 150.0, Id::unique("row"), &labels, *selected, false);
-                assert_eq!(rows, chip_row_height(ui, theme, 150.0, &labels));
                 *height = rows;
                 rects.clear();
                 rects.extend((0..labels.len()).map(|index| {
@@ -237,6 +228,8 @@ mod tests {
             assert!(long > short + 30.0);
             assert_eq!(dotted, short + 10.0);
             assert_eq!(short.fract(), 0.0, "widths are whole pixels");
+            assert_eq!(chip_row_width(ui, theme, &["M", "Ping Pong"]), short + long + 2.0);
+            assert_eq!(chip_row_width(ui, theme, &[]), 0.0);
         });
     }
 }

@@ -6,9 +6,9 @@
 //! UI thread never waits on any of it.
 
 use super::state::{Cx, UiState};
-use super::theme;
 use super::toast::ToastKind;
 use daw_engine::{RenderOptions, RenderReport, SharedSession};
+use daw_noir::{Variant, paint, text};
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -245,28 +245,51 @@ pub fn confirm_modal(ctx: &egui::Context, cx: &mut Cx) {
         Confirm::Quit => ("quitting", "Discard and quit"),
     };
 
+    let theme = cx.theme;
     let mut choice = None;
-    let modal = egui::Modal::new(egui::Id::unique("confirm-discard")).show(ctx, |ui| {
-        ui.set_width(380.0);
-        ui.label(egui::RichText::new("Discard unsaved changes?").font(theme::strong(16.0)));
-        ui.add_space(4.0);
-        ui.label(
-            egui::RichText::new(format!(
-                "\"{}\" has changes that are not saved. They will be lost by {verb}.",
-                cx.snap.project.name
-            ))
-            .color(theme::TEXT_DIM),
-        );
-        ui.add_space(12.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add(egui::Button::new(proceed).fill(theme::fade(theme::ERROR, 0.35))).clicked() {
-                choice = Some(true);
-            }
-            if ui.button("Cancel").clicked() {
-                choice = Some(false);
-            }
-        });
-    });
+    // A flat panel with a hairline: a caps title over a rule, the question,
+    // and the buttons at the right.
+    let frame = egui::Frame::NONE
+        .fill(theme.panel)
+        .stroke(egui::Stroke::new(1.0, theme.hairline))
+        .inner_margin(egui::Margin::symmetric(14, 12));
+    let modal = egui::Modal::new(egui::Id::unique("confirm-discard")).frame(frame).backdrop_color(theme.backdrop).show(
+        ctx,
+        |ui| {
+            ui.set_width(400.0);
+            ui.spacing_mut().item_spacing = egui::vec2(theme.metric.gap, 0.0);
+            let (title, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), egui::Sense::hover());
+            let caps = theme.text.caps;
+            text::paint(
+                ui.painter(),
+                title,
+                egui::Align2::LEFT_CENTER,
+                caps,
+                "Discard unsaved changes?",
+                theme.ink_dim,
+            );
+            ui.add_space(6.0);
+            let (rule, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+            paint::hline(ui.painter(), rule.x_range(), rule.top(), theme.hairline);
+            ui.add_space(10.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "\"{}\" has changes that are not saved. They will be lost by {verb}.",
+                    cx.snap.project.name
+                ))
+                .color(theme.ink),
+            );
+            ui.add_space(14.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if daw_noir::button(ui, theme, proceed, Variant::Danger).clicked() {
+                    choice = Some(true);
+                }
+                if daw_noir::button(ui, theme, "Cancel", Variant::Default).clicked() {
+                    choice = Some(false);
+                }
+            });
+        },
+    );
     if modal.should_close() {
         choice.get_or_insert(false);
     }
