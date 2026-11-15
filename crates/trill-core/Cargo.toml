@@ -4,6 +4,7 @@ description = "Project model, edit operations and the device API shared by every
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 base64.workspace = true

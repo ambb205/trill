@@ -4,6 +4,7 @@ description = "Instrument Noir: the DAW's design tokens and egui widget kit"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 # The same egui that eframe re-exports to the app.

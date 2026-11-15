@@ -121,3 +121,11 @@ isolated today, so a plugin that crashes while playing still takes the app with 
 view, audio recording, time-stretching/warping, group and return tracks, MIDI input devices, plugin delay
 compensation, multi-core rendering, compressed audio formats (audio clips are WAV only). Only Windows has been
 run so far.
+
+## Licence
+
+Trill is free software: you can redistribute it and modify it under the terms of the GNU General Public License,
+version 3 or (at your option) any later version. It comes with no warranty. See [LICENSE](LICENSE).
+
+The Inter typeface bundled in `crates/trill-noir/assets/fonts` is under the SIL Open Font License; its text is beside
+the font.
