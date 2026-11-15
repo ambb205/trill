@@ -443,3 +443,57 @@ async fn midi_files_round_trip_through_the_song() {
     assert!(error.contains("missing.mid"), "{error}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tracks_can_share_a_reverb_and_a_group() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let keys =
+        ok(client, "create_track", json!({ "name": "Keys", "instrument": "builtin:polysynth" })).await["track_id"]
+            .as_u64()
+            .unwrap();
+    let verb =
+        ok(client, "create_track", json!({ "name": "Verb", "kind": "return" })).await["track_id"].as_u64().unwrap();
+    let bus =
+        ok(client, "create_track", json!({ "name": "Music", "kind": "group" })).await["track_id"].as_u64().unwrap();
+    ok(client, "add_device", json!({ "track": verb, "uri": "builtin:reverb", "params": { "mix": 1.0 } })).await;
+
+    let routed =
+        ok(client, "update_track", json!({ "track": keys, "group": bus, "send": { "to": verb, "level_db": -9 } }))
+            .await;
+    assert_eq!(routed["group"], bus);
+    assert_eq!(routed["sends"], json!([{ "to": verb, "level_db": -9.0 }]));
+    assert!(routed.get("clips").is_none());
+
+    let project = ok(client, "get_project", json!({})).await;
+    assert_eq!(project["tracks"][1]["kind"], "return");
+    assert_eq!(project["tracks"][2]["kind"], "group");
+    assert!(project["tracks"][0].get("kind").is_none(), "normal tracks do not say so");
+
+    // The rules come back as plain errors.
+    let error = call(client, "create_clip", json!({ "track": verb, "start": 0, "length": 4 })).await.unwrap_err();
+    assert!(error.contains("return track and does not hold clips"), "{error}");
+    let error =
+        call(client, "update_track", json!({ "track": keys, "send": { "to": bus, "level_db": 0 } })).await.unwrap_err();
+    assert!(error.contains("is not a return track"), "{error}");
+
+    // The reverb is heard: the render is longer than the note because of its tail.
+    ok(client, "create_clip", json!({ "track": keys, "start": 0, "length": 2, "notes": [["C4", 0, 0.5]] })).await;
+    let dir = std::env::temp_dir().join(format!("daw-mcp-routing-{}", std::process::id()));
+    let report = ok(client, "render", json!({ "path": dir.join("r.wav").display().to_string() })).await;
+    let levels: Vec<(String, f64)> = report["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|track| (track["name"].as_str().unwrap().to_string(), track["peak_db"].as_f64().unwrap()))
+        .collect();
+    assert!(levels.iter().all(|(_, peak)| *peak > -60.0), "keys, return and group all carry signal: {levels:?}");
+    assert!(report["duration_seconds"].as_f64().unwrap() > 1.5, "the shared reverb rings on after the clip");
+    std::fs::remove_dir_all(&dir).ok();
+
+    // Removing the send and the group routes the track straight to the master again.
+    let direct =
+        ok(client, "update_track", json!({ "track": keys, "group": 0, "send": { "to": verb, "level_db": null } }))
+            .await;
+    assert!(direct.get("group").is_none() && direct.get("sends").is_none(), "{direct}");
+}

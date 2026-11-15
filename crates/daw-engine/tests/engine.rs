@@ -499,6 +499,69 @@ fn audio_fades_and_master_automation_shape_the_level() {
     assert!((peak(&out.left[seconds(0.7..1.0)]) - 0.5).abs() < 0.01, "at full level after the jump");
 }
 
+#[test]
+fn groups_and_returns_carry_the_signal_they_are_sent() {
+    use daw_core::TrackKind;
+    // One held sine; its level at the master tells us where it went.
+    let build = || {
+        let mut project = Project::new("t");
+        let track = sine_track(&mut project, "A");
+        clip_with(&mut project, track, 0.0, 4.0, &[note(69, 0.0, 4.0)]);
+        (project, track)
+    };
+    let level = |project: &Project| {
+        let out = render(project, &BuiltinFactory, &options()).unwrap();
+        (rms(&out.left[seconds(0.5..1.5)]), out)
+    };
+    let (project, _) = build();
+    let (dry, _) = level(&project);
+    assert!(dry > 0.05);
+
+    // A send at unity to an empty return doubles the signal at the master;
+    // at -6 dB it adds half; muting the return removes it again.
+    let (mut project, track) = build();
+    let verb = project.add_track_of_kind("Return", TrackKind::Return);
+    project.set_send(track, verb, Some(0.0)).unwrap();
+    let (with_send, out) = level(&project);
+    assert!((with_send / dry - 2.0).abs() < 0.01, "ratio {}", with_send / dry);
+    let return_peak = out.track_peaks.iter().find(|(id, _)| *id == verb).unwrap().1;
+    assert!(return_peak > 0.05, "the return's meter shows what it received");
+    project.set_send(track, verb, Some(-6.0206)).unwrap();
+    assert!((level(&project).0 / dry - 1.5).abs() < 0.01);
+    project.track_mut(verb).unwrap().mute = true;
+    assert!((level(&project).0 / dry - 1.0).abs() < 0.01);
+
+    // The send is taken after the fader: pull the track down and the
+    // return follows.
+    let (mut project, track) = build();
+    let verb = project.add_track_of_kind("Return", TrackKind::Return);
+    project.set_send(track, verb, Some(0.0)).unwrap();
+    project.set_track_volume(track, -6.0206).unwrap();
+    assert!((level(&project).0 / dry - 1.0).abs() < 0.01, "half the level, twice (direct + return)");
+
+    // A group's fader and devices act on everything routed through it.
+    let (mut project, track) = build();
+    let second = sine_track(&mut project, "B");
+    clip_with(&mut project, second, 0.0, 4.0, &[note(69, 0.0, 4.0)]);
+    let bus = project.add_track_of_kind("Bus", TrackKind::Group);
+    project.set_track_group(track, Some(bus)).unwrap();
+    project.set_track_group(second, Some(bus)).unwrap();
+    let (both, _) = level(&project);
+    assert!((both / dry - 2.0).abs() < 0.01, "two identical tracks through a unity group");
+    project.set_track_volume(bus, -6.0206).unwrap();
+    assert!((level(&project).0 / dry - 1.0).abs() < 0.01, "the group fader halves both");
+    let utility = project.add_device(ChainRef::Track(bus), "builtin:utility", "Utility", None).unwrap();
+    project.device_mut(utility).unwrap().params.insert("gain".into(), -6.0206);
+    assert!((level(&project).0 / dry - 0.5).abs() < 0.01, "and its devices process the sum");
+    project.track_mut(bus).unwrap().mute = true;
+    assert_eq!(level(&project).0, 0.0, "muting the group silences its members");
+
+    // Solo: a soloed member is heard through its group; the other is not.
+    project.track_mut(bus).unwrap().mute = false;
+    project.track_mut(track).unwrap().solo = true;
+    assert!((level(&project).0 / dry - 0.25).abs() < 0.01, "one member, through the -6 dB fader and -6 dB utility");
+}
+
 fn session() -> Session {
     Session::new(Arc::new(BuiltinFactory), AudioBackend::Null { sample_rate: SR }).unwrap()
 }

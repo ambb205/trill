@@ -37,9 +37,32 @@ pub struct SetProjectRequest {
     pub master_volume_db: Option<f32>,
 }
 
+#[derive(Copy, Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackKindInput {
+    /// Holds clips and plays them through its devices.
+    #[default]
+    Normal,
+    /// Mixes the tracks routed through it, so they share effects and a fader (a drum bus).
+    Group,
+    /// Receives what other tracks send to it: put one reverb or delay here and share it.
+    Return,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SendInput {
+    /// Id of the return track.
+    pub to: u64,
+    /// Send level in dB (0 = as loud as the track itself, at most 6). null removes the send.
+    pub level_db: Option<f32>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateTrackRequest {
     pub name: String,
+    /// "normal" (default), "group" or "return". Group and return tracks hold no clips.
+    #[serde(default)]
+    pub kind: TrackKindInput,
     /// Instrument to put on the track, e.g. "builtin:polysynth" or "builtin:drumkit" (see `list_devices`).
     /// Omit for a track that only holds audio clips.
     pub instrument: Option<String>,
@@ -64,6 +87,11 @@ pub struct UpdateTrackRequest {
     pub solo: Option<bool>,
     /// New position in the track list, 0 = top.
     pub index: Option<usize>,
+    /// Route this track through a group track (its id), or back to the master with 0.
+    pub group: Option<u64>,
+    /// Set, change or remove a send from this track to a return track. The send is taken after the track's
+    /// fader.
+    pub send: Option<SendInput>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

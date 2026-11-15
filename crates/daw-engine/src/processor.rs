@@ -233,11 +233,27 @@ impl Processor {
         mix_left.fill(0.0);
         mix_right.fill(0.0);
 
-        for track in &mut self.graph.tracks {
+        let Graph { tracks, buses, .. } = &mut *self.graph;
+        for bus in buses.iter_mut() {
+            bus.left[..frames].fill(0.0);
+            bus.right[..frames].fill(0.0);
+        }
+
+        for track in tracks.iter_mut() {
             let left = &mut self.track_left[..frames];
             let right = &mut self.track_right[..frames];
-            left.fill(0.0);
-            right.fill(0.0);
+            // A group or return starts from what was fed to its bus; every
+            // track that feeds it has already run.
+            match track.input_bus.and_then(|bus| buses.get(bus)) {
+                Some(bus) => {
+                    left.copy_from_slice(&bus.left[..frames]);
+                    right.copy_from_slice(&bus.right[..frames]);
+                }
+                None => {
+                    left.fill(0.0);
+                    right.fill(0.0);
+                }
+            }
 
             let events = &mut self.events;
             events.clear();
@@ -279,11 +295,30 @@ impl Processor {
                 state.gain_right = target_right;
                 state.primed = true;
             }
-            let peak_left = mix_ramped(left, mix_left, state.gain_left, target_left);
-            let peak_right = mix_ramped(right, mix_right, state.gain_right, target_right);
+            // Fade in place, so the output and every send carry the same
+            // post-fader signal.
+            let peak_left = fade_ramped(left, state.gain_left, target_left);
+            let peak_right = fade_ramped(right, state.gain_right, target_right);
             state.gain_left = target_left;
             state.gain_right = target_right;
             track.meter.record(peak_left, peak_right);
+
+            match track.output_bus.and_then(|bus| buses.get_mut(bus)) {
+                Some(bus) => {
+                    add_scaled(left, &mut bus.left[..frames], 1.0);
+                    add_scaled(right, &mut bus.right[..frames], 1.0);
+                }
+                None => {
+                    add_scaled(left, mix_left, 1.0);
+                    add_scaled(right, mix_right, 1.0);
+                }
+            }
+            for &(bus, gain) in &track.sends {
+                if let Some(bus) = buses.get_mut(bus) {
+                    add_scaled(left, &mut bus.left[..frames], gain);
+                    add_scaled(right, &mut bus.right[..frames], gain);
+                }
+            }
         }
         self.live.clear();
 
@@ -314,6 +349,29 @@ impl Processor {
             counts_per_bar: signature.numerator as u32,
         });
         self.monitor.mix(out_left, out_right, beats);
+    }
+}
+
+/// Applies a gain ramping from `from` to `to` in place and returns the
+/// resulting peak.
+#[inline]
+fn fade_ramped(samples: &mut [f32], from: f32, to: f32) -> f32 {
+    let step = (to - from) / samples.len().max(1) as f32;
+    let mut gain = from;
+    let mut peak = 0.0f32;
+    for sample in samples.iter_mut() {
+        gain += step;
+        *sample *= gain;
+        peak = peak.max(sample.abs());
+    }
+    peak
+}
+
+/// Adds `source`, scaled, into `destination`.
+#[inline]
+fn add_scaled(source: &[f32], destination: &mut [f32], gain: f32) {
+    for (out, sample) in destination.iter_mut().zip(source) {
+        *out += sample * gain;
     }
 }
 
@@ -529,6 +587,9 @@ mod tests {
             pan_automation: None,
             meter: Arc::new(Meter::default()),
             state: TrackState::default(),
+            input_bus: None,
+            output_bus: None,
+            sends: Vec::new(),
         }
     }
 

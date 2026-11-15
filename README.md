@@ -64,7 +64,7 @@ MCP like any other device's.
 
 **Engine**: sample-accurate MIDI and audio clips, clip looping, non-destructive trimming and splitting, audio
 fades, automation of track and master volume, pan and any device parameter with straight, held or curved
-segments, sample-exact transport looping, mute/solo, undo/redo, offline rendering that is bit-identical to
+segments, group tracks and return tracks with sends, a metronome, sample-exact transport looping, mute/solo, undo/redo, offline rendering that is bit-identical to
 playback, and render analysis (peak, LUFS, stereo correlation, spectral balance, per-track levels).
 
 **Application**: arrangement view with clip editing, piano roll, device panels generated from each device's

@@ -318,10 +318,45 @@ mod state_base64 {
     }
 }
 
+/// What a track is for.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackKind {
+    /// Holds clips and plays them through its devices.
+    #[default]
+    Normal,
+    /// Mixes the tracks that belong to it, so they can be processed and
+    /// faded together.
+    Group,
+    /// Receives what other tracks send to it: a shared reverb or delay.
+    Return,
+}
+
+impl TrackKind {
+    fn is_normal(&self) -> bool {
+        *self == TrackKind::Normal
+    }
+}
+
+/// A copy of a track's signal, taken after its fader, routed to a return
+/// track.
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Send {
+    pub to: TrackId,
+    pub level_db: f32,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub id: TrackId,
     pub name: String,
+    #[serde(default, skip_serializing_if = "TrackKind::is_normal")]
+    pub kind: TrackKind,
+    /// The group track this track plays through instead of the master.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<TrackId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sends: Vec<Send>,
     /// 0xRRGGBB.
     pub color: u32,
     pub volume_db: f32,
@@ -550,11 +585,19 @@ impl Project {
     // ---- tracks --------------------------------------------------------
 
     pub fn add_track(&mut self, name: impl Into<String>) -> TrackId {
+        self.add_track_of_kind(name, TrackKind::Normal)
+    }
+
+    /// Adds a normal, group or return track at the end of the list.
+    pub fn add_track_of_kind(&mut self, name: impl Into<String>, kind: TrackKind) -> TrackId {
         let id = TrackId(self.alloc_id());
         let color = TRACK_COLORS[self.tracks.len() % TRACK_COLORS.len()];
         self.tracks.push(Track {
             id,
             name: name.into(),
+            kind,
+            group: None,
+            sends: Vec::new(),
             color,
             volume_db: 0.0,
             pan: 0.0,
@@ -569,8 +612,57 @@ impl Project {
     pub fn remove_track(&mut self, id: TrackId) -> Result<Track, EditError> {
         let index = self.track_index(id)?;
         let track = self.tracks.remove(index);
+        // Nothing may keep routing to a track that is gone.
+        for other in &mut self.tracks {
+            if other.group == Some(id) {
+                other.group = None;
+            }
+            other.sends.retain(|send| send.to != id);
+        }
         self.prune_automation();
         Ok(track)
+    }
+
+    /// Routes a track through a group track, or back to the master with
+    /// `None`. Only normal tracks can be grouped.
+    pub fn set_track_group(&mut self, id: TrackId, group: Option<TrackId>) -> Result<(), EditError> {
+        if self.track(id)?.kind != TrackKind::Normal {
+            return invalid(format!("{id} is a group or return track and cannot be put in a group"));
+        }
+        if let Some(group) = group
+            && self.track(group)?.kind != TrackKind::Group
+        {
+            return invalid(format!("{group} is not a group track"));
+        }
+        self.track_mut(id)?.group = group;
+        Ok(())
+    }
+
+    /// Sets how much of a track is sent to a return track, in dB after the
+    /// fader; `None` removes the send.
+    pub fn set_send(&mut self, id: TrackId, to: TrackId, level_db: Option<f32>) -> Result<(), EditError> {
+        if self.track(id)?.kind == TrackKind::Return {
+            return invalid(format!("{id} is a return track; returns cannot send to returns"));
+        }
+        if self.track(to)?.kind != TrackKind::Return {
+            return invalid(format!("{to} is not a return track"));
+        }
+        let level_db = level_db.map(validate_volume).transpose()?;
+        let sends = &mut self.track_mut(id)?.sends;
+        sends.retain(|send| send.to != to);
+        if let Some(level_db) = level_db {
+            sends.push(Send { to, level_db });
+        }
+        Ok(())
+    }
+
+    /// Only normal tracks hold clips.
+    fn holds_clips(&self, id: TrackId) -> Result<(), EditError> {
+        match self.track(id)?.kind {
+            TrackKind::Normal => Ok(()),
+            TrackKind::Group => invalid(format!("{id} is a group track and does not hold clips")),
+            TrackKind::Return => invalid(format!("{id} is a return track and does not hold clips")),
+        }
     }
 
     pub fn move_track(&mut self, id: TrackId, new_index: usize) -> Result<(), EditError> {
@@ -645,7 +737,7 @@ impl Project {
         content: ClipContent,
     ) -> Result<ClipId, EditError> {
         validate_span(start, length)?;
-        self.track(track)?;
+        self.holds_clips(track)?;
         let id = ClipId(self.alloc_id());
         let track = self.track_mut(track)?;
         track.clips.push(Clip { id, name, start, length, muted: false, content });
@@ -694,7 +786,7 @@ impl Project {
             Some(track) => track,
             None => self.clip_track(id)?,
         };
-        self.track(track)?;
+        self.holds_clips(track)?;
         let new_id = ClipId(self.alloc_id());
         let track = self.track_mut(track)?;
         track.clips.push(Clip { id: new_id, start, ..source });
@@ -710,7 +802,7 @@ impl Project {
             Some(track) => track,
             None => self.clip_track(id)?,
         };
-        self.track(target)?;
+        self.holds_clips(target)?;
         let mut clip = self.remove_clip(id)?;
         clip.start = start;
         let clips = &mut self.track_mut(target)?.clips;
@@ -1269,6 +1361,50 @@ mod tests {
         assert_eq!(exported.tracks.len(), 1);
         let starts: Vec<f64> = exported.tracks[0].notes.iter().map(|n| n.start).collect();
         assert_eq!(starts, [4.0, 5.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn groups_and_returns_route_and_clean_up_after_themselves() {
+        let mut project = Project::new("t");
+        let (drums, bass) = (project.add_track("Drums"), project.add_track("Bass"));
+        let bus = project.add_track_of_kind("Rhythm", TrackKind::Group);
+        let reverb = project.add_track_of_kind("Reverb", TrackKind::Return);
+
+        project.set_track_group(drums, Some(bus)).unwrap();
+        project.set_track_group(bass, Some(bus)).unwrap();
+        project.set_send(drums, reverb, Some(-12.0)).unwrap();
+        project.set_send(drums, reverb, Some(-6.0)).unwrap();
+        project.set_send(bus, reverb, Some(-20.0)).unwrap();
+        assert_eq!(project.track(drums).unwrap().sends, [Send { to: reverb, level_db: -6.0 }], "one send per return");
+
+        // The rules: groups do not nest, returns do not send, only returns
+        // receive, and neither kind holds clips.
+        assert!(project.set_track_group(bus, Some(bus)).is_err());
+        assert!(project.set_track_group(drums, Some(reverb)).is_err());
+        assert!(project.set_track_group(reverb, Some(bus)).is_err());
+        assert!(project.set_send(reverb, reverb, Some(0.0)).is_err());
+        assert!(project.set_send(drums, bus, Some(0.0)).is_err());
+        assert!(project.set_send(drums, reverb, Some(40.0)).is_err());
+        assert!(project.add_midi_clip(bus, "x", 0.0, 1.0).is_err());
+        assert!(project.add_midi_clip(reverb, "x", 0.0, 1.0).is_err());
+        let clip = project.add_midi_clip(drums, "c", 0.0, 1.0).unwrap();
+        assert!(project.move_clip(clip, Some(reverb), 0.0).is_err());
+        assert!(project.duplicate_clip(clip, 2.0, Some(bus)).is_err());
+
+        let restored = Project::from_json(&project.to_json()).unwrap();
+        assert_eq!(restored, project);
+
+        project.set_send(drums, reverb, None).unwrap();
+        assert!(project.track(drums).unwrap().sends.is_empty());
+
+        // Removing a group or return leaves nothing pointing at it.
+        project.set_send(bass, reverb, Some(-3.0)).unwrap();
+        project.remove_track(reverb).unwrap();
+        project.remove_track(bus).unwrap();
+        for id in [drums, bass] {
+            let track = project.track(id).unwrap();
+            assert!(track.group.is_none() && track.sends.is_empty());
+        }
     }
 
     #[test]

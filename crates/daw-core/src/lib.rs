@@ -16,6 +16,6 @@ pub mod time;
 pub use ids::{ClipId, DeviceId, TrackId};
 pub use project::{
     AutomationLane, AutomationPoint, AutomationTarget, ChainRef, Clip, Device, EditError, LoopRegion, Marker, Master,
-    Note, Project, Segment, Track,
+    Note, Project, Segment, Send, Track, TrackKind,
 };
 pub use time::{Beats, TimeSignature};

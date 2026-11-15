@@ -123,6 +123,25 @@ pub(crate) struct TrackNode {
     pub pan_automation: Option<Vec<AutomationPoint>>,
     pub meter: Arc<Meter>,
     pub state: TrackState,
+    /// The bus this node reads as its input: set for groups and returns,
+    /// which process what other tracks feed them.
+    pub input_bus: Option<usize>,
+    /// The group bus the faded signal goes to; the master when `None`.
+    pub output_bus: Option<usize>,
+    /// Copies of the faded signal for return tracks: bus and linear gain.
+    pub sends: Vec<(usize, f32)>,
+}
+
+/// Where a group or return track collects its input during a block.
+pub(crate) struct Bus {
+    pub left: Vec<f32>,
+    pub right: Vec<f32>,
+}
+
+impl Bus {
+    pub fn new() -> Self {
+        Self { left: vec![0.0; MAX_BLOCK], right: vec![0.0; MAX_BLOCK] }
+    }
 }
 
 pub(crate) struct MasterNode {
@@ -135,7 +154,10 @@ pub(crate) struct MasterNode {
 }
 
 pub struct Graph {
+    /// In processing order: every node comes before the bus it feeds
+    /// (normal tracks, then groups, then returns).
     pub(crate) tracks: Vec<TrackNode>,
+    pub(crate) buses: Vec<Bus>,
     pub(crate) master: MasterNode,
     pub(crate) tempo: f64,
     pub(crate) time_signature: TimeSignature,
@@ -147,6 +169,7 @@ impl Graph {
     pub fn empty() -> Self {
         Self {
             tracks: Vec::new(),
+            buses: Vec::new(),
             master: MasterNode {
                 chain: Chain::default(),
                 volume_db: 0.0,

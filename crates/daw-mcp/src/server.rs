@@ -6,12 +6,12 @@ use crate::input::{find_param, parse_notes, parse_param_value, parse_pitch_value
 use crate::requests::*;
 use crate::view::{
     clip_json, descriptor_json, descriptor_summary_json, device_json, lane_json, param_state_json, project_json, round,
-    transport_json,
+    track_json, transport_json,
 };
 use daw_core::device::DeviceCategory;
 use daw_core::midi_file;
 use daw_core::project::{AudioContent, AutomationTarget, MAX_TEMPO, MAX_VOLUME_DB, MIN_TEMPO};
-use daw_core::{ChainRef, ClipId, DeviceId, EditError, Project, TrackId};
+use daw_core::{ChainRef, ClipId, DeviceId, EditError, Project, TrackId, TrackKind};
 use daw_engine::audio_file::read_wav;
 use daw_engine::{RenderOptions, RenderReport, Session, SessionError, SharedSession};
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -221,6 +221,8 @@ impl DawServer {
     }
 
     /// Add a track, optionally with an instrument. MIDI clips on the track play through its instrument.
+    /// `kind` makes a group track (route other tracks through it with update_track `group`) or a return
+    /// track (feed it with update_track `send`, and put a shared reverb or delay on it).
     #[tool(annotations(title = "Create track"))]
     fn create_track(&self, Parameters(request): Parameters<CreateTrackRequest>) -> CallToolResult {
         let mut session = self.session.lock();
@@ -228,8 +230,13 @@ impl DawServer {
             if request.preset.is_some() && request.instrument.is_none() {
                 return Err("`preset` needs `instrument`".to_string());
             }
+            let kind = match request.kind {
+                TrackKindInput::Normal => TrackKind::Normal,
+                TrackKindInput::Group => TrackKind::Group,
+                TrackKindInput::Return => TrackKind::Return,
+            };
             let track = edit(&mut session, |project| {
-                let id = project.add_track(request.name.clone());
+                let id = project.add_track_of_kind(request.name.clone(), kind);
                 if let Some(volume) = request.volume_db {
                     project.set_track_volume(id, volume)?;
                 }
@@ -253,7 +260,8 @@ impl DawServer {
         finish(reply)
     }
 
-    /// Change a track's name, volume, pan, mute, solo or position in the track list.
+    /// Change a track's name, volume, pan, mute, solo or position in the track list, route it through a
+    /// group, or send it to a return track.
     #[tool(annotations(title = "Update track"))]
     fn update_track(&self, Parameters(request): Parameters<UpdateTrackRequest>) -> CallToolResult {
         let mut session = self.session.lock();
@@ -268,6 +276,12 @@ impl DawServer {
             if let Some(index) = request.index {
                 project.move_track(id, index)?;
             }
+            if let Some(group) = request.group {
+                project.set_track_group(id, (group != 0).then_some(TrackId(group)))?;
+            }
+            if let Some(send) = &request.send {
+                project.set_send(id, TrackId(send.to), send.level_db)?;
+            }
             let track = project.track_mut(id)?;
             if let Some(name) = &request.name {
                 track.name = name.clone();
@@ -278,10 +292,12 @@ impl DawServer {
             if let Some(solo) = request.solo {
                 track.solo = solo;
             }
-            Ok(json!({
-                "id": track.id, "name": track.name, "volume_db": track.volume_db, "pan": track.pan,
-                "mute": track.mute, "solo": track.solo,
-            }))
+            let mut out = track_json(track, 4.0, false);
+            // The clips are not what was asked about.
+            if let Some(fields) = out.as_object_mut() {
+                fields.remove("clips");
+            }
+            Ok(out)
         });
         finish(reply)
     }

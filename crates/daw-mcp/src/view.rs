@@ -5,7 +5,7 @@
 use daw_core::device::{DeviceCategory, DeviceDescriptor, ParamInfo, ParamKind};
 use daw_core::pitch::pitch_name;
 use daw_core::project::{AutomationLane, AutomationTarget, Clip, ClipContent, Segment};
-use daw_core::{Device, Note, Project, Track};
+use daw_core::{Device, Note, Project, Track, TrackKind};
 use daw_engine::{ParamState, Session};
 use serde_json::{Value, json};
 
@@ -78,6 +78,22 @@ pub fn device_json(device: &Device) -> Value {
 }
 
 pub fn track_json(track: &Track, beats_per_bar: f64, include_notes: bool) -> Value {
+    let mut out = track_fields(track, beats_per_bar, include_notes);
+    match track.kind {
+        TrackKind::Normal => {}
+        TrackKind::Group => out["kind"] = json!("group"),
+        TrackKind::Return => out["kind"] = json!("return"),
+    }
+    if let Some(group) = track.group {
+        out["group"] = json!(group);
+    }
+    if !track.sends.is_empty() {
+        out["sends"] = track.sends.iter().map(|send| json!({ "to": send.to, "level_db": send.level_db })).collect();
+    }
+    out
+}
+
+fn track_fields(track: &Track, beats_per_bar: f64, include_notes: bool) -> Value {
     json!({
         "id": track.id,
         "name": track.name,

@@ -4,12 +4,12 @@
 
 use crate::audio_file::AudioCache;
 use crate::graph::{
-    AudioRegion, Chain, DeviceSlot, Graph, MAX_BLOCK, MasterNode, Meter, NoteEvent, ParamAutomation, TrackNode,
+    AudioRegion, Bus, Chain, DeviceSlot, Graph, MAX_BLOCK, MasterNode, Meter, NoteEvent, ParamAutomation, TrackNode,
     TrackState,
 };
 use daw_core::device::{DeviceController, DeviceFactory, ParamInfo};
 use daw_core::project::{AutomationTarget, Clip, ClipContent};
-use daw_core::{Device, DeviceId, Project, TrackId};
+use daw_core::{Device, DeviceId, Project, Track, TrackId, TrackKind};
 use daw_dsp::util::db_to_gain;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
@@ -75,7 +75,7 @@ impl Compiler<'_> {
     /// for the audio thread to carry over; new ones are created here.
     pub fn compile(&mut self, project: &Project, looping: bool) -> (Box<Graph>, Vec<Problem>) {
         let mut problems = Vec::new();
-        let any_solo = project.tracks.iter().any(|track| track.solo);
+        let routing = Routing::of(project);
 
         let mut tracks = Vec::with_capacity(project.tracks.len());
         for track in &project.tracks {
@@ -108,7 +108,7 @@ impl Compiler<'_> {
                 chain: self.chain(&track.devices, project, &mut problems),
                 volume_db: track.volume_db,
                 pan: track.pan,
-                audible: !track.mute && (!any_solo || track.solo),
+                audible: routing.audible(project, track),
                 volume_automation: lane_points(
                     project,
                     |target| matches!(target, AutomationTarget::TrackVolume { track: id } if *id == track.id),
@@ -119,8 +119,17 @@ impl Compiler<'_> {
                 ),
                 meter,
                 state: TrackState::default(),
+                input_bus: routing.bus(track.id),
+                output_bus: track.group.and_then(|group| routing.bus(group)),
+                sends: track
+                    .sends
+                    .iter()
+                    .filter_map(|send| Some((routing.bus(send.to)?, db_to_gain(send.level_db))))
+                    .collect(),
             });
         }
+        // Every node must run before the bus it feeds is read.
+        tracks.sort_by_key(|node| routing.stage(node.id));
 
         let master = MasterNode {
             chain: self.chain(&project.master.devices, project, &mut problems),
@@ -139,6 +148,7 @@ impl Compiler<'_> {
         let region = project.loop_region;
         let graph = Graph {
             tracks,
+            buses: (0..routing.bus_count()).map(|_| Bus::new()).collect(),
             master,
             tempo: project.tempo,
             time_signature: project.time_signature,
@@ -203,6 +213,63 @@ impl Compiler<'_> {
             }
         };
         DeviceSlot { id: device.id, processor, enabled: device.enabled }
+    }
+}
+
+/// Which tracks own a bus, and in what order tracks must be processed.
+struct Routing {
+    /// Group and return tracks, in bus order.
+    buses: Vec<TrackId>,
+    stages: HashMap<TrackId, u8>,
+    any_solo: bool,
+}
+
+impl Routing {
+    fn of(project: &Project) -> Self {
+        let buses =
+            project.tracks.iter().filter(|track| track.kind != TrackKind::Normal).map(|track| track.id).collect();
+        let stages = project
+            .tracks
+            .iter()
+            .map(|track| {
+                let stage = match track.kind {
+                    TrackKind::Normal => 0,
+                    TrackKind::Group => 1,
+                    TrackKind::Return => 2,
+                };
+                (track.id, stage)
+            })
+            .collect();
+        Self { buses, stages, any_solo: project.tracks.iter().any(|track| track.solo) }
+    }
+
+    fn bus(&self, track: TrackId) -> Option<usize> {
+        self.buses.iter().position(|id| *id == track)
+    }
+
+    fn bus_count(&self) -> usize {
+        self.buses.len()
+    }
+
+    fn stage(&self, track: TrackId) -> u8 {
+        self.stages.get(&track).copied().unwrap_or(0)
+    }
+
+    /// Mute and solo, resolved. Soloing a track keeps its group open, and
+    /// soloing a group keeps its members; returns stay open so a soloed
+    /// track is heard with its reverb.
+    fn audible(&self, project: &Project, track: &Track) -> bool {
+        if track.mute {
+            return false;
+        }
+        if !self.any_solo || track.solo {
+            return true;
+        }
+        match track.kind {
+            TrackKind::Return => true,
+            TrackKind::Group => project.tracks.iter().any(|member| member.group == Some(track.id) && member.solo),
+            TrackKind::Normal => track.group.is_some_and(|group| project.track(group).is_ok_and(|group| group.solo)),
+        }
     }
 }
 
