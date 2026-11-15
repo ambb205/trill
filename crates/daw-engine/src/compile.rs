@@ -8,14 +8,12 @@ use crate::graph::{
     TrackState,
 };
 use daw_core::device::{DeviceController, DeviceFactory, ParamInfo};
-use daw_core::project::{AutomationTarget, Clip, ClipContent, MidiContent};
+use daw_core::project::{AutomationTarget, Clip, ClipContent};
 use daw_core::{Device, DeviceId, Project, TrackId};
 use daw_dsp::util::db_to_gain;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-
-const MIN_LOOP_BEATS: f64 = 1.0 / 64.0;
 
 /// What the controller knows about a device whose processor lives on the
 /// audio thread.
@@ -85,7 +83,7 @@ impl Compiler<'_> {
             let mut audio = Vec::new();
             for clip in track.clips.iter().filter(|clip| !clip.muted) {
                 match &clip.content {
-                    ClipContent::Midi(midi) => flatten_notes(clip, midi, &mut notes),
+                    ClipContent::Midi(_) => flatten_notes(clip, &mut notes),
                     ClipContent::Audio(content) => match self.audio.load(&content.path) {
                         Ok(data) => audio.push(AudioRegion {
                             start: clip.start,
@@ -215,54 +213,15 @@ fn lane_points(
     project.automation.iter().find(|lane| matches(&lane.target)).map(|lane| lane.points.clone())
 }
 
-/// Resolves a clip's notes to absolute timeline positions, repeating the
-/// looped section and trimming whatever hangs past the clip or loop end.
-fn flatten_notes(clip: &Clip, midi: &MidiContent, out: &mut Vec<NoteEvent>) {
-    let mut push = |start: f64, end: f64, note: &daw_core::Note| {
-        out.push(NoteEvent {
-            start: clip.start + start,
-            end: clip.start + end,
-            pitch: note.pitch,
-            velocity: note.velocity,
-        });
-    };
-    let offset = midi.start_offset.max(0.0);
-
-    let Some(period) = midi.loop_length.filter(|length| *length > 0.0) else {
-        // No loop: the clip plays the notes from `offset` on, once.
-        for note in &midi.notes {
-            let start = note.start - offset;
-            if start >= clip.length {
-                break;
-            }
-            // A note that began before the clip's start is not sounded late.
-            if start >= 0.0 {
-                push(start, (start + note.length).min(clip.length), note);
-            }
-        }
-        return;
-    };
-
-    // Looped: the first `period` beats of notes repeat, entered `offset`
-    // beats in. A floor on the period bounds the number of repeats.
-    let period = period.max(MIN_LOOP_BEATS);
-    let mut repeat_start = -offset.rem_euclid(period);
-    while repeat_start < clip.length {
-        let repeat_end = (repeat_start + period).min(clip.length);
-        for note in &midi.notes {
-            if note.start >= period {
-                break;
-            }
-            let start = repeat_start + note.start;
-            if start >= repeat_end {
-                break;
-            }
-            if start >= 0.0 {
-                push(start, (start + note.length).min(repeat_end), note);
-            }
-        }
-        repeat_start += period;
-    }
+/// A clip's notes as the engine plays them: absolute positions, with the
+/// offset, loop and trimming already resolved by the model.
+fn flatten_notes(clip: &Clip, out: &mut Vec<NoteEvent>) {
+    out.extend(clip.timeline_notes().into_iter().map(|note| NoteEvent {
+        start: note.start,
+        end: note.end(),
+        pitch: note.pitch,
+        velocity: note.velocity,
+    }));
 }
 
 #[cfg(test)]
@@ -289,27 +248,28 @@ mod tests {
 
         let clip_ref = project.clip(clip).unwrap();
         let mut plain = Vec::new();
-        flatten_notes(clip_ref, clip_ref.midi().unwrap(), &mut plain);
+        flatten_notes(clip_ref, &mut plain);
         assert_eq!(starts(&plain), [8.0, 9.5], "the note past the clip end is dropped");
         assert_eq!(plain[1].end, 13.0, "a note hanging over the clip end is trimmed");
 
         project.clip_mut(clip).unwrap().set_loop_length(Some(2.0)).unwrap();
         let clip_ref = project.clip(clip).unwrap();
         let mut looped = Vec::new();
-        flatten_notes(clip_ref, clip_ref.midi().unwrap(), &mut looped);
+        flatten_notes(clip_ref, &mut looped);
         assert_eq!(starts(&looped), [8.0, 9.5, 10.0, 11.5, 12.0]);
         assert_eq!(looped[1].end, 10.0, "notes are cut at the loop boundary");
         assert_eq!(looped[4].end, 13.0);
 
         // Entering the loop half a beat in shifts every repeat earlier and
         // drops the note that would have started before the clip.
-        project.clip_mut(clip).unwrap().content = daw_core::project::ClipContent::Midi(MidiContent {
-            start_offset: 0.5,
-            ..project.clip(clip).unwrap().midi().unwrap().clone()
-        });
+        project.clip_mut(clip).unwrap().content =
+            daw_core::project::ClipContent::Midi(daw_core::project::MidiContent {
+                start_offset: 0.5,
+                ..project.clip(clip).unwrap().midi().unwrap().clone()
+            });
         let clip_ref = project.clip(clip).unwrap();
         let mut offset = Vec::new();
-        flatten_notes(clip_ref, clip_ref.midi().unwrap(), &mut offset);
+        flatten_notes(clip_ref, &mut offset);
         assert_eq!(starts(&offset), [9.0, 9.5, 11.0, 11.5]);
         assert_eq!(offset[0].end, 9.5, "the long note is cut where its loop pass ends");
         assert_eq!(offset[1].end, 10.5);

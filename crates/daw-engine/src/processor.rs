@@ -4,7 +4,8 @@
 //! processor drives realtime playback and offline rendering, so a bounce is
 //! exactly what you heard.
 
-use crate::graph::{Chain, Graph, MAX_BLOCK, TrackNode, TrackState};
+use crate::graph::{AudioData, Chain, Graph, MAX_BLOCK, TrackNode, TrackState};
+use crate::monitor::{Beats, Monitor};
 use daw_core::device::{Event, EventKind, MAX_EVENTS_PER_BLOCK, ProcessInfo};
 use daw_core::project::{MIN_VOLUME_DB, automation_value};
 use daw_core::{DeviceId, TrackId};
@@ -34,6 +35,8 @@ pub struct Processor {
     track_right: Vec<f32>,
     mix_left: Vec<f32>,
     mix_right: Vec<f32>,
+    /// The audition voice and the metronome, heard but never rendered.
+    monitor: Monitor,
 }
 
 impl Processor {
@@ -51,6 +54,7 @@ impl Processor {
             track_right: vec![0.0; MAX_BLOCK],
             mix_left: vec![0.0; MAX_BLOCK],
             mix_right: vec![0.0; MAX_BLOCK],
+            monitor: Monitor::new(sample_rate),
         }
     }
 
@@ -110,6 +114,30 @@ impl Processor {
         if let Some(processor) = self.graph.processor_mut(device) {
             processor.set_param(index, value);
         }
+    }
+
+    /// Starts auditioning a sound over the song. Returns the buffer that was
+    /// being auditioned before, to be freed off the audio thread.
+    pub fn start_audition(&mut self, audio: std::sync::Arc<AudioData>, gain: f32) -> Option<std::sync::Arc<AudioData>> {
+        self.monitor.start_audition(audio, gain)
+    }
+
+    pub fn stop_audition(&mut self) {
+        self.monitor.stop_audition();
+    }
+
+    /// The buffer of an audition that has ended, to be freed off the audio
+    /// thread.
+    pub fn take_finished_audition(&mut self) -> Option<std::sync::Arc<AudioData>> {
+        self.monitor.take_finished()
+    }
+
+    pub fn is_auditioning(&self) -> bool {
+        self.monitor.is_auditioning()
+    }
+
+    pub fn set_metronome(&mut self, on: bool) {
+        self.monitor.set_metronome(on);
     }
 
     /// Queues a live note for `track`. Dropped if the queue is full.
@@ -277,6 +305,15 @@ impl Processor {
         let peak_right = mix_ramped(mix_right, out_right, master.gain, target);
         master.gain = target;
         master.meter.record(peak_left, peak_right);
+
+        let signature = self.graph.time_signature;
+        let beats = playing.then(|| Beats {
+            start: start_beat,
+            per_frame: beats_per_frame,
+            count: 4.0 / signature.denominator as f64,
+            counts_per_bar: signature.numerator as u32,
+        });
+        self.monitor.mix(out_left, out_right, beats);
     }
 }
 

@@ -661,6 +661,37 @@ fn live_parameter_changes_are_heard() {
 }
 
 #[test]
+fn auditioning_and_the_metronome_are_heard_but_not_rendered() {
+    let mut session = session();
+    let track = session.edit(|p| Ok(p.add_track("A"))).unwrap();
+    session.edit(|p| p.add_midi_clip(track, "empty", 0.0, 8.0)).unwrap();
+    let master = session.master_meter();
+    let tone: Vec<f32> = (0..96_000).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+    let audio = Arc::new(daw_core::audio::AudioBuffer { sample_rate: 48_000.0, left: tone.clone(), right: tone });
+
+    // The song is silent and stopped; the audition is still heard, and it
+    // does not go through (or register on) the master.
+    session.audition(audio, 0.0);
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(session.is_auditioning());
+    session.stop_audition();
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(!session.is_auditioning());
+    assert_eq!(master.take(), (0.0, 0.0), "auditioning is not part of the mix");
+
+    session.set_metronome(true);
+    assert!(session.metronome());
+    session.play();
+    std::thread::sleep(Duration::from_millis(150));
+    session.stop();
+    assert_eq!(session.audio_faults(), 0);
+
+    // A render of the same project is pure silence: no click, no audition.
+    let out = session.render_job().render(&options()).unwrap();
+    assert_eq!(peak(&out.left), 0.0);
+}
+
+#[test]
 fn session_saves_loads_and_renders() {
     let dir = std::env::temp_dir().join(format!("daw-session-{}", std::process::id()));
     let project_path = dir.join("song.dawproj.json");

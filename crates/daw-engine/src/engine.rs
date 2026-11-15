@@ -6,7 +6,7 @@
 //! buffer; the audio thread applies them at the start of its next callback
 //! and sends retired graphs back to be freed off the audio thread.
 
-use crate::graph::Graph;
+use crate::graph::{AudioData, Graph};
 use crate::processor::Processor;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use daw_core::device::EventKind;
@@ -61,6 +61,15 @@ pub(crate) enum Message {
     Param { device: DeviceId, index: usize, value: f64 },
     Live { track: TrackId, kind: EventKind },
     Panic,
+    Audition { audio: Arc<AudioData>, gain: f32 },
+    StopAudition,
+    Metronome(bool),
+}
+
+/// What the audio thread hands back to be freed elsewhere.
+pub(crate) enum Garbage {
+    Graph(Box<Graph>),
+    Audio(Arc<AudioData>),
 }
 
 #[derive(Default)]
@@ -71,6 +80,7 @@ struct Shared {
     load: AtomicU32,
     /// Callbacks that panicked and were replaced by silence.
     faults: AtomicU32,
+    auditioning: AtomicBool,
     quit: AtomicBool,
 }
 
@@ -78,7 +88,7 @@ struct Shared {
 struct Realtime {
     processor: Processor,
     messages: rtrb::Consumer<Message>,
-    garbage: rtrb::Producer<Box<Graph>>,
+    garbage: rtrb::Producer<Garbage>,
     shared: Arc<Shared>,
     left: Vec<f32>,
     right: Vec<f32>,
@@ -93,7 +103,7 @@ impl Realtime {
                     // The controller never has more swaps in flight than the
                     // queue holds, so this push cannot fail. If it somehow
                     // does, freeing here is still correct, only slow.
-                    let _ = self.garbage.push(old);
+                    let _ = self.garbage.push(Garbage::Graph(old));
                 }
                 Message::Play => self.processor.play(),
                 Message::Stop => self.processor.stop(),
@@ -101,7 +111,17 @@ impl Realtime {
                 Message::Param { device, index, value } => self.processor.set_param(device, index, value),
                 Message::Live { track, kind } => self.processor.live_event(track, kind),
                 Message::Panic => self.processor.panic(),
+                Message::Audition { audio, gain } => {
+                    if let Some(previous) = self.processor.start_audition(audio, gain) {
+                        let _ = self.garbage.push(Garbage::Audio(previous));
+                    }
+                }
+                Message::StopAudition => self.processor.stop_audition(),
+                Message::Metronome(on) => self.processor.set_metronome(on),
             }
+        }
+        if let Some(finished) = self.processor.take_finished_audition() {
+            let _ = self.garbage.push(Garbage::Audio(finished));
         }
     }
 
@@ -119,6 +139,7 @@ impl Realtime {
             self.shared.faults.fetch_add(1, Ordering::Relaxed);
         }
         self.shared.playing.store(self.processor.is_playing(), Ordering::Relaxed);
+        self.shared.auditioning.store(self.processor.is_auditioning(), Ordering::Relaxed);
         self.shared.position.store(self.processor.position().to_bits(), Ordering::Relaxed);
     }
 
@@ -166,7 +187,7 @@ fn sanitize(sample: f32) -> f32 {
 /// Controller-side handle to the audio thread.
 pub struct Engine {
     messages: rtrb::Producer<Message>,
-    garbage: rtrb::Consumer<Box<Graph>>,
+    garbage: rtrb::Consumer<Garbage>,
     shared: Arc<Shared>,
     info: StreamInfo,
     /// Graphs sent to the audio thread and not yet returned.
@@ -228,6 +249,11 @@ impl Engine {
         f32::from_bits(self.shared.load.load(Ordering::Relaxed))
     }
 
+    /// Whether a sound is being auditioned, as of the last audio callback.
+    pub fn is_auditioning(&self) -> bool {
+        self.shared.auditioning.load(Ordering::Relaxed)
+    }
+
     /// Number of audio blocks lost to a panicking device.
     pub fn faults(&self) -> u32 {
         self.shared.faults.load(Ordering::Relaxed)
@@ -235,9 +261,15 @@ impl Engine {
 
     /// Frees graphs the audio thread has retired. Cheap; call it often.
     pub fn collect_garbage(&mut self) {
-        while let Ok(graph) = self.garbage.pop() {
-            self.swaps_in_flight = self.swaps_in_flight.saturating_sub(1);
-            drop(graph);
+        // Dropping here, on the caller's thread, is the whole point.
+        while let Ok(garbage) = self.garbage.pop() {
+            match garbage {
+                Garbage::Graph(graph) => {
+                    self.swaps_in_flight = self.swaps_in_flight.saturating_sub(1);
+                    drop(graph);
+                }
+                Garbage::Audio(audio) => drop(audio),
+            }
         }
     }
 

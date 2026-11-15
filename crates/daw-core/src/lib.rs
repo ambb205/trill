@@ -8,6 +8,7 @@
 pub mod audio;
 pub mod device;
 pub mod ids;
+pub mod midi_file;
 pub mod pitch;
 pub mod project;
 pub mod time;

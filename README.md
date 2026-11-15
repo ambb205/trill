@@ -74,7 +74,7 @@ parameters, mixer strips with meters, project files, WAV export.
 
 | Area | Tools |
 |---|---|
-| Project | `get_project`, `set_project`, `new_project`, `save_project`, `load_project`, `history` |
+| Project | `get_project`, `set_project`, `new_project`, `save_project`, `load_project`, `import_midi`, `export_midi`, `history` |
 | Tracks | `create_track`, `update_track`, `delete_track` |
 | Devices | `list_devices`, `describe_device`, `add_device`, `get_device`, `update_device`, `delete_device` |
 | Clips | `create_clip`, `create_audio_clip`, `update_clip`, `split_clip`, `duplicate_clip`, `delete_clip` |

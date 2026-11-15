@@ -345,6 +345,25 @@ pub struct LoadProjectRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ImportMidiRequest {
+    /// Path of a Standard MIDI File (.mid).
+    pub path: String,
+    /// Beat at which the imported clips start (default 0).
+    pub at: Option<f64>,
+    /// Instrument for the new melodic tracks (default "builtin:polysynth"). Drum parts always get
+    /// "builtin:drumkit".
+    pub instrument: Option<String>,
+    /// Also adopt the file's tempo and time signature. Defaults to true when the project has no tracks yet.
+    pub use_tempo: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExportMidiRequest {
+    /// Where to write the .mid file.
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct MarkerInput {
     /// Timeline position in beats.
     pub beat: f64,

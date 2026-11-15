@@ -391,3 +391,55 @@ async fn clips_can_be_split_trimmed_and_the_song_annotated() {
         "a bad list changes nothing"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn midi_files_round_trip_through_the_song() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let dir = std::env::temp_dir().join(format!("daw-mcp-midi-{}", std::process::id()));
+    let exported = dir.join("out.mid");
+
+    // Write a song, export it, start over and import it again.
+    ok(client, "set_project", json!({ "tempo": 132 })).await;
+    let keys = ok(client, "create_track", json!({ "name": "Keys", "instrument": "builtin:polysynth" })).await;
+    ok(
+        client,
+        "create_clip",
+        json!({ "track": keys["track_id"], "start": 0, "length": 4, "loop_length": 2, "notes": [["C4", 0, 1], ["G4", 1, 1]] }),
+    )
+    .await;
+    let drums = ok(client, "create_track", json!({ "name": "Drums", "instrument": "builtin:drumkit" })).await;
+    ok(client, "create_clip", json!({ "track": drums["track_id"], "start": 0, "length": 4, "notes": [["kick", 0, 0.25], ["snare", 1, 0.25]] })).await;
+
+    let written = ok(client, "export_midi", json!({ "path": exported.display().to_string() })).await;
+    assert_eq!(
+        (written["tracks"].as_u64(), written["notes"].as_u64()),
+        (Some(2), Some(6)),
+        "the loop is written out twice"
+    );
+
+    ok(client, "new_project", json!({})).await;
+    let imported = ok(client, "import_midi", json!({ "path": exported.display().to_string() })).await;
+    assert_eq!(imported["tempo"], 132.0, "an empty project takes the file's tempo");
+    let tracks = imported["tracks"].as_array().unwrap();
+    assert_eq!(tracks.len(), 2);
+    assert_eq!(
+        (tracks[0]["name"].as_str(), tracks[0]["note_count"].as_u64(), tracks[0]["drums"].as_bool()),
+        (Some("Keys"), Some(4), Some(false))
+    );
+    assert_eq!((tracks[1]["name"].as_str(), tracks[1]["drums"].as_bool()), (Some("Drums"), Some(true)));
+
+    let project = ok(client, "get_project", json!({})).await;
+    assert_eq!(project["tracks"][1]["devices"][0]["uri"], "builtin:drumkit", "drum parts get the drum kit");
+    assert_eq!(project["tracks"][0]["devices"][0]["uri"], "builtin:polysynth");
+
+    // The whole import is one undo step.
+    ok(client, "history", json!({ "action": "undo" })).await;
+    assert_eq!(ok(client, "get_project", json!({})).await["tracks"].as_array().unwrap().len(), 0);
+
+    let error = call(client, "import_midi", json!({ "path": dir.join("missing.mid").display().to_string() }))
+        .await
+        .unwrap_err();
+    assert!(error.contains("missing.mid"), "{error}");
+    std::fs::remove_dir_all(&dir).ok();
+}

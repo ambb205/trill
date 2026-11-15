@@ -72,6 +72,7 @@ pub struct Session {
     saved_revision: u64,
     /// `Some(has_step)` while a gesture is open; see [`Session::begin_gesture`].
     gesture: Option<bool>,
+    metronome: bool,
 }
 
 impl Session {
@@ -92,6 +93,7 @@ impl Session {
             revision: 0,
             saved_revision: 0,
             gesture: None,
+            metronome: false,
         };
         session.replace_project(Self::blank_project("Untitled"));
         Ok(session)
@@ -382,6 +384,33 @@ impl Session {
 
     pub fn transport(&self) -> TransportStatus {
         TransportStatus { playing: self.engine.is_playing(), position_beats: self.engine.position() }
+    }
+
+    /// Plays a sound over the song without adding it to the project, as a
+    /// browser does when a sample is clicked. Replaces any sound already
+    /// being auditioned.
+    pub fn audition(&mut self, audio: Arc<daw_core::audio::AudioBuffer>, gain_db: f32) {
+        self.engine.collect_garbage();
+        self.engine.send(Message::Audition { audio, gain: 10f32.powf(gain_db / 20.0) });
+    }
+
+    pub fn stop_audition(&mut self) {
+        self.engine.send(Message::StopAudition);
+    }
+
+    pub fn is_auditioning(&self) -> bool {
+        self.engine.is_auditioning()
+    }
+
+    /// Turns the metronome on or off. It clicks on every count of the time
+    /// signature while the song plays and is never part of a render.
+    pub fn set_metronome(&mut self, on: bool) {
+        self.metronome = on;
+        self.engine.send(Message::Metronome(on));
+    }
+
+    pub fn metronome(&self) -> bool {
+        self.metronome
     }
 
     /// Plays a note on a track's instrument right now, for auditioning.

@@ -6,6 +6,7 @@
 //! render graph.
 
 use crate::ids::{ClipId, DeviceId, TrackId};
+use crate::midi_file::{MidiFile, MidiTrack};
 use crate::time::{Beats, TimeSignature};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -15,6 +16,9 @@ pub const MAX_TEMPO: f64 = 999.0;
 pub const MIN_VOLUME_DB: f32 = -70.0;
 pub const MAX_VOLUME_DB: f32 = 6.0;
 pub const FORMAT_VERSION: u32 = 1;
+/// Shortest loop a clip repeats, so a tiny loop length cannot explode into
+/// millions of notes.
+pub const MIN_LOOP_BEATS: Beats = 1.0 / 64.0;
 
 const TRACK_COLORS: [u32; 10] =
     [0xF2994A, 0x56CCF2, 0xBB6BD9, 0x6FCF97, 0xEB5757, 0xF2C94C, 0x2D9CDB, 0x9B51E0, 0x27AE60, 0xE27AB0];
@@ -168,6 +172,57 @@ impl Clip {
 
     pub fn notes(&self) -> &[Note] {
         self.midi().map_or(&[], |midi| midi.notes.as_slice())
+    }
+
+    /// The notes this clip actually plays, at their positions on the
+    /// timeline: the start offset applied, the loop repeated to fill the
+    /// clip, and anything hanging past the clip or loop end cut off. Sorted
+    /// by start. This is the one definition of what a MIDI clip sounds
+    /// like; the engine, the exporters and the views all use it.
+    pub fn timeline_notes(&self) -> Vec<Note> {
+        let Some(midi) = self.midi() else { return Vec::new() };
+        let mut out = Vec::new();
+        let mut push = |start: Beats, end: Beats, note: &Note| {
+            out.push(Note { start: self.start + start, length: end - start, ..*note });
+        };
+        let offset = midi.start_offset.max(0.0);
+
+        let Some(period) = midi.loop_length.filter(|length| *length > 0.0) else {
+            // No loop: the notes from `offset` on, once.
+            for note in &midi.notes {
+                let start = note.start - offset;
+                if start >= self.length {
+                    break;
+                }
+                // A note that began before the clip's start is not sounded late.
+                if start >= 0.0 {
+                    push(start, (start + note.length).min(self.length), note);
+                }
+            }
+            return out;
+        };
+
+        // Looped: the first `period` beats of notes repeat, entered `offset`
+        // beats in. A floor on the period bounds the number of repeats.
+        let period = period.max(MIN_LOOP_BEATS);
+        let mut repeat_start = -offset.rem_euclid(period);
+        while repeat_start < self.length {
+            let repeat_end = (repeat_start + period).min(self.length);
+            for note in &midi.notes {
+                if note.start >= period {
+                    break;
+                }
+                let start = repeat_start + note.start;
+                if start >= repeat_end {
+                    break;
+                }
+                if start >= 0.0 {
+                    push(start, (start + note.length).min(repeat_end), note);
+                }
+            }
+            repeat_start += period;
+        }
+        out
     }
 
     fn midi_mut(&mut self) -> Result<&mut MidiContent, EditError> {
@@ -391,6 +446,15 @@ pub fn automation_value(points: &[AutomationPoint], beat: Beats) -> f64 {
         return b.value;
     }
     a.value + (b.value - a.value) * a.shape.shape((beat - a.beat) / span)
+}
+
+/// A track and clip created by [`Project::import_midi`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ImportedPart {
+    pub track: TrackId,
+    pub clip: ClipId,
+    /// Whether the part was on the General MIDI drum channel.
+    pub drums: bool,
 }
 
 /// A named position on the timeline.
@@ -747,6 +811,51 @@ impl Project {
             }
             ClipContent::Midi(_) => invalid(format!("{id} is a MIDI clip; only audio clips have fades")),
         }
+    }
+
+    // ---- MIDI files ----------------------------------------------------
+
+    /// Adds the contents of a MIDI file at `at`: one new track with one clip
+    /// per track of the file that has notes. Returns the new track and clip
+    /// ids with whether each is a drum part, so the caller can give them
+    /// instruments. The project's tempo is left alone.
+    pub fn import_midi(&mut self, file: &MidiFile, at: Beats) -> Result<Vec<ImportedPart>, EditError> {
+        if !at.is_finite() || at < 0.0 {
+            return invalid(format!("start {at} must be >= 0 beats"));
+        }
+        let bar = self.time_signature.beats_per_bar();
+        let mut parts = Vec::new();
+        for (index, part) in file.tracks.iter().enumerate().filter(|(_, part)| !part.notes.is_empty()) {
+            let name = if part.name.is_empty() { format!("MIDI {}", index + 1) } else { part.name.clone() };
+            let end = part.notes.iter().map(Note::end).fold(0.0, f64::max);
+            // Whole bars, so the clip sits on the grid.
+            let length = ((end / bar).ceil().max(1.0)) * bar;
+            let track = self.add_track(name.clone());
+            let clip = self.add_midi_clip(track, name, at, length)?;
+            self.clip_mut(clip)?.add_notes(&part.notes)?;
+            parts.push(ImportedPart { track, clip, drums: part.drums });
+        }
+        Ok(parts)
+    }
+
+    /// The song's MIDI as a file: one track per project track that has MIDI
+    /// clips, with every note where it sounds on the timeline.
+    pub fn export_midi(&self) -> MidiFile {
+        let tracks = self
+            .tracks
+            .iter()
+            .filter_map(|track| {
+                let mut notes: Vec<Note> =
+                    track.clips.iter().filter(|clip| !clip.muted).flat_map(Clip::timeline_notes).collect();
+                if notes.is_empty() {
+                    return None;
+                }
+                sort_notes(&mut notes);
+                let drums = track.devices.iter().any(|device| device.uri.contains("drum"));
+                Some(MidiTrack { name: track.name.clone(), drums, notes })
+            })
+            .collect();
+        MidiFile { tempo: Some(self.tempo), time_signature: Some(self.time_signature), tracks }
     }
 
     // ---- markers -------------------------------------------------------
@@ -1123,6 +1232,43 @@ mod tests {
         project.set_automation(AutomationTarget::MasterVolume, points.to_vec()).unwrap();
         let restored = Project::from_json(&project.to_json()).unwrap();
         assert_eq!(restored, project, "shapes survive saving");
+    }
+
+    #[test]
+    fn midi_files_import_as_tracks_and_export_what_sounds() {
+        let mut project = Project::new("t");
+        project.set_time_signature(3, 4).unwrap();
+        let file = MidiFile {
+            tempo: Some(140.0),
+            time_signature: None,
+            tracks: vec![
+                MidiTrack { name: "Lead".into(), drums: false, notes: vec![note(60, 0.0), note(64, 3.5)] },
+                MidiTrack { name: String::new(), drums: false, notes: vec![] },
+                MidiTrack { name: String::new(), drums: true, notes: vec![note(36, 0.0)] },
+            ],
+        };
+        let parts = project.import_midi(&file, 6.0).unwrap();
+        assert_eq!(parts.len(), 2, "tracks without notes are skipped");
+        assert_eq!(project.tempo, 120.0, "importing does not change the tempo");
+        let lead = project.clip(parts[0].clip).unwrap();
+        assert_eq!((lead.start, lead.length, lead.notes().len()), (6.0, 6.0, 2), "4.5 beats rounds up to two 3/4 bars");
+        assert_eq!(project.track(parts[1].track).unwrap().name, "MIDI 3");
+        assert!(parts[1].drums && !parts[0].drums);
+        assert!(project.import_midi(&file, -1.0).is_err());
+
+        // Export resolves loops and trims to what is heard.
+        let mut project = Project::new("t");
+        let track = project.add_track("Bass");
+        let clip = project.add_midi_clip(track, "c", 4.0, 4.0).unwrap();
+        let c = project.clip_mut(clip).unwrap();
+        c.add_notes(&[note(40, 0.0), note(43, 1.0)]).unwrap();
+        c.set_loop_length(Some(2.0)).unwrap();
+        project.add_track("Empty");
+        let exported = project.export_midi();
+        assert_eq!(exported.tempo, Some(120.0));
+        assert_eq!(exported.tracks.len(), 1);
+        let starts: Vec<f64> = exported.tracks[0].notes.iter().map(|n| n.start).collect();
+        assert_eq!(starts, [4.0, 5.0, 6.0, 7.0]);
     }
 
     #[test]

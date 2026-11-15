@@ -9,7 +9,8 @@ use crate::view::{
     transport_json,
 };
 use daw_core::device::DeviceCategory;
-use daw_core::project::{AudioContent, AutomationTarget, MAX_VOLUME_DB};
+use daw_core::midi_file;
+use daw_core::project::{AudioContent, AutomationTarget, MAX_TEMPO, MAX_VOLUME_DB, MIN_TEMPO};
 use daw_core::{ChainRef, ClipId, DeviceId, EditError, Project, TrackId};
 use daw_engine::audio_file::read_wav;
 use daw_engine::{RenderOptions, RenderReport, Session, SessionError, SharedSession};
@@ -840,6 +841,84 @@ impl DawServer {
             Ok(Err(error)) => Err(error.to_string()),
             Err(error) => Err(format!("the render did not finish: {error}")),
         })
+    }
+
+    /// Bring a MIDI file into the song: each part becomes a new track with an instrument and one clip.
+    #[tool(annotations(title = "Import MIDI file"))]
+    fn import_midi(&self, Parameters(request): Parameters<ImportMidiRequest>) -> CallToolResult {
+        let mut session = self.session.lock();
+        let reply = (|| {
+            let bytes = std::fs::read(&request.path).map_err(|error| format!("{}: {error}", request.path))?;
+            let file = midi_file::parse(&bytes).map_err(|error| format!("{}: {error}", request.path))?;
+            if file.tracks.iter().all(|track| track.notes.is_empty()) {
+                return Err(format!("{} contains no notes", request.path));
+            }
+            let use_tempo = request.use_tempo.unwrap_or(session.project().tracks.is_empty());
+            let melodic = request.instrument.as_deref().unwrap_or("builtin:polysynth");
+            if !session.factory().descriptors().iter().any(|descriptor| descriptor.uri == melodic) {
+                return Err(format!("unknown device '{melodic}'; list_devices shows what is available"));
+            }
+
+            // One undo step for the whole import.
+            session.begin_gesture();
+            let result: Result<Vec<Value>, String> = (|| {
+                let parts = edit(&mut session, |project| {
+                    if use_tempo {
+                        if let Some(tempo) = file.tempo {
+                            project.set_tempo(tempo.clamp(MIN_TEMPO, MAX_TEMPO))?;
+                        }
+                        if let Some(signature) = file.time_signature {
+                            project.set_time_signature(signature.numerator, signature.denominator)?;
+                        }
+                    }
+                    project.import_midi(&file, request.at.unwrap_or(0.0))
+                })?;
+                let mut out = Vec::new();
+                for part in parts {
+                    let uri = if part.drums { "builtin:drumkit" } else { melodic };
+                    let device = session
+                        .add_device(ChainRef::Track(part.track), uri, None, None)
+                        .map_err(|error| error.to_string())?;
+                    let project = session.project();
+                    let clip = project.clip(part.clip).map_err(|e| e.to_string())?;
+                    out.push(json!({
+                        "track_id": part.track,
+                        "name": project.track(part.track).map_err(|e| e.to_string())?.name,
+                        "instrument_device_id": device,
+                        "clip_id": part.clip,
+                        "note_count": clip.notes().len(),
+                        "length": round(clip.length),
+                        "drums": part.drums,
+                    }));
+                }
+                Ok(out)
+            })();
+            session.end_gesture();
+            let parts = result?;
+            Ok(json!({ "tracks": parts, "file_tempo": file.tempo, "tempo": session.project().tempo }))
+        })();
+        finish(reply)
+    }
+
+    /// Write the song's notes to a Standard MIDI File, one track per track, exactly as they sound (loops
+    /// repeated, trims applied).
+    #[tool(annotations(title = "Export MIDI file"))]
+    fn export_midi(&self, Parameters(request): Parameters<ExportMidiRequest>) -> CallToolResult {
+        let session = self.session.lock();
+        let reply = (|| {
+            let file = session.project().export_midi();
+            if file.tracks.is_empty() {
+                return Err("the project has no MIDI notes to export".to_string());
+            }
+            let path = Path::new(&request.path);
+            if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+            }
+            std::fs::write(path, midi_file::write(&file)).map_err(|error| format!("{}: {error}", request.path))?;
+            let notes: usize = file.tracks.iter().map(|track| track.notes.len()).sum();
+            Ok(json!({ "path": request.path, "tracks": file.tracks.len(), "notes": notes }))
+        })();
+        finish(reply)
     }
 
     /// Step backwards or forwards through the edit history. Every change made through these tools is undoable.

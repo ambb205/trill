@@ -1,0 +1,438 @@
+//! Standard MIDI Files (`.mid`): reading the notes out of one, and writing
+//! notes to one.
+//!
+//! Only what a song needs is kept: notes with their timing in beats, track
+//! names, the first tempo and the first time signature. Controllers, pitch
+//! bend and program changes are skipped.
+
+use crate::project::Note;
+use crate::time::TimeSignature;
+use std::collections::BTreeMap;
+
+/// Ticks per quarter note in files this module writes.
+const WRITE_DIVISION: u16 = 480;
+/// The General MIDI drum channel (channel 10, counted from zero).
+const DRUM_CHANNEL: u8 = 9;
+
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+pub enum MidiFileError {
+    #[error("not a MIDI file")]
+    NotMidi,
+    #[error("the MIDI file is cut short or damaged")]
+    Truncated,
+    #[error("unsupported MIDI file: {0}")]
+    Unsupported(String),
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MidiFile {
+    /// The first tempo in the file, in beats per minute.
+    pub tempo: Option<f64>,
+    /// The first time signature in the file.
+    pub time_signature: Option<TimeSignature>,
+    pub tracks: Vec<MidiTrack>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MidiTrack {
+    pub name: String,
+    /// Whether the notes are on the General MIDI drum channel.
+    pub drums: bool,
+    /// Sorted by start; positions are in beats from the start of the file.
+    pub notes: Vec<Note>,
+}
+
+impl MidiFile {
+    /// The end of the last note, in beats.
+    pub fn length_beats(&self) -> f64 {
+        self.tracks.iter().flat_map(|track| track.notes.iter()).map(Note::end).fold(0.0, f64::max)
+    }
+}
+
+/// Bounds-checked reader over the file's bytes.
+struct Reader<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn take(&mut self, count: usize) -> Result<&'a [u8], MidiFileError> {
+        let end = self.at.checked_add(count).filter(|end| *end <= self.bytes.len()).ok_or(MidiFileError::Truncated)?;
+        let slice = &self.bytes[self.at..end];
+        self.at = end;
+        Ok(slice)
+    }
+
+    fn u8(&mut self) -> Result<u8, MidiFileError> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u16(&mut self) -> Result<u16, MidiFileError> {
+        let bytes = self.take(2)?;
+        Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
+    }
+
+    fn u32(&mut self) -> Result<u32, MidiFileError> {
+        let bytes = self.take(4)?;
+        Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    /// A variable-length quantity: seven bits per byte, high bit set on all
+    /// but the last.
+    fn variable(&mut self) -> Result<u32, MidiFileError> {
+        let mut value = 0u32;
+        for _ in 0..4 {
+            let byte = self.u8()?;
+            value = (value << 7) | (byte & 0x7F) as u32;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+        }
+        Err(MidiFileError::Truncated)
+    }
+
+    fn done(&self) -> bool {
+        self.at >= self.bytes.len()
+    }
+}
+
+/// A note-on waiting for its note-off.
+struct Sounding {
+    start: u64,
+    velocity: u8,
+}
+
+/// Reads a Standard MIDI File (format 0 or 1).
+pub fn parse(bytes: &[u8]) -> Result<MidiFile, MidiFileError> {
+    let mut reader = Reader { bytes, at: 0 };
+    if reader.take(4).map_err(|_| MidiFileError::NotMidi)? != b"MThd" {
+        return Err(MidiFileError::NotMidi);
+    }
+    let header_length = reader.u32()? as usize;
+    let mut header = Reader { bytes: reader.take(header_length)?, at: 0 };
+    let format = header.u16()?;
+    let _track_count = header.u16()?;
+    let division = header.u16()?;
+    if format > 1 {
+        return Err(MidiFileError::Unsupported(format!("format {format} (only 0 and 1 are read)")));
+    }
+    if division & 0x8000 != 0 || division == 0 {
+        return Err(MidiFileError::Unsupported("timing in frames per second rather than beats".into()));
+    }
+    let ticks_per_beat = division as f64;
+
+    let mut file = MidiFile::default();
+    while !reader.done() {
+        let kind = reader.take(4)?;
+        let length = reader.u32()? as usize;
+        let chunk = reader.take(length)?;
+        // Chunks of other kinds are allowed and skipped.
+        if kind == b"MTrk" {
+            parse_track(chunk, ticks_per_beat, &mut file)?;
+        }
+    }
+    Ok(file)
+}
+
+fn parse_track(chunk: &[u8], ticks_per_beat: f64, file: &mut MidiFile) -> Result<(), MidiFileError> {
+    let mut reader = Reader { bytes: chunk, at: 0 };
+    let mut tick = 0u64;
+    let mut status = 0u8;
+    let mut name = String::new();
+    // Per channel: the notes finished so far, and those still sounding by pitch.
+    let mut notes: BTreeMap<u8, Vec<Note>> = BTreeMap::new();
+    let mut sounding: BTreeMap<(u8, u8), Vec<Sounding>> = BTreeMap::new();
+
+    let finish = |channel: u8, pitch: u8, started: Sounding, end: u64, notes: &mut BTreeMap<u8, Vec<Note>>| {
+        let length = (end.saturating_sub(started.start).max(1)) as f64 / ticks_per_beat;
+        notes.entry(channel).or_default().push(Note {
+            pitch,
+            start: started.start as f64 / ticks_per_beat,
+            length,
+            velocity: started.velocity,
+        });
+    };
+
+    while !reader.done() {
+        tick += reader.variable()? as u64;
+        let first = reader.u8()?;
+        // A data byte here means "same status as the previous event".
+        let data = if first & 0x80 != 0 {
+            status = first;
+            None
+        } else {
+            Some(first)
+        };
+        match status {
+            0xFF => {
+                let kind = reader.u8()?;
+                let length = reader.variable()? as usize;
+                let payload = reader.take(length)?;
+                match kind {
+                    0x03 if name.is_empty() => name = String::from_utf8_lossy(payload).trim().to_string(),
+                    0x51 if payload.len() == 3 && file.tempo.is_none() => {
+                        let micros = u32::from_be_bytes([0, payload[0], payload[1], payload[2]]);
+                        if micros > 0 {
+                            // The file stores whole microseconds per beat, so 132 BPM
+                            // comes back as 132.000132; a thousandth of a BPM is
+                            // finer than any tempo a person sets.
+                            file.tempo = Some((60_000_000_000.0 / micros as f64).round() / 1000.0);
+                        }
+                    }
+                    0x58 if payload.len() >= 2 && file.time_signature.is_none() => {
+                        let denominator = 1u32.checked_shl(payload[1] as u32).unwrap_or(0);
+                        file.time_signature =
+                            u8::try_from(denominator).ok().and_then(|d| TimeSignature::new(payload[0], d));
+                    }
+                    0x2F => break,
+                    _ => {}
+                }
+                // Meta events cancel running status.
+                status = 0;
+            }
+            0xF0 | 0xF7 => {
+                let length = reader.variable()? as usize;
+                reader.take(length)?;
+                status = 0;
+            }
+            0x80..=0xEF => {
+                let first_data = match data {
+                    Some(byte) => byte,
+                    None => reader.u8()?,
+                };
+                let two_bytes = !matches!(status & 0xF0, 0xC0 | 0xD0);
+                let second_data = if two_bytes { reader.u8()? } else { 0 };
+                let channel = status & 0x0F;
+                let pitch = first_data & 0x7F;
+                let velocity = second_data & 0x7F;
+                match status & 0xF0 {
+                    0x90 if velocity > 0 => {
+                        sounding.entry((channel, pitch)).or_default().push(Sounding { start: tick, velocity });
+                    }
+                    // A note-on with velocity zero is a note-off.
+                    0x80 | 0x90 => {
+                        if let Some(queue) = sounding.get_mut(&(channel, pitch))
+                            && !queue.is_empty()
+                        {
+                            let started = queue.remove(0);
+                            finish(channel, pitch, started, tick, &mut notes);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => return Err(MidiFileError::Truncated),
+        }
+    }
+
+    // Notes never released end where the track does.
+    for ((channel, pitch), queue) in sounding {
+        for started in queue {
+            finish(channel, pitch, started, tick, &mut notes);
+        }
+    }
+
+    let several = notes.len() > 1;
+    for (channel, mut notes) in notes {
+        notes.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.pitch.cmp(&b.pitch)));
+        let name = match (name.is_empty(), several) {
+            (true, _) => format!("Channel {}", channel + 1),
+            (false, true) => format!("{name} ({})", channel + 1),
+            (false, false) => name.clone(),
+        };
+        file.tracks.push(MidiTrack { name, drums: channel == DRUM_CHANNEL, notes });
+    }
+    Ok(())
+}
+
+fn write_variable(out: &mut Vec<u8>, value: u32) {
+    let mut groups = [0u8; 5];
+    let mut count = 0;
+    let mut rest = value;
+    loop {
+        groups[count] = (rest & 0x7F) as u8;
+        count += 1;
+        rest >>= 7;
+        if rest == 0 {
+            break;
+        }
+    }
+    for index in (0..count).rev() {
+        out.push(groups[index] | if index > 0 { 0x80 } else { 0 });
+    }
+}
+
+fn write_chunk(out: &mut Vec<u8>, kind: &[u8; 4], body: &[u8]) {
+    out.extend_from_slice(kind);
+    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    out.extend_from_slice(body);
+}
+
+fn meta(body: &mut Vec<u8>, kind: u8, payload: &[u8]) {
+    body.extend_from_slice(&[0x00, 0xFF, kind]);
+    write_variable(body, payload.len() as u32);
+    body.extend_from_slice(payload);
+}
+
+/// Writes a format 1 Standard MIDI File: a tempo track, then one track per
+/// [`MidiTrack`].
+pub fn write(file: &MidiFile) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut header = Vec::new();
+    header.extend_from_slice(&1u16.to_be_bytes());
+    header.extend_from_slice(&((file.tracks.len() + 1) as u16).to_be_bytes());
+    header.extend_from_slice(&WRITE_DIVISION.to_be_bytes());
+    write_chunk(&mut out, b"MThd", &header);
+
+    let mut conductor = Vec::new();
+    if let Some(signature) = file.time_signature {
+        let power = signature.denominator.trailing_zeros() as u8;
+        meta(&mut conductor, 0x58, &[signature.numerator, power, 24, 8]);
+    }
+    if let Some(tempo) = file.tempo.filter(|tempo| *tempo > 0.0) {
+        let micros = (60_000_000.0 / tempo).round().clamp(1.0, 16_777_215.0) as u32;
+        meta(&mut conductor, 0x51, &micros.to_be_bytes()[1..]);
+    }
+    meta(&mut conductor, 0x2F, &[]);
+    write_chunk(&mut out, b"MTrk", &conductor);
+
+    for track in &file.tracks {
+        let channel = if track.drums { DRUM_CHANNEL } else { 0 };
+        let to_tick = |beats: f64| (beats.max(0.0) * WRITE_DIVISION as f64).round() as u64;
+        // (tick, is note-on, pitch, velocity); at one tick, offs go first so
+        // a repeated note is released before it is struck again.
+        let mut events: Vec<(u64, bool, u8, u8)> = Vec::with_capacity(track.notes.len() * 2);
+        for note in &track.notes {
+            let start = to_tick(note.start);
+            let end = to_tick(note.end()).max(start + 1);
+            events.push((start, true, note.pitch, note.velocity));
+            events.push((end, false, note.pitch, 0));
+        }
+        events.sort_by_key(|&(tick, on, pitch, _)| (tick, on, pitch));
+
+        let mut body = Vec::new();
+        meta(&mut body, 0x03, track.name.as_bytes());
+        let mut last = 0u64;
+        for (tick, on, pitch, velocity) in events {
+            write_variable(&mut body, (tick - last).min(0x0FFF_FFFF) as u32);
+            last = tick;
+            body.extend_from_slice(&[if on { 0x90 } else { 0x80 } | channel, pitch & 0x7F, velocity & 0x7F]);
+        }
+        meta(&mut body, 0x2F, &[]);
+        write_chunk(&mut out, b"MTrk", &body);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn note(pitch: u8, start: f64, length: f64, velocity: u8) -> Note {
+        Note { pitch, start, length, velocity }
+    }
+
+    #[test]
+    fn what_is_written_reads_back_the_same() {
+        let file = MidiFile {
+            tempo: Some(96.0),
+            time_signature: TimeSignature::new(6, 8),
+            tracks: vec![
+                MidiTrack {
+                    name: "Lead".into(),
+                    drums: false,
+                    notes: vec![
+                        note(60, 0.0, 1.0, 100),
+                        note(64, 1.0, 0.5, 80),
+                        note(64, 1.5, 0.25, 127),
+                        note(67, 4.0, 2.0, 1),
+                    ],
+                },
+                MidiTrack {
+                    name: "Drums".into(),
+                    drums: true,
+                    notes: vec![note(36, 0.0, 0.25, 110), note(38, 1.0, 0.25, 90)],
+                },
+            ],
+        };
+        let parsed = parse(&write(&file)).unwrap();
+        assert_eq!(parsed, file);
+        assert_eq!(parsed.length_beats(), 6.0);
+    }
+
+    #[test]
+    fn reads_running_status_velocity_zero_offs_and_tempo() {
+        // Format 0, 96 ticks per beat. Tempo 500000 us/beat (120 BPM), then
+        // on channel 1: C4 on, (running status) E4 on, both released with
+        // velocity-zero note-ons, one beat and two beats later.
+        let mut track = Vec::new();
+        track.extend_from_slice(&[0x00, 0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20]);
+        track.extend_from_slice(&[0x00, 0x90, 60, 100]);
+        track.extend_from_slice(&[0x00, 64, 90]);
+        track.extend_from_slice(&[0x60, 60, 0]);
+        track.extend_from_slice(&[0x60, 64, 0]);
+        track.extend_from_slice(&[0x00, 0xFF, 0x2F, 0x00]);
+        let mut bytes = Vec::new();
+        write_chunk(&mut bytes, b"MThd", &[0, 0, 0, 1, 0, 96]);
+        write_chunk(&mut bytes, b"MTrk", &track);
+
+        let file = parse(&bytes).unwrap();
+        assert_eq!(file.tempo, Some(120.0));
+        assert_eq!(file.tracks.len(), 1);
+        assert_eq!(file.tracks[0].name, "Channel 1");
+        assert_eq!(file.tracks[0].notes, [note(60, 0.0, 1.0, 100), note(64, 0.0, 2.0, 90)]);
+    }
+
+    #[test]
+    fn channels_in_one_track_become_separate_tracks_and_unreleased_notes_end() {
+        let mut track = Vec::new();
+        track.extend_from_slice(&[0x00, 0xFF, 0x03, 0x04, b'B', b'a', b'n', b'd']);
+        track.extend_from_slice(&[0x00, 0x90, 48, 100]);
+        track.extend_from_slice(&[0x00, 0x99, 36, 120]);
+        // A controller and a program change in between must be skipped.
+        track.extend_from_slice(&[0x10, 0xB0, 7, 100]);
+        track.extend_from_slice(&[0x00, 0xC0, 5]);
+        track.extend_from_slice(&[0x50, 0x89, 36, 0]);
+        track.extend_from_slice(&[0x60, 0xFF, 0x2F, 0x00]);
+        let mut bytes = Vec::new();
+        write_chunk(&mut bytes, b"MThd", &[0, 0, 0, 1, 0, 96]);
+        write_chunk(&mut bytes, b"MTrk", &track);
+
+        let file = parse(&bytes).unwrap();
+        assert_eq!(file.tracks.len(), 2);
+        assert_eq!((file.tracks[0].name.as_str(), file.tracks[0].drums), ("Band (1)", false));
+        assert_eq!(file.tracks[0].notes, [note(48, 0.0, 2.0, 100)], "held to the end of the track");
+        assert_eq!((file.tracks[1].name.as_str(), file.tracks[1].drums), ("Band (10)", true));
+        assert_eq!(file.tracks[1].notes, [note(36, 0.0, 1.0, 120)]);
+    }
+
+    #[test]
+    fn bad_files_are_errors_not_panics() {
+        assert_eq!(parse(b"RIFF....WAVE"), Err(MidiFileError::NotMidi));
+        assert_eq!(parse(b""), Err(MidiFileError::NotMidi));
+        let good = write(&MidiFile {
+            tracks: vec![MidiTrack { notes: vec![note(60, 0.0, 1.0, 100)], ..Default::default() }],
+            ..Default::default()
+        });
+        for cut in [10, 20, good.len() - 3] {
+            assert_eq!(parse(&good[..cut]), Err(MidiFileError::Truncated), "cut at {cut}");
+        }
+        let mut smpte = Vec::new();
+        write_chunk(&mut smpte, b"MThd", &[0, 0, 0, 1, 0xE7, 40]);
+        assert!(matches!(parse(&smpte), Err(MidiFileError::Unsupported(_))));
+        // Garbage inside a track must not hang or panic.
+        let mut junk = Vec::new();
+        write_chunk(&mut junk, b"MThd", &[0, 0, 0, 1, 0, 96]);
+        write_chunk(&mut junk, b"MTrk", &[0x00, 0x12, 0x34, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+        assert!(parse(&junk).is_err());
+    }
+
+    #[test]
+    fn variable_lengths_round_trip() {
+        for value in [0u32, 1, 127, 128, 8192, 16_383, 16_384, 2_097_151, 0x0FFF_FFFF] {
+            let mut bytes = Vec::new();
+            write_variable(&mut bytes, value);
+            assert_eq!(Reader { bytes: &bytes, at: 0 }.variable().unwrap(), value);
+        }
+    }
+}

@@ -11,6 +11,7 @@ pub mod audio_file;
 pub mod compile;
 pub mod engine;
 pub mod graph;
+mod monitor;
 pub mod processor;
 pub mod render;
 pub mod session;
