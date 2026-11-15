@@ -1,0 +1,6 @@
+# Keep LF in the working tree on every platform, so formatting and diffs are stable.
+* text=auto eol=lf
+*.png binary
+*.otf binary
+*.ttf binary
+*.wav binary
