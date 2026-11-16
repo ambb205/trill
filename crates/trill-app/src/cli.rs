@@ -49,6 +49,8 @@ Options:
   --hold <KEYS>           Hold these keys of it down, for screenshots: adg is a C major chord, and
                           zzat a kick and a hat two octaves down
   --screenshot <PATH.png> Render the window to a PNG and exit (implies --null-audio)
+  --real-audio            With --screenshot: open this machine's audio output and MIDI inputs
+                          all the same, to see the window on real hardware (nothing is played)
   --exit-after <SECONDS>  Close the window by itself after this long
   -h, --help              Show this help
 ";
@@ -102,6 +104,8 @@ pub struct Cli {
     /// Made-up audio and MIDI devices to show in it.
     pub audio_scene: Option<AudioScene>,
     pub screenshot: Option<PathBuf>,
+    /// With a screenshot: open the machine's own devices all the same.
+    pub real_audio: bool,
     pub exit_after: Option<Duration>,
 }
 
@@ -122,6 +126,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
             "--demo" => cli.demo = true,
             "--play" => cli.play = true,
             "--null-audio" => cli.null_audio = true,
+            "--real-audio" => cli.real_audio = true,
             "--no-plugins" => cli.no_plugins = true,
             "--no-mcp" => cli.no_mcp = true,
             "--no-browser" => cli.no_browser = true,
@@ -224,9 +229,10 @@ fn parse_size(text: &str) -> anyhow::Result<[f32; 2]> {
 }
 
 impl Cli {
-    /// Screenshots run without audio hardware so they work on any machine.
+    /// Screenshots run without audio hardware so they work on any machine;
+    /// `--real-audio` is for the one that is to show this machine's.
     pub fn audio_backend(&self) -> AudioBackend {
-        if self.null_audio || self.screenshot.is_some() {
+        if self.null_audio || (self.screenshot.is_some() && !self.real_audio) {
             AudioBackend::Null { sample_rate: 48_000 }
         } else {
             AudioBackend::Auto
@@ -564,6 +570,21 @@ mod tests {
         let error = run(&["--audio-scene", "stadium"]).unwrap_err().to_string();
         assert!(error.contains("stadium") && error.contains("fallback"), "{error}");
         assert!(run(&["--arm"]).is_err() && run(&["--audio-scene"]).is_err());
+    }
+
+    #[test]
+    fn a_picture_shows_this_machines_devices_only_when_asked_to() {
+        let null = AudioBackend::Null { sample_rate: 48_000 };
+        assert_eq!(run(&["--screenshot", "out.png", "--settings"]).unwrap().audio_backend(), null);
+        let real = run(&["--screenshot", "out.png", "--settings", "--real-audio"]).unwrap();
+        assert_eq!(real.audio_backend(), AudioBackend::Auto);
+        // Still nothing of the user's: no plugins, no settings, no server.
+        assert!(!real.plugins_enabled() && real.mcp_address().is_none());
+        assert_eq!(real.runtime_options().storage, Storage::Nowhere);
+        // And the switch that turns audio off wins over it.
+        assert_eq!(run(&["--screenshot", "out.png", "--real-audio", "--null-audio"]).unwrap().audio_backend(), null);
+        assert_eq!(run(&["--real-audio"]).unwrap().audio_backend(), AudioBackend::Auto, "without a picture, as ever");
+        assert!(USAGE.contains("--real-audio"));
     }
 
     #[test]

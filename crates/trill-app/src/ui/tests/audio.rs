@@ -287,9 +287,12 @@ fn while_a_device_is_being_opened_nothing_else_asks_for_the_session() {
     // look is what the last assertion below is about.)
     // And the panel stays where it is: Escape does not put it away while
     // the wait it explains is going on.
+    // (Looked at after each key: the two together would close a panel
+    // that could be closed and open it again.)
     harness.key(Modifiers::NONE, Key::Escape);
-    harness.key(Modifiers::COMMAND, Key::Comma);
     assert!(harness.app.settings().is_open(), "the panel says what the window is waiting for");
+    harness.key(Modifiers::COMMAND, Key::Comma);
+    assert!(harness.app.settings().is_open(), "and its own shortcut does not put it away either");
     assert!(harness.app.settings().is_applying());
 
     harness.app.sounds().hold(false);

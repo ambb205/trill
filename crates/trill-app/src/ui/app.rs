@@ -532,7 +532,7 @@ impl TrillApp {
             // What is still on its way (a scan, a waveform, a clip being
             // stretched) should be in the picture as it will be once it has
             // arrived: wait for it, then a few frames more.
-            let arriving = self.sounds.is_waiting() || self.live.preparing > 0;
+            let arriving = self.sounds.is_waiting() || self.live.preparing > 0 || self.settings.is_waiting();
             if arriving && elapsed < SCREENSHOT_PATIENCE {
                 self.busy_at_frame = self.frames;
             }

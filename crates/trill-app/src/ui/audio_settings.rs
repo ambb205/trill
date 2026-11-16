@@ -111,6 +111,13 @@ impl Settings {
         self.applying
     }
 
+    /// True while the panel shows something that is still on its way: the
+    /// list of devices, a stream being opened, a look at the MIDI ports. A
+    /// screenshot waits for it.
+    pub fn is_waiting(&self) -> bool {
+        self.open && (self.listing || self.applying || self.rescanning)
+    }
+
     /// Takes in what the workers have finished.
     pub fn poll(&mut self) {
         while let Ok(done) = self.receiver.try_recv() {

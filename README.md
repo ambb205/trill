@@ -164,8 +164,27 @@ transposition. The sampler shows its sample and the drum rack its sixteen pads.
 
 ![The sound browser, waveforms on audio clips and an audio clip in the Clip tab](docs/images/sounds-browser.png)
 
+**Arm a track and record.** A track with an instrument has an arm button in its header and on its mixer strip,
+lit while it is armed. The armed tracks are what every keyboard plays and what a take records; arming one disarms
+the rest, and `Ctrl`-click keeps them. `F9`, or the record button in the transport, starts a take after the
+count-in chosen in the box beside it (none, one, two or four bars). The transport says what the take is doing
+(counting in, recording, and which pass of the loop when the loop is on); `Space` or Stop ends it, what it wrote is
+selected, and one undo takes the whole take back. Asked to record with nothing armed, Trill arms the selected track
+if it has an instrument, and otherwise says why it cannot.
+
+**Audio and MIDI settings** are one panel: `Ctrl+,`, `File`, or a click on the device in the status bar. It has
+the output device, exclusive mode, the sample rate and the buffer size, and beside the choice what is running now
+with its latency in milliseconds as the device reports it. What a choice costs is said before it is applied:
+exclusive mode silences other programs on that device, and another sample rate stops playback and closes plugin
+windows. Devices are listed and opened away from the window's own thread, so a driver that takes its time shows
+as "Opening the device…" in a window that still draws. A device that was unplugged, a list that comes back
+empty, a choice that fell back to something else: each is a sentence in the panel, with what Trill does about it.
+Below are the MIDI inputs, each with a switch, a lamp that lights when it sends, what is wrong with it if
+anything is, and a rescan. The status bar shows the device, rate, buffer and latency as they are at the moment.
+
 **Play it from the keyboard you type on.** `Ctrl+K`, or the keyboard button in the top bar, turns the two middle
-rows of letters into a piano on the selected track's instrument: `A S D F G H J K L ; '` are the white keys from C
+rows of letters into a piano that plays where a MIDI keyboard plays (the armed tracks, or the selected one) and
+is recorded like one: `A S D F G H J K L ; '` are the white keys from C
 and `W E T Y U O P` the black ones, `Z` and `X` move them an octave down and up, `C` and `V` play softer and
 louder, and `Tab` sustains while it is held. The keys are where they are on the keyboard, whatever layout types
 on them. A strip above the detail panel shows the octave, the velocity, the keys with the letter on each and the
@@ -176,8 +195,8 @@ remembered.
 While it is on, a letter it uses plays a note, and the shortcut that letter had is `Alt` with the letter (`F1`
 lists them as they are at the moment). It never takes a key while a text field, the sound search or a dialog has
 the keyboard, or while `Ctrl`, `Alt`, `Shift` or the Windows key is held. And no note is left sounding: whatever
-ends the playing (the switch, another track selected, an octave change under a held key, the window losing the
-keyboard, a dialog, another project, exit) ends its notes.
+ends the playing (the switch, another track selected or armed, an octave change under a held key, the window
+losing the keyboard, a dialog, another audio device, another project, exit) ends its notes.
 
 ![A chord held on the computer keyboard, lit in the strip and on the piano roll](docs/images/keyboard-playing.png)
 
