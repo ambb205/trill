@@ -509,6 +509,14 @@ impl TurnJob {
                 Event::Failed(FailureReason::TurnLimitReached { .. }) if self.control.is_cancelled() => {
                     return Event::Cancelled;
                 }
+                // A run that says it used its steps, in which the model was
+                // not seen to answer once: carried on, that would go round
+                // for ever. No CLI has been seen to do it.
+                Event::Failed(FailureReason::TurnLimitReached { limit })
+                    if figures.is_none_or(|figures| figures.replies == 0) =>
+                {
+                    return Event::Failed(FailureReason::TurnLimitReached { limit });
+                }
                 Event::Failed(FailureReason::TurnLimitReached { .. }) => {
                     // What the request has cost so far is known now.
                     let _ = self.events.send(Event::Progress(spent.progress()));
@@ -891,6 +899,7 @@ mod tests {
     fn what_a_request_has_taken_is_added_up_over_its_runs() {
         let run = |turns, cost| Figures {
             turns,
+            replies: turns,
             duration: Duration::from_secs(60),
             usage: TokenUsage { input: 10, output: 20, cache_read: 30, cache_write: 40 },
             cost,

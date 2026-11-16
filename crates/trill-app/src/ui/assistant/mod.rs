@@ -111,6 +111,10 @@ const MODEL_NOTE: &str = "model";
 /// again because the assistant's instructions have changed since.
 const STARTED_OVER: &str = "Trill has given the assistant new instructions since the last conversation about this \
                             project, so a new one starts here. The assistant does not remember the earlier one.";
+/// How often the conversation of a turn under way is kept: a long request
+/// runs for an hour, and what it has said and done by then is worth more
+/// than a turn's worth of loss if the program does not see its end.
+const KEEP_EVERY: Duration = Duration::from_secs(60);
 /// The step limits the panel offers for one request. The smallest is still
 /// three times what a message used to be allowed; the default (the back
 /// end's) is among them.
@@ -170,6 +174,8 @@ struct Turn {
     opened_another: bool,
     /// How far it has come, as the back end last said.
     progress: Option<Progress>,
+    /// When the conversation was last kept while this turn ran.
+    kept: Instant,
 }
 
 /// How the turn under way stands, for whoever shows it.
@@ -581,6 +587,7 @@ impl Assistant {
             file,
             opened_another: false,
             progress: None,
+            kept: started,
         });
         true
     }
@@ -792,6 +799,14 @@ impl Assistant {
 
     /// Takes in what the turn under way has reported since the last look.
     fn pump(&mut self, project: &Project) {
+        // A long turn's conversation is kept as it goes. Read back, one
+        // that was cut off reads as stopped where it had got to.
+        if let (Some(turn), Some(session)) = (&mut self.turn, &self.conversation)
+            && turn.kept.elapsed() >= KEEP_EVERY
+        {
+            turn.kept = Instant::now();
+            self.store.keep_transcript(session, &self.transcript);
+        }
         // Until the turn has ended: what follows its end is the next turn's.
         while self.turn.is_some()
             && let Some(event) = self.chat.as_mut().and_then(|chat| chat.poll())

@@ -136,7 +136,10 @@ shot graphite-sounds-drum-rack "$night" --browse sounds --library "$pack" --sear
 # The assistant's panel: ready, in the middle of a turn, after a turn that
 # changed the song (the window has gone to the clip it wrote), after an
 # answer that uses every kind of Markdown the panel sets, with the list of
-# models open, at a usage limit after a tool call that failed, with nobody
+# models open and with the list of thinking efforts open, in the middle of
+# a whole song (a plan partly ticked off, a web search and a page read,
+# past a hundred steps) and at its end, the same in the smallest window,
+# at a usage limit after a tool call that failed, with nobody
 # signed in, with no CLI, and in the smallest window with the notice that
 # an API key is being billed. What it shows is a scripted conversation
 # played through the panel's own handling of a turn; no CLI is started, and

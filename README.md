@@ -88,11 +88,22 @@ client outside the window cannot have:
 - when it has finished, what it made or edited is selected and brought into view (unless you are busy elsewhere in
   the window at that moment), and each tool call's line leads to what the call changed;
 - the reply appears as it is written, set from its Markdown, and can be selected and copied like any text; each
-  tool call is a line in plain words that unfolds to what was sent and answered, and Stop ends the turn.
+  tool call is a line in plain words that unfolds to what was sent and answered, and Stop ends the turn;
+- a big request, a whole song, runs to its end by itself: the assistant writes a plan, which stands above the
+  message field as a checklist it ticks off, and the panel says how long it has run, which step it is on of how
+  many one request may take, and what Claude Code estimates it has cost so far. It is still one undo step.
 
-Which model answers is chosen under the message field: Claude Code's own choice, one of the names it takes
-(`fable`, `opus`, `sonnet`, `haiku`), or any name you type. It is passed to Claude Code as it is; what your account
-can use is for Claude Code to say.
+Under the message field: which model answers (Claude Code's own choice, one of the names it takes: `fable`, `opus`,
+`sonnet`, `haiku`, or any name you type), how hard it thinks (Claude Code's own, or `low` to `max`), whether it may
+use the web, and the most steps one request may take. The model and the effort are passed to Claude Code as they
+are; what your account can use is for Claude Code to say.
+
+With **Web** on, the assistant may search the web and read pages for what Trill does not know (a genre's
+conventions, a technique), and every search and page is a line in the conversation with its query or address. Off,
+it is given no way to reach the web. It never has a tool that reads or writes your files or runs a program: a page
+it reads can at worst talk it into changing the song (one Undo) or writing a project, render or MIDI file into the
+folders named below. Why the line is drawn there is in
+[`crates/trill-assistant/src/lib.rs`](crates/trill-assistant/src/lib.rs).
 
 Trill never asks for, reads or stores a login: if Claude Code is not installed or not signed in, the panel says so
 and what to do about it in a terminal. Conversations are kept per project beside the settings and taken up again
@@ -246,7 +257,7 @@ crates/
                   safety copies of unsaved work.
   trill-theory    Music theory for writing parts: chords, scales, voicings, rhythms, grooves, analysis.
   trill-mcp       MCP server (library) and the headless `trill-mcp` binary.
-  trill-assistant Back end of the in-app assistant: runs the user's own Claude Code, confined to Trill's tools.
+  trill-assistant Back end of the in-app assistant: runs the user's own Claude Code, kept to Trill's tools, a plan and the web.
   trill-noir      The GUI kit: theme, widgets and painting.
   trill-app       The desktop application (`trill`).
 ```

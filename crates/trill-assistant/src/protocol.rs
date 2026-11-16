@@ -120,6 +120,9 @@ pub(crate) struct Figures {
     /// calls and one more (six replies that made nine calls: ten), while
     /// what its `--max-turns` counts is replies.
     pub(crate) turns: u32,
+    /// How many replies were seen to begin, which is `turns` unless none
+    /// was.
+    pub(crate) replies: u32,
     pub(crate) duration: Duration,
     pub(crate) usage: TokenUsage,
     pub(crate) cost: Option<f64>,
@@ -454,6 +457,7 @@ impl Translator {
             // The CLI's own count only for a run none of whose replies was
             // seen, which no CLI has been found to write.
             turns: if self.steps > 0 { self.steps } else { number(value, "num_turns") as u32 },
+            replies: self.steps,
             duration: Duration::from_millis(number(value, "duration_ms")),
             usage: TokenUsage {
                 input: number(usage, "input_tokens"),
@@ -1390,6 +1394,7 @@ mod tests {
         feed(&mut stopped, &[limit]);
         let took = Figures {
             turns: 13,
+            replies: 0,
             duration: Duration::from_secs(9),
             usage: TokenUsage { output: 7, ..TokenUsage::default() },
             cost: Some(0.25),

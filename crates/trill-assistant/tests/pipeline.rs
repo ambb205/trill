@@ -660,6 +660,19 @@ fn a_request_without_a_limit_is_carried_on_for_as_long_as_it_takes() {
 }
 
 #[test]
+fn a_run_that_used_its_steps_without_a_reply_is_not_carried_on() {
+    // No CLI has been seen to do this. One that did would otherwise be
+    // started again and again.
+    let (stage, mut conversation) = long_request("no-reply", 3, None);
+    stage.script(&script(&[&init(), &out_of_steps(4, 0.0), "exit 1"]));
+
+    let events = turn(&mut conversation, "go round in circles");
+
+    assert_eq!(events.last(), Some(&Event::Failed(FailureReason::TurnLimitReached { limit: 3 })));
+    assert_eq!(stage.launches(), 1);
+}
+
+#[test]
 fn stop_ends_a_long_request_in_whichever_run_it_is_and_no_other_is_started() {
     let (stage, mut conversation) = long_request("stop-long", 2, Some(100));
     stage.script_for(1, &script(&[&init(), &call("a", "write_drums"), &out_of_steps(3, 0.10), "exit 1"]));

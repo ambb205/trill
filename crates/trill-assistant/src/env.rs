@@ -73,10 +73,14 @@ const INHERITED_SESSION_VARIABLES: &[&str] = &[
     "CLAUDE_CODE_RESUME_INTERRUPTED_TURN",
     // Would have the plan tools keep their list under a name of somebody's
     // choosing, where another session's list may be, instead of under the
-    // conversation's own id; or share it with a team of agents.
+    // conversation's own id.
     "CLAUDE_CODE_TASK_LIST_ID",
+    // Set in a Claude Code session that works as a team of agents, which
+    // share a list. Not seen to change anything in a run started here;
+    // removed so that it cannot.
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
-    // Would swap the plan tools for an older one this crate does not read.
+    // Set to 0 it swaps the plan tools for the older one (seen with
+    // 2.1.325). Either is read; the conversation keeps to the newer.
     "CLAUDE_CODE_ENABLE_TASKS",
 ];
 
