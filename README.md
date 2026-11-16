@@ -53,6 +53,8 @@ calls.
 |---|---|
 | `builtin:polysynth` | 16-voice subtractive/FM synth: two oscillators, unison, sub, noise, multimode filter, two envelopes, LFO, mono/glide. 15 presets from pads and basses to FM keys and bells. |
 | `builtin:drumkit` | Synthesized drum machine on the General MIDI map, with 808, 909, tight, trap and lo-fi kits. |
+| `builtin:sampler` | Plays one audio file across the keyboard: loops with crossfade, reverse, one-shot, amp and filter envelopes. |
+| `builtin:drumrack` | Sixteen pads on the General MIDI drum notes, each playing its own audio file, with level, pan, tune, decay and choke groups. |
 
 **Effects**: `reverb`, `delay` (tempo-synced, ping-pong), `eq` (6-band), `compressor`, `limiter` (look-ahead
 brickwall), `chorus`, `filter` (resonant, with LFO), `pump` (sidechain-style ducking locked to the grid),
@@ -61,6 +63,11 @@ brickwall), `chorus`, `filter` (resonant, with LFO), `pump` (sidechain-style duc
 **Plugins**: installed CLAP and VST3 plugins appear beside the built-in devices as `clap:<plugin id>` and
 `vst3:<class id>`. Their state is saved in the project, and their parameters are automatable and reachable over
 MCP like any other device's.
+
+**Sounds**: a library of the sample folders you point it at, scanned in the background and searchable by words,
+tags, tempo, key and length (all read from file and folder names). Audio clips play WAV, AIFF, FLAC, MP3 and Ogg
+Vorbis at any sample rate, and can be warped to follow the project tempo: `beats` keeps drum hits sharp, `tonal`
+keeps sustained sound smooth, `repitch` plays faster or slower like a record; warped clips can be transposed.
 
 **Engine**: sample-accurate MIDI and audio clips, clip looping, non-destructive trimming and splitting, audio
 fades, automation of track and master volume, pan and any device parameter with straight, held or curved
@@ -78,6 +85,7 @@ parameters, mixer strips with meters, project files, WAV export.
 | Tracks | `create_track`, `update_track`, `delete_track` |
 | Devices | `list_devices`, `describe_device`, `add_device`, `get_device`, `update_device`, `delete_device` |
 | Clips | `create_clip`, `create_audio_clip`, `update_clip`, `split_clip`, `duplicate_clip`, `delete_clip` |
+| Sounds | `search_sounds`, `library`, `preview_sound`, `set_sample` |
 | Notes | `get_notes`, `add_notes`, `set_notes`, `remove_notes`, `transform_notes` |
 | Automation | `set_automation`, `get_automation`, `set_markers` |
 | Playback | `transport`, `render` |
@@ -91,10 +99,14 @@ that exist, a bad note with its index and the reason.
 ```
 crates/
   trill-core      Project model, edit operations, and the device API. No audio or UI dependencies.
-  trill-dsp       Built-in instruments and effects.
+  trill-dsp       Built-in instruments and effects, and offline time-stretching.
+  trill-media     Audio file decoding and caching, waveform overviews, sample-rate conversion, WAV writing.
   trill-engine    Realtime engine, offline renderer, analysis, and the Session.
+  trill-library   The sound library (scanning, indexing, searching sample folders) and the settings file.
   trill-plugins   Plugin hosting: scanning in a child process, the plugin main thread, CLAP and VST3.
+  trill-runtime   What both programs share, built once: session, media cache, library, settings, housekeeping.
   trill-mcp       MCP server (library) and the headless `trill-mcp` binary.
+  trill-noir      The GUI kit: theme, widgets and painting.
   trill-app       The desktop application (`trill`).
 ```
 
@@ -118,9 +130,9 @@ Working: everything listed above, with tests.
 
 Not yet: plugin editor windows, running plugins out of process (only scanning is
 isolated today, so a plugin that crashes while playing still takes the app with it), session (clip-launching)
-view, audio recording, time-stretching/warping, group and return tracks, MIDI input devices, plugin delay
-compensation, multi-core rendering, compressed audio formats (audio clips are WAV only). Only Windows has been
-run so far.
+view, audio recording, a sound browser and warp controls in the window (the library, sample assignment and
+warping are reachable over MCP only so far), warp markers, MIDI input devices, plugin delay compensation,
+multi-core rendering. Only Windows has been run so far.
 
 ## Licence
 
