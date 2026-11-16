@@ -6,12 +6,13 @@
 //! through those; they never allocate, lock or wait.
 
 use super::buffers::PortBuffers;
-use super::events::{BlockEvents, transport};
-use super::host::{AudioContext, TrillHost};
-use super::instance::{Activated, Created, InstanceId, PortLayout};
+use super::events::{BlockEvents, ParamFeedback, ParamOutput, transport};
+use super::host::{AudioContext, HostShared, TrillHost};
+use super::instance::{AudioSlot, Created, InstanceId, PortLayout};
 use crate::main_thread::MainThread;
 use crate::plugin_thread::PluginThread;
 use clack_host::prelude::*;
+use std::sync::Arc;
 use std::time::Duration;
 use trill_core::device::{DeviceProcessor, Event, ProcessInfo};
 
@@ -22,19 +23,24 @@ const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const REACTIVATE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(crate) struct ClapProcessor {
-    /// `None` only after a failed re-activation, when the plugin is left
-    /// inactive and the device passes audio through.
-    audio: Option<PluginAudioProcessor<TrillHost>>,
-    /// Set when the plugin refuses to start or fails a block; it is then
-    /// bypassed instead of being asked again on every block.
-    failed: bool,
+    /// The plugin's audio processor. It holds `None` only after a failed
+    /// re-activation, when the plugin is left inactive and the device
+    /// passes audio through.
+    audio: Arc<AudioSlot>,
+    block: Block,
     main: MainThread<PluginThread>,
     instance: InstanceId,
     plugin_id: String,
-
     sample_rate: f64,
-    max_block: usize,
     latency: u32,
+}
+
+/// What a block is processed with, apart from the plugin itself.
+struct Block {
+    /// Set when the plugin refuses to start or fails a block; it is then
+    /// bypassed instead of being asked again on every block.
+    failed: bool,
+    max_block: usize,
     layout: PortLayout,
     /// Whether the plugin's output is added to the buffer instead of
     /// replacing it. The device API requires this of instruments; it also
@@ -44,6 +50,8 @@ pub(crate) struct ClapProcessor {
     inputs: PortBuffers,
     outputs: PortBuffers,
     events: BlockEvents,
+    /// Where the plugin's own parameter edits are reported.
+    feedback: Arc<ParamFeedback>,
     /// Frames processed so far; CLAP wants a clock that never runs back.
     steady_time: u64,
 }
@@ -69,38 +77,34 @@ impl ClapProcessor {
             events.set_param(index, value);
         }
         Self {
-            audio: Some(created.activated.processor.into()),
-            failed: false,
+            audio: created.audio,
+            block: Block {
+                failed: false,
+                max_block,
+                additive: instrument || created.ports.inputs.is_empty(),
+                inputs: PortBuffers::new(&created.ports.inputs, max_block),
+                outputs: PortBuffers::new(&created.ports.outputs, max_block),
+                layout: created.ports,
+                events,
+                feedback: created.feedback,
+                steady_time: 0,
+            },
             main,
             instance: created.id,
             plugin_id,
             sample_rate,
-            max_block,
-            latency: created.activated.latency,
-            additive: instrument || created.ports.inputs.is_empty(),
-            inputs: PortBuffers::new(&created.ports.inputs, max_block),
-            outputs: PortBuffers::new(&created.ports.outputs, max_block),
-            layout: created.ports,
-            events,
-            steady_time: 0,
+            latency: created.latency,
         }
     }
+}
 
-    /// Stops processing, as CLAP requires before deactivating.
-    fn stop(&mut self) -> Option<StoppedPluginAudioProcessor<TrillHost>> {
-        let audio = self.audio.take()?;
-        // `stop_processing` is an audio-thread function. Nothing else is
-        // processing this plugin (`&mut self`), so this thread is its audio
-        // thread for the duration.
-        let _audio_thread = AudioContext::enter();
-        Some(audio.into_stopped())
-    }
-
+impl Block {
     /// Runs the plugin over the frames `start..start + left.len()` of a
     /// block of `total` frames. `left` and `right` are that part of the
     /// block and no longer than the plugin's maximum block size.
     fn process_part(
         &mut self,
+        audio: &mut PluginAudioProcessor<TrillHost>,
         info: &ProcessInfo,
         events: &[Event],
         (start, total): (usize, usize),
@@ -110,10 +114,13 @@ impl ClapProcessor {
         let frames = left.len();
         // The first block starts the plugin: CLAP wants `start_processing`
         // called from the audio thread.
-        let Some(Ok(audio)) = self.audio.as_mut().map(PluginAudioProcessor::ensure_processing_started) else {
+        let Ok(audio) = audio.ensure_processing_started() else {
             self.failed = true;
             return;
         };
+        // Parameter changes travel both ways with every block, which is
+        // all a plugin that asked for a flush is waiting for.
+        audio.access_shared_handler(HostShared::flush_served);
 
         let events = self.events.fill(events, start, frames, total);
         self.inputs.load(left, right);
@@ -125,7 +132,7 @@ impl ClapProcessor {
             &self.inputs.as_inputs(frames),
             &mut self.outputs.as_outputs(frames),
             &InputEvents::from_buffer(events),
-            &mut OutputEvents::void(),
+            &mut OutputEvents::from_buffer(&mut ParamOutput(&self.feedback)),
             Some(self.steady_time),
             Some(&transport(info, start)),
         );
@@ -144,49 +151,58 @@ impl DeviceProcessor for ClapProcessor {
     /// activated again, on its main thread, to change sample rate.
     fn prepare(&mut self, sample_rate: f64, max_block: usize) {
         let max_block = max_block.max(1);
-        if sample_rate == self.sample_rate && max_block == self.max_block {
+        if sample_rate == self.sample_rate && max_block == self.block.max_block {
             return;
         }
-        let stopped = self.stop();
         let instance = self.instance;
-        let block = u32::try_from(max_block).unwrap_or(u32::MAX);
+        let frames = u32::try_from(max_block).unwrap_or(u32::MAX);
         let result = self
             .main
-            .call(REACTIVATE_TIMEOUT, move |thread| thread.clap.reactivate(instance, stopped, sample_rate, block));
+            .call_at_rest(REACTIVATE_TIMEOUT, move |thread| thread.clap.reactivate(instance, sample_rate, frames));
         match result {
-            Ok(Ok(Activated { processor, latency })) => {
-                self.audio = Some(processor.into());
+            Ok(Ok(latency)) => {
                 self.latency = latency;
-                self.failed = false;
+                self.block.failed = false;
             }
             Ok(Err(reason)) => log::error!("[{}] {reason}; the device is bypassed", self.plugin_id),
             Err(error) => log::error!("[{}] cannot re-activate: {error}; the device is bypassed", self.plugin_id),
         }
         self.sample_rate = sample_rate;
-        self.max_block = max_block;
-        self.inputs = PortBuffers::new(&self.layout.inputs, max_block);
-        self.outputs = PortBuffers::new(&self.layout.outputs, max_block);
-        self.events.forget_notes();
+        self.block.max_block = max_block;
+        self.block.inputs = PortBuffers::new(&self.block.layout.inputs, max_block);
+        self.block.outputs = PortBuffers::new(&self.block.layout.outputs, max_block);
+        self.block.events.forget_notes();
     }
 
     fn set_param(&mut self, index: usize, value: f64) {
-        self.events.set_param(index, value);
+        self.block.events.set_param(index, value);
     }
 
     fn process(&mut self, info: &ProcessInfo, events: &[Event], left: &mut [f32], right: &mut [f32]) {
         let total = left.len().min(right.len());
-        if total == 0 || self.failed || self.audio.is_none() {
+        let block = &mut self.block;
+        if total == 0 || block.failed {
             return;
         }
-        let _audio_thread = AudioContext::enter();
-        // The engine never exceeds `max_block`, the size the plugin was
-        // activated for. Should a caller do so anyway, feed the plugin in
-        // pieces it can take.
-        let mut start = 0;
-        while start < total && !self.failed {
-            let end = (start + self.max_block).min(total);
-            self.process_part(info, events, (start, total), &mut left[start..end], &mut right[start..end]);
-            start = end;
+        // The processor is this thread's to use except for the moment in
+        // which the main thread flushes a plugin that it took to be idle.
+        // A block that falls into such a moment passes its input through,
+        // and its notes are kept for the next.
+        let processed = self.audio.try_with(|audio| {
+            let Some(audio) = audio else { return };
+            let _audio_thread = AudioContext::enter();
+            // The engine never exceeds `max_block`, the size the plugin was
+            // activated for. Should a caller do so anyway, feed the plugin
+            // in pieces it can take.
+            let mut start = 0;
+            while start < total && !block.failed {
+                let end = (start + block.max_block).min(total);
+                block.process_part(audio, info, events, (start, total), &mut left[start..end], &mut right[start..end]);
+                start = end;
+            }
+        });
+        if processed.is_none() {
+            self.block.events.defer(events);
         }
     }
 
@@ -196,11 +212,13 @@ impl DeviceProcessor for ClapProcessor {
     /// block, by means every plugin understands. Tails inside a plugin that
     /// ignores `reset` (a built-in reverb, say) cannot be cleared.
     fn reset(&mut self) {
-        self.events.silence();
-        if let Some(audio) = self.audio.as_mut() {
-            let _audio_thread = AudioContext::enter();
-            audio.reset();
-        }
+        self.block.events.silence();
+        self.audio.try_with(|audio| {
+            if let Some(audio) = audio {
+                let _audio_thread = AudioContext::enter();
+                audio.reset();
+            }
+        });
     }
 
     fn latency_samples(&self) -> u32 {
@@ -209,8 +227,9 @@ impl DeviceProcessor for ClapProcessor {
 }
 
 impl Drop for ClapProcessor {
-    /// Tears the plugin down in the order CLAP requires: stop processing
-    /// here, then deactivate and destroy on the plugin main thread.
+    /// Has the plugin torn down on its main thread, in the order CLAP
+    /// requires: stop processing, deactivate, destroy. Processing has
+    /// stopped by the fact that this is being dropped.
     ///
     /// This waits for the teardown, so that once a device is dropped its
     /// plugin is really gone, and a DAW shutting down does not exit in the
@@ -218,9 +237,8 @@ impl Drop for ClapProcessor {
     /// long as any processor holds a handle to it, so this cannot be left
     /// waiting on a thread that has already stopped.
     fn drop(&mut self) {
-        let stopped = self.stop();
         let instance = self.instance;
-        if let Err(error) = self.main.call(TEARDOWN_TIMEOUT, move |thread| thread.clap.destroy(instance, stopped)) {
+        if let Err(error) = self.main.call_at_rest(TEARDOWN_TIMEOUT, move |thread| thread.clap.destroy(instance)) {
             log::warn!("[{}] was not torn down cleanly: {error}", self.plugin_id);
         }
     }

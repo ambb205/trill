@@ -17,6 +17,8 @@ use trill_core::{ChainRef, Device, DeviceId, EditError, Project, TrackId};
 use trill_dsp::{SampleRef, StateError, drumrack, sampler};
 use trill_media::MediaCache;
 
+mod editors;
+
 const UNDO_LIMIT: usize = 200;
 const LIMITER_URI: &str = "builtin:limiter";
 const SAMPLER_URI: &str = "builtin:sampler";

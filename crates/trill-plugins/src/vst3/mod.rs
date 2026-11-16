@@ -17,6 +17,7 @@
 //!   and out of `process`).
 //! * `controller`: the [`DeviceController`](trill_core::device::DeviceController)
 //!   the session keeps; it forwards to the plugin main thread.
+//! * `editor`: the plugin's view, opened in a window of the host's.
 //! * `links`: what the two halves share. A VST3 plugin is itself two
 //!   objects, a processor and an edit controller, which only learn of each
 //!   other's parameter changes through the host.
@@ -28,16 +29,18 @@
 //!   DAW's terms.
 //!
 //! VST3 is a COM-style API, used here through the `vst3` crate's bindings.
-//! Those are unsafe by nature; `com` and `exclusive` hold the few helpers
-//! everything else leans on.
+//! Those are unsafe by nature; `com` holds the few helpers everything else
+//! leans on.
 
 mod buffers;
 mod changes;
 mod class_id;
 mod com;
 mod controller;
+mod editor;
+#[cfg(all(test, windows))]
+mod editor_tests;
 mod events;
-mod exclusive;
 mod factory;
 mod host;
 mod instance;

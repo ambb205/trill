@@ -1,5 +1,5 @@
-//! Interior mutability for the objects a plugin calls back into from the
-//! audio thread.
+//! Interior mutability for what a plugin's audio thread and its main thread
+//! both reach, where neither may wait for the other.
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,12 +7,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// A value that one user at a time may touch. A second user that arrives
 /// while the first is busy is turned away instead of being made to wait.
 ///
-/// The host's event list is filled by the host before `process` and read
-/// by the plugin during it, never both at once, so in a correct run nobody
-/// is ever turned away. But the plugin reaches the list through a COM
-/// pointer it may use from any thread at any time, and a data race in this
-/// host must not depend on a plugin behaving. A lock would make that safe
-/// and the audio thread wait; this makes it safe and wait-free.
+/// Two things are kept in one of these:
+///
+/// * The VST3 host's event list, which the host fills before `process` and
+///   the plugin reads during it, never both at once. In a correct run
+///   nobody is ever turned away. But the plugin reaches the list through a
+///   COM pointer it may use from any thread at any time, and a data race
+///   in this host must not depend on a plugin behaving.
+/// * A CLAP plugin's audio processor, which belongs to the audio thread
+///   but which the main thread borrows to flush parameter changes while
+///   the plugin is not being processed.
+///
+/// A lock would make both safe and the audio thread wait; this makes them
+/// safe and wait-free.
 pub(crate) struct Exclusive<T> {
     busy: AtomicBool,
     value: UnsafeCell<T>,

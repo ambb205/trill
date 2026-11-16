@@ -1,15 +1,19 @@
-//! The events and transport handed to a plugin with each block.
+//! The events and transport handed to a plugin with each block, and the
+//! events it hands back.
 //!
 //! Everything here is used on the audio thread: fixed capacity, no
 //! allocation after construction.
 
+use crate::edits::{Edit, EditQueue};
 use crate::notes::{HeldKeys, events_in_part};
 use clack_host::events::event_types::{
     MidiEvent, NoteChokeEvent, NoteOffEvent, NoteOnEvent, ParamValueEvent, TransportEvent, TransportFlags,
 };
-use clack_host::events::io::InputEventBuffer;
+use clack_host::events::io::{InputEventBuffer, OutputEventBuffer, TryPushError};
+use clack_host::events::spaces::CoreEventSpace;
 use clack_host::events::{Event as _, EventFlags, EventHeader, Match, Pckn, UnknownEvent};
 use clack_host::utils::{BeatTime, ClapId, SecondsTime};
+use std::collections::HashMap;
 use trill_core::device::{Event, EventKind, MAX_EVENTS_PER_BLOCK, ProcessInfo};
 
 /// The form in which a plugin's note port accepts notes.
@@ -162,6 +166,9 @@ pub(crate) struct BlockEvents {
     notes: Option<NotePort>,
     held: HeldKeys,
     silence: bool,
+    /// The note events of blocks the plugin could not be given, waiting
+    /// for the next one it can. Never grows beyond its capacity.
+    deferred: Vec<EventKind>,
     queue: EventQueue,
 }
 
@@ -178,7 +185,8 @@ impl BlockEvents {
             notes,
             held: HeldKeys::default(),
             silence: false,
-            queue: EventQueue::with_capacity(count + MAX_NOTE_EVENTS + MAX_SILENCE_EVENTS),
+            deferred: Vec::with_capacity(MAX_NOTE_EVENTS),
+            queue: EventQueue::with_capacity(count + 2 * MAX_NOTE_EVENTS + MAX_SILENCE_EVENTS),
         }
     }
 
@@ -205,6 +213,15 @@ impl BlockEvents {
     pub(crate) fn forget_notes(&mut self) {
         self.held.take().for_each(drop);
         self.silence = false;
+        self.deferred.clear();
+    }
+
+    /// Keeps the note events of a block the plugin could not be given, to
+    /// deliver them at the start of the next. A key that was released
+    /// during such a block would otherwise stay down for good.
+    pub(crate) fn defer(&mut self, events: &[Event]) {
+        let room = self.deferred.capacity() - self.deferred.len();
+        self.deferred.extend(events.iter().take(room).map(|event| event.kind));
     }
 
     /// Builds the events for the frames `start..start + frames` of a block
@@ -226,7 +243,10 @@ impl BlockEvents {
             self.queue.silence(port, &mut self.held);
         }
 
-        for (time, kind) in events_in_part(events, start, frames, total) {
+        // What earlier blocks could not deliver comes first, in order.
+        let deferred = self.deferred.len();
+        let late = (0..deferred).map(|index| (0, self.deferred[index]));
+        for (time, kind) in late.chain(events_in_part(events, start, frames, total)) {
             match kind {
                 EventKind::NoteOn { pitch, velocity } => {
                     self.held.press(pitch);
@@ -243,7 +263,53 @@ impl BlockEvents {
                 }
             }
         }
+        self.deferred.clear();
         &self.queue
+    }
+}
+
+/// What a plugin reports about its own parameters: the edits made in its
+/// editor. The audio-thread half and the main-thread half of an instance
+/// both write here (whichever of them exchanges events with the plugin),
+/// and the device's controller reads.
+pub(crate) struct ParamFeedback {
+    /// Where each parameter is in the device's parameter list, by CLAP id.
+    /// Looking one up does not allocate, so the audio thread may.
+    indices: HashMap<ClapId, usize>,
+    /// The edits, each under its parameter's place in the device's list.
+    pub edits: EditQueue,
+}
+
+impl ParamFeedback {
+    /// `ids` are the parameters' CLAP ids in parameter-list order.
+    pub(crate) fn new(ids: &[ClapId]) -> Self {
+        Self { indices: ids.iter().enumerate().map(|(index, id)| (*id, index)).collect(), edits: EditQueue::new() }
+    }
+}
+
+/// The list a plugin puts its output events on, in `process` and in
+/// `flush` alike. Of everything a plugin may send, this host has use for
+/// what it says about its parameters: that the user took hold of one,
+/// what value it has now, that the user let go. Those go to the feedback
+/// queue; the rest is dropped.
+pub(crate) struct ParamOutput<'a>(pub &'a ParamFeedback);
+
+impl OutputEventBuffer for ParamOutput<'_> {
+    fn try_push(&mut self, event: &UnknownEvent) -> Result<(), TryPushError> {
+        let (id, edit) = match event.as_core_event() {
+            // Whatever note the event is addressed to: CLAP lets a value
+            // target one voice, but what plugins report to their host is
+            // the parameter's value, and those built on JUCE address it
+            // to "port 0, channel 0, key 0" where the wildcard was meant.
+            Some(CoreEventSpace::ParamValue(event)) => (event.param_id(), Edit::Value(event.value())),
+            Some(CoreEventSpace::ParamGestureBegin(event)) => (event.param_id(), Edit::Begin),
+            Some(CoreEventSpace::ParamGestureEnd(event)) => (event.param_id(), Edit::End),
+            _ => return Ok(()),
+        };
+        if let Some(index) = id.and_then(|id| self.0.indices.get(&id)) {
+            self.0.edits.push(*index, edit);
+        }
+        Ok(())
     }
 }
 
@@ -472,6 +538,31 @@ mod tests {
     }
 
     #[test]
+    fn the_notes_of_a_block_that_was_not_processed_arrive_with_the_next() {
+        let mut feed = BlockEvents::new(Vec::new(), CLAP_PORT);
+        feed.fill(&[on(0, 60)], 0, 64, 64);
+        // The plugin was busy for two blocks: a key went down in one and
+        // the first key was released in the other.
+        feed.defer(&[on(40, 64)]);
+        feed.defer(&[off(3, 60)]);
+        assert_eq!(
+            listing(feed.fill(&[on(9, 67)], 0, 64, 64)),
+            [(0, "on", 64, 1.0), (0, "off", 60, 0.0), (9, "on", 67, 1.0)]
+        );
+        assert_eq!(feed.fill(&[], 0, 64, 64).len(), 0, "delivered once");
+        // The keys that are down are known as if nothing had happened.
+        let flush = Event { offset: 0, kind: EventKind::AllNotesOff };
+        assert_eq!(listing(feed.fill(&[flush], 0, 64, 64)), [(0, "off", 64, 0.0), (0, "off", 67, 0.0)]);
+
+        // More than can be kept is dropped rather than growing the buffer.
+        let storage = feed.deferred.as_ptr();
+        for _ in 0..MAX_NOTE_EVENTS + 10 {
+            feed.defer(&[on(0, 60)]);
+        }
+        assert_eq!((feed.deferred.len(), feed.deferred.as_ptr()), (MAX_NOTE_EVENTS, storage));
+    }
+
+    #[test]
     fn a_plugin_without_a_note_port_gets_parameters_only() {
         let mut feed = BlockEvents::new(vec![Some(ClapId::new(1))], None);
         feed.set_param(0, 0.5);
@@ -492,6 +583,34 @@ mod tests {
         );
         assert_eq!(listing(feed.fill(&events, 40, 40, 100)), [(0, "on", 62, 1.0), (39, "off", 60, 0.0)]);
         assert_eq!(listing(feed.fill(&events, 80, 20, 100)), [(0, "on", 63, 1.0), (19, "off", 61, 0.0)]);
+    }
+
+    #[test]
+    fn parameter_events_from_the_plugin_become_edits_by_list_position() {
+        use clack_host::events::event_types::{ParamGestureBeginEvent, ParamGestureEndEvent};
+        use clack_host::events::io::OutputEvents;
+
+        let feedback = ParamFeedback::new(&[ClapId::new(100), ClapId::new(7)]);
+        let mut output = ParamOutput(&feedback);
+        let mut events = OutputEvents::from_buffer(&mut output);
+        let whole = Pckn::match_all();
+        events.try_push(ParamGestureBeginEvent::new(0, ClapId::new(7))).unwrap();
+        events.try_push(ParamValueEvent::new(3, ClapId::new(7), whole, 0.25)).unwrap();
+        events.try_push(ParamValueEvent::new(4, ClapId::new(100), whole, -6.0)).unwrap();
+        events.try_push(ParamGestureEndEvent::new(9, ClapId::new(7))).unwrap();
+        // A value addressed the way plugins built on JUCE address theirs:
+        // to zeros, where CLAP has -1 for "the whole parameter".
+        let zeros = Pckn::new(0u16, 0u16, 0u16, 0u32);
+        events.try_push(ParamValueEvent::new(0, ClapId::new(100), zeros, 3.0)).unwrap();
+        // Neither of these says anything about a parameter of this device.
+        events.try_push(ParamValueEvent::new(0, ClapId::new(999), whole, 1.0)).unwrap();
+        events.try_push(NoteOnEvent::new(0, note_address(60), 1.0)).unwrap();
+
+        let mut edits = Vec::new();
+        assert!(!feedback.edits.drain(|index, edit| edits.push((index, edit))));
+        let expected =
+            [(1, Edit::Begin), (1, Edit::Value(0.25)), (0, Edit::Value(-6.0)), (1, Edit::End), (0, Edit::Value(3.0))];
+        assert_eq!(edits, expected);
     }
 
     #[test]

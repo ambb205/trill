@@ -155,6 +155,103 @@ pub trait DeviceController: Send {
     fn param_values(&mut self) -> Option<Vec<f64>> {
         None
     }
+
+    /// Whether the device has an editor window of its own to open. Cheap:
+    /// a view may ask on every frame.
+    fn has_editor(&self) -> bool {
+        false
+    }
+
+    /// Opens the device's editor in a window of its own. If it is already
+    /// open, that window is brought to the front instead.
+    ///
+    /// The editor closes when the controller is dropped, so it never
+    /// outlives the device it belongs to.
+    fn open_editor(&mut self, options: &EditorOptions) -> Result<(), EditorError> {
+        let _ = options;
+        Err(EditorError::NoEditor)
+    }
+
+    /// Closes the device's editor, if it is open.
+    fn close_editor(&mut self) {}
+
+    /// Whether the device's editor is open right now. The user may close
+    /// the window at any time, so views ask rather than remember. Cheap.
+    fn is_editor_open(&self) -> bool {
+        false
+    }
+
+    /// The pixels of the open editor, as it is drawn right now.
+    fn capture_editor(&mut self) -> Option<EditorImage> {
+        None
+    }
+
+    /// What the device changed about its own parameters since the last
+    /// call, oldest first: the knobs the user turned in its editor.
+    fn take_param_edits(&mut self) -> Vec<ParamEdit> {
+        Vec::new()
+    }
+}
+
+/// How to open a device's editor window.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditorOptions {
+    /// The window's title. Left empty, the device names the window itself.
+    pub title: String,
+    /// The native window the editor belongs to (an `HWND` on Windows): the
+    /// editor stays above it, and is minimized and closed with it.
+    pub owner: Option<isize>,
+    /// Where to put the window's top-left corner, in screen pixels. `None`
+    /// puts it where it was when this device's editor was last closed, and
+    /// the first time wherever the system places a new window.
+    pub position: Option<(i32, i32)>,
+    /// Whether the window takes the keyboard focus as it opens. Automated
+    /// runs turn this off so as not to interrupt whoever is at the machine.
+    pub activate: bool,
+}
+
+impl Default for EditorOptions {
+    fn default() -> Self {
+        Self { title: String::new(), owner: None, position: None, activate: true }
+    }
+}
+
+/// Why a device's editor could not be opened.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum EditorError {
+    #[error("the device has no editor")]
+    NoEditor,
+    #[error("plugin editors are not supported on this platform yet")]
+    Unsupported,
+    #[error("the editor could not be opened: {0}")]
+    Failed(String),
+}
+
+/// A picture of an editor window's contents: `width * height` pixels of
+/// red, green, blue and alpha, row by row from the top.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditorImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// A change a device made to one of its own parameters.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct ParamEdit {
+    /// Position of the parameter in the device's parameter list.
+    pub index: usize,
+    pub kind: ParamEditKind,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum ParamEditKind {
+    /// The user took hold of the control.
+    Begin,
+    /// The parameter's new value, in plain units.
+    Value(f64),
+    /// The user let go of the control.
+    End,
 }
 
 /// A freshly created device, ready to be handed to the engine.

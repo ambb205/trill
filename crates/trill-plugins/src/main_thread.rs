@@ -15,14 +15,42 @@
 //! asks: a plugin library loaded twice is still one library with one idea
 //! of its main thread. [`SharedMainThread`] therefore hands every user the
 //! same thread.
+//!
+//! # The thread is also a UI thread
+//!
+//! Plugin editors are windows, and their windows live on this thread. So
+//! between jobs the thread runs the operating system's event loop, and that
+//! has a consequence a plain job queue does not have: the thread can be
+//! inside an event loop this module did not start. Dragging a window by
+//! its title bar, a plugin's popup menu and a plugin's file dialog all run
+//! one, for as long as the user takes. The queue is served from inside
+//! those too (the `os_events` module arranges for that), or every caller
+//! would time out while a menu is open. Two things are held back until the
+//! thread is back in its own loop:
+//!
+//! * a job that is already running, which simply finishes first, and
+//! * jobs sent with [`MainThread::call_at_rest`]: the ones that take
+//!   something away from a plugin (its instance, its editor) that the code
+//!   further up the stack may still be using.
 
+use std::any::TypeId;
+use std::cell::{Cell, RefCell};
+use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SendError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SendError, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 use std::thread::{self, JoinHandle, ThreadId};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-/// How often an idling thread services plugin callbacks and OS messages.
+#[cfg(windows)]
+#[path = "main_thread/windows.rs"]
+mod os_events;
+
+#[cfg(not(windows))]
+#[path = "main_thread/portable.rs"]
+mod os_events;
+
+/// How often an idling thread services plugin callbacks.
 const IDLE_INTERVAL: Duration = Duration::from_millis(15);
 /// Plugins assume a main thread's stack, not the smaller default of a
 /// spawned thread (some parse deeply nested state recursively).
@@ -36,20 +64,30 @@ pub(crate) trait ThreadState: 'static {
     /// Called once, on the plugin thread.
     fn new() -> Self;
 
-    /// Whether [`idle`](Self::idle) and the OS message pump need to run
-    /// periodically. While this is false the thread sleeps until a job
-    /// arrives, so a DAW with no plugins loaded pays nothing for it.
+    /// Whether [`idle`](Self::idle) needs to run periodically. While this
+    /// is false the thread sleeps until a job or an OS event arrives, so a
+    /// DAW with no plugins loaded pays nothing for it.
     fn wants_idle(&self) -> bool;
 
     /// Called after every job, and every [`IDLE_INTERVAL`] in between while
     /// [`wants_idle`](Self::wants_idle) is true.
-    fn idle(&mut self);
+    ///
+    /// `nested` says that the thread is inside an event loop it did not
+    /// start (see the module documentation), with unknown code further up
+    /// its stack. Whatever takes something away from a plugin waits for a
+    /// call without it.
+    fn idle(&mut self, nested: bool);
 }
 
 type Job<S> = Box<dyn FnOnce(&mut S) + Send>;
 
 enum Message<S> {
-    Run(Job<S>),
+    Run {
+        job: Job<S>,
+        /// Whether the job has to wait for the thread to be back in its
+        /// own loop.
+        at_rest: bool,
+    },
     Shutdown,
 }
 
@@ -71,6 +109,17 @@ impl std::fmt::Display for CallError {
             CallError::Failed => "the plugin host failed unexpectedly",
             CallError::Reentrant => "called from the plugin main thread itself",
         })
+    }
+}
+
+impl From<RecvTimeoutError> for CallError {
+    fn from(error: RecvTimeoutError) -> Self {
+        match error {
+            RecvTimeoutError::Timeout => CallError::TimedOut,
+            // The job panicked, or was dropped without being run, and with
+            // it its end of the channel.
+            RecvTimeoutError::Disconnected => CallError::Failed,
+        }
     }
 }
 
@@ -108,6 +157,8 @@ impl Drop for SignalOnDrop {
 
 struct Inner<S> {
     sender: Sender<Message<S>>,
+    /// Ends the thread's wait for OS events when a message was sent.
+    waker: os_events::Waker,
     thread_id: ThreadId,
     thread: Option<JoinHandle<()>>,
     exit: Arc<Exit>,
@@ -117,7 +168,9 @@ impl<S> Drop for Inner<S> {
     fn drop(&mut self) {
         // Every job sent before this one still runs, so plugins are torn
         // down in order before their libraries are unloaded.
-        let _ = self.sender.send(Message::Shutdown);
+        if self.sender.send(Message::Shutdown).is_ok() {
+            self.waker.wake();
+        }
         let Some(thread) = self.thread.take() else { return };
         if thread::current().id() == self.thread_id {
             return;
@@ -148,19 +201,34 @@ impl<S> Clone for MainThread<S> {
 impl<S: ThreadState> MainThread<S> {
     fn spawn(name: &str) -> std::io::Result<Self> {
         let (sender, receiver) = mpsc::channel();
+        let (ready, started) = mpsc::sync_channel(1);
         let exit = Arc::new(Exit::default());
         let signal = SignalOnDrop(exit.clone());
-        let thread = thread::Builder::new()
-            .name(name.to_string())
-            .stack_size(STACK_SIZE)
-            .spawn(move || run::<S>(receiver, signal))?;
-        let inner = Inner { sender, thread_id: thread.thread().id(), thread: Some(thread), exit };
+        let thread = thread::Builder::new().name(name.to_string()).stack_size(STACK_SIZE).spawn(move || {
+            // Declared first so that it drops last, after the state.
+            let _exit = signal;
+            let pump = match os_events::Pump::new() {
+                Ok(pump) => pump,
+                Err(error) => {
+                    let _ = ready.send(Err(error));
+                    return;
+                }
+            };
+            let _ = ready.send(Ok(pump.waker()));
+            run::<S>(receiver, &pump);
+        })?;
+        let waker = started
+            .recv()
+            .map_err(|_| std::io::Error::other("the plugin main thread ended while it was starting"))??;
+        let inner = Inner { sender, waker, thread_id: thread.thread().id(), thread: Some(thread), exit };
         Ok(Self { inner: Arc::new(inner) })
     }
 
     /// Queues `job` without waiting for it.
-    pub(crate) fn post(&self, job: impl FnOnce(&mut S) + Send + 'static) -> Result<(), CallError> {
-        self.inner.sender.send(Message::Run(Box::new(job))).map_err(|_| CallError::Failed)
+    fn send(&self, at_rest: bool, job: impl FnOnce(&mut S) + Send + 'static) -> Result<(), CallError> {
+        self.inner.sender.send(Message::Run { job: Box::new(job), at_rest }).map_err(|_| CallError::Failed)?;
+        self.inner.waker.wake();
+        Ok(())
     }
 
     /// Runs `job` on the plugin thread and waits up to `timeout` for its
@@ -171,18 +239,45 @@ impl<S: ThreadState> MainThread<S> {
         timeout: Duration,
         job: impl FnOnce(&mut S) -> R + Send + 'static,
     ) -> Result<R, CallError> {
+        self.call_with(false, timeout, job)
+    }
+
+    /// Like [`call`](Self::call), for a job that takes something away from
+    /// a plugin: destroying it, deactivating it, closing its editor.
+    ///
+    /// Such a job only runs once the thread is back in its own loop. While
+    /// it is inside someone else's (a plugin's menu or dialog, a window
+    /// being dragged), the plugin's own code may be further up the stack,
+    /// in the middle of using what the job would remove. The job, and
+    /// everything queued behind it, waits for that loop to end.
+    pub(crate) fn call_at_rest<R: Send + 'static>(
+        &self,
+        timeout: Duration,
+        job: impl FnOnce(&mut S) -> R + Send + 'static,
+    ) -> Result<R, CallError> {
+        self.call_with(true, timeout, job)
+    }
+
+    fn call_with<R: Send + 'static>(
+        &self,
+        at_rest: bool,
+        timeout: Duration,
+        job: impl FnOnce(&mut S) -> R + Send + 'static,
+    ) -> Result<R, CallError> {
         if thread::current().id() == self.inner.thread_id {
             return Err(CallError::Reentrant);
         }
         let (reply, result) = mpsc::sync_channel(1);
-        self.post(move |state| {
-            let _ = reply.send(job(state));
+        let arrival = os_events::Arrival::new();
+        let announcer = arrival.announcer();
+        self.send(at_rest, move |state| {
+            // Dropped, and with that announcing, however this closure ends.
+            let announcer = announcer;
+            let value = job(state);
+            drop(announcer);
+            let _ = reply.send(value);
         })?;
-        result.recv_timeout(timeout).map_err(|error| match error {
-            RecvTimeoutError::Timeout => CallError::TimedOut,
-            // The job panicked and dropped its end of the channel.
-            RecvTimeoutError::Disconnected => CallError::Failed,
-        })
+        Ok(arrival.await_reply(&result, timeout)?)
     }
 
     /// Like [`call`](Self::call), for a job whose result must not be lost:
@@ -205,15 +300,17 @@ impl<S: ThreadState> MainThread<S> {
         // A rendezvous: sending succeeds only into the hands of a caller
         // that is still there.
         let (reply, result) = mpsc::sync_channel(0);
-        self.post(move |state| {
-            if let Err(SendError(value)) = reply.send(job(state)) {
+        let arrival = os_events::Arrival::new();
+        let announcer = arrival.announcer();
+        self.send(false, move |state| {
+            let announcer = announcer;
+            let value = job(state);
+            drop(announcer);
+            if let Err(SendError(value)) = reply.send(value) {
                 unclaimed(state, value);
             }
         })?;
-        result.recv_timeout(timeout).map_err(|error| match error {
-            RecvTimeoutError::Timeout => CallError::TimedOut,
-            RecvTimeoutError::Disconnected => CallError::Failed,
-        })
+        Ok(arrival.await_reply(&result, timeout)?)
     }
 }
 
@@ -258,75 +355,182 @@ impl<S: ThreadState> SharedMainThread<S> {
     }
 }
 
-/// `_exit` is declared first so that it drops last, after the state.
-fn run<S: ThreadState>(receiver: Receiver<Message<S>>, _exit: SignalOnDrop) {
-    let mut state = S::new();
-    loop {
-        let message = if state.wants_idle() {
-            match receiver.recv_timeout(IDLE_INTERVAL) {
-                Ok(message) => Some(message),
-                Err(RecvTimeoutError::Timeout) => None,
-                Err(RecvTimeoutError::Disconnected) => Some(Message::Shutdown),
-            }
-        } else {
-            Some(receiver.recv().unwrap_or(Message::Shutdown))
-        };
-        match message {
-            Some(Message::Run(job)) => {
-                // One bad job must not take every plugin's main thread away.
-                if catch_unwind(AssertUnwindSafe(|| job(&mut state))).is_err() {
-                    log::error!("a job on the plugin main thread panicked");
-                }
-            }
-            Some(Message::Shutdown) => break,
-            None => {}
-        }
-        if catch_unwind(AssertUnwindSafe(|| state.idle())).is_err() {
-            log::error!("plugin idle processing panicked");
-        }
-        os_events::pump();
-    }
-    // `state` drops here, on the thread that created it.
+/// What a plugin thread keeps for as long as it runs.
+struct Home<S> {
+    /// Behind a `RefCell` because the thread's own stack is the one thing
+    /// that can get in its way: a job that is running when an event loop
+    /// further down calls back in must find the state taken.
+    state: RefCell<S>,
+    receiver: Receiver<Message<S>>,
+    /// A message that was taken from the queue where it could not be
+    /// acted on. It is still the next one.
+    held: Cell<Option<Message<S>>>,
+    shutdown: Cell<bool>,
+    last_idle: Cell<Instant>,
 }
 
-/// Plugin frameworks deliver their timers and deferred main-thread work
-/// through the operating system's event queue of the thread they were
-/// created on. A host main thread is expected to drain it.
-#[cfg(windows)]
-mod os_events {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
-    };
-
-    /// Bounds one pump so a plugin flooding its queue cannot starve jobs.
-    const MAX_MESSAGES: usize = 256;
-
-    pub(super) fn pump() {
-        // SAFETY: `MSG` is a plain C struct for which all-zero bytes are a
-        // valid value, and `PeekMessageW` only writes to it. A null window
-        // handle selects every message of the calling thread, so nothing
-        // owned by another thread is touched. Dispatching runs the window
-        // procedures plugins registered on this thread, which is exactly the
-        // main-thread context they expect.
-        unsafe {
-            let mut message: MSG = std::mem::zeroed();
-            for _ in 0..MAX_MESSAGES {
-                if PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) == 0 {
+impl<S: ThreadState> Home<S> {
+    /// Runs the jobs that are waiting, then [`ThreadState::idle`] if it is
+    /// due. `nested` is whether this is a call from inside an event loop
+    /// the thread did not start.
+    fn service(&self, nested: bool) {
+        // In use further up this thread's stack. Whoever has it finishes
+        // first, and the thread's loop comes back here afterwards.
+        let Ok(mut state) = self.state.try_borrow_mut() else { return };
+        while let Some(message) = self.next_message() {
+            match message {
+                Message::Run { at_rest: true, .. } | Message::Shutdown if nested => {
+                    self.held.set(Some(message));
                     break;
                 }
-                TranslateMessage(&message);
-                DispatchMessageW(&message);
+                Message::Run { job, .. } => {
+                    // One bad job must not take every plugin's main thread
+                    // away.
+                    if catch_unwind(AssertUnwindSafe(|| job(&mut state))).is_err() {
+                        log::error!("a job on the plugin main thread panicked");
+                    }
+                    self.idle(&mut state, nested);
+                }
+                Message::Shutdown => {
+                    self.shutdown.set(true);
+                    return;
+                }
             }
         }
+        let due = self.last_idle.get().elapsed() >= IDLE_INTERVAL;
+        if IDLE_REQUESTED.take() || (due && state.wants_idle()) {
+            self.idle(&mut state, nested);
+        }
+    }
+
+    fn next_message(&self) -> Option<Message<S>> {
+        self.held.take().or_else(|| match self.receiver.try_recv() {
+            Ok(message) => Some(message),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(Message::Shutdown),
+        })
+    }
+
+    fn idle(&self, state: &mut S, nested: bool) {
+        self.last_idle.set(Instant::now());
+        if catch_unwind(AssertUnwindSafe(|| state.idle(nested))).is_err() {
+            log::error!("plugin idle processing panicked");
+        }
+    }
+
+    /// How long the thread may sleep before `idle` is due, or `None` if
+    /// nothing needs it to wake by itself.
+    fn until_idle(&self) -> Option<Duration> {
+        let wanted = self.state.try_borrow().map_or(true, |state| state.wants_idle());
+        wanted.then(|| IDLE_INTERVAL.saturating_sub(self.last_idle.get().elapsed()))
     }
 }
 
-/// On macOS a run loop only works on the process's first thread, and on
-/// Linux plugins bring their own event loop or use CLAP's timer and fd
-/// extensions. Neither is needed until plugin editors are hosted.
-#[cfg(not(windows))]
-mod os_events {
-    pub(super) fn pump() {}
+fn run<S: ThreadState>(receiver: Receiver<Message<S>>, pump: &os_events::Pump) {
+    let home = Home {
+        state: RefCell::new(S::new()),
+        receiver,
+        held: Cell::new(None),
+        shutdown: Cell::new(false),
+        last_idle: Cell::new(Instant::now()),
+    };
+    let _registered = Registered::new(&home);
+    loop {
+        home.service(false);
+        if home.shutdown.get() {
+            break;
+        }
+        // Dispatches what the operating system has for this thread's
+        // windows. That is where an event loop of someone else's may start,
+        // and call back into `service`.
+        pump.wait(home.until_idle());
+    }
+    // `home` drops here, and the state with it: on the thread that created
+    // it, and while the thread's OS resources (`pump`) still exist.
+}
+
+thread_local! {
+    /// The home of this thread, while it is a plugin thread in its loop.
+    static HOME: Cell<Option<Registration>> = const { Cell::new(None) };
+    /// Set by [`request_idle`] until the idle it asks for has run.
+    static IDLE_REQUESTED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// A [`Home`] with its type erased, for the thread-local it is found by.
+#[derive(Copy, Clone)]
+struct Registration {
+    home: *const (),
+    /// The type of state the home holds.
+    state: TypeId,
+    // Only the Windows layer has event loops of others to notice.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    service_nested: unsafe fn(*const ()),
+}
+
+/// Keeps a home registered as its thread's, and for no longer than it
+/// lives.
+struct Registered<'a>(PhantomData<&'a ()>);
+
+impl<'a> Registered<'a> {
+    fn new<S: ThreadState>(home: &'a Home<S>) -> Self {
+        /// # Safety
+        ///
+        /// `home` must point to a live `Home<S>` of the calling thread.
+        unsafe fn service_nested<S: ThreadState>(home: *const ()) {
+            // SAFETY: per this function's contract.
+            unsafe { &*home.cast::<Home<S>>() }.service(true);
+        }
+        HOME.set(Some(Registration {
+            home: std::ptr::from_ref(home).cast(),
+            state: TypeId::of::<S>(),
+            service_nested: service_nested::<S>,
+        }));
+        Self(PhantomData)
+    }
+}
+
+impl Drop for Registered<'_> {
+    fn drop(&mut self) {
+        HOME.set(None);
+    }
+}
+
+/// Serves the calling thread's queue from inside an event loop that is not
+/// the thread's own. For the OS layer, which is what notices being there;
+/// so far only the Windows one has such loops to notice.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn service_nested() {
+    if let Some(registration) = HOME.get() {
+        // SAFETY: a registration exists only while the home it points to
+        // does (`Registered` borrows the home and unregisters when dropped),
+        // and it is thread-local, so this is that home's thread. The
+        // function stored with the pointer is the one for the home's type.
+        unsafe { (registration.service_nested)(registration.home) };
+    }
+}
+
+/// Runs `body` with the state of the plugin thread, right now, if the
+/// caller is on that thread and nothing further up its stack is using the
+/// state. Otherwise returns `None` without running it.
+///
+/// This is for code the operating system calls on the plugin thread, which
+/// has no job to hand its work to: a window procedure that needs an answer
+/// from a plugin before it returns.
+pub(crate) fn with_current<S: ThreadState, R>(body: impl FnOnce(&mut S) -> R) -> Option<R> {
+    let registration = HOME.get().filter(|registration| registration.state == TypeId::of::<S>())?;
+    // SAFETY: as in `service_nested`; the state's type was just checked.
+    let home = unsafe { &*registration.home.cast::<Home<S>>() };
+    let mut state = home.state.try_borrow_mut().ok()?;
+    Some(body(&mut state))
+}
+
+/// Asks for [`ThreadState::idle`] to run as soon as the plugin thread is
+/// free, instead of at its next interval. For code the operating system
+/// calls on the plugin thread with news that should not wait: a window
+/// that was resized or closed.
+pub(crate) fn request_idle() {
+    IDLE_REQUESTED.set(true);
+    os_events::wake_current();
 }
 
 #[cfg(test)]
@@ -340,20 +544,24 @@ mod tests {
         thread: ThreadId,
         jobs: usize,
         idles: usize,
+        /// The idles that were told they run inside a loop of someone
+        /// else's.
+        nested_idles: usize,
         busy: bool,
     }
 
     impl ThreadState for Counter {
         fn new() -> Self {
-            Self { thread: thread::current().id(), jobs: 0, idles: 0, busy: false }
+            Self { thread: thread::current().id(), jobs: 0, idles: 0, nested_idles: 0, busy: false }
         }
 
         fn wants_idle(&self) -> bool {
             self.busy
         }
 
-        fn idle(&mut self) {
+        fn idle(&mut self, nested: bool) {
             self.idles += 1;
+            self.nested_idles += usize::from(nested);
         }
     }
 
@@ -415,7 +623,7 @@ mod tests {
             false
         }
 
-        fn idle(&mut self) {}
+        fn idle(&mut self, _nested: bool) {}
     }
 
     impl Drop for Tenant {
@@ -518,5 +726,130 @@ mod tests {
         thread::sleep(IDLE_INTERVAL * 8);
         let idles = main.call(WAIT, |state| state.idles).unwrap();
         assert!(idles >= 4, "expected periodic idling, got {idles}");
+    }
+
+    #[test]
+    fn the_state_is_lent_only_on_its_own_thread_and_only_while_free() {
+        assert_eq!(with_current(|state: &mut Counter| state.jobs), None, "this is not a plugin thread");
+
+        let main = MainThread::<Counter>::spawn("test-main").unwrap();
+        // A job has the state, so nothing it calls can have it too.
+        assert_eq!(main.call(WAIT, |_| with_current(|state: &mut Counter| state.jobs)), Ok(None));
+        // Nor is it lent as another type than it is.
+        assert_eq!(main.call(WAIT, |_| with_current(|_: &mut Tenant| ()).is_some()), Ok(false));
+    }
+
+    #[cfg(windows)]
+    mod windows {
+        use super::*;
+        use crate::main_thread::os_events::testing;
+        use crate::test_support::eventually;
+        use std::sync::atomic::AtomicBool;
+
+        /// A flag that says whether a test's foreign loop is running, and
+        /// a way to read it that a job can take along.
+        fn loop_flag() -> (Arc<AtomicBool>, impl Fn() -> bool + Clone + Send + 'static) {
+            let running = Arc::new(AtomicBool::new(false));
+            let reader = running.clone();
+            (running, move || reader.load(Ordering::SeqCst))
+        }
+
+        #[test]
+        fn message_handling_is_lent_the_state_and_can_hurry_the_idle() {
+            static LENT: AtomicBool = AtomicBool::new(false);
+            let main = MainThread::<Counter>::spawn("test-main").unwrap();
+            let idles = main.call(WAIT, |state| state.idles).unwrap();
+            // What a window procedure does: it runs between jobs, on the
+            // thread, and asks for the state.
+            main.call(WAIT, |_| {
+                testing::from_message_handling(|| {
+                    LENT.store(with_current(|state: &mut Counter| state.jobs += 100).is_some(), Ordering::SeqCst);
+                    request_idle();
+                });
+            })
+            .unwrap();
+            assert!(eventually(WAIT, || LENT.load(Ordering::SeqCst)));
+            assert!(main.call(WAIT, |state| state.jobs).unwrap() >= 100);
+            // The thread does not idle by itself (`busy` is off): the
+            // jobs so far account for three idles, the request for one
+            // more, and reading the count comes before its own.
+            assert!(eventually(WAIT, || main.call(WAIT, |state| state.idles).unwrap() >= idles + 4));
+        }
+
+        #[test]
+        fn the_queue_is_served_inside_a_loop_the_thread_did_not_start() {
+            let main = MainThread::<Counter>::spawn("test-main").unwrap();
+            let (running, in_loop) = loop_flag();
+            // A loop of someone else's, started from message handling the
+            // way dragging a window starts one.
+            main.call(WAIT, move |_| {
+                testing::from_message_handling(move || testing::foreign_loop(Duration::from_millis(600), &running));
+            })
+            .unwrap();
+            assert!(eventually(WAIT, &in_loop));
+
+            // An ordinary job does not wait for the loop to end, and the
+            // idle after it is told where it is.
+            let asked = in_loop.clone();
+            let served_inside = main.call(WAIT, move |state| {
+                state.jobs += 1;
+                asked()
+            });
+            assert_eq!(served_inside, Ok(true));
+            assert!(main.call(WAIT, |state| state.nested_idles).unwrap() >= 1);
+
+            // A job that must find the thread at rest is held back until
+            // the loop is over, and what was queued behind it keeps its
+            // place.
+            let behind = {
+                let (main, asked) = (main.clone(), in_loop.clone());
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(50));
+                    main.call(WAIT, move |_| asked())
+                })
+            };
+            assert_eq!(main.call_at_rest(WAIT, move |_| in_loop()), Ok(false));
+            assert_eq!(behind.join().unwrap(), Ok(false), "a later job overtook one that was held");
+        }
+
+        #[test]
+        fn a_job_that_runs_a_message_loop_keeps_the_queue_waiting() {
+            let main = MainThread::<Counter>::spawn("test-main").unwrap();
+            // A plugin that puts up a dialog from inside a call: the job
+            // is not over, so nothing else may touch the state.
+            let (running, in_loop) = loop_flag();
+            let looping = {
+                let main = main.clone();
+                thread::spawn(move || {
+                    main.call(WAIT, move |_| testing::foreign_loop(Duration::from_millis(300), &running))
+                })
+            };
+            assert!(eventually(WAIT, &in_loop));
+            assert_eq!(main.call(WAIT, move |_| in_loop()), Ok(false), "a job ran inside another");
+            assert_eq!(looping.join().unwrap(), Ok(()));
+        }
+
+        #[test]
+        fn a_caller_that_owns_windows_answers_them_while_it_waits() {
+            let main = MainThread::<Counter>::spawn("test-main").unwrap();
+            // The plugin thread sends a message to a window of the thread
+            // that is waiting for it, as it does when an editor belongs to
+            // that window. A caller that just blocked would never answer.
+            let window = testing::echo_window();
+            let before = testing::pings();
+            let answer = main.call(Duration::from_secs(5), move |_| testing::send(window));
+            assert_eq!(answer, Ok(testing::ECHO));
+            assert_eq!(testing::pings(), before + 1);
+
+            // The same through the rendezvous of `call_claimed`.
+            let claimed = main.call_claimed(Duration::from_secs(5), move |_| testing::send(window), |_, _| ());
+            assert_eq!(claimed, Ok(testing::ECHO));
+            // A panicking job still fails its caller at once, not at the
+            // timeout.
+            let started = Instant::now();
+            assert_eq!(main.call(WAIT, |_| -> u32 { panic!("deliberate") }), Err(CallError::Failed));
+            assert!(started.elapsed() < WAIT / 2);
+            testing::destroy(window);
+        }
     }
 }

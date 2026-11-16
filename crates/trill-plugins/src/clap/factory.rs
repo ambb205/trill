@@ -77,7 +77,8 @@ impl From<ClapConfig> for Settings {
 ///
 /// The factory may be used from any thread. All plugin main-thread work is
 /// carried out on the process's plugin main thread, which runs for as long
-/// as a factory or a device created by one exists.
+/// as a factory or a device created by one exists, and for the rest of
+/// the process once a plugin has shown its editor.
 ///
 /// Cloning is cheap and yields a handle to the same factory: keep one to
 /// scan and report with, and give another to the engine.
@@ -165,6 +166,7 @@ impl DeviceFactory for ClapFactory {
         let request = CreateRequest {
             path: installed.path.clone(),
             plugin_id: plugin_id.to_string(),
+            name: installed.name.clone(),
             state: device.state.clone(),
             // Parameter keys are CLAP parameter ids. Anything else was not
             // written by this host and has no meaning to the plugin.
@@ -176,7 +178,13 @@ impl DeviceFactory for ClapFactory {
         let created = instantiate(main, request, CREATE_TIMEOUT).map_err(failed)?;
 
         let params = created.params.iter().map(|spec| spec.info.clone()).collect();
-        let controller = ClapController::new(main.clone(), created.id, plugin_id.to_string());
+        let controller = ClapController::new(
+            main.clone(),
+            created.id,
+            plugin_id.to_string(),
+            created.editor.clone(),
+            created.feedback.clone(),
+        );
         let processor = ClapProcessor::new(
             main.clone(),
             plugin_id.to_string(),
@@ -196,7 +204,7 @@ fn instantiate(main: &MainThread<PluginThread>, request: CreateRequest, timeout:
         main,
         timeout,
         move |thread| thread.clap.create(request),
-        |thread, created: Created| thread.clap.destroy(created.id, Some(created.activated.processor)),
+        |thread, created: Created| thread.clap.destroy(created.id),
     )
 }
 
@@ -289,6 +297,7 @@ mod tests {
         let request = || CreateRequest {
             path: installed.path.clone(),
             plugin_id: scripted::id(kind::SLOW_INIT).to_string(),
+            name: installed.name.clone(),
             state: None,
             values: Vec::new(),
             sample_rate: 48_000.0,
@@ -300,10 +309,7 @@ mod tests {
         assert!(error.contains("too long"), "{error}");
         // A patient caller, queued behind the slow job, gets its instance.
         let created = instantiate(main, request(), Duration::from_secs(30)).unwrap_or_else(|error| panic!("{error}"));
-        main.call(Duration::from_secs(30), move |thread| {
-            thread.clap.destroy(created.id, Some(created.activated.processor))
-        })
-        .unwrap();
+        main.call(Duration::from_secs(30), move |thread| thread.clap.destroy(created.id)).unwrap();
 
         // Both instances existed, and both are gone again. The first one
         // was never seen by anyone but the plugin thread.

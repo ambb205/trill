@@ -10,6 +10,7 @@
 use crate::clap::ClapThread;
 use crate::main_thread::{CallError, MainThread, SharedMainThread, ThreadState};
 use crate::vst3::Vst3Thread;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 /// The state of the plugin main thread.
@@ -27,9 +28,9 @@ impl ThreadState for PluginThread {
         self.clap.wants_idle() || self.vst3.wants_idle()
     }
 
-    fn idle(&mut self) {
-        self.clap.idle();
-        self.vst3.idle();
+    fn idle(&mut self, nested: bool) {
+        self.clap.idle(nested);
+        self.vst3.idle(nested);
     }
 }
 
@@ -40,6 +41,29 @@ static PLUGIN_THREAD: SharedMainThread<PluginThread> = SharedMainThread::new();
 /// not running. Fails only if the operating system cannot start a thread.
 pub(crate) fn plugin_thread() -> std::io::Result<MainThread<PluginThread>> {
     PLUGIN_THREAD.get("plugin-main")
+}
+
+/// The handle that keeps the plugin main thread running once it has been
+/// decided that it must not end; see [`keep_for_good`].
+static KEPT: OnceLock<MainThread<PluginThread>> = OnceLock::new();
+
+/// Keeps the plugin main thread running, and with it every plugin library
+/// it has loaded, for the rest of the process. Called when a plugin first
+/// shows an editor.
+///
+/// Until then the thread ends with its last user, shuts its plugins'
+/// libraries down and unloads them, and a later user gets a fresh thread
+/// and freshly loaded libraries. A plugin that has shown an editor does
+/// not survive either half of that. It has started threads of its own
+/// (timers, graphics, an embedded web view) which it does not reliably
+/// stop before it reports being shut down, so unloading takes the code
+/// away from under them: seen as a crash a moment after the last plugin
+/// was let go, about every second time. And its framework has adopted
+/// this thread as its user-interface thread for good, so it cannot be
+/// handed a new one. A process that is done with its plugins simply
+/// exits.
+pub(crate) fn keep_for_good(main: &MainThread<PluginThread>) {
+    let _ = KEPT.set(main.clone());
 }
 
 /// Longest a plugin may take to load, restore its state and activate.
