@@ -14,6 +14,8 @@ use trill_core::device::{DeviceDescriptor, DeviceFactory, EventKind, ParamInfo};
 use trill_core::project::AutomationTarget;
 use trill_core::{ChainRef, DeviceId, EditError, Project, TrackId};
 
+mod editors;
+
 const UNDO_LIMIT: usize = 200;
 const LIMITER_URI: &str = "builtin:limiter";
 
