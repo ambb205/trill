@@ -1115,3 +1115,128 @@ async fn automation_is_switched_off_and_on_without_losing_it() {
     assert!(error.contains("no automation for that target"), "{error}");
     assert_eq!(ok(client, "set_automation", json!({ "target": target, "points": [] })).await["cleared"], true);
 }
+
+/// A server and a client on the assistant's guarded endpoint. Its working
+/// folder is `work` inside the fixture's own folder.
+async fn connect_guarded() -> (Fixture, std::path::PathBuf) {
+    let folder = tempfile::tempdir().unwrap();
+    let work = folder.path().join("work");
+    let runtime = Arc::new(Runtime::start(options_in(folder.path())).unwrap());
+    let options = trill_mcp::HttpOptions { assistant_folder: Some(work.clone()) };
+    let server = trill_mcp::serve_http_with(runtime.clone(), "127.0.0.1:0".parse().unwrap(), options).unwrap();
+    let transport = StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(
+        server.assistant_url(),
+    ));
+    let client = ClientConfig::default().serve(transport).await.unwrap();
+    (Fixture { session: runtime.session.clone(), runtime, client, _server: server, folder }, work)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_assistant_writes_only_into_the_users_working_folders() {
+    let (fixture, work) = connect_guarded().await;
+    let client = &fixture.client;
+    let outside = fixture.folder.path().join("elsewhere");
+    std::fs::create_dir_all(&outside).unwrap();
+    let files_in = |folder: &std::path::Path| -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(folder)
+            .map(|entries| entries.flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect())
+            .unwrap_or_default();
+        names.sort();
+        names
+    };
+    let track = ok(client, "create_track", json!({ "name": "Keys", "instrument": "builtin:polysynth" })).await;
+    ok(
+        client,
+        "create_clip",
+        json!({ "track": track["track_id"], "start": 0, "length": 4, "notes": [[60, 0, 1, 100]] }),
+    )
+    .await;
+
+    // Anywhere else is refused, whichever way it is spelled, and nothing is written.
+    let elsewhere = outside.join("song.trill").display().to_string();
+    for path in [elsewhere.as_str(), "../elsewhere/song.trill", "sub/../../elsewhere/song.trill"] {
+        let error = call(client, "save_project", json!({ "path": path })).await.unwrap_err();
+        assert!(error.contains("can only be written inside"), "{path}: {error}");
+    }
+    let error = call(client, "render", json!({ "path": outside.join("mix.wav").display().to_string() })).await;
+    assert!(error.unwrap_err().contains("can only be written inside"));
+    let error = call(client, "export_midi", json!({ "path": outside.join("song.mid").display().to_string() })).await;
+    assert!(error.unwrap_err().contains("can only be written inside"));
+    // So is the wrong kind of file, even in the right place.
+    let error = call(client, "save_project", json!({ "path": "song.exe" })).await.unwrap_err();
+    assert!(error.contains(".trill file, not .exe"), "{error}");
+    let error = call(client, "render", json!({ "path": "song.trill" })).await.unwrap_err();
+    assert!(error.contains(".wav file"), "{error}");
+    assert!(files_in(&outside).is_empty() && files_in(&work).is_empty());
+
+    // A name goes into the working folder, with the right ending.
+    let saved = ok(client, "save_project", json!({ "path": "Night Drive" })).await;
+    let saved = std::path::PathBuf::from(saved["saved"].as_str().unwrap());
+    assert!(saved.ends_with("work/Night Drive.trill") || saved.ends_with(r"work\Night Drive.trill"), "{saved:?}");
+    assert!(saved.is_file());
+    // From then on the project's own folder is one, too (here the same one).
+    let midi = ok(client, "export_midi", json!({ "path": "parts/keys.mid" })).await;
+    assert!(std::path::Path::new(midi["path"].as_str().unwrap()).is_file());
+    ok(client, "render", json!({ "path": "bounces/mix.wav", "end": 4 })).await;
+    assert!(work.join("bounces").join("mix.wav").is_file());
+    // A render without a place goes where renders always go.
+    ok(client, "render", json!({ "end": 4 })).await;
+    assert_eq!(files_in(&work), ["Night Drive.trill", "bounces", "parts", "renders"]);
+    assert!(files_in(&outside).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_assistant_cannot_throw_the_users_work_away() {
+    let folder = tempfile::tempdir().unwrap();
+    {
+        let lost = Runtime::start(options_in(folder.path())).unwrap();
+        let renamed = lost.session.lock().edit(|project| {
+            project.name = "Lost".into();
+            Ok(())
+        });
+        renamed.unwrap();
+        lost.refresh_safety_copy();
+        lost.abandon();
+    }
+    let work = folder.path().join("work");
+    let runtime = Arc::new(Runtime::start(options_in(folder.path())).unwrap());
+    let options = trill_mcp::HttpOptions { assistant_folder: Some(work) };
+    let server = trill_mcp::serve_http_with(runtime.clone(), "127.0.0.1:0".parse().unwrap(), options).unwrap();
+    let connect = |url: String| async move {
+        let transport = StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(url));
+        ClientConfig::default().serve(transport).await.unwrap()
+    };
+    let assistant = connect(server.assistant_url()).await;
+    let other = folder.path().join("other.trill");
+    std::fs::write(&other, trill_core::Project::new("Other").to_json()).unwrap();
+    let other = other.display().to_string();
+
+    // With unsaved changes in the open project, nothing may take its place.
+    ok(&assistant, "create_track", json!({ "name": "Unsaved idea" })).await;
+    for (tool, arguments) in [
+        ("new_project", json!({})),
+        ("load_project", json!({ "path": other })),
+        ("recover_project", json!({ "action": "open", "index": 0 })),
+    ] {
+        let error = call(&assistant, tool, arguments).await.unwrap_err();
+        assert!(error.contains("unsaved changes") && error.contains("save_project"), "{tool}: {error}");
+    }
+    assert_eq!(ok(&assistant, "get_project", json!({})).await["tracks"][0]["name"], "Unsaved idea");
+    // Nor may it delete what a crash left, saved or not.
+    let error = call(&assistant, "recover_project", json!({ "action": "discard", "index": 0 })).await.unwrap_err();
+    assert!(error.contains("the user's to do"), "{error}");
+    assert_eq!(ok(&assistant, "recover_project", json!({})).await["unsaved"].as_array().unwrap().len(), 1);
+
+    // Once the work is saved, it may.
+    ok(&assistant, "save_project", json!({ "path": "idea" })).await;
+    assert_eq!(ok(&assistant, "load_project", json!({ "path": other })).await["name"], "Other");
+    assert_eq!(ok(&assistant, "recover_project", json!({ "action": "open", "index": 0 })).await["recovered"], "Lost");
+
+    // The user's own clients, on the other endpoint, are held to none of this.
+    let full = connect(server.url()).await;
+    ok(&full, "create_track", json!({ "name": "Mine to lose" })).await;
+    assert_eq!(ok(&full, "new_project", json!({ "name": "Fresh" })).await["name"], "Fresh");
+    let anywhere = folder.path().join("anywhere").join("song.trill").display().to_string();
+    ok(&full, "save_project", json!({ "path": anywhere })).await;
+    assert!(std::path::Path::new(&anywhere).is_file());
+}

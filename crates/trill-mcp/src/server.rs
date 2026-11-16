@@ -3,6 +3,7 @@
 //! that join them. No musical logic lives here that the GUI could not also
 //! reach.
 
+use crate::guard::Guard;
 use crate::input::{find_param, parse_notes, parse_param_value, parse_pitch_value, parse_points};
 use crate::requests::*;
 use crate::view::{
@@ -202,12 +203,46 @@ pub struct TrillServer {
     /// The runtime's session, which most tools need and nothing else.
     pub(crate) session: SharedSession,
     tool_router: ToolRouter<Self>,
+    /// Set for a client that works beside the user: see [`crate::guard`].
+    guard: Option<Arc<Guard>>,
 }
 
 impl TrillServer {
+    /// A server for a client the user set up themselves, which may read and
+    /// write wherever it is told.
     pub fn new(runtime: Arc<Runtime>) -> Self {
         let session = runtime.session.clone();
-        Self { session, runtime, tool_router: Self::tool_router() + Self::music_router() }
+        Self { session, runtime, tool_router: Self::tool_router() + Self::music_router(), guard: None }
+    }
+
+    /// A server for a client that works beside the user in the window. It
+    /// offers the same tools, but writes only into the open project's
+    /// folder or `folder`, will not replace a project that has unsaved
+    /// changes, and cannot delete a project lost in a crash.
+    pub fn guarded(runtime: Arc<Runtime>, folder: PathBuf) -> Self {
+        Self { guard: Some(Arc::new(Guard { folder })), ..Self::new(runtime) }
+    }
+
+    /// Where a tool that was asked to write `kind` at `requested` may write
+    /// it: wherever it was told, or for a guarded client only inside the
+    /// working folders. `None` when no place was asked for.
+    fn write_path(
+        &self,
+        session: &Session,
+        requested: Option<&str>,
+        kind: &str,
+        endings: &[&str],
+    ) -> Result<Option<PathBuf>, String> {
+        match (requested, &self.guard) {
+            (None, _) => Ok(None),
+            (Some(requested), None) => Ok(Some(PathBuf::from(requested))),
+            (Some(requested), Some(guard)) => guard.write_target(session, requested, kind, endings).map(Some),
+        }
+    }
+
+    /// Whether the open project may be replaced by another right now.
+    fn may_replace_project(&self, session: &Session) -> Result<(), String> {
+        self.guard.as_ref().map_or(Ok(()), |guard| guard.may_replace_project(session))
     }
 
     /// What a `library` reply always carries: the folders, how much is in
@@ -1104,12 +1139,16 @@ impl TrillServer {
         let reply = match request.action.as_deref().unwrap_or("list") {
             "list" => Ok(json!({ "unsaved": listed(&lost) })),
             "open" => chosen().and_then(|copy| {
+                self.may_replace_project(&self.session.lock())?;
                 self.runtime.recover(copy).map_err(|error| error.to_string())?;
                 let session = self.session.lock();
                 let mut out = project_json(&session, false);
                 out["recovered"] = json!(copy.name);
                 Ok(out)
             }),
+            "discard" if self.guard.is_some() => Err("Deleting a lost project cannot be undone, so that is the \
+                user's to do, from the window. You can bring it back with action \"open\" instead."
+                .to_string()),
             "discard" => chosen().map(|copy| {
                 self.runtime.discard(copy);
                 json!({ "discarded": copy.name, "unsaved": listed(&self.runtime.recoverable()) })
@@ -1386,7 +1425,10 @@ impl TrillServer {
         // freeze the GUI or other tools.
         let (job, path, options) = {
             let mut session = self.session.lock();
-            let path = request.path.as_deref().map(PathBuf::from).unwrap_or_else(|| default_render_path(&session));
+            let path = match self.write_path(&session, request.path.as_deref(), "a render", &["wav"]) {
+                Ok(path) => path.unwrap_or_else(|| default_render_path(&session)),
+                Err(refusal) => return finish(Err(refusal)),
+            };
             let defaults = RenderOptions::default();
             let options = RenderOptions {
                 sample_rate: session.audio_info().sample_rate as u32,
@@ -1471,13 +1513,15 @@ impl TrillServer {
             if file.tracks.is_empty() {
                 return Err("the project has no MIDI notes to export".to_string());
             }
-            let path = Path::new(&request.path);
+            let path = self
+                .write_path(&session, Some(&request.path), "a MIDI file", &["mid", "midi"])?
+                .unwrap_or_else(|| PathBuf::from(&request.path));
             if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
                 std::fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
             }
-            std::fs::write(path, midi_file::write(&file)).map_err(|error| format!("{}: {error}", request.path))?;
+            std::fs::write(&path, midi_file::write(&file)).map_err(|error| format!("{}: {error}", path.display()))?;
             let notes: usize = file.tracks.iter().map(|track| track.notes.len()).sum();
-            Ok(json!({ "path": request.path, "tracks": file.tracks.len(), "notes": notes }))
+            Ok(json!({ "path": path.display().to_string(), "tracks": file.tracks.len(), "notes": notes }))
         })();
         finish(reply)
     }
@@ -1506,8 +1550,9 @@ impl TrillServer {
     fn save_project(&self, Parameters(request): Parameters<SaveProjectRequest>) -> CallToolResult {
         let mut session = self.session.lock();
         let reply = (|| {
-            let path = match (&request.path, session.path()) {
-                (Some(path), _) => PathBuf::from(path),
+            let requested = self.write_path(&session, request.path.as_deref(), "a project", &["trill"])?;
+            let path = match (requested, session.path()) {
+                (Some(path), _) => path,
                 (None, Some(path)) => path.to_path_buf(),
                 (None, None) => return Err("this project has never been saved; give a `path`".to_string()),
             };
@@ -1521,10 +1566,9 @@ impl TrillServer {
     #[tool(annotations(title = "Load project", destructive_hint = true))]
     fn load_project(&self, Parameters(request): Parameters<LoadProjectRequest>) -> CallToolResult {
         let mut session = self.session.lock();
-        let reply = session
-            .load(Path::new(&request.path))
-            .map(|()| project_json(&session, false))
-            .map_err(|error| error.to_string());
+        let reply = self.may_replace_project(&session).and_then(|()| {
+            session.load(Path::new(&request.path)).map(|()| project_json(&session, false)).map_err(|e| e.to_string())
+        });
         finish(reply)
     }
 
@@ -1532,6 +1576,9 @@ impl TrillServer {
     #[tool(annotations(title = "New project", destructive_hint = true))]
     fn new_project(&self, Parameters(request): Parameters<NewProjectRequest>) -> CallToolResult {
         let mut session = self.session.lock();
+        if let Err(refusal) = self.may_replace_project(&session) {
+            return finish(Err(refusal));
+        }
         session.new_project();
         let reply = match request.name {
             Some(name) => edit(&mut session, |project| {
