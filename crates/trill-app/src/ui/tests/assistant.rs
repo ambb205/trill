@@ -1938,7 +1938,7 @@ fn the_plan_is_a_checklist_that_fills_in_as_the_work_proceeds() {
     script.say([Event::Plan(reworded)]);
     harness.idle(2);
     assert!(harness.shows("Render and read the mix: to do") && !harness.shows_start("Render and check"));
-    let step = |id: &str, title: &str, status| PlanStep { id: id.into(), title: title.into(), status };
+    let step = |id: &str, title: &str, status| PlanStep { id: id.into(), title: title.into(), doing: None, status };
     script.say([Event::Plan(PlanChange::Listed(vec![
         step("1", "Set tempo and key", StepStatus::Done),
         step("2", "Write the drums", StepStatus::InProgress),

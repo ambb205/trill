@@ -497,7 +497,10 @@ mod tests {
         assert_eq!((usual.effort, usual.max_turns), (None, Some(DEFAULT_MAX_TURNS)));
         // Several times the eighty steps one message used to be allowed.
         const { assert!(DEFAULT_MAX_TURNS >= 5 * 80) };
-        assert_eq!(usual.cli_tools(), ["TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "WebFetch", "WebSearch"]);
+        assert_eq!(
+            usual.cli_tools(),
+            ["TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TodoWrite", "WebFetch", "WebSearch"]
+        );
 
         let chosen = Setup { model: None, effort: Some(Effort::High), web: false, step_limit: 250 };
         let config = config(Path::new("settings"), "http://127.0.0.1:9000/assistant", &chosen);

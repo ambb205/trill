@@ -273,15 +273,17 @@ impl Plan {
             }
             PlanChange::Removed { id } => self.steps.retain(|step| step.id != *id),
             PlanChange::Listed(listed) => {
-                // The CLI's word on what the plan is. How a step reads
-                // while it is done is not in the list, and is kept.
+                // The CLI's word on what the plan is. Where the list does
+                // not say how a step reads while it is done, what was
+                // known of that is kept.
                 let old = std::mem::take(&mut self.steps);
+                let known = |id: &str| old.iter().find(|known| known.id == id).and_then(|known| known.doing.clone());
                 self.steps = listed
                     .iter()
                     .map(|step| Step {
                         id: step.id.clone(),
                         title: step.title.clone(),
-                        doing: old.iter().find(|known| known.id == step.id).and_then(|known| known.doing.clone()),
+                        doing: step.doing.clone().or_else(|| known(&step.id)),
                         state: step.status.into(),
                     })
                     .collect();
@@ -1037,7 +1039,8 @@ mod tests {
 
         // The CLI's own list is the last word on what the plan is; how a
         // step reads while it is done is the panel's to remember.
-        let listed = |id: &str, title: &str, status| PlanStep { id: id.into(), title: title.into(), status };
+        let listed =
+            |id: &str, title: &str, status| PlanStep { id: id.into(), title: title.into(), doing: None, status };
         plan.apply(&PlanChange::Listed(vec![
             listed("1", "Set tempo and key", StepStatus::Done),
             listed("3", "Render and check", StepStatus::InProgress),
@@ -1051,6 +1054,16 @@ mod tests {
                 step("Export", StepState::Pending)
             ]
         );
+        // A list that says how its steps read while they are done (an older
+        // CLI's, which is the whole plan each time) is taken at its word.
+        let exporting = PlanStep { doing: Some("Exporting".into()), ..listed("8", "Export", StepStatus::InProgress) };
+        plan.apply(&PlanChange::Listed(vec![listed("1", "Set tempo and key", StepStatus::Done), exporting]));
+        assert_eq!(read(&plan), [step("Set tempo and key", StepState::Done), step("Exporting", StepState::Doing)]);
+        plan.apply(&PlanChange::Listed(vec![
+            listed("1", "Set tempo and key", StepStatus::Done),
+            listed("3", "Render and check", StepStatus::InProgress),
+            listed("8", "Export", StepStatus::Pending),
+        ]));
 
         // A plan with steps still to do is kept when another request comes;
         // one that was carried out is put away.

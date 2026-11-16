@@ -8,7 +8,8 @@
 //! what that CLI wrote while answering to a stand-in for the model service,
 //! which told it which tools to call: the CLI and its tools were real, and
 //! no model was asked. In the last three the MCP server was a stand-in too,
-//! with one tool that waits.
+//! with one tool that waits. `todo_write` was recorded the same way from
+//! CLI 2.1.94, whose plan tool is another.
 
 mod support;
 
@@ -222,9 +223,12 @@ fn the_cli_is_started_confined_to_trill_with_the_message_on_standard_input() {
     };
     // The empty arguments are the point of these two flags, and the easiest
     // thing to lose on the way to another process.
-    assert_eq!(after("--tools"), "TaskCreate,TaskGet,TaskList,TaskUpdate,WebFetch,WebSearch");
+    assert_eq!(after("--tools"), "TaskCreate,TaskGet,TaskList,TaskUpdate,TodoWrite,WebFetch,WebSearch");
     assert_eq!(after("--setting-sources"), "");
-    assert_eq!(after("--allowedTools"), "mcp__trill__*,TaskCreate,TaskGet,TaskList,TaskUpdate,WebFetch,WebSearch");
+    assert_eq!(
+        after("--allowedTools"),
+        "mcp__trill__*,TaskCreate,TaskGet,TaskList,TaskUpdate,TodoWrite,WebFetch,WebSearch"
+    );
     assert_eq!(after("--permission-mode"), "dontAsk");
     assert_eq!(after("--permission-prompts"), "none");
     assert_eq!(after("--output-format"), "stream-json");
@@ -502,8 +506,8 @@ fn with_the_web_switched_off_its_tools_are_not_offered_and_a_cli_that_offers_the
         let at = arguments.iter().position(|argument| argument == flag).unwrap_or_else(|| panic!("no {flag}"));
         arguments[at + 1].clone()
     };
-    assert_eq!(after("--tools"), "TaskCreate,TaskGet,TaskList,TaskUpdate");
-    assert_eq!(after("--allowedTools"), "mcp__trill__*,TaskCreate,TaskGet,TaskList,TaskUpdate");
+    assert_eq!(after("--tools"), "TaskCreate,TaskGet,TaskList,TaskUpdate,TodoWrite");
+    assert_eq!(after("--allowedTools"), "mcp__trill__*,TaskCreate,TaskGet,TaskList,TaskUpdate,TodoWrite");
     assert!(!arguments.iter().any(|argument| argument.contains("Web")), "{arguments:?}");
 
     // A CLI that has them on offer all the same is not talked to.
@@ -727,7 +731,7 @@ fn a_recorded_plan_is_reported_as_changes_and_not_as_tool_calls() {
     };
     let status =
         |id: &str, status| PlanChange::Changed { id: id.into(), status: Some(status), title: None, doing: None };
-    let step = |id: &str, title: &str, status| PlanStep { id: id.into(), title: title.into(), status };
+    let step = |id: &str, title: &str, status| PlanStep { id: id.into(), title: title.into(), doing: None, status };
     // Three steps written down, the first begun and finished, the second
     // begun, the third worded anew and then dropped (calls made together
     // answer in the order they finish); the list read twice; a fourth step.
@@ -764,6 +768,47 @@ fn a_recorded_plan_is_reported_as_changes_and_not_as_tool_calls() {
         ])
     );
     assert_eq!(said(&events), "Planning.\n\nAll planned.");
+}
+
+#[test]
+fn a_recorded_plan_of_an_older_cli_is_reported_too() {
+    // CLI 2.1.94 was asked for the same tools. It has `TodoWrite` and not
+    // the others, offered that, and kept the plan with it.
+    let stage = Stage::new("recorded-todo-write");
+    stage.fixture("todo_write.jsonl");
+    stage.script("replay todo_write.jsonl");
+
+    let events = turn(&mut stage.conversation(), "plan a song");
+
+    assert!(matches!(events.last(), Some(Event::Finished(summary)) if summary.turns == 4), "{:?}", events.last());
+    let plans: Vec<&PlanChange> =
+        events.iter().filter_map(|event| if let Event::Plan(change) = event { Some(change) } else { None }).collect();
+    let step = |id: &str, title: &str, doing: &str, status| PlanStep {
+        id: id.into(),
+        title: title.into(),
+        doing: Some(doing.into()),
+        status,
+    };
+    assert_eq!(
+        plans,
+        [
+            &PlanChange::Listed(vec![
+                step("1", "Set tempo and key", "Setting tempo and key", StepStatus::InProgress),
+                step("2", "Write the drums", "Writing the drums", StepStatus::Pending),
+            ]),
+            &PlanChange::Listed(vec![
+                step("1", "Set tempo and key", "Setting tempo and key", StepStatus::Done),
+                step("2", "Write the drums", "Writing the drums", StepStatus::InProgress),
+                step("3", "Render", "Rendering", StepStatus::Pending),
+            ]),
+        ]
+    );
+    // The plan is not a tool call to show; the one call that was Trill's is.
+    let called: Vec<&str> = events
+        .iter()
+        .filter_map(|event| if let Event::ToolCallStarted { tool, .. } = event { Some(tool.as_str()) } else { None })
+        .collect();
+    assert_eq!(called, ["wait"]);
 }
 
 #[test]
@@ -838,7 +883,9 @@ fn a_recorded_conversation_that_outgrew_the_model_carries_on_and_says_so() {
     });
     assert_eq!(
         listed,
-        Some(&[PlanStep { id: "1".into(), title: "Write the intro".into(), status: StepStatus::Pending }][..])
+        Some(
+            &[PlanStep { id: "1".into(), title: "Write the intro".into(), doing: None, status: StepStatus::Pending }][..]
+        )
     );
     assert!(said(&events).ends_with("SCRIPT-STEP-5: carried on after compaction."), "{}", said(&events));
     assert!(!said(&events).contains("This session is being continued"), "what the CLI tells the model is not a reply");

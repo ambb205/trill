@@ -768,8 +768,8 @@ mod tests {
             "[-p][--output-format][stream-json][--verbose][--include-partial-messages]",
             "[--mcp-config][mcp.json][--strict-mcp-config]",
             "[--setting-sources][][--disable-slash-commands]",
-            "[--tools][TaskCreate,TaskGet,TaskList,TaskUpdate,WebFetch,WebSearch]",
-            "[--allowedTools][mcp__trill__*,TaskCreate,TaskGet,TaskList,TaskUpdate,WebFetch,WebSearch]",
+            "[--tools][TaskCreate,TaskGet,TaskList,TaskUpdate,TodoWrite,WebFetch,WebSearch]",
+            "[--allowedTools][mcp__trill__*,TaskCreate,TaskGet,TaskList,TaskUpdate,TodoWrite,WebFetch,WebSearch]",
             "[--permission-mode][dontAsk][--permission-prompts][none]",
             "[--append-system-prompt-file][prompt.txt]",
             "[--max-turns=100]",
@@ -782,8 +782,10 @@ mod tests {
         }
         // Nothing of the CLI's that reads or writes a file, runs a program,
         // or starts another agent is ever asked for.
+        let asked = config.cli_tools();
+        assert!(arguments.contains(&format!("[--tools][{}]", asked.join(","))), "the list above is what is asked for");
         for tool in ["Read", "Write", "Edit", "Bash", "PowerShell", "Glob", "Grep", "NotebookEdit", "Skill", "Agent"] {
-            assert!(!arguments.contains(&format!("{tool},")) && !arguments.contains(&format!(",{tool}")), "{tool}");
+            assert!(!asked.contains(&tool), "{tool}");
         }
     }
 
@@ -791,8 +793,13 @@ mod tests {
     fn with_the_web_switched_off_its_tools_are_not_asked_for_at_all() {
         let offline = AssistantConfig { web: false, ..AssistantConfig::new("data") };
         let asked = joined(&arguments(&offline, &cli(CliVersion::new(2, 1, 325)), &files(), None, None));
-        assert!(asked.contains("[--tools][TaskCreate,TaskGet,TaskList,TaskUpdate][--allowedTools]"), "{asked}");
-        assert!(asked.contains("[--allowedTools][mcp__trill__*,TaskCreate,TaskGet,TaskList,TaskUpdate][--perm"));
+        assert!(
+            asked.contains("[--tools][TaskCreate,TaskGet,TaskList,TaskUpdate,TodoWrite][--allowedTools]"),
+            "{asked}"
+        );
+        assert!(
+            asked.contains("[--allowedTools][mcp__trill__*,TaskCreate,TaskGet,TaskList,TaskUpdate,TodoWrite][--perm")
+        );
         assert!(!asked.contains("Web"), "{asked}");
 
         // With the plan off as well, the CLI is given no tool of its own:
@@ -818,7 +825,7 @@ mod tests {
 
         assert!(arguments.contains("[--model=haiku][--effort=xhigh][--resume=39367d22-e40b-4a04-9358-33e91538ff0d]"));
         assert!(arguments.contains(
-            "[--allowedTools][mcp__studio__*,TaskCreate,TaskGet,TaskList,TaskUpdate,WebFetch,WebSearch]\
+            "[--allowedTools][mcp__studio__*,TaskCreate,TaskGet,TaskList,TaskUpdate,TodoWrite,WebFetch,WebSearch]\
              [--disallowedTools][mcp__studio__load_project,mcp__studio__new_project]"
         ));
         assert!(!arguments.contains("--max-turns"));

@@ -31,14 +31,20 @@ pub const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// The CLI's tools for keeping a plan: a list of steps and their state.
 ///
-/// These are the names CLI 2.1.325 goes by. Named to `--tools`, it offers
-/// them; a name a CLI does not know is passed over. Each was called through
-/// that CLI and watched: they take a title and a description, hand out the
-/// numbers themselves, and keep the list as a few small files of the CLI's
-/// own (`tasks/<conversation id>/<number>.json` in its data folder, beside
-/// the record it keeps of the conversation). A number that is not one of the
-/// list's (`../../x`) finds nothing and writes nothing.
-pub const PLAN_TOOLS: &[&str] = &["TaskCreate", "TaskGet", "TaskList", "TaskUpdate"];
+/// The CLI has had two of these, and a version has one or the other. Named
+/// to `--tools`, it offers the ones it has and passes over the names it
+/// does not know: 2.1.325 offered the four `Task` tools and not
+/// `TodoWrite`; 2.1.94 offered `TodoWrite` and none of the others. Each was
+/// called through its CLI and watched:
+///
+/// * The `Task` tools take a title and a description, hand out the numbers
+///   themselves, and keep the list as a few small files of the CLI's own
+///   (`tasks/<conversation id>/<number>.json` in its data folder, beside
+///   the record it keeps of the conversation). A number that is not one of
+///   the list's (`../../x`) finds nothing and writes nothing.
+/// * `TodoWrite` takes the whole list each time and keeps it in the
+///   conversation; it wrote no file of its own.
+pub const PLAN_TOOLS: &[&str] = &["TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TodoWrite"];
 
 /// The CLI's tools for looking things up: a web search, which Anthropic's
 /// service runs, and reading a page, which the CLI fetches itself.
@@ -63,8 +69,8 @@ What you have
 - Trill's own tools (their names start with mcp__trill__). They act on the project that is open right now, and they \
 are how you do everything. You have no shell, and you reach files only through those tools (saving and loading \
 projects, rendering, importing and exporting).
-- A task list (TaskCreate, TaskUpdate, TaskList) for planning long work. The user sees it as a checklist above the \
-message field.
+- A task list for planning long work: TaskCreate, TaskUpdate and TaskList, or TodoWrite if that is the one you have. \
+The user sees it as a checklist above the message field.
 - WebSearch and WebFetch, if the user has left web research switched on. If they are not among your tools, the user \
 has switched the web off: work from what you know, and say so plainly if that limits an answer.
 - A tool that writes a file may refuse a path outside the folders Trill lets you write to. Its reply says where it \
@@ -121,8 +127,8 @@ them together in one step. One request is allowed a limited number of steps; spe
 looking at (selection, playhead, loop) when they sent it. Treat it as a hint and the tools as the truth.
 - A message that is only a <trill-continue> block also comes from Trill and not from the user. It means your work was \
 paused at a checkpoint and nothing is wrong: carry on exactly where you stopped, with no greeting, recap or new plan.
-- If you are told that the conversation continues from a summary, call TaskList and get_project to see where things \
-stand before you go on.
+- If you are told that the conversation continues from a summary, read your task list and call get_project to see \
+where things stand before you go on.
 - Every edit can be undone with the history tool, and for the user everything you change while answering one message \
 is a single Undo. Ask before doing something destructive the user did not clearly request: deleting tracks or clips, \
 replacing notes they wrote, starting or loading another project.
@@ -464,7 +470,10 @@ mod tests {
     #[test]
     fn the_clis_own_tools_are_the_plan_and_the_web_and_each_can_be_switched_off() {
         let all = AssistantConfig::new("data");
-        assert_eq!(all.cli_tools(), ["TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "WebFetch", "WebSearch"]);
+        assert_eq!(
+            all.cli_tools(),
+            ["TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TodoWrite", "WebFetch", "WebSearch"]
+        );
 
         let offline = AssistantConfig { web: false, ..all.clone() };
         assert_eq!(offline.cli_tools(), PLAN_TOOLS);
@@ -568,11 +577,11 @@ mod tests {
     fn the_default_prompt_names_the_tools_the_assistant_is_given_and_no_others() {
         // Every one of the CLI's own tools it may be offered is spoken of
         // by name, so the model knows what they are for here...
-        for tool in ["TaskCreate", "TaskUpdate", "TaskList", "WebSearch", "WebFetch"] {
+        for tool in ["TaskCreate", "TaskUpdate", "TaskList", "TodoWrite", "WebSearch", "WebFetch"] {
             assert!(DEFAULT_SYSTEM_PROMPT.contains(tool), "{tool}");
         }
         // ...and none it is not offered is.
-        for tool in ["TodoWrite", "Bash", "PowerShell", "Read(", "Write(", "Edit(", "Glob", "Grep"] {
+        for tool in ["Bash", "PowerShell", "Read(", "Write(", "Edit(", "Glob", "Grep"] {
             assert!(!DEFAULT_SYSTEM_PROMPT.contains(tool), "{tool}");
         }
         // The two notes Trill itself puts in a message are explained.

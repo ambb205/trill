@@ -173,6 +173,9 @@ pub struct PlanStep {
     pub id: String,
     /// What is to be done: "Write the drums".
     pub title: String,
+    /// The step as it reads while it is being worked on, where the list
+    /// says.
+    pub doing: Option<String>,
     pub status: StepStatus,
 }
 
@@ -193,9 +196,10 @@ pub enum PlanChange {
     Changed { id: String, status: Option<StepStatus>, title: Option<String>, doing: Option<String> },
     /// A step was dropped.
     Removed { id: String },
-    /// The whole plan as the CLI holds it, which the assistant asked to see.
-    /// Steps the app has that are not in it are gone; what the app knows
-    /// about the others beyond title and state it keeps.
+    /// The whole plan as it now is: the assistant asked the CLI to list it,
+    /// or (with a CLI whose plan tool takes the whole list each time) wrote
+    /// it anew. Steps the app has that are not in it are gone; what the app
+    /// knows about the others that the list does not say, it keeps.
     Listed(Vec<PlanStep>),
 }
 

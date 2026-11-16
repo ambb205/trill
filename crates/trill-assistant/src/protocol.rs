@@ -582,11 +582,8 @@ fn plan_change(tool: &str, input: &Value, said: &str, data: &Value) -> Option<Pl
         "TaskList" => {
             let listed = |task: &Value| {
                 let id = Some(text(task, "id")).filter(|id| !id.is_empty())?.to_owned();
-                Some(PlanStep {
-                    id,
-                    title: text(task, "subject").to_owned(),
-                    status: step_status(text(task, "status"))?,
-                })
+                let (title, status) = (text(task, "subject").to_owned(), step_status(text(task, "status"))?);
+                Some(PlanStep { id, title, doing: None, status })
             };
             match data["tasks"].as_array() {
                 Some(tasks) => Some(PlanChange::Listed(tasks.iter().filter_map(listed).collect())),
@@ -597,6 +594,20 @@ fn plan_change(tool: &str, input: &Value, said: &str, data: &Value) -> Option<Pl
                     steps.filter(|steps| !steps.is_empty()).map(PlanChange::Listed)
                 }
             }
+        }
+        // The plan tool of an older CLI (2.1.94): the whole list every
+        // time, without numbers. A step goes by its place in the list.
+        "TodoWrite" => {
+            let todos = input["todos"].as_array()?;
+            let steps = todos.iter().enumerate().filter_map(|(index, todo)| {
+                Some(PlanStep {
+                    id: (index + 1).to_string(),
+                    title: Some(text(todo, "content")).filter(|title| !title.is_empty())?.to_owned(),
+                    doing: Some(text(todo, "activeForm")).filter(|doing| !doing.is_empty()).map(str::to_owned),
+                    status: step_status(text(todo, "status"))?,
+                })
+            });
+            Some(PlanChange::Listed(steps.collect()))
         }
         // Reading one step changes nothing.
         _ => None,
@@ -616,7 +627,7 @@ fn step_status(word: &str) -> Option<StepStatus> {
 fn listed_line(line: &str) -> Option<PlanStep> {
     let (id, rest) = line.trim().strip_prefix('#')?.split_once(' ')?;
     let (status, title) = rest.strip_prefix('[')?.split_once("] ")?;
-    Some(PlanStep { id: id.to_owned(), title: title.to_owned(), status: step_status(status)? })
+    Some(PlanStep { id: id.to_owned(), title: title.to_owned(), doing: None, status: step_status(status)? })
 }
 
 fn classify_api_error(kind: ApiErrorKind, message: String, resets_at: Option<SystemTime>) -> FailureReason {
@@ -682,7 +693,8 @@ mod tests {
         }
     }
 
-    const EVERYTHING: [&str; 6] = ["TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "WebFetch", "WebSearch"];
+    const EVERYTHING: [&str; 7] =
+        ["TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TodoWrite", "WebFetch", "WebSearch"];
 
     /// A translator for a run with everything on: the plan and the web.
     fn translator() -> Translator {
@@ -827,8 +839,16 @@ mod tests {
 
     #[test]
     fn the_clis_own_tools_are_let_through_only_if_they_were_asked_for() {
-        let on_offer =
-            ["mcp__trill__render", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "WebFetch", "WebSearch"];
+        let on_offer = [
+            "mcp__trill__render",
+            "TaskCreate",
+            "TaskGet",
+            "TaskList",
+            "TaskUpdate",
+            "TodoWrite",
+            "WebFetch",
+            "WebSearch",
+        ];
 
         // Everything on: the run starts.
         let mut everything = translator();
@@ -837,7 +857,7 @@ mod tests {
         assert_eq!(everything.verdict(), None);
 
         // The web switched off, and a CLI that offers it regardless.
-        let mut offline = Translator::new(expecting(&["TaskCreate", "TaskGet", "TaskList", "TaskUpdate"]));
+        let mut offline = Translator::new(expecting(&["TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TodoWrite"]));
         assert_eq!(feed(&mut offline, &[init(&on_offer, connected())]), []);
         let refused = FailureReason::UnexpectedTools { tools: vec!["WebFetch".into(), "WebSearch".into()] };
         assert_eq!(offline.verdict(), Some(&Verdict::Refused(refused)));
@@ -850,7 +870,7 @@ mod tests {
 
         // And a tool of the CLI's that was never asked for is never let
         // through, whatever else is on.
-        for stranger in ["Read", "Write", "Edit", "Bash", "PowerShell", "NotebookEdit", "Task", "Skill", "TodoWrite"] {
+        for stranger in ["Read", "Write", "Edit", "Bash", "PowerShell", "NotebookEdit", "Task", "Skill", "Agent"] {
             let mut translator = translator();
             feed(&mut translator, &[init(&["mcp__trill__render", "WebSearch", stranger], connected())]);
             let refused = FailureReason::UnexpectedTools { tools: vec![stranger.to_owned()] };
@@ -924,7 +944,7 @@ mod tests {
                 ),
             ],
         );
-        let step = |id: &str, title: &str, status| PlanStep { id: id.into(), title: title.into(), status };
+        let step = |id: &str, title: &str, status| PlanStep { id: id.into(), title: title.into(), doing: None, status };
         let changed = |id: &str, status| PlanChange::Changed { id: id.into(), status, title: None, doing: None };
         assert_eq!(
             events,
@@ -978,10 +998,61 @@ mod tests {
             [
                 Event::Plan(PlanChange::Added { id: "12".into(), title: "Write the bass".into(), doing: None }),
                 Event::Plan(PlanChange::Listed(vec![
-                    PlanStep { id: "11".into(), title: "Write the drums".into(), status: StepStatus::Done },
-                    PlanStep { id: "12".into(), title: "Write the bass".into(), status: StepStatus::InProgress },
+                    PlanStep {
+                        id: "11".into(),
+                        title: "Write the drums".into(),
+                        doing: None,
+                        status: StepStatus::Done
+                    },
+                    PlanStep {
+                        id: "12".into(),
+                        title: "Write the bass".into(),
+                        doing: None,
+                        status: StepStatus::InProgress
+                    },
                 ])),
             ]
+        );
+    }
+
+    #[test]
+    fn the_plan_tool_of_an_older_cli_gives_the_whole_plan_each_time() {
+        // As CLI 2.1.94 answered it, called through it.
+        let said = "Todos have been modified successfully. Ensure that you continue to use the todo list to track \
+                    your progress. Please proceed with the current tasks if applicable";
+        let events = feed(
+            &mut translator(),
+            &[
+                calls(
+                    "p1",
+                    "TodoWrite",
+                    json!({"todos":[
+                        {"content":"Set tempo and key","status":"completed","activeForm":"Setting tempo and key"},
+                        {"content":"Write the drums","status":"in_progress","activeForm":"Writing the drums"},
+                        {"content":"Render","status":"pending"},
+                        {"content":"","status":"pending"},
+                        {"content":"Not a state","status":"paused"}]}),
+                ),
+                answers("p1", said, json!({"oldTodos":[],"newTodos":[]})),
+                // One that was refused changed nothing.
+                calls("p2", "TodoWrite", json!({"todos":[]})),
+                json!({"type":"user","message":{"content":[
+                    {"type":"tool_result","tool_use_id":"p2","content":"Permission denied","is_error":true}]}}),
+            ],
+        );
+        let step = |id: &str, title: &str, doing: Option<&str>, status| PlanStep {
+            id: id.into(),
+            title: title.into(),
+            doing: doing.map(str::to_owned),
+            status,
+        };
+        assert_eq!(
+            events,
+            [Event::Plan(PlanChange::Listed(vec![
+                step("1", "Set tempo and key", Some("Setting tempo and key"), StepStatus::Done),
+                step("2", "Write the drums", Some("Writing the drums"), StepStatus::InProgress),
+                step("3", "Render", None, StepStatus::Pending),
+            ]))]
         );
     }
 
