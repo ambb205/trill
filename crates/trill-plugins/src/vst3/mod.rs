@@ -36,7 +36,7 @@
 
 mod buffers;
 mod changes;
-mod class_id;
+pub(crate) mod class_id;
 mod com;
 mod controller;
 mod editor;
@@ -56,8 +56,8 @@ mod presets;
 mod probe;
 mod processor;
 #[cfg(test)]
-mod scripted;
-mod state;
+pub(crate) mod scripted;
+pub(crate) mod state;
 mod stream;
 #[cfg(test)]
 mod tests;
@@ -65,7 +65,7 @@ mod text;
 
 pub use factory::{Vst3Config, Vst3Factory};
 pub(crate) use instance::Vst3Thread;
-pub(crate) use paths::is_plugin_file;
+pub(crate) use paths::{documents_folder, is_plugin_file};
 pub use paths::{find_plugin_files, standard_search_paths};
 pub(crate) use presets::read_presets;
 pub use presets::standard_preset_paths;

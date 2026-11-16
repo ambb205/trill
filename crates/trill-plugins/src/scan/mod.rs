@@ -156,7 +156,9 @@ pub fn probe_file(path: &Path) -> Result<Vec<PluginRecord>, String> {
 ///
 /// Started as `trill-plugin-scan --presets <format> <plugin file> <plugin id>`
 /// it reads that plugin's presets instead, and prints them a batch to a
-/// line as it finds them.
+/// line as it finds them; started with `--vendor-preset` it builds the
+/// state of one preset that is in a vendor's own format
+/// ([`crate::vendor`]).
 pub fn scanner_main() -> ExitCode {
     ExitCode::from(run_scanner())
 }
@@ -180,6 +182,10 @@ fn run_scanner() -> u8 {
     if arguments.peek().is_some_and(|first| first == crate::presets::PRESETS_ARGUMENT) {
         suppress_crash_dialogs();
         return crate::presets::run_reader(arguments.skip(1));
+    }
+    if arguments.peek().is_some_and(|first| first == crate::vendor::VENDOR_PRESET_ARGUMENT) {
+        suppress_crash_dialogs();
+        return crate::vendor::run_builder(arguments.skip(1));
     }
     let (Some(path), None) = (arguments.next(), arguments.next()) else {
         eprintln!("usage: {SCANNER_NAME} <plugin file>");

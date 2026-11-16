@@ -469,6 +469,7 @@ impl TrillServer {
                         if let Some(preset) = session.device_preset(device) {
                             out["preset"] = json!(preset.name);
                         }
+                        crate::sounds::preset_note_into(&mut out, &mut session, device);
                     }
                     Err(error) => {
                         session.undo();
@@ -656,6 +657,7 @@ impl TrillServer {
             if let Some(preset) = &model.preset {
                 out["preset"] = json!(preset.name);
             }
+            crate::sounds::preset_note_into(&mut out, &mut session, device);
             Ok(out)
         })();
         finish(reply)
@@ -750,12 +752,13 @@ impl TrillServer {
                 return Ok(out);
             }
             params_into(&mut out, &session, id, &states, &request)?;
+            crate::sounds::settings_into(&mut out, &session, id, request.query.as_deref());
             Ok(out)
         })();
         finish(reply)
     }
 
-    /// Change a device: switch preset, set parameters, or bypass it. A preset replaces the device's sound, a
+    /// Change a device: switch preset, set parameters or settings, or bypass it. A preset replaces the device's sound, a
     /// plugin's as its own preset browser would (get_device and describe_device list and search them);
     /// `params` in the same call go on top of it, and the whole call is one undo step.
     #[tool(annotations(title = "Update device"))]
@@ -770,6 +773,7 @@ impl TrillServer {
                 Some(params) => resolve_params(&session, id, params)?,
                 None => Vec::new(),
             };
+            let settings = crate::sounds::settings_asked(request.settings.as_ref())?;
             session.begin_gesture();
             let mut loaded = None;
             let result: Result<(), String> = (|| {
@@ -781,6 +785,9 @@ impl TrillServer {
                 }
                 if !resolved.is_empty() {
                     session.set_device_params(id, &resolved).map_err(|error| explain(session.project(), error))?;
+                }
+                if !settings.is_empty() {
+                    session.set_device_settings(id, &settings).map_err(|error| explain(session.project(), error))?;
                 }
                 if let Some(enabled) = request.enabled {
                     edit(&mut session, |project| {
@@ -802,6 +809,10 @@ impl TrillServer {
             if let Some(preset) = loaded {
                 out["preset"] = json!(preset);
             }
+            if !settings.is_empty() {
+                out["settings"] = json!(settings.into_iter().collect::<BTreeMap<String, String>>());
+            }
+            crate::sounds::preset_note_into(&mut out, &mut session, id);
             Ok(out)
         })();
         finish(reply)

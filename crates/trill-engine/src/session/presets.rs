@@ -336,6 +336,65 @@ impl Session {
         Ok(())
     }
 
+    /// What a device goes on doing after the preset or the settings it
+    /// was last given, where that is worth telling whoever asked: a
+    /// sampler reads its samples for a while, silent until it has. Given
+    /// once; `None` for a device that is as ready as it was. (Whether it
+    /// is ready yet is asked with [`Session::readiness_job`].)
+    pub fn take_preset_note(&mut self, id: DeviceId) -> Option<String> {
+        self.bank.devices.get(&id)?.controller.as_ref()?.lock().take_preset_note()
+    }
+
+    /// The settings in a plugin's saved state that it shows a host no
+    /// parameter for, by name, with the value each has as the plugin
+    /// writes it. Empty for a device whose state is not a list of named
+    /// settings that is read.
+    pub fn device_settings(&self, id: DeviceId) -> Result<Vec<(String, String)>, SessionError> {
+        self.project.device(id)?;
+        let meta = self.bank.devices.get(&id).ok_or(EditError::DeviceNotFound(id))?;
+        let Some(controller) = &meta.controller else { return Ok(Vec::new()) };
+        let mut settings = controller.lock().settings().unwrap_or_default();
+        // What has a parameter is set as a parameter.
+        settings.retain(|(name, _)| !meta.params.iter().any(|param| param.name == *name));
+        Ok(settings)
+    }
+
+    /// Gives settings of [`Session::device_settings`] other values, by
+    /// name: one undo step, while the song plays. The plugin is handed
+    /// its state with the values in place, as it is handed a preset. A
+    /// name that is no setting is an error that says which names come
+    /// near, and the device is as it was.
+    pub fn set_device_settings(&mut self, id: DeviceId, values: &[(String, String)]) -> Result<(), SessionError> {
+        let name = self.project.device(id)?.name.clone();
+        let meta = self.bank.devices.get(&id).ok_or(EditError::DeviceNotFound(id))?;
+        if let Some(error) = &meta.error {
+            return Err(SessionError::Device(format!("{id} is unavailable: {error}")));
+        }
+        self.absorb_editor_edits();
+        self.capture_state_of(id);
+        let before = self.project.clone();
+        let asked = match self.bank.devices.get(&id).and_then(|meta| meta.controller.as_ref()) {
+            Some(controller) => controller.lock().set_settings(values),
+            None => Err(PresetLoadError::Unsupported),
+        };
+        if let Err(error) = asked {
+            let after = self.put_back(id, &error);
+            let reason = match error {
+                PresetLoadError::Unsupported => "its saved state has no settings that are set by name".to_string(),
+                error => error.to_string(),
+            };
+            return Err(SessionError::Device(format!("{id} ({name}) was not given the settings: {reason}. {after}")));
+        }
+        if let Some(meta) = self.bank.devices.get_mut(&id) {
+            meta.applied_state = None;
+        }
+        // The state is the running plugin's until it is next captured,
+        // as after a preset it loaded itself.
+        self.project.device_mut(id)?.state = None;
+        self.make_step(before);
+        Ok(())
+    }
+
     fn ask_to_load(&self, id: DeviceId, preset: &PresetInfo) -> Result<(), PresetLoadError> {
         match self.bank.devices.get(&id).and_then(|meta| meta.controller.as_ref()) {
             Some(controller) => controller.lock().load_preset(preset),

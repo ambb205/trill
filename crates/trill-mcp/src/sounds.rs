@@ -7,6 +7,10 @@
 //! searches one), and had nothing to ask of a plugin that keeps its presets
 //! in its own window. So it settled for a built-in synth and set amplifiers
 //! parameter by parameter.
+//!
+//! Also here: what the device tools say after a preset that takes the
+//! plugin a while to make ready, and the settings in a plugin's saved
+//! state that it has no parameter for.
 
 use crate::server::{TrillServer, explain, finish, is_plugin};
 use rmcp::handler::server::wrapper::Parameters;
@@ -15,11 +19,12 @@ use rmcp::schemars::{self, JsonSchema};
 use rmcp::{tool, tool_router};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 use trill_core::DeviceId;
 use trill_core::device::{DeviceCategory, DeviceDescriptor, DeviceFactory};
 use trill_core::presets::{PresetInfo, PresetList, PresetStatus, SavedPreset};
+use trill_engine::Session;
 
 /// Appended to the server's instructions so a model knows these tools
 /// exist and when to reach for them.
@@ -29,16 +34,30 @@ Finding and keeping sounds
 installed instrument and the ones that were saved, and answers with the device and the preset to give \
 create_track. Look there before settling for a built-in synth: an installed instrument usually has the better \
 sound. The first search reads each plugin's presets, in the background; the reply says which are still being read.
-- A plugin that lists no presets keeps them in its own window, where only the user can choose one. Ask them to \
-(show_device_editor opens the window), then save_preset keeps that sound under a name. save_preset also keeps a \
-sound you have shaped by parameter. Saved presets are found by search_presets and given to a device by `preset` \
-like any other, in every song.
+- Presets are the way to a good sound: the makers' own, by people who can hear. Trill lists a plugin's presets \
+whichever way the plugin keeps them, the files of its maker's own format included (drum kits, guitar tones, \
+amplifier presets, synth patches), so give every plugin instrument and amplifier a preset before touching a \
+parameter, and say in a sentence which you chose. Then probe it once (see below): a preset's name does not say \
+what its notes sound like or which keys it answers to.
+- A reply's `note` after a preset says what to know about it: that a drum sampler or a sampled guitar reads its \
+samples for seconds, up to a minute, silent until it has (probe, measure and render wait for that), or that the \
+preset switched a setting on that changes how a part is played.
+- A few plugins still list no presets: they keep them where a host cannot read them, and only the user can choose \
+one, in the plugin's own window (show_device_editor opens it). Then save_preset keeps that sound under a name. \
+save_preset also keeps a sound you have shaped by parameter. Saved presets are found by search_presets and given \
+to a device by `preset` like any other, in every song.
 - A plugin's parameters are numbers whose meaning only the plugin knows. get_device shows each value as the \
 plugin displays it (`text`), lists the parameters that were moved from their defaults, and finds others by name \
 (`query`: \"mic\", \"gain\"). update_device takes a value as that text: \"-6 dB\", \"Dynamic 57\", \"On\".
 - get_device shows the channels a device takes and gives, and get_project marks a device that takes one channel: \
 what comes before it is mono from there on. Some plugins are mono inside whatever they take (a guitar amplifier \
-is) and widen the sound with a parameter of their own, such as a doubler: look for it with get_device `query`.";
+is) and widen the sound with a parameter of their own, such as a doubler: look for it with get_device `query`.
+- Some plugins have settings in their saved state that no parameter reaches (an Ample guitar has 250: its \
+effects, pedals, amplifier channels and strummer): get_device counts them (`settings_count`) and its `query` \
+finds them by name beside the parameters, and update_device `settings` sets them.
+- One parameter that matters for writing: the Ample guitars come with \"Auto Legato\" at 1, and nearly every \
+preset of theirs and of the bass puts it there, which hammers a note on to a neighbouring one that still rings. \
+For a picked chord or a strum that is to ring, set it to 0 (update_device params), again after every preset.";
 
 /// How many presets a search lists when the caller does not say, and the
 /// most it can ask for.
@@ -55,10 +74,12 @@ const NAMED_SAVED: usize = 24;
 
 /// What `describe_device` and `get_device` say of a plugin that lists no
 /// presets, in place of an empty list.
-pub(crate) const NO_PRESETS: &str = "This plugin gives a host no presets to list: it keeps them in its own window, \
-    where only the user can reach them. Ask the user to choose one there (show_device_editor opens it), then \
-    save_preset keeps the sound under a name, for this song and every other; or shape the sound by parameter \
-    (get_device `query` finds parameters by name).";
+pub(crate) const NO_PRESETS: &str = "This plugin gives a host no presets to list, and keeps them in no files that \
+    Trill reads: they are in its own window, where only the user can reach them. Ask the user to choose one there \
+    (show_device_editor opens it), then save_preset keeps the sound under a name, for this song and every other; \
+    or shape the sound by parameter (get_device `query` finds parameters by name).";
+/// The most settings a search of a device's saved state lists.
+const SHOWN_SETTINGS: usize = 40;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchPresetsRequest {
@@ -291,6 +312,70 @@ fn search_json(searched: &[Searched], query: &str, offset: usize, limit: usize) 
     }
     out["items"] = json!(items);
     out
+}
+
+/// The settings a call asked to change, as the text a plugin's state has
+/// them as: a number as a number, a switch as the number it stands for
+/// nowhere, since plugins differ (0 and 1, or -1 and 1), so true and
+/// false are refused.
+pub(crate) fn settings_asked(asked: Option<&BTreeMap<String, Value>>) -> Result<Vec<(String, String)>, String> {
+    let mut settings = Vec::new();
+    for (name, value) in asked.into_iter().flatten() {
+        let text = match value {
+            Value::String(text) => text.clone(),
+            Value::Number(number) => number.to_string(),
+            other => {
+                return Err(format!(
+                    "the setting '{name}' needs a number or a string, written as get_device shows its value now \
+                     (given: {other}); a switch is a number, and which number is off differs from plugin to plugin"
+                ));
+            }
+        };
+        settings.push((name.clone(), text));
+    }
+    Ok(settings)
+}
+
+/// Says in a reply what a device goes on doing after the preset or the
+/// settings it was just given, if that is worth saying.
+pub(crate) fn preset_note_into(out: &mut Value, session: &mut Session, device: DeviceId) {
+    if let Some(note) = session.take_preset_note(device) {
+        out["note"] = json!(note);
+    }
+}
+
+/// Adds to a `get_device` reply the settings in the device's saved state
+/// that it has no parameter for: how many there are, and with a `query`
+/// those whose names have its words.
+pub(crate) fn settings_into(out: &mut Value, session: &Session, device: DeviceId, query: Option<&str>) {
+    let settings = session.device_settings(device).unwrap_or_default();
+    if settings.is_empty() {
+        return;
+    }
+    out["settings_count"] = json!(settings.len());
+    let words: Vec<String> = query.unwrap_or_default().split_whitespace().map(str::to_lowercase).collect();
+    if words.is_empty() {
+        out["settings_note"] = json!(
+            "The plugin's saved state holds this many settings that it has no parameter for. `query` finds them \
+             by name, like parameters; update_device `settings` sets one."
+        );
+        return;
+    }
+    let found: Vec<&(String, String)> = settings
+        .iter()
+        .filter(|(name, _)| words.iter().all(|word| name.to_lowercase().contains(word.as_str())))
+        .collect();
+    out["settings"] =
+        found.iter().take(SHOWN_SETTINGS).map(|(name, value)| json!({ "name": name, "value": value })).collect();
+    if found.len() > SHOWN_SETTINGS {
+        out["settings_more"] = json!(format!("{} more match; narrow the query", found.len() - SHOWN_SETTINGS));
+    }
+    if !found.is_empty() {
+        out["settings_note"] = json!(
+            "`settings` are read from the plugin's saved state: it has no parameter for them. update_device \
+             `settings` sets one by its name to a value written as it is written here."
+        );
+    }
 }
 
 /// Adds what is known of a device type's presets to its entry in a

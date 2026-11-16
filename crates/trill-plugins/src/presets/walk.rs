@@ -13,13 +13,17 @@ const MAX_DEPTH: usize = 16;
 pub(crate) const MAX_FILES: usize = 100_000;
 
 /// Whether `path` has one of `extensions` (without the dot, lower case).
-/// With no extensions every file has.
+/// With no extensions every file has; an empty extension is that of a
+/// file whose name has none.
 fn has_extension(path: &Path, extensions: &[String]) -> bool {
     if extensions.is_empty() {
         return true;
     }
-    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else { return false };
-    extensions.iter().any(|wanted| wanted.eq_ignore_ascii_case(extension))
+    let extension = match path.extension() {
+        Some(extension) => extension.to_str(),
+        None => Some(""),
+    };
+    extension.is_some_and(|extension| extensions.iter().any(|wanted| wanted.eq_ignore_ascii_case(extension)))
 }
 
 /// The files below `folder` that have one of `extensions`, sorted so that

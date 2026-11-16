@@ -26,6 +26,9 @@
 //!   and note bookkeeping.
 //! * `param_text`: a parameter's value from the text a plugin shows for
 //!   it, for the plugins that will not say themselves.
+//! * `vendor`: the presets vendors keep in files of their own formats,
+//!   listed with a plugin's other presets and loaded by building the
+//!   state one stands for.
 //! * `edits` and `exclusive`: how the audio-thread and main-thread halves
 //!   of a hosted plugin pass things to each other without waiting.
 //!
@@ -71,9 +74,11 @@ pub mod scan;
 mod signal;
 #[cfg(test)]
 mod test_support;
+mod vendor;
 pub mod vst3;
 
 pub use clap::{CLAP_SCHEME, ClapConfig, ClapFactory};
 pub use plugin_host::PluginHost;
 pub use scan::{PluginRecord, ScanFailure, ScanMode, Scanner};
+pub use vendor::{VendorPlaces, describe_state, split_state};
 pub use vst3::{VST3_SCHEME, Vst3Config, Vst3Factory};

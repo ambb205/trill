@@ -548,7 +548,9 @@ impl Vst3Thread {
         factory: ComPtr<vst3::Steinberg::IPluginFactory>,
     ) -> (PathBuf, Vec<crate::scan::PluginRecord>) {
         let records = super::probe::records(&factory);
-        let path = PathBuf::from(format!("<scripted module {name}>"));
+        // Named as a plugin's file would be: some things about a plugin
+        // are told by its file's name.
+        let path = PathBuf::from(format!("<scripted modules>/{name}.vst3"));
         self.modules.insert(path.clone(), introduce(Module::from_factory(factory), &self.host));
         (path, records)
     }
@@ -679,6 +681,28 @@ impl Vst3Thread {
         let class = ClassId::parse(class).ok_or_else(|| format!("'{class}' is not a VST3 class id"))?;
         let module = module(&mut self.modules, &self.host, path)?;
         presets::programs(module, &self.host, class, sink)
+    }
+
+    /// Both states of an instance as it is now; `None` for an instance
+    /// that is gone. A half the plugin does not have is empty.
+    pub(crate) fn state_of(&mut self, id: InstanceId) -> Option<PluginState> {
+        let instance = self.instances.get(&id)?;
+        instance.sync_controller();
+        Some(PluginState {
+            component: instance.component_state().unwrap_or_default(),
+            controller: instance.controller_state().unwrap_or_default(),
+        })
+    }
+
+    /// Has an instance take on `state`, as it plays: a state that was
+    /// built for it rather than saved by it.
+    pub(crate) fn load_state(&mut self, id: InstanceId, state: &PluginState) -> Result<(), String> {
+        let instance = self.instances.get_mut(&id).ok_or("the plugin instance no longer exists")?;
+        if state.is_empty() {
+            return Err("the preset holds nothing to hand the plugin".to_string());
+        }
+        let blob = state::encode(instance.class, state);
+        instance.restore(Some(&blob)).map_err(|reason| reason.replace("its saved state", "the preset's state"))
     }
 
     /// Has an instance take on the states in the preset file at `path`,

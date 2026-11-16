@@ -120,7 +120,9 @@ impl ClapFactory {
     pub fn new(config: ClapConfig) -> std::io::Result<Self> {
         let main = plugin_thread()?;
         let settings: Settings = config.into();
-        let presets = PresetStore::new(&PRESETS, settings.preset_settings(Vec::new()), main.clone());
+        // No vendor's own preset files are read for a CLAP plugin yet.
+        let places = crate::vendor::VendorPlaces::default();
+        let presets = PresetStore::new(&PRESETS, settings.preset_settings(Vec::new(), places), main.clone());
         let installed = Inventory::new(&FORMAT, settings, main.clone());
         Ok(Self { shared: Arc::new(Shared { main, installed, presets }) })
     }

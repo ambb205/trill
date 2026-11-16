@@ -49,14 +49,20 @@ impl Settings {
     /// Where and how the presets of the plugins these settings find are
     /// read: by the same scanner, cached beside the scan cache, and given
     /// more time, since a plugin has more presets than a file has
-    /// plugins. `folders` are where the format keeps preset files.
-    pub(crate) fn preset_settings(&self, folders: Vec<PathBuf>) -> crate::presets::store::Settings {
+    /// plugins. `folders` are where the format keeps preset files, and
+    /// `vendor_places` where vendors keep presets of their own.
+    pub(crate) fn preset_settings(
+        &self,
+        folders: Vec<PathBuf>,
+        vendor_places: crate::vendor::VendorPlaces,
+    ) -> crate::presets::store::Settings {
         let beside = self.cache_path.as_ref().and_then(|path| path.parent());
         crate::presets::store::Settings {
             scanner: self.scanner.clone(),
             cache_folder: beside.map(|folder| folder.join(crate::presets::cache::FOLDER)),
             timeout: self.scan_timeout * crate::presets::store::PRESET_PATIENCE,
             folders,
+            vendor_places,
         }
     }
 }

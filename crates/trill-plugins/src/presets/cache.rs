@@ -16,7 +16,9 @@ use trill_core::presets::{PresetInfo, short_id};
 /// Bumped whenever the file layout changes, or what is read from a plugin
 /// does; older entries are read again.
 // 2: program lists that are only numbered slots are no longer listed.
-const FORMAT_VERSION: u32 = 2;
+// 3: the presets a plugin's maker keeps in files of its own are listed, so
+//    an entry that says "none" of such a plugin is no longer true.
+const FORMAT_VERSION: u32 = 3;
 /// Name of the folder, beside the scan cache, that holds the entries.
 pub(crate) const FOLDER: &str = "presets";
 /// The longest piece of a plugin's id used in its entry's file name.

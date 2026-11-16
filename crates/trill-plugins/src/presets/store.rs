@@ -3,7 +3,7 @@
 //! thread of the store's own.
 
 use super::cache::{self, Entry};
-use super::{Found, Line, PRESETS_ARGUMENT, Sink, identify, walk};
+use super::{About, Found, Line, PRESETS_ARGUMENT, Sink, identify, walk};
 use crate::main_thread::MainThread;
 use crate::plugin_thread::PluginThread;
 use crate::scan::Scanner;
@@ -59,6 +59,9 @@ pub(crate) struct Settings {
     /// The folders the format keeps preset files in, for
     /// [`PresetFormat::read_files`].
     pub folders: Vec<PathBuf>,
+    /// Where vendors keep presets in formats of their own
+    /// ([`crate::vendor`]).
+    pub vendor_places: crate::vendor::VendorPlaces,
 }
 
 /// What is known of one plugin's presets, and whether more is coming.
@@ -317,11 +320,18 @@ impl Shared {
     fn run_plugin_code(&self, plugin: &PluginRef, found: &mut Found) -> Outcome {
         match self.settings.scanner.resolve() {
             Some(scanner) => {
-                let arguments: [&OsStr; 4] = [
+                let about = About {
+                    name: plugin.name.clone(),
+                    vendor: plugin.vendor.clone(),
+                    places: self.settings.vendor_places.clone(),
+                };
+                let about = serde_json::to_string(&about).unwrap_or_default();
+                let arguments: [&OsStr; 5] = [
                     OsStr::new(PRESETS_ARGUMENT),
                     OsStr::new(self.format.scheme),
                     plugin.path.as_os_str(),
                     OsStr::new(&plugin.id),
+                    OsStr::new(&about),
                 ];
                 match child::run_process(&scanner, &arguments, self.settings.timeout, Some(&self.closed)) {
                     Ok(finished) => interpret(&finished, self.settings.timeout, found),
@@ -330,6 +340,8 @@ impl Shared {
                 }
             }
             None => {
+                // The vendor's own files take no code of the plugin's.
+                crate::vendor::list(plugin, &self.settings.vendor_places, found);
                 let (read, path, id) = (self.format.read_in_thread, plugin.path.clone(), plugin.id.clone());
                 let read = move |thread: &mut PluginThread| {
                     let mut found = Found::default();
@@ -491,6 +503,7 @@ mod tests {
                 cache_folder: Some(self.dir.path().join("cache").join(cache::FOLDER)),
                 timeout: WAIT,
                 folders: vec![self.dir.path().join("shared presets")],
+                vendor_places: crate::vendor::VendorPlaces::default(),
             };
             PresetStore::new(&FAKE, settings, plugin_thread().unwrap())
         }
@@ -741,6 +754,7 @@ mod tests {
             cache_folder: Some(rig.dir.path().join("cache")),
             timeout: WAIT,
             folders: Vec::new(),
+            vendor_places: crate::vendor::VendorPlaces::default(),
         };
         let store = PresetStore::new(&FAKE, settings, plugin_thread().unwrap());
         let list = store.wait(&rig.plugin, WAIT);

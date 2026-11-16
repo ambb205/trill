@@ -35,8 +35,9 @@ asked for:
 
 ```sh
 cargo test -p trill-plugins -- --include-ignored    # against the CLAP and VST3 plugins installed here (minutes)
-cargo test -p trill-mcp --test presets -- --include-ignored --nocapture    # an assistant's pass over Surge XT's presets, and over an amplifier that lists none
+cargo test -p trill-mcp --test presets -- --include-ignored --nocapture    # an assistant's pass over Surge XT's presets, an amplifier's, and a kit, a guitar tone and a patch of their makers'
 cargo test -p trill-plugins --test sounds -- --include-ignored --nocapture --test-threads 1    # what installed plugins say of their parameters, channels and presets
+cargo test -p trill-plugins --test vendor -- --include-ignored --nocapture --test-threads 1    # the makers' own presets of Serum 2, the Ample guitars, Superior Drummer 3 and the Archetypes: listed, loaded, and heard to differ
 cargo test -p trill-mcp --test controllers -- --include-ignored --nocapture    # a SWAM saxophone and Surge XT played from the controller curves of clips
 cargo test -p trill-mcp --test hearing -- --include-ignored --nocapture    # renders and probes of Superior Drummer 3, a SWAM saxophone and an Ample bass
 cargo test -p trill-mcp --test instruments -- --include-ignored --nocapture    # what Trill ships about the Ample guitars and bass and Superior Drummer 3, checked on the plugins themselves
@@ -143,16 +144,35 @@ provides: a CLAP plugin's through its preset-discovery providers, a VST3 plugin'
 standard preset folders and the programs of its program lists. A big synth has thousands, so they are read in the
 background, in the scanner process, and remembered until the plugin or its preset folders change. Loading one is
 done by the running plugin, as its own preset browser would, while the song plays; it is one undo step, and what
-it comes to is saved with the project. (What a plugin keeps in a format and a browser of its own, without telling
-the host, cannot be listed: Surge XT lists its three thousand patches as a CLAP plugin and none as a VST3. A
-program list that is only numbered slots, "Prog 1" to "Prog 128", is not listed either: there is no sound to
-choose by a number.)
+it comes to is saved with the project. (A program list that is only numbered slots, "Prog 1" to "Prog 128", is not
+listed: there is no sound to choose by a number.)
 `cargo run -p trill-plugins --example presets -- "clap:Surge XT" warm pad` shows what an installed plugin offers.
 
+**The makers' own presets**: most sampled instruments and amplifiers tell a host of no presets at all, and keep
+them as files of a format of their own for the browser in their window. For the plugins it knows by their ids,
+Trill reads those files where the maker's installer put them and lists them with the rest:
+
+| Plugin | Its presets |
+|---|---|
+| Serum 2 | the patches in `Documents/Xfer/Serum 2 Presets`: a JSON header and zstd-compressed CBOR |
+| Ample Sound's guitars and basses | the tones in `Documents/Ample Sound/<instrument>/Presets4`: XML documents |
+| Superior Drummer 3 | the factory kits of each installed sound library: one text file of them |
+| Neural DSP's Archetypes | the presets in the shared `Neural DSP/<plugin>` folder: trees in JUCE's binary form |
+
+Loading one builds the state the plugin would save with that preset in it and hands it to the running plugin.
+Trill then asks the plugin for its state again and looks for the preset's settings in it, so a preset the plugin
+did not take (a damaged file, a version this reader does not know, a plugin that refuses) is a sentence that names
+it, and the device keeps the sound it had. The files are read in the scanner process, in bounded sizes, and nothing
+is ever written to a maker's folder. Where a preset makes the plugin read samples for a while (a drum kit, a
+guitar's other set of samples) the reply says so; a probe, a measurement and a render wait for it. It also says
+when an Ample preset switches the instrument's automatic legato on, as nearly all of them do: notes that ring over
+each other are then hammered on unasked, until the parameter "Auto Legato" is set to 0. A folder or a product that
+is not there is simply no presets.
+
 **Saved presets**: any device's sound can be kept under a name: a plugin's state with everything that was set in
-its own window, a built-in device's every parameter. That is how a plugin that keeps its presets in its own window
-(most guitar, bass and drum instruments, and amplifiers) gets presets a host can list: choose a sound in the
-plugin's window once, then "Save preset…" in the preset menu of its panel, or `save_preset` over MCP. A saved
+its own window, a built-in device's every parameter. That is how a plugin whose presets are neither told to the
+host nor in files that Trill reads gets presets a host can list: choose a sound in the plugin's window once, then
+"Save preset…" in the preset menu of its panel, or `save_preset` over MCP. A saved
 preset is listed with the device type's own, under "Saved", in every song, and is given to a device like any
 other. They are small files in `saved-presets` beside the settings file, one folder per device type.
 
@@ -164,6 +184,17 @@ with one input channel is handed left and right mixed, and is marked in the chai
 pair may still be mono inside: a guitar amplifier is, and widens the sound with a doubler of its own.)
 `cargo run -p trill-plugins --example inspect -- "vst3:<plugin name>" mic` shows an installed plugin's channels
 and the parameters with that word in their name, as the plugin shows them.
+
+Some of what a plugin can do has no parameter: an Ample guitar's saved state is a document of some 480 named
+settings, and about 250 of them (its effects, pedals, amplifier and strummer) are not among the 226 parameters it
+shows a host.
+Those are found by name and set through the state, as one undo step, with the values the plugin itself writes.
+
+The same example is where reading another maker's presets begins. With `--state <folder> --files` it says what
+the plugin's state is (text, a document, a container that is known, or bytes that give nothing away), writes the
+state out to look at, and lists the files that look like presets in the maker's folders; `--file <path>` says
+what one of those files is, in the same words. When both are the same kind of thing, a preset can be made into a
+state.
 
 **Songwriting**: chords by symbol or Roman numeral, voicings, rhythms, arpeggios, bass lines, drum grooves with
 fills (and a reply that says what each fill took the place of), melodies by scale degree with their ornaments (a
@@ -352,15 +383,18 @@ them a page at a time and search them (`preset_query: "warm pad"`, `preset_categ
 `add_device` and `update_device` take one by its name, its category and name, or its id. `search_presets` looks
 for a sound ("warm pad", "808 sub") across every installed instrument at once and answers with the device and the
 preset to give `create_track`; the presets are read in the background the first time and remembered, and the reply
-says which are still being read. `list_devices` says how many presets a plugin has, where that is known. A plugin
-that lists none says so in a sentence: its presets are in its own window, and `save_preset` keeps what is chosen
-there.
+says which are still being read. `list_devices` says how many presets a plugin has, where that is known. The
+presets a maker keeps in files of its own format (see "The makers' own presets") are among them. After a preset
+that sets the plugin reading samples, the reply has a `note` that says so. A plugin that lists none says so in a
+sentence: its presets are in its own window, and `save_preset` keeps what is chosen there.
 
 `get_device` is small whatever the device: for a plugin with hundreds of parameters it gives the count and the
 ones that are not at the plugin's own defaults, `query` finds others by name with their ranges and choices, and
 `show: "all"` pages through every one. Each of a plugin's parameters comes with `text`, the value as the plugin
 displays it, and `update_device` takes that text as well as a number: `{"Cab L Mic Type": "Dynamic 57", "Input
-Gain": "-6 dB"}`. It also says which channels the device takes and gives.
+Gain": "-6 dB"}`. It also says which channels the device takes and gives. Where a plugin's saved state has
+settings that no parameter reaches, `get_device` counts them (`settings_count`), `query` finds them by name beside
+the parameters, and `update_device` sets them: `"settings": {"M-Fret Sound": 1}`.
 
 The HTTP server listens on localhost only and has no password: any program on the machine may use it. Pages in a
 web browser may not; requests that carry a browser's `Origin` are refused.
@@ -399,7 +433,7 @@ crates/
   trill-engine    Realtime engine, offline renderer, analysis, and the Session.
   trill-library   The sound library (scanning, indexing, searching sample folders) and the settings file.
   trill-plugins   Plugin hosting: scanning and preset discovery in a child process, the plugin main thread, CLAP
-                  and VST3.
+                  and VST3, and the readers of the presets some makers keep in files of their own.
   trill-runtime   What both programs share, built once: session, media cache, library, settings, housekeeping,
                   safety copies of unsaved work.
   trill-theory    Music theory for writing parts: chords, scales, voicings, rhythms, grooves, ornaments,

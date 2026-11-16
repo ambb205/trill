@@ -1,6 +1,7 @@
 //! The off-audio-thread half of a hosted plugin: state, parameter values
 //! and the plugin's editor.
 
+use super::class_id::ClassId;
 use super::instance::{Created, InstanceId};
 use super::links::ParamLinks;
 use super::params::Mapping;
@@ -9,9 +10,12 @@ use crate::edits::Edit;
 use crate::main_thread::{CallError, MainThread};
 use crate::plugin_thread::{PluginThread, keep_for_good};
 use crate::presets::{LOAD_TIMEOUT, Locator, await_arrival};
+use crate::scan::Scanner;
+use crate::vendor;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use trill_core::device::{
     ChannelLayout, ControllerSupport, DeviceController, EditorError, EditorImage, EditorOptions, ParamEdit,
     ParamEditKind, PresetLoadError,
@@ -21,6 +25,12 @@ use trill_core::presets::PresetInfo;
 /// How long a plugin may take to serialize its state or report its
 /// parameter values before the request is abandoned.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a plugin that was handed a state built from a vendor's preset
+/// is given to show the preset in its own state, and how often it is
+/// looked at meanwhile. Plugins take a state on a moment after they are
+/// handed it; none was seen to need a second.
+const TOOK_TIMEOUT: Duration = if cfg!(test) { Duration::from_millis(400) } else { Duration::from_secs(8) };
+const TOOK_POLL: Duration = Duration::from_millis(25);
 
 /// Forwards the session's requests to the plugin main thread, whichever
 /// thread the session happens to be driven from.
@@ -45,12 +55,28 @@ pub(crate) struct Vst3Controller {
     channels: ChannelLayout,
     /// The value the plugin calls each listed parameter's default.
     defaults: Vec<f64>,
+    /// The plugin's class, which a state built for it is filed under.
+    class: ClassId,
+    /// Where a vendor's preset is made into a state.
+    scanner: Scanner,
+    /// What the plugin goes on doing after the preset it was last given,
+    /// until someone asks.
+    note: Option<String>,
 }
 
 impl Vst3Controller {
-    pub(crate) fn new(main: MainThread<PluginThread>, name: String, created: &Created) -> Self {
+    pub(crate) fn new(
+        main: MainThread<PluginThread>,
+        name: String,
+        created: &Created,
+        class: ClassId,
+        scanner: Scanner,
+    ) -> Self {
         let listed = created.params.iter().enumerate().map(|(index, spec)| (spec.slot, (index, spec.mapping)));
         Self {
+            class,
+            scanner,
+            note: None,
             main,
             instance: created.id,
             name,
@@ -64,6 +90,77 @@ impl Vst3Controller {
             },
             defaults: created.params.iter().map(|spec| spec.declared).collect(),
         }
+    }
+}
+
+impl Vst3Controller {
+    /// Both states of the plugin as it is now.
+    fn states(&self) -> Result<vendor::States, PresetLoadError> {
+        let instance = self.instance;
+        match self.main.call(REQUEST_TIMEOUT, move |thread| thread.vst3.state_of(instance)) {
+            Ok(Some(state)) => Ok(state),
+            Ok(None) => Err(PresetLoadError::Failed("the plugin is no longer running".into())),
+            Err(CallError::TimedOut) => Err(PresetLoadError::Unresponsive(format!(
+                "the plugin did not give its state within {} s",
+                REQUEST_TIMEOUT.as_secs()
+            ))),
+            Err(error) => Err(PresetLoadError::Failed(error.to_string())),
+        }
+    }
+
+    /// Loads a preset that is in a file of its vendor's own format: makes
+    /// the state it stands for, hands the plugin that, and waits until
+    /// the plugin's own state shows the preset.
+    fn load_vendor_preset(
+        &mut self,
+        format: vendor::Format,
+        file: &Path,
+        key: Option<&str>,
+    ) -> Result<(), PresetLoadError> {
+        let current = self.states()?;
+        let built = vendor::child::build(&self.scanner, format, file, key, self.class, &current);
+        self.hand_over(format, built.map_err(PresetLoadError::Failed)?, "preset")
+    }
+
+    /// Hands the plugin a state that was built for it, and waits until
+    /// the plugin's own state shows what the state was built to bring:
+    /// `what`, a preset or settings.
+    fn hand_over(&mut self, format: vendor::Format, built: vendor::Built, what: &str) -> Result<(), PresetLoadError> {
+        let instance = self.instance;
+        let vendor::Built { state, marks, note } = built;
+        match self.main.call(LOAD_TIMEOUT, move |thread| thread.vst3.load_state(instance, &state)) {
+            Ok(Ok(())) => {}
+            Ok(Err(reason)) => return Err(PresetLoadError::Failed(reason)),
+            Err(CallError::TimedOut) => {
+                return Err(PresetLoadError::Unresponsive(format!(
+                    "the plugin did not answer within {} s",
+                    LOAD_TIMEOUT.as_secs()
+                )));
+            }
+            Err(error) => return Err(PresetLoadError::Failed(error.to_string())),
+        }
+        // The plugin has said yes. Whether it took the preset is what its
+        // own state shows, a moment later.
+        let deadline = Instant::now() + TOOK_TIMEOUT;
+        loop {
+            let after = self.states()?;
+            let missing = vendor::missing(format, &marks, &after);
+            if vendor::took(&marks, &missing) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let first = missing.first().map(|mark| mark.name.as_str()).unwrap_or_default();
+                return Err(PresetLoadError::Failed(format!(
+                    "the plugin was handed the {what} and did not take it: its state does not show {} of the {} \
+                     settings the {what} gives it ('{first}' among them)",
+                    missing.len(),
+                    marks.len()
+                )));
+            }
+            std::thread::sleep(TOOK_POLL);
+        }
+        self.note = note;
+        Ok(())
     }
 }
 
@@ -179,9 +276,15 @@ impl DeviceController for Vst3Controller {
 
     fn load_preset(&mut self, preset: &PresetInfo) -> Result<(), PresetLoadError> {
         let instance = self.instance;
+        self.note = None;
         let locator = Locator::parse(&preset.locator)
-            .filter(|locator| matches!(locator, Locator::Vst3File { .. } | Locator::Vst3Program { .. }))
+            .filter(|locator| {
+                matches!(locator, Locator::Vst3File { .. } | Locator::Vst3Program { .. } | Locator::Vendor { .. })
+            })
             .ok_or_else(|| PresetLoadError::Failed("it is not a preset of a VST3 plugin".into()))?;
+        if let Locator::Vendor { format, path, key } = &locator {
+            return self.load_vendor_preset(*format, path, key.as_deref());
+        }
         let before = self.save_state();
         let loaded = self.main.call(LOAD_TIMEOUT, move |thread| match locator {
             Locator::Vst3File { path } => thread.vst3.load_preset_file(instance, &path),
@@ -203,6 +306,24 @@ impl DeviceController for Vst3Controller {
             ))),
             Err(error) => Err(PresetLoadError::Failed(error.to_string())),
         }
+    }
+
+    fn take_preset_note(&mut self) -> Option<String> {
+        self.note.take()
+    }
+
+    fn settings(&mut self) -> Option<Vec<(String, String)>> {
+        let format = vendor::Format::of_class(&self.class.to_string())?;
+        vendor::settings(format, &self.states().ok()?)
+    }
+
+    fn set_settings(&mut self, values: &[(String, String)]) -> Result<(), PresetLoadError> {
+        self.note = None;
+        let format = vendor::Format::of_class(&self.class.to_string()).ok_or(PresetLoadError::Unsupported)?;
+        let current = self.states()?;
+        // The plugin's own state is read here, not a file from elsewhere.
+        let built = vendor::with_settings(format, &current, values).map_err(PresetLoadError::Failed)?;
+        self.hand_over(format, built, "settings")
     }
 }
 
