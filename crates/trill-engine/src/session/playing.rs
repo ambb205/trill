@@ -285,7 +285,7 @@ impl Session {
     /// records it, or disarms it. Disarming lets go of whatever the
     /// keyboard was holding on the track. Only tracks that hold clips can
     /// be armed (not groups or returns), and at most
-    /// [`MAX_LIVE_TRACKS`](crate::live::MAX_LIVE_TRACKS) at once.
+    /// [`MAX_LIVE_TRACKS`] at once.
     pub fn set_armed(&mut self, track: TrackId, armed: bool) -> Result<(), SessionError> {
         let found = self.project.track(track)?;
         if !armed {

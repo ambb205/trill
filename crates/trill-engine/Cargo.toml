@@ -18,16 +18,15 @@ serde.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# For taking an output device exclusively (WASAPI), which the audio library
+# does not offer. The same crate and version it brings in itself.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Media_Audio",
     "Win32_Media_KernelStreaming",
     "Win32_Media_Multimedia",
-    "Win32_Devices_FunctionDiscovery",
-    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Com",
     "Win32_System_Threading",
-    "Win32_System_Variant",
-    "Win32_UI_Shell_PropertiesSystem",
 ] }
 
 [dev-dependencies]

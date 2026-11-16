@@ -8,10 +8,10 @@
 //!
 //! The audio thread itself belongs to an [`AudioHost`]: the engine asks the
 //! host to open a device and hands it a [`Renderer`]. Which device that is
-//! can change while the program runs ([`Engine::apply`]), and a device can
-//! disappear ([`Engine::check`]). Through all of it the processor, with the
-//! graph and every running device, stays where it is, in a [`Seat`] that
-//! one stream after another renders from.
+//! can change while the program runs (`Engine::apply`), and a device can
+//! disappear (`Engine::check`). Through all of it the processor, with the
+//! graph and every running device, stays where it is, in a `Seat` that one
+//! stream after another renders from.
 
 use crate::graph::{AudioData, Graph};
 use crate::host::{
