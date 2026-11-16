@@ -39,6 +39,7 @@ cargo test -p trill-mcp --test presets -- --include-ignored --nocapture    # an 
 cargo test -p trill-plugins --test sounds -- --include-ignored --nocapture --test-threads 1    # what installed plugins say of their parameters, channels and presets
 cargo test -p trill-mcp --test controllers -- --include-ignored --nocapture    # a SWAM saxophone and Surge XT played from the controller curves of clips
 cargo test -p trill-mcp --test hearing -- --include-ignored --nocapture    # renders and probes of Superior Drummer 3, a SWAM saxophone and an Ample bass
+cargo test -p trill-mcp --test instruments -- --include-ignored --nocapture    # what Trill ships about the Ample guitars and bass and Superior Drummer 3, checked on the plugins themselves
 cargo test -p trill-app a_modelled_saxophone -- --include-ignored --nocapture    # the same saxophone typed on the computer keyboard, through the window's own code (no window opens)
 cargo test -p trill-media -- --include-ignored      # decoding audio files found in this machine's usual folders
 TRILL_TEST_PLUGIN_WINDOWS=1 cargo test -p trill-plugins --test editor_windows -- --test-threads=1   # opens windows
@@ -165,9 +166,27 @@ pair may still be mono inside: a guitar amplifier is, and widens the sound with 
 and the parameters with that word in their name, as the plugin shows them.
 
 **Songwriting**: chords by symbol or Roman numeral, voicings, rhythms, arpeggios, bass lines, drum grooves with
-fills, melodies by scale degree, swing and humanizing, and reading a song's key and chords back from its notes
-(`trill-theory`). Over MCP an assistant says `Am9 | Fmaj9 | Cmaj7 G/B | Em7`, drop-2, house groove, rather than
-spelling notes.
+fills (and a reply that says what each fill took the place of), melodies by scale degree with their ornaments (a
+bend up to a pitch and its release, a slide, a hammer-on or pull-off, vibrato: `5:2!bend=6!vib`), swing and
+humanizing, and reading a song's key and chords back from its notes (`trill-theory`). Over MCP an assistant says
+`Am9 | Fmaj9 | Cmaj7 G/B | Em7`, drop-2, house groove, rather than spelling notes.
+
+**A track knows what its notes mean** to its instrument: whether they are drums or pitches (a drum kit, and a
+plugin that calls itself a drum instrument, are drums without being told; any track can be switched), which key
+each drum is on, which keys are keyswitches and what they choose, which play a noise, where the range ends, the
+octave the instrument really sounds at, how far its pitch wheel bends. It is kept in the song, on the track, and
+everything reads it. A drum name lands on the kit's own key. `articulation: "palm_mute"` presses the keyswitch
+just before the note, and fits the velocity where velocity decides how a note is played. An ornament is written as
+the instrument's own keyswitch where it has one for it, and as a pitch-bend curve scaled to its bend range where
+it has not. Reading a song back leaves keyswitches and drums out of the harmony and reads a bass at the octave it
+sounds. A part that lands outside the range, or on a keyswitch, says so when it is written.
+
+What is found out about a plugin is remembered for that plugin on this machine (`instruments`, beside the settings
+file) and given to the next track that plays it. Trill ships what was measured of a few: Ample Guitar PF, Metal
+Eclipse, Metal Hellrazer and Metal Ray5, Superior Drummer 3, and the SWAM winds and strings. A song opened from a
+file takes what is known where its tracks say nothing themselves. A probe says whether the instrument it played
+is known already, and names keys and ranges in the words `set_instrument_profile` takes, so that what one probe
+found is written down in one call.
 
 **Sounds**: a library of the sample folders you point it at, scanned in the background and searchable by words,
 tags, tempo, key and length (all read from file and folder names). Audio clips play WAV, AIFF, FLAC, MP3 and Ogg
@@ -227,9 +246,10 @@ count-in, loop recording that layers each pass onto the last, one undo step per 
 [Playing and latency](#playing-and-latency).
 
 **Application**: an arrangement with multi-clip editing (move and copy across tracks, trim either edge, split,
-fades, a clipboard, time selection, and deleting, repeating or inserting a stretch of time on every track at
-once), markers, group and return tracks, and automation lanes that are edited by hand or drawn in steps; a piano
-roll; device panels generated from each device's parameters; a mixer; MIDI import and export; project files; WAV
+fades, a clipboard, time selection, deleting, repeating or inserting a stretch of time on every track at once,
+and copying one, with its automation, to paste over what is there or with room made for it), markers, group and
+return tracks, and automation lanes that are edited by hand or drawn in steps; a piano roll, which lists a drum
+track's rows by the names its kit has for them; device panels generated from each device's parameters; a mixer; MIDI import and export; project files; WAV
 export. `F1` lists the keyboard shortcuts.
 
 The lane under the piano roll's notes shows velocity or a MIDI controller of the clip, chosen from the chips
@@ -316,8 +336,9 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Notes | `get_notes`, `add_notes`, `set_notes`, `remove_notes`, `transform_notes` |
 | Controllers | `get_controllers`, `set_controllers`, `shape_dynamics` (gives a line its dynamics from its notes, as an expression curve) |
 | Music | `write_chords`, `write_drums`, `write_arpeggio`, `write_bass`, `write_melody`, `analyze_music`, `music_reference` |
+| Instruments | `get_instrument_profile`, `set_instrument_profile` (what a track's notes mean to its instrument: drums or pitches, the drum map, keyswitches, range, octave, bend range; kept in the song and remembered for the plugin) |
 | Automation | `set_automation`, `get_automation`, `set_markers` |
-| Arrangement | `edit_time` (remove, repeat or open up a stretch of time on every track at once) |
+| Arrangement | `edit_time` (remove, repeat or open up a stretch of time on every track at once; copy one to another place, on every track or some, over what is there or making room) |
 | Playback | `transport` (play, stop, seek, record) |
 | Hearing | `probe` (what an instrument does: range, octave, keyswitches, drum map), `measure` (the mix, every track, every section, gain reduction; writes nothing), `render` (the same, and a WAV file) |
 | Playing live | `play_notes`, `midi_inputs`, `audio` (device, sample rate, buffer size, latency) |
@@ -381,7 +402,8 @@ crates/
                   and VST3.
   trill-runtime   What both programs share, built once: session, media cache, library, settings, housekeeping,
                   safety copies of unsaved work.
-  trill-theory    Music theory for writing parts: chords, scales, voicings, rhythms, grooves, analysis.
+  trill-theory    Music theory for writing parts: chords, scales, voicings, rhythms, grooves, ornaments,
+                  articulations, analysis.
   trill-mcp       MCP server (library) and the headless `trill-mcp` binary.
   trill-assistant Back end of the in-app assistant: runs the user's own Claude Code, kept to Trill's tools, a plan and the web.
   trill-noir      The GUI kit: theme, widgets and painting.

@@ -30,7 +30,8 @@ pub(crate) const INSTRUCTIONS: &str = "\
 What a track's notes mean
 - A track knows what its notes are to its instrument, and get_project shows it: a drum track (`plays: drums`), \
 the articulations it can be asked for, its range, the octave it sounds at. A track is given this with its \
-instrument: Trill ships it for some plugins and remembers what you taught it about others.
+instrument: Trill ships it for some plugins and remembers what you taught it about others. A song that is \
+opened takes it too, for the tracks that say nothing themselves.
 - A drum track's notes are drums: write_drums and drum names (\"china\", \"ride_bell\", \"closed_hat_edge\") go \
 by the track's own map, and analyze_music keeps them out of the key and the chords.
 - Sampled guitars and basses choose how a note is played with keyswitches: silent keys under the range. Never \
@@ -40,7 +41,9 @@ the note and fits the velocity where velocity decides (on some guitars a note un
 - When you learn something about an instrument that the track does not know (a key that switches, a drum on \
 another note, where its range ends, that it sounds an octave down, how far it bends), call \
 set_instrument_profile once with all of it. It is kept in the song and remembered for that plugin in every \
-song. get_instrument_profile reads it back, with the instrument's whole drum map.";
+song. get_instrument_profile reads it back, with the instrument's whole drum map and, in `notes`, what else \
+there is to know before writing for it: a setting of the plugin its keyswitches depend on, keys that are not \
+what General MIDI says.";
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct GetInstrumentProfileRequest {
