@@ -6,6 +6,22 @@
 //! translation between the two. It is pure: no audio, no I/O, no global
 //! state, and everything that looks random is driven by a seed, so the same
 //! request always writes the same music.
+//!
+//! | To...                                   | use                          |
+//! |-----------------------------------------|------------------------------|
+//! | name notes, build scales, snap to a key | [`pitch`], [`scale`]         |
+//! | read `Am9`, `F#m7b5/A` or `bVII`        | [`chord`], [`roman`]         |
+//! | place a chord on the keyboard           | [`voicing`]                  |
+//! | lay a progression out in time and comp  | [`progression`]              |
+//! | break chords up or put a bass under them | [`arpeggio`], [`bass`]      |
+//! | write a line as degrees or note names   | [`melody`]                   |
+//! | write drums as a grid, or take a groove | [`steps`], [`drums`], [`grooves`] |
+//! | swing, humanize and shape velocity      | [`expression`]               |
+//! | find the key and the chords of a passage | [`analysis`]                |
+//!
+//! Every notation is documented at the top of its module, and every parser
+//! answers bad input with an [`Error`] that quotes it and says what was
+//! expected.
 
 pub mod analysis;
 pub mod arpeggio;

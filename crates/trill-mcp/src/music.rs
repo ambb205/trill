@@ -8,7 +8,7 @@
 //! terms what was written, and warnings about what would otherwise go
 //! unnoticed.
 
-use crate::input::parse_pitch_value;
+use crate::input::{PitchInput, parse_pitch_value};
 use crate::server::{Reply, TrillServer, edit, explain, finish};
 use crate::view::round;
 use rmcp::handler::server::wrapper::Parameters;
@@ -64,6 +64,8 @@ Use create_clip and add_notes for what these cannot say: single hits, sound effe
 
 const MAX_BARS: u32 = 512;
 const MAX_NOTES: usize = 50_000;
+/// The most chords write_chords lists back.
+const SHOWN_CHORDS: usize = 32;
 const EPSILON: f64 = 1e-6;
 
 /// A length given as a number of beats or as a note value.
@@ -84,10 +86,6 @@ impl JsonSchema for LengthInput {
         })
     }
 }
-
-/// A pitch as a number or a note name. A local alias of the server's own
-/// pitch input with wording for registers.
-type PitchInput = crate::input::PitchInput;
 
 #[derive(Copy, Clone, Debug, Default, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -593,7 +591,9 @@ fn write(
             let unit = length_or(feel.swing_unit.as_ref(), usual.map_or(0.25, |(_, unit)| unit), "swing_unit")?;
             Some(Swing::new(percent, unit).map_err(theory)?)
         }
-        (None, Some((percent, unit))) => Some(Swing::new(percent, unit).map_err(theory)?),
+        (None, Some((percent, unit))) => {
+            Some(Swing::new(percent, length_or(feel.swing_unit.as_ref(), unit, "swing_unit")?).map_err(theory)?)
+        }
         (None, None) => None,
     };
     if let Some(swing) = swing.filter(|swing| swing.percent > 50.0) {
@@ -816,7 +816,7 @@ impl TrillServer {
                 {
                     muddy.push((chord.name(), format!("{}-{}", chord.spell(lower), chord.spell(upper))));
                 }
-                if span.start < pass - EPSILON && chords.len() < 32 {
+                if span.start < pass - EPSILON && chords.len() < SHOWN_CHORDS {
                     let mut entry = json!({
                         "at": bar_beat(span.start, bar_length),
                         "chord": chord.name(),
@@ -845,6 +845,10 @@ impl TrillServer {
             }
             let mut summary = Map::new();
             summary.insert("voicing".into(), json!(style.name()));
+            if chords.len() == SHOWN_CHORDS {
+                summary
+                    .insert("chords_note".into(), json!(format!("Only the first {SHOWN_CHORDS} chords are listed.")));
+            }
             summary.insert("chords".into(), json!(chords));
             Ok(Part {
                 notes,

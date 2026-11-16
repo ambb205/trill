@@ -19,7 +19,7 @@
 
 use crate::chord::Chord;
 use crate::error::{Error, Result, list};
-use crate::pitch::{Interval, at_or_above, pitch_class};
+use crate::pitch::{Interval, at_or_above};
 
 /// How the upper voices are laid out.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -432,16 +432,10 @@ fn bass_notes(chord: &Chord, spec: &VoicingSpec, upper: &[u8]) -> Vec<u8> {
     notes
 }
 
-/// Whether every pitch of `voicing` is a tone of `chord` or its bass.
-pub fn belongs_to(voicing: &Voicing, chord: &Chord) -> bool {
-    let mut classes = chord.pitch_classes();
-    classes.push(chord.bass_name().pitch_class());
-    voicing.pitches().iter().all(|pitch| classes.contains(&pitch_class(*pitch)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pitch::pitch_class;
     use crate::roman;
     use crate::scale::Scale;
 
@@ -455,6 +449,13 @@ mod tests {
 
     fn spec(style: VoicingStyle) -> VoicingSpec {
         VoicingSpec { style, ..VoicingSpec::default() }
+    }
+
+    /// Whether every pitch of `voicing` is a tone of `chord` or its bass.
+    fn belongs_to(voicing: &Voicing, chord: &Chord) -> bool {
+        let mut classes = chord.pitch_classes();
+        classes.push(chord.bass_name().pitch_class());
+        voicing.pitches().iter().all(|pitch| classes.contains(&pitch_class(*pitch)))
     }
 
     fn total_movement(voicings: &[Vec<u8>]) -> u32 {

@@ -82,7 +82,7 @@ pub struct BassLine {
     /// Fraction of each note that sounds.
     pub gate: f64,
     /// Beats by which chord changes arrive early; see
-    /// [`strikes`](crate::progression::strikes).
+    /// [`strikes`].
     pub anticipation: f64,
     pub dynamics: Dynamics,
 }
