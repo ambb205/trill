@@ -37,12 +37,15 @@ pub(crate) const INSTRUCTIONS: &str = "\
 Hearing what you wrote
 You cannot listen, so measure. Three tools, from quick to slow:
 - probe plays one instrument a list of notes and measures each, in a second or two, without touching the song. \
-Call it ONCE for every plugin you have not used before, before you write for it: with no `notes` it plays the \
-whole keyboard and tells you which notes sound (the range), at what pitch (an instrument may sound an octave away \
-from what is written) and, for a drum plugin, what each note is (a low thump, a noisy mid hit, a long bright \
-wash). With `keyswitches` it tells you which keys change the articulation and how (shorter, darker). Notes below \
-or above an instrument's range are silent, and so is a clip that holds only keyswitches: probe first and that \
-does not happen.
+Call it ONCE for every plugin that Trill does not know yet, before you write for it. A track says what it knows \
+in get_project (`plays`, `articulations`, `range`), and a probe's reply says whether the plugin has an entry: \
+one that has needs no probe. With no `notes` it plays the whole keyboard and tells you which notes sound (the \
+range), at what pitch (an instrument may sound an octave away from what is written) and, for a drum plugin, \
+what each note is (a low thump, a noisy mid hit, a long bright wash). With `keyswitches` it tells you which \
+keys change the articulation and how (shorter, darker). Then write down what it found, once, with \
+set_instrument_profile: its arguments take a probe's reply as it stands, and the plugin is known from then on, \
+in every song. Notes below or above an instrument's range are silent, and so is a clip that holds only \
+keyswitches: with the instrument known, the writing tools keep to its range and press its keyswitches themselves.
 - measure renders the song (or `start`/`end`, or only some `tracks`) and reports loudness, true peak, spectral \
 balance, the level and loudness of every track, the loudness of every section between the markers, and how many \
 dB each compressor and limiter took off. It writes no file. Use it after every change you want to check; set a \
@@ -293,8 +296,15 @@ fn silent_track_notes(
             "'{}' has clips here but made no sound. Its instrument is the plugin {} (device {}).",
             track.name, device.name, device.id.0
         );
-        // What the notes themselves say.
+        // What the track knows about its instrument explains it, if it
+        // does; otherwise what the notes themselves say.
         let range = played_notes(track, start, end);
+        let known = crate::instruments::known_silence(track, start, end);
+        if let Some(reason) = &known {
+            note.push_str(reason);
+            notes.push(note);
+            continue;
+        }
         match range {
             None => note.push_str(" Its clips here hold no notes."),
             Some((low, high, count)) if high < 24 => note.push_str(&format!(
@@ -1049,11 +1059,15 @@ impl TrillServer {
                 Err(error) => return finish(Err(crate::server::explain(session.project(), error))),
             };
             let mut about = json!({ "instrument": job.devices[0].name });
+            let mut on_track = None;
             if let ProbeTarget::Track { track, .. } = &plan.target {
                 about["device"] = json!(job.devices[0].id.0);
                 about["track"] =
                     json!(session.project().track(*track).map(|track| track.name.clone()).unwrap_or_default());
+                on_track = Some(*track);
             }
+            // Whether this is already known, and where to keep what is found.
+            about["known"] = json!(crate::instruments::probe_note(&session, &job.devices[0].uri, on_track));
             about["through"] = match job.devices.len() {
                 1 => json!("the instrument alone"),
                 more => json!(format!("the instrument and the {} device(s) after it", more - 1)),

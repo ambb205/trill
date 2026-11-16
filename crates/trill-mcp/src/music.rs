@@ -21,16 +21,18 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use trill_core::controllers::splice;
 use trill_core::device::{DeviceCategory, DeviceFactory};
-use trill_core::pitch::{drum_name, pitch_name};
+use trill_core::pitch::pitch_name;
 use trill_core::project::{AutomationPoint, Segment};
-use trill_core::{ClipId, ControllerKind, Note, TimeSignature, TrackId, TrackKind};
+use trill_core::{ClipId, ControllerKind, InstrumentProfile, Note, TimeSignature, TrackId, TrackKind};
 use trill_dsp::BuiltinFactory;
 use trill_engine::Session;
 use trill_theory::arpeggio::{ArpOrder, Arpeggio, ORDERS};
+use trill_theory::articulation::{articulate, unknown};
 use trill_theory::bass::{BassLine, BassStyle, bass_line};
 use trill_theory::chord::QUALITIES;
 use trill_theory::drums::{FillPlan, arrange, drum_names};
-use trill_theory::melody::Phrase;
+use trill_theory::melody::{ORNAMENTS, Phrase, Tone};
+use trill_theory::ornament::{Playing, perform};
 use trill_theory::phrasing::{self, Phrasing};
 use trill_theory::progression::{Comping, Progression, RHYTHMS, Rhythm, StrumDirection, comp};
 use trill_theory::steps::LEGEND;
@@ -51,20 +53,29 @@ lines, and each replies with what it wrote (chord names, pitches, ranges) so you
 voice-led into a clip, in a rhythm (sustain, stabs, offbeats, tresillo, a step pattern...) with strum and dynamics.
 - write_drums: a groove by name (house, boom_bap, trap, drum_and_bass, uk_garage, reggaeton, funk, rock, \
 half_time, shuffle, six_eight, bossa_nova, jazz_swing) with an optional fill, and/or your own lanes in step \
-notation, e.g. {\"kick\": \"x...x...x...x...\", \"snare\": \"....x.......x...\"}.
+notation, e.g. {\"kick\": \"x...x...x...x...\", \"snare\": \"....x.......x...\"}. Drums are named, and the \
+name lands on the key the track's kit uses: china, splash, ride_bell, crash2, floor_tom, rimshot, \
+closed_hat_edge, half_open_hat, wide_open_hat beside the usual ones. A fill's reply says what it replaced.
 - write_bass and write_arpeggio: a bass line or an arpeggio that follows the same progression text.
-- write_melody: one line as scale degrees or note names with lengths, e.g. \":0.5 5 6 5 4 3:2 | 1:4\".
+- write_melody: one line as scale degrees or note names with lengths, e.g. \":0.5 5 6 5 4 3:2 | 1:4\". A lead \
+is more than its notes: mark bends, slides, vibrato and hammer-ons on the notes that have them \
+(\"4:2!bend=5!vib\", \"6!hammer\", \"3!slide\", \"5:2!fall\"). The tool writes the instrument's own keyswitch \
+where it has one and a pitch-bend curve where not; never draw such curves by hand. Keep a line with ornaments \
+on a track of its own: the pitch wheel bends every note of a track at once.
 - shape_dynamics: gives a line its dynamics from its notes, as an expression curve in the clip: a rise into each \
 phrase's high point, a swell through long notes, a breath between phrases. Call it after writing a melody for a \
 wind, brass or string instrument (those modelled on breath or a bow make no sound without it), and whenever a \
 line should breathe rather than sit at one level.
 - analyze_music: the key, the chord in each bar, the range and density of a clip, a track or the whole song. Use \
 it to check your work, and to read what the user wrote before adding to it.
-- music_reference: the vocabulary and the notations (chord symbols, scales, voicings, rhythms, grooves, fills). \
-Look things up there instead of guessing.
+- music_reference: the vocabulary and the notations (chord symbols, scales, voicings, rhythms, grooves, fills, \
+ornaments, drum names, what a track knows about its instrument). Look things up there instead of guessing.
 
 Every writing tool takes `track` (it creates a clip there) or `clip` (it writes into that clip), is one undo \
-step, and gives the same result for the same arguments. Give all parts of a section the same progression, key \
+step, and gives the same result for the same arguments. Its reply gives `written_beats` (what was just written) \
+and `clip_length` (the clip it is in, which is longer when the written bars loop). The pitches you ask for are \
+the pitches that are heard: for an instrument that sounds an octave from its keys the tool writes the other \
+octave, and says so. Give all parts of a section the same progression, key \
 and swing so they agree. A song usually goes: set_project, create_track per part, write_drums, write_chords, \
 write_bass, write_arpeggio, write_melody, analyze_music, then effects, automation and render.
 Use create_clip and add_notes for what these cannot say: single hits, sound effects, a voicing spelled by hand.";
@@ -73,6 +84,8 @@ const MAX_BARS: u32 = 512;
 const MAX_NOTES: usize = 50_000;
 /// The most chords write_chords lists back.
 const SHOWN_CHORDS: usize = 32;
+/// The most fill bars write_drums describes one by one.
+const SHOWN_FILLS: usize = 4;
 const EPSILON: f64 = 1e-6;
 
 /// A length given as a number of beats or as a note value.
@@ -186,6 +199,9 @@ pub struct WriteChordsRequest {
     pub velocity: Option<u8>,
     /// Extra velocity on the downbeat of each bar, half of it on the other beats (default 8).
     pub accent: Option<u8>,
+    /// How every note is played, by the name of one of the track's articulations ("palm_mute", "muted";
+    /// get_project lists them). The keyswitch is pressed for you. Omit for the instrument's ordinary way.
+    pub articulation: Option<String>,
     #[serde(flatten)]
     pub feel: Feel,
 }
@@ -198,14 +214,19 @@ pub struct WriteDrumsRequest {
     /// "rock", "half_time", "shuffle", "six_eight", "bossa_nova" or "jazz_swing" (music_reference topic
     /// "grooves" describes them).
     pub groove: Option<String>,
-    /// Lanes by drum name, added to the groove or replacing its lane for that drum. One character per step:
+    /// Lanes by drum name, added to the groove or replacing its lane for that drum. A name is one of the
+    /// track's own drums (get_instrument_profile lists its map) or a General MIDI one: kick, snare, rimshot,
+    /// rim, clap, closed_hat, closed_hat_edge, pedal_hat, half_open_hat, open_hat, wide_open_hat, low_tom,
+    /// mid_tom, high_tom, floor_tom, crash, crash2, china, splash, ride, ride_bell, tambourine, cowbell,
+    /// shaker... Where a kit has no key for a drum the nearest is played and the reply says so. One character per step:
     /// x hit, X accent, g ghost note, . rest, _ lengthens the hit before it, a digit after a hit makes a roll
     /// (x3_ is three hits across two steps), | separates bars. Each bar's characters divide the bar evenly:
     /// 16 make sixteenths, 12 triplet eighths, 8 eighths. A lane of only rests removes that drum.
     /// Example: {"kick": "x...x...x...x...", "clap": "....x.......x...", "closed_hat": "x.x.x.x.x.x.x3_x."}.
     pub lanes: Option<BTreeMap<String, String>>,
     /// A fill for the end of the phrase: "snare_roll", "toms", "build", "drop", "trap_roll", "triplet_toms"
-    /// or "six_eight_toms". The bar after a fill starts with a crash.
+    /// or "six_eight_toms". The bar after a fill starts with a crash. The reply lists, for each bar a fill
+    /// was played in, the hits of the groove it took the place of and the hits it played.
     pub fill: Option<String>,
     /// Put the fill at the end of every this-many bars (4 or 8 is usual). Default: only the last bar.
     pub fill_every: Option<u32>,
@@ -245,6 +266,9 @@ pub struct WriteArpeggioRequest {
     pub velocity: Option<u8>,
     /// Extra velocity on the downbeat of each bar, half of it on the other beats (default 12).
     pub accent: Option<u8>,
+    /// How every note is played, by the name of one of the track's articulations ("palm_mute", "muted";
+    /// get_project lists them). The keyswitch is pressed for you. Omit for the instrument's ordinary way.
+    pub articulation: Option<String>,
     #[serde(flatten)]
     pub feel: Feel,
 }
@@ -276,6 +300,9 @@ pub struct WriteBassRequest {
     pub velocity: Option<u8>,
     /// Extra velocity on the downbeat of each bar, half of it on the other beats (default 10).
     pub accent: Option<u8>,
+    /// How every note is played, by the name of one of the track's articulations ("palm_mute", "muted";
+    /// get_project lists them). The keyswitch is pressed for you. Omit for the instrument's ordinary way.
+    pub articulation: Option<String>,
     #[serde(flatten)]
     pub feel: Feel,
 }
@@ -288,6 +315,10 @@ pub struct WriteMelodyRequest {
     /// (1-7; b3 and #4 alter it; 5' is an octave up, 7, an octave down) or a note name with its octave (C4,
     /// F#5). "5:0.5" gives that note a length in beats; a bare ":0.5" sets the length of the notes after it
     /// (1 beat to begin with). "r" rests, "~" lengthens the note before it, "|" marks a bar and is checked.
+    /// Ornaments are marks after a note, each begun by "!": "4:2!bend=5" bends up to the fifth degree,
+    /// "!bend=5!release" lets it back down, "!prebend=5", "5:2!vib" (vibrato), "6!hammer" and "5!pull" join a
+    /// note to the one before with no new attack, "3!slide" slides into it, "5:2!fall" drops off at the end;
+    /// "1!palm_mute" asks for one of the instrument's own articulations. They combine: "4:2!bend=5!vib".
     pub phrase: String,
     /// The key the degrees are in: "A minor", "D dorian", "Bb". Not needed for note names.
     pub key: Option<String>,
@@ -299,6 +330,9 @@ pub struct WriteMelodyRequest {
     pub velocity: Option<u8>,
     /// Extra velocity on the downbeat of each bar, half of it on the other beats (default 8).
     pub accent: Option<u8>,
+    /// How every note without a mark of its own is played, by the name of one of the track's articulations
+    /// ("palm_mute"). The keyswitch is pressed for you.
+    pub articulation: Option<String>,
     #[serde(flatten)]
     pub feel: Feel,
 }
@@ -415,30 +449,29 @@ fn bar_beat(beat: f64, bar_length: f64) -> String {
     format!("{}.{}", bar as i64 + 1, round(beat - bar * bar_length + 1.0))
 }
 
-/// What a track plays its notes through. Built-in instruments come with
-/// the preset they appear to be on.
-#[derive(Clone, Debug, PartialEq)]
-enum Instrument {
-    None,
-    Drums(Option<String>),
-    Pitched(Option<String>),
-}
-
-impl Instrument {
-    fn is_drums(&self) -> bool {
-        matches!(self, Instrument::Drums(_))
-    }
+/// What a track plays its notes through.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Instrument {
+    /// Whether the track has an instrument at all.
+    exists: bool,
+    /// Whether its notes are drums: the track says so, or its instrument
+    /// is a drum instrument.
+    drums: bool,
+    /// The built-in instrument it is, if it is one, by URI.
+    builtin: Option<String>,
+    /// The preset a built-in instrument appears to be on.
+    preset: Option<String>,
 }
 
 fn instrument(session: &Session, track: TrackId) -> Instrument {
-    let Ok(track) = session.project().track(track) else { return Instrument::None };
-    // Only the built-in catalog is consulted: it is instant, while asking
-    // the plugin hosts could start a scan with the session locked.
+    let Ok(found) = session.project().track(track) else { return Instrument::default() };
+    let drums = session.plays_drums(track);
+    // Only the built-in catalog is consulted for presets: it is instant.
     let builtins = BuiltinFactory.descriptors();
-    for device in &track.devices {
+    for device in &found.devices {
         let Some(descriptor) = builtins.iter().find(|descriptor| descriptor.uri == device.uri) else {
             // A plugin: the first one in the chain is the instrument.
-            return Instrument::Pitched(None);
+            return Instrument { exists: true, drums, builtin: None, preset: None };
         };
         if descriptor.category != DeviceCategory::Instrument {
             continue;
@@ -457,9 +490,9 @@ fn instrument(session: &Session, track: TrackId) -> Instrument {
             })
             .max_by_key(|preset| preset.params.len())
             .map(|preset| preset.name.clone());
-        return if device.uri.contains("drum") { Instrument::Drums(preset) } else { Instrument::Pitched(preset) };
+        return Instrument { exists: true, drums, builtin: Some(device.uri.clone()), preset };
     }
-    Instrument::None
+    Instrument { drums, ..Instrument::default() }
 }
 
 /// What kind of part a tool writes, for checking it against the track.
@@ -470,48 +503,76 @@ enum PartKind {
 }
 
 /// Problems with putting these notes on this track that cannot be heard
-/// from the reply alone.
-fn instrument_warnings(session: &Session, track: TrackId, kind: PartKind, notes: &[Note]) -> Vec<String> {
+/// from the reply alone. `notes` are the notes of music, as written.
+fn instrument_warnings(
+    session: &Session,
+    track: TrackId,
+    kind: PartKind,
+    notes: &[Note],
+    profile: &InstrumentProfile,
+) -> Vec<String> {
     let mut warnings = Vec::new();
     let count_below = |limit: u8| notes.iter().filter(|note| note.pitch < limit).count();
     let count_above = |limit: u8| notes.iter().filter(|note| note.pitch > limit).count();
-    match (instrument(session, track), kind) {
-        (Instrument::None, _) => {
+    let found = instrument(session, track);
+    match (found.drums, kind) {
+        _ if !found.exists => {
             warnings
                 .push(format!("Track {} has no instrument, so this will be silent; add one with add_device.", track.0));
         }
-        (Instrument::Drums(_), PartKind::Pitched) => warnings.push(format!(
-            "Track {}'s instrument is a drum kit: these pitches will trigger drums, not notes. Write this on a \
-             track with a pitched instrument.",
+        (true, PartKind::Pitched) => warnings.push(format!(
+            "Track {} is a drum track: these pitches will trigger drums, not notes. Write this on a track with a \
+             pitched instrument (or, if this instrument is one, say so with set_instrument_profile role \
+             \"pitched\").",
             track.0
         )),
-        (Instrument::Pitched(_), PartKind::Drums) => warnings.push(format!(
-            "Track {}'s instrument is not a drum kit: these drum notes will play as low pitches. Write drums on a \
-             track with builtin:drumkit.",
+        (false, PartKind::Drums) => warnings.push(format!(
+            "Track {} is not a drum track: these drum notes will play as pitches. Write drums on a track whose \
+             instrument is a drum kit (builtin:drumkit, or a drum plugin); if this instrument is one that does not \
+             say so, set_instrument_profile role \"drums\" tells the track.",
             track.0
         )),
-        (Instrument::Pitched(Some(preset)), PartKind::Pitched) if preset.contains("bass") => {
-            let high = count_above(60);
-            if high > 0 {
-                warnings.push(format!(
-                    "{high} note(s) are above C4, where the '{preset}' preset sounds thin; it is voiced for about \
-                     E1-G2. Lower the register or use another preset."
-                ));
+        (false, PartKind::Pitched) => match found.preset {
+            Some(preset) if preset.contains("bass") => {
+                let high = count_above(60);
+                if high > 0 {
+                    warnings.push(format!(
+                        "{high} note(s) are above C4, where the '{preset}' preset sounds thin; it is voiced for \
+                         about E1-G2. Lower the register or use another preset."
+                    ));
+                }
             }
-        }
-        (Instrument::Pitched(Some(preset)), PartKind::Pitched) => {
-            let low = count_below(36);
-            if low > 0 {
-                warnings.push(format!(
-                    "{low} note(s) are below C2, lower than the '{preset}' preset is voiced for; they will sound \
-                     muddy or vanish. Raise the register, or use a bass preset for a bass part."
-                ));
+            Some(preset) => {
+                let low = count_below(36);
+                if low > 0 {
+                    warnings.push(format!(
+                        "{low} note(s) are below C2, lower than the '{preset}' preset is voiced for; they will \
+                         sound muddy or vanish. Raise the register, or use a bass preset for a bass part."
+                    ));
+                }
             }
-        }
-        _ => {}
+            None => {}
+        },
+        (true, PartKind::Drums) => {}
     }
-    if kind == PartKind::Pitched && count_below(24) > 0 {
-        warnings.push(format!("{} note(s) are below C1, under what most speakers reproduce.", count_below(24)));
+    if kind == PartKind::Pitched {
+        // A note of music on a key that switches is silent, and changes the notes after it.
+        let switching: Vec<&Note> = notes.iter().filter(|note| profile.is_keyswitch(note.pitch)).collect();
+        if !switching.is_empty() {
+            let mut names: Vec<&str> = switching.iter().filter_map(|note| profile.keyswitch_name(note.pitch)).collect();
+            names.sort_unstable();
+            names.dedup();
+            warnings.push(format!(
+                "{} note(s) of this part fall on keys that are keyswitches of this instrument ({}): they make no                  sound, and change how the notes after them are played. Move the part into the instrument's range.",
+                switching.len(),
+                names.join(", ")
+            ));
+        }
+        // What the track knows of its instrument's range, else what speakers can do.
+        warnings.extend(crate::instruments::note_warnings(profile, found.drums, notes, usize::MAX));
+        if profile.range.is_none() && count_below(24) > 0 {
+            warnings.push(format!("{} note(s) are below C1, under what most speakers reproduce.", count_below(24)));
+        }
     }
     warnings
 }
@@ -570,8 +631,17 @@ fn destination(session: &Session, target: &Target) -> Result<Destination, String
 }
 
 /// What a tool hands back to [`write`]: the notes and what to say about them.
+#[derive(Default)]
 struct Part {
+    /// The notes, at the pitches that are to be heard.
     notes: Vec<Note>,
+    /// The articulation each note asks of the instrument, in step with
+    /// `notes`; empty when none asks for one.
+    how: Vec<Option<String>>,
+    /// The pitch wheel's course under the notes, in beats like theirs.
+    /// `None` for a part that leaves the wheel, and whatever curve the clip
+    /// has for it, alone.
+    wheel: Option<Vec<AutomationPoint>>,
     /// Bars the notes cover.
     bars: usize,
     /// Fields for the reply, in musical terms.
@@ -587,16 +657,31 @@ struct Part {
     key: Option<Scale>,
 }
 
+/// One articulation for every note of a part, if one was asked for.
+fn all_played(articulation: Option<&str>, notes: &[Note]) -> Vec<Option<String>> {
+    match articulation {
+        Some(name) => vec![Some(name.to_string()); notes.len()],
+        None => Vec::new(),
+    }
+}
+
 /// The project settings a part is built against.
 struct Setting {
     signature: TimeSignature,
     tempo: f64,
     /// Bars asked for, if any.
     bars: Option<usize>,
+    /// What the track knows about its instrument.
+    profile: InstrumentProfile,
 }
 
+/// How long before the stretch being written a keyswitch of an earlier
+/// write may lie, in beats.
+const SWITCH_REACH: f64 = 0.1;
+
 /// The shared half of every writing tool: resolve the target, build the
-/// part, apply the feel, write it as one undo step and describe the result.
+/// part, fit it to the instrument, apply the feel, write it as one undo
+/// step and describe the result.
 fn write(
     session: &mut Session,
     target: &Target,
@@ -614,9 +699,28 @@ fn write(
         }
         bars => bars.map(|bars| bars as usize),
     };
-    let mut part = build(&Setting { signature, tempo: session.project().tempo, bars })?;
+    let profile = session.project().track(destination.track).map(|track| track.profile.clone()).unwrap_or_default();
+    let mut part = build(&Setting { signature, tempo: session.project().tempo, bars, profile: profile.clone() })?;
     if part.notes.len() > MAX_NOTES {
         return Err(format!("that would write {} notes; write fewer bars or a slower rate", part.notes.len()));
+    }
+    let heard = summarize(&part.notes);
+
+    // An instrument that sounds an octave from its keys is written the
+    // other way, so that what was asked for is what is heard.
+    let pitched = kind == PartKind::Pitched;
+    if pitched && profile.sounds_octaves != 0 {
+        for note in &mut part.notes {
+            note.pitch = profile.written(note.pitch).ok_or_else(|| {
+                format!(
+                    "{} cannot be played: this instrument sounds {} octave(s) from its keys, and there is no key \
+                     that far {}",
+                    pitch_name(note.pitch),
+                    profile.sounds_octaves,
+                    if profile.sounds_octaves < 0 { "up" } else { "down" }
+                )
+            })?;
+        }
     }
 
     // Feel: swing against the song's grid, then the human touch.
@@ -632,6 +736,9 @@ fn write(
     };
     if let Some(swing) = swing.filter(|swing| swing.percent > 50.0) {
         swing.apply(&mut part.notes, destination.origin);
+        for point in part.wheel.iter_mut().flatten() {
+            point.beat = (swing.warp(point.beat + destination.origin) - destination.origin).max(0.0);
+        }
         part.summary.insert("swing".into(), json!(swing.percent));
     }
     let timing = within(feel.humanize_timing, 0.0, 0.0..=0.25, "humanize_timing")?;
@@ -640,10 +747,34 @@ fn write(
         Humanize { timing, velocity, seed: feel.seed.unwrap_or(1) as u64 }.apply(&mut part.notes);
     }
 
-    let written = part.bars as f64 * bar_length;
+    // The instrument's keyswitches, pressed where they belong, and the
+    // velocities that play what was asked for.
+    let music = part.notes.clone();
     let offset = destination.offset;
+    let mut presses: BTreeMap<String, usize> = BTreeMap::new();
+    if pitched && !profile.articulations.is_empty() {
+        let how = |index: usize| part.how.get(index).cloned().flatten();
+        let asked: Vec<(Note, Option<String>)> =
+            part.notes.iter().enumerate().map(|(index, note)| (*note, how(index))).collect();
+        let articulated = articulate(&profile, &asked, offset).map_err(theory)?;
+        if let (Some((low, high)), true) = (articulated.default_range, articulated.fitted > 0) {
+            part.remarks.push(format!(
+                "{} note(s) were outside the velocities {low}-{high} that play this instrument's ordinary note \
+                 (softer or harder it plays them another way: {}); they were moved to the nearest of those. Ask \
+                 for the other way by name if it was meant.",
+                articulated.fitted,
+                other_hits(&profile).join(", ")
+            ));
+        }
+        presses = articulated.presses;
+        part.notes = articulated.notes;
+    } else if let Some(name) = part.how.iter().flatten().next() {
+        return Err(theory(unknown(&profile, name)));
+    }
+
+    let written = part.bars as f64 * bar_length;
     for note in &mut part.notes {
-        note.start += offset;
+        note.start = (note.start + offset).max(0.0);
     }
     let clip_length = match target.clip_length {
         Some(length) if !length.is_finite() || length <= 0.0 => {
@@ -655,13 +786,40 @@ fn write(
     let replace = target.mode.unwrap_or_default() == WriteMode::Replace;
     let name = target.name.clone().unwrap_or_else(|| default_name.to_string());
     let (track, notes) = (destination.track, &part.notes);
+    // The wheel's course within the stretch that was written.
+    let wheel: Option<Vec<AutomationPoint>> = part.wheel.as_ref().map(|points| {
+        points
+            .iter()
+            .map(|point| AutomationPoint { beat: point.beat + offset, ..*point })
+            .filter(|point| point.beat <= offset + written + EPSILON)
+            .collect()
+    });
     let clip = edit(session, |project| match destination.clip {
         Some(id) => {
             let clip = project.clip_mut(id)?;
             if replace {
-                clip.remove_notes(|note| note.start >= offset - EPSILON && note.start < offset + written - EPSILON)?;
+                let inside = |note: &Note| note.start >= offset - EPSILON && note.start < offset + written - EPSILON;
+                // With them go the keyswitches an earlier write pressed just before the stretch.
+                let leading = |note: &Note| {
+                    profile.is_keyswitch(note.pitch) && note.start >= offset - SWITCH_REACH && note.start < offset
+                };
+                clip.remove_notes(|note| inside(note) || leading(note))?;
             }
             clip.add_notes(notes)?;
+            if let Some(wheel) = &wheel {
+                let kind = ControllerKind::PitchBend;
+                let existing = clip.controller(kind).map(|curve| curve.points.clone()).unwrap_or_default();
+                // A line without ornaments still takes the wheel back from what was there.
+                let rest = vec![AutomationPoint { beat: offset, value: 0.0, shape: Segment::Hold }];
+                let piece = if wheel.is_empty() { &rest } else { wheel };
+                if !(wheel.is_empty() && existing.is_empty()) {
+                    let points = match existing.is_empty() {
+                        true => piece.clone(),
+                        false => splice(&existing, offset, Some(offset + written), piece),
+                    };
+                    clip.set_controller(kind, points)?;
+                }
+            }
             Ok(id)
         }
         None => {
@@ -671,22 +829,30 @@ fn write(
             if clip_length > written + EPSILON {
                 clip.set_loop_length(Some(written))?;
             }
+            if let Some(wheel) = wheel.as_ref().filter(|wheel| !wheel.is_empty()) {
+                clip.set_controller(ControllerKind::PitchBend, wheel.clone())?;
+            }
             Ok(id)
         }
     })?;
 
+    let found = instrument(session, track);
     let mut warnings = std::mem::take(&mut part.warnings);
-    warnings.extend(instrument_warnings(session, track, kind, &part.notes));
-    // Suggest the kit a groove is written for, unless the track is on it.
-    if let (Some(kit), Instrument::Drums(current)) = (part.usual_kit, instrument(session, track))
-        && current.as_deref().unwrap_or("default") != kit
+    warnings.extend(instrument_warnings(session, track, kind, &music, &profile));
+    // Suggest the kit a groove is written for, where the track plays the
+    // built-in kit and is on another.
+    if let (Some(kit), Some("builtin:drumkit")) = (part.usual_kit, found.builtin.as_deref())
+        && found.preset.as_deref().unwrap_or("default") != kit
     {
         part.remarks.push(format!(
             "This groove is written for the '{kit}' drum kit preset; the track is on '{}'. update_device can switch it.",
-            current.as_deref().unwrap_or("default")
+            found.preset.as_deref().unwrap_or("default")
         ));
     }
     warnings.extend(outside_clip(session, clip));
+    if wheel.as_ref().is_some_and(|wheel| !wheel.is_empty()) {
+        warnings.extend(bent_together(session, track, destination.origin, written));
+    }
 
     let mut out = Map::new();
     out.insert("clip_id".into(), json!(clip));
@@ -701,21 +867,37 @@ fn write(
         }
     }
     out.insert("bars".into(), json!(part.bars));
-    out.insert("length".into(), json!(round(written)));
-    out.insert("note_count".into(), json!(part.notes.len()));
-    if kind == PartKind::Pitched
-        && let Some(summary) = summarize(&part.notes)
-    {
+    // Two lengths that are easy to take for one another: what was written
+    // now, and the clip it is in.
+    out.insert("written_beats".into(), json!(round(written)));
+    if let Ok(clip) = session.project().clip(clip) {
+        out.insert("clip_length".into(), json!(round(clip.length)));
+    }
+    out.insert("note_count".into(), json!(music.len()));
+    if let (true, Some(heard)) = (pitched, heard) {
         let key = part.key.as_ref();
-        out.insert(
-            "pitch_range".into(),
-            json!(format!("{}-{}", name_pitch(summary.lowest, key), name_pitch(summary.highest, key))),
-        );
+        let named = |low: u8, high: u8| format!("{}-{}", name_pitch(low, key), name_pitch(high, key));
+        out.insert("pitch_range".into(), json!(named(heard.lowest, heard.highest)));
+        if profile.sounds_octaves != 0
+            && let Some(written) = summarize(&music)
+        {
+            out.insert("written_range".into(), json!(named(written.lowest, written.highest)));
+            part.remarks.push(format!(
+                "This instrument sounds {} octave(s) {} its keys, so the part was written that much {}: \
+                 `pitch_range` is what is heard, `written_range` the keys in the clip.",
+                profile.sounds_octaves.abs(),
+                if profile.sounds_octaves < 0 { "below" } else { "above" },
+                if profile.sounds_octaves < 0 { "higher" } else { "lower" },
+            ));
+        }
     }
     if let Some(key) = &part.key {
         out.insert("key".into(), json!(key.name()));
     }
     out.append(&mut part.summary);
+    if !presses.is_empty() {
+        out.insert("keyswitches".into(), json!(presses));
+    }
     if !part.remarks.is_empty() {
         out.insert("notes".into(), json!(part.remarks));
     }
@@ -723,6 +905,43 @@ fn write(
         out.insert("warnings".into(), json!(warnings));
     }
     Ok(Value::Object(out))
+}
+
+/// The articulations of an instrument that are chosen by how hard a note
+/// is hit, other than its ordinary one.
+fn other_hits(profile: &InstrumentProfile) -> Vec<&str> {
+    profile
+        .articulations
+        .iter()
+        .filter(|articulation| articulation.velocity.is_some() && !articulation.default)
+        .map(|articulation| articulation.name.as_str())
+        .collect()
+}
+
+/// The pitch wheel moves every note of a track at once. Says so when a
+/// stretch that was given bends has other notes of the track sounding
+/// together in it: a chord under the line, or another clip of the track.
+fn bent_together(session: &Session, track: TrackId, start: f64, length: f64) -> Option<String> {
+    let found = session.project().track(track).ok()?;
+    let end = start + length;
+    // Notes that only touch (a slur, a joined note) are not a chord.
+    let sounding: Vec<Note> = found
+        .clips
+        .iter()
+        .filter(|clip| !clip.muted)
+        .flat_map(|clip| clip.timeline_notes())
+        .filter(|note| found.profile.is_music(note.pitch) && note.end() > start && note.start < end)
+        .map(|note| Note { length: (note.length - 0.1).max(0.01), ..note })
+        .collect();
+    (summarize(&sounding)?.polyphony > 1).then(|| {
+        format!(
+            "The pitch wheel moves every note of a track at once, and this track has notes sounding together \
+             between beats {} and {} (a chord in this clip, or another clip of the track): they bend and waver \
+             with the line. Give the lead a track of its own.",
+            round(start),
+            round(end)
+        )
+    })
 }
 
 /// Notes that start at or past the end of their clip never play.
@@ -885,14 +1104,14 @@ impl TrillServer {
             }
             summary.insert("chords".into(), json!(chords));
             Ok(Part {
+                how: all_played(request.articulation.as_deref(), &notes),
                 notes,
                 bars: chart.progression.bars,
                 summary,
                 warnings,
                 remarks: chart.remarks,
-                usual_swing: None,
-                usual_kit: None,
                 key: chart.key,
+                ..Part::default()
             })
         });
         finish(reply)
@@ -904,10 +1123,15 @@ impl TrillServer {
     fn write_drums(&self, Parameters(request): Parameters<WriteDrumsRequest>) -> CallToolResult {
         let mut session = self.session.lock();
         let reply = write(&mut session, &request.target, &request.feel, PartKind::Drums, "Drums", |setting| {
+            let kit = &setting.profile;
             let groove = request.groove.as_deref().map(Groove::find).transpose().map_err(theory)?;
-            let mut pattern = groove.map(Groove::pattern).unwrap_or_default();
+            // A groove is written on the General MIDI map; this kit may keep its drums elsewhere.
+            let mut pattern = groove.map(|groove| groove.pattern().on_kit(kit)).unwrap_or_default();
+            let mut stand_ins: Vec<String> = Vec::new();
             for (drum, steps) in request.lanes.iter().flatten() {
-                pattern.set_lane(drum, steps).map_err(theory)?;
+                if let Some(stand_in) = pattern.set_lane_on(kit, drum, steps).map_err(theory)? {
+                    stand_ins.push(format!("{stand_in} for {}", trill_core::pitch::name_key(drum)));
+                }
             }
             if pattern.lanes.is_empty() {
                 return Err(format!(
@@ -916,23 +1140,40 @@ impl TrillServer {
                 ));
             }
             let fill = request.fill.as_deref().map(Fill::find).transpose().map_err(theory)?;
-            let fill_pattern = fill.map(Fill::pattern);
+            let fill_pattern = fill.map(|fill| fill.pattern().on_kit(kit));
             let every = request.fill_every.unwrap_or(0) as usize;
+            let crash = kit.drum("crash").map_or(49, |drum| drum.pitch);
             let plan = fill.zip(fill_pattern.as_ref()).map(|(fill, pattern)| FillPlan {
                 pattern,
                 from: fill.from,
                 every,
-                crash: 49,
+                crash,
             });
             let bars = setting.bars.unwrap_or(pattern.bars());
             let bar_length = setting.signature.beats_per_bar();
             let level = within(request.level, 1.0, 0.1..=1.5, "level")?;
-            let notes = arrange(&pattern, plan.as_ref(), bars, bar_length, level).notes;
+            let arranged = arrange(&pattern, plan.as_ref(), bars, bar_length, level);
+            let notes = arranged.notes;
 
             let meter = (setting.signature.numerator, setting.signature.denominator);
             let mut warnings = pattern.odd_lanes(bar_length);
             let mut remarks = Vec::new();
             let mut summary = Map::new();
+            if !stand_ins.is_empty() {
+                remarks.push(format!(
+                    "This track's kit has no key of its own for some of these drums; the nearest was played: {}. If \
+                     the instrument has one, name its key with set_instrument_profile `sounds`.",
+                    stand_ins.join(", ")
+                ));
+            }
+            // The hits of some notes, by the names this kit gives its drums.
+            let by_drum = |notes: &[Note]| -> BTreeMap<String, usize> {
+                let mut counts = BTreeMap::new();
+                for note in notes {
+                    *counts.entry(kit.drum_name(note.pitch)).or_default() += 1;
+                }
+                counts
+            };
             if let Some(groove) = groove {
                 summary.insert("groove".into(), json!(groove.name));
                 if groove.signature != meter {
@@ -957,25 +1198,40 @@ impl TrillServer {
                         fill.name, fill.signature.0, fill.signature.1, meter.0, meter.1
                     ));
                 }
-                let in_bars: Vec<usize> = match every {
-                    0 => vec![bars],
-                    every => (1..=bars).filter(|bar| bar % every == 0).collect(),
-                };
+                let in_bars: Vec<usize> = arranged.fills.iter().map(|fill| fill.bar).collect();
                 if in_bars.is_empty() {
                     warnings.push(format!(
                         "`fill_every` {every} is more than the {bars} bar(s) written, so no fill was played."
                     ));
                 }
-                summary.insert("fill".into(), json!({ "name": fill.name, "in_bars": in_bars }));
+                let mut said = json!({ "name": fill.name, "in_bars": in_bars });
+                // What each fill took the place of, since that cannot be heard: the first few say it all.
+                let shown: Vec<Value> = arranged
+                    .fills
+                    .iter()
+                    .take(SHOWN_FILLS)
+                    .map(|bar| {
+                        let mut entry = json!({
+                            "bar": bar.bar,
+                            "from_beat": round(bar.from + 1.0),
+                            "replaced": by_drum(&bar.replaced),
+                            "played": by_drum(&bar.played),
+                        });
+                        if bar.crash {
+                            entry["then"] = json!(format!("a crash on the downbeat of bar {}", bar.bar + 1));
+                        }
+                        entry
+                    })
+                    .collect();
+                if !shown.is_empty() {
+                    said["bars"] = json!(shown);
+                }
+                summary.insert("fill".into(), said);
             }
             let lanes: Map<String, Value> =
                 pattern.grid().into_iter().map(|(drum, steps)| (drum.to_string(), json!(steps))).collect();
             summary.insert("lanes".into(), Value::Object(lanes));
-            let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-            for note in &notes {
-                *counts.entry(drum_name(note.pitch).unwrap_or("other")).or_default() += 1;
-            }
-            summary.insert("hits".into(), json!(counts));
+            summary.insert("hits".into(), json!(by_drum(&notes)));
             Ok(Part {
                 notes,
                 bars,
@@ -984,7 +1240,7 @@ impl TrillServer {
                 remarks,
                 usual_swing: groove.and_then(|groove| groove.swing),
                 usual_kit: groove.map(|groove| groove.kit),
-                key: None,
+                ..Part::default()
             })
         });
         finish(reply)
@@ -1033,14 +1289,13 @@ impl TrillServer {
                 json!(spell_bars(&notes, setting.signature.beats_per_bar(), 1, chart.key.as_ref())),
             );
             Ok(Part {
+                how: all_played(request.articulation.as_deref(), &notes),
                 notes,
                 bars: chart.progression.bars,
                 summary,
-                warnings: Vec::new(),
                 remarks: chart.remarks,
-                usual_swing: None,
-                usual_kit: None,
                 key: chart.key,
+                ..Part::default()
             })
         });
         finish(reply)
@@ -1084,14 +1339,13 @@ impl TrillServer {
                 json!(spell_bars(&notes, setting.signature.beats_per_bar(), shown, chart.key.as_ref())),
             );
             Ok(Part {
+                how: all_played(request.articulation.as_deref(), &notes),
                 notes,
                 bars: chart.progression.bars,
                 summary,
-                warnings: Vec::new(),
                 remarks,
-                usual_swing: None,
-                usual_kit: None,
                 key: chart.key,
+                ..Part::default()
             })
         });
         finish(reply)
@@ -1122,24 +1376,35 @@ impl TrillServer {
                     round(phrase.pickup)
                 ));
             }
-            let mut notes =
-                phrase.notes(gate, &dynamics(request.velocity, request.accent, (90, 8))?, setting.signature);
-            // Dynamics are worked out on the phrase's own bar lines, then the phrase is moved.
-            for note in &mut notes {
-                note.start += lead_in;
-            }
             let own_bars = (((lead_in + phrase.length) / bar_length) - EPSILON).ceil().max(1.0) as usize;
             let bars = setting.bars.unwrap_or(own_bars);
-            // Repeat the phrase to fill more bars, or cut it to fit fewer.
+            // The phrase where it falls in the clip, repeated to fill more bars or cut to fit fewer.
             let period = own_bars as f64 * bar_length;
             let total = bars as f64 * bar_length;
-            let once = notes.clone();
-            let mut repeat = 1;
-            while repeat as f64 * period < total - EPSILON {
-                notes.extend(once.iter().map(|note| Note { start: note.start + repeat as f64 * period, ..*note }));
+            let mut tones: Vec<Tone> = Vec::new();
+            let mut repeat = 0;
+            while (repeat as f64) * period < total - EPSILON {
+                let later = lead_in + repeat as f64 * period;
+                tones.extend(
+                    phrase
+                        .tones
+                        .iter()
+                        .filter(|tone| tone.start + later < total - EPSILON)
+                        .map(|tone| Tone { start: tone.start + later, ..tone.clone() }),
+                );
                 repeat += 1;
             }
-            notes.retain(|note| note.start < total - EPSILON);
+            // What each note becomes on this instrument: a key of its own, or the pitch wheel.
+            let playing = Playing {
+                gate,
+                dynamics: dynamics(request.velocity, request.accent, (90, 8))?,
+                signature: setting.signature,
+                tempo: setting.tempo,
+                profile: &setting.profile,
+                articulation: request.articulation.as_deref(),
+            };
+            let performance = perform(&tones, &playing).map_err(theory)?;
+            remarks.extend(performance.remarks.iter().cloned());
 
             // Named as the phrase spelled them: a #1 is a sharp, not the key's flat second.
             let spelled: Vec<(f64, String)> =
@@ -1175,7 +1440,29 @@ impl TrillServer {
                 .collect();
             let mut summary = Map::new();
             summary.insert("pitches".into(), json!(by_bar.join(" | ")));
-            Ok(Part { notes, bars, summary, warnings: Vec::new(), remarks, usual_swing: None, usual_kit: None, key })
+            if !performance.written.is_empty() {
+                // What each ornament was written as: a key of the instrument's, or the wheel.
+                let mut ornaments: BTreeMap<String, Vec<String>> = BTreeMap::new();
+                for (ornament, how, count) in &performance.written {
+                    ornaments.entry(ornament.clone()).or_default().push(format!("{count} as {how}"));
+                }
+                let said: BTreeMap<String, String> =
+                    ornaments.into_iter().map(|(ornament, ways)| (ornament, ways.join("; "))).collect();
+                summary.insert("ornaments".into(), json!(said));
+                if !performance.wheel.is_empty() {
+                    summary.insert(
+                        "pitch_bend".into(),
+                        json!(format!(
+                            "{} point(s) on the clip's pitch_bend curve, for an instrument that bends {} semitone(s) \
+                             each way",
+                            performance.wheel.len(),
+                            round(setting.profile.bend_semitones())
+                        )),
+                    );
+                }
+            }
+            let (notes, how): (Vec<Note>, Vec<Option<String>>) = performance.notes.into_iter().unzip();
+            Ok(Part { notes, how, wheel: Some(performance.wheel), bars, summary, remarks, key, ..Part::default() })
         });
         finish(reply)
     }
@@ -1317,13 +1604,104 @@ fn shape_dynamics(session: &mut Session, request: &ShapeDynamicsRequest) -> Repl
     Ok(out)
 }
 
+/// What analysis leaves out of the music: keys that are not notes.
+#[derive(Default)]
+struct LeftOut {
+    /// The stretch of the song that is being read.
+    from: f64,
+    to: f64,
+    keyswitches: usize,
+    noises: usize,
+    outside_range: usize,
+    /// Whether some notes were read at another octave than they are
+    /// written at, because that is where they sound.
+    moved: bool,
+}
+
+impl LeftOut {
+    /// The notes of `played` that are music on the instrument `profile`
+    /// describes, at the pitch they sound at. The rest is counted.
+    fn music(&mut self, profile: &InstrumentProfile, played: Vec<Note>) -> Vec<Note> {
+        let mut music = Vec::with_capacity(played.len());
+        for note in played.into_iter().filter(|note| note.end() > self.from && note.start < self.to) {
+            if profile.is_keyswitch(note.pitch) {
+                self.keyswitches += 1;
+            } else if profile.sound_name(note.pitch).is_some() {
+                self.noises += 1;
+            } else if !profile.in_range(note.pitch) {
+                self.outside_range += 1;
+            } else {
+                self.moved |= profile.sounds_octaves != 0;
+                music.push(Note { pitch: profile.sounding(note.pitch), ..note });
+            }
+        }
+        music
+    }
+
+    /// What was left out, for the reply; `None` if nothing was.
+    fn said(&self) -> Option<Value> {
+        let mut out = Map::new();
+        for (name, count) in
+            [("keyswitches", self.keyswitches), ("noises", self.noises), ("outside_range", self.outside_range)]
+        {
+            if count > 0 {
+                out.insert(name.into(), json!(count));
+            }
+        }
+        if self.moved {
+            out.insert("read_at".into(), json!("the octave the instrument sounds at, not the keys in the clip"));
+        }
+        (!out.is_empty()).then(|| Value::Object(out))
+    }
+}
+
+/// The first `bars` bars of a drum part as lanes in step notation, to the
+/// nearest sixteenth, by the kit's own drum names: what write_drums would
+/// be given to write them. `None` where a bar is not a whole number of
+/// sixteenths.
+fn read_lanes(kit: &InstrumentProfile, notes: &[Note], start: f64, bars: usize, bar_length: f64) -> Option<Value> {
+    let steps = bar_length * 4.0;
+    if bars == 0 || (steps - steps.round()).abs() > EPSILON {
+        return None;
+    }
+    let steps = steps.round() as usize;
+    let mut lanes: BTreeMap<String, Vec<char>> = BTreeMap::new();
+    for note in notes {
+        let step = ((note.start - start) * 4.0).round();
+        if step < 0.0 || step as usize >= steps * bars {
+            continue;
+        }
+        let lane = lanes.entry(kit.drum_name(note.pitch)).or_insert_with(|| vec!['.'; steps * bars]);
+        lane[step as usize] = match note.velocity {
+            0..=50 => 'g',
+            51..=114 => 'x',
+            _ => 'X',
+        };
+    }
+    let text: Map<String, Value> = lanes
+        .into_iter()
+        .map(|(drum, lane)| {
+            let bars: Vec<String> = lane.chunks(steps).map(|bar| bar.iter().collect()).collect();
+            (drum, json!(bars.join("|")))
+        })
+        .collect();
+    (!text.is_empty()).then(|| Value::Object(text))
+}
+
 fn analyze(session: &Session, request: &AnalyzeMusicRequest) -> Reply {
     let project = session.project();
     let signature = project.time_signature;
     let bar_length = signature.beats_per_bar();
 
-    // Gather the notes as they sound on the timeline.
-    let (scope, mut notes, drums): (String, Vec<Note>, bool) = match (request.clip, request.track) {
+    let (from, to) = (request.start.unwrap_or(f64::MIN), request.end.unwrap_or(f64::MAX));
+    if from >= to {
+        return Err("`start` must be before `end`".to_string());
+    }
+    // Gather the notes as they sound on the timeline, each track's through
+    // what it knows about its instrument.
+    let mut left_out = LeftOut { from, to, ..LeftOut::default() };
+    let mut drum_kit: Option<InstrumentProfile> = None;
+    let (scope, mut notes): (String, Vec<Note>) = match (request.clip, request.track) {
         (Some(_), Some(_)) => return Err("give `clip` or `track`, not both".to_string()),
         (Some(clip), None) => {
             let id = ClipId(clip);
@@ -1332,41 +1710,55 @@ fn analyze(session: &Session, request: &AnalyzeMusicRequest) -> Reply {
                 return Err(format!("{id} is an audio clip; only MIDI can be analyzed"));
             }
             let track = project.clip_track(id).map_err(|error| explain(project, error))?;
-            (format!("clip {clip} ({})", found.name), found.timeline_notes(), instrument(session, track).is_drums())
+            let profile = &project.track(track).map_err(|error| explain(project, error))?.profile;
+            let notes = if session.plays_drums(track) {
+                drum_kit = Some(profile.clone());
+                found.timeline_notes()
+            } else {
+                left_out.music(profile, found.timeline_notes())
+            };
+            (format!("clip {clip} ({})", found.name), notes)
         }
         (None, Some(track)) => {
             let id = TrackId(track);
             let found = project.track(id).map_err(|error| explain(project, error))?;
-            let notes = found.clips.iter().filter(|clip| !clip.muted).flat_map(|clip| clip.timeline_notes()).collect();
-            (format!("track {track} ({})", found.name), notes, instrument(session, id).is_drums())
+            let played: Vec<Note> =
+                found.clips.iter().filter(|clip| !clip.muted).flat_map(|clip| clip.timeline_notes()).collect();
+            let notes = if session.plays_drums(id) {
+                drum_kit = Some(found.profile.clone());
+                played
+            } else {
+                left_out.music(&found.profile, played)
+            };
+            (format!("track {track} ({})", found.name), notes)
         }
         (None, None) => {
             let pitched: Vec<_> = project
                 .tracks
                 .iter()
-                .filter(|track| !track.mute && !instrument(session, track.id).is_drums())
+                .filter(|track| !track.mute && !session.plays_drums(track.id))
                 .filter(|track| track.clips.iter().any(|clip| !clip.notes().is_empty()))
                 .collect();
             let names: Vec<&str> = pitched.iter().map(|track| track.name.as_str()).collect();
-            let notes = pitched
-                .iter()
-                .flat_map(|track| track.clips.iter().filter(|clip| !clip.muted))
-                .flat_map(|clip| clip.timeline_notes())
-                .collect();
+            let mut notes = Vec::new();
+            for track in &pitched {
+                let played = track.clips.iter().filter(|clip| !clip.muted).flat_map(|clip| clip.timeline_notes());
+                notes.extend(left_out.music(&track.profile, played.collect()));
+            }
             (
                 format!("song ({})", if names.is_empty() { "no pitched tracks".to_string() } else { names.join(", ") }),
                 notes,
-                false,
             )
         }
     };
-    let (from, to) = (request.start.unwrap_or(f64::MIN), request.end.unwrap_or(f64::MAX));
-    if from >= to {
-        return Err("`start` must be before `end`".to_string());
-    }
     notes.retain(|note| note.end() > from && note.start < to);
     let Some(summary) = summarize(&notes) else {
-        return Ok(json!({ "scope": scope, "note_count": 0, "note": "There are no notes here to analyze." }));
+        let mut out = json!({ "scope": scope, "note_count": 0, "note": "There are no notes here to analyze." });
+        if let Some(said) = left_out.said() {
+            out["left_out"] = said;
+            out["note"] = json!("There are no notes of music here: only keys that switch or make a noise.");
+        }
+        return Ok(out);
     };
 
     // Whole bars around the music, on the song's bar grid.
@@ -1381,14 +1773,22 @@ fn analyze(session: &Session, request: &AnalyzeMusicRequest) -> Reply {
         "notes_per_bar": round(summary.note_count as f64 / bars as f64),
     });
 
-    if drums {
+    if let Some(kit) = &drum_kit {
+        // A drum part: what is hit how often, and the first bars as the
+        // lanes they would be written as.
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
         for note in &notes {
-            *counts.entry(drum_name(note.pitch).map_or_else(|| pitch_name(note.pitch), str::to_string)).or_default() +=
-                1;
+            *counts.entry(kit.drum_name(note.pitch)).or_default() += 1;
         }
+        out["plays"] = json!("drums");
         out["drums"] = json!(counts);
+        if let Some(lanes) = read_lanes(kit, &notes, start, bars.min(2), bar_length) {
+            out["first_bars"] = lanes;
+        }
         return Ok(out);
+    }
+    if let Some(said) = left_out.said() {
+        out["left_out"] = said;
     }
 
     let estimate = estimate_key(&notes).ok_or("the key could not be estimated")?;
@@ -1482,6 +1882,8 @@ const TOPICS: &[(&str, &str)] = &[
     ("drums", "the lane notation and the drum names"),
     ("grooves", "the groove and fill library"),
     ("melody", "the phrase notation"),
+    ("ornaments", "bends, slides, vibrato and hammer-ons in a melody"),
+    ("instruments", "what a track knows about its instrument: drums, keyswitches, range, octave"),
 ];
 
 fn reference(topic: Option<&str>) -> Reply {
@@ -1572,9 +1974,14 @@ fn reference(topic: Option<&str>) -> Reply {
         "drums" | "drum" | "lanes" => json!({
             "notation": LEGEND,
             "drums": drum_names(),
-            "example": { "kick": "x...x...x...x...", "snare": "....x..g.g..x...", "closed_hat": "x.x.x.x.x.x.x3_x." },
+            "which_key": "A drum is asked for by name; the key that plays it is the track's own where its \
+                          instrument keeps the drum elsewhere than General MIDI (get_instrument_profile shows a \
+                          drum track's whole map). A name the kit has no key for is played by the nearest it has \
+                          (half_open_hat by open_hat), and the reply says so.",
+            "example": { "kick": "x...x...x...x...", "snare": "....x..g.g..x...", "closed_hat": "x.x.x.x.x.x.x3_x.", "china": "x.......x.......", "ride_bell": "..x...x...x...x." },
             "tips": "Velocities are balanced per drum (hats under the kick and snare). Lanes may have different \
-                     lengths; shorter ones repeat. Lanes given with a `groove` replace that groove's lane for the drum.",
+                     lengths; shorter ones repeat. Lanes given with a `groove` replace that groove's lane for the drum. \
+                     With a `fill`, the reply lists what the fill took the place of in each bar it was played in.",
         }),
         "grooves" | "groove" | "fills" | "fill" => json!({
             "grooves": GROOVES
@@ -1605,6 +2012,55 @@ fn reference(topic: Option<&str>) -> Reply {
                         beat to begin with); 0.33 is a triplet eighth",
             "other": "r rests; ~ lengthens the note before it; | marks a bar line and is checked; a short first bar is \
                       a pickup",
+            "ornaments": "marks after a note, each begun by !: 4:2!bend=5 5:2!vib 6!hammer 3!slide (topic \"ornaments\")",
+        }),
+        "ornaments" | "ornament" => json!({
+            "form": "after a note and its length, each mark begun by !: 4:2!bend=5!vib",
+            "marks": pairs(ORNAMENTS),
+            "articulations": "any other word is one of the track's own articulations, by name: 1:0.5!palm_mute \
+                              (get_project lists a track's articulations)",
+            "examples": {
+                "4:2!bend=5": "the fourth degree bent up to the fifth and held",
+                "4:2!bend=5!release 3:2!vib": "a bend let back down, then a note with vibrato",
+                ":0.5 5 6!hammer 5!pull 3": "a hammer-on and a pull-off: one attack for three notes",
+                "1:1 3:1!slide": "the third slid into from the first",
+                "E5:2!fall": "a note that drops away at its end",
+            },
+            "what_they_become": "The instrument's own articulation where it has one (a sampled guitar's hammer, \
+                                 glide and slide keyswitches); otherwise a pitch_bend curve in the clip, scaled by \
+                                 the track's bend range (2 semitones each way unless the track says otherwise). A \
+                                 hammer-on or slide between notes is written without a new attack: the note before \
+                                 is held and the wheel steps or glides. The reply says what each was written as.",
+            "limits": "A bend wider than the bend range goes as far as the wheel does, and the reply says so. The \
+                       pitch wheel moves every note of a track at once: ornaments are for a line on its own track, \
+                       not over chords.",
+        }),
+        "instruments" | "instrument" | "articulations" | "articulation" | "keyswitches" => json!({
+            "what": "A track knows what its notes mean to its instrument, and the other tools use it: drums or \
+                     pitched, names for keys (a drum map, or noises), articulations with their keyswitches, the \
+                     range, the octave it sounds at, its bend range.",
+            "read": "get_project shows it per track (plays, articulations, range); get_instrument_profile shows all \
+                     of it, and with no arguments every instrument something is known about",
+            "write": "set_instrument_profile, once, with everything a probe found; it is kept in the song and \
+                      remembered for the plugin in every song",
+            "example": {
+                "track": 3,
+                "range": "E1-G4 (28-67)",
+                "offset_semitones": -12,
+                "articulations": {
+                    "open": { "key": 24, "velocity": [64, 126], "default": true },
+                    "muted": { "key": 24, "velocity": [32, 63] },
+                    "palm_mute": 26,
+                    "slide": { "key": 27, "lasts": "once" },
+                    "hammer": { "key": 29, "lasts": "joins" },
+                },
+                "sounds": { "scrape": 101 },
+            },
+            "asking": "`articulation` on write_chords, write_bass, write_arpeggio and write_melody, or a mark on one \
+                       note of a melody (1:0.5!palm_mute). The keyswitch is pressed just before the note; never \
+                       place keyswitch notes by hand.",
+            "lasts": "stays: until another keyswitch; once: the next note only; joins: notes that overlap are \
+                      joined (hammer-ons, a slide along the string)",
         }),
         _ => {
             return Err(format!(

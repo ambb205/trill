@@ -10,7 +10,7 @@
 //! articulation is asked for by name, and analysis leaves keyswitches and
 //! drums out of the harmony.
 
-use crate::input::{NoteInput, PitchInput, parse_notes_with, parse_pitch_with};
+use crate::input::{NoteInput, parse_notes_with, parse_pitch_with};
 use crate::server::{Reply, TrillServer, edit, explain, finish};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -60,7 +60,8 @@ pub struct SetInstrumentProfileRequest {
     /// they are pitches. "auto" (the default for a new track) leaves it to the instrument: a drum kit or a
     /// plugin that calls itself a drum instrument makes a drum track.
     pub role: Option<String>,
-    /// Names for keys, each a MIDI note number or a note name: {"china": 52, "ride_bell": "F2"}. On a drum
+    /// Names for keys, each a MIDI note number, a note name or a key as a probe names it ("E3 (52)"):
+    /// {"china": 52, "ride_bell": "F2"}. On a drum
     /// track these are its drums where they differ from General MIDI (which fills in the rest). On a pitched
     /// track they are keys that play a noise instead of a note (a pick scrape). null removes a name.
     pub sounds: Option<BTreeMap<String, Value>>,
@@ -68,17 +69,20 @@ pub struct SetInstrumentProfileRequest {
     /// stays chosen until another is pressed: {"palm_mute": 26}. An object says more:
     /// {"open": {"key": 24, "velocity": [64, 126], "default": true}, "muted": {"key": 24, "velocity": [32, 63]},
     /// "slide": {"key": 27, "lasts": "once"}, "hammer": {"key": 29, "lasts": "joins"}}.
-    /// `lasts`: "stays" (default), "once" (the next note only) or "joins" (each note that starts while the one
+    /// `lasts`: "stays" (default; a probe's `latches: true`), "once" (the next note only) or "joins" (each note that starts while the one
     /// before still sounds is joined to it: hammer-ons, a slide along the string). `velocity` is the lowest and
     /// highest velocity that plays it, where how hard a note is hit decides. `default` marks how a note is
     /// played when nothing is asked for. Name them hammer, glide and slide and write_melody's ornaments use
     /// them. null removes one.
     pub articulations: Option<BTreeMap<String, Value>>,
-    /// The lowest and highest key that plays a note, as numbers or note names: [36, 84] or ["C2", "C6"].
-    pub range: Option<Vec<PitchInput>>,
+    /// The lowest and highest key that plays a note: [36, 84], ["C2", "C6"], or the text a probe reports
+    /// ("E1-G4 (28-67)"; of several runs the lowest and highest key are taken). [] takes the range away.
+    pub range: Option<Value>,
     /// How many octaves from the key the instrument sounds: -1 if it sounds an octave under what is written.
     /// The writing tools then write an octave up so that what you ask for is what is heard.
     pub sounds_octaves: Option<i8>,
+    /// The same as a probe reports it: -12 for an octave under what is written. Give this or `sounds_octaves`.
+    pub offset_semitones: Option<f64>,
     /// How far the instrument's pitch wheel bends, in semitones each way (2 unless it says otherwise). Bends
     /// and vibrato in write_melody are scaled by it.
     pub bend_range: Option<f64>,
@@ -217,9 +221,68 @@ fn articulation_json(articulation: &Articulation) -> Value {
     }
 }
 
-/// Reads a key given as a number or a note name.
+/// Reads a key given as a number, a note name, or the way a probe names
+/// one: `"D1 (26)"`.
 fn key_of(value: &Value, what: &str) -> Result<u8, String> {
-    parse_pitch_with(value, &|_| None, "nothing else").map_err(|error| format!("{what}: {error}"))
+    if let Some(number) = value.as_str().and_then(numbered) {
+        return Ok(number);
+    }
+    parse_pitch_with(value, &|_| None, "a key as a probe names it (like \"D1 (26)\")")
+        .map_err(|error| format!("{what}: {error}"))
+}
+
+/// The number in a key written as a probe writes it: `"D1 (26)"`.
+fn numbered(text: &str) -> Option<u8> {
+    let (_, rest) = text.trim().rsplit_once('(')?;
+    rest.strip_suffix(')')?.trim().parse::<u8>().ok().filter(|key| *key <= 127)
+}
+
+/// Reads a range: `[low, high]`, or runs of keys as a probe lists them
+/// (`"E1-G4 (28-67), C5 (72)"`), of which the lowest and the highest key
+/// are taken. `[]` is no range.
+fn range_of(value: &Value) -> Result<Option<(u8, u8)>, String> {
+    let wrong = || {
+        format!(
+            "`range` {value} should be the lowest and highest key, as in [36, 84] or \"E1-G4 (28-67)\"; [] takes it away"
+        )
+    };
+    match value {
+        Value::Array(keys) if keys.is_empty() => Ok(None),
+        Value::Array(keys) if keys.len() == 2 => Ok(Some((key_of(&keys[0], "range")?, key_of(&keys[1], "range")?))),
+        Value::String(text) => {
+            let mut keys: Vec<u8> = Vec::new();
+            for run in text.split(',').map(str::trim).filter(|run| !run.is_empty()) {
+                // "E1-G4 (28-67)" says it in numbers; "E1-G4" in names.
+                let ends: Vec<String> = match run.rsplit_once('(') {
+                    Some((_, numbers)) => numbers.trim_end_matches(')').split('-').map(str::to_string).collect(),
+                    None => split_names(run),
+                };
+                for end in ends {
+                    keys.push(
+                        key_of(&json!(end.trim()), "range")
+                            .or_else(|_| end.trim().parse::<u8>().ok().filter(|key| *key <= 127).ok_or_else(wrong))?,
+                    );
+                }
+            }
+            match (keys.iter().min(), keys.iter().max()) {
+                (Some(low), Some(high)) => Ok(Some((*low, *high))),
+                _ => Err(wrong()),
+            }
+        }
+        _ => Err(wrong()),
+    }
+}
+
+/// The two names of a run written as `"E1-G4"`: split at the dash that a
+/// note letter follows, since an octave may be negative (`"C-1-G9"`).
+fn split_names(run: &str) -> Vec<String> {
+    let dash = run.char_indices().skip(1).find(|(index, c)| {
+        *c == '-' && run[index + 1..].starts_with(|next: char| matches!(next.to_ascii_uppercase(), 'A'..='G'))
+    });
+    match dash {
+        Some((index, _)) => vec![run[..index].to_string(), run[index + 1..].to_string()],
+        None => vec![run.to_string()],
+    }
 }
 
 fn articulation_of(name: &str, value: &Value) -> Result<Articulation, String> {
@@ -228,15 +291,19 @@ fn articulation_of(name: &str, value: &Value) -> Result<Articulation, String> {
         return Ok(Articulation::key(name, key_of(value, &what)?));
     };
     if let Some(unknown) =
-        fields.keys().find(|field| !["key", "lasts", "velocity", "default"].contains(&field.as_str()))
+        fields.keys().find(|field| !["key", "lasts", "latches", "velocity", "default"].contains(&field.as_str()))
     {
         return Err(format!(
-            "{what}: '{unknown}' is not something an articulation has; it has key, lasts, velocity and default"
+            "{what}: '{unknown}' is not something an articulation has; it has key, lasts (or latches), velocity and default"
         ));
     }
     let key = fields.get("key").filter(|key| !key.is_null()).map(|key| key_of(key, &what)).transpose()?;
     let lasts = match fields.get("lasts").filter(|lasts| !lasts.is_null()) {
-        None => Lasts::Stays,
+        // As a probe reports it: a key whose change goes on after it has come up.
+        None => match fields.get("latches").and_then(Value::as_bool) {
+            Some(false) => Lasts::Once,
+            _ => Lasts::Stays,
+        },
         Some(lasts) => match lasts.as_str().map(str::to_ascii_lowercase).as_deref() {
             Some("stays") => Lasts::Stays,
             Some("once") => Lasts::Once,
@@ -291,18 +358,22 @@ fn requested(request: &SetInstrumentProfileRequest, base: InstrumentProfile) -> 
         }
     }
     if let Some(range) = &request.range {
-        profile.range = match range.as_slice() {
-            [] => None,
-            [low, high] => Some((key_of(&low.0, "range")?, key_of(&high.0, "range")?)),
-            _ => {
-                return Err(
-                    "`range` should be the lowest and highest key, as in [36, 84]; [] takes it away".to_string()
-                );
-            }
-        };
+        profile.range = range_of(range)?;
     }
-    if let Some(octaves) = request.sounds_octaves {
-        profile.sounds_octaves = octaves;
+    match (request.sounds_octaves, request.offset_semitones) {
+        (Some(_), Some(_)) => return Err("give `sounds_octaves` or `offset_semitones`, not both".to_string()),
+        (Some(octaves), None) => profile.sounds_octaves = octaves,
+        (None, Some(semitones)) => {
+            let octaves = semitones / 12.0;
+            if !semitones.is_finite() || octaves.fract() != 0.0 || octaves.abs() > 4.0 {
+                return Err(format!(
+                    "`offset_semitones` {semitones} is not a whole number of octaves; an instrument that is tuned \
+                     or transposed otherwise is set right in the instrument (get_device, update_device), not here"
+                ));
+            }
+            profile.sounds_octaves = octaves as i8;
+        }
+        (None, None) => {}
     }
     if let Some(bend) = request.bend_range {
         profile.bend_range = Some(bend);
@@ -342,6 +413,80 @@ fn summary(profile: &InstrumentProfile) -> String {
 
 fn known_json(known: &Known) -> Value {
     json!({ "uri": known.uri, "device": known.device, "source": known.source.name(), "profile": profile_json(&known.profile) })
+}
+
+/// What a probe's reply says about how much of what it measures is known
+/// already about the device type `uri`, and where to keep what is not.
+pub(crate) fn probe_note(session: &Session, uri: &str, track: Option<TrackId>) -> String {
+    let on_track = track.and_then(|id| session.project().track(id).ok()).is_some_and(|track| !track.profile.is_empty());
+    match session.instruments().of(uri) {
+        Some(known) => format!(
+            "Trill already knows this instrument ({}): {}. get_instrument_profile reads it all; a probe is only \
+             needed to check it or to find what it lacks.",
+            match known.source {
+                trill_engine::instruments::Source::BuiltIn => "it ships with an entry for it",
+                trill_engine::instruments::Source::Learned => "it was taught on this machine",
+            },
+            summary(&known.profile)
+        ),
+        None if on_track => "This track says what its notes mean (get_instrument_profile); nothing is remembered \
+                             for the plugin itself yet. set_instrument_profile remembers it."
+            .to_string(),
+        None => "Nothing is recorded about this instrument yet. Keep what this probe found with one call: \
+                 set_instrument_profile with `range` (the text above), `offset_semitones`, and for keys that \
+                 switch or play something else `articulations` and `sounds`, written as this reply names them. \
+                 It is then known for every song."
+            .to_string(),
+    }
+}
+
+/// Why a track that had notes made no sound, where what the track knows
+/// about its instrument says: its notes were keyswitches, or outside the
+/// range. `None` where the track knows nothing that explains it.
+pub(crate) fn known_silence(track: &trill_core::Track, start: f64, end: Option<f64>) -> Option<String> {
+    let profile = &track.profile;
+    if profile.is_empty() {
+        return None;
+    }
+    let notes: Vec<Note> = track
+        .clips
+        .iter()
+        .filter(|clip| !clip.muted)
+        .flat_map(|clip| clip.timeline_notes())
+        .filter(|note| note.end() > start && end.is_none_or(|end| note.start < end))
+        .collect();
+    if notes.is_empty() {
+        return None;
+    }
+    let switches = notes.iter().filter(|note| profile.is_keyswitch(note.pitch)).count();
+    if switches == notes.len() {
+        let mut names: Vec<&str> = notes.iter().filter_map(|note| profile.keyswitch_name(note.pitch)).collect();
+        names.sort_unstable();
+        names.dedup();
+        return Some(format!(
+            " Its {} note(s) here are all keyswitches of this instrument ({}): they choose how notes are played \
+             and make no sound themselves. Write the notes to be heard, asking for the articulation by name.",
+            notes.len(),
+            names.join(", ")
+        ));
+    }
+    let (low, high) = profile.range?;
+    let music: Vec<&Note> = notes
+        .iter()
+        .filter(|note| !profile.is_keyswitch(note.pitch) && profile.sound_name(note.pitch).is_none())
+        .collect();
+    let outside = music.iter().filter(|note| !profile.in_range(note.pitch)).count();
+    (outside > 0 && outside == music.len()).then(|| {
+        let lowest = music.iter().map(|note| note.pitch).min().unwrap_or(low);
+        let highest = music.iter().map(|note| note.pitch).max().unwrap_or(high);
+        format!(
+            " Its notes here run from {} to {}, all outside this instrument's range ({}-{}): move them into it.",
+            pitch_name(lowest),
+            pitch_name(highest),
+            pitch_name(low),
+            pitch_name(high)
+        )
+    })
 }
 
 /// What get_project says of a track's notes: nothing for an ordinary
@@ -519,6 +664,7 @@ fn write(session: &mut Session, request: &SetInstrumentProfileRequest) -> Reply 
             || request.articulations.is_some()
             || request.range.is_some()
             || request.sounds_octaves.is_some()
+            || request.offset_semitones.is_some()
             || request.bend_range.is_some()
             || request.slurs.is_some()
             || request.notes.is_some();
