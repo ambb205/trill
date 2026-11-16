@@ -583,14 +583,18 @@ impl Chord {
         self.spell_pitch_class(pitch_class(pitch)).spell(pitch)
     }
 
-    /// The same chord with its root and bass named as `key` names them:
-    /// G#m in E major, Abm in Eb major.
+    /// The same chord with its root named as `key` names it: G#m in E
+    /// major, Abm in Eb major. A slash bass that is a chord tone follows the
+    /// chord (D7/F#, even in F major); any other bass follows the key.
     pub fn spelled_in(&self, key: &Scale) -> Self {
-        Self {
-            root: key.spell_pitch_class(self.root.pitch_class()),
-            quality: self.quality.clone(),
-            bass: self.bass.map(|bass| key.spell_pitch_class(bass.pitch_class())),
-        }
+        let mut chord =
+            Self { root: key.spell_pitch_class(self.root.pitch_class()), quality: self.quality.clone(), bass: None };
+        chord.bass = self.bass.map(|bass| {
+            let class = bass.pitch_class();
+            let as_tone = chord.tone_names().into_iter().find(|name| name.pitch_class() == class);
+            as_tone.unwrap_or_else(|| key.spell_pitch_class(class))
+        });
+        chord
     }
 }
 
@@ -898,6 +902,12 @@ mod tests {
         assert_eq!(chord("Fmaj7/A").spell(57), "A3");
         assert_eq!(chord("Db7").spell(59), "Cb4");
         assert_eq!(chord("C").spell(61), "Db4");
+
+        let f_major = Scale::parse("F major").unwrap();
+        assert_eq!(chord("D7/Gb").spelled_in(&f_major).name(), "D7/F#", "a chord tone in the bass follows the chord");
+        assert_eq!(chord("A#m").spelled_in(&f_major).name(), "Bbm");
+        assert_eq!(chord("C/A#").spelled_in(&f_major).name(), "C/Bb", "any other bass follows the key");
+        assert_eq!(chord("Abm").spelled_in(&Scale::parse("E major").unwrap()).name(), "G#m");
     }
 
     #[test]

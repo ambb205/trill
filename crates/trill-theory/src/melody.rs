@@ -32,6 +32,16 @@ pub struct Tone {
     pub pitch: u8,
     pub start: f64,
     pub length: f64,
+    /// The note's name as the phrase spelled it: a sharpened degree is a
+    /// sharp and a flattened one a flat, whatever the key would call it.
+    pub name: NoteName,
+}
+
+impl Tone {
+    /// The name with its octave, such as `"F#5"`.
+    pub fn spelled(&self) -> String {
+        self.name.spell(self.pitch)
+    }
 }
 
 /// A parsed melodic phrase.
@@ -116,8 +126,8 @@ impl Phrase {
                     tone.length += length;
                 }
                 _ => {
-                    let pitch = parse_pitch(body, key, octave).map_err(|problem| fail(&problem))?;
-                    tones.push(Tone { pitch, start: position, length });
+                    let (pitch, name) = parse_pitch(body, key, octave).map_err(|problem| fail(&problem))?;
+                    tones.push(Tone { pitch, start: position, length, name });
                     tieable = true;
                 }
             }
@@ -156,13 +166,14 @@ fn round(value: f64) -> f64 {
     (value * 1e4).round() / 1e4
 }
 
-fn parse_pitch(body: &str, key: Option<&Scale>, octave: i32) -> std::result::Result<u8, String> {
+fn parse_pitch(body: &str, key: Option<&Scale>, octave: i32) -> std::result::Result<(u8, NoteName), String> {
     // A capital letter starts a note name; degrees start with a digit or an accidental.
     if body.starts_with(|c: char| c.is_ascii_uppercase()) {
         let named = NoteName::split_prefix(body)
             .and_then(|(name, rest)| rest.parse::<i32>().ok().map(|octave| (name, octave)))
             .ok_or_else(|| format!("not a note name with an octave; {EXPECTED}"))?;
-        return named.0.pitch(named.1).ok_or_else(|| "that note is outside the MIDI range C-1 to G9".to_string());
+        let pitch = named.0.pitch(named.1).ok_or("that note is outside the MIDI range C-1 to G9")?;
+        return Ok((pitch, named.0));
     }
     let after_accidentals = body.trim_start_matches(['b', '#', '♭', '♯']);
     let alter: i32 =
@@ -180,8 +191,13 @@ fn parse_pitch(body: &str, key: Option<&Scale>, octave: i32) -> std::result::Res
         }
     }
     let key = key.ok_or_else(|| "a scale degree needs a key; give one, or write note names like C4".to_string())?;
-    key.degree_pitch(degree, alter, octave + shift)
-        .ok_or_else(|| "that degree is outside the MIDI range in this octave".to_string())
+    let pitch = key
+        .degree_pitch(degree, alter, octave + shift)
+        .ok_or("that degree is outside the MIDI range in this octave")?;
+    // The degree's own letter, altered as written.
+    let own = key.names()[(degree as usize - 1) % key.size()];
+    let name = NoteName::new(own.letter, (own.accidental as i32 + alter).clamp(-3, 3) as i8).simplified();
+    Ok((pitch, name))
 }
 
 #[cfg(test)]
@@ -220,6 +236,17 @@ mod tests {
         assert_eq!(written(&phrase("1 2 3 4 5 6", "A minor pentatonic")), "69@0+1 72@1+1 74@2+1 76@3+1 79@4+1 81@5+1");
         let low = Phrase::parse("1 5", Some(&Scale::parse("E minor").unwrap()), 2, four()).unwrap();
         assert_eq!(written(&low), "40@0+1 47@1+1");
+    }
+
+    #[test]
+    fn notes_keep_the_spelling_they_were_written_with() {
+        let spelled = |text: &str, key: &str| -> String {
+            phrase(text, key).tones.iter().map(Tone::spelled).collect::<Vec<_>>().join(" ")
+        };
+        assert_eq!(spelled("1 #1 2 b3 3 #4 5 b6 6 b7 7", "F major"), "F4 F#4 G4 Ab4 A4 B4 C5 Db5 D5 Eb5 E5");
+        assert_eq!(spelled("7 #7 1' 7, #7,", "A minor"), "G5 G#5 A5 G4 G#4");
+        assert_eq!(spelled("Gb4 F#4 Cb5 B#3", "C major"), "Gb4 F#4 Cb5 B#3");
+        assert_eq!(spelled("1 2 3 4", "Bb minor"), "Bb4 C5 Db5 Eb5");
     }
 
     #[test]

@@ -383,13 +383,19 @@ fn bar_beat(beat: f64, bar_length: f64) -> String {
     format!("{}.{}", bar as i64 + 1, round(beat - bar * bar_length + 1.0))
 }
 
-/// What a track plays its notes through.
+/// What a track plays its notes through. Built-in instruments come with
+/// the preset they appear to be on.
 #[derive(Clone, Debug, PartialEq)]
 enum Instrument {
     None,
-    Drums,
-    /// A pitched instrument, with the built-in preset it appears to be on.
+    Drums(Option<String>),
     Pitched(Option<String>),
+}
+
+impl Instrument {
+    fn is_drums(&self) -> bool {
+        matches!(self, Instrument::Drums(_))
+    }
 }
 
 fn instrument(session: &Session, track: TrackId) -> Instrument {
@@ -398,31 +404,28 @@ fn instrument(session: &Session, track: TrackId) -> Instrument {
     // the plugin hosts could start a scan with the session locked.
     let builtins = BuiltinFactory.descriptors();
     for device in &track.devices {
-        match builtins.iter().find(|descriptor| descriptor.uri == device.uri) {
-            Some(descriptor) if descriptor.category != DeviceCategory::Instrument => continue,
-            Some(descriptor) if device.uri.contains("drum") => {
-                debug_assert_eq!(descriptor.category, DeviceCategory::Instrument);
-                return Instrument::Drums;
-            }
-            Some(descriptor) => {
-                // The model stores parameter values, not the preset's name;
-                // the preset whose values are all still in place is the one.
-                let preset = descriptor
-                    .presets
-                    .iter()
-                    .filter(|preset| !preset.params.is_empty())
-                    .filter(|preset| {
-                        preset.params.iter().all(|(id, value)| {
-                            device.params.get(id).is_some_and(|current| (current - value).abs() < 1e-6)
-                        })
-                    })
-                    .max_by_key(|preset| preset.params.len())
-                    .map(|preset| preset.name.clone());
-                return Instrument::Pitched(preset);
-            }
+        let Some(descriptor) = builtins.iter().find(|descriptor| descriptor.uri == device.uri) else {
             // A plugin: the first one in the chain is the instrument.
-            None => return Instrument::Pitched(None),
+            return Instrument::Pitched(None);
+        };
+        if descriptor.category != DeviceCategory::Instrument {
+            continue;
         }
+        // The model stores parameter values, not the preset's name; the
+        // preset whose values are all still in place is the one.
+        let preset = descriptor
+            .presets
+            .iter()
+            .filter(|preset| !preset.params.is_empty())
+            .filter(|preset| {
+                preset
+                    .params
+                    .iter()
+                    .all(|(id, value)| device.params.get(id).is_some_and(|current| (current - value).abs() < 1e-6))
+            })
+            .max_by_key(|preset| preset.params.len())
+            .map(|preset| preset.name.clone());
+        return if device.uri.contains("drum") { Instrument::Drums(preset) } else { Instrument::Pitched(preset) };
     }
     Instrument::None
 }
@@ -445,7 +448,7 @@ fn instrument_warnings(session: &Session, track: TrackId, kind: PartKind, notes:
             warnings
                 .push(format!("Track {} has no instrument, so this will be silent; add one with add_device.", track.0));
         }
-        (Instrument::Drums, PartKind::Pitched) => warnings.push(format!(
+        (Instrument::Drums(_), PartKind::Pitched) => warnings.push(format!(
             "Track {}'s instrument is a drum kit: these pitches will trigger drums, not notes. Write this on a \
              track with a pitched instrument.",
             track.0
@@ -547,6 +550,8 @@ struct Part {
     remarks: Vec<String>,
     /// The swing the material is normally played with: percent and unit.
     usual_swing: Option<(f64, f64)>,
+    /// The drum kit preset the material is written for.
+    usual_kit: Option<&'static str>,
     key: Option<Scale>,
 }
 
@@ -638,6 +643,15 @@ fn write(
 
     let mut warnings = std::mem::take(&mut part.warnings);
     warnings.extend(instrument_warnings(session, track, kind, &part.notes));
+    // Suggest the kit a groove is written for, unless the track is on it.
+    if let (Some(kit), Instrument::Drums(current)) = (part.usual_kit, instrument(session, track))
+        && current.as_deref().unwrap_or("default") != kit
+    {
+        part.remarks.push(format!(
+            "This groove is written for the '{kit}' drum kit preset; the track is on '{}'. update_device can switch it.",
+            current.as_deref().unwrap_or("default")
+        ));
+    }
     warnings.extend(outside_clip(session, clip));
 
     let mut out = Map::new();
@@ -839,6 +853,7 @@ impl TrillServer {
                 warnings,
                 remarks: chart.remarks,
                 usual_swing: None,
+                usual_kit: None,
                 key: chart.key,
             })
         });
@@ -892,7 +907,6 @@ impl TrillServer {
                         groove.name, groove.tempo.0, groove.tempo.1, setting.tempo
                     ));
                 }
-                remarks.push(format!("The '{}' drum kit preset suits this groove.", groove.kit));
             }
             if let Some(fill) = fill {
                 if fill.signature != meter {
@@ -927,6 +941,7 @@ impl TrillServer {
                 warnings,
                 remarks,
                 usual_swing: groove.and_then(|groove| groove.swing),
+                usual_kit: groove.map(|groove| groove.kit),
                 key: None,
             })
         });
@@ -982,6 +997,7 @@ impl TrillServer {
                 warnings: Vec::new(),
                 remarks: chart.remarks,
                 usual_swing: None,
+                usual_kit: None,
                 key: chart.key,
             })
         });
@@ -1032,6 +1048,7 @@ impl TrillServer {
                 warnings: Vec::new(),
                 remarks,
                 usual_swing: None,
+                usual_kit: None,
                 key: chart.key,
             })
         });
@@ -1082,11 +1099,16 @@ impl TrillServer {
             }
             notes.retain(|note| note.start < total - EPSILON);
 
+            // Named as the phrase spelled them: a #1 is a sharp, not the key's flat second.
+            let spelled: Vec<(f64, String)> =
+                phrase.tones.iter().map(|tone| (tone.start + lead_in, tone.spelled())).collect();
             if let Some(key) = &key {
-                let outside: Vec<String> = once
+                let outside: Vec<String> = phrase
+                    .tones
                     .iter()
-                    .filter(|note| !key.contains(note.pitch))
-                    .map(|note| format!("{} at {}", key.spell(note.pitch), bar_beat(note.start, bar_length)))
+                    .zip(&spelled)
+                    .filter(|(tone, _)| !key.contains(tone.pitch))
+                    .map(|(_, (start, name))| format!("{name} at {}", bar_beat(*start, bar_length)))
                     .collect();
                 if !outside.is_empty() {
                     let shown = outside.iter().take(6).cloned().collect::<Vec<_>>().join(", ");
@@ -1098,9 +1120,20 @@ impl TrillServer {
                     ));
                 }
             }
+            let by_bar: Vec<String> = (0..own_bars.min(16))
+                .map(|bar| {
+                    let (from, to) = (bar as f64 * bar_length, (bar + 1) as f64 * bar_length);
+                    let names: Vec<&str> = spelled
+                        .iter()
+                        .filter(|(start, _)| *start >= from - EPSILON && *start < to - EPSILON)
+                        .map(|(_, name)| name.as_str())
+                        .collect();
+                    names.join(" ")
+                })
+                .collect();
             let mut summary = Map::new();
-            summary.insert("pitches".into(), json!(spell_bars(&once, bar_length, own_bars.min(16), key.as_ref())));
-            Ok(Part { notes, bars, summary, warnings: Vec::new(), remarks, usual_swing: None, key })
+            summary.insert("pitches".into(), json!(by_bar.join(" | ")));
+            Ok(Part { notes, bars, summary, warnings: Vec::new(), remarks, usual_swing: None, usual_kit: None, key })
         });
         finish(reply)
     }
@@ -1138,23 +1171,19 @@ fn analyze(session: &Session, request: &AnalyzeMusicRequest) -> Reply {
                 return Err(format!("{id} is an audio clip; only MIDI can be analyzed"));
             }
             let track = project.clip_track(id).map_err(|error| explain(project, error))?;
-            (
-                format!("clip {clip} ({})", found.name),
-                found.timeline_notes(),
-                instrument(session, track) == Instrument::Drums,
-            )
+            (format!("clip {clip} ({})", found.name), found.timeline_notes(), instrument(session, track).is_drums())
         }
         (None, Some(track)) => {
             let id = TrackId(track);
             let found = project.track(id).map_err(|error| explain(project, error))?;
             let notes = found.clips.iter().filter(|clip| !clip.muted).flat_map(|clip| clip.timeline_notes()).collect();
-            (format!("track {track} ({})", found.name), notes, instrument(session, id) == Instrument::Drums)
+            (format!("track {track} ({})", found.name), notes, instrument(session, id).is_drums())
         }
         (None, None) => {
             let pitched: Vec<_> = project
                 .tracks
                 .iter()
-                .filter(|track| !track.mute && instrument(session, track.id) != Instrument::Drums)
+                .filter(|track| !track.mute && !instrument(session, track.id).is_drums())
                 .filter(|track| track.clips.iter().any(|clip| !clip.notes().is_empty()))
                 .collect();
             let names: Vec<&str> = pitched.iter().map(|track| track.name.as_str()).collect();

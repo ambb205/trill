@@ -450,7 +450,12 @@ async fn replies_warn_about_what_cannot_be_heard() {
         remarks(&reply).contains("'drum_and_bass' is usually played at 165-176 BPM; the project is at 120"),
         "{reply}"
     );
-    assert!(remarks(&reply).contains("'tight' drum kit preset suits this groove"), "{reply}");
+    assert!(
+        reply.get("notes").is_some_and(|notes| notes.as_array().unwrap().len() == 1),
+        "the kit already suits: {reply}"
+    );
+    let reply = ok(client, "write_drums", json!({ "track": kit, "groove": "house", "start": 40 })).await;
+    assert!(remarks(&reply).contains("written for the '909' drum kit preset; the track is on 'tight'"), "{reply}");
     let reply =
         ok(client, "write_drums", json!({ "track": kit, "lanes": { "kick": "x...x...x...x.." }, "start": 24 })).await;
     assert!(warnings(&reply).contains("lane 'kick' bar 1 has 15 steps"), "{reply}");

@@ -136,6 +136,10 @@ fn home_note<'a>(notes: impl Iterator<Item = &'a Note>) -> Option<(u8, bool)> {
     }
 }
 
+/// How much a note that enters at the very end of a window counts toward
+/// that window's chord.
+const LEAD_IN_WEIGHT: f64 = 0.4;
+
 /// The most windows [`read_chords`] reads in one call.
 const MAX_WINDOWS: usize = 4096;
 
@@ -156,8 +160,10 @@ pub struct Reading {
 ///
 /// Pitch classes are weighed by how long they sound within the window (see
 /// [`identify_weighted`]), so a melody over the chords or an arpeggio
-/// spelling them out reads as the chord underneath. With a `key`, roots are
-/// spelled as that key spells them.
+/// spelling them out reads as the chord underneath. The bass is the lowest
+/// note sounding as the window opens, and notes that only enter at its very
+/// end count for little, so a walking bass or a pushed chord change does not
+/// rename the chord. With a `key`, roots are spelled as that key spells them.
 pub fn read_chords(notes: &[Note], window: f64, start: f64, end: f64, key: Option<&Scale>) -> Vec<Reading> {
     let mut readings = Vec::new();
     // Written so that a NaN anywhere reads nothing rather than looping.
@@ -173,21 +179,34 @@ pub fn read_chords(notes: &[Note], window: f64, start: f64, end: f64, key: Optio
         // How long each pitch class sounds here, and its lowest pitch.
         let mut weights = [0.0f64; 12];
         let mut lowest = [u8::MAX; 12];
+        // The lowest note sounding as the window opens, allowing for a
+        // strummed or humanized entry.
+        let opening = from + (window * 0.125).min(0.25);
+        let mut downbeat_bass: Option<u8> = None;
         for note in notes {
             let overlap = note.end().min(to) - note.start.max(from);
             if overlap > 1e-9 {
                 let class = pitch_class(note.pitch) as usize;
-                weights[class] += overlap;
+                // What enters in the last quarter of a window leads into
+                // the next one: an approach note, a pickup, a pushed chord.
+                let leading = note.start > from + (to - from) * 0.75 - 1e-9;
+                weights[class] += overlap * if leading { LEAD_IN_WEIGHT } else { 1.0 };
                 lowest[class] = lowest[class].min(note.pitch);
+                if note.start <= opening {
+                    downbeat_bass = Some(downbeat_bass.map_or(note.pitch, |bass| bass.min(note.pitch)));
+                }
             }
         }
         // A note counts toward the reading if it is heard at least a tenth
-        // as long as the most-heard one; the lowest such note is the bass.
+        // as long as the most-heard one.
         let strongest = weights.iter().copied().fold(0.0, f64::max);
         let mut sounding: Vec<usize> =
             (0..12).filter(|class| weights[*class] > 0.0 && weights[*class] >= strongest * 0.1).collect();
         sounding.sort_by_key(|class| lowest[*class]);
-        let bass = sounding.first().map(|class| *class as u8);
+        // The bass of a chord is what is underneath when it arrives; where
+        // a bass line walks to afterwards does not rename the chord. If
+        // nothing sounds at the start, the lowest note heard stands in.
+        let bass = downbeat_bass.map(pitch_class).or(sounding.first().map(|class| *class as u8));
         let chord = identify_weighted(&weights, bass).map(|chord| match key {
             Some(key) => chord.spelled_in(key),
             None => chord,
@@ -410,6 +429,26 @@ mod tests {
         song.extend(melody(":0.5 5 6 5 4 3 4 5 3 | 6 5 6 7 1':1 6:1 | 7 1' 2' 1' 7 6 5:1 | 5 4 3 2 1:2", "C major"));
         assert_eq!(names(&read_chords(&song, 4.0, 0.0, 16.0, None)), ["C", "F", "G", "C"]);
         assert_eq!(key_of(&song), "C major");
+    }
+
+    #[test]
+    fn a_walking_bass_does_not_rename_the_chords() {
+        // Comping in short stabs over a bass that moves on every beat: the
+        // approach notes are as long as the chord tones and lower than the roots.
+        let progression = Progression::parse("Dm7 | G7 | Cmaj7 | A7 | Dm7 | G7 | Cmaj7 | Cmaj7", four(), None).unwrap();
+        let spec = VoicingSpec { style: VoicingStyle::Drop2, ..VoicingSpec::default() };
+        let comping = Comping {
+            rhythm: crate::progression::Rhythm::parse("charleston", four()).unwrap(),
+            gate: 0.7,
+            ..Comping::default()
+        };
+        let mut band = comp(&progression, &progression.voice(&spec), &comping);
+        band.extend(bass_line(&progression, &BassLine { style: BassStyle::Walking, ..BassLine::default() }));
+        assert_eq!(
+            names(&read_chords(&band, 4.0, 0.0, 32.0, None)),
+            ["Dm7", "G7", "Cmaj7", "A7", "Dm7", "G7", "Cmaj7", "Cmaj7"]
+        );
+        assert_eq!(key_of(&band), "C major");
     }
 
     #[test]
