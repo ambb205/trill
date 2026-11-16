@@ -1,9 +1,9 @@
 //! A compact notation for single melodic lines.
 //!
 //! ```text
-//! 5:0.5 6 5 4 3:2 | 1:2 r:1 7,:1 | 1:4            scale degrees, here in A minor
-//! E5:0.5 F5 E5 D5 C5:2 | A4:2 r:1 G4:1 | A4:4    the same line as note names
-//! 3:1.5 ~:0.5 b3:1 #4 1':2                       a tie, a flat third, the tonic an octave up
+//! :0.5 5 6 5 4 3:2 | :1 1:2 r 7, | 1:4            scale degrees, here in A minor
+//! :0.5 E5 F5 E5 D5 C5:2 | :1 A4:2 r G4 | A4:4    the same line as note names
+//! 3:1.5 ~:0.5 b3 #4 1':2                         a tie, a flat third, the tonic an octave up
 //! ```
 //!
 //! * A pitch is a **scale degree** (`1`-`7`, counting up from the tonic in
@@ -11,11 +11,13 @@
 //!   with its octave** (`C4`, `F#5`, `Bb3`).
 //! * `b` or `#` before a degree lowers or raises it a semitone. After a
 //!   degree, `'` moves it up an octave and `,` down.
-//! * `:` and a number give the length in beats. A length stays in force
-//!   until the next one, so a run of equal notes states it once.
+//! * `:` and a number after a note give that note's length in beats. A note
+//!   without one is a beat long, or whatever the last bare `:beats` set: so
+//!   `:0.5` on its own makes the notes after it eighths, and `:1` goes back.
 //! * `r` is a rest and `~` ties: it lengthens the note before it.
 //! * `|` is an optional bar line. When bar lines are written, every bar is
-//!   checked to be the right length, which catches slips in counting.
+//!   checked to be the right length, which catches slips in counting. The
+//!   first bar may be shorter: a pickup leading into the first full bar.
 
 use crate::error::{Error, Result};
 use crate::expression::{Dynamics, MIN_LENGTH, clamp_velocity};
@@ -38,11 +40,15 @@ pub struct Phrase {
     pub tones: Vec<Tone>,
     /// Total length in beats, including rests at either end.
     pub length: f64,
+    /// Length of the pickup before the first bar line, or 0 when the
+    /// phrase starts on a downbeat. A phrase with a pickup belongs this
+    /// many beats before a bar line.
+    pub pickup: f64,
 }
 
 const EXPECTED: &str = "expected a scale degree (1-7, b3, #4, 5' for the octave above, 7, for the octave below), a note \
                         name with its octave (C4, F#5), r for a rest or ~ for a tie, each optionally followed by \
-                        :beats";
+                        :beats; a bare :beats sets the length of the notes after it";
 
 impl Phrase {
     /// Parses a phrase. Degrees are read in `key`, with degree 1 in
@@ -51,7 +57,9 @@ impl Phrase {
         let bar_length = signature.beats_per_bar();
         let spaced = text.replace('|', " | ");
         let mut tones: Vec<Tone> = Vec::new();
-        let (mut position, mut length, mut bar_start, mut bar) = (0.0f64, 1.0f64, 0.0f64, 1usize);
+        let (mut position, mut default, mut bar_start, mut bar) = (0.0f64, 1.0f64, 0.0f64, 1usize);
+        let mut notes_and_rests = 0;
+        let mut pickup = 0.0;
         // Whether the last thing written was a note, which is what a tie extends.
         let mut tieable = false;
         let mut count = 0;
@@ -59,10 +67,15 @@ impl Phrase {
         for token in spaced.split_whitespace() {
             if token == "|" {
                 let written = position - bar_start;
-                if (written - bar_length).abs() > EPSILON && !(bar == 1 && written.abs() < EPSILON) {
+                // Only the first bar may be short: it is then a pickup.
+                let short_first = bar == 1 && bar_start == 0.0 && written < bar_length - EPSILON;
+                if short_first {
+                    pickup = written;
+                }
+                if (written - bar_length).abs() > EPSILON && !short_first {
                     return Err(Error::new(format!(
                         "bar {bar} of the phrase is {} beats long, but a bar of {}/{} has {bar_length}; check the \
-                         lengths, remembering that a length carries over to the notes after it",
+                         lengths: a note without :beats is as long as the last bare :beats said (1 to begin with)",
                         round(written),
                         signature.numerator,
                         signature.denominator
@@ -76,18 +89,24 @@ impl Phrase {
             }
             count += 1;
             let fail = |problem: &str| Error::new(format!("phrase token {count} '{token}': {problem}"));
-            let body = match token.split_once(':') {
+            // "5:0.5" is one note's length; a bare ":0.5" is the default from here on.
+            let (body, own) = match token.split_once(':') {
                 Some((body, beats)) => {
                     let Some(beats) = parse_beats(beats) else {
                         return Err(fail(&format!(
                             "'{beats}' is not a length in beats; expected a number, as in 5:0.5"
                         )));
                     };
-                    length = beats;
-                    body
+                    (body, Some(beats))
                 }
-                None => token,
+                None => (token, None),
             };
+            if body.is_empty() {
+                default = own.unwrap_or(default);
+                continue;
+            }
+            notes_and_rests += 1;
+            let length = own.unwrap_or(default);
             match body {
                 "r" | "R" => tieable = false,
                 "~" => {
@@ -104,10 +123,10 @@ impl Phrase {
             }
             position += length;
         }
-        if count == 0 {
+        if notes_and_rests == 0 {
             return Err(Error::new(format!("'{text}' has no notes; {EXPECTED}")));
         }
-        Ok(Self { tones, length: position })
+        Ok(Self { tones, length: position, pickup })
     }
 
     /// The phrase as notes. `gate` is the fraction of each note that
@@ -205,24 +224,26 @@ mod tests {
 
     #[test]
     fn note_names_need_no_key() {
-        let named = Phrase::parse("E5:0.5 F5 E5 D5 C5:2 | A4:2 r:1 G4:1 | A4:4", None, 4, four()).unwrap();
+        let named = Phrase::parse(":0.5 E5 F5 E5 D5 C5:2 | :1 A4:2 r G4 | A4:4", None, 4, four()).unwrap();
         assert_eq!(written(&named), "76@0+0.5 77@0.5+0.5 76@1+0.5 74@1.5+0.5 72@2+2 69@4+2 67@7+1 69@8+4");
         // The same line in degrees.
-        assert_eq!(phrase("5:0.5 6 5 4 3:2 | 1:2 r:1 7,:1 | 1:4", "A minor"), named);
+        assert_eq!(phrase(":0.5 5 6 5 4 3:2 | :1 1:2 r 7, | 1:4", "A minor"), named);
         assert_eq!(written(&phrase("Bb3 F#4 C-1 Cb4", "C major")), "58@0+1 66@1+1 0@2+1 59@3+1");
     }
 
     #[test]
-    fn lengths_carry_over_and_ties_and_rests_count() {
-        let line = phrase("1:0.5 2 3 4:2 5", "C major");
-        assert_eq!(written(&line), "60@0+0.5 62@0.5+0.5 64@1+0.5 65@1.5+2 67@3.5+2");
-        assert_eq!(line.length, 5.5);
-        assert_eq!(written(&phrase("3:1.5 ~:0.5 5:2 ~ ~:4", "C major")), "64@0+2 67@2+8");
+    fn lengths_defaults_ties_and_rests() {
+        // A note's own length is its alone; a bare length sets the default.
+        assert_eq!(written(&phrase("1:0.5 2 3:2 4", "C major")), "60@0+0.5 62@0.5+1 64@1.5+2 65@3.5+1");
+        let line = phrase(":0.5 1 2 3 4:2 5 :1 6", "C major");
+        assert_eq!(written(&line), "60@0+0.5 62@0.5+0.5 64@1+0.5 65@1.5+2 67@3.5+0.5 69@4+1");
+        assert_eq!(line.length, 5.0);
+        assert_eq!(written(&phrase("3:1.5 ~:0.5 5:2 ~ ~:4", "C major")), "64@0+2 67@2+7");
         let rests = phrase("r:2 1:1 r 3 r:4", "C major");
         assert_eq!(written(&rests), "60@2+1 64@4+1");
         assert_eq!(rests.length, 9.0);
         // Triplets written as 0.33 are exact.
-        let triplets = phrase("1:0.33 2 3 4:1", "C major");
+        let triplets = phrase(":0.33 1 2 3 4:1", "C major");
         assert!((triplets.tones[3].start - 1.0).abs() < 1e-12);
         assert!((triplets.length - 2.0).abs() < 1e-12);
     }
@@ -230,16 +251,20 @@ mod tests {
     #[test]
     fn bar_lines_check_the_counting() {
         assert!(Phrase::parse("| 1:1 2 3 4 | 5:4 |", Some(&Scale::parse("C").unwrap()), 4, four()).is_ok());
-        assert_eq!(phrase("1:1 2 3 4|5:2 6", "C major").length, 8.0, "the last bar may be left open");
-        let error = Phrase::parse("1:1 2 3 | 4 5 6 7", Some(&Scale::parse("C").unwrap()), 4, four()).unwrap_err();
-        assert!(error.message().starts_with("bar 1 of the phrase is 3 beats long, but a bar of 4/4 has 4"), "{error}");
+        assert_eq!(phrase("1:1 2 3 4|5:2 6", "C major").length, 7.0, "the last bar may be left open");
+        let error = Phrase::parse("1:1 2 3 4 5 | 6", Some(&Scale::parse("C").unwrap()), 4, four()).unwrap_err();
+        assert!(error.message().starts_with("bar 1 of the phrase is 5 beats long, but a bar of 4/4 has 4"), "{error}");
+        // A short first bar is a pickup, not a mistake.
+        let pickup = phrase(":0.5 5 5 | :1 1':2 7 6 | 5:4", "C major");
+        assert_eq!((pickup.pickup, pickup.length), (1.0, 9.0));
+        assert_eq!(phrase("1:1 2 3 4 | 5:4", "C major").pickup, 0.0);
         let error =
             Phrase::parse("1:1 2 3 4 | 5:0.5 6 7 | 1", Some(&Scale::parse("C").unwrap()), 4, four()).unwrap_err();
-        assert!(error.message().starts_with("bar 2 of the phrase is 1.5 beats long"), "{error}");
+        assert!(error.message().starts_with("bar 2 of the phrase is 2.5 beats long"), "{error}");
         let waltz = TimeSignature::new(3, 4).unwrap();
         assert!(Phrase::parse("1:1 2 3 | 4:3 | 5:1.5 6", Some(&Scale::parse("C").unwrap()), 4, waltz).is_ok());
         let compound = TimeSignature::new(6, 8).unwrap();
-        assert!(Phrase::parse("1:0.5 2 3 4 5 6 | 1:1.5 5", Some(&Scale::parse("C").unwrap()), 4, compound).is_ok());
+        assert!(Phrase::parse(":0.5 1 2 3 4 5 6 | :1.5 1 5", Some(&Scale::parse("C").unwrap()), 4, compound).is_ok());
     }
 
     #[test]
@@ -253,6 +278,8 @@ mod tests {
             ("C", "phrase token 1 'C': not a note name with an octave"),
             ("C4 Dx", "phrase token 2 'Dx': not a note name with an octave"),
             ("1:abc", "phrase token 1 '1:abc': 'abc' is not a length in beats"),
+            ("1 :x 2", "phrase token 2 ':x': 'x' is not a length in beats"),
+            (":0.5", "has no notes"),
             ("1:0", "is not a length in beats"),
             ("1:-1", "is not a length in beats"),
             ("~ 1", "phrase token 1 '~': a tie lengthens the note before it"),

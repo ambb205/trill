@@ -7,11 +7,14 @@
 //! state, and everything that looks random is driven by a seed, so the same
 //! request always writes the same music.
 
+pub mod analysis;
 pub mod arpeggio;
 pub mod bass;
 pub mod chord;
+pub mod drums;
 pub mod error;
 pub mod expression;
+pub mod grooves;
 pub mod melody;
 pub mod pitch;
 pub mod progression;
@@ -21,11 +24,14 @@ pub mod steps;
 pub mod timing;
 pub mod voicing;
 
+pub use analysis::{KeyEstimate, estimate_key, read_chords, summarize};
 pub use arpeggio::{ArpOrder, Arpeggio};
 pub use bass::{BassLine, BassStyle, bass_line};
 pub use chord::{Chord, Quality, identify, is_no_chord};
+pub use drums::{DrumPattern, FillPlan};
 pub use error::{Error, Result};
 pub use expression::{Dynamics, Humanize, Level, Rng, Swing};
+pub use grooves::{FILLS, Fill, GROOVES, Groove};
 pub use melody::Phrase;
 pub use pitch::{Interval, Letter, NoteName};
 pub use progression::{Comping, Progression, Rhythm, Span, StrumDirection};

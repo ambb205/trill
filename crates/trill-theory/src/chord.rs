@@ -3,6 +3,7 @@
 
 use crate::error::{Error, Result};
 use crate::pitch::{Interval, NoteName, pitch_class};
+use crate::scale::Scale;
 use std::fmt;
 
 /// The tones of a chord above its root, without the root itself being
@@ -581,6 +582,16 @@ impl Chord {
     pub fn spell(&self, pitch: u8) -> String {
         self.spell_pitch_class(pitch_class(pitch)).spell(pitch)
     }
+
+    /// The same chord with its root and bass named as `key` names them:
+    /// G#m in E major, Abm in Eb major.
+    pub fn spelled_in(&self, key: &Scale) -> Self {
+        Self {
+            root: key.spell_pitch_class(self.root.pitch_class()),
+            quality: self.quality.clone(),
+            bass: self.bass.map(|bass| key.spell_pitch_class(bass.pitch_class())),
+        }
+    }
 }
 
 impl fmt::Display for Chord {
@@ -610,10 +621,6 @@ const IDENTIFIABLE: &[&str] = &[
     "13sus4", "mMaj9", "m9b5", "add11", "madd11", "7alt",
 ];
 
-fn mask(pitch_classes: impl IntoIterator<Item = u8>) -> u16 {
-    pitch_classes.into_iter().fold(0, |mask, pc| mask | 1 << (pc % 12))
-}
-
 /// Names the chord a set of pitches makes, reading the lowest pitch as the
 /// bass. Root position is preferred, so C E G A is C6 but A C E G is Am7; an
 /// inversion comes back as a slash chord (E G C is C/E). The tones players
@@ -622,35 +629,61 @@ fn mask(pitch_classes: impl IntoIterator<Item = u8>) -> u16 {
 /// classes or for a cluster that is not a recognisable chord.
 pub fn identify(pitches: &[u8]) -> Option<Chord> {
     let bass = pitch_class(*pitches.iter().min()?);
-    let sounding = mask(pitches.iter().map(|pitch| pitch_class(*pitch)));
-    if sounding.count_ones() < 2 {
+    let mut weights = [0.0; 12];
+    for pitch in pitches {
+        weights[pitch_class(*pitch) as usize] = 1.0;
+    }
+    identify_weighted(&weights, Some(bass))
+}
+
+/// Names the chord in a passage, given how much each pitch class is heard
+/// (index 0 is C; any unit, such as beats sounding) and, if known, the
+/// pitch class in the bass.
+///
+/// Every chord on every sounding root is scored: the weight of its tones,
+/// less the weight of the notes it does not explain, less a charge for each
+/// tone it claims that is not there and for each tone beyond a triad. So a
+/// passing note in a melody does not turn C into Cadd11, while a ninth held
+/// with the chord does make it a ninth chord. `None` when no chord accounts
+/// for at least four fifths of what sounds.
+pub fn identify_weighted(weights: &[f64; 12], bass: Option<u8>) -> Option<Chord> {
+    let total: f64 = weights.iter().sum();
+    if weights.iter().filter(|weight| **weight > 0.0).count() < 2 {
         return None;
     }
+    let bass = bass.map(|bass| bass % 12).filter(|bass| weights[*bass as usize] > 0.0);
     let templates: Vec<Quality> =
         IDENTIFIABLE.iter().map(|symbol| Quality::parse(symbol).expect("built-in qualities parse")).collect();
 
-    let mut best: Option<(i32, Chord)> = None;
-    for root in (0..12u8).filter(|root| sounding & (1 << root) != 0) {
-        // The sounding notes as pitch classes above this root.
-        let relative = mask((0..12u8).filter(|pc| sounding & (1 << pc) != 0).map(|pc| (pc + 12 - root) % 12));
+    let mut best: Option<(f64, Chord)> = None;
+    for root in (0..12u8).filter(|root| weights[*root as usize] > 0.0) {
         for (rank, quality) in templates.iter().enumerate() {
-            let template = mask(quality.tones().iter().map(|tone| tone.pitch_class()));
-            let fifth = if quality.has(Interval::PERFECT_FIFTH) { 1 << 7 } else { 0 };
+            // The tones a player may leave out without changing the chord's name.
             let ninth_under_extension = quality.has(Interval::new(NINTH, 0))
                 && (quality.has(Interval::new(ELEVENTH, 0)) || quality.has(Interval::new(THIRTEENTH, 0)));
-            let ninth = if ninth_under_extension { 1 << 2 } else { 0 };
-            let Some(omitted) = [0, fifth, ninth, fifth | ninth]
-                .into_iter()
-                .find(|omitted| relative == template & !omitted)
-                .map(|omitted: u16| omitted.count_ones() as i32)
-            else {
-                continue;
+            let optional = |tone: &Interval| {
+                *tone == Interval::PERFECT_FIFTH || (ninth_under_extension && *tone == Interval::new(NINTH, 0))
             };
-            let score = 1000 - 200 * omitted - 5 * rank as i32 + if root == bass { 150 } else { 0 };
+            let (mut inside, mut present, mut missing) = (0.0, 0, 0);
+            for tone in quality.tones() {
+                let weight = weights[((root + tone.pitch_class()) % 12) as usize];
+                inside += weight;
+                if weight > 0.0 {
+                    present += 1;
+                } else if !optional(tone) {
+                    missing += 1;
+                }
+            }
+            if present < 2 || inside < 0.8 * total {
+                continue;
+            }
+            let extra_tones = quality.tones().len().saturating_sub(3) as f64;
+            let score =
+                inside - (total - inside) - total * (0.2 * missing as f64 + 0.12 * extra_tones + 0.002 * rank as f64)
+                    + if Some(root) == bass { 0.1 * total } else { 0.0 };
             if best.as_ref().is_none_or(|(top, _)| score > *top) {
-                let name = NoteName::of_pitch_class(root);
-                let mut chord = Chord::new(name, quality.clone());
-                if root != bass {
+                let mut chord = Chord::new(NoteName::of_pitch_class(root), quality.clone());
+                if let Some(bass) = bass.filter(|bass| *bass != root) {
                     chord.bass = Some(chord.spell_pitch_class(bass));
                 }
                 best = Some((score, chord));
@@ -670,6 +703,10 @@ mod tests {
 
     fn spelled(text: &str) -> String {
         chord(text).tone_names().iter().map(ToString::to_string).collect::<Vec<_>>().join(" ")
+    }
+
+    fn mask(pitch_classes: impl IntoIterator<Item = u8>) -> u16 {
+        pitch_classes.into_iter().fold(0, |mask, pc| mask | 1 << (pc % 12))
     }
 
     #[test]

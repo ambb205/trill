@@ -131,8 +131,8 @@ impl StepPattern {
     }
 
     /// The hits of one pass through the pattern, in order, with rolls
-    /// written out as separate hits. Hits after the first of a roll are a
-    /// little softer, so the roll keeps the pulse of the grid.
+    /// written out as separate hits. Only the first hit of an accented roll
+    /// keeps the accent, so the roll does not bury the pulse of the grid.
     pub fn hits(&self, bar_length: f64) -> Vec<Hit> {
         // (start, length, level, roll) with holds folded into the length.
         let mut spans: Vec<(f64, f64, Level, u8)> = Vec::new();
@@ -141,7 +141,9 @@ impl StepPattern {
             for (index, cell) in cells.iter().enumerate() {
                 match cell {
                     Cell::Hit { level, roll } => {
-                        spans.push((bar as f64 * bar_length + index as f64 * step, step, *level, *roll));
+                        // Multiplying before dividing keeps grid points exact (step 9 of 12 is beat 3).
+                        let within = bar_length * index as f64 / cells.len() as f64;
+                        spans.push((bar as f64 * bar_length + within, step, *level, *roll));
                     }
                     Cell::Hold => {
                         if let Some(span) = spans.last_mut() {
