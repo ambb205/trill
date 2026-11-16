@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use trill_assistant::{AssistantConfig, CliInstallation, CliVersion, Conversation, Event, SessionId};
+use trill_assistant::{AssistantConfig, CliInstallation, CliVersion, Conversation, Event, Progress, SessionId};
 
 /// The session id the scripted `init` line announces.
 pub const SESSION: &str = "5e55104d-0000-4000-8000-000000000001";
@@ -176,6 +176,29 @@ pub fn success() -> &'static str {
     r#"line {"type":"result","subtype":"success","is_error":false,"num_turns":1,"duration_ms":10,"total_cost_usd":0.001,"usage":{"input_tokens":1,"output_tokens":2}}"#
 }
 
+/// A `result` line for a run that used every step it was given: `turns` is
+/// what the CLI says it took (one more than it was given, with 2.1.325).
+pub fn out_of_steps(turns: u32, cost: f64) -> String {
+    format!(
+        r#"line {{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":{turns},"duration_ms":1000,"total_cost_usd":{cost},"usage":{{"input_tokens":100,"output_tokens":10}},"errors":["Reached maximum number of turns ({})"]}}"#,
+        turns - 1
+    )
+}
+
+/// The assistant calling one of Trill's tools, and the tool's answer.
+pub fn call(id: &str, tool: &str) -> String {
+    let asked = serde_json::json!({
+        "type": "assistant",
+        "message": { "id": format!("msg_call_{id}"), "content": [
+            { "type": "tool_use", "id": id, "name": format!("mcp__trill__{tool}"), "input": {} }] },
+    });
+    let answered = serde_json::json!({
+        "type": "user",
+        "message": { "content": [{ "type": "tool_result", "tool_use_id": id, "content": "{}" }] },
+    });
+    format!("line {asked}\nline {answered}")
+}
+
 /// A complete reply that was not streamed.
 pub fn say(text: &str) -> String {
     let message = serde_json::json!({
@@ -213,6 +236,19 @@ pub fn rest_of_turn(conversation: &mut Conversation) -> Vec<Event> {
             None => assert!(Instant::now() < deadline, "the turn did not end; so far: {events:?}"),
         }
     }
+}
+
+/// The events of a turn without the reports of how far it has come.
+pub fn plain(events: &[Event]) -> Vec<Event> {
+    events.iter().filter(|event| !matches!(event, Event::Progress(_))).cloned().collect()
+}
+
+/// How far the turn said it had come, each time it said.
+pub fn progress(events: &[Event]) -> Vec<Progress> {
+    events
+        .iter()
+        .filter_map(|event| if let Event::Progress(progress) = event { Some(*progress) } else { None })
+        .collect()
 }
 
 /// Everything the assistant said during the turn, joined.

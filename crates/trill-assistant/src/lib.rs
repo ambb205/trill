@@ -153,9 +153,12 @@ mod protocol;
 
 pub use config::{
     AssistantConfig, ConfigError, DEFAULT_MAX_TURNS, DEFAULT_MCP_SERVER_NAME, DEFAULT_MCP_URL, DEFAULT_SYSTEM_PROMPT,
-    Effort, MODEL_ALIASES, is_model_name,
+    DEFAULT_TOOL_TIMEOUT, DEFAULT_TURNS_PER_RUN, Effort, MODEL_ALIASES, PLAN_TOOLS, WEB_TOOLS, is_model_name,
 };
 pub use conversation::{Conversation, SendError};
 pub use detect::{CliInstallation, CliStatus, CliVersion, LoginMethod, MINIMUM_CLI_VERSION, Unavailable, detect};
 pub use env::REDIRECTING_VARIABLES;
-pub use event::{ApiErrorKind, Event, FailureReason, Notice, SessionId, TokenUsage, TurnStart, TurnSummary};
+pub use event::{
+    ApiErrorKind, Event, FailureReason, Notice, PlanChange, PlanStep, Progress, SessionId, StepStatus, TokenUsage,
+    TurnStart, TurnSummary, WebLookup,
+};

@@ -16,14 +16,20 @@ use serde_json::json;
 use crate::config::{AssistantConfig, ConfigError};
 use crate::detect::{CliInstallation, CliVersion};
 use crate::env;
-use crate::event::{Event, FailureReason, Notice, SessionId};
+use crate::event::{Event, FailureReason, Notice, Progress, SessionId, TokenUsage, TurnSummary};
 use crate::process::{self, ProcessTree};
-use crate::protocol::{Exit, Expectations, LineSplitter, MAX_LINE_BYTES, Translator, Verdict};
+use crate::protocol::{Exit, Expectations, Figures, LineSplitter, MAX_LINE_BYTES, Translator, Verdict};
 
 /// The first CLI version checked to accept `--permission-prompts`; 2.1.94
 /// does not know the flag. It is a second lock on a door `--permission-mode
 /// dontAsk` already shuts, so older versions simply go without.
 const PERMISSION_PROMPTS_SINCE: CliVersion = CliVersion::new(2, 1, 325);
+
+/// The first CLI version checked to take a `timeout` for one MCP server in
+/// the file that names it. With 2.1.325 that alone let a call of 310 s
+/// through. An older CLI is not shown a field it may not know, and has the
+/// environment (`env.rs`) to go by.
+const SERVER_TIMEOUT_SINCE: CliVersion = CliVersion::new(2, 1, 325);
 
 /// How often the turn's thread looks up from waiting for output, which
 /// bounds how long a cancel takes to be noticed.
@@ -40,6 +46,17 @@ const DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 /// How much of the CLI's error stream is kept for a failure report.
 const STDERR_TAIL_BYTES: usize = 4096;
+
+/// What the CLI is given in place of a message when a request is carried on
+/// in another run. The system prompt says what it means; the words here are
+/// for a model that has not read that far.
+const CONTINUATION: &str = "\
+<trill-continue>
+Trill is writing this, not the user. Your work on the user's last request was paused at a checkpoint, and nothing is \
+wrong: the user has said nothing new and is still waiting for the same request. Carry on exactly where you stopped. \
+Do not greet, recap, start over or re-read what you already know; your plan is as you left it. When everything that \
+was asked for is done, close the request as you normally would.
+</trill-continue>";
 
 /// A message could not be sent. Both cases are mistakes in the calling code,
 /// not conditions to show the user.
@@ -59,6 +76,12 @@ pub enum SendError {
 /// continue, so nothing runs between messages, a cancelled or crashed turn
 /// cannot take the conversation with it, and continuing five seconds later
 /// is the same operation as resuming next week.
+///
+/// A request that needs more steps than one run of the CLI is given
+/// ([`turns_per_run`](AssistantConfig::turns_per_run)) is carried on in
+/// another run, and another, up to the limit for one request
+/// ([`max_turns`](AssistantConfig::max_turns)). To the caller it is one
+/// turn all the same: one stream of events and one terminal event.
 ///
 /// Events are pulled, not pushed: call [`poll`](Conversation::poll) from the
 /// UI's frame loop until it returns `None`. Dropping the conversation stops
@@ -245,6 +268,7 @@ fn arguments(
     cli: &CliInstallation,
     files: &HandoverFiles,
     session: Option<&SessionId>,
+    max_turns: Option<u32>,
 ) -> Vec<OsString> {
     let mut arguments: Vec<OsString> = Vec::new();
     let mut add = |argument: &str| arguments.push(argument.into());
@@ -268,13 +292,17 @@ fn arguments(
     add("");
     add("--disable-slash-commands");
 
-    // No built-in tools at all; Trill's tools allowed; anything else that
-    // would ask for permission is refused instead of waiting for an answer
-    // nobody can give.
+    // Of the CLI's own tools, only the ones for keeping a plan and for the
+    // web, each if it is switched on; with both off the list is empty, which
+    // is no built-in tool at all. Those and Trill's tools are allowed;
+    // anything else that would ask for permission is refused instead of
+    // waiting for an answer nobody can give.
+    let own = config.cli_tools().join(",");
     add("--tools");
-    add("");
+    add(&own);
     add("--allowedTools");
-    add(&format!("mcp__{}__*", config.mcp_server_name));
+    let trills = format!("mcp__{}__*", config.mcp_server_name);
+    add(&if own.is_empty() { trills } else { format!("{trills},{own}") });
     if !config.withheld_tools.is_empty() {
         // Denied tools are not merely refused: the model is never told of them.
         let withheld: Vec<String> =
@@ -298,9 +326,9 @@ fn arguments(
         add(&format!("--model={model}"));
     }
     if let Some(effort) = config.effort {
-        add(&format!("--effort={}", effort.as_flag_value()));
+        add(&format!("--effort={}", effort.name()));
     }
-    if let Some(max_turns) = config.max_turns {
+    if let Some(max_turns) = max_turns {
         add(&format!("--max-turns={max_turns}"));
     }
     if let Some(session) = session {
@@ -329,13 +357,23 @@ impl HandoverFiles {
         }
     }
 
-    fn write(&self, config: &AssistantConfig) -> io::Result<()> {
+    fn write(&self, config: &AssistantConfig, cli: &CliInstallation) -> io::Result<()> {
         fs::create_dir_all(&config.working_dir)?;
         fs::create_dir_all(&config.temp_dir)?;
-        let servers = json!({ "mcpServers": { &config.mcp_server_name: { "type": "http", "url": &config.mcp_url } } });
-        fs::write(&self.mcp_config, servers.to_string())?;
+        fs::write(&self.mcp_config, mcp_servers(config, cli).to_string())?;
         fs::write(&self.system_prompt, &config.system_prompt)
     }
+}
+
+/// What the CLI is told about MCP servers: Trill's, and how long one call to
+/// it may take.
+fn mcp_servers(config: &AssistantConfig, cli: &CliInstallation) -> serde_json::Value {
+    let mut server = json!({ "type": "http", "url": &config.mcp_url });
+    if cli.version >= SERVER_TIMEOUT_SINCE {
+        let milliseconds = u64::try_from(config.tool_timeout.as_millis()).unwrap_or(u64::MAX);
+        server["timeout"] = json!(milliseconds);
+    }
+    json!({ "mcpServers": { &config.mcp_server_name: server } })
 }
 
 impl Drop for HandoverFiles {
@@ -395,48 +433,128 @@ struct TurnJob {
     events: Sender<Event>,
 }
 
+/// What a request has taken so far, over the runs of the CLI that have
+/// ended.
+#[derive(Default)]
+struct Spent {
+    /// Model round trips, as `--max-turns` counts them.
+    steps: u32,
+    duration: Duration,
+    usage: TokenUsage,
+    /// The CLI's estimates, added up; `None` until a run has given one.
+    cost: Option<f64>,
+}
+
+impl Spent {
+    /// Adds what one run took. A run that was stopped at its limit of
+    /// `allowed` used exactly that many steps: that is what the limit
+    /// counts, whatever was seen of them.
+    fn add(&mut self, figures: Figures, allowed: Option<u32>, stopped_at_limit: bool) {
+        self.steps += match (allowed, stopped_at_limit) {
+            (Some(allowed), true) => allowed,
+            _ => figures.turns,
+        };
+        self.duration += figures.duration;
+        self.usage.input += figures.usage.input;
+        self.usage.output += figures.usage.output;
+        self.usage.cache_read += figures.usage.cache_read;
+        self.usage.cache_write += figures.usage.cache_write;
+        if let Some(cost) = figures.cost {
+            self.cost = Some(self.cost.unwrap_or(0.0) + cost);
+        }
+    }
+
+    fn progress(&self) -> Progress {
+        Progress { steps: self.steps, estimated_cost_usd: self.cost, costed_steps: self.steps }
+    }
+}
+
 impl TurnJob {
     fn run(self, prompt: String) {
-        let terminal = self.work(prompt);
+        let terminal = self.request(prompt);
         if terminal == Event::Failed(FailureReason::SessionNotFound) {
             *lock(&self.session) = None;
         }
         let _ = self.events.send(terminal);
     }
 
-    /// Runs the CLI for one message and returns the turn's terminal event,
-    /// having sent every other event on the way.
-    fn work(&self, prompt: String) -> Event {
-        if let Err(error) = self.files.write(&self.config) {
-            return Event::Failed(FailureReason::CannotStart {
-                detail: format!("could not write to {}: {error}", self.config.temp_dir.display()),
-            });
+    /// Works on one message until it is answered, stopped or failed, in as
+    /// many runs of the CLI as that takes, and returns the terminal event.
+    fn request(&self, prompt: String) -> Event {
+        let mut spent = Spent::default();
+        let mut input = prompt;
+        let mut first = true;
+        loop {
+            // What this run may use: its share, and no more than the
+            // request has left.
+            let left = self.config.max_turns.map(|limit| limit.saturating_sub(spent.steps));
+            let allowed = left.map_or(self.config.turns_per_run, |left| left.min(self.config.turns_per_run));
+            let (terminal, figures) = self.work(&input, Some(allowed), spent.progress(), first);
+            first = false;
+
+            let stopped_at_limit = matches!(&terminal, Event::Failed(FailureReason::TurnLimitReached { .. }));
+            if let Some(figures) = figures {
+                spent.add(figures, Some(allowed), stopped_at_limit);
+            }
+            match terminal {
+                Event::Finished(_) => {
+                    return Event::Finished(TurnSummary {
+                        turns: spent.steps,
+                        duration: spent.duration,
+                        usage: spent.usage,
+                        estimated_cost_usd: spent.cost,
+                    });
+                }
+                // Stopped while the run was ending: stopped.
+                Event::Failed(FailureReason::TurnLimitReached { .. }) if self.control.is_cancelled() => {
+                    return Event::Cancelled;
+                }
+                Event::Failed(FailureReason::TurnLimitReached { .. }) => {
+                    // What the request has cost so far is known now.
+                    let _ = self.events.send(Event::Progress(spent.progress()));
+                    if let Some(limit) = self.config.max_turns.filter(|limit| spent.steps >= *limit) {
+                        return Event::Failed(FailureReason::TurnLimitReached { limit });
+                    }
+                    CONTINUATION.clone_into(&mut input);
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// Runs the CLI once and returns how the run ended, having sent every
+    /// other event on the way, with what the CLI said the run took.
+    fn work(&self, prompt: &str, max_turns: Option<u32>, before: Progress, first: bool) -> (Event, Option<Figures>) {
+        if let Err(error) = self.files.write(&self.config, &self.cli) {
+            let detail = format!("could not write to {}: {error}", self.config.temp_dir.display());
+            return (Event::Failed(FailureReason::CannotStart { detail }), None);
         }
 
         let session = lock(&self.session).clone();
         let mut command = Command::new(&self.cli.path);
         command
-            .args(arguments(&self.config, &self.cli, &self.files, session.as_ref()))
+            .args(arguments(&self.config, &self.cli, &self.files, session.as_ref(), max_turns))
             .current_dir(&self.config.working_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let ignored = env::apply(&mut command, self.config.keep_redirecting_environment);
-        if self.report_environment {
+        env::allow_long_tool_calls(&mut command, self.config.tool_timeout);
+        if self.report_environment && first {
             for name in ignored {
                 let _ = self.events.send(Event::Notice(Notice::EnvironmentVariableIgnored { name }));
             }
         }
 
         if self.control.is_cancelled() {
-            return Event::Cancelled;
+            return (Event::Cancelled, None);
         }
         let (mut child, tree) = match process::spawn(&mut command) {
             Ok(started) => started,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Event::Failed(FailureReason::CliMissing { path: self.cli.path.clone() });
+                return (Event::Failed(FailureReason::CliMissing { path: self.cli.path.clone() }), None);
             }
-            Err(error) => return Event::Failed(FailureReason::CannotStart { detail: error.to_string() }),
+            Err(error) => return (Event::Failed(FailureReason::CannotStart { detail: error.to_string() }), None),
         };
         let mut stdin = child.stdin.take().expect("stdin was piped");
         let stdout = child.stdout.take().expect("stdout was piped");
@@ -445,15 +563,18 @@ impl TurnJob {
 
         // On its own thread so that a CLI slow to read cannot hold up reading
         // what it writes. Dropping `stdin` is the end of the message.
+        let message = prompt.to_owned();
         thread::spawn(move || {
-            let _ = stdin.write_all(prompt.as_bytes());
+            let _ = stdin.write_all(message.as_bytes());
         });
         let stderr_tail = tail_of(stderr);
 
         let mut translator = Translator::new(Expectations {
             mcp_server_name: self.config.mcp_server_name.clone(),
             mcp_url: self.config.mcp_url.clone(),
-            max_turns: self.config.max_turns,
+            cli_tools: self.config.cli_tools().into_iter().map(str::to_owned).collect(),
+            max_turns,
+            before,
         });
         let (exit_status, overlong) = self.follow(&mut child, chunks_of(stdout), &mut translator);
 
@@ -466,12 +587,13 @@ impl TurnJob {
 
         let cancelled = self.control.is_cancelled();
         if overlong && !cancelled {
-            return Event::Failed(FailureReason::Protocol {
-                detail: format!("a line of the reply was longer than {} MB", MAX_LINE_BYTES / (1024 * 1024)),
-            });
+            let detail = format!("a line of the reply was longer than {} MB", MAX_LINE_BYTES / (1024 * 1024));
+            return (Event::Failed(FailureReason::Protocol { detail }), None);
         }
         let stderr_tail = stderr_tail.recv_timeout(DRAIN_GRACE).unwrap_or_default();
-        translator.finish(cancelled, Exit { code: exit_status.and_then(|status| status.code()), stderr_tail })
+        let figures = translator.figures();
+        let exit = Exit { code: exit_status.and_then(|status| status.code()), stderr_tail };
+        (translator.finish(cancelled, exit), figures)
     }
 
     /// Reads the CLI's output until it ends or has to be cut short. Returns
@@ -640,16 +762,17 @@ mod tests {
     #[test]
     fn the_command_line_confines_the_cli_to_trill() {
         let config = AssistantConfig::new("data");
-        let arguments = joined(&arguments(&config, &cli(CliVersion::new(2, 1, 325)), &files(), None));
+        let arguments = joined(&arguments(&config, &cli(CliVersion::new(2, 1, 325)), &files(), None, Some(100)));
 
         for group in [
             "[-p][--output-format][stream-json][--verbose][--include-partial-messages]",
             "[--mcp-config][mcp.json][--strict-mcp-config]",
             "[--setting-sources][][--disable-slash-commands]",
-            "[--tools][][--allowedTools][mcp__trill__*]",
+            "[--tools][TaskCreate,TaskGet,TaskList,TaskUpdate,WebFetch,WebSearch]",
+            "[--allowedTools][mcp__trill__*,TaskCreate,TaskGet,TaskList,TaskUpdate,WebFetch,WebSearch]",
             "[--permission-mode][dontAsk][--permission-prompts][none]",
             "[--append-system-prompt-file][prompt.txt]",
-            "[--max-turns=80]",
+            "[--max-turns=100]",
         ] {
             assert!(arguments.contains(group), "missing {group} in {arguments}");
         }
@@ -657,6 +780,26 @@ mod tests {
         {
             assert!(!arguments.contains(absent), "unexpected {absent} in {arguments}");
         }
+        // Nothing of the CLI's that reads or writes a file, runs a program,
+        // or starts another agent is ever asked for.
+        for tool in ["Read", "Write", "Edit", "Bash", "PowerShell", "Glob", "Grep", "NotebookEdit", "Skill", "Agent"] {
+            assert!(!arguments.contains(&format!("{tool},")) && !arguments.contains(&format!(",{tool}")), "{tool}");
+        }
+    }
+
+    #[test]
+    fn with_the_web_switched_off_its_tools_are_not_asked_for_at_all() {
+        let offline = AssistantConfig { web: false, ..AssistantConfig::new("data") };
+        let asked = joined(&arguments(&offline, &cli(CliVersion::new(2, 1, 325)), &files(), None, None));
+        assert!(asked.contains("[--tools][TaskCreate,TaskGet,TaskList,TaskUpdate][--allowedTools]"), "{asked}");
+        assert!(asked.contains("[--allowedTools][mcp__trill__*,TaskCreate,TaskGet,TaskList,TaskUpdate][--perm"));
+        assert!(!asked.contains("Web"), "{asked}");
+
+        // With the plan off as well, the CLI is given no tool of its own:
+        // the empty list, which must still be there.
+        let bare = AssistantConfig { web: false, plan: false, ..AssistantConfig::new("data") };
+        let asked = joined(&arguments(&bare, &cli(CliVersion::new(2, 1, 325)), &files(), None, None));
+        assert!(asked.contains("[--tools][][--allowedTools][mcp__trill__*][--permission-mode]"), "{asked}");
     }
 
     #[test]
@@ -671,11 +814,12 @@ mod tests {
             ..AssistantConfig::new("data")
         };
         let session = SessionId::parse("39367d22-e40b-4a04-9358-33e91538ff0d").unwrap();
-        let arguments = joined(&arguments(&config, &cli(CliVersion::new(2, 1, 325)), &files(), Some(&session)));
+        let arguments = joined(&arguments(&config, &cli(CliVersion::new(2, 1, 325)), &files(), Some(&session), None));
 
         assert!(arguments.contains("[--model=haiku][--effort=xhigh][--resume=39367d22-e40b-4a04-9358-33e91538ff0d]"));
         assert!(arguments.contains(
-            "[--allowedTools][mcp__studio__*][--disallowedTools][mcp__studio__load_project,mcp__studio__new_project]"
+            "[--allowedTools][mcp__studio__*,TaskCreate,TaskGet,TaskList,TaskUpdate,WebFetch,WebSearch]\
+             [--disallowedTools][mcp__studio__load_project,mcp__studio__new_project]"
         ));
         assert!(!arguments.contains("--max-turns"));
         assert!(!arguments.contains("--append-system-prompt-file"));
@@ -684,7 +828,7 @@ mod tests {
     #[test]
     fn an_older_cli_is_not_given_a_flag_it_does_not_know() {
         let arguments =
-            joined(&arguments(&AssistantConfig::new("data"), &cli(CliVersion::new(2, 1, 94)), &files(), None));
+            joined(&arguments(&AssistantConfig::new("data"), &cli(CliVersion::new(2, 1, 94)), &files(), None, None));
 
         assert!(arguments.contains("[--permission-mode][dontAsk]"));
         assert!(!arguments.contains("--permission-prompts"));
@@ -721,6 +865,50 @@ mod tests {
     fn an_unusable_configuration_is_refused_before_anything_runs() {
         let config = AssistantConfig { mcp_server_name: String::new(), ..AssistantConfig::new("data") };
         assert!(matches!(Conversation::new(config, cli(CliVersion::new(2, 1, 325))), Err(ConfigError::ServerName(_))));
+    }
+
+    #[test]
+    fn the_cli_is_told_how_long_a_call_to_trill_may_take_where_it_is_known_to_listen() {
+        let config = AssistantConfig { tool_timeout: Duration::from_secs(900), ..AssistantConfig::new("data") };
+        assert_eq!(
+            mcp_servers(&config, &cli(CliVersion::new(2, 1, 325))),
+            json!({ "mcpServers": { "trill": { "type": "http", "url": "http://127.0.0.1:7777/mcp", "timeout": 900_000 } } })
+        );
+        assert_eq!(
+            mcp_servers(&config, &cli(CliVersion::new(2, 1, 94))),
+            json!({ "mcpServers": { "trill": { "type": "http", "url": "http://127.0.0.1:7777/mcp" } } })
+        );
+    }
+
+    #[test]
+    fn what_a_request_has_taken_is_added_up_over_its_runs() {
+        let run = |turns, cost| Figures {
+            turns,
+            duration: Duration::from_secs(60),
+            usage: TokenUsage { input: 10, output: 20, cache_read: 30, cache_write: 40 },
+            cost,
+        };
+        let mut spent = Spent::default();
+        assert_eq!(spent.progress(), Progress { steps: 0, estimated_cost_usd: None, costed_steps: 0 });
+
+        // A run stopped at its limit used the limit, whatever was counted.
+        spent.add(run(101, Some(1.25)), Some(100), true);
+        assert_eq!(spent.progress(), Progress { steps: 100, estimated_cost_usd: Some(1.25), costed_steps: 100 });
+        // One that finished used what it says; one that gave no estimate
+        // takes nothing from the estimate so far.
+        spent.add(run(37, None), Some(100), false);
+        spent.add(run(3, Some(0.5)), Some(100), false);
+        assert_eq!(spent.progress(), Progress { steps: 140, estimated_cost_usd: Some(1.75), costed_steps: 140 });
+        assert_eq!(spent.duration, Duration::from_secs(180));
+        assert_eq!(spent.usage, TokenUsage { input: 30, output: 60, cache_read: 90, cache_write: 120 });
+    }
+
+    #[test]
+    fn the_note_that_carries_a_request_on_says_who_wrote_it() {
+        assert!(CONTINUATION.starts_with("<trill-continue>") && CONTINUATION.ends_with("</trill-continue>"));
+        assert!(CONTINUATION.contains("Trill is writing this, not the user"));
+        // The CLI takes a line that begins with `/` for a command of its own.
+        assert!(!CONTINUATION.starts_with('/'));
     }
 
     #[test]

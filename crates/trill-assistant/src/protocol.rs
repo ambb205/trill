@@ -8,12 +8,16 @@
 //! are skipped; only the handful of fields named below are relied on. The
 //! shapes were recorded from CLI 2.1.325 (see `tests/fixtures`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
 
-use crate::event::{ApiErrorKind, Event, FailureReason, Notice, SessionId, TokenUsage, TurnStart, TurnSummary};
+use crate::config::PLAN_TOOLS;
+use crate::event::{
+    ApiErrorKind, Event, FailureReason, Notice, PlanChange, PlanStep, Progress, SessionId, StepStatus, TokenUsage,
+    TurnStart, TurnSummary, WebLookup,
+};
 
 /// The longest line accepted. Tool results travel on one line each and can be
 /// large (a rendered waveform, a long note list); this only stops a child
@@ -92,12 +96,33 @@ pub(crate) struct Exit {
     pub(crate) stderr_tail: String,
 }
 
-/// What the translator needs to know about the conversation it is reading.
+/// What the translator needs to know about the run of the CLI it is reading.
 #[derive(Debug, Clone)]
 pub(crate) struct Expectations {
     pub(crate) mcp_server_name: String,
     pub(crate) mcp_url: String,
+    /// The CLI's own tools that were asked for, by its names for them. A
+    /// tool on offer that is neither one of these nor Trill's stops the
+    /// turn.
+    pub(crate) cli_tools: Vec<String>,
+    /// The most model round trips this run was given.
     pub(crate) max_turns: Option<u32>,
+    /// How far the request had come before this run began.
+    pub(crate) before: Progress,
+}
+
+/// What a run of the CLI took, known once it has reported how it ended,
+/// however it ended.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct Figures {
+    /// How many times the model was asked: the replies seen to begin. Not
+    /// the CLI's own `num_turns`, which with 2.1.325 is the number of tool
+    /// calls and one more (six replies that made nine calls: ten), while
+    /// what its `--max-turns` counts is replies.
+    pub(crate) turns: u32,
+    pub(crate) duration: Duration,
+    pub(crate) usage: TokenUsage,
+    pub(crate) cost: Option<f64>,
 }
 
 /// Turns the CLI's lines into [`Event`]s.
@@ -112,6 +137,17 @@ pub(crate) struct Translator {
     after_text: bool,
     break_pending: bool,
     tool_names: HashMap<String, String>,
+    /// Calls to the CLI's plan tools that have not answered: what was
+    /// called, and with what. They are not shown as calls; what they did
+    /// to the plan is reported when they answer.
+    plan_calls: HashMap<String, (String, Value)>,
+    /// Web lookups that have not answered.
+    web_calls: HashSet<String>,
+    /// How many replies of the model's this run has seen begin, and the
+    /// last of them.
+    steps: u32,
+    last_reply: String,
+    figures: Option<Figures>,
     /// The last error the CLI reported in place of a reply.
     api_error: Option<(ApiErrorKind, String)>,
     limit_rejected: bool,
@@ -135,6 +171,11 @@ impl Translator {
             after_text: false,
             break_pending: false,
             tool_names: HashMap::new(),
+            plan_calls: HashMap::new(),
+            web_calls: HashSet::new(),
+            steps: 0,
+            last_reply: String::new(),
+            figures: None,
             api_error: None,
             limit_rejected: false,
             limit_resets_at: None,
@@ -146,6 +187,11 @@ impl Translator {
     /// ignored.
     pub(crate) fn verdict(&self) -> Option<&Verdict> {
         self.verdict.as_ref()
+    }
+
+    /// What the CLI said the run took, once it has said how the run ended.
+    pub(crate) fn figures(&self) -> Option<Figures> {
+        self.figures
     }
 
     /// Reads one line of output and appends what it means to `events`.
@@ -200,6 +246,26 @@ impl Translator {
                 let tool = self.tool_name(text(value, "tool_name")).to_owned();
                 events.push(Event::Notice(Notice::PermissionDenied { tool }));
             }
+            // The conversation has outgrown what the model can hold. Seen
+            // with CLI 2.1.325 run with `-p`: "compacting", then a status
+            // with the outcome, then the boundary with the sizes; the run
+            // then carries on by itself from the summary.
+            "status" => match (text(value, "status"), text(value, "compact_result")) {
+                ("compacting", _) => events.push(Event::Notice(Notice::Compacting)),
+                (_, "" | "success") => {}
+                (_, outcome) => {
+                    let said = text(value, "compact_error");
+                    let detail = if said.is_empty() { outcome.to_owned() } else { format!("{outcome}: {said}") };
+                    events.push(Event::Notice(Notice::CompactionFailed { detail }));
+                }
+            },
+            "compact_boundary" => {
+                let sizes = &value["compact_metadata"];
+                events.push(Event::Notice(Notice::Compacted {
+                    tokens_before: sizes["pre_tokens"].as_u64(),
+                    tokens_after: sizes["post_tokens"].as_u64(),
+                }));
+            }
             _ => {}
         }
     }
@@ -221,12 +287,8 @@ impl Translator {
         }
 
         let tools = value["tools"].as_array().map(Vec::as_slice).unwrap_or_default();
-        let mut unexpected: Vec<String> = tools
-            .iter()
-            .filter_map(Value::as_str)
-            .filter(|tool| !tool.starts_with(&self.tool_prefix))
-            .map(str::to_owned)
-            .collect();
+        let mut unexpected: Vec<String> =
+            tools.iter().filter_map(Value::as_str).filter(|tool| !self.is_allowed(tool)).map(str::to_owned).collect();
         unexpected.extend(
             servers
                 .iter()
@@ -257,8 +319,9 @@ impl Translator {
     fn stream_event(&mut self, event: &Value, events: &mut Vec<Event>) {
         match text(event, "type") {
             "message_start" => {
-                self.streaming =
-                    Some(StreamingMessage { id: text(&event["message"], "id").to_owned(), text: String::new() });
+                let id = text(&event["message"], "id");
+                self.count_reply(id, true, events);
+                self.streaming = Some(StreamingMessage { id: id.to_owned(), text: String::new() });
             }
             "content_block_start" if text(&event["content_block"], "type") == "text" => {
                 self.begin_passage();
@@ -290,6 +353,7 @@ impl Translator {
             self.api_error = Some((api_error_kind(text(value, "error")), said.concat()));
             return;
         }
+        self.count_reply(text(message, "id"), false, events);
 
         for block in blocks {
             match text(block, "type") {
@@ -308,10 +372,29 @@ impl Translator {
                 }
                 "tool_use" => {
                     let id = text(block, "id").to_owned();
-                    let tool = self.tool_name(text(block, "name")).to_owned();
-                    self.tool_names.insert(id.clone(), tool.clone());
-                    self.after_text = false;
-                    events.push(Event::ToolCallStarted { id, tool, input: block["input"].clone() });
+                    let name = text(block, "name");
+                    let input = &block["input"];
+                    if !self.is_allowed(name) {
+                        // Not on offer when the run began, and called all
+                        // the same: nothing here is waited for.
+                        let tools = vec![name.to_owned()];
+                        self.verdict = Some(Verdict::Refused(FailureReason::UnexpectedTools { tools }));
+                        return;
+                    }
+                    if name.starts_with(&self.tool_prefix) {
+                        let tool = self.tool_name(name).to_owned();
+                        self.tool_names.insert(id.clone(), tool.clone());
+                        self.after_text = false;
+                        events.push(Event::ToolCallStarted { id, tool, input: input.clone() });
+                    } else if PLAN_TOOLS.contains(&name) {
+                        // No line of its own, so what is said before and
+                        // after it stays two passages.
+                        self.plan_calls.insert(id, (name.to_owned(), input.clone()));
+                    } else {
+                        self.web_calls.insert(id.clone());
+                        self.after_text = false;
+                        events.push(Event::WebStarted { id, lookup: web_lookup(name, input) });
+                    }
                 }
                 _ => {}
             }
@@ -322,17 +405,33 @@ impl Translator {
     /// of tool calls.
     fn user(&mut self, value: &Value, events: &mut Vec<Event>) {
         let blocks = value["message"]["content"].as_array().map(Vec::as_slice).unwrap_or_default();
-        for block in blocks.iter().filter(|block| text(block, "type") == "tool_result") {
+        let results: Vec<&Value> = blocks.iter().filter(|block| text(block, "type") == "tool_result").collect();
+        // Beside the words for the model, the CLI gives the result as data.
+        // It belongs to the one result the line carries; with several on a
+        // line there is no telling whose it is, and the words are read.
+        let data = if results.len() == 1 { &value["tool_use_result"] } else { &Value::Null };
+        for block in results {
             let id = text(block, "tool_use_id").to_owned();
-            let tool = self.tool_names.remove(&id).unwrap_or_default();
             let said = match &block["content"] {
                 Value::String(said) => said.clone(),
                 Value::Array(parts) => parts.iter().map(|part| text(part, "text")).collect::<Vec<_>>().join("\n"),
                 _ => String::new(),
             };
-            let result = if block["is_error"] == true { Err(said) } else { Ok(said) };
+            let failed = block["is_error"] == true;
+            if let Some((tool, input)) = self.plan_calls.remove(&id) {
+                if !failed && let Some(change) = plan_change(&tool, &input, &said, data) {
+                    events.push(Event::Plan(change));
+                }
+                continue;
+            }
+            let result = if failed { Err(said) } else { Ok(said) };
             self.after_text = false;
-            events.push(Event::ToolCallFinished { id, tool, result });
+            if self.web_calls.remove(&id) {
+                events.push(Event::WebFinished { id, result });
+            } else {
+                let tool = self.tool_names.remove(&id).unwrap_or_default();
+                events.push(Event::ToolCallFinished { id, tool, result });
+            }
         }
     }
 
@@ -350,18 +449,27 @@ impl Translator {
 
     fn result(&mut self, value: &Value) {
         let subtype = text(value, "subtype");
+        let usage = &value["usage"];
+        let figures = Figures {
+            // The CLI's own count only for a run none of whose replies was
+            // seen, which no CLI has been found to write.
+            turns: if self.steps > 0 { self.steps } else { number(value, "num_turns") as u32 },
+            duration: Duration::from_millis(number(value, "duration_ms")),
+            usage: TokenUsage {
+                input: number(usage, "input_tokens"),
+                output: number(usage, "output_tokens"),
+                cache_read: number(usage, "cache_read_input_tokens"),
+                cache_write: number(usage, "cache_creation_input_tokens"),
+            },
+            cost: value["total_cost_usd"].as_f64(),
+        };
+        self.figures = Some(figures);
         let event = if subtype == "success" && value["is_error"] != true {
-            let usage = &value["usage"];
             Event::Finished(TurnSummary {
-                turns: number(value, "num_turns") as u32,
-                duration: Duration::from_millis(number(value, "duration_ms")),
-                usage: TokenUsage {
-                    input: number(usage, "input_tokens"),
-                    output: number(usage, "output_tokens"),
-                    cache_read: number(usage, "cache_read_input_tokens"),
-                    cache_write: number(usage, "cache_creation_input_tokens"),
-                },
-                estimated_cost_usd: value["total_cost_usd"].as_f64(),
+                turns: figures.turns,
+                duration: figures.duration,
+                usage: figures.usage,
+                estimated_cost_usd: figures.cost,
             })
         } else {
             Event::Failed(self.failure(subtype, value))
@@ -409,6 +517,106 @@ impl Translator {
     fn tool_name<'a>(&self, full: &'a str) -> &'a str {
         full.strip_prefix(&self.tool_prefix).unwrap_or(full)
     }
+
+    /// Whether `tool`, by the CLI's full name for it, is one the assistant
+    /// may have: one of Trill's, or one of the CLI's own that was asked for.
+    fn is_allowed(&self, tool: &str) -> bool {
+        tool.starts_with(&self.tool_prefix) || self.expect.cli_tools.iter().any(|allowed| allowed == tool)
+    }
+
+    /// Counts a reply of the model's, once, however many lines speak of it,
+    /// and says how far the request has come. A reply that is streamed is
+    /// announced as it begins (`beginning`), and that is always a new one;
+    /// its blocks then follow under the same id, as do those of a reply
+    /// that was not streamed, which is counted at its first.
+    fn count_reply(&mut self, id: &str, beginning: bool, events: &mut Vec<Event>) {
+        if !beginning && (id.is_empty() || id == self.last_reply) {
+            return;
+        }
+        id.clone_into(&mut self.last_reply);
+        self.steps += 1;
+        let before = self.expect.before;
+        events.push(Event::Progress(Progress { steps: before.steps + self.steps, ..before }));
+    }
+}
+
+/// What a call to one of the CLI's web tools looks up.
+fn web_lookup(tool: &str, input: &Value) -> WebLookup {
+    match tool {
+        "WebSearch" => WebLookup::Search { query: text(input, "query").to_owned() },
+        _ => WebLookup::Page { url: text(input, "url").to_owned(), question: text(input, "prompt").to_owned() },
+    }
+}
+
+/// What a call to one of the CLI's plan tools did to the plan, read from
+/// what it was given, what it answered in words (`said`) and, where the CLI
+/// gave it, the answer as data. The shapes are those of CLI 2.1.325.
+fn plan_change(tool: &str, input: &Value, said: &str, data: &Value) -> Option<PlanChange> {
+    let given = |key: &str| Some(text(input, key)).filter(|value| !value.is_empty()).map(str::to_owned);
+    match tool {
+        "TaskCreate" => {
+            // "Task #4 created successfully: Render and check"
+            let numbered = || {
+                let digits = said.split_once('#')?.1.split(|c: char| !c.is_ascii_digit()).next()?;
+                Some(digits.to_owned()).filter(|digits| !digits.is_empty())
+            };
+            let id = Some(text(&data["task"], "id").to_owned()).filter(|id| !id.is_empty()).or_else(numbered)?;
+            Some(PlanChange::Added { id, title: given("subject")?, doing: given("activeForm") })
+        }
+        "TaskUpdate" => {
+            // A step that is not there answers "Task not found", as a result
+            // like any other.
+            if data["success"] == false || said.trim() == "Task not found" {
+                return None;
+            }
+            let id = given("taskId")?;
+            let status = match text(input, "status") {
+                "deleted" => return Some(PlanChange::Removed { id }),
+                status => step_status(status),
+            };
+            let (title, doing) = (given("subject"), given("activeForm"));
+            // Who a step belongs to and what it waits for are not shown.
+            let shown = status.is_some() || title.is_some() || doing.is_some();
+            shown.then_some(PlanChange::Changed { id, status, title, doing })
+        }
+        "TaskList" => {
+            let listed = |task: &Value| {
+                let id = Some(text(task, "id")).filter(|id| !id.is_empty())?.to_owned();
+                Some(PlanStep {
+                    id,
+                    title: text(task, "subject").to_owned(),
+                    status: step_status(text(task, "status"))?,
+                })
+            };
+            match data["tasks"].as_array() {
+                Some(tasks) => Some(PlanChange::Listed(tasks.iter().filter_map(listed).collect())),
+                // "#2 [in_progress] Write the drums", a line each.
+                None => {
+                    let lines = said.lines().filter(|line| !line.trim().is_empty());
+                    let steps: Option<Vec<PlanStep>> = lines.map(listed_line).collect();
+                    steps.filter(|steps| !steps.is_empty()).map(PlanChange::Listed)
+                }
+            }
+        }
+        // Reading one step changes nothing.
+        _ => None,
+    }
+}
+
+fn step_status(word: &str) -> Option<StepStatus> {
+    match word {
+        "pending" => Some(StepStatus::Pending),
+        "in_progress" => Some(StepStatus::InProgress),
+        "completed" => Some(StepStatus::Done),
+        _ => None,
+    }
+}
+
+/// One line of the plan as the CLI lists it in words.
+fn listed_line(line: &str) -> Option<PlanStep> {
+    let (id, rest) = line.trim().strip_prefix('#')?.split_once(' ')?;
+    let (status, title) = rest.strip_prefix('[')?.split_once("] ")?;
+    Some(PlanStep { id: id.to_owned(), title: title.to_owned(), status: step_status(status)? })
 }
 
 fn classify_api_error(kind: ApiErrorKind, message: String, resets_at: Option<SystemTime>) -> FailureReason {
@@ -460,12 +668,25 @@ mod tests {
 
     const SESSION: &str = "39367d22-e40b-4a04-9358-33e91538ff0d";
 
-    fn translator() -> Translator {
-        Translator::new(Expectations {
+    const NOWHERE: Progress = Progress { steps: 0, estimated_cost_usd: None, costed_steps: 0 };
+
+    /// What a run is told to expect when it was offered `cli_tools` of the
+    /// CLI's own.
+    fn expecting(cli_tools: &[&str]) -> Expectations {
+        Expectations {
             mcp_server_name: "trill".into(),
             mcp_url: "http://127.0.0.1:7777/mcp".into(),
+            cli_tools: cli_tools.iter().map(|tool| (*tool).to_owned()).collect(),
             max_turns: Some(12),
-        })
+            before: NOWHERE,
+        }
+    }
+
+    const EVERYTHING: [&str; 6] = ["TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "WebFetch", "WebSearch"];
+
+    /// A translator for a run with everything on: the plan and the web.
+    fn translator() -> Translator {
+        Translator::new(expecting(&EVERYTHING))
     }
 
     fn init(tools: &[&str], servers: Value) -> Value {
@@ -479,12 +700,32 @@ mod tests {
         json!([{ "name": "trill", "status": "connected" }])
     }
 
-    fn feed(translator: &mut Translator, lines: &[Value]) -> Vec<Event> {
+    /// What `lines` mean, with how far the request has come at each reply.
+    fn feed_all(translator: &mut Translator, lines: &[Value]) -> Vec<Event> {
         let mut events = Vec::new();
         for line in lines {
             translator.line(line.to_string().as_bytes(), &mut events);
         }
         events
+    }
+
+    /// What `lines` mean, without the progress reports.
+    fn feed(translator: &mut Translator, lines: &[Value]) -> Vec<Event> {
+        let mut events = feed_all(translator, lines);
+        events.retain(|event| !matches!(event, Event::Progress(_)));
+        events
+    }
+
+    fn calls(id: &str, tool: &str, input: Value) -> Value {
+        json!({"type":"assistant","message":{"id":format!("msg_{id}"),"content":[
+            {"type":"tool_use","id":id,"name":tool,"input":input}]}})
+    }
+
+    /// A tool's answer as CLI 2.1.325 writes it: the words for the model,
+    /// and beside them the result as data.
+    fn answers(id: &str, said: &str, data: Value) -> Value {
+        json!({"type":"user","tool_use_result":data,"message":{"content":[
+            {"type":"tool_result","tool_use_id":id,"content":said}]}})
     }
 
     fn lines_of(splitter: &mut LineSplitter, chunks: &[&[u8]]) -> Vec<Vec<u8>> {
@@ -581,6 +822,278 @@ mod tests {
             Some(&Verdict::Refused(FailureReason::UnexpectedTools {
                 tools: vec!["Bash".into(), "mcp__mail__send".into(), "MCP server mail".into()],
             }))
+        );
+    }
+
+    #[test]
+    fn the_clis_own_tools_are_let_through_only_if_they_were_asked_for() {
+        let on_offer =
+            ["mcp__trill__render", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "WebFetch", "WebSearch"];
+
+        // Everything on: the run starts.
+        let mut everything = translator();
+        let events = feed(&mut everything, &[init(&on_offer, connected())]);
+        assert!(matches!(events.as_slice(), [Event::Started(_)]), "{events:?}");
+        assert_eq!(everything.verdict(), None);
+
+        // The web switched off, and a CLI that offers it regardless.
+        let mut offline = Translator::new(expecting(&["TaskCreate", "TaskGet", "TaskList", "TaskUpdate"]));
+        assert_eq!(feed(&mut offline, &[init(&on_offer, connected())]), []);
+        let refused = FailureReason::UnexpectedTools { tools: vec!["WebFetch".into(), "WebSearch".into()] };
+        assert_eq!(offline.verdict(), Some(&Verdict::Refused(refused)));
+
+        // Nothing of the CLI's asked for: none of it may be there.
+        let mut bare = Translator::new(expecting(&[]));
+        feed(&mut bare, &[init(&["mcp__trill__render", "TaskCreate"], connected())]);
+        let refused = FailureReason::UnexpectedTools { tools: vec!["TaskCreate".into()] };
+        assert_eq!(bare.verdict(), Some(&Verdict::Refused(refused)));
+
+        // And a tool of the CLI's that was never asked for is never let
+        // through, whatever else is on.
+        for stranger in ["Read", "Write", "Edit", "Bash", "PowerShell", "NotebookEdit", "Task", "Skill", "TodoWrite"] {
+            let mut translator = translator();
+            feed(&mut translator, &[init(&["mcp__trill__render", "WebSearch", stranger], connected())]);
+            let refused = FailureReason::UnexpectedTools { tools: vec![stranger.to_owned()] };
+            assert_eq!(translator.verdict(), Some(&Verdict::Refused(refused)), "{stranger}");
+        }
+    }
+
+    #[test]
+    fn a_tool_that_was_not_on_offer_stops_the_run_when_it_is_called() {
+        // The list at the start is what is checked; a call to something
+        // that was not on it is not waited for either.
+        let mut translator = translator();
+        let events = feed(
+            &mut translator,
+            &[
+                init(&["mcp__trill__render", "WebSearch"], connected()),
+                calls("t1", "mcp__trill__render", json!({})),
+                calls("t2", "Bash", json!({ "command": "whoami" })),
+                calls("t3", "mcp__trill__render", json!({})),
+            ],
+        );
+        assert_eq!(events.len(), 2, "the start and the one call that was Trill's: {events:?}");
+        let refused = FailureReason::UnexpectedTools { tools: vec!["Bash".into()] };
+        assert_eq!(translator.verdict(), Some(&Verdict::Refused(refused)));
+    }
+
+    #[test]
+    fn the_plan_tools_are_reported_as_changes_to_the_plan_and_not_as_calls() {
+        // As CLI 2.1.325 answered each of these, called through it.
+        let created = |id: &str, title: &str| json!({ "task": { "id": id, "subject": title } });
+        let updated = |id: &str| json!({ "success": true, "taskId": id });
+        let events = feed(
+            &mut translator(),
+            &[
+                calls(
+                    "p1",
+                    "TaskCreate",
+                    json!({"subject":"Set tempo and key","description":"96 BPM","activeForm":"Setting tempo and key"}),
+                ),
+                answers("p1", "Task #1 created successfully: Set tempo and key", created("1", "Set tempo and key")),
+                calls("p2", "TaskCreate", json!({"subject":"Write the drums","description":"House groove"})),
+                answers("p2", "Task #2 created successfully: Write the drums", created("2", "Write the drums")),
+                calls("p3", "TaskUpdate", json!({"taskId":"1","status":"in_progress"})),
+                answers("p3", "Updated task #1 status", updated("1")),
+                calls("p4", "TaskUpdate", json!({"taskId":"1","status":"completed"})),
+                answers("p4", "Updated task #1 status", updated("1")),
+                calls(
+                    "p5",
+                    "TaskUpdate",
+                    json!({"taskId":"2","subject":"Write the drums and a fill","activeForm":"Writing the drums"}),
+                ),
+                answers("p5", "Updated task #2 subject", updated("2")),
+                calls("p6", "TaskUpdate", json!({"taskId":"2","status":"deleted"})),
+                answers("p6", "Updated task #2 deleted", updated("2")),
+                // What changes nothing that is shown is not reported.
+                calls("p7", "TaskUpdate", json!({"taskId":"1","owner":"someone","addBlockedBy":["2"]})),
+                answers("p7", "Updated task #1 owner, blockedBy", updated("1")),
+                calls("p8", "TaskGet", json!({"taskId":"1"})),
+                answers("p8", "Task #1: Set tempo and key", json!({"task":{"id":"1"}})),
+                // Nor a step that is not there, which the CLI answers as a
+                // result like any other.
+                calls("p9", "TaskUpdate", json!({"taskId":"../../x","status":"in_progress"})),
+                answers("p9", "Task not found", json!({"success":false,"taskId":"../../x","error":"Task not found"})),
+                calls("p10", "TaskList", json!({})),
+                answers(
+                    "p10",
+                    "#1 [completed] Set tempo and key\n#4 [pending] Render",
+                    json!({"tasks":[
+                        {"id":"1","subject":"Set tempo and key","status":"completed","blockedBy":[]},
+                        {"id":"4","subject":"Render","status":"pending","blockedBy":[]}]}),
+                ),
+            ],
+        );
+        let step = |id: &str, title: &str, status| PlanStep { id: id.into(), title: title.into(), status };
+        let changed = |id: &str, status| PlanChange::Changed { id: id.into(), status, title: None, doing: None };
+        assert_eq!(
+            events,
+            [
+                Event::Plan(PlanChange::Added {
+                    id: "1".into(),
+                    title: "Set tempo and key".into(),
+                    doing: Some("Setting tempo and key".into()),
+                }),
+                Event::Plan(PlanChange::Added { id: "2".into(), title: "Write the drums".into(), doing: None }),
+                Event::Plan(changed("1", Some(StepStatus::InProgress))),
+                Event::Plan(changed("1", Some(StepStatus::Done))),
+                Event::Plan(PlanChange::Changed {
+                    id: "2".into(),
+                    status: None,
+                    title: Some("Write the drums and a fill".into()),
+                    doing: Some("Writing the drums".into()),
+                }),
+                Event::Plan(PlanChange::Removed { id: "2".into() }),
+                Event::Plan(PlanChange::Listed(vec![
+                    step("1", "Set tempo and key", StepStatus::Done),
+                    step("4", "Render", StepStatus::Pending),
+                ])),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_plan_is_read_from_the_words_when_the_answer_comes_without_data() {
+        let bare = |id: &str, said: &str| json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":id,"content":said}]}});
+        let events = feed(
+            &mut translator(),
+            &[
+                calls("p1", "TaskCreate", json!({"subject":"Write the bass","description":"Roots"})),
+                bare("p1", "Task #12 created successfully: Write the bass"),
+                calls("p2", "TaskList", json!({})),
+                bare("p2", "#11 [completed] Write the drums\n#12 [in_progress] Write the bass"),
+                // An answer that cannot be read is no change, and no harm.
+                calls("p3", "TaskCreate", json!({"subject":"Lost"})),
+                bare("p3", "Something else entirely"),
+                calls("p4", "TaskList", json!({})),
+                bare("p4", "No tasks found"),
+                // One that failed changed nothing.
+                calls("p5", "TaskUpdate", json!({"taskId":"12","status":"completed"})),
+                json!({"type":"user","message":{"content":[
+                    {"type":"tool_result","tool_use_id":"p5","content":"Permission denied","is_error":true}]}}),
+            ],
+        );
+        assert_eq!(
+            events,
+            [
+                Event::Plan(PlanChange::Added { id: "12".into(), title: "Write the bass".into(), doing: None }),
+                Event::Plan(PlanChange::Listed(vec![
+                    PlanStep { id: "11".into(), title: "Write the drums".into(), status: StepStatus::Done },
+                    PlanStep { id: "12".into(), title: "Write the bass".into(), status: StepStatus::InProgress },
+                ])),
+            ]
+        );
+    }
+
+    #[test]
+    fn what_is_said_around_a_step_of_the_plan_stays_two_passages() {
+        let said = |id: &str, words: &str| json!({"type":"assistant","message":{"id":id,"content":[{"type":"text","text":words}]}});
+        let events = feed(
+            &mut translator(),
+            &[
+                said("a", "Here is the plan."),
+                calls("p1", "TaskCreate", json!({"subject":"Write the drums","description":"x"})),
+                answers("p1", "Task #1 created successfully: Write the drums", json!({"task":{"id":"1"}})),
+                said("b", "Now the drums."),
+            ],
+        );
+        let texts: Vec<&str> = events
+            .iter()
+            .filter_map(|event| if let Event::Text(piece) = event { Some(piece.as_str()) } else { None })
+            .collect();
+        assert_eq!(texts, ["Here is the plan.", "\n\n", "Now the drums."]);
+    }
+
+    #[test]
+    fn web_lookups_are_reported_with_the_query_or_the_address() {
+        let found = "Web search results for query: \"dorian mode chord progressions\"";
+        let events = feed(
+            &mut translator(),
+            &[
+                calls("w1", "WebSearch", json!({"query":"dorian mode chord progressions"})),
+                answers("w1", found, json!({"results":[]})),
+                calls(
+                    "w2",
+                    "WebFetch",
+                    json!({"url":"https://example.com/dorian","prompt":"Which chords are typical?"}),
+                ),
+                json!({"type":"user","message":{"content":[
+                    {"type":"tool_result","tool_use_id":"w2","content":"getaddrinfo ENOTFOUND example.com","is_error":true}]}}),
+            ],
+        );
+        assert_eq!(
+            events,
+            [
+                Event::WebStarted {
+                    id: "w1".into(),
+                    lookup: WebLookup::Search { query: "dorian mode chord progressions".into() }
+                },
+                Event::WebFinished { id: "w1".into(), result: Ok(found.into()) },
+                Event::WebStarted {
+                    id: "w2".into(),
+                    lookup: WebLookup::Page {
+                        url: "https://example.com/dorian".into(),
+                        question: "Which chords are typical?".into()
+                    }
+                },
+                Event::WebFinished { id: "w2".into(), result: Err("getaddrinfo ENOTFOUND example.com".into()) },
+            ]
+        );
+    }
+
+    #[test]
+    fn each_reply_of_the_model_is_a_step_counted_once_from_where_the_request_stood() {
+        let before = Progress { steps: 200, estimated_cost_usd: Some(2.5), costed_steps: 200 };
+        let mut translator = Translator::new(Expectations { before, ..expecting(&EVERYTHING) });
+        let said = |id: &str| json!({"type":"assistant","message":{"id":id,"content":[{"type":"text","text":"x"}]}});
+        let events = feed_all(
+            &mut translator,
+            &[
+                // Streamed: announced as it begins, then given whole, block
+                // by block, under the same id.
+                json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_1"}}}),
+                said("msg_1"),
+                said("msg_1"),
+                // Not streamed: counted when it is given.
+                said("msg_2"),
+                // An error written as if the model had said it is no step.
+                json!({"type":"assistant","error":"server_error","is_api_error_message":true,
+                       "message":{"id":"msg_3","model":"<synthetic>","content":[{"type":"text","text":"529"}]}}),
+            ],
+        );
+        let steps: Vec<Progress> = events
+            .iter()
+            .filter_map(|event| if let Event::Progress(progress) = event { Some(*progress) } else { None })
+            .collect();
+        assert_eq!(steps.iter().map(|progress| progress.steps).collect::<Vec<_>>(), [201, 202]);
+        assert!(steps.iter().all(|progress| progress.estimated_cost_usd == Some(2.5) && progress.costed_steps == 200));
+    }
+
+    #[test]
+    fn a_conversation_that_outgrows_the_model_is_reported_as_it_is_summarised() {
+        // As CLI 2.1.325 wrote it, run with `-p`, when the replies said the
+        // conversation had reached 985,053 tokens of a million.
+        let events = feed(
+            &mut translator(),
+            &[
+                json!({"type":"system","subtype":"status","status":"requesting"}),
+                json!({"type":"system","subtype":"status","status":"compacting","compact_output_chars":0}),
+                json!({"type":"system","subtype":"status","status":null,"compact_result":"success"}),
+                json!({"type":"system","subtype":"compact_boundary","compact_metadata":{
+                    "trigger":"auto","pre_tokens":985053,"post_tokens":644,"cumulative_dropped_tokens":984409}}),
+                // What the CLI then tells the model is nothing to show.
+                json!({"type":"user","isSynthetic":true,"message":{"content":[
+                    {"type":"text","text":"This session is being continued from a previous conversation"}]}}),
+                json!({"type":"system","subtype":"status","status":null,"compact_result":"failed","compact_error":"too long"}),
+            ],
+        );
+        assert_eq!(
+            events,
+            [
+                Event::Notice(Notice::Compacting),
+                Event::Notice(Notice::Compacted { tokens_before: Some(985_053), tokens_after: Some(644) }),
+                Event::Notice(Notice::CompactionFailed { detail: "failed: too long".into() }),
+            ]
         );
     }
 
@@ -798,8 +1311,20 @@ mod tests {
                           "errors":["No conversation found with session ID: 1111"]});
         assert_eq!(failure_of(&[lost]), FailureReason::SessionNotFound);
 
-        let limit = json!({"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":13});
-        assert_eq!(failure_of(&[limit]), FailureReason::TurnLimitReached { limit: 12 });
+        let limit = json!({"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":13,
+                           "total_cost_usd":0.25,"duration_ms":9000,"usage":{"output_tokens":7}});
+        assert_eq!(failure_of(std::slice::from_ref(&limit)), FailureReason::TurnLimitReached { limit: 12 });
+        // What the run took is known however it ended.
+        let mut stopped = translator();
+        feed(&mut stopped, &[limit]);
+        let took = Figures {
+            turns: 13,
+            duration: Duration::from_secs(9),
+            usage: TokenUsage { output: 7, ..TokenUsage::default() },
+            cost: Some(0.25),
+        };
+        assert_eq!(stopped.figures(), Some(took));
+        assert_eq!(translator().figures(), None);
 
         let overloaded = api_error("server_error", "API Error: 529 Overloaded");
         assert_eq!(

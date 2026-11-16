@@ -3,7 +3,12 @@
 //! here starts the real CLI or uses the network.
 //!
 //! The transcripts in `fixtures/` were recorded from CLI 2.1.325 and had
-//! everything particular to the machine and account removed.
+//! everything particular to the machine and account removed. Five of them
+//! (`plan`, `web_lookups`, `compacted`, `run_limit`, `slow_tool_call`) are
+//! what that CLI wrote while answering to a stand-in for the model service,
+//! which told it which tools to call: the CLI and its tools were real, and
+//! no model was asked. In the last three the MCP server was a stand-in too,
+//! with one tool that waits.
 
 mod support;
 
@@ -12,11 +17,13 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Value, json};
-use support::{SESSION, Stage, init, rest_of_turn, said, say, session, success, turn};
+use support::{
+    SESSION, Stage, call, init, out_of_steps, plain, progress, rest_of_turn, said, say, session, success, turn,
+};
 use trill_assistant::{
     ApiErrorKind, AssistantConfig, CliInstallation, CliVersion, Conversation, DEFAULT_MCP_URL, DEFAULT_SYSTEM_PROMPT,
-    Event, FailureReason, LoginMethod, Notice, SendError, SessionId, TokenUsage, TurnStart, TurnSummary, Unavailable,
-    detect,
+    Event, FailureReason, LoginMethod, Notice, PlanChange, PlanStep, Progress, SendError, SessionId, StepStatus,
+    TokenUsage, TurnStart, TurnSummary, Unavailable, WebLookup, detect,
 };
 
 fn script(lines: &[&str]) -> String {
@@ -62,6 +69,8 @@ fn a_recorded_tool_call_is_reported_start_to_finish() {
     stage.script("replay tool_call.jsonl");
 
     let events = turn(&mut stage.conversation(), "set the tempo to 97");
+    assert_eq!(progress(&events).iter().map(|progress| progress.steps).collect::<Vec<_>>(), [1, 2]);
+    let events = plain(&events);
 
     let Event::ToolCallStarted { id, tool, input } = &events[1] else { panic!("expected a tool call: {events:?}") };
     assert_eq!(tool, "set_project");
@@ -213,21 +222,29 @@ fn the_cli_is_started_confined_to_trill_with_the_message_on_standard_input() {
     };
     // The empty arguments are the point of these two flags, and the easiest
     // thing to lose on the way to another process.
-    assert_eq!(after("--tools"), "");
+    assert_eq!(after("--tools"), "TaskCreate,TaskGet,TaskList,TaskUpdate,WebFetch,WebSearch");
     assert_eq!(after("--setting-sources"), "");
-    assert_eq!(after("--allowedTools"), "mcp__trill__*");
+    assert_eq!(after("--allowedTools"), "mcp__trill__*,TaskCreate,TaskGet,TaskList,TaskUpdate,WebFetch,WebSearch");
     assert_eq!(after("--permission-mode"), "dontAsk");
     assert_eq!(after("--permission-prompts"), "none");
     assert_eq!(after("--output-format"), "stream-json");
     for flag in ["-p", "--verbose", "--include-partial-messages", "--strict-mcp-config", "--disable-slash-commands"] {
         assert!(launch.has_argument(flag), "missing {flag}");
     }
-    assert!(launch.has_argument("--max-turns=80"));
+    assert!(launch.has_argument("--max-turns=100"), "a run is given its share of the request's steps");
     assert!(!arguments.iter().any(|argument| argument.contains("make it swing")), "the message is not an argument");
     assert!(!launch.had_console_window(), "no console window appears when the CLI starts");
 
+    // A tool call is given half an hour, in each of the three places the
+    // CLI keeps a clock for it, and is waited for however long it runs.
     let servers: Value = serde_json::from_str(&fs::read_to_string(after("--mcp-config")).unwrap()).unwrap();
-    assert_eq!(servers, json!({ "mcpServers": { "trill": { "type": "http", "url": "http://127.0.0.1:4321/mcp" } } }));
+    assert_eq!(
+        servers,
+        json!({ "mcpServers": { "trill": { "type": "http", "url": "http://127.0.0.1:4321/mcp", "timeout": 1_800_000 } } })
+    );
+    assert_eq!(launch.variable("MCP_TOOL_TIMEOUT"), Some("1800000"));
+    assert_eq!(launch.variable("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"), Some("1800000"));
+    assert_eq!(launch.variable("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS"), Some("0"));
     assert_eq!(fs::read_to_string(after("--append-system-prompt-file")).unwrap(), DEFAULT_SYSTEM_PROMPT);
 
     let handed_over = [after("--mcp-config").to_owned(), after("--append-system-prompt-file").to_owned()];
@@ -327,7 +344,7 @@ fn output_the_crate_does_not_know_is_skipped() {
         r#"line {"type":"result","subtype":"success","is_error":false,"num_turns":1,"brand_new_field":{"x":1}}"#,
     ]));
 
-    let events = turn(&mut stage.conversation(), "hello");
+    let events = plain(&turn(&mut stage.conversation(), "hello"));
 
     assert_eq!(said(&events), "Still here.");
     assert_eq!(events.len(), 3, "start, text, finish: {events:?}");
@@ -446,20 +463,429 @@ fn a_clean_exit_without_a_result_is_a_protocol_failure() {
     assert!(matches!(failure(&events), FailureReason::Protocol { .. }), "{events:?}");
 }
 
+/// The `init` line of a CLI that offers `tools`, with Trill connected.
+fn offering(tools: &[&str]) -> String {
+    let start = json!({
+        "type": "system", "subtype": "init", "session_id": SESSION, "model": "m", "tools": tools,
+        "mcp_servers": [{ "name": "trill", "status": "connected" }],
+    });
+    format!("line {start}")
+}
+
 #[test]
 fn a_cli_that_offers_tools_of_its_own_is_stopped() {
     let stage = Stage::new("unexpected-tools");
+    // What was asked for is let through: the plan and the web. The shell
+    // was not asked for, and stops the turn before the model is asked.
     stage.script(&script(&[
-        r#"line {"type":"system","subtype":"init","session_id":"5e55104d-0000-4000-8000-000000000001","model":"m","tools":["Bash","mcp__trill__render","WebFetch"],"mcp_servers":[{"name":"trill","status":"connected"}]}"#,
+        &offering(&["Bash", "mcp__trill__render", "TaskCreate", "TaskUpdate", "WebFetch", "WebSearch", "Read"]),
         "hang",
     ]));
 
     let events = turn(&mut stage.conversation(), "hello");
 
+    assert_eq!(events, [Event::Failed(FailureReason::UnexpectedTools { tools: vec!["Bash".into(), "Read".into()] })]);
+}
+
+#[test]
+fn with_the_web_switched_off_its_tools_are_not_offered_and_a_cli_that_offers_them_is_stopped() {
+    let stage = Stage::new("web-off");
+    stage.script_for(1, &script(&[&offering(&["mcp__trill__render", "TaskCreate"]), &say("Done."), success()]));
+    stage.script_for(2, &script(&[&offering(&["mcp__trill__render", "TaskCreate", "WebFetch", "WebSearch"]), "hang"]));
+    let config = AssistantConfig { web: false, ..stage.config() };
+    let mut conversation = Conversation::new(config, stage.cli()).unwrap();
+
+    // Asked for: the plan tools, and nothing of the web's.
+    assert!(matches!(turn(&mut conversation, "hello").last(), Some(Event::Finished(_))));
+    let arguments = stage.launch(1).arguments();
+    let after = |flag: &str| {
+        let at = arguments.iter().position(|argument| argument == flag).unwrap_or_else(|| panic!("no {flag}"));
+        arguments[at + 1].clone()
+    };
+    assert_eq!(after("--tools"), "TaskCreate,TaskGet,TaskList,TaskUpdate");
+    assert_eq!(after("--allowedTools"), "mcp__trill__*,TaskCreate,TaskGet,TaskList,TaskUpdate");
+    assert!(!arguments.iter().any(|argument| argument.contains("Web")), "{arguments:?}");
+
+    // A CLI that has them on offer all the same is not talked to.
     assert_eq!(
-        events,
-        [Event::Failed(FailureReason::UnexpectedTools { tools: vec!["Bash".into(), "WebFetch".into()] })]
+        turn(&mut conversation, "hello again"),
+        [Event::Failed(FailureReason::UnexpectedTools { tools: vec!["WebFetch".into(), "WebSearch".into()] })]
     );
+
+    // With the plan off too, the CLI is given no tool of its own: an empty
+    // argument, which has to arrive as one.
+    let bare = AssistantConfig { web: false, plan: false, ..stage.config() };
+    stage.script_for(3, &script(&[&offering(&["mcp__trill__render"]), &say("Done."), success()]));
+    assert!(matches!(
+        turn(&mut Conversation::new(bare, stage.cli()).unwrap(), "hello").last(),
+        Some(Event::Finished(_))
+    ));
+    let arguments = stage.launch(3).arguments();
+    let at = arguments.iter().position(|argument| argument == "--tools").expect("--tools");
+    assert_eq!((arguments[at + 1].as_str(), arguments[at + 2].as_str()), ("", "--allowedTools"));
+    assert_eq!(arguments[at + 3], "mcp__trill__*");
+}
+
+// --- A long request -------------------------------------------------------------
+
+/// A stage whose conversation gives one run of the CLI `per_run` steps and
+/// one request `limit`.
+fn long_request(name: &str, per_run: u32, limit: Option<u32>) -> (Stage, Conversation) {
+    let stage = Stage::new(name);
+    let config = AssistantConfig { turns_per_run: per_run, max_turns: limit, ..stage.config() };
+    let conversation = Conversation::new(config, stage.cli()).unwrap();
+    (stage, conversation)
+}
+
+#[test]
+fn a_request_longer_than_one_run_is_carried_on_to_its_end_as_one_turn() {
+    let (stage, mut conversation) = long_request("carried-on", 3, Some(10));
+    stage.script_for(
+        1,
+        &script(&[
+            &init(),
+            &say("Drums first."),
+            &call("a", "write_drums"),
+            &call("b", "write_bass"),
+            &out_of_steps(4, 0.10),
+            "exit 1",
+        ]),
+    );
+    stage.script_for(
+        2,
+        &script(&[&init(), &call("c", "write_chords"), &say("Now the melody."), &out_of_steps(4, 0.25), "exit 1"]),
+    );
+    stage.script_for(3, &script(&[&init(), &call("d", "render"), &say("The song is done."), success()]));
+
+    let events = turn(&mut conversation, "write me a song");
+
+    // One turn: the runs' events in order, and one ending, which is the
+    // last run's with what all three took.
+    assert_eq!(events.iter().filter(|event| event.is_terminal()).count(), 1);
+    assert_eq!(
+        events.last(),
+        Some(&Event::Finished(TurnSummary {
+            turns: 3 + 3 + 2,
+            duration: Duration::from_millis(1000 + 1000 + 10),
+            usage: TokenUsage { input: 201, output: 22, cache_read: 0, cache_write: 0 },
+            estimated_cost_usd: Some(0.10 + 0.25 + 0.001),
+        }))
+    );
+    assert_eq!(said(&events), "Drums first.Now the melody.The song is done.");
+    let called: Vec<&str> = events
+        .iter()
+        .filter_map(|event| if let Event::ToolCallStarted { tool, .. } = event { Some(tool.as_str()) } else { None })
+        .collect();
+    assert_eq!(called, ["write_drums", "write_bass", "write_chords", "render"]);
+
+    // Each run was given its share, and no more than the request had left.
+    assert_eq!(stage.launches(), 3);
+    for number in 1..=3 {
+        assert!(stage.launch(number).has_argument("--max-turns=3"), "run {number}");
+    }
+    // The first was given the message; the others the conversation to
+    // carry on and a note that says who is writing.
+    assert_eq!(stage.launch(1).input(), "write me a song");
+    assert!(!stage.launch(1).arguments().iter().any(|argument| argument.starts_with("--resume")));
+    for number in 2..=3 {
+        let launch = stage.launch(number);
+        assert!(launch.has_argument(&format!("--resume={SESSION}")), "run {number}");
+        assert!(
+            launch.input().starts_with("<trill-continue>\nTrill is writing this, not the user."),
+            "{}",
+            launch.input()
+        );
+        assert!(launch.input().ends_with("</trill-continue>"));
+    }
+
+    // How far it had come was said at every step, and what it had cost each
+    // time a run had reported it.
+    let reports = progress(&events);
+    assert_eq!(reports.first(), Some(&Progress { steps: 1, estimated_cost_usd: None, costed_steps: 0 }));
+    assert!(reports.contains(&Progress { steps: 3, estimated_cost_usd: Some(0.10), costed_steps: 3 }), "{reports:?}");
+    assert!(reports.contains(&Progress { steps: 6, estimated_cost_usd: Some(0.35), costed_steps: 6 }), "{reports:?}");
+    assert!(reports.windows(2).all(|pair| pair[0].steps <= pair[1].steps), "{reports:?}");
+    assert_eq!(reports.last().map(|last| last.steps), Some(8), "two replies in the last run: {reports:?}");
+
+    // And the conversation goes on from it like any other.
+    assert_eq!(conversation.session_id(), Some(session()));
+    stage.script_for(4, &script(&[&init(), &say("Louder."), success()]));
+    assert_eq!(said(&turn(&mut conversation, "make it louder")), "Louder.");
+    assert_eq!(stage.launch(4).input(), "make it louder");
+}
+
+#[test]
+fn a_request_stops_at_its_own_limit_however_many_runs_that_is() {
+    let (stage, mut conversation) = long_request("request-limit", 3, Some(5));
+    stage.script_for(1, &script(&[&init(), &call("a", "write_drums"), &out_of_steps(4, 0.10), "exit 1"]));
+    stage.script_for(2, &script(&[&init(), &call("b", "write_bass"), &out_of_steps(3, 0.05), "exit 1"]));
+    stage.script_for(3, &script(&[&init(), &say("Never asked for."), success()]));
+
+    let events = turn(&mut conversation, "go round in circles");
+
+    // The second run was given what the request had left, and the request
+    // ended there, with what it had done still done and its cost known.
+    assert_eq!(events.last(), Some(&Event::Failed(FailureReason::TurnLimitReached { limit: 5 })));
+    assert_eq!(stage.launches(), 2);
+    assert!(stage.launch(1).has_argument("--max-turns=3"));
+    assert!(stage.launch(2).has_argument("--max-turns=2"));
+    assert_eq!(
+        progress(&events).last(),
+        Some(&Progress { steps: 5, estimated_cost_usd: Some(0.15000000000000002), costed_steps: 5 })
+    );
+
+    // Told to continue, it has the whole limit again.
+    assert!(matches!(turn(&mut conversation, "Continue.").last(), Some(Event::Finished(_))));
+    assert!(stage.launch(3).has_argument("--max-turns=3"));
+    assert_eq!(stage.launch(3).input(), "Continue.");
+}
+
+#[test]
+fn a_request_without_a_limit_is_carried_on_for_as_long_as_it_takes() {
+    let (stage, mut conversation) = long_request("no-limit", 2, None);
+    for number in 1..=6 {
+        stage.script_for(number, &script(&[&init(), &call("a", "add_notes"), &out_of_steps(3, 0.01), "exit 1"]));
+    }
+    stage.script_for(7, &script(&[&init(), &say("Done."), success()]));
+
+    let events = turn(&mut conversation, "a long one");
+
+    assert!(matches!(events.last(), Some(Event::Finished(summary)) if summary.turns == 13), "{:?}", events.last());
+    assert_eq!(stage.launches(), 7);
+    assert!((1..=7).all(|number| stage.launch(number).has_argument("--max-turns=2")));
+}
+
+#[test]
+fn stop_ends_a_long_request_in_whichever_run_it_is_and_no_other_is_started() {
+    let (stage, mut conversation) = long_request("stop-long", 2, Some(100));
+    stage.script_for(1, &script(&[&init(), &call("a", "write_drums"), &out_of_steps(3, 0.10), "exit 1"]));
+    stage.script_for(2, &script(&[&init(), &say("Second run."), "child", "hang"]));
+    stage.script_for(3, &script(&[&init(), &say("Picking up."), success()]));
+
+    conversation.send("write a long piece", None).unwrap();
+    let mut before = Vec::new();
+    while !said(&before).ends_with("Second run.") {
+        assert!(conversation.is_busy(), "the turn ended early: {before:?}");
+        before.extend(conversation.wait(Duration::from_secs(30)));
+    }
+    stage.await_helper();
+    assert!(stage.helper_is_alive());
+
+    let asked = Instant::now();
+    conversation.cancel();
+    let after = rest_of_turn(&mut conversation);
+
+    assert_eq!(after, [Event::Cancelled]);
+    assert!(asked.elapsed() < Duration::from_secs(2), "stopping took {:?}", asked.elapsed());
+    assert!(stage.helper_has_stopped(), "the run under way went, and what it had started");
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(stage.launches(), 2, "and no run was started after it");
+
+    // What it had done stays done, and the conversation goes on.
+    assert!(before.iter().any(|event| matches!(event, Event::ToolCallFinished { tool, .. } if tool == "write_drums")));
+    assert_eq!(said(&turn(&mut conversation, "carry on")), "Picking up.");
+    assert!(stage.launch(3).has_argument(&format!("--resume={SESSION}")));
+    assert_eq!(stage.launch(3).input(), "carry on");
+}
+
+#[test]
+fn a_run_that_fails_ends_a_long_request_with_its_reason() {
+    let (stage, mut conversation) = long_request("fails-later", 2, Some(100));
+    stage.script_for(1, &script(&[&init(), &call("a", "write_drums"), &out_of_steps(3, 0.10), "exit 1"]));
+    stage.script_for(2, &script(&[&init(), &say("Working on it"), "stderr Fatal: out of memory", "exit 137"]));
+
+    let events = turn(&mut conversation, "write a long piece");
+
+    assert_eq!(
+        failure(&events),
+        &FailureReason::CliExited { exit_code: Some(137), stderr_tail: "Fatal: out of memory".into() }
+    );
+    assert_eq!(stage.launches(), 2, "nothing is tried again behind the user's back");
+    assert_eq!(conversation.session_id(), Some(session()));
+}
+
+// --- Recorded: the plan, the web, a full conversation, a slow tool ---------------
+
+#[test]
+fn a_recorded_plan_is_reported_as_changes_and_not_as_tool_calls() {
+    let stage = Stage::new("recorded-plan");
+    stage.fixture("plan.jsonl");
+    stage.script("replay plan.jsonl");
+
+    let events = turn(&mut stage.conversation(), "plan a song");
+
+    assert!(matches!(events.last(), Some(Event::Finished(summary)) if summary.turns == 8), "{:?}", events.last());
+    assert!(
+        !events.iter().any(|event| matches!(event, Event::ToolCallStarted { .. } | Event::ToolCallFinished { .. }))
+    );
+    let changes: Vec<&PlanChange> =
+        events.iter().filter_map(|event| if let Event::Plan(change) = event { Some(change) } else { None }).collect();
+    let added = |id: &str, title: &str, doing: Option<&str>| PlanChange::Added {
+        id: id.into(),
+        title: title.into(),
+        doing: doing.map(str::to_owned),
+    };
+    let status =
+        |id: &str, status| PlanChange::Changed { id: id.into(), status: Some(status), title: None, doing: None };
+    let step = |id: &str, title: &str, status| PlanStep { id: id.into(), title: title.into(), status };
+    // Three steps written down, the first begun and finished, the second
+    // begun, the third worded anew and then dropped (calls made together
+    // answer in the order they finish); the list read twice; a fourth step.
+    // The calls that named a step that is not there changed nothing.
+    assert_eq!(changes.len(), 11, "{changes:?}");
+    assert_eq!(*changes[0], added("1", "Set tempo and key", Some("Setting tempo and key")));
+    assert_eq!(*changes[1], added("2", "Write the drums", None));
+    assert_eq!(*changes[2], added("3", "Write the bass", Some("Writing the bass")));
+    assert_eq!(*changes[3], status("1", StepStatus::InProgress));
+    assert!(changes[4..7].contains(&&status("1", StepStatus::Done)));
+    assert!(changes[4..7].contains(&&status("2", StepStatus::InProgress)));
+    assert!(changes[4..7].contains(&&PlanChange::Changed {
+        id: "3".into(),
+        status: None,
+        title: Some("Write the bass line".into()),
+        doing: None
+    }));
+    assert_eq!(
+        *changes[7],
+        PlanChange::Listed(vec![
+            step("1", "Set tempo and key", StepStatus::Done),
+            step("2", "Write the drums", StepStatus::InProgress),
+            step("3", "Write the bass line", StepStatus::Pending),
+        ])
+    );
+    assert_eq!(*changes[8], PlanChange::Removed { id: "3".into() });
+    assert_eq!(*changes[9], added("4", "Render and check", None));
+    assert_eq!(
+        *changes[10],
+        PlanChange::Listed(vec![
+            step("1", "Set tempo and key", StepStatus::Done),
+            step("2", "Write the drums", StepStatus::InProgress),
+            step("4", "Render and check", StepStatus::Pending),
+        ])
+    );
+    assert_eq!(said(&events), "Planning.\n\nAll planned.");
+}
+
+#[test]
+fn recorded_web_lookups_are_reported_with_what_was_asked_and_what_came_back() {
+    let stage = Stage::new("recorded-web");
+    stage.fixture("web_lookups.jsonl");
+    stage.script("replay web_lookups.jsonl");
+
+    let events = turn(&mut stage.conversation(), "look things up");
+
+    assert!(matches!(events.last(), Some(Event::Finished(_))), "{:?}", events.last());
+    let lookups: Vec<(&WebLookup, &Result<String, String>)> = events
+        .iter()
+        .filter_map(|event| if let Event::WebStarted { id, lookup } = event { Some((id, lookup)) } else { None })
+        .map(|(id, lookup)| {
+            let result = events.iter().find_map(|event| match event {
+                Event::WebFinished { id: finished, result } if finished == id => Some(result),
+                _ => None,
+            });
+            (lookup, result.expect("every lookup answered"))
+        })
+        .collect();
+    assert_eq!(lookups.len(), 9);
+    let page = |url: &str| {
+        lookups.iter().find(|(lookup, _)| matches!(lookup, WebLookup::Page { url: asked, .. } if asked == url))
+    };
+    let refused = |url: &str| page(url).unwrap_or_else(|| panic!("no lookup of {url}")).1.clone().expect_err("refused");
+
+    // What the page reader does with an address on this machine: a name
+    // without a dot is refused outright, and everything else is asked for
+    // over HTTPS whatever was written, which a server that speaks plain
+    // HTTP, as Trill's does, cannot answer.
+    for local in ["http://localhost:18432/page", "http://[::1]:18432/page"] {
+        assert!(refused(local).contains("cannot fetch localhost or other hostnames without a dot"), "{local}");
+    }
+    for local in [
+        "http://127.0.0.1:18432/page",
+        "https://127.0.0.1:18432/page",
+        "http://127.0.0.1.nip.io:18432/page",
+        "http://2130706433:18432/page",
+    ] {
+        assert!(refused(local).contains("SSL routines"), "{local}: {}", refused(local));
+    }
+    assert_eq!(refused("file:///C:/Windows/win.ini"), "Invalid URL");
+    // A page on the web is read, and a search is a search.
+    assert!(page("https://example.com/").expect("the page").1.is_ok());
+    let (search, found) = lookups.last().expect("the search");
+    assert_eq!(**search, WebLookup::Search { query: "dorian mode chord progressions".into() });
+    assert!(found.as_ref().is_ok_and(|found| found.starts_with("Web search results for query:")), "{found:?}");
+    assert!(!events.iter().any(|event| matches!(event, Event::ToolCallStarted { .. })));
+}
+
+#[test]
+fn a_recorded_conversation_that_outgrew_the_model_carries_on_and_says_so() {
+    let stage = Stage::new("recorded-compacted");
+    stage.fixture("compacted.jsonl");
+    stage.script("replay compacted.jsonl");
+
+    let events = turn(&mut stage.conversation(), "write a long song");
+
+    let notices: Vec<&Notice> =
+        events.iter().filter_map(|event| if let Event::Notice(notice) = event { Some(notice) } else { None }).collect();
+    assert_eq!(
+        notices,
+        [&Notice::Compacting, &Notice::Compacted { tokens_before: Some(985_053), tokens_after: Some(644) }]
+    );
+    // The run went on by itself afterwards: the plan was read back, which
+    // the summary could not have told it, and the turn finished.
+    let listed = events.iter().rev().find_map(|event| match event {
+        Event::Plan(PlanChange::Listed(steps)) => Some(steps.as_slice()),
+        _ => None,
+    });
+    assert_eq!(
+        listed,
+        Some(&[PlanStep { id: "1".into(), title: "Write the intro".into(), status: StepStatus::Pending }][..])
+    );
+    assert!(said(&events).ends_with("SCRIPT-STEP-5: carried on after compaction."), "{}", said(&events));
+    assert!(!said(&events).contains("This session is being continued"), "what the CLI tells the model is not a reply");
+    assert!(matches!(events.last(), Some(Event::Finished(_))));
+}
+
+#[test]
+fn a_recorded_run_that_used_its_steps_is_carried_on() {
+    let stage = Stage::new("recorded-run-limit");
+    stage.fixture("run_limit.jsonl");
+    stage.script_for(1, &script(&["replay run_limit.jsonl", "exit 1"]));
+    stage.script_for(2, &script(&[&init(), &say("Finished after the pause."), success()]));
+    let config = AssistantConfig { turns_per_run: 3, ..stage.config() };
+    let mut conversation = Conversation::new(config, stage.cli()).unwrap();
+
+    let events = turn(&mut conversation, "do several steps");
+
+    // Three steps in the run that was stopped at three, and one more.
+    assert!(
+        matches!(events.last(), Some(Event::Finished(summary)) if summary.turns == 4
+            && summary.estimated_cost_usd == Some(0.0009750000000000001 + 0.001)),
+        "{:?}",
+        events.last()
+    );
+    assert_eq!(stage.launches(), 2);
+    assert!(stage.launch(2).has_argument("--resume=00000014-0000-4000-8000-000000000000"));
+    assert!(said(&events).ends_with("Finished after the pause."));
+}
+
+#[test]
+fn a_recorded_tool_call_that_ran_out_of_time_is_a_failed_call_and_not_a_failed_turn() {
+    // What CLI 2.1.325 does, left to itself, with a call to an HTTP server
+    // that takes longer than a minute. This crate gives the call more time
+    // (see `the_cli_is_started_confined_to_trill...`); should a CLI not
+    // listen, this is how it reads.
+    let stage = Stage::new("recorded-slow-tool");
+    stage.fixture("slow_tool_call.jsonl");
+    stage.script("replay slow_tool_call.jsonl");
+
+    let events = turn(&mut stage.conversation(), "wait");
+
+    let timed_out = events.iter().find_map(|event| match event {
+        Event::ToolCallFinished { tool, result: Err(message), .. } => Some((tool.as_str(), message.as_str())),
+        _ => None,
+    });
+    assert_eq!(timed_out, Some(("wait", "The operation timed out.")));
+    assert!(matches!(events.last(), Some(Event::Finished(_))));
 }
 
 #[test]

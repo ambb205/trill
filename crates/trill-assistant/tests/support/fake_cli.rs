@@ -52,7 +52,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 const HEARTBEAT_ARGUMENT: &str = "--fake-heartbeat";
-const RECORDED_PREFIXES: &[&str] = &["ANTHROPIC", "CLAUDE", "ENABLE_", "DISABLE_"];
+const RECORDED_PREFIXES: &[&str] = &["ANTHROPIC", "CLAUDE", "ENABLE_", "DISABLE_", "MCP_"];
 
 fn main() -> ExitCode {
     let home = std::env::current_exe()

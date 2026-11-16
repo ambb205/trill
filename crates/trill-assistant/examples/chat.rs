@@ -6,6 +6,7 @@
 //! ```text
 //! cargo run -p trill-assistant --example chat -- [--mcp <url>] [--model <name>] [--resume <id>]
 //!     [--context <text>] [--dir <folder>] [--cli <path>] [--keep-environment]
+//!     [--effort <level>] [--no-web] [--max-turns <n>] [--turns-per-run <n>]
 //! ```
 //!
 //! Type a message and press Enter. While the assistant is working, an empty
@@ -20,7 +21,8 @@ use std::thread;
 use std::time::Duration;
 
 use trill_assistant::{
-    AssistantConfig, Conversation, Event, LoginMethod, Notice, SessionId, TurnSummary, Unavailable, detect,
+    AssistantConfig, Conversation, Effort, Event, LoginMethod, Notice, PlanChange, SessionId, StepStatus, TurnSummary,
+    Unavailable, WebLookup, detect,
 };
 
 /// How often a frame loop would come round.
@@ -37,7 +39,7 @@ fn main() {
         Ok(options) => options,
         Err(problem) => {
             eprintln!(
-                "{problem}\n\nusage: chat [--mcp <url>] [--model <name>] [--resume <id>] [--context <text>] [--dir <folder>] [--cli <path>] [--keep-environment]"
+                "{problem}\n\nusage: chat [--mcp <url>] [--model <name>] [--resume <id>] [--context <text>] [--dir <folder>] [--cli <path>] [--keep-environment] [--effort <level>] [--no-web] [--max-turns <n>] [--turns-per-run <n>]"
             );
             std::process::exit(2);
         }
@@ -132,6 +134,27 @@ fn show(event: &Event) {
         Event::ToolCallStarted { tool, input, .. } => println!("\n  -> {tool} {}", shortened(&input.to_string())),
         Event::ToolCallFinished { result: Ok(answer), .. } => println!("  <- {}", shortened(answer)),
         Event::ToolCallFinished { result: Err(error), .. } => println!("  <- failed: {}", shortened(error)),
+        // A lookup on the web, with the CLI's own tools: say what is asked
+        // of whom, every time.
+        Event::WebStarted { lookup: WebLookup::Search { query }, .. } => println!("\n  -> web search: {query}"),
+        Event::WebStarted { lookup: WebLookup::Page { url, .. }, .. } => println!("\n  -> web page: {url}"),
+        Event::WebFinished { result: Ok(answer), .. } => println!("  <- {}", shortened(answer)),
+        Event::WebFinished { result: Err(error), .. } => println!("  <- failed: {}", shortened(error)),
+        // The plan is the app's to keep; a panel shows it as a checklist.
+        Event::Plan(PlanChange::Added { title, .. }) => println!("\n  [ ] {title}"),
+        Event::Plan(PlanChange::Changed { id, status: Some(StepStatus::InProgress), .. }) => {
+            println!("\n  [>] step {id}");
+        }
+        Event::Plan(PlanChange::Changed { id, status: Some(StepStatus::Done), .. }) => println!("\n  [x] step {id}"),
+        Event::Plan(_) => {}
+        // A long request is worked on in several runs of the CLI. What it
+        // has cost is known when a run ends, and is an estimate.
+        Event::Progress(progress) if progress.costed_steps == progress.steps => {
+            if let Some(cost) = progress.estimated_cost_usd {
+                println!("\n[{} steps so far, about ${cost:.2} at API prices; carrying on]", progress.steps);
+            }
+        }
+        Event::Progress(_) => {}
         Event::Notice(notice) => {
             println!("\n[{notice}]");
             if let Notice::UsageLimitNear { resets_at: Some(_) } = notice {
@@ -207,6 +230,15 @@ fn options() -> Result<Options, String> {
                 resume = Some(SessionId::parse(&id).ok_or_else(|| format!("{id} is not a conversation id"))?);
             }
             "--keep-environment" => config.keep_redirecting_environment = true,
+            "--no-web" => config.web = false,
+            "--effort" => {
+                let name = value()?;
+                config.effort = Some(Effort::named(&name).ok_or_else(|| format!("{name} is not an effort level"))?);
+            }
+            "--max-turns" => config.max_turns = Some(value()?.parse().map_err(|_| "--max-turns needs a number")?),
+            "--turns-per-run" => {
+                config.turns_per_run = value()?.parse().map_err(|_| "--turns-per-run needs a number")?;
+            }
             other => return Err(format!("unknown option {other}")),
         }
     }

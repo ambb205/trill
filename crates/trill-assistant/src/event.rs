@@ -48,7 +48,9 @@ impl fmt::Display for SessionId {
 /// [`Failed`](Event::Failed).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
-    /// The CLI is up, connected to Trill, and about to ask the model.
+    /// The CLI is up, connected to Trill, and about to ask the model. A long
+    /// request is worked on in several runs of the CLI, and this comes again
+    /// at the start of each.
     Started(TurnStart),
 
     /// The next piece of the assistant's reply. Append the pieces in order;
@@ -77,6 +79,31 @@ pub enum Event {
         /// usually corrects).
         result: Result<String, String>,
     },
+
+    /// The assistant is looking something up on the web, with the CLI's own
+    /// tools. Sent only when [`web`](crate::AssistantConfig::web) is on.
+    WebStarted {
+        /// Pairs this event with its [`WebFinished`](Event::WebFinished).
+        id: String,
+        lookup: WebLookup,
+    },
+
+    /// A web lookup returned.
+    WebFinished {
+        id: String,
+        /// What came back: for a search, titles and addresses; for a page,
+        /// what a small model made of it in answer to the question. `Err`
+        /// when the search or the page could not be had.
+        result: Result<String, String>,
+    },
+
+    /// The assistant's plan for the request changed: a step was written
+    /// down, begun, finished or dropped.
+    Plan(PlanChange),
+
+    /// How far a request has come: sent each time the model is asked again,
+    /// and when a run of the CLI has reported what it cost.
+    Progress(Progress),
 
     /// Something worth showing that does not end the turn.
     Notice(Notice),
@@ -114,6 +141,81 @@ pub struct TurnStart {
     pub api_key_source: Option<String>,
 }
 
+/// What the assistant is looking up on the web.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebLookup {
+    /// A search, which Anthropic's service runs. The query is all of Trill's
+    /// that leaves the machine for it.
+    Search { query: String },
+    /// One page, which the CLI fetches from this machine and has a small
+    /// model read.
+    Page {
+        /// The address asked for.
+        url: String,
+        /// What the assistant wants to know from the page.
+        question: String,
+    },
+}
+
+/// How a step of the assistant's plan stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepStatus {
+    Pending,
+    InProgress,
+    Done,
+}
+
+/// One step of the assistant's plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanStep {
+    /// The CLI's number for the step. Steps are listed in the order of
+    /// their numbers.
+    pub id: String,
+    /// What is to be done: "Write the drums".
+    pub title: String,
+    pub status: StepStatus,
+}
+
+/// A change to the assistant's plan. The plan itself is the app's to keep:
+/// apply the changes in the order they come.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanChange {
+    /// A step was written down, not yet begun.
+    Added {
+        id: String,
+        title: String,
+        /// The step as it reads while it is being worked on ("Writing the
+        /// drums"), if the assistant gave one.
+        doing: Option<String>,
+    },
+    /// A step was begun, finished, put back or worded anew. What is `None`
+    /// stays as it was.
+    Changed { id: String, status: Option<StepStatus>, title: Option<String>, doing: Option<String> },
+    /// A step was dropped.
+    Removed { id: String },
+    /// The whole plan as the CLI holds it, which the assistant asked to see.
+    /// Steps the app has that are not in it are gone; what the app knows
+    /// about the others beyond title and state it keeps.
+    Listed(Vec<PlanStep>),
+}
+
+/// How far a request has come.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Progress {
+    /// How many times the model has been asked so far for this request:
+    /// the steps that [`max_turns`](crate::AssistantConfig::max_turns)
+    /// counts.
+    pub steps: u32,
+    /// What the request would have cost so far at API list prices, as the
+    /// CLI estimates it, for the part of the request the CLI has reported
+    /// on. It reports when one of its runs ends, so this is `None` until
+    /// the first run has, and is behind by the run under way after that.
+    /// An estimate, never a charge.
+    pub estimated_cost_usd: Option<f64>,
+    /// How many of the steps that estimate covers.
+    pub costed_steps: u32,
+}
+
 /// Something worth showing that does not end the turn.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Notice {
@@ -136,6 +238,32 @@ pub enum Notice {
     /// A tool call was refused by the CLI's permission rules, so it did not
     /// run.
     PermissionDenied { tool: String },
+
+    /// The conversation has grown past what the model can hold at once, and
+    /// the CLI is writing a summary of the earlier part to carry on from.
+    /// [`Compacted`](Notice::Compacted) or
+    /// [`CompactionFailed`](Notice::CompactionFailed) follows.
+    Compacting,
+
+    /// The CLI replaced the earlier part of the conversation with a summary
+    /// of it and is carrying on. The request goes on by itself; what the
+    /// assistant knows of its early steps is now what the summary says. Its
+    /// plan and the project are not part of the conversation and are as
+    /// they were.
+    Compacted {
+        /// How large the conversation had grown, in tokens, if the CLI said.
+        tokens_before: Option<u64>,
+        /// How large it is with the summary in place.
+        tokens_after: Option<u64>,
+    },
+
+    /// The CLI could not summarise the conversation. What it does next is
+    /// its own affair; most likely the service refuses the next request as
+    /// too long, and the turn fails saying so.
+    CompactionFailed {
+        /// The CLI's word for what went wrong.
+        detail: String,
+    },
 }
 
 impl fmt::Display for Notice {
@@ -152,11 +280,48 @@ impl fmt::Display for Notice {
             }
             Notice::UsageLimitNear { .. } => f.write_str("You are close to your Claude usage limit."),
             Notice::PermissionDenied { tool } => write!(f, "The assistant was not allowed to use {tool}."),
+            Notice::Compacting => f.write_str(
+                "The conversation has grown past what the model can hold at once. Claude Code is summarising the \
+                 earlier part\u{2026}",
+            ),
+            Notice::Compacted { tokens_before, tokens_after } => {
+                f.write_str("The conversation had grown past what the model can hold at once")?;
+                if let Some(before) = tokens_before {
+                    write!(f, " ({} tokens)", thousands(*before))?;
+                }
+                f.write_str(", so Claude Code summarised the earlier part")?;
+                if let Some(after) = tokens_after {
+                    write!(f, " ({} tokens now)", thousands(*after))?;
+                }
+                f.write_str(
+                    " and is carrying on. The song and the plan are untouched; what the assistant remembers of its \
+                     early steps is now the summary.",
+                )
+            }
+            Notice::CompactionFailed { detail } => write!(
+                f,
+                "The conversation has grown past what the model can hold at once, and Claude Code could not \
+                 summarise it ({detail}). If the assistant stops, start a new conversation: the song stays as it is."
+            ),
         }
     }
 }
 
-/// How a finished turn went.
+/// A whole number with its thousands set apart: `985,053`.
+fn thousands(number: u64) -> String {
+    let digits = number.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// How a finished turn went. For a request that took several runs of the
+/// CLI, each figure is the sum over them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnSummary {
     /// How many times the model was asked: one for the reply, plus one for
@@ -250,9 +415,13 @@ pub enum FailureReason {
     )]
     SessionNotFound,
 
-    /// The assistant used every round trip it was allowed. What it did so
-    /// far stays done.
-    #[error("The assistant stopped after {limit} steps. Ask it to continue if it was not finished.")]
+    /// The request used every round trip it was allowed
+    /// ([`max_turns`](crate::AssistantConfig::max_turns)). What it did so
+    /// far stays done, and the conversation can be told to carry on.
+    #[error(
+        "The assistant stopped at the limit of {limit} steps for one request. It can carry on from where it is; \
+         the limit is there to catch an assistant going round in circles."
+    )]
     TurnLimitReached { limit: u32 },
 
     /// The model that was asked for cannot be used: the service does not
@@ -332,5 +501,30 @@ mod tests {
         assert!(Event::Failed(FailureReason::NotLoggedIn).is_terminal());
         assert!(!Event::Text("hi".into()).is_terminal());
         assert!(!Event::Notice(Notice::PermissionDenied { tool: "render".into() }).is_terminal());
+        let progress = Progress { steps: 100, estimated_cost_usd: Some(1.0), costed_steps: 100 };
+        assert!(!Event::Progress(progress).is_terminal());
+        assert!(!Event::Plan(PlanChange::Removed { id: "1".into() }).is_terminal());
+        assert!(!Event::WebFinished { id: "w".into(), result: Err("no such page".into()) }.is_terminal());
+        assert!(!Event::Notice(Notice::Compacting).is_terminal());
+    }
+
+    #[test]
+    fn a_summarised_conversation_is_said_plainly() {
+        let said = Notice::Compacted { tokens_before: Some(985_053), tokens_after: Some(644) }.to_string();
+        assert_eq!(
+            said,
+            "The conversation had grown past what the model can hold at once (985,053 tokens), so Claude Code \
+             summarised the earlier part (644 tokens now) and is carrying on. The song and the plan are untouched; \
+             what the assistant remembers of its early steps is now the summary."
+        );
+        let bare = Notice::Compacted { tokens_before: None, tokens_after: None }.to_string();
+        assert!(bare.contains("at once, so Claude Code summarised the earlier part and is carrying on."), "{bare}");
+        assert!(Notice::Compacting.to_string().ends_with("the earlier part\u{2026}"));
+        let failed = Notice::CompactionFailed { detail: "the summary was refused".into() }.to_string();
+        assert!(failed.contains("(the summary was refused)") && failed.contains("new conversation"), "{failed}");
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_000), "1,000");
+        assert_eq!(thousands(1_234_567), "1,234,567");
     }
 }

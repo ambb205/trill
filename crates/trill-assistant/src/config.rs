@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// The MCP endpoint Trill serves by default.
 pub const DEFAULT_MCP_URL: &str = "http://127.0.0.1:7777/mcp";
@@ -10,9 +11,38 @@ pub const DEFAULT_MCP_URL: &str = "http://127.0.0.1:7777/mcp";
 /// (`mcp__trill__create_track`), which this crate strips again.
 pub const DEFAULT_MCP_SERVER_NAME: &str = "trill";
 
-/// How many model round trips one message may take before the turn is stopped.
-/// A whole arrangement takes dozens of tool calls; this only catches a loop.
-pub const DEFAULT_MAX_TURNS: u32 = 80;
+/// How many model round trips one request may take before it is stopped. A
+/// whole song takes several hundred; this only catches a loop, and the app
+/// lets the user move it.
+pub const DEFAULT_MAX_TURNS: u32 = 1000;
+
+/// How many of those round trips one run of the CLI is given. A request that
+/// needs more is carried on in another run of the same conversation, without
+/// anything being asked of the user.
+///
+/// The CLI reports what a run cost only when the run ends, so this is also
+/// how often a long request learns what it has cost so far.
+pub const DEFAULT_TURNS_PER_RUN: u32 = 100;
+
+/// The longest a single tool call may take. Rendering a long song with the
+/// user's plugins is the slow one; half an hour is far beyond it and still an
+/// end.
+pub const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// The CLI's tools for keeping a plan: a list of steps and their state.
+///
+/// These are the names CLI 2.1.325 goes by. Named to `--tools`, it offers
+/// them; a name a CLI does not know is passed over. Each was called through
+/// that CLI and watched: they take a title and a description, hand out the
+/// numbers themselves, and keep the list as a few small files of the CLI's
+/// own (`tasks/<conversation id>/<number>.json` in its data folder, beside
+/// the record it keeps of the conversation). A number that is not one of the
+/// list's (`../../x`) finds nothing and writes nothing.
+pub const PLAN_TOOLS: &[&str] = &["TaskCreate", "TaskGet", "TaskList", "TaskUpdate"];
+
+/// The CLI's tools for looking things up: a web search, which Anthropic's
+/// service runs, and reading a page, which the CLI fetches itself.
+pub const WEB_TOOLS: &[&str] = &["WebFetch", "WebSearch"];
 
 /// The instructions added to the CLI's own system prompt.
 ///
@@ -55,6 +85,11 @@ and mention it.
 ";
 
 /// How hard the model should think, as the CLI's `--effort` understands it.
+///
+/// These five are the values CLI 2.1.325 names when it is given one it does
+/// not know ("Valid values: low, medium, high, xhigh, max"), and each was
+/// seen to reach the request it then makes. What a level does, and whether a
+/// model has it, is the service's to say.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Effort {
     Low,
@@ -65,7 +100,11 @@ pub enum Effort {
 }
 
 impl Effort {
-    pub(crate) fn as_flag_value(self) -> &'static str {
+    /// Every level, from the least effort to the most.
+    pub const ALL: [Effort; 5] = [Effort::Low, Effort::Medium, Effort::High, Effort::ExtraHigh, Effort::Max];
+
+    /// The level as the CLI spells it: `"xhigh"`.
+    pub fn name(self) -> &'static str {
         match self {
             Effort::Low => "low",
             Effort::Medium => "medium",
@@ -73,6 +112,11 @@ impl Effort {
             Effort::ExtraHigh => "xhigh",
             Effort::Max => "max",
         }
+    }
+
+    /// The level the CLI spells `name`, for a choice that was stored.
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|effort| effort.name() == name)
     }
 }
 
@@ -130,9 +174,36 @@ pub struct AssistantConfig {
     /// `None` leaves the CLI's default.
     pub effort: Option<Effort>,
 
-    /// The most model round trips one message may take. `None` removes the
-    /// limit.
+    /// Offer the assistant the CLI's own web search and page reading
+    /// ([`WEB_TOOLS`]), so that it can look up what Trill does not know: a
+    /// genre's conventions, a technique, a piece of theory. On by default.
+    ///
+    /// What that lets in, and why it is acceptable only as long as the
+    /// assistant has no file access of its own, is in the crate
+    /// documentation ("What the web can do to the assistant").
+    pub web: bool,
+
+    /// Offer the assistant the CLI's tools for keeping a plan
+    /// ([`PLAN_TOOLS`]). What it plans arrives as
+    /// [`Event::Plan`](crate::Event::Plan). On by default.
+    pub plan: bool,
+
+    /// The most model round trips one request may take, over however many
+    /// runs of the CLI that is. `None` removes the limit. A request that
+    /// reaches it ends with
+    /// [`TurnLimitReached`](crate::FailureReason::TurnLimitReached), with
+    /// everything it did still done.
     pub max_turns: Option<u32>,
+
+    /// The most model round trips one run of the CLI is given. A request
+    /// that has used them and is not finished is carried on in another run,
+    /// by itself. See [`DEFAULT_TURNS_PER_RUN`].
+    pub turns_per_run: u32,
+
+    /// The longest one tool call may take. Without this the CLI gives a
+    /// call to an MCP server reached over HTTP sixty seconds, and one that
+    /// is silent five minutes. See `env.rs`.
+    pub tool_timeout: Duration,
 
     /// The directory the CLI runs in. Use a folder of Trill's own (in the
     /// app data directory), never the user's project folder: the CLI files
@@ -168,7 +239,11 @@ impl AssistantConfig {
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_owned(),
             model: None,
             effort: None,
+            web: true,
+            plan: true,
             max_turns: Some(DEFAULT_MAX_TURNS),
+            turns_per_run: DEFAULT_TURNS_PER_RUN,
+            tool_timeout: DEFAULT_TOOL_TIMEOUT,
             working_dir,
             temp_dir,
             keep_redirecting_environment: false,
@@ -190,10 +265,24 @@ impl AssistantConfig {
         if let Some(model) = self.model.as_ref().filter(|model| !is_model_name(model)) {
             return Err(ConfigError::Model(model.clone()));
         }
-        if self.max_turns == Some(0) {
+        if self.max_turns == Some(0) || self.turns_per_run == 0 {
             return Err(ConfigError::MaxTurns);
         }
+        if self.tool_timeout < Duration::from_secs(1) {
+            return Err(ConfigError::ToolTimeout);
+        }
         Ok(())
+    }
+
+    /// The CLI's own tools the assistant is offered, by the CLI's names for
+    /// them: the ones for keeping a plan and the ones for the web, each if
+    /// it is switched on. Everything else of the CLI's stays off, whatever
+    /// this says: reading and writing files, the shell, editing, notebooks,
+    /// sub-agents, skills.
+    pub fn cli_tools(&self) -> Vec<&'static str> {
+        let plan = PLAN_TOOLS.iter().filter(|_| self.plan);
+        let web = WEB_TOOLS.iter().filter(|_| self.web);
+        plan.chain(web).copied().collect()
     }
 }
 
@@ -240,6 +329,8 @@ pub enum ConfigError {
     Model(String),
     /// A turn limit of zero would let the assistant do nothing.
     MaxTurns,
+    /// A tool call needs at least a second.
+    ToolTimeout,
 }
 
 impl fmt::Display for ConfigError {
@@ -254,6 +345,7 @@ impl fmt::Display for ConfigError {
             ConfigError::McpUrl(url) => write!(f, "the MCP address {url:?} is not an http:// or https:// URL"),
             ConfigError::Model(model) => write!(f, "{model:?} is not a model name"),
             ConfigError::MaxTurns => f.write_str("the turn limit must be at least 1"),
+            ConfigError::ToolTimeout => f.write_str("a tool call must be given at least a second"),
         }
     }
 }
@@ -285,8 +377,44 @@ mod tests {
         let config = AssistantConfig { model: Some("--dangerously-skip-permissions".into()), ..base.clone() };
         assert!(matches!(config.validate(), Err(ConfigError::Model(_))));
 
-        let config = AssistantConfig { max_turns: Some(0), ..base };
+        let config = AssistantConfig { max_turns: Some(0), ..base.clone() };
         assert_eq!(config.validate(), Err(ConfigError::MaxTurns));
+
+        let config = AssistantConfig { turns_per_run: 0, ..base.clone() };
+        assert_eq!(config.validate(), Err(ConfigError::MaxTurns));
+
+        let config = AssistantConfig { tool_timeout: Duration::from_millis(20), ..base };
+        assert_eq!(config.validate(), Err(ConfigError::ToolTimeout));
+    }
+
+    #[test]
+    fn the_clis_own_tools_are_the_plan_and_the_web_and_each_can_be_switched_off() {
+        let all = AssistantConfig::new("data");
+        assert_eq!(all.cli_tools(), ["TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "WebFetch", "WebSearch"]);
+
+        let offline = AssistantConfig { web: false, ..all.clone() };
+        assert_eq!(offline.cli_tools(), PLAN_TOOLS);
+        let bare = AssistantConfig { web: false, plan: false, ..all };
+        assert!(bare.cli_tools().is_empty());
+
+        // Nothing that reads or writes a file, runs a program or starts
+        // another agent is ever among them.
+        for forbidden in
+            ["Read", "Write", "Edit", "Bash", "PowerShell", "Glob", "Grep", "NotebookEdit", "Task", "Skill"]
+        {
+            assert!(!PLAN_TOOLS.contains(&forbidden) && !WEB_TOOLS.contains(&forbidden), "{forbidden}");
+        }
+    }
+
+    #[test]
+    fn effort_levels_go_by_the_clis_names() {
+        let names: Vec<&str> = Effort::ALL.iter().map(|effort| effort.name()).collect();
+        assert_eq!(names, ["low", "medium", "high", "xhigh", "max"]);
+        for effort in Effort::ALL {
+            assert_eq!(Effort::named(effort.name()), Some(effort));
+        }
+        assert_eq!(Effort::named("ultra"), None);
+        assert_eq!(Effort::named("--model=x"), None);
     }
 
     #[test]
