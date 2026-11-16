@@ -14,6 +14,7 @@
 
 mod guard;
 mod input;
+mod instruments;
 pub mod logging;
 mod music;
 mod requests;

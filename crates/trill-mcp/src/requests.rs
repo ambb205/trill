@@ -570,13 +570,22 @@ pub struct EditTimeRequest {
     /// "delete": remove the time from `start` to `end`; what follows moves earlier and closes the gap.
     /// "duplicate": repeat the time from `start` to `end` right after itself; what follows moves later.
     /// "insert": open up `length` beats of empty time at `start`; what follows moves later.
+    /// "copy": copy the time from `start` to `end` to the beat `to`, on every track or on `tracks`.
     pub action: String,
     /// Where the stretch begins, in beats (bar N of 4/4 starts at (N-1)*4).
     pub start: f64,
-    /// Where the stretch ends, in beats. Needed for "delete" and "duplicate".
+    /// Where the stretch ends, in beats. Needed for "delete", "duplicate" and "copy".
     pub end: Option<f64>,
     /// How many beats to open up. Needed for "insert".
     pub length: Option<f64>,
+    /// For "copy": the beat the copy starts at. It may lie anywhere, inside the stretch too.
+    pub to: Option<f64>,
+    /// For "copy": the ids of the tracks to copy. Omit to copy every track, with the master's automation.
+    pub tracks: Option<Vec<u64>>,
+    /// For "copy": true (default) makes room at `to`, moving everything from there on later on every track
+    /// (reuse a chorus after the bridge). false puts the copy over what the copied tracks hold there, and
+    /// nothing moves (fill bars that are still empty, or replace a section).
+    pub make_room: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

@@ -918,12 +918,16 @@ impl TrillServer {
             let fill = request.fill.as_deref().map(Fill::find).transpose().map_err(theory)?;
             let fill_pattern = fill.map(Fill::pattern);
             let every = request.fill_every.unwrap_or(0) as usize;
-            let plan =
-                fill.zip(fill_pattern.as_ref()).map(|(fill, pattern)| FillPlan { pattern, from: fill.from, every });
+            let plan = fill.zip(fill_pattern.as_ref()).map(|(fill, pattern)| FillPlan {
+                pattern,
+                from: fill.from,
+                every,
+                crash: 49,
+            });
             let bars = setting.bars.unwrap_or(pattern.bars());
             let bar_length = setting.signature.beats_per_bar();
             let level = within(request.level, 1.0, 0.1..=1.5, "level")?;
-            let notes = arrange(&pattern, plan.as_ref(), bars, bar_length, level);
+            let notes = arrange(&pattern, plan.as_ref(), bars, bar_length, level).notes;
 
             let meter = (setting.signature.numerator, setting.signature.denominator);
             let mut warnings = pattern.odd_lanes(bar_length);

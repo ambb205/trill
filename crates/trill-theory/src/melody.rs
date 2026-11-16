@@ -18,16 +18,87 @@
 //! * `|` is an optional bar line. When bar lines are written, every bar is
 //!   checked to be the right length, which catches slips in counting. The
 //!   first bar may be shorter: a pickup leading into the first full bar.
+//!
+//! # Ornaments
+//!
+//! A note can say how it is played, in marks after it, each begun by `!`:
+//!
+//! ```text
+//! 4:2!bend=5              bent up to the fifth degree and held there
+//! 4:2!bend=5!release      bent up, then let back down
+//! 4:2!prebend=5           struck already bent, then let down
+//! 5:2!vib                 with vibrato (5:2!vib=0.5 says how wide, in semitones)
+//! :0.5 5 6!hammer 5!pull  hammered on and pulled off: no new attack
+//! 3:1!slide               slid into from the note before, or from below if there is none
+//! 3:1!slide=1             slid into from the first degree
+//! 5:2!fall                falling away at its end
+//! 1:0.5!palm_mute         by one of the instrument's own articulations, by name
+//! ```
+//!
+//! Marks combine (`4:2!bend=5!vib`). What a mark becomes depends on the
+//! instrument, which [`ornament`](crate::ornament) decides: a keyswitch
+//! where the instrument has one for it, a pitch-bend curve where not.
 
 use crate::error::{Error, Result};
-use crate::expression::{Dynamics, MIN_LENGTH, clamp_velocity};
+use crate::expression::{Dynamics, MIN_LENGTH};
 use crate::pitch::NoteName;
 use crate::scale::Scale;
 use crate::timing::{EPSILON, parse_beats};
 use trill_core::{Note, TimeSignature};
 
+/// How a note is played, beyond its pitch and length.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Mark {
+    /// Bent from its own pitch to this one and held there.
+    Bend(u8),
+    /// After a bend: let back to its own pitch before it ends.
+    Release,
+    /// Struck already bent to this pitch, then let down to its own.
+    Prebend(u8),
+    /// Slid into: from this pitch, or with `None` from the note before it,
+    /// or from below where no note comes right before.
+    Slide(Option<u8>),
+    /// Falling away in pitch at its end.
+    Fall,
+    /// With vibrato, this many semitones each way if given.
+    Vibrato(Option<f64>),
+    /// Joined to the note before it with no new attack: a hammer-on, a
+    /// pull-off, a slur.
+    Join,
+    /// By an articulation of the instrument, named as the instrument's
+    /// profile names it.
+    Named(String),
+}
+
+impl Mark {
+    /// What the mark is written as, for messages.
+    pub fn word(&self) -> &str {
+        match self {
+            Mark::Bend(_) => "bend",
+            Mark::Release => "release",
+            Mark::Prebend(_) => "prebend",
+            Mark::Slide(_) => "slide",
+            Mark::Fall => "fall",
+            Mark::Vibrato(_) => "vib",
+            Mark::Join => "hammer",
+            Mark::Named(name) => name,
+        }
+    }
+}
+
+/// The ornaments a note can be marked with, for listings and messages.
+pub const ORNAMENTS: &[(&str, &str)] = &[
+    ("bend=P", "bent up (or down) from its own pitch to the pitch P and held there"),
+    ("release", "after bend=P: let back to its own pitch before the note ends"),
+    ("prebend=P", "struck already bent to P, then let down to its own pitch"),
+    ("slide", "slid into from the note before it, or from below if no note comes right before; slide=P slides from P"),
+    ("hammer", "joined to the note before it with no new attack: a hammer-on or pull-off (also pull, legato, h, p)"),
+    ("vib", "vibrato, after a moment; vib=0.5 sets how wide in semitones (default 0.3)"),
+    ("fall", "falls away in pitch at its end"),
+];
+
 /// One note of a phrase, before dynamics.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Tone {
     pub pitch: u8,
     pub start: f64,
@@ -35,6 +106,8 @@ pub struct Tone {
     /// The note's name as the phrase spelled it: a sharpened degree is a
     /// sharp and a flattened one a flat, whatever the key would call it.
     pub name: NoteName,
+    /// How it is played, in the order the marks were written.
+    pub marks: Vec<Mark>,
 }
 
 impl Tone {
@@ -58,7 +131,8 @@ pub struct Phrase {
 
 const EXPECTED: &str = "expected a scale degree (1-7, b3, #4, 5' for the octave above, 7, for the octave below), a note \
                         name with its octave (C4, F#5), r for a rest or ~ for a tie, each optionally followed by \
-                        :beats; a bare :beats sets the length of the notes after it";
+                        :beats; a bare :beats sets the length of the notes after it; marks such as !bend=5, !vib, \
+                        !hammer or !slide follow a note";
 
 impl Phrase {
     /// Parses a phrase. Degrees are read in `key`, with degree 1 in
@@ -99,8 +173,13 @@ impl Phrase {
             }
             count += 1;
             let fail = |problem: &str| Error::new(format!("phrase token {count} '{token}': {problem}"));
+            // Marks come last: "4:2!bend=5!vib".
+            let (token_head, marks_text) = match token.split_once('!') {
+                Some((head, marks)) => (head, Some(marks)),
+                None => (token, None),
+            };
             // "5:0.5" is one note's length; a bare ":0.5" is the default from here on.
-            let (body, own) = match token.split_once(':') {
+            let (body, own) = match token_head.split_once(':') {
                 Some((body, beats)) => {
                     let Some(beats) = parse_beats(beats) else {
                         return Err(fail(&format!(
@@ -109,15 +188,21 @@ impl Phrase {
                     };
                     (body, Some(beats))
                 }
-                None => (token, None),
+                None => (token_head, None),
             };
             if body.is_empty() {
+                if marks_text.is_some() {
+                    return Err(fail("marks follow a note; this has none"));
+                }
                 default = own.unwrap_or(default);
                 continue;
             }
             notes_and_rests += 1;
             let length = own.unwrap_or(default);
             match body {
+                "r" | "R" | "~" if marks_text.is_some() => {
+                    return Err(fail("only a note can be marked; a rest or a tie has nothing to bend or slide"));
+                }
                 "r" | "R" => tieable = false,
                 "~" => {
                     let Some(tone) = tones.last_mut().filter(|_| tieable) else {
@@ -127,7 +212,13 @@ impl Phrase {
                 }
                 _ => {
                     let (pitch, name) = parse_pitch(body, key, octave).map_err(|problem| fail(&problem))?;
-                    tones.push(Tone { pitch, start: position, length, name });
+                    let marks = match marks_text {
+                        Some(text) => {
+                            parse_marks(text, pitch, tieable, key, octave).map_err(|problem| fail(&problem))?
+                        }
+                        None => Vec::new(),
+                    };
+                    tones.push(Tone { pitch, start: position, length, name, marks });
                     tieable = true;
                 }
             }
@@ -144,19 +235,15 @@ impl Phrase {
     /// of the phrase's range, the way a singer or player leans on the high
     /// notes.
     pub fn notes(&self, gate: f64, dynamics: &Dynamics, signature: TimeSignature) -> Vec<Note> {
-        let lowest = self.tones.iter().map(|tone| tone.pitch).min().unwrap_or(0) as f64;
-        let highest = self.tones.iter().map(|tone| tone.pitch).max().unwrap_or(0) as f64;
-        let span = highest - lowest;
+        let velocities = crate::ornament::velocities(&self.tones, dynamics, signature);
         self.tones
             .iter()
-            .map(|tone| {
-                let lift = if span > 0.0 { ((tone.pitch as f64 - lowest) / span - 0.5) * 8.0 } else { 0.0 };
-                Note {
-                    pitch: tone.pitch,
-                    start: tone.start,
-                    length: (tone.length * gate).max(MIN_LENGTH),
-                    velocity: clamp_velocity(dynamics.at(tone.start, signature) + lift),
-                }
+            .zip(velocities)
+            .map(|(tone, velocity)| Note {
+                pitch: tone.pitch,
+                start: tone.start,
+                length: (tone.length * gate).max(MIN_LENGTH),
+                velocity,
             })
             .collect()
     }
@@ -164,6 +251,81 @@ impl Phrase {
 
 fn round(value: f64) -> f64 {
     (value * 1e4).round() / 1e4
+}
+
+/// Reads the marks after a note: `bend=5!vib`. `follows` says whether a
+/// note comes right before this one, which joining needs.
+fn parse_marks(
+    text: &str,
+    pitch: u8,
+    follows: bool,
+    key: Option<&Scale>,
+    octave: i32,
+) -> std::result::Result<Vec<Mark>, String> {
+    let mut marks: Vec<Mark> = Vec::new();
+    for written in text.split('!') {
+        let (word, value) = match written.split_once('=') {
+            Some((word, value)) => (word, Some(value)),
+            None => (written, None),
+        };
+        let name = trill_core::pitch::name_key(word);
+        let target = |what: &str| -> std::result::Result<u8, String> {
+            let value =
+                value.ok_or_else(|| format!("'{what}' needs the pitch to reach, as in {what}=5 or {what}=E5"))?;
+            let (target, _) =
+                parse_pitch(value, key, octave).map_err(|problem| format!("{what}={value}: {problem}"))?;
+            if target == pitch {
+                return Err(format!("{what}={value} is the note's own pitch, so there is nothing to bend"));
+            }
+            Ok(target)
+        };
+        let plain = |what: &str| match value {
+            Some(value) => Err(format!("'{what}' takes no value, but was given '{value}'")),
+            None => Ok(()),
+        };
+        let mark = match name.as_str() {
+            "" => return Err("a '!' with no mark after it; write for example !vib or !bend=5".to_string()),
+            "bend" => Mark::Bend(target("bend")?),
+            "prebend" | "pre_bend" => Mark::Prebend(target("prebend")?),
+            "release" => plain("release").map(|()| Mark::Release)?,
+            "fall" => plain("fall").map(|()| Mark::Fall)?,
+            "slide" => match value {
+                Some(_) => Mark::Slide(Some(target("slide")?)),
+                None => Mark::Slide(None),
+            },
+            "vib" | "vibrato" => match value {
+                None => Mark::Vibrato(None),
+                Some(depth) => match depth.parse::<f64>() {
+                    Ok(depth) if depth > 0.0 && depth <= 2.0 => Mark::Vibrato(Some(depth)),
+                    _ => return Err(format!("vib={depth}: the width is in semitones, above 0 and at most 2")),
+                },
+            },
+            "hammer" | "hammer_on" | "pull" | "pull_off" | "legato" | "slur" | "h" | "p" => {
+                plain(word)?;
+                if !follows {
+                    return Err(format!(
+                        "'{word}' joins a note to the one before it, and no note comes right before this one"
+                    ));
+                }
+                Mark::Join
+            }
+            _ => plain(word).map(|()| Mark::Named(name.clone()))?,
+        };
+        if !marks.iter().any(|other| std::mem::discriminant(other) == std::mem::discriminant(&mark)) {
+            marks.push(mark);
+        }
+    }
+    let has = |wanted: fn(&Mark) -> bool| marks.iter().any(wanted);
+    if has(|mark| matches!(mark, Mark::Release)) && !has(|mark| matches!(mark, Mark::Bend(_))) {
+        return Err("'release' lets a bend back down, and this note has no bend=P".to_string());
+    }
+    if has(|mark| matches!(mark, Mark::Bend(_))) && has(|mark| matches!(mark, Mark::Prebend(_))) {
+        return Err("a note is bent (bend=P) or struck already bent (prebend=P), not both".to_string());
+    }
+    if has(|mark| matches!(mark, Mark::Join)) && has(|mark| matches!(mark, Mark::Slide(_))) {
+        return Err("a note is hammered on or slid into, not both".to_string());
+    }
+    Ok(marks)
 }
 
 fn parse_pitch(body: &str, key: Option<&Scale>, octave: i32) -> std::result::Result<(u8, NoteName), String> {
@@ -249,6 +411,69 @@ mod tests {
         assert_eq!(spelled("1 2 3 4", "Bb minor"), "Bb4 C5 Db5 Eb5");
     }
 
+    fn marks(text: &str, key: &str) -> Vec<Vec<Mark>> {
+        phrase(text, key).tones.into_iter().map(|tone| tone.marks).collect()
+    }
+
+    #[test]
+    fn notes_carry_the_marks_written_after_them() {
+        assert_eq!(marks("4:2!bend=5 5!vib 1", "A minor"), [vec![Mark::Bend(76)], vec![Mark::Vibrato(None)], vec![]]);
+        assert_eq!(
+            marks("4:2!bend=5!release!vib=0.5", "A minor"),
+            [vec![Mark::Bend(76), Mark::Release, Mark::Vibrato(Some(0.5))]]
+        );
+        assert_eq!(marks("E5!prebend=F#5 E5:2!fall", "C"), [vec![Mark::Prebend(78)], vec![Mark::Fall]]);
+        assert_eq!(
+            marks(":0.5 5 6!hammer 5!pull 3!h 1!p 2!legato", "C")[1..],
+            [vec![Mark::Join], vec![Mark::Join], vec![Mark::Join], vec![Mark::Join], vec![Mark::Join]]
+        );
+        assert_eq!(
+            marks("3!slide 5!slide=3 5!Slide", "C"),
+            [vec![Mark::Slide(None)], vec![Mark::Slide(Some(64))], vec![Mark::Slide(None)]]
+        );
+        // Any other word is one of the instrument's own articulations.
+        assert_eq!(
+            marks("1:0.5!palm_mute 1!Palm-Mute!vib", "E minor"),
+            [vec![Mark::Named("palm_mute".into())], vec![Mark::Named("palm_mute".into()), Mark::Vibrato(None)]]
+        );
+        // Marks change nothing about where and how long the notes are.
+        let plain = phrase(":0.5 5 6 5 4 3:2 | :1 1:2 r 7, | 1:4", "A minor");
+        let marked = phrase(":0.5 5 6!hammer 5!pull 4 3:2!vib | :1 1:2!bend=2 r 7,!slide | 1:4!fall", "A minor");
+        assert_eq!(written(&marked), written(&plain));
+        assert_eq!(marked.length, plain.length);
+        for (word, mark) in [("bend", Mark::Bend(1)), ("vib", Mark::Vibrato(None)), ("hammer", Mark::Join)] {
+            assert_eq!(mark.word(), word);
+        }
+        assert!(ORNAMENTS.iter().all(|(name, what)| !name.is_empty() && what.len() > 10));
+    }
+
+    #[test]
+    fn a_mark_that_cannot_be_played_says_why() {
+        let key = Scale::parse("C major").unwrap();
+        for (bad, reason) in [
+            ("4!bend", "'bend' needs the pitch to reach, as in bend=5 or bend=E5"),
+            ("4!bend=4", "bend=4 is the note's own pitch"),
+            ("4!bend=x", "bend=x: expected a scale degree"),
+            ("4!release", "'release' lets a bend back down, and this note has no bend=P"),
+            ("4!bend=5!prebend=6", "not both"),
+            ("4!vib=9", "vib=9: the width is in semitones"),
+            ("4!vib=wide", "the width is in semitones"),
+            ("4!fall=2", "'fall' takes no value"),
+            ("4!", "a '!' with no mark after it"),
+            ("4!!vib", "a '!' with no mark after it"),
+            ("4!hammer", "phrase token 1 '4!hammer': 'hammer' joins a note to the one before it"),
+            ("4 r 5!pull", "phrase token 3 '5!pull': 'pull' joins a note to the one before it"),
+            ("4 5!hammer!slide", "hammered on or slid into, not both"),
+            ("r!vib", "only a note can be marked"),
+            ("4 ~!vib", "only a note can be marked"),
+            (":0.5!vib 4", "marks follow a note"),
+            ("4!palm_mute=3", "'palm_mute' takes no value"),
+        ] {
+            let error = Phrase::parse(bad, Some(&key), 4, four()).unwrap_err();
+            assert!(error.message().contains(reason), "{bad:?}: {error}");
+        }
+    }
+
     #[test]
     fn note_names_need_no_key() {
         let named = Phrase::parse(":0.5 E5 F5 E5 D5 C5:2 | :1 A4:2 r G4 | A4:4", None, 4, four()).unwrap();
@@ -312,7 +537,7 @@ mod tests {
             ("~ 1", "phrase token 1 '~': a tie lengthens the note before it"),
             ("1 r ~", "phrase token 3 '~': a tie lengthens the note before it"),
             ("0", "phrase token 1 '0': expected a scale degree"),
-            ("1 5!", "phrase token 2 '5!': expected a scale degree"),
+            ("1 5?", "phrase token 2 '5?': expected a scale degree"),
             ("C12", "outside the MIDI range"),
             ("1''''''", "outside the MIDI range"),
         ] {
