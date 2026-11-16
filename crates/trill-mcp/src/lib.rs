@@ -9,6 +9,7 @@
 
 mod input;
 pub mod logging;
+mod music;
 mod requests;
 mod server;
 mod view;

@@ -611,10 +611,11 @@ pub fn is_no_chord(text: &str) -> bool {
     compact.eq_ignore_ascii_case("nc")
 }
 
-/// The qualities [`identify`] can name, most common first. When two
+/// The chord qualities [`identify`] can name, most common first: a list of
+/// the everyday ones, for reference listings too. When two
 /// readings fit equally well the earlier one wins, so a plain triad is
 /// preferred to an exotic chord on another root.
-const IDENTIFIABLE: &[&str] = &[
+pub const QUALITIES: &[&str] = &[
     "", "m", "7", "maj7", "m7", "sus4", "sus2", "5", "6", "m6", "dim", "aug", "dim7", "m7b5", "mMaj7", "add9", "madd9",
     "9", "maj9", "m9", "6/9", "m6/9", "7sus4", "9sus4", "11", "m11", "13", "maj13", "m13", "7b9", "7#9", "7#11",
     "7b13", "7b5", "7#5", "maj7#11", "maj7#5", "maj9#11", "9#11", "13#11", "13b9", "7#9b13", "7b9b13", "7b9#11",
@@ -653,7 +654,7 @@ pub fn identify_weighted(weights: &[f64; 12], bass: Option<u8>) -> Option<Chord>
     }
     let bass = bass.map(|bass| bass % 12).filter(|bass| weights[*bass as usize] > 0.0);
     let templates: Vec<Quality> =
-        IDENTIFIABLE.iter().map(|symbol| Quality::parse(symbol).expect("built-in qualities parse")).collect();
+        QUALITIES.iter().map(|symbol| Quality::parse(symbol).expect("built-in qualities parse")).collect();
 
     let mut best: Option<(f64, Chord)> = None;
     for root in (0..12u8).filter(|root| weights[*root as usize] > 0.0) {
@@ -989,7 +990,7 @@ mod tests {
 
     #[test]
     fn every_identifiable_quality_is_found_on_every_root() {
-        for symbol in IDENTIFIABLE {
+        for symbol in QUALITIES {
             let quality = Quality::parse(symbol).unwrap();
             assert_eq!(&quality.symbol(), symbol, "the list should use canonical names");
             for root in 0..12u8 {

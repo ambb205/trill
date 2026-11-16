@@ -15,6 +15,7 @@ trill-core.workspace = true
 trill-dsp.workspace = true
 trill-engine.workspace = true
 trill-plugins.workspace = true
+trill-theory.workspace = true
 parking_lot.workspace = true
 anyhow.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }

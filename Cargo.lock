@@ -4830,6 +4830,7 @@ dependencies = [
  "trill-dsp",
  "trill-engine",
  "trill-plugins",
+ "trill-theory",
 ]
 
 [[package]]
