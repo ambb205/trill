@@ -18,6 +18,7 @@ clack-extensions = { version = "0.2.0", features = [
     "gui",
     "params",
     "preset-discovery",
+    "render",
     "state",
     "thread-check",
     "timer",

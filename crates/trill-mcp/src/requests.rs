@@ -484,18 +484,6 @@ pub struct PlayNotesRequest {
     pub controllers: Option<BTreeMap<String, f64>>,
 }
 
-#[derive(Debug, Default, Deserialize, JsonSchema)]
-pub struct RenderRequest {
-    /// Output WAV path. Defaults to a `renders` folder beside the project file, or the system temp folder.
-    pub path: Option<String>,
-    /// First beat to render (default 0).
-    pub start: Option<f64>,
-    /// Beat to stop at (default: end of the last clip).
-    pub end: Option<f64>,
-    /// Longest reverb/delay tail to keep after the end, in seconds (default 10; trimmed when silent sooner).
-    pub max_tail_seconds: Option<f64>,
-}
-
 #[derive(Copy, Clone, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HistoryAction {

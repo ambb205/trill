@@ -29,8 +29,7 @@ use trill_core::presets::PresetList;
 use trill_core::project::AutomationPoint;
 use trill_core::project::{AutomationTarget, MAX_TEMPO, MAX_VOLUME_DB, MIN_TEMPO, WarpMode};
 use trill_core::{ChainRef, ClipId, ControllerKind, DeviceId, EditError, Project, TrackId, TrackKind};
-use trill_engine::render::TrackLevel;
-use trill_engine::{RenderOptions, RenderReport, Session, SessionError, SharedSession};
+use trill_engine::{Session, SessionError, SharedSession};
 use trill_library::{EntryKind, Key, Query, Tag, Tags, suggested_locations};
 use trill_runtime::{Runtime, SoundClip, SoundError};
 
@@ -77,16 +76,20 @@ A good workflow
    A plugin (clap:, vst3:) may have thousands of presets: before programming one by hand, search them with \
 describe_device `preset_query` (\"warm pad\") and give `preset` the name or id to create_track, add_device or \
 update_device.
+   Before you write for a plugin you have not used, call probe on its track once: it tells you which notes the \
+instrument plays, at what pitch they sound, and which keys switch its articulation.
 3. create_clip with notes. For repeating parts, write one or two bars and set loop_length, or duplicate_clip.
    Instruments modelled on breath or a bow (solo winds, brass, strings) are silent until they are given \
 expression, as a saxophone is without air. After writing such a line, call shape_dynamics on its clip: it reads \
 the phrases from the notes and writes an expression curve that rises into the high points, swells through long \
 notes and breathes between phrases. set_controllers writes or adjusts a curve point by point (a pedal, a pitch \
-bend, vibrato on the mod wheel). render names any track that had notes and made no sound.
+bend, vibrato on the mod wheel). measure names any track that had notes and made no sound.
 4. Shape the sound: add_device for effects (reverb, delay, eq, compressor, pump...), update_device for \
 parameters, set_automation for movement such as filter sweeps and fades, update_track for the mix.
-5. render writes a WAV and reports loudness, peak, spectral balance and per-track levels. You cannot hear, so \
-read those numbers and adjust.
+5. measure reports loudness, true peak, spectral balance, every track's level and loudness, each section's \
+loudness and what the compressors and limiters took off, without writing a file. You cannot hear, so read those \
+numbers and adjust, as often as it takes.
+6. render writes the WAV file: once, for the finished song, or when the user asks for one.
 
 Working with the user's own sounds
 - search_sounds looks through the user's sample library (drum hits, loops, one-shots) by words, tags, tempo, key \
@@ -101,7 +104,7 @@ the loop follows the project tempo: its beats then line up with the song's, at a
 is its own length in beats. `transpose` shifts its pitch into the song's key. Unwarped clips play at their \
 recorded speed.
 - A freshly warped clip plays in time but repitched for a moment while it is prepared (get_project shows \
-preparing_clips); renders always wait for the real audio.
+preparing_clips); measure and render always wait for the real audio.
 
 Playing and recording live
 - update_track `armed` arms a track: a MIDI keyboard (midi_inputs lists them; every input is on unless switched off) then plays its instrument. With no track armed, a keyboard plays the track selected in the window.
@@ -185,110 +188,6 @@ impl Noise {
     }
 }
 
-fn default_render_path(session: &Session) -> PathBuf {
-    let name: String = session
-        .project()
-        .name
-        .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect();
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or_default();
-    let folder = match session.path().and_then(Path::parent) {
-        Some(parent) => parent.join("renders"),
-        None => std::env::temp_dir().join("trill-renders"),
-    };
-    folder.join(format!("{name}-{stamp}.wav"))
-}
-
-/// What a level at or below this is called: nothing at all.
-const SILENT_DB: f32 = -119.0;
-
-/// The tracks that had something to play in the rendered stretch and made
-/// no sound, each with what to try. A part that is silent in a full mix is
-/// easy to miss in the numbers, and the usual cause with a plugin is not a
-/// mistake in the song: instruments modelled on breath or a bow wait for an
-/// expression controller, as a saxophone waits for air. The answer to that
-/// is a curve in the clip.
-fn silent_track_notes(project: &Project, levels: &[TrackLevel], start: f64, end: Option<f64>) -> Vec<String> {
-    let soloing = project.tracks.iter().any(|track| track.solo);
-    let mut notes = Vec::new();
-    for level in levels.iter().filter(|level| level.peak_db <= SILENT_DB) {
-        let Ok(track) = project.track(level.track) else { continue };
-        // Silenced on purpose is not news.
-        if track.mute || (soloing && !track.solo) || track.clips.iter().all(|clip| clip.muted) {
-            continue;
-        }
-        let playing = |clip: &trill_core::Clip| clip.end() > start && end.is_none_or(|end| clip.start < end);
-        if !track.clips.iter().any(|clip| !clip.muted && playing(clip)) {
-            continue;
-        }
-        let plugin = track.devices.iter().find(|device| device.enabled && !device.uri.starts_with("builtin:"));
-        // Whether the clips that played were given air already.
-        let breathes = |clip: &trill_core::Clip| {
-            [ControllerKind::EXPRESSION, ControllerKind::BREATH].iter().any(|kind| clip.controller(*kind).is_some())
-        };
-        let expressive = track.clips.iter().any(|clip| !clip.muted && playing(clip) && breathes(clip));
-        notes.push(match plugin {
-            Some(device) if expressive => format!(
-                "'{}' has clips here but made no sound, though they have an expression curve. Its instrument is \
-                 the plugin {} (device {}). Check that the curve is above zero where the notes are (get_controllers), \
-                 that the notes are in the instrument's range, and that it has a sound loaded (get_device); or try \
-                 one of its presets.",
-                track.name, device.name, device.id.0
-            ),
-            Some(device) => format!(
-                "'{}' has clips here but made no sound. Its instrument is the plugin {} (device {}). Instruments \
-                 modelled on breath or a bow are silent until they are given expression: call shape_dynamics on \
-                 each of its clips (it writes an expression curve from the notes), or write one with \
-                 set_controllers, such as {{\"expression\": [[0, 90]]}}. If that is not it, try a preset, or check \
-                 the notes are in the instrument's range.",
-                track.name, device.name, device.id.0
-            ),
-            None => format!(
-                "'{}' has clips here but made no sound. Check that it has an instrument, that the instrument has a \
-                 sound loaded (get_device), and that its volume and its group are up.",
-                track.name
-            ),
-        });
-    }
-    notes
-}
-
-/// The render report plus plain-language observations about it.
-fn render_reply(report: &RenderReport, silent_tracks: Vec<String>) -> Value {
-    let stats = &report.stats;
-    let mut notes: Vec<String> = Vec::new();
-    let mut note = |text: &str| notes.push(text.to_owned());
-    if stats.peak_db <= SILENT_DB {
-        note("The render is silent. Check that tracks have instruments, clips have notes, and nothing is muted.");
-    } else {
-        if stats.clipped_samples > 0 {
-            note("The output clips. Lower track volumes or keep a limiter last on the master.");
-        }
-        if stats.loudness_lufs < -20.0 {
-            note("Quiet master (streaming targets are around -14 LUFS). Raise track levels or the limiter gain.");
-        } else if stats.loudness_lufs > -8.0 {
-            note("Very loud master; it may sound crushed. Consider lowering the limiter gain.");
-        }
-        if stats.stereo_correlation < 0.0 {
-            note("Negative stereo correlation: parts may cancel in mono. Reduce width or chorus depth.");
-        }
-        if stats.spectrum.sub_db > -3.0 {
-            note("Most of the energy is below 60 Hz. Thin out the sub bass or kick.");
-        }
-        if stats.spectrum.presence_db < -30.0 && stats.spectrum.air_db < -30.0 {
-            note("Very little energy above 2 kHz; the mix may sound dull. Open filters or add brighter parts.");
-        }
-    }
-    notes.extend(silent_tracks);
-    let mut out = serde_json::to_value(report).unwrap_or_else(|_| json!({}));
-    out["notes"] = json!(notes);
-    out
-}
-
 #[derive(Clone)]
 pub struct TrillServer {
     runtime: Arc<Runtime>,
@@ -304,7 +203,8 @@ impl TrillServer {
     /// write wherever it is told.
     pub fn new(runtime: Arc<Runtime>) -> Self {
         let session = runtime.session.clone();
-        Self { session, runtime, tool_router: Self::tool_router() + Self::music_router(), guard: None }
+        let tool_router = Self::tool_router() + Self::music_router() + Self::hearing_router();
+        Self { session, runtime, tool_router, guard: None }
     }
 
     /// A server for a client that works beside the user in the window. It
@@ -318,7 +218,7 @@ impl TrillServer {
     /// Where a tool that was asked to write `kind` at `requested` may write
     /// it: wherever it was told, or for a guarded client only inside the
     /// working folders. `None` when no place was asked for.
-    fn write_path(
+    pub(crate) fn write_path(
         &self,
         session: &Session,
         requested: Option<&str>,
@@ -1950,41 +1850,6 @@ impl TrillServer {
         finish(Ok(out))
     }
 
-    /// Render the song to a WAV file, faster than real time, and measure it: peak, loudness (LUFS), clipping,
-    /// stereo correlation, spectral balance and the peak level of each track. This is how you check a mix
-    /// without hearing it.
-    #[tool(annotations(title = "Render to WAV"))]
-    async fn render(&self, Parameters(request): Parameters<RenderRequest>) -> CallToolResult {
-        // Snapshot under the lock, render outside it: a long bounce must not
-        // freeze the GUI or other tools.
-        let (job, path, options) = {
-            let mut session = self.session.lock();
-            let path = match self.write_path(&session, request.path.as_deref(), "a render", &["wav"]) {
-                Ok(path) => path.unwrap_or_else(|| default_render_path(&session)),
-                Err(refusal) => return finish(Err(refusal)),
-            };
-            let defaults = RenderOptions::default();
-            let options = RenderOptions {
-                sample_rate: session.audio_info().sample_rate as u32,
-                start_beat: request.start.unwrap_or(defaults.start_beat),
-                end_beat: request.end,
-                max_tail_seconds: request.max_tail_seconds.unwrap_or(defaults.max_tail_seconds),
-            };
-            (session.render_job(), path, options)
-        };
-        let outcome = tokio::task::spawn_blocking(move || {
-            let report = job.render_to_file(&path, &options)?;
-            let silent = silent_track_notes(&job.project, &report.tracks, options.start_beat, options.end_beat);
-            Ok::<_, trill_engine::render::RenderError>((report, silent))
-        })
-        .await;
-        finish(match outcome {
-            Ok(Ok((report, silent))) => Ok(render_reply(&report, silent)),
-            Ok(Err(error)) => Err(error.to_string()),
-            Err(error) => Err(format!("the render did not finish: {error}")),
-        })
-    }
-
     /// Bring a MIDI file into the song: each part becomes a new track with an instrument and one clip, with
     /// its notes and its controllers (expression, the wheels, the pedals) as curves.
     #[tool(annotations(title = "Import MIDI file"))]
@@ -2304,69 +2169,10 @@ impl ServerHandler for TrillServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
-            .with_instructions(format!("{INSTRUCTIONS}\n\n{}", crate::music::INSTRUCTIONS))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_track_that_had_notes_and_made_no_sound_is_named_with_what_to_try() {
-        let mut project = Project::new("t");
-        let mut track = |name: &str, uri: &str, clip_at: Option<f64>| {
-            let id = project.add_track(name);
-            project.add_device(ChainRef::Track(id), uri, name, None).unwrap();
-            if let Some(start) = clip_at {
-                project.add_midi_clip(id, "c", start, 4.0).unwrap();
-            }
-            id
-        };
-        let sax = track("Sax", "vst3:ABCDEF", Some(0.0));
-        let kit = track("Kit", "builtin:drumrack", Some(0.0));
-        let keys = track("Keys", "builtin:polysynth", Some(0.0));
-        let later = track("Later", "vst3:ABCDEF", Some(64.0));
-        let empty = track("Empty", "vst3:ABCDEF", None);
-        let muted = track("Muted", "vst3:ABCDEF", Some(0.0));
-        project.track_mut(muted).unwrap().mute = true;
-        let level = |track: TrackId, peak_db: f32| TrackLevel { track, name: String::new(), peak_db };
-        let levels = [
-            level(sax, -120.0),
-            level(kit, -120.0),
-            level(keys, -9.0),
-            level(later, -120.0),
-            level(empty, -120.0),
-            level(muted, -120.0),
-        ];
-
-        let notes = silent_track_notes(&project, &levels, 0.0, Some(16.0));
-        assert_eq!(notes.len(), 2, "{notes:#?}");
-        // A plugin: the likely cause and the tools that fix it, which is a
-        // curve in the clip.
-        assert!(notes[0].starts_with("'Sax' has clips here but made no sound."), "{}", notes[0]);
-        for word in ["expression", "shape_dynamics", "set_controllers"] {
-            assert!(notes[0].contains(word), "{word}: {}", notes[0]);
-        }
-        assert!(!notes[0].contains("set_automation") && !notes[0].contains("update_device"), "{}", notes[0]);
-        // A built-in device: what can be wrong with those.
-        assert!(notes[1].starts_with("'Kit' has clips here but made no sound."), "{}", notes[1]);
-        assert!(!notes[1].contains("expression"));
-
-        // A plugin whose clips have an expression curve already and is
-        // silent all the same is not told to write one.
-        let clip = project.track(sax).unwrap().clips[0].id;
-        let level = vec![AutomationPoint::new(0.0, 0.0)];
-        project.clip_mut(clip).unwrap().set_controller(ControllerKind::EXPRESSION, level).unwrap();
-        let notes = silent_track_notes(&project, &levels, 0.0, Some(16.0));
-        assert!(notes[0].contains("though they have an expression curve"), "{}", notes[0]);
-        assert!(notes[0].contains("get_controllers") && !notes[0].contains("shape_dynamics"), "{}", notes[0]);
-
-        // The whole song: the late clip counts now. A solo elsewhere, and
-        // nothing that was silenced on purpose is news.
-        let notes = silent_track_notes(&project, &levels, 0.0, None);
-        assert!(notes.iter().any(|note| note.starts_with("'Later'")), "{notes:#?}");
-        project.track_mut(keys).unwrap().solo = true;
-        assert!(silent_track_notes(&project, &levels, 0.0, None).is_empty());
+            .with_instructions(format!(
+                "{INSTRUCTIONS}\n\n{}\n\n{}",
+                crate::music::INSTRUCTIONS,
+                crate::hearing::INSTRUCTIONS
+            ))
     }
 }

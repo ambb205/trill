@@ -3,7 +3,48 @@
 use crate::define_params;
 use crate::params::{ParamValues, float};
 use crate::util::{DelayLine, crossfade_gains, db_to_gain, gain_to_db, smooth_coef};
-use trill_core::device::{DeviceProcessor, Event, ProcessInfo};
+use trill_core::device::{DeviceProcessor, Event, GainReduction, ProcessInfo};
+
+/// Keeps count of what a dynamics device takes off, a few additions a
+/// sample, for [`DeviceProcessor::gain_reduction`].
+#[derive(Default)]
+struct ReductionMeter {
+    /// The most taken off, in dB.
+    most: f32,
+    /// The dB taken off, summed over the frames it was half a dB or more.
+    sum: f64,
+    active: u64,
+    frames: u64,
+}
+
+impl ReductionMeter {
+    /// Below this, in dB, a device is not said to be doing anything.
+    const WORTH_THE_NAME: f32 = 0.5;
+
+    /// One frame on which `taken_off` dB (0 or more) was taken off.
+    #[inline]
+    fn record(&mut self, taken_off: f32) {
+        self.frames += 1;
+        if taken_off >= Self::WORTH_THE_NAME {
+            self.active += 1;
+            self.sum += f64::from(taken_off);
+            self.most = self.most.max(taken_off);
+        }
+    }
+
+    /// What was counted since the last call, which starts the count anew.
+    fn take(&mut self) -> GainReduction {
+        let counted = std::mem::take(self);
+        if counted.active == 0 {
+            return GainReduction::default();
+        }
+        GainReduction {
+            most_db: counted.most,
+            typical_db: (counted.sum / counted.active as f64) as f32,
+            active: (counted.active as f64 / counted.frames.max(1) as f64) as f32,
+        }
+    }
+}
 
 // ---- Compressor ------------------------------------------------------------
 
@@ -28,6 +69,7 @@ control; slow `attack` keeps transients punchy; add `makeup` to restore level.";
         sample_rate: f32,
         /// Current gain reduction in dB (<= 0).
         reduction: f32,
+        taken_off: ReductionMeter,
         threshold: f32,
         slope: f32,
         knee: f32,
@@ -44,6 +86,7 @@ control; slow `attack` keeps transients punchy; add `makeup` to restore level.";
                 params: ParamValues::new(PARAMS),
                 sample_rate: 48_000.0,
                 reduction: 0.0,
+                taken_off: ReductionMeter::default(),
                 threshold: 0.0,
                 slope: 0.0,
                 knee: 0.0,
@@ -114,6 +157,7 @@ control; slow `attack` keeps transients punchy; add `makeup` to restore level.";
                 let target = self.curve(gain_to_db(l.abs().max(r.abs())));
                 let coef = if target < self.reduction { self.attack } else { self.release };
                 self.reduction += (target - self.reduction) * coef;
+                self.taken_off.record(-self.reduction);
                 let gain = db_to_gain(self.reduction) * self.makeup;
                 left[i] = l * self.dry + l * gain * self.wet;
                 right[i] = r * self.dry + r * gain * self.wet;
@@ -122,6 +166,10 @@ control; slow `attack` keeps transients punchy; add `makeup` to restore level.";
 
         fn reset(&mut self) {
             self.reduction = 0.0;
+        }
+
+        fn gain_reduction(&mut self) -> Option<GainReduction> {
+            Some(self.taken_off.take())
         }
     }
 }
@@ -163,6 +211,11 @@ the master; raise `gain` to make the mix louder.";
         gain: f32,
         ceiling: f32,
         release: f32,
+        taken_off: ReductionMeter,
+        /// The gain last looked at for the count, and what it is in dB:
+        /// while the limiter is not limiting the gain stays at 1, and the
+        /// count costs no logarithm.
+        counted: (f32, f32),
     }
 
     impl Limiter {
@@ -182,6 +235,8 @@ the master; raise `gain` to make the mix louder.";
                 gain: 1.0,
                 ceiling: 1.0,
                 release: 1.0,
+                taken_off: ReductionMeter::default(),
+                counted: (1.0, 0.0),
             }
         }
 
@@ -261,6 +316,10 @@ the master; raise `gain` to make the mix louder.";
                     self.sum = self.averaged.iter().sum();
                 }
                 let gain = (self.sum / window as f32).min(1.0);
+                if gain != self.counted.0 {
+                    self.counted = (gain, -gain_to_db(gain));
+                }
+                self.taken_off.record(self.counted.1);
 
                 self.delay[0].write(l);
                 self.delay[1].write(r);
@@ -284,6 +343,10 @@ the master; raise `gain` to make the mix louder.";
 
         fn latency_samples(&self) -> u32 {
             (self.window - 1) as u32
+        }
+
+        fn gain_reduction(&mut self) -> Option<GainReduction> {
+            Some(self.taken_off.take())
         }
     }
 }

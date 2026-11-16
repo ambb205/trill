@@ -208,7 +208,13 @@ fn at_a_clips_end_the_pedal_comes_up_and_the_wheel_centres_and_the_rest_stays() 
         [pedal(false), ControllerKind::Pressure.event(0.0), EventKind::PitchBend { value: 0.0 }, off(60)],
         "what springs back is let go of where the clip ends"
     );
-    let later: Vec<(u64, EventKind)> = events.iter().copied().filter(|(frame, _)| *frame > end).collect();
+    // (The probe never makes a sound, so it is told where its controllers
+    // are again while it has a note to play: the same places, which is
+    // nothing moving.)
+    let at_rest = [MOD.event(0.5), EXPRESSION.event(0.75), pedal(false), ControllerKind::Pressure.event(0.0)];
+    let moved = |kind: &EventKind| !at_rest.contains(kind) && *kind != EventKind::PitchBend { value: 0.0 };
+    let later: Vec<(u64, EventKind)> =
+        events.iter().copied().filter(|(frame, kind)| *frame > end && moved(kind)).collect();
     assert_eq!(later, [(start + 72_000, on(64)), (start + 96_000, off(64))], "and nothing else moves: {later:?}");
     assert_eq!(rig.session.audio_faults(), 0);
 }
@@ -358,6 +364,50 @@ fn an_instrument_that_is_made_anew_is_told_where_its_controllers_are() {
     rig.run(2);
     let told: Vec<EventKind> = rig.probes.events().into_iter().map(|(_, kind)| kind).collect();
     assert_eq!(told, [EventKind::AllNotesOff, MOD.event(0.5), EXPRESSION.event(0.75)]);
+    assert_eq!(rig.session.audio_faults(), 0);
+}
+
+#[test]
+fn an_instrument_that_has_not_answered_its_notes_is_told_its_controllers_again() {
+    // A plugin that is still waking up when the song starts does not hear
+    // what it is told. A level that never moves would not be said twice.
+    let mut rig = Rig::new();
+    let silent = rig.probe_track("Sax");
+    let level = vec![point(0.0, 0.75)];
+    clip(&mut rig.session, silent, (0.0, 8.0), &[note(60, 0.5, 6.0)], &[(EXPRESSION, level)]);
+    rig.session.send_controller(silent, MOD, 0.5);
+    rig.run(2);
+    rig.probes.take();
+    let start = play(&mut rig);
+    // A second and a half: a quarter of a second before the note, and
+    // then the note, which the probe never answers.
+    rig.run(150);
+    let events = rig.probes.events();
+    let told = moves(&events, EXPRESSION);
+    // (It was told once before the song started, where the playhead stood.)
+    assert!(told.len() >= 3, "said again and again while nothing sounded: {told:?}");
+    assert!(told.iter().all(|(_, value)| *value == 0.75), "the same thing every time: {told:?}");
+    let note_on = start + RATE as u64 / 4;
+    assert!(told[0].0 > note_on, "not before there was a note to answer: {told:?}");
+    let apart: Vec<u64> = told.windows(2).map(|pair| pair[1].0 - pair[0].0).collect();
+    assert!(apart.iter().all(|frames| (15_000..=18_000).contains(frames)), "about three times a second: {apart:?}");
+    // What the hand set is said again with it.
+    assert_eq!(moves(&events, MOD).len(), told.len(), "{events:?}");
+
+    // An instrument that sounds is told once.
+    let mut rig = Rig::new();
+    let sine = rig.sine_track("Keys");
+    let level = vec![point(0.0, 0.75)];
+    clip(&mut rig.session, sine, (0.0, 8.0), &[note(60, 0.5, 6.0)], &[(EXPRESSION, level)]);
+    let probe = rig.probe_track("Listener");
+    clip(&mut rig.session, probe, (0.0, 8.0), &[], &[(EXPRESSION, vec![point(0.0, 0.5)])]);
+    rig.run(2);
+    rig.probes.take();
+    play(&mut rig);
+    rig.run(150);
+    // (The probe has no notes, so it has nothing to answer either.)
+    assert_eq!(moves(&rig.probes.events(), EXPRESSION).len(), 0, "told before the song started, and not again");
+    assert_eq!(rig.session.silent_instrument(sine), None);
     assert_eq!(rig.session.audio_faults(), 0);
 }
 
@@ -646,6 +696,7 @@ fn controllers_play_the_same_at_any_buffer_size_and_in_a_render() {
             audio: &audio,
             stand_ins: None,
             sample_rate: RATE as f64,
+            purpose: trill_core::device::Purpose::Playing,
         }
         .compile(&project, looping);
         let mut processor = Processor::new(RATE as f64);

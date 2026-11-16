@@ -248,6 +248,42 @@ pub trait DeviceProcessor: Send {
     fn latency_samples(&self) -> u32 {
         0
     }
+
+    /// How far the device has turned the signal down since this was last
+    /// asked, for a device whose business that is (a compressor, a
+    /// limiter); `None` for any other. Asked off the audio thread, of a
+    /// device that is not being processed meanwhile: by a render, once it
+    /// is done, so that a threshold can be set from a number.
+    fn gain_reduction(&mut self) -> Option<GainReduction> {
+        None
+    }
+}
+
+/// How far a compressor or a limiter turned the signal down over a stretch
+/// of audio. All of it is in dB taken off, so 0 is "did nothing".
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct GainReduction {
+    /// The most it took off at any moment.
+    pub most_db: f32,
+    /// What it took off on average, over the time it took off anything
+    /// worth the name (half a dB or more).
+    pub typical_db: f32,
+    /// The share of the time it was doing that, 0..=1.
+    pub active: f32,
+}
+
+/// What a device is created for.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum Purpose {
+    /// To be played, under an audio device's clock.
+    #[default]
+    Playing,
+    /// To be rendered, as fast as the machine goes and with nobody
+    /// listening meanwhile. A plugin is told so where its format has a way
+    /// of saying it, so that it can prefer being right over being on time:
+    /// a sampler that loads what it needs instead of streaming it in
+    /// behind the music.
+    Rendering,
 }
 
 /// The off-audio-thread half of a device. Built-in devices keep all of their
@@ -458,6 +494,20 @@ pub trait DeviceFactory: Send + Sync {
     /// and prepares it for `sample_rate`.
     fn create(&self, device: &Device, sample_rate: f64, max_block: usize) -> Result<DeviceInstance, DeviceError>;
 
+    /// [`create`](Self::create), saying what the device is for. A factory
+    /// whose devices are the same either way needs no implementation of
+    /// its own.
+    fn create_for(
+        &self,
+        device: &Device,
+        sample_rate: f64,
+        max_block: usize,
+        purpose: Purpose,
+    ) -> Result<DeviceInstance, DeviceError> {
+        let _ = purpose;
+        self.create(device, sample_rate, max_block)
+    }
+
     /// What is wrong with `device` as this factory would create it, short
     /// of failing to create it. Empty when all is well, and for devices of
     /// other factories. Called off the audio thread, and often: it should
@@ -507,6 +557,16 @@ impl<T: DeviceFactory + ?Sized> DeviceFactory for std::sync::Arc<T> {
         (**self).create(device, sample_rate, max_block)
     }
 
+    fn create_for(
+        &self,
+        device: &Device,
+        sample_rate: f64,
+        max_block: usize,
+        purpose: Purpose,
+    ) -> Result<DeviceInstance, DeviceError> {
+        (**self).create_for(device, sample_rate, max_block, purpose)
+    }
+
     fn warnings(&self, device: &Device) -> Vec<DeviceWarning> {
         (**self).warnings(device)
     }
@@ -546,8 +606,18 @@ impl DeviceFactory for CompositeFactory {
     }
 
     fn create(&self, device: &Device, sample_rate: f64, max_block: usize) -> Result<DeviceInstance, DeviceError> {
+        self.create_for(device, sample_rate, max_block, Purpose::Playing)
+    }
+
+    fn create_for(
+        &self,
+        device: &Device,
+        sample_rate: f64,
+        max_block: usize,
+        purpose: Purpose,
+    ) -> Result<DeviceInstance, DeviceError> {
         for factory in &self.factories {
-            match factory.create(device, sample_rate, max_block) {
+            match factory.create_for(device, sample_rate, max_block, purpose) {
                 Err(DeviceError::Unknown(_)) => continue,
                 result => return result,
             }
