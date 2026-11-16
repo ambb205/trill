@@ -67,7 +67,19 @@ impl Harness {
     }
 
     /// Runs one frame with the given input events, with `modifiers` held.
-    fn step(&mut self, modifiers: Modifiers, mut events: Vec<Event>) {
+    fn step(&mut self, modifiers: Modifiers, events: Vec<Event>) {
+        self.step_with_files(modifiers, events, &[], &[]);
+    }
+
+    /// Runs one frame in which another program holds `hovered` over the
+    /// window, or lets go of `dropped` there.
+    fn step_with_files(
+        &mut self,
+        modifiers: Modifiers,
+        mut events: Vec<Event>,
+        hovered: &[std::path::PathBuf],
+        dropped: &[std::path::PathBuf],
+    ) {
         self.time += FRAME;
         events.insert(0, Event::ModifiersChanged(modifiers));
         let input = egui::RawInput {
@@ -75,6 +87,11 @@ impl Harness {
             time: Some(self.time),
             events,
             focused: true,
+            hovered_files: hovered
+                .iter()
+                .map(|path| egui::HoveredFile { path: Some(path.clone()), ..Default::default() })
+                .collect(),
+            dropped_files: dropped.iter().map(|path| Arc::new(sounds::Dropped(path.clone())) as _).collect(),
             ..Default::default()
         };
         self.app.tick(&self.ctx);

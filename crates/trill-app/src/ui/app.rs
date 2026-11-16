@@ -196,6 +196,7 @@ impl TrillApp {
                 if session.revision() != self.snapshot.revision {
                     self.snapshot = Snapshot::capture(&session, &params_tracks(&self.state));
                     self.state.reconcile(&self.snapshot.project);
+                    self.recheck_problem_files();
                 }
                 // The selection moved or a lane was opened (by the user,
                 // or by `reconcile` just now): cover the devices now shown.
@@ -253,9 +254,9 @@ impl TrillApp {
                 Report::Info(text) => self.state.toasts.info(text),
                 Report::Error(text) => self.state.toasts.error(text),
                 Report::FolderAdded(folder) => {
-                    let name = folder.file_name().map_or_else(|| folder.display().to_string(), |name| {
-                        name.to_string_lossy().into_owned()
-                    });
+                    let name = folder
+                        .file_name()
+                        .map_or_else(|| folder.display().to_string(), |name| name.to_string_lossy().into_owned());
                     self.state.toasts.success(format!("Added {name} to the library"));
                     self.state.browser.sounds.last_added = Some(folder);
                 }
@@ -281,6 +282,21 @@ impl TrillApp {
                     }
                 }
             }
+        }
+    }
+
+    /// Has the files the engine could not use looked at again. A waveform
+    /// read while its file was still there would otherwise go on being
+    /// shown for a clip that has fallen silent.
+    fn recheck_problem_files(&self) {
+        for clip in self.snapshot.clip_problems.keys() {
+            if let Some(audio) = self.snapshot.clip(*clip).and_then(|(_, clip)| clip.audio()) {
+                self.sounds.recheck(&audio.path);
+            }
+        }
+        let samples = self.snapshot.samples.values().flatten();
+        for file in samples.filter(|file| file.problem.is_some()) {
+            self.sounds.recheck(&file.path);
         }
     }
 
@@ -539,6 +555,16 @@ impl TrillApp {
     }
 
     #[cfg(test)]
+    pub fn sounds_mut(&mut self) -> &mut Sounds {
+        &mut self.sounds
+    }
+
+    #[cfg(test)]
+    pub fn live(&self) -> &Live {
+        &self.live
+    }
+
+    #[cfg(test)]
     pub fn state_mut(&mut self) -> &mut UiState {
         &mut self.state
     }
@@ -631,6 +657,8 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
         Command::Escape => {
             if cx.state.shortcuts_open {
                 cx.state.shortcuts_open = false;
+            } else if dragging::cancel(cx) {
+                // The sound in the air was put down.
             } else if cx.sounds.preview.is_playing() || cx.sounds.preview.loading.is_some() {
                 // A sound being auditioned is the first thing Escape ends.
                 cx.sounds.stop_preview();

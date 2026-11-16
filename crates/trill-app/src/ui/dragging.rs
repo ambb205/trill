@@ -21,7 +21,7 @@
 use super::state::{Cx, DragSource, SoundDrag, SystemDrop};
 use super::{colors, timeline};
 use crate::ui::sounds::{DropTarget, file_stem};
-use eframe::egui::{self, Align2, CursorIcon, Event, Id, Key, LayerId, Order, Pos2, Rect, vec2};
+use eframe::egui::{self, Align2, CursorIcon, Event, Id, LayerId, Order, Pos2, Rect, vec2};
 use std::path::PathBuf;
 use trill_core::TrackKind;
 use trill_noir::{paint, text};
@@ -133,13 +133,7 @@ pub fn end(ctx: &egui::Context, cx: &mut Cx) {
     hint(cx, &drag);
     match drag.source {
         DragSource::Browser => {
-            let (down, cancelled) =
-                ctx.input_mut(|input| (input.pointer.primary_down(), input.consume_key(egui::Modifiers::NONE, Key::Escape)));
-            if cancelled {
-                cx.state.sound_drag = None;
-                return;
-            }
-            if down {
+            if ctx.input(|input| input.pointer.primary_down()) {
                 ctx.set_cursor_icon(if drag.target.is_some() { CursorIcon::Copy } else { CursorIcon::Grabbing });
                 floating_label(ctx, cx, &drag);
                 // The ghost follows the pointer.
@@ -164,6 +158,17 @@ pub fn end(ctx: &egui::Context, cx: &mut Cx) {
             land(cx, drag, target);
         }
     }
+}
+
+/// Puts down a sound dragged from the browser, where it was: Escape.
+/// Returns whether there was one. Files another program is dragging are
+/// that program's to let go of.
+pub fn cancel(cx: &mut Cx) -> bool {
+    let dragging = cx.state.sound_drag.as_ref().is_some_and(|drag| drag.source == DragSource::Browser);
+    if dragging {
+        cx.state.sound_drag = None;
+    }
+    dragging
 }
 
 /// Carries a drop out.
@@ -193,7 +198,7 @@ pub fn new_track_colors(cx: &Cx, count: usize) -> Vec<u32> {
 /// Says in the status bar where the drag would land.
 fn hint(cx: &mut Cx, drag: &SoundDrag) {
     let project = &cx.snap.project;
-    let at = |beat: f64| timeline::format_bar_beat(beat, project.time_signature);
+    let at = |beat: f64| timeline::format_position(beat, project.time_signature);
     let name = |track| cx.snap.track(track).map_or("the track", |track| track.name.as_str());
     let device = |id| project.device(id).map_or("the device", |device| device.name.as_str());
     let text = match (&drag.target, drag.refusal) {
@@ -203,7 +208,9 @@ fn hint(cx: &mut Cx, drag: &SoundDrag) {
         (Some(DropTarget::NewTrack { beat, .. }), _) => {
             format!("Drop for a new audio track with {} at {}", drag.label, at(*beat))
         }
-        (Some(DropTarget::Sampler { device: id }), _) => format!("Drop to make {} what {} plays", drag.label, device(*id)),
+        (Some(DropTarget::Sampler { device: id }), _) => {
+            format!("Drop to make {} what {} plays", drag.label, device(*id))
+        }
         (Some(DropTarget::Pad { note, .. }), _) => {
             format!("Drop to put {} on pad {}", drag.label, crate::ui::sample_panels::pad_title(*note))
         }
@@ -212,7 +219,8 @@ fn hint(cx: &mut Cx, drag: &SoundDrag) {
         }
         (None, Some(refusal)) => refusal.to_owned(),
         (None, None) => {
-            "Drag onto a track, below the tracks for a new one, or onto a sampler or a pad \u{00B7} Esc cancels".to_owned()
+            "Drag onto a track, below the tracks for a new one, or onto a sampler or a pad \u{00B7} Esc cancels"
+                .to_owned()
         }
     };
     cx.state.hint.set(text);

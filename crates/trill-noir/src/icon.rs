@@ -149,7 +149,8 @@ pub fn paint_icon(painter: &Painter, center: Pos2, icon: Icon, color: Color32) {
         Icon::Hit => {
             // Loud at once and dying away: the shape of a drum hit.
             let floor = center.y + 4.0;
-            let points = vec![pos2(center.x - 4.0, floor), pos2(center.x - 4.0, center.y - 5.0), pos2(center.x + 5.0, floor)];
+            let points =
+                vec![pos2(center.x - 4.0, floor), pos2(center.x - 4.0, center.y - 5.0), pos2(center.x + 5.0, floor)];
             painter.add(Shape::convex_polygon(points, color, Stroke::NONE));
         }
     }

@@ -123,7 +123,14 @@ mod tests {
     fn meshes_are_appended_to_and_empty_input_adds_nothing() {
         let mut mesh = Mesh::default();
         waveform(&mut mesh, rect(), &[], 1.0, Color32::WHITE, 1.0);
-        waveform(&mut mesh, Rect::from_min_size(pos2(0.0, 0.0), vec2(0.0, 10.0)), &[(0.0, 1.0)], 1.0, Color32::WHITE, 1.0);
+        waveform(
+            &mut mesh,
+            Rect::from_min_size(pos2(0.0, 0.0), vec2(0.0, 10.0)),
+            &[(0.0, 1.0)],
+            1.0,
+            Color32::WHITE,
+            1.0,
+        );
         assert!(mesh.is_empty());
 
         waveform(&mut mesh, rect(), &[(-1.0, 1.0)], 1.0, Color32::WHITE, 1.0);

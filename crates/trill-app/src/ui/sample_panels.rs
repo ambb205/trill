@@ -11,11 +11,11 @@
 //!
 //! Both take sounds dragged from the browser (see [`crate::ui::dragging`]).
 
+use super::browser;
 use super::device_layouts::Format;
 use super::devices::{self, Body};
 use super::sounds::{DropTarget, WaveState, file_stem};
 use super::state::{AUDITION_LENGTH, Cx};
-use super::browser;
 use eframe::egui::{self, Align2, Color32, Mesh, Rect, Role, Sense, Shape, Ui, WidgetInfo, pos2, vec2};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -52,9 +52,9 @@ pub fn plays_samples(uri: &str) -> bool {
 /// chain.
 pub fn instrument<'a>(cx: &Cx, track: &'a Track) -> Option<&'a Device> {
     track.devices.iter().find(|device| {
-        cx.descriptors.iter().any(|known| {
-            known.uri == device.uri && known.category == trill_core::device::DeviceCategory::Instrument
-        })
+        cx.descriptors
+            .iter()
+            .any(|known| known.uri == device.uri && known.category == trill_core::device::DeviceCategory::Instrument)
     })
 }
 
@@ -145,7 +145,8 @@ pub(super) fn sampler_sample(ui: &mut Ui, cx: &mut Cx, body: &Body, column: Rect
     match &path {
         Some(path) => {
             let clear = Rect::from_center_size(pos2(name_row.right() - 8.0, name_row.center().y), vec2(18.0, 18.0));
-            let response = trill_noir::bare_icon_button(ui, theme, clear, id.with("clear"), Icon::Close, "Remove the sample");
+            let response =
+                trill_noir::bare_icon_button(ui, theme, clear, id.with("clear"), Icon::Close, "Remove the sample");
             cx.hint(&response, "Take the sample out of the sampler");
             if response.clicked() {
                 cx.sounds.clear_sample(device, None);
@@ -289,9 +290,14 @@ pub(super) fn drum_rack(ui: &mut Ui, cx: &mut Cx, body: &Body, area: Rect, panel
         text::paint(ui.painter(), hint, Align2::CENTER_CENTER, theme.text.micro, "Empty pad", theme.ink_faint);
     }
     top = wave.bottom() + gap;
-    for (suffix, label) in
-        [("level", "Level"), ("pan", "Pan"), ("tune", "Tune"), ("start", "Start"), ("decay", "Decay"), ("choke", "Choke")]
-    {
+    for (suffix, label) in [
+        ("level", "Level"),
+        ("pan", "Pan"),
+        ("tune", "Tune"),
+        ("start", "Start"),
+        ("decay", "Decay"),
+        ("choke", "Choke"),
+    ] {
         let rect = Rect::from_min_size(pos2(left, top), vec2(PAD_COLUMN, bar));
         if let Some(param) = body.param(&format!("pad{selected}_{suffix}")) {
             devices::param_bar(ui, cx, body, param, label, Format::Auto, rect);
@@ -337,7 +343,17 @@ fn pad(ui: &mut Ui, cx: &mut Cx, body: &Body, rect: Rect, note: u8, selected: bo
     if ui.is_rect_visible(rect) {
         let painter = ui.painter_at(rect);
         let lit = response.hovered() || dropping;
-        painter.rect_filled(rect, 0.0, if selected { theme.selected } else if lit { theme.hover } else { theme.well });
+        painter.rect_filled(
+            rect,
+            0.0,
+            if selected {
+                theme.selected
+            } else if lit {
+                theme.hover
+            } else {
+                theme.well
+            },
+        );
         paint::frame(&painter, rect, if dropping || selected { theme.ink } else { theme.hairline });
         let quiet = theme.quiet_on(if selected { theme.raised } else { theme.panel });
         let inner = rect.shrink2(vec2(6.0, 4.0));
@@ -346,7 +362,14 @@ fn pad(ui: &mut Ui, cx: &mut Cx, body: &Body, rect: Rect, note: u8, selected: bo
         let number = trill_noir::TextStyle { size: 10.0, ..theme.text.value };
         let used = text::paint(&painter, caption, Align2::LEFT_CENTER, number, &note.to_string(), quiet);
         let drum = PAD_NAMES[usize::from(note - FIRST_NOTE)];
-        text::paint(&painter, caption.with_min_x(caption.left() + used + 5.0), Align2::LEFT_CENTER, theme.text.micro, drum, quiet);
+        text::paint(
+            &painter,
+            caption.with_min_x(caption.left() + used + 5.0),
+            Align2::LEFT_CENTER,
+            theme.text.micro,
+            drum,
+            quiet,
+        );
         // The file, or that there is none.
         let line = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 18.0), inner.max);
         let failed = file.as_ref().is_some_and(|file| file.problem.is_some());
@@ -364,23 +387,26 @@ fn pad(ui: &mut Ui, cx: &mut Cx, body: &Body, rect: Rect, note: u8, selected: bo
                 let strip = Rect::from_min_max(pos2(rect.left(), rect.bottom() - 2.0), rect.max);
                 painter.rect_filled(strip, 0.0, if failed { theme.warn } else { accent });
             }
-            None => {
-                text::paint(&painter, line, Align2::LEFT_CENTER, theme.text.micro, "Empty", theme.ghost);
-            }
+            // An empty pad says so by having nothing on it.
+            None => {}
         }
     }
 
     let about = match (&file, dropping) {
         (_, true) => String::new(),
         (Some(SampleFile { problem: Some(problem), .. }), _) => problem.clone(),
-        (Some(file), _) => format!("{} \u{00B7} click to hear it \u{00B7} drop a sound to replace it \u{00B7} right-click for more", file.path),
+        (Some(file), _) => format!(
+            "{} \u{00B7} click to hear it \u{00B7} drop a sound to replace it \u{00B7} right-click for more",
+            file.path
+        ),
         (None, _) => "An empty pad \u{00B7} drop a sound on it, or right-click to load a file".to_owned(),
     };
     if !about.is_empty() {
         cx.hint(&response, about);
     }
-    // Taking the file away, without a trip through the menu.
-    if file.is_some() && response.hovered() {
+    // Taking the file away, without a trip through the menu. Shown while
+    // the pointer is anywhere on the pad, the button itself included.
+    if file.is_some() && ui.rect_contains_pointer(rect) {
         let clear = Rect::from_center_size(pos2(rect.right() - 10.0, rect.top() + 10.0), vec2(16.0, 16.0));
         let name = format!("Clear pad {note}");
         let button = trill_noir::bare_icon_button(ui, theme, clear, id.with("clear"), Icon::Close, &name);

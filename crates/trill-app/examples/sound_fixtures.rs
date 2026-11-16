@@ -78,7 +78,8 @@ fn metal(seconds: f64, seed: u32, level: f64) -> Vec<f32> {
 fn clap(seed: u32) -> Vec<f32> {
     let mut noise = Noise(seed);
     render(0.3, |time| {
-        let bursts: f64 = [0.0, 0.012, 0.024].iter().filter(|start| time >= **start).map(|start| decay(time - start, 0.02)).sum();
+        let bursts: f64 =
+            [0.0, 0.012, 0.024].iter().filter(|start| time >= **start).map(|start| decay(time - start, 0.02)).sum();
         noise.next() * (bursts * 0.5 + decay(time, 0.3) * 0.4) * 0.6
     })
 }
@@ -90,8 +91,9 @@ fn tom(frequency: f64) -> Vec<f32> {
 /// A note of `frequency` with a few harmonics, plucked.
 fn pluck(frequency: f64, seconds: f64) -> Vec<f32> {
     render(seconds, |time| {
-        let harmonics: f64 =
-            (1..=5).map(|n| (time * frequency * f64::from(n) * TAU).sin() / f64::from(n) * decay(time, seconds / f64::from(n))).sum();
+        let harmonics: f64 = (1..=5)
+            .map(|n| (time * frequency * f64::from(n) * TAU).sin() / f64::from(n) * decay(time, seconds / f64::from(n)))
+            .sum();
         harmonics * 0.45
     })
 }
@@ -140,7 +142,10 @@ fn line(tempo: f64, beats: f64, notes: &[(f64, f64, f64)], voice: impl Fn(f64, f
 fn pad(seconds: f64, chord: &[f64]) -> Vec<f32> {
     render(seconds, |time| {
         let swell = (time / seconds * std::f64::consts::PI).sin().powf(0.6);
-        let voices: f64 = chord.iter().map(|frequency| (time * frequency * TAU).sin() + 0.4 * (time * frequency * 2.003 * TAU).sin()).sum();
+        let voices: f64 = chord
+            .iter()
+            .map(|frequency| (time * frequency * TAU).sin() + 0.4 * (time * frequency * 2.003 * TAU).sin())
+            .sum();
         voices / chord.len() as f64 * swell * 0.45
     })
 }
@@ -159,7 +164,11 @@ impl Pack {
             std::fs::create_dir_all(folder)?;
         }
         // A little apart in the two channels, so the stereo view has two.
-        let right: Vec<f32> = samples.iter().enumerate().map(|(index, sample)| if index % 2 == 0 { *sample } else { sample * 0.96 }).collect();
+        let right: Vec<f32> = samples
+            .iter()
+            .enumerate()
+            .map(|(index, sample)| if index % 2 == 0 { *sample } else { sample * 0.96 })
+            .collect();
         write_wav(&path, &AudioBuffer { sample_rate: RATE, left: samples, right }, WavFormat::Int16)?;
         Ok(format!("{}/{name}", self.named))
     }
@@ -179,7 +188,10 @@ fn main() -> anyhow::Result<()> {
     pack.write("Drums/Kicks/808 Long C.wav", render(1.4, |time| (time * 65.4 * TAU).sin() * decay(time, 1.4) * 0.9))?;
     let snare_tight = pack.write("Drums/Snares/Snare Tight 01.wav", snare(200.0, 0.2, 3))?;
     pack.write("Drums/Snares/Snare Fat 02.wav", snare(165.0, 0.32, 5))?;
-    pack.write("Drums/Snares/Rim Shot 01.wav", render(0.09, |time| (time * 820.0 * TAU).sin() * decay(time, 0.09) * 0.8))?;
+    pack.write(
+        "Drums/Snares/Rim Shot 01.wav",
+        render(0.09, |time| (time * 820.0 * TAU).sin() * decay(time, 0.09) * 0.8),
+    )?;
     let clap_wide = pack.write("Drums/Claps/Clap Wide 01.wav", clap(17))?;
     pack.write("Drums/Claps/Clap Short 02.wav", clap(19).into_iter().take(frames(0.16)).collect())?;
     let hat_closed = pack.write("Drums/Hats/HH Closed 01.wav", metal(0.06, 23, 0.6))?;
@@ -198,19 +210,40 @@ fn main() -> anyhow::Result<()> {
         render(8.0, move |time| noise.next() * (time / 8.0).powi(2) * 0.5)
     })?;
     pack.write("FX/Impact Low 01.wav", kick(34.0, 1.1))?;
-    let vocal = pack.write("Vocals/Vocal Chop Ah 01.wav", render(0.45, |time| {
-        let voice: f64 = [(1.0, 220.0), (0.6, 660.0), (0.35, 1100.0)].iter().map(|(level, frequency)| level * (time * frequency * TAU).sin()).sum();
-        voice * (time / 0.05).min(1.0) * decay(time, 0.45) * 0.4
-    }))?;
+    let vocal = pack.write(
+        "Vocals/Vocal Chop Ah 01.wav",
+        render(0.45, |time| {
+            let voice: f64 = [(1.0, 220.0), (0.6, 660.0), (0.35, 1100.0)]
+                .iter()
+                .map(|(level, frequency)| level * (time * frequency * TAU).sin())
+                .sum();
+            voice * (time / 0.05).min(1.0) * decay(time, 0.45) * 0.4
+        }),
+    )?;
 
     // Loops, with their tempo (and key) in the name, as packs have them.
     let drums = pack.write("Loops/Drum Loop Steady 120bpm.wav", drum_loop(120.0, false))?;
     let drums_busy = pack.write("Loops/Drum Loop Busy 120bpm.wav", drum_loop(120.0, true))?;
     pack.write("Loops/Drum Loop Half 90bpm.wav", drum_loop(90.0, false))?;
-    let bass_notes = [(0.0, 1.5, 55.0), (1.5, 0.5, 55.0), (2.0, 1.0, 65.41), (3.0, 1.0, 49.0), (4.0, 1.5, 55.0), (5.5, 0.5, 82.41), (6.0, 2.0, 73.42)];
-    let bass = pack.write("Loops/Bass Loop 120bpm Am.wav", line(120.0, 8.0, &bass_notes, |frequency, seconds| {
-        render(seconds, |time| ((time * frequency * TAU).sin() + 0.3 * (time * frequency * 2.0 * TAU).sin()) * decay(time, seconds * 1.6) * 0.7)
-    }))?;
+    let bass_notes = [
+        (0.0, 1.5, 55.0),
+        (1.5, 0.5, 55.0),
+        (2.0, 1.0, 65.41),
+        (3.0, 1.0, 49.0),
+        (4.0, 1.5, 55.0),
+        (5.5, 0.5, 82.41),
+        (6.0, 2.0, 73.42),
+    ];
+    let bass = pack.write(
+        "Loops/Bass Loop 120bpm Am.wav",
+        line(120.0, 8.0, &bass_notes, |frequency, seconds| {
+            render(seconds, |time| {
+                ((time * frequency * TAU).sin() + 0.3 * (time * frequency * 2.0 * TAU).sin())
+                    * decay(time, seconds * 1.6)
+                    * 0.7
+            })
+        }),
+    )?;
     let arp_notes: Vec<(f64, f64, f64)> =
         (0..16).map(|step| (f64::from(step) * 0.5, 0.5, [293.66, 349.23, 440.0, 587.33][step as usize % 4])).collect();
     pack.write("Loops/Arp Loop 140bpm Dm.wav", line(140.0, 8.0, &arp_notes, pluck))?;
@@ -240,20 +273,34 @@ fn main() -> anyhow::Result<()> {
     let pad_track = project.add_track("Pad");
     // A hundred beats per minute in a song at a hundred and twenty: its
     // sixteen beats are sixteen beats here too, once it is warped.
-    let pad_clip = project.add_audio_clip(pad_track, "Pad Loop", 0.0, 16.0, AudioContent {
-        transpose: -2.0,
-        gain_db: -3.0,
-        ..audio(&pad_loop, WarpMode::Tonal, Some(100.0))
-    })?;
+    let pad_clip = project.add_audio_clip(
+        pad_track,
+        "Pad Loop",
+        0.0,
+        16.0,
+        AudioContent { transpose: -2.0, gain_db: -3.0, ..audio(&pad_loop, WarpMode::Tonal, Some(100.0)) },
+    )?;
     project.set_clip_fades(pad_clip, 3.0, 4.0)?;
-    project.add_audio_clip(pad_track, "Riser", 16.0, 8.0, AudioContent { offset_seconds: 4.0, ..audio(&riser, WarpMode::Off, None) })?;
+    project.add_audio_clip(
+        pad_track,
+        "Riser",
+        16.0,
+        8.0,
+        AudioContent { offset_seconds: 4.0, ..audio(&riser, WarpMode::Off, None) },
+    )?;
 
     let vocal_track = project.add_track("Vocal chops");
     for start in [2.0, 3.5, 6.0, 10.0, 11.5, 14.0, 18.0, 19.5] {
         project.add_audio_clip(vocal_track, "Vocal Chop", start, 0.9, audio(&vocal, WarpMode::Off, None))?;
     }
     // A file that is not there: what a moved sample folder looks like.
-    project.add_audio_clip(vocal_track, "Lost Take", 22.0, 4.0, audio(&format!("{named}/Night Shift/Vocals/Lead Take 03.wav"), WarpMode::Off, None))?;
+    project.add_audio_clip(
+        vocal_track,
+        "Lost Take",
+        22.0,
+        4.0,
+        audio(&format!("{named}/Night Shift/Vocals/Lead Take 03.wav"), WarpMode::Off, None),
+    )?;
 
     let kit_track = project.add_track("Kit");
     let rack = project.add_device(ChainRef::Track(kit_track), "builtin:drumrack", "Drum Rack", None)?;
@@ -293,12 +340,17 @@ fn main() -> anyhow::Result<()> {
     let keys_track = project.add_track("Keys");
     let keys = project.add_device(ChainRef::Track(keys_track), "builtin:sampler", "Sampler", None)?;
     project.device_mut(keys)?.state = Some(sampler::State::new(pluck_c).to_bytes());
-    project.device_mut(keys)?.params.extend([("start".to_owned(), 2.0), ("end".to_owned(), 82.0), ("release".to_owned(), 0.4)]);
+    project.device_mut(keys)?.params.extend([
+        ("start".to_owned(), 2.0),
+        ("end".to_owned(), 82.0),
+        ("release".to_owned(), 0.4),
+    ]);
     let riff = project.add_midi_clip(keys_track, "Riff", 8.0, 16.0)?;
-    let riff_notes: Vec<Note> = [(0.0, 57), (0.5, 60), (1.0, 64), (1.5, 60), (2.0, 55), (2.5, 59), (3.0, 62), (3.5, 59)]
-        .into_iter()
-        .map(|(start, pitch)| Note { pitch, start, length: 0.45, velocity: 96 })
-        .collect();
+    let riff_notes: Vec<Note> =
+        [(0.0, 57), (0.5, 60), (1.0, 64), (1.5, 60), (2.0, 55), (2.5, 59), (3.0, 62), (3.5, 59)]
+            .into_iter()
+            .map(|(start, pitch)| Note { pitch, start, length: 0.45, velocity: 96 })
+            .collect();
     project.clip_mut(riff)?.set_notes(riff_notes)?;
     project.clip_mut(riff)?.set_loop_length(Some(4.0))?;
     project.add_device(ChainRef::Master, "builtin:limiter", "Limiter", None)?;

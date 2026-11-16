@@ -111,8 +111,9 @@ impl Work {
     }
 
     /// Blocks until nothing is queued or running, or `timeout` has passed,
-    /// and says whether the workers are idle. For tests and for a
-    /// screenshot run, which have nothing else to do meanwhile.
+    /// and says whether the workers are idle. For tests, which have
+    /// nothing else to do meanwhile.
+    #[cfg(test)]
     pub fn wait_until_idle(&self, timeout: std::time::Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         let mut queue = self.shared.queue.lock();

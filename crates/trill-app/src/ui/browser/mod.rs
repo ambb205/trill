@@ -9,9 +9,9 @@ use super::state::{BrowserTab, Cx, FocusArea};
 use eframe::egui::{self, Rect, Ui, pos2, vec2};
 use trill_noir::paint;
 
-pub(super) use sounds::{choose_file, facts, keys, reveal};
 #[cfg(test)]
 pub(in crate::ui) use sounds::{FILTER_BLOCK, PREVIEW_HEIGHT, RESULTS_HEADER, SECTION_HEADER, TREE_ROW};
+pub(super) use sounds::{choose_file, facts, keys, reveal};
 
 /// Height of the row of tabs.
 pub(in crate::ui) const HEADER: f32 = 24.0;

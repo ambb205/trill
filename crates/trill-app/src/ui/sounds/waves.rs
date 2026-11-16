@@ -50,6 +50,7 @@ impl WaveState {
         }
     }
 
+    #[cfg(test)]
     pub fn failure(&self) -> Option<&str> {
         match self {
             WaveState::Failed(reason) => Some(reason),
@@ -108,8 +109,10 @@ impl WaveData {
 
 /// Reads the file and builds its overview: the worker's part.
 pub(super) fn load(runtime: &Runtime, path: &Path) -> Result<WaveData, MediaError> {
-    let facts = runtime.sound_facts(path)?;
+    // The overview first: if the file cannot be read, the reason then names
+    // it as the project does, not by where it would be on this machine.
     let peaks = runtime.media.peaks(path)?;
+    let facts = runtime.sound_facts(path)?;
     // In the cache already, as the overview was built from it.
     let audio = runtime.media.audio(path).map(|audio| Arc::downgrade(&audio)).unwrap_or_default();
     Ok(WaveData { peaks, audio, facts })
@@ -155,6 +158,17 @@ impl Waves {
                 self.wanted.borrow_mut().push(path.to_owned());
                 WaveState::Loading
             }
+        }
+    }
+
+    /// Has a file whose waveform is known looked at again: what is shown
+    /// stays until the answer is in. Nothing happens for a file nobody
+    /// has asked about.
+    pub fn recheck(&self, path: &str) {
+        if let Some(slot) = self.slots.borrow().get(path)
+            && !slot.asked.replace(true)
+        {
+            self.wanted.borrow_mut().push(path.to_owned());
         }
     }
 
@@ -272,6 +286,16 @@ mod tests {
         assert!(waves.get("a.wav").ready().is_some() && waves.peek("a.wav").is_some());
         waves.store("never-asked.wav", Err("ignored".into()));
         assert!(waves.peek("never-asked.wav").is_none());
+
+        // Looked at again on request: asked once, and what is known stays
+        // until the answer is in.
+        waves.recheck("a.wav");
+        waves.recheck("a.wav");
+        waves.recheck("never-asked.wav");
+        assert!(waves.peek("a.wav").is_some());
+        assert_eq!(waves.take_requests(), ["a.wav"]);
+        waves.store("a.wav", Err("gone again".into()));
+        assert_eq!(waves.get("a.wav").failure(), Some("gone again"));
     }
 
     #[test]

@@ -59,9 +59,15 @@ pub enum DropTarget {
 pub enum Dropped {
     Clips(Vec<(TrackId, ClipId)>),
     /// A sampler was given `name`.
-    Sample { device: DeviceId, name: String },
+    Sample {
+        device: DeviceId,
+        name: String,
+    },
     /// These pads of a drum rack were given files.
-    Pads { device: DeviceId, notes: Vec<u8> },
+    Pads {
+        device: DeviceId,
+        notes: Vec<u8>,
+    },
 }
 
 /// What a worker reports back.
@@ -104,9 +110,20 @@ pub struct Found {
     /// The library's generation the answer was read at.
     pub generation: u64,
     pub results: SearchResults,
-    /// Where in the results the sound that was selected when the search
-    /// began now is.
+    /// The sound that was selected when the search began, and where in
+    /// the results it is.
+    pub selected: Option<PathBuf>,
     pub selected_row: Option<usize>,
+}
+
+impl Found {
+    /// Where in the results the file at `path` is. A lookup in the index
+    /// and a pass over the matches' numbers: microseconds, even for a
+    /// hundred thousand of them.
+    pub fn row_of(&self, path: &Path) -> Option<usize> {
+        let id = self.results.index().find(path)?;
+        self.results.ids().iter().position(|found| *found == id)
+    }
 }
 
 /// The sound being auditioned from the browser.
@@ -215,6 +232,12 @@ impl Sounds {
     /// until a worker has.
     pub fn wave(&self, path: &str) -> WaveState {
         self.waves.get(path)
+    }
+
+    /// Has the file at `path` looked at again, if its waveform is known:
+    /// for a file the engine has just found missing or changed.
+    pub fn recheck(&self, path: &str) {
+        self.waves.recheck(path);
     }
 
     /// The same, without asking: for callers that only want what is there.
@@ -349,7 +372,8 @@ impl Sounds {
     /// `selected` is looked up in the new list.
     pub fn search(&mut self, query: &Query, selected: Option<&Path>) {
         let generation = self.runtime.library.generation();
-        let current = self.search.found.as_ref().is_some_and(|found| found.query == *query && found.generation == generation);
+        let current =
+            self.search.found.as_ref().is_some_and(|found| found.query == *query && found.generation == generation);
         if current || self.search.in_flight.is_some() {
             return;
         }
@@ -362,11 +386,9 @@ impl Sounds {
             // the answer then counts as old and is asked for again.
             let generation = runtime.library.generation();
             let results = runtime.library.search(&query);
-            let selected_row = selected.and_then(|path| {
-                let id = results.index().find(&path)?;
-                results.ids().iter().position(|found| *found == id)
-            });
-            Done::Found { ticket, results: Box::new(Found { query, generation, results, selected_row }) }
+            let mut found = Found { query, generation, results, selected, selected_row: None };
+            found.selected_row = found.selected.as_deref().and_then(|path| found.row_of(path));
+            Done::Found { ticket, results: Box::new(found) }
         });
     }
 
@@ -421,6 +443,7 @@ impl Sounds {
     }
 
     /// Adds `folder` to the library without asking.
+    #[cfg(test)]
     pub fn add_folder(&mut self, folder: PathBuf) {
         let runtime = self.runtime.clone();
         self.work.spawn(Priority::Urgent, move || Done::FolderAdded(Some(add_folder(&runtime, &folder))));
@@ -461,6 +484,14 @@ impl Sounds {
         });
     }
 
+    /// Points `clip` at the file at `path`, as the dialog does once it has
+    /// been answered.
+    #[cfg(test)]
+    pub fn relink(&mut self, clip: ClipId, path: PathBuf) {
+        let runtime = self.runtime.clone();
+        self.work.spawn(Priority::Urgent, move || Done::Relinked(Some(relink(&runtime, clip, &path))));
+    }
+
     /// Runs `job` on a worker; a failure is shown to the user.
     pub fn quietly(&mut self, job: impl FnOnce(&Runtime) -> Result<(), String> + Send + 'static) {
         let runtime = self.runtime.clone();
@@ -474,6 +505,7 @@ impl Sounds {
     }
 
     /// Waits until the workers have nothing left to do.
+    #[cfg(test)]
     pub fn wait_until_idle(&self, timeout: std::time::Duration) -> bool {
         self.work.wait_until_idle(timeout)
     }
@@ -561,7 +593,16 @@ pub fn pad_for(tags: Tags, name: &str) -> Option<u8> {
         (Tag::Snare, 38),
         (Tag::Clap, 39),
         (Tag::Hat, if says(&["open", "ohh", "ohat"]) { 46 } else { 42 }),
-        (Tag::Tom, if says(&["low", "floor"]) { 41 } else if says(&["hi", "high"]) { 48 } else { 45 }),
+        (
+            Tag::Tom,
+            if says(&["low", "floor"]) {
+                41
+            } else if says(&["hi", "high"]) {
+                48
+            } else {
+                45
+            },
+        ),
         (Tag::Cymbal, if says(&["ride"]) { 51 } else { 49 }),
         (Tag::Perc, 37),
     ];
@@ -652,7 +693,8 @@ fn place_read(runtime: &Runtime, sounds: &[(&PathBuf, SoundFacts)], target: &Dro
             };
             let mut chosen = Vec::new();
             for (path, facts) in sounds {
-                let by_name = pad_for(facts.tags, &file_stem(path)).filter(|note| !chosen.iter().any(|(_, n)| n == note));
+                let by_name =
+                    pad_for(facts.tags, &file_stem(path)).filter(|note| !chosen.iter().any(|(_, n)| n == note));
                 let free = || {
                     let mut pads = drumrack::PAD_NOTES;
                     pads.find(|note| !taken.contains(note))

@@ -162,6 +162,16 @@ pub(super) fn paint_clip(
     }
 }
 
+/// Where in its file, in seconds, an audio clip is at timeline position
+/// `beat`. A straight line whatever the warp mode: the clip enters the file
+/// at its offset, and from there every beat covers the same stretch of the
+/// recording (see [`AudioContent`]). This is what puts a waveform under a
+/// clip: trimming the clip's start moves the offset with it, so the picture
+/// stays put, and warping changes how much of the file a beat covers.
+pub(in crate::ui) fn file_second(clip: &Clip, audio: &AudioContent, tempo: f64, beat: Beats) -> f64 {
+    audio.offset_seconds + (beat - clip.start) * audio.seconds_per_beat(tempo)
+}
+
 /// How many beats of the timeline `clip`'s file can fill from where the
 /// clip enters it: the longest the clip can be before it runs off the end
 /// of its recording. `None` for a MIDI clip, and while the file's length
@@ -196,15 +206,14 @@ fn paint_audio(
         }
         WaveState::Failed(_) => {
             // The clip is silent; it says which file it is waiting for.
-            let label = format!("{name} \u{00B7} missing");
+            let label = format!("Missing \u{00B7} {name}");
             paint_audio_body(painter, theme, content, clip_rect, Some(&label), fade(theme.warn, 0.7), theme.warn);
             return;
         }
     };
-    // One beat of the timeline covers this much of the recording, warped
-    // or not, so the picture is a straight line from seconds to pixels.
-    let per_beat = audio.seconds_per_beat(cx.snap.project.tempo);
-    let second_at = |x: f32| audio.offset_seconds + (geometry.beat(x) - clip.start) * per_beat;
+    let tempo = cx.snap.project.tempo;
+    let per_beat = audio.seconds_per_beat(tempo);
+    let second_at = |x: f32| file_second(clip, audio, tempo, geometry.beat(x));
     let columns = trill_noir::waveform_columns(painter, content.width());
     let found = wave.columns(second_at(content.left())..second_at(content.right()), columns);
     let bands: Vec<(f32, f32)> = found.iter().map(|column| (column.mixed.min, column.mixed.max)).collect();
@@ -503,6 +512,42 @@ mod tests {
         assert!(marks(&project).is_empty());
         project.clip_mut(id).unwrap().set_loop_length(Some(0.1)).unwrap();
         assert!(marks(&project).is_empty());
+    }
+
+    #[test]
+    fn a_waveform_follows_offset_trimming_and_warping() {
+        let mut project = Project::new("t");
+        project.set_tempo(120.0).unwrap();
+        let track = project.add_track("A");
+        let content = AudioContent { offset_seconds: 1.0, ..AudioContent::new("take.wav") };
+        let id = project.add_audio_clip(track, "Take", 4.0, 8.0, content).unwrap();
+        let second = |project: &Project, beat: f64| {
+            let clip = project.clip(id).unwrap();
+            file_second(clip, clip.audio().unwrap(), project.tempo, beat)
+        };
+        // At 120 a beat is half a second; the clip enters a second in.
+        assert_eq!(second(&project, 4.0), 1.0);
+        assert_eq!(second(&project, 6.0), 2.0);
+        assert_eq!(second(&project, 12.0), 5.0);
+
+        // Trimming the start hides the beginning: what is under each beat
+        // of the timeline stays what it was.
+        project.trim_clip_start(id, 6.0).unwrap();
+        assert_eq!(second(&project, 6.0), 2.0);
+        assert_eq!(second(&project, 12.0), 5.0);
+        // So does splitting, for the half that is cut off.
+        let rest = project.split_clip(id, 8.0).unwrap();
+        let half = project.clip(rest).unwrap();
+        assert_eq!(file_second(half, half.audio().unwrap(), 120.0, 8.0), 3.0);
+
+        // Warped, a beat covers a beat of the recording, whatever the
+        // song's tempo; unwarped it covers a beat of the song's.
+        project.set_clip_warp(id, trill_core::project::WarpMode::Beats, Some(60.0), 0.0).unwrap();
+        assert_eq!(second(&project, 7.0), 3.0, "a second per beat at 60");
+        project.set_tempo(90.0).unwrap();
+        assert_eq!(second(&project, 7.0), 3.0);
+        project.set_clip_warp(id, trill_core::project::WarpMode::Off, Some(60.0), 0.0).unwrap();
+        assert!((second(&project, 7.0) - (2.0 + 60.0 / 90.0)).abs() < 1e-12);
     }
 
     #[test]

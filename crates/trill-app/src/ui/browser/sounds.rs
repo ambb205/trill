@@ -198,9 +198,16 @@ fn sync_search(cx: &mut Cx) {
     }
     let Some(found) = &cx.sounds.search.found else { return };
     let browser = &mut cx.state.browser.sounds;
+    // The search looked the selection up as it was when it set out. If
+    // another sound has been chosen since, that one is looked up here.
+    let row = if found.selected == browser.selected {
+        found.selected_row
+    } else {
+        browser.selected.as_deref().and_then(|path| found.row_of(path))
+    };
     // A sound that has just turned up in the list is brought into view.
-    browser.reveal |= browser.selected_row.is_none() && found.selected_row.is_some();
-    browser.selected_row = found.selected_row;
+    browser.reveal |= browser.selected_row.is_none() && row.is_some();
+    browser.selected_row = row;
     // A sound named on the command line is chosen once the library has it.
     if let Some(wanted) = &browser.pending_select {
         let index = found.results.index();
@@ -232,7 +239,8 @@ fn search_field(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
     );
     if !cx.state.browser.sounds.search.is_empty() {
         let clear = Rect::from_center_size(pos2(rect.right() - 11.0, rect.center().y), vec2(18.0, 18.0));
-        let response = trill_noir::bare_icon_button(ui, theme, clear, id.with("clear"), Icon::Close, "Clear the search");
+        let response =
+            trill_noir::bare_icon_button(ui, theme, clear, id.with("clear"), Icon::Close, "Clear the search");
         cx.hint(&response, "Clear the search");
         if response.clicked() {
             cx.state.browser.sounds.search.clear();
@@ -249,7 +257,8 @@ fn filters(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
     let forms = [SoundForm::Any, SoundForm::OneShot, SoundForm::Loop];
     let current = forms.iter().position(|form| *form == cx.state.browser.sounds.form);
     let labels = ["All", "One-shot", "Loop"];
-    let (clicked, _) = trill_noir::chip_row(ui, theme, rect.min, rect.width(), id.with("form"), &labels, current, false);
+    let (clicked, _) =
+        trill_noir::chip_row(ui, theme, rect.min, rect.width(), id.with("form"), &labels, current, false);
     if let Some(index) = clicked {
         cx.state.browser.sounds.form = forms[index];
     }
@@ -372,7 +381,9 @@ fn no_folders(ui: &mut Ui, cx: &mut Cx, area: Rect) {
         pos2(area.right() - EDGE, (area.top() + 150.0).min(area.bottom())),
     );
     let painter = ui.painter_at(area);
-    let line = |index: usize| Rect::from_min_size(pos2(block.left(), block.top() + index as f32 * 18.0), vec2(block.width(), 18.0));
+    let line = |index: usize| {
+        Rect::from_min_size(pos2(block.left(), block.top() + index as f32 * 18.0), vec2(block.width(), 18.0))
+    };
     text::paint(&painter, line(0), Align2::LEFT_CENTER, theme.text.caps, "No sound folders yet", theme.ink_dim);
     let quiet = trill_noir::TextStyle { size: 12.0, ..theme.text.body };
     for (index, sentence) in ["Add a folder of samples and Trill", "indexes it in the background."].iter().enumerate() {
@@ -462,7 +473,10 @@ fn folders(ui: &mut Ui, cx: &mut Cx, area: Rect, roots: &[PathBuf]) -> f32 {
     let mut action = |ui: &Ui, label: &str| {
         let spec = Chip::action(label);
         let width = spec.width(ui, theme);
-        let rect = Rect::from_min_size(pos2(right - width, header.center().y - theme.metric.chip / 2.0), vec2(width, theme.metric.chip));
+        let rect = Rect::from_min_size(
+            pos2(right - width, header.center().y - theme.metric.chip / 2.0),
+            vec2(width, theme.metric.chip),
+        );
         right = rect.left() - theme.metric.gap;
         trill_noir::chip(ui, theme, rect, id.with(("action", label)), &spec)
     };
@@ -491,7 +505,8 @@ fn folders(ui: &mut Ui, cx: &mut Cx, area: Rect, roots: &[PathBuf]) -> f32 {
         ScanPhase::Indexing => Some(("Indexing".to_owned(), Some(1.0))),
     };
     if let Some((words, fraction)) = &progress {
-        let room = Rect::from_min_max(pos2(title.left() + used + 10.0, header.top()), pos2(right - 4.0, header.bottom()));
+        let room =
+            Rect::from_min_max(pos2(title.left() + used + 10.0, header.top()), pos2(right - 4.0, header.bottom()));
         text::paint(&painter, room, Align2::LEFT_CENTER, theme.text.micro, words, theme.info);
         if let Some(fraction) = fraction {
             let done = header.left() + header.width() * fraction.clamp(0.0, 1.0);
@@ -560,7 +575,12 @@ fn tree_row(
     let left = rect.left() + EDGE + depth as f32 * INDENT;
     if let Some(unfolded) = caret {
         let icon = if unfolded { Icon::CaretDown } else { Icon::CaretRight };
-        trill_noir::paint_icon(painter, pos2(left + 4.0, rect.center().y), icon, if lit { theme.ink } else { theme.ink_faint });
+        trill_noir::paint_icon(
+            painter,
+            pos2(left + 4.0, rect.center().y),
+            icon,
+            if lit { theme.ink } else { theme.ink_faint },
+        );
     }
     let mut content = Rect::from_min_max(pos2(left + 14.0, rect.top()), pos2(rect.right() - EDGE, rect.bottom()));
     if let Some(files) = files {
@@ -596,11 +616,10 @@ fn folder_row(ui: &mut Ui, cx: &mut Cx, id: egui::Id, node: &TreeNode, selected:
     };
     // The caret has a zone of its own, so that looking inside a folder
     // does not also narrow the list to it.
-    let caret_zone = Rect::from_min_max(
-        rect.min,
-        pos2(rect.left() + EDGE + node.depth as f32 * INDENT + 12.0, rect.bottom()),
-    );
-    let on_caret = node.has_subfolders && response.interact_pointer_pos().is_some_and(|position| caret_zone.contains(position));
+    let caret_zone =
+        Rect::from_min_max(rect.min, pos2(rect.left() + EDGE + node.depth as f32 * INDENT + 12.0, rect.bottom()));
+    let on_caret =
+        node.has_subfolders && response.interact_pointer_pos().is_some_and(|position| caret_zone.contains(position));
     if response.clicked() {
         if on_caret {
             toggle(cx);
@@ -717,7 +736,8 @@ fn results(ui: &mut Ui, cx: &mut Cx, area: Rect) {
             } else {
                 "Nothing fits the search and the filters above."
             };
-            let room = Rect::from_min_size(pos2(list.left() + EDGE, list.top() + 8.0), vec2(list.width() - 2.0 * EDGE, 18.0));
+            let room =
+                Rect::from_min_size(pos2(list.left() + EDGE, list.top() + 8.0), vec2(list.width() - 2.0 * EDGE, 18.0));
             let quiet = trill_noir::TextStyle { size: 12.0, ..theme.text.body };
             text::paint(&painter, room, Align2::LEFT_CENTER, quiet, advice, theme.ink_faint);
         }
@@ -736,7 +756,8 @@ fn results(ui: &mut Ui, cx: &mut Cx, area: Rect) {
             ui.set_height(count as f32 * ROW);
             let origin = ui.max_rect().min;
             let width = ui.max_rect().width();
-            let row_rect = |row: usize| Rect::from_min_size(pos2(origin.x, origin.y + row as f32 * ROW), vec2(width, ROW));
+            let row_rect =
+                |row: usize| Rect::from_min_size(pos2(origin.x, origin.y + row as f32 * ROW), vec2(width, ROW));
             if reveal && let Some(row) = selected_row.filter(|row| *row < count) {
                 ui.scroll_to_rect(row_rect(row), None);
             }
@@ -762,10 +783,17 @@ fn sound_row(ui: &mut Ui, cx: &mut Cx, id: egui::Id, rect: Rect, sound: &SoundRo
     let response = ui.interact(rect, id.with(sound.row), Sense::click_and_drag());
     response.widget_info(|| WidgetInfo::selected(Role::Button, true, selected, &sound.name));
     let favorite = cx.sounds.runtime.library.is_favorite(&sound.path);
-    let star = Rect::from_min_max(pos2(rect.right() - EDGE - STAR_COLUMN + 2.0, rect.top()), pos2(rect.right() - EDGE + 4.0, rect.bottom()));
+    let star = Rect::from_min_max(
+        pos2(rect.right() - EDGE - STAR_COLUMN + 2.0, rect.top()),
+        pos2(rect.right() - EDGE + 4.0, rect.bottom()),
+    );
     // Registered after the row, so that it takes the clicks that land on it.
     let star_response = ui.interact(star, id.with(("favorite", sound.row)), Sense::click());
-    let star_name = if favorite { format!("Remove {} from the favorites", sound.name) } else { format!("Add {} to the favorites", sound.name) };
+    let star_name = if favorite {
+        format!("Remove {} from the favorites", sound.name)
+    } else {
+        format!("Add {} to the favorites", sound.name)
+    };
     star_response.widget_info(|| WidgetInfo::selected(Role::CheckBox, true, favorite, &star_name));
     let hovered = response.hovered() || star_response.hovered();
 
@@ -808,7 +836,14 @@ fn sound_row(ui: &mut Ui, cx: &mut Cx, id: egui::Id, rect: Rect, sound: &SoundRo
             right -= width;
         }
         let name = Rect::from_min_max(pos2(rect.left() + EDGE + 16.0, rect.top()), pos2(right - 4.0, rect.bottom()));
-        text::paint(painter, name, Align2::LEFT_CENTER, theme.text.body, &sound.name, if lit { theme.ink } else { theme.ink_dim });
+        text::paint(
+            painter,
+            name,
+            Align2::LEFT_CENTER,
+            theme.text.body,
+            &sound.name,
+            if lit { theme.ink } else { theme.ink_dim },
+        );
     }
 
     if response.hovered() {
@@ -916,7 +951,10 @@ fn sound_menu(ui: &mut Ui, cx: &mut Cx, sound: &SoundRow, favorite: bool) {
         add_to(cx, sound, DropTarget::NewTrack { beat, colors: dragging::new_track_colors(cx, 1) });
     }
     trill_noir::menu_separator(ui, theme);
-    if MenuItem::new(if favorite { "Remove from the favorites" } else { "Add to the favorites" }).show(ui, theme).clicked() {
+    if MenuItem::new(if favorite { "Remove from the favorites" } else { "Add to the favorites" })
+        .show(ui, theme)
+        .clicked()
+    {
         toggle_favorite(cx, &sound.path, favorite);
     }
     if let Some(folder) = sound.path.parent()
@@ -962,12 +1000,19 @@ fn preview_strip(ui: &mut Ui, cx: &mut Cx, area: Rect) {
     let gain = cx.state.browser.sounds.preview_gain_db;
     let (low, high) = PREVIEW_GAIN;
     let shown = units::format_db(gain);
-    let volume = Rect::from_min_max(pos2(auto_rect.left() - 3.0 - 62.0, top_line.top()), pos2(auto_rect.left() - 3.0, top_line.top() + theme.metric.bar));
+    let volume = Rect::from_min_max(
+        pos2(auto_rect.left() - 3.0 - 62.0, top_line.top()),
+        pos2(auto_rect.left() - 3.0, top_line.top() + theme.metric.bar),
+    );
     let bar = Bar::compact("Preview volume", &shown, (gain - low) / (high - low)).default((-6.0 - low) / (high - low));
     let output = trill_noir::bar(ui, theme, volume, id.with("volume"), &bar);
-    cx.hint(&output.response, format!("Preview volume \u{00B7} {shown} \u{00B7} drag to set, double-click for \u{2212}6 dB"));
+    cx.hint(
+        &output.response,
+        format!("Preview volume \u{00B7} {shown} \u{00B7} drag to set, double-click for \u{2212}6 dB"),
+    );
     if let Some(position) = output.frac {
-        cx.state.browser.sounds.preview_gain_db = if output.reset { -6.0 } else { (low + position * (high - low)).round() };
+        cx.state.browser.sounds.preview_gain_db =
+            if output.reset { -6.0 } else { (low + position * (high - low)).round() };
     }
 
     let Some(path) = cx.state.browser.sounds.selected.clone() else {
@@ -975,8 +1020,16 @@ fn preview_strip(ui: &mut Ui, cx: &mut Cx, area: Rect) {
         text::paint(&painter, room, Align2::LEFT_CENTER, theme.text.caps, "Preview", theme.ink_faint);
         let wave = wave_rect(area, inner);
         paint::hline(&painter, wave.x_range(), wave.center().y, theme.ghost);
-        let line = Rect::from_min_max(pos2(inner.left(), wave.bottom() + 2.0), pos2(inner.right(), area.bottom() - 4.0));
-        text::paint(&painter, line, Align2::LEFT_CENTER, theme.text.micro, "Select a sound to hear it", theme.ink_faint);
+        let line =
+            Rect::from_min_max(pos2(inner.left(), wave.bottom() + 2.0), pos2(inner.right(), area.bottom() - 4.0));
+        text::paint(
+            &painter,
+            line,
+            Align2::LEFT_CENTER,
+            theme.text.micro,
+            "Select a sound to hear it",
+            theme.ink_faint,
+        );
         return;
     };
     let playing = cx.sounds.preview.position(&path);
@@ -986,11 +1039,17 @@ fn preview_strip(ui: &mut Ui, cx: &mut Cx, area: Rect) {
     let button = Rect::from_min_size(top_line.min, vec2(18.0, 18.0));
     let icon = if playing.is_some() || loading { Icon::Stop } else { Icon::Play };
     let response = trill_noir::icon_button(ui, theme, button, id.with("play"), icon, playing.is_some(), theme.ink_dim);
-    cx.hint(&response, if playing.is_some() { "Stop the preview \u{00B7} Esc" } else { "Play this sound \u{00B7} Enter" });
+    // "Play" and "Stop" are the transport's.
+    response.widget_info(|| WidgetInfo::selected(Role::Button, true, playing.is_some(), "Preview"));
+    cx.hint(
+        &response,
+        if playing.is_some() { "Stop the preview \u{00B7} Esc" } else { "Play this sound \u{00B7} Enter" },
+    );
     if response.clicked() {
         toggle_preview(cx, &path, playing.is_some() || loading);
     }
-    let name = Rect::from_min_max(pos2(button.right() + 6.0, top_line.top()), pos2(volume.left() - 6.0, top_line.bottom()));
+    let name =
+        Rect::from_min_max(pos2(button.right() + 6.0, top_line.top()), pos2(volume.left() - 6.0, top_line.bottom()));
     text::paint(&painter, name, Align2::LEFT_CENTER, theme.text.body, &file_stem(&path), theme.ink);
 
     let wave = wave_rect(area, inner);
@@ -998,21 +1057,39 @@ fn preview_strip(ui: &mut Ui, cx: &mut Cx, area: Rect) {
     response.widget_info(|| WidgetInfo::labeled(Role::Button, true, "Preview waveform"));
     cx.hint(&response, "Click to play \u{00B7} drag into the song, onto a sampler or onto a pad");
     let state = cx.sounds.wave(&path.to_string_lossy());
-    let facts_line = Rect::from_min_max(pos2(inner.left(), wave.bottom() + 2.0), pos2(inner.right(), area.bottom() - 4.0));
+    let facts_line =
+        Rect::from_min_max(pos2(inner.left(), wave.bottom() + 2.0), pos2(inner.right(), area.bottom() - 4.0));
     match &state {
         WaveState::Ready(data) => {
             let columns = trill_noir::waveform_columns(&painter, wave.width());
-            let bands: Vec<(f32, f32)> =
-                data.columns(0.0..data.seconds(), columns).iter().map(|column| (column.mixed.min, column.mixed.max)).collect();
+            let bands: Vec<(f32, f32)> = data
+                .columns(0.0..data.seconds(), columns)
+                .iter()
+                .map(|column| (column.mixed.min, column.mixed.max))
+                .collect();
             let mut mesh = Mesh::default();
             let ink = if response.hovered() { theme.ink } else { theme.ink_dim };
             trill_noir::waveform(&mut mesh, wave, &bands, 1.0, ink, paint::hair(&painter));
             painter.add(Shape::mesh(Arc::new(mesh)));
-            text::paint(&painter, facts_line, Align2::LEFT_CENTER, theme.text.micro, &facts(&data.facts), theme.ink_faint);
+            text::paint(
+                &painter,
+                facts_line,
+                Align2::LEFT_CENTER,
+                theme.text.micro,
+                &facts(&data.facts),
+                theme.ink_faint,
+            );
         }
         WaveState::Loading => {
             paint::hline(&painter, wave.x_range(), wave.center().y, theme.ghost);
-            text::paint(&painter, facts_line, Align2::LEFT_CENTER, theme.text.micro, "Reading the file\u{2026}", theme.ink_faint);
+            text::paint(
+                &painter,
+                facts_line,
+                Align2::LEFT_CENTER,
+                theme.text.micro,
+                "Reading the file\u{2026}",
+                theme.ink_faint,
+            );
         }
         WaveState::Failed(reason) => {
             paint::hline(&painter, wave.x_range(), wave.center().y, theme.ghost);
@@ -1075,7 +1152,8 @@ pub(in crate::ui) fn facts(facts: &trill_runtime::SoundFacts) -> String {
 /// for the list's purposes only counts when it is its own search field.
 pub fn keys(ctx: &egui::Context, cx: &mut Cx, typing: bool) {
     let browser = &cx.state.browser;
-    let working = browser.open && browser.tab == crate::ui::state::BrowserTab::Sounds && cx.state.focus == FocusArea::Browser;
+    let working =
+        browser.open && browser.tab == crate::ui::state::BrowserTab::Sounds && cx.state.focus == FocusArea::Browser;
     let in_search = browser.sounds.search_focused;
     if !working || cx.jobs.confirm.is_some() || cx.state.shortcuts_open || (typing && !in_search) {
         return;

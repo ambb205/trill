@@ -37,7 +37,11 @@ const WARP_MODES: [(WarpMode, &str, &str); 4] = [
     (WarpMode::Off, "Off", "Plays at the speed and pitch it was recorded at, whatever the song\u{2019}s tempo"),
     (WarpMode::Repitch, "Repitch", "Follows the tempo by playing faster or slower, like a record: the pitch moves too"),
     (WarpMode::Beats, "Beats", "Follows the tempo and keeps the pitch, keeping hits sharp: for drums"),
-    (WarpMode::Tonal, "Tonal", "Follows the tempo and keeps the pitch, keeping sustained sound smooth: for chords, bass, vocals"),
+    (
+        WarpMode::Tonal,
+        "Tonal",
+        "Follows the tempo and keeps the pitch, keeping sustained sound smooth: for chords, bass, vocals",
+    ),
 ];
 
 /// Changes the audio of `clip`, as one undo step.
@@ -90,7 +94,10 @@ pub(super) fn sidebar(ui: &mut Ui, cx: &mut Cx, clip: &Clip, audio: &AudioConten
         .default((0.0 - low) / (high - low))
         .bipolar((0.0 - low) / (high - low));
     let output = trill_noir::bar(ui, theme, stack.row(bar), id.with("gain"), &spec);
-    cx.hint(&output.response, format!("Gain of this clip \u{00B7} {shown} \u{00B7} drag to set, double-click for 0 dB"));
+    cx.hint(
+        &output.response,
+        format!("Gain of this clip \u{00B7} {shown} \u{00B7} drag to set, double-click for 0 dB"),
+    );
     if output.pressed {
         cx.begin_gesture();
     }
@@ -175,7 +182,14 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, track: &Track, clip: &Clip, audio: 
         WaveState::Loading => {
             paint::hline(&painter, view.x_range(), view.center().y, theme.ghost);
             let room = Rect::from_center_size(view.center() - vec2(0.0, 14.0), vec2(view.width() - 32.0, 18.0));
-            text::paint(&painter, room, Align2::CENTER_CENTER, theme.text.caps, "Reading the file\u{2026}", theme.ink_faint);
+            text::paint(
+                &painter,
+                room,
+                Align2::CENTER_CENTER,
+                theme.text.caps,
+                "Reading the file\u{2026}",
+                theme.ink_faint,
+            );
         }
         WaveState::Failed(reason) => missing(ui, cx, clip, audio, reason, view),
     }
@@ -199,7 +213,8 @@ fn toolbar(ui: &mut Ui, cx: &mut Cx, clip: &Clip, audio: &AudioContent, state: &
     let labels: Vec<&str> = WARP_MODES.iter().map(|(_, label, _)| *label).collect();
     let current = WARP_MODES.iter().position(|(mode, ..)| *mode == audio.warp);
     let width = trill_noir::chip_row_width(ui, theme, &labels);
-    let (clicked, _) = trill_noir::chip_row(ui, theme, pos2(x, top), width + 1.0, id.with("warp"), &labels, current, false);
+    let (clicked, _) =
+        trill_noir::chip_row(ui, theme, pos2(x, top), width + 1.0, id.with("warp"), &labels, current, false);
     let row = Rect::from_min_size(pos2(x, top), vec2(width, chip));
     if let Some(pointer) = ui.input(|input| input.pointer.hover_pos()).filter(|pointer| row.contains(*pointer)) {
         // Which chip the pointer is on, for the hint.
@@ -245,7 +260,7 @@ fn toolbar(ui: &mut Ui, cx: &mut Cx, clip: &Clip, audio: &AudioContent, state: &
         style: theme.text.value,
         name: "Source tempo",
     };
-    let rect = Rect::from_min_size(pos2(x, top), vec2(132.0, chip));
+    let rect = Rect::from_min_size(pos2(x, top), vec2(162.0, chip));
     let output = trill_noir::number_field(ui, theme, rect, id.with("source"), &field);
     cx.hint(
         &output.response,
@@ -315,8 +330,12 @@ fn toolbar(ui: &mut Ui, cx: &mut Cx, clip: &Clip, audio: &AudioContent, state: &
     let room = Rect::from_min_max(pos2(x, bar.top()), pos2(bar.right() - 12.0, bar.bottom()));
     let problem = cx.snap.clip_problems.get(&clip.id);
     let stretched = warped && audio.source_tempo.is_some();
-    if let Some(problem) = problem {
-        status(&painter, theme, room, theme.warn, problem);
+    if matches!(state, WaveState::Failed(_)) {
+        status(&painter, theme, room, theme.warn, "File missing");
+    } else if problem.is_some_and(|reason| reason.contains("stretch")) {
+        status(&painter, theme, room, theme.warn, "Could not be stretched: plays repitched");
+    } else if problem.is_some() {
+        status(&painter, theme, room, theme.warn, "The file cannot be played");
     } else if stretched && cx.live.preparing > 0 {
         status(&painter, theme, room, theme.info, "Preparing the stretched audio\u{2026}");
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(150));
@@ -394,7 +413,9 @@ fn missing(ui: &mut Ui, cx: &mut Cx, clip: &Clip, audio: &AudioContent, reason: 
     let theme = cx.theme;
     let painter = ui.painter_at(view);
     let middle = view.center().y.round();
-    let line = |offset: f32| Rect::from_min_max(pos2(view.left() + 16.0, middle + offset), pos2(view.right() - 16.0, middle + offset + 18.0));
+    let line = |offset: f32| {
+        Rect::from_min_max(pos2(view.left() + 16.0, middle + offset), pos2(view.right() - 16.0, middle + offset + 18.0))
+    };
     text::paint(&painter, line(-34.0), Align2::CENTER_CENTER, theme.text.caps, "This clip is silent", theme.warn);
     let quiet = trill_noir::TextStyle { size: 12.0, ..theme.text.body };
     text::paint(&painter, line(-14.0), Align2::CENTER_CENTER, quiet, reason, theme.ink_dim);
@@ -427,11 +448,23 @@ fn framed(clip: &Clip, audio: &AudioContent, tempo: f64, file_seconds: f64) -> (
 
 /// `"0:01.250"`, or `"1.250"` under a minute.
 fn format_time(seconds: f64, step: f64) -> String {
-    let decimals = if step >= 1.0 { 0 } else if step >= 0.1 { 1 } else if step >= 0.01 { 2 } else { 3 };
+    let decimals = if step >= 1.0 {
+        0
+    } else if step >= 0.1 {
+        1
+    } else if step >= 0.01 {
+        2
+    } else {
+        3
+    };
     let seconds = seconds.max(0.0);
     if seconds >= 60.0 {
         let minutes = (seconds / 60.0).floor();
-        format!("{minutes:.0}:{:0width$.decimals$}", seconds - minutes * 60.0, width = if decimals == 0 { 2 } else { decimals + 3 })
+        format!(
+            "{minutes:.0}:{:0width$.decimals$}",
+            seconds - minutes * 60.0,
+            width = if decimals == 0 { 2 } else { decimals + 3 }
+        )
     } else {
         format!("{seconds:.decimals$}")
     }
@@ -447,7 +480,15 @@ fn ruler_step(seconds_per_pixel: f64, min_pixels: f64) -> f64 {
 
 /// The waveform of the file, the stretch the clip plays lit, with a ruler
 /// in seconds above it.
-fn waveform(ui: &mut Ui, cx: &mut Cx, clip: &Clip, audio: &AudioContent, wave: &Arc<WaveData>, view: Rect, color: Color32) {
+fn waveform(
+    ui: &mut Ui,
+    cx: &mut Cx,
+    clip: &Clip,
+    audio: &AudioContent,
+    wave: &Arc<WaveData>,
+    view: Rect,
+    color: Color32,
+) {
     let theme = cx.theme;
     let tempo = cx.snap.project.tempo;
     let file_seconds = wave.seconds();
@@ -577,10 +618,7 @@ fn waveform(ui: &mut Ui, cx: &mut Cx, clip: &Clip, audio: &AudioContent, wave: &
         }
     }
     let per_beat = audio.seconds_per_beat(tempo);
-    let fades = [
-        (clip_start, clip_start + audio.fade_in * per_beat),
-        (clip_end, clip_end - audio.fade_out * per_beat),
-    ];
+    let fades = [(clip_start, clip_start + audio.fade_in * per_beat), (clip_end, clip_end - audio.fade_out * per_beat)];
     for (silent, full) in fades {
         let (silent, full) = (x_of(silent), x_of(full));
         if (full - silent).abs() < 1.0 {

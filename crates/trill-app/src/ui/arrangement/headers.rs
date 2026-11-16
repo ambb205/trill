@@ -277,7 +277,8 @@ fn header(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, number: 
 /// sampler, onto its drum rack, or as a clip at the edit cursor.
 fn sound_drop(ui: &Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, rect: Rect) {
     let visible = rect.intersect(geometry.headers);
-    let over = cx.state.sound_drag.as_ref().and_then(|drag| drag.pointer).is_some_and(|pointer| visible.contains(pointer));
+    let over =
+        cx.state.sound_drag.as_ref().and_then(|drag| drag.pointer).is_some_and(|pointer| visible.contains(pointer));
     if !over {
         return;
     }

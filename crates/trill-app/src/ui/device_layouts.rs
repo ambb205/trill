@@ -272,7 +272,7 @@ pub static LAYOUTS: &[Layout] = &[
             Column {
                 width: NARROW,
                 sections: &[section(
-                    "Sample",
+                    "Playback",
                     &[
                         key("root", "Root"),
                         p("transpose", "Transpose"),
