@@ -112,7 +112,7 @@ on the samples.
   check a mix, `RenderJob::measure` (the `measure` tool), which writes nothing.
 - **Hermetic by default.** Tests, screenshots and scripts never read or write the user's settings
   (`%APPDATA%\trill`), sample library or safety copies: `RuntimeOptions::hermetic()` or `Storage::At` on a
-  temporary folder in tests, `trill-mcp --scratch` and `trill --profile <folder>` by hand.
+  temporary folder in tests, `trill-mcp --scratch`, or `--profile <folder>` on either program, by hand.
 - **Tests go through the real path** and are named as sentences
   (`a_take_is_counted_in_recorded_and_selected_as_one_undo_step`). Engine tests render audio; app tests drive
   the window; MCP tests talk to a real server over HTTP.
