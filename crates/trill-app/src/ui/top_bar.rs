@@ -40,7 +40,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     paint::hline_above(&painter, bar.x_range(), bar.bottom(), theme.hairline);
 
     let left_end = project_group(ui, cx, bar);
-    let right_start = status_group(ui, cx, bar);
+    // Where the transport ends if it starts right after the menus: what is
+    // on the right keeps clear of that for as long as it can.
+    let right_start = status_group(ui, cx, bar, left_end + GAP + TRANSPORT_WIDTH + GAP);
 
     // At its usual place when there is room; otherwise squeezed between
     // its neighbors, keeping clear of the menus first.
@@ -216,13 +218,20 @@ fn edit_menu(ui: &mut Ui, cx: &mut Cx) {
 fn view_menu(ui: &mut Ui, cx: &mut Cx) {
     let theme = cx.theme;
     let open = cx.state.browser.open;
-    let keys = shortcuts::keys;
+    // The keys as they are now: letters the computer keyboard plays are
+    // shortcuts with Alt while it is on.
+    let playing = cx.keyboard.is_on();
+    let keys = |command| shortcuts::keys_while(command, playing);
     if MenuItem::new("Browser").shortcut(&keys(Command::ToggleBrowser)).checked(open).show(ui, theme).clicked() {
         cx.state.browser.open = !open;
     }
     let shown = cx.assistant.is_open();
     if MenuItem::new("Assistant").shortcut(&keys(Command::ToggleAssistant)).checked(shown).show(ui, theme).clicked() {
         cx.assistant.toggle();
+    }
+    let switch = keys(Command::ToggleKeyboard);
+    if MenuItem::new("Computer keyboard").shortcut(&switch).checked(playing).show(ui, theme).clicked() {
+        cx.keyboard.toggle(cx.session);
     }
     trill_noir::menu_separator(ui, theme);
     for (tab, label) in [(DetailTab::Clip, "Clip"), (DetailTab::Devices, "Devices"), (DetailTab::Mixer, "Mixer")] {
@@ -292,7 +301,8 @@ fn transport_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, left: f32) {
     let looping = cx.snap.project.loop_region.enabled;
     let color = if looping { theme.ink } else { theme.ink_dim };
     let response = trill_noir::icon_button(ui, theme, button(&mut x), id.with("loop"), Icon::Loop, looping, color);
-    cx.hint(&response, "Loop the region marked on the ruler \u{00B7} L");
+    let playing = cx.keyboard.is_on();
+    cx.hint(&response, shortcuts::with_keys("Loop the region marked on the ruler", Command::ToggleLoop, playing));
     if response.clicked() {
         toggle_loop(cx);
     }
@@ -300,7 +310,8 @@ fn transport_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, left: f32) {
     let color = if metronome { theme.ink } else { theme.ink_dim };
     let rect = button(&mut x);
     let response = trill_noir::icon_button(ui, theme, rect, id.with("metronome"), Icon::Metronome, metronome, color);
-    cx.hint(&response, "Metronome: a click on every beat while the song plays \u{00B7} K");
+    let about = "Metronome: a click on every beat while the song plays";
+    cx.hint(&response, shortcuts::with_keys(about, Command::ToggleMetronome, playing));
     if response.clicked() {
         toggle_metronome(cx);
     }
@@ -441,9 +452,11 @@ pub fn toggle_metronome(cx: &mut Cx) {
     cx.with_session(|session| session.set_metronome(on));
 }
 
-/// CPU load and the MCP chip, laid out from the right edge. Returns the x
-/// where the group starts.
-fn status_group(ui: &mut Ui, cx: &mut Cx, bar: Rect) -> f32 {
+/// The computer keyboard's switch, CPU load and the MCP chip, laid out from
+/// the right edge. Returns the x where the group starts. In a window too
+/// narrow for all of it (`least` is where the group may start), the load's
+/// meter goes and its number stays.
+fn status_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, least: f32) -> f32 {
     let theme = cx.theme;
     let painter = ui.painter().clone();
     let mut right = bar.right() - EDGE;
@@ -489,20 +502,28 @@ fn status_group(ui: &mut Ui, cx: &mut Cx, bar: Rect) -> f32 {
     let value_width = text::width(&painter, theme.text.value, "100 %").ceil();
     let value = Rect::from_min_max(pos2(right - value_width, bar.top()), pos2(right, bar.bottom()));
     text::paint(&painter, value, Align2::RIGHT_CENTER, theme.text.value, &percent, theme.ink);
-    let meter = Rect::from_min_size(
-        pos2(value.left() - 6.0 - CPU_METER_WIDTH, bar.center().y - 4.0),
-        vec2(CPU_METER_WIDTH, 8.0),
-    );
-    trill_noir::mini_meter(&painter, theme, meter, load, color);
     let label_width = text::width(&painter, theme.text.micro, "CPU").ceil();
-    let label =
-        Rect::from_min_max(pos2(meter.left() - 8.0 - label_width, bar.top()), pos2(meter.left() - 8.0, bar.bottom()));
+    let meter_width = 6.0 + CPU_METER_WIDTH;
+    let with_meter = value.left() - meter_width - 8.0 - label_width - GAP - BUTTON_WIDTH >= least;
+    let mut label_right = value.left() - 8.0;
+    if with_meter {
+        let meter =
+            Rect::from_min_size(pos2(value.left() - meter_width, bar.center().y - 4.0), vec2(CPU_METER_WIDTH, 8.0));
+        trill_noir::mini_meter(&painter, theme, meter, load, color);
+        label_right = meter.left() - 8.0;
+    }
+    let label = Rect::from_min_max(pos2(label_right - label_width, bar.top()), pos2(label_right, bar.bottom()));
     text::paint(&painter, label, Align2::LEFT_CENTER, theme.text.micro, "CPU", theme.ink_faint);
 
     let group = Rect::from_min_max(pos2(label.left(), bar.top()), pos2(right, bar.bottom()));
     let response = ui.interact(group, Id::unique("cpu-load"), Sense::hover());
     cx.hint(&response, "Share of the audio thread\u{2019}s time budget in use");
-    label.left()
+
+    // The computer keyboard's switch, on the transport's side of the
+    // readouts. What it plays is shown in a strip of its own while on.
+    let switch = boxed(bar, label.left() - GAP - BUTTON_WIDTH, BUTTON_WIDTH);
+    super::keyboard::switch(ui, cx, switch);
+    switch.left()
 }
 
 #[cfg(test)]

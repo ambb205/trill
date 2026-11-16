@@ -10,6 +10,7 @@ mod assistant;
 mod automation;
 mod clips;
 mod editors;
+mod keyboard;
 mod keys;
 mod mixer;
 mod perf;

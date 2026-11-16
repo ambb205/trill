@@ -23,7 +23,8 @@
 //! [`browser`], [`arrangement`] and [`detail`] (with [`piano_roll`],
 //! [`audio_clip`], [`devices`] and [`mixer`]) are the views; the
 //! arrangement and the browser are modules of their own parts.
-//! [`automation`] is what the views share about envelopes.
+//! [`automation`] is what the views share about envelopes. [`keyboard`]
+//! is the computer keyboard played as an instrument.
 //! [`device_layouts`] says how each built-in device arranges its
 //! parameters, [`sample_panels`] draws what the sampler and the drum rack
 //! play, and [`displays`] draws the devices' small curves from the math in
@@ -52,6 +53,7 @@ mod displays;
 mod dragging;
 mod editors;
 mod files;
+mod keyboard;
 mod mixer;
 mod piano_roll;
 mod recovery;
@@ -73,6 +75,7 @@ mod work;
 mod tests;
 
 pub use assistant::{Options as AssistantOptions, Scene as AssistantScene};
+pub use keyboard::Options as KeyboardOptions;
 pub use state::{BrowserTab, DetailTab};
 
 use anyhow::anyhow;
@@ -130,6 +133,8 @@ pub struct UiOptions {
     pub window_size: [f32; 2],
     /// How the assistant's panel starts.
     pub assistant: AssistantOptions,
+    /// How the computer keyboard starts, when not as it was left.
+    pub keyboard: KeyboardOptions,
 }
 
 impl Default for UiOptions {
@@ -152,6 +157,7 @@ impl Default for UiOptions {
             open_editor: None,
             window_size: [1440.0, 900.0],
             assistant: AssistantOptions::default(),
+            keyboard: KeyboardOptions::default(),
         }
     }
 }

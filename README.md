@@ -145,6 +145,23 @@ transposition. The sampler shows its sample and the drum rack its sixteen pads.
 
 ![The sound browser, waveforms on audio clips and an audio clip in the Clip tab](crates/trill-app/screenshots/sounds-browser.png)
 
+**Play it from the keyboard you type on.** `Ctrl+K`, or the keyboard button in the top bar, turns the two middle
+rows of letters into a piano on the selected track's instrument: `A S D F G H J K L ; '` are the white keys from C
+and `W E T Y U O P` the black ones, `Z` and `X` move them an octave down and up, `C` and `V` play softer and
+louder, and `Tab` sustains while it is held. The keys are where they are on the keyboard, whatever layout types
+on them. A strip above the detail panel shows the octave, the velocity, the keys with the letter on each and the
+notes being held, and says why nothing sounds when nothing can (no track selected, a track with no instrument, a
+muted one); the piano roll's own keyboard lights the same notes. The switch, the octave and the velocity are
+remembered.
+
+While it is on, a letter it uses plays a note, and the shortcut that letter had is `Alt` with the letter (`F1`
+lists them as they are at the moment). It never takes a key while a text field, the sound search or a dialog has
+the keyboard, or while `Ctrl`, `Alt`, `Shift` or the Windows key is held. And no note is left sounding: whatever
+ends the playing (the switch, another track selected, an octave change under a held key, the window losing the
+keyboard, a dialog, another project, exit) ends its notes.
+
+![A chord held on the computer keyboard, lit in the strip and on the piano roll](crates/trill-app/screenshots/keyboard-playing.png)
+
 No samples at hand? `cargo run -p trill-app --example sound_fixtures -- some/folder` synthesizes a small pack and a
 song made from it (it is what the screenshots are taken from); add `some/folder/Night Shift` in the browser, or
 start with `--library "some/folder/Night Shift" --browse sounds some/folder/night-shift.trill`.

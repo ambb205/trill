@@ -4,6 +4,7 @@
 use super::assistant::Assistant;
 use super::editors::Editors;
 use super::files::Jobs;
+use super::keyboard::Keyboard;
 use super::recovery::Recovery;
 use super::snapshot::{Live, Snapshot};
 use super::sounds::{DropTarget, Sounds};
@@ -904,6 +905,8 @@ pub struct Cx<'a> {
     pub sounds: &'a mut Sounds,
     /// The assistant and its panel down the right side.
     pub assistant: &'a mut Assistant,
+    /// The computer keyboard, played as an instrument.
+    pub keyboard: &'a mut Keyboard,
 }
 
 impl Cx<'_> {

@@ -130,6 +130,14 @@ fn default_loop_length(clip: &Clip, beats_per_bar: Beats) -> Beats {
     (bars * beats_per_bar).min(clip.length)
 }
 
+/// Where the top of a view `rows` tall has to be for the pitches
+/// `low..=high` to be in it, moving it from `top` by as little as that
+/// takes. A range taller than the view is shown from its lowest pitch up.
+fn revealed_top(top: f32, rows: f32, low: u8, high: u8) -> f32 {
+    let (low, above) = (low as f32, high as f32 + 1.0);
+    if top - rows > low || above - low > rows { low + rows } else { top.max(above) }
+}
+
 /// Name of a General MIDI drum the built-in kit plays, for labeling rows.
 fn drum_name(pitch: u8) -> Option<&'static str> {
     Some(match pitch {
@@ -693,6 +701,13 @@ fn roll(ui: &mut Ui, cx: &mut Cx, track: &Track, clip: &Clip, midi: &MidiContent
         view.pitch.center_on(low, high, inner.grid.height());
     }
     view.pitch.clamp(inner.grid.height());
+    // The computer keyboard moved to another octave: the keys it plays
+    // now are brought into view, by as little as it takes.
+    if cx.keyboard.take_reveal() {
+        let rows = inner.grid.height() / view.pitch.row_height;
+        view.pitch.top = revealed_top(view.pitch.top, rows, cx.keyboard.lowest(), cx.keyboard.highest());
+        view.pitch.clamp(inner.grid.height());
+    }
     scroll_and_zoom(ui, cx, &inner);
 
     let view = &cx.state.piano;
@@ -903,7 +918,9 @@ fn paint_ruler(ui: &Ui, cx: &Cx, geometry: &Geometry, clip: &Clip, midi: &MidiCo
     }
 }
 
-/// The keyboard down the left side. Press a key to hear it.
+/// The keyboard down the left side. Press a key to hear it. The notes the
+/// computer keyboard is playing on this track are lit as well, and while it
+/// is on each key it plays carries its letter.
 fn keys(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, color: Color32, is_drums: bool) {
     let theme = cx.theme;
     let keys = geometry.keys;
@@ -919,7 +936,9 @@ fn keys(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, color: Col
     for pitch in low..=high {
         let row = Rect::from_min_size(pos2(keys.left(), geometry.y(pitch)), vec2(keys.width(), row_height));
         let named = row_height >= 10.0 && row.top() >= keys.top() - 0.5 && row.bottom() <= keys.bottom() + 0.5;
-        let state = KeyState { lit: held == Some(pitch), hovered: hovered == Some(pitch), named };
+        let lit = held == Some(pitch) || cx.keyboard.is_sounding(track.id, pitch);
+        let letter = super::keyboard::letter_on(cx.keyboard, theme, pitch, timeline::is_black_key(pitch), lit);
+        let state = KeyState { lit, hovered: hovered == Some(pitch), named, letter: letter.filter(|_| named) };
         if is_drums {
             paint_drum_row(&painter, theme, row, pitch, state, color);
         } else {
@@ -949,6 +968,8 @@ struct KeyState {
     /// The row is tall enough for its name and wholly in view: a name cut
     /// in half by the ruler reads as a glitch.
     named: bool,
+    /// The letter of the computer key that plays this one, and its ink.
+    letter: Option<(&'static str, Color32)>,
 }
 
 fn paint_key(painter: &egui::Painter, theme: &Theme, row: Rect, pitch: u8, state: KeyState, color: Color32) {
@@ -971,6 +992,11 @@ fn paint_key(painter: &egui::Painter, theme: &Theme, row: Rect, pitch: u8, state
         let label = Rect::from_min_max(row.min, pos2(row.right() - 4.0, row.bottom()));
         let style = trill_noir::TextStyle { tracking: 0.0, ..theme.text.micro };
         text::paint(painter, label, Align2::RIGHT_CENTER, style, &pitch_name(pitch), ink);
+    }
+    if let Some((letter, ink)) = state.letter {
+        let style = trill_noir::TextStyle { tracking: 0.0, ..theme.text.micro };
+        let place = Rect::from_min_max(pos2(row.left() + 5.0, row.top()), row.max);
+        text::paint(painter, place, Align2::LEFT_CENTER, style, letter, ink);
     }
 }
 
@@ -995,6 +1021,12 @@ fn paint_drum_row(painter: &egui::Painter, theme: &Theme, row: Rect, pitch: u8, 
         };
         let style = trill_noir::TextStyle { upper: false, tracking: 0.2, ..theme.text.micro };
         text::paint(painter, row.shrink2(vec2(6.0, 0.0)), Align2::LEFT_CENTER, style, name, ink);
+    }
+    if let Some((letter, _)) = state.letter {
+        // At the far end from the drum's name, and quieter than it.
+        let ink = if state.lit { theme.on_accent } else { theme.quiet_on(theme.panel) };
+        let style = trill_noir::TextStyle { tracking: 0.0, ..theme.text.micro };
+        text::paint(painter, row.shrink2(vec2(6.0, 0.0)), Align2::RIGHT_CENTER, style, letter, ink);
     }
 }
 
@@ -1389,6 +1421,18 @@ mod tests {
         assert_eq!(default_loop_length(project.clip(id).unwrap(), 4.0), 8.0, "notes end exactly on bar 3");
         project.clip_mut(id).unwrap().add_notes(&[note(60, 30.0, 4.0)]).unwrap();
         assert_eq!(default_loop_length(project.clip(id).unwrap(), 4.0), 16.0, "never longer than the clip");
+    }
+
+    #[test]
+    fn the_view_moves_no_further_than_it_takes_to_show_a_range() {
+        // Twenty-four rows, C4 to F5 (60..=77) wanted.
+        assert_eq!(revealed_top(84.0, 24.0, 60, 77), 84.0, "in view already (60 up to 84): left alone");
+        assert_eq!(revealed_top(90.0, 24.0, 60, 77), 84.0, "too high: down until the lowest key is the bottom row");
+        assert_eq!(revealed_top(70.0, 24.0, 60, 77), 78.0, "too low: up until the highest key is the top row");
+        assert_eq!(revealed_top(78.0, 24.0, 60, 77), 78.0);
+        // A view too short for the range shows it from the bottom.
+        assert_eq!(revealed_top(100.0, 12.0, 60, 77), 72.0);
+        assert_eq!(revealed_top(40.0, 12.0, 60, 77), 72.0);
     }
 
     #[test]
