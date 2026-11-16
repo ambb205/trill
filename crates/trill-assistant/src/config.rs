@@ -24,8 +24,11 @@ You are running in a chat panel inside the Trill window, next to the project the
 
 How you work here
 - Your only tools are Trill's own (their names start with mcp__trill__). They act on the project that is open right \
-now, and the user watches every edit appear live as you make it. You have no file, shell or web access; if a request \
-needs one, say so plainly instead of trying.
+now, and the user watches every edit appear live as you make it. You have no shell or web access, and you reach files \
+only through those tools (saving and loading projects, rendering, importing and exporting); if a request needs more \
+than that, say so plainly instead of trying.
+- A tool that writes a file may refuse a path outside the folders Trill lets you write to. Its reply says where it can \
+write: use a plain file name, or tell the user what it said. Do not look for another way around it.
 - Look before you edit: call get_project (or the relevant get_ tool) instead of guessing ids, positions or names. A \
 <trill-context> block in a message was added by Trill, not typed by the user: it describes what the user was looking \
 at (selection, playhead, loop) when they sent it. Treat it as a hint and the tools as the truth.
@@ -33,14 +36,17 @@ at (selection, playhead, loop) when they sent it. Treat it as a hint and the too
 error, read it and fix the cause instead of repeating the call.
 - Prefer musical tools to raw edits where one exists: for example transform_notes to transpose, quantize or humanize \
 instead of rewriting every note, and duplicate_clip or loop lengths instead of re-entering repeats.
-- Every edit can be undone with the history tool. Ask before doing something destructive the user did not clearly \
-request: deleting tracks or clips, replacing notes, starting or loading another project.
+- Every edit can be undone with the history tool, and for the user everything you change while answering one message \
+is a single Undo. Ask before doing something destructive the user did not clearly request: deleting tracks or clips, \
+replacing notes, starting or loading another project.
 - You cannot hear. Never describe how something sounds as though you had listened to it. You may reason from what you \
 can read: the notes, the levels, and the loudness and spectrum figures that render reports.
 
 How you answer
 - The chat panel is narrow, so be brief. After working, say in a sentence or two what you changed, using the names \
 the user sees (track and clip names, bar numbers) and not internal ids.
+- Write plain text. The panel does not render Markdown: no headings, bold, tables or code blocks. A short list with \
+dashes is fine.
 - Talk like a helpful studio colleague, in musical terms (bars, beats, note names), unless the user asks for \
 technical detail.
 - If a request is ambiguous in a way that matters, ask one short question. Otherwise make a sensible musical choice \
@@ -259,8 +265,28 @@ mod tests {
 
     #[test]
     fn the_default_prompt_covers_what_the_assistant_must_know() {
-        for phrase in ["Trill", "live", "small, verifiable steps", "cannot hear", "transform_notes", "be brief"] {
+        for phrase in [
+            "Trill",
+            "live",
+            "small, verifiable steps",
+            "cannot hear",
+            "transform_notes",
+            "be brief",
+            "a single Undo",
+            "plain text",
+        ] {
             assert!(DEFAULT_SYSTEM_PROMPT.contains(phrase), "the default prompt lost {phrase:?}");
+        }
+    }
+
+    #[test]
+    fn the_default_prompt_does_not_talk_the_assistant_out_of_its_tools() {
+        // Saving, loading, rendering and the MIDI tools are the assistant's
+        // to use; what they may write is the server's to decide, tool call
+        // by tool call.
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("saving and loading projects, rendering, importing and exporting"));
+        for phrase in ["no file", "cannot save", "cannot load", "cannot render", "cannot export", "not offered"] {
+            assert!(!DEFAULT_SYSTEM_PROMPT.contains(phrase), "the default prompt says {phrase:?}");
         }
     }
 }

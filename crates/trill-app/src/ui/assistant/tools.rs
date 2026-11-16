@@ -319,7 +319,36 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
             Some("panic") => about("Silencing", "Silenced", "everything"),
             _ => about("Checking", "Checked", "the transport"),
         },
-        "render" => about("Rendering", "Rendered", "the song"),
+        "render" => match call.text("path") {
+            Some(path) => about("Rendering", "Rendered", &format!("the song to {}", quoted(file_name(path)))),
+            None => about("Rendering", "Rendered", "the song"),
+        },
+
+        "save_project" => match call.text("path") {
+            Some(path) => about("Saving", "Saved", &format!("the project as {}", quoted(file_name(path)))),
+            None => about("Saving", "Saved", "the project"),
+        },
+        "load_project" => match call.text("path") {
+            Some(path) => about("Opening", "Opened", &quoted(file_name(path))),
+            None => about("Opening", "Opened", "a project"),
+        },
+        "new_project" => match call.text("name") {
+            Some(name) => about("Starting", "Started", &format!("a new project, {}", quoted(name))),
+            None => about("Starting", "Started", "a new project"),
+        },
+        "recover_project" => match call.text("action") {
+            Some("open") => about("Bringing back", "Brought back", "a project that was not saved"),
+            Some("discard") => about("Discarding", "Discarded", "a project that was not saved"),
+            _ => about("Looking for", "Looked for", "projects that were not saved"),
+        },
+        "import_midi" => match call.text("path") {
+            Some(path) => about("Importing", "Imported", &quoted(file_name(path))),
+            None => about("Importing", "Imported", "a MIDI file"),
+        },
+        "export_midi" => match call.text("path") {
+            Some(path) => about("Exporting", "Exported", &format!("the song as {}", quoted(file_name(path)))),
+            None => about("Exporting", "Exported", "the song as MIDI"),
+        },
 
         "search_sounds" => match call.text("text") {
             Some(text) => about("Searching", "Searched", &format!("the sounds for {}", quoted(text))),
@@ -454,6 +483,21 @@ mod tests {
             "Automated the volume of \u{201C}Bass\u{201D}"
         );
         assert_eq!(did("history", json!({ "action": "undo", "steps": 3 }), p), "Undid 3 steps");
+        assert_eq!(
+            did("save_project", json!({ "path": "C:\\Songs\\Night Drive.trill" }), p),
+            "Saved the project as \u{201C}Night Drive.trill\u{201D}"
+        );
+        assert_eq!(did("save_project", json!({}), p), "Saved the project");
+        assert_eq!(did("load_project", json!({ "path": "songs/day.trill" }), p), "Opened \u{201C}day.trill\u{201D}");
+        assert_eq!(did("render", json!({ "path": "mix.wav" }), p), "Rendered the song to \u{201C}mix.wav\u{201D}");
+        assert_eq!(did("render", json!({}), p), "Rendered the song");
+        assert_eq!(did("import_midi", json!({ "path": "D:/midi/riff.mid" }), p), "Imported \u{201C}riff.mid\u{201D}");
+        assert_eq!(did("export_midi", json!({ "path": "out.mid" }), p), "Exported the song as \u{201C}out.mid\u{201D}");
+        assert_eq!(
+            did("recover_project", json!({ "action": "open", "index": 0 }), p),
+            "Brought back a project that was not saved"
+        );
+        assert_eq!(did("new_project", json!({ "name": "Sketch" }), p), "Started a new project, \u{201C}Sketch\u{201D}");
         assert_eq!(did("transport", json!({ "action": "play" }), p), "Started playback");
         assert_eq!(
             did("search_sounds", json!({ "text": "deep kick" }), p),
@@ -484,10 +528,17 @@ mod tests {
     fn every_tool_the_assistant_is_offered_has_words_of_its_own() {
         let (project, track, clip, device) = song();
         let input = json!({ "track": track, "clip": clip, "device": device });
-        // The tools in the README's table, less the withheld ones.
+        // The tools in the README's table.
         for tool in [
             "get_project",
             "set_project",
+            "new_project",
+            "save_project",
+            "load_project",
+            "recover_project",
+            "import_midi",
+            "export_midi",
+            "render",
             "history",
             "create_track",
             "update_track",

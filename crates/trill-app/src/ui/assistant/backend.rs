@@ -4,9 +4,11 @@
 //! The panel talks to a [`Backend`] and the [`Chat`]s it opens, and never to
 //! `trill-assistant` directly. [`Installed`] is the real thing: the user's
 //! own Claude Code, found and run by `trill-assistant`, working through
-//! Trill's MCP server. [`Script`] is a stand-in that says what it is told
-//! to, for the tests and for the pictures of the panel, neither of which
-//! may start anybody's CLI.
+//! the door Trill's MCP server keeps for it (`/assistant`): every tool is
+//! there, but what is written goes into the project's folder or
+//! `Documents/Trill`, and unsaved work cannot be thrown away. [`Script`] is
+//! a stand-in that says what it is told to, for the tests and for the
+//! pictures of the panel, neither of which may start anybody's CLI.
 //!
 //! Nothing here blocks: finding the CLI takes a second or more and starting
 //! a server takes a moment, so both happen on a thread of their own and the
@@ -23,18 +25,12 @@ use std::time::Duration;
 use trill_assistant::{AssistantConfig, CliStatus, Conversation, Event, SendError, SessionId, Unavailable};
 use trill_runtime::Runtime;
 
-/// Tools of Trill's the assistant is not offered: the ones that read or
-/// write wherever a path points. The assistant works on the open project;
-/// saving, loading and exporting stay with the person at the window.
-pub const WITHHELD_TOOLS: [&str; 7] =
-    ["save_project", "load_project", "new_project", "recover_project", "render", "import_midi", "export_midi"];
-
 /// Everything a conversation needs to start.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ready {
     /// The CLI and how it is signed in.
     pub cli: CliStatus,
-    /// Where Trill's MCP server listens.
+    /// The address of the door Trill's MCP server keeps for the assistant.
     pub mcp_url: String,
 }
 
@@ -95,7 +91,8 @@ pub trait Backend {
 /// Where Trill's MCP server is, as the window was started.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum McpServer {
-    /// The window's own server, at this address.
+    /// The window's own server, by the address of its main door: the one
+    /// the top bar shows and any MCP client uses.
     Running(String),
     /// It was asked for and could not be started (most often because
     /// another Trill window has the port).
@@ -138,16 +135,23 @@ impl Installed {
 }
 
 /// How the CLI is run. `working_dir` is a folder of Trill's own that never
-/// changes (the CLI files conversations by it), never the project's.
+/// changes (the CLI files conversations by it), never the project's. No
+/// tool is withheld: the door the assistant comes in by sees to what the
+/// tools that take a path may do.
 fn config(settings_folder: &Path, mcp_url: &str, model: Option<String>) -> AssistantConfig {
     let folder = settings_folder.join("assistant");
     AssistantConfig {
         mcp_url: mcp_url.to_owned(),
-        withheld_tools: WITHHELD_TOOLS.iter().map(|tool| (*tool).to_owned()).collect(),
         model,
         temp_dir: folder.join("tmp"),
         ..AssistantConfig::new(folder.join("work"))
     }
+}
+
+/// The assistant's door of the server whose main door is at `url`: the same
+/// address, another path. `None` for an address that is not a main door's.
+fn assistant_door(url: &str) -> Option<String> {
+    Some(format!("{}{}", url.strip_suffix(trill_mcp::HTTP_PATH)?, trill_mcp::ASSISTANT_PATH))
 }
 
 /// Whether something is listening where `url` points.
@@ -165,15 +169,15 @@ impl Backend for Installed {
         // The server to use, if one is known: the window's, or the one
         // started here last time.
         let known = match &self.app_server {
-            McpServer::Running(url) => Some(url.clone()),
+            McpServer::Running(url) => assistant_door(url),
             McpServer::Failed | McpServer::Off => None,
         };
-        let known = known.or_else(|| self.own_server.as_ref().map(trill_mcp::HttpServer::url));
+        let known = known.or_else(|| self.own_server.as_ref().map(trill_mcp::HttpServer::assistant_url));
         let may_start = self.app_server != McpServer::Off;
         // The thread holds the runtime only to hand it to a server it has
         // to start, so the runtime never ends on it.
         let runtime = may_start.then(|| self.runtime.clone());
-        let config = self.config("http://127.0.0.1:0/mcp");
+        let config = self.config("http://127.0.0.1:0/assistant");
         let ctx = ctx.clone();
 
         let spawned = std::thread::Builder::new().name("assistant-check".into()).spawn(move || {
@@ -190,7 +194,7 @@ impl Backend for Installed {
                     // every message, so it need not be the usual one.
                     Some(runtime) => match trill_mcp::serve_http(runtime, SocketAddr::from(([127, 0, 0, 1], 0))) {
                         Ok(server) => {
-                            let url = server.url();
+                            let url = server.assistant_url();
                             log::info!("MCP server for the assistant listening on {url}");
                             started = Some(server);
                             Ok(url)
@@ -352,7 +356,7 @@ pub fn ready() -> Ready {
             installation: CliInstallation { path: PathBuf::from("claude"), version: CliVersion::new(2, 1, 325) },
             login: LoginMethod::Subscription { plan: None },
         },
-        mcp_url: "http://127.0.0.1:7777/mcp".to_owned(),
+        mcp_url: "http://127.0.0.1:7777/assistant".to_owned(),
     }
 }
 
@@ -433,21 +437,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_cli_works_in_a_folder_of_trills_own_and_is_kept_from_files() {
-        let config = config(Path::new("settings"), "http://127.0.0.1:9000/mcp", Some("haiku".into()));
+    fn the_cli_works_in_a_folder_of_trills_own_with_every_tool() {
+        let config = config(Path::new("settings"), "http://127.0.0.1:9000/assistant", Some("haiku".into()));
         assert_eq!(config.working_dir, Path::new("settings").join("assistant").join("work"));
         assert_eq!(config.temp_dir, Path::new("settings").join("assistant").join("tmp"));
-        assert_eq!(config.mcp_url, "http://127.0.0.1:9000/mcp");
+        assert_eq!(config.mcp_url, "http://127.0.0.1:9000/assistant");
         assert_eq!(config.model.as_deref(), Some("haiku"));
-        for tool in ["save_project", "load_project", "new_project", "recover_project", "render"] {
-            assert!(config.withheld_tools.iter().any(|withheld| withheld == tool), "{tool} must be withheld");
-        }
-        assert!(config.withheld_tools.iter().any(|tool| tool == "import_midi"));
-        assert!(config.withheld_tools.iter().any(|tool| tool == "export_midi"));
+        assert!(config.withheld_tools.is_empty(), "the server's guarded door does the keeping; no tool is withheld");
         assert_eq!(config.cli_path, None, "the CLI is the one the user installed, wherever that is");
         assert!(!config.keep_redirecting_environment);
         // With no model named, the choice is the CLI's.
-        assert_eq!(super::config(Path::new("settings"), "http://127.0.0.1:1/mcp", None).model, None);
+        assert_eq!(super::config(Path::new("settings"), "http://127.0.0.1:1/assistant", None).model, None);
+    }
+
+    #[test]
+    fn the_assistant_comes_in_by_the_servers_guarded_door() {
+        // Whatever address the window's server shows, the assistant's is
+        // the one the server itself gives for it.
+        let runtime = Arc::new(Runtime::start(trill_runtime::RuntimeOptions::hermetic()).unwrap());
+        let server = trill_mcp::serve_http(runtime, SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        assert_eq!(assistant_door(&server.url()), Some(server.assistant_url()));
+        assert!(server.assistant_url().ends_with("/assistant"));
+        assert!(listening(&server.assistant_url()));
+        assert_eq!(assistant_door("http://127.0.0.1:7777/somewhere-else"), None);
     }
 
     #[test]
