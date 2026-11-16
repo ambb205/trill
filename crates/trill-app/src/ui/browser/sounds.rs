@@ -118,6 +118,36 @@ pub(in crate::ui) fn format_count(count: usize) -> String {
     out
 }
 
+/// A sound's name as its row shows it: without the tempo and the key at
+/// its end, which the row's own columns state. `Bass Loop 120bpm Am` is
+/// listed as `Bass Loop`, beside 120 and Am, so that the room the name has
+/// goes to what the columns do not say. Only what the library read as this
+/// sound's tempo or key is left off, only from the end, and never the whole
+/// name. The full name is in the strip below the list and under the pointer.
+pub(in crate::ui) fn listed_name(name: &str, tempo: Option<f64>, key: Option<MusicalKey>) -> &str {
+    // A dot may be the point of a tempo ("87.5bpm"), so it does not part
+    // one word of a name from the next.
+    let is_separator = |c: char| c.is_whitespace() || "_-()[]".contains(c);
+    let says_tempo = |token: &str| {
+        let digits =
+            token.strip_suffix("bpm").or(token.strip_suffix("BPM")).or(token.strip_suffix("Bpm")).unwrap_or(token);
+        tempo.is_some_and(|tempo| digits.parse::<f64>().is_ok_and(|said| (said - tempo).abs() < 0.01))
+    };
+    let mut shown = name.trim_end_matches(is_separator);
+    loop {
+        let start = shown.rfind(is_separator).map_or(0, |at| at + shown[at..].chars().next().map_or(1, char::len_utf8));
+        let token = &shown[start..];
+        let before = shown[..start].trim_end_matches(is_separator);
+        // "120 BPM" is the unit and, before it, the number.
+        let unit = token.eq_ignore_ascii_case("bpm") && tempo.is_some();
+        let states = says_tempo(token) || unit || key.is_some_and(|key| MusicalKey::parse(token) == Some(key));
+        if !states || before.is_empty() {
+            return shown;
+        }
+        shown = before;
+    }
+}
+
 /// A tag's label with a capital, as a menu shows it: `"Kick"`, `"808"`.
 fn tag_title(tag: Tag) -> String {
     let label = tag.label();
@@ -521,7 +551,14 @@ fn folders(ui: &mut Ui, cx: &mut Cx, area: Rect, roots: &[PathBuf]) -> f32 {
         return header.bottom();
     }
 
-    let index = cx.sounds.runtime.library.index();
+    // The index the list on show was made from, when there is one: a
+    // second handle on the library's own could be the last one left to an
+    // index that a scan has just replaced, and freeing a hundred thousand
+    // entries is not for this thread.
+    let index = match &cx.sounds.search.found {
+        Some(found) => found.results.index().clone(),
+        None => cx.sounds.runtime.library.index(),
+    };
     let nodes = tree(&index, roots, &cx.state.browser.sounds);
     // "All folders" leads the list.
     let wanted = (nodes.len() + 1) as f32 * TREE_ROW + 4.0;
@@ -839,7 +876,8 @@ fn sound_row(ui: &mut Ui, cx: &mut Cx, id: egui::Id, rect: Rect, sound: &SoundRo
         // Packs name their files alike at the start; what tells two rows
         // apart is further on, so a name too long loses its middle.
         let ink = if lit { theme.ink } else { theme.ink_dim };
-        text::paint_name(painter, name, Align2::LEFT_CENTER, theme.text.body, &sound.name, ink);
+        let shown = listed_name(&sound.name, sound.tempo, sound.key);
+        text::paint_name(painter, name, Align2::LEFT_CENTER, theme.text.body, shown, ink);
     }
 
     if response.hovered() {
@@ -1333,6 +1371,30 @@ mod tests {
         assert_eq!(format_count(1_234_567), "1,234,567");
         assert_eq!(tag_title(Tag::Kick), "Kick");
         assert_eq!(tag_title(Tag::Sub808), "808");
+    }
+
+    #[test]
+    fn rows_leave_off_the_tempo_and_key_their_columns_state() {
+        let key = |name: &str| MusicalKey::parse(name);
+        assert_eq!(listed_name("Bass Loop 120bpm Am", Some(120.0), key("Am")), "Bass Loop");
+        assert_eq!(listed_name("PACK_drum_beat_100_swag_Ebm", Some(100.0), key("Ebm")), "PACK_drum_beat_100_swag");
+        assert_eq!(listed_name("PACK_synth_loop_dreamy_94_F", Some(94.0), key("F")), "PACK_synth_loop_dreamy");
+        assert_eq!(listed_name("Keys Loop 140 BPM C#m", Some(140.0), key("C#m")), "Keys Loop");
+        assert_eq!(listed_name("Drum Loop Half 87.5bpm", Some(87.5), None), "Drum Loop Half");
+        assert_eq!(listed_name("Pad_Gbm_", None, key("F#m")), "Pad", "the same key, respelled");
+        // What the library did not read as this sound's tempo or key stays.
+        assert_eq!(listed_name("Kick 01", None, None), "Kick 01");
+        assert_eq!(listed_name("Snare 120", None, None), "Snare 120");
+        assert_eq!(listed_name("Tom 140", Some(120.0), None), "Tom 140", "a number that is not the tempo");
+        assert_eq!(listed_name("Stab Am", None, key("C")), "Stab Am", "a key that is not the one read");
+        assert_eq!(listed_name("808 Long C", None, None), "808 Long C");
+        // Never the whole name, and never from the middle.
+        assert_eq!(listed_name("120bpm", Some(120.0), None), "120bpm");
+        assert_eq!(listed_name("Am", None, key("Am")), "Am");
+        assert_eq!(listed_name("140 Am", Some(140.0), key("Am")), "140");
+        assert_eq!(listed_name("Am Chords 120bpm take 2", Some(120.0), key("Am")), "Am Chords 120bpm take 2");
+        assert_eq!(listed_name("", Some(120.0), None), "");
+        assert_eq!(listed_name("\u{00FC}ber Fl\u{00E4}che 90bpm", Some(90.0), None), "\u{00FC}ber Fl\u{00E4}che");
     }
 
     #[test]

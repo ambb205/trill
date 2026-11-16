@@ -206,10 +206,9 @@ mod tests {
 
             // With no room at all, the ellipsis alone.
             assert_eq!(elide_middle(painter, style, name, 0.0), ELLIPSIS.to_string());
-            assert_eq!(
-                elide_middle(painter, style, "\u{00FC}ber_n\u{00EF}ce_name_here", 40.0).chars().count() > 1,
-                true
-            );
+            // Letters of more than one byte are cut between, never through.
+            let accented = elide_middle(painter, style, "\u{00FC}ber_n\u{00EF}ce_name_here", 40.0);
+            assert!(accented.contains(ELLIPSIS) && accented.chars().count() > 1, "{accented}");
         });
     }
 

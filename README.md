@@ -79,6 +79,19 @@ fades, a clipboard, time selection), markers, group and return tracks, and autom
 hand or drawn in steps; a piano roll; device panels generated from each device's parameters; a mixer; MIDI import
 and export; project files; WAV export. `F1` lists the keyboard shortcuts.
 
+The browser's **Sounds** tab is the sample library: add folders, search as you type, filter by one-shot or loop,
+kind, tempo and key, mark favorites, and hear a sound as you select it. Drag a sound onto a track for an audio
+clip where it lands (loops whose name states a tempo follow the song's), below the tracks for a new track, onto a
+sampler or onto a drum rack pad; files dragged in from the file manager land the same way. Audio clips show their
+waveform, and the Clip tab shows an audio clip's file with its gain, offset, fades, warp mode, source tempo and
+transposition. The sampler shows its sample and the drum rack its sixteen pads.
+
+![The sound browser, waveforms on audio clips and an audio clip in the Clip tab](crates/trill-app/screenshots/sounds-browser.png)
+
+No samples at hand? `cargo run -p trill-app --example sound_fixtures -- some/folder` synthesizes a small pack and a
+song made from it (it is what the screenshots are taken from); add `some/folder/Night Shift` in the browser, or
+start with `--library "some/folder/Night Shift" --browse sounds some/folder/night-shift.trill`.
+
 ## MCP tools
 
 | Area | Tools |
@@ -132,8 +145,7 @@ Working: everything listed above, with tests.
 
 Not yet: plugin editor windows, running plugins out of process (only scanning is
 isolated today, so a plugin that crashes while playing still takes the app with it), session (clip-launching)
-view, audio recording, a sound browser and warp controls in the window (the library, sample assignment and
-warping are reachable over MCP only so far), warp markers, MIDI input devices, plugin delay compensation,
+view, audio recording, warp markers, MIDI input devices, plugin delay compensation,
 multi-core rendering. Only Windows has been run so far.
 
 ## Licence

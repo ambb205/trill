@@ -318,7 +318,7 @@ pub(super) fn drum_rack(ui: &mut Ui, cx: &mut Cx, body: &Body, area: Rect, panel
     let loaded = cx.snap.samples.get(&device).map_or(0, Vec::len);
     let summary = Rect::from_min_size(pos2(left, top + 4.0), vec2(RACK_COLUMN, 16.0));
     let words = match loaded {
-        0 => "Drop sounds on the pads".to_owned(),
+        0 => "No pads loaded yet".to_owned(),
         count => format!("{count} of {PAD_COUNT} pads loaded"),
     };
     text::paint(ui.painter(), summary, Align2::LEFT_CENTER, theme.text.micro, &words, theme.ink_faint);

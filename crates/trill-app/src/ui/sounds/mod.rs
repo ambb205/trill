@@ -93,13 +93,16 @@ pub enum Done {
     },
     /// A file was taken off a sampler or a pad.
     Cleared(Result<(), String>),
-    /// A folder was chosen in a dialog (or the dialog dismissed) and has
-    /// been added to the library.
-    FolderAdded(Option<Result<PathBuf, String>>),
-    /// A file was chosen in a dialog to load into a sample slot.
+    /// A dialog was answered: with a folder for the library, with a file
+    /// for a sampler or a pad, or with where a clip's file is now. `None`
+    /// when it was dismissed.
+    FolderPicked(Option<PathBuf>),
     FilePicked(Option<(PathBuf, DropTarget)>),
-    /// A missing clip's file was pointed out again.
-    Relinked(Option<Result<String, String>>),
+    RelinkPicked(Option<(ClipId, PathBuf)>),
+    /// A folder was added to the library, or why it was not.
+    FolderAdded(Result<PathBuf, String>),
+    /// A clip was pointed at another file: the file's name, or why not.
+    Relinked(Result<String, String>),
     /// Something the user need not hear about unless it failed.
     Quiet(Result<(), String>),
 }
@@ -316,28 +319,28 @@ impl Sounds {
                         reports.push(Report::Error(reason));
                     }
                 }
-                Done::FolderAdded(answer) => {
+                Done::FolderPicked(answer) => {
                     self.dialog_open = false;
-                    match answer {
-                        Some(Ok(folder)) => reports.push(Report::FolderAdded(folder)),
-                        Some(Err(reason)) => reports.push(Report::Info(reason)),
-                        None => {}
+                    if let Some(folder) = answer {
+                        self.add_folder(folder);
                     }
                 }
+                Done::FolderAdded(Ok(folder)) => reports.push(Report::FolderAdded(folder)),
+                Done::FolderAdded(Err(reason)) => reports.push(Report::Info(reason)),
                 Done::FilePicked(answer) => {
                     self.dialog_open = false;
                     if let Some((path, target)) = answer {
                         reports.push(Report::Picked(path, target));
                     }
                 }
-                Done::Relinked(answer) => {
+                Done::RelinkPicked(answer) => {
                     self.dialog_open = false;
-                    match answer {
-                        Some(Ok(name)) => reports.push(Report::Info(format!("The clip now plays {name}"))),
-                        Some(Err(reason)) => reports.push(Report::Error(reason)),
-                        None => {}
+                    if let Some((clip, path)) = answer {
+                        self.relink(clip, path);
                     }
                 }
+                Done::Relinked(Ok(name)) => reports.push(Report::Info(format!("The clip now plays {name}"))),
+                Done::Relinked(Err(reason)) => reports.push(Report::Error(reason)),
             }
         }
         for path in self.waves.take_requests() {
@@ -456,23 +459,19 @@ impl Sounds {
         if std::mem::replace(&mut self.dialog_open, true) {
             return;
         }
-        let runtime = self.runtime.clone();
-        self.work.spawn(Priority::Urgent, move || {
+        self.work.ask(move || {
             let mut dialog = rfd::AsyncFileDialog::new().set_title("Add a folder of sounds");
             if let Some(folder) = start_in.filter(|folder| folder.is_dir()) {
                 dialog = dialog.set_directory(folder);
             }
-            let Some(folder) = pollster::block_on(dialog.pick_folder()) else { return Done::FolderAdded(None) };
-            let folder = folder.path().to_path_buf();
-            Done::FolderAdded(Some(add_folder(&runtime, &folder)))
+            Done::FolderPicked(pollster::block_on(dialog.pick_folder()).map(|folder| folder.path().to_path_buf()))
         });
     }
 
-    /// Adds `folder` to the library without asking.
-    #[cfg(test)]
+    /// Adds `folder` to the library, which starts scanning it.
     pub fn add_folder(&mut self, folder: PathBuf) {
         let runtime = self.runtime.clone();
-        self.work.spawn(Priority::Urgent, move || Done::FolderAdded(Some(add_folder(&runtime, &folder))));
+        self.work.spawn(Priority::Urgent, move || Done::FolderAdded(add_folder(&runtime, &folder)));
     }
 
     pub fn remove_folder(&mut self, folder: PathBuf) {
@@ -488,11 +487,9 @@ impl Sounds {
         if std::mem::replace(&mut self.dialog_open, true) {
             return;
         }
-        self.work.spawn(Priority::Urgent, move || {
-            let Some(file) = pollster::block_on(audio_dialog("Load a sample", start_in).pick_file()) else {
-                return Done::FilePicked(None);
-            };
-            Done::FilePicked(Some((file.path().to_path_buf(), target)))
+        self.work.ask(move || {
+            let file = pollster::block_on(audio_dialog("Load a sample", start_in).pick_file());
+            Done::FilePicked(file.map(|file| (file.path().to_path_buf(), target)))
         });
     }
 
@@ -501,21 +498,16 @@ impl Sounds {
         if std::mem::replace(&mut self.dialog_open, true) {
             return;
         }
-        let runtime = self.runtime.clone();
-        self.work.spawn(Priority::Urgent, move || {
-            let Some(file) = pollster::block_on(audio_dialog("Locate the audio file", start_in).pick_file()) else {
-                return Done::Relinked(None);
-            };
-            Done::Relinked(Some(relink(&runtime, clip, file.path())))
+        self.work.ask(move || {
+            let file = pollster::block_on(audio_dialog("Locate the audio file", start_in).pick_file());
+            Done::RelinkPicked(file.map(|file| (clip, file.path().to_path_buf())))
         });
     }
 
-    /// Points `clip` at the file at `path`, as the dialog does once it has
-    /// been answered.
-    #[cfg(test)]
+    /// Points `clip` at the file at `path`: what the dialog's answer does.
     pub fn relink(&mut self, clip: ClipId, path: PathBuf) {
         let runtime = self.runtime.clone();
-        self.work.spawn(Priority::Urgent, move || Done::Relinked(Some(relink(&runtime, clip, &path))));
+        self.work.spawn(Priority::Urgent, move || Done::Relinked(relink(&runtime, clip, &path)));
     }
 
     /// Runs `job` on a worker; a failure is shown to the user.

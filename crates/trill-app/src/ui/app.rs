@@ -427,9 +427,11 @@ impl TrillApp {
         if let Some(path) = self.options.screenshot.clone() {
             // Playing takes a moment to show on the meters.
             let settle = if self.options.autoplay { Duration::from_millis(1800) } else { Duration::from_millis(400) };
-            // What is still on its way (a scan, a waveform) should be in
-            // the picture: wait for the workers, then a few frames more.
-            if self.sounds.is_waiting() && elapsed < SCREENSHOT_PATIENCE {
+            // What is still on its way (a scan, a waveform, a clip being
+            // stretched) should be in the picture as it will be once it has
+            // arrived: wait for it, then a few frames more.
+            let arriving = self.sounds.is_waiting() || self.live.preparing > 0;
+            if arriving && elapsed < SCREENSHOT_PATIENCE {
                 self.busy_at_frame = self.frames;
             }
             let settled = self.frames >= self.busy_at_frame + SCREENSHOT_SETTLE_FRAMES;

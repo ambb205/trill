@@ -11,6 +11,11 @@
 //! user just did (a click that previews, a drop, a keystroke in the search
 //! field) and must not queue behind a screenful of waveforms; one worker
 //! takes nothing else. *Bulk* ones (waveforms) are done in the order asked.
+//!
+//! A native dialog is neither: it may stay open for minutes, and nothing
+//! should wait for it, least of all the window when it closes. Dialogs get
+//! a thread of their own ([`Work::ask`]) that knows nothing but the
+//! question and where to send the answer.
 
 use super::sounds::Done;
 use eframe::egui;
@@ -57,6 +62,9 @@ struct Shared {
 pub struct Work {
     shared: Arc<Shared>,
     finished: Receiver<Done>,
+    /// For the threads that ask the user something.
+    sender: Sender<Done>,
+    ctx: egui::Context,
     threads: Vec<JoinHandle<()>>,
 }
 
@@ -76,7 +84,24 @@ impl Work {
                     .ok()
             })
             .collect();
-        Self { shared, finished, threads }
+        Self { shared, finished, sender, ctx: ctx.clone(), threads }
+    }
+
+    /// Runs `question` (a native dialog) on a thread of its own and takes
+    /// its answer like any finished job. The thread is not waited for when
+    /// the window closes, so `question` must hold nothing that has to end
+    /// in an orderly way: it is given the answer to return, not the
+    /// runtime to act on it.
+    pub fn ask(&self, question: impl FnOnce() -> Done + Send + 'static) {
+        let (sender, ctx) = (self.sender.clone(), self.ctx.clone());
+        let asked = std::thread::Builder::new().name("sound-dialog".into()).spawn(move || {
+            // The receiver is gone only when the window has closed.
+            let _ = sender.send(question());
+            ctx.request_repaint();
+        });
+        if let Err(error) = asked {
+            log::warn!("a dialog could not be opened: {error}");
+        }
     }
 
     /// Queues `job`. It runs on a worker thread, some time after this

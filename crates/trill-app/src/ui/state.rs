@@ -474,7 +474,7 @@ pub struct BrowserState {
 
 impl BrowserState {
     pub const DEFAULT_WIDTH: f32 = 280.0;
-    pub const MIN_WIDTH: f32 = 220.0;
+    pub const MIN_WIDTH: f32 = 250.0;
     pub const MAX_WIDTH: f32 = 520.0;
 
     pub fn new() -> Self {

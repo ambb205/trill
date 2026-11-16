@@ -507,6 +507,9 @@ fn waveform(
     color: Color32,
 ) {
     let theme = cx.theme;
+    if view.width() < 8.0 || view.height() < RULER + 8.0 {
+        return;
+    }
     let tempo = cx.snap.project.tempo;
     let file_seconds = wave.seconds();
     let (clip_start, clip_end) = played(clip, audio, tempo);
