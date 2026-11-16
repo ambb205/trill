@@ -99,6 +99,45 @@
 //!
 //! `examples/chat.rs` is a complete terminal client and the reference for
 //! the UI.
+//!
+//! # What the app does around it
+//!
+//! * Start Trill's MCP server before the first message, and pass its real
+//!   address in [`AssistantConfig::mcp_url`].
+//! * Give [`AssistantConfig::working_dir`] a folder of Trill's own that
+//!   never changes, and store [`Conversation::session_id`] next to the
+//!   transcript the app keeps for display. Those two together are what
+//!   resuming needs. The CLI's own transcript files are never read.
+//! * Send what the user is looking at as the `context` of each message.
+//! * Show a [`FailureReason`] or [`Unavailable`] as its `Display` text. Label
+//!   [`TurnSummary::estimated_cost_usd`] as an estimate.
+//!
+//! # What was checked, and against which CLI
+//!
+//! Against CLI 2.1.325 on Windows 11, by reading what the CLI reported:
+//!
+//! * `--safe-mode` cannot be used: it also drops the server given with
+//!   `--mcp-config`. The flags above do its work one by one instead.
+//! * With those flags the CLI lists Trill's tools and nothing else, one MCP
+//!   server, no skills, no commands, no plugins of the user's, and runs none
+//!   of the user's hooks. Started with only the MCP flags, it listed its
+//!   built-in tools and the user's skills and plugins, and ran a hook of
+//!   theirs.
+//! * The MCP servers attached to the user's claude.ai account are fetched
+//!   even under `--strict-mcp-config`, and a prompt that begins with `/` is
+//!   answered by the CLI itself even under `--disable-slash-commands`. The
+//!   first is switched off through the environment, the second avoided by
+//!   how the message is worded (see `conversation.rs`).
+//! * An `ANTHROPIC_API_KEY` in the environment is used in preference to the
+//!   stored login, silently. See [`REDIRECTING_VARIABLES`].
+//! * A conversation resumes after its CLI was killed: both straight after
+//!   the first event and in the middle of a round of tool calls.
+//!
+//! CLI 2.1.94 was checked to start with the same command line (less
+//! `--permission-prompts`, which it does not know) and to report the same
+//! shapes for a missing login; that is why it is the
+//! [minimum](MINIMUM_CLI_VERSION). The stream when a usage limit is reached
+//! could not be provoked and is handled from the documented shapes.
 
 mod config;
 mod conversation;
