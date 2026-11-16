@@ -161,7 +161,7 @@ pub fn of_call(tool: &str, input: &Value, answer: &str) -> Option<Place> {
     let answered = |key: &str| answer.get(key).and_then(Value::as_u64);
     match tool {
         "create_track" => answered("track_id").map(Place::track),
-        "update_track" => given("track").map(Place::track),
+        "update_track" | "set_instrument_profile" => given("track").map(Place::track),
 
         "add_device" => answered("device_id").map(Place::device),
         "update_device" | "set_sample" | "show_device_editor" | "save_preset" => given("device").map(Place::device),
@@ -207,6 +207,11 @@ pub fn of_call(tool: &str, input: &Value, answer: &str) -> Option<Place> {
                 // The stretch and its repeat.
                 ("duplicate", Some(end), _) => 2.0 * (end - start),
                 ("insert", _, Some(length)) => length,
+                // The copy, where it was put.
+                ("copy", Some(end), _) => {
+                    let to = number("to")?;
+                    return Some(Place::Span { start: to, end: to + (end - start).max(0.0) });
+                }
                 _ => return None,
             };
             Some(Place::Span { start, end: start + length.max(0.0) })
@@ -496,6 +501,8 @@ mod tests {
         assert_eq!(of("edit_time", open, json!({})), Some(Place::Span { start: 8.0, end: 12.0 }));
         let cut = json!({ "action": "delete", "start": 8, "end": 16 });
         assert_eq!(of("edit_time", cut, json!({})), Some(Place::Span { start: 8.0, end: 8.0 }));
+        let copy = json!({ "action": "copy", "start": 16, "end": 32, "to": 64 });
+        assert_eq!(of("edit_time", copy, json!({})), Some(Place::Span { start: 64.0, end: 80.0 }));
         let looped = json!({ "tempo": 96, "loop": { "enabled": true, "start": 16, "end": 32 } });
         assert_eq!(of("set_project", looped, json!({})), Some(Place::Span { start: 16.0, end: 32.0 }));
         assert_eq!(of("set_project", json!({ "tempo": 96 }), json!({})), None);
