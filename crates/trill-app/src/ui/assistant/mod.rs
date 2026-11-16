@@ -107,6 +107,10 @@ const CONTINUE: &str = "Continue.";
 pub const AT_WORK: f64 = 8.0;
 /// The slot of the line that says another model answers from now on.
 const MODEL_NOTE: &str = "model";
+/// What the panel says in place of a conversation it does not take up
+/// again because the assistant's instructions have changed since.
+const STARTED_OVER: &str = "Trill has given the assistant new instructions since the last conversation about this \
+                            project, so a new one starts here. The assistant does not remember the earlier one.";
 /// The step limits the panel offers for one request. The smallest is still
 /// three times what a message used to be allowed; the default (the back
 /// end's) is among them.
@@ -959,6 +963,15 @@ impl Assistant {
                 self.arrival = None;
                 self.transcript = Transcript::default();
                 self.conversation = path.and_then(|path| self.store.conversation(path));
+                // A conversation begun under other instructions would go on
+                // under them: the assistant starts over, and says so.
+                if self.conversation.is_none() && path.is_some_and(|path| self.store.has_outdated_conversation(path)) {
+                    self.transcript.items.push(Item::Note {
+                        text: STARTED_OVER.to_owned(),
+                        tone: Tone::Info,
+                        slot: "",
+                    });
+                }
                 self.awaiting = self.conversation.clone();
                 if let Some(session) = &self.conversation {
                     self.store.load_transcript(session);

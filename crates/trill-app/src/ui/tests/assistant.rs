@@ -2221,6 +2221,61 @@ fn what_is_chosen_under_the_message_field_is_remembered_from_one_session_to_the_
     assert!(!file.contains("effort") && !file.contains("step_limit") && file.contains("\"web\": true"), "{file}");
 }
 
+#[test]
+fn a_conversation_begun_under_earlier_instructions_is_not_resumed_and_the_panel_says_so() {
+    let home = tempfile::tempdir().unwrap();
+    let start = || {
+        let storage = trill_runtime::Storage::At { settings: home.path().join("settings.json"), library_index: None };
+        Arc::new(Runtime::start(RuntimeOptions { storage, ..RuntimeOptions::hermetic() }).unwrap())
+    };
+    let song = home.path().join("songs").join("night.trill");
+    let mut harness = Harness::on(start(), UiOptions::default(), |session| {
+        three_tracks(session);
+        session.save(&song).unwrap();
+    });
+    let script = Script::ready();
+    harness.open_assistant(&script);
+    harness.tell("remember the word marimba");
+    script.say([started(), text("I will."), finished()]);
+    harness.idle(3);
+    drop(harness);
+
+    // As a Trill that told the assistant something else left it. The CLI
+    // keeps a conversation to the instructions it began with: that one has
+    // never been told what the web is, or that a page is not to be obeyed.
+    let file = home.path().join("assistant.json");
+    let kept = std::fs::read_to_string(&file).unwrap();
+    let (before, after) = kept.split_once("\"instructions\": \"").expect("the mark is kept with the conversation");
+    std::fs::write(&file, format!("{before}\"instructions\": \"0000000000000000{}", &after[16..])).unwrap();
+
+    let mut harness = Harness::on(start(), UiOptions::default(), |session| session.load(&song).unwrap());
+    let script = Script::ready();
+    harness.app.assistant_mut().use_script(script.clone());
+    harness.idle(5);
+    assert!(
+        harness.shows_start("Trill has given the assistant new instructions since the last conversation"),
+        "{:?}",
+        harness.said_in_the_panel()
+    );
+    assert!(!harness.is_on_screen("I will."), "the conversation it cannot carry on is not shown as if it could");
+    harness.tell("what was the word?");
+    assert_eq!(script.state().opened, [None], "a new conversation, not the old one resumed");
+    let begun = TurnStart { session_id: conversation_id('b'), model: "test-model".into(), api_key_source: None };
+    script.say([Event::Started(begun), text("I do not know."), finished()]);
+    harness.idle(3);
+    drop(harness);
+
+    // From here on it is that one that is taken up again.
+    let kept = std::fs::read_to_string(&file).unwrap();
+    assert!(kept.contains(conversation_id('b').as_str()) && !kept.contains(conversation_id('a').as_str()), "{kept}");
+    let mut harness = Harness::on(start(), UiOptions::default(), |session| session.load(&song).unwrap());
+    let script = Script::ready();
+    harness.app.assistant_mut().use_script(script.clone());
+    wait_for_the_conversation(&mut harness);
+    harness.tell("and now?");
+    assert_eq!(script.state().opened, [Some(conversation_id('b'))]);
+}
+
 // ---- against the CLI installed on this machine ------------------------------------------
 
 /// The panel driven against the real thing: the CLI installed and signed in

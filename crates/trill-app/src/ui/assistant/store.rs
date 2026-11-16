@@ -43,6 +43,28 @@ struct Kept {
     /// go of first.
     #[serde(default)]
     used: u64,
+    /// Which instructions the assistant was given when the conversation
+    /// began ([`instructions`]). The CLI records them then and keeps to
+    /// them for as long as the conversation lasts.
+    #[serde(default)]
+    instructions: String,
+}
+
+/// A mark that tells one wording of the assistant's instructions from
+/// another: sixteen hex digits worked out from the text.
+///
+/// A conversation goes on under the instructions it began with, whatever
+/// Trill has since learned to tell the assistant. One begun under other
+/// instructions is therefore not taken up again: they may say nothing of
+/// the tools the assistant is now given, nor that a page from the web is
+/// to be read and never obeyed.
+fn instructions() -> String {
+    // FNV-1a: small, and the same on every machine and in every version.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in trill_assistant::DEFAULT_SYSTEM_PROMPT.bytes() {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 /// What `assistant.json` holds.
@@ -254,14 +276,25 @@ impl Store {
         }
     }
 
-    /// The conversation about `project`, if one is remembered.
+    /// The conversation about `project`, if one is remembered that the
+    /// assistant can carry on: one begun under the instructions it is given
+    /// now.
     pub fn conversation(&self, project: &Path) -> Option<SessionId> {
-        SessionId::parse(&self.remembered.conversations.get(&key(project))?.session)
+        let kept = self.remembered.conversations.get(&key(project))?;
+        SessionId::parse(&kept.session).filter(|_| kept.instructions == instructions())
+    }
+
+    /// Whether a conversation about `project` is remembered that was begun
+    /// under other instructions than the assistant is given now, and so is
+    /// not taken up again.
+    pub fn has_outdated_conversation(&self, project: &Path) -> bool {
+        let kept = self.remembered.conversations.get(&key(project));
+        kept.is_some_and(|kept| SessionId::parse(&kept.session).is_some() && kept.instructions != instructions())
     }
 
     /// Remembers that `session` is the conversation about `project`.
     pub fn remember(&mut self, project: &Path, session: &SessionId) {
-        let kept = Kept { session: session.as_str().to_owned(), used: now() };
+        let kept = Kept { session: session.as_str().to_owned(), used: now(), instructions: instructions() };
         let previous = self.remembered.conversations.insert(key(project), kept);
         if let Some(previous) = previous.filter(|previous| previous.session != session.as_str()) {
             self.remove_transcript(&previous.session);
@@ -507,6 +540,40 @@ mod tests {
         assert_eq!(store.conversation(other), None);
         assert_eq!(std::fs::read_dir(&transcripts).unwrap().count(), 0);
         assert_eq!(open(home.path()).conversation(other), None);
+    }
+
+    #[test]
+    fn a_conversation_begun_under_other_instructions_is_not_taken_up_again() {
+        let home = tempfile::tempdir().unwrap();
+        let project = Path::new("songs/a.trill");
+        let mut store = open(home.path());
+        store.remember(project, &id('a'));
+        assert_eq!(store.conversation(project), Some(id('a')));
+        assert!(!store.has_outdated_conversation(project));
+        store.flush();
+        let file = home.path().join(FILE);
+        let kept = std::fs::read_to_string(&file).unwrap();
+        let mark = instructions();
+        assert_eq!(mark.len(), 16);
+        assert!(kept.contains(&format!("\"instructions\": \"{mark}\"")), "{kept}");
+
+        // As an earlier version of Trill, with other instructions, left it;
+        // and as one from before the mark was kept at all.
+        for earlier in [
+            kept.replace(&mark, "0123456789abcdef"),
+            kept.replace(&format!(",\n      \"instructions\": \"{mark}\""), ""),
+        ] {
+            assert_ne!(earlier, kept);
+            std::fs::write(&file, earlier).unwrap();
+            let mut store = open(home.path());
+            assert_eq!(store.conversation(project), None, "it would go on under the old instructions");
+            assert!(store.has_outdated_conversation(project));
+            assert!(!store.has_outdated_conversation(Path::new("songs/b.trill")));
+            // The conversation that takes its place is of today.
+            store.remember(project, &id('b'));
+            assert_eq!(store.conversation(project), Some(id('b')));
+            assert!(!store.has_outdated_conversation(project));
+        }
     }
 
     #[test]
