@@ -11,7 +11,7 @@ use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use trill_core::device::{DeviceController, DeviceFactory, DeviceWarning, ParamInfo};
+use trill_core::device::{DeviceController, DeviceFactory, DeviceWarning, ParamInfo, Purpose};
 use trill_core::project::{AutomationTarget, Clip, ClipContent};
 use trill_core::{ClipId, Device, DeviceId, Project, Track, TrackId, TrackKind};
 use trill_dsp::util::db_to_gain;
@@ -138,6 +138,8 @@ pub struct Compiler<'a> {
     /// compile waits until every clip has its real audio.
     pub stand_ins: Option<&'a mut StandIns>,
     pub sample_rate: f64,
+    /// What the devices this compile creates are for: played or rendered.
+    pub purpose: Purpose,
 }
 
 impl Compiler<'_> {
@@ -234,6 +236,7 @@ impl Compiler<'_> {
                     .iter()
                     .filter_map(|send| Some((routing.bus(send.to)?, db_to_gain(send.level_db))))
                     .collect(),
+                tap: None,
             });
         }
         // Every node must run before the bus it feeds is read.
@@ -296,7 +299,7 @@ impl Compiler<'_> {
         let processor = if running {
             None
         } else {
-            match self.factory.create(device, self.sample_rate, MAX_BLOCK) {
+            match self.factory.create_for(device, self.sample_rate, MAX_BLOCK, self.purpose) {
                 Ok(instance) => {
                     self.bank.devices.insert(
                         device.id,

@@ -557,7 +557,11 @@ async fn a_saxophone_that_waits_for_expression_plays_a_clips_curve() {
     assert!(report["peak_db"].as_f64().unwrap() < -100.0, "{report}");
     let advice =
         report["notes"].as_array().unwrap().iter().map(|note| note.as_str().unwrap()).collect::<Vec<_>>().join(" ");
-    assert!(advice.contains("shape_dynamics") && advice.contains("set_controllers"), "{advice}");
+    // It does not lead with breath (most silent plugins are silent for
+    // other reasons) but it gets there: the probe that tells, and the
+    // tool that writes the curve.
+    assert!(advice.contains("probe with track") && advice.contains("\"expression\": 100"), "{advice}");
+    assert!(advice.contains("shape_dynamics"), "{advice}");
     assert!(level(&silent, 1.0..7.0) < -100.0);
 
     // A crescendo over the whole clip: sound, louder where the curve is

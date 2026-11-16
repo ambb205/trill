@@ -119,6 +119,7 @@ fn swapping_graphs_mid_playback_changes_nothing() {
                 audio: &audio,
                 stand_ins: None,
                 sample_rate: SR as f64,
+                purpose: trill_core::device::Purpose::Playing,
             }
             .compile(project, true)
             .0
@@ -165,6 +166,7 @@ fn output_does_not_depend_on_the_block_size() {
             audio: &audio,
             stand_ins: None,
             sample_rate: SR as f64,
+            purpose: trill_core::device::Purpose::Playing,
         }
         .compile(&project, true);
         let mut processor = Processor::new(SR as f64);
@@ -202,6 +204,7 @@ fn loop_wraps_on_the_exact_sample() {
         audio: &audio,
         stand_ins: None,
         sample_rate: SR as f64,
+        purpose: trill_core::device::Purpose::Playing,
     }
     .compile(&project, true);
     let mut processor = Processor::new(SR as f64);

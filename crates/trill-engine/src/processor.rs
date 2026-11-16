@@ -736,6 +736,9 @@ impl Processor {
             state.gain_left = target_left;
             state.gain_right = target_right;
             track.meter.record(peak_left, peak_right);
+            if let Some(tap) = &mut track.tap {
+                tap.push(left, right);
+            }
 
             match track.output_bus.and_then(|bus| buses.get_mut(bus)) {
                 Some(bus) => {
@@ -1022,9 +1025,20 @@ fn collect_controllers(track: &mut TrackNode, block: &ControlBlock, events: &mut
     }
 }
 
+/// How often, in frames, an instrument that has notes to play and has
+/// made no sound yet is told its controllers again.
+const TELL_AGAIN: u32 = 16_384;
+
 /// Keeps count of the notes a track is given without anything coming out
 /// of its devices: see [`Meter::unanswered_frames`](crate::graph::Meter).
 /// `left` and `right` are what the chain put out, ahead of the fader.
+///
+/// While that goes on, the track's controllers are said again a few times
+/// a second. A plugin that has only just been made may not be listening
+/// yet: a modelled instrument that was sent its expression while it was
+/// still waking up never heard it, and a level that does not move is not
+/// sent a second time. Without this it would stay silent until the song
+/// was stopped and started again.
 fn listen_for_an_answer(track: &mut TrackNode, left: &[f32], right: &[f32]) {
     let state = &mut track.state;
     let sounding = state.active_count > 0 || state.live_held != 0;
@@ -1039,7 +1053,11 @@ fn listen_for_an_answer(track: &mut TrackNode, left: &[f32], right: &[f32]) {
             state.answered = true;
             state.unanswered = 0;
         } else if sounding && !state.answered {
-            state.unanswered = state.unanswered.saturating_add(left.len() as u32);
+            let before = state.unanswered;
+            state.unanswered = before.saturating_add(left.len() as u32);
+            if state.unanswered / TELL_AGAIN != before / TELL_AGAIN {
+                state.resend = true;
+            }
         }
     }
     if state.unanswered != state.unanswered_told {
@@ -1365,6 +1383,7 @@ mod tests {
             input_bus: None,
             output_bus: None,
             sends: Vec::new(),
+            tap: None,
         }
     }
 

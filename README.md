@@ -38,6 +38,7 @@ cargo test -p trill-plugins -- --include-ignored    # against the CLAP and VST3 
 cargo test -p trill-mcp --test presets -- --include-ignored --nocapture    # an assistant's pass over Surge XT's presets, and over an amplifier that lists none
 cargo test -p trill-plugins --test sounds -- --include-ignored --nocapture --test-threads 1    # what installed plugins say of their parameters, channels and presets
 cargo test -p trill-mcp --test controllers -- --include-ignored --nocapture    # a SWAM saxophone and Surge XT played from the controller curves of clips
+cargo test -p trill-mcp --test hearing -- --include-ignored --nocapture    # renders and probes of Superior Drummer 3, a SWAM saxophone and an Ample bass
 cargo test -p trill-app a_modelled_saxophone -- --include-ignored --nocapture    # the same saxophone typed on the computer keyboard, through the window's own code (no window opens)
 cargo test -p trill-media -- --include-ignored      # decoding audio files found in this machine's usual folders
 TRILL_TEST_PLUGIN_WINDOWS=1 cargo test -p trill-plugins --test editor_windows -- --test-threads=1   # opens windows
@@ -176,7 +177,30 @@ keeps sustained sound smooth, `repitch` plays faster or slower like a record; wa
 **Engine**: sample-accurate MIDI and audio clips, clip looping, non-destructive trimming and splitting, audio
 fades, automation of track and master volume, pan and any device parameter with straight, held or curved
 segments, MIDI controllers in clips (see below), group tracks and return tracks with sends, a metronome, sample-exact transport looping, mute/solo, undo/redo, offline rendering that is bit-identical to
-playback, and render analysis (peak, LUFS, stereo correlation, spectral balance, per-track levels).
+playback, and render analysis (see below).
+
+**Hearing without ears.** Whoever cannot listen (a script, an assistant) measures instead, and three things make
+that quick and true:
+
+- *A render waits for its plugins.* A sampler goes on loading after it is created (a drum kit one drum after
+  another, for as much as a minute, the cymbals last), a modelled instrument goes on waking up, and an amplifier
+  may pass nothing for a moment; a render that started at once lost the beginning of the song. Plugins are told
+  they are being rendered offline (VST3 process mode, CLAP `render`). Before the first sample each plugin
+  instrument is rehearsed on the notes it is about to play, and each plugin effect on a burst of noise, until it
+  has answered alike three times running for a quarter of a second or more and the program has stopped growing
+  meanwhile: while samples are being read its memory rises, which is what tells a kit that is still loading
+  from one that is complete. Built-in devices are not touched, so their renders are the samples they always
+  were. `Session::readiness_job` asks the same of one device, for a front end that wants to say "still loading".
+- *A render measures everything as it goes*, without keeping a stem per track: the mix (peak, true peak, LUFS,
+  stereo correlation, spectral balance), every track after its fader in the same terms, the loudness of every
+  section between the markers (or of bar ranges), and how many dB each built-in compressor and limiter took
+  off, at the most and typically. It can be made without writing a file, and with only some tracks heard,
+  the song's mute and solo left alone.
+- *A probe plays one instrument a list of notes* and measures each: whether it sounds, how loud, the pitch that
+  is heard, how soon it starts, how long it rings, how bright it is. One call gives an instrument's range and
+  the octave it really sounds at, a drum plugin's map (which notes are a low thump, a noisy mid hit, a long
+  bright wash), or which keys switch the articulation and how. It plays a copy of a track's instrument as it is
+  now, or an instrument that is not in the song yet; nothing in the song changes and nothing is written.
 
 **Expression, wheels and pedals belong to the clip.** A MIDI clip holds a curve for any controller by its number,
 for the pitch wheel and for channel pressure, with the straight, held and curved segments automation has. The
@@ -294,7 +318,8 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Music | `write_chords`, `write_drums`, `write_arpeggio`, `write_bass`, `write_melody`, `analyze_music`, `music_reference` |
 | Automation | `set_automation`, `get_automation`, `set_markers` |
 | Arrangement | `edit_time` (remove, repeat or open up a stretch of time on every track at once) |
-| Playback | `transport` (play, stop, seek, record), `render` |
+| Playback | `transport` (play, stop, seek, record) |
+| Hearing | `probe` (what an instrument does: range, octave, keyswitches, drum map), `measure` (the mix, every track, every section, gain reduction; writes nothing), `render` (the same, and a WAV file) |
 | Playing live | `play_notes`, `midi_inputs`, `audio` (device, sample rate, buffer size, latency) |
 
 Time is in beats. Pitches are MIDI numbers, note names (`"F#3"`) or drum names (`"kick"`). Notes can be written

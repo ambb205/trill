@@ -415,7 +415,7 @@ fn export_summary(report: &RenderReport) -> String {
     let seconds = stats.duration_seconds.round() as u64;
     let mut summary = format!(
         "Exported {} ({}:{:02}, {} kHz). Peak {:.1} dBFS, loudness {:.1} LUFS.",
-        file_name(Path::new(&report.path)),
+        file_name(Path::new(report.path.as_deref().unwrap_or_default())),
         seconds / 60,
         seconds % 60,
         report.sample_rate as f32 / 1000.0,
@@ -461,11 +461,12 @@ mod tests {
 
     fn report(clipped_samples: usize, problems: Vec<String>) -> RenderReport {
         RenderReport {
-            path: "C:/music/night drive.wav".into(),
+            path: Some("C:/music/night drive.wav".into()),
             sample_rate: 48_000,
             stats: AudioStats {
                 duration_seconds: 64.4,
                 peak_db: -1.04,
+                true_peak_db: None,
                 rms_db: -16.0,
                 loudness_lufs: -13.96,
                 clipped_samples,
@@ -473,6 +474,9 @@ mod tests {
                 spectrum: Spectrum { sub_db: -20.0, bass_db: -6.0, mid_db: -3.0, presence_db: -12.0, air_db: -20.0 },
             },
             tracks: Vec::new(),
+            sections: Vec::new(),
+            dynamics: Vec::new(),
+            waited: Vec::new(),
             problems,
         }
     }

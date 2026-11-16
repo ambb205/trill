@@ -295,6 +295,9 @@ pub(crate) struct TrackNode {
     pub output_bus: Option<usize>,
     /// Copies of the faded signal for return tracks: bus and linear gain.
     pub sends: Vec<(usize, f32)>,
+    /// Measures the track as it leaves its fader. Only a graph that is
+    /// rendered has one; a graph that is played measures nothing.
+    pub tap: Option<Box<crate::analysis::Analyzer>>,
 }
 
 /// Where a group or return track collects its input during a block.

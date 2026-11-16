@@ -15,7 +15,6 @@ use crate::plugin_thread::PluginThread;
 use std::ptr::null_mut;
 use std::time::Duration;
 use trill_core::device::{DeviceProcessor, Event, ProcessInfo};
-use vst3::Steinberg::Vst::ProcessModes_::kRealtime;
 use vst3::Steinberg::Vst::SymbolicSampleSizes_::kSample32;
 use vst3::Steinberg::Vst::{IAudioProcessor, IAudioProcessorTrait, ProcessData};
 use vst3::Steinberg::{int32, kResultOk};
@@ -62,6 +61,8 @@ pub(crate) struct Vst3Processor {
     params: BlockParams,
     /// Frames processed so far: VST3's clock that never runs back.
     continuous_samples: i64,
+    /// The plugin was set up for offline processing (a render).
+    offline: bool,
 }
 
 impl Vst3Processor {
@@ -80,6 +81,7 @@ impl Vst3Processor {
     ) -> Result<Self, String> {
         let max_block = max_block.max(1);
         let mut processor = Self {
+            offline: created.offline,
             audio: Some(created.audio),
             active: true,
             processing: false,
@@ -192,7 +194,7 @@ impl Vst3Processor {
         let (input_changes, output_changes) = self.params.lists();
         let mut context = process_context(info, start, self.continuous_samples);
         let mut data = ProcessData {
-            processMode: kRealtime as int32,
+            processMode: super::instance::process_mode(self.offline),
             symbolicSampleSize: kSample32 as int32,
             numSamples: frames as int32,
             numInputs: if with_audio { self.inputs.count() } else { 0 },
