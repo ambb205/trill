@@ -96,8 +96,9 @@ impl Session {
                     continue;
                 };
                 let stale = std::mem::replace(held, value);
-                for snapshot in self.undo.iter_mut().chain(self.redo.iter_mut()) {
-                    if let Some(old) = snapshot.device_mut(*id).ok().and_then(|device| device.params.get_mut(&info.id))
+                for step in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+                    if let Some(old) =
+                        step.project.device_mut(*id).ok().and_then(|device| device.params.get_mut(&info.id))
                         && *old == stale
                     {
                         *old = value;

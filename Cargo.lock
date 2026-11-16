@@ -4446,6 +4446,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "trill-assistant",
  "trill-core",
  "trill-dsp",
  "trill-engine",

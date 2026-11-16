@@ -6,6 +6,7 @@
 //! This module holds the harness and the tests of the window as a whole;
 //! the editing gestures are tested by area in the modules below.
 
+mod assistant;
 mod automation;
 mod clips;
 mod editors;

@@ -60,6 +60,34 @@ pub struct SampleFile {
     pub problem: Option<String>,
 }
 
+/// Identifies one step of the undo history. A step keeps its id as it goes
+/// from the undo side to the redo side and back, so a front end can ask
+/// whether the step it means is still the one [`Session::undo`] would take
+/// back ([`Session::undo_step`]).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct UndoStep(u64);
+
+/// An undo group that is open; see [`Session::begin_group`]. It is closed
+/// by handing it back to [`Session::end_group`].
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "an undo group stays open until it is handed to Session::end_group"]
+pub struct UndoGroup(u64);
+
+/// One step of the undo history: the project as it was before the step on
+/// the undo side, as it was after it on the redo side.
+struct Step {
+    id: UndoStep,
+    project: Project,
+}
+
+/// A group between its [`Session::begin_group`] and [`Session::end_group`].
+struct OpenGroup {
+    id: u64,
+    /// How many undo steps are older than the group. The steps above them
+    /// are the group's, and become one when it closes.
+    floor: usize,
+}
+
 /// How much of the engine an edit can have affected.
 #[derive(Copy, Clone, PartialEq)]
 enum Scope {
@@ -72,8 +100,12 @@ enum Scope {
 
 pub struct Session {
     project: Project,
-    undo: Vec<Project>,
-    redo: Vec<Project>,
+    undo: Vec<Step>,
+    redo: Vec<Step>,
+    /// The undo groups that are open; see [`Session::begin_group`].
+    groups: Vec<OpenGroup>,
+    /// The last id given to an undo step or a group.
+    last_id: u64,
     // Field order is drop order: the engine (which owns every running
     // device processor) and the bank (their controllers) must go before the
     // factory that created them, so plugins are torn down while their host
@@ -126,6 +158,8 @@ impl Session {
             project: Project::default(),
             undo: Vec::new(),
             redo: Vec::new(),
+            groups: Vec::new(),
+            last_id: 0,
             factory,
             engine,
             bank: DeviceBank::default(),
@@ -223,6 +257,16 @@ impl Session {
         !self.redo.is_empty()
     }
 
+    /// The step [`Session::undo`] would take back now, if there is one.
+    pub fn undo_step(&self) -> Option<UndoStep> {
+        self.undo.last().map(|step| step.id)
+    }
+
+    /// The step [`Session::redo`] would bring back now, if there is one.
+    pub fn redo_step(&self) -> Option<UndoStep> {
+        self.redo.last().map(|step| step.id)
+    }
+
     pub fn track_meter(&self, track: TrackId) -> Option<Arc<Meter>> {
         self.meters.tracks.get(&track).cloned()
     }
@@ -308,6 +352,70 @@ impl Session {
         self.gesture = None;
     }
 
+    /// Opens an undo group: everything that changes the project until
+    /// [`Session::end_group`], whoever makes the change, becomes one undo
+    /// step when the group closes. Use it around work that spans many calls
+    /// and many holds of the session, such as everything an assistant does
+    /// in answer to one request.
+    ///
+    /// A gesture cannot do this. There is one gesture for the whole
+    /// session, so the first front end to end one (a fader let go in the
+    /// window, a tool that wraps its own edits in a gesture) would close it
+    /// for everybody. A group is closed only by whoever holds its
+    /// [`UndoGroup`], and what happens inside keeps its usual meaning while
+    /// the group is open: edits and whole gestures are steps, and
+    /// [`Session::undo`] takes back the last of them, which is what a tool
+    /// relies on to back out of an edit it could not finish. Only at the
+    /// close do the steps made since the opening become one.
+    ///
+    /// A gesture that is under way when the group opens or closes is cut
+    /// there: what it changed before stays outside the group, what it
+    /// changes after is inside. Groups may be open at the same time; each
+    /// gathers what was done since it was opened.
+    pub fn begin_group(&mut self) -> UndoGroup {
+        self.cut_gesture();
+        let id = self.fresh_id();
+        self.groups.push(OpenGroup { id, floor: self.undo.len() });
+        UndoGroup(id)
+    }
+
+    /// Closes an undo group. Returns the one step that now holds everything
+    /// done while it was open, or `None` if that left the project as it
+    /// was: then the history is as if the group had never been opened.
+    pub fn end_group(&mut self, group: UndoGroup) -> Option<UndoStep> {
+        let index = self.groups.iter().position(|open| open.id == group.0)?;
+        let floor = self.groups.remove(index).floor;
+        self.cut_gesture();
+        if self.undo.len() <= floor {
+            return None;
+        }
+        // The oldest of the group's steps holds the project as it was
+        // before any of them; the rest are the stops along the way.
+        self.undo.truncate(floor + 1);
+        let unchanged = self.undo[floor].project == self.project;
+        if unchanged {
+            self.undo.truncate(floor);
+        }
+        // A group opened inside this one has nothing of its own left.
+        let depth = self.undo.len();
+        for open in &mut self.groups {
+            open.floor = open.floor.min(depth);
+        }
+        (!unchanged).then(|| self.undo[floor].id)
+    }
+
+    /// Makes the next edit of a gesture under way a step of its own.
+    fn cut_gesture(&mut self) {
+        if let Some(has_step) = &mut self.gesture {
+            *has_step = false;
+        }
+    }
+
+    fn fresh_id(&mut self) -> u64 {
+        self.last_id += 1;
+        self.last_id
+    }
+
     fn commit(&mut self, mut before: Project, scope: Scope) {
         if self.project == before {
             return;
@@ -316,10 +424,7 @@ impl Session {
         self.sync(&before, scope);
         // Inside a gesture only the state before its first edit is kept.
         if self.gesture != Some(true) {
-            self.undo.push(before);
-            if self.undo.len() > UNDO_LIMIT {
-                self.undo.remove(0);
-            }
+            self.push_step(before);
         }
         if let Some(has_step) = &mut self.gesture {
             *has_step = true;
@@ -328,22 +433,47 @@ impl Session {
         self.revision += 1;
     }
 
+    /// Puts a step on the undo history, forgetting the oldest one when
+    /// there are too many.
+    fn push_step(&mut self, before: Project) {
+        // Steps older than a group may have been undone since it opened.
+        // An edit made from there is the group's, and so is its step.
+        let depth = self.undo.len();
+        for open in &mut self.groups {
+            open.floor = open.floor.min(depth);
+        }
+        let id = UndoStep(self.fresh_id());
+        self.undo.push(Step { id, project: before });
+        if self.undo.len() > UNDO_LIMIT {
+            // The oldest step goes, unless it is where an open group began:
+            // that group must still be able to undo all the way back, so
+            // one of its stops along the way goes instead.
+            let forgotten = usize::from(self.groups.iter().any(|open| open.floor == 0));
+            self.undo.remove(forgotten);
+            for open in &mut self.groups {
+                if open.floor > forgotten {
+                    open.floor -= 1;
+                }
+            }
+        }
+    }
+
     pub fn undo(&mut self) -> bool {
-        let Some(previous) = self.undo.pop() else { return false };
+        let Some(Step { id, project: previous }) = self.undo.pop() else { return false };
         let mut current = std::mem::replace(&mut self.project, previous);
         self.keep_removed_state(&mut current);
         self.sync(&current, Scope::Everything);
-        self.redo.push(current);
+        self.redo.push(Step { id, project: current });
         self.revision += 1;
         true
     }
 
     pub fn redo(&mut self) -> bool {
-        let Some(next) = self.redo.pop() else { return false };
+        let Some(Step { id, project: next }) = self.redo.pop() else { return false };
         let mut current = std::mem::replace(&mut self.project, next);
         self.keep_removed_state(&mut current);
         self.sync(&current, Scope::Everything);
-        self.undo.push(current);
+        self.undo.push(Step { id, project: current });
         self.revision += 1;
         true
     }
@@ -788,8 +918,8 @@ impl Session {
             }
             let stale = device.state.replace(captured.clone());
             meta.applied_state = Some(captured.clone());
-            for snapshot in self.undo.iter_mut().chain(self.redo.iter_mut()) {
-                if let Ok(device) = snapshot.device_mut(id)
+            for step in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+                if let Ok(device) = step.project.device_mut(id)
                     && device.state == stale
                 {
                     device.state = Some(captured.clone());
@@ -814,4 +944,271 @@ fn readable<S>(id: DeviceId, state: Result<S, StateError>) -> Result<Option<S>, 
 
 fn io_error(path: &Path, error: std::io::Error) -> SessionError {
     SessionError::Io(format!("{}: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trill_dsp::BuiltinFactory;
+
+    fn session() -> Session {
+        Session::new(Arc::new(BuiltinFactory), AudioBackend::Null { sample_rate: 48_000 }).unwrap()
+    }
+
+    /// How many steps can be undone, found by undoing them and putting
+    /// them back.
+    fn depth(session: &mut Session) -> usize {
+        let mut depth = 0;
+        while session.undo() {
+            depth += 1;
+        }
+        for _ in 0..depth {
+            session.redo();
+        }
+        depth
+    }
+
+    fn volume(session: &Session, track: TrackId) -> f32 {
+        session.project().track(track).unwrap().volume_db
+    }
+
+    #[test]
+    fn a_group_is_one_undo_step_whatever_happens_inside() {
+        let mut session = session();
+        let track = session.edit(|p| Ok(p.add_track("Keys"))).unwrap();
+        let before = session.project().clone();
+
+        let group = session.begin_group();
+        // An edit of the assistant's.
+        let bass = session.edit(|p| Ok(p.add_track("Bass"))).unwrap();
+        // A fader dragged in the window meanwhile: a whole gesture, begun
+        // and ended inside the group. Ending it must not end the group.
+        session.begin_gesture();
+        for step in 1..=5 {
+            session.edit(|p| p.set_track_volume(track, -(step as f32))).unwrap();
+        }
+        session.end_gesture();
+        // A tool that wraps its own edits in a gesture, as several do.
+        session.begin_gesture();
+        session.edit(|p| p.set_track_pan(bass, 0.25)).unwrap();
+        session.edit(|p| p.set_track_volume(bass, -3.0)).unwrap();
+        session.end_gesture();
+        // A tool that fails halfway backs out with an undo of its own. It
+        // must take back that one edit and nothing done before it.
+        assert!(session.add_device(ChainRef::Track(bass), "builtin:polysynth", Some("no such preset"), None).is_err());
+        let doomed = session.edit(|p| Ok(p.add_track("Doomed"))).unwrap();
+        assert!(session.undo(), "the tool backs out");
+        assert!(session.project().track(doomed).is_err());
+        assert!(session.project().track(bass).is_ok(), "and what came before it stands");
+        // And more edits after that.
+        session.edit(|p| p.add_midi_clip(bass, "Line", 0.0, 4.0)).unwrap();
+        let after = session.project().clone();
+        assert!(depth(&mut session) > 3, "inside the group the steps are separate, as ever");
+
+        let step = session.end_group(group).expect("the group changed the project");
+        assert_eq!(session.project(), &after, "closing a group changes nothing in the project");
+        assert_eq!(depth(&mut session), 2, "the track from before, and the group");
+        assert_eq!(session.undo_step(), Some(step));
+
+        assert!(session.undo());
+        assert_eq!(session.project(), &before, "one undo takes back everything done in the group");
+        assert_eq!(session.redo_step(), Some(step), "the step keeps its id on the redo side");
+        assert!(session.redo());
+        assert_eq!(session.project(), &after, "and one redo brings it all back");
+        assert_eq!(session.undo_step(), Some(step));
+    }
+
+    #[test]
+    fn a_group_that_changes_nothing_leaves_no_step() {
+        let mut session = session();
+        let track = session.edit(|p| Ok(p.add_track("Keys"))).unwrap();
+        let before = session.project().clone();
+        let step_before = session.undo_step();
+
+        // Nothing at all happened.
+        let group = session.begin_group();
+        assert_eq!(session.end_group(group), None);
+        assert_eq!((depth(&mut session), session.undo_step()), (1, step_before));
+
+        // Edits that were refused, and a look around, change nothing.
+        let group = session.begin_group();
+        assert!(session.edit(|p| p.set_track_volume(TrackId(999), 0.0)).is_err());
+        assert!(session.add_device(ChainRef::Track(track), "builtin:nope", None, None).is_err());
+        assert_eq!(session.end_group(group), None);
+        assert_eq!(depth(&mut session), 1);
+
+        // An edit that was put right again by another leaves the project
+        // as it was, and no step to undo.
+        let group = session.begin_group();
+        session.edit(|p| p.set_track_volume(track, -6.0)).unwrap();
+        session.edit(|p| p.set_track_volume(track, 0.0)).unwrap();
+        assert_eq!(session.end_group(group), None);
+        assert_eq!(session.project(), &before);
+        assert_eq!(depth(&mut session), 1);
+
+        // So does an edit that was undone inside the group.
+        let group = session.begin_group();
+        session.edit(|p| p.set_track_volume(track, -6.0)).unwrap();
+        assert!(session.undo());
+        assert_eq!(session.end_group(group), None);
+        assert_eq!(session.project(), &before);
+        assert_eq!(session.undo_step(), step_before);
+    }
+
+    #[test]
+    fn a_group_cut_short_holds_what_was_done_and_the_next_edit_is_its_own_step() {
+        let mut session = session();
+        let before = session.project().clone();
+
+        // Work that was stopped halfway: the group is closed all the same.
+        let group = session.begin_group();
+        let track = session.edit(|p| Ok(p.add_track("Half"))).unwrap();
+        session.edit(|p| p.set_track_volume(track, -9.0)).unwrap();
+        let step = session.end_group(group).expect("what was done before the stop is a step");
+        let halfway = session.project().clone();
+
+        // Nothing is left open: what comes next is separate.
+        session.edit(|p| p.set_track_pan(track, -0.5)).unwrap();
+        assert_ne!(session.undo_step(), Some(step));
+        assert!(session.undo());
+        assert_eq!(session.project(), &halfway);
+        assert_eq!(session.undo_step(), Some(step));
+        assert!(session.undo());
+        assert_eq!(session.project(), &before);
+        assert!(!session.can_undo());
+    }
+
+    #[test]
+    fn a_gesture_under_way_is_cut_where_a_group_opens_and_closes() {
+        let mut session = session();
+        let track = session.edit(|p| Ok(p.add_track("Keys"))).unwrap();
+
+        // The user is dragging a fader when the assistant's turn begins...
+        session.begin_gesture();
+        session.edit(|p| p.set_track_volume(track, -1.0)).unwrap();
+        session.edit(|p| p.set_track_volume(track, -2.0)).unwrap();
+        let group = session.begin_group();
+        // ...keeps dragging while the assistant works...
+        session.edit(|p| p.set_track_volume(track, -3.0)).unwrap();
+        let bass = session.edit(|p| Ok(p.add_track("Bass"))).unwrap();
+        session.edit(|p| p.set_track_volume(track, -4.0)).unwrap();
+        let step = session.end_group(group).expect("the group changed the project");
+        // ...and is still dragging after it has finished.
+        session.edit(|p| p.set_track_volume(track, -5.0)).unwrap();
+        session.edit(|p| p.set_track_volume(track, -6.0)).unwrap();
+        session.end_gesture();
+
+        // The drag after the group, the group, the drag before it, the track.
+        assert_eq!(depth(&mut session), 4);
+        assert!(session.undo());
+        assert_eq!(volume(&session, track), -4.0);
+        assert_eq!(session.undo_step(), Some(step));
+        assert!(session.undo());
+        assert_eq!(volume(&session, track), -2.0, "the group's undo takes back what was done while it was open");
+        assert!(session.project().track(bass).is_err());
+        assert!(session.undo());
+        assert_eq!(volume(&session, track), 0.0);
+    }
+
+    #[test]
+    fn older_steps_undone_inside_a_group() {
+        let mut session = session();
+        let track = session.edit(|p| Ok(p.add_track("Keys"))).unwrap();
+        session.edit(|p| p.set_track_volume(track, -3.0)).unwrap();
+        let mine = session.undo_step();
+
+        // The user undoes and redoes a step of their own while a group is
+        // open: nothing of the group's, so no step for it.
+        let group = session.begin_group();
+        assert!(session.undo());
+        assert!(session.redo());
+        assert_eq!(session.end_group(group), None);
+        assert_eq!((depth(&mut session), session.undo_step()), (2, mine));
+
+        // The user undoes their step, and then the assistant edits from
+        // there: the group's undo returns to where that edit started.
+        let group = session.begin_group();
+        assert!(session.undo());
+        assert_eq!(volume(&session, track), 0.0);
+        session.edit(|p| p.set_track_pan(track, 0.5)).unwrap();
+        session.edit(|p| p.set_track_volume(track, -12.0)).unwrap();
+        let step = session.end_group(group).expect("the group changed the project");
+        assert_eq!(depth(&mut session), 2, "the track and the group");
+        assert!(session.undo());
+        assert_eq!(session.redo_step(), Some(step));
+        let project = session.project();
+        assert_eq!((project.track(track).unwrap().volume_db, project.track(track).unwrap().pan), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_long_group_is_still_one_step_past_the_history_limit() {
+        let mut session = session();
+        let track = session.edit(|p| Ok(p.add_track("Keys"))).unwrap();
+        let before = session.project().clone();
+
+        let group = session.begin_group();
+        for step in 1..=(UNDO_LIMIT + 40) {
+            session.edit(|p| p.set_track_volume(track, -(step as f32) / 10.0)).unwrap();
+        }
+        assert!(session.end_group(group).is_some());
+        assert!(session.undo());
+        assert_eq!(session.project(), &before, "the group's beginning was kept while older stops were forgotten");
+
+        // Without a group the oldest steps go, as they always have.
+        assert!(session.redo());
+        for step in 1..=(UNDO_LIMIT + 40) {
+            session.edit(|p| p.set_track_pan(track, (step % 2) as f32 - 0.5)).unwrap();
+        }
+        assert_eq!(depth(&mut session), UNDO_LIMIT);
+    }
+
+    #[test]
+    fn groups_opened_inside_one_another() {
+        let mut session = session();
+        let before = session.project().clone();
+
+        let outer = session.begin_group();
+        let track = session.edit(|p| Ok(p.add_track("Outer"))).unwrap();
+        let inner = session.begin_group();
+        session.edit(|p| p.set_track_volume(track, -6.0)).unwrap();
+        session.edit(|p| p.set_track_pan(track, 0.5)).unwrap();
+        let inner_step = session.end_group(inner).expect("the inner group changed the project");
+        assert_eq!(depth(&mut session), 2, "the inner group is one step of the outer one");
+        assert_eq!(session.undo_step(), Some(inner_step));
+        session.edit(|p| p.add_midi_clip(track, "Clip", 0.0, 4.0)).unwrap();
+        assert!(session.end_group(outer).is_some());
+        assert_eq!(depth(&mut session), 1);
+        assert!(session.undo());
+        assert_eq!(session.project(), &before);
+
+        // Closed in the other order, the one closed last has nothing left
+        // of its own: the first took it all.
+        assert!(session.redo());
+        let outer = session.begin_group();
+        session.edit(|p| p.set_track_volume(track, -1.0)).unwrap();
+        let inner = session.begin_group();
+        session.edit(|p| p.set_track_volume(track, -2.0)).unwrap();
+        assert!(session.end_group(outer).is_some());
+        assert_eq!(session.end_group(inner), None);
+        assert_eq!(depth(&mut session), 2);
+    }
+
+    #[test]
+    fn another_project_opened_inside_a_group() {
+        let mut session = session();
+        session.edit(|p| Ok(p.add_track("Old"))).unwrap();
+
+        let group = session.begin_group();
+        session.edit(|p| Ok(p.add_track("Older still"))).unwrap();
+        // The history does not carry over to another project, and neither
+        // does what the group had gathered so far.
+        session.new_project();
+        let blank = session.project().clone();
+        let track = session.edit(|p| Ok(p.add_track("New"))).unwrap();
+        session.edit(|p| p.set_track_volume(track, -6.0)).unwrap();
+        assert!(session.end_group(group).is_some());
+        assert_eq!(depth(&mut session), 1);
+        assert!(session.undo());
+        assert_eq!(session.project(), &blank);
+    }
 }

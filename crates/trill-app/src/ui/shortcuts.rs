@@ -51,6 +51,7 @@ pub enum Command {
     ToggleDraw,
     ToggleBlade,
     ToggleBrowser,
+    ToggleAssistant,
     ShowShortcuts,
 }
 
@@ -201,6 +202,7 @@ pub const BINDINGS: &[Binding] = &[
     bind(Command::ZoomToSelection, NONE, Key::Z, When::NotTyping, Section::View, "Zoom to the selection"),
     bind(Command::ZoomToSong, SHIFT, Key::Z, When::NotTyping, Section::View, "Zoom to the whole song"),
     bind(Command::ToggleBrowser, CTRL, Key::B, When::NotTyping, Section::View, "Show or hide the browser"),
+    bind(Command::ToggleAssistant, CTRL_SHIFT, Key::A, When::Always, Section::View, "Show or hide the assistant"),
     bind(Command::ShowShortcuts, NONE, Key::F1, When::Always, Section::View, "This reference"),
 ];
 

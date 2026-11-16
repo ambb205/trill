@@ -1,6 +1,6 @@
 //! Command-line options.
 
-use crate::ui::{BrowserTab, DetailTab, UiOptions};
+use crate::ui::{AssistantOptions, AssistantScene, BrowserTab, DetailTab, UiOptions};
 use anyhow::{Context, anyhow, bail};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -34,6 +34,10 @@ Options:
   --no-plugins            Offer only the built-in devices
   --mcp-port <PORT>       Port of the MCP server for AI assistants (default: 7777)
   --no-mcp                Do not start the MCP server
+  --assistant             Start with the assistant's panel open (Ctrl+Shift+A shows it)
+  --assistant-model <NAME>    Model the assistant asks Claude Code for (default: Claude Code's own choice)
+  --assistant-scene <NAME>    Show a canned conversation in the assistant, for screenshots: ready, working,
+                          answered, limit, api-key, signed-out or not-installed
   --screenshot <PATH.png> Render the window to a PNG and exit (implies --null-audio)
   --exit-after <SECONDS>  Close the window by itself after this long
   -h, --help              Show this help
@@ -73,6 +77,10 @@ pub struct Cli {
     pub no_plugins: bool,
     pub no_mcp: bool,
     pub mcp_port: Option<u16>,
+    /// Open the assistant's panel.
+    pub assistant: bool,
+    pub assistant_model: Option<String>,
+    pub assistant_scene: Option<AssistantScene>,
     pub screenshot: Option<PathBuf>,
     pub exit_after: Option<Duration>,
 }
@@ -97,6 +105,16 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
             "--no-plugins" => cli.no_plugins = true,
             "--no-mcp" => cli.no_mcp = true,
             "--no-browser" => cli.no_browser = true,
+            "--assistant" => cli.assistant = true,
+            "--assistant-model" => cli.assistant_model = Some(value("a model name")?),
+            "--assistant-scene" => {
+                let name = value("the name of a scene")?;
+                let known: Vec<&str> = AssistantScene::ALL.iter().map(|(name, _)| *name).collect();
+                let scene = AssistantScene::named(&name);
+                cli.assistant_scene = Some(
+                    scene.with_context(|| format!("unknown scene '{name}' (expected one of {})", known.join(", ")))?,
+                );
+            }
             "--automation" => cli.automation = true,
             "--shortcuts" => cli.shortcuts = true,
             "--also-select" => cli.also_select.push(value("a clip name")?),
@@ -245,6 +263,14 @@ impl Cli {
             exit_after: self.exit_after,
             open_editor: self.editor.clone(),
             window_size: self.size.unwrap_or(defaults.window_size),
+            assistant: AssistantOptions {
+                open: self.assistant,
+                scene: self.assistant_scene,
+                model: self.assistant_model.clone(),
+                // No address means the server was turned off; one that
+                // could not be listened on is found out in `main`.
+                mcp_off: self.mcp_address().is_none(),
+            },
         }
     }
 }
@@ -428,6 +454,28 @@ mod tests {
         assert_eq!(options.sound_search.as_deref(), Some("kick"));
         assert_eq!(options.select_sound.as_deref(), Some("Kick Deep 01"));
         assert_eq!(run(&["--browse", "devices"]).unwrap().browse, Some(BrowserTab::Devices));
+    }
+
+    #[test]
+    fn the_assistant_can_be_opened_and_told_what_to_use() {
+        let plain = run(&[]).unwrap();
+        let options = plain.ui_options().assistant;
+        assert!(!options.open && options.scene.is_none() && options.model.is_none());
+        assert!(!options.mcp_off, "the MCP server it works through is on unless turned off");
+        assert!(run(&["--no-mcp"]).unwrap().ui_options().assistant.mcp_off);
+
+        let cli = run(&["--assistant", "--assistant-model", "haiku", "--assistant-scene", "working"]).unwrap();
+        let options = cli.ui_options().assistant;
+        assert!(options.open);
+        assert_eq!(options.model.as_deref(), Some("haiku"));
+        assert_eq!(options.scene, Some(AssistantScene::Working));
+        for (name, scene) in AssistantScene::ALL {
+            assert_eq!(run(&["--assistant-scene", name]).unwrap().assistant_scene, Some(scene));
+            assert!(USAGE.contains(name), "the help does not list the scene '{name}'");
+        }
+        let error = run(&["--assistant-scene", "live"]).unwrap_err().to_string();
+        assert!(error.contains("live") && error.contains("signed-out"), "{error}");
+        assert!(run(&["--assistant-model"]).is_err() && run(&["--assistant-scene"]).is_err());
     }
 
     #[test]
