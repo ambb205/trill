@@ -511,17 +511,23 @@ mod tests {
 
     #[test]
     fn closed_hat_chokes_open_hat() {
-        let mut open = make("drumkit", &[]);
-        let (ringing, _) = run(open.as_mut(), 40, |_| 0.0, |b| if b == 0 { note_on(46) } else { vec![] });
-        let mut choked = make("drumkit", &[]);
-        let events = |b: usize| match b {
-            0 => note_on(46),
-            10 => note_on(42),
-            _ => vec![],
-        };
-        let (cut, _) = run(choked.as_mut(), 40, |_| 0.0, events);
-        let late = 30 * BLOCK..40 * BLOCK;
-        assert!(rms(&cut[late.clone()]) < rms(&ringing[late]) * 0.1);
+        // A long open hat, so that it is plainly still ringing when the
+        // closed one that cut it off has long ended.
+        let long = [("open_hat_decay", 1.0)];
+        let mut open = make("drumkit", &long);
+        let (ringing, _) = run(open.as_mut(), 60, |_| 0.0, |b| if b == 0 { note_on(46) } else { vec![] });
+        for closing in [42u8, 44] {
+            let mut choked = make("drumkit", &long);
+            let events = |b: usize| match b {
+                0 => note_on(46),
+                10 => note_on(closing),
+                _ => vec![],
+            };
+            let (cut, _) = run(choked.as_mut(), 60, |_| 0.0, events);
+            let late = 50 * BLOCK..60 * BLOCK;
+            assert!(rms(&ringing[late.clone()]) > 0.005, "the open hat should still ring");
+            assert!(rms(&cut[late.clone()]) < rms(&ringing[late]) * 0.05, "hat {closing} left the open hat ringing");
+        }
     }
 
     #[test]

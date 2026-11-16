@@ -4394,7 +4394,7 @@
             "kick_pitch": 48.0,
             "kick_punch": 0.6,
             "snare_decay": 0.18,
-            "snare_level": 1.25
+            "snare_level": 1.0
           }
         },
         {
