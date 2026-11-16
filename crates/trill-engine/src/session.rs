@@ -20,6 +20,7 @@ use trill_media::MediaCache;
 
 mod controllers;
 mod editors;
+mod params;
 mod playing;
 mod presets;
 mod take;

@@ -210,6 +210,22 @@ pub fn device_json(device: &Device) -> Value {
     out
 }
 
+/// The devices of a chain as a song's overview lists them, with a mark on
+/// each that takes one channel: from there on left and right are the same,
+/// which is worth seeing without asking about every device.
+pub fn chain_json(session: &Session, devices: &[Device]) -> Vec<Value> {
+    let listed = devices.iter().map(|device| {
+        let mut out = device_json(device);
+        if let Ok(channels) = session.device_channels(device.id)
+            && channels.folds_input()
+        {
+            out["channels"] = json!(channels.describe());
+        }
+        out
+    });
+    listed.collect()
+}
+
 pub fn track_json(track: &Track, beats_per_bar: f64, include_notes: bool) -> Value {
     let mut out = track_fields(track, beats_per_bar, include_notes);
     match track.kind {
@@ -408,12 +424,13 @@ pub fn project_json(session: &Session, include_notes: bool) -> Value {
                 if session.is_armed(track.id) {
                     out["armed"] = json!(true);
                 }
+                out["devices"] = json!(chain_json(session, &track.devices));
                 out
             })
             .collect::<Vec<_>>(),
         "master": {
             "volume_db": project.master.volume_db,
-            "devices": project.master.devices.iter().map(device_json).collect::<Vec<_>>(),
+            "devices": chain_json(session, &project.master.devices),
         },
         "automation": project.automation.iter().map(|lane| lane_json(lane, false)).collect::<Vec<_>>(),
         "audio_output": info.output,
@@ -476,6 +493,53 @@ pub fn param_state_json(state: &ParamState) -> Value {
         ParamKind::Bool => json!(state.value >= 0.5),
         _ => json!(round(state.value)),
     };
+    out
+}
+
+/// What a plugin shows for a parameter beyond its current value, in its
+/// own words: its own default, and what values there are.
+pub struct ParamDetail {
+    pub default: String,
+    pub span: ParamSpan,
+}
+
+/// The values a plugin's parameter can take, as the plugin shows them.
+pub enum ParamSpan {
+    /// Every step of a parameter with a few steps, from the lowest.
+    Choices(Vec<String>),
+    /// The two ends of a range.
+    Range(String, String),
+}
+
+/// A plugin's parameter with its current value. The number says little
+/// (most are 0 to 1, whatever they stand for), so it comes with the text
+/// the plugin shows for it, and, when a few parameters were asked about,
+/// with what the plugin shows at the ends of the range and every choice
+/// there is.
+pub fn plugin_param_json(state: &ParamState, text: &str, detail: Option<&ParamDetail>) -> Value {
+    let info = &state.info;
+    // Finer than other numbers in a reply: a thousandth of a knob's travel
+    // can be a semitone, and the value is there to be written back.
+    let value = (state.value * 1e6).round() / 1e6;
+    let mut out = json!({ "id": info.id, "name": info.name, "value": value, "text": text });
+    if info.max != 1.0 || info.min != 0.0 {
+        out["max"] = json!(info.max);
+        if info.min != 0.0 {
+            out["min"] = json!(info.min);
+        }
+    }
+    if let Some(detail) = detail {
+        match &detail.span {
+            ParamSpan::Choices(choices) => out["choices"] = json!(choices),
+            ParamSpan::Range(low, high) => {
+                out["from"] = json!(low);
+                out["to"] = json!(high);
+            }
+        }
+        if detail.default != text {
+            out["default"] = json!(detail.default);
+        }
+    }
     out
 }
 

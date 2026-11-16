@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use trill_core::Device;
-use trill_core::device::{DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance, split_uri};
+use trill_core::device::{ChannelLayout, DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance, split_uri};
 use trill_core::presets::PresetList;
 
 /// The CLAP feature that marks a plugin as an instrument.
@@ -204,12 +204,17 @@ impl DeviceFactory for ClapFactory {
         let created = instantiate(main, request, CREATE_TIMEOUT).map_err(failed)?;
 
         let params = created.params.iter().map(|spec| spec.info.clone()).collect();
+        let main_port = |ports: &[u32]| ports.first().copied().unwrap_or(0);
+        let channels =
+            ChannelLayout { inputs: main_port(&created.ports.inputs), outputs: main_port(&created.ports.outputs) };
+        let defaults = created.params.iter().map(|spec| spec.declared).collect();
         let controller = ClapController::new(
             main.clone(),
             created.id,
             plugin_id.to_string(),
             created.editor.clone(),
             (created.feedback.clone(), created.notes.is_some_and(|port| port.midi)),
+            (channels, defaults),
         );
         let processor = ClapProcessor::new(
             main.clone(),

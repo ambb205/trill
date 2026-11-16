@@ -517,7 +517,7 @@ mod tests {
             unit: String::new(),
             kind: if steps == 0 { ParamKind::Float } else { ParamKind::Int },
         };
-        ParamSpec { id, slot, info, mapping }
+        ParamSpec { id, slot, info, mapping, declared: 0.0, units: String::new() }
     }
 
     /// A plugin with four parameters, of which the device lists two: a

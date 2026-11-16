@@ -10,6 +10,7 @@
 //! one without is used as it is, 0 to 1.
 
 use super::text;
+use crate::param_text::{self, Values};
 use std::collections::{HashMap, HashSet};
 use trill_core::ControllerKind;
 use trill_core::device::ControllerSupport;
@@ -88,6 +89,12 @@ pub(crate) struct ParamSpec {
     pub slot: usize,
     pub info: ParamInfo,
     pub mapping: Mapping,
+    /// The value the plugin itself calls the default, in plain units.
+    /// `info.default` is replaced by the value the instance starts with.
+    pub declared: f64,
+    /// What the plugin's values are measured in, if it says: kept for
+    /// every kind of parameter, to read a value's text with.
+    pub units: String,
 }
 
 /// The parameters of a plugin instance.
@@ -200,7 +207,68 @@ fn spec(param: &Described, name: String, choices: impl FnOnce(u32) -> Option<Vec
             kind,
         },
         mapping,
+        declared: mapping.plain(param.default_normalized),
+        units: param.units.clone(),
     }
+}
+
+/// What the plugin shows for the plain value `value` of a parameter, with
+/// its unit where the plugin keeps that apart ("-6.0" and "dB").
+pub(crate) fn text(controller: &ComPtr<IEditController>, spec: &ParamSpec, value: f64) -> Option<String> {
+    let mut shown: String128 = [0; 128];
+    // SAFETY: `controller` is a live edit controller, used on the plugin
+    // main thread; `shown` is a local the plugin fills in.
+    let result = unsafe { controller.getParamStringByValue(spec.id, spec.mapping.normalize(value), &mut shown) };
+    let shown = text::from_utf16(&shown).trim().to_string();
+    if result != kResultOk || shown.is_empty() {
+        return None;
+    }
+    let units = spec.units.trim();
+    // Some plugins put the unit into the text as well.
+    let has_units = units.is_empty() || shown.to_lowercase().ends_with(&units.to_lowercase());
+    Some(if has_units { shown } else { format!("{shown} {units}") })
+}
+
+/// The plain value of a parameter that the plugin shows as `wanted`: by
+/// the plugin's own account if it gives one, and otherwise found among
+/// what it shows for its values.
+pub(crate) fn value_of(controller: &ComPtr<IEditController>, spec: &ParamSpec, wanted: &str) -> Option<f64> {
+    let ask = |asked: &str| {
+        let mut buffer = [0u16; 256];
+        text::to_utf16(asked, &mut buffer);
+        let mut normalized = f64::NAN;
+        // SAFETY: `controller` is a live edit controller, used on the
+        // plugin main thread; the text is NUL-terminated and `normalized`
+        // a local the plugin fills in.
+        let result = unsafe { controller.getParamValueByString(spec.id, buffer.as_mut_ptr(), &mut normalized) };
+        (result == kResultOk && normalized.is_finite()).then(|| spec.mapping.plain(normalized))
+    };
+    let wanted = wanted.trim();
+    // As it was typed, and without the unit, which plugins that keep the
+    // unit apart do not expect in the text.
+    let units = spec.units.trim();
+    let bare = wanted.len().checked_sub(units.len()).filter(|_| !units.is_empty()).and_then(|at| {
+        let (number, tail) = (wanted.get(..at)?, wanted.get(at..)?);
+        tail.eq_ignore_ascii_case(units).then(|| number.trim_end())
+    });
+    let asked = ask(wanted).or_else(|| bare.and_then(ask));
+    // A plugin's own answer counts only if it shows that value the way it
+    // was asked for: asked for something they do not know, plugins answer
+    // with the nearest end of the range, or with 0.
+    let same = |shown: &str| {
+        let canonical = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+        canonical(shown) == canonical(wanted)
+            || matches!((param_text::number(shown), param_text::number(wanted)),
+                (Some((shown, unit)), Some((wanted, wanted_unit)))
+                    if (wanted_unit.is_empty() || unit == wanted_unit)
+                        && (shown - wanted).abs() <= 1e-9 * wanted.abs().max(1.0))
+    };
+    let confirmed = asked.filter(|value| text(controller, spec, *value).is_some_and(|shown| same(&shown)));
+    let values = match spec.mapping {
+        Mapping::Continuous => Values::Range(0.0, 1.0),
+        Mapping::Stepped { steps } => Values::Steps(steps),
+    };
+    confirmed.or_else(|| param_text::find(wanted, values, |value| text(controller, spec, value)))
 }
 
 /// The name of each of the `steps + 1` values of a stepped parameter, or

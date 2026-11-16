@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use trill_core::ControllerKind;
 use trill_core::device::{
-    ControllerSupport, DeviceController, EditorError, EditorImage, EditorOptions, ParamEdit, ParamEditKind,
-    PresetLoadError,
+    ChannelLayout, ControllerSupport, DeviceController, EditorError, EditorImage, EditorOptions, ParamEdit,
+    ParamEditKind, PresetLoadError,
 };
 use trill_core::presets::PresetInfo;
 
@@ -35,6 +35,10 @@ pub(crate) struct ClapController {
     feedback: Arc<ParamFeedback>,
     /// Whether the plugin's note port takes MIDI, and with it controllers.
     takes_midi: bool,
+    /// The channels of the plugin's main ports.
+    channels: ChannelLayout,
+    /// The value the plugin calls each parameter's default.
+    defaults: Vec<f64>,
 }
 
 impl ClapController {
@@ -44,8 +48,9 @@ impl ClapController {
         plugin_id: String,
         editor: Arc<EditorStatus>,
         (feedback, takes_midi): (Arc<ParamFeedback>, bool),
+        (channels, defaults): (ChannelLayout, Vec<f64>),
     ) -> Self {
-        Self { main, instance, plugin_id, editor, feedback, takes_midi }
+        Self { main, instance, plugin_id, editor, feedback, takes_midi, channels, defaults }
     }
 }
 
@@ -55,6 +60,27 @@ impl DeviceController for ClapController {
     /// the sustain pedal is worked out for it by the host.
     fn controller_support(&self) -> ControllerSupport {
         if self.takes_midi { ControllerSupport::Any } else { ControllerSupport::Listed(vec![ControllerKind::SUSTAIN]) }
+    }
+
+    fn channels(&self) -> Option<ChannelLayout> {
+        Some(self.channels)
+    }
+
+    fn param_defaults(&self) -> Option<Vec<f64>> {
+        Some(self.defaults.clone())
+    }
+
+    fn param_texts(&mut self, values: &[(usize, f64)]) -> Vec<Option<String>> {
+        let (instance, asked) = (self.instance, values.to_vec());
+        let count = values.len();
+        self.main
+            .call(REQUEST_TIMEOUT, move |thread| thread.clap.param_texts(instance, &asked))
+            .unwrap_or_else(|_| vec![None; count])
+    }
+
+    fn param_value(&mut self, index: usize, text: &str) -> Option<f64> {
+        let (instance, text) = (self.instance, text.to_string());
+        self.main.call(REQUEST_TIMEOUT, move |thread| thread.clap.param_value(instance, index, &text)).ok().flatten()
     }
 
     fn save_state(&mut self) -> Option<Vec<u8>> {

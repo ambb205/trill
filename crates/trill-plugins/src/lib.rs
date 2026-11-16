@@ -24,6 +24,8 @@
 //! * `signal` and `notes`: what every format's audio-thread half needs:
 //!   the mapping between a plugin's ports and the device's stereo signal,
 //!   and note bookkeeping.
+//! * `param_text`: a parameter's value from the text a plugin shows for
+//!   it, for the plugins that will not say themselves.
 //! * `edits` and `exclusive`: how the audio-thread and main-thread halves
 //!   of a hosted plugin pass things to each other without waiting.
 //!
@@ -61,6 +63,7 @@ mod edits;
 mod exclusive;
 mod main_thread;
 mod notes;
+mod param_text;
 mod plugin_host;
 mod plugin_thread;
 mod presets;

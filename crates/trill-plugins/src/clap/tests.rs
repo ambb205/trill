@@ -136,6 +136,68 @@ fn parameters_are_listed_sanitized_and_told_apart() {
     assert_eq!(reversed.clamp(5.0), 1.0);
 }
 
+#[test]
+fn a_value_is_shown_in_the_plugins_words_and_found_from_them() {
+    let factory = factory();
+    let mut instance = create(&factory, &device(kind::MONO_GAIN));
+    let at = |id| index(&instance, id);
+    let (gain, steps) = (at(scripted::GAIN), at(scripted::STEPS));
+    let (first, second) = (at(scripted::CUTOFF_1), at(scripted::CUTOFF_2));
+    let controller = instance.controller.as_mut().unwrap();
+    let text = |text: &str| Some(text.to_string());
+
+    // Whatever value is asked about, not only the one it has now; and
+    // nothing for a parameter there is not.
+    let shown = controller.param_texts(&[(gain, 0.5), (steps, 3.0), (first, 440.0), (9999, 0.0)]);
+    assert_eq!(shown, [text("0.50 x"), text("Plate"), text("440 Hz"), None]);
+
+    // The plugin reads its own gain, with the unit or without.
+    assert_eq!(controller.param_value(gain, "1.5 x"), Some(1.5));
+    assert_eq!(controller.param_value(gain, "1.5"), Some(1.5));
+    assert_eq!(controller.param_value(gain, "loud"), None);
+    // It does not convert the name of a step, which is then found among
+    // the names it shows.
+    assert_eq!(controller.param_value(steps, "hall"), Some(2.0));
+    assert_eq!(controller.param_value(steps, " SPRING "), Some(4.0));
+    assert_eq!(controller.param_value(steps, "Cathedral"), None);
+    // Nor a cutoff, which is found by its number.
+    let found = controller.param_value(first, "1000 Hz").unwrap();
+    assert_eq!(controller.param_texts(&[(first, found)]), [text("1000 Hz")]);
+
+    // Asked about the second cutoff, the plugin says 20 whatever the text.
+    // That is believed only where it shows 20 as what was asked for.
+    assert_eq!(controller.param_value(second, "20 Hz"), Some(20.0));
+    let found = controller.param_value(second, "8000").unwrap();
+    assert_eq!(controller.param_texts(&[(second, found)]), [text("8000 Hz")]);
+    assert_eq!(controller.param_value(second, "8 kHz"), None, "not a unit it shows");
+    assert_eq!(controller.param_value(second, "30000 Hz"), None, "not a value it has");
+    assert_eq!(controller.param_value(9999, "1"), None);
+}
+
+#[test]
+fn a_plugin_says_what_channels_it_has_and_what_its_own_defaults_are() {
+    let factory = factory();
+    let effect = create(&factory, &device(kind::MONO_GAIN));
+    let layout = effect.controller.as_ref().unwrap().channels().unwrap();
+    assert_eq!((layout.inputs, layout.outputs, layout.folds_input()), (1, 1, true));
+    assert_eq!(layout.describe(), "mono in, mono out");
+    let instrument = create(&factory, &device(kind::IMPULSE));
+    let layout = instrument.controller.as_ref().unwrap().channels().unwrap();
+    assert_eq!((layout.describe().as_str(), layout.folds_input()), ("no audio in, mono out", false));
+
+    // A parameter is listed with the value it started with as its default
+    // (3); the plugin's own default is the one it declares (2).
+    let defaults = effect.controller.as_ref().unwrap().param_defaults().unwrap();
+    assert_eq!(defaults.len(), effect.params.len());
+    let steps = index(&effect, scripted::STEPS);
+    assert_eq!((effect.params[steps].default, defaults[steps]), (3.0, 2.0));
+    let gain = index(&effect, scripted::GAIN);
+    assert_eq!((effect.params[gain].default, defaults[gain]), (1.0, 1.0));
+    // A default that is no number is one the host makes up, in the range.
+    let reversed = defaults[index(&effect, scripted::REVERSED)];
+    assert!((-1.0..=1.0).contains(&reversed), "{reversed}");
+}
+
 // ---- audio and events ----------------------------------------------------
 
 #[test]
