@@ -171,6 +171,8 @@ fn the_home_row_plays_the_selected_track() {
     down(&mut harness, Key::A);
     assert_eq!(log(&harness), [Sent::On(keys, 60, 100)], "the note leaves in the frame its key arrives in");
     assert_eq!(sounding(&harness), [(keys, 60)]);
+    // The press was the keyboard's: nothing later in the frame saw a key.
+    assert!(!harness.ctx.input(|input| input.key_pressed(Key::A)));
     up(&mut harness, Key::A);
     assert_eq!(log(&harness), [Sent::On(keys, 60, 100), Sent::Off(keys, 60)]);
     assert_all_ended(&harness);
@@ -382,6 +384,10 @@ fn switched_off_the_letters_are_the_shortcuts_they_always_were() {
     harness.key(NONE, Key::Tab);
     harness.key(NONE, Key::X);
     harness.key(NONE, Key::V);
+    // A letter with no shortcut is left for whatever wants it.
+    down(&mut harness, Key::S);
+    assert!(harness.ctx.input(|input| input.key_pressed(Key::S)));
+    up(&mut harness, Key::S);
     let keyboard = harness.app.keyboard();
     assert_eq!((keyboard.lowest(), keyboard.velocity(), keyboard.sustaining()), (60, 100, false));
     assert_eq!(log(&harness), [], "and nothing was played");
@@ -689,12 +695,8 @@ fn a_note_begun_just_before_the_window_lost_the_keyboard_is_ended_there() {
     // so its note ends where the keyboard was lost; what goes down after
     // coming back plays.
     let (mut harness, [keys, ..]) = playing();
-    let events = vec![
-        key_event(Key::A, true),
-        Event::WindowFocused(false),
-        Event::WindowFocused(true),
-        key_event(Key::D, true),
-    ];
+    let events =
+        vec![key_event(Key::A, true), Event::WindowFocused(false), Event::WindowFocused(true), key_event(Key::D, true)];
     harness.step(NONE, events);
     assert_eq!(log(&harness), [Sent::On(keys, 60, 100), Sent::Off(keys, 60), Sent::On(keys, 64, 100)]);
     up(&mut harness, Key::D);
