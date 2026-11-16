@@ -6,7 +6,7 @@ mod common;
 
 use common::*;
 use std::sync::Arc;
-use trill_core::project::AudioContent;
+use trill_core::project::{AudioContent, WarpMode};
 use trill_core::{ChainRef, Note};
 use trill_dsp::{BuiltinFactory, Builtins, sampler};
 use trill_engine::render::{RenderOptions, render};
@@ -145,6 +145,37 @@ fn renders_at_other_rates_than_the_engines_are_right_for_clips_and_samplers() {
                 && (peak(&out.left[at(2.1)..at(2.9)]) - 0.5).abs() < 0.01
         );
     }
+}
+
+#[test]
+fn clips_pointing_far_outside_their_file_are_silent_not_a_crash() {
+    // Offsets the model accepts (any finite number of seconds) but no file
+    // reaches: copied, interpolated and stretched clips alike must simply
+    // have nothing to play. A panic here would be a panic on the audio
+    // thread.
+    let folder = folder();
+    let path = write_wav(&file(&folder, "tone.wav"), SR, &sine(440.0, SR, 1.0, 0.5));
+    let (mut project, track) = audio_project(20.0);
+    let cases = [
+        (1e300, WarpMode::Off, None),
+        (1e300, WarpMode::Repitch, Some(100.0)),
+        // A ratio far beyond what the stretcher covers, so the copy is
+        // read at a speed of its own.
+        (1e300, WarpMode::Beats, Some(999.0)),
+        (1e15, WarpMode::Tonal, Some(999.0)),
+    ];
+    for (index, (offset_seconds, warp, source_tempo)) in cases.into_iter().enumerate() {
+        let content = AudioContent { offset_seconds, warp, source_tempo, ..AudioContent::new(path.clone()) };
+        project.add_audio_clip(track, "far", index as f64, 1.0, content).unwrap();
+    }
+    let out = render(&project, &BuiltinFactory, &options(SR)).unwrap();
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    assert_eq!(peak(&out.left), 0.0);
+
+    // The same on stand-ins, which is what a live graph plays first.
+    let mut rig = LiveRig::new(SR);
+    rig.compile(&project);
+    assert_eq!(peak(&rig.play(4 * SR as usize)), 0.0);
 }
 
 #[test]

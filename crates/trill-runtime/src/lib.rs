@@ -8,7 +8,7 @@
 //!   decoded once however many of them use it;
 //! * the device factories: the built-in devices loading through that
 //!   cache, and the user's plugins;
-//! * the [`Session`](trill_engine::Session);
+//! * the [`Session`];
 //! * the sound [`Library`], opened from the user's settings;
 //! * the settings file itself ([`Runtime::settings`]);
 //! * a housekeeping thread that gives the session its regular turn (which
@@ -92,6 +92,11 @@ pub enum RuntimeError {
 /// The program's shared parts. Front ends hold it in an `Arc` and reach
 /// into the public fields; everything stops when the last holder lets go.
 pub struct Runtime {
+    // Field order is drop order. The housekeeping thread holds the session
+    // too, so it is stopped first: the session then ends on the thread that
+    // lets go of the runtime, not on a background thread that happened to
+    // hold the last reference.
+    _housekeeper: Housekeeper,
     /// The one open project and the engine playing it.
     pub session: SharedSession,
     /// The cache every audio file is read through.
@@ -101,8 +106,6 @@ pub struct Runtime {
     pub library: Arc<Library>,
     plugins: Option<PluginHost>,
     settings: Arc<Mutex<SettingsFile>>,
-    /// Stops the housekeeping thread when the runtime goes.
-    _housekeeper: Housekeeper,
 }
 
 impl Runtime {
@@ -148,7 +151,7 @@ impl Runtime {
         }
         let settings = Arc::new(Mutex::new(settings));
         let housekeeper = Housekeeper::start(session.clone(), library.clone(), settings.clone())?;
-        Ok(Self { session, media, library, plugins, settings, _housekeeper: housekeeper })
+        Ok(Self { _housekeeper: housekeeper, session, media, library, plugins, settings })
     }
 
     /// The plugin host, when plugins are on: for rescanning and for what
@@ -191,7 +194,7 @@ impl Drop for Runtime {
     /// Saves the library's folders, favorites and recently used files if
     /// they changed since the housekeeping thread last looked. Nothing is
     /// written otherwise: a run that changed nothing leaves no trace. The
-    /// thread itself stops when its field is dropped, right after this.
+    /// thread itself is stopped right after this, as the fields go.
     fn drop(&mut self) {
         housekeeping::save_if_changed(&self.library, &self.settings);
     }

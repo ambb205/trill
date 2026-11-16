@@ -519,8 +519,9 @@ impl<'a> Reader<'a> {
         let (left, right) = (&audio.data.left[..frames], &audio.data.right[..frames]);
         if audio.step == 1.0 {
             // Snapping to whole frames moves the clip by at most half a
-            // sample and plays the file exactly as it is stored.
-            let first = (audio.origin + block.anchor_frames).round() as i64 + block.elapsed as i64;
+            // sample and plays the file exactly as it is stored. The sums
+            // saturate: a clip with an absurd offset is silent, not a panic.
+            let first = ((audio.origin + block.anchor_frames).round() as i64).saturating_add(block.elapsed as i64);
             Self::Copy { left, right, first }
         } else {
             let first = audio.origin + (block.anchor_frames + block.elapsed as f64) * audio.step;
@@ -532,19 +533,17 @@ impl<'a> Reader<'a> {
     #[inline]
     fn at(&self, i: usize) -> (f32, f32) {
         match *self {
-            Self::Copy { left, right, first } => match usize::try_from(first + i as i64) {
+            Self::Copy { left, right, first } => match usize::try_from(first.saturating_add(i as i64)) {
                 Ok(index) if index < left.len() => (left[index], right[index]),
                 _ => (0.0, 0.0),
             },
             Self::Interpolate { left, right, first, step } => {
                 let position = first + i as f64 * step;
-                if position < 0.0 {
+                // Also catches positions that are not numbers at all.
+                if !(0.0..left.len() as f64 - 1.0).contains(&position) {
                     return (0.0, 0.0);
                 }
                 let index = position as usize;
-                if index + 1 >= left.len() {
-                    return (0.0, 0.0);
-                }
                 let fraction = (position - index as f64) as f32;
                 (
                     left[index] + (left[index + 1] - left[index]) * fraction,

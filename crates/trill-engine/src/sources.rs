@@ -8,7 +8,8 @@
 //! * Files are decoded and converted to the engine's rate by the shared
 //!   [`MediaCache`], band-limited, once per file and rate.
 //! * A clip that is warped or transposed gets a stretched copy of its whole
-//!   file from the [`Stretcher`](crate::stretcher). The whole file, not the
+//!   file from the engine's stretcher, which makes them on a worker thread
+//!   and keeps them in a bounded cache. The whole file, not the
 //!   part the clip shows: trimming, splitting and moving a clip then only
 //!   change where in that copy it reads, so they are instant and a split is
 //!   inaudible by construction.

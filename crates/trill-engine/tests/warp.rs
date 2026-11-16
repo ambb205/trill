@@ -62,6 +62,14 @@ fn a_warped_click_track_lands_on_the_beats_of_the_project() {
         }
     }
 
+    // A render at another sample rate stretches a copy of its own, at that
+    // rate, and is as exact.
+    let (mut project, track) = audio_project(120.0);
+    add_warped(&mut project, track, &path, 8.0, WarpMode::Beats, 100.0);
+    let out = render(&project, &BuiltinFactory, &RenderOptions { sample_rate: 44_100, ..options() }).unwrap();
+    let worst = assert_clicks_on_the_beat(&out.left, 44_100.0, 120.0, 8, 1.0);
+    println!("at 44.1 kHz  Beats     {worst:>8.3}");
+
     // Unwarped, the same file ignores the tempo: its clicks stay 0.6 s apart.
     let (mut project, track) = audio_project(120.0);
     add_clip(&mut project, track, &path, 0.0, 16.0);
@@ -103,6 +111,25 @@ fn tonal_keeps_the_pitch_repitch_moves_it_and_transpose_shifts_it() {
         assert!((measured - hz).abs() < hz * 0.002, "{mode:?} {transpose:+}: {measured:.3} Hz, wanted {hz:.3}");
         assert!((end - seconds).abs() < 0.01, "{mode:?} {transpose:+}: ends at {end:.4} s, wanted {seconds}");
         assert!((level - 0.5).abs() < 0.03, "{mode:?} {transpose:+}: level {level}");
+    }
+}
+
+#[test]
+fn warped_clips_keep_pitch_and_length_at_any_render_rate() {
+    let folder = folder();
+    let path = tone_at_100(&folder);
+    let (mut project, track) = audio_project(120.0);
+    let clip = add_warped(&mut project, track, &path, 12.0, WarpMode::Tonal, 100.0);
+    project.set_clip_warp(clip, WarpMode::Tonal, Some(100.0), 7.0).unwrap();
+    let wanted = 440.0 * 2f64.powf(7.0 / 12.0);
+    for rate in [44_100.0, 96_000.0] {
+        let out = render(&project, &BuiltinFactory, &RenderOptions { sample_rate: rate as u32, ..options() }).unwrap();
+        assert!(out.problems.is_empty(), "{:?}", out.problems);
+        let hz = zero_crossing_hz(&out.left[(0.3 * rate) as usize..(3.7 * rate) as usize], rate);
+        let end = end_of_sound(&out.left, 0.05) as f64 / rate;
+        println!("{rate} Hz: {hz:.3} Hz (wanted {wanted:.3}), ends at {end:.4} s (wanted 4)");
+        assert!((hz - wanted).abs() < wanted * 0.002, "{rate}: {hz:.3} Hz, wanted {wanted:.3}");
+        assert!((end - 4.0).abs() < 0.01, "{rate}: ends at {end:.4} s, wanted 4.0");
     }
 }
 
