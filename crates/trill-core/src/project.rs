@@ -7,6 +7,7 @@
 
 use crate::ids::{ClipId, DeviceId, TrackId};
 use crate::midi_file::{MidiFile, MidiTrack};
+use crate::presets::PresetRef;
 use crate::time::{Beats, TimeSignature};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -406,6 +407,10 @@ pub struct Device {
     /// Opaque plugin state, captured when the project is saved.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "state_base64")]
     pub state: Option<Vec<u8>>,
+    /// The preset the device was last given: what its sound started from,
+    /// whatever has been changed about it since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<PresetRef>,
 }
 
 fn enabled_default() -> bool {
@@ -1224,7 +1229,15 @@ impl Project {
         let index = index.unwrap_or(devices.len()).min(devices.len());
         devices.insert(
             index,
-            Device { id, uri: uri.into(), name: name.into(), enabled: true, params: BTreeMap::new(), state: None },
+            Device {
+                id,
+                uri: uri.into(),
+                name: name.into(),
+                enabled: true,
+                params: BTreeMap::new(),
+                state: None,
+                preset: None,
+            },
         );
         Ok(id)
     }
