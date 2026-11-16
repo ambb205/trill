@@ -166,7 +166,18 @@ pub fn open(cx: &mut Cx) {
 }
 
 pub fn toggle(cx: &mut Cx) {
-    if cx.settings.open { cx.settings.open = false } else { open(cx) }
+    if cx.settings.open { close(cx) } else { open(cx) }
+}
+
+/// Puts the panel away, unless a stream is being opened: the session is
+/// busy for as long as that takes, and with the panel gone the next click
+/// in the window would wait for it. The panel stays up and says what it
+/// is waiting for; a window that waits with nothing to show for it is a
+/// window that has frozen.
+pub fn close(cx: &mut Cx) {
+    if !cx.settings.applying {
+        cx.settings.open = false;
+    }
 }
 
 fn list_devices(cx: &mut Cx) {
@@ -455,7 +466,7 @@ pub fn modal(ctx: &egui::Context, cx: &mut Cx) {
             midi(ui, cx, now);
         });
     if modal.should_close() {
-        cx.settings.open = false;
+        close(cx);
     }
 }
 

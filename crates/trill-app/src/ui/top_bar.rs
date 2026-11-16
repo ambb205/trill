@@ -55,8 +55,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     // of the name there is room for.
     let shortest = project_group_shortest(&painter, cx, bar);
     let right_start = status_group(ui, cx, bar, shortest + GAP + TRANSPORT_WIDTH + GAP);
-    let compact = right_start < shortest + GAP + TRANSPORT_WIDTH + GAP;
-    let width = if compact { TRANSPORT_COMPACT } else { TRANSPORT_WIDTH };
+    let (width, compact) = transport_width(right_start - shortest);
     let left_end = project_group(ui, cx, bar, right_start - GAP - width - GAP);
 
     // At its usual place when there is room; otherwise squeezed between
@@ -64,6 +63,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     let latest = right_start - GAP - width;
     let left = TRANSPORT_LEFT.min(latest).max(left_end + GAP);
     transport_group(ui, cx, bar, bar.left() + left, compact);
+}
+
+/// How wide the transport is set when `room` lies between the end of the
+/// project group at its shortest and the start of what is on the right,
+/// and whether that is without its clock.
+fn transport_width(room: f32) -> (f32, bool) {
+    if room < GAP + TRANSPORT_WIDTH + GAP { (TRANSPORT_COMPACT, true) } else { (TRANSPORT_WIDTH, false) }
 }
 
 /// A box of the bar's height at `left`, vertically centered.
@@ -664,6 +670,21 @@ mod tests {
         assert_eq!(name_width(500.0, 120.0), 120.0, "and less in a narrow window");
         assert_eq!(name_width(80.0, 120.0), 80.0);
         assert_eq!(name_width(500.0, -30.0), NAME_MIN_WIDTH, "but always a few letters");
+    }
+
+    #[test]
+    fn the_transport_gives_up_its_clock_last_and_only_when_it_must() {
+        let full = GAP + TRANSPORT_WIDTH + GAP;
+        assert_eq!(transport_width(full + 200.0), (TRANSPORT_WIDTH, false));
+        assert_eq!(transport_width(full), (TRANSPORT_WIDTH, false), "an exact fit is a fit");
+        assert_eq!(transport_width(full - 1.0), (TRANSPORT_COMPACT, true));
+        assert_eq!(TRANSPORT_WIDTH - TRANSPORT_COMPACT, POSITION_WIDTH - POSITION_COMPACT, "the clock is what goes");
+        // The smallest window with everything in the bar that can be: the
+        // name cut to a few letters, the dot of unsaved work, the MCP chip.
+        // Wordmark and menus take about 290 points and the right about
+        // 260; what is left has to hold the transport without its clock.
+        let smallest_window = 1060.0;
+        assert!(smallest_window - 290.0 - 260.0 >= GAP + TRANSPORT_COMPACT + GAP, "{TRANSPORT_COMPACT}");
     }
 
     #[test]

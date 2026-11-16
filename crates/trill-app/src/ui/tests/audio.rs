@@ -205,6 +205,8 @@ fn revert_puts_the_form_back_and_a_new_device_drops_a_rate_it_does_not_run_at() 
 #[test]
 fn a_slow_device_does_not_hold_the_window_up() {
     let (mut harness, stage) = studio();
+    let other = harness.session.lock().edit(|project| Ok(project.add_track("Bass"))).unwrap();
+    harness.idle(2);
     open_panel(&mut harness);
     choose(&mut harness, "Device:", "Interface");
     // The driver takes its time to answer.
@@ -228,6 +230,11 @@ fn a_slow_device_does_not_hold_the_window_up() {
     let mut frames = 0;
     while harness.app.settings().is_applying() {
         let before = Instant::now();
+        if frames == 3 {
+            // Something moves the selection meanwhile: the session will
+            // want telling, and that too has to wait its turn.
+            harness.app.state_mut().select_track(other);
+        }
         frame(&mut harness, Vec::new());
         frames += 1;
         assert!(before.elapsed() < Duration::from_millis(150), "a frame waited for the audio device");
@@ -244,11 +251,15 @@ fn a_slow_device_does_not_hold_the_window_up() {
     harness.idle(2);
     assert_eq!(running(&stage).0, "Interface");
     assert_eq!(harness.app.audio().info.device.as_deref(), Some("Interface"));
+    assert_eq!(harness.session.lock().selected_track(), Some(other), "told once the session was free");
 }
 
 #[test]
 fn while_a_device_is_being_opened_nothing_else_asks_for_the_session() {
     let (mut harness, stage) = studio();
+    let other = harness.session.lock().edit(|project| Ok(project.add_track("Bass"))).unwrap();
+    harness.idle(2);
+    let first = harness.app.state().selected_track;
     open_panel(&mut harness);
     choose(&mut harness, "Device:", "Interface");
     // The workers are held: the panel is applying for as long as the test
@@ -256,8 +267,6 @@ fn while_a_device_is_being_opened_nothing_else_asks_for_the_session() {
     harness.app.sounds().hold(true);
     harness.click_label("Apply");
     assert!(harness.app.settings().is_applying());
-    harness.idle(3);
-    assert!(!harness.is_on_screen("Device: Interface") || harness.is_on_screen("Device: Interface"));
 
     // Apply again, and Revert: the buttons wait.
     let apply = harness.labeled("Apply");
@@ -266,6 +275,21 @@ fn while_a_device_is_being_opened_nothing_else_asks_for_the_session() {
     assert_eq!(draft(&harness).output.as_deref(), Some("Interface"), "the form is as it was sent");
     // Space, which would ask the session to play, is not acted on.
     harness.key(Modifiers::NONE, Key::Space);
+    stage.host.advance(960);
+    assert!(!harness.session.lock().transport().playing, "the song was not asked to play");
+    // Nor is the session told of a selection that moved: it hears of it
+    // when it is free again.
+    harness.app.state_mut().select_track(other);
+    frame(&mut harness, Vec::new());
+    frame(&mut harness, Vec::new());
+    // (The window's regular look at the session does tell it, when it can
+    // have the session without waiting; here nothing holds it, so that
+    // look is what the last assertion below is about.)
+    // And the panel stays where it is: Escape does not put it away while
+    // the wait it explains is going on.
+    harness.key(Modifiers::NONE, Key::Escape);
+    harness.key(Modifiers::COMMAND, Key::Comma);
+    assert!(harness.app.settings().is_open(), "the panel says what the window is waiting for");
     assert!(harness.app.settings().is_applying());
 
     harness.app.sounds().hold(false);
@@ -273,10 +297,38 @@ fn while_a_device_is_being_opened_nothing_else_asks_for_the_session() {
     harness.idle(2);
     assert!(!harness.app.settings().is_applying());
     assert_eq!(running(&stage).0, "Interface");
-    assert_eq!(
-        stage.host.requests().iter().filter(|request| request.device.as_deref() == Some("Interface")).count(),
-        1
-    );
+    let opened = stage.host.requests().iter().filter(|request| request.device.as_deref() == Some("Interface")).count();
+    assert_eq!(opened, 1, "the device was opened once, however often Apply was pressed");
+    assert_eq!(harness.session.lock().selected_track(), Some(other), "the session has caught up with the selection");
+    assert_ne!(first, Some(other));
+    harness.key(Modifiers::NONE, Key::Escape);
+    assert!(!harness.app.settings().is_open(), "done, the panel can be put away");
+}
+
+#[test]
+fn nothing_is_played_from_the_computer_keyboard_behind_the_panel() {
+    let midi = ScriptedMidi::new();
+    let options =
+        UiOptions { keyboard: crate::ui::KeyboardOptions { on: true, hold: Vec::new() }, ..UiOptions::default() };
+    let (mut harness, _stage) = on_stage(three_outputs(), midi, options, Storage::Nowhere, |session| {
+        let track = session.edit(|project| Ok(project.add_track("Keys"))).unwrap();
+        session.add_device(ChainRef::Track(track), super::recording::PROBE_URI, None, None).unwrap();
+    });
+    // A note held when the panel opens ends there.
+    let key =
+        |pressed| Event::Key { key: Key::A, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE };
+    harness.step(Modifiers::NONE, vec![key(true)]);
+    assert_eq!(harness.app.keyboard().sounding().len(), 1);
+    open_panel(&mut harness);
+    assert_eq!(harness.app.keyboard().sounding(), [], "the panel took the keyboard, and the note with it");
+    harness.step(Modifiers::NONE, vec![key(false)]);
+    // And the letters play nothing while it is up.
+    let sent = harness.app.keyboard().sent.len();
+    harness.key(Modifiers::NONE, Key::D);
+    assert_eq!(harness.app.keyboard().sent.len(), sent);
+    harness.key(Modifiers::NONE, Key::Escape);
+    harness.key(Modifiers::NONE, Key::D);
+    assert_eq!(harness.app.keyboard().sent.len(), sent + 2, "put away, they play again");
 }
 
 // ---- when things go wrong, in sentences ---------------------------------------------------

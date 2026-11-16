@@ -938,6 +938,16 @@ fn whatever_is_done_every_note_that_starts_also_ends() {
                 harness.key(NONE, Key::Escape);
             }
             95 => harness.key(NONE, [Key::C, Key::V][random(2)]),
+            96..=97 => {
+                // A track is armed or disarmed, as an assistant might:
+                // the keys then play other tracks than a moment ago.
+                let track = tracks[random(3)];
+                let mut session = harness.session.lock();
+                let armed = session.is_armed(track);
+                let _ = session.set_armed(track, !armed);
+                drop(session);
+                harness.idle(1);
+            }
             _ => harness.idle(1 + random(3)),
         }
         // Now and then the player puts things right and plays on, or most

@@ -283,6 +283,8 @@ impl TrillApp {
                 // it runs at, and why that is not what was asked for.
                 if session.audio_revision() != self.audio.revision {
                     self.audio = AudioSummary::of(&session);
+                    // A new stream may have new meters behind it.
+                    self.snapshot = Snapshot::capture(&session, &params_tracks(&self.state));
                 }
                 self.audio.hear_latency(session.output_latency_ms());
 
