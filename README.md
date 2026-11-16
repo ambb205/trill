@@ -38,6 +38,7 @@ cargo test -p trill-plugins -- --include-ignored    # against the CLAP and VST3 
 cargo test -p trill-media -- --include-ignored      # decoding audio files found in this machine's usual folders
 TRILL_TEST_PLUGIN_WINDOWS=1 cargo test -p trill-plugins --test editor_windows -- --test-threads=1   # opens windows
 TRILL_TEST_CLAUDE=1 cargo test -p trill-assistant --test real_cli    # talks to an installed, signed-in Claude Code
+TRILL_TEST_CLAUDE=1 cargo test -p trill-app live_ -- --test-threads=1    # ...through the assistant's panel (five messages)
 ```
 
 Run the first two after touching plugin hosting or audio decoding.
@@ -69,6 +70,25 @@ claude mcp add trill -- /path/to/target/debug/trill-mcp
 Then ask for music: *"Write a slow, warm synthwave track in A minor, about a minute long. Render it and check the
 mix."* [`examples/first-light.trill`](examples/first-light.trill) was written this way, entirely through tool
 calls.
+
+### Or ask from inside the window
+
+The assistant is a panel down the right side (`Ctrl+Shift+A`, or the button at the right end of the top bar). It
+runs the Claude Code you have installed, signed in as you are there, against the same MCP server, and adds what a
+client outside the window cannot have:
+
+- every message goes with what you are looking at (the selected track, clips, notes and device, the time
+  selection, the playhead, the loop, the open tab), so "make this busier" has a "this";
+- everything it changes while answering one message is one undo step, with an Undo on the turn itself;
+- the reply appears as it is written, each tool call is a line in plain words that unfolds to what was sent and
+  answered, and Stop ends the turn.
+
+Trill never asks for, reads or stores a login: if Claude Code is not installed or not signed in, the panel says so
+and what to do about it in a terminal. Conversations are kept per project beside the settings and taken up again
+the next time the project is open. The assistant comes in by a door of its own on the MCP server (`/assistant`),
+through which files are written only into the project's folder or `Documents/Trill`.
+
+![The assistant after a turn that added a bass line, with the Undo for it](crates/trill-app/screenshots/assistant-answered.png)
 
 ## What is in the box
 
@@ -184,8 +204,8 @@ Working: everything listed above, with tests.
 
 Not yet: running plugins out of process (only scanning is isolated today, so a plugin that crashes while playing
 still takes the app with it; the safety copy is what saves the work), a button for plugin editors and a prompt
-for recovered projects in the window (both are reachable over MCP so far), plugin editors on Linux and macOS, the
-assistant's chat panel, session (clip-launching) view, audio recording, warp markers, MIDI input devices, plugin
+for recovered projects in the window (both are reachable over MCP so far), plugin editors on Linux and macOS,
+session (clip-launching) view, audio recording, warp markers, MIDI input devices, plugin
 delay compensation, multi-core rendering. Only Windows has been run so far.
 
 ## Licence

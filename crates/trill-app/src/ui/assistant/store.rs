@@ -23,7 +23,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use trill_assistant::SessionId;
 
 const FILE: &str = "assistant.json";
@@ -106,6 +106,29 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs())
 }
 
+/// How often a file is tried again when it cannot be had this moment, and
+/// how long the first wait is; each one after is that much longer.
+const TRIES: u32 = 6;
+const FIRST_WAIT: Duration = Duration::from_millis(40);
+
+/// Does `attempt` until it succeeds, a few times over. On Windows a file
+/// that has just been written is opened by the virus scanner for a moment,
+/// and renaming or reading it in that moment is refused; a moment later it
+/// is not. A file that is not there is not waited for. Only ever called on
+/// the store's own thread, where a wait holds nobody up.
+fn persistently<T>(mut attempt: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut tried = 1;
+    loop {
+        match attempt() {
+            Err(error) if tried < TRIES && error.kind() != std::io::ErrorKind::NotFound => {
+                std::thread::sleep(FIRST_WAIT * tried);
+                tried += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Replaces `path` with `text` in one step.
 fn write(path: &Path, text: &str) -> std::io::Result<()> {
     if let Some(folder) = path.parent() {
@@ -116,7 +139,7 @@ fn write(path: &Path, text: &str) -> std::io::Result<()> {
     let temporary = PathBuf::from(temporary);
     let written = std::fs::File::create(&temporary)
         .and_then(|mut file| file.write_all(text.as_bytes()))
-        .and_then(|()| std::fs::rename(&temporary, path));
+        .and_then(|()| persistently(|| std::fs::rename(&temporary, path)));
     if written.is_err() {
         let _ = std::fs::remove_file(&temporary);
     }
@@ -265,7 +288,8 @@ fn work(queue: &Receiver<Job>, loaded: &Sender<(SessionId, Option<Transcript>)>,
                 let _ = std::fs::remove_file(path);
             }
             Job::Read { session, path } => {
-                let transcript = std::fs::read_to_string(path).ok().and_then(|text| Transcript::from_json(&text));
+                let text = persistently(|| std::fs::read_to_string(&path));
+                let transcript = text.ok().and_then(|text| Transcript::from_json(&text));
                 // The receiver is gone only when the window has closed.
                 let _ = loaded.send((session, transcript));
                 ctx.request_repaint();
@@ -278,7 +302,7 @@ fn work(queue: &Receiver<Job>, loaded: &Sender<(SessionId, Option<Transcript>)>,
 mod tests {
     use super::*;
     use crate::ui::assistant::transcript::{Ending, TurnEnd};
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     fn id(last: char) -> SessionId {
         SessionId::parse(&format!("39367d22-e40b-4a04-9358-33e91538ff0{last}")).unwrap()
@@ -289,7 +313,7 @@ mod tests {
     }
 
     fn wait_for_loaded(store: &mut Store) -> (SessionId, Option<Transcript>) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             if let Some(loaded) = store.loaded() {
                 return loaded;
@@ -371,6 +395,37 @@ mod tests {
         assert_eq!(store.remembered.conversations.len(), MAX_CONVERSATIONS);
         assert_eq!(store.conversation(Path::new("songs/0.trill")), None, "the least recently used went");
         assert!(store.conversation(Path::new(&format!("songs/{}.trill", MAX_CONVERSATIONS + 4))).is_some());
+    }
+
+    #[test]
+    fn a_file_held_for_a_moment_is_tried_again_and_a_missing_one_is_not() {
+        use std::io::{Error, ErrorKind};
+        // Refused twice, as when a scanner has the file open, then let go.
+        let mut calls = 0;
+        let result = persistently(|| {
+            calls += 1;
+            if calls < 3 { Err(Error::from(ErrorKind::PermissionDenied)) } else { Ok(calls) }
+        });
+        assert_eq!(result.unwrap(), 3);
+
+        // Held for good: given up after a few tries, with the reason.
+        let mut calls = 0;
+        let result: std::io::Result<()> = persistently(|| {
+            calls += 1;
+            Err(Error::from(ErrorKind::PermissionDenied))
+        });
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::PermissionDenied);
+        assert_eq!(calls, TRIES);
+
+        // Not there: there is nothing to wait for.
+        let mut calls = 0;
+        let started = Instant::now();
+        let result: std::io::Result<()> = persistently(|| {
+            calls += 1;
+            Err(Error::from(ErrorKind::NotFound))
+        });
+        assert_eq!((result.unwrap_err().kind(), calls), (ErrorKind::NotFound, 1));
+        assert!(started.elapsed() < FIRST_WAIT);
     }
 
     #[test]

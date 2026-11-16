@@ -4,8 +4,10 @@
 //! It runs the user's own installed, signed-in Claude Code (through
 //! `trill-assistant`, whose five rules bind this module too) against Trill's
 //! own MCP server, so everything the assistant does is done with the same
-//! tools any MCP client has, and shows up in the window as it happens. What
-//! the panel adds to an outside client:
+//! tools any MCP client has, and shows up in the window as it happens. It
+//! comes in by the door the server keeps for it (`/assistant`), where what
+//! the tools may write is held to the user's working folders. What the
+//! panel adds to an outside client:
 //!
 //! * **It knows what the user is looking at.** Every message goes with a
 //!   description of the selection, the playhead, the loop and the open tab

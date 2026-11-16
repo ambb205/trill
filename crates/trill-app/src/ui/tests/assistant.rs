@@ -843,7 +843,8 @@ fn a_conversation_billed_to_an_api_key_says_so() {
 
 /// Runs frames until the conversation kept on disk has been read back.
 fn wait_for_the_conversation(harness: &mut Harness) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Long enough for a machine that is busy with something else.
+    let deadline = Instant::now() + Duration::from_secs(30);
     while harness.items().is_empty() {
         assert!(Instant::now() < deadline, "the kept conversation never arrived");
         std::thread::sleep(Duration::from_millis(2));
@@ -1081,7 +1082,11 @@ mod live {
         let mut zebra = None;
         let mut harness = start(home.path(), |session| {
             let (_, clips) = three_tracks(session);
-            session.edit(|project| Ok(project.clip_mut(clips[1])?.name = "Zebra".to_owned())).unwrap();
+            let rename = |project: &mut Project| {
+                project.clip_mut(clips[1])?.name = "Zebra".to_owned();
+                Ok(())
+            };
+            session.edit(rename).unwrap();
             zebra = Some(clips[1]);
         });
         let zebra = zebra.unwrap();

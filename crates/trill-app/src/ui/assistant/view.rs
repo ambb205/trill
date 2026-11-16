@@ -305,7 +305,8 @@ fn conversation(ui: &mut Ui, cx: &mut Cx, body: Rect) {
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             let Cx { assistant, state, theme, .. } = cx;
             if assistant.transcript.is_empty() {
-                welcome(ui, theme, state, &mut actions);
+                let ready = matches!(assistant.readiness, Readiness::Ready(_));
+                welcome(ui, theme, state, ready, &mut actions);
             }
             for (index, item) in assistant.transcript.items.iter().enumerate() {
                 match item {
@@ -354,8 +355,9 @@ fn send(cx: &mut Cx, message: &str) -> bool {
     sent
 }
 
-/// What the panel says before anything has been said.
-fn welcome(ui: &mut Ui, theme: &Theme, state: &mut UiState, actions: &mut Vec<Action>) {
+/// What the panel says before anything has been said: what the assistant
+/// is, what it runs on, and, once it can be talked to, a few things to ask.
+fn welcome(ui: &mut Ui, theme: &Theme, state: &mut UiState, ready: bool, actions: &mut Vec<Action>) {
     ui.add_space(14.0);
     label(ui, theme.text.caps, "Ask about this song", theme.ink, EDGE, 16.0);
     ui.add_space(6.0);
@@ -379,6 +381,19 @@ fn welcome(ui: &mut Ui, theme: &Theme, state: &mut UiState, actions: &mut Vec<Ac
         EDGE,
         EDGE,
     );
+    ui.add_space(6.0);
+    paragraph(
+        ui,
+        style,
+        "It runs the Claude Code installed on this computer, signed in as you are there. Messages count against \
+         your usage there.",
+        theme.ink_dim,
+        EDGE,
+        EDGE,
+    );
+    if !ready {
+        return;
+    }
     ui.add_space(14.0);
     label(ui, theme.text.micro, "For example", theme.ink_faint, EDGE, 16.0);
     let top = ui.cursor().top();

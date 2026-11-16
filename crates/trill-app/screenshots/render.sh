@@ -3,11 +3,16 @@
 #
 #   sh crates/trill-app/screenshots/render.sh
 #
+# With a word after it, only the pictures with that word in their name:
+#
+#   sh crates/trill-app/screenshots/render.sh assistant
+#
 # A screenshot run is hermetic: no audio device, no plugins, no pointer and
 # no user settings, so the pictures are the same on every machine. Look at
 # what changed before committing them: they are the record of what the
 # window looks like, and the place where a layout slip shows first.
 set -eu
+only=${1:-}
 
 cargo build -p trill-app
 bin=target/debug/trill
@@ -29,6 +34,10 @@ night=$sounds/night-shift.trill
 shot() {
     name=$1
     shift
+    case "$name" in
+        *"$only"*) ;;
+        *) return 0 ;;
+    esac
     "$bin" "$@" --screenshot "$out/$name.png"
     echo "$name"
 }
@@ -76,3 +85,18 @@ shot sounds-missing-file "$night" --browse sounds --select "Lost Take"
 shot min-window-sounds "$night" --browse sounds --library "$pack" --sound "Bass Loop 120bpm Am" --select "Bass Loop"     --size 1060x640
 shot graphite-sounds-browser "$night" --browse sounds --library "$pack" --sound "Drum Loop Steady 120bpm"     --select "Pad Loop" --theme graphite
 shot graphite-sounds-drum-rack "$night" --browse sounds --library "$pack" --search kick --select Beat --tab devices     --theme graphite
+
+# The assistant's panel: ready, in the middle of a turn, after a turn that
+# changed the song, at a usage limit after a tool call that failed, with
+# nobody signed in, with no CLI, and in the smallest window with the notice
+# that an API key is being billed. What it shows is a scripted conversation
+# played through the panel's own handling of a turn; no CLI is started, and
+# where the script changes the song, the song is changed.
+shot assistant-ready "$song" --select Lead --assistant-scene ready
+shot assistant-working "$song" --select "Beat A" --assistant-scene working
+shot assistant-answered "$song" --select Bass --assistant-scene answered
+shot assistant-limit "$song" --select Lead --assistant-scene limit
+shot assistant-signed-out "$song" --select Lead --assistant-scene signed-out
+shot assistant-not-installed "$song" --select Lead --assistant-scene not-installed
+shot min-window-assistant "$song" --select Bass --assistant-scene api-key --size 1060x640
+shot graphite-assistant-answered "$song" --select Bass --assistant-scene answered --theme graphite
