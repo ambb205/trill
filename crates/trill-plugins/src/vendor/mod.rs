@@ -16,6 +16,10 @@
 //! * [`serum`]: Serum 2's `.SerumPreset` files (Xfer's container, [`xfer`]).
 //! * [`ample`]: the preset files of Ample Sound's guitars and basses, which
 //!   are the XML document the plugin's state is.
+//! * [`superior`]: the factory kits of Superior Drummer 3's sound
+//!   libraries, which are the text the plugin's state is, many to a file.
+//! * [`archetype`]: the presets of Neural DSP's Archetype amplifiers,
+//!   which are the tree the plugin's state is, in JUCE's binary form.
 //!
 //! A reader takes files Trill did not write. It reads no more of a file
 //! than it has set aside room for, checks every length it is told against
@@ -26,11 +30,13 @@
 //! Nothing is ever written to a vendor's folders.
 
 pub(crate) mod ample;
+pub(crate) mod archetype;
 mod cbor;
 pub(crate) mod child;
 mod juce;
 mod places;
 pub(crate) mod serum;
+pub(crate) mod superior;
 mod xfer;
 mod xml;
 
@@ -57,10 +63,12 @@ const MAX_FILE: u64 = 256 * 1024 * 1024;
 pub(crate) enum Format {
     Serum2,
     Ample,
+    Superior3,
+    Archetype,
 }
 
 /// Every format there is.
-const FORMATS: [Format; 2] = [Format::Serum2, Format::Ample];
+const FORMATS: [Format; 4] = [Format::Serum2, Format::Ample, Format::Superior3, Format::Archetype];
 
 impl Format {
     /// The format's name in a preset's locator.
@@ -68,6 +76,8 @@ impl Format {
         match self {
             Format::Serum2 => "serum2",
             Format::Ample => "ample",
+            Format::Superior3 => "superior3",
+            Format::Archetype => "archetype",
         }
     }
 
@@ -81,7 +91,9 @@ impl Format {
     pub(crate) fn of(plugin: &PluginRef) -> Option<Self> {
         match plugin.id.as_str() {
             serum::CLASS => Some(Format::Serum2),
+            superior::CLASS => Some(Format::Superior3),
             id if ample::is_ours(id) => Some(Format::Ample),
+            id if archetype::is_ours(id) => Some(Format::Archetype),
             _ => None,
         }
     }
@@ -114,6 +126,8 @@ pub(crate) fn list(plugin: &PluginRef, places: &VendorPlaces, sink: &mut dyn Sin
     match Format::of(plugin) {
         Some(Format::Serum2) => serum::list(plugin, places, sink),
         Some(Format::Ample) => ample::list(plugin, places, sink),
+        Some(Format::Superior3) => superior::list(plugin, places, sink),
+        Some(Format::Archetype) => archetype::list(plugin, places, sink),
         None => {}
     }
 }
@@ -125,11 +139,12 @@ pub(crate) fn list(plugin: &PluginRef, places: &VendorPlaces, sink: &mut dyn Sin
 ///
 /// An error is a sentence about the preset: why it cannot be loaded.
 pub(crate) fn build(format: Format, file: &Path, key: Option<&str>, current: &PluginState) -> Result<Built, String> {
-    let _ = key;
     let bytes = read_whole(file)?;
     match format {
         Format::Serum2 => serum::build(&bytes, current),
         Format::Ample => ample::build(&bytes, current),
+        Format::Superior3 => superior::build(&bytes, key, current),
+        Format::Archetype => archetype::build(&bytes, current),
     }
     .map_err(|reason| format!("'{}' cannot be loaded: {reason}", file.display()))
 }
@@ -141,6 +156,8 @@ pub(crate) fn missing<'a>(format: Format, marks: &'a [Mark], state: &PluginState
     let shown = |mark: &Mark| match format {
         Format::Serum2 => serum::shown(state, &mark.name),
         Format::Ample => ample::shown(state, &mark.name),
+        Format::Superior3 => superior::shown(state, &mark.name),
+        Format::Archetype => archetype::shown(state, &mark.name),
     };
     marks.iter().filter(|mark| shown(mark).is_none_or(|value| !same_value(&value, &mark.value))).collect()
 }
