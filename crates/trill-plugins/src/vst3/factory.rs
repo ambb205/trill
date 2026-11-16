@@ -10,6 +10,7 @@ use crate::plugin_thread::{self, CREATE_TIMEOUT, PluginThread, plugin_thread};
 use crate::presets::store::{PluginRef, PresetFormat, PresetStore};
 use crate::scan::catalog::{Format, Inventory, Settings};
 use crate::scan::{self, ScanFailure, ScanMode, Scanner};
+use crate::vendor::VendorPlaces;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,6 +67,9 @@ pub struct Vst3Config {
     /// first. A plugin's presets are in `<vendor>/<plugin name>` below
     /// each, in whatever folders the user sorts them into.
     pub preset_paths: Vec<PathBuf>,
+    /// Where vendors keep presets in formats of their own, for the
+    /// plugins whose vendor's format is read ([`VendorPlaces`]).
+    pub vendor_places: VendorPlaces,
 }
 
 impl Default for Vst3Config {
@@ -78,6 +82,7 @@ impl Default for Vst3Config {
             cache_path: scan::cache::default_directory().map(|directory| directory.join(CACHE_FILE)),
             scan_timeout: Duration::from_secs(20),
             preset_paths: super::standard_preset_paths(),
+            vendor_places: VendorPlaces::system(),
         }
     }
 }
@@ -122,6 +127,9 @@ struct Shared {
     main: MainThread<PluginThread>,
     installed: Inventory,
     presets: PresetStore,
+    /// Where a vendor's preset is made into a state: in the scanner
+    /// process, like everything that reads files Trill did not write.
+    scanner: Scanner,
 }
 
 impl Vst3Factory {
@@ -132,10 +140,12 @@ impl Vst3Factory {
     pub fn new(mut config: Vst3Config) -> std::io::Result<Self> {
         let main = plugin_thread()?;
         let folders = std::mem::take(&mut config.preset_paths);
+        let places = std::mem::take(&mut config.vendor_places);
+        let scanner = config.scanner.clone();
         let settings: Settings = config.into();
-        let presets = PresetStore::new(&PRESETS, settings.preset_settings(folders), main.clone());
+        let presets = PresetStore::new(&PRESETS, settings.preset_settings(folders, places), main.clone());
         let installed = Inventory::new(&FORMAT, settings, main.clone());
-        Ok(Self { shared: Arc::new(Shared { main, installed, presets }) })
+        Ok(Self { shared: Arc::new(Shared { main, installed, presets, scanner }) })
     }
 
     /// The installed plugin `uri` names, as the plugin whose presets are
@@ -179,6 +189,7 @@ impl Vst3Factory {
             cache_path: None,
             scan_timeout: Duration::from_secs(5),
             preset_paths: Vec::new(),
+            vendor_places: VendorPlaces::default(),
         };
         Self::with_modules_in(config, modules)
     }
@@ -238,7 +249,8 @@ impl DeviceFactory for Vst3Factory {
         let created = instantiate(main, request, CREATE_TIMEOUT).map_err(failed)?;
 
         let params = created.params.iter().map(|spec| spec.info.clone()).collect();
-        let controller = Vst3Controller::new(main.clone(), installed.name.clone(), &created);
+        let scanner = self.shared.scanner.clone();
+        let controller = Vst3Controller::new(main.clone(), installed.name.clone(), &created, class, scanner);
         let processor = Vst3Processor::new(
             main.clone(),
             installed.name.clone(),
@@ -311,6 +323,7 @@ mod tests {
             cache_path: Some(dir.path().join("cache.json")),
             scan_timeout: Duration::from_secs(5),
             preset_paths: Vec::new(),
+            vendor_places: VendorPlaces::default(),
         })
         .unwrap()
     }

@@ -41,6 +41,7 @@ impl Rig {
             cache_path: Some(dir.path().join("cache").join("vst3.json")),
             scan_timeout: Duration::from_secs(10),
             preset_paths: vec![dir.path().join("user"), dir.path().join("shared")],
+            vendor_places: crate::VendorPlaces::default(),
         };
         let factory = Vst3Factory::with_modules_in(config, vec![("scripted", scripted::factory())]);
         Self { dir, factory }

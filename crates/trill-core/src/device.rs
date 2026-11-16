@@ -401,6 +401,15 @@ pub trait DeviceController: Send {
         Err(PresetLoadError::Unsupported)
     }
 
+    /// What the device goes on doing after the preset it was last given,
+    /// where that takes long enough to be worth telling whoever asked for
+    /// the preset: a drum sampler reads its samples for most of a minute,
+    /// and is silent or cut short until it has. `None` for a device that
+    /// is as ready as it was. Asking takes the answer: it is given once.
+    fn take_preset_note(&mut self) -> Option<String> {
+        None
+    }
+
     /// Which MIDI controllers the device does something with, if it can
     /// say. Cheap: a view may ask whenever it is drawn.
     fn controller_support(&self) -> ControllerSupport {

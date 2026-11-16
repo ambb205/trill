@@ -36,6 +36,7 @@ struct Options {
     limit: usize,
     set: Vec<(String, String)>,
     stereo: bool,
+    state: Option<std::path::PathBuf>,
 }
 
 fn parse(arguments: &[String]) -> Result<Options, String> {
@@ -46,6 +47,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         match argument.as_str() {
             "--changed" => options.changed = true,
             "--stereo" => options.stereo = true,
+            "--state" => options.state = Some(value("--state")?.into()),
             "--limit" => options.limit = value("--limit")?.parse().map_err(|_| "--limit needs a number")?,
             "--set" => {
                 let pair = value("--set")?;
@@ -196,6 +198,18 @@ fn run(options: &Options) -> Result<(), String> {
             text(2),
             if moved(index) { "  *" } else { "" }
         );
+    }
+
+    if let Some(folder) = &options.state {
+        std::fs::create_dir_all(folder).map_err(|error| error.to_string())?;
+        match controller.save_state() {
+            Some(state) => {
+                let file = folder.join("state.bin");
+                std::fs::write(&file, &state).map_err(|error| error.to_string())?;
+                println!("state: {} bytes, written to {}", state.len(), file.display());
+            }
+            None => println!("state: the plugin gives none"),
+        }
     }
 
     for (name, text) in &options.set {

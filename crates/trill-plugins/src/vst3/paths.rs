@@ -156,7 +156,7 @@ fn platform_preset_paths(
 /// profile would have them: moved to another disk, or into a folder that
 /// is kept in step with a server. The system knows.
 #[cfg(windows)]
-fn documents_folder() -> Option<PathBuf> {
+pub(crate) fn documents_folder() -> Option<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::System::Com::CoTaskMemFree;
     use windows_sys::Win32::UI::Shell::{FOLDERID_Documents, SHGetKnownFolderPath};
@@ -180,7 +180,7 @@ fn documents_folder() -> Option<PathBuf> {
 }
 
 #[cfg(not(windows))]
-fn documents_folder() -> Option<PathBuf> {
+pub(crate) fn documents_folder() -> Option<PathBuf> {
     None
 }
 

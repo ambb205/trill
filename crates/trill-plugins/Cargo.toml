@@ -30,6 +30,12 @@ serde_json.workspace = true
 vst3 = "0.3.0"
 # Loads VST3 modules. (clack loads CLAP libraries with it too.)
 libloading = "0.8"
+# For the presets vendors keep in files of their own: Serum 2's are
+# zstd-compressed, and its states carry the MD5 of their compressed body.
+# Both are small and written in Rust alone: no C compiler, no further
+# dependencies (ruzstd's checksum support is left out).
+ruzstd = { version = "0.9", default-features = false, features = ["std"] }
+md5 = "0.8"
 
 # The plugin main thread runs a Win32 message loop and hosts the windows
 # of plugin editors, the scanner process turns off crash dialogs, and VST3

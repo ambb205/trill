@@ -95,11 +95,17 @@ pub(crate) enum Locator {
     /// A program of one of a VST3 plugin's program lists: `index` of the
     /// `steps + 1` values of the parameter `param` that selects programs.
     Vst3Program { param: u32, index: u32, steps: u32 },
+    /// A preset in a file of the vendor's own format ([`crate::vendor`]),
+    /// with the key that tells it apart if the file holds several.
+    Vendor { format: crate::vendor::Format, path: PathBuf, key: Option<String> },
 }
 
 /// What separates the parts of a locator's text. A line break cannot be
 /// part of a file name on any system that is in use.
 const LOCATOR_SEPARATOR: char = '\n';
+/// What the kind of a vendor preset's locator begins with; the name of
+/// its format follows.
+const VENDOR_KIND: &str = "vendor-";
 
 impl Locator {
     pub(crate) fn to_text(&self) -> String {
@@ -114,6 +120,10 @@ impl Locator {
             Locator::Vst3File { path } => join("vst3-file", &path.to_string_lossy(), ""),
             Locator::Vst3Program { param, index, steps } => {
                 join("vst3-program", &param.to_string(), &format!("{index}/{steps}"))
+            }
+            Locator::Vendor { format, path, key } => {
+                let kind = format!("{VENDOR_KIND}{}", format.tag());
+                join(&kind, &path.to_string_lossy(), key.as_deref().unwrap_or_default())
             }
         }
     }
@@ -133,6 +143,10 @@ impl Locator {
                     index: index.parse().ok()?,
                     steps: steps.parse().ok()?,
                 })
+            }
+            vendor if !first.is_empty() => {
+                let format = crate::vendor::Format::parse(vendor.strip_prefix(VENDOR_KIND)?)?;
+                Some(Locator::Vendor { format, path: PathBuf::from(first), key: key() })
             }
             _ => None,
         }
@@ -229,11 +243,42 @@ impl Sink for Printer {
     }
 }
 
+/// What the scanner process is told of a plugin whose presets it is to
+/// read, beyond the plugin's file and id: what the plugin is called, and
+/// where vendors keep presets of their own ([`crate::vendor`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct About {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub vendor: String,
+    #[serde(default)]
+    pub places: crate::vendor::VendorPlaces,
+}
+
 /// Reads the presets of the plugin `id` in `path` **in the current
-/// process**, by running the plugin's code. Like
+/// process**: the ones its vendor keeps in files of a format of its own,
+/// which takes no code of the plugin's, and then the ones only the
+/// plugin's code can tell of. Like
 /// [`probe_file`](crate::scan::probe_file), this is what the scanner
 /// executable is for.
-pub(crate) fn read_in_this_process(format: &str, path: &Path, id: &str, sink: &mut dyn Sink) -> Result<(), String> {
+pub(crate) fn read_in_this_process(
+    format: &str,
+    path: &Path,
+    id: &str,
+    about: &About,
+    sink: &mut dyn Sink,
+) -> Result<(), String> {
+    // First, so that a plugin which takes the process down with it has
+    // not taken these.
+    let plugin = store::PluginRef {
+        uri: format!("{format}:{id}"),
+        id: id.to_string(),
+        path: path.to_path_buf(),
+        name: about.name.clone(),
+        vendor: about.vendor.clone(),
+    };
+    crate::vendor::list(&plugin, &about.places, sink);
     match format {
         crate::CLAP_SCHEME => crate::clap::read_presets(path, id, sink),
         crate::VST3_SCHEME => crate::vst3::read_presets(path, id, sink),
@@ -245,14 +290,21 @@ pub(crate) fn read_in_this_process(format: &str, path: &Path, id: &str, sink: &m
 /// `arguments` are what follows [`PRESETS_ARGUMENT`]. Returns the exit
 /// code.
 pub(crate) fn run_reader(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> u8 {
-    let (Some(format), Some(path), Some(id), None) =
-        (arguments.next(), arguments.next(), arguments.next(), arguments.next())
+    let (Some(format), Some(path), Some(id), about, None) =
+        (arguments.next(), arguments.next(), arguments.next(), arguments.next(), arguments.next())
     else {
-        eprintln!("usage: {} {PRESETS_ARGUMENT} <format> <plugin file> <plugin id>", crate::scan::SCANNER_NAME);
+        eprintln!(
+            "usage: {} {PRESETS_ARGUMENT} <format> <plugin file> <plugin id> [<about the plugin, as JSON>]",
+            crate::scan::SCANNER_NAME
+        );
         return 2;
     };
+    // Without it, or with one that cannot be read, the plugin is asked
+    // and no vendor's folder is looked in.
+    let about: About = about.and_then(|about| serde_json::from_str(&about.to_string_lossy()).ok()).unwrap_or_default();
     let mut printer = Printer { waiting: Vec::new() };
-    let result = read_in_this_process(&format.to_string_lossy(), Path::new(&path), &id.to_string_lossy(), &mut printer);
+    let (format, id) = (format.to_string_lossy(), id.to_string_lossy());
+    let result = read_in_this_process(&format, Path::new(&path), &id, &about, &mut printer);
     printer.flush();
     match result {
         Ok(()) => {
@@ -333,6 +385,11 @@ mod tests {
             Locator::ClapPlugin { key: None },
             Locator::Vst3File { path: PathBuf::from("C:/Users/me/Documents/VST3 Presets/A/B/c.vstpreset") },
             Locator::Vst3Program { param: 1_886_548_852, index: 41, steps: 127 },
+            Locator::Vendor {
+                format: crate::vendor::Format::Serum2,
+                path: PathBuf::from("C:/Users/me/Documents/Xfer/Serum 2 Presets/Presets/Factory/Pad/Warm.SerumPreset"),
+                key: None,
+            },
         ];
         for locator in locators {
             assert_eq!(Locator::parse(&locator.to_text()), Some(locator.clone()), "{locator:?}");
@@ -426,11 +483,15 @@ mod tests {
     }
 
     #[test]
-    fn the_reader_wants_exactly_three_arguments() {
+    fn the_reader_wants_three_arguments_and_takes_a_fourth() {
         let arguments = |list: &[&str]| list.iter().map(std::ffi::OsString::from).collect::<Vec<_>>().into_iter();
         assert_eq!(run_reader(arguments(&[])), 2);
         assert_eq!(run_reader(arguments(&["clap", "x.clap"])), 2);
-        assert_eq!(run_reader(arguments(&["clap", "x.clap", "id", "more"])), 2);
+        assert_eq!(run_reader(arguments(&["clap", "x.clap", "id", "{}", "more"])), 2);
+        // The fourth says what the host knows of the plugin. One that
+        // cannot be read is done without.
+        assert_eq!(run_reader(arguments(&["clap", "no-such-file.clap", "id", "not JSON"])), 1);
+        assert_eq!(run_reader(arguments(&["clap", "no-such-file.clap", "id", "{}"])), 1);
         // A format there is none of, and a plugin file there is none of,
         // are failures that say so.
         assert_eq!(run_reader(arguments(&["lv2", "x.lv2", "id"])), 1);
