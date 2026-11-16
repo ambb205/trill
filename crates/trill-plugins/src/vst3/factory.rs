@@ -192,7 +192,7 @@ impl DeviceFactory for Vst3Factory {
         let created = instantiate(main, request, CREATE_TIMEOUT).map_err(failed)?;
 
         let params = created.params.iter().map(|spec| spec.info.clone()).collect();
-        let controller = Vst3Controller::new(main.clone(), created.id, installed.name.clone());
+        let controller = Vst3Controller::new(main.clone(), installed.name.clone(), &created);
         let processor = Vst3Processor::new(
             main.clone(),
             installed.name.clone(),

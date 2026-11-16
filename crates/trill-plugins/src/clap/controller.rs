@@ -1,10 +1,15 @@
-//! The off-audio-thread half of a hosted plugin: state and parameter values.
+//! The off-audio-thread half of a hosted plugin: state, parameter values
+//! and the plugin's editor.
 
+use super::events::ParamFeedback;
 use super::instance::InstanceId;
+use crate::editor::{EDITOR_TIMEOUT, EditorStatus};
+use crate::edits::Edit;
 use crate::main_thread::MainThread;
 use crate::plugin_thread::PluginThread;
+use std::sync::Arc;
 use std::time::Duration;
-use trill_core::device::DeviceController;
+use trill_core::device::{DeviceController, EditorError, EditorImage, EditorOptions, ParamEdit, ParamEditKind};
 
 /// How long a plugin may take to serialize its state or report its
 /// parameter values before the request is abandoned.
@@ -19,11 +24,19 @@ pub(crate) struct ClapController {
     main: MainThread<PluginThread>,
     instance: InstanceId,
     plugin_id: String,
+    editor: Arc<EditorStatus>,
+    feedback: Arc<ParamFeedback>,
 }
 
 impl ClapController {
-    pub(crate) fn new(main: MainThread<PluginThread>, instance: InstanceId, plugin_id: String) -> Self {
-        Self { main, instance, plugin_id }
+    pub(crate) fn new(
+        main: MainThread<PluginThread>,
+        instance: InstanceId,
+        plugin_id: String,
+        editor: Arc<EditorStatus>,
+        feedback: Arc<ParamFeedback>,
+    ) -> Self {
+        Self { main, instance, plugin_id, editor, feedback }
     }
 }
 
@@ -48,5 +61,71 @@ impl DeviceController for ClapController {
                 None
             }
         }
+    }
+
+    fn has_editor(&self) -> bool {
+        self.editor.is_available()
+    }
+
+    fn open_editor(&mut self, options: &EditorOptions) -> Result<(), EditorError> {
+        if !self.editor.is_available() {
+            return Err(EditorError::NoEditor);
+        }
+        let (instance, options) = (self.instance, options.clone());
+        self.main
+            .call(EDITOR_TIMEOUT, move |thread| thread.clap.open_editor(instance, &options))
+            .unwrap_or_else(|error| Err(EditorError::Failed(error.to_string())))
+    }
+
+    fn close_editor(&mut self) {
+        if !self.editor.is_open() {
+            return;
+        }
+        let instance = self.instance;
+        if let Err(error) = self.main.call_at_rest(EDITOR_TIMEOUT, move |thread| thread.clap.close_editor(instance)) {
+            log::warn!("[{}] its editor was not closed cleanly: {error}", self.plugin_id);
+        }
+    }
+
+    fn is_editor_open(&self) -> bool {
+        self.editor.is_open()
+    }
+
+    fn capture_editor(&mut self) -> Option<EditorImage> {
+        if !self.editor.is_open() {
+            return None;
+        }
+        let instance = self.instance;
+        self.main.call(REQUEST_TIMEOUT, move |thread| thread.clap.capture_editor(instance)).ok().flatten()
+    }
+
+    /// CLAP parameters are in plain units to begin with, and the plugin
+    /// reports them by their place in the device's list, so the edits are
+    /// handed on as they come.
+    fn take_param_edits(&mut self) -> Vec<ParamEdit> {
+        let mut edits = Vec::new();
+        let lost = self.feedback.edits.drain(|index, edit| {
+            let kind = match edit {
+                Edit::Begin => ParamEditKind::Begin,
+                Edit::Value(value) => ParamEditKind::Value(value),
+                Edit::End => ParamEditKind::End,
+            };
+            edits.push(ParamEdit { index, kind });
+        });
+        if lost {
+            log::warn!(
+                "[{}] changed its parameters faster than the changes were collected; some were dropped",
+                self.plugin_id
+            );
+        }
+        edits
+    }
+}
+
+impl Drop for ClapController {
+    /// An editor does not outlive the device it belongs to: when the
+    /// session lets go of the device, its window goes with it.
+    fn drop(&mut self) {
+        self.close_editor();
     }
 }

@@ -17,9 +17,13 @@
 //! * `main_thread` and `plugin_thread`: the single thread on which every
 //!   plugin's main-thread calls are made, whichever thread the DAW asked
 //!   from and whichever format the plugin is.
+//! * `editor`: the window a plugin's own interface is shown in, and what
+//!   the formats share in hosting it.
 //! * `signal` and `notes`: what every format's audio-thread half needs:
 //!   the mapping between a plugin's ports and the device's stereo signal,
 //!   and note bookkeeping.
+//! * `edits` and `exclusive`: how the audio-thread and main-thread halves
+//!   of a hosted plugin pass things to each other without waiting.
 //!
 //! Hosting happens in the DAW's own process. Only *scanning* is isolated
 //! in a child process; a plugin that crashes while instantiated or while
@@ -49,6 +53,9 @@
 //! ```
 
 pub mod clap;
+mod editor;
+mod edits;
+mod exclusive;
 mod main_thread;
 mod notes;
 mod plugin_host;

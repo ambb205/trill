@@ -9,21 +9,30 @@
 //! What a plugin observes (the transport it was given, the threads it was
 //! called on, how often it was activated) it reports through read-only
 //! parameters, so the tests can read it back through the host itself.
+//!
+//! Some of the plugins have an editor. It draws nothing; what it does is
+//! everything an editor does to its host: it negotiates a size, runs a
+//! timer while it exists, and has a "user" ([`act`]) who turns its knob,
+//! resizes it and closes it.
 
 use clack_extensions::audio_ports::{
     AudioPortFlags, AudioPortInfo, AudioPortInfoWriter, AudioPortType, PluginAudioPorts, PluginAudioPortsImpl,
 };
+use clack_extensions::gui::{GuiApiType, GuiConfiguration, GuiSize, HostGui, PluginGui, PluginGuiImpl, Window};
 use clack_extensions::note_ports::{
     NoteDialect, NoteDialects, NotePortInfo, NotePortInfoWriter, PluginNotePorts, PluginNotePortsImpl,
 };
 use clack_extensions::params::{
-    ParamDisplayWriter, ParamInfo, ParamInfoFlags, ParamInfoWriter, PluginAudioProcessorParams, PluginMainThreadParams,
-    PluginParams,
+    HostParams, ParamDisplayWriter, ParamInfo, ParamInfoFlags, ParamInfoWriter, PluginAudioProcessorParams,
+    PluginMainThreadParams, PluginParams,
 };
 use clack_extensions::state::{PluginState, PluginStateImpl};
 use clack_extensions::thread_check::HostThreadCheck;
+use clack_extensions::timer::{HostTimer, PluginTimer, PluginTimerImpl, TimerId};
 use clack_plugin::clack_entry;
-use clack_plugin::events::event_types::TransportFlags;
+use clack_plugin::events::event_types::{
+    ParamGestureBeginEvent, ParamGestureEndEvent, ParamValueEvent, TransportFlags,
+};
 use clack_plugin::events::spaces::CoreEventSpace;
 use clack_plugin::prelude::*;
 use clack_plugin::stream::{InputStream, OutputStream};
@@ -32,7 +41,7 @@ use std::ffi::CStr;
 use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 /// What each scripted plugin does. The number is the `KIND` of
 /// [`Scripted`].
@@ -59,9 +68,26 @@ pub(crate) mod kind {
     /// [`MONO_GAIN`] that takes a fifth of a second to instantiate.
     pub(crate) const SLOW_INIT: u8 = 8;
 
-    /// Every kind that instantiates without delay.
+    /// [`MONO_GAIN`] with an editor the user may resize, to sizes that are
+    /// multiples of ten pixels and no smaller than half its natural size.
+    pub(crate) const EDITOR: u8 = 9;
+    /// [`MONO_GAIN`] with an editor of one size, which works out the
+    /// scale of its monitor by itself (it does not: it stays unscaled).
+    pub(crate) const FIXED_EDITOR: u8 = 10;
+    /// [`EDITOR`] that cannot create its editor.
+    pub(crate) const FAILS_EDITOR_CREATE: u8 = 11;
+    /// [`EDITOR`] that cannot put its editor into a window.
+    pub(crate) const FAILS_EDITOR_ATTACH: u8 = 12;
+    /// [`EDITOR`] that only offers a window of its own, floating above
+    /// the host's.
+    pub(crate) const FLOATING_EDITOR: u8 = 13;
+
+    /// Every kind without an editor that instantiates without delay.
     pub(crate) const ALL: [u8; 8] =
         [IMPULSE, MONO_GAIN, MIDI_IMPULSE, BARE, FAILS_INIT, FAILS_ACTIVATE, FAILS_START, FAILS_PROCESS];
+    /// Every kind with an editor.
+    pub(crate) const EDITORS: [u8; 5] =
+        [EDITOR, FIXED_EDITOR, FAILS_EDITOR_CREATE, FAILS_EDITOR_ATTACH, FLOATING_EDITOR];
 }
 
 /// The CLAP id of the scripted plugin of `kind`.
@@ -75,8 +101,17 @@ pub(crate) fn id(kind: u8) -> &'static str {
         kind::FAILS_ACTIVATE => "test.fails-activate",
         kind::FAILS_START => "test.fails-start",
         kind::FAILS_PROCESS => "test.fails-process",
+        kind::EDITOR => "test.editor",
+        kind::FIXED_EDITOR => "test.fixed-editor",
+        kind::FAILS_EDITOR_CREATE => "test.fails-editor-create",
+        kind::FAILS_EDITOR_ATTACH => "test.fails-editor-attach",
+        kind::FLOATING_EDITOR => "test.floating-editor",
         _ => "test.slow-init",
     }
+}
+
+fn has_editor(kind: u8) -> bool {
+    kind::EDITORS.contains(&kind)
 }
 
 fn is_instrument(kind: u8) -> bool {
@@ -84,7 +119,7 @@ fn is_instrument(kind: u8) -> bool {
 }
 
 fn has_input(kind: u8) -> bool {
-    matches!(kind, kind::MONO_GAIN | kind::FAILS_START | kind::FAILS_PROCESS | kind::SLOW_INIT)
+    matches!(kind, kind::MONO_GAIN | kind::FAILS_START | kind::FAILS_PROCESS | kind::SLOW_INIT) || has_editor(kind)
 }
 
 /// The entry of the scripted plugin of `kind`, as a plugin file would
@@ -99,6 +134,13 @@ pub(crate) fn entry(kind: u8) -> &'static EntryDescriptor {
     static FAILS_START: EntryDescriptor = clack_entry!(SinglePluginEntry<Scripted<{ kind::FAILS_START }>>);
     static FAILS_PROCESS: EntryDescriptor = clack_entry!(SinglePluginEntry<Scripted<{ kind::FAILS_PROCESS }>>);
     static SLOW_INIT: EntryDescriptor = clack_entry!(SinglePluginEntry<Scripted<{ kind::SLOW_INIT }>>);
+    static EDITOR: EntryDescriptor = clack_entry!(SinglePluginEntry<Scripted<{ kind::EDITOR }>>);
+    static FIXED_EDITOR: EntryDescriptor = clack_entry!(SinglePluginEntry<Scripted<{ kind::FIXED_EDITOR }>>);
+    static FAILS_EDITOR_CREATE: EntryDescriptor =
+        clack_entry!(SinglePluginEntry<Scripted<{ kind::FAILS_EDITOR_CREATE }>>);
+    static FAILS_EDITOR_ATTACH: EntryDescriptor =
+        clack_entry!(SinglePluginEntry<Scripted<{ kind::FAILS_EDITOR_ATTACH }>>);
+    static FLOATING_EDITOR: EntryDescriptor = clack_entry!(SinglePluginEntry<Scripted<{ kind::FLOATING_EDITOR }>>);
     match kind {
         kind::IMPULSE => &IMPULSE,
         kind::MONO_GAIN => &MONO_GAIN,
@@ -108,6 +150,11 @@ pub(crate) fn entry(kind: u8) -> &'static EntryDescriptor {
         kind::FAILS_ACTIVATE => &FAILS_ACTIVATE,
         kind::FAILS_START => &FAILS_START,
         kind::FAILS_PROCESS => &FAILS_PROCESS,
+        kind::EDITOR => &EDITOR,
+        kind::FIXED_EDITOR => &FIXED_EDITOR,
+        kind::FAILS_EDITOR_CREATE => &FAILS_EDITOR_CREATE,
+        kind::FAILS_EDITOR_ATTACH => &FAILS_EDITOR_ATTACH,
+        kind::FLOATING_EDITOR => &FLOATING_EDITOR,
         _ => &SLOW_INIT,
     }
 }
@@ -153,13 +200,31 @@ pub(crate) const SEEN_MAX_FRAMES: u32 = 19;
 pub(crate) const LARGEST_BLOCK: u32 = 20;
 pub(crate) const RESETS: u32 = 21;
 pub(crate) const SEEN_STEADY_TIME: u32 = 22;
+/// Ticks of the timer the editor runs while it exists.
+pub(crate) const TIMER_TICKS: u32 = 23;
+/// The scale the host gave the editor, or 0 before it gave one.
+pub(crate) const SEEN_SCALE: u32 = 24;
+/// The size the editor takes itself to have.
+pub(crate) const EDITOR_WIDTH: u32 = 25;
+pub(crate) const EDITOR_HEIGHT: u32 = 26;
+/// The window the editor was put into, as a number.
+pub(crate) const SEEN_PARENT: u32 = 27;
+/// Flushes that came the way CLAP has them for an active plugin: on a
+/// thread the host calls audio and not main.
+pub(crate) const AUDIO_FLUSHES: u32 = 28;
+
+/// The editor's size at a scale of 1.
+pub(crate) const EDITOR_SIZE: (u32, u32) = (400, 300);
+/// What the editor rounds the sizes it is offered down to.
+pub(crate) const EDITOR_STEP: u32 = 10;
+const TIMER_PERIOD_MS: u32 = 5;
 
 /// What `CUTOFF_1` reads before the plugin has first been activated. Some
 /// real plugins only fill in their parameters while activating.
 pub(crate) const UNSETTLED: f64 = 20.0;
 pub(crate) const SETTLED_CUTOFF: f64 = 1_000.0;
 
-const PARAMS: [Param; 19] = [
+const PARAMS: [Param; 25] = [
     param(GAIN, "Gain", (0.0, 2.0, 1.0)),
     // Declares a default that is not what it starts with, as a plugin with
     // a patch loaded does.
@@ -183,6 +248,12 @@ const PARAMS: [Param; 19] = [
     seen(LARGEST_BLOCK, "Largest Block"),
     seen(RESETS, "Resets"),
     seen(SEEN_STEADY_TIME, "Seen Steady Time"),
+    seen(TIMER_TICKS, "Timer Ticks"),
+    seen(SEEN_SCALE, "Seen Scale"),
+    seen(EDITOR_WIDTH, "Editor Width"),
+    seen(EDITOR_HEIGHT, "Editor Height"),
+    seen(SEEN_PARENT, "Seen Parent"),
+    seen(AUDIO_FLUSHES, "Audio Flushes"),
 ];
 
 /// How many parameters a host should end up listing.
@@ -209,6 +280,46 @@ pub(crate) fn lifecycle(serial: u64) -> Vec<&'static str> {
     LIFECYCLE.lock().unwrap().iter().filter(|(instance, _)| *instance == serial).map(|(_, step)| *step).collect()
 }
 
+// ---- the editor's user ---------------------------------------------------
+
+/// Something the user of an editor does in it.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) enum Action {
+    /// Turns the gain knob to this value, as one gesture.
+    TurnKnob(f64),
+    /// Makes the editor ask its host for this size.
+    Resize(u32, u32),
+    /// Switches whether the editor may be resized.
+    SetResizable(bool),
+    /// Has the editor report itself closed, as a plugin does when it
+    /// loses the connection to its window.
+    Lose,
+}
+
+static ACTIONS: Mutex<Vec<(u64, Action)>> = Mutex::new(Vec::new());
+
+/// Has the user of the editor of the instance with this serial do
+/// `action`. The editor carries it out on its next timer tick, which only
+/// comes while the editor is open.
+pub(crate) fn act(serial: u64, action: Action) {
+    ACTIONS.lock().unwrap().push((serial, action));
+}
+
+fn take_actions(serial: u64) -> Vec<Action> {
+    let mut actions = ACTIONS.lock().unwrap();
+    let (mine, others) = actions.drain(..).partition(|(instance, _)| *instance == serial);
+    *actions = others;
+    mine.into_iter().map(|(_, action)| action).collect()
+}
+
+/// A parameter event the plugin has yet to send its host.
+#[derive(Copy, Clone)]
+enum Outgoing {
+    Begin,
+    Value(f64),
+    End,
+}
+
 // ---- the plugin ----------------------------------------------------------
 
 pub(crate) struct Scripted<const KIND: u8>;
@@ -218,6 +329,12 @@ pub(crate) struct Shared<'a> {
     serial: u64,
     /// The value of each parameter, as `f64` bits, in `PARAMS` order.
     values: [AtomicU64; PARAMS.len()],
+    /// What the editor did to the gain, for the host to be told with the
+    /// next block or flush.
+    outbox: Mutex<Vec<Outgoing>>,
+    /// The editor's timer, or `u32::MAX` while it has none.
+    timer: AtomicU32,
+    resizable: AtomicBool,
 }
 
 impl<'a> Shared<'a> {
@@ -227,6 +344,9 @@ impl<'a> Shared<'a> {
             host,
             serial: SERIALS.fetch_add(1, Ordering::Relaxed),
             values: PARAMS.each_ref().map(|param| AtomicU64::new(param.initial.to_bits())),
+            outbox: Mutex::new(Vec::new()),
+            timer: AtomicU32::new(u32::MAX),
+            resizable: AtomicBool::new(true),
         };
         shared.set(SERIAL, shared.serial as f64);
         shared
@@ -268,6 +388,34 @@ impl<'a> Shared<'a> {
         let Some(check) = self.host.get_extension::<HostThreadCheck>() else { return (false, false) };
         (check.is_main_thread(&self.host).unwrap_or(false), check.is_audio_thread(&self.host).unwrap_or(false))
     }
+
+    /// Tells the host what the editor did to the gain.
+    fn emit(&self, output: &mut OutputEvents) {
+        let gain = ClapId::new(GAIN);
+        for outgoing in self.outbox.lock().unwrap().drain(..) {
+            let _ = match outgoing {
+                Outgoing::Begin => output.try_push(ParamGestureBeginEvent::new(0, gain)),
+                Outgoing::Value(value) => output.try_push(ParamValueEvent::new(0, gain, Pckn::match_all(), value)),
+                Outgoing::End => output.try_push(ParamGestureEndEvent::new(0, gain)),
+            };
+        }
+    }
+
+    /// The size the editor accepts in place of `size`: no smaller than
+    /// half its natural size, and a multiple of [`EDITOR_STEP`].
+    fn accepted(size: GuiSize) -> GuiSize {
+        let fit = |length: u32, natural: u32| (length.max(natural / 2) / EDITOR_STEP) * EDITOR_STEP;
+        GuiSize { width: fit(size.width, EDITOR_SIZE.0), height: fit(size.height, EDITOR_SIZE.1) }
+    }
+
+    fn editor_size(&self) -> GuiSize {
+        GuiSize { width: self.get(EDITOR_WIDTH) as u32, height: self.get(EDITOR_HEIGHT) as u32 }
+    }
+
+    fn set_editor_size(&self, size: GuiSize) {
+        self.set(EDITOR_WIDTH, size.width.into());
+        self.set(EDITOR_HEIGHT, size.height.into());
+    }
 }
 
 impl<'a> PluginShared<'a> for Shared<'a> {}
@@ -284,6 +432,9 @@ impl<const KIND: u8> Plugin for Scripted<KIND> {
                 .register::<PluginState>()
                 .register::<PluginAudioPorts>()
                 .register::<PluginNotePorts>();
+        }
+        if has_editor(KIND) {
+            builder.register::<PluginGui>().register::<PluginTimer>();
         }
     }
 }
@@ -302,7 +453,7 @@ impl<const KIND: u8> DefaultPluginFactory for Scripted<KIND> {
     }
 
     fn new_main_thread<'a>(
-        _host: HostMainThreadHandle<'a>,
+        host: HostMainThreadHandle<'a>,
         shared: &'a Shared<'a>,
     ) -> Result<MainThread<'a, KIND>, PluginError> {
         if KIND == kind::FAILS_INIT {
@@ -313,7 +464,7 @@ impl<const KIND: u8> DefaultPluginFactory for Scripted<KIND> {
         }
         INSTANCES.lock().unwrap().push((shared.serial, KIND));
         log(shared.serial, "init");
-        Ok(MainThread { shared })
+        Ok(MainThread { shared, host })
     }
 }
 
@@ -321,6 +472,7 @@ impl<const KIND: u8> DefaultPluginFactory for Scripted<KIND> {
 
 pub(crate) struct MainThread<'a, const KIND: u8> {
     shared: &'a Shared<'a>,
+    host: HostMainThreadHandle<'a>,
 }
 
 impl<'a, const KIND: u8> PluginMainThread<'a, Shared<'a>> for MainThread<'a, KIND> {
@@ -375,8 +527,151 @@ impl<const KIND: u8> PluginMainThreadParams for MainThread<'_, KIND> {
         None
     }
 
-    fn flush(&self, input: &InputEvents, _output: &mut OutputEvents) {
+    fn flush(&self, input: &InputEvents, output: &mut OutputEvents) {
         self.shared.apply(input);
+        self.shared.emit(output);
+    }
+}
+
+// ---- the editor ------------------------------------------------------------
+
+impl<const KIND: u8> MainThread<'_, KIND> {
+    /// Carries out something the editor's user did.
+    fn perform(&self, action: Action) {
+        let shared = self.shared;
+        let host_gui = shared.host.get_extension::<HostGui>();
+        match action {
+            Action::TurnKnob(value) => {
+                shared.set(GAIN, value);
+                shared.outbox.lock().unwrap().extend([Outgoing::Begin, Outgoing::Value(value), Outgoing::End]);
+                if let Some(params) = shared.host.get_extension::<HostParams>() {
+                    params.request_flush(&shared.host);
+                }
+            }
+            Action::Resize(width, height) => {
+                if let Some(gui) = host_gui
+                    && gui.request_resize(&shared.host, width, height).is_ok()
+                {
+                    shared.set_editor_size(GuiSize { width, height });
+                }
+            }
+            Action::SetResizable(resizable) => {
+                shared.resizable.store(resizable, Ordering::Relaxed);
+                if let Some(gui) = host_gui {
+                    gui.resize_hints_changed(&shared.host);
+                }
+            }
+            Action::Lose => {
+                if let Some(gui) = host_gui {
+                    gui.closed(&shared.host, true);
+                }
+            }
+        }
+    }
+}
+
+impl<const KIND: u8> PluginGuiImpl for MainThread<'_, KIND> {
+    fn is_api_supported(&self, configuration: GuiConfiguration) -> bool {
+        Some(configuration.api_type) == GuiApiType::default_for_current_platform()
+            && configuration.is_floating == (KIND == kind::FLOATING_EDITOR)
+    }
+
+    fn get_preferred_api(&self) -> Option<GuiConfiguration<'_>> {
+        let api_type = GuiApiType::default_for_current_platform()?;
+        Some(GuiConfiguration { api_type, is_floating: KIND == kind::FLOATING_EDITOR })
+    }
+
+    fn create(&self, _configuration: GuiConfiguration) -> Result<(), PluginError> {
+        if KIND == kind::FAILS_EDITOR_CREATE {
+            return Err(PluginError::Message("scripted to fail when creating its editor"));
+        }
+        let shared = self.shared;
+        log(shared.serial, "gui create");
+        shared.set_editor_size(GuiSize { width: EDITOR_SIZE.0, height: EDITOR_SIZE.1 });
+        if let Some(timers) = self.host.get_extension::<HostTimer>()
+            && let Ok(timer) = timers.register_timer(&self.host, TIMER_PERIOD_MS)
+        {
+            shared.timer.store(timer.0, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    fn destroy(&self) {
+        log(self.shared.serial, "gui destroy");
+        let timer = self.shared.timer.swap(u32::MAX, Ordering::Relaxed);
+        if let Some(timers) = self.host.get_extension::<HostTimer>() {
+            let _ = timers.unregister_timer(&self.host, TimerId(timer));
+        }
+    }
+
+    fn set_scale(&self, scale: f64) -> Result<(), PluginError> {
+        if KIND == kind::FIXED_EDITOR {
+            return Err(PluginError::Message("scripted to work its scale out by itself"));
+        }
+        log(self.shared.serial, "gui scale");
+        self.shared.set(SEEN_SCALE, scale);
+        let scaled = |length: u32| (f64::from(length) * scale).round() as u32;
+        self.shared.set_editor_size(GuiSize { width: scaled(EDITOR_SIZE.0), height: scaled(EDITOR_SIZE.1) });
+        Ok(())
+    }
+
+    fn get_size(&self) -> Option<GuiSize> {
+        Some(self.shared.editor_size())
+    }
+
+    fn can_resize(&self) -> bool {
+        KIND != kind::FIXED_EDITOR && self.shared.resizable.load(Ordering::Relaxed)
+    }
+
+    fn adjust_size(&self, size: GuiSize) -> Option<GuiSize> {
+        Some(Shared::accepted(size))
+    }
+
+    /// Like a real plugin, takes only sizes it would have offered itself.
+    fn set_size(&self, size: GuiSize) -> Result<(), PluginError> {
+        if size != Shared::accepted(size) {
+            return Err(PluginError::Message("not a size this editor has"));
+        }
+        log(self.shared.serial, "gui size");
+        self.shared.set_editor_size(size);
+        Ok(())
+    }
+
+    fn set_parent(&self, window: Window) -> Result<(), PluginError> {
+        if KIND == kind::FAILS_EDITOR_ATTACH {
+            return Err(PluginError::Message("scripted to fail when given a window"));
+        }
+        log(self.shared.serial, "gui parent");
+        self.shared.set(SEEN_PARENT, window.as_generic_ptr() as usize as f64);
+        Ok(())
+    }
+
+    fn set_transient(&self, _window: Window) -> Result<(), PluginError> {
+        Err(PluginError::Message("this editor is not asked to float"))
+    }
+
+    fn show(&self) -> Result<(), PluginError> {
+        log(self.shared.serial, "gui show");
+        Ok(())
+    }
+
+    fn hide(&self) -> Result<(), PluginError> {
+        log(self.shared.serial, "gui hide");
+        Ok(())
+    }
+}
+
+impl<const KIND: u8> PluginTimerImpl for MainThread<'_, KIND> {
+    /// Counts the tick, and does what the editor's user did since the
+    /// last one.
+    fn on_timer(&self, timer_id: TimerId) {
+        if timer_id.0 != self.shared.timer.load(Ordering::Relaxed) {
+            return;
+        }
+        self.shared.add(TIMER_TICKS, 1.0);
+        for action in take_actions(self.shared.serial) {
+            self.perform(action);
+        }
     }
 }
 
@@ -512,6 +807,7 @@ impl<'a, const KIND: u8> PluginAudioProcessor<'a, Shared<'a>, MainThread<'a, KIN
         if self.blocks == 1 {
             self.host.request_callback();
         }
+        shared.emit(events.output);
 
         if let Some(input) = audio.input_port(0)
             && let Ok(channels) = input.channels()
@@ -576,7 +872,11 @@ fn event_as_buffer<'a>(event: CoreEventSpace<'a>) -> [&'a UnknownEvent; 1] {
 }
 
 impl<const KIND: u8> PluginAudioProcessorParams for Processor<'_, KIND> {
-    fn flush(&mut self, input: &InputEvents, _output: &mut OutputEvents) {
+    fn flush(&mut self, input: &InputEvents, output: &mut OutputEvents) {
         self.shared.apply(input);
+        self.shared.emit(output);
+        if self.shared.threads() == (false, true) {
+            self.shared.add(AUDIO_FLUSHES, 1.0);
+        }
     }
 }

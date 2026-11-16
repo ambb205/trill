@@ -27,9 +27,9 @@ impl ThreadState for PluginThread {
         self.clap.wants_idle() || self.vst3.wants_idle()
     }
 
-    fn idle(&mut self) {
-        self.clap.idle();
-        self.vst3.idle();
+    fn idle(&mut self, nested: bool) {
+        self.clap.idle(nested);
+        self.vst3.idle(nested);
     }
 }
 

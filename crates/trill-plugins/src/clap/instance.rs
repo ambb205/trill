@@ -3,14 +3,19 @@
 //! it owns the loaded libraries and every plugin instance, and is only ever
 //! touched by jobs running on that thread.
 
-use super::events::{NoteDialect, NotePort};
-use super::host::{HostMainThread, HostShared, TrillHost};
+use super::events::{NoteDialect, NotePort, ParamFeedback, ParamOutput};
+use super::gui;
+use super::host::{AudioContext, HostMainThread, HostShared, TrillHost};
+use crate::editor::{EditorStatus, HostedEditor, Placement};
+use crate::exclusive::Exclusive;
 use crate::main_thread::ThreadState;
 use clack_extensions::audio_ports::{AudioPortInfoBuffer, PluginAudioPorts};
+use clack_extensions::gui::PluginGui;
 use clack_extensions::latency::PluginLatency;
 use clack_extensions::note_ports::{NoteDialects, NotePortInfoBuffer, PluginNotePorts};
 use clack_extensions::params::{ParamInfoBuffer, ParamInfoFlags, PluginParams};
 use clack_extensions::state::PluginState;
+use clack_extensions::timer::{PluginTimer, TimerId};
 use clack_host::events::Pckn;
 use clack_host::events::event_types::ParamValueEvent;
 use clack_host::prelude::*;
@@ -18,16 +23,33 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use trill_core::device::{ParamInfo, ParamKind};
+
+/// How long a plugin's request for a flush may go unanswered by a block
+/// before the main thread flushes instead. Longer than the longest block
+/// the engine processes, so that a plugin which is being processed is
+/// left to its audio thread.
+const FLUSH_GRACE: Duration = Duration::from_millis(150);
 
 /// Identifies a plugin instance on the plugin main thread. Never reused.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct InstanceId(u64);
 
+/// A plugin's audio processor, where both halves of an instance can reach
+/// it, one at a time and without waiting. It belongs to the audio thread,
+/// which processes with it on every block. The main thread takes it to
+/// start and stop the plugin, and borrows it to flush parameter changes
+/// when no block is coming. `None` while the plugin is not active.
+pub(crate) type AudioSlot = Exclusive<Option<PluginAudioProcessor<TrillHost>>>;
+
 /// What to instantiate, and the model state to bring it up with.
 pub(crate) struct CreateRequest {
     pub path: PathBuf,
     pub plugin_id: String,
+    /// The plugin's name, for the title of its editor's window.
+    pub name: String,
     /// Opaque state from an earlier [`ClapThread::save_state`].
     pub state: Option<Vec<u8>>,
     /// Parameter values by CLAP parameter id, applied on top of `state`.
@@ -52,15 +74,16 @@ pub(crate) struct PortLayout {
 }
 
 /// A plugin activated for one audio configuration.
-pub(crate) struct Activated {
-    pub processor: StoppedPluginAudioProcessor<TrillHost>,
-    pub latency: u32,
+struct Activated {
+    processor: StoppedPluginAudioProcessor<TrillHost>,
+    latency: u32,
 }
 
 /// A freshly created, activated instance, ready for the audio thread.
 pub(crate) struct Created {
     pub id: InstanceId,
-    pub activated: Activated,
+    pub audio: Arc<AudioSlot>,
+    pub latency: u32,
     /// In the order the processor's `set_param` indexes them.
     pub params: Vec<ParamSpec>,
     /// `(parameter index, value)` for the model values that were applied.
@@ -68,15 +91,136 @@ pub(crate) struct Created {
     pub ports: PortLayout,
     /// How the plugin takes notes, if it takes any.
     pub notes: Option<NotePort>,
+    /// Where the plugin's own parameter edits are reported.
+    pub feedback: Arc<ParamFeedback>,
+    pub editor: Arc<EditorStatus>,
 }
 
-struct Instance {
-    plugin: PluginInstance<TrillHost>,
+pub(super) struct Instance {
+    pub(super) plugin: PluginInstance<TrillHost>,
+    /// The plugin's id, for log messages.
+    pub(super) plugin_id: String,
+    /// The plugin's name, for the title of its editor's window.
+    pub(super) name: String,
     state: Option<PluginState>,
     params: Option<PluginParams>,
     latency: Option<PluginLatency>,
+    pub(super) gui: Option<PluginGui>,
+    timer: Option<PluginTimer>,
     /// In parameter-list order.
     param_ids: Vec<ClapId>,
+    audio: Arc<AudioSlot>,
+    feedback: Arc<ParamFeedback>,
+    /// Since when the plugin has been waiting for a flush that no block
+    /// has answered.
+    flush_waiting: Option<Instant>,
+    pub(super) editor: Option<HostedEditor>,
+    pub(super) editor_status: Arc<EditorStatus>,
+    /// Set once the editor has to be closed, until it has been.
+    pub(super) editor_closing: bool,
+    /// Where the editor's window was when it was last closed.
+    pub(super) placement: Option<Placement>,
+}
+
+impl Instance {
+    /// Serves what the plugin asked for since the last call, and whatever
+    /// else is due. `nested` is [`ThreadState::idle`]'s.
+    fn idle(&mut self, now: Instant, nested: bool, due_timers: &mut Vec<TimerId>) {
+        let (callback, restart) =
+            self.plugin.access_shared_handler(|shared| (shared.take_callback_request(), shared.take_restart_request()));
+        if callback {
+            self.plugin.call_on_main_thread_callback();
+        }
+        if restart {
+            log::info!(
+                "[{}] asked to be restarted; changes to its latency, ports or parameter list take effect when \
+                 the device is next created",
+                self.plugin_id
+            );
+        }
+        self.tick_timers(now, due_timers);
+        self.flush_if_unanswered(now);
+        self.service_editor(nested);
+    }
+
+    /// Calls the plugin for each of its timers that is due. `due` is
+    /// scratch space, so that idling does not allocate.
+    fn tick_timers(&mut self, now: Instant, due: &mut Vec<TimerId>) {
+        let Some(timer) = self.timer else { return };
+        due.clear();
+        self.plugin.access_handler(|handler| handler.take_due_timers(now, due));
+        for &id in due.iter() {
+            // The tick of one timer may have unregistered the next.
+            if self.plugin.access_handler(|handler| handler.has_timer(id)) {
+                timer.on_timer(&self.plugin.plugin_handle(), id);
+            }
+        }
+    }
+
+    /// Flushes the plugin's parameter changes if it asked for that and no
+    /// block has come along to do it.
+    ///
+    /// A plugin whose editor changed a parameter tells the host by an
+    /// event in its next block. If it is not being processed (its device
+    /// is switched off, or nothing is driving the engine), it asks for a
+    /// flush instead, which CLAP wants made on the audio thread while the
+    /// plugin is active. With no block coming, this thread plays that
+    /// part, for as long as it holds the audio processor.
+    fn flush_if_unanswered(&mut self, now: Instant) {
+        let Some(params) = self.params else { return };
+        if !self.plugin.access_shared_handler(HostShared::flush_requested) {
+            self.flush_waiting = None;
+            return;
+        }
+        if now.duration_since(*self.flush_waiting.get_or_insert(now)) < FLUSH_GRACE {
+            return;
+        }
+        self.flush_waiting = None;
+        // Before the flush, so that a request made during it stands.
+        self.plugin.access_shared_handler(HostShared::flush_served);
+        let mut output = ParamOutput(&self.feedback);
+        let flushed = self.audio.try_with(|audio| {
+            let Some(audio) = audio else { return false };
+            let _audio_thread = AudioContext::enter();
+            let mut output = OutputEvents::from_buffer(&mut output);
+            params.flush_active(&mut audio.plugin_handle(), &InputEvents::empty(), &mut output);
+            true
+        });
+        // Turned away: the audio thread is processing after all, and its
+        // block is the flush. Not active: the main thread flushes as
+        // itself.
+        if flushed == Some(false)
+            && let Some(mut inactive) = self.plugin.inactive_plugin_handle()
+        {
+            params.flush(&mut inactive, &InputEvents::empty(), &mut OutputEvents::from_buffer(&mut output));
+        }
+    }
+
+    /// Returns the plugin to the inactive state, whatever state it was in.
+    /// Whoever asks for this has stopped processing the plugin.
+    fn deactivate(&mut self) {
+        let processor = self.audio.try_with(Option::take).flatten();
+        // `stop_processing` is an audio-thread function. Nothing else is
+        // processing this plugin, so this thread is its audio thread for
+        // the duration.
+        let stopped = processor.map(|processor| {
+            let _audio_thread = AudioContext::enter();
+            processor.into_stopped()
+        });
+        deactivate(&mut self.plugin, stopped);
+    }
+}
+
+impl Drop for Instance {
+    /// Takes the plugin down in the order CLAP requires: its editor goes,
+    /// it stops processing and is deactivated, and only then is the
+    /// instance itself dropped, which destroys the plugin. clack keeps a
+    /// plugin alive (leaked) if an audio processor handle still exists,
+    /// which deactivating has just ruled out.
+    fn drop(&mut self) {
+        self.close_editor();
+        self.deactivate();
+    }
 }
 
 /// The state of the plugin main thread.
@@ -85,8 +229,10 @@ pub(crate) struct ClapThread {
     /// Libraries stay loaded once used: reloading one for every instance is
     /// slow, and plugins are rarely tested against repeated unloading.
     entries: HashMap<PathBuf, PluginEntry>,
-    instances: HashMap<InstanceId, Instance>,
+    pub(super) instances: HashMap<InstanceId, Instance>,
     next_id: u64,
+    /// Scratch space for the timers that are due in one round of idling.
+    due_timers: Vec<TimerId>,
 }
 
 impl ThreadState for ClapThread {
@@ -97,6 +243,7 @@ impl ThreadState for ClapThread {
             entries: HashMap::new(),
             instances: HashMap::new(),
             next_id: 1,
+            due_timers: Vec::new(),
         }
     }
 
@@ -104,22 +251,13 @@ impl ThreadState for ClapThread {
         !self.instances.is_empty()
     }
 
-    /// Serves the requests plugins left in their [`HostShared`] flags.
-    fn idle(&mut self) {
-        for instance in self.instances.values_mut() {
-            let (callback, restart) = instance
-                .plugin
-                .access_shared_handler(|shared| (shared.take_callback_request(), shared.take_restart_request()));
-            if callback {
-                instance.plugin.call_on_main_thread_callback();
-            }
-            if restart {
-                let id = instance.plugin.access_shared_handler(|shared| shared.plugin_id().to_string());
-                log::info!(
-                    "[{id}] asked to be restarted; changes to its latency, ports or parameter list \
-                     take effect when the device is next created"
-                );
-            }
+    /// Serves the requests plugins left in their [`HostShared`] flags,
+    /// their timers and their editors.
+    fn idle(&mut self, nested: bool) {
+        let now = Instant::now();
+        let Self { instances, due_timers, .. } = self;
+        for instance in instances.values_mut() {
+            instance.idle(now, nested, due_timers);
         }
     }
 }
@@ -166,7 +304,7 @@ impl ClapThread {
         let plugin_id = CString::new(request.plugin_id.as_str()).map_err(|_| "the plugin id contains a NUL byte")?;
         let mut plugin = PluginInstance::<TrillHost>::new(
             |_| HostShared::new(&request.plugin_id),
-            |_| HostMainThread,
+            |shared| HostMainThread::new(shared),
             &entry,
             &plugin_id,
             &self.host_info,
@@ -177,6 +315,9 @@ impl ClapThread {
         let state: Option<PluginState> = handle.get_extension();
         let params: Option<PluginParams> = handle.get_extension();
         let latency: Option<PluginLatency> = handle.get_extension();
+        let gui: Option<PluginGui> = handle.get_extension();
+        let timer: Option<PluginTimer> = handle.get_extension();
+        let has_editor = gui.is_some_and(|gui| gui::is_embeddable(gui, &handle));
 
         // An empty state is what `save_state` never returns; treat it as
         // "nothing saved" rather than handing the plugin zero bytes.
@@ -219,34 +360,65 @@ impl ClapThread {
 
         let id = InstanceId(self.next_id);
         self.next_id += 1;
-        let param_ids = specs.iter().map(|spec| spec.id).collect();
-        self.instances.insert(id, Instance { plugin, state, params, latency, param_ids });
-        Ok(Created { id, activated, params: specs, initial_values, ports, notes })
+        let param_ids: Vec<ClapId> = specs.iter().map(|spec| spec.id).collect();
+        let feedback = Arc::new(ParamFeedback::new(&param_ids));
+        let audio = Arc::new(Exclusive::new(Some(activated.processor.into())));
+        let editor_status = EditorStatus::new(has_editor);
+        let instance = Instance {
+            plugin,
+            plugin_id: request.plugin_id,
+            name: request.name,
+            state,
+            params,
+            latency,
+            gui,
+            timer,
+            param_ids,
+            audio: audio.clone(),
+            feedback: feedback.clone(),
+            flush_waiting: None,
+            editor: None,
+            editor_status: editor_status.clone(),
+            editor_closing: false,
+            placement: None,
+        };
+        self.instances.insert(id, instance);
+        Ok(Created {
+            id,
+            audio,
+            latency: activated.latency,
+            params: specs,
+            initial_values,
+            ports,
+            notes,
+            feedback,
+            editor: editor_status,
+        })
     }
 
-    /// Deactivates and destroys an instance. `processor` is its audio
-    /// processor, already stopped; `None` if it was lost to a failed
-    /// re-activation.
-    pub(crate) fn destroy(&mut self, id: InstanceId, processor: Option<StoppedPluginAudioProcessor<TrillHost>>) {
-        let Some(mut instance) = self.instances.remove(&id) else { return };
-        deactivate(&mut instance.plugin, processor);
-        // Dropping the instance destroys the plugin. clack keeps it alive
-        // (leaked) instead if an audio processor handle still exists, which
-        // `deactivate` has just ruled out.
+    /// Closes the editor of an instance, deactivates and destroys it. Its
+    /// audio half must have stopped processing it.
+    pub(crate) fn destroy(&mut self, id: InstanceId) {
+        // Dropping the instance is what takes the plugin down.
+        self.instances.remove(&id);
     }
 
-    /// Re-activates an instance for a different sample rate or block size.
-    /// On failure the instance stays deactivated.
-    pub(crate) fn reactivate(
-        &mut self,
-        id: InstanceId,
-        processor: Option<StoppedPluginAudioProcessor<TrillHost>>,
-        sample_rate: f64,
-        max_block: u32,
-    ) -> Result<Activated, String> {
+    /// Re-activates an instance, whose audio half must have stopped
+    /// processing it, for a sample rate and block size. Returns its
+    /// latency. On failure the instance stays deactivated.
+    pub(crate) fn reactivate(&mut self, id: InstanceId, sample_rate: f64, max_block: u32) -> Result<u32, String> {
         let instance = self.instances.get_mut(&id).ok_or("the plugin instance no longer exists")?;
-        deactivate(&mut instance.plugin, processor);
-        activate(&mut instance.plugin, instance.latency, sample_rate, max_block)
+        instance.deactivate();
+        let Activated { processor, latency } =
+            activate(&mut instance.plugin, instance.latency, sample_rate, max_block)?;
+        // Dropping a processor that could not be handed over would leave
+        // the plugin active with no way to process it; deactivating again
+        // is the way out of that.
+        if instance.audio.try_with(|audio| *audio = Some(processor.into())).is_none() {
+            instance.deactivate();
+            return Err("the plugin's audio processor is in use".to_string());
+        }
+        Ok(latency)
     }
 
     /// The plugin's complete state, or `None` if it has none to give.
@@ -257,8 +429,7 @@ impl ClapThread {
         match state.save(&instance.plugin.plugin_handle(), &mut bytes) {
             Ok(()) => Some(bytes).filter(|bytes| !bytes.is_empty()),
             Err(error) => {
-                let plugin = instance.plugin.access_shared_handler(|shared| shared.plugin_id().to_string());
-                log::warn!("[{plugin}] {error}");
+                log::warn!("[{}] {error}", instance.plugin_id);
                 None
             }
         }

@@ -6,12 +6,14 @@
 use super::buffers::BusLayout;
 use super::class_id::ClassId;
 use super::com::{create_instance, interface, result_name};
+use super::editor::Editor;
 use super::host::{ComponentHandler, HostApplication};
 use super::links::ParamLinks;
 use super::module::Module;
 use super::params::{self, ParamSpec};
 use super::state::{self, PluginState};
 use super::stream::MemoryStream;
+use crate::editor::{EditorStatus, Placement};
 use crate::main_thread::ThreadState;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -41,6 +43,14 @@ const MAX_CHANNELS: int32 = 64;
 /// Identifies a plugin instance on the plugin main thread. Never reused.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct InstanceId(u64);
+
+#[cfg(test)]
+impl InstanceId {
+    /// An id for a test that needs one and has no instance.
+    pub(crate) fn for_tests(id: u64) -> Self {
+        Self(id)
+    }
+}
 
 /// What to instantiate, and the model state to bring it up with.
 pub(crate) struct CreateRequest {
@@ -76,11 +86,12 @@ pub(crate) struct Created {
     /// The parameters that stand for MIDI's "all sound off".
     pub silencing: Vec<ParamID>,
     pub links: Arc<ParamLinks>,
+    pub editor: Arc<EditorStatus>,
 }
 
 /// A plugin's edit controller.
-struct Controller {
-    edit: ComPtr<IEditController>,
+pub(super) struct Controller {
+    pub(super) edit: ComPtr<IEditController>,
     /// Whether the controller is an object of its own rather than another
     /// interface of the component: one that is initialized and terminated
     /// separately.
@@ -92,10 +103,16 @@ struct Controller {
 
 /// One plugin: its component, and everything attached to it. Dropping it
 /// takes the plugin down in the order VST3 requires.
-struct Instance {
-    name: String,
+pub(super) struct Instance {
+    pub(super) name: String,
     class: ClassId,
-    controller: Option<Controller>,
+    pub(super) controller: Option<Controller>,
+    pub(super) editor: Option<Editor>,
+    pub(super) editor_status: Arc<EditorStatus>,
+    /// Set once the editor has to be closed, until it has been.
+    pub(super) editor_closing: bool,
+    /// Where the editor's window was when it was last closed.
+    pub(super) placement: Option<Placement>,
     handler: ComWrapper<ComponentHandler>,
     /// Set once the instance is fully created.
     links: Option<Arc<ParamLinks>>,
@@ -125,6 +142,10 @@ impl Instance {
             name: name.to_string(),
             class,
             controller: None,
+            editor: None,
+            editor_status: EditorStatus::new(false),
+            editor_closing: false,
+            placement: None,
             handler: ComponentHandler::new(),
             links: None,
             listed: Vec::new(),
@@ -164,6 +185,9 @@ impl Instance {
             }
         }
         self.controller = Some(Controller { edit, separate, connection });
+        // The controller is what makes the plugin's view. Whether it will
+        // is only known once it has been asked to.
+        self.editor_status.set_available(true);
     }
 
     /// Creates and initializes the controller class the component names.
@@ -405,9 +429,10 @@ impl Instance {
 }
 
 impl Drop for Instance {
-    /// Takes the plugin down: deactivate, disconnect, terminate, and only
-    /// then release.
+    /// Takes the plugin down: close its editor, deactivate, disconnect,
+    /// terminate, and only then release.
     fn drop(&mut self) {
+        self.close_editor();
         self.deactivate();
         // SAFETY: every object is live and initialized, this is the plugin
         // main thread, and each call undoes what was done when the
@@ -433,7 +458,7 @@ impl Drop for Instance {
 /// The VST3 part of the plugin main thread's state.
 pub(crate) struct Vst3Thread {
     /// Declared first: instances must be gone before their modules are.
-    instances: HashMap<InstanceId, Instance>,
+    pub(super) instances: HashMap<InstanceId, Instance>,
     /// Modules stay loaded once used: reloading one for every instance is
     /// slow, and plugins are rarely tested against repeated unloading.
     modules: HashMap<PathBuf, Module>,
@@ -451,12 +476,14 @@ impl ThreadState for Vst3Thread {
         !self.instances.is_empty()
     }
 
-    /// Carries values from each plugin's processor to its controller, and
-    /// reports what plugins left in their flags.
-    fn idle(&mut self) {
-        for instance in self.instances.values() {
+    /// Carries values from each plugin's processor to its controller,
+    /// reports what plugins left in their flags, and looks after their
+    /// editors.
+    fn idle(&mut self, nested: bool) {
+        for instance in self.instances.values_mut() {
             instance.sync_controller();
             instance.report();
+            instance.service_editor(nested);
         }
     }
 }
@@ -544,6 +571,7 @@ impl Vst3Thread {
             takes_notes,
             silencing: silencing.unwrap_or_default(),
             links,
+            editor: instance.editor_status.clone(),
         };
         self.instances.insert(id, instance);
         Ok(created)

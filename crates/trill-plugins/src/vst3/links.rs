@@ -11,7 +11,13 @@
 //! Both directions cross between a thread that may not wait and one that
 //! may, so each is a [`Mailbox`]: a slot per parameter holding the latest
 //! value, written and read with atomics only.
+//!
+//! The edits made in the plugin's editor are also of interest outside the
+//! plugin: the session wants to know that the user turned a knob, and when
+//! they took hold of it and let go. For that every one of them, not just
+//! the latest value, is kept in a queue as well.
 
+use crate::edits::EditQueue;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use vst3::Steinberg::Vst::ParamID;
@@ -81,6 +87,10 @@ pub(crate) struct ParamLinks {
     /// those the engine set, and those the plugin reports having changed
     /// by itself.
     pub to_controller: Mailbox,
+    /// What the user did in the plugin's editor, in order and with the
+    /// start and end of each gesture, for the device's controller to
+    /// report. Values are normalized and filed under the parameter's slot.
+    pub edits: EditQueue,
     /// Set by the audio thread when the plugin failed a block and was
     /// bypassed, for the main thread to report.
     failed: AtomicBool,
@@ -93,6 +103,7 @@ impl ParamLinks {
             slots: ids.iter().enumerate().map(|(slot, id)| (*id, slot)).collect(),
             to_processor: Mailbox::new(ids.len()),
             to_controller: Mailbox::new(ids.len()),
+            edits: EditQueue::new(),
             ids: ids.into_boxed_slice(),
             failed: AtomicBool::new(false),
         }

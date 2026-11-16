@@ -7,19 +7,27 @@
 //! are noted, and take effect the next time the device is created.
 
 use super::com::{interface, write_out};
+use super::instance::InstanceId;
 use super::links::ParamLinks;
 use super::text;
+use crate::editor::Size;
+use crate::edits::Edit;
+use crate::main_thread::{request_idle, with_current};
+use crate::plugin_thread::PluginThread;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use vst3::Steinberg::Vst::IAttributeList_::AttrID;
 use vst3::Steinberg::Vst::{
     IAttributeList, IAttributeListTrait, IComponentHandler, IComponentHandlerTrait, IHostApplication,
     IHostApplicationTrait, IMessage, IMessageTrait, ParamID, ParamValue, String128, TChar,
 };
-use vst3::Steinberg::{FIDString, TUID, int32, int64, kInvalidArgument, kResultFalse, kResultOk, tresult, uint32};
+use vst3::Steinberg::{
+    FIDString, IPlugFrame, IPlugFrameTrait, IPlugView, TUID, ViewRect, int32, int64, kInvalidArgument, kResultFalse,
+    kResultOk, tresult, uint32,
+};
 use vst3::{Class, ComWrapper, Interface};
 
 /// The name plugins know this host by.
@@ -125,11 +133,21 @@ impl ComponentHandler {
     }
 }
 
-impl IComponentHandlerTrait for ComponentHandler {
-    /// The start and end of a gesture are not passed on: the session
-    /// records plugin state when it saves, not edit by edit.
-    unsafe fn beginEdit(&self, _id: ParamID) -> tresult {
+impl ComponentHandler {
+    /// Files what the user did to parameter `id` in the plugin's editor,
+    /// for the device's controller to report.
+    fn record(&self, id: ParamID, edit: Edit) -> tresult {
+        let Some(links) = self.links.get() else { return kResultFalse };
+        let Some(slot) = links.slot(id) else { return kInvalidArgument };
+        links.edits.push(slot, edit);
         kResultOk
+    }
+}
+
+impl IComponentHandlerTrait for ComponentHandler {
+    /// The user took hold of a control in the plugin's editor.
+    unsafe fn beginEdit(&self, id: ParamID) -> tresult {
+        self.record(id, Edit::Begin)
     }
 
     /// The user moved a control in the plugin's editor. The controller
@@ -138,19 +156,78 @@ impl IComponentHandlerTrait for ComponentHandler {
         if !value_normalized.is_finite() {
             return kInvalidArgument;
         }
-        let Some(links) = self.links.get() else { return kResultFalse };
-        let Some(slot) = links.slot(id) else { return kInvalidArgument };
-        links.to_processor.post(slot, value_normalized.clamp(0.0, 1.0));
-        kResultOk
+        let value = value_normalized.clamp(0.0, 1.0);
+        let recorded = self.record(id, Edit::Value(value));
+        if let Some((links, slot)) = self.links.get().and_then(|links| Some((links, links.slot(id)?))) {
+            links.to_processor.post(slot, value);
+        }
+        recorded
     }
 
-    unsafe fn endEdit(&self, _id: ParamID) -> tresult {
-        kResultOk
+    /// The user let go of the control.
+    unsafe fn endEdit(&self, id: ParamID) -> tresult {
+        self.record(id, Edit::End)
     }
 
     unsafe fn restartComponent(&self, flags: int32) -> tresult {
         self.restart.fetch_or(flags, Ordering::AcqRel);
         kResultOk
+    }
+}
+
+/// What a plugin's view tells the host: that it wants to be another size.
+///
+/// A view asks from wherever it happens to be. If the plugin thread is
+/// free (the view is reacting to a click, say), the window is resized and
+/// the view told its new size before the call returns, which is what VST3
+/// expects and what most plugins are written against. If the view asks
+/// from inside a call the host is making into the plugin, or from some
+/// other thread, the request is kept and served when the plugin thread
+/// next idles.
+pub(crate) struct PlugFrame {
+    /// Whose editor the view belongs to.
+    instance: InstanceId,
+    /// The size asked for and not served yet: width in the low half,
+    /// height in the high half. Zero: none.
+    request: AtomicU64,
+}
+
+impl Class for PlugFrame {
+    type Interfaces = (IPlugFrame,);
+}
+
+impl PlugFrame {
+    pub(crate) fn new(instance: InstanceId) -> ComWrapper<Self> {
+        ComWrapper::new(Self { instance, request: AtomicU64::new(0) })
+    }
+
+    /// The size the view asked for since the last call, if that is still
+    /// to be acted on.
+    pub(crate) fn take_request(&self) -> Option<Size> {
+        let packed = self.request.swap(0, Ordering::AcqRel);
+        (packed != 0).then(|| Size::new(packed as u32, (packed >> 32) as u32))
+    }
+}
+
+impl IPlugFrameTrait for PlugFrame {
+    unsafe fn resizeView(&self, _view: *mut IPlugView, new_size: *mut ViewRect) -> tresult {
+        // SAFETY: the view passes a rectangle of its own, or null.
+        let Some(rect) = (unsafe { new_size.as_ref() }) else { return kInvalidArgument };
+        let (width, height) = (rect.right.saturating_sub(rect.left), rect.bottom.saturating_sub(rect.top));
+        if width <= 0 || height <= 0 {
+            return kInvalidArgument;
+        }
+        let (instance, size) = (self.instance, Size::new(width as u32, height as u32));
+        match with_current(|thread: &mut PluginThread| thread.vst3.resize_editor(instance, size)) {
+            Some(true) => kResultOk,
+            // The view's editor is not open; there is no window to resize.
+            Some(false) => kResultFalse,
+            None => {
+                self.request.store(u64::from(size.width) | (u64::from(size.height) << 32), Ordering::Release);
+                request_idle();
+                kResultOk
+            }
+        }
     }
 }
 
@@ -529,7 +606,32 @@ mod tests {
             assert_eq!(plugin.performEdit(7, f64::NAN), kInvalidArgument);
             assert_eq!(collected(&links), []);
             assert_eq!(collected_by_controller(&links), [], "an edit is not echoed back to the controller");
+
+            // Every edit is also on record, in order, with its gesture.
+            let mut edits = Vec::new();
+            assert!(!links.edits.drain(|slot, edit| edits.push((slot, edit))));
+            assert_eq!(edits, [(1, Edit::Begin), (1, Edit::Value(0.5)), (0, Edit::Value(1.0)), (1, Edit::End)]);
+            assert_eq!(plugin.beginEdit(99), kInvalidArgument);
+            assert_eq!(plugin.endEdit(99), kInvalidArgument);
         }
+    }
+
+    #[test]
+    fn a_view_asking_for_a_size_off_the_plugin_thread_is_served_later() {
+        let frame = PlugFrame::new(InstanceId::for_tests(1));
+        let plugin: ComPtr<IPlugFrame> = frame.to_com_ptr().unwrap();
+        let mut rect = ViewRect { left: 10, top: 20, right: 650, bottom: 500 };
+        // SAFETY: the rectangle is a local; null is refused. The view
+        // pointer is not used by the host.
+        unsafe {
+            assert_eq!(plugin.resizeView(null_mut(), null_mut()), kInvalidArgument);
+            // This is not the plugin thread: the request is kept.
+            assert_eq!(plugin.resizeView(null_mut(), &mut rect), kResultOk);
+            rect.right = 5;
+            assert_eq!(plugin.resizeView(null_mut(), &mut rect), kInvalidArgument, "an empty view");
+        }
+        assert_eq!(frame.take_request(), Some(Size::new(640, 480)));
+        assert_eq!(frame.take_request(), None, "a request is served once");
     }
 
     fn collected_by_controller(links: &ParamLinks) -> Vec<(usize, f64)> {

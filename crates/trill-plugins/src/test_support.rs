@@ -37,3 +37,43 @@ impl Drop for TestDir {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+
+/// Polls `condition` until it holds or `limit` passes; returns whether it
+/// came to hold.
+pub(crate) fn eventually(limit: std::time::Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        if condition() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// Fails a test that deadlocks instead of hanging the whole suite.
+pub(crate) fn within(limit: std::time::Duration, body: impl FnOnce() + Send + 'static) {
+    let (done, finished) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        body();
+        let _ = done.send(());
+    });
+    match finished.recv_timeout(limit) {
+        Ok(()) => worker.join().expect("the test body finished"),
+        // The body panicked: report its panic, not a timeout.
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            if let Err(panic) = worker.join() {
+                std::panic::resume_unwind(panic);
+            }
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("not finished after {limit:?}: deadlocked?"),
+    }
+}
+
+/// A window title no other test uses, to find a test's own editor by.
+pub(crate) fn unique_title(what: &str) -> String {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    format!("{what} #{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
+}

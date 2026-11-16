@@ -15,13 +15,18 @@
 //!   parameter changes as CLAP events).
 //! * `controller`: the [`DeviceController`](trill_core::device::DeviceController)
 //!   the session keeps; it forwards to the plugin main thread.
-//! * `host`: the callbacks a plugin may make into its host.
+//! * `gui`: the plugin's editor, opened in a window of the host's.
+//! * `host`: the callbacks a plugin may make into its host, and `timers`,
+//!   the timers it may ask the host to run.
 //! * `paths` and `probe`: finding plugin files and reading their descriptors.
 
 mod buffers;
 mod controller;
 mod events;
 mod factory;
+mod gui;
+#[cfg(all(test, windows))]
+mod gui_tests;
 mod host;
 mod instance;
 mod paths;
@@ -31,6 +36,7 @@ mod processor;
 mod scripted;
 #[cfg(test)]
 mod tests;
+mod timers;
 
 pub use factory::{ClapConfig, ClapFactory};
 pub(crate) use instance::ClapThread;

@@ -4,7 +4,7 @@
 //! allocation after construction.
 
 use super::com::{interface, write_out};
-use super::exclusive::Exclusive;
+use crate::exclusive::Exclusive;
 use crate::notes::{HeldKeys, events_in_part};
 use trill_core::device::{self, EventKind, MAX_EVENTS_PER_BLOCK, ProcessInfo};
 use vst3::Steinberg::Vst::Event_::EventTypes_::{kNoteOffEvent, kNoteOnEvent};
