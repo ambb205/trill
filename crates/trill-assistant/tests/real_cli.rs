@@ -4,22 +4,23 @@
 //! small model), so each test does nothing unless asked:
 //!
 //! ```text
-//! trill-mcp --http 127.0.0.1:17801 --no-audio --no-plugins
-//! TRILL_TEST_CLAUDE=1 TRILL_TEST_MCP_URL=http://127.0.0.1:17801/mcp \
+//! trill-mcp --http 127.0.0.1:17801 --no-audio --no-plugins --scratch
+//! TRILL_TEST_CLAUDE=1 TRILL_TEST_MCP_URL=http://127.0.0.1:17801/assistant \
 //!     cargo test -p trill-assistant --test real_cli -- --test-threads=1 --nocapture
 //! ```
 //!
 //! They need the CLI installed and signed in, and they edit whatever project
 //! the MCP server has open. Run them one at a time (`--test-threads=1`):
-//! they share that project.
+//! they share that project. Name one test to run only that one: each run of
+//! the CLI that reaches the model is somebody's usage.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use trill_assistant::{
-    AssistantConfig, CliInstallation, Conversation, DEFAULT_MCP_URL, Event, FailureReason, LoginMethod,
-    MINIMUM_CLI_VERSION, detect,
+    AssistantConfig, CliInstallation, Conversation, DEFAULT_MCP_URL, Effort, Event, FailureReason, LoginMethod,
+    MINIMUM_CLI_VERSION, PlanChange, StepStatus, WebLookup, detect,
 };
 
 /// The longest a real turn may take before the test gives up.
@@ -144,10 +145,10 @@ fn a_conversation_edits_the_project_continues_and_resumes() {
 }
 
 #[test]
-fn nothing_but_trill_is_within_reach() {
+fn with_the_plan_and_the_web_switched_off_nothing_but_trill_is_within_reach() {
     let Some(cli) = cli() else { return };
     // An instruction file where the CLI would look for one, to be ignored.
-    let config = config("confined");
+    let config = AssistantConfig { web: false, plan: false, ..config("confined") };
     std::fs::create_dir_all(&config.working_dir).unwrap();
     std::fs::write(
         config.working_dir.join("CLAUDE.md"),
@@ -170,6 +171,90 @@ fn nothing_but_trill_is_within_reach() {
     let reply = said(&events);
     assert!(reply.contains("NONE") || reply.to_lowercase().contains("none"), "{reply}");
     assert!(!reply.contains("PINEAPPLE"), "an instruction file in the working directory leaked in: {reply}");
+}
+
+#[test]
+fn the_web_is_within_reach_and_files_and_the_shell_still_are_not() {
+    let Some(cli) = cli() else { return };
+    let mut conversation = Conversation::new(config("web"), cli).unwrap();
+
+    let events = turn(
+        &mut conversation,
+        "This is a check of your tools, not a music request. Do each of these and report the result of each on its \
+         own line: (1) read the file C:\\Windows\\win.ini, (2) run the shell command `whoami`, (3) search the web \
+         for: tresillo rhythm, (4) fetch https://example.com and give the page's title. Then (5) list every tool \
+         you have whose name does not start with mcp__trill__, by its exact name.",
+    );
+
+    assert!(matches!(events.last(), Some(Event::Finished(_))), "{events:?}");
+    assert_eq!(tool_calls(&events), [] as [&str; 0], "none of this is done with Trill's tools");
+    // Each look at the web is reported, with what was asked and what came.
+    let lookups: Vec<&WebLookup> = events
+        .iter()
+        .filter_map(|event| if let Event::WebStarted { lookup, .. } = event { Some(lookup) } else { None })
+        .collect();
+    assert!(lookups.iter().any(|lookup| matches!(lookup, WebLookup::Search { query } if query.contains("tresillo"))));
+    assert!(lookups.iter().any(|lookup| matches!(lookup, WebLookup::Page { url, .. } if url.contains("example.com"))));
+    for event in &events {
+        if let Event::WebFinished { result, .. } = event {
+            eprintln!(
+                "  web answered: {:?}",
+                result.as_ref().map(|answer| answer.chars().take(400).collect::<String>())
+            );
+        }
+    }
+    let answered = events.iter().filter(|event| matches!(event, Event::WebFinished { result: Ok(_), .. })).count();
+    assert!(answered >= 2, "the search and the page both came back");
+    // And what it has beside Trill's tools is the plan and the web: no
+    // file, no shell.
+    let reply = said(&events);
+    for tool in ["WebSearch", "WebFetch", "TaskCreate", "TaskUpdate"] {
+        assert!(reply.contains(tool), "{tool} is not in: {reply}");
+    }
+    for tool in ["Bash", "PowerShell", "Read,", "Write,", "Edit,", "Glob", "Grep", "NotebookEdit"] {
+        assert!(!reply.contains(tool), "{tool} is in: {reply}");
+    }
+}
+
+#[test]
+fn a_plan_is_kept_and_a_request_longer_than_one_run_is_carried_on() {
+    let Some(cli) = cli() else { return };
+    // Four steps to a run, so that a small request takes several; and the
+    // least thinking, which is all this needs.
+    let config =
+        AssistantConfig { turns_per_run: 4, max_turns: Some(30), effort: Some(Effort::Low), ..config("carried-on") };
+    let mut conversation = Conversation::new(config, cli).unwrap();
+
+    let events = turn(
+        &mut conversation,
+        "Do this exactly, one tool call per step and nothing in parallel. First put two tasks on your task list: \
+         \"Set the tempo\" and \"Add a track\". Then mark the first in progress, set the project tempo to 111 BPM, \
+         and mark it completed. Then mark the second in progress, create a track named Probe, and mark it \
+         completed. Then reply with just the word: done.",
+    );
+
+    assert!(matches!(events.last(), Some(Event::Finished(_))), "{events:?}");
+    assert_eq!(events.iter().filter(|event| event.is_terminal()).count(), 1, "one turn, however many runs");
+    let runs = events.iter().filter(|event| matches!(event, Event::Started(_))).count();
+    eprintln!("runs of the CLI: {runs}");
+    assert!(runs >= 2, "it could not be done in four steps: {runs} runs");
+    // The plan was reported as it was made and worked through.
+    let changes: Vec<&PlanChange> =
+        events.iter().filter_map(|event| if let Event::Plan(change) = event { Some(change) } else { None }).collect();
+    let added = changes.iter().filter(|change| matches!(change, PlanChange::Added { .. })).count();
+    let done = changes
+        .iter()
+        .filter(|change| matches!(change, PlanChange::Changed { status: Some(StepStatus::Done), .. }))
+        .count();
+    assert_eq!((added, done), (2, 2), "{changes:?}");
+    // The work was done once, across the runs, and not begun again.
+    let calls = tool_calls(&events);
+    assert_eq!(calls.iter().filter(|tool| **tool == "set_project").count(), 1, "{calls:?}");
+    assert_eq!(calls.iter().filter(|tool| **tool == "create_track").count(), 1, "{calls:?}");
+    let Some(Event::Finished(summary)) = events.last() else { unreachable!() };
+    eprintln!("steps: {}, estimated cost: {:?}", summary.turns, summary.estimated_cost_usd);
+    assert!(summary.turns > 4 && summary.estimated_cost_usd.is_some());
+    assert!(said(&events).to_lowercase().trim_end_matches('.').ends_with("done"), "{}", said(&events));
 }
 
 #[test]

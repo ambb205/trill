@@ -1,5 +1,6 @@
-//! The conversation as the panel shows it: what was said, each tool call as
-//! a line, the notices, and how each turn ended.
+//! The conversation as the panel shows it: what was said, each tool call
+//! and each look at the web as a line, the notices, how each turn ended,
+//! and beside it the assistant's plan.
 //!
 //! This is the app's own record, built from the events of a turn as they
 //! arrive. It is what is drawn, and what is kept beside the settings so
@@ -12,7 +13,7 @@ use super::tools;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
-use trill_assistant::{Event, FailureReason, Notice, TurnSummary};
+use trill_assistant::{Event, FailureReason, Notice, PlanChange, StepStatus, TurnSummary, WebLookup};
 use trill_core::Project;
 use trill_engine::session::UndoStep;
 
@@ -118,11 +119,29 @@ pub enum Ending {
     },
 }
 
+/// What a turn that did not finish had taken when it ended, as far as the
+/// panel was told. (One that finished says so itself.)
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Spent {
+    /// How long it ran, by the clock on the wall.
+    pub seconds: f32,
+    /// How many times the model had been asked.
+    pub steps: u32,
+    /// What the CLI estimated the first `costed_steps` of them would cost
+    /// at API prices: it says when one of its runs ends, so the last
+    /// stretch is not in it. `None` if it never said.
+    pub estimated_cost: Option<f64>,
+    pub costed_steps: u32,
+}
+
 /// The line that closes a turn.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TurnEnd {
     #[serde(flatten)]
     pub ending: Ending,
+    /// For a turn that was stopped or failed after it had got going.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spent: Option<Spent>,
     /// Whether the turn changed the song.
     pub changed: bool,
     /// The undo step that holds everything the turn changed. Known only to
@@ -139,7 +158,146 @@ pub struct TurnEnd {
 impl TurnEnd {
     /// A turn that ended so, having changed nothing.
     pub fn unchanged(ending: Ending) -> Self {
-        Self { ending, changed: false, step: None, places: Vec::new() }
+        Self { ending, spent: None, changed: false, step: None, places: Vec::new() }
+    }
+}
+
+/// How a step of the assistant's plan stands.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepState {
+    Pending,
+    Doing,
+    Done,
+}
+
+impl From<StepStatus> for StepState {
+    fn from(status: StepStatus) -> Self {
+        match status {
+            StepStatus::Pending => StepState::Pending,
+            StepStatus::InProgress => StepState::Doing,
+            StepStatus::Done => StepState::Done,
+        }
+    }
+}
+
+/// One step of the assistant's plan.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Step {
+    /// The CLI's number for it. Means nothing to the user.
+    pub id: String,
+    /// What is to be done: "Write the drums".
+    pub title: String,
+    /// As it reads while it is being done ("Writing the drums"), if the
+    /// assistant said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doing: Option<String>,
+    pub state: StepState,
+}
+
+impl Step {
+    /// The step as it reads now.
+    pub fn words(&self) -> &str {
+        match (&self.doing, self.state) {
+            (Some(doing), StepState::Doing) => doing,
+            _ => &self.title,
+        }
+    }
+}
+
+/// The assistant's plan for what it was asked: the steps it wrote down, in
+/// its order, and how each stands. The CLI keeps the list for the model;
+/// this is the panel's copy, kept in step by the changes the back end
+/// reports, to show as a checklist.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Plan {
+    pub steps: Vec<Step>,
+}
+
+impl Plan {
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+
+    /// How many of the steps are done.
+    pub fn done(&self) -> usize {
+        self.steps.iter().filter(|step| step.state == StepState::Done).count()
+    }
+
+    /// Whether there was a plan and all of it is done.
+    pub fn is_finished(&self) -> bool {
+        !self.steps.is_empty() && self.done() == self.steps.len()
+    }
+
+    /// The step being worked on, or failing that the next one to do.
+    pub fn current(&self) -> Option<&Step> {
+        let doing = self.steps.iter().find(|step| step.state == StepState::Doing);
+        doing.or_else(|| self.steps.iter().find(|step| step.state == StepState::Pending))
+    }
+
+    /// Takes in a change to the plan.
+    pub fn apply(&mut self, change: &PlanChange) {
+        match change {
+            PlanChange::Added { id, title, doing } => match self.steps.iter_mut().find(|step| step.id == *id) {
+                // Written down twice: the second wording stands.
+                Some(step) => {
+                    step.title.clone_from(title);
+                    step.doing.clone_from(doing);
+                }
+                None => self.steps.push(Step {
+                    id: id.clone(),
+                    title: title.clone(),
+                    doing: doing.clone(),
+                    state: StepState::Pending,
+                }),
+            },
+            PlanChange::Changed { id, status, title, doing } => {
+                let at = self.steps.iter().position(|step| step.id == *id).unwrap_or_else(|| {
+                    // A step the panel never saw written down (its start
+                    // went by unseen). It is shown by what is known of it.
+                    let title = title.clone().unwrap_or_else(|| format!("Step {id}"));
+                    self.steps.push(Step { id: id.clone(), title, doing: None, state: StepState::Pending });
+                    self.steps.len() - 1
+                });
+                let step = &mut self.steps[at];
+                if let Some(status) = status {
+                    step.state = (*status).into();
+                }
+                if let Some(title) = title {
+                    step.title.clone_from(title);
+                }
+                if doing.is_some() {
+                    step.doing.clone_from(doing);
+                }
+            }
+            PlanChange::Removed { id } => self.steps.retain(|step| step.id != *id),
+            PlanChange::Listed(listed) => {
+                // The CLI's word on what the plan is. Where the list does
+                // not say how a step reads while it is done, what was
+                // known of that is kept.
+                let old = std::mem::take(&mut self.steps);
+                let known = |id: &str| old.iter().find(|known| known.id == id).and_then(|known| known.doing.clone());
+                self.steps = listed
+                    .iter()
+                    .map(|step| Step {
+                        id: step.id.clone(),
+                        title: step.title.clone(),
+                        doing: step.doing.clone().or_else(|| known(&step.id)),
+                        state: step.status.into(),
+                    })
+                    .collect();
+            }
+        }
+    }
+
+    /// A new request begins. A plan that was carried out belongs to the
+    /// request it was made for, and is put away; one with steps still to do
+    /// stays, for the assistant may be about to carry on with it.
+    pub fn begin_request(&mut self) {
+        if self.is_finished() {
+            self.steps.clear();
+        }
     }
 }
 
@@ -172,6 +330,8 @@ pub enum Item {
 #[derive(Clone, Debug)]
 pub struct Transcript {
     pub items: Vec<Item>,
+    /// The assistant's plan, as it stands.
+    pub plan: Plan,
     /// Tells this conversation's items from any other's, and from its own
     /// once they are no longer where they were: it changes when the oldest
     /// are let go. What the panel keeps about an item by its place in the
@@ -187,15 +347,36 @@ fn new_epoch() -> u64 {
 
 impl Default for Transcript {
     fn default() -> Self {
-        Self { items: Vec::new(), epoch: new_epoch() }
+        Self { items: Vec::new(), plan: Plan::default(), epoch: new_epoch() }
     }
 }
 
 impl PartialEq for Transcript {
-    /// Two conversations are the same if the same was said in them.
+    /// Two conversations are the same if the same was said in them and the
+    /// same was planned.
     fn eq(&self, other: &Self) -> bool {
-        self.items == other.items
+        self.items == other.items && self.plan == other.plan
     }
+}
+
+/// What is kept of a conversation between runs.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Kept {
+    /// As it is kept now.
+    Whole {
+        items: Vec<Item>,
+        #[serde(default)]
+        plan: Plan,
+    },
+    /// As it was kept before the assistant had a plan: the items alone.
+    Items(Vec<Item>),
+}
+
+#[derive(Serialize)]
+struct Keeping<'a> {
+    items: &'a [Item],
+    plan: &'a Plan,
 }
 
 /// `text`, cut to what is kept of a tool's arguments or answer.
@@ -227,6 +408,10 @@ fn note(notice: &Notice, now: SystemTime) -> Item {
         Notice::RateLimited { .. } => (Tone::Warning, "retry"),
         Notice::UsageLimitNear { .. } => (Tone::Warning, "limit"),
         Notice::PermissionDenied { .. } => (Tone::Warning, ""),
+        // One line for a conversation being summarised: first that it is,
+        // then, in its place, that it was.
+        Notice::Compacting | Notice::Compacted { .. } => (Tone::Info, "summary"),
+        Notice::CompactionFailed { .. } => (Tone::Warning, "summary"),
     };
     let mut text = notice.to_string();
     if let Notice::UsageLimitNear { resets_at: Some(when) } = notice
@@ -238,12 +423,18 @@ fn note(notice: &Notice, now: SystemTime) -> Item {
     Item::Note { text, tone, slot }
 }
 
-/// What to offer after a failure.
-pub fn offer_for(reason: &FailureReason) -> Offer {
+/// What to offer after a failure. `worked` says the turn had got as far as
+/// using a tool: what it did is done, and sending the same request again
+/// would ask for it a second time.
+pub fn offer_for(reason: &FailureReason, worked: bool) -> Offer {
     match reason {
         FailureReason::TurnLimitReached { .. } => Offer::Continue,
         // Sending it again would be refused again.
         FailureReason::UnexpectedTools { .. } => Offer::Nothing,
+        // The assistant remembers nothing of the request: it has to be
+        // made again.
+        FailureReason::SessionNotFound => Offer::TryAgain,
+        _ if worked => Offer::Continue,
         _ => Offer::TryAgain,
     }
 }
@@ -313,6 +504,42 @@ impl Transcript {
                     arguments: input.clone(),
                 }));
             }
+            Event::WebStarted { id, lookup } => {
+                let wording = tools::describe_web(lookup);
+                // The CLI's own name for the tool, and what it was given.
+                let (tool, given) = match lookup {
+                    WebLookup::Search { query } => ("WebSearch", query.clone()),
+                    WebLookup::Page { url, question } if question.is_empty() => ("WebFetch", url.clone()),
+                    WebLookup::Page { url, question } => ("WebFetch", format!("{url}\n\n{question}")),
+                };
+                self.items.push(Item::Tool(ToolLine {
+                    id: id.clone(),
+                    tool: tool.to_owned(),
+                    doing: wording.doing,
+                    did: wording.did,
+                    state: ToolState::Running,
+                    input: detail(&given),
+                    output: String::new(),
+                    open: false,
+                    place: None,
+                    arguments: serde_json::Value::Null,
+                }));
+            }
+            Event::WebFinished { id, result } => {
+                let (state, output) = match result {
+                    Ok(answer) => (ToolState::Done, detail(answer)),
+                    Err(error) => (ToolState::Failed, detail(error)),
+                };
+                let running = self.items.iter_mut().rev().find_map(|item| match item {
+                    Item::Tool(line) if line.id == *id && line.state == ToolState::Running => Some(line),
+                    _ => None,
+                });
+                if let Some(line) = running {
+                    line.state = state;
+                    line.output = output;
+                }
+            }
+            Event::Plan(change) => self.plan.apply(change),
             Event::ToolCallFinished { id, tool, result } => {
                 let (state, output) = match result {
                     Ok(answer) => (ToolState::Done, detail(answer)),
@@ -364,8 +591,16 @@ impl Transcript {
                     _ => self.items.push(new),
                 }
             }
+            // How far the turn has come is the turn's to know, not the
+            // conversation's.
+            Event::Progress(_) => {}
             Event::Started(_) | Event::Finished(_) | Event::Cancelled | Event::Failed(_) => {}
         }
+    }
+
+    /// Whether the turn under way has used a tool or the web yet.
+    pub fn turn_has_worked(&self) -> bool {
+        self.items[self.turn_start(self.items.len())..].iter().any(|item| matches!(item, Item::Tool(_)))
     }
 
     /// Closes the turn: calls still running are marked as cut short, and
@@ -480,14 +715,19 @@ impl Transcript {
 
     /// What is kept between runs.
     pub fn to_json(&self) -> String {
-        serde_json::to_string(&self.items).unwrap_or_else(|_| "[]".to_owned())
+        let keeping = Keeping { items: &self.items, plan: &self.plan };
+        serde_json::to_string(&keeping).unwrap_or_else(|_| "[]".to_owned())
     }
 
     /// Reads a kept conversation. One that was cut off when the program
     /// closed mid-turn is closed here; text that makes no sense is no
     /// conversation.
     pub fn from_json(text: &str) -> Option<Self> {
-        let mut transcript = Self { items: serde_json::from_str(text).ok()?, epoch: new_epoch() };
+        let (items, plan) = match serde_json::from_str(text).ok()? {
+            Kept::Whole { items, plan } => (items, plan),
+            Kept::Items(items) => (items, Plan::default()),
+        };
+        let mut transcript = Self { items, plan, epoch: new_epoch() };
         let open = transcript.items.iter().rev().find_map(|item| match item {
             Item::End(_) => Some(false),
             Item::User { .. } => Some(true),
@@ -521,6 +761,32 @@ pub fn format_seconds(seconds: f32) -> String {
 /// The CLI's cost figure as shown: always marked as an estimate.
 pub fn format_estimate(dollars: f64) -> String {
     if dollars < 0.01 { "est. under $0.01".to_owned() } else { format!("est. ${dollars:.2}") }
+}
+
+/// A count with its thousands set apart: `"1,000"`.
+pub fn format_count(count: u32) -> String {
+    let digits = count.to_string();
+    let mut out = String::with_capacity(digits.len() + 1);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// `"1 step"`, `"132 steps"`.
+pub fn format_steps(steps: u32) -> String {
+    if steps == 1 { "1 step".to_owned() } else { format!("{} steps", format_count(steps)) }
+}
+
+/// The CLI's cost figure for a turn still under way, or one that did not
+/// finish: what it covers is said, because the CLI reports a cost only now
+/// and then (`costed` of the `steps` so far).
+pub fn format_estimate_so_far(dollars: f64, costed: u32, steps: u32) -> String {
+    let estimate = format_estimate(dollars);
+    if costed >= steps { estimate } else { format!("{estimate} to step {}", format_count(costed)) }
 }
 
 #[cfg(test)]
@@ -692,14 +958,230 @@ mod tests {
             F::CannotStart { detail: "d".into() },
         ] {
             assert!(calls_for_a_check(&setup), "{setup:?}");
-            assert_eq!(offer_for(&setup), Offer::TryAgain);
+            assert_eq!(offer_for(&setup, false), Offer::TryAgain);
         }
-        assert_eq!(offer_for(&F::TurnLimitReached { limit: 80 }), Offer::Continue);
         let limit = F::UsageLimitReached { message: "m".into(), resets_at: None };
-        assert_eq!((offer_for(&limit), calls_for_a_check(&limit)), (Offer::TryAgain, false));
-        assert_eq!(offer_for(&F::SessionNotFound), Offer::TryAgain);
-        assert_eq!(offer_for(&F::UnexpectedTools { tools: vec!["Bash".into()] }), Offer::Nothing);
+        assert_eq!((offer_for(&limit, false), calls_for_a_check(&limit)), (Offer::TryAgain, false));
         assert!(!calls_for_a_check(&F::TurnLimitReached { limit: 80 }));
+        // A turn that had done work is carried on, not asked for again:
+        // what it did is done.
+        let overloaded = F::Api { kind: trill_assistant::ApiErrorKind::Server, message: "529".into() };
+        let died = F::CliExited { exit_code: Some(1), stderr_tail: String::new() };
+        for later in [limit, overloaded, died, F::NotLoggedIn] {
+            assert_eq!(offer_for(&later, true), Offer::Continue, "{later:?}");
+        }
+        for worked in [false, true] {
+            assert_eq!(offer_for(&F::TurnLimitReached { limit: 80 }, worked), Offer::Continue);
+            // Nothing is remembered of the request: it has to be made again.
+            assert_eq!(offer_for(&F::SessionNotFound, worked), Offer::TryAgain);
+            assert_eq!(offer_for(&F::UnexpectedTools { tools: vec!["Bash".into()] }, worked), Offer::Nothing);
+        }
+    }
+
+    #[test]
+    fn the_plan_is_kept_in_step_with_what_the_back_end_reports() {
+        use trill_assistant::PlanStep;
+        let added = |id: &str, title: &str, doing: Option<&str>| PlanChange::Added {
+            id: id.into(),
+            title: title.into(),
+            doing: doing.map(str::to_owned),
+        };
+        let stands =
+            |id: &str, status| PlanChange::Changed { id: id.into(), status: Some(status), title: None, doing: None };
+        let read = |plan: &Plan| -> Vec<(String, StepState)> {
+            plan.steps.iter().map(|step| (step.words().to_owned(), step.state)).collect()
+        };
+        let step = |words: &str, state| (words.to_owned(), state);
+
+        let mut plan = Plan::default();
+        assert!(plan.is_empty() && !plan.is_finished() && plan.current().is_none());
+        plan.apply(&added("1", "Set tempo and key", Some("Setting tempo and key")));
+        plan.apply(&added("2", "Write the drums", None));
+        plan.apply(&added("3", "Render", Some("Rendering")));
+        assert_eq!(plan.done(), 0);
+        assert_eq!(plan.current().map(Step::words), Some("Set tempo and key"), "nothing in hand: the next to do");
+
+        // In hand, a step reads as what is being done, if that was said.
+        plan.apply(&stands("1", StepStatus::InProgress));
+        assert_eq!(plan.current().map(Step::words), Some("Setting tempo and key"));
+        plan.apply(&stands("1", StepStatus::Done));
+        plan.apply(&stands("2", StepStatus::InProgress));
+        assert_eq!(
+            read(&plan),
+            [
+                step("Set tempo and key", StepState::Done),
+                step("Write the drums", StepState::Doing),
+                step("Render", StepState::Pending)
+            ]
+        );
+        assert_eq!((plan.done(), plan.is_finished()), (1, false));
+
+        // Worded anew; written down twice; put back; dropped.
+        let reworded =
+            PlanChange::Changed { id: "3".into(), status: None, title: Some("Render and check".into()), doing: None };
+        plan.apply(&reworded);
+        assert_eq!(plan.steps[2].title, "Render and check");
+        assert_eq!(plan.steps[2].doing.as_deref(), Some("Rendering"), "what was not said again stays");
+        plan.apply(&added("2", "Write the drums and a fill", Some("Writing the drums")));
+        assert_eq!((plan.steps.len(), plan.steps[1].state), (3, StepState::Doing), "the same step, still in hand");
+        plan.apply(&stands("2", StepStatus::Pending));
+        assert_eq!(plan.steps[1].state, StepState::Pending);
+        plan.apply(&PlanChange::Removed { id: "2".into() });
+        plan.apply(&PlanChange::Removed { id: "no such step".into() });
+        assert_eq!(
+            read(&plan),
+            [step("Set tempo and key", StepState::Done), step("Render and check", StepState::Pending)]
+        );
+
+        // A step whose writing down went unseen is shown by what is known.
+        plan.apply(&stands("7", StepStatus::InProgress));
+        assert_eq!(plan.steps[2].words(), "Step 7");
+
+        // The CLI's own list is the last word on what the plan is; how a
+        // step reads while it is done is the panel's to remember.
+        let listed =
+            |id: &str, title: &str, status| PlanStep { id: id.into(), title: title.into(), doing: None, status };
+        plan.apply(&PlanChange::Listed(vec![
+            listed("1", "Set tempo and key", StepStatus::Done),
+            listed("3", "Render and check", StepStatus::InProgress),
+            listed("8", "Export", StepStatus::Pending),
+        ]));
+        assert_eq!(
+            read(&plan),
+            [
+                step("Set tempo and key", StepState::Done),
+                step("Rendering", StepState::Doing),
+                step("Export", StepState::Pending)
+            ]
+        );
+        // A list that says how its steps read while they are done (an older
+        // CLI's, which is the whole plan each time) is taken at its word.
+        let exporting = PlanStep { doing: Some("Exporting".into()), ..listed("8", "Export", StepStatus::InProgress) };
+        plan.apply(&PlanChange::Listed(vec![listed("1", "Set tempo and key", StepStatus::Done), exporting]));
+        assert_eq!(read(&plan), [step("Set tempo and key", StepState::Done), step("Exporting", StepState::Doing)]);
+        plan.apply(&PlanChange::Listed(vec![
+            listed("1", "Set tempo and key", StepStatus::Done),
+            listed("3", "Render and check", StepStatus::InProgress),
+            listed("8", "Export", StepStatus::Pending),
+        ]));
+
+        // A plan with steps still to do is kept when another request comes;
+        // one that was carried out is put away.
+        plan.begin_request();
+        assert_eq!(plan.steps.len(), 3);
+        plan.apply(&stands("3", StepStatus::Done));
+        plan.apply(&stands("8", StepStatus::Done));
+        assert!(plan.is_finished() && plan.current().is_none());
+        plan.begin_request();
+        assert!(plan.is_empty());
+        plan.begin_request();
+        assert!(plan.is_empty() && !plan.is_finished());
+    }
+
+    #[test]
+    fn a_look_at_the_web_is_a_line_with_the_query_or_the_address() {
+        let project = Project::new("t");
+        let mut transcript = Transcript::default();
+        transcript.push_user("what is a tresillo?");
+        assert!(!transcript.turn_has_worked());
+        let search = WebLookup::Search { query: "tresillo rhythm".into() };
+        transcript.apply(&Event::WebStarted { id: "w1".into(), lookup: search }, &project);
+        assert!(transcript.turn_has_worked());
+        let line = tool(&transcript.items[1]);
+        assert_eq!(
+            (line.words(), line.state),
+            ("Searching the web for \u{201C}tresillo rhythm\u{201D}", ToolState::Running)
+        );
+        assert_eq!((line.tool.as_str(), line.input.as_str()), ("WebSearch", "tresillo rhythm"));
+
+        let found = "Web search results for query: \"tresillo rhythm\"";
+        transcript.apply(&Event::WebFinished { id: "w1".into(), result: Ok(found.into()) }, &project);
+        let page =
+            WebLookup::Page { url: "https://example.com/tresillo".into(), question: "How is it counted?".into() };
+        transcript.apply(&Event::WebStarted { id: "w2".into(), lookup: page }, &project);
+        transcript.apply(&Event::WebFinished { id: "w2".into(), result: Err("404".into()) }, &project);
+        // An answer nobody asked for is nobody's line.
+        transcript.apply(&Event::WebFinished { id: "w9".into(), result: Ok("stray".into()) }, &project);
+
+        assert_eq!(transcript.items.len(), 3);
+        let searched = tool(&transcript.items[1]);
+        assert_eq!(
+            (searched.words(), searched.state),
+            ("Searched the web for \u{201C}tresillo rhythm\u{201D}", ToolState::Done)
+        );
+        assert_eq!(searched.output, found);
+        let read = tool(&transcript.items[2]);
+        assert_eq!(
+            (read.words(), read.state, read.output.as_str()),
+            ("Reading example.com/tresillo", ToolState::Failed, "404")
+        );
+        assert_eq!(
+            (read.tool.as_str(), read.input.as_str()),
+            ("WebFetch", "https://example.com/tresillo\n\nHow is it counted?")
+        );
+        assert!(searched.place.is_none() && read.place.is_none(), "the web is nowhere in the song");
+
+        // Kept and read back, they read the same.
+        let kept = Transcript::from_json(&transcript.to_json()).expect("it reads back");
+        assert_eq!(tool(&kept.items[1]).did, "Searched the web for \u{201C}tresillo rhythm\u{201D}");
+    }
+
+    #[test]
+    fn a_conversation_being_summarised_is_one_line_that_ends_up_saying_what_happened() {
+        let project = Project::new("t");
+        let mut transcript = Transcript::default();
+        transcript.push_user("a long one");
+        transcript.apply(&Event::Notice(Notice::Compacting), &project);
+        let Some(Item::Note { text, tone, .. }) = transcript.items.last() else { panic!("a note") };
+        assert!(text.ends_with("summarising the earlier part\u{2026}") && *tone == Tone::Info, "{text}");
+
+        let done = Notice::Compacted { tokens_before: Some(985_053), tokens_after: Some(644) };
+        transcript.apply(&Event::Notice(done.clone()), &project);
+        assert_eq!(transcript.items.len(), 2, "in the place of the line that said it was under way");
+        let Some(Item::Note { text, .. }) = transcript.items.last() else { panic!("a note") };
+        assert_eq!(*text, done.to_string());
+
+        transcript.apply(&Event::Notice(Notice::CompactionFailed { detail: "failed".into() }), &project);
+        let Some(Item::Note { tone, .. }) = transcript.items.last() else { panic!("a note") };
+        assert_eq!(*tone, Tone::Warning);
+    }
+
+    #[test]
+    fn the_plan_and_what_a_stopped_turn_took_are_kept_with_the_conversation() {
+        let project = Project::new("t");
+        let mut transcript = Transcript::default();
+        transcript.push_user("write a song");
+        let added = PlanChange::Added {
+            id: "1".into(),
+            title: "Write the drums".into(),
+            doing: Some("Writing the drums".into()),
+        };
+        transcript.apply(&Event::Plan(added), &project);
+        let begun =
+            PlanChange::Changed { id: "1".into(), status: Some(StepStatus::InProgress), title: None, doing: None };
+        transcript.apply(&Event::Plan(begun), &project);
+        // How far the turn has come is not part of the conversation.
+        let progress = trill_assistant::Progress { steps: 3, estimated_cost_usd: None, costed_steps: 0 };
+        transcript.apply(&Event::Progress(progress), &project);
+        assert_eq!(transcript.items.len(), 1);
+        let spent = Spent { seconds: 842.0, steps: 131, estimated_cost: Some(1.25), costed_steps: 100 };
+        transcript.end(TurnEnd { spent: Some(spent.clone()), ..TurnEnd::unchanged(Ending::Stopped) });
+
+        let kept = transcript.to_json();
+        let read = Transcript::from_json(&kept).expect("it reads back");
+        assert_eq!(read, transcript);
+        assert_eq!(read.plan.steps.len(), 1);
+        assert_eq!((read.plan.steps[0].words(), read.plan.steps[0].state), ("Writing the drums", StepState::Doing));
+        let Some(Item::End(end)) = read.items.last() else { panic!("an end") };
+        assert_eq!(end.spent, Some(spent));
+
+        // A conversation kept before there was a plan is the items alone,
+        // and reads as one without a plan.
+        let old = r#"[{"kind":"user","text":"hi"},{"kind":"end","how":"stopped","changed":false}]"#;
+        let old = Transcript::from_json(old).expect("an older conversation");
+        assert!(old.plan.is_empty() && old.items.len() == 2);
+        let Some(Item::End(end)) = old.items.last() else { panic!("an end") };
+        assert_eq!(end.spent, None);
     }
 
     #[test]
@@ -856,5 +1338,17 @@ mod tests {
         assert_eq!(format_estimate(0.0031), "est. under $0.01");
         assert_eq!(format_estimate(0.1234), "est. $0.12");
         assert_eq!(format_estimate(2.5), "est. $2.50");
+        assert_eq!(format_seconds(1864.0), "31 min 4 s");
+        assert_eq!(
+            (format_count(7), format_count(1000), format_count(12_345)),
+            ("7".into(), "1,000".into(), "12,345".into())
+        );
+        assert_eq!(
+            (format_steps(1), format_steps(320), format_steps(2000)),
+            ("1 step".into(), "320 steps".into(), "2,000 steps".into())
+        );
+        // An estimate that is behind says how far it reaches.
+        assert_eq!(format_estimate_so_far(1.25, 100, 150), "est. $1.25 to step 100");
+        assert_eq!(format_estimate_so_far(2.5, 200, 200), "est. $2.50");
     }
 }

@@ -12,6 +12,7 @@
 
 use std::ffi::OsStr;
 use std::process::Command;
+use std::time::Duration;
 
 /// Variables that make the CLI authenticate, or bill, somewhere other than
 /// the login the user made with `claude`, or that put it in a mode in which
@@ -70,6 +71,17 @@ const INHERITED_SESSION_VARIABLES: &[&str] = &[
     // Would make a resumed conversation carry on with a turn the user
     // cancelled.
     "CLAUDE_CODE_RESUME_INTERRUPTED_TURN",
+    // Would have the plan tools keep their list under a name of somebody's
+    // choosing, where another session's list may be, instead of under the
+    // conversation's own id.
+    "CLAUDE_CODE_TASK_LIST_ID",
+    // Set in a Claude Code session that works as a team of agents, which
+    // share a list. Not seen to change anything in a run started here;
+    // removed so that it cannot.
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+    // Set to 0 it swaps the plan tools for the older one (seen with
+    // 2.1.325). Either is read; the conversation keeps to the newer.
+    "CLAUDE_CODE_ENABLE_TASKS",
 ];
 
 /// Variables set for every run, whatever the user's environment says.
@@ -85,12 +97,37 @@ const FIXED_VARIABLES: &[(&str, &str)] = &[
     ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
     // Using the assistant must not be what replaces the user's CLI.
     ("DISABLE_AUTOUPDATER", "1"),
+    // A tool call that runs long is waited for, not moved to the background:
+    // run with `-p`, the CLI would lose its result (so its documentation
+    // says; with 2.1.325 a call of 130 s was simply waited for either way).
+    ("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS", "0"),
+];
+
+/// The two limits the CLI puts on one call to an MCP server reached over
+/// HTTP, as Trill's is. Both were met with CLI 2.1.325 and a tool that only
+/// waits: left alone, a call of 75 s failed at 60 s ("The operation timed
+/// out."); with the first of these raised, one of 310 s failed at 300 s
+/// ("sent no response or progress for 300s; aborting"); with both, it
+/// answered. Rendering a long song is such a call.
+const TOOL_TIMEOUT_VARIABLES: &[&str] = &[
+    // How long one request to the server may take, in milliseconds.
+    "MCP_TOOL_TIMEOUT",
+    // How long a call may go without a sign of life from the server.
+    "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT",
 ];
 
 /// Prepares `command`'s environment and returns the names of the redirecting
 /// variables that were present and removed.
 pub(crate) fn apply(command: &mut Command, keep_redirecting: bool) -> Vec<String> {
     apply_with(command, keep_redirecting, |name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+}
+
+/// Gives every tool call of the run `command` starts up to `limit`.
+pub(crate) fn allow_long_tool_calls(command: &mut Command, limit: Duration) {
+    let milliseconds = limit.as_millis().to_string();
+    for name in TOOL_TIMEOUT_VARIABLES {
+        command.env(name, &milliseconds);
+    }
 }
 
 fn apply_with(command: &mut Command, keep_redirecting: bool, is_set: impl Fn(&OsStr) -> bool) -> Vec<String> {
@@ -157,6 +194,28 @@ mod tests {
         let changes = changes(&command);
         for (name, value) in FIXED_VARIABLES {
             assert_eq!(changes.get(OsStr::new(name)), Some(&Some(OsString::from(value))));
+        }
+    }
+
+    #[test]
+    fn a_tool_call_is_given_its_time_in_the_clis_two_clocks() {
+        let mut command = Command::new("cli");
+        allow_long_tool_calls(&mut command, Duration::from_secs(30 * 60));
+
+        let changes = changes(&command);
+        for name in ["MCP_TOOL_TIMEOUT", "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"] {
+            assert_eq!(changes.get(OsStr::new(name)), Some(&Some(OsString::from("1800000"))), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_plan_is_kept_with_the_conversation_and_nowhere_shared() {
+        let mut command = Command::new("cli");
+        apply_with(&mut command, false, |_| true);
+
+        let changes = changes(&command);
+        for name in ["CLAUDE_CODE_TASK_LIST_ID", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "CLAUDE_CODE_ENABLE_TASKS"] {
+            assert_eq!(changes.get(OsStr::new(name)), Some(&None), "{name} must not reach the CLI");
         }
     }
 

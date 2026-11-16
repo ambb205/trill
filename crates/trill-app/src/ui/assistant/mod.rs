@@ -18,6 +18,18 @@
 //! * **It can be watched and stopped.** The reply appears as it is written,
 //!   each tool call is a line in plain words ([`tools`]), and Stop ends the
 //!   turn.
+//! * **A long request runs to its end.** A whole song takes hundreds of
+//!   steps and may take an hour. The back end carries the request on by
+//!   itself for as long as it takes, up to a limit the user sets; here it is
+//!   one turn throughout, with one undo group, however it ends. While it
+//!   runs the panel says how long, how many steps of how many, and what the
+//!   CLI estimates it has cost; the assistant's plan stands above the
+//!   message field as a checklist that fills in as the work proceeds.
+//! * **It can look things up, and says when it does.** With the switch
+//!   under the message field on, the assistant may search the web and read
+//!   pages; every search and every page is a line with the query or the
+//!   address. Off, the tools are not offered to it at all. What a page can
+//!   and cannot make it do is set out in `trill-assistant`.
 //! * **It shows what it changed.** When a turn that changed the song has
 //!   ended, what it made or edited is selected and brought into view
 //!   ([`places`]): once, at the end, and not if the user is at work
@@ -38,9 +50,9 @@
 //! knows what a tool call changed and how the window goes there; [`store`]
 //! what is kept between runs; [`view`] the panel itself; [`scenes`] canned
 //! conversations for the screenshots. This file is the part in between:
-//! whether the assistant is ready, which model is asked for, the turn
-//! under way and its undo group, and which conversation belongs to which
-//! project.
+//! whether the assistant is ready, what was chosen for it (the model, how
+//! hard it thinks, the web, the step limit), the turn under way and its
+//! undo group, and which conversation belongs to which project.
 //!
 //! Closed and idle, the assistant does nothing at all: [`Assistant::tick`]
 //! is not called, and nothing was started that would need it.
@@ -62,7 +74,7 @@ pub use view::{show, toggle_button};
 use super::UiOptions;
 use super::snapshot::{Live, Snapshot};
 use super::state::UiState;
-use backend::{Backend, Chat, Installed, McpServer, Nowhere, Problem, Ready};
+use backend::{Backend, Chat, Installed, McpServer, Nowhere, Problem, Ready, Setup};
 use context::Context;
 use eframe::egui;
 use places::{Place, Route};
@@ -70,8 +82,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use store::Store;
-use transcript::{Ending, Item, Offer, Tone, Transcript, TurnEnd};
-use trill_assistant::{Event, FailureReason, LoginMethod, SessionId};
+use transcript::{Ending, Item, Offer, Spent, Tone, Transcript, TurnEnd};
+use trill_assistant::{Effort, Event, FailureReason, LoginMethod, Progress, SessionId};
 use trill_core::Project;
 use trill_engine::SharedSession;
 use trill_engine::session::{UndoGroup, UndoStep};
@@ -95,6 +107,18 @@ const CONTINUE: &str = "Continue.";
 pub const AT_WORK: f64 = 8.0;
 /// The slot of the line that says another model answers from now on.
 const MODEL_NOTE: &str = "model";
+/// What the panel says in place of a conversation it does not take up
+/// again because the assistant's instructions have changed since.
+const STARTED_OVER: &str = "Trill has given the assistant new instructions since the last conversation about this \
+                            project, so a new one starts here. The assistant does not remember the earlier one.";
+/// How often the conversation of a turn under way is kept: a long request
+/// runs for an hour, and what it has said and done by then is worth more
+/// than a turn's worth of loss if the program does not see its end.
+const KEEP_EVERY: Duration = Duration::from_secs(60);
+/// The step limits the panel offers for one request. The smallest is still
+/// three times what a message used to be allowed; the default (the back
+/// end's) is among them.
+pub const STEP_LIMITS: [u32; 4] = [250, 500, 1000, 2000];
 
 /// How the assistant starts up.
 #[derive(Clone, Debug, Default)]
@@ -148,6 +172,23 @@ struct Turn {
     /// of the open one; the next tick takes the window and the
     /// conversation over to it.
     opened_another: bool,
+    /// How far it has come, as the back end last said.
+    progress: Option<Progress>,
+    /// When the conversation was last kept while this turn ran.
+    kept: Instant,
+}
+
+/// How the turn under way stands, for whoever shows it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Working {
+    /// How long it has run, in whole seconds.
+    pub seconds: u64,
+    /// How many times the model has been asked, and the most it may be.
+    pub steps: u32,
+    pub limit: u32,
+    /// What the CLI estimates it has cost at API prices, and how many of
+    /// the steps that covers: the CLI says only now and then.
+    pub cost: Option<(f64, u32)>,
 }
 
 /// Who the conversation is billed to, when that is not the user's Claude
@@ -239,6 +280,21 @@ pub struct Assistant {
     model_problem: Option<String>,
     /// Open the chooser's menu on the next frame.
     open_model_menu: bool,
+    /// How hard the model is asked to think from the next message on;
+    /// `None` leaves that to the CLI.
+    effort_choice: Option<Effort>,
+    /// Open the list of efforts on the next frame.
+    open_effort_menu: bool,
+    /// Whether the assistant may search the web and read pages, from the
+    /// next message on.
+    web: bool,
+    /// The most steps one request may take, from the next message on.
+    step_limit: u32,
+    /// The plan's checklist is folded down to its heading.
+    plan_folded: bool,
+    /// The step of the plan that was in hand when the checklist was last
+    /// drawn: when another is, it is brought into view.
+    plan_shown: Option<String>,
     /// How the replies were last set.
     replies: reply::Replies,
     /// Which items of the conversation lead somewhere in the song as it
@@ -299,6 +355,7 @@ impl Assistant {
         let open = options.assistant.open || scene.is_some() || was_open;
         let width = width.clamp(MIN_WIDTH, MAX_WIDTH);
         let model_choice = options.assistant.model.clone().or_else(|| store.model().map(str::to_owned));
+        let (effort_choice, web, step_limit) = (store.effort(), store.web(), store.step_limit());
         Self {
             backend,
             script,
@@ -322,6 +379,12 @@ impl Assistant {
             model_draft: String::new(),
             model_problem: None,
             open_model_menu: false,
+            effort_choice,
+            open_effort_menu: false,
+            web,
+            step_limit,
+            plan_folded: false,
+            plan_shown: None,
             replies: reply::Replies::default(),
             leads: (Vec::new(), None),
             arrival: None,
@@ -477,7 +540,7 @@ impl Assistant {
             return false;
         }
         if self.chat.is_none() {
-            match self.backend.open(ready, self.conversation.clone(), self.model_choice.as_deref()) {
+            match self.backend.open(ready, self.conversation.clone(), &self.setup()) {
                 Ok(chat) => self.chat = Some(chat),
                 Err(reason) => {
                     self.transcript.push_user(message);
@@ -502,6 +565,8 @@ impl Assistant {
             log::warn!("the assistant did not take the message: {error}");
             return false;
         }
+        // A plan that was carried out belongs to the request before.
+        self.transcript.plan.begin_request();
         self.transcript.push_user(message);
         if self.sent.last().is_none_or(|last| last != message) {
             self.sent.push(message.to_owned());
@@ -514,8 +579,91 @@ impl Assistant {
         self.worked_at = None;
         self.arrival = None;
         let started = Instant::now();
-        self.turn = Some(Turn { group: Some(group), started, stopping: false, before, file, opened_another: false });
+        self.turn = Some(Turn {
+            group: Some(group),
+            started,
+            stopping: false,
+            before,
+            file,
+            opened_another: false,
+            progress: None,
+            kept: started,
+        });
         true
+    }
+
+    // ---- what the next message is answered with ---------------------------
+
+    /// Everything a conversation is opened with, as chosen in the panel.
+    fn setup(&self) -> Setup {
+        Setup {
+            model: self.model_choice.clone(),
+            effort: self.effort_choice,
+            web: self.web,
+            step_limit: self.step_limit,
+        }
+    }
+
+    /// What is chosen in the panel takes hold when a conversation is
+    /// opened, so the one that is open is let go of: the next message opens
+    /// it again by its id, and everything said so far carries over. Not
+    /// while a turn is under way, which is answered as it began.
+    fn reopen(&mut self) -> Result<(), String> {
+        if self.turn.is_some() {
+            return Err("That can be changed once the assistant has finished".to_owned());
+        }
+        self.chat = None;
+        Ok(())
+    }
+
+    /// How hard the model is asked to think; `None` leaves it to the CLI.
+    pub fn effort_choice(&self) -> Option<Effort> {
+        self.effort_choice
+    }
+
+    /// Chooses how hard the model thinks, from the next message on.
+    /// Remembered between sessions.
+    pub fn choose_effort(&mut self, effort: Option<Effort>) -> Result<(), String> {
+        if self.effort_choice != effort {
+            self.reopen()?;
+            self.effort_choice = effort;
+            self.store.set_effort(effort);
+        }
+        Ok(())
+    }
+
+    /// Whether the assistant may search the web and read pages.
+    pub fn web(&self) -> bool {
+        self.web
+    }
+
+    /// Lets the assistant use the web, or not, from the next message on.
+    /// Off, the tools for it are not offered to the assistant at all.
+    /// Remembered between sessions.
+    pub fn set_web(&mut self, web: bool) -> Result<(), String> {
+        if self.web != web {
+            self.reopen()?;
+            self.web = web;
+            self.store.set_web(web);
+        }
+        Ok(())
+    }
+
+    /// The most steps one request may take.
+    pub fn step_limit(&self) -> u32 {
+        self.step_limit
+    }
+
+    /// Sets the most steps one request may take, from the next message on.
+    /// Remembered between sessions.
+    pub fn set_step_limit(&mut self, limit: u32) -> Result<(), String> {
+        let limit = limit.clamp(*store::STEP_LIMITS.start(), *store::STEP_LIMITS.end());
+        if self.step_limit != limit {
+            self.reopen()?;
+            self.step_limit = limit;
+            self.store.set_step_limit(limit);
+        }
+        Ok(())
     }
 
     // ---- which model answers --------------------------------------------------
@@ -590,10 +738,18 @@ impl Assistant {
         self.turn.as_ref().is_some_and(|turn| turn.stopping)
     }
 
-    /// How long the turn under way has run, in whole seconds.
-    pub fn working_for(&self) -> Option<u64> {
+    /// How the turn under way stands: how long it has run, how many steps
+    /// it has taken of how many, and what the CLI says it has cost.
+    pub fn working(&self) -> Option<Working> {
         let turn = self.turn.as_ref()?;
-        Some(self.frozen_seconds.unwrap_or_else(|| turn.started.elapsed().as_secs()))
+        let seconds = self.frozen_seconds.unwrap_or_else(|| turn.started.elapsed().as_secs());
+        let progress = turn.progress;
+        Some(Working {
+            seconds,
+            steps: progress.map_or(0, |progress| progress.steps),
+            limit: self.step_limit,
+            cost: progress.and_then(|progress| Some((progress.estimated_cost_usd?, progress.costed_steps))),
+        })
     }
 
     /// What a failed or stopped turn offers to send, if anything: the same
@@ -643,6 +799,14 @@ impl Assistant {
 
     /// Takes in what the turn under way has reported since the last look.
     fn pump(&mut self, project: &Project) {
+        // A long turn's conversation is kept as it goes. Read back, one
+        // that was cut off reads as stopped where it had got to.
+        if let (Some(turn), Some(session)) = (&mut self.turn, &self.conversation)
+            && turn.kept.elapsed() >= KEEP_EVERY
+        {
+            turn.kept = Instant::now();
+            self.store.keep_transcript(session, &self.transcript);
+        }
         // Until the turn has ended: what follows its end is the next turn's.
         while self.turn.is_some()
             && let Some(event) = self.chat.as_mut().and_then(|chat| chat.poll())
@@ -654,6 +818,11 @@ impl Assistant {
                         self.billing = Some(Billing::KeyFrom(source));
                     }
                     self.adopt(start.session_id);
+                }
+                Event::Progress(progress) => {
+                    if let Some(turn) = &mut self.turn {
+                        turn.progress = Some(progress);
+                    }
                 }
                 Event::Finished(summary) => self.finish(transcript::finished(&summary)),
                 Event::Cancelled => self.finish(Ending::Stopped),
@@ -713,7 +882,8 @@ impl Assistant {
 
     fn fail(&mut self, reason: &FailureReason) {
         let text = transcript::failure_text(reason, SystemTime::now());
-        self.finish(Ending::Failed { text, offer: transcript::offer_for(reason) });
+        let offer = transcript::offer_for(reason, self.transcript.turn_has_worked());
+        self.finish(Ending::Failed { text, offer });
         if transcript::calls_for_a_check(reason) {
             // What the check finds says what is wrong now, and whether it
             // still is.
@@ -733,6 +903,19 @@ impl Assistant {
     /// it changed is worked out, and the conversation so far is kept.
     fn finish(&mut self, ending: Ending) {
         let Some(turn) = self.turn.take() else { return };
+        // A turn that finished says what it took. One that did not is
+        // closed with what the panel was told on the way.
+        let spent = match (&ending, turn.progress) {
+            (Ending::Finished { .. }, _) | (_, None) => None,
+            (_, Some(progress)) => Some(Spent {
+                seconds: self
+                    .frozen_seconds
+                    .map_or_else(|| turn.started.elapsed().as_secs_f32(), |seconds| seconds as f32),
+                steps: progress.steps,
+                estimated_cost: progress.estimated_cost_usd,
+                costed_steps: progress.costed_steps,
+            }),
+        };
         let (step, places, route) = {
             let mut session = self.session.lock();
             let step = turn.group.and_then(|group| session.end_group(group));
@@ -754,7 +937,7 @@ impl Assistant {
             (step, places, route)
         };
         self.arrival = route;
-        self.transcript.end(TurnEnd { ending, changed: step.is_some(), step, places });
+        self.transcript.end(TurnEnd { ending, spent, changed: step.is_some(), step, places });
         // The back end's word on which conversation this is, should the
         // start of the turn have gone unseen.
         if let Some(session) = self.chat.as_ref().and_then(|chat| chat.session_id()) {
@@ -795,6 +978,15 @@ impl Assistant {
                 self.arrival = None;
                 self.transcript = Transcript::default();
                 self.conversation = path.and_then(|path| self.store.conversation(path));
+                // A conversation begun under other instructions would go on
+                // under them: the assistant starts over, and says so.
+                if self.conversation.is_none() && path.is_some_and(|path| self.store.has_outdated_conversation(path)) {
+                    self.transcript.items.push(Item::Note {
+                        text: STARTED_OVER.to_owned(),
+                        tone: Tone::Info,
+                        slot: "",
+                    });
+                }
                 self.awaiting = self.conversation.clone();
                 if let Some(session) = &self.conversation {
                     self.store.load_transcript(session);
@@ -998,7 +1190,7 @@ impl Assistant {
 pub(in crate::ui) mod testing {
     //! What the interaction tests need of the assistant's insides.
     pub use super::AT_WORK;
-    pub use super::backend::{Problem, Script, Sent, ready};
+    pub use super::backend::{Problem, Script, Sent, Setup, ready};
     pub use super::places::Place;
     pub use super::transcript::{Ending, Item, Offer, ToolState};
 }

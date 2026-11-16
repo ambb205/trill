@@ -1,9 +1,10 @@
 //! What the assistant's panel keeps between runs, beside the settings:
 //!
-//! * `assistant.json`: whether the panel was open and how wide, the model
-//!   chosen in it, and for each project file the id of the conversation
-//!   about it. The id is how a conversation is taken up again; it is the
-//!   CLI's name for it, not a credential.
+//! * `assistant.json`: whether the panel was open and how wide, what was
+//!   chosen in it (the model, how hard it is to think, whether it may use
+//!   the web, how many steps one request may take), and for each project
+//!   file the id of the conversation about it. The id is how a conversation
+//!   is taken up again; it is the CLI's name for it, not a credential.
 //! * `assistant/transcripts/<id>.json`: the conversation as the panel
 //!   showed it, to read back.
 //!
@@ -24,9 +25,12 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use trill_assistant::SessionId;
+use trill_assistant::{DEFAULT_MAX_TURNS, Effort, SessionId};
 
 const FILE: &str = "assistant.json";
+/// The fewest and the most steps a request can be allowed. The panel offers
+/// a few values between; a file edited by hand is held to these.
+pub const STEP_LIMITS: std::ops::RangeInclusive<u32> = 20..=10_000;
 /// Conversations are remembered for this many projects, the most recently
 /// used ones.
 const MAX_CONVERSATIONS: usize = 200;
@@ -39,6 +43,28 @@ struct Kept {
     /// go of first.
     #[serde(default)]
     used: u64,
+    /// Which instructions the assistant was given when the conversation
+    /// began ([`instructions`]). The CLI records them then and keeps to
+    /// them for as long as the conversation lasts.
+    #[serde(default)]
+    instructions: String,
+}
+
+/// A mark that tells one wording of the assistant's instructions from
+/// another: sixteen hex digits worked out from the text.
+///
+/// A conversation goes on under the instructions it began with, whatever
+/// Trill has since learned to tell the assistant. One begun under other
+/// instructions is therefore not taken up again: they may say nothing of
+/// the tools the assistant is now given, nor that a page from the web is
+/// to be read and never obeyed.
+fn instructions() -> String {
+    // FNV-1a: small, and the same on every machine and in every version.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in trill_assistant::DEFAULT_SYSTEM_PROMPT.bytes() {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 /// What `assistant.json` holds.
@@ -51,13 +77,31 @@ struct Remembered {
     /// while the choice is left to the CLI.
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
+    /// How hard the model is asked to think, in the CLI's word for it;
+    /// absent while that is left to the CLI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<String>,
+    /// Whether the assistant may search the web and read pages. On unless
+    /// the user switched it off.
+    web: bool,
+    /// The most steps one request may take; absent while it is Trill's own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    step_limit: Option<u32>,
     /// By project file.
     conversations: BTreeMap<String, Kept>,
 }
 
 impl Default for Remembered {
     fn default() -> Self {
-        Self { open: false, width: super::DEFAULT_WIDTH, model: None, conversations: BTreeMap::new() }
+        Self {
+            open: false,
+            width: super::DEFAULT_WIDTH,
+            model: None,
+            effort: None,
+            web: true,
+            step_limit: None,
+            conversations: BTreeMap::new(),
+        }
     }
 }
 
@@ -191,14 +235,66 @@ impl Store {
         }
     }
 
-    /// The conversation about `project`, if one is remembered.
+    /// How hard the model is asked to think; `None` while that is the
+    /// CLI's to decide. A word that is not one of the CLI's levels (the
+    /// file was edited by hand) is no choice.
+    pub fn effort(&self) -> Option<Effort> {
+        self.remembered.effort.as_deref().and_then(Effort::named)
+    }
+
+    pub fn set_effort(&mut self, effort: Option<Effort>) {
+        let name = effort.map(|effort| effort.name().to_owned());
+        if self.remembered.effort != name {
+            self.remembered.effort = name;
+            self.save();
+        }
+    }
+
+    /// Whether the assistant may search the web and read pages.
+    pub fn web(&self) -> bool {
+        self.remembered.web
+    }
+
+    pub fn set_web(&mut self, web: bool) {
+        if self.remembered.web != web {
+            self.remembered.web = web;
+            self.save();
+        }
+    }
+
+    /// The most steps one request may take.
+    pub fn step_limit(&self) -> u32 {
+        let limit = self.remembered.step_limit.unwrap_or(DEFAULT_MAX_TURNS);
+        limit.clamp(*STEP_LIMITS.start(), *STEP_LIMITS.end())
+    }
+
+    pub fn set_step_limit(&mut self, limit: u32) {
+        let kept = (limit != DEFAULT_MAX_TURNS).then_some(limit);
+        if self.remembered.step_limit != kept {
+            self.remembered.step_limit = kept;
+            self.save();
+        }
+    }
+
+    /// The conversation about `project`, if one is remembered that the
+    /// assistant can carry on: one begun under the instructions it is given
+    /// now.
     pub fn conversation(&self, project: &Path) -> Option<SessionId> {
-        SessionId::parse(&self.remembered.conversations.get(&key(project))?.session)
+        let kept = self.remembered.conversations.get(&key(project))?;
+        SessionId::parse(&kept.session).filter(|_| kept.instructions == instructions())
+    }
+
+    /// Whether a conversation about `project` is remembered that was begun
+    /// under other instructions than the assistant is given now, and so is
+    /// not taken up again.
+    pub fn has_outdated_conversation(&self, project: &Path) -> bool {
+        let kept = self.remembered.conversations.get(&key(project));
+        kept.is_some_and(|kept| SessionId::parse(&kept.session).is_some() && kept.instructions != instructions())
     }
 
     /// Remembers that `session` is the conversation about `project`.
     pub fn remember(&mut self, project: &Path, session: &SessionId) {
-        let kept = Kept { session: session.as_str().to_owned(), used: now() };
+        let kept = Kept { session: session.as_str().to_owned(), used: now(), instructions: instructions() };
         let previous = self.remembered.conversations.insert(key(project), kept);
         if let Some(previous) = previous.filter(|previous| previous.session != session.as_str()) {
             self.remove_transcript(&previous.session);
@@ -359,11 +455,17 @@ mod tests {
         assert_eq!(store.panel(), (false, crate::ui::assistant::DEFAULT_WIDTH), "closed until it is asked for");
         assert_eq!(store.conversation(Path::new("songs/a.trill")), None);
         assert_eq!(store.model(), None, "the model is the CLI's choice until one is chosen");
+        assert_eq!(store.effort(), None, "and so is how hard it thinks");
+        assert!(store.web(), "the web is on until it is switched off");
+        assert_eq!(store.step_limit(), DEFAULT_MAX_TURNS);
         store.flush();
         assert!(!home.path().join(FILE).exists(), "nothing is written for having looked");
 
         store.set_panel(true, 412.0);
         store.set_model(Some("sonnet"));
+        store.set_effort(Some(Effort::ExtraHigh));
+        store.set_web(false);
+        store.set_step_limit(2000);
         store.remember(Path::new("songs/a.trill"), &id('a'));
         store.remember(Path::new("songs/b.trill"), &id('b'));
         let mut transcript = Transcript::default();
@@ -375,6 +477,7 @@ mod tests {
         let mut store = open(home.path());
         assert_eq!(store.panel(), (true, 412.0));
         assert_eq!(store.model(), Some("sonnet"));
+        assert_eq!((store.effort(), store.web(), store.step_limit()), (Some(Effort::ExtraHigh), false, 2000));
         assert_eq!(store.conversation(Path::new("songs/a.trill")), Some(id('a')));
         assert_eq!(store.conversation(Path::new("songs/b.trill")), Some(id('b')));
         assert_eq!(store.conversation(Path::new("songs/c.trill")), None);
@@ -386,12 +489,21 @@ mod tests {
         store.load_transcript(&id('b'));
         assert_eq!(wait_for_loaded(&mut store), (id('b'), None), "none was kept for that one");
 
-        // Back to the CLI's own choice: the name is gone from the file.
+        // Back to the CLI's own choices and Trill's own limit: they are
+        // gone from the file.
         store.set_model(None);
+        store.set_effort(None);
+        store.set_step_limit(DEFAULT_MAX_TURNS);
+        store.set_web(true);
         store.flush();
         let kept = std::fs::read_to_string(home.path().join(FILE)).unwrap();
         assert!(!kept.contains("model") && !kept.contains("sonnet"), "{kept}");
-        assert_eq!(open(home.path()).model(), None);
+        assert!(!kept.contains("effort") && !kept.contains("step_limit") && kept.contains("\"web\": true"), "{kept}");
+        let store = open(home.path());
+        assert_eq!(
+            (store.model(), store.effort(), store.web(), store.step_limit()),
+            (None, None, true, DEFAULT_MAX_TURNS)
+        );
     }
 
     #[test]
@@ -428,6 +540,40 @@ mod tests {
         assert_eq!(store.conversation(other), None);
         assert_eq!(std::fs::read_dir(&transcripts).unwrap().count(), 0);
         assert_eq!(open(home.path()).conversation(other), None);
+    }
+
+    #[test]
+    fn a_conversation_begun_under_other_instructions_is_not_taken_up_again() {
+        let home = tempfile::tempdir().unwrap();
+        let project = Path::new("songs/a.trill");
+        let mut store = open(home.path());
+        store.remember(project, &id('a'));
+        assert_eq!(store.conversation(project), Some(id('a')));
+        assert!(!store.has_outdated_conversation(project));
+        store.flush();
+        let file = home.path().join(FILE);
+        let kept = std::fs::read_to_string(&file).unwrap();
+        let mark = instructions();
+        assert_eq!(mark.len(), 16);
+        assert!(kept.contains(&format!("\"instructions\": \"{mark}\"")), "{kept}");
+
+        // As an earlier version of Trill, with other instructions, left it;
+        // and as one from before the mark was kept at all.
+        for earlier in [
+            kept.replace(&mark, "0123456789abcdef"),
+            kept.replace(&format!(",\n      \"instructions\": \"{mark}\""), ""),
+        ] {
+            assert_ne!(earlier, kept);
+            std::fs::write(&file, earlier).unwrap();
+            let mut store = open(home.path());
+            assert_eq!(store.conversation(project), None, "it would go on under the old instructions");
+            assert!(store.has_outdated_conversation(project));
+            assert!(!store.has_outdated_conversation(Path::new("songs/b.trill")));
+            // The conversation that takes its place is of today.
+            store.remember(project, &id('b'));
+            assert_eq!(store.conversation(project), Some(id('b')));
+            assert!(!store.has_outdated_conversation(project));
+        }
     }
 
     #[test]
@@ -486,11 +632,15 @@ mod tests {
         // Names this version does not know are ignored, and an id that is
         // not an id is no conversation.
         let text = r#"{ "open": true, "new_in_version_nine": 1, "model": "--dangerously-skip-permissions",
+            "effort": "--tools=Bash", "step_limit": 4000000000,
             "conversations": { "x": { "session": "--resume=evil" } } }"#;
         std::fs::write(home.path().join(FILE), text).unwrap();
         let store = open(home.path());
         assert!(store.panel().0);
         assert_eq!(store.model(), None, "a name the command line would take for an option is no model");
+        assert_eq!(store.effort(), None, "and a word that is not a level is no effort");
+        assert_eq!(store.step_limit(), *STEP_LIMITS.end(), "a limit out of all proportion is held to the most");
+        assert!(store.web(), "a file that says nothing of the web leaves it on");
         assert_eq!(store.remembered.conversations.len(), 1);
         assert!(store.remembered.conversations.values().all(|kept| SessionId::parse(&kept.session).is_none()));
 

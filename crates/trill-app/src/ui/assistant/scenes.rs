@@ -22,8 +22,8 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::time::Duration;
 use trill_assistant::{
-    CliInstallation, CliVersion, Event, FailureReason, Notice, SessionId, TokenUsage, TurnStart, TurnSummary,
-    Unavailable,
+    CliInstallation, CliVersion, Effort, Event, FailureReason, Notice, PlanChange, Progress, SessionId, StepStatus,
+    TokenUsage, TurnStart, TurnSummary, Unavailable, WebLookup,
 };
 use trill_core::{ClipId, Note, Project, TrackId};
 
@@ -41,6 +41,14 @@ pub enum Scene {
     Markdown,
     /// After an answer, with the list of models open.
     Model,
+    /// After an answer, with the list of thinking efforts open.
+    Effort,
+    /// In the middle of a whole song: a plan partly ticked off, something
+    /// looked up on the web, and well past a hundred steps.
+    Song,
+    /// The whole song finished: the plan done, what it took, and a
+    /// conversation that had to be summarised on the way.
+    SongDone,
     /// A turn that ran into the usage limit, after a tool call that failed.
     Limit,
     /// A conversation billed to an API key.
@@ -53,12 +61,15 @@ pub enum Scene {
 
 impl Scene {
     /// Every scene by the name the command line knows it by.
-    pub const ALL: [(&'static str, Scene); 9] = [
+    pub const ALL: [(&'static str, Scene); 12] = [
         ("ready", Scene::Ready),
         ("working", Scene::Working),
         ("answered", Scene::Answered),
         ("markdown", Scene::Markdown),
         ("model", Scene::Model),
+        ("effort", Scene::Effort),
+        ("song", Scene::Song),
+        ("song-done", Scene::SongDone),
         ("limit", Scene::Limit),
         ("api-key", Scene::ApiKey),
         ("signed-out", Scene::SignedOut),
@@ -143,21 +154,26 @@ impl Scene {
                     }),
                 ]);
             }
-            Scene::Markdown | Scene::Model => {
+            Scene::Markdown | Scene::Model | Scene::Effort => {
                 if self == Scene::Model {
                     // Chosen before anything is said, so nothing is said of it.
                     let _ = assistant.choose_model(Some("sonnet"));
                     assistant.open_model_menu = true;
                 }
+                if self == Scene::Effort {
+                    let _ = assistant.choose_model(Some("opus"));
+                    let _ = assistant.choose_effort(Some(Effort::High));
+                    assistant.open_effort_menu = true;
+                }
                 let question = match self {
-                    Scene::Model => "What key is this in?",
+                    Scene::Model | Scene::Effort => "What key is this in?",
                     _ => "How would you build up to the drop at bar 17?",
                 };
                 if !assistant.submit(question, &context) {
                     return;
                 }
                 let said = match self {
-                    Scene::Model => {
+                    Scene::Model | Scene::Effort => {
                         "**A minor.** The pad moves through Am, F, C and G, and nothing in the song leaves the key."
                     }
                     _ => {
@@ -212,6 +228,127 @@ impl Scene {
                 ]);
                 assistant.frozen_seconds = Some(14);
             }
+            Scene::Song | Scene::SongDone => {
+                let bass = track("Bass");
+                let asked = "Make this a whole song: about two minutes of melodic house in A minor, with a build, \
+                             a drop and an outro. Look up how the genre paces a build if you need to.";
+                if !assistant.submit(asked, &context) {
+                    return;
+                }
+                let written = bass.and_then(|bass| write_bass_intro(assistant, bass));
+                let wrote = match written {
+                    Some(clip) => format!("{{ \"clip_id\": {}, \"created\": true, \"bars\": 8 }}", clip.0),
+                    None => "{ \"note_count\": 0 }".to_owned(),
+                };
+                let bass_id = id(bass.map(|track| track.0));
+                let drums_id = id(track("Drums").map(|track| track.0));
+                let steps = [
+                    ("Settle tempo, key and sections", "Settling tempo, key and sections"),
+                    ("Look up how the genre paces a build", "Looking up how the genre paces a build"),
+                    ("Drums for every section", "Writing the drums"),
+                    ("Bass line under the chords", "Writing the bass line"),
+                    ("Chords, pad and arp", "Writing chords, pad and arp"),
+                    ("Lead for the drop", "Writing the lead"),
+                    ("Fills, sweeps and automation", "Adding fills and automation"),
+                    ("Render and read the mix", "Rendering and reading the mix"),
+                ];
+                let planned = steps.iter().enumerate().map(|(index, (title, doing))| {
+                    Event::Plan(PlanChange::Added {
+                        id: (index + 1).to_string(),
+                        title: (*title).to_owned(),
+                        doing: Some((*doing).to_owned()),
+                    })
+                });
+                let mut events = vec![
+                    started(false),
+                    Event::Text(
+                        "A two-minute track at **122 BPM** in A minor. Here is the plan; I\u{2019}ll work through it \
+                         section by section."
+                            .to_owned(),
+                    ),
+                ];
+                events.extend(planned);
+                events.extend([
+                    stands("1", StepStatus::InProgress),
+                    call("1", "get_project", json!({})),
+                    answer("1", "get_project", Ok("{ \"name\": \"First Light\", \"tempo\": 96, \"tracks\": 7 }")),
+                    call("2", "set_project", json!({ "tempo": 122 })),
+                    answer("2", "set_project", Ok("{ \"tempo\": 122.0 }")),
+                    stands("1", StepStatus::Done),
+                    stands("2", StepStatus::InProgress),
+                    looks_up("3", WebLookup::Search { query: "melodic house arrangement build length in bars".into() }),
+                    found(
+                        "3",
+                        "Web search results for query: \"melodic house arrangement build length in bars\"\n\nLinks: \
+                         [{\"title\":\"Arranging melodic house: sections and energy\",\"url\":\"https://example.com/melodic-house-arrangement\"}]",
+                    ),
+                    looks_up(
+                        "4",
+                        WebLookup::Page {
+                            url: "https://example.com/melodic-house-arrangement".into(),
+                            question: "How long is a build before the drop, and what changes in it?".into(),
+                        },
+                    ),
+                    found(
+                        "4",
+                        "Builds run 8 or 16 bars. The kick often drops out for the last 2 to 4; a filter opens on the \
+                         pad; snare rolls double every 2 bars.",
+                    ),
+                    stands("2", StepStatus::Done),
+                    Event::Text(
+                        "The usual shape is a **16-bar build** with the kick out for the last four bars. I\u{2019}ll \
+                         use that."
+                            .to_owned(),
+                    ),
+                    stands("3", StepStatus::InProgress),
+                    call("5", "write_drums", json!({ "target": { "track": drums_id, "bars": 16 }, "groove": "house" })),
+                    answer("5", "write_drums", Ok("{ \"bars\": 16, \"note_count\": 208 }")),
+                    stands("3", StepStatus::Done),
+                    stands("4", StepStatus::InProgress),
+                    call(
+                        "6",
+                        "write_bass",
+                        json!({ "target": { "track": bass_id, "start": 0, "bars": 8 }, "progression": "Am | F | C | G" }),
+                    ),
+                ]);
+                if self == Scene::Song {
+                    // Well into its second run of the CLI: the first has
+                    // said what it cost.
+                    events.push(Event::Progress(Progress {
+                        steps: 118,
+                        estimated_cost_usd: Some(1.42),
+                        costed_steps: 100,
+                    }));
+                    script.say(events);
+                    assistant.frozen_seconds = Some(14 * 60 + 2);
+                    return;
+                }
+                events.push(answer("6", "write_bass", Ok(&wrote)));
+                events.extend((4..=8).flat_map(|step| {
+                    let id = step.to_string();
+                    [stands(&id, StepStatus::InProgress), stands(&id, StepStatus::Done)]
+                }));
+                events.extend([
+                    Event::Notice(Notice::Compacted { tokens_before: Some(986_210), tokens_after: Some(41_870) }),
+                    call("7", "render", json!({ "path": "first-light-house.wav" })),
+                    answer("7", "render", Ok("{ \"lufs\": -9.4, \"peak_db\": -1.0, \"seconds\": 126.0 }")),
+                    Event::Text(
+                        "**Done: 2:06 at 122 BPM in A minor.**\n\n- Intro (bars 1\u{2013}16), build (17\u{2013}32), drop \
+                         (33\u{2013}48), break, second drop, outro\n- The build opens a filter on **Pad** and drops \
+                         the kick for its last four bars\n- The render reads **\u{2212}9.4 LUFS**, peak \u{2212}1.0 dB, \
+                         with the low end centred\n\nListen for whether the lead at bar 33 sits above the pad or \
+                         fights it; I can only read its level, not hear it."
+                            .to_owned(),
+                    ),
+                    Event::Finished(TurnSummary {
+                        turns: 412,
+                        duration: Duration::from_secs(31 * 60 + 4),
+                        usage: TokenUsage { input: 5200, output: 410, cache_read: 0, cache_write: 0 },
+                        estimated_cost_usd: Some(6.18),
+                    }),
+                ]);
+                script.say(events);
+            }
             Scene::Limit => {
                 let lead = clip("Lead");
                 if !assistant.submit("Double the lead an octave up for the last chorus.", &context) {
@@ -245,6 +382,19 @@ fn started(with_api_key: bool) -> Event {
         model: "claude-sonnet-5-5".to_owned(),
         api_key_source: with_api_key.then(|| "ANTHROPIC_API_KEY".to_owned()),
     })
+}
+
+/// A step of the plan coming to stand as `status`.
+fn stands(id: &str, status: StepStatus) -> Event {
+    Event::Plan(PlanChange::Changed { id: id.to_owned(), status: Some(status), title: None, doing: None })
+}
+
+fn looks_up(id: &str, lookup: WebLookup) -> Event {
+    Event::WebStarted { id: format!("web-{id}"), lookup }
+}
+
+fn found(id: &str, answer: &str) -> Event {
+    Event::WebFinished { id: format!("web-{id}"), result: Ok(answer.to_owned()) }
 }
 
 fn call(id: &str, tool: &str, input: Value) -> Event {
