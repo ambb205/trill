@@ -11,8 +11,10 @@ use crate::plugin_thread::{PluginThread, keep_for_good};
 use crate::presets::{LOAD_TIMEOUT, Locator, await_arrival};
 use std::sync::Arc;
 use std::time::Duration;
+use trill_core::ControllerKind;
 use trill_core::device::{
-    DeviceController, EditorError, EditorImage, EditorOptions, ParamEdit, ParamEditKind, PresetLoadError,
+    ControllerSupport, DeviceController, EditorError, EditorImage, EditorOptions, ParamEdit, ParamEditKind,
+    PresetLoadError,
 };
 use trill_core::presets::PresetInfo;
 
@@ -31,6 +33,8 @@ pub(crate) struct ClapController {
     plugin_id: String,
     editor: Arc<EditorStatus>,
     feedback: Arc<ParamFeedback>,
+    /// Whether the plugin's note port takes MIDI, and with it controllers.
+    takes_midi: bool,
 }
 
 impl ClapController {
@@ -39,13 +43,20 @@ impl ClapController {
         instance: InstanceId,
         plugin_id: String,
         editor: Arc<EditorStatus>,
-        feedback: Arc<ParamFeedback>,
+        (feedback, takes_midi): (Arc<ParamFeedback>, bool),
     ) -> Self {
-        Self { main, instance, plugin_id, editor, feedback }
+        Self { main, instance, plugin_id, editor, feedback, takes_midi }
     }
 }
 
 impl DeviceController for ClapController {
+    /// A plugin that takes MIDI is handed every controller and does not
+    /// say which it uses. One that takes only CLAP's own notes gets none:
+    /// the sustain pedal is worked out for it by the host.
+    fn controller_support(&self) -> ControllerSupport {
+        if self.takes_midi { ControllerSupport::Any } else { ControllerSupport::Listed(vec![ControllerKind::SUSTAIN]) }
+    }
+
     fn save_state(&mut self) -> Option<Vec<u8>> {
         let instance = self.instance;
         match self.main.call(REQUEST_TIMEOUT, move |thread| thread.clap.save_state(instance)) {

@@ -160,7 +160,8 @@ fn a_take_is_written_where_it_was_heard_and_is_one_undo_step() {
     rig.key(heard(1.5), on(64));
     rig.key(heard(2.0), off(60));
     rig.key(heard(2.75) + 133.7, off(64));
-    // The pedal holds a note past its key.
+    // The pedal holds a note past its key: the note is as long as the
+    // key was down, and the pedal is recorded as the pedal.
     rig.key(heard(3.0), on(72));
     rig.key(heard(3.25), pedal(true));
     rig.key(heard(3.5), off(72));
@@ -185,8 +186,15 @@ fn a_take_is_written_where_it_was_heard_and_is_one_undo_step() {
     let off_grid = 133.7 / FRAMES_PER_BEAT;
     assert_notes(
         &timeline(&rig.session, take[0].clip),
-        &[(60, 1.0, 1.0), (64, 1.5, 1.25 + off_grid), (72, 3.0, 1.5), (67, 5.0, 1.0)],
+        &[(60, 1.0, 1.0), (64, 1.5, 1.25 + off_grid), (72, 3.0, 0.5), (67, 5.0, 1.0)],
     );
+    let pedalling = rig.session.controller_curve(take[0].clip, trill_core::ControllerKind::SUSTAIN).unwrap();
+    let steps: Vec<(f64, f64)> = pedalling.iter().map(|point| (point.beat, point.value)).collect();
+    assert_eq!(steps.len(), 2, "{steps:?}");
+    let frame = 1.0 / FRAMES_PER_BEAT;
+    assert!((steps[0].0 - 3.25).abs() < 0.01 * frame && steps[0].1 == 1.0, "{steps:?}");
+    assert!((steps[1].0 - 4.5).abs() < 0.01 * frame && steps[1].1 == 0.0, "{steps:?}");
+    assert_eq!(take[0].controllers, [trill_core::ControllerKind::SUSTAIN]);
     let clip = rig.session.project().clip(take[0].clip).unwrap();
     assert_eq!((clip.start, clip.length), (0.0, 8.0), "whole bars around what was played");
     assert_eq!(clip.notes()[0].velocity, 100);

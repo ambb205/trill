@@ -13,7 +13,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use trill_core::device::{
-    DeviceController, EditorError, EditorImage, EditorOptions, ParamEdit, ParamEditKind, PresetLoadError,
+    ControllerSupport, DeviceController, EditorError, EditorImage, EditorOptions, ParamEdit, ParamEditKind,
+    PresetLoadError,
 };
 use trill_core::presets::PresetInfo;
 
@@ -38,6 +39,8 @@ pub(crate) struct Vst3Controller {
     /// plugin's: its place in the device's list, and how its plain values
     /// relate to the normalized ones the plugin deals in.
     listed: HashMap<usize, (usize, Mapping)>,
+    /// The MIDI controllers the plugin has named a parameter for.
+    support: ControllerSupport,
 }
 
 impl Vst3Controller {
@@ -50,11 +53,16 @@ impl Vst3Controller {
             editor: created.editor.clone(),
             links: created.links.clone(),
             listed: listed.collect(),
+            support: created.midi.support(),
         }
     }
 }
 
 impl DeviceController for Vst3Controller {
+    fn controller_support(&self) -> ControllerSupport {
+        self.support.clone()
+    }
+
     fn save_state(&mut self) -> Option<Vec<u8>> {
         let instance = self.instance;
         match self.main.call(REQUEST_TIMEOUT, move |thread| thread.vst3.save_state(instance)) {

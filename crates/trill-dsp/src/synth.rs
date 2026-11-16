@@ -2,6 +2,7 @@
 //! unison, phase-modulation FM, a multimode filter and two envelopes.
 
 use crate::define_params;
+use crate::level::ChannelLevel;
 use crate::params::{ParamValues, PresetDef, boolean, choice, float, int};
 use crate::util::{Rng, db_to_gain, midi_to_hz, pan_gains};
 use crate::voice::{EnvShape, Envelope, FILTER_MODES, FilterMode, Stage, VoiceFilter, resonance_to_q};
@@ -437,12 +438,13 @@ impl Voice {
         self.filt = Envelope::idle();
     }
 
-    /// `lfo` is the LFO's value for the stretch and `bend` what the wheels
-    /// add to the pitch, in semitones.
+    /// `lfo` is the LFO's value for the stretch, `bend` what the wheels add
+    /// to the pitch, in semitones, and `levels` the channel's level at each
+    /// frame.
     fn render(
         &mut self,
         d: &Derived,
-        (lfo, bend): (f32, f32),
+        (lfo, bend, levels): (f32, f32, &[f32]),
         sample_rate: f32,
         rng: &mut Rng,
         out_l: &mut [f32],
@@ -503,7 +505,7 @@ impl Voice {
 
             let (l, r) = self.filter.tick(d.filter_type, l, r);
 
-            let level = amp * gain;
+            let level = amp * gain * levels[i];
             out_l[i] += l * level;
             out_r[i] += r * level;
         }
@@ -558,6 +560,14 @@ pub struct PolySynth {
     bend: f32,
     /// The mod wheel, 0..=1: vibrato on top of what the LFO is set to.
     mod_wheel: f32,
+    /// Channel volume and expression.
+    level: ChannelLevel,
+    /// The LFO's value, worked out once every [`CONTROL_BLOCK`] frames of
+    /// the synth's own clock, and how many frames it still stands for:
+    /// where a buffer or an event divides the frames makes no difference
+    /// to it.
+    lfo: f32,
+    lfo_frames: usize,
 }
 
 impl PolySynth {
@@ -575,6 +585,9 @@ impl PolySynth {
             pedal: Pedal::default(),
             bend: 0.0,
             mod_wheel: 0.0,
+            level: ChannelLevel::new(),
+            lfo: 0.0,
+            lfo_frames: 0,
         }
     }
 
@@ -777,13 +790,18 @@ impl PolySynth {
             EventKind::Control { controller: CONTROLLER_MOD_WHEEL, value } => {
                 self.mod_wheel = if value.is_finite() { value.clamp(0.0, 1.0) } else { 0.0 };
             }
-            EventKind::Control { .. } => {
+            EventKind::Control { controller, value } => {
                 if let Some(down) = kind.sustain() {
                     for pitch in self.pedal.set(down) {
                         self.release(pitch);
                     }
+                } else {
+                    let sounding = self.voices.iter().any(|voice| voice.active);
+                    self.level.control(controller, value, sounding);
                 }
             }
+            // Pressure has nothing to press on here.
+            EventKind::ChannelPressure { .. } => {}
         }
     }
 
@@ -791,14 +809,21 @@ impl PolySynth {
         let sample_rate = self.sample_rate;
         let mut pos = 0;
         while pos < left.len() {
-            let len = (left.len() - pos).min(CONTROL_BLOCK);
-            let lfo = (self.lfo_phase * TAU).sin();
-            self.lfo_phase = (self.lfo_phase + self.derived.lfo_rate * len as f32 / sample_rate).fract();
+            if self.lfo_frames == 0 {
+                self.lfo = (self.lfo_phase * TAU).sin();
+                self.lfo_phase = (self.lfo_phase + self.derived.lfo_rate * CONTROL_BLOCK as f32 / sample_rate).fract();
+                self.lfo_frames = CONTROL_BLOCK;
+            }
+            let len = (left.len() - pos).min(self.lfo_frames);
+            self.lfo_frames -= len;
+            let lfo = self.lfo;
             let bend = self.bend + lfo * self.mod_wheel * MOD_WHEEL_VIBRATO;
+            let mut levels = [1.0f32; CONTROL_BLOCK];
+            self.level.fill(&mut levels[..len], sample_rate);
             for voice in self.voices.iter_mut().filter(|v| v.active) {
                 voice.render(
                     &self.derived,
-                    (lfo, bend),
+                    (lfo, bend, &levels[..len]),
                     sample_rate,
                     &mut self.rng,
                     &mut left[pos..pos + len],
@@ -851,6 +876,7 @@ impl DeviceProcessor for PolySynth {
     fn reset(&mut self) {
         self.held_len = 0;
         self.pedal.clear();
+        self.level.settle();
         for voice in &mut self.voices {
             voice.kill();
         }
@@ -972,5 +998,75 @@ mod tests {
         assert!((0.3..0.6).contains(&full), "half a semitone with the wheel up: {full}");
         let half = wobble(&mut sine_synth(&[]), 0.5);
         assert!(half > still && half < full, "{half} between {still} and {full}");
+    }
+
+    const CONTROL: fn(u8, f32) -> EventKind = |controller, value| EventKind::Control { controller, value };
+
+    #[test]
+    fn expression_and_volume_set_the_level() {
+        let level = |events: &[(usize, EventKind)]| {
+            let mut synth = sine_synth(&[]);
+            let (left, _) = run(&mut synth, SR, 256, 48_000, events);
+            rms(&left[24_000..])
+        };
+        let full = level(&[(0, ON(69))]);
+        let half = level(&[(0, CONTROL(11, 0.5)), (0, ON(69))]);
+        assert!(
+            (half / full - 0.25).abs() < 1e-3,
+            "half the expression is a quarter of the amplitude: {}",
+            half / full
+        );
+        let both = level(&[(0, CONTROL(7, 0.5)), (0, CONTROL(11, 0.5)), (0, ON(69))]);
+        assert!((both / full - 0.0625).abs() < 1e-3, "volume and expression multiply: {}", both / full);
+        assert_eq!(level(&[(0, CONTROL(11, 0.0)), (0, ON(69))]), 0.0, "no expression, no sound");
+
+        // A synth told that both are at the top plays to the bit what one
+        // that was never told anything plays.
+        let untouched = run(&mut sine_synth(&[]), SR, 256, 4_800, &[(0, ON(69))]).0;
+        let topped = [(0, CONTROL(11, 1.0)), (0, CONTROL(7, 1.0)), (0, ON(69))];
+        assert_eq!(run(&mut sine_synth(&[]), SR, 256, 4_800, &topped).0, untouched);
+
+        // A level set before a note is the note's level from its first
+        // sample: nothing of it is heard louder on the way there.
+        let quiet = run(&mut sine_synth(&[]), SR, 256, 4_800, &[(0, CONTROL(11, 0.5)), (0, ON(69))]).0;
+        assert!(peak(&quiet) <= 0.25 * peak(&untouched) * 1.001, "{} against {}", peak(&quiet), peak(&untouched));
+        // And one that is still in force after every voice was cut off.
+        let mut synth = sine_synth(&[]);
+        run(&mut synth, SR, 256, 4_800, &[(0, ON(69)), (2_400, CONTROL(11, 0.5))]);
+        synth.reset();
+        let after = run(&mut synth, SR, 256, 4_800, &[(0, ON(69))]).0;
+        assert!((peak(&after) / peak(&untouched) - 0.25).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_swell_is_smooth_and_a_step_in_expression_does_not_click() {
+        // Expression rising from nothing to full over a second, sent every
+        // 32 frames as the engine sends a curve.
+        let mut events = vec![(0, CONTROL(11, 0.0)), (0, ON(69))];
+        events.extend((1..=1_500).map(|n| (n * 32, CONTROL(11, n as f32 / 1_500.0))));
+        let swell = run(&mut sine_synth(&[]), SR, 256, 52_800, &events).0;
+        let plain = run(&mut sine_synth(&[]), SR, 256, 52_800, &[(0, ON(69))]).0;
+        // What the swell multiplied the plain note by, wherever the wave is
+        // far enough from zero to say.
+        let gains: Vec<(usize, f32)> = (2_400..48_000)
+            .filter(|&frame| plain[frame].abs() > 0.3)
+            .map(|frame| (frame, swell[frame] / plain[frame]))
+            .collect();
+        for &(frame, gain) in &gains {
+            // The level follows the square of the expression, a few
+            // milliseconds behind.
+            let expression = frame as f32 / 48_000.0;
+            assert!((gain - expression * expression).abs() < 0.01, "at frame {frame}: {gain}");
+        }
+        for pair in gains.windows(2).filter(|pair| pair[1].0 == pair[0].0 + 1) {
+            let step = pair[1].1 - pair[0].1;
+            assert!((-1e-6..5e-5).contains(&step), "the gain steps by {step} at frame {}", pair[1].0);
+        }
+
+        // A sudden drop while the note sounds takes its few milliseconds.
+        let events = [(0, ON(69)), (24_000, CONTROL(11, 0.2))];
+        let dropped = run(&mut sine_synth(&[]), SR, 256, 36_000, &events).0;
+        assert!(largest_step(&dropped[23_900..24_600]) <= largest_step(&plain[23_900..24_600]) * 1.05);
+        assert!((rms(&dropped[26_400..36_000]) / rms(&plain[26_400..36_000]) - 0.04).abs() < 1e-3);
     }
 }

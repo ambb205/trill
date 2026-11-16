@@ -8,6 +8,7 @@ use crate::engine::RecordPhase;
 use crate::graph::{AudioData, Chain, Graph, MAX_BLOCK, RegionAudio, TrackNode, TrackState};
 use crate::live::{Captured, LiveTarget, TrackSet};
 use crate::monitor::{Beats, Monitor};
+use trill_core::controllers::{CONTROLLER_KINDS, ControllerKind};
 use trill_core::device::{Event, EventKind, MAX_EVENTS_PER_BLOCK, ProcessInfo};
 use trill_core::project::{MIN_VOLUME_DB, automation_value};
 use trill_core::{DeviceId, TrackId};
@@ -16,6 +17,17 @@ use trill_dsp::util::{db_to_gain, pan_gains};
 const EVENT_CAPACITY: usize = MAX_EVENTS_PER_BLOCK;
 /// Leave room for the note-offs that follow a burst of note-ons.
 const NOTE_ON_LIMIT: usize = EVENT_CAPACITY - 512;
+/// How often, in frames, a controller that a clip moves is told where it
+/// is: fine enough that a swell is a slope and not a staircase (two thirds
+/// of a millisecond at 48 kHz). The frames are counted from where the song
+/// last started or jumped, not from the start of a buffer, so the same
+/// song makes the same events whatever the buffer size.
+const CONTROL_STEP: u64 = 32;
+/// The most events a track's controllers add to one block. One that finds
+/// no room is told a step later.
+const CONTROL_LIMIT: usize = 768;
+/// Below this, what a track's devices put out counts as nothing.
+const AUDIBLE: f32 = 1e-5;
 /// Live events held for one callback. A player with ten fingers, two feet
 /// and a pitch wheel does not come near it; a controller that floods can.
 /// So the room is not given out evenly: see [`Processor::push_live`].
@@ -44,6 +56,7 @@ pub(crate) enum Taken {
 fn same_control(a: EventKind, b: EventKind) -> bool {
     match (a, b) {
         (EventKind::PitchBend { .. }, EventKind::PitchBend { .. }) => true,
+        (EventKind::ChannelPressure { .. }, EventKind::ChannelPressure { .. }) => true,
         (EventKind::Control { controller: one, .. }, EventKind::Control { controller: other, .. }) => one == other,
         _ => false,
     }
@@ -88,6 +101,9 @@ struct Recording {
     click_shift: f64,
     /// How many times the loop has come round during the take.
     pass: u32,
+    /// Set as the song starts rolling: the next block reports where the
+    /// hand has left each controller, which is how the take begins.
+    standing_due: bool,
 }
 
 pub struct Processor {
@@ -105,6 +121,14 @@ pub struct Processor {
     /// The tracks a keyboard plays.
     live_targets: TrackSet,
     events: Vec<Event>,
+    /// Room to put a block's events in order.
+    sorted: Vec<Event>,
+    /// Set when the song starts or jumps: the next block says where every
+    /// controller is at its first frame.
+    chase: bool,
+    /// Set when the song starts playing or jumps while it plays: the
+    /// controllers it has curves for are its own again, whoever moved them.
+    take_back: bool,
     track_left: Vec<f32>,
     track_right: Vec<f32>,
     mix_left: Vec<f32>,
@@ -136,6 +160,9 @@ impl Processor {
             live: Vec::with_capacity(LIVE_CAPACITY),
             live_targets: TrackSet::default(),
             events: Vec::with_capacity(EVENT_CAPACITY),
+            sorted: Vec::with_capacity(EVENT_CAPACITY),
+            chase: true,
+            take_back: false,
             track_left: vec![0.0; MAX_BLOCK],
             track_right: vec![0.0; MAX_BLOCK],
             mix_left: vec![0.0; MAX_BLOCK],
@@ -173,12 +200,22 @@ impl Processor {
             && recording.count_in > 0
         {
             recording.count_in = 0;
-            self.report(Captured::Rolling { beat: self.position() });
+            self.rolling();
         }
         if !self.playing {
             self.playing = true;
+            self.chase = true;
+            self.take_back = true;
             self.jumped(self.position(), false);
         }
+    }
+
+    /// Reports that the take's song has started rolling from here.
+    fn rolling(&mut self) {
+        if let Some(recording) = &mut self.recording {
+            recording.standing_due = true;
+        }
+        self.report(Captured::Rolling { beat: self.position() });
     }
 
     /// Stops the transport. Sounding notes are released, those held by
@@ -223,6 +260,10 @@ impl Processor {
         self.anchor_beat = beat.max(0.0);
         self.frames = 0;
         self.flush = self.flush.max(Flush::Song);
+        self.chase = true;
+        // A song that stands still takes nothing back: what the hand set
+        // while it stood is for playing by hand until it runs.
+        self.take_back |= self.playing;
         self.jumped(before, false);
     }
 
@@ -243,6 +284,9 @@ impl Processor {
                     processor.reset();
                 }
             }
+            // A device that was reset may have forgotten where its
+            // controllers were.
+            track.state.resend = true;
         }
         for slot in &mut self.graph.master.chain.devices {
             if let Some(processor) = slot.processor.as_mut() {
@@ -389,10 +433,10 @@ impl Processor {
         let count_in_beats = if self.playing || !count_in_beats.is_finite() { 0.0 } else { count_in_beats.max(0.0) };
         let count_in = (count_in_beats / self.beats_per_frame()).round() as u64;
         let click_shift = if bar > 0.0 { (count_in_beats / bar).ceil() * bar } else { 0.0 };
-        self.recording = Some(Recording { tracks, count_in, click_shift, pass: 0 });
+        self.recording = Some(Recording { tracks, count_in, click_shift, pass: 0, standing_due: false });
         if count_in == 0 {
             self.play();
-            self.report(Captured::Rolling { beat: self.position() });
+            self.rolling();
         }
     }
 
@@ -468,6 +512,8 @@ impl Processor {
                     self.anchor_beat = start;
                     self.frames = 0;
                     self.flush = self.flush.max(Flush::Song);
+                    self.chase = true;
+                    self.take_back = true;
                     self.jumped(reached, true);
                     let pass = self.recording.as_mut().map(|recording| {
                         recording.pass += 1;
@@ -483,7 +529,7 @@ impl Processor {
             }
             if starts {
                 self.play();
-                self.report(Captured::Rolling { beat: self.position() });
+                self.rolling();
             }
         }
 
@@ -521,6 +567,9 @@ impl Processor {
         };
         let flush = std::mem::replace(&mut self.flush, Flush::Nothing);
         let playing = self.playing;
+        let chase = std::mem::take(&mut self.chase);
+        let take_back = std::mem::take(&mut self.take_back);
+        let standing_due = self.recording.as_mut().is_some_and(|recording| std::mem::take(&mut recording.standing_due));
         let block = block_start as u32..(block_start + frames) as u32;
         let has_live = self.live.iter().any(|event| block.contains(&event.offset));
         // Where a take's events are written: see `Heard`.
@@ -554,6 +603,7 @@ impl Processor {
             }
 
             let events = &mut self.events;
+            let sorted = &mut self.sorted;
             events.clear();
             release_notes(track, flush, events);
             let recorded = heard.as_ref().filter(|heard| heard.tracks.contains(track.id));
@@ -598,13 +648,43 @@ impl Processor {
                     track.state.played(event.kind, routed);
                     events.push(Event { offset, kind: event.kind });
                     let keeps = matches!(event.kind, EventKind::NoteOn { .. } | EventKind::NoteOff { .. })
-                        || event.kind.sustain().is_some();
+                        || ControllerKind::of_event(event.kind).is_some();
                     if let (true, Some(heard), Some(capture)) = (keeps, recorded, &mut self.capture) {
                         let (beat, pass) = heard.at(offset, event.early);
                         let _ = capture.push(Captured::Event { track: track.id, kind: event.kind, beat, pass });
                     }
                 }
             }
+            // The song's controllers, after whatever the hand did in this
+            // block (which makes a controller the hand's) and before the
+            // song's notes, so that a note begins at the level meant for it.
+            let controls = ControlBlock {
+                playing,
+                chase,
+                take_back,
+                start_beat,
+                end_beat,
+                anchor_beat: self.anchor_beat,
+                elapsed: self.frames,
+                beats_per_frame,
+                frames,
+            };
+            let before_controls = events.len();
+            collect_controllers(track, &controls, events);
+            let moved = events.len() > before_controls;
+            if let (true, Some(heard), Some(capture)) = (standing_due, recorded, &mut self.capture) {
+                // Where the hand has left the controllers is how the take
+                // begins: an instrument that was given its expression
+                // before the take needs it to play the take back.
+                for (index, value) in track.state.live.iter().enumerate().filter(|(_, value)| !value.is_nan()) {
+                    let Some(kind) = ControllerKind::from_index(index) else { continue };
+                    if kind.rest().is_none_or(|rest| rest as f32 != *value) {
+                        let report = Captured::Standing { track: track.id, kind, value: *value, pass: heard.pass };
+                        let _ = capture.push(report);
+                    }
+                }
+            }
+            let before_notes = events.len();
             if playing {
                 collect_notes(track, start_beat, end_beat, beats_per_frame, frames, events);
                 let block = Block {
@@ -616,14 +696,17 @@ impl Processor {
                 };
                 render_audio(track, &block, left, right);
             }
-            if by_hand {
+            if by_hand || moved {
                 // What is played by hand comes at any offset, and the
-                // song's notes were added after it: devices want one list
-                // in order. Ties keep the order they were added in.
-                sort_by_offset(events);
+                // song's controllers and notes were added after it: devices
+                // want one list in order. Ties keep the order they were
+                // added in.
+                sort_by_offset(&mut events[..before_notes]);
+                merge_by_offset(events, before_notes, sorted);
             }
 
             run_chain(&mut track.chain, &info, events, left, right);
+            listen_for_an_answer(track, left, right);
 
             let volume = match &track.volume_automation {
                 Some(points) => automation_value(points, start_beat) as f32,
@@ -800,11 +883,168 @@ fn release_routed(track: &mut TrackNode, events: &mut Vec<Event>, mut released: 
     for pitch in (0..128u8).filter(|pitch| held & (1 << pitch) != 0) {
         push(EventKind::NoteOff { pitch });
     }
-    if std::mem::take(&mut state.live_sustain) {
-        push(EventKind::Control { controller: trill_core::device::CONTROLLER_SUSTAIN, value: 0.0 });
+    state.release_sprung(|kind| push(kind.event(0.0)));
+}
+
+/// Puts `events` in order of offset, given that the part before `middle`
+/// and the part from it on each already are. Events at one offset keep
+/// their order, those of the first part before those of the second. One
+/// pass, however many there are: `room` is somewhere to lay them out.
+fn merge_by_offset(events: &mut [Event], middle: usize, room: &mut Vec<Event>) {
+    if middle == 0 || middle >= events.len() || events[middle - 1].offset <= events[middle].offset {
+        return;
     }
-    if std::mem::take(&mut state.live_bent) {
-        push(EventKind::PitchBend { value: 0.0 });
+    room.clear();
+    let (mut first, mut second) = (0, middle);
+    while first < middle && second < events.len() {
+        if events[second].offset < events[first].offset {
+            room.push(events[second]);
+            second += 1;
+        } else {
+            room.push(events[first]);
+            first += 1;
+        }
+    }
+    room.extend_from_slice(&events[first..middle]);
+    room.extend_from_slice(&events[second..]);
+    events.copy_from_slice(room);
+}
+
+/// Where a block lies for the controllers the song moves.
+struct ControlBlock {
+    playing: bool,
+    /// The song has just started or jumped: every controller is said at
+    /// the block's first frame.
+    chase: bool,
+    /// The song has just started playing or jumped while playing: it takes
+    /// the controllers it has curves for back from the hand.
+    take_back: bool,
+    start_beat: f64,
+    end_beat: f64,
+    anchor_beat: f64,
+    /// Frames played since the anchor, at the block's first frame.
+    elapsed: u64,
+    beats_per_frame: f64,
+    frames: usize,
+}
+
+/// Appends the events that put each controller of `track`'s lanes where the
+/// song has it over the block, in order of offset.
+///
+/// While the song plays, a lane is looked at every [`CONTROL_STEP`] frames
+/// and a controller is told whenever it has moved since it was last told.
+/// While the song stands still it is looked at once a block, where the
+/// song stands: what stays put (expression, the mod wheel) is where the
+/// song has it there, so that a note played by hand sounds as it would in
+/// the song, and what springs back (the pedals, the pitch wheel) is at
+/// rest, so that nothing is held or bent while nothing plays.
+///
+/// A controller the hand has moved is the hand's and is left alone, until
+/// the song takes it back as it next starts or jumps.
+fn collect_controllers(track: &mut TrackNode, block: &ControlBlock, events: &mut Vec<Event>) {
+    let TrackNode { state, controllers, .. } = track;
+    let room = |events: &Vec<Event>| events.len() < CONTROL_LIMIT;
+    if std::mem::take(&mut state.resend) {
+        // The instrument knows nothing: what the song said must be said
+        // again, and first of all what the hand has set.
+        state.sent = [f32::NAN; CONTROLLER_KINDS];
+        for (index, value) in state.live.iter().enumerate().filter(|(_, value)| !value.is_nan()) {
+            if let (Some(kind), true) = (ControllerKind::from_index(index), room(events)) {
+                events.push(Event { offset: 0, kind: kind.event(*value) });
+            }
+        }
+    }
+    if std::mem::take(&mut state.lanes_changed) {
+        // A controller the song moved and has no curve for any more: what
+        // springs back goes to rest, so that no pedal stays down for a
+        // curve that was deleted; the rest stay where they were left.
+        for index in 0..CONTROLLER_KINDS {
+            let sent = state.sent[index];
+            if sent.is_nan() || controllers.iter().any(|lane| lane.kind.index() == index) {
+                continue;
+            }
+            state.sent[index] = f32::NAN;
+            let rest = ControllerKind::from_index(index).and_then(|kind| Some((kind, kind.rest()? as f32)));
+            if let Some((kind, rest)) = rest
+                && sent != rest
+                && state.live[index].is_nan()
+                && room(events)
+            {
+                events.push(Event { offset: 0, kind: kind.event(rest) });
+            }
+        }
+    }
+    if controllers.is_empty() {
+        return;
+    }
+    if block.take_back {
+        for lane in controllers.iter() {
+            let index = lane.kind.index();
+            if !state.live[index].is_nan() {
+                state.live[index] = f32::NAN;
+                state.sent[index] = f32::NAN;
+            }
+        }
+    }
+
+    let mut tell = |offset: usize, beat: f64| {
+        for lane in controllers.iter() {
+            let index = lane.kind.index();
+            if !state.live[index].is_nan() {
+                continue;
+            }
+            let value = match lane.kind.rest() {
+                Some(rest) if !block.playing => rest as f32,
+                _ => lane.value_at(beat) as f32,
+            };
+            if value != state.sent[index] && room(events) {
+                state.sent[index] = value;
+                events.push(Event { offset: offset as u32, kind: lane.kind.event(value) });
+            }
+        }
+    };
+    if !block.playing || block.chase {
+        tell(0, block.start_beat);
+    }
+    if block.playing {
+        let mut offset = ((CONTROL_STEP - block.elapsed % CONTROL_STEP) % CONTROL_STEP) as usize;
+        while offset < block.frames {
+            // Computed as the start of a block is, so that a step that
+            // falls on a block's first frame reads the lane where the
+            // block does.
+            let beat = block.anchor_beat + (block.elapsed + offset as u64) as f64 * block.beats_per_frame;
+            if beat >= block.end_beat {
+                break;
+            }
+            tell(offset, beat);
+            offset += CONTROL_STEP as usize;
+        }
+    }
+}
+
+/// Keeps count of the notes a track is given without anything coming out
+/// of its devices: see [`Meter::unanswered_frames`](crate::graph::Meter).
+/// `left` and `right` are what the chain put out, ahead of the fader.
+fn listen_for_an_answer(track: &mut TrackNode, left: &[f32], right: &[f32]) {
+    let state = &mut track.state;
+    let sounding = state.active_count > 0 || state.live_held != 0;
+    if sounding && !state.had_notes {
+        // A phrase begins: what was heard before is no answer to it.
+        state.answered = false;
+    }
+    state.had_notes = sounding;
+    if (sounding && !state.answered) || state.unanswered > 0 {
+        let heard = left.iter().chain(right).any(|sample| sample.abs() > AUDIBLE);
+        if heard {
+            state.answered = true;
+            state.unanswered = 0;
+        } else if sounding && !state.answered {
+            state.unanswered = state.unanswered.saturating_add(left.len() as u32);
+        }
+    }
+    if state.unanswered != state.unanswered_told {
+        state.unanswered_told = state.unanswered;
+        track.meter.set_unanswered(state.unanswered);
     }
 }
 
@@ -1111,6 +1351,8 @@ mod tests {
         TrackNode {
             id: TrackId(1),
             notes: notes.iter().map(|&(start, end, pitch)| NoteEvent { start, end, pitch, velocity: 127 }).collect(),
+            controllers: Vec::new(),
+            fresh_devices: false,
             audio: Vec::new(),
             chain: Chain::default(),
             volume_db: 0.0,

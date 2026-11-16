@@ -11,6 +11,7 @@ pub mod drumrack;
 pub mod drums;
 pub mod effects;
 pub mod fft;
+mod level;
 pub mod loading;
 pub mod params;
 pub mod playhead;
@@ -25,6 +26,7 @@ pub mod voice;
 #[cfg(test)]
 mod testing;
 
+pub use level::{controller_support, is_instrument};
 pub use loading::{SampleRef, StateError};
 
 use effects::{delay, dynamics, eq, modulation, reverb, utility};

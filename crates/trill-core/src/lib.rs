@@ -6,6 +6,7 @@
 //! [`device::DeviceProcessor`].
 
 pub mod audio;
+pub mod controllers;
 pub mod device;
 pub mod ids;
 pub mod midi_file;
@@ -15,6 +16,7 @@ pub mod project;
 pub mod time;
 mod time_ops;
 
+pub use controllers::{ControllerCurve, ControllerKind, ControllerLane};
 pub use ids::{ClipId, DeviceId, TrackId};
 pub use project::{
     AutomationLane, AutomationPoint, AutomationTarget, ChainRef, Clip, Device, EditError, LoopRegion, Marker, Master,

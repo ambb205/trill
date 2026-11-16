@@ -147,6 +147,11 @@ pub enum EventKind {
         controller: u8,
         value: f32,
     },
+    /// Channel pressure: how hard the keys are being leaned on after they
+    /// went down (aftertouch for the whole keyboard), 0..=1.
+    ChannelPressure {
+        value: f32,
+    },
 }
 
 /// How far the pitch wheel bends, each way, where an instrument has no
@@ -306,6 +311,12 @@ pub trait DeviceController: Send {
         let _ = preset;
         Err(PresetLoadError::Unsupported)
     }
+
+    /// Which MIDI controllers the device does something with, if it can
+    /// say. Cheap: a view may ask whenever it is drawn.
+    fn controller_support(&self) -> ControllerSupport {
+        ControllerSupport::Unknown
+    }
 }
 
 /// Why a device did not load a preset.
@@ -383,6 +394,31 @@ pub enum ParamEditKind {
     Value(f64),
     /// The user let go of the control.
     End,
+}
+
+/// Which MIDI controllers a device does something with, as far as that can
+/// be known without playing it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ControllerSupport {
+    /// The device does not say.
+    #[default]
+    Unknown,
+    /// The device is handed every controller as MIDI. What it does with
+    /// each is its own business.
+    Any,
+    /// The device responds to exactly these.
+    Listed(Vec<crate::controllers::ControllerKind>),
+}
+
+impl ControllerSupport {
+    /// Whether the device is known to respond to `kind` (`Some(true)`),
+    /// known not to (`Some(false)`), or cannot say (`None`).
+    pub fn responds_to(&self, kind: crate::controllers::ControllerKind) -> Option<bool> {
+        match self {
+            Self::Unknown | Self::Any => None,
+            Self::Listed(kinds) => Some(kinds.contains(&kind)),
+        }
+    }
 }
 
 /// A freshly created device, ready to be handed to the engine.

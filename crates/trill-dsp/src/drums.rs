@@ -10,6 +10,7 @@
 //! `tests::the_drums_sit_where_recorded_drums_do` keeps it that way.
 
 use crate::define_params;
+use crate::level::ChannelLevel;
 use crate::params::{ParamValues, PresetDef, float};
 use crate::util::{OnePole, Rng, Svf, db_to_gain, decay_coef, pan_gains};
 use std::f32::consts::TAU;
@@ -546,6 +547,10 @@ pub struct DrumKit {
     ride_pan: (f32, f32),
     perc_pan: (f32, f32),
     shaker_pan: (f32, f32),
+    /// Channel volume and expression.
+    level: ChannelLevel,
+    /// Whether a drum has been hit since the kit was last silenced.
+    struck: bool,
 }
 
 impl DrumKit {
@@ -573,6 +578,8 @@ impl DrumKit {
             ride_pan: pan_gains(0.35),
             perc_pan: pan_gains(-0.2),
             shaker_pan: pan_gains(0.3),
+            level: ChannelLevel::new(),
+            struck: false,
         }
     }
 
@@ -786,6 +793,23 @@ impl DrumKit {
         (l * c.volume, r * c.volume)
     }
 
+    /// Of the notes only note-ons matter to a drum. Volume and expression
+    /// set the level of the whole kit: at once before its first hit, so
+    /// that a song begins at the level it has there, and after that a
+    /// little at a time, since a drum may still be ringing.
+    fn handle(&mut self, kind: EventKind) {
+        match kind {
+            EventKind::NoteOn { pitch, velocity } => {
+                self.struck = true;
+                self.trigger(pitch, velocity);
+            }
+            EventKind::Control { controller, value } => {
+                self.level.control(controller, value, self.struck);
+            }
+            _ => {}
+        }
+    }
+
     /// Stops every drum and forgets what the filters were ringing with.
     fn silence(&mut self) {
         self.kick.life = 0.0;
@@ -854,24 +878,23 @@ impl DeviceProcessor for DrumKit {
         let mut next_event = 0;
         for i in 0..left.len() {
             while next_event < events.len() && events[next_event].offset as usize <= i {
-                if let EventKind::NoteOn { pitch, velocity } = events[next_event].kind {
-                    self.trigger(pitch, velocity);
-                }
+                self.handle(events[next_event].kind);
                 next_event += 1;
             }
             let (l, r) = self.tick();
-            left[i] += l;
-            right[i] += r;
+            let level = self.level.next(self.sample_rate);
+            left[i] += l * level;
+            right[i] += r * level;
         }
         for event in &events[next_event..] {
-            if let EventKind::NoteOn { pitch, velocity } = event.kind {
-                self.trigger(pitch, velocity);
-            }
+            self.handle(event.kind);
         }
     }
 
     fn reset(&mut self) {
         self.silence();
+        self.level.settle();
+        self.struck = false;
     }
 }
 
@@ -1051,5 +1074,22 @@ mod tests {
         let step = crate::testing::largest_step(&samples);
         assert!(step < 0.05, "largest step {step}");
         assert_eq!(peak(&samples[48_000..]), 0.0, "still sounding after a second");
+    }
+
+    #[test]
+    fn expression_and_volume_set_the_level_of_the_kit() {
+        let level = |events: &[(usize, EventKind)]| {
+            let mut kit = DrumKit::new();
+            kit.prepare(48_000.0, 256);
+            peak(&run(&mut kit, 48_000.0, 256, 12_000, events).0)
+        };
+        let kick = EventKind::NoteOn { pitch: 36, velocity: 1.0 };
+        let control = |controller: u8, value: f32| EventKind::Control { controller, value };
+        let full = level(&[(1_000, kick)]);
+        assert!(full > 0.1);
+        assert!((level(&[(0, control(11, 0.5)), (1_000, kick)]) / full - 0.25).abs() < 1e-3);
+        assert!((level(&[(0, control(7, 0.5)), (1_000, kick)]) / full - 0.25).abs() < 1e-3);
+        assert_eq!(level(&[(0, control(11, 0.0)), (1_000, kick)]), 0.0);
+        assert_eq!(level(&[(0, control(11, 1.0)), (1_000, kick)]), full);
     }
 }

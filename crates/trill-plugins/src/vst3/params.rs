@@ -11,6 +11,8 @@
 
 use super::text;
 use std::collections::{HashMap, HashSet};
+use trill_core::ControllerKind;
+use trill_core::device::ControllerSupport;
 use trill_core::device::{ParamInfo, ParamKind};
 use vst3::ComPtr;
 use vst3::Steinberg::Vst::ControllerNumbers_::{kCtrlAllNotesOff, kCtrlAllSoundsOff};
@@ -339,7 +341,9 @@ pub(crate) fn resolve_values(specs: &[ParamSpec], values: &[(ParamID, f64)]) -> 
         .collect()
 }
 
-/// The pitch wheel, as VST3 numbers it among the MIDI controllers.
+/// Channel pressure and the pitch wheel, as VST3 numbers them among the
+/// MIDI controllers.
+pub(crate) const AFTERTOUCH: u8 = 128;
 pub(crate) const PITCH_BEND: u8 = 129;
 /// The most controllers kept: every one a plugin could name.
 const MIDI_CONTROLLERS: u8 = 120;
@@ -361,6 +365,24 @@ impl MidiParams {
         self.assigned.iter().find(|(number, _)| *number == controller).map(|(_, id)| *id)
     }
 
+    /// The controllers the plugin has named a parameter for, with the
+    /// sustain pedal, which the host works out for a plugin that has not.
+    pub(crate) fn support(&self) -> ControllerSupport {
+        let mut kinds: Vec<ControllerKind> = self
+            .assigned
+            .iter()
+            .filter_map(|(number, _)| match *number {
+                AFTERTOUCH => Some(ControllerKind::Pressure),
+                PITCH_BEND => Some(ControllerKind::PitchBend),
+                number => ControllerKind::numbered(number),
+            })
+            .chain([ControllerKind::SUSTAIN])
+            .collect();
+        kinds.sort();
+        kinds.dedup();
+        ControllerSupport::Listed(kinds)
+    }
+
     #[cfg(test)]
     pub(crate) fn of(assigned: &[(u8, ParamID)]) -> Self {
         Self { assigned: assigned.to_vec() }
@@ -372,7 +394,7 @@ impl MidiParams {
 pub(crate) fn midi_params(controller: &ComPtr<IEditController>) -> MidiParams {
     let Some(mapping) = controller.cast::<IMidiMapping>() else { return MidiParams::default() };
     let assigned = (0..MIDI_CONTROLLERS)
-        .chain([PITCH_BEND])
+        .chain([AFTERTOUCH, PITCH_BEND])
         .filter_map(|number| {
             let mut id: ParamID = 0;
             // SAFETY: `mapping` is an interface of the live edit
@@ -575,5 +597,20 @@ mod tests {
         let values = [(20, 100.0), (99, 0.5), (10, 0.25), (10, f64::NAN), (20, 2.6)];
         assert_eq!(resolve_values(&specs, &values), [(1, 4.0), (0, 0.25), (1, 3.0)]);
         assert!(resolve_values(&specs, &[]).is_empty());
+    }
+
+    #[test]
+    fn the_controllers_a_plugin_names_parameters_for_are_what_it_responds_to() {
+        let midi = MidiParams::of(&[(11, 1), (1, 2), (PITCH_BEND, 3), (AFTERTOUCH, 4), (123, 5)]);
+        let kinds = vec![
+            ControllerKind::MOD_WHEEL,
+            ControllerKind::EXPRESSION,
+            ControllerKind::SUSTAIN,
+            ControllerKind::Pressure,
+            ControllerKind::PitchBend,
+        ];
+        assert_eq!(midi.support(), ControllerSupport::Listed(kinds), "with the pedal, which the host works out");
+        assert_eq!(midi.support().responds_to(ControllerKind::BREATH), Some(false));
+        assert_eq!(MidiParams::default().support(), ControllerSupport::Listed(vec![ControllerKind::SUSTAIN]));
     }
 }

@@ -30,8 +30,8 @@ pub use live::LiveSender;
 pub use processor::Processor;
 pub use render::{RenderError, RenderJob, RenderOptions, RenderReport, Rendered};
 pub use session::{
-    MAX_COUNT_IN_BARS, ParamState, RecordState, RecordStatus, SampleFile, Session, SessionError, TakeClip,
-    TransportStatus,
+    MAX_COUNT_IN_BARS, ParamState, RecordState, RecordStatus, SampleFile, Session, SessionError, SilentInstrument,
+    TakeClip, TransportStatus,
 };
 pub use sources::AudioSources;
 

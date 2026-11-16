@@ -6,7 +6,10 @@
 //!
 //! So must playing by hand and recording it: taking live input off its
 //! queue, placing it, following the armed tracks, counting in, reporting
-//! what was played and where, and letting go of it all.
+//! what was played and where, and letting go of it all. And so must
+//! playing the controllers clips hold: reading their curves every few
+//! frames, putting every one of them back where the loop starts, giving
+//! way to a controller moved by hand and taking it back.
 //!
 //! This test binary replaces the global allocator with one that counts the
 //! calls made by the current thread while the processor runs. The devices
@@ -198,6 +201,31 @@ fn playing_by_hand_and_recording_never_touch_the_allocator() {
     let drums = rig.session.edit(|project| Ok(project.add_track("Drums"))).unwrap();
     rig.session.add_device(trill_core::ChainRef::Track(drums), "builtin:drumkit", None, None).unwrap();
     rig.session.edit(|project| project.set_loop(true, 0.0, 2.0)).unwrap();
+    // Controllers in clips, played from the song's first frame: a swell, a
+    // pedal, a bent wheel and a mod wheel under the take on one track, and
+    // on another a clip that loops them and is entered off the beat.
+    rig.session
+        .edit(|project| {
+            use trill_core::project::{AutomationPoint, Segment};
+            use trill_core::{ControllerKind, Note};
+            let point = AutomationPoint::new;
+            let held = |beat: f64, value: f64| AutomationPoint { beat, value, shape: Segment::Hold };
+            for (track, start, length) in [(keys, 0.0, 4.0), (drums, 0.0, 4.0)] {
+                let id = project.add_midi_clip(track, "curves", start, length)?;
+                let clip = project.clip_mut(id)?;
+                clip.add_notes(&[Note { pitch: 40, start: 0.25, length: 0.5, velocity: 90 }])?;
+                let bent = AutomationPoint { beat: 0.5, value: 0.1, shape: Segment::Curve(0.7) };
+                clip.set_controller(ControllerKind::EXPRESSION, vec![point(0.0, 0.4), bent, point(1.75, 1.0)])?;
+                clip.set_controller(ControllerKind::SUSTAIN, vec![held(0.25, 1.0), held(1.5, 0.0)])?;
+                clip.set_controller(ControllerKind::PitchBend, vec![point(0.0, 0.0), point(1.0, 0.5), held(1.0, 0.0)])?;
+                clip.set_controller(ControllerKind::MOD_WHEEL, vec![point(0.0, 1.0), point(2.0, 0.0)])?;
+                clip.set_controller(ControllerKind::Pressure, vec![point(0.0, 0.0), point(0.5, 1.0)])?;
+            }
+            let looped = project.track(drums)?.clips[0].id;
+            project.clip_mut(looped)?.set_loop_length(Some(0.75))?;
+            project.trim_clip_start(looped, 0.3).map(|_| ())
+        })
+        .unwrap();
     rig.session.set_metronome(true);
     rig.session.set_armed(keys, true).unwrap();
     rig.session.set_armed(bass, true).unwrap();
@@ -236,6 +264,10 @@ fn playing_by_hand_and_recording_never_touch_the_allocator() {
             6 => assert!(live.play_at(early(200.0), EventKind::NoteOff { pitch: pitch + 1 })),
             7 => assert!(live.play_at(early(0.0), EventKind::Control { controller: 1, value: 0.7 })),
             8 => assert!(live.play_at(early(90.0), EventKind::Control { controller: 64, value: 0.0 })),
+            // The hand takes the expression from the song now and then, and
+            // leans on the keys.
+            2 if step % 40 == 2 => rig.session.send_controller(keys, trill_core::ControllerKind::EXPRESSION, 0.3),
+            2 => assert!(live.play_at(early(33.0), EventKind::ChannelPressure { value: 0.6 })),
             // And notes that name their track, as the window plays them.
             9 => rig.session.note_on(drums, 36 + (step % 3) as u8, 110),
             _ => {}
@@ -268,10 +300,13 @@ fn playing_by_hand_and_recording_never_touch_the_allocator() {
     assert!(level > 0.05, "something should have been sounding: {level}");
     assert_eq!(calls, 0, "{calls} allocator calls on the audio thread while playing by hand and recording");
     assert_eq!(rig.session.audio_faults(), 0);
-    // It was a real take: there are notes in two clips.
+    // It was a real take: there are notes in two clips, and what was
+    // played on the wheels and the pedal with them.
     let take = rig.session.last_take();
     assert_eq!(take.len(), 2, "{take:?}");
     assert!(take.iter().all(|clip| clip.notes > 20), "{take:?}");
+    assert!(take.iter().all(|clip| clip.controllers.len() >= 4), "{take:?}");
+    assert!(take.iter().any(|clip| !clip.created), "one of them was recorded over the clip with the curves: {take:?}");
 }
 
 #[test]
