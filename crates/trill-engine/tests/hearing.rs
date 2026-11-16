@@ -450,8 +450,16 @@ fn plain(pitch: u8) -> ProbeNote {
     ProbeNote { pitch, velocity: 100, with: Vec::new() }
 }
 
+/// With little patience: an instrument that is silent on some of the
+/// keys it is asked is held to that for half of it.
 fn probe_options() -> ProbeOptions {
-    ProbeOptions { sample_rate: SR, hold_seconds: 0.3, tail_seconds: 0.5, ..ProbeOptions::default() }
+    ProbeOptions {
+        sample_rate: SR,
+        hold_seconds: 0.3,
+        tail_seconds: 0.5,
+        patience: Duration::from_secs(2),
+        ..ProbeOptions::default()
+    }
 }
 
 fn probe(session: &mut Session, target: ProbeTarget, notes: &[ProbeNote], options: &ProbeOptions) -> Vec<Heard> {
@@ -487,6 +495,21 @@ fn a_probe_finds_an_instruments_range_and_the_octave_it_really_sounds_at() {
     let target = ProbeTarget::Device { uri: BASS.to_string(), preset: Some("Octave up".to_string()) };
     let heard = probe(&mut session, target, &[plain(40)], &probe_options());
     assert!((heard[0].pitch.unwrap() - 40.0).abs() < 0.1, "{:?}", heard[0].pitch);
+}
+
+#[test]
+fn an_instrument_probed_from_a_preset_is_made_again_from_the_state_the_preset_left() {
+    let _quiet = beside_the_others();
+    // A sampler that is handed another sound goes on playing the one it
+    // had for a moment, and nothing shows that it does. This one does for
+    // a second, and names the preset in its state at once.
+    let scripted = ScriptedFactory::loading(Loading { changes_after: Duration::from_secs(1), ..Loading::default() });
+    let mut session = session_with(&scripted);
+    let target = ProbeTarget::Device { uri: BASS.to_string(), preset: Some("Octave up".to_string()) };
+    let heard = probe(&mut session, target, &[plain(40)], &probe_options());
+    assert!((heard[0].pitch.unwrap() - 40.0).abs() < 0.1, "the preset's sound, not the one before: {:?}", heard[0]);
+    let rendering = (BASS.to_string(), Purpose::Rendering);
+    assert_eq!(scripted.made(), [rendering.clone(), rendering], "made, given the preset, and made again");
 }
 
 #[test]

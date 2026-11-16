@@ -168,6 +168,20 @@ fn settle_editors(harness: &mut Harness) {
 const BUTTON: &str = "Editor of Synth";
 
 #[test]
+fn a_plugin_that_was_just_made_says_that_it_is_loading_and_a_built_in_device_does_not() {
+    let (mut harness, _plugins, _synth) = with_plugins(devices_tab());
+    // The two plugins were made a moment ago and may be reading what
+    // they play; the reverb is built in, and ready when it exists.
+    assert_eq!(harness.all_labeled("Loading ").len(), 2);
+    assert!(harness.all_labeled("Loading Reverb").is_empty());
+    harness.move_to(harness.labeled("Loading Synth"));
+    harness.idle(1);
+    assert!(harness.hint().contains("Synth is still loading what it plays"), "{}", harness.hint());
+    // The button for its own window is still there, after the word.
+    assert_eq!(harness.all_labeled("Editor of").len(), 1);
+}
+
+#[test]
 fn a_plugins_panel_has_a_button_that_opens_and_closes_its_own_window() {
     let (mut harness, plugins, synth) = with_plugins(devices_tab());
     // Only the device that has an editor has the button.

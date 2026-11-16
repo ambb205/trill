@@ -295,8 +295,12 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
     let response = ui.interact(dot_zone, id.with("enable"), Sense::click());
     response.widget_info(|| WidgetInfo::selected(Role::Button, true, device.enabled, "Device on"));
     let dot = pos2(header.left() + BODY_PADDING, header.center().y);
+    // A plugin that is still reading what it plays: its notes may not
+    // sound yet.
+    let loading = cx.live.loading.contains(&device_id);
     if device.enabled {
-        paint::dot(&painter, dot, theme.metric.dot, if response.hovered() { theme.ink } else { theme.ok });
+        let lit = if loading { theme.signal } else { theme.ok };
+        paint::dot(&painter, dot, theme.metric.dot, if response.hovered() { theme.ink } else { lit });
     } else {
         paint::hollow_dot(&painter, dot, theme.metric.dot, if response.hovered() { theme.ink } else { quiet });
     }
@@ -395,6 +399,17 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
         }
         return;
     }
+    if loading {
+        // Said ahead of the name, where it is seen however narrow the
+        // panel is.
+        let width = text::width(&painter, theme.text.micro, LOADING).ceil();
+        let rect = Rect::from_min_size(name.min, vec2(width.min(name.width()), name.height()));
+        let response = ui.interact(rect, id.with("loading"), Sense::hover());
+        response.widget_info(|| WidgetInfo::labeled(Role::Label, true, format!("{LOADING} {}", device.name)));
+        cx.hint(&response, format!("{} is still loading what it plays: notes may not sound yet", device.name));
+        text::paint(&painter, rect, Align2::LEFT_CENTER, theme.text.micro, LOADING, theme.signal);
+        name.min.x = (rect.right() + 6.0).min(name.max.x);
+    }
     if editors::has(cx, device_id) {
         // The plugin's own window. Its button follows the name, at the
         // panel's left: a plugin with hundreds of parameters makes a panel
@@ -415,6 +430,9 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
     let color = if device.enabled { theme.ink } else { quiet };
     text::paint(&painter, name, Align2::LEFT_CENTER, theme.text.caps, &device.name, color);
 }
+
+/// What a plugin's panel says while the plugin reads what it plays.
+const LOADING: &str = "Loading";
 
 /// What tells the field a preset is named in from the other name fields:
 /// a device's id is a plain number, as a track's is.

@@ -214,6 +214,7 @@ pub fn device_json(device: &Device) -> Value {
 /// each that takes one channel: from there on left and right are the same,
 /// which is worth seeing without asking about every device.
 pub fn chain_json(session: &Session, devices: &[Device]) -> Vec<Value> {
+    let loading = session.loading();
     let listed = devices.iter().map(|device| {
         let mut out = device_json(device);
         if let Ok(channels) = session.device_channels(device.id)
@@ -221,9 +222,28 @@ pub fn chain_json(session: &Session, devices: &[Device]) -> Vec<Value> {
         {
             out["channels"] = json!(channels.describe());
         }
+        if loading.contains(&device.id) {
+            out["loading"] = json!(true);
+        }
         out
     });
     listed.collect()
+}
+
+/// What to say of the plugins that are still loading what they play, if
+/// any are: which, and what that means for playing them live.
+pub fn loading_note(session: &Session) -> Option<String> {
+    let project = session.project();
+    let named =
+        |id: &trill_core::DeviceId| project.device(*id).ok().map(|device| format!("{} (device {})", device.name, id.0));
+    let names: Vec<String> = session.loading().iter().filter_map(named).collect();
+    (!names.is_empty()).then(|| {
+        format!(
+            "Still loading what they play: {}. Played live now their notes may be silent; get_project shows when \
+             they have done. probe, measure and render wait for them by themselves.",
+            names.join(", ")
+        )
+    })
 }
 
 pub fn track_json(track: &Track, beats_per_bar: f64, include_notes: bool) -> Value {
@@ -444,6 +464,9 @@ pub fn project_json(session: &Session, include_notes: bool) -> Value {
             .iter()
             .map(|marker| json!({ "beat": round(marker.beat), "bar": round(marker.beat / beats_per_bar + 1.0), "name": marker.name }))
             .collect();
+    }
+    if let Some(note) = loading_note(session) {
+        out["loading"] = json!(note);
     }
     let problems: Vec<String> = session.problems().iter().map(ToString::to_string).collect();
     if !problems.is_empty() {

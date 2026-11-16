@@ -20,6 +20,7 @@
 //! what it would say in between is the sound it had.
 
 use super::{Session, SessionError, preset_values};
+use crate::ready::Plugins;
 use crate::saved::{Saved, SavedPresets};
 use std::sync::Arc;
 use trill_core::device::PresetLoadError;
@@ -397,7 +398,14 @@ impl Session {
 
     fn ask_to_load(&self, id: DeviceId, preset: &PresetInfo) -> Result<(), PresetLoadError> {
         match self.bank.devices.get(&id).and_then(|meta| meta.controller.as_ref()) {
-            Some(controller) => controller.lock().load_preset(preset),
+            Some(controller) => {
+                let loaded = controller.lock().load_preset(preset);
+                // A sampler goes on to read the preset's samples.
+                if loaded.is_ok() && self.project.device(id).is_ok_and(|device| Plugins::is_plugin(&device.uri)) {
+                    self.bank.loads.began(id);
+                }
+                loaded
+            }
             None => Err(PresetLoadError::Unsupported),
         }
     }

@@ -10,20 +10,51 @@
 //! it is ready.
 //!
 //! So readiness is measured by the one thing that shows it: **a plugin is
-//! ready when it answers the notes it is about to be given, and has gone
-//! on answering them the same way for a quarter of a second.** Before a
-//! render begins, each track whose instrument is a
+//! ready when it answers every note it is about to be given, each by
+//! itself, and has gone on answering them the same way for a quarter of a
+//! second.** Before a render begins, each track whose instrument is a
 //! plugin is rehearsed on its own: the first different notes it will play,
-//! one after the other in their order (a keyswitch stays ahead of the
-//! notes it is for), each with the controllers the song has for it. How
-//! much comes out while each note is down is written down. When a
-//! rehearsal is answered, and answered again note for note as the ones
-//! before it were for a quarter of a second (a sampler that loads its
-//! kit piece by piece answers a little more each time until it is done),
-//! the plugin has stopped changing and is taken to be ready; until then
-//! it is rehearsed again some ten times a second, for as long as the
-//! caller has patience. Then the notes are let go of, what rings is left to die
-//! away, the plugins are reset, and the render starts from the top.
+//! in their order, each with the controllers the song has for it. How much
+//! comes out while each note is down is written down. When a rehearsal is
+//! answered, and answered again note for note as the ones before it were
+//! for a quarter of a second, the plugin has stopped changing and is taken
+//! to be ready; until then it is rehearsed again some ten times a second.
+//! Then the notes are let go of, the plugins are silenced and reset, and
+//! the render starts from the top.
+//!
+//! **Each note is heard alone.** A drum that has not been loaded sounds
+//! exactly like a key that plays nothing, and under the ringing of the
+//! drum before it, it sounds like nothing at all: a tom that is there
+//! hides a cymbal that is not. So after every rehearsed note the plugins
+//! are reset, which silences most, and what still rings is left a moment
+//! to die away. A plugin that rings on through all of that is heard as
+//! before, one note over the last, and its silent keys cannot be told.
+//!
+//! **A sampler that is partly there is waited for.** A kit arrives one
+//! drum after another, and between two of them a sampler may do nothing
+//! that shows for seconds: no memory taken, nothing read, no processor
+//! used. (Superior Drummer 3 was watched doing so; see the `loading`
+//! example of `trill-plugins`.) An instrument that answers some of its
+//! notes and not others is therefore not ready after a quarter of a
+//! second like one that answers them all: it is held to it for half of
+//! the caller's patience with no further note arriving and nothing
+//! loading, five seconds as renders and probes ask. Then the silent notes
+//! are taken to be keys that play nothing (a keyswitch, a note outside the
+//! range), which is remembered of that plugin in that state, so that it
+//! is waited out once and not every time. The pitches are handed back
+//! ([`Waited::silent`]) for a reply to say that they made no sound,
+//! because this is the case that cannot be told from a kit that is still
+//! loading after all that time.
+//!
+//! **Loading shows from outside.** While samples are being read, the
+//! program's memory rises by megabytes a second. While it does, nothing
+//! is taken as ready, and the wait goes on, up to two minutes; the
+//! caller's patience is for how long nothing at all may happen. (Windows
+//! can be asked. Elsewhere the answers have to do.) The sign is the whole
+//! program's: something else that grows as fast makes a wait longer,
+//! never shorter. (How much the program reads from files is not a sign:
+//! a sampler that plays its samples from the disk reads whenever it is
+//! played a note.)
 //!
 //! **Effects wait too.** An amplifier or a reverb that is a plugin may
 //! pass no sound for a moment after it is made. Behind a plugin
@@ -46,39 +77,32 @@
 //! what it was (the plugins, their state, the notes), and the next render
 //! of the same thing waits only a moment for it.
 //!
-//! **Loading shows in memory.** A drum sampler loads its kit one drum
-//! after another, over as much as a minute, and the cymbals come last; a
-//! drum that has not arrived sounds exactly like a key that plays
-//! nothing. So answers alone do not say a kit is complete. What does is
-//! that the program has stopped growing: while samples are being read,
-//! its memory rises by megabytes a second. A plugin is therefore ready
-//! when it has answered alike three times running, for a quarter of a
-//! second or more, *and* the process did not grow meanwhile. While it is
-//! growing, or the answers are still changing, the wait goes on, up to
-//! two minutes; the caller's patience is for how long nothing at all may
-//! happen. (Memory can be asked about on Windows. Elsewhere the answers
-//! have to do.)
-//!
 //! A plugin that was slow to give its first answer is asked to hold its
-//! answers for longer (half as long as it took, up to two seconds): on a
-//! busy machine a sampler's loading stalls, and a stall is not the end.
+//! answers for longer (half as long as it took, up to two seconds). One
+//! whose answers never settle (a kit that plays another recording of the
+//! drum each time, a key that makes a noise one time and not the next) is
+//! ready once no note has sounded for a second that had not before, with
+//! nothing loading.
 //!
 //! **What was ready is remembered** for as long as the program runs: the
-//! plugin, its state, the notes and how it answered them. A render makes
-//! its plugins anew, and a sampler usually finds the samples of its
-//! twin, which is still loaded, without reading them again. A plugin
-//! that answers as it did when it was last found ready, twice and with
-//! the program not growing between the two, is ready without being held
-//! to it for longer. (Once is not enough: a kit whose cymbals have yet to
-//! load answers like the whole kit wherever a drum that has loaded rings
-//! over them.) One that does not is waited for as if for the first time. [`is_loading`] says whether anything in the program seems
-//! to be loading right now, for telling a user so.
+//! plugin, its state, the notes and how it answered them. A plugin that
+//! answers as it did when it was last found ready, twice and with nothing
+//! loading between the two, is ready without being held to it for longer.
 //!
-//! What this cannot see: a plugin that stops changing for longer than
-//! that without the program growing and is still not done, one whose
-//! later notes are not among the thirty-two that are rehearsed, and an
-//! effect that passes sound before it is ready to pass it rightly. None of them is worse off than before there
-//! was any waiting.
+//! **While it plays, nothing waits.** A plugin in the song that is heard
+//! live is not rehearsed: nobody is to hear notes that are not in the
+//! song. What can be said of it is that it was just made or given
+//! another sound and that the program shows the signs of loading:
+//! [`LoadWatch`], which a session keeps, for a window to say "loading" on
+//! the device and a model to see it before it presses play.
+//!
+//! What this cannot see: a sampler that stops for longer than it is held
+//! and is still not done (said, as above, where notes are silent; not
+//! where every note asked already sounds and others, not asked, are yet
+//! to come, which a render does not play), one whose later notes are not
+//! among the thirty-two that are rehearsed, a plugin that goes on ringing
+//! through a reset, and an effect that passes sound before it is ready to
+//! pass it rightly.
 
 use crate::graph::Graph;
 use parking_lot::Mutex;
@@ -93,10 +117,17 @@ use trill_core::{ControllerKind, Device, DeviceId, Project, TimeSignature, Track
 pub const OPENING_NOTES: usize = 32;
 /// Frames in each block a rehearsal processes.
 const BLOCK: usize = 256;
-/// How long each rehearsed note is held, and how long the plugin is
-/// listened to after the last.
+/// How long each rehearsed note is held; a note that has made no sound by
+/// then is held for [`LATE_SECONDS`] more, for an instrument that speaks
+/// late.
 const NOTE_SECONDS: f64 = 0.05;
+const LATE_SECONDS: f64 = 0.1;
+/// How long the plugins are listened to after the noise an effect is
+/// tried with.
 const AFTER_SECONDS: f64 = 0.1;
+/// How long at most what a plugin lets ring after it was reset is left to
+/// die away before the next note.
+const HUSH_SECONDS: f64 = 0.1;
 /// Output above this (-80 dB) is an answer, unless the plugin makes more
 /// noise than that when it is given nothing.
 const ANSWER: f32 = 1e-4;
@@ -109,6 +140,9 @@ const SAME_ANSWER_DB: f32 = 3.0;
 /// as long as its first answer took to come.
 const SETTLED_FOR: Duration = Duration::from_millis(250);
 const SETTLED_AT_MOST: Duration = Duration::from_secs(2);
+/// How long the same notes must have sounded, with nothing loading, for a
+/// plugin whose levels never settle to be taken as it is.
+const UNSETTLED_FOR: Duration = Duration::from_secs(1);
 /// The longest an effect that passes nothing is waited for.
 const EFFECT_PATIENCE: Duration = Duration::from_secs(3);
 /// The level of the noise an effect is tried with: -12 dB, which opens a
@@ -116,10 +150,6 @@ const EFFECT_PATIENCE: Duration = Duration::from_secs(3);
 const SIGNAL_LEVEL: f32 = 0.25;
 /// How many stretches of [`NOTE_SECONDS`] the noise lasts.
 const SIGNAL_STRETCHES: usize = 3;
-/// How many more times an answer that keeps changing is asked for before
-/// it is taken as it is: an instrument that never plays a note the same
-/// way twice is ready all the same.
-const CHANGING_ANSWERS: u32 = 10;
 /// How long a rehearsal waits between tries.
 const BETWEEN_TRIES: Duration = Duration::from_millis(100);
 /// How many tries in a row must be answered alike.
@@ -127,6 +157,9 @@ const ALIKE_RUNNING: u32 = 3;
 /// The program is loading something while its memory grows faster than
 /// this, in bytes a second: a slow disk reads samples faster.
 const LOADING_BYTES_A_SECOND: f64 = 4.0 * 1024.0 * 1024.0;
+/// Memory given back in one piece of this size or more is something
+/// unloaded: a kit that is being replaced.
+const UNLOADED_BYTES: u64 = 64 * 1024 * 1024;
 /// How long plugins that show signs of loading are waited for at most.
 const LOADING_LIMIT: Duration = Duration::from_secs(120);
 /// The longest a rehearsed plugin is left to ring out before it is reset:
@@ -138,70 +171,269 @@ const QUIET_SECONDS: f64 = 0.1;
 const KNOWN_SILENT: Duration = Duration::from_secs(1);
 /// How many things that did not answer are remembered.
 const REMEMBERED: usize = 256;
+/// How long after it was made, or after the last sign of loading, a
+/// plugin that plays live is still said to be loading: longer than the
+/// pauses a sampler was seen to make between two drums.
+const SETTLED_AFTER: Duration = Duration::from_secs(4);
+/// How often a [`LoadWatch`] looks at the program at most.
+const LOOK_EVERY: Duration = Duration::from_millis(100);
+/// How long ago a [`LoadWatch`] may have looked for what it saw then to
+/// say anything about now.
+const LOOKED_LATELY: Duration = Duration::from_secs(1);
+
+/// Which keys of a plugin are known to sound, and which to stay silent
+/// when everything is loaded: by MIDI note number.
+type Keys = [Option<bool>; 128];
 
 /// What did not answer the last time it was asked, by [`signature`].
 static KNOWN_NOT_TO_ANSWER: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 /// What was found ready, by [`signature`], and how it answered then.
 static KNOWN_READY: Mutex<Vec<(u64, Vec<Answer>)>> = Mutex::new(Vec::new());
+/// What is known of the keys of plugins, by [`device_signature`].
+static KNOWN_KEYS: Mutex<Vec<(u64, Keys)>> = Mutex::new(Vec::new());
 
-/// How much memory the program holds, in bytes: what it has in use and
-/// what it has asked for. `None` where that cannot be asked.
-fn memory_held() -> Option<(u64, u64)> {
-    #[cfg(windows)]
-    {
-        use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
-        use windows::Win32::System::Threading::GetCurrentProcess;
-        let mut counters = PROCESS_MEMORY_COUNTERS::default();
-        let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-        // SAFETY: the handle is the pseudo-handle of this process, which is
-        // always valid, and `counters` is a local of the size given.
-        unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) }.ok()?;
-        Some((counters.WorkingSetSize as u64, counters.PagefileUsage as u64))
+/// What the program shows of its own work, from the outside.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct Vitals {
+    /// Memory in use (the working set), in bytes.
+    pub in_use: u64,
+    /// Memory asked for (committed), in bytes.
+    pub asked: u64,
+    /// Bytes read from files and devices since the program began.
+    pub read: u64,
+    /// How many reads those were.
+    pub reads: u64,
+    /// Processor time the program has used, on all its threads.
+    pub busy: Duration,
+    /// Processor time the thread that asks has used.
+    pub own: Duration,
+    /// How many handles the program holds: files, threads and the like.
+    pub handles: u32,
+}
+
+impl Vitals {
+    /// The program's vitals now. `None` where they cannot be asked.
+    pub fn now() -> Option<Self> {
+        #[cfg(windows)]
+        {
+            use windows::Win32::Foundation::FILETIME;
+            use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+            use windows::Win32::System::Threading::{
+                GetCurrentProcess, GetCurrentThread, GetProcessHandleCount, GetProcessIoCounters, GetProcessTimes,
+                GetThreadTimes, IO_COUNTERS,
+            };
+            let mut counters = PROCESS_MEMORY_COUNTERS::default();
+            let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+            let mut io = IO_COUNTERS::default();
+            let mut times = [FILETIME::default(); 6];
+            let mut handles = 0u32;
+            // SAFETY: the handles are the pseudo-handles of this process and
+            // this thread, which are always valid, and every pointer is to
+            // a local of the type the call fills in.
+            unsafe {
+                let process = GetCurrentProcess();
+                GetProcessMemoryInfo(process, &mut counters, size).ok()?;
+                GetProcessIoCounters(process, &mut io).ok()?;
+                let [made, left, kernel, user, own_kernel, own_user] = &mut times;
+                GetProcessTimes(process, made, left, kernel, user).ok()?;
+                let (mut made, mut left) = (FILETIME::default(), FILETIME::default());
+                GetThreadTimes(GetCurrentThread(), &mut made, &mut left, own_kernel, own_user).ok()?;
+                GetProcessHandleCount(process, &mut handles).ok()?;
+            }
+            // Times come in units of 100 ns.
+            let spent = |kernel: FILETIME, user: FILETIME| {
+                let ticks = |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+                Duration::from_nanos((ticks(kernel) + ticks(user)) * 100)
+            };
+            Some(Self {
+                in_use: counters.WorkingSetSize as u64,
+                asked: counters.PagefileUsage as u64,
+                read: io.ReadTransferCount,
+                reads: io.ReadOperationCount,
+                busy: spent(times[2], times[3]),
+                own: spent(times[4], times[5]),
+                handles,
+            })
+        }
+        #[cfg(not(windows))]
+        None
     }
-    #[cfg(not(windows))]
-    None
 }
 
-/// Watches the program's memory for the growth that loading samples
-/// makes: it rises past the most it has ever held, and goes on rising.
-/// Memory that is taken and given back, as any busy program does, does
-/// not count.
-struct Growth {
-    /// The most the program has held so far, and when it was last asked.
-    most: Option<((u64, u64), Instant)>,
+/// Watches the program for the sign that loading samples makes: its
+/// memory rises past the most it has held, and goes on rising. Memory
+/// that is taken and given back, as any busy program does, does not
+/// count.
+struct Signs {
+    /// When the program was last looked at.
+    looked: Option<Instant>,
+    /// The most memory it has held so far: in use, and asked for.
+    most: (u64, u64),
+    /// Whether memory that is given back in bulk lowers that mark: for a
+    /// watch that goes on for as long as the program runs, in which one
+    /// kit is unloaded and a smaller one loaded.
+    follows: bool,
 }
 
-impl Growth {
+impl Signs {
     fn new() -> Self {
-        Self { most: memory_held().map(|held| (held, Instant::now())) }
+        let now = Vitals::now();
+        Self {
+            most: now.map(|vitals| (vitals.in_use, vitals.asked)).unwrap_or_default(),
+            looked: now.map(|_| Instant::now()),
+            follows: false,
+        }
+    }
+
+    /// [`Self::new`], for watching over a long time.
+    fn following() -> Self {
+        Self { follows: true, ..Self::new() }
     }
 
     /// Whether the program grew since this was last asked at the rate of
     /// something being loaded. Always false where memory cannot be asked
     /// about.
-    fn grew(&mut self) -> bool {
-        let (Some(((in_use, asked), then)), Some(now)) = (self.most, memory_held()) else { return false };
+    fn seen(&mut self) -> bool {
+        let (Some(then), Some(now)) = (self.looked, Vitals::now()) else { return false };
         let at = Instant::now();
         let seconds = at.duration_since(then).as_secs_f64();
         if seconds < 0.05 {
             return false;
         }
-        self.most = Some(((in_use.max(now.0), asked.max(now.1)), at));
-        let grown = now.0.saturating_sub(in_use).max(now.1.saturating_sub(asked)) as f64;
-        grown / seconds >= LOADING_BYTES_A_SECOND
+        let grown = now.in_use.saturating_sub(self.most.0).max(now.asked.saturating_sub(self.most.1));
+        let mark = |most: u64, now: u64| if self.follows && now + UNLOADED_BYTES < most { now } else { most.max(now) };
+        self.most = (mark(self.most.0, now.in_use), mark(self.most.1, now.asked));
+        self.looked = Some(at);
+        grown as f64 / seconds >= LOADING_BYTES_A_SECOND
     }
 }
 
-/// Whether something in the program seems to be loading right now: its
-/// memory grew, over the tenth of a second this takes, as it does while a
-/// plugin reads its samples. A sampler that has just been given a kit or a
-/// preset says "yes" here for as long as it is loading, and a moment
-/// longer says nothing. It is the program that is asked, not one device,
-/// and only Windows can be asked: elsewhere the answer is `false`.
+/// Whether something in the program seems to be loading right now: over
+/// the tenth of a second this takes, its memory grew as it does while a
+/// plugin reads its samples. It is the program that is
+/// asked, not one device, and only Windows can be asked: elsewhere the
+/// answer is `false`. A sampler pauses between two drums, so `false` is
+/// not "done": [`LoadWatch`] keeps looking.
 pub fn is_loading() -> bool {
-    let mut growth = Growth::new();
-    std::thread::sleep(Duration::from_millis(100));
-    growth.grew()
+    let mut signs = Signs::new();
+    std::thread::sleep(LOOK_EVERY);
+    signs.seen()
+}
+
+/// Which plugins that play live seem to be loading: the ones that were
+/// made, or given another state or preset, since the program last stood
+/// still for a few seconds.
+///
+/// A plugin that is heard live cannot be asked by playing it notes, so
+/// this goes by the program alone, whose memory rises while samples are
+/// read. It cannot tell which plugin that is for, and says "loading" of
+/// every one that began since. A plugin that loads nothing is said to be loading
+/// for a few seconds after it is made; one that pauses for longer in the
+/// middle is said to have done.
+pub struct LoadWatch {
+    /// How long after the last sign of loading a plugin is said to have
+    /// done.
+    settled_after: Duration,
+    state: Mutex<Option<Watching>>,
+}
+
+impl Default for LoadWatch {
+    fn default() -> Self {
+        Self::settling_after(SETTLED_AFTER)
+    }
+}
+
+struct Watching {
+    signs: Signs,
+    /// When the program was last looked at, and when it last showed a
+    /// sign of loading.
+    looked: Instant,
+    stirred: Option<Instant>,
+    /// The plugins that may be loading, and since when.
+    fresh: Vec<(DeviceId, Instant)>,
+}
+
+impl LoadWatch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A watch that says a plugin has done loading once the program has
+    /// stood still for `settled_after`.
+    pub fn settling_after(settled_after: Duration) -> Self {
+        Self { settled_after, state: Mutex::new(None) }
+    }
+
+    /// A plugin was made, or given a state or a preset: it may be loading
+    /// from now on.
+    pub fn began(&self, device: DeviceId) {
+        let now = Instant::now();
+        let mut state = self.state.lock();
+        let watching = state.get_or_insert_with(|| Watching {
+            signs: Signs::following(),
+            looked: now,
+            stirred: None,
+            fresh: Vec::new(),
+        });
+        if watching.fresh.is_empty() {
+            // What the program did while nothing was watched is not this
+            // plugin's.
+            (watching.signs, watching.looked, watching.stirred) = (Signs::following(), now, None);
+        }
+        watching.fresh.retain(|(other, _)| *other != device);
+        watching.fresh.push((device, now));
+    }
+
+    /// The plugin is gone.
+    pub fn gone(&self, device: DeviceId) {
+        if let Some(watching) = self.state.lock().as_mut() {
+            watching.fresh.retain(|(other, _)| *other != device);
+        }
+    }
+
+    /// The plugins that seem to be loading. Looks at the program if it
+    /// has not just done so: asked every frame by a window, this is the
+    /// watching. Never waits.
+    pub fn loading(&self) -> Vec<DeviceId> {
+        let mut state = self.state.lock();
+        let Some(watching) = state.as_mut().filter(|watching| !watching.fresh.is_empty()) else {
+            return Vec::new();
+        };
+        let now = Instant::now();
+        if now.duration_since(watching.looked) >= LOOK_EVERY {
+            if watching.signs.seen() {
+                watching.stirred = Some(now);
+            }
+            watching.looked = now;
+        }
+        let (stirred, settled_after) = (watching.stirred, self.settled_after);
+        watching.fresh.retain(|(_, since)| {
+            let last = stirred.map_or(*since, |stirred| stirred.max(*since));
+            now.duration_since(last) < settled_after
+        });
+        watching.fresh.iter().map(|(device, _)| *device).collect()
+    }
+
+    /// [`Self::loading`] for a caller that asks once in a while and may
+    /// wait a moment, such as a server answering a request: if nobody has
+    /// looked lately, the program is looked at over a tenth of a second
+    /// first. What it did before that is not known and not counted.
+    pub fn loading_now(&self) -> Vec<DeviceId> {
+        let stale = {
+            let mut state = self.state.lock();
+            match state.as_mut().filter(|watching| !watching.fresh.is_empty()) {
+                Some(watching) if watching.looked.elapsed() >= LOOKED_LATELY => {
+                    (watching.signs, watching.looked) = (Signs::following(), Instant::now());
+                    true
+                }
+                _ => false,
+            }
+        };
+        if stale {
+            std::thread::sleep(LOOK_EVERY);
+        }
+        self.loading()
+    }
 }
 
 /// How waiting for the plugins of one chain went.
@@ -219,6 +451,11 @@ pub struct Waited {
     pub seconds: f64,
     /// Whether it answered. If not, the render went ahead without it.
     pub answered: bool,
+    /// The pitches that made no sound to the end, though others did, and
+    /// that were not known to be silent keys of this plugin: it was held
+    /// to it for as long as the caller had patience for, and either does
+    /// not play them or had not loaded them by then.
+    pub silent: Vec<u8>,
 }
 
 /// One note of a rehearsal.
@@ -229,6 +466,9 @@ pub(crate) struct OpeningNote {
     pub velocity: f32,
     /// Where the controllers stand for it, sent just ahead of it.
     pub controllers: Vec<EventKind>,
+    /// It is a key held with the note after it (a keyswitch): pressed
+    /// just before that note, let go with it, and not expected to sound.
+    pub switch: bool,
 }
 
 /// What a plugin is given to see whether it answers.
@@ -238,6 +478,14 @@ pub(crate) struct Opening {
     pub notes: Vec<OpeningNote>,
     /// For effects, which take no notes: a burst of noise to pass.
     pub signal: bool,
+}
+
+impl Opening {
+    /// The pitches that are expected to sound, in the order of the
+    /// answers a rehearsal gives.
+    fn pitches(&self) -> impl Iterator<Item = u8> + '_ {
+        self.notes.iter().filter(|note| !note.switch).map(|note| note.pitch)
+    }
 }
 
 /// Devices in a row, driven by hand outside any graph: events in at the
@@ -270,6 +518,18 @@ impl<'a> Stand<'a> {
 
     pub fn frames(&self, seconds: f64) -> usize {
         (seconds * self.info.sample_rate).ceil() as usize
+    }
+
+    /// How long one block lasts.
+    fn block_seconds(&self) -> f64 {
+        BLOCK as f64 / self.info.sample_rate
+    }
+
+    /// How late what goes in comes out, in seconds: a limiter that looks
+    /// ahead answers a note that much after it.
+    fn latency_seconds(&self) -> f64 {
+        let frames: u32 = self.devices.iter().map(|device| device.latency_samples()).sum();
+        f64::from(frames) / self.info.sample_rate
     }
 
     /// Runs the devices for `frames` frames, with `events` in the first
@@ -338,25 +598,23 @@ impl<'a> Stand<'a> {
     }
 
     /// Runs the devices for `seconds`, with `events` in the first block,
-    /// and returns what came out as an [`Answer`].
-    fn hear(&mut self, events: &[Event], seconds: f64) -> Answer {
+    /// and adds what came out to `answer`.
+    fn hear(&mut self, events: &[Event], seconds: f64, answer: &mut Answer) {
         let frames = self.frames(seconds);
-        let (mut peak, mut energy) = (0.0f32, 0.0f64);
         self.run_into(events, frames, |left, right| {
             for sample in left.iter().chain(right) {
-                peak = peak.max(sample.abs());
-                energy += f64::from(*sample) * f64::from(*sample);
+                answer.peak = answer.peak.max(sample.abs());
+                answer.energy += f64::from(*sample) * f64::from(*sample);
             }
             true
         });
-        Answer { peak, energy }
     }
 
     /// Puts noise through the devices for `seconds` and returns what came
     /// out. The noise is the same every time it is begun from `seed`.
     fn pass(&mut self, seed: &mut u32, seconds: f64) -> Answer {
         let frames = self.frames(seconds);
-        let (mut peak, mut energy) = (0.0f32, 0.0f64);
+        let mut answer = Answer::default();
         let feed = |left: &mut [f32], right: &mut [f32]| {
             for (l, r) in left.iter_mut().zip(right.iter_mut()) {
                 *seed ^= *seed << 13;
@@ -368,57 +626,102 @@ impl<'a> Stand<'a> {
         };
         self.run_through(&[], frames, feed, |left, right| {
             for sample in left.iter().chain(right) {
-                peak = peak.max(sample.abs());
-                energy += f64::from(*sample) * f64::from(*sample);
+                answer.peak = answer.peak.max(sample.abs());
+                answer.energy += f64::from(*sample) * f64::from(*sample);
             }
             true
         });
-        Answer { peak, energy }
+        answer
     }
 
-    /// Plays `opening` a note at a time and returns what came out while
-    /// each was down, and after the last. For effects: what came out
-    /// while the noise went in, stretch by stretch, and after it.
+    /// Plays `opening` a note at a time, each from silence, and returns
+    /// what came out while each was down: one answer for every note that
+    /// is not a key held with another. For effects: what came out while
+    /// the noise went in, stretch by stretch, and after it.
     fn rehearse(&mut self, opening: &Opening) -> Vec<Answer> {
         if opening.signal {
             let mut seed = 0x2545_F491u32;
             let mut answers: Vec<Answer> = (0..SIGNAL_STRETCHES).map(|_| self.pass(&mut seed, NOTE_SECONDS)).collect();
-            answers.push(self.hear(&[], AFTER_SECONDS));
+            let mut after = Answer::default();
+            self.hear(&[], AFTER_SECONDS, &mut after);
+            answers.push(after);
             return answers;
         }
-        let mut answers = Vec::with_capacity(opening.notes.len() + 1);
+        let floor = self.heard_above();
+        // What comes out does so as late as the devices make it.
+        let (held, block) = (NOTE_SECONDS + self.latency_seconds(), self.block_seconds());
+        let mut answers = Vec::with_capacity(opening.notes.len());
         let mut events: Vec<Event> = Vec::new();
+        let mut down: Vec<u8> = Vec::new();
         for note in &opening.notes {
             events.extend(note.controllers.iter().map(|kind| Event { offset: 0, kind: *kind }));
             events.push(Event { offset: 0, kind: EventKind::NoteOn { pitch: note.pitch, velocity: note.velocity } });
-            answers.push(self.hear(&events, NOTE_SECONDS));
+            down.push(note.pitch);
+            if note.switch {
+                // A key held with the note after it goes down a moment
+                // ahead of that note and comes up with it.
+                self.run(&events, block);
+                events.clear();
+                continue;
+            }
+            let mut answer = Answer::default();
+            self.hear(&events, held, &mut answer);
+            if answer.peak <= floor {
+                // An instrument that speaks late is given longer.
+                self.hear(&[], LATE_SECONDS, &mut answer);
+            }
+            answers.push(answer);
             events.clear();
-            events.push(Event { offset: 0, kind: EventKind::NoteOff { pitch: note.pitch } });
+            events.extend(down.drain(..).map(|pitch| Event { offset: 0, kind: EventKind::NoteOff { pitch } }));
+            self.hush(&events);
+            events.clear();
         }
-        answers.push(self.hear(&events, AFTER_SECONDS));
+        if !down.is_empty() {
+            events.extend(down.drain(..).map(|pitch| Event { offset: 0, kind: EventKind::NoteOff { pitch } }));
+            self.hush(&events);
+        }
         answers
     }
 
-    /// Lets go of every note, leaves what rings to die away (not for
-    /// ever), and resets the devices: they are as they were made, but
-    /// awake.
+    /// Lets go of what is down (`off`) and silences the devices, so that
+    /// what is played next is heard by itself: they are reset, and what
+    /// still rings after that is left a moment to die away.
+    fn hush(&mut self, off: &[Event]) {
+        let (quiet, block) = (self.heard_above(), self.block_seconds());
+        self.run(off, block);
+        self.reset();
+        // Some devices act on a reset with their next block (a VST3 plugin
+        // is told to be silent then).
+        let mut waited = 0.0;
+        while self.run(&[], block) > quiet && waited < HUSH_SECONDS {
+            waited += block;
+        }
+    }
+
+    /// Lets go of every note, silences the devices, leaves what still
+    /// rings to die away (not for ever), and resets them: they are as
+    /// they were made, but awake.
     pub fn settle(&mut self) {
         let quiet = self.heard_above() / 2.0;
         let needed = self.frames(QUIET_SECONDS);
         let limit = self.frames(RING_OUT_SECONDS);
-        let all_off = [Event { offset: 0, kind: EventKind::AllNotesOff }];
-        let (mut done, mut silent) = (0, 0);
+        let block = self.block_seconds();
+        // Where a reset silences a plugin, there is nothing to ring out.
+        self.run(&[Event { offset: 0, kind: EventKind::AllNotesOff }], block);
+        self.reset();
+        self.run(&[], block);
+        let (mut done, mut silent, mut rang) = (0, 0, false);
         while done < limit && silent < needed {
-            let events: &[Event] = if done == 0 { &all_off } else { &[] };
-            let peak = self.run(events, BLOCK as f64 / self.info.sample_rate);
-            silent = if peak < quiet { silent + BLOCK } else { 0 };
+            let peak = self.run(&[], block);
+            (silent, rang) = if peak < quiet { (silent + BLOCK, rang) } else { (0, true) };
             done += BLOCK;
         }
-        self.reset();
-        // Some devices act on a reset with their next block (a VST3 plugin
-        // is told to be silent then): that block is this one, not the
-        // first of what comes after.
-        self.run(&[], BLOCK as f64 / self.info.sample_rate);
+        if rang {
+            self.reset();
+            // That reset's block is this one, not the first of what comes
+            // after.
+            self.run(&[], block);
+        }
     }
 
     /// Resets every device: voices silenced, delay lines cleared.
@@ -431,9 +734,8 @@ impl<'a> Stand<'a> {
 
 /// What came out of a plugin over a short stretch: its highest sample, by
 /// which it is known to have answered at all, and its energy, by which
-/// one answer is compared with the next. A note that has only now begun
-/// to sound adds energy even under the ringing of the note before it.
-#[derive(Copy, Clone, Debug, PartialEq)]
+/// one answer is compared with the next.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
 struct Answer {
     peak: f32,
     energy: f64,
@@ -456,52 +758,77 @@ fn alike(now: &[Answer], before: &[Answer], floor: f32) -> bool {
     now.len() == before.len() && now.iter().zip(before).all(|(now, before)| now.like(before, floor))
 }
 
+/// What a wait is told of what is known already.
+#[derive(Copy, Clone, Default)]
+struct Known<'a> {
+    /// How this was answered when it was last found ready.
+    answers: Option<&'a [Answer]>,
+    /// Which keys of these plugins are known to sound, and to be silent.
+    keys: Option<&'a Keys>,
+}
+
 /// One plugin's wait: what it is asked, and how it has answered so far.
 pub(crate) struct Wait<'a> {
     pub stand: Stand<'a>,
     pub opening: Opening,
     /// What is waited for, for remembering how it went.
     pub signature: u64,
+    /// The plugins alone, whatever they are asked: for what is known of
+    /// their keys.
+    pub devices: u64,
     /// The answers of the last try, if it was answered at all.
     last: Option<Vec<Answer>>,
     /// How many tries in a row were answered alike with nothing loading,
     /// and since when.
     alike: u32,
     alike_since: Option<Instant>,
-    /// How many answers so far were not like the one before.
-    changing: u32,
+    /// Which of the things asked have made a sound at some try so far.
+    ever: Vec<bool>,
+    /// Since when nothing has been loading and no note has sounded that
+    /// had not before.
+    steady_since: Option<Instant>,
     /// It answers as it did when it was last found ready.
     known: bool,
     /// How long after the wait began the first answer came.
     first_answer: Option<Duration>,
     /// When there was last a sign of life: an answer that was not like
-    /// the one before, or the program growing.
+    /// the one before, or the program loading.
     stirred: Instant,
     /// When it was found ready, or given up on.
     outcome: Option<(Duration, bool)>,
+    /// It was found ready, and not given up on.
+    found: bool,
+    /// The pitches that have made no sound at any try so far, though
+    /// others have, and are not known to be silent keys.
+    silent: Vec<u8>,
 }
 
 impl<'a> Wait<'a> {
-    pub fn new(stand: Stand<'a>, opening: Opening, signature: u64) -> Self {
+    pub fn new(stand: Stand<'a>, opening: Opening, signature: u64, devices: u64) -> Self {
         Self {
             stand,
             opening,
             signature,
+            devices,
             last: None,
             alike: 0,
             alike_since: None,
-            changing: 0,
+            ever: Vec::new(),
+            steady_since: None,
             known: false,
             first_answer: None,
             stirred: Instant::now(),
             outcome: None,
+            found: false,
+            silent: Vec::new(),
         }
     }
 
-    /// One try. `loading` is whether the program grew since the last one;
-    /// `remembered` how this was answered when it was last found ready.
-    /// Returns whether the wait is over.
-    fn attempt(&mut self, begun: Instant, loading: bool, remembered: Option<&[Answer]>) -> bool {
+    /// One try. `loading` is whether the program showed signs of loading
+    /// since the last one; `partly` how long an instrument that answers
+    /// only some of its notes is held to that. Returns whether the wait
+    /// is over.
+    fn attempt(&mut self, begun: Instant, loading: bool, known: Known, partly: Duration) -> bool {
         let floor = self.stand.heard_above();
         let now = Instant::now();
         let answers = self.stand.rehearse(&self.opening);
@@ -509,38 +836,65 @@ impl<'a> Wait<'a> {
             self.stirred = now;
         }
         if answers.iter().all(|answer| answer.peak <= floor) {
-            (self.last, self.alike, self.alike_since) = (None, 0, None);
+            (self.last, self.alike, self.alike_since, self.steady_since) = (None, 0, None, None);
+            self.ever.clear();
+            self.silent.clear();
             return false;
         }
         let first = *self.first_answer.get_or_insert(begun.elapsed());
+        // What sounds now and never did before has arrived: a sampler's
+        // kit comes a drum at a time, and what it has it keeps. (A key
+        // that sounds one time and not the next is no sign of anything.)
+        self.ever.resize(answers.len(), false);
+        let mut arrived = false;
+        for (ever, answer) in self.ever.iter_mut().zip(&answers) {
+            arrived |= answer.peak > floor && !*ever;
+            *ever |= answer.peak > floor;
+        }
+        // The notes that have made no sound yet, unless that is what is
+        // known of them: the instrument may not have loaded them.
+        self.silent.clear();
+        for (pitch, ever) in self.opening.pitches().zip(&self.ever) {
+            let expected = known.keys.is_some_and(|keys| keys[usize::from(pitch)] == Some(false));
+            if !*ever && !expected && !self.silent.contains(&pitch) {
+                self.silent.push(pitch);
+            }
+        }
+        let whole = self.silent.is_empty();
         // What answers as it did when it was last found ready has one
         // like answer behind it already, and need not be held for long.
-        let known = remembered.is_some_and(|before| alike(&answers, before, floor));
-        if self.last.is_none() && known && !loading {
+        let as_before = known.answers.is_some_and(|before| alike(&answers, before, floor));
+        if self.last.is_none() && as_before && !loading {
             (self.alike, self.alike_since, self.known) = (1, Some(now), true);
         }
         let same = self.last.as_ref().is_some_and(|last| alike(&answers, last, floor));
         if self.last.is_some() && !same {
-            self.changing += 1;
             self.stirred = now;
+        }
+        if loading || arrived {
+            self.steady_since = Some(now);
         }
         if same && !loading {
             self.alike += 1;
             self.alike_since.get_or_insert(now);
         } else if self.last.is_some() || !self.known {
             (self.alike, self.alike_since) = (u32::from(!loading), (!loading).then_some(now));
-            self.known &= !loading && known;
+            self.known &= !loading && as_before;
         }
         self.last = Some(answers);
         // One that was slow to answer at all is given longer to finish.
         let hold = if self.known { BETWEEN_TRIES } else { (first / 2).clamp(SETTLED_FOR, SETTLED_AT_MOST) };
         let held = self.alike_since.is_some_and(|since| now.duration_since(since) >= hold);
         let enough = if self.known { ALIKE_RUNNING - 1 } else { ALIKE_RUNNING };
+        let steady = self.steady_since.map_or(Duration::ZERO, |since| now.duration_since(since));
         // An instrument that never plays a note the same way twice is
-        // ready all the same, once nothing is being loaded.
-        let never_the_same = self.changing >= CHANGING_ANSWERS && !loading;
-        if (self.alike >= enough && held) || never_the_same {
-            self.outcome = Some((begun.elapsed(), true));
+        // ready all the same, once no more notes have come to it for a
+        // while with nothing loading.
+        let settled = (self.alike >= enough && held) || steady >= hold.max(UNSETTLED_FOR);
+        // And one that leaves notes unanswered may be between two parts of
+        // what it loads.
+        if settled && !loading && (whole || steady >= partly) {
+            (self.outcome, self.found) = (Some((begun.elapsed(), true)), true);
         }
         self.outcome.is_some()
     }
@@ -549,30 +903,74 @@ impl<'a> Wait<'a> {
     pub fn outcome(&self) -> (Duration, bool) {
         self.outcome.unwrap_or_default()
     }
+
+    /// The pitches that made no sound to the end, though others did, and
+    /// were not known to be silent keys: see [`Waited::silent`].
+    pub fn silent(&self) -> &[u8] {
+        &self.silent
+    }
+}
+
+/// Says every try of a wait to whoever logs at the finest level: how the
+/// program stood and how each wait was answered. The `loading` example of
+/// `trill-plugins` prints it.
+fn tell(begun: Instant, first: &Vitals, loading: bool, waits: &[Wait]) {
+    if !log::log_enabled!(log::Level::Trace) {
+        return;
+    }
+    let now = Vitals::now().unwrap_or_default();
+    let megabytes = |bytes: u64| bytes as f64 / 1_048_576.0;
+    let answers: Vec<String> = waits
+        .iter()
+        .map(|wait| {
+            let floor = wait.stand.heard_above();
+            let level = |answer: &Answer| match answer.peak > floor {
+                true => format!("{:.0}", 20.0 * answer.peak.log10()),
+                false => "-".to_string(),
+            };
+            let said: Vec<String> = wait.last.as_deref().unwrap_or_default().iter().map(level).collect();
+            format!("alike {} [{}]", wait.alike, said.join(" "))
+        })
+        .collect();
+    log::trace!(
+        "wait {:>6.2} s  in use {:>7.1} MB  asked {:>7.1} MB  read {:>8.1} MB  {}  {}",
+        begun.elapsed().as_secs_f64(),
+        megabytes(now.in_use),
+        megabytes(now.asked),
+        megabytes(now.read.saturating_sub(first.read)),
+        if loading { "loading" } else { "still  " },
+        answers.join(" | ")
+    );
 }
 
 /// Tries every wait in turn until each is over, then settles them all.
 /// A wait is given up on when nothing has stirred for `patience` (no
-/// answer that differs from the last, and the program not growing), or
+/// answer that differs from the last, and the program not loading), or
 /// after [`LOADING_LIMIT`] whatever stirs. Waits that are known not to be
 /// answered get [`KNOWN_SILENT`] at most; how each went is remembered.
 pub(crate) fn wait_for(waits: &mut [Wait], patience: Duration) {
     let begun = Instant::now();
     let silent: Vec<u64> = KNOWN_NOT_TO_ANSWER.lock().clone();
     let ready: Vec<(u64, Vec<Answer>)> = KNOWN_READY.lock().clone();
-    let mut growth = Growth::new();
+    let keys: Vec<(u64, Keys)> = KNOWN_KEYS.lock().clone();
+    let mut signs = Signs::new();
+    let first = Vitals::now().unwrap_or_default();
     for wait in waits.iter_mut() {
         wait.stand.hear_noise();
         wait.stirred = Instant::now();
     }
     loop {
-        let loading = growth.grew();
+        let loading = signs.seen();
+        tell(begun, &first, loading, waits);
         let mut pending = false;
         for wait in waits.iter_mut().filter(|wait| wait.outcome.is_none()) {
             let patience = if wait.opening.signal { patience.min(EFFECT_PATIENCE) } else { patience };
             let patience = if silent.contains(&wait.signature) { patience.min(KNOWN_SILENT) } else { patience };
-            let remembered = ready.iter().find(|(signature, _)| *signature == wait.signature);
-            if wait.attempt(begun, loading, remembered.map(|(_, answers)| answers.as_slice())) {
+            let known = Known {
+                answers: ready.iter().find(|(signature, _)| *signature == wait.signature).map(|(_, a)| a.as_slice()),
+                keys: keys.iter().find(|(devices, _)| *devices == wait.devices).map(|(_, keys)| keys),
+            };
+            if wait.attempt(begun, loading, known, patience / 2) {
                 continue;
             }
             // Given up on: nothing has happened for as long as the caller
@@ -590,13 +988,30 @@ pub(crate) fn wait_for(waits: &mut [Wait], patience: Duration) {
         }
         std::thread::sleep(BETWEEN_TRIES);
     }
-    let (mut silent, mut ready) = (KNOWN_NOT_TO_ANSWER.lock(), KNOWN_READY.lock());
+    let (mut silent, mut ready, mut keys) = (KNOWN_NOT_TO_ANSWER.lock(), KNOWN_READY.lock(), KNOWN_KEYS.lock());
     for wait in waits.iter_mut() {
         wait.stand.settle();
         silent.retain(|signature| *signature != wait.signature);
         ready.retain(|(signature, _)| *signature != wait.signature);
         match (wait.outcome().1, wait.last.take()) {
-            (true, Some(answers)) => ready.push((wait.signature, answers)),
+            (true, Some(answers)) => {
+                // What is now known of these plugins' keys: the ones that
+                // sounded do, and the ones that stayed silent for as long
+                // as it was held to them are keys that play nothing.
+                if !wait.opening.signal {
+                    let at = keys.iter().position(|(devices, _)| *devices == wait.devices);
+                    let mut known = at.map_or([None; 128], |at| keys.remove(at).1);
+                    for (pitch, ever) in wait.opening.pitches().zip(&wait.ever) {
+                        match *ever {
+                            true => known[usize::from(pitch)] = Some(true),
+                            false if wait.found => known[usize::from(pitch)] = Some(false),
+                            false => {}
+                        }
+                    }
+                    keys.push((wait.devices, known));
+                }
+                ready.push((wait.signature, answers));
+            }
             _ => silent.push(wait.signature),
         }
     }
@@ -604,24 +1019,38 @@ pub(crate) fn wait_for(waits: &mut [Wait], patience: Duration) {
     silent.drain(..surplus);
     let surplus = ready.len().saturating_sub(REMEMBERED);
     ready.drain(..surplus);
+    let surplus = keys.len().saturating_sub(REMEMBERED);
+    keys.drain(..surplus);
+}
+
+fn hash_devices<'a>(devices: impl Iterator<Item = &'a Device>, hasher: &mut impl Hasher) {
+    for device in devices {
+        device.uri.hash(hasher);
+        device.state.hash(hasher);
+        device.preset.as_ref().map(|preset| &preset.id).hash(hasher);
+        for (key, value) in &device.params {
+            key.hash(hasher);
+            value.to_bits().hash(hasher);
+        }
+    }
+}
+
+/// What identifies plugins whatever they are asked: what they are, and
+/// their saved states.
+pub(crate) fn device_signature<'a>(devices: impl Iterator<Item = &'a Device>) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hash_devices(devices, &mut hasher);
+    hasher.finish()
 }
 
 /// What identifies a wait: the plugins, their saved states, and what they
 /// are asked.
 pub(crate) fn signature<'a>(devices: impl Iterator<Item = &'a Device>, opening: &Opening) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for device in devices {
-        device.uri.hash(&mut hasher);
-        device.state.hash(&mut hasher);
-        device.preset.as_ref().map(|preset| &preset.id).hash(&mut hasher);
-        for (key, value) in &device.params {
-            key.hash(&mut hasher);
-            value.to_bits().hash(&mut hasher);
-        }
-    }
+    hash_devices(devices, &mut hasher);
     opening.signal.hash(&mut hasher);
     for note in &opening.notes {
-        (note.pitch, note.velocity.to_bits()).hash(&mut hasher);
+        (note.pitch, note.velocity.to_bits(), note.switch).hash(&mut hasher);
         for kind in &note.controllers {
             if let Some((controller, value)) = ControllerKind::of_event(*kind) {
                 (controller.index(), value.to_bits()).hash(&mut hasher);
@@ -710,7 +1139,7 @@ pub(crate) fn wake(
                 })
                 .collect();
             let velocity = f32::from(note.velocity.clamp(1, 127)) / 127.0;
-            notes.push(OpeningNote { pitch: note.pitch, velocity, controllers });
+            notes.push(OpeningNote { pitch: note.pitch, velocity, controllers, switch: false });
         }
         // The instrument and the plugins after it are what a note goes
         // through before it is heard, the built-in devices left out. With
@@ -742,13 +1171,15 @@ pub(crate) fn wake(
         if let (Some(instrument), true) = (instrument, !rehearsed.is_empty() && with_notes.len() == rehearsed.len()) {
             let opening = Opening { notes, signal: false };
             let signature = signature(rehearsed.iter().copied(), &opening);
-            waits.push(Wait::new(Stand::new(with_notes, sample_rate, tempo), opening, signature));
+            let devices = device_signature(rehearsed.iter().copied());
+            waits.push(Wait::new(Stand::new(with_notes, sample_rate, tempo), opening, signature, devices));
             who.push((Some(node.id), instrument.id, false));
         }
         if let (Some(first), true) = (effects.first(), with_noise.len() == effects.len()) {
             let opening = Opening { notes: Vec::new(), signal: true };
             let signature = signature(effects.iter().copied(), &opening);
-            waits.push(Wait::new(Stand::new(with_noise, sample_rate, tempo), opening, signature));
+            let devices = device_signature(effects.iter().copied());
+            waits.push(Wait::new(Stand::new(with_noise, sample_rate, tempo), opening, signature, devices));
             who.push((Some(node.id), first.id, true));
         }
     }
@@ -760,7 +1191,8 @@ pub(crate) fn wake(
     if let (Some(first), true) = (effects.first(), processors.len() == effects.len()) {
         let opening = Opening { notes: Vec::new(), signal: true };
         let signature = signature(effects.iter().copied(), &opening);
-        waits.push(Wait::new(Stand::new(processors, sample_rate, tempo), opening, signature));
+        let devices = device_signature(effects.iter().copied());
+        waits.push(Wait::new(Stand::new(processors, sample_rate, tempo), opening, signature, devices));
         who.push((None, first.id, true));
     }
     if waits.is_empty() {
@@ -772,7 +1204,45 @@ pub(crate) fn wake(
         .zip(who)
         .map(|(wait, (track, device, effect))| {
             let (waited, answered) = wait.outcome();
-            Waited { track, device, effect, seconds: waited.as_secs_f64(), answered }
+            let silent = wait.silent().to_vec();
+            Waited { track, device, effect, seconds: waited.as_secs_f64(), answered, silent }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_plugin_is_said_to_be_loading_until_the_program_has_stood_still_for_a_while() {
+        let watch = LoadWatch::settling_after(Duration::from_millis(400));
+        assert!(watch.loading().is_empty());
+        watch.began(DeviceId(7));
+        assert_eq!(watch.loading(), [DeviceId(7)]);
+        // While the program grows as it does when samples are read, it
+        // goes on being said. (Only Windows can be asked.)
+        #[cfg(windows)]
+        {
+            let mut held = Vec::new();
+            let begun = Instant::now();
+            while begun.elapsed() < Duration::from_millis(700) {
+                held.push(vec![1u8; 8 << 20]);
+                std::thread::sleep(Duration::from_millis(40));
+                assert_eq!(watch.loading(), [DeviceId(7)], "after {:?}", begun.elapsed());
+            }
+        }
+        // And for a while after, a pause not being the end; then no more.
+        let stopped = Instant::now();
+        while !watch.loading().is_empty() {
+            assert!(stopped.elapsed() < Duration::from_secs(20), "it never came to an end");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        #[cfg(windows)]
+        assert!(stopped.elapsed() >= Duration::from_millis(200), "{:?}", stopped.elapsed());
+        // One that began and is gone again is not loading.
+        watch.began(DeviceId(8));
+        watch.gone(DeviceId(8));
+        assert!(watch.loading().is_empty() && watch.loading_now().is_empty());
+    }
 }

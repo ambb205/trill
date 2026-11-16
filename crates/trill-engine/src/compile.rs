@@ -6,6 +6,7 @@ use crate::graph::{
     AudioRegion, Bus, Chain, DeviceSlot, Graph, MAX_BLOCK, MasterNode, Meter, NoteEvent, ParamAutomation, RegionAudio,
     TrackNode, TrackState,
 };
+use crate::ready::{LoadWatch, Plugins};
 use crate::sources::AudioSources;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
@@ -65,6 +66,10 @@ pub struct DeviceMeta {
 #[derive(Default)]
 pub struct DeviceBank {
     pub devices: HashMap<DeviceId, DeviceMeta>,
+    /// Which of the plugins among them were made lately and may still be
+    /// loading what they play: told of every plugin that is made to be
+    /// heard live.
+    pub loads: Arc<LoadWatch>,
 }
 
 /// Track meters, kept across compiles so readers hold stable handles.
@@ -252,6 +257,9 @@ impl Compiler<'_> {
         };
 
         let live_devices: HashSet<DeviceId> = project.devices().map(|device| device.id).collect();
+        for gone in self.bank.devices.keys().filter(|id| !live_devices.contains(id)) {
+            self.bank.loads.gone(*gone);
+        }
         self.bank.devices.retain(|id, _| live_devices.contains(id));
         let live_tracks: HashSet<TrackId> = project.tracks.iter().map(|track| track.id).collect();
         self.meters.tracks.retain(|id, _| live_tracks.contains(id));
@@ -301,6 +309,9 @@ impl Compiler<'_> {
         } else {
             match self.factory.create_for(device, self.sample_rate, MAX_BLOCK, self.purpose) {
                 Ok(instance) => {
+                    if self.purpose == Purpose::Playing && Plugins::is_plugin(&device.uri) {
+                        self.bank.loads.began(device.id);
+                    }
                     self.bank.devices.insert(
                         device.id,
                         DeviceMeta {
