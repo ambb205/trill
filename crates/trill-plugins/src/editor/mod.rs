@@ -195,7 +195,6 @@ impl HostedEditor {
         // The order is the one both formats document: scale first, since
         // every size that follows is in pixels of that scale.
         let scale = window.scale();
-        log::debug!("[{plugin_name}] before scale {scale}: its editor says {:?}", view.size());
         view.set_scale(scale);
         let resizable = view.can_resize();
         window.set_resizable(resizable);
@@ -232,10 +231,7 @@ impl HostedEditor {
         if let Some(settled) = view.size().filter(|settled| !settled.is_empty() && *settled != editor.size) {
             editor.size = editor.window.set_client_size(settled);
         }
-        log::debug!(
-            "[{plugin_name}] its editor asked for {size:?} at scale {scale} and has {:?}; resizable: {resizable}",
-            editor.size
-        );
+        log::debug!("[{plugin_name}] its editor opens at {:?} (scale {scale}, resizable: {resizable})", editor.size);
         view.show();
         editor.window.show(options.activate);
         editor.status.set_open(true);

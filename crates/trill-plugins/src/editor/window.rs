@@ -22,24 +22,28 @@ use std::rc::Rc;
 use std::sync::OnceLock;
 use trill_core::device::EditorImage;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows_sys::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
+use windows_sys::Win32::Graphics::Dwm::{
+    DWMWA_CLOAKED, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmGetWindowAttribute, DwmSetWindowAttribute,
+};
 use windows_sys::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLACK_BRUSH, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC,
-    DeleteObject, GdiFlush, GetDC, GetMonitorInfoW, GetStockObject, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
-    MONITORINFO, MonitorFromPoint, MonitorFromWindow, ReleaseDC, SelectObject,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLACK_BRUSH, BitBlt, ClientToScreen, CreateCompatibleDC, CreateDIBSection,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, EqualRect, GdiFlush, GetDC, GetMonitorInfoW, GetStockObject, HDC,
+    IntersectRect, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromPoint, MonitorFromWindow,
+    OffsetRect, ReleaseDC, SRCCOPY, SelectObject,
 };
 use windows_sys::Win32::Storage::Xps::{PW_CLIENTONLY, PrintWindow};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GW_CHILD, GWL_EXSTYLE, GWL_STYLE,
-    GWLP_USERDATA, GetClientRect, GetWindow, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, HWND_TOP, IDC_ARROW,
-    IsIconic, IsWindow, LoadCursorW, LoadIconW, RegisterClassExW, SIZE_MINIMIZED, SW_RESTORE, SW_SHOWNOACTIVATE,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOWPLACEMENT, WM_CLOSE, WM_DPICHANGED, WM_NCCREATE, WM_NCDESTROY,
-    WM_SETFOCUS, WM_SIZE, WM_SIZING, WMSZ_BOTTOMLEFT, WMSZ_LEFT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WNDCLASSEXW,
-    WS_CAPTION, WS_CLIPCHILDREN, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_THICKFRAME,
+    CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GW_CHILD, GW_HWNDPREV, GWL_EXSTYLE,
+    GWL_STYLE, GWLP_USERDATA, GetClientRect, GetWindow, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, HWND_TOP,
+    IDC_ARROW, IsIconic, IsWindow, IsWindowVisible, LoadCursorW, LoadIconW, RegisterClassExW, SIZE_MINIMIZED,
+    SW_RESTORE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOWPLACEMENT, WM_CLOSE,
+    WM_DPICHANGED, WM_NCCREATE, WM_NCDESTROY, WM_SETFOCUS, WM_SIZE, WM_SIZING, WMSZ_BOTTOMLEFT, WMSZ_LEFT, WMSZ_TOP,
+    WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
+    WS_THICKFRAME,
 };
 
 /// Whether this platform hosts plugin editors.
@@ -312,53 +316,139 @@ impl Window {
 
     /// The area inside the window's frame as it is drawn right now, the
     /// view's own windows included.
+    ///
+    /// While nothing is in front of the window, that is what the screen
+    /// shows there, and the picture is taken off the screen: the one way
+    /// that works whatever a view draws with. A window that is covered is
+    /// asked for its picture instead, since what covers an editor is
+    /// somebody else's and not this host's to hand out. That picture is
+    /// the window's last painted state, which for a view that draws with
+    /// the graphics card, or was covered before it first painted, can be
+    /// blank.
     pub(crate) fn capture(&self) -> Option<EditorImage> {
         let window = self.handle();
         let size = self.client_size();
-        if window.is_null() || size.width == 0 || size.height == 0 {
+        if window.is_null() {
             return None;
         }
-        let (width, height) = (size.width as i32, size.height as i32);
-        // SAFETY: every GDI object made here is released before returning.
-        // The bitmap is 32 bits per pixel and `width` by `height`, so
-        // `bits` points to `width * height * 4` bytes for as long as the
-        // bitmap exists, which is until after they are copied.
-        unsafe {
-            let screen = GetDC(null_mut());
-            let memory = CreateCompatibleDC(screen);
-            let mut info: BITMAPINFO = std::mem::zeroed();
-            info.bmiHeader = BITMAPINFOHEADER {
-                biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width,
-                // Negative: rows run from the top down.
-                biHeight: -height,
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB,
-                ..std::mem::zeroed()
-            };
-            let mut bits: *mut c_void = null_mut();
-            let bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
-            let mut image = None;
-            if !bitmap.is_null() && !bits.is_null() {
-                let previous = SelectObject(memory, bitmap);
-                let printed = PrintWindow(window, memory, PW_CLIENTONLY | PW_RENDERFULLCONTENT) != 0;
-                GdiFlush();
-                if printed {
-                    let bgra =
-                        std::slice::from_raw_parts(bits.cast::<u8>(), size.width as usize * size.height as usize * 4);
-                    let rgba = bgra.chunks_exact(4).flat_map(|pixel| [pixel[2], pixel[1], pixel[0], 255]).collect();
-                    image = Some(EditorImage { width: size.width, height: size.height, rgba });
-                }
-                SelectObject(memory, previous);
+        if self.is_on_top() {
+            // SAFETY: the handle is this window's, the point is a local
+            // the system fills in, and copying from the screen only reads
+            // it. The device contexts are `picture`'s, for the call.
+            let displayed = picture(size, |memory, screen| unsafe {
+                let mut origin = POINT { x: 0, y: 0 };
+                let (width, height) = (size.width as i32, size.height as i32);
+                ClientToScreen(window, &mut origin) != 0
+                    && BitBlt(memory, 0, 0, width, height, screen, origin.x, origin.y, SRCCOPY) != 0
+            });
+            if displayed.is_some() {
+                return displayed;
             }
-            if !bitmap.is_null() {
-                DeleteObject(bitmap);
-            }
-            DeleteDC(memory);
-            ReleaseDC(null_mut(), screen);
-            image
         }
+        // SAFETY: as above.
+        picture(size, |memory, _| unsafe { PrintWindow(window, memory, PW_CLIENTONLY | PW_RENDERFULLCONTENT) != 0 })
+    }
+
+    /// Whether the screen shows all of the inside of the window: it is on
+    /// a monitor, and no other window in front of it overlaps it.
+    fn is_on_top(&self) -> bool {
+        let window = self.handle();
+        // SAFETY: the handle is this window's; every structure is a local
+        // the system fills in, and windows that go away while they are
+        // looked at make the calls about them fail, not misbehave.
+        unsafe {
+            let mut inside: RECT = std::mem::zeroed();
+            let mut origin = POINT { x: 0, y: 0 };
+            if IsWindowVisible(window) == 0
+                || IsIconic(window) != 0
+                || GetClientRect(window, &mut inside) == 0
+                || ClientToScreen(window, &mut origin) == 0
+            {
+                return false;
+            }
+            OffsetRect(&mut inside, origin.x, origin.y);
+            // All of it has to be on the monitor it is on.
+            let mut monitor = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..std::mem::zeroed() };
+            let mut shown: RECT = std::mem::zeroed();
+            if GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &mut monitor) == 0
+                || IntersectRect(&mut shown, &inside, &monitor.rcMonitor) == 0
+                || EqualRect(&shown, &inside) == 0
+            {
+                return false;
+            }
+            // Every window in front of this one, nearest first.
+            let mut above = GetWindow(window, GW_HWNDPREV);
+            while !above.is_null() {
+                let (mut frame, mut overlap): (RECT, RECT) = (std::mem::zeroed(), std::mem::zeroed());
+                let displayed = IsWindowVisible(above) != 0 && IsIconic(above) == 0 && !is_cloaked(above);
+                if displayed
+                    && GetWindowRect(above, &mut frame) != 0
+                    && IntersectRect(&mut overlap, &frame, &inside) != 0
+                {
+                    return false;
+                }
+                above = GetWindow(above, GW_HWNDPREV);
+            }
+            true
+        }
+    }
+}
+
+/// Whether the system keeps `window` off the screen although it counts as
+/// visible, as it does with windows on another virtual desktop.
+fn is_cloaked(window: HWND) -> bool {
+    let mut cloaked = 0u32;
+    // SAFETY: the attribute is a `u32`, which is what is passed to be
+    // filled in, with its size.
+    let asked = unsafe { DwmGetWindowAttribute(window, DWMWA_CLOAKED as u32, (&raw mut cloaked).cast(), 4) };
+    asked >= 0 && cloaked != 0
+}
+
+/// A picture of `size`, painted by `paint`, which is given the bitmap to
+/// paint into and the screen to copy from, and says whether it managed.
+fn picture(size: Size, paint: impl FnOnce(HDC, HDC) -> bool) -> Option<EditorImage> {
+    let (width, height) = (i32::try_from(size.width).ok()?, i32::try_from(size.height).ok()?);
+    if width == 0 || height == 0 {
+        return None;
+    }
+    // SAFETY: every GDI object made here is released before returning. The
+    // bitmap is 32 bits per pixel and `width` by `height`, so `bits` points
+    // to `width * height * 4` bytes for as long as the bitmap exists, which
+    // is until after they are copied.
+    unsafe {
+        let screen = GetDC(null_mut());
+        let memory = CreateCompatibleDC(screen);
+        let mut info: BITMAPINFO = std::mem::zeroed();
+        info.bmiHeader = BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            // Negative: rows run from the top down.
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB,
+            ..std::mem::zeroed()
+        };
+        let mut bits: *mut c_void = null_mut();
+        let bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+        let mut image = None;
+        if !bitmap.is_null() && !bits.is_null() {
+            let previous = SelectObject(memory, bitmap);
+            if paint(memory, screen) {
+                GdiFlush();
+                let bgra =
+                    std::slice::from_raw_parts(bits.cast::<u8>(), size.width as usize * size.height as usize * 4);
+                let rgba = bgra.chunks_exact(4).flat_map(|pixel| [pixel[2], pixel[1], pixel[0], 255]).collect();
+                image = Some(EditorImage { width: size.width, height: size.height, rgba });
+            }
+            SelectObject(memory, previous);
+        }
+        if !bitmap.is_null() {
+            DeleteObject(bitmap);
+        }
+        DeleteDC(memory);
+        ReleaseDC(null_mut(), screen);
+        image
     }
 }
 

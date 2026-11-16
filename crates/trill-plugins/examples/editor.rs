@@ -7,8 +7,11 @@
 //!
 //! <device>                 a device URI (`clap:<plugin id>`, `vst3:<class id>`), or a
 //!                          scheme and a plugin's name (`vst3:Surge XT`), or `list`
-//! --screenshot <png>       save a picture of the editor's contents
-//! --settle <seconds>       wait this long before taking the picture (default 2)
+//! --screenshot <png>       save a picture of the editor's contents; the window is kept
+//!                          in front of others (without the focus) until it is taken,
+//!                          since a covered window does not paint
+//! --settle <seconds>       wait this long before taking the picture (default 2), and up
+//!                          to eight seconds longer for an editor that has drawn nothing
 //! --exit-after <seconds>   close the editor and exit after this long; without it the
 //!                          program runs until the editor's window is closed
 //! --position <x,y>         where to put the window, in screen pixels
@@ -45,6 +48,12 @@ const POLL: Duration = Duration::from_millis(50);
 /// How long the whole run may take beyond what was asked for before the
 /// program gives up on a plugin that hangs, and exits.
 const GRACE: Duration = Duration::from_secs(45);
+/// How often an editor that has not drawn yet is looked at again.
+const LOOK: Duration = Duration::from_millis(250);
+/// How much longer than asked the picture waits for an editor that is
+/// still blank. Editors that draw with the graphics card can take seconds
+/// to show their first frame.
+const PATIENCE: Duration = Duration::from_secs(8);
 
 struct Options {
     device: String,
@@ -196,11 +205,13 @@ fn save(image: &EditorImage, path: &Path) -> Result<(), String> {
     writer.write_image_data(&image.rgba).map_err(|error| describe(&error))
 }
 
-/// How much of a picture is not black: an editor that has not drawn, or
-/// could not be captured, shows as nearly nothing.
-fn drawn_share(image: &EditorImage) -> f64 {
-    let lit = image.rgba.chunks_exact(4).filter(|pixel| pixel[..3].iter().any(|channel| *channel > 16)).count();
-    lit as f64 / (image.width as f64 * image.height as f64).max(1.0)
+/// How much of a picture differs from its first pixel: an editor that has
+/// not drawn, or could not be captured, is one flat color.
+fn varied_share(image: &EditorImage) -> f64 {
+    let Some(first) = image.rgba.get(..3) else { return 0.0 };
+    let differs = |pixel: &&[u8]| pixel[..3].iter().zip(first).any(|(channel, first)| channel.abs_diff(*first) > 16);
+    let varied = image.rgba.chunks_exact(4).filter(differs).count();
+    varied as f64 / (image.width as f64 * image.height as f64).max(1.0)
 }
 
 /// What the plugin's parameters are called, to report edits by.
@@ -280,9 +291,18 @@ fn run(options: &Options) -> Result<ExitCode, String> {
         if let Some(geometry) = platform::describe(&title) {
             println!("window: {geometry}");
         }
+        if options.screenshot.is_some() {
+            platform::keep_in_front(&title);
+        }
         let started = Instant::now();
-        let (mut captured, mut dragged, mut reopened) =
-            (options.screenshot.is_none(), options.drag.is_none(), !options.reopen);
+        let wants_picture = options.screenshot.is_some();
+        let (mut captured, mut dragged, mut reopened) = (!wants_picture, options.drag.is_none(), !options.reopen);
+        // When the editor first showed anything, and when it was last
+        // looked at for that.
+        let (mut drawn, mut looked) = (None, Duration::ZERO);
+        // The longest the plugin's main thread kept a request waiting
+        // while the editor had yet to draw.
+        let mut longest_wait = Duration::ZERO;
         loop {
             thread::sleep(POLL);
             if let Some(owner) = &owner {
@@ -308,25 +328,46 @@ fn run(options: &Options) -> Result<ExitCode, String> {
                 break;
             }
             let elapsed = started.elapsed();
+            if wants_picture && drawn.is_none() && elapsed >= looked + LOOK {
+                looked = elapsed;
+                let asked = Instant::now();
+                let image = controller.capture_editor();
+                longest_wait = longest_wait.max(asked.elapsed());
+                if image.is_some_and(|image| varied_share(&image) >= 0.01) {
+                    let after = opening.elapsed();
+                    println!(
+                        "drawn: the editor shows something after {after:.1?} (its thread answered within {longest_wait:.0?})"
+                    );
+                    drawn = Some(elapsed);
+                }
+            }
+            // The picture is taken once the editor has had the time that
+            // was asked for and has drawn, or patience runs out.
+            let ready = elapsed >= options.settle
+                && (drawn.is_some_and(|drawn| elapsed >= drawn + LOOK) || elapsed >= options.settle + PATIENCE);
             if !dragged && elapsed >= options.settle {
                 dragged = true;
                 let [x1, y1, x2, y2] = options.drag.unwrap_or_default();
                 println!("drag: from {x1},{y1} to {x2},{y2}: {}", platform::drag(&title, (x1, y1), (x2, y2)));
-            } else if !captured && elapsed >= options.settle + Duration::from_millis(600) {
+                // What the drag did shows in the picture.
+                drawn = drawn.map(|_| elapsed + LOOK);
+            } else if !captured && ready {
                 captured = true;
                 let path = options.screenshot.as_deref().unwrap_or(Path::new(""));
                 match controller.capture_editor() {
                     Some(image) => {
                         let saved = save(&image, path);
-                        let drawn = drawn_share(&image) * 100.0;
-                        println!("screenshot: {}x{}, {drawn:.0}% drawn, {saved:?}", image.width, image.height);
+                        let varied = varied_share(&image) * 100.0;
+                        let blank =
+                            if varied < 1.0 { " (blank: nothing was drawn, or it could not be captured)" } else { "" };
+                        println!("screenshot: {}x{}, {varied:.0}% varied{blank}, {saved:?}", image.width, image.height);
                     }
                     None => {
                         println!("screenshot: the editor could not be captured");
                         outcome = ExitCode::from(4);
                     }
                 }
-            } else if captured && dragged && !reopened && elapsed >= options.settle + Duration::from_millis(1_200) {
+            } else if captured && dragged && !reopened {
                 reopened = true;
                 controller.close_editor();
                 println!("reopen: closed; the editor is open: {}", controller.is_editor_open());
@@ -339,7 +380,9 @@ fn run(options: &Options) -> Result<ExitCode, String> {
                     println!("window: {geometry}");
                 }
             }
-            if options.exit_after.is_some_and(|limit| elapsed >= limit) {
+            // The time asked for is over, and nothing that was asked for
+            // is still to do.
+            if options.exit_after.is_some_and(|limit| elapsed >= limit) && captured && dragged && reopened {
                 break;
             }
         }
@@ -392,7 +435,7 @@ fn main() -> ExitCode {
 
     // A plugin that hangs, or blocks its thread with a dialog, must not
     // leave this program and its windows behind: exiting closes them.
-    let limit = options.exit_after.map(|asked| asked + options.settle + GRACE);
+    let limit = options.exit_after.map(|asked| asked + options.settle + PATIENCE + GRACE);
     if let Some(limit) = limit {
         thread::spawn(move || {
             thread::sleep(limit);
@@ -423,7 +466,7 @@ mod platform {
     use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
     use windows_sys::Win32::Graphics::Gdi::{
         BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC,
-        DeleteObject, GdiFlush, GetDC, MapWindowPoints, ReleaseDC, SelectObject,
+        DeleteObject, GdiFlush, GetDC, HDC, MapWindowPoints, ReleaseDC, SelectObject,
     };
     use windows_sys::Win32::Storage::Xps::PrintWindow;
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -434,8 +477,9 @@ mod platform {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CWP_SKIPINVISIBLE, ChildWindowFromPointEx, CreateWindowExW, DestroyWindow, DispatchMessageW, EnumWindows,
         FindWindowW, GWL_STYLE, GetClassNameW, GetClientRect, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
-        GetWindowThreadProcessId, IsWindowVisible, MSG, PM_REMOVE, PeekMessageW, PostMessageW, TranslateMessage,
-        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
+        GetWindowThreadProcessId, HWND_TOPMOST, IsWindowVisible, MSG, PM_REMOVE, PeekMessageW, PostMessageW,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos, TranslateMessage, WM_LBUTTONDOWN, WM_LBUTTONUP,
+        WM_MOUSEMOVE, WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
     };
 
     /// `PrintWindow`'s flag for capturing what the compositor shows.
@@ -572,10 +616,10 @@ mod platform {
             .collect()
     }
 
-    /// A picture of a whole window, frame included.
-    pub fn capture(stray: &Stray) -> Option<EditorImage> {
-        let rect = rect_of(stray.window);
-        let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+    /// A picture of `width` by `height` pixels, painted by `paint`, which
+    /// is given the bitmap to paint into and the screen to copy from, and
+    /// says whether it managed.
+    fn picture(width: i32, height: i32, paint: impl FnOnce(HDC, HDC) -> bool) -> Option<EditorImage> {
         if width <= 0 || height <= 0 {
             return None;
         }
@@ -600,7 +644,7 @@ mod platform {
             let mut image = None;
             if !bitmap.is_null() && !bits.is_null() {
                 let previous = SelectObject(memory, bitmap);
-                if PrintWindow(stray.window, memory, PW_RENDERFULLCONTENT) != 0 {
+                if paint(memory, screen) {
                     GdiFlush();
                     let bgra = std::slice::from_raw_parts(bits.cast::<u8>(), width as usize * height as usize * 4);
                     let rgba = bgra.chunks_exact(4).flat_map(|pixel| [pixel[2], pixel[1], pixel[0], 255]).collect();
@@ -617,11 +661,31 @@ mod platform {
         }
     }
 
+    /// A picture of a whole window, frame included, as the window drew it.
+    pub fn capture(stray: &Stray) -> Option<EditorImage> {
+        let rect = rect_of(stray.window);
+        // SAFETY: the window may be gone by now, which makes the call fail.
+        picture(rect.right - rect.left, rect.bottom - rect.top, |memory, _| unsafe {
+            PrintWindow(stray.window, memory, PW_RENDERFULLCONTENT) != 0
+        })
+    }
+
     fn editor_window(title: &str) -> Option<HWND> {
         let title = wide(title);
         // SAFETY: the title is NUL-terminated; a null class matches any.
         let window = unsafe { FindWindowW(null(), title.as_ptr()) };
         (!window.is_null()).then_some(window)
+    }
+
+    /// Keeps the editor's window in front of every other, without giving
+    /// it the focus: a window that is covered does not paint, and one that
+    /// has not painted makes an empty picture.
+    pub fn keep_in_front(title: &str) {
+        if let Some(window) = editor_window(title) {
+            let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+            // SAFETY: only the window's place in the stack is changed.
+            unsafe { SetWindowPos(window, HWND_TOPMOST, 0, 0, 0, 0, flags) };
+        }
     }
 
     /// Where the editor's window is and how it is set up, in words.
@@ -719,6 +783,8 @@ mod platform {
     pub fn capture(_stray: &Stray) -> Option<EditorImage> {
         None
     }
+
+    pub fn keep_in_front(_title: &str) {}
 
     pub fn describe(_title: &str) -> Option<String> {
         None
