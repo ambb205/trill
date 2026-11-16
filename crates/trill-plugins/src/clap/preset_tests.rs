@@ -104,6 +104,9 @@ fn a_plugins_providers_tell_of_its_presets_wherever_they_are() {
             "Factory/Rotten",
             "Factory/Pads/Warm",
             "Factory/Pads/Soft/Air",
+            // A file the provider failed on, and read when it was asked
+            // again after the rest.
+            "Factory/Flaky",
             // The presets that are part of the plugin.
             "Built in/Quiet",
             "Built in/Loud",
@@ -129,13 +132,13 @@ fn a_plugins_providers_tell_of_its_presets_wherever_they_are() {
     let mut ids: Vec<&str> = list.presets.iter().map(|preset| preset.id.as_str()).collect();
     ids.sort_unstable();
     ids.dedup();
-    assert_eq!(ids.len(), 9);
+    assert_eq!(ids.len(), 10);
     assert!(ids.iter().all(|id| id.len() == 10));
     assert_eq!(preset(&list, &warm.id), warm);
 
     // The other plugin of the same file is told of the same presets, and
     // asking again reads nothing again.
-    assert_eq!(listed(&factory, kind::LATE_PRESETS).len(), 9);
+    assert_eq!(listed(&factory, kind::LATE_PRESETS).len(), 10);
     assert_eq!(factory.presets(&uri(kind::PRESETS)), Some(list));
 }
 
@@ -147,11 +150,11 @@ fn the_first_request_answers_at_once_and_a_refresh_keeps_the_list() {
     assert!(started.elapsed() < Duration::from_secs(1), "asking took {:?}", started.elapsed());
     // Read already, by another test's request for the same plugin file,
     // or being read: never anything in between.
-    assert!(first.is_reading() || first.len() == 9, "{first:?}");
-    assert_eq!(listed(&factory, kind::PRESETS).len(), 9);
+    assert!(first.is_reading() || first.len() == 10, "{first:?}");
+    assert_eq!(listed(&factory, kind::PRESETS).len(), 10);
 
     factory.refresh_presets(&uri(kind::PRESETS));
-    assert_eq!(factory.presets(&uri(kind::PRESETS)).unwrap().len(), 9, "listed while it is read again");
+    assert_eq!(factory.presets(&uri(kind::PRESETS)).unwrap().len(), 10, "listed while it is read again");
     assert_eq!(listed(&factory, kind::PRESETS).status, PresetStatus::Ready);
 }
 
@@ -165,7 +168,7 @@ fn a_provider_that_fails_costs_a_message_and_not_the_presets() {
         }
         other => panic!("expected a failure, got {other:?}"),
     }
-    assert_eq!(list.len(), 9, "what the working provider told of is listed");
+    assert_eq!(list.len(), 10, "what the working provider told of is listed");
 }
 
 #[test]
@@ -310,9 +313,9 @@ fn the_session_lists_loads_undoes_and_saves_a_plugins_presets() {
 
     // Listed for the device type and for a device of it, like a built-in
     // device's.
-    assert_eq!(session.presets(&uri).len(), 9);
+    assert_eq!(session.presets(&uri).len(), 10);
     let device = session.add_device(ChainRef::Track(track), &uri, Some("Pads/Warm"), None).unwrap();
-    assert_eq!(session.device_presets(device).unwrap().len(), 9);
+    assert_eq!(session.device_presets(device).unwrap().len(), 10);
     assert_eq!(preset_name(&session, device).as_deref(), Some("Warm"));
     assert_eq!(rendered(&mut session), 0.75);
 

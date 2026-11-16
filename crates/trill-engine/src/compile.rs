@@ -10,6 +10,7 @@ use crate::sources::AudioSources;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use trill_core::device::{DeviceController, DeviceFactory, DeviceWarning, ParamInfo};
 use trill_core::project::{AutomationTarget, Clip, ClipContent};
 use trill_core::{ClipId, Device, DeviceId, Project, Track, TrackId, TrackKind};
@@ -22,6 +23,18 @@ const TOUCHING_BEATS: f64 = 1e-9;
 /// How far apart, in frames, two clips' positions in the same audio may be
 /// and still count as one continuing the other.
 const CONTINUOUS_FRAMES: f64 = 1e-3;
+
+/// How long a plugin that was created from a saved state is given to take
+/// that state on before what it says its state is counts for more than
+/// what it was given.
+///
+/// Some plugins take a state on with their first audio block, not when
+/// they are handed it, and until then report the state they were born
+/// with. Read back in that moment (a project opened and saved or rendered
+/// at once), that would replace the project's state with a blank one.
+/// Nothing a user does to a plugin can happen this soon after it is
+/// created: its editor is not open yet.
+const SETTLING: Duration = Duration::from_millis(500);
 
 /// What the controller knows about a device whose processor lives on the
 /// audio thread.
@@ -36,6 +49,10 @@ pub struct DeviceMeta {
     /// different state (a sampler given another file, an undo), the device
     /// is created again.
     pub applied_state: Option<Vec<u8>>,
+    /// Until when a plugin that was created from a saved state is taken
+    /// to have that state, whatever it reports: see [`SETTLING`]. `None`
+    /// for a device that was created from nothing.
+    pub settling: Option<Instant>,
     /// Why the device could not be created, if it could not. Such a device
     /// stays in the project and passes audio through.
     pub error: Option<String>,
@@ -88,6 +105,15 @@ pub enum Problem {
     /// The clip's file cannot be read, so the clip is silent, or cannot be
     /// stretched, so it plays repitched. `reason` names the file.
     AudioFile { clip: ClipId, path: String, reason: String },
+}
+
+impl DeviceMeta {
+    /// Whether the device is a plugin that was created from the state
+    /// `held` so recently that it may not have taken it on yet.
+    pub fn is_settling_into(&self, held: Option<&Vec<u8>>) -> bool {
+        let fresh = self.settling.is_some_and(|until| Instant::now() < until);
+        fresh && held.is_some() && held == self.applied_state.as_ref()
+    }
 }
 
 impl std::fmt::Display for Problem {
@@ -276,6 +302,7 @@ impl Compiler<'_> {
                             params: instance.params,
                             controller: instance.controller.map(Mutex::new),
                             applied_state: device.state.clone(),
+                            settling: device.state.as_ref().map(|_| Instant::now() + SETTLING),
                             error: None,
                             warnings: self.factory.warnings(device),
                         },
@@ -290,6 +317,7 @@ impl Compiler<'_> {
                             params: Vec::new(),
                             controller: None,
                             applied_state: device.state.clone(),
+                            settling: None,
                             error: Some(error.to_string()),
                             warnings: Vec::new(),
                         },

@@ -966,7 +966,8 @@ impl Session {
             .map(|device| device.id)
             .collect();
         for id in parting {
-            let Some(captured) = self.live_state(id) else { continue };
+            let held = leaving.device(id).ok().and_then(|device| device.state.clone());
+            let Some(captured) = self.news_of_state(id, held.as_ref()) else { continue };
             let Ok(device) = leaving.device_mut(id) else { continue };
             if device.state.as_ref() == Some(&captured) {
                 continue;
@@ -980,6 +981,18 @@ impl Session {
     fn live_state(&self, id: DeviceId) -> Option<Vec<u8>> {
         let controller = self.bank.devices.get(&id)?.controller.as_ref()?;
         controller.lock().save_state()
+    }
+
+    /// [`Session::live_state`], for replacing `held`, the state a project
+    /// holds for the device. `None` also when the plugin was created from
+    /// `held` a moment ago: until it has had time to take that state on,
+    /// what it was given is truer than what it says
+    /// (`DeviceMeta::settling`).
+    fn news_of_state(&self, id: DeviceId, held: Option<&Vec<u8>>) -> Option<Vec<u8>> {
+        if self.bank.devices.get(&id)?.is_settling_into(held) {
+            return None;
+        }
+        self.live_state(id)
     }
 
     /// Replaces a device's state in every history entry that holds
@@ -1010,7 +1023,8 @@ impl Session {
 
     /// [`Session::capture_device_state`] for one device.
     fn capture_state_of(&mut self, id: DeviceId) {
-        let Some(captured) = self.live_state(id) else { return };
+        let held = self.project.device(id).ok().and_then(|device| device.state.clone());
+        let Some(captured) = self.news_of_state(id, held.as_ref()) else { return };
         let Ok(device) = self.project.device_mut(id) else { return };
         if device.state.as_ref() == Some(&captured) {
             return;

@@ -21,8 +21,10 @@ pub(crate) const BUILT_IN: [(&CStr, &str, f64); 2] = [(c"Quiet", "quiet", 0.125)
 /// The preset files, below [`folder`]: path and contents. A patch says
 /// `gain=<value>` and may describe itself on a second line; a bank holds a
 /// preset per line, as `<name>=<gain>`.
-pub(crate) const FILES: [(&str, &str); 8] = [
+pub(crate) const FILES: [(&str, &str); 9] = [
     ("Bass.patch", "gain=0.5"),
+    // The provider fails to read it the first time it is asked.
+    ("Flaky.patch", "gain=0.875"),
     ("Drums.bank", "Kick=0.625\nSnare=0.375"),
     // Loads with a complaint to the host, and without one.
     ("Rotten.patch", "rotten"),
@@ -178,12 +180,15 @@ impl<const BROKEN: bool> PresetDiscoveryFactoryImpl for Providers<BROKEN> {
                 image_path: None,
                 release_timestamp: None,
             })?;
-            Ok(Provider)
+            Ok(Provider { flaked: false })
         }))
     }
 }
 
-struct Provider;
+struct Provider {
+    /// Whether it has failed to read the file it fails on once.
+    flaked: bool,
+}
 
 /// Says of the preset being described that it is for the scripted
 /// plugins with presets, all of them.
@@ -211,6 +216,10 @@ impl<'a> ProviderImpl<'a> for Provider {
                 return Ok(());
             }
         };
+        if path.file_stem().is_some_and(|stem| stem == "Flaky") && !std::mem::replace(&mut self.flaked, true) {
+            receiver.on_error(0, Some(c"Error reading Attributes."));
+            return Ok(());
+        }
         if path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("bank")) {
             // One file, several presets, each found again by its key.
             for (name, _) in text.lines().filter_map(|line| line.split_once('=')) {

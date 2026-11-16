@@ -26,6 +26,19 @@ const CLAP_ABI: &str = "clap";
 /// provider that never stops describing presets must be stopped.
 const MAX_PRESETS_PER_FILE: usize = 20_000;
 
+/// How often the files a provider could not read are gone over again,
+/// once the rest of their folder has been read.
+///
+/// A provider that reports an error for a file, and describes no preset
+/// in it, usually has found the file damaged. But Surge XT's provider
+/// (1.3.4) fails on one sound file in a hundred, a different handful in
+/// every run of the scanner, and fails on the same file again when asked
+/// again at once; asked once more after it has read other files, it reads
+/// nearly all of them. (What that looks like from outside is a buffer
+/// that is read past its end.) Going over them again costs a moment for
+/// the files that really are damaged.
+const SECOND_LOOKS: usize = 2;
+
 /// Loads the CLAP file at `path` into the current process and has its
 /// providers tell of the presets of the plugin `plugin_id`.
 ///
@@ -133,26 +146,42 @@ fn read_place(
     plugin_id: &str,
     sink: &mut dyn Sink,
 ) {
-    let mut read = |sink: &mut dyn Sink, file: Option<&Path>, root: Option<&Path>| {
+    // Reads one file (or the plugin itself), and returns whether the
+    // provider could: false if all it had to say was that it failed.
+    let mut read = |sink: &mut dyn Sink, file: Option<&Path>, root: Option<&Path>| -> bool {
+        // A path with a NUL byte in it is no path a plugin could be given.
+        let path = match file.map(|file| CString::new(file.to_string_lossy().as_bytes())) {
+            Some(Ok(path)) => Some(path),
+            Some(Err(_)) => return true,
+            None => None,
+        };
+        let location = path.as_deref().map_or(Location::Plugin, |path| Location::File { path });
         let mut receiver = Receiver::new(plugin_id, place, &declared.packs, file, root);
-        match file {
-            None => provider.get_metadata(Location::Plugin, &mut receiver),
-            Some(file) => {
-                // A path with a NUL byte in it is no path a plugin could
-                // be given.
-                let Ok(path) = CString::new(file.to_string_lossy().as_bytes()) else { return };
-                provider.get_metadata(Location::File { path: &path }, &mut receiver);
-            }
-        }
+        provider.get_metadata(location, &mut receiver);
+        let failed = receiver.described == 0 && receiver.errors > 0;
         sink.presets(receiver.finish());
+        !failed
     };
     match &place.path {
-        None => read(sink, None, None),
+        None => {
+            read(sink, None, None);
+        }
         Some(folder) if folder.is_dir() => {
             let extensions = declared.extensions();
             sink.watch(Watch { path: folder.clone(), extensions: extensions.clone() });
+            let mut unread: Vec<PathBuf> = Vec::new();
             for file in walk::files(folder, &extensions) {
-                read(sink, Some(&file), Some(folder));
+                if !read(sink, Some(&file), Some(folder)) {
+                    unread.push(file);
+                }
+            }
+            // See `SECOND_LOOKS`. What is read now is listed after the
+            // rest of its folder, which is the one thing it costs.
+            for _ in 0..SECOND_LOOKS {
+                unread.retain(|file| !read(sink, Some(file), Some(folder)));
+            }
+            if !unread.is_empty() {
+                log::debug!("[{plugin_id}] its provider could not read {} of its preset files", unread.len());
             }
         }
         // A single file, such as a bank; or nothing at all, which the
@@ -189,6 +218,10 @@ struct Receiver<'a> {
     root: Option<&'a Path>,
     current: Option<Described>,
     presets: Vec<PresetInfo>,
+    /// How many presets the provider began to describe, this plugin's or
+    /// not, and how many errors it reported.
+    described: usize,
+    errors: usize,
 }
 
 impl<'a> Receiver<'a> {
@@ -199,7 +232,7 @@ impl<'a> Receiver<'a> {
         file: Option<&'a Path>,
         root: Option<&'a Path>,
     ) -> Self {
-        Self { plugin_id, place, packs, file, root, current: None, presets: Vec::new() }
+        Self { plugin_id, place, packs, file, root, current: None, presets: Vec::new(), described: 0, errors: 0 }
     }
 
     /// Everything that was described.
@@ -276,6 +309,7 @@ impl<'a> Receiver<'a> {
 
 impl MetadataReceiverImpl for Receiver<'_> {
     fn on_error(&mut self, error_code: i32, error_message: Option<&CStr>) {
+        self.errors += 1;
         let message = error_message.map(lossy).unwrap_or_default();
         let place = self.file.map_or_else(|| "the plugin's own presets".to_string(), |file| file.display().to_string());
         log::debug!("[{}] cannot read {place}: {message} (error {error_code})", self.plugin_id);
@@ -286,6 +320,7 @@ impl MetadataReceiverImpl for Receiver<'_> {
         if self.presets.len() >= MAX_PRESETS_PER_FILE {
             return Err(HostError::Message("too many presets in one place"));
         }
+        self.described += 1;
         self.current = Some(Described {
             name: name.map(lossy).unwrap_or_default(),
             key: load_key.map(lossy).filter(|key| !key.is_empty()),

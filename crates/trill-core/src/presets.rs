@@ -101,8 +101,10 @@ pub struct PresetQuery<'a> {
     /// found somewhere in a preset: its name, category, author, tags or
     /// description. Empty: every preset.
     pub text: &'a str,
-    /// Only the presets filed under this category or below it. The words
-    /// of the path are enough: `pads` finds `Factory/Pads/Soft`.
+    /// Only the presets filed under this category or below it. Any
+    /// stretch of the path will do, and of each part of it any piece:
+    /// `pads` finds `Factory/Pads/Soft`, and `factory/pad` finds
+    /// `Big Synth Factory Bank/Pads`.
     pub category: Option<&'a str>,
     /// How many of the matching presets to skip, and the most to return
     /// after them.
@@ -220,7 +222,7 @@ impl PresetList {
     /// The presets that match `query`, a page of them.
     pub fn search(&self, query: &PresetQuery<'_>) -> PresetPage<'_> {
         let words = words(query.text);
-        let category = query.category.map(|category| parts(category)).filter(|parts| !parts.is_empty());
+        let category = query.category.map(parts).filter(|parts| !parts.is_empty());
         let whole = query.text.trim().to_lowercase();
 
         let mut matching: Vec<(u8, &PresetInfo)> = Vec::new();
@@ -284,10 +286,13 @@ fn parts(category: &str) -> Vec<String> {
     category.split(CATEGORY_SEPARATOR).map(|part| part.trim().to_lowercase()).filter(|part| !part.is_empty()).collect()
 }
 
-/// Whether `category` has the parts `wanted` in a row, anywhere along it.
+/// Whether `category` has parts in a row, anywhere along it, that hold
+/// the parts `wanted`, each in its place.
 fn filed_under(category: &str, wanted: &[String]) -> bool {
     let parts = parts(category);
-    parts.windows(wanted.len()).any(|window| window == wanted)
+    parts
+        .windows(wanted.len())
+        .any(|window| window.iter().zip(wanted).all(|(part, wanted)| part.contains(wanted.as_str())))
 }
 
 /// A short id for something that is found by `locator`: the same for the
@@ -361,6 +366,21 @@ mod tests {
 
     #[test]
     fn a_category_narrows_a_search_by_any_stretch_of_its_path() {
+        // What plugins call their banks is long; a piece of it will do.
+        let long = PresetList::ready(vec![
+            preset("Air", "Big Synth Factory Bank/Pads", "", &[]),
+            preset("Sub", "Big Synth Factory Bank/Basses", "", &[]),
+            preset("Mine", "Big Synth User Bank/Pads", "", &[]),
+        ]);
+        let found = |category| {
+            let query = PresetQuery { text: "", category: Some(category), offset: 0, limit: 10 };
+            names(&long.search(&query))
+        };
+        assert_eq!(found("factory/pads"), ["Big Synth Factory Bank/Pads/Air"]);
+        assert_eq!(found("Factory Bank"), ["Big Synth Factory Bank/Pads/Air", "Big Synth Factory Bank/Basses/Sub"]);
+        assert_eq!(found("pad").len(), 2);
+        assert_eq!(found("pads/factory"), [] as [&str; 0]);
+
         let list = list();
         let filed = |category, text| {
             let query = PresetQuery { text, category: Some(category), offset: 0, limit: 10 };
@@ -370,7 +390,7 @@ mod tests {
         assert_eq!(filed("User", ""), ["User/Pads/Warm Pad", "User/Leads/Padlock"]);
         assert_eq!(filed("factory/pads", "glass"), ["Factory/Pads/Glass"]);
         assert_eq!(filed("Pads/Factory", ""), [] as [&str; 0], "the parts are wanted in their order");
-        assert_eq!(filed("pad", ""), [] as [&str; 0], "and whole");
+        assert_eq!(filed("pad", "").len(), 3, "a piece of a part will do");
         assert_eq!(filed(" / ", "").len(), 7, "an empty category is no category");
     }
 

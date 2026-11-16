@@ -141,23 +141,21 @@ impl DeviceController for Vst3Controller {
 
     fn load_preset(&mut self, preset: &PresetInfo) -> Result<(), PresetLoadError> {
         let instance = self.instance;
-        let loaded = match Locator::parse(&preset.locator) {
-            Some(Locator::Vst3File { path }) => {
-                self.main.call(LOAD_TIMEOUT, move |thread| thread.vst3.load_preset_file(instance, &path))
-            }
-            Some(Locator::Vst3Program { param, index, steps }) => {
-                // A program is switched to by the plugin's processor, with
-                // its next block.
-                let before = self.save_state();
-                let asked =
-                    self.main.call(LOAD_TIMEOUT, move |thread| thread.vst3.load_program(instance, param, index, steps));
-                if matches!(asked, Ok(Ok(()))) {
-                    await_arrival(before.as_deref(), || self.save_state());
-                }
-                asked
-            }
-            _ => return Err(PresetLoadError::Failed("it is not a preset of a VST3 plugin".into())),
-        };
+        let locator = Locator::parse(&preset.locator)
+            .filter(|locator| matches!(locator, Locator::Vst3File { .. } | Locator::Vst3Program { .. }))
+            .ok_or_else(|| PresetLoadError::Failed("it is not a preset of a VST3 plugin".into()))?;
+        let before = self.save_state();
+        let loaded = self.main.call(LOAD_TIMEOUT, move |thread| match locator {
+            Locator::Vst3File { path } => thread.vst3.load_preset_file(instance, &path),
+            Locator::Vst3Program { param, index, steps } => thread.vst3.load_program(instance, param, index, steps),
+            _ => Err("it is not a preset of a VST3 plugin".to_string()),
+        });
+        if matches!(loaded, Ok(Ok(()))) {
+            // A program is switched to by the plugin's processor, with its
+            // next block; and plugins take even a state they are handed
+            // on the spot a moment later, on their own time.
+            await_arrival(before.as_deref(), || self.save_state());
+        }
         match loaded {
             Ok(Ok(())) => Ok(()),
             Ok(Err(reason)) => Err(PresetLoadError::Failed(reason)),

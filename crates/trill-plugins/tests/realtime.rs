@@ -73,6 +73,10 @@ fn the_counter_counts() {
     assert!(allocator_calls(|| drop(std::hint::black_box(vec![0u8; 64]))) >= 2);
 }
 
+/// How long the presets of one plugin may take to read, and a preset to
+/// load.
+const PRESET_PATIENCE: std::time::Duration = std::time::Duration::from_secs(300);
+
 fn scanner() -> Scanner {
     Scanner::Executable(PathBuf::from(env!("CARGO_BIN_EXE_trill-plugin-scan")))
 }
@@ -140,6 +144,47 @@ fn drive(factory: &dyn DeviceFactory, uri: &str) {
         }
     });
     assert_eq!(calls, 0, "{uri}: the host used the allocator on the audio thread");
+    assert!(left.iter().chain(&right).all(|sample| sample.is_finite()), "{uri}");
+
+    // A preset loaded while the plugin plays: asked for on another
+    // thread, as the session does, and taken on by the plugin under the
+    // audio thread's feet. Whatever of that passes through the host's
+    // side of the audio thread (a program change is a parameter change)
+    // must not allocate there either.
+    let preset = factory.presets_within(uri, PRESET_PATIENCE).and_then(|list| list.presets.first().cloned());
+    let (Some(preset), Some(mut controller)) = (preset, instance.controller.take()) else { return };
+    let loading = std::thread::spawn(move || {
+        let loaded = controller.load_preset(&preset);
+        // The controller goes with the instance, on the thread it came from.
+        (controller, preset, loaded)
+    });
+    let info = ProcessInfo {
+        sample_rate: 48_000.0,
+        tempo: 120.0,
+        time_signature: Default::default(),
+        playing: true,
+        position_beats: 0.0,
+        loop_range: None,
+    };
+    let patience = std::time::Instant::now() + PRESET_PATIENCE;
+    let calls = allocator_calls(|| {
+        // Until the plugin has answered, and a while longer for what it
+        // does after answering.
+        let mut after = 0;
+        while after < 64 && std::time::Instant::now() < patience {
+            after += usize::from(loading.is_finished());
+            left.fill(0.1);
+            right.fill(-0.1);
+            instance.processor.process(&info, &events[after % events.len()], &mut left, &mut right);
+        }
+    });
+    let (controller, preset, loaded) = loading.join().expect("the loading thread finished");
+    instance.controller = Some(controller);
+    match loaded {
+        Ok(()) => eprintln!("{uri}: loaded '{}' while it played", preset.path()),
+        Err(error) => eprintln!("{uri}: '{}' did not load ({error}); played on all the same", preset.path()),
+    }
+    assert_eq!(calls, 0, "{uri}: the host used the allocator on the audio thread while a preset was loaded");
     assert!(left.iter().chain(&right).all(|sample| sample.is_finite()), "{uri}");
 }
 

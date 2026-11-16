@@ -254,6 +254,9 @@ mod tests {
         tweaks: u32,
         /// A patch it has said it will load, and has not yet.
         arriving: Option<String>,
+        /// It was created from a saved state and has not taken it on yet:
+        /// until it has, it reports the state it was born with.
+        restoring: bool,
         values: [f64; 2],
         /// Every value its processor was sent.
         sent: Vec<(usize, f64)>,
@@ -265,6 +268,9 @@ mod tests {
         }
 
         fn state(&self) -> Vec<u8> {
+            if self.restoring {
+                return b"init|0".to_vec();
+            }
             format!("{}|{}", self.patch, self.tweaks).into_bytes()
         }
 
@@ -288,6 +294,9 @@ mod tests {
         created: usize,
         list: PresetList,
         refreshed: usize,
+        /// Plugins created from now on take a saved state on a moment
+        /// after they are created.
+        slow_to_restore: bool,
     }
 
     #[derive(Clone, Default)]
@@ -311,10 +320,12 @@ mod tests {
             self.0.lock().plugins.get_mut(&id).unwrap().tweaks += 1;
         }
 
-        /// A patch the plugin said it would load arrives.
+        /// A patch the plugin said it would load arrives, and a state it
+        /// was created from is taken on.
         fn arrive(&self, id: DeviceId) {
             let mut world = self.0.lock();
             let plugin = world.plugins.get_mut(&id).unwrap();
+            plugin.restoring = false;
             if let Some(patch) = plugin.arriving.take() {
                 plugin.values = patch_values(&patch);
                 plugin.patch = patch;
@@ -426,6 +437,7 @@ mod tests {
                 }
             }
             let mut world = self.0.lock();
+            plugin.restoring = world.slow_to_restore && device.state.is_some();
             world.plugins.insert(device.id, plugin);
             world.created += 1;
             Ok(DeviceInstance {
@@ -638,6 +650,48 @@ mod tests {
         session.load(&path).unwrap();
         assert_eq!(plugins.patch(device), "slow one");
         assert_eq!(session.device_preset(device).unwrap().name, "Slow One");
+        std::fs::remove_dir_all(&folder).ok();
+    }
+
+    #[test]
+    fn a_plugin_that_has_not_taken_its_saved_state_on_yet_does_not_lose_it() {
+        let (mut session, plugins) = session();
+        let device = session.add_device(ChainRef::Master, URI, Some("glass"), None).unwrap();
+        let folder = std::env::temp_dir().join(format!("trill-preset-settle-{}", std::process::id()));
+        let path = folder.join("song.trill");
+        session.save(&path).unwrap();
+        let stored = |path: &std::path::Path| {
+            let saved = Project::from_json(&std::fs::read_to_string(path).unwrap()).unwrap();
+            String::from_utf8(saved.device(device).unwrap().state.clone().expect("a state")).unwrap()
+        };
+        assert_eq!(stored(&path), "glass|0");
+
+        // Opened again, with a plugin that takes its state on with its
+        // first block, as some do: asked at once, it knows of none.
+        plugins.0.lock().slow_to_restore = true;
+        session.new_project();
+        session.load(&path).unwrap();
+        assert_eq!(plugins.plugin(device).state(), b"init|0");
+        // Saved, rendered and copied for safety in that moment, the
+        // project still has the state it was opened with.
+        let again = folder.join("again.trill");
+        session.save(&again).unwrap();
+        assert_eq!(stored(&again), "glass|0");
+        assert_eq!(session.render_job().project.device(device).unwrap().state.as_deref(), Some(b"glass|0".as_slice()));
+        let copy = Project::from_json(&session.snapshot_json()).unwrap();
+        assert_eq!(copy.device(device).unwrap().state.as_deref(), Some(b"glass|0".as_slice()));
+        // And an undo that crosses it keeps it too.
+        session.load_preset(device, "Deep Bass").unwrap();
+        assert!(session.undo());
+        assert_eq!(session.project().device(device).unwrap().state.as_deref(), Some(b"glass|0".as_slice()));
+
+        // Once the plugin has had its moment, what it says counts again:
+        // a knob turned in its editor is saved.
+        plugins.arrive(device);
+        session.bank.devices.get_mut(&device).unwrap().settling = None;
+        plugins.tweak(device);
+        session.save(&again).unwrap();
+        assert_eq!(stored(&again), "glass|1");
         std::fs::remove_dir_all(&folder).ok();
     }
 
