@@ -215,6 +215,9 @@ fn vst3_processing_setting_parameters_and_resetting_do_not_allocate() {
         scanner: scanner(),
         cache_path: Some(scratch("vst3-host")),
         scan_timeout: std::time::Duration::from_secs(60),
+        // The presets a plugin lists itself are enough to load one of;
+        // the user's own preset files are not this test's to read.
+        preset_paths: Vec::new(),
         ..Vst3Config::default()
     })
     .unwrap();
