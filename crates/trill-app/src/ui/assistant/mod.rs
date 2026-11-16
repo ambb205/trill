@@ -222,8 +222,9 @@ impl Assistant {
         let script = scene.map(Scene::script);
         let backend: Box<dyn Backend> = match (&script, folder) {
             (Some(script), _) => Box::new(script.clone()),
-            // The tests never start anybody's CLI: they bring a script.
-            (None, Some(folder)) if !cfg!(test) => {
+            // The tests never start anybody's CLI (they bring a script), and
+            // neither does a run that only takes a picture.
+            (None, Some(folder)) if !cfg!(test) && options.screenshot.is_none() => {
                 Box::new(Installed::new(runtime.clone(), folder, options.assistant.model.clone(), server))
             }
             (None, _) => Box::new(Nowhere),

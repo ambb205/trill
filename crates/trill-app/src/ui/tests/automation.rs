@@ -271,22 +271,238 @@ fn an_automated_control_shows_it_and_follows_its_envelope() {
     harness.idle(2);
     assert!((shown(&harness) - units::db_to_fader(-32.0) as f64).abs() < 0.01, "{}", shown(&harness));
 
-    // Dragging it does not fight the envelope: it opens the lane instead.
+    // Looking at it changes nothing, and the hint says what a drag would do.
     let before = harness.undo_depth();
-    harness.drag(harness.volume_bar(0, 0.8), harness.volume_bar(0, 0.3));
-    assert_eq!(harness.project().tracks[0].volume_db, 0.0);
-    assert_eq!(harness.undo_depth(), before);
-    assert_eq!(harness.app.state().arrangement.lanes[0].target, target);
     harness.move_to(harness.volume_bar(0, 0.5));
     harness.idle(1);
-    assert!(harness.hint().starts_with("Automated"), "{}", harness.hint());
+    assert!(harness.hint().starts_with("Volume") && harness.hint().contains("drag to take hold"), "{}", harness.hint());
+    assert_eq!(harness.project().tracks[0].volume_db, 0.0);
+    assert_eq!(harness.undo_depth(), before);
 
-    // Its menu clears the envelope, and the control is the user's again.
+    // Its menu clears the envelope, and the control is simply the user's.
     harness.right_click(harness.volume_bar(0, 0.5));
     harness.click_label("Clear automation");
     assert!(envelope(&harness, &target).is_empty());
     harness.drag(harness.volume_bar(0, 0.8), harness.volume_bar(0, 0.4));
     assert!(harness.project().tracks[0].volume_db < -10.0);
+    assert!(harness.project().automation.is_empty(), "with no envelope there is nothing to switch off");
+}
+
+/// Whether the envelope of `target` is switched on.
+fn lane_on(harness: &Harness, target: &AutomationTarget) -> bool {
+    harness.project().automation.iter().find(|lane| lane.target == *target).expect("an envelope").enabled
+}
+
+#[test]
+fn dragging_an_automated_control_takes_hold_of_it_as_one_undo_step() {
+    // A flat envelope at -12 dB, with its lane closed again.
+    let points = [(0.0, -12.0), (16.0, -12.0)];
+    let (mut harness, target) = with_volume_lane(&points);
+    harness.click_label("Automation of One");
+    let volume = |harness: &Harness| harness.project().tracks[0].volume_db;
+    let at_minus_12 = units::db_to_fader(-12.0) as f64;
+    let off_mark = "Automation of Vol is off";
+    assert!((harness.shown("Vol") - at_minus_12).abs() < 0.01);
+    assert!(!harness.is_on_screen(off_mark));
+    let before = harness.undo_depth();
+
+    harness.drag(harness.volume_bar(0, 0.84), harness.volume_bar(0, 0.4));
+    assert!((-23.0..-21.0).contains(&volume(&harness)), "the bar set the volume: {}", volume(&harness));
+    assert!(!lane_on(&harness, &target), "and switched the envelope off");
+    assert_eq!(envelope(&harness, &target).len(), 2, "without touching it");
+    assert_eq!(harness.undo_depth(), before + 1, "the whole takeover is one undo step");
+    // The control shows the value it was given, not the envelope's.
+    assert!((harness.shown("Vol") - 0.4).abs() < 0.01, "{}", harness.shown("Vol"));
+    assert!(harness.app.state().arrangement.lanes.is_empty(), "no lane is unfolded behind the user's back");
+
+    // It says so: the mark in its corner is a button, and the hint names it.
+    assert!(harness.is_on_screen(off_mark));
+    harness.move_to(harness.volume_bar(0, 0.5));
+    harness.idle(1);
+    assert!(harness.hint().contains("its automation is off"), "{}", harness.hint());
+    harness.move_to(harness.labeled(off_mark));
+    harness.idle(1);
+    assert!(harness.hint().starts_with("Automation is off"), "{}", harness.hint());
+    // Held, the control is an ordinary one: another drag is another step.
+    harness.drag(harness.volume_bar(0, 0.4), harness.volume_bar(0, 0.6));
+    assert!((-12.0..-9.0).contains(&volume(&harness)), "{}", volume(&harness));
+    assert_eq!(harness.undo_depth(), before + 2);
+    harness.key(Modifiers::COMMAND, Key::Z);
+
+    // One click on the mark, and the envelope sets the volume again. What
+    // was set by hand is kept under it.
+    harness.settle();
+    harness.click_label(off_mark);
+    assert!(lane_on(&harness, &target));
+    assert!((-23.0..-21.0).contains(&volume(&harness)));
+    harness.idle(1);
+    assert!((harness.shown("Vol") - at_minus_12).abs() < 0.01, "{}", harness.shown("Vol"));
+    assert!(!harness.is_on_screen(off_mark));
+    assert_eq!(harness.undo_depth(), before + 2);
+
+    // Undo: off again, then everything as it was before the drag.
+    harness.key(Modifiers::COMMAND, Key::Z);
+    assert!(!lane_on(&harness, &target));
+    harness.key(Modifiers::COMMAND, Key::Z);
+    assert!(lane_on(&harness, &target), "undoing the takeover gives the control back to its envelope");
+    assert_eq!(volume(&harness), 0.0, "and the volume back as it was");
+    assert_eq!(harness.undo_depth(), before);
+    harness.key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+    assert!(!lane_on(&harness, &target) && volume(&harness) < -20.0, "redo takes hold again, in one step");
+
+    // A press without a drag takes hold too: the pointer is the value.
+    harness.settle();
+    harness.click_label(off_mark);
+    let before = harness.undo_depth();
+    harness.settle();
+    harness.click(harness.volume_bar(0, 0.7));
+    assert!(!lane_on(&harness, &target));
+    assert!((-8.5..-5.5).contains(&volume(&harness)), "{}", volume(&harness));
+    assert_eq!(harness.undo_depth(), before + 1);
+}
+
+#[test]
+fn a_lane_shows_that_it_is_off_and_one_click_switches_it_back_on() {
+    let (mut harness, target) = with_volume_lane(&[(0.0, -12.0), (16.0, -12.0)]);
+    let switch = "Envelope of Volume on";
+    assert!(harness.is_on(switch));
+    let before = harness.undo_depth();
+
+    // Taken hold of from the track's own bar, the lane shows it.
+    harness.drag(harness.volume_bar(0, 0.84), harness.volume_bar(0, 0.4));
+    assert!(!lane_on(&harness, &target));
+    harness.idle(1);
+    assert!(!harness.is_on(switch), "the lane's switch is off");
+    harness.move_to(harness.labeled(switch));
+    harness.idle(1);
+    assert!(harness.hint().starts_with("Off: the value stays where it is set by hand"), "{}", harness.hint());
+
+    // An envelope that is off can still be edited, and stays off.
+    harness.click(at_volume(&harness, 8.0, -30.0));
+    assert_eq!(envelope(&harness, &target).len(), 3);
+    assert!(!lane_on(&harness, &target));
+
+    // The switch is the way back, in one click and one undo step.
+    harness.settle();
+    harness.click_label(switch);
+    assert!(lane_on(&harness, &target));
+    harness.idle(1);
+    assert!(harness.is_on(switch));
+    assert_eq!(harness.undo_depth(), before + 3);
+    // And the way there: switching off by hand leaves the value alone.
+    harness.settle();
+    harness.click_label(switch);
+    assert!(!lane_on(&harness, &target));
+    let held = harness.project().tracks[0].volume_db;
+    assert!((-23.0..-21.0).contains(&held), "what the drag set earlier: {held}");
+
+    // The menus of the lane and of the control say the same.
+    harness.right_click(at_volume(&harness, 20.0, -50.0));
+    harness.click_label("Switch the envelope back on");
+    assert!(lane_on(&harness, &target));
+    harness.right_click(harness.volume_bar(0, 0.5));
+    harness.click_label("Switch automation off");
+    assert!(!lane_on(&harness, &target));
+    harness.right_click(harness.volume_bar(0, 0.5));
+    harness.click_label("Switch automation back on");
+    assert!(lane_on(&harness, &target));
+    assert_eq!(harness.project().tracks[0].volume_db, held, "none of which moved the control");
+}
+
+#[test]
+fn pan_and_the_master_volume_are_taken_hold_of_the_same_way() {
+    let (mut harness, first, ..) = with_two_tracks(UiOptions::default());
+    let pan = AutomationTarget::TrackPan { track: first };
+    set_envelope(&mut harness, &pan, &[(0.0, -1.0)]);
+    set_envelope(&mut harness, &AutomationTarget::MasterVolume, &[(0.0, -30.0)]);
+    harness.idle(1);
+    assert!(harness.shown("Pan") < 0.01, "hard left, as the envelope says");
+    let before = harness.undo_depth();
+
+    // The pan cell: three quarters across is half right.
+    let pan_left = arrangement::HEADER_WIDTH - arrangement::HEADER_RIGHT - arrangement::HEADER_PAN_WIDTH;
+    let cell = harness.header(
+        0,
+        pan_left + arrangement::HEADER_PAN_WIDTH * 0.75,
+        arrangement::HEADER_CONTROLS_TOP + BAR - 4.0,
+    );
+    harness.click(cell);
+    let set = harness.project().track(first).unwrap().pan;
+    assert!((set - 0.5).abs() < 0.05, "{set}");
+    assert!(!lane_on(&harness, &pan));
+    assert_eq!(harness.undo_depth(), before + 1);
+    harness.settle();
+    harness.click_label("Automation of Pan is off");
+    assert!(lane_on(&harness, &pan));
+
+    // The master's volume, in its row under the tracks.
+    let before = harness.undo_depth();
+    let right = harness.work_left() + arrangement::HEADER_WIDTH - arrangement::HEADER_RIGHT;
+    let y = harness.master_top() + arrangement::MASTER_HEIGHT / 2.0 + 4.0;
+    let at = |fraction: f32| pos2(right - arrangement::MASTER_VOLUME_WIDTH * (1.0 - fraction), y);
+    harness.drag(at(0.8), at(0.5));
+    let volume = harness.project().master.volume_db;
+    assert!((-17.5..-15.0).contains(&volume), "halfway up the fader scale: {volume}");
+    assert!(!lane_on(&harness, &AutomationTarget::MasterVolume));
+    assert_eq!(harness.undo_depth(), before + 1);
+    harness.key(Modifiers::COMMAND, Key::Z);
+    assert!(lane_on(&harness, &AutomationTarget::MasterVolume));
+    assert_eq!(harness.project().master.volume_db, 0.0);
+}
+
+#[test]
+fn chips_follow_their_envelopes_and_a_click_takes_hold() {
+    let mut device = None;
+    let mut harness = Harness::new(UiOptions { detail_tab: DetailTab::Devices, ..Default::default() }, |session| {
+        let track = session.edit(|project| Ok(project.add_track("FX"))).unwrap();
+        device = Some(session.add_device(ChainRef::Track(track), "builtin:delay", None, None).unwrap());
+    });
+    let device = device.unwrap();
+    let ping_pong = AutomationTarget::DeviceParam { device, param: "ping_pong".into() };
+    let sync = AutomationTarget::DeviceParam { device, param: "sync".into() };
+    let stored = |harness: &Harness, id: &str| harness.project().device(device).unwrap().params.get(id).copied();
+    assert!(harness.is_on("Ping Pong") && harness.is_on("Sync"), "both on, as the delay comes");
+
+    // Envelopes switch them off; the chips show what is heard, while the
+    // values the device was given by hand are what they were.
+    set_envelope(&mut harness, &ping_pong, &[(0.0, 0.0)]);
+    set_envelope(&mut harness, &sync, &[(0.0, 0.0)]);
+    harness.session.lock().set_device_params(device, &[("sync".into(), 0.0)]).unwrap();
+    harness.idle(1);
+    assert!(!harness.is_on("Ping Pong") && !harness.is_on("Sync"));
+    assert_eq!(stored(&harness, "ping_pong"), None, "nothing was set by hand");
+    let before = harness.undo_depth();
+
+    // A click is the user's: the chip goes on and the envelope off. The
+    // value by hand was "on" all along, so switching the envelope off is
+    // all it takes.
+    harness.click_label("Ping Pong");
+    assert!(!lane_on(&harness, &ping_pong));
+    assert_eq!(stored(&harness, "ping_pong"), None);
+    assert_eq!(harness.undo_depth(), before + 1);
+    harness.idle(1);
+    assert!(harness.is_on("Ping Pong"));
+    // Where the value by hand has to change as well, both are one step.
+    harness.click_label("Sync");
+    assert!(!lane_on(&harness, &sync));
+    assert_eq!(stored(&harness, "sync"), Some(1.0));
+    assert_eq!(harness.undo_depth(), before + 2, "one undo step for the envelope and the value");
+    harness.idle(1);
+    assert!(harness.is_on("Sync"));
+
+    // The mark on the chip switches the envelope back on.
+    harness.settle();
+    harness.click_label("Automation of Ping Pong is off");
+    assert!(lane_on(&harness, &ping_pong));
+    harness.idle(1);
+    assert!(!harness.is_on("Ping Pong"), "and the chip follows it again");
+
+    harness.key(Modifiers::COMMAND, Key::Z);
+    harness.key(Modifiers::COMMAND, Key::Z);
+    assert!(lane_on(&harness, &sync), "undo gives the envelope back");
+    assert_eq!(stored(&harness, "sync"), Some(0.0), "with the value by hand, together");
+    harness.idle(1);
+    assert!(!harness.is_on("Sync"));
 }
 
 #[test]
@@ -317,9 +533,20 @@ fn show_automation_on_a_device_parameter_opens_its_lane() {
     harness.idle(1);
     assert!(harness.hint().starts_with("25 %"), "{}", harness.hint());
 
-    // The bar in the rack now belongs to the envelope.
+    // The bar in the rack shows the envelope, and dragging it takes hold of
+    // the parameter: the value is set and the envelope switched off, as
+    // one undo step.
+    assert!((harness.shown("Size") - 0.5).abs() < 0.02, "{}", harness.shown("Size"));
+    let before = harness.undo_depth();
     harness.drag(harness.first_panel_bar(0, 150.0, 0.2), harness.first_panel_bar(0, 150.0, 0.9));
-    assert_eq!(harness.project().device(device).unwrap().params.get("size"), None, "the bar did not set a value");
+    let stored = |harness: &Harness| harness.project().device(device).unwrap().params.get("size").copied();
+    assert!((stored(&harness).unwrap() - 0.9).abs() < 0.01, "{:?}", stored(&harness));
+    assert!(!lane_on(&harness, &target));
+    assert_eq!(harness.undo_depth(), before + 1);
+    assert!((harness.shown("Size") - 0.9).abs() < 0.01);
+    harness.key(Modifiers::COMMAND, Key::Z);
+    assert_eq!(stored(&harness), None);
+    assert!(lane_on(&harness, &target));
     harness.right_click(size);
     harness.click_label("Hide automation");
     assert!(harness.app.state().arrangement.lanes.is_empty());

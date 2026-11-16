@@ -28,6 +28,7 @@
 //!
 //! Nothing here knows about audio or projects.
 
+mod automation;
 mod bar;
 mod button;
 mod chip;
@@ -46,6 +47,7 @@ pub mod text;
 mod theme;
 mod waveform;
 
+pub use automation::{Automation, automation_mark, automation_zone};
 pub use bar::{Bar, BarOutput, bar};
 pub use button::{Variant, bare_icon_button, button, icon_button, tab, tab_width};
 pub use chip::{Chip, chip, chip_row, chip_row_width};

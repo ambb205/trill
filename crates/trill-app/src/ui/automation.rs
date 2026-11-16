@@ -2,14 +2,21 @@
 //! values are drawn on, and the actions every automated control offers.
 //! The lane editor is in the arrangement; this is what it shares with the
 //! track headers, the device rack and the mixer.
+//!
+//! An automated control is not locked: moving it takes hold of it. The
+//! envelope is switched off (not thrown away) and the control stays where
+//! it is put, until the envelope is switched on again from the mark in the
+//! control's corner or from its lane. [`Hold`] says which of the three a
+//! control is in, and [`respond`] is what every such control does about it.
 
 use super::snapshot::Snapshot;
 use super::state::{Cx, LaneOwner, lane_owner};
 use super::units::{self, ParamScale};
-use eframe::egui::Ui;
+use eframe::egui::{self, Rect, Ui};
 use trill_core::AutomationTarget;
 use trill_core::device::{ParamInfo, ParamKind};
-use trill_noir::MenuItem;
+use trill_core::project::automation_value;
+use trill_noir::{Automation, BarOutput, MenuItem, paint};
 
 /// How an envelope's values map onto the height of its lane, and how they
 /// read. The same mappings as the controls they automate, so a point half
@@ -196,9 +203,29 @@ pub fn toggle_lanes(cx: &mut Cx, owner: LaneOwner) {
 }
 
 /// True if any envelope belongs to `owner`.
+#[cfg(test)]
 pub fn has_automation(snapshot: &Snapshot, owner: LaneOwner) -> bool {
+    owner_automation(snapshot, owner) != Automation::None
+}
+
+/// What the envelopes of `owner` come to, for the mark on the chip that
+/// unfolds its lanes: none, all switched on, or at least one switched off
+/// (which is the one worth looking for).
+pub fn owner_automation(snapshot: &Snapshot, owner: LaneOwner) -> Automation {
     let project = &snapshot.project;
-    project.automation.iter().any(|lane| lane_owner(project, &lane.target) == Some(owner))
+    let mut lanes = project.automation.iter().filter(|lane| lane_owner(project, &lane.target) == Some(owner));
+    let Some(first) = lanes.next() else { return Automation::None };
+    if first.enabled && lanes.all(|lane| lane.enabled) { Automation::On } else { Automation::Off }
+}
+
+/// Paints the mark of `owner`'s envelopes in the corner of the chip at
+/// `rect`. Only a sign here: the chip itself unfolds the lanes.
+pub fn paint_owner_mark(painter: &egui::Painter, cx: &Cx, owner: LaneOwner, rect: Rect) {
+    match owner_automation(cx.snap, owner) {
+        Automation::None => {}
+        Automation::On => paint::corner_mark(painter, rect, cx.theme.signal),
+        Automation::Off => paint::hollow_corner_mark(painter, rect, cx.theme.signal),
+    }
 }
 
 /// The rows a control's context menu offers for its automation.
@@ -212,21 +239,137 @@ pub fn menu_items(ui: &mut Ui, cx: &mut Cx, target: &AutomationTarget) {
             show_lane(cx, target.clone());
         }
     }
-    let automated = cx.snap.envelope(target).is_some();
-    if MenuItem::new("Clear automation").enabled(automated).show(ui, theme).clicked() {
+    // Off, the envelope is kept and the control is the user's; on, the
+    // envelope sets it again.
+    let on = cx.snap.lane(target).map(|lane| lane.enabled);
+    let label = if on == Some(false) { "Switch automation back on" } else { "Switch automation off" };
+    if MenuItem::new(label).enabled(on.is_some()).show(ui, theme).clicked() {
+        set_enabled(cx, target, on == Some(false));
+    }
+    if MenuItem::new("Clear automation").enabled(on.is_some()).show(ui, theme).clicked() {
         let target = target.clone();
         cx.edit(|project| project.set_automation(target, Vec::new()));
     }
 }
 
-/// What a control shows while an envelope drives it: the envelope's value
-/// at the playhead, which is what is heard, and the hint that says so.
-pub fn driven(cx: &Cx, target: &AutomationTarget) -> Option<f64> {
-    cx.snap.automated(target, cx.live.position)
+/// How an envelope stands to the control it automates, as of this frame.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum Hold {
+    /// There is no envelope: the control is the user's.
+    Free,
+    /// The envelope sets the control: to this value at the playhead, which
+    /// is what is heard and what the control shows.
+    Driven(f64),
+    /// There is an envelope and it is switched off: the user holds the
+    /// control, which shows the value it was given by hand.
+    Held,
 }
 
-/// The hint for a control that an envelope drives.
-pub const DRIVEN_HINT: &str = "Automated: its envelope sets this value \u{00B7} click to show the lane";
+impl Hold {
+    pub fn of(cx: &Cx, target: &AutomationTarget) -> Self {
+        match cx.snap.lane(target) {
+            None => Hold::Free,
+            Some(lane) if lane.enabled => Hold::Driven(automation_value(&lane.points, cx.live.position)),
+            Some(_) => Hold::Held,
+        }
+    }
+
+    /// What the envelope makes of the control right now, if it drives it.
+    pub fn driven(self) -> Option<f64> {
+        match self {
+            Hold::Driven(value) => Some(value),
+            Hold::Free | Hold::Held => None,
+        }
+    }
+
+    /// The mark the control carries in its corner.
+    pub fn mark(self) -> Automation {
+        match self {
+            Hold::Free => Automation::None,
+            Hold::Driven(_) => Automation::On,
+            Hold::Held => Automation::Off,
+        }
+    }
+
+    /// The hint for the control: `what` it is and reads, then `gestures`,
+    /// what the pointer does to it, or what its automation has to say.
+    pub fn hint(self, what: &str, gestures: &str) -> String {
+        match self {
+            Hold::Free => format!("{what} \u{00B7} {gestures}"),
+            Hold::Driven(_) => format!("{what} \u{00B7} {DRIVEN_HINT}"),
+            Hold::Held => format!("{what} \u{00B7} {HELD_HINT}"),
+        }
+    }
+}
+
+/// What the hint says of a control an envelope drives.
+pub const DRIVEN_HINT: &str = "automated \u{00B7} drag to take hold of it: its envelope is switched off, not lost";
+/// And of one the user holds.
+pub const HELD_HINT: &str = "its automation is off \u{00B7} click the mark in its corner to switch it back on";
+/// The hint of the mark itself.
+const RESUME_HINT: &str =
+    "Automation is off: this stays where you set it \u{00B7} click to let the envelope set it again";
+
+/// Switches the envelope of `target` on or off, as one undo step.
+pub fn set_enabled(cx: &mut Cx, target: &AutomationTarget, enabled: bool) {
+    let target = target.clone();
+    cx.edit(|project| project.set_automation_enabled(&target, enabled));
+}
+
+/// Call before setting an automatable control by hand. If its envelope was
+/// driving it, the envelope is switched off first, inside the undo gesture
+/// of the drag (or of the click): taking hold and the value set while
+/// holding are then one undo step, and undoing it gives the control back.
+pub fn take_hold(cx: &mut Cx, target: &AutomationTarget, hold: Hold) {
+    if matches!(hold, Hold::Driven(_)) {
+        cx.begin_gesture();
+        set_enabled(cx, target, false);
+    }
+}
+
+/// The mark of `hold` on a control that is not a Bar or a Fader (those
+/// carry their own): painted in the corner of `rect`, and, for an envelope
+/// that is off, the click that switches it back on. Place it after the
+/// control. `name` is what the control is called.
+pub fn mark(ui: &Ui, cx: &mut Cx, target: &AutomationTarget, hold: Hold, rect: Rect, id: egui::Id, name: &str) {
+    let mark = trill_noir::automation_mark(ui, cx.theme, rect, id, hold.mark(), name);
+    resume_on_click(cx, target, mark.as_ref());
+}
+
+fn resume_on_click(cx: &mut Cx, target: &AutomationTarget, mark: Option<&egui::Response>) {
+    if let Some(mark) = mark {
+        cx.hint(mark, RESUME_HINT);
+        if mark.clicked() {
+            set_enabled(cx, target, true);
+        }
+    }
+}
+
+/// What every Bar and Fader that an envelope may drive does with what the
+/// user did to it this frame: says what it is in the status bar, opens the
+/// undo gesture of a drag, takes hold of the control if its envelope was
+/// driving it, switches the envelope back on if its mark was clicked, and
+/// offers the automation menu. Returns the position the user asked for,
+/// for the caller to turn into a value and set.
+pub fn respond(
+    cx: &mut Cx,
+    target: &AutomationTarget,
+    hold: Hold,
+    output: &BarOutput,
+    what: &str,
+    gestures: &str,
+) -> Option<f32> {
+    cx.hint(&output.response, hold.hint(what, gestures));
+    resume_on_click(cx, target, output.mark.as_ref());
+    if output.pressed {
+        cx.begin_gesture();
+    }
+    if output.frac.is_some() {
+        take_hold(cx, target, hold);
+    }
+    output.response.context_menu(|ui| menu_items(ui, cx, target));
+    output.frac
+}
 
 #[cfg(test)]
 mod tests {

@@ -100,3 +100,24 @@ shot assistant-signed-out "$song" --select Lead --assistant-scene signed-out
 shot assistant-not-installed "$song" --select Lead --assistant-scene not-installed
 shot min-window-assistant "$song" --select Bass --assistant-scene api-key --size 1060x640
 shot graphite-assistant-answered "$song" --select Bass --assistant-scene answered --theme graphite
+
+# Staged for the last pictures, in a folder git ignores: two projects that
+# their program did not live to save, in a profile folder of their own (so
+# the offer shows nobody's real work, and nothing of the user's is read),
+# and the example song with envelopes switched off. Staged here and not at
+# the top, so that the work lost "moments ago" still was when it is shown.
+fixtures=$out/fixtures
+cargo run -p trill-app --example window_fixtures -- "$fixtures"
+lost=$fixtures/lost-work
+held=$fixtures/held-automation.trill
+
+# The offer to bring back unsaved work, as a window opens on it.
+shot recovery-offer --profile "$lost"
+shot graphite-recovery-offer --profile "$lost" --theme graphite
+shot min-window-recovery-offer --profile "$lost" --size 1060x640
+
+# Automation someone has taken hold of: envelopes that are off beside ones
+# that are on, in the lanes, on the device's panel and on the mixer's faders.
+shot held-automation "$held" --select "Pad chords" --tab devices --automation
+shot held-automation-mixer "$held" --select "Pad chords" --tab mixer --automation
+shot graphite-held-automation "$held" --select "Pad chords" --tab devices --automation --theme graphite

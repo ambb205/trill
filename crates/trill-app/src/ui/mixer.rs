@@ -1,21 +1,22 @@
 //! The Mixer tab: a channel strip for every track, in the order the
 //! arrangement shows them, and the master's pinned at the right.
 //!
-//! A strip reads top to bottom as the signal flows: the chain's devices,
-//! the sends, pan, then the fader beside its meter, and mute and solo at
-//! the foot. Every strip is laid out to the same plan, whatever it holds,
+//! A strip reads top to bottom as the signal flows: the chain's devices
+//! (a plugin's with the button for its own window), the sends, pan, then
+//! the fader beside its meter, and mute and solo at the foot. Every strip
+//! is laid out to the same plan, whatever it holds,
 //! so that faders, pans and sends line up across the row. The plan fits
 //! the detail panel's height: the device lists and then the sends give
 //! way before the faders get too short to use. With many tracks the strips
 //! keep a width that still fits a name and the row scrolls sideways.
 
 use super::arrangement::{self, display_order};
-use super::automation;
+use super::automation::{self, Hold};
 use super::state::{Cx, DetailTab};
-use super::{colors, units, widgets};
+use super::{colors, editors, units, widgets};
 use eframe::egui::{self, Align2, Color32, Rect, Sense, Ui, pos2, vec2};
 use trill_core::{AutomationTarget, Device, Track, TrackId, TrackKind};
-use trill_noir::{Chip, Fader, fade, paint, text};
+use trill_noir::{Chip, Fader, Icon, fade, paint, text};
 
 /// Strips are never narrower than this, so thirty tracks scroll rather
 /// than squeeze, and never wider than `MAX_STRIP`, so three do not sprawl.
@@ -250,7 +251,8 @@ fn select(cx: &mut Cx, channel: Channel) {
 
 /// The chain's devices as chips in `shown` rows, the last of which counts
 /// the devices there was no room for. A click shows that device in the
-/// Devices tab.
+/// Devices tab. A plugin's chip ends in a button of its own: it opens the
+/// plugin's window, and is lit while that is open.
 #[expect(clippy::too_many_arguments, reason = "a placement call: what to list, how much of it and where")]
 fn device_chips(
     ui: &Ui,
@@ -267,7 +269,20 @@ fn device_chips(
     // The last row counts the devices it has no room for.
     let listed = if devices.len() > shown { shown.saturating_sub(1) } else { shown };
     for device in devices.iter().take(listed) {
-        let rect = Rect::from_min_size(pos2(inner.left(), top), vec2(inner.width(), theme.metric.chip));
+        let mut rect = Rect::from_min_size(pos2(inner.left(), top), vec2(inner.width(), theme.metric.chip));
+        if editors::has(cx, device.id) {
+            // A square at the chip's end, set off like one chip from the next.
+            let cell = rect.with_min_x(rect.right() - rect.height());
+            rect.max.x = cell.left() - (theme.metric.gap - 1.0);
+            let open = editors::is_open(cx, device.id);
+            let color = if open { theme.ink } else { theme.ink_dim };
+            let button = id.with(("editor", device.id));
+            let response = trill_noir::icon_button(ui, theme, cell, button, Icon::Window, open, color);
+            cx.hint(&response, editors::hint(cx, device.id, &device.name));
+            if response.clicked() {
+                editors::toggle(cx, device.id);
+            }
+        }
         let lit = cx.state.selected_device == Some(device.id) && cx.state.shown_chain() == chain_of(channel);
         let name = format!("{} in the mixer", device.name);
         let dot = if device.enabled { theme.ok } else { theme.ghost };
@@ -297,8 +312,8 @@ fn chain_of(channel: Channel) -> trill_core::ChainRef {
 }
 
 /// The volume fader of a strip. Returns the volume it shows, in dB. While
-/// an envelope drives the volume the fader shows what the envelope says
-/// and opens its lane instead of editing.
+/// an envelope drives the volume the fader shows what the envelope says;
+/// dragging it takes hold of the volume (see [`automation::respond`]).
 fn fader(ui: &Ui, cx: &mut Cx, channel: Channel, rect: Rect, id: egui::Id) -> f32 {
     let (target, resting, name) = match channel {
         Channel::Track(track) => {
@@ -308,32 +323,18 @@ fn fader(ui: &Ui, cx: &mut Cx, channel: Channel, rect: Rect, id: egui::Id) -> f3
             (AutomationTarget::MasterVolume, cx.snap.project.master.volume_db, "Master volume".to_owned())
         }
     };
-    let driven = automation::driven(cx, &target);
-    let volume = driven.map_or(resting, |value| value as f32);
+    let hold = Hold::of(cx, &target);
+    let volume = hold.driven().map_or(resting, |value| value as f32);
     let spec = Fader::new(&name, units::db_to_fader(volume)).default(units::db_to_fader(0.0));
-    let output = trill_noir::fader(ui, cx.theme, rect, id, &spec.automated(driven.is_some()));
-    if driven.is_some() {
-        cx.hint(&output.response, automation::DRIVEN_HINT);
-        if output.pressed {
-            automation::show_lane(cx, target.clone());
-        }
-    } else {
-        let shown = units::format_db(volume);
-        cx.hint(
-            &output.response,
-            format!("{name} \u{00B7} {shown} \u{00B7} drag to set, Ctrl-drag for fine, double-click for 0 dB"),
-        );
-        if output.pressed {
-            cx.begin_gesture();
-        }
-        if let Some(position) = output.frac {
-            let next = if output.reset { 0.0 } else { units::fader_to_db(position) };
-            if next != resting {
-                set_volume(cx, channel, next);
-            }
+    let output = trill_noir::fader(ui, cx.theme, rect, id, &spec.automation(hold.mark()));
+    let what = format!("{name} \u{00B7} {}", units::format_db(volume));
+    let gestures = "drag to set, Ctrl-drag for fine, double-click for 0 dB";
+    if let Some(position) = automation::respond(cx, &target, hold, &output, &what, gestures) {
+        let next = if output.reset { 0.0 } else { units::fader_to_db(position) };
+        if next != resting {
+            set_volume(cx, channel, next);
         }
     }
-    output.response.context_menu(|ui| automation::menu_items(ui, cx, &target));
     volume
 }
 

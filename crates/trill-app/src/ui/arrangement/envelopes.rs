@@ -2,6 +2,12 @@
 //! track it belongs to, and the pointer editing it. Click adds a point,
 //! points and lines drag, Alt bends a line, the pencil writes steps.
 //!
+//! A lane can be switched off, which is what taking hold of an automated
+//! control does: its envelope stays, drawn stepped back, and drives
+//! nothing. The broken line across it is then the value in force, the one
+//! the control was given by hand, and the switch in the lane's header
+//! turns the envelope back on. An envelope that is off can still be edited.
+//!
 //! Points have no ids, so like notes they are followed by value. Every
 //! step of a drag is derived from the points as they were when it began
 //! and swaps them for the previous step's in the project, inside one undo
@@ -13,8 +19,8 @@ use crate::ui::automation::{self, Choice, Scale};
 use crate::ui::state::{ArrangeDrag, Cx, FocusArea, LaneDrag, LaneOwner, LaneView, PointSelection, Tool};
 use crate::ui::{colors, timeline};
 use eframe::egui::{
-    self, Align2, Color32, CursorIcon, Id, Mesh, PointerButton, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, pos2,
-    vec2,
+    self, Align2, Color32, CursorIcon, Id, Mesh, PointerButton, Pos2, Rect, Response, Role, Sense, Shape, Stroke, Ui,
+    WidgetInfo, pos2, vec2,
 };
 use trill_core::project::automation_value;
 use trill_core::{AutomationPoint, AutomationTarget, Beats, Segment};
@@ -34,6 +40,12 @@ const CURVE_STEP: f32 = 3.0;
 const LINE_WIDTH: f32 = 1.25;
 /// Where a lane header's content starts: indented under its track's name.
 const HEADER_INDENT: f32 = 26.0;
+/// Where the switch of a lane's envelope is, from the header's left edge:
+/// under its track's number.
+const SWITCH_LEFT: f32 = super::headers::HEADER_LEFT + 1.0;
+/// How long the dashes of a value nothing automates are, and the gaps
+/// between them.
+const DASH: f32 = 4.0;
 /// A chooser listing more parameters than this gets a search field.
 const SEARCH_ABOVE: usize = 14;
 
@@ -251,7 +263,8 @@ pub(super) fn show(
     let map = LaneMap::new(geometry, rect, scale);
     let points = snapshot.envelope(&view.target).unwrap_or_default();
     let color = lane_color(cx, &view);
-    paint_envelope(&painter, cx, &map, &view.target, points, color);
+    let off = snapshot.lane(&view.target).is_some_and(|lane| !lane.enabled);
+    paint_envelope(&painter, cx, &map, &view.target, points, color, off);
     interact(ui, cx, geometry, response, &map, &view.target, points);
     paint_band(ui, &painter, cx, &map, &view.target);
 }
@@ -266,6 +279,21 @@ fn lane_color(cx: &Cx, view: &LaneView) -> Color32 {
     }
 }
 
+/// A broken line across the lane at `value`: where a control stands that
+/// nothing automates. The dashes keep their place on the screen.
+fn paint_resting(painter: &egui::Painter, map: &LaneMap, value: f64, color: Color32) {
+    let rect = map.rect;
+    let y = map.y(value).round();
+    let mut x = (rect.left() / (2.0 * DASH)).ceil() * 2.0 * DASH;
+    while x < rect.right() {
+        paint::hline(painter, x..=(x + DASH).min(rect.right()), y, color);
+        x += 2.0 * DASH;
+    }
+}
+
+/// Paints the envelope of `target` in `color`. `off` says its lane is
+/// switched off: the envelope steps back, and the value in force is drawn
+/// over it.
 fn paint_envelope(
     painter: &egui::Painter,
     cx: &Cx,
@@ -273,24 +301,24 @@ fn paint_envelope(
     target: &AutomationTarget,
     points: &[AutomationPoint],
     color: Color32,
+    off: bool,
 ) {
     let theme = cx.theme;
     let rect = map.rect;
     // Where the control rests: 0 dB, center, a parameter's default.
     paint::hline(painter, rect.x_range(), map.y_at(map.scale.default_position()).round(), theme.grid);
 
+    let resting = automation::resting_value(cx.snap, target);
     if points.is_empty() {
         // Not automated yet: a broken line at the value the control has.
-        if let Some(value) = automation::resting_value(cx.snap, target) {
-            let y = map.y(value).round();
-            let mut x = rect.left() + (rect.left() / 8.0).ceil() * 8.0 - rect.left();
-            while x < rect.right() {
-                paint::hline(painter, x..=(x + 4.0).min(rect.right()), y, theme.ghost);
-                x += 8.0;
-            }
+        if let Some(value) = resting {
+            paint_resting(painter, map, value, theme.ghost);
         }
         return;
     }
+    // Switched off, the envelope is what could be and not what is: it
+    // gives up its hue, which goes to the value the user holds.
+    let (held, color) = if off { (Some(color), fade(theme.ink_faint, 0.55)) } else { (None, color) };
 
     let (first_beat, last_beat) = (map.beat(rect.left()), map.time.x_to_beat(map.left, rect.right()));
     // The points on screen, and one on either side for the lines that
@@ -327,19 +355,22 @@ fn paint_envelope(
     }
 
     // A tint between the envelope and the lane's floor, as the displays
-    // of the devices have under their curves.
-    let tint = fade(color, 0.10);
-    let mut fill = Mesh::default();
-    for (index, point) in path.iter().enumerate() {
-        fill.colored_vertex(*point, tint);
-        fill.colored_vertex(pos2(point.x, rect.bottom()), tint);
-        if index > 0 {
-            let first = 2 * index as u32;
-            fill.add_triangle(first - 2, first - 1, first);
-            fill.add_triangle(first - 1, first + 1, first);
+    // of the devices have under their curves. An envelope that is off
+    // carries none: nothing is filled by it.
+    if !off {
+        let tint = fade(color, 0.10);
+        let mut fill = Mesh::default();
+        for (index, point) in path.iter().enumerate() {
+            fill.colored_vertex(*point, tint);
+            fill.colored_vertex(pos2(point.x, rect.bottom()), tint);
+            if index > 0 {
+                let first = 2 * index as u32;
+                fill.add_triangle(first - 2, first - 1, first);
+                fill.add_triangle(first - 1, first + 1, first);
+            }
         }
+        painter.add(Shape::mesh(fill));
     }
-    painter.add(Shape::mesh(fill));
     painter.add(Shape::line(path, Stroke::new(LINE_WIDTH, color)));
 
     let selected = cx.state.arrangement.points.as_ref().filter(|selection| selection.target == *target);
@@ -358,6 +389,9 @@ fn paint_envelope(
     painter.add(Shape::mesh(squares));
     for square in outlined {
         painter.rect_filled(square.expand(1.0), 0.0, cx.theme.ink);
+    }
+    if let (Some(hue), Some(value)) = (held, resting) {
+        paint_resting(painter, map, value, hue);
     }
 }
 
@@ -696,8 +730,12 @@ pub(super) fn menu(ui: &mut Ui, cx: &mut Cx, subject: &MenuSubject) {
         select(cx, target, vec![subject.place]);
     }
     trill_noir::menu_separator(ui, theme);
-    let automated = cx.snap.envelope(target).is_some();
-    if MenuItem::new("Clear the envelope").enabled(automated).show(ui, theme).clicked() {
+    let on = cx.snap.lane(target).map(|lane| lane.enabled);
+    let label = if on == Some(false) { "Switch the envelope back on" } else { "Switch the envelope off" };
+    if MenuItem::new(label).enabled(on.is_some()).show(ui, theme).clicked() {
+        automation::set_enabled(cx, target, on == Some(false));
+    }
+    if MenuItem::new("Clear the envelope").enabled(on.is_some()).show(ui, theme).clicked() {
         let target = target.clone();
         cx.edit(|project| project.set_automation(target, Vec::new()));
     }
@@ -708,9 +746,9 @@ pub(super) fn menu(ui: &mut Ui, cx: &mut Cx, subject: &MenuSubject) {
 
 // ---- the lane's header -----------------------------------------------------
 
-/// The header of a lane: what it shows (a menu of everything the track can
-/// automate), its value at the playhead, and buttons to add a lane and to
-/// close this one.
+/// The header of a lane: the switch of its envelope, what it shows (a menu
+/// of everything the track can automate), its value at the playhead, and
+/// buttons to add a lane and to close this one.
 pub(super) fn header(ui: &mut Ui, cx: &mut Cx, lane: usize, rect: Rect, strip: f32) {
     let theme = cx.theme;
     let snapshot = cx.snap;
@@ -752,6 +790,10 @@ pub(super) fn header(ui: &mut Ui, cx: &mut Cx, lane: usize, rect: Rect, strip: f
     }
 
     let (name, device) = automation::names(snapshot, &view.target);
+    let on = snapshot.lane(&view.target).map(|lane| lane.enabled);
+    if let Some(on) = on {
+        switch(ui, cx, &view.target, on, pos2(rect.left() + SWITCH_LEFT, row.center().y), id.with("switch"), &name);
+    }
     let chooser = row.with_max_x(button(1.0).left() - 3.0);
     let dropdown = trill_noir::dropdown(ui, theme, chooser, id.with("target"), "", &name, false);
     cx.hint(&dropdown, "What this lane automates \u{00B7} click to choose");
@@ -772,15 +814,51 @@ pub(super) fn header(ui: &mut Ui, cx: &mut Cx, lane: usize, rect: Rect, strip: f
                 let used =
                     text::paint(&painter, line, Align2::LEFT_CENTER, theme.text.value, &scale.format(value), ink);
                 // Beside the value, whose parameter it is: the device, or
-                // that nothing is written yet.
-                let note = if driven.is_none() { Some("No envelope") } else { device.as_deref() };
+                // that nothing is written yet, or that what is written is
+                // switched off and the value is the one set by hand.
+                let (note, note_ink) = match on {
+                    None => (Some("No envelope"), quiet),
+                    Some(false) => (Some("Envelope off"), theme.ink),
+                    Some(true) => (device.as_deref(), quiet),
+                };
                 if let Some(note) = note {
                     let rest = line.with_min_x(line.left() + used + 8.0);
-                    text::paint(&painter, rest, Align2::RIGHT_CENTER, theme.text.micro, note, quiet);
+                    text::paint(&painter, rest, Align2::RIGHT_CENTER, theme.text.micro, note, note_ink);
                 }
             }
             _ => drop(text::paint(&painter, line, Align2::LEFT_CENTER, theme.text.micro, "Unavailable", quiet)),
         }
+    }
+}
+
+/// The switch of a lane's envelope, at `left_center`: a dot like the one
+/// that bypasses a device. Filled, the envelope drives its control; an
+/// outline, it is off and the control stays where it is set by hand. A
+/// click switches, as one undo step.
+fn switch(ui: &Ui, cx: &mut Cx, target: &AutomationTarget, on: bool, left_center: Pos2, id: Id, name: &str) {
+    let theme = cx.theme;
+    let side = theme.metric.dot;
+    let zone = Rect::from_center_size(left_center + vec2(side / 2.0, 0.0), vec2(side + 10.0, theme.metric.chip));
+    let response = ui.interact(zone, id, Sense::click());
+    response.widget_info(|| WidgetInfo::selected(Role::Button, true, on, format!("Envelope of {name} on")));
+    let painter = ui.painter();
+    if on {
+        paint::dot(painter, left_center, side, if response.hovered() { theme.ink } else { theme.ok });
+    } else {
+        // In the signal color: this is the one thing in the lane that is
+        // not as it was written, and the way back.
+        paint::hollow_dot(painter, left_center, side, if response.hovered() { theme.ink } else { theme.signal });
+    }
+    cx.hint(
+        &response,
+        if on {
+            "On: the envelope sets this value \u{00B7} click to switch it off and set the value by hand"
+        } else {
+            "Off: the value stays where it is set by hand \u{00B7} click to let the envelope set it again"
+        },
+    );
+    if response.clicked() {
+        automation::set_enabled(cx, target, !on);
     }
 }
 

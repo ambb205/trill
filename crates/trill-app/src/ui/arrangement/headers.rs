@@ -5,7 +5,7 @@
 
 use super::rows::{self, RowKind};
 use super::{Geometry, envelopes};
-use crate::ui::automation;
+use crate::ui::automation::{self, Hold};
 use crate::ui::shortcuts::{self, Command};
 use crate::ui::sounds::DropTarget;
 use crate::ui::state::{ArrangeDrag, ArrangementState, Cx, FocusArea, LaneOwner, TextEditState, TrackDrop};
@@ -207,9 +207,7 @@ fn header(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, number: 
     let lanes_name = format!("Automation of {}", track.name);
     let lanes_chip = Chip::new("A", lanes_open).quiet(quiet).named(&lanes_name);
     let response = trill_noir::chip(ui, theme, chip(-1.0), id.with("automation"), &lanes_chip);
-    if automation::has_automation(snapshot, LaneOwner::Track(track.id)) {
-        paint::corner_mark(&painter, chip(-1.0), theme.signal);
-    }
+    automation::paint_owner_mark(&painter, cx, LaneOwner::Track(track.id), chip(-1.0));
     cx.hint(&response, "Show or hide this track\u{2019}s automation lanes \u{00B7} A");
     if response.clicked() {
         cx.state.select_track(track.id);
@@ -302,69 +300,43 @@ fn sound_drop(ui: &Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, rect: Re
 }
 
 /// The volume bar of a track. While an envelope drives the volume the bar
-/// shows what the envelope says and opens its lane instead of editing.
+/// shows what the envelope says; dragging it takes hold of the volume (see
+/// [`automation::respond`]).
 pub(in crate::ui) fn volume_bar(ui: &Ui, cx: &mut Cx, track: &Track, rect: Rect, id: egui::Id) {
     let target = AutomationTarget::TrackVolume { track: track.id };
-    let driven = automation::driven(cx, &target);
-    let volume = driven.map_or(track.volume_db, |value| value as f32);
+    let hold = Hold::of(cx, &target);
+    let volume = hold.driven().map_or(track.volume_db, |value| value as f32);
     let shown = units::format_db(volume);
     let bar = Bar::new("Vol", &shown, units::db_to_fader(volume)).default(units::db_to_fader(0.0));
-    let output = trill_noir::bar(ui, cx.theme, rect, id, &bar.automated(driven.is_some()));
-    if driven.is_some() {
-        cx.hint(&output.response, automation::DRIVEN_HINT);
-        if output.pressed {
-            automation::show_lane(cx, target.clone());
-        }
-    } else {
-        cx.hint(
-            &output.response,
-            format!("Volume \u{00B7} {shown} \u{00B7} drag to set, Ctrl-drag for fine, double-click for 0 dB"),
-        );
-        if output.pressed {
-            cx.begin_gesture();
-        }
-        if let Some(position) = output.frac {
-            let volume = if output.reset { 0.0 } else { units::fader_to_db(position) };
-            let track_id = track.id;
-            if volume != track.volume_db {
-                cx.edit(|project| project.set_track_volume(track_id, volume));
-            }
+    let output = trill_noir::bar(ui, cx.theme, rect, id, &bar.automation(hold.mark()));
+    let (what, gestures) =
+        (format!("Volume \u{00B7} {shown}"), "drag to set, Ctrl-drag for fine, double-click for 0 dB");
+    if let Some(position) = automation::respond(cx, &target, hold, &output, &what, gestures) {
+        let volume = if output.reset { 0.0 } else { units::fader_to_db(position) };
+        let track_id = track.id;
+        if volume != track.volume_db {
+            cx.edit(|project| project.set_track_volume(track_id, volume));
         }
     }
-    output.response.context_menu(|ui| automation::menu_items(ui, cx, &target));
 }
 
 /// The pan cell of a track; see [`volume_bar`] for how automation shows.
 pub(in crate::ui) fn pan_bar(ui: &Ui, cx: &mut Cx, track: &Track, rect: Rect, id: egui::Id) {
     let target = AutomationTarget::TrackPan { track: track.id };
-    let driven = automation::driven(cx, &target);
-    let pan = driven.map_or(track.pan, |value| value as f32);
+    let hold = Hold::of(cx, &target);
+    let pan = hold.driven().map_or(track.pan, |value| value as f32);
     let shown = units::format_pan(pan);
     let bar = Bar::compact("Pan", &shown, (pan + 1.0) / 2.0).default(0.5);
-    let output = trill_noir::bar(ui, cx.theme, rect, id, &bar.automated(driven.is_some()));
-    if driven.is_some() {
-        cx.hint(&output.response, automation::DRIVEN_HINT);
-        if output.pressed {
-            automation::show_lane(cx, target.clone());
-        }
-    } else {
-        cx.hint(
-            &output.response,
-            format!("Pan \u{00B7} {shown} \u{00B7} drag to set, Ctrl-drag for fine, double-click to center"),
-        );
-        if output.pressed {
-            cx.begin_gesture();
-        }
-        if let Some(position) = output.frac {
-            let pan = position * 2.0 - 1.0;
-            // A small dead zone makes center easy to find again.
-            let (track_id, pan) = (track.id, if output.reset || pan.abs() < 0.03 { 0.0 } else { pan });
-            if pan != track.pan {
-                cx.edit(|project| project.set_track_pan(track_id, pan));
-            }
+    let output = trill_noir::bar(ui, cx.theme, rect, id, &bar.automation(hold.mark()));
+    let (what, gestures) = (format!("Pan \u{00B7} {shown}"), "drag to set, Ctrl-drag for fine, double-click to center");
+    if let Some(position) = automation::respond(cx, &target, hold, &output, &what, gestures) {
+        let pan = position * 2.0 - 1.0;
+        // A small dead zone makes center easy to find again.
+        let (track_id, pan) = (track.id, if output.reset || pan.abs() < 0.03 { 0.0 } else { pan });
+        if pan != track.pan {
+            cx.edit(|project| project.set_track_pan(track_id, pan));
         }
     }
-    output.response.context_menu(|ui| automation::menu_items(ui, cx, &target));
 }
 
 /// How much of `track` goes to the return track `target`. Dragged to the

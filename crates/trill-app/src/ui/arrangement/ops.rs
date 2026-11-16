@@ -2,7 +2,6 @@
 //! menu and the context menus all call. Each is one undo step.
 
 use super::rows::Rows;
-use super::time_ops;
 use crate::ui::snapshot::Snapshot;
 use crate::ui::state::{Clipboard, CopiedClip, Cx, InlineClip, TextEditState, TimeSelection, Tool, UiState};
 use trill_core::{Beats, Clip, ClipId, Track, TrackId, TrackKind};
@@ -220,7 +219,7 @@ pub fn delete_time(cx: &mut Cx) {
         cx.state.toasts.info("Select the time to delete first: drag in an empty lane or on the ruler");
         return;
     };
-    if cx.edit(|project| time_ops::delete_time(project, start, end)).is_some() {
+    if cx.edit(|project| project.delete_time(start, end)).is_some() {
         cx.state.arrangement.time_selection = None;
         cx.state.arrangement.cursor = start;
     }
@@ -232,12 +231,25 @@ pub fn duplicate_time(cx: &mut Cx) {
         cx.state.toasts.info("Select the time to duplicate first: drag in an empty lane or on the ruler");
         return;
     };
-    if cx.edit(|project| time_ops::duplicate_time(project, start, end)).is_some() {
+    if cx.edit(|project| project.duplicate_time(start, end)).is_some() {
         // The copy becomes the selection, so the command can be repeated.
         let tracks = cx.state.arrangement.time_selection.take().map(|selection| selection.tracks).unwrap_or_default();
         let length = end - start;
         cx.state.arrangement.time_selection = Some(TimeSelection { start: end, end: end + length, tracks });
         cx.state.arrangement.cursor = end;
+    }
+}
+
+/// Opens up empty time as long as the selected time, where it starts:
+/// what was there, and everything after it, moves later to make room.
+pub fn insert_time(cx: &mut Cx) {
+    let Some((start, end)) = selected_span(cx) else {
+        cx.state.toasts.info("Select as much time as to insert first: drag in an empty lane or on the ruler");
+        return;
+    };
+    if cx.edit(|project| project.insert_time(start, end - start)).is_some() {
+        // The selection stays where it is, over the room that was made.
+        cx.state.arrangement.cursor = start;
     }
 }
 

@@ -6,7 +6,11 @@
 //! the pointer. Holding Ctrl (or Shift) moves a tenth as far for fine
 //! adjustment, and a double-click restores the default. The wheel is left
 //! alone, so scrolling a panel never edits a value.
+//!
+//! A bar that an envelope can drive carries the mark of it in its corner;
+//! see [`crate::Automation`].
 
+use crate::automation::{Automation, automation_mark};
 use crate::theme::{Theme, fade};
 use crate::{paint, text};
 use egui::{Align2, Id, Rangef, Rect, Response, Sense, Ui, WidgetInfo, pos2};
@@ -24,13 +28,22 @@ pub struct Bar<'a> {
     default: f32,
     dimmed: bool,
     compact: bool,
-    automated: bool,
+    automation: Automation,
 }
 
 impl<'a> Bar<'a> {
     /// A bar reading `value`, filled from the left up to `frac` (0..=1).
     pub fn new(label: &'a str, value: &'a str, frac: f32) -> Self {
-        Self { label, value, frac, origin: None, default: 0.0, dimmed: false, compact: false, automated: false }
+        Self {
+            label,
+            value,
+            frac,
+            origin: None,
+            default: 0.0,
+            dimmed: false,
+            compact: false,
+            automation: Automation::None,
+        }
     }
 
     /// A bar for a cell too narrow for a label: the value is centered and
@@ -60,10 +73,11 @@ impl<'a> Bar<'a> {
         self
     }
 
-    /// Marks the bar's corner in the signal color: an envelope, not the
-    /// user, is setting this value.
-    pub fn automated(mut self, automated: bool) -> Self {
-        self.automated = automated;
+    /// Marks the bar's corner for the envelope that can drive it: filled
+    /// while it sets this value, an outline that takes a click while it is
+    /// switched off.
+    pub fn automation(mut self, automation: Automation) -> Self {
+        self.automation = automation;
         self
     }
 }
@@ -80,6 +94,9 @@ pub struct BarOutput {
     /// True on the frame the pointer went down on the bar: the moment to
     /// open an undo gesture, since the press itself already sets a value.
     pub pressed: bool,
+    /// The mark of an envelope that is switched off, when the control has
+    /// one: a click on it asks for the envelope to be switched back on.
+    pub mark: Option<Response>,
 }
 
 /// Places a bar in `rect`.
@@ -120,7 +137,8 @@ pub fn bar(ui: &Ui, theme: &Theme, rect: Rect, id: Id, bar: &Bar) -> BarOutput {
         let active = enabled && (response.hovered() || response.is_pointer_button_down_on());
         paint_bar(ui, theme, rect, bar, frac.unwrap_or(bar.frac), active);
     }
-    BarOutput { response, frac, pressed, reset }
+    let mark = automation_mark(ui, theme, rect, id, bar.automation, bar.label);
+    BarOutput { response, frac, pressed, reset, mark }
 }
 
 fn paint_bar(ui: &Ui, theme: &Theme, rect: Rect, bar: &Bar, frac: f32, active: bool) {
@@ -143,9 +161,6 @@ fn paint_bar(ui: &Ui, theme: &Theme, rect: Rect, bar: &Bar, frac: f32, active: b
         painter.rect_filled(rect, 0.0, theme.hover);
     }
     paint::frame(&painter, rect, theme.hairline);
-    if bar.automated {
-        paint::corner_mark(&painter, rect, theme.signal);
-    }
 
     let opacity = if bar.dimmed { theme.disabled } else { 1.0 };
     if bar.compact {
@@ -199,12 +214,17 @@ mod tests {
         frac: f32,
         /// How many frames reported a press.
         presses: usize,
+        /// What the bar is told about its envelope, and how often the mark
+        /// of one that is off was clicked.
+        automation: Automation,
+        resumes: usize,
         time: f64,
     }
 
     impl Rig {
         fn new(frac: f32) -> Self {
-            let mut rig = Self { ctx: testing::context(), frac, presses: 0, time: 0.0 };
+            let automation = Automation::None;
+            let mut rig = Self { ctx: testing::context(), frac, presses: 0, automation, resumes: 0, time: 0.0 };
             rig.frame(Modifiers::NONE, Vec::new());
             rig
         }
@@ -212,16 +232,18 @@ mod tests {
         fn frame(&mut self, modifiers: Modifiers, mut events: Vec<Event>) {
             self.time += 1.0 / 60.0;
             events.insert(0, Event::ModifiersChanged(modifiers));
-            let (mut frac, mut presses) = (self.frac, self.presses);
+            let (mut frac, mut presses, mut resumes, automation) =
+                (self.frac, self.presses, self.resumes, self.automation);
             testing::frame(&self.ctx, self.time, events, |ui, theme| {
-                let spec = Bar::new("Cutoff", "1.00 kHz", frac).default(0.6);
+                let spec = Bar::new("Cutoff", "1.00 kHz", frac).default(0.6).automation(automation);
                 let output = bar(ui, theme, RECT, Id::unique("bar"), &spec);
                 presses += output.pressed as usize;
+                resumes += output.mark.is_some_and(|mark| mark.clicked()) as usize;
                 if let Some(next) = output.frac {
                     frac = next;
                 }
             });
-            (self.frac, self.presses) = (frac, presses);
+            (self.frac, self.presses, self.resumes) = (frac, presses, resumes);
         }
 
         fn at(fraction: f32) -> Pos2 {
@@ -288,6 +310,36 @@ mod tests {
             rig.button(Modifiers::NONE, Rig::at(0.9), false);
         }
         assert_eq!(rig.frac, 0.6);
+    }
+
+    #[test]
+    fn the_mark_of_an_envelope_that_is_off_is_clicked_without_moving_the_bar() {
+        let mut rig = Rig::new(0.4);
+        rig.automation = Automation::Off;
+        rig.frame(Modifiers::NONE, Vec::new());
+        let corner = pos2(RECT.right() - 4.0, RECT.top() + 4.0);
+        rig.frame(Modifiers::NONE, vec![Event::PointerMoved(corner)]);
+        rig.button(Modifiers::NONE, corner, true);
+        rig.button(Modifiers::NONE, corner, false);
+        assert_eq!((rig.resumes, rig.presses, rig.frac), (1, 0, 0.4), "the click was the mark's alone");
+        // Below the mark the far end of the bar is still the bar.
+        let end = pos2(RECT.right() - 4.0, RECT.bottom() - 3.0);
+        rig.frame(Modifiers::NONE, vec![Event::PointerMoved(end)]);
+        rig.button(Modifiers::NONE, end, true);
+        rig.button(Modifiers::NONE, end, false);
+        assert_eq!((rig.resumes, rig.presses), (1, 1));
+        assert!(rig.frac > 0.97, "{}", rig.frac);
+
+        // An envelope that is on, or none at all: the corner is the bar's.
+        for automation in [Automation::On, Automation::None] {
+            let mut rig = Rig::new(0.4);
+            rig.automation = automation;
+            rig.frame(Modifiers::NONE, vec![Event::PointerMoved(corner)]);
+            rig.button(Modifiers::NONE, corner, true);
+            rig.button(Modifiers::NONE, corner, false);
+            assert_eq!((rig.resumes, rig.presses), (0, 1), "{automation:?}");
+            assert!(rig.frac > 0.97);
+        }
     }
 
     #[test]

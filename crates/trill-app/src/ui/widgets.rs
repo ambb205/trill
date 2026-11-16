@@ -8,7 +8,7 @@ use super::units::db_to_fader;
 use eframe::egui::{self, Id, Layout, Rect, Response, Ui, UiBuilder};
 use std::fmt::Debug;
 use std::hash::Hash;
-use trill_noir::{Levels, Theme, Zones};
+use trill_noir::{Levels, Theme, Variant, Zones, paint, text};
 
 /// Runs `add` in a child `Ui` that covers `rect`.
 ///
@@ -60,6 +60,52 @@ pub fn activated(ui: &Ui, response: &Response) -> bool {
         }
     });
     paired
+}
+
+/// A question that stands in the way of something that loses work: a flat
+/// panel with a hairline, a caps title over a rule, what is at stake, and
+/// two buttons at the right. `proceed` is the one that loses the work, in
+/// the signal color; `cancel` the one that does not, and what Escape or a
+/// click beside the panel means. Returns the answer once there is one:
+/// `true` to proceed.
+pub fn question(
+    ctx: &egui::Context,
+    theme: &Theme,
+    salt: &str,
+    title: &str,
+    body: &str,
+    proceed: &str,
+    cancel: &str,
+) -> Option<bool> {
+    let mut choice = None;
+    let frame = egui::Frame::NONE
+        .fill(theme.panel)
+        .stroke(egui::Stroke::new(1.0, theme.hairline))
+        .inner_margin(egui::Margin::symmetric(14, 12));
+    let modal = egui::Modal::new(Id::unique(salt)).frame(frame).backdrop_color(theme.backdrop).show(ctx, |ui| {
+        ui.set_width(400.0);
+        ui.spacing_mut().item_spacing = egui::vec2(theme.metric.gap, 0.0);
+        let (heading, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), egui::Sense::hover());
+        text::paint(ui.painter(), heading, egui::Align2::LEFT_CENTER, theme.text.caps, title, theme.ink_dim);
+        ui.add_space(6.0);
+        let (rule, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+        paint::hline(ui.painter(), rule.x_range(), rule.top(), theme.hairline);
+        ui.add_space(10.0);
+        ui.label(egui::RichText::new(body).color(theme.ink));
+        ui.add_space(14.0);
+        ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+            if trill_noir::button(ui, theme, proceed, Variant::Danger).clicked() {
+                choice = Some(true);
+            }
+            if trill_noir::button(ui, theme, cancel, Variant::Default).clicked() {
+                choice = Some(false);
+            }
+        });
+    });
+    if modal.should_close() {
+        choice.get_or_insert(false);
+    }
+    choice
 }
 
 /// Where the colors of a level meter change. Meters share the faders'

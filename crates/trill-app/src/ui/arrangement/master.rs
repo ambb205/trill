@@ -4,7 +4,7 @@
 
 use super::headers::{HEADER_STRIP, HeaderParts};
 use super::{Geometry, HEADER_WIDTH, MASTER_HEIGHT, envelopes};
-use crate::ui::automation;
+use crate::ui::automation::{self, Hold};
 use crate::ui::state::{Cx, DetailTab, LaneOwner};
 use crate::ui::{units, widgets};
 use eframe::egui::{Align2, Rect, Sense, Ui, UiBuilder, pos2, vec2};
@@ -74,8 +74,9 @@ fn row(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry) {
     }
 
     let target = AutomationTarget::MasterVolume;
-    let driven = automation::driven(cx, &target);
-    let volume = driven.map_or(cx.snap.project.master.volume_db, |value| value as f32);
+    let hold = Hold::of(cx, &target);
+    let resting = cx.snap.project.master.volume_db;
+    let volume = hold.driven().map_or(resting, |value| value as f32);
     let bar_rect = Rect::from_min_size(
         pos2(parts.right - MASTER_VOLUME_WIDTH, (head.center().y - theme.metric.bar / 2.0).round()),
         vec2(MASTER_VOLUME_WIDTH, theme.metric.bar),
@@ -90,9 +91,7 @@ fn row(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry) {
     let lanes_open = cx.state.arrangement.lanes.iter().any(|open| open.owner == LaneOwner::Master);
     let chip = Chip::new("A", lanes_open).quiet(quiet).named("Automation of the master");
     let response = trill_noir::chip(ui, theme, chip_rect, id.with("automation"), &chip);
-    if automation::has_automation(cx.snap, LaneOwner::Master) {
-        paint::corner_mark(&painter, chip_rect, theme.signal);
-    }
+    automation::paint_owner_mark(&painter, cx, LaneOwner::Master, chip_rect);
     cx.hint(&response, "Show or hide the master\u{2019}s automation lanes");
     if response.clicked() {
         automation::toggle_lanes(cx, LaneOwner::Master);
@@ -102,28 +101,14 @@ fn row(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry) {
     text::paint(&painter, title, Align2::LEFT_CENTER, theme.text.caps, "Master", theme.ink);
     let shown = units::format_db(volume);
     let bar = Bar::new("Vol", &shown, units::db_to_fader(volume)).default(units::db_to_fader(0.0));
-    let output = trill_noir::bar(ui, theme, bar_rect, id.with("volume"), &bar.automated(driven.is_some()));
-    if driven.is_some() {
-        cx.hint(&output.response, automation::DRIVEN_HINT);
-        if output.pressed {
-            automation::show_lane(cx, target.clone());
-        }
-    } else {
-        cx.hint(
-            &output.response,
-            format!("Master volume \u{00B7} {shown} \u{00B7} drag to set, double-click for 0 dB"),
-        );
-        if output.pressed {
-            cx.begin_gesture();
-        }
-        if let Some(position) = output.frac {
-            let next = if output.reset { 0.0 } else { units::fader_to_db(position) };
-            if next != cx.snap.project.master.volume_db {
-                cx.edit(|project| project.set_master_volume(next));
-            }
+    let output = trill_noir::bar(ui, theme, bar_rect, id.with("volume"), &bar.automation(hold.mark()));
+    let (what, gestures) = (format!("Master volume \u{00B7} {shown}"), "drag to set, double-click for 0 dB");
+    if let Some(position) = automation::respond(cx, &target, hold, &output, &what, gestures) {
+        let next = if output.reset { 0.0 } else { units::fader_to_db(position) };
+        if next != resting {
+            cx.edit(|project| project.set_master_volume(next));
         }
     }
-    output.response.context_menu(|ui| automation::menu_items(ui, cx, &target));
 
     let meter = cx.live.master;
     trill_noir::stereo_meter(&painter, theme, parts.meter, widgets::levels(meter), widgets::meter_zones());
