@@ -27,7 +27,8 @@
 //! [`device_layouts`] says how each built-in device arranges its
 //! parameters, [`sample_panels`] draws what the sampler and the drum rack
 //! play, and [`displays`] draws the devices' small curves from the math in
-//! [`response`]. [`editors`] opens the windows plugins bring with them.
+//! [`response`]. [`editors`] opens the windows plugins bring with them,
+//! and [`recovery`] offers back the work a crash left unsaved.
 //! [`files`] runs dialogs, imports and exports off the UI
 //! thread, and [`sounds`] does the same for everything that reads audio
 //! files (waveforms, previews, searches, drops) on the workers of
@@ -52,6 +53,7 @@ mod editors;
 mod files;
 mod mixer;
 mod piano_roll;
+mod recovery;
 mod response;
 mod sample_panels;
 mod shortcuts;

@@ -12,6 +12,7 @@ mod editors;
 mod keys;
 mod mixer;
 mod perf;
+mod recovery;
 mod ruler;
 mod sounds;
 mod tracks;

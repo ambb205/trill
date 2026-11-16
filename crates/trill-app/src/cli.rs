@@ -28,6 +28,8 @@ Options:
   --search <TEXT>         Search the sound library for this at startup
   --sound <NAME>          Select the sound with this name in the browser
   --editor <DEVICE NAME>  Open this plugin's own window at startup
+  --profile <FOLDER>      Keep settings, the library index and safety copies in this
+                          folder instead of the user's own
   --null-audio            Run without an audio device
   --no-plugins            Offer only the built-in devices
   --mcp-port <PORT>       Port of the MCP server for AI assistants (default: 7777)
@@ -65,6 +67,8 @@ pub struct Cli {
     pub sound: Option<String>,
     /// Name of a device whose editor to open.
     pub editor: Option<String>,
+    /// A folder to keep settings, the library index and safety copies in.
+    pub profile: Option<PathBuf>,
     pub null_audio: bool,
     pub no_plugins: bool,
     pub no_mcp: bool,
@@ -100,6 +104,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
             "--search" => cli.search = Some(value("what to search for")?),
             "--sound" => cli.sound = Some(value("the name of a sound")?),
             "--editor" => cli.editor = Some(value("the name of a device")?),
+            "--profile" => cli.profile = Some(PathBuf::from(value("a folder")?)),
             "--browse" => {
                 cli.browse = Some(match value("what to list")?.as_str() {
                     "devices" => BrowserTab::Devices,
@@ -194,11 +199,21 @@ impl Cli {
     /// scanned in a second process of this executable. A screenshot run
     /// touches nothing of the user's: no plugins, no settings read or
     /// written, no library, so it comes out the same on every machine.
+    /// With `--profile` what is kept between runs is kept in that folder,
+    /// screenshot or not, and the user's own is left alone.
     pub fn runtime_options(&self) -> RuntimeOptions {
+        let storage = match &self.profile {
+            Some(folder) => Storage::At {
+                settings: folder.join("settings.json"),
+                library_index: Some(folder.join("library-index.json")),
+            },
+            None if self.screenshot.is_some() => Storage::Nowhere,
+            None => Storage::User,
+        };
         RuntimeOptions {
             audio: self.audio_backend(),
             plugins: self.plugins_enabled().then_some(Scanner::CurrentExecutable),
-            storage: if self.screenshot.is_some() { Storage::Nowhere } else { Storage::User },
+            storage,
         }
     }
 
@@ -294,6 +309,16 @@ mod tests {
         assert_eq!(shot.audio, AudioBackend::Null { sample_rate: 48_000 });
         assert!(shot.plugins.is_none());
         assert_eq!(shot.storage, Storage::Nowhere);
+
+        // A profile folder takes the place of the user's own, in any run.
+        let kept = Storage::At {
+            settings: PathBuf::from("scratch/settings.json"),
+            library_index: Some(PathBuf::from("scratch/library-index.json")),
+        };
+        assert_eq!(run(&["--profile", "scratch"]).unwrap().runtime_options().storage, kept);
+        let shot = run(&["--profile", "scratch", "--screenshot", "out.png"]).unwrap().runtime_options();
+        assert_eq!(shot.storage, kept, "which is how a picture of what is kept there is taken");
+        assert!(shot.plugins.is_none());
     }
 
     #[test]
@@ -431,6 +456,7 @@ mod tests {
             &["--search"],
             &["--sound"],
             &["--editor"],
+            &["--profile"],
             &["--size", "big"],
             &["--size", "10x10"],
             &["--theme"],

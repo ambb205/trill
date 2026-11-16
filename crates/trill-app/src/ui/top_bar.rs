@@ -5,7 +5,7 @@
 use super::arrangement::ops;
 use super::shortcuts::{self, Command};
 use super::state::{Clipboard, Cx, DetailTab};
-use super::{arrangement, brand, files, timeline};
+use super::{arrangement, brand, files, recovery, timeline};
 use eframe::egui::{self, Align2, Id, Rect, Sense, Ui, pos2, vec2};
 use trill_core::TimeSignature;
 use trill_core::project::{MAX_TEMPO, MIN_TEMPO};
@@ -101,6 +101,13 @@ fn file_menu(ui: &mut Ui, cx: &mut Cx) {
     }
     if item(ui, "Open\u{2026}", Command::Open, true) {
         files::open(ui.ctx(), cx);
+    }
+    // What a crash left unsaved, for as long as any of it is left: the
+    // count stands where a shortcut would.
+    let lost = cx.recovery.count();
+    let count = if lost > 0 { lost.to_string() } else { String::new() };
+    if MenuItem::new("Recover unsaved work\u{2026}").shortcut(&count).enabled(lost > 0).show(ui, theme).clicked() {
+        recovery::open(cx);
     }
     trill_noir::menu_separator(ui, theme);
     if item(ui, "Save", Command::Save, true) {

@@ -4,6 +4,7 @@
 use super::arrangement::ops;
 use super::editors::{self, Editors};
 use super::files::{self, Confirm, Jobs};
+use super::recovery::{self, Recovery};
 use super::shortcuts::{self, Command};
 use super::snapshot::{Live, Snapshot};
 use super::sounds::{Dropped, Report, Sounds};
@@ -58,6 +59,7 @@ pub struct TrillApp {
     state: UiState,
     editors: Editors,
     jobs: Jobs,
+    recovery: Recovery,
     /// The colors, type and metrics the window is painted with.
     theme: Theme,
     /// The devices that can be added. Starts as the built-in ones and is
@@ -179,6 +181,9 @@ impl TrillApp {
         // from whoever is at the machine.
         let unattended = options.screenshot.is_some() || options.exit_after.is_some();
         jobs.quit_confirmed = unattended;
+        // What an earlier program did not live to save: found when the
+        // runtime started, so this is a look at a list in memory.
+        let recovery = Recovery::new(runtime.recoverable());
         Self {
             sounds: Sounds::new(ctx, runtime),
             session,
@@ -187,6 +192,7 @@ impl TrillApp {
             state,
             editors: Editors::new(!unattended),
             jobs,
+            recovery,
             theme,
             descriptors: BuiltinFactory.descriptors(),
             catalog,
@@ -271,6 +277,7 @@ impl TrillApp {
             state: &mut self.state,
             editors: &mut self.editors,
             jobs: &mut self.jobs,
+            recovery: &mut self.recovery,
             sounds: &mut self.sounds,
         }
     }
@@ -368,7 +375,7 @@ impl TrillApp {
     /// takes the keyboard; the shortcut reference lets only its own key
     /// through, which closes it.
     fn read_commands(&self, ctx: &egui::Context) -> Vec<Command> {
-        if self.jobs.confirm.is_some() {
+        if self.jobs.confirm.is_some() || self.recovery.is_open() {
             return Vec::new();
         }
         let state = &self.state;
@@ -487,10 +494,17 @@ impl TrillApp {
     /// The part of a frame that needs no window: catching up with the
     /// session and with background work.
     pub fn tick(&mut self, ctx: &egui::Context) {
-        self.jobs.poll(&mut self.state);
+        let replaced = self.jobs.poll(&mut self.state) | self.recovery.poll(&mut self.state);
         self.editors.poll(&mut self.state.toasts);
         self.take_reports();
         self.sync(ctx);
+        if replaced {
+            // The window's state was reset for a project that a helper
+            // thread opened. The snapshot may have caught up with that
+            // project before the news of it arrived, in which case nothing
+            // else would give the fresh state its selection.
+            self.state.reconcile(&self.snapshot.project);
+        }
         self.release_audition(ctx);
         // Edits from other front ends arrive without any input event, so an
         // idle window has to look for them.
@@ -557,6 +571,7 @@ impl TrillApp {
 
         dragging::end(&ctx, &mut cx);
         files::confirm_modal(&ctx, &mut cx);
+        recovery::modal(&ctx, &mut cx);
         shortcuts::window(&ctx, &mut cx);
         let corner = ctx.content_rect().right_bottom() - egui::vec2(12.0, status_bar::HEIGHT + 10.0);
         cx.state.toasts.show(&ctx, cx.theme, corner);
@@ -598,6 +613,11 @@ impl TrillApp {
     #[cfg(test)]
     pub fn editors(&self) -> &Editors {
         &self.editors
+    }
+
+    #[cfg(test)]
+    pub fn recovery(&self) -> &Recovery {
+        &self.recovery
     }
 
     #[cfg(test)]
