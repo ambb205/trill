@@ -8,9 +8,11 @@
 
 mod automation;
 mod clips;
+mod editors;
 mod keys;
 mod mixer;
 mod perf;
+mod recovery;
 mod ruler;
 mod sounds;
 mod tracks;
@@ -45,6 +47,9 @@ struct Harness {
     labels: Vec<(String, Rect)>,
     /// Label and position (0..=1) of every bar and fader on the last frame.
     values: Vec<(String, f64)>,
+    /// Label of every chip and switch on the last frame, and whether it
+    /// was on.
+    switches: Vec<(String, bool)>,
     /// What the app last put on the system clipboard.
     clipboard: Option<String>,
 }
@@ -63,8 +68,17 @@ impl Harness {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
         let app = TrillApp::new(&ctx, runtime.clone(), options, Arc::<Mutex<Option<String>>>::default());
-        let mut harness =
-            Self { ctx, app, runtime, session, time: 0.0, labels: Vec::new(), values: Vec::new(), clipboard: None };
+        let mut harness = Self {
+            ctx,
+            app,
+            runtime,
+            session,
+            time: 0.0,
+            labels: Vec::new(),
+            values: Vec::new(),
+            switches: Vec::new(),
+            clipboard: None,
+        };
         // Widgets are hit-tested against where they were on the previous
         // frame, so the layout has to exist before any input arrives.
         harness.idle(3);
@@ -138,6 +152,15 @@ impl Harness {
             let mut sliders: Vec<_> = sliders.collect();
             sliders.sort_by(|(.., a), (.., b)| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
             self.values = sliders.into_iter().map(|(label, value, _)| (label, value)).collect();
+            let switches = update.nodes.iter().filter_map(|(_, node)| {
+                let on = match node.toggled()? {
+                    egui::accesskit::Toggled::True => true,
+                    egui::accesskit::Toggled::False => false,
+                    egui::accesskit::Toggled::Mixed => return None,
+                };
+                Some((node.label()?.to_owned(), on))
+            });
+            self.switches = switches.collect();
             // The update lists nodes in no particular order; reading order
             // makes "the first button labeled X" mean something.
             self.labels.sort_by(|(_, a), (_, b)| a.top().total_cmp(&b.top()).then(a.left().total_cmp(&b.left())));
@@ -165,6 +188,22 @@ impl Harness {
 
     fn is_on_screen(&self, label: &str) -> bool {
         !self.all_labeled(label).is_empty()
+    }
+
+    /// Whether the chip or switch labeled `label` is on.
+    fn is_on(&self, label: &str) -> bool {
+        match self.switches.iter().find(|(text, _)| text == label) {
+            Some((_, on)) => *on,
+            None => panic!("no chip or switch on screen is labeled '{label}'"),
+        }
+    }
+
+    /// The position (0..=1) the first bar or fader labeled `label` shows.
+    fn shown(&self, label: &str) -> f64 {
+        match self.values.iter().find(|(text, _)| text == label) {
+            Some((_, value)) => *value,
+            None => panic!("no bar or fader on screen is labeled '{label}'"),
+        }
     }
 
     /// Center of the first widget labeled `label` that lies below `y`:

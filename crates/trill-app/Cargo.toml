@@ -34,6 +34,9 @@ rfd = "0.18"
 pollster = "1"
 # Encodes `--screenshot` output.
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Names the window's own handle, which plugin editors are given as their
+# owner. The version eframe itself is built on.
+raw-window-handle = "0.6"
 
 [dev-dependencies]
 # Sample packs for the interaction tests, away from the user's own.

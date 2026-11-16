@@ -76,3 +76,24 @@ shot sounds-missing-file "$night" --browse sounds --select "Lost Take"
 shot min-window-sounds "$night" --browse sounds --library "$pack" --sound "Bass Loop 120bpm Am" --select "Bass Loop"     --size 1060x640
 shot graphite-sounds-browser "$night" --browse sounds --library "$pack" --sound "Drum Loop Steady 120bpm"     --select "Pad Loop" --theme graphite
 shot graphite-sounds-drum-rack "$night" --browse sounds --library "$pack" --search kick --select Beat --tab devices     --theme graphite
+
+# Staged for the last pictures, in a folder git ignores: two projects that
+# their program did not live to save, in a profile folder of their own (so
+# the offer shows nobody's real work, and nothing of the user's is read),
+# and the example song with envelopes switched off. Staged here and not at
+# the top, so that the work lost "moments ago" still was when it is shown.
+fixtures=$out/fixtures
+cargo run -p trill-app --example window_fixtures -- "$fixtures"
+lost=$fixtures/lost-work
+held=$fixtures/held-automation.trill
+
+# The offer to bring back unsaved work, as a window opens on it.
+shot recovery-offer --profile "$lost"
+shot graphite-recovery-offer --profile "$lost" --theme graphite
+shot min-window-recovery-offer --profile "$lost" --size 1060x640
+
+# Automation someone has taken hold of: envelopes that are off beside ones
+# that are on, in the lanes, on the device's panel and on the mixer's faders.
+shot held-automation "$held" --select "Pad chords" --tab devices --automation
+shot held-automation-mixer "$held" --select "Pad chords" --tab mixer --automation
+shot graphite-held-automation "$held" --select "Pad chords" --tab devices --automation --theme graphite

@@ -1,7 +1,9 @@
 //! View state that belongs to the window rather than the project (selection,
 //! zoom, which tab is open) and [`Cx`], the bundle every view is handed.
 
+use super::editors::Editors;
 use super::files::Jobs;
+use super::recovery::Recovery;
 use super::snapshot::{Live, Snapshot};
 use super::sounds::{DropTarget, Sounds};
 use super::timeline::{Glide, GridChoice, PitchView, Snap, TimeView};
@@ -885,7 +887,12 @@ pub struct Cx<'a> {
     /// Address of the MCP server, when one is running for this window.
     pub mcp_url: Option<&'a str>,
     pub state: &'a mut UiState,
+    /// The plugins' own windows: opening them, and which are on their way.
+    pub editors: &'a mut Editors,
     pub jobs: &'a mut Jobs,
+    /// Unsaved work a program that died left behind, and the offer to
+    /// bring it back.
+    pub recovery: &'a mut Recovery,
     /// Waveforms, previews, the library and drops: everything that reads
     /// audio files, none of it on this thread.
     pub sounds: &'a mut Sounds,

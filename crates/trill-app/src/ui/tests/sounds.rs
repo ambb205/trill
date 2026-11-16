@@ -986,6 +986,36 @@ fn an_audio_clip_shows_a_placeholder_until_its_waveform_arrives() {
 // ---- the end of the file ----------------------------------------------------
 
 #[test]
+fn an_audio_clips_edge_waits_until_the_length_of_its_file_is_known() {
+    let (mut harness, _pack, _, clips) = with_audio_clips(UiOptions::default());
+    // The kick is one beat long; here it has been trimmed to half of that,
+    // and its file is still being read: nobody knows yet where it ends.
+    let kick = clips[0];
+    harness.session.lock().edit(|project| project.set_clip_span(kick, 0.0, 0.5)).unwrap();
+    harness.runtime.media.clear();
+    harness.app.sounds().hold(true);
+    harness.idle(5);
+    let length = |harness: &Harness| harness.project().clip(kick).unwrap().length;
+    let before = harness.undo_depth();
+
+    // Dragged out now, the edge stays: it would have run past an end that
+    // is not known. It can still be dragged in.
+    harness.drag_holding(Modifiers::ALT, harness.lane(0.5, 0) - vec2(2.0, 0.0), harness.lane(5.0, 0));
+    assert_eq!(length(&harness), 0.5, "not past the end of a file nobody has measured");
+    assert_eq!(harness.undo_depth(), before, "and a drag that changed nothing is no undo step");
+    harness.drag_holding(Modifiers::ALT, harness.lane(0.5, 0) - vec2(2.0, 0.0), harness.lane(0.125, 0));
+    assert!(length(&harness) < 0.2, "shorter is always allowed: {}", length(&harness));
+
+    // Once the file has been read, the edge goes as far as the file does.
+    harness.app.sounds().hold(false);
+    harness.settle_work();
+    harness.session.lock().edit(|project| project.set_clip_span(kick, 0.0, 0.5)).unwrap();
+    harness.idle(2);
+    harness.drag_holding(Modifiers::ALT, harness.lane(0.5, 0) - vec2(2.0, 0.0), harness.lane(5.0, 0));
+    assert!((length(&harness) - 1.0).abs() < 1e-3, "{}", length(&harness));
+}
+
+#[test]
 fn an_audio_clip_cannot_be_dragged_past_the_end_of_its_file() {
     let (mut harness, _pack, _, clips) = with_audio_clips(UiOptions::default());
     harness.settle_work();

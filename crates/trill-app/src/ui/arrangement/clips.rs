@@ -172,15 +172,26 @@ pub(in crate::ui) fn file_second(clip: &Clip, audio: &AudioContent, tempo: f64, 
     audio.offset_seconds + (beat - clip.start) * audio.seconds_per_beat(tempo)
 }
 
-/// How many beats of the timeline `clip`'s file can fill from where the
-/// clip enters it: the longest the clip can be before it runs off the end
-/// of its recording. `None` for a MIDI clip, and while the file's length
-/// is not known (it has not been read yet, or cannot be).
-pub(in crate::ui) fn audio_room(cx: &Cx, clip: &Clip) -> Option<Beats> {
-    let audio = clip.audio()?;
-    let wave = cx.sounds.known_wave(&audio.path)?;
-    let seconds = (wave.seconds() - audio.offset_seconds).max(0.0);
-    Some(seconds / audio.seconds_per_beat(cx.snap.project.tempo))
+/// The length `clip` may take when it is asked to be `wanted` beats long.
+///
+/// A MIDI clip takes what it is asked, and any clip may get shorter. An
+/// audio clip stops growing where its file ends: beyond that there is
+/// nothing to play. One that is already longer (the tempo changed under
+/// it) may stay so, but not grow. While the file is still being read
+/// nobody knows where it ends, so the clip does not grow at all until that
+/// is known; asking here is what has it read. A file that cannot be read
+/// has no end to stop at, and its clip is silent at any length.
+pub(in crate::ui) fn allowed_length(cx: &Cx, clip: &Clip, wanted: Beats) -> Beats {
+    let Some(audio) = clip.audio().filter(|_| wanted > clip.length) else { return wanted };
+    match cx.sounds.wave(&audio.path) {
+        WaveState::Ready(wave) => {
+            let seconds = (wave.seconds() - audio.offset_seconds).max(0.0);
+            let room = seconds / audio.seconds_per_beat(cx.snap.project.tempo);
+            wanted.min(room.max(clip.length))
+        }
+        WaveState::Loading => clip.length,
+        WaveState::Failed(_) => wanted,
+    }
 }
 
 /// Draws what an audio clip plays: the waveform of its stretch of the

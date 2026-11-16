@@ -6,9 +6,9 @@
 //! reports back through a channel that [`Jobs::poll`] drains each frame; the
 //! UI thread never waits on any of it.
 
-use super::colors;
 use super::state::{Cx, UiState};
 use super::toast::ToastKind;
+use super::{colors, widgets};
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -17,7 +17,6 @@ use trill_core::midi_file::{self, MidiFile};
 use trill_core::project::ImportedPart;
 use trill_core::{Beats, ChainRef};
 use trill_engine::{RenderOptions, RenderReport, Session, SessionError, SharedSession};
-use trill_noir::{Variant, paint, text};
 
 pub const PROJECT_EXTENSION: &str = "trill";
 const MIDI_EXTENSIONS: [&str; 2] = ["mid", "midi"];
@@ -75,7 +74,9 @@ impl Jobs {
     }
 
     /// Applies what helper threads have reported since the last frame.
-    pub fn poll(&mut self, state: &mut UiState) {
+    /// Returns true if the open project was replaced by one from a file.
+    pub fn poll(&mut self, state: &mut UiState) -> bool {
+        let mut replaced = false;
         while let Ok(event) = self.receiver.try_recv() {
             match event {
                 Event::DialogCancelled => self.dialog_open = false,
@@ -83,6 +84,7 @@ impl Jobs {
                     self.dialog_open = false;
                     match result {
                         Ok(path) => {
+                            replaced = true;
                             state.reset_for_new_project();
                             state.toasts.info(format!("Opened {}", file_name(&path)));
                         }
@@ -129,6 +131,7 @@ impl Jobs {
                 }
             }
         }
+        replaced
     }
 
     /// Runs `work` on a helper thread. `work` reports through the callback
@@ -363,55 +366,9 @@ pub fn confirm_modal(ctx: &egui::Context, cx: &mut Cx) {
         Confirm::Quit => ("quitting", "Discard and quit"),
     };
 
-    let theme = cx.theme;
-    let mut choice = None;
-    // A flat panel with a hairline: a caps title over a rule, the question,
-    // and the buttons at the right.
-    let frame = egui::Frame::NONE
-        .fill(theme.panel)
-        .stroke(egui::Stroke::new(1.0, theme.hairline))
-        .inner_margin(egui::Margin::symmetric(14, 12));
-    let modal = egui::Modal::new(egui::Id::unique("confirm-discard")).frame(frame).backdrop_color(theme.backdrop).show(
-        ctx,
-        |ui| {
-            ui.set_width(400.0);
-            ui.spacing_mut().item_spacing = egui::vec2(theme.metric.gap, 0.0);
-            let (title, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), egui::Sense::hover());
-            let caps = theme.text.caps;
-            text::paint(
-                ui.painter(),
-                title,
-                egui::Align2::LEFT_CENTER,
-                caps,
-                "Discard unsaved changes?",
-                theme.ink_dim,
-            );
-            ui.add_space(6.0);
-            let (rule, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
-            paint::hline(ui.painter(), rule.x_range(), rule.top(), theme.hairline);
-            ui.add_space(10.0);
-            ui.label(
-                egui::RichText::new(format!(
-                    "\"{}\" has changes that are not saved. They will be lost by {verb}.",
-                    cx.snap.project.name
-                ))
-                .color(theme.ink),
-            );
-            ui.add_space(14.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if trill_noir::button(ui, theme, proceed, Variant::Danger).clicked() {
-                    choice = Some(true);
-                }
-                if trill_noir::button(ui, theme, "Cancel", Variant::Default).clicked() {
-                    choice = Some(false);
-                }
-            });
-        },
-    );
-    if modal.should_close() {
-        choice.get_or_insert(false);
-    }
-
+    let body = format!("\"{}\" has changes that are not saved. They will be lost by {verb}.", cx.snap.project.name);
+    let title = "Discard unsaved changes?";
+    let choice = widgets::question(ctx, cx.theme, "confirm-discard", title, &body, proceed, "Cancel");
     let Some(proceed) = choice else { return };
     cx.jobs.confirm = None;
     if !proceed {

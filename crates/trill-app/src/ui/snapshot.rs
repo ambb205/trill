@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use trill_core::project::AutomationLane;
 use trill_core::{AutomationPoint, AutomationTarget, Beats, Clip, ClipId, DeviceId, Note, Project, Track, TrackId};
 use trill_engine::{Meter, ParamState, Problem, SampleFile, Session};
 
@@ -49,6 +50,9 @@ pub struct Snapshot {
     /// Parameters of the devices the Devices tab and the automation lanes
     /// show, or why a device has none (it failed to load).
     pub params: HashMap<DeviceId, Result<Vec<ParamState>, String>>,
+    /// The devices that bring a window of their own (plugins do, built-in
+    /// devices do not), in ascending order.
+    pub editors: Vec<DeviceId>,
     /// What each MIDI clip plays, worked out the first time it is drawn and
     /// kept until the next revision.
     clip_notes: RefCell<HashMap<ClipId, Rc<ClipNotes>>>,
@@ -91,6 +95,12 @@ impl Snapshot {
             .iter()
             .filter_map(|track| session.track_meter(track.id).map(|meter| (track.id, meter)))
             .collect();
+        // Asked of every device, shown or not: the mixer lists them all.
+        // For a built-in device it is a failed lookup and no more.
+        let chains = project.tracks.iter().map(|track| &track.devices).chain([&project.master.devices]);
+        let mut editors: Vec<DeviceId> =
+            chains.flatten().map(|device| device.id).filter(|id| session.device_has_editor(*id)).collect();
+        editors.sort_unstable();
         Self {
             revision: session.revision(),
             can_undo: session.can_undo(),
@@ -102,6 +112,7 @@ impl Snapshot {
             samples,
             params_tracks: shown.iter().map(|track| track.id).collect(),
             params,
+            editors,
             clip_notes: RefCell::default(),
             track_meters,
             master_meter: session.master_meter(),
@@ -143,14 +154,29 @@ impl Snapshot {
         entry.clone()
     }
 
-    /// The envelope that automates `target`, if there is one.
-    pub fn envelope(&self, target: &AutomationTarget) -> Option<&[AutomationPoint]> {
-        self.project.automation.iter().find(|lane| lane.target == *target).map(|lane| lane.points.as_slice())
+    /// The lane that automates `target`, if there is one: its envelope, and
+    /// whether it is switched on.
+    pub fn lane(&self, target: &AutomationTarget) -> Option<&AutomationLane> {
+        self.project.automation.iter().find(|lane| lane.target == *target)
     }
 
-    /// What `target`'s envelope says at `beat`; `None` if it has none.
+    /// The envelope that automates `target`, if there is one, switched on
+    /// or not.
+    pub fn envelope(&self, target: &AutomationTarget) -> Option<&[AutomationPoint]> {
+        self.lane(target).map(|lane| lane.points.as_slice())
+    }
+
+    /// What `target`'s envelope makes of it at `beat`: what is heard.
+    /// `None` if it has no envelope, or one that is switched off, in which
+    /// case the target stays where it is set by hand.
     pub fn automated(&self, target: &AutomationTarget, beat: Beats) -> Option<f64> {
-        self.envelope(target).map(|points| trill_core::project::automation_value(points, beat))
+        let lane = self.lane(target).filter(|lane| lane.enabled)?;
+        Some(trill_core::project::automation_value(&lane.points, beat))
+    }
+
+    /// Whether `device` brings a window of its own to open.
+    pub fn has_editor(&self, device: DeviceId) -> bool {
+        self.editors.binary_search(&device).is_ok()
     }
 
     /// The description of a device's parameter, when the snapshot covers
@@ -235,11 +261,26 @@ pub struct Live {
     /// How many warped clips play a stand-in while their stretched audio
     /// is being made.
     pub preparing: usize,
+    /// The devices whose own windows are open right now. Asked of the
+    /// session every time: the user closes them without telling anyone.
+    pub open_editors: Vec<DeviceId>,
     pub master: MeterState,
     tracks: HashMap<TrackId, MeterState>,
 }
 
 impl Live {
+    /// Whether the editor of `device` is open.
+    pub fn editor_open(&self, device: DeviceId) -> bool {
+        self.open_editors.contains(&device)
+    }
+
+    /// Reads which of the snapshot's editors are open. A handful of
+    /// lookups, and nothing at all for a project without plugins.
+    pub fn update_editors(&mut self, snapshot: &Snapshot, session: &Session) {
+        self.open_editors.clear();
+        self.open_editors.extend(snapshot.editors.iter().copied().filter(|id| session.is_device_editor_open(*id)));
+    }
+
     pub fn track_meter(&self, id: TrackId) -> MeterState {
         self.tracks.get(&id).copied().unwrap_or_default()
     }
@@ -401,5 +442,12 @@ mod tests {
         assert_eq!(snapshot.envelope(&volume).unwrap().len(), 2);
         assert_eq!(snapshot.automated(&volume, 2.0), Some(-6.0));
         assert_eq!(snapshot.automated(&AutomationTarget::TrackPan { track }, 2.0), None);
+
+        // Switched off, the envelope is still there and says nothing.
+        session.edit(|project| project.set_automation_enabled(&volume, false)).unwrap();
+        let snapshot = Snapshot::capture(&session, &[]);
+        assert_eq!(snapshot.envelope(&volume).unwrap().len(), 2);
+        assert!(snapshot.lane(&volume).is_some_and(|lane| !lane.enabled));
+        assert_eq!(snapshot.automated(&volume, 2.0), None);
     }
 }

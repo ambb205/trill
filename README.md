@@ -87,8 +87,8 @@ brickwall), `chorus`, `filter` (resonant, with LFO), `pump` (sidechain-style duc
 
 **Plugins**: installed CLAP and VST3 plugins appear beside the built-in devices as `clap:<plugin id>` and
 `vst3:<class id>`. Their state is saved in the project, and their parameters are automatable and reachable over
-MCP like any other device's. A plugin's own editor opens in a window (Windows only so far), and what is changed
-there flows back into the project.
+MCP like any other device's. A plugin's own editor opens in a window (Windows only so far), from the Editor button
+on its panel or at the end of its chip in the mixer, and what is changed there flows back into the project.
 
 **Songwriting**: chords by symbol or Roman numeral, voicings, rhythms, arpeggios, bass lines, drum grooves with
 fills, melodies by scale degree, swing and humanizing, and reading a song's key and chords back from its notes
@@ -106,9 +106,15 @@ segments, group tracks and return tracks with sends, a metronome, sample-exact t
 playback, and render analysis (peak, LUFS, stereo correlation, spectral balance, per-track levels).
 
 **Application**: an arrangement with multi-clip editing (move and copy across tracks, trim either edge, split,
-fades, a clipboard, time selection), markers, group and return tracks, and automation lanes that are edited by
-hand or drawn in steps; a piano roll; device panels generated from each device's parameters; a mixer; MIDI import
-and export; project files; WAV export. `F1` lists the keyboard shortcuts.
+fades, a clipboard, time selection, and deleting, repeating or inserting a stretch of time on every track at
+once), markers, group and return tracks, and automation lanes that are edited by hand or drawn in steps; a piano
+roll; device panels generated from each device's parameters; a mixer; MIDI import and export; project files; WAV
+export. `F1` lists the keyboard shortcuts.
+
+An automated control is not locked: drag it and it is yours. Its envelope is switched off, not lost, the mark in
+the control's corner turns into an outline, and a click on that mark (or on the switch of its lane) hands the
+control back to the envelope. And when the program did not live to save a project, the window that opens next
+offers it back: recover it, discard it, or decide later (`File`, `Recover unsaved work`).
 
 The browser's **Sounds** tab is the sample library: add folders, search as you type, filter by one-shot or loop,
 kind, tempo and key, mark favorites, and hear a sound as you select it. Drag a sound onto a track for an audio
@@ -183,8 +189,7 @@ the graph is swapped on every block). The GUI is tested headlessly with simulate
 Working: everything listed above, with tests.
 
 Not yet: running plugins out of process (only scanning is isolated today, so a plugin that crashes while playing
-still takes the app with it; the safety copy is what saves the work), a button for plugin editors and a prompt
-for recovered projects in the window (both are reachable over MCP so far), plugin editors on Linux and macOS, the
+still takes the app with it; the safety copy is what saves the work), plugin editors on Linux and macOS, the
 assistant's chat panel, session (clip-launching) view, audio recording, warp markers, MIDI input devices, plugin
 delay compensation, multi-core rendering. Only Windows has been run so far.
 

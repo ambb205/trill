@@ -78,6 +78,22 @@ pub fn corner_mark(painter: &Painter, rect: Rect, color: Color32) {
     painter.add(Shape::convex_polygon(points, color, Stroke::NONE));
 }
 
+/// Side of a [`hollow_corner_mark`]: larger than the filled one, since an
+/// outline needs room to read as one.
+const HOLLOW_CORNER_MARK: f32 = 6.0;
+
+/// The outline of a triangle in the top right corner of `rect`: the mark of
+/// a control whose envelope is switched off. Where [`corner_mark`] says
+/// "something else drives this", its outline says "something else could".
+pub fn hollow_corner_mark(painter: &Painter, rect: Rect, color: Color32) {
+    let hair = hair(painter);
+    // Half a hairline further in, so the stroke lands on whole pixels.
+    let corner = pos2(snap(painter, rect.right()) - 1.5 * hair, snap(painter, rect.top()) + 1.5 * hair);
+    let points =
+        vec![corner - egui::vec2(HOLLOW_CORNER_MARK, 0.0), corner, corner + egui::vec2(0.0, HOLLOW_CORNER_MARK)];
+    painter.add(Shape::closed_line(points, Stroke::new(hair, color)));
+}
+
 /// The square of a status dot `side` points wide, vertically centered on
 /// `left_center`: a whole number of pixels each way, so every dot in a
 /// column is the same size.
