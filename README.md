@@ -36,6 +36,7 @@ asked for:
 ```sh
 cargo test -p trill-plugins -- --include-ignored    # against the CLAP and VST3 plugins installed here (minutes)
 cargo test -p trill-mcp --test presets -- --include-ignored --nocapture    # an assistant's pass over Surge XT's presets
+cargo test -p trill-mcp --test controllers -- --include-ignored --nocapture    # a SWAM saxophone and Surge XT played from the controller curves of clips
 cargo test -p trill-media -- --include-ignored      # decoding audio files found in this machine's usual folders
 TRILL_TEST_PLUGIN_WINDOWS=1 cargo test -p trill-plugins --test editor_windows -- --test-threads=1   # opens windows
 TRILL_TEST_CLAUDE=1 cargo test -p trill-assistant --test real_cli    # talks to an installed, signed-in Claude Code
@@ -154,15 +155,31 @@ keeps sustained sound smooth, `repitch` plays faster or slower like a record; wa
 
 **Engine**: sample-accurate MIDI and audio clips, clip looping, non-destructive trimming and splitting, audio
 fades, automation of track and master volume, pan and any device parameter with straight, held or curved
-segments, group tracks and return tracks with sends, a metronome, sample-exact transport looping, mute/solo, undo/redo, offline rendering that is bit-identical to
+segments, MIDI controllers in clips (see below), group tracks and return tracks with sends, a metronome, sample-exact transport looping, mute/solo, undo/redo, offline rendering that is bit-identical to
 playback, and render analysis (peak, LUFS, stereo correlation, spectral balance, per-track levels).
+
+**Expression, wheels and pedals belong to the clip.** A MIDI clip holds a curve for any controller by its number,
+for the pitch wheel and for channel pressure, with the straight, held and curved segments automation has. The
+curves loop, trim, split, move and duplicate with the notes, are undone with them, and are read from and written
+to MIDI files. They are played smoothly and in time, at the right value wherever playback starts, seeks or wraps,
+and a render is the same as playback. Instruments that are silent until they are given expression (physically
+modelled winds and strings) get it from the clip, and the built-in instruments take expression and channel volume
+as a level. Three rules:
+
+- *After a clip ends*, the pitch wheel, pressure and the pedals return to rest; every other controller stays
+  where the clip left it.
+- *By hand against a clip*: a controller moved by hand is the hand's until the song next starts playing, seeks
+  while playing or loops round.
+- *The pedal* is recorded as a controller, and notes are as long as their keys were down: nothing is written
+  twice, and half-pedalling survives.
 
 **Playing and recording**: every MIDI keyboard that is plugged in plays the armed tracks (or the selected one)
 without a visit to the settings: notes, velocity, pitch wheel, mod wheel and sustain pedal, for built-in
 instruments and plugins alike. A key is placed in its audio buffer by the time it went down, so it is heard a
 fixed moment later rather than whenever the next buffer happens to start. Recording writes what is played into
-clips where it was *heard*: the engine takes the output latency off again, to the sample. A count-in, loop
-recording that layers each pass onto the last, one undo step per take. See
+clips where it was *heard*: the engine takes the output latency off again, to the sample. The wheels, the pedals
+and expression are recorded with the notes, thinned to the few points of a curve that follows the hand. A
+count-in, loop recording that layers each pass onto the last, one undo step per take. See
 [Playing and latency](#playing-and-latency).
 
 **Application**: an arrangement with multi-clip editing (move and copy across tracks, trim either edge, split,
@@ -170,6 +187,16 @@ fades, a clipboard, time selection, and deleting, repeating or inserting a stret
 once), markers, group and return tracks, and automation lanes that are edited by hand or drawn in steps; a piano
 roll; device panels generated from each device's parameters; a mixer; MIDI import and export; project files; WAV
 export. `F1` lists the keyboard shortcuts.
+
+The lane under the piano roll's notes shows velocity or a MIDI controller of the clip, chosen from the chips
+above it: expression, the mod wheel, the pitch wheel, the sustain pedal, whatever else the clip holds, and any
+other from the `+` beside them. A dot on a chip says the clip has a curve for that controller. The curve is
+edited as an automation lane is: a click adds a point, points and lines drag, `Alt`-drag bends a line, a
+double-click or `Delete` removes, a drag over nothing selects, and the pencil writes steps on the grid; each
+gesture is one undo step. While a take is recorded its clip is in the piano roll, and the lane shows the wheel or
+the pedal going down as it is moved. A track whose instrument is given notes and stays silent for a second is
+marked on its header and in the lane's strip, with what to do about it (`--lane expression` opens the window with
+the lane on a controller).
 
 An automated control is not locked: drag it and it is yours. Its envelope is switched off, not lost, the mark in
 the control's corner turns into an outline, and a click on that mark (or on the switch of its lane) hands the
@@ -207,17 +234,24 @@ anything is, and a rescan. The status bar shows the device, rate, buffer and lat
 rows of letters into a piano that plays where a MIDI keyboard plays (the armed tracks, or the selected one) and
 is recorded like one: `A S D F G H J K L ; '` are the white keys from C
 and `W E T Y U O P` the black ones, `Z` and `X` move them an octave down and up, `C` and `V` play softer and
-louder, and `Tab` sustains while it is held. The keys are where they are on the keyboard, whatever layout types
-on them. A strip above the detail panel shows the octave, the velocity, the keys with the letter on each and the
-notes being held, and says why nothing sounds when nothing can (no track selected, a track with no instrument, a
-muted one); the piano roll's own keyboard lights the same notes. The switch, the octave and the velocity are
-remembered.
+louder, `B` and `N` give less and more expression, `M` and `,` turn the mod wheel down and up, and `Tab`
+sustains while it is held. The keys are where they are on the keyboard, whatever layout types
+on them. A strip above the detail panel shows the octave, the velocity, expression, the mod wheel, the keys with
+the letter on each and the notes being held, and says why nothing sounds when nothing can (no track selected, a
+track with no instrument, a muted one, an instrument that is given the notes and puts nothing out); the piano
+roll's own keyboard lights the same notes. The switch, the octave and the velocity are remembered.
+
+A track is told the keyboard's expression (full, until it is set lower) and where its mod wheel is just before
+the first note typed on it, and whenever either changes after that: an instrument that waits for breath sounds
+when it is simply typed on, and a take records what it was played with. When the keys stop playing a track, its
+mod wheel is put back at rest and its expression back at full.
 
 While it is on, a letter it uses plays a note, and the shortcut that letter had is `Alt` with the letter (`F1`
 lists them as they are at the moment). It never takes a key while a text field, the sound search or a dialog has
 the keyboard, or while `Ctrl`, `Alt`, `Shift` or the Windows key is held. And no note is left sounding: whatever
 ends the playing (the switch, another track selected or armed, an octave change under a held key, the window
-losing the keyboard, a dialog, another audio device, another project, exit) ends its notes.
+losing the keyboard, a dialog, another audio device, another project, exit) ends its notes, and gives back the
+controllers the keyboard moved.
 
 ![A chord held on the computer keyboard, lit in the strip and on the piano roll](docs/images/keyboard-playing.png)
 
@@ -235,6 +269,7 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Clips | `create_clip`, `create_audio_clip`, `update_clip`, `split_clip`, `duplicate_clip`, `delete_clip` |
 | Sounds | `search_sounds`, `library`, `preview_sound`, `set_sample` |
 | Notes | `get_notes`, `add_notes`, `set_notes`, `remove_notes`, `transform_notes` |
+| Controllers | `get_controllers`, `set_controllers`, `shape_dynamics` (gives a line its dynamics from its notes, as an expression curve) |
 | Music | `write_chords`, `write_drums`, `write_arpeggio`, `write_bass`, `write_melody`, `analyze_music`, `music_reference` |
 | Automation | `set_automation`, `get_automation`, `set_markers` |
 | Arrangement | `edit_time` (remove, repeat or open up a stretch of time on every track at once) |
@@ -318,8 +353,8 @@ Not yet: running plugins out of process (only scanning and the reading of preset
 that crashes while playing or while it loads a preset still takes the app with it; the safety copy is what saves
 the work), a preset browser for plugins in the window (the session lists, searches and loads them, and so does
 MCP; the device panel shows built-in presets only), plugin editors on Linux and macOS,
-session (clip-launching) view, audio recording (MIDI is recorded; audio is not), recording of the pitch and
-mod wheels (they are heard while playing; clips have nowhere to keep them yet), ASIO, warp markers, plugin
+session (clip-launching) view, audio recording (MIDI is recorded; audio is not), polyphonic aftertouch and MPE
+(per-note expression; clips hold one curve per controller for the whole channel), ASIO, warp markers, plugin
 delay compensation, multi-core rendering. Only Windows has been run so far.
 
 ## Licence

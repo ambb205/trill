@@ -148,6 +148,9 @@ impl TrillApp {
         }
         state.browser.sounds.pending_select = options.select_sound.clone();
         state.shortcuts_open = options.show_shortcuts;
+        if let Some(kind) = options.lane {
+            state.piano.lane = super::state::LaneShown::Controller(kind);
+        }
         let (snapshot, factory, audio, live_input) = {
             let mut guard = session.lock();
             let first = Snapshot::capture(&guard, &[]);

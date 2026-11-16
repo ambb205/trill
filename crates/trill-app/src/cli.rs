@@ -5,7 +5,7 @@ use crate::ui::{AssistantOptions, AssistantScene, BrowserTab, DetailTab, Keyboar
 use anyhow::{Context, anyhow, bail};
 use std::path::PathBuf;
 use std::time::Duration;
-use trill_core::{ClipId, Project, TrackId};
+use trill_core::{ClipId, ControllerKind, Project, TrackId};
 use trill_engine::AudioBackend;
 use trill_plugins::Scanner;
 use trill_runtime::{RuntimeOptions, Storage};
@@ -19,6 +19,9 @@ Options:
   --select <CLIP NAME>    Select the first clip with this name at startup
   --also-select <NAME>    Select this clip as well; may be given several times
   --automation            Start with a lane open for every automation envelope
+  --lane <CONTROLLER>     What the lane under the piano roll's notes shows first: velocity, or a
+                          MIDI controller by name or number (expression, mod_wheel, pitch_bend,
+                          sustain, 74)
   --shortcuts             Start with the shortcut reference open
   --play                  Start playback when the window opens
   --size <WIDTHxHEIGHT>   Initial window size in points (default: 1440x900)
@@ -104,6 +107,9 @@ pub struct Cli {
     pub settings: bool,
     /// Made-up audio and MIDI devices to show in it.
     pub audio_scene: Option<AudioScene>,
+    /// The controller the lane under the piano roll's notes shows first;
+    /// `None` for velocity.
+    pub lane: Option<ControllerKind>,
     pub screenshot: Option<PathBuf>,
     /// With a screenshot: open the machine's own devices all the same.
     pub real_audio: bool,
@@ -158,6 +164,17 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
                 cli.keyboard.hold = KeyboardOptions::holding(&keys).map_err(|reason| anyhow!(reason))?;
             }
             "--automation" => cli.automation = true,
+            "--lane" => {
+                let name = value("what the lane shows")?;
+                cli.lane = match name.as_str() {
+                    "velocity" => None,
+                    name => Some(ControllerKind::parse(name).with_context(|| {
+                        format!(
+                            "the lane cannot show '{name}' (expected velocity, or a controller such as expression,                              mod_wheel, pitch_bend, sustain or a number from 0 to 119)"
+                        )
+                    })?),
+                };
+            }
             "--shortcuts" => cli.shortcuts = true,
             "--also-select" => cli.also_select.push(value("a clip name")?),
             "--library" => cli.library.push(PathBuf::from(value("a folder")?)),
@@ -294,6 +311,7 @@ impl Cli {
             select_clip: None,
             also_select: Vec::new(),
             show_automation: self.automation,
+            lane: self.lane,
             show_shortcuts: self.shortcuts,
             mcp_url: None,
             theme: self.theme.unwrap_or(defaults.theme),
@@ -544,6 +562,13 @@ mod tests {
         let error = run(&["--hold", "aq"]).unwrap_err().to_string();
         assert!(error.contains("'q'"), "{error}");
         assert!(USAGE.contains("--keyboard") && USAGE.contains("--hold"));
+        // What the lane under the piano roll's notes shows first.
+        assert!(USAGE.contains("--lane"));
+        assert_eq!(run(&["--lane", "expression"]).unwrap().ui_options().lane, Some(ControllerKind::EXPRESSION));
+        assert_eq!(run(&["--lane", "pitch_bend"]).unwrap().ui_options().lane, Some(ControllerKind::PitchBend));
+        assert_eq!(run(&["--lane", "74"]).unwrap().ui_options().lane, ControllerKind::numbered(74));
+        assert_eq!(run(&["--lane", "velocity"]).unwrap().ui_options().lane, None);
+        assert!(run(&["--lane", "loudness"]).unwrap_err().to_string().contains("cannot show 'loudness'"));
     }
 
     #[test]

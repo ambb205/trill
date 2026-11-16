@@ -2,10 +2,13 @@
 //! on an empty project). Sixteen bars in A minor over Am - F - C - G: pad and
 //! hats, then drums and bass, then an arpeggio, then a bell melody on top.
 //! The three synths share a group and send to a reverb on a return track,
-//! the pad's filter opens along an envelope, and markers name the sections.
+//! the pad's filter opens along an envelope, the melody's clip holds its own
+//! dynamics as an expression curve and leans on its long notes with the mod
+//! wheel, and markers name the sections.
 
 use trill_core::{
-    AutomationPoint, AutomationTarget, Beats, ChainRef, ClipId, DeviceId, Note, Segment, TrackId, TrackKind,
+    AutomationPoint, AutomationTarget, Beats, ChainRef, ClipId, ControllerKind, DeviceId, Note, Segment, TrackId,
+    TrackKind,
 };
 use trill_engine::{Session, SessionError};
 
@@ -75,7 +78,12 @@ fn build(session: &mut Session) -> Result<ClipId, SessionError> {
 
     let bell = track(session, "Bell", "builtin:polysynth", "bell", -12.0, -0.25)?;
     effect(session, bell, "builtin:delay", &[("time_beats", 1.0), ("mix", 0.25)])?;
-    clip(session, bell, "Melody", 12.0 * BAR, PROGRESSION, None, melody())?;
+    let sung = clip(session, bell, "Melody", 12.0 * BAR, PROGRESSION, None, melody())?;
+    session.edit(|project| {
+        let clip = project.clip_mut(sung)?;
+        clip.set_controller(ControllerKind::EXPRESSION, melody_dynamics())?;
+        clip.set_controller(ControllerKind::MOD_WHEEL, melody_vibrato())
+    })?;
 
     // The synths play through a group, and each sends a little to a shared
     // reverb.
@@ -262,6 +270,35 @@ fn melody() -> Vec<Note> {
     ]
 }
 
+/// The melody's dynamics, as the clip's expression: each half of the
+/// phrase swells into its long note, and the whole falls away at the end.
+fn melody_dynamics() -> Vec<AutomationPoint> {
+    let bent = |beat: Beats, value: f64, bend: f32| AutomationPoint { beat, value, shape: Segment::Curve(bend) };
+    vec![
+        bent(0.0, 0.62, -0.3),
+        AutomationPoint::new(2.0, 0.94),
+        AutomationPoint::new(4.0, 0.8),
+        bent(8.0, 0.66, -0.3),
+        AutomationPoint::new(12.0, 1.0),
+        bent(14.0, 0.9, 0.4),
+        AutomationPoint::new(16.0, 0.5),
+    ]
+}
+
+/// The mod wheel on the melody's two long notes: up as each is held, and
+/// back at rest for the note after it.
+fn melody_vibrato() -> Vec<AutomationPoint> {
+    let held = |beat: Beats, value: f64| AutomationPoint { beat, value, shape: Segment::Hold };
+    vec![
+        AutomationPoint::new(1.0, 0.0),
+        AutomationPoint::new(2.75, 0.45),
+        held(3.0, 0.0),
+        AutomationPoint::new(13.0, 0.0),
+        AutomationPoint::new(14.75, 0.5),
+        held(15.0, 0.0),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,6 +345,11 @@ mod tests {
         assert!(project.tracks[..2].iter().all(|track| track.group.is_none() && track.sends.is_empty()));
         assert_eq!(project.markers.len(), 4);
         assert_eq!(project.automation.len(), 1, "the pad's filter envelope");
+        // The melody carries its own dynamics and vibrato, in its clip.
+        let melody = &project.tracks[5].clips[0];
+        let held: Vec<ControllerKind> = melody.controllers().iter().map(|curve| curve.controller).collect();
+        assert_eq!(held, [ControllerKind::MOD_WHEEL, ControllerKind::EXPRESSION]);
+        assert!(melody.controllers().iter().all(|curve| curve.points.iter().all(|point| point.beat <= PROGRESSION)));
 
         assert!(session.undo());
         assert!(session.project().tracks.is_empty(), "one undo removes the whole demo");

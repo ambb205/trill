@@ -113,6 +113,9 @@ pub struct UiOptions {
     pub also_select: Vec<ClipId>,
     /// Unfold a lane for every envelope the project has.
     pub show_automation: bool,
+    /// The MIDI controller the lane under the piano roll's notes shows
+    /// first; `None` for velocity.
+    pub lane: Option<trill_core::ControllerKind>,
     /// Open with the shortcut reference up.
     pub show_shortcuts: bool,
     /// Address of the MCP server AI assistants can connect to, if it runs.
@@ -155,6 +158,7 @@ impl Default for UiOptions {
             select_clip: None,
             also_select: Vec::new(),
             show_automation: false,
+            lane: None,
             show_shortcuts: false,
             mcp_url: None,
             theme: theme_names()[0],
