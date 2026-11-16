@@ -61,9 +61,9 @@ on the samples.
 | `trill-library` | The sample library (scan, index, search, tags from file names) and the settings file. |
 | `trill-theory` | Music theory as pure functions: chord symbols, progressions, voicings, grooves, bass lines, melody notation, key and chord reading. |
 | `trill-plugins` | CLAP (`clap/`) and VST3 (`vst3/`) hosting. Per format: `factory`, `instance` (the plugin's main-thread half), `processor` (its audio-thread half), `controller`. Plugins are scanned, and their presets read, in a child process (`scan/`, `presets/`, the `trill-plugin-scan` binary) so one that crashes costs a message. All plugin main-thread work runs on one thread (`main_thread.rs`). `scripted.rs` in each format is a fake plugin for tests. |
-| `trill-engine` | `engine.rs` (the stream and its queues), `processor.rs` (the audio thread), `compile.rs`, `graph.rs`, `render.rs`, `session.rs` with `session/` (plugin editors, live playing and audio settings, presets, recording takes), `host/` (audio hosts: the system's, WASAPI exclusive, and `scripted` for tests), `sources.rs` and `stretcher.rs` (clip audio). |
+| `trill-engine` | `engine.rs` (the stream and its queues), `processor.rs` (the audio thread), `compile.rs`, `graph.rs`, `render.rs` with `analysis.rs` (what a render measures, as it goes) and `ready.rs` (waiting for plugins before one), `probe.rs` (playing an instrument notes to learn what it does), `session.rs` with `session/` (plugin editors, live playing and audio settings, presets, recording takes, probes), `host/` (audio hosts: the system's, WASAPI exclusive, and `scripted` for tests), `scripted.rs` (instruments for tests that behave like slow plugins), `sources.rs` and `stretcher.rs` (clip audio). |
 | `trill-runtime` | `Runtime`: the session, media cache, library, settings, MIDI input ports, safety copies of unsaved work and the housekeeping thread, built once. Both programs start from it. |
-| `trill-mcp` | The MCP server and the windowless `trill-mcp` binary. `requests.rs` (tool arguments), `server.rs` and `music.rs` (the tools), `view.rs` (replies), `guard.rs` (limits on the in-app assistant's endpoint). |
+| `trill-mcp` | The MCP server and the windowless `trill-mcp` binary. `requests.rs` (tool arguments), `server.rs` and `music.rs` (the tools), `hearing.rs` (`probe`, `measure` and `render`, with their arguments and replies), `view.rs` (replies), `guard.rs` (limits on the in-app assistant's endpoint). |
 | `trill-assistant` | The back end of the in-app assistant: runs the user's own Claude Code CLI, one process per message, confined to Trill's tools. |
 | `trill-noir` | The egui widget kit and theme ("Instrument Noir"): Bars, Chips, Faders, text, icons, tokens. |
 | `trill-app` | The window (binary `trill`), all under `src/ui/`. |
@@ -105,6 +105,9 @@ on the samples.
 - **A failure is a sentence, not a crash.** A device that vanishes, a plugin that refuses, a file that is gone:
   each ends in a message the user can read (`Session::problems`, `StreamInfo::warning`, a toast) and the song
   keeps playing. No stuck notes: whatever starts a note owns stopping it.
+- **A render is not a quick look.** It creates every device afresh and waits for plugins to be ready
+  (`ready.rs`). To find out what an instrument does, use a probe (`Session::probe_job`, the `probe` tool); to
+  check a mix, `RenderJob::measure` (the `measure` tool), which writes nothing.
 - **Hermetic by default.** Tests, screenshots and scripts never read or write the user's settings
   (`%APPDATA%\trill`), sample library or safety copies: `RuntimeOptions::hermetic()` or `Storage::At` on a
   temporary folder in tests, `trill-mcp --scratch` and `trill --profile <folder>` by hand.

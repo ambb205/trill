@@ -244,6 +244,8 @@ pub(crate) struct Seen {
     pub blocks: u32,
     pub flushes: u32,
     pub largest_block: int32,
+    /// The process mode the last block was given in.
+    pub block_mode: Option<int32>,
     /// The transport of the last block.
     pub context: Option<ProcessContext>,
     /// The audio buses of the last block with frames: inputs, outputs.
@@ -1197,6 +1199,7 @@ impl<const ROLE: u8> IAudioProcessorTrait for Object<ROLE> {
                 seen.blocks = blocks;
                 seen.flushes += u32::from(frames == 0);
                 seen.largest_block = seen.largest_block.max(data.numSamples);
+                seen.block_mode = Some(data.processMode);
                 seen.lists_missing |= lists.contains(&true);
                 seen.context = data.processContext.as_ref().copied();
                 note_thread(&mut seen.audio_threads);

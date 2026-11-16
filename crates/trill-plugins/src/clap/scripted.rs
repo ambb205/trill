@@ -26,6 +26,7 @@ use clack_extensions::params::{
     HostParams, ParamDisplayWriter, ParamInfo, ParamInfoFlags, ParamInfoWriter, PluginAudioProcessorParams,
     PluginMainThreadParams, PluginParams,
 };
+use clack_extensions::render::{PluginRender, PluginRenderImpl, RenderMode};
 use clack_extensions::state::{PluginState, PluginStateImpl};
 use clack_extensions::thread_check::HostThreadCheck;
 use clack_extensions::timer::{HostTimer, PluginTimer, PluginTimerImpl, TimerId};
@@ -462,7 +463,8 @@ impl<const KIND: u8> Plugin for Scripted<KIND> {
                 .register::<PluginParams>()
                 .register::<PluginState>()
                 .register::<PluginAudioPorts>()
-                .register::<PluginNotePorts>();
+                .register::<PluginNotePorts>()
+                .register::<PluginRender>();
         }
         if has_editor(KIND) {
             builder.register::<PluginGui>().register::<PluginTimer>();
@@ -706,6 +708,19 @@ impl<const KIND: u8> PluginTimerImpl for MainThread<'_, KIND> {
         for action in take_actions(self.shared.serial) {
             self.perform(action);
         }
+    }
+}
+
+/// The plugin cares whether it is rendered or played, and writes down
+/// which it was told.
+impl<const KIND: u8> PluginRenderImpl for MainThread<'_, KIND> {
+    fn has_hard_realtime_requirement(&self) -> bool {
+        false
+    }
+
+    fn set(&self, mode: RenderMode) -> Result<(), PluginError> {
+        log(self.shared.serial, if mode == RenderMode::Offline { "render offline" } else { "render realtime" });
+        Ok(())
     }
 }
 
