@@ -34,6 +34,25 @@
 //! exits. An octave change lets go of the keys held through it. The
 //! sustain key keeps notes whose keys came up, until it comes up itself.
 //!
+//! **Expression and the mod wheel.** The keyboard has an expression (full,
+//! until it is set lower) and a mod wheel (at rest), as it has a velocity:
+//! `B` and `N` step expression down and up, `M` and `,` the wheel, and the
+//! strip shows both. A track is told the two just before the first note
+//! the keyboard plays on it, and from then on whenever one changes, so an
+//! instrument that is silent until it is given breath (the modelled winds
+//! and strings are) sounds when it is simply typed on. They go the way the
+//! notes go, so a take records them like a pedal's or a wheel's: what the
+//! line was played with is in its clip, and plays back with it.
+//!
+//! **No controller is left where the keyboard put it.** What each track
+//! was told is written down in [`Keyboard::told`], and wherever notes are
+//! stopped because the keys no longer play a track (see above: the
+//! keyboard switched off, another track, a text field, the window no
+//! longer typed into, the program closing) the track's mod wheel is put
+//! back at rest and its expression back at full, if the keyboard had them
+//! anywhere else. The keyboard sends no pitch wheel and no pedal: its
+//! sustain key holds the notes itself.
+//!
 //! What is in [`layout`] says which key does what; [`remembered`] keeps
 //! the switch, the octave and the velocity between sessions; [`view`]
 //! draws the switch in the top bar and the strip above the detail panel.
@@ -53,7 +72,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use trill_core::device::{DeviceCategory, DeviceDescriptor, EventKind};
 use trill_core::pitch::pitch_name;
-use trill_core::{Device, Track, TrackId, TrackKind};
+use trill_core::{ControllerKind, Device, Track, TrackId, TrackKind};
 use trill_engine::LiveSender;
 
 /// The clock live input is stamped with: the engine's own, except in a test
@@ -68,6 +87,12 @@ const HIGHEST_LOWEST: u8 = 108;
 /// The velocities `C` and `V` step through: tens, so that a number says
 /// where one is, with the softest and the loudest note at the ends.
 const VELOCITIES: [u8; 14] = [1, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 127];
+/// The steps of expression and of the mod wheel: the same tens, down to
+/// nothing, where a wind instrument is silent and a wheel at rest.
+const LEVELS: [u8; 14] = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 127];
+/// Expression until it is set lower, and what a track is left with: full,
+/// where it changes nothing about an instrument that has a level of its own.
+pub const FULL_EXPRESSION: u8 = 127;
 /// Frames the settings must stay as they are before they are written down
 /// for the next session: not on every step of the velocity.
 const REMEMBER_AFTER_FRAMES: u32 = 45;
@@ -91,7 +116,7 @@ impl Options {
             layout::key_lettered(letter).ok_or_else(|| {
                 format!(
                     "'{letter}' is not a key of the computer keyboard (A W S E D F T G Y H U J K O L P ; ' are its \
-                     notes, Z and X move the octave, C and V the velocity)"
+                     notes, Z and X move the octave, C and V the velocity, B and N expression, M and , the mod wheel)"
                 )
             })
         };
@@ -106,6 +131,15 @@ struct Sounding {
     pitch: u8,
     /// The key that holds it down; `None` once only the sustain does.
     key: Option<Key>,
+}
+
+/// What a track was last told by the keyboard of its expression and its
+/// mod wheel; `None` for one it was not told.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct Told {
+    track: TrackId,
+    expression: Option<u8>,
+    mod_wheel: Option<u8>,
 }
 
 /// Why the keys are not heard.
@@ -124,6 +158,8 @@ pub enum Silence {
     /// Another track is soloed.
     Soloed(String),
     NoOutput,
+    /// The instrument, by name, is given the notes and puts nothing out.
+    Unanswered(String),
 }
 
 impl Silence {
@@ -148,6 +184,7 @@ impl Silence {
             Silence::Muted(name) => about(name, " is muted"),
             Silence::Soloed(name) => about(name, " is silenced by a solo"),
             Silence::NoOutput => (None, "No audio output \u{00B7} nothing will be heard".to_owned()),
+            Silence::Unanswered(name) => about(name, " is given notes and makes no sound"),
         }
     }
 
@@ -163,6 +200,7 @@ impl Silence {
             Silence::NoInstrument(_) => Some("add one from the browser"),
             Silence::Group(_) | Silence::Return(_) => Some("select a track with an instrument"),
             Silence::Soloed(_) => Some("solo this track too, or end the solo"),
+            Silence::Unanswered(_) => Some("it may have no sound loaded, or its expression or volume is at nothing"),
             _ => None,
         }
     }
@@ -196,10 +234,17 @@ pub struct Keyboard {
     /// The pitch of the lowest key: a C.
     lowest: u8,
     velocity: u8,
+    /// Expression (controller 11) and the mod wheel (controller 1), 0 to
+    /// 127, as the tracks the keys play are told them.
+    expression: u8,
+    mod_wheel: u8,
     /// Whether the strip shows the picture of the keys.
     key_map: bool,
     /// Every note that was started and not yet stopped.
     sounding: Vec<Sounding>,
+    /// Every track that was told an expression or a mod wheel, and has
+    /// not been given back its own.
+    told: Vec<Told>,
     /// The sustain key is down.
     sustain: bool,
     /// What the keys play, as worked out at the start of the frame.
@@ -233,6 +278,9 @@ pub struct Keyboard {
     /// Every message sent to the session, in order.
     #[cfg(test)]
     pub sent: Vec<Sent>,
+    /// Every controller sent to the session, in order, in steps of 127.
+    #[cfg(test)]
+    pub controls: Vec<(TrackId, ControllerKind, u8)>,
 }
 
 impl Keyboard {
@@ -249,8 +297,13 @@ impl Keyboard {
             on: saved.on || options.on || !options.hold.is_empty(),
             lowest,
             velocity: saved.velocity.clamp(1, 127),
+            // Not remembered: a session that began with the expression
+            // someone once turned down would begin in silence.
+            expression: FULL_EXPRESSION,
+            mod_wheel: 0,
             key_map: saved.key_map,
             sounding: Vec::new(),
+            told: Vec::new(),
             sustain: false,
             playing: Playing::default(),
             live,
@@ -268,6 +321,8 @@ impl Keyboard {
             windows_key: false,
             #[cfg(test)]
             sent: Vec::new(),
+            #[cfg(test)]
+            controls: Vec::new(),
         };
         // What the command line switched on is not what the user left.
         keyboard.remembered.1 = keyboard.settings();
@@ -294,6 +349,16 @@ impl Keyboard {
 
     pub fn sustaining(&self) -> bool {
         self.sustain
+    }
+
+    /// The expression the keys play with, 0 to 127.
+    pub fn expression(&self) -> u8 {
+        self.expression
+    }
+
+    /// Where the keyboard's mod wheel is, 0 to 127.
+    pub fn mod_wheel(&self) -> u8 {
+        self.mod_wheel
     }
 
     pub fn shows_key_map(&self) -> bool {
@@ -337,7 +402,8 @@ impl Keyboard {
         self.moved_at.take().is_some_and(|frame| self.frames.saturating_sub(frame) <= 1)
     }
 
-    /// Switches the keyboard on or off. Off, nothing is left sounding.
+    /// Switches the keyboard on or off. Off, nothing is left sounding and
+    /// no controller where the keyboard had it.
     pub fn toggle(&mut self) {
         self.on = !self.on;
         if !self.on {
@@ -363,10 +429,101 @@ impl Keyboard {
         self.velocity = stepped_velocity(self.velocity, steps);
     }
 
-    /// Stops every note this keyboard started.
+    /// Steps the expression: more for a positive `steps`, less for a
+    /// negative one. The tracks being played hear it at once.
+    pub fn step_expression(&mut self, steps: i8) {
+        self.expression = stepped(&LEVELS, self.expression, steps);
+        self.retell();
+    }
+
+    /// Turns the mod wheel up for a positive `steps`, down for a negative
+    /// one. The tracks being played hear it at once.
+    pub fn step_mod_wheel(&mut self, steps: i8) {
+        self.mod_wheel = stepped(&LEVELS, self.mod_wheel, steps);
+        self.retell();
+    }
+
+    /// Stops every note this keyboard started, and gives every track back
+    /// the controllers it moved.
     pub fn release_all(&mut self) {
         self.sustain = false;
         self.stop_where(|_| true);
+        self.withdraw(|_| true);
+    }
+
+    /// Sends `track` a controller. Returns whether the audio thread had
+    /// room for it.
+    fn send(&mut self, track: TrackId, kind: ControllerKind, value: u8) -> bool {
+        let sent = self.live.play_on_at((self.clock)(), track, kind.event(f32::from(value) / 127.0));
+        #[cfg(test)]
+        if sent {
+            self.controls.push((track, kind, value));
+        }
+        sent
+    }
+
+    /// Gives `track` the keyboard's expression and its mod wheel, unless
+    /// the track has them from it already. What the audio thread had no
+    /// room for is sent with the next note.
+    fn tell(&mut self, track: TrackId) {
+        let index = self.told.iter().position(|told| told.track == track).unwrap_or_else(|| {
+            self.told.push(Told { track, expression: None, mod_wheel: None });
+            self.told.len() - 1
+        });
+        let mut told = self.told[index];
+        let (expression, mod_wheel) = (self.expression, self.mod_wheel);
+        if told.expression != Some(expression) && self.send(track, ControllerKind::EXPRESSION, expression) {
+            told.expression = Some(expression);
+        }
+        // The wheel at rest is said too: a take then knows where it was
+        // before it was first moved.
+        if told.mod_wheel != Some(mod_wheel) && self.send(track, ControllerKind::MOD_WHEEL, mod_wheel) {
+            told.mod_wheel = Some(mod_wheel);
+        }
+        self.told[index] = told;
+    }
+
+    /// Gives `track` the keyboard's expression if the keys play it: a note
+    /// asked for with the mouse then sounds as one that is typed does.
+    pub fn tell_if_played(&mut self, track: TrackId) {
+        if self.on && self.playing.tracks.contains(&track) {
+            self.tell(track);
+        }
+    }
+
+    /// Tells the tracks that were told before what the two are now.
+    fn retell(&mut self) {
+        for index in 0..self.told.len() {
+            self.tell(self.told[index].track);
+        }
+    }
+
+    /// Gives the tracks `which` picks out their controllers back: the mod
+    /// wheel at rest and expression at full, where the keyboard had them
+    /// elsewhere. A track the audio thread had no room to tell is kept, and
+    /// told the next time this runs.
+    fn withdraw(&mut self, which: impl Fn(TrackId) -> bool) {
+        if !self.told.iter().any(|told| which(told.track)) {
+            return;
+        }
+        let (gone, kept): (Vec<Told>, Vec<Told>) =
+            std::mem::take(&mut self.told).into_iter().partition(|told| which(told.track));
+        self.told = kept;
+        for mut told in gone {
+            if told.expression.is_some_and(|sent| sent != FULL_EXPRESSION)
+                && self.send(told.track, ControllerKind::EXPRESSION, FULL_EXPRESSION)
+            {
+                told.expression = None;
+            }
+            if told.mod_wheel.is_some_and(|sent| sent != 0) && self.send(told.track, ControllerKind::MOD_WHEEL, 0) {
+                told.mod_wheel = None;
+            }
+            let owed = told.expression.is_some_and(|sent| sent != FULL_EXPRESSION)
+                || told.mod_wheel.is_some_and(|sent| sent != 0);
+            if owed {
+                self.told.push(told);
+            }
+        }
     }
 
     /// The window is told whether it is the one typed into before a frame
@@ -386,9 +543,11 @@ impl Keyboard {
         self.remember(true, None);
     }
 
-    /// Starts a note on `track`. A note the audio thread had no room for
-    /// was not started, and is not written down as one.
+    /// Starts a note on `track`, which is first told the keyboard's
+    /// expression if it has not been. A note the audio thread had no room
+    /// for was not started, and is not written down as one.
     fn start(&mut self, track: TrackId, pitch: u8, key: Key) {
+        self.tell(track);
         let kind = EventKind::NoteOn { pitch, velocity: self.velocity.clamp(1, 127) as f32 / 127.0 };
         if self.live.play_on_at((self.clock)(), track, kind) {
             self.sounding.push(Sounding { track, pitch, key: Some(key) });
@@ -451,6 +610,8 @@ impl Keyboard {
             }
             Role::Octave(octaves) => self.shift_octave(octaves),
             Role::Velocity(steps) => self.step_velocity(steps),
+            Role::Expression(steps) => self.step_expression(steps),
+            Role::ModWheel(steps) => self.step_mod_wheel(steps),
             Role::Sustain => self.sustain = true,
         }
     }
@@ -462,7 +623,7 @@ impl Keyboard {
                 self.sustain = false;
                 self.stop_where(|note| note.key.is_none());
             }
-            Role::Octave(_) | Role::Velocity(_) => {}
+            Role::Octave(_) | Role::Velocity(_) | Role::Expression(_) | Role::ModWheel(_) => {}
         }
     }
 
@@ -528,21 +689,34 @@ impl Keyboard {
     pub fn pedalled(&self) -> usize {
         self.sounding.iter().filter(|note| note.key.is_none()).count()
     }
+
+    /// The tracks that hold a controller of the keyboard's, with the
+    /// expression and the mod wheel each was told.
+    #[cfg(test)]
+    pub fn told(&self) -> Vec<(TrackId, Option<u8>, Option<u8>)> {
+        self.told.iter().map(|told| (told.track, told.expression, told.mod_wheel)).collect()
+    }
 }
 
 /// The velocity `steps` along the ladder from `velocity`: the next rung up
 /// or down, also from a value that is not on one.
 fn stepped_velocity(velocity: u8, steps: i8) -> u8 {
-    let mut velocity = velocity;
+    stepped(&VELOCITIES, velocity, steps)
+}
+
+/// The value `steps` rungs along `ladder` from `value`, which need not be
+/// on a rung itself. The ends of the ladder are as far as it goes.
+fn stepped(ladder: &[u8], value: u8, steps: i8) -> u8 {
+    let mut value = value;
     for _ in 0..steps.unsigned_abs() {
         let next = if steps > 0 {
-            VELOCITIES.iter().copied().find(|rung| *rung > velocity)
+            ladder.iter().copied().find(|rung| *rung > value)
         } else {
-            VELOCITIES.iter().rev().copied().find(|rung| *rung < velocity)
+            ladder.iter().rev().copied().find(|rung| *rung < value)
         };
-        velocity = next.unwrap_or(velocity);
+        value = next.unwrap_or(value);
     }
-    velocity
+    value
 }
 
 /// Whether the Windows key is down, as far as this thread's messages say.
@@ -599,6 +773,12 @@ fn unheard(cx: &Cx, track: &Track) -> Option<Silence> {
     }
 }
 
+/// The instrument of `track` was given notes and has put nothing out, as
+/// far as the engine has heard: said in the strip, where the player looks.
+fn unanswered(cx: &Cx, track: &Track) -> Option<Silence> {
+    cx.live.silent_instrument(track.id).map(|silent| Silence::Unanswered(silent.name.clone()))
+}
+
 /// What the keys would play now. Where a keyboard plays is the session's
 /// rule ([`trill_engine::Session::live_tracks`]): the armed tracks, or the
 /// selected one when none is armed. The selected track stays the one
@@ -627,7 +807,7 @@ fn assess(cx: &Cx, paused: Option<Silence>) -> Playing {
         return Playing { name, silence: Some(silence), ..Playing::default() };
     };
     // Played all the same, and not heard: say so.
-    let silence = paused.or_else(|| unheard(cx, track));
+    let silence = paused.or_else(|| unheard(cx, track)).or_else(|| unanswered(cx, track));
     Playing { tracks: vec![track.id], armed: false, name, instrument: instrument.name.clone(), silence }
 }
 
@@ -651,7 +831,9 @@ fn assess_armed(cx: &Cx, armed: &[&Track], paused: Option<Silence>) -> Playing {
     let silence = paused.or_else(|| match playable.first() {
         None => Some(Silence::NoInstrument(armed[0].name.clone())),
         Some((first, _)) => {
-            playable.iter().all(|(track, _)| unheard(cx, track).is_some()).then(|| unheard(cx, first)).flatten()
+            let unheard_by_all = playable.iter().all(|(track, _)| unheard(cx, track).is_some());
+            let silent = || playable.iter().find_map(|(track, _)| unanswered(cx, track));
+            if unheard_by_all { unheard(cx, first) } else { silent() }
         }
     });
     Playing { tracks: armed.iter().map(|track| track.id).collect(), armed: true, name, instrument, silence }
@@ -692,6 +874,7 @@ fn look(ctx: &egui::Context, cx: &mut Cx, typing: bool) -> bool {
     } else {
         let tracks = keyboard.playing.tracks.clone();
         keyboard.stop_where(|note| !tracks.contains(&note.track));
+        keyboard.withdraw(|track| !tracks.contains(&track));
     }
     keyboard.generation = cx.state.project_generation;
     keyboard.audio_revision = cx.audio.revision;
@@ -816,6 +999,40 @@ mod tests {
     }
 
     #[test]
+    fn expression_and_the_mod_wheel_step_along_tens_down_to_nothing() {
+        let mut keyboard = Keyboard::new(None, &Options { on: true, hold: Vec::new() }, sender());
+        assert_eq!((keyboard.expression(), keyboard.mod_wheel()), (127, 0), "full breath, the wheel at rest");
+        keyboard.step_expression(1);
+        assert_eq!(keyboard.expression(), 127, "nothing is above full");
+        keyboard.step_expression(-1);
+        keyboard.step_expression(-1);
+        assert_eq!(keyboard.expression(), 110, "back onto the tens from the top");
+        keyboard.step_mod_wheel(-1);
+        assert_eq!(keyboard.mod_wheel(), 0, "nothing is below rest");
+        keyboard.step_mod_wheel(1);
+        keyboard.step_mod_wheel(1);
+        assert_eq!(keyboard.mod_wheel(), 20);
+        for _ in 0..20 {
+            keyboard.step_expression(-1);
+            keyboard.step_mod_wheel(1);
+        }
+        assert_eq!((keyboard.expression(), keyboard.mod_wheel()), (0, 127), "the ends of both");
+        // No track was played, so nothing was sent and nothing is owed.
+        assert!(keyboard.told().is_empty() && keyboard.controls.is_empty());
+    }
+
+    #[test]
+    fn a_session_starts_at_full_expression_whatever_the_last_one_was_left_at() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut keyboard = Keyboard::new(Some(folder.path().to_path_buf()), &Options::default(), sender());
+        keyboard.step_expression(-5);
+        keyboard.step_mod_wheel(3);
+        keyboard.close();
+        let next = Keyboard::new(Some(folder.path().to_path_buf()), &Options::default(), sender());
+        assert_eq!((next.expression(), next.mod_wheel()), (127, 0), "a keyboard left turned down would start silent");
+    }
+
+    #[test]
     fn it_starts_as_it_was_left_and_ignores_what_makes_no_sense() {
         let fresh = Keyboard::new(None, &Options::default(), sender());
         assert!(!fresh.is_on(), "off until it is switched on");
@@ -911,6 +1128,7 @@ mod tests {
             Silence::Muted(name()),
             Silence::Soloed(name()),
             Silence::NoOutput,
+            Silence::Unanswered(name()),
         ];
         for reason in reasons {
             assert!(reason.text().len() > 10, "{reason:?}");

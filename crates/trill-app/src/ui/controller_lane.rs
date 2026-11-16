@@ -254,26 +254,45 @@ fn choose(
 }
 
 /// What to say about an instrument that is given notes and gives no sound:
-/// who it is, and what to do about it here.
+/// who it is, in a few words, and what to do about it. A click on either
+/// place that says it shows the Expression lane.
 pub(super) fn silent_advice(name: &str, plugin: bool) -> (String, String) {
-    if plugin {
-        (
-            format!("{name} is given notes and stays silent"),
-            format!(
-                "{name} is given notes and makes no sound. Instruments modelled on breath or a bow wait for \
-                 expression: draw an Expression curve under the notes (click here), or switch on the computer \
-                 keyboard, which gives expression as you play"
-            ),
+    let short = format!("{name} is given notes and stays silent");
+    let long = if plugin {
+        format!(
+            "{name} is given notes and makes no sound. Instruments modelled on breath or a bow wait for \
+             expression: draw an Expression curve under the clip\u{2019}s notes, or switch on the computer keyboard, \
+             which gives expression as you play \u{00B7} click to show the Expression lane"
         )
     } else {
-        (
-            format!("{name} is given notes and stays silent"),
-            format!(
-                "{name} is given notes and makes no sound: its expression or volume may be at nothing (click to \
-                 see the clip\u{2019}s Expression), or it has no sound loaded"
-            ),
+        format!(
+            "{name} is given notes and makes no sound: it has no sound loaded, or its expression or volume is at \
+             nothing \u{00B7} click to show the Expression lane"
         )
+    };
+    (short, long)
+}
+
+/// The mark of a track whose instrument is given notes and stays silent: a
+/// hollow dot in `rect` that says who and what to do, where the track is
+/// looked at. A click selects the track and shows the Expression lane.
+/// Returns whether there was anything to mark.
+pub(super) fn silent_mark(ui: &Ui, cx: &mut Cx, rect: Rect, id: Id, track: &Track) -> bool {
+    let Some(silent) = cx.live.silent_instrument(track.id) else { return false };
+    let (short, long) = silent_advice(&silent.name, silent.plugin);
+    let theme = cx.theme;
+    let response = ui.interact(rect, id, Sense::click());
+    let name = format!("{}: {short}", track.name);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &name));
+    let color = if response.hovered() { theme.ink } else { theme.warn };
+    let left = pos2(rect.center().x - theme.metric.dot / 2.0, rect.center().y);
+    paint::hollow_dot(ui.painter(), left, theme.metric.dot, color);
+    cx.hint(&response, long);
+    if response.clicked() {
+        cx.state.select_track(track.id);
+        show_lane(cx, LaneShown::Controller(ControllerKind::EXPRESSION));
     }
+    true
 }
 
 /// At the far end of the strip, when this track's instrument has been
@@ -760,7 +779,8 @@ mod tests {
         let (short, long) = silent_advice("SWAM Alto Sax 3", true);
         assert_eq!(short, "SWAM Alto Sax 3 is given notes and stays silent");
         assert!(long.contains("Expression curve") && long.contains("computer keyboard"), "{long}");
-        let (_, long) = silent_advice("Sampler", false);
+        let (short, long) = silent_advice("Sampler", false);
+        assert_eq!(short, "Sampler is given notes and stays silent");
         assert!(long.contains("no sound loaded") && !long.contains("breath"), "{long}");
     }
 }

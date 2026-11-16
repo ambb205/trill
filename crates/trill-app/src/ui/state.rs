@@ -648,6 +648,9 @@ pub struct UiState {
     /// A clip being renamed on its own name strip in the arrangement.
     pub renaming_clip_inline: Option<TextEditState<InlineClip>>,
     pub audition: Option<Audition>,
+    /// The clip of the running take that the Clip tab was made to show, so
+    /// that it is shown once and the choice left alone after that.
+    pub take_shown: Option<ClipId>,
     pub clipboard: Option<Clipboard>,
     /// Text for the system clipboard, set by copy and cut. A windowing
     /// backend only reports a paste while the system clipboard holds text,
@@ -710,6 +713,7 @@ impl UiState {
             renaming_clip: None,
             renaming_clip_inline: None,
             audition: None,
+            take_shown: None,
             clipboard: None,
             copied_text: None,
             shortcuts_open: false,
@@ -1043,6 +1047,10 @@ impl Cx<'_> {
     /// [`Self::stop_audition`] when `None`.
     pub fn audition(&mut self, track: TrackId, pitch: u8, velocity: u8, release_at: Option<Instant>) {
         self.stop_audition();
+        // A track the computer keyboard plays has its expression from it,
+        // or is given it now: a note asked for with the mouse sounds as one
+        // that is typed does, also on an instrument that waits for breath.
+        self.keyboard.tell_if_played(track);
         self.session.lock().note_on(track, pitch, velocity);
         self.state.audition = Some(Audition { track, pitch, release_at });
     }

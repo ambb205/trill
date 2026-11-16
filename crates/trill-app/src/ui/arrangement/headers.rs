@@ -189,6 +189,15 @@ fn header(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, number: 
         let width = text::paint(&painter, name_rect, Align2::RIGHT_CENTER, theme.text.micro, badge, quiet);
         name_rect.max.x -= width + 6.0;
     }
+    // An instrument that is given notes and stays silent is marked here,
+    // where the track is looked at when its clips play and nothing is
+    // heard.
+    let mark = Rect::from_min_max(pos2(name_rect.right() - 14.0, name_rect.top()), name_rect.max);
+    if track.kind == TrackKind::Normal
+        && crate::ui::controller_lane::silent_mark(ui, cx, mark, id.with("silent-instrument"), track)
+    {
+        name_rect.max.x = mark.left() - 2.0;
+    }
     if cx.state.renaming_track.as_ref().is_some_and(|edit| edit.target == track.id) {
         let field = name_rect.expand2(vec2(5.0, 2.0)).with_min_x(name_rect.left() - 7.0);
         let committed = widgets::name_field(ui, theme, field, track.id, &track.name, &mut cx.state.renaming_track);

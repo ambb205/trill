@@ -1,7 +1,8 @@
 //! What the keyboard shows: its switch in the top bar, and while it is on a
 //! strip between the song and the detail panel that says what the keys
-//! play, in which octave and how hard, and draws the keys themselves with
-//! the letter that plays each.
+//! play, in which octave, how hard, with how much expression and how much
+//! of the mod wheel, and draws the keys themselves with the letter that
+//! plays each.
 //!
 //! The strip is where the player's eye goes for what the top bar has no
 //! room for. Its picture of the keys can be folded away by someone who
@@ -92,7 +93,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     let room = area.right() - EDGE - cells.x;
     let sustain_cap = text::width(&painter, theme.text.micro, "Tab").ceil() + 12.0;
     let piano_width = white_keys() as f32 * WHITE_KEY;
-    let steppers = cells.width("Octave", STEPPER) + cells.width("Velocity", STEPPER) + 2.0 * GAP;
+    let steppers: f32 =
+        ["Octave", "Velocity", "Expression", "Mod wheel"].iter().map(|label| cells.width(label, STEPPER) + GAP).sum();
     let sustain = GAP + cells.width("Sustain", sustain_cap);
     let held = GAP + cells.width("Held", HELD_WIDTH);
     let least = cells.width("Plays", PLAYS_MIN) + steppers;
@@ -108,6 +110,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     plays(ui, cx, &mut cells, id, plays_width);
     octave(ui, cx, &mut cells, id);
     velocity(ui, cx, &mut cells, id);
+    expression(ui, cx, &mut cells, id);
+    mod_wheel(ui, cx, &mut cells, id);
     if with_sustain {
         let (value, whole) = cells.claim("Sustain", sustain_cap);
         key_cap(&painter, theme, value.with_max_x(value.left() + sustain_cap), "Tab", cx.keyboard.sustaining());
@@ -236,6 +240,19 @@ fn plays(ui: &Ui, cx: &mut Cx, cells: &mut Cells, id: Id, width: f32) {
 /// A number between the two keys that step it, which can be clicked as
 /// well as pressed. Returns which of the two was clicked, if one was.
 fn stepper(ui: &Ui, cx: &mut Cx, value: Rect, id: Id, shown: &str, keys: [(&str, &str); 2]) -> Option<usize> {
+    let ink = cx.theme.ink;
+    stepper_in(ui, cx, value, id, (shown, ink), keys)
+}
+
+/// [`stepper`] with the number in an ink of the caller's choosing.
+fn stepper_in(
+    ui: &Ui,
+    cx: &mut Cx,
+    value: Rect,
+    id: Id,
+    (shown, ink): (&str, Color32),
+    keys: [(&str, &str); 2],
+) -> Option<usize> {
     let theme = cx.theme;
     let mut clicked = None;
     for (index, (label, name)) in keys.into_iter().enumerate() {
@@ -247,8 +264,15 @@ fn stepper(ui: &Ui, cx: &mut Cx, value: Rect, id: Id, shown: &str, keys: [(&str,
         }
     }
     let number = Rect::from_min_size(pos2(value.left() + CAP, value.top()), vec2(VALUE, CAP));
-    text::paint(ui.painter(), number, Align2::CENTER_CENTER, theme.text.value, shown, theme.ink);
+    text::paint(ui.painter(), number, Align2::CENTER_CENTER, theme.text.value, shown, ink);
     clicked
+}
+
+/// Says what a readout of the strip shows to assistive technology, which
+/// cannot read a painted number: `"Expression 127"`.
+fn read_out(response: &Response, label: &str, shown: &str) {
+    response
+        .widget_info(|| eframe::egui::WidgetInfo::labeled(eframe::egui::Role::Label, true, format!("{label} {shown}")));
 }
 
 fn octave(ui: &Ui, cx: &mut Cx, cells: &mut Cells, id: Id) {
@@ -274,6 +298,44 @@ fn velocity(ui: &Ui, cx: &mut Cx, cells: &mut Cells, id: Id) {
     }
     let response = ui.interact(whole, id.with("velocity-cell"), Sense::hover());
     cx.hint(&response, "How hard the keys strike, 1 to 127 \u{00B7} C plays softer and V louder");
+}
+
+fn expression(ui: &Ui, cx: &mut Cx, cells: &mut Cells, id: Id) {
+    let (value, whole) = cells.claim("Expression", STEPPER);
+    let level = cx.keyboard.expression();
+    // At nothing, nothing sounds: the number says so before the ear does.
+    let ink = if level == 0 { cx.theme.warn } else { cx.theme.ink };
+    let keys = [(cap_of(Role::Expression(-1)), "Less expression"), (cap_of(Role::Expression(1)), "More expression")];
+    let clicked = stepper_in(ui, cx, value, id.with("expression"), (&level.to_string(), ink), keys);
+    if let Some(index) = clicked {
+        cx.keyboard.step_expression(if index == 0 { -1 } else { 1 });
+    }
+    let response = ui.interact(whole, id.with("expression-cell"), Sense::hover());
+    read_out(&response, "Expression", &cx.keyboard.expression().to_string());
+    let about = if level == 0 {
+        "Expression is at 0: nothing sounds \u{00B7} N gives more"
+    } else {
+        "Expression, 0 to 127: the breath or the bow of a modelled instrument, a level for any other \u{00B7} B gives \
+         less and N more \u{00B7} a track is told before its first note"
+    };
+    cx.hint(&response, about);
+}
+
+fn mod_wheel(ui: &Ui, cx: &mut Cx, cells: &mut Cells, id: Id) {
+    let (value, whole) = cells.claim("Mod wheel", STEPPER);
+    let shown = cx.keyboard.mod_wheel().to_string();
+    let keys = [(cap_of(Role::ModWheel(-1)), "Mod wheel down"), (cap_of(Role::ModWheel(1)), "Mod wheel up")];
+    let clicked = stepper(ui, cx, value, id.with("mod-wheel"), &shown, keys);
+    if let Some(index) = clicked {
+        cx.keyboard.step_mod_wheel(if index == 0 { -1 } else { 1 });
+    }
+    let response = ui.interact(whole, id.with("mod-wheel-cell"), Sense::hover());
+    read_out(&response, "Mod wheel", &cx.keyboard.mod_wheel().to_string());
+    cx.hint(
+        &response,
+        "The mod wheel, 0 to 127: vibrato on most instruments \u{00B7} M turns it down and , up \u{00B7} back at rest \
+         when the keys stop playing the track",
+    );
 }
 
 /// The letter on the key with `role`.

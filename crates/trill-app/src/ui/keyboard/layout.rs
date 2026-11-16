@@ -20,6 +20,11 @@ pub enum Role {
     /// Holds what is played for as long as it is down, like a piano's
     /// right pedal.
     Sustain,
+    /// Gives less or more expression (controller 11): the breath of a
+    /// wind instrument, the bow of a string, a level for any other.
+    Expression(i8),
+    /// Turns the mod wheel (controller 1) down or up.
+    ModWheel(i8),
 }
 
 /// A key that plays, the letter printed on it, and what it does.
@@ -55,12 +60,18 @@ pub const NOTES: [PlayingKey; 18] = [
     note(Key::Quote, "'", 17),
 ];
 
-/// The keys that change how the others play.
-pub const CONTROLS: [PlayingKey; 5] = [
+/// The keys that change how the others play. The bottom row of letters is
+/// four pairs, each a step down and a step up: the octave, the velocity,
+/// expression and the mod wheel.
+pub const CONTROLS: [PlayingKey; 9] = [
     PlayingKey { key: Key::Z, label: "Z", role: Role::Octave(-1) },
     PlayingKey { key: Key::X, label: "X", role: Role::Octave(1) },
     PlayingKey { key: Key::C, label: "C", role: Role::Velocity(-1) },
     PlayingKey { key: Key::V, label: "V", role: Role::Velocity(1) },
+    PlayingKey { key: Key::B, label: "B", role: Role::Expression(-1) },
+    PlayingKey { key: Key::N, label: "N", role: Role::Expression(1) },
+    PlayingKey { key: Key::M, label: "M", role: Role::ModWheel(-1) },
+    PlayingKey { key: Key::Comma, label: ",", role: Role::ModWheel(1) },
     PlayingKey { key: Key::Tab, label: "Tab", role: Role::Sustain },
 ];
 
@@ -107,7 +118,7 @@ pub fn key_lettered(letter: char) -> Option<Key> {
 }
 
 /// The label of a control key.
-fn control(role: Role) -> &'static str {
+pub fn control(role: Role) -> &'static str {
     CONTROLS.iter().find(|playing| playing.role == role).map_or("", |playing| playing.label)
 }
 
@@ -136,6 +147,8 @@ pub fn reference() -> Vec<(String, String)> {
         ("Black keys".to_owned(), row(true)),
         ("Octave down, up".to_owned(), pair(Role::Octave(-1), Role::Octave(1))),
         ("Softer, louder".to_owned(), pair(Role::Velocity(-1), Role::Velocity(1))),
+        ("Less, more expression".to_owned(), pair(Role::Expression(-1), Role::Expression(1))),
+        ("Mod wheel down, up".to_owned(), pair(Role::ModWheel(-1), Role::ModWheel(1))),
         ("Sustain, while held".to_owned(), control(Role::Sustain).to_owned()),
         ("Shortcuts on those letters, while on".to_owned(), "Alt+letter".to_owned()),
     ]
@@ -176,7 +189,10 @@ mod tests {
         assert_eq!(role(Key::C), Some(Role::Velocity(-1)));
         assert_eq!(role(Key::V), Some(Role::Velocity(1)));
         assert_eq!(role(Key::Tab), Some(Role::Sustain));
-        for free in [Key::Q, Key::R, Key::I, Key::B, Key::N, Key::M, Key::Space, Key::Num0, Key::Enter] {
+        // The bottom row goes on in pairs: expression, then the mod wheel.
+        assert_eq!((role(Key::B), role(Key::N)), (Some(Role::Expression(-1)), Some(Role::Expression(1))));
+        assert_eq!((role(Key::M), role(Key::Comma)), (Some(Role::ModWheel(-1)), Some(Role::ModWheel(1))));
+        for free in [Key::Q, Key::R, Key::I, Key::Period, Key::Slash, Key::Space, Key::Num0, Key::Enter] {
             assert_eq!(role(free), None, "{free:?} is left to the rest of the window");
         }
     }
@@ -202,6 +218,7 @@ mod tests {
         assert_eq!(key_lettered('z'), Some(Key::Z), "the octave keys have letters too");
         assert_eq!(key_lettered('q'), None);
         assert_eq!(key_lettered('T'), Some(Key::T), "T is the F sharp, not the start of Tab");
+        assert_eq!((key_lettered('b'), key_lettered(',')), (Some(Key::B), Some(Key::Comma)));
     }
 
     #[test]
@@ -212,6 +229,8 @@ mod tests {
         assert_eq!(keys_for("Black keys"), Some("W E T Y U O P"));
         assert_eq!(keys_for("Octave down, up"), Some("Z / X"));
         assert_eq!(keys_for("Softer, louder"), Some("C / V"));
+        assert_eq!(keys_for("Less, more expression"), Some("B / N"));
+        assert_eq!(keys_for("Mod wheel down, up"), Some("M / ,"));
         assert_eq!(keys_for("Sustain, while held"), Some("Tab"));
     }
 }

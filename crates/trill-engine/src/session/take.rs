@@ -219,8 +219,12 @@ impl Take {
             .iter()
             .filter_map(|track| {
                 let clip = track.clip?;
-                let mut controllers: Vec<ControllerKind> =
-                    track.controllers.iter().filter(|taken| taken.written > 0).map(|taken| taken.kind).collect();
+                let mut controllers: Vec<ControllerKind> = track
+                    .controllers
+                    .iter()
+                    .filter(|taken| taken.written > 0 && !taken.idle())
+                    .map(|taken| taken.kind)
+                    .collect();
                 controllers.sort();
                 Some(TakeClip { track: track.track, clip, notes: track.written, controllers, created: track.created })
             })
@@ -389,6 +393,11 @@ impl Take {
                 if taken.written == taken.moves.len() && self.stopped.is_none() {
                     continue;
                 }
+                if taken.idle() {
+                    // Nothing a clip needs to hold, unless it moves yet.
+                    taken.written = taken.moves.len();
+                    continue;
+                }
                 let clip = project.clip_mut(clip)?;
                 let had = clip.controller(taken.kind).map(|curve| curve.points.clone()).unwrap_or_default();
                 let base = taken.base.take().unwrap_or(had);
@@ -456,6 +465,21 @@ struct Place {
 }
 
 impl ControllerTake {
+    /// Whether the controller has only ever been reported where every
+    /// instrument has it to begin with: the mod wheel down, the pitch
+    /// wheel centred, no pressure, a pedal up. A take says nothing about
+    /// such a controller; a clip's own curve for it is left as it is. (Not
+    /// so expression or volume: an instrument modelled on breath begins
+    /// with none, and the full expression a line was played with is what
+    /// makes the take sound when it is played back.)
+    fn idle(&self) -> bool {
+        let unmoved = match self.kind {
+            ControllerKind::MOD_WHEEL => Some(0.0),
+            kind => kind.rest(),
+        };
+        self.base.is_none() && unmoved.is_some_and(|unmoved| self.moves.iter().all(|moved| moved.value == unmoved))
+    }
+
     /// The clip's curve for this controller with the take's movements
     /// written into `base`, what it had before the take.
     ///
@@ -918,7 +942,53 @@ mod tests {
         take.handle(Captured::Stopped { beat: 2.0, pass: 0 });
         write(&mut take, &mut project);
         assert_eq!(curve(&project, ControllerKind::EXPRESSION), [point(1.0, 1.0)]);
-        assert_eq!(curve(&project, ControllerKind::PitchBend), [point(1.0, 0.0)]);
+        assert!(curve(&project, ControllerKind::PitchBend).is_empty(), "a wheel reported only at its centre");
+    }
+
+    #[test]
+    fn a_controller_that_only_stood_where_every_instrument_has_it_says_nothing() {
+        let standing = |kind: ControllerKind, value: f32| Captured::Standing { track: TRACK, kind, value, pass: 0 };
+        // A keyboard whose wheel is down and whose pedal is up, played at
+        // full expression: what a computer keyboard tells a track.
+        let (mut project, mut take) = rolling(0.0, None);
+        take.handle(standing(ControllerKind::EXPRESSION, 1.0));
+        take.handle(standing(ControllerKind::MOD_WHEEL, 0.0));
+        take.handle(standing(ControllerKind::SUSTAIN, 0.0));
+        take.handle(on(60, 1.0));
+        take.handle(off(60, 2.0));
+        write(&mut take, &mut project);
+        take.handle(Captured::Stopped { beat: 4.0, pass: 0 });
+        write(&mut take, &mut project);
+        assert!(curve(&project, ControllerKind::MOD_WHEEL).is_empty(), "a wheel that stayed down");
+        assert!(curve(&project, ControllerKind::SUSTAIN).is_empty(), "a pedal that stayed up");
+        // Expression is kept: an instrument that waits for breath is
+        // silent without it, and this line was played with all of it.
+        assert_eq!(curve(&project, ControllerKind::EXPRESSION), [point(0.0, 1.0)]);
+        assert_eq!(take.clips()[0].controllers, [ControllerKind::EXPRESSION]);
+
+        // Once it moves, where it stood before is part of the movement.
+        let (mut project, mut take) = rolling(0.0, None);
+        take.handle(standing(ControllerKind::MOD_WHEEL, 0.0));
+        take.handle(on(60, 1.0));
+        write(&mut take, &mut project);
+        take.handle(moved(ControllerKind::MOD_WHEEL, 0.25, 2.0));
+        take.handle(off(60, 3.0));
+        take.handle(Captured::Stopped { beat: 4.0, pass: 0 });
+        write(&mut take, &mut project);
+        assert_eq!(curve(&project, ControllerKind::MOD_WHEEL), [held(0.0, 0.0), point(2.0, 0.25)]);
+        assert_eq!(worth(&project, ControllerKind::MOD_WHEEL, 1.5), 0.0, "down until it was moved");
+
+        // A clip's own curve is not written over by a wheel nobody touched.
+        let (mut project, mut take) = rolling(0.0, None);
+        let clip = project.add_midi_clip(TRACK, "Part", 0.0, 4.0).unwrap();
+        let wheel = vec![point(0.0, 0.5), point(4.0, 1.0)];
+        project.clip_mut(clip).unwrap().set_controller(ControllerKind::MOD_WHEEL, wheel.clone()).unwrap();
+        take.handle(standing(ControllerKind::MOD_WHEEL, 0.0));
+        take.handle(on(60, 1.0));
+        take.handle(off(60, 2.0));
+        take.handle(Captured::Stopped { beat: 4.0, pass: 0 });
+        write(&mut take, &mut project);
+        assert_eq!(curve(&project, ControllerKind::MOD_WHEEL), wheel);
     }
 
     #[test]
