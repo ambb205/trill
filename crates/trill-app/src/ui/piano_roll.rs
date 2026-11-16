@@ -392,11 +392,9 @@ fn sidebar(ui: &mut Ui, cx: &mut Cx, clip: &Clip, rect: Rect) {
         cx.begin_gesture();
     }
     if let Some(length) = output.value {
-        let (start, mut length) = (clip.start, timeline::snap_round(length, step).max(step.unwrap_or(SHORTEST_NOTE)));
+        let wanted = timeline::snap_round(length, step).max(step.unwrap_or(SHORTEST_NOTE));
         // An audio clip does not grow past the end of its file.
-        if let Some(room) = super::arrangement::audio_room(cx, clip).filter(|_| length > clip.length) {
-            length = length.min(room.max(clip.length));
-        }
+        let (start, length) = (clip.start, super::arrangement::allowed_length(cx, clip, wanted));
         if length != clip.length {
             cx.edit(|project| project.set_clip_span(clip_id, start, length));
         }

@@ -25,7 +25,7 @@ pub(super) mod ops;
 mod rows;
 mod ruler;
 
-pub(super) use clips::{audio_room, fade_level};
+pub(super) use clips::{allowed_length, fade_level};
 pub use envelopes::{delete_selected as delete_selected_points, select_all as select_all_points};
 pub use headers::{add_group_track, add_return_track, add_track, add_track_with, group_selected_track};
 pub(super) use headers::{pan_bar, send_bar};

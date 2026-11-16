@@ -405,13 +405,9 @@ fn drag(ui: &Ui, cx: &mut Cx, geometry: &Geometry, pointer: Pos2, free: bool) {
             ui.set_cursor_icon(CursorIcon::ResizeHorizontal);
             let Some((_, current)) = snapshot.clip(clip) else { return };
             let end = geometry.snap(geometry.beat(pointer.x), free);
-            let (start, mut length) = (current.start, (end - current.start).max(geometry.min_clip_length(free)));
-            // An audio clip stops growing where its file ends: beyond that
-            // there is nothing to play. One that is already longer (the
-            // tempo changed under it) may stay so, but not grow.
-            if let Some(room) = clips::audio_room(cx, current).filter(|_| length > current.length) {
-                length = length.min(room.max(current.length));
-            }
+            let wanted = (end - current.start).max(geometry.min_clip_length(free));
+            // An audio clip stops growing where its file ends.
+            let (start, length) = (current.start, clips::allowed_length(cx, current, wanted));
             if (current.length - length).abs() >= 1e-9 {
                 cx.edit(|project| project.set_clip_span(clip, start, length));
             }

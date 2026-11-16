@@ -230,6 +230,8 @@ const GESTURES: &[(&str, &[(&str, &str)])] = &[
             ("Drag a line", "Move both of its ends"),
             ("Alt-drag a line", "Bend it"),
             ("Drag in empty space", "Select points"),
+            ("Drag an automated control", "Take hold of it"),
+            ("Click the mark in its corner", "Hand it back"),
         ],
     ),
     (
