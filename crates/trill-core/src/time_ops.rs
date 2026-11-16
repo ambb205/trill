@@ -1,13 +1,45 @@
 //! Edits to a stretch of time across the whole song: cutting it out so
-//! what follows closes up, repeating it, and opening up empty time. Each
-//! carries everything that lives on the timeline with it: clips on every
-//! track, automation, markers and the loop.
+//! what follows closes up, repeating it, opening up empty time, and copying
+//! it to another place. Each carries everything that lives on the timeline
+//! with it: clips on every track (with the controller curves inside them),
+//! automation, markers and the loop.
 //!
 //! An edit that fails may leave the project half changed; run it where a
 //! failure is rolled back, as the session's edits are.
 
-use crate::project::{AutomationPoint, EditError, Project, automation_value};
+use crate::controllers::{splice, value_before};
+use crate::project::{
+    AutomationPoint, AutomationTarget, ChainRef, Clip, EditError, Project, Segment, automation_value,
+};
 use crate::time::Beats;
+use crate::{ClipId, TrackId};
+
+/// What a stretch of time holds, lifted out of the song: the clips of the
+/// tracks it was taken from, cut to the stretch, and the course of their
+/// automation through it. [`Project::paste_time`] puts it down again.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TimeExcerpt {
+    pub length: Beats,
+    /// Each clip with the track it was on. Its start counts from the
+    /// start of the stretch.
+    pub clips: Vec<(TrackId, Clip)>,
+    /// Each envelope's course through the stretch, in beats from its
+    /// start: a point at 0, the points inside, and a point at the end.
+    pub lanes: Vec<(AutomationTarget, Vec<AutomationPoint>)>,
+    /// The tracks it was taken from; `None` for all of them, with the
+    /// master's automation.
+    pub tracks: Option<Vec<TrackId>>,
+}
+
+/// What becomes of the time an excerpt is pasted into.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PasteMode {
+    /// Room is made for it: everything from there on, on every track,
+    /// moves later by its length.
+    Insert,
+    /// It takes the place of what its tracks hold there.
+    Replace,
+}
 
 /// `start..end` as a stretch of time, or why it is none.
 fn stretch(start: Beats, end: Beats) -> Result<Beats, EditError> {
@@ -115,6 +147,142 @@ impl Project {
         self.shift_marks(at, length)
     }
 
+    /// What the time from `start` to `end` holds on `tracks` (every track
+    /// with `None`), as something that can be put down elsewhere. The song
+    /// is not changed: a clip lying across an edge is cut in the excerpt
+    /// only.
+    pub fn excerpt(&self, start: Beats, end: Beats, tracks: Option<&[TrackId]>) -> Result<TimeExcerpt, EditError> {
+        let length = stretch(start, end)?;
+        for id in tracks.into_iter().flatten() {
+            self.track(*id)?;
+        }
+        let chosen = |id: TrackId| tracks.is_none_or(|tracks| tracks.contains(&id));
+
+        // Cut in a copy of the song, where the cutting is already written.
+        let mut scratch = self.clone();
+        let ids: Vec<(TrackId, ClipId)> = self
+            .tracks
+            .iter()
+            .filter(|track| chosen(track.id))
+            .flat_map(|track| track.clips.iter().map(move |clip| (track.id, clip.id)))
+            .collect();
+        let mut clips = Vec::new();
+        for (track, id) in ids {
+            let clip = scratch.clip(id)?;
+            if clip.end() <= start || clip.start >= end {
+                continue;
+            }
+            let inside = if clip.start < start { scratch.split_clip(id, start)? } else { id };
+            if scratch.clip(inside)?.end() > end {
+                scratch.split_clip(inside, end)?;
+            }
+            let mut clip = scratch.clip(inside)?.clone();
+            clip.start -= start;
+            clips.push((track, clip));
+        }
+
+        let lanes = self
+            .automation
+            .iter()
+            .filter(|lane| match self.target_track(&lane.target) {
+                Some(track) => chosen(track),
+                // The master's own automation goes with the whole song only.
+                None => tracks.is_none(),
+            })
+            .map(|lane| (lane.target.clone(), course(&lane.points, start, end)))
+            .collect();
+        Ok(TimeExcerpt { length, clips, lanes, tracks: tracks.map(<[TrackId]>::to_vec) })
+    }
+
+    /// Puts `excerpt` down at `at`, on the tracks it was taken from, and
+    /// returns the clips this made. With [`PasteMode::Insert`] room is made
+    /// for it on every track, as [`Project::insert_time`] makes it; with
+    /// [`PasteMode::Replace`] it takes the place of what its tracks hold
+    /// there, and clips lying across the edges are cut. Automation follows
+    /// the excerpt through the stretch and then picks up where it was.
+    /// Markers are not copied. What belonged to a track or a device that
+    /// is no longer there is left out.
+    pub fn paste_time(&mut self, excerpt: &TimeExcerpt, at: Beats, mode: PasteMode) -> Result<Vec<ClipId>, EditError> {
+        if !at.is_finite() || at < 0.0 {
+            return Err(EditError::Invalid(format!("the position {at} to paste at must be >= 0")));
+        }
+        let end = at + excerpt.length;
+        match mode {
+            PasteMode::Insert => self.insert_time(at, excerpt.length)?,
+            PasteMode::Replace => self.clear_time(at, end, excerpt.tracks.as_deref())?,
+        }
+        let mut pasted = Vec::new();
+        for (track, clip) in &excerpt.clips {
+            if self.track(*track).is_ok() {
+                pasted.push(self.paste_clip(*track, clip, at + clip.start)?);
+            }
+        }
+        for (target, piece) in &excerpt.lanes {
+            let Some(base) = self.automation.iter().find(|lane| lane.target == *target).map(|lane| lane.points.clone())
+            else {
+                continue;
+            };
+            let moved: Vec<AutomationPoint> =
+                piece.iter().map(|point| AutomationPoint { beat: point.beat + at, ..*point }).collect();
+            let spliced = tidied(splice(&base, at, Some(end), &moved));
+            if spliced != base {
+                self.set_automation(target.clone(), spliced)?;
+            }
+        }
+        Ok(pasted)
+    }
+
+    /// Copies the time from `start` to `end` to `to`: [`Project::excerpt`]
+    /// and [`Project::paste_time`] in one. The stretch may be copied onto
+    /// or into itself; what is copied is what it held before.
+    pub fn copy_time(
+        &mut self,
+        start: Beats,
+        end: Beats,
+        to: Beats,
+        tracks: Option<&[TrackId]>,
+        mode: PasteMode,
+    ) -> Result<Vec<ClipId>, EditError> {
+        let excerpt = self.excerpt(start, end, tracks)?;
+        self.paste_time(&excerpt, to, mode)
+    }
+
+    /// Empties the time from `start` to `end` on `tracks` (every track
+    /// with `None`) without closing it up: clips inside it go, and clips
+    /// across its edges are cut there.
+    fn clear_time(&mut self, start: Beats, end: Beats, tracks: Option<&[TrackId]>) -> Result<(), EditError> {
+        let ids: Vec<ClipId> = self
+            .tracks
+            .iter()
+            .filter(|track| tracks.is_none_or(|tracks| tracks.contains(&track.id)))
+            .flat_map(|track| track.clips.iter().map(|clip| clip.id))
+            .collect();
+        for id in ids {
+            let clip = self.clip(id)?;
+            if clip.end() <= start || clip.start >= end {
+                continue;
+            }
+            let inside = if clip.start < start { self.split_clip(id, start)? } else { id };
+            if self.clip(inside)?.end() > end {
+                self.split_clip(inside, end)?;
+            }
+            self.remove_clip(inside)?;
+        }
+        Ok(())
+    }
+
+    /// The track an automation target belongs to; `None` for the master's.
+    fn target_track(&self, target: &AutomationTarget) -> Option<TrackId> {
+        match target {
+            AutomationTarget::TrackVolume { track } | AutomationTarget::TrackPan { track } => Some(*track),
+            AutomationTarget::DeviceParam { device, .. } => match self.device_chain(*device) {
+                Ok(ChainRef::Track(track)) => Some(track),
+                _ => None,
+            },
+            AutomationTarget::MasterVolume => None,
+        }
+    }
+
     /// Moves every clip that starts at or after `at` later by `length`, and
     /// cuts a clip lying across `at` there so that its tail moves too.
     /// Returns the clips as they were before, each with its track.
@@ -143,6 +311,27 @@ impl Project {
         let shifted = |beat: Beats| if beat >= at { beat + length } else { beat };
         self.set_loop(region.enabled, shifted(region.start), shifted(region.end))
     }
+}
+
+/// The course `points` take from `start` to `end`, in beats from `start`:
+/// a point at 0 with the value there, the points inside, and a point at the
+/// end with the value the envelope arrives at.
+fn course(points: &[AutomationPoint], start: Beats, end: Beats) -> Vec<AutomationPoint> {
+    // The shape of the segment `start` falls in carries on from the cut.
+    let shape = match points.partition_point(|point| point.beat <= start) {
+        0 => Segment::Linear,
+        next if next == points.len() => Segment::Hold,
+        next => points[next - 1].shape,
+    };
+    let mut course = vec![AutomationPoint { beat: 0.0, value: automation_value(points, start), shape }];
+    course.extend(
+        points
+            .iter()
+            .filter(|point| point.beat > start && point.beat < end)
+            .map(|point| AutomationPoint { beat: point.beat - start, ..*point }),
+    );
+    course.push(AutomationPoint { beat: end - start, value: value_before(points, end), shape: Segment::Hold });
+    course
 }
 
 /// `points` with `length` beats opened up at `at`, through which the
@@ -403,6 +592,113 @@ mod tests {
         };
         assert_eq!(values(&lane(&volume), &[8.0, 10.0, 12.0, 20.0]), [-4.0, -4.0, -4.0, 4.0]);
         assert_eq!(lane(&pan), envelope(&[(0.0, -1.0), (1.0, 0.0)]), "it ended before the new time");
+    }
+
+    /// A second track with one clip over 0..16 holding a note on every
+    /// beat, beside the track of [`project`].
+    fn two_tracks() -> (Project, TrackId, TrackId) {
+        let (mut project, first, _) = project();
+        let second = project.add_track("B");
+        let clip = project.add_midi_clip(second, "whole", 0.0, 16.0).unwrap();
+        let notes: Vec<Note> = (0..16).map(|beat| note(beat as f64)).collect();
+        project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
+        (project, first, second)
+    }
+
+    #[test]
+    fn copying_time_over_what_is_there_replaces_it_on_the_chosen_tracks_only() {
+        let (mut project, first, second) = two_tracks();
+        let before = project.clone();
+        // Beats 6..10 (inside the long clip) onto 12..16, on the first track.
+        let pasted = project.copy_time(6.0, 10.0, 12.0, Some(&[first]), PasteMode::Replace).unwrap();
+        assert_eq!(pasted.len(), 1);
+        assert_eq!(spans(&project, first), [(0.0, 4.0), (4.0, 12.0), (12.0, 16.0)]);
+        assert_eq!(project.clip(pasted[0]).unwrap().name, "long", "the last clip gave way to a piece of the long one");
+        assert_eq!(sounding(&project, first), [4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0]);
+        assert_eq!(project.track(second).unwrap(), before.track(second).unwrap(), "the other track is as it was");
+        assert_eq!(project.markers, before.markers, "nothing moved, so no marker did");
+        assert_eq!(project.loop_region, before.loop_region);
+
+        // Onto a place where clips lie across the edges: they are cut there.
+        let (mut project, first, second) = two_tracks();
+        project.copy_time(0.0, 2.0, 5.0, None, PasteMode::Replace).unwrap();
+        assert_eq!(spans(&project, first), [(0.0, 4.0), (4.0, 5.0), (5.0, 7.0), (7.0, 12.0), (12.0, 16.0)]);
+        assert_eq!(sounding(&project, first), [4.0, 7.0, 8.0, 9.0, 10.0, 11.0], "the empty start of the song is there");
+        assert_eq!(spans(&project, second), [(0.0, 5.0), (5.0, 7.0), (7.0, 16.0)]);
+        assert_eq!(sounding(&project, second).len(), 16, "beats 0 and 1 are heard again at 5 and 6");
+    }
+
+    #[test]
+    fn copying_time_with_room_made_moves_every_track_and_fills_the_chosen_ones() {
+        let (mut project, first, second) = two_tracks();
+        // Beats 4..8 to beat 12, making room, from the first track only.
+        project.copy_time(4.0, 8.0, 12.0, Some(&[first]), PasteMode::Insert).unwrap();
+        assert_eq!(spans(&project, first), [(0.0, 4.0), (4.0, 12.0), (12.0, 16.0), (16.0, 20.0)]);
+        assert_eq!(sounding(&project, first)[8..], [12.0, 13.0, 14.0, 15.0]);
+        assert_eq!(spans(&project, second), [(0.0, 12.0), (16.0, 20.0)], "it made room too, and was given nothing");
+        let markers: Vec<Beats> = project.markers.iter().map(|marker| marker.beat).collect();
+        assert_eq!(markers, [2.0, 7.0, 18.0], "markers after the new time move; none is copied");
+        assert_eq!((project.loop_region.start, project.loop_region.end), (8.0, 20.0));
+
+        // Into itself: what is copied is what the stretch held before.
+        let (mut project, first, _) = two_tracks();
+        project.copy_time(4.0, 8.0, 6.0, None, PasteMode::Insert).unwrap();
+        assert_eq!(sounding(&project, first), [4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0]);
+        assert_eq!(spans(&project, first), [(0.0, 4.0), (4.0, 6.0), (6.0, 10.0), (10.0, 16.0), (16.0, 20.0)]);
+    }
+
+    #[test]
+    fn copied_time_carries_automation_and_controller_curves() {
+        let (mut project, track) = expressive();
+        let volume = AutomationTarget::TrackVolume { track };
+        project
+            .set_automation(volume.clone(), envelope(&[(0.0, -12.0), (4.0, -12.0), (8.0, 0.0), (16.0, 0.0)]))
+            .unwrap();
+        let before = project.clone();
+        // The first half of the swell (4..8) onto the last clip (12..16).
+        project.copy_time(4.0, 8.0, 12.0, None, PasteMode::Replace).unwrap();
+        for beat in [12.0, 13.0, 15.5] {
+            assert_eq!(worth(&project, track, beat), worth(&before, track, beat - 8.0), "the curves, at {beat}");
+        }
+        let lane = project.automation.iter().find(|lane| lane.target == volume).unwrap().points.clone();
+        assert_eq!(values(&lane, &[4.0, 6.0, 8.0, 11.0]), [-12.0, -6.0, 0.0, 0.0], "as it was before the copy");
+        assert_eq!(values(&lane, &[12.0, 14.0, 15.0]), [-12.0, -6.0, -3.0], "the rise is heard again");
+        assert_eq!(automation_value(&lane, 16.0), 0.0, "and then the envelope is where it was");
+
+        // An excerpt can be kept and put down later, even after its track is gone.
+        let (mut project, track) = expressive();
+        let excerpt = project.excerpt(4.0, 8.0, Some(&[track])).unwrap();
+        assert_eq!((excerpt.length, excerpt.clips.len()), (4.0, 1));
+        assert_eq!(excerpt.clips[0].1.start, 0.0, "starts count from the stretch");
+        project.remove_track(track).unwrap();
+        assert_eq!(project.paste_time(&excerpt, 0.0, PasteMode::Replace).unwrap(), []);
+
+        // What cannot be a stretch or a place says so and changes nothing.
+        let (mut project, track) = expressive();
+        let before = project.clone();
+        assert!(project.copy_time(4.0, 4.0, 0.0, None, PasteMode::Replace).is_err());
+        assert!(project.copy_time(4.0, 8.0, -1.0, None, PasteMode::Insert).is_err());
+        assert!(project.copy_time(4.0, 8.0, 0.0, Some(&[TrackId(999)]), PasteMode::Insert).is_err());
+        assert_eq!(project, before);
+        let _ = track;
+    }
+
+    #[test]
+    fn the_course_of_an_envelope_through_a_stretch_keeps_its_shape() {
+        let ramp = envelope(&[(0.0, 0.0), (16.0, 16.0)]);
+        let piece = course(&ramp, 4.0, 8.0);
+        assert_eq!(values(&piece, &[0.0, 2.0, 3.99]), [4.0, 6.0, 7.99]);
+        assert_eq!(piece.last().map(|point| (point.beat, point.value)), Some((4.0, 8.0)));
+        // A step keeps stepping: held, then the jump, then held to the end.
+        let hold = Segment::Hold;
+        let steps = vec![
+            AutomationPoint { beat: 0.0, value: 1.0, shape: hold },
+            AutomationPoint { beat: 6.0, value: 5.0, shape: hold },
+        ];
+        let piece = course(&steps, 4.0, 8.0);
+        assert_eq!(values(&piece, &[0.0, 1.9, 2.0, 3.9]), [1.0, 1.0, 5.0, 5.0]);
+        // Past its last point an envelope is flat.
+        assert_eq!(values(&course(&ramp, 20.0, 24.0), &[0.0, 4.0]), [16.0, 16.0]);
     }
 
     /// The project of [`project`], with a swell over the whole of the long

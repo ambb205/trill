@@ -142,6 +142,9 @@ pub struct AudioStatus {
 
 /// The folder, beside the settings file, that saved presets are kept in.
 pub const SAVED_PRESETS_FOLDER: &str = "saved-presets";
+/// The folder, beside the settings file, that keeps what was learned about
+/// instruments.
+pub const INSTRUMENTS_FOLDER: &str = "instruments";
 /// How long listing the audio devices may take.
 const DEVICE_LIST_TIMEOUT: Duration = Duration::from_secs(6);
 /// How long a rescan of the MIDI ports is waited for.
@@ -241,6 +244,9 @@ impl Runtime {
         // nothing is kept, they last as long as the program runs.
         if let Some(folder) = settings.folder() {
             session.saved_presets().open(folder.join(SAVED_PRESETS_FOLDER));
+            // So is what was learned about instruments: which keys of a
+            // plugin are drums or keyswitches, its range, its octave.
+            session.instruments().open(folder.join(INSTRUMENTS_FOLDER));
         }
         let live = session.live();
         let session: SharedSession = Arc::new(Mutex::new(session));
