@@ -552,7 +552,9 @@ async fn a_sound_is_found_across_every_instrument_there_is() {
     assert_eq!(listed[..2], [format!("{SYNTH}: Warm Pad"), format!("{SYNTH}: Warm Pad")], "{found}");
     assert!(listed.contains(&format!("{POLYSYNTH}: warm_pad")), "{found}");
     assert!(found["searched"].as_str().unwrap().starts_with("30"), "thousands were looked through: {found}");
-    assert_eq!(found["without_presets"], json!(["Big Synth"]), "the format that lists none");
+    // The synth lists none in its other format, and is not said to be
+    // without presets for that: it has three thousand.
+    assert!(found.get("without_presets").is_none(), "{found}");
     assert!(found.get("still_reading").is_none(), "{found}");
     let first = &found["items"][0];
     let made =
