@@ -35,6 +35,7 @@ asked for:
 
 ```sh
 cargo test -p trill-plugins -- --include-ignored    # against the CLAP and VST3 plugins installed here (minutes)
+cargo test -p trill-mcp --test presets -- --include-ignored --nocapture    # an assistant's pass over Surge XT's presets
 cargo test -p trill-media -- --include-ignored      # decoding audio files found in this machine's usual folders
 TRILL_TEST_PLUGIN_WINDOWS=1 cargo test -p trill-plugins --test editor_windows -- --test-threads=1   # opens windows
 TRILL_TEST_CLAUDE=1 cargo test -p trill-assistant --test real_cli    # talks to an installed, signed-in Claude Code
@@ -121,6 +122,15 @@ brickwall), `chorus`, `filter` (resonant, with LFO), `pump` (sidechain-style duc
 MCP like any other device's. A plugin's own editor opens in a window (Windows only so far), from the Editor button
 on its panel or at the end of its chip in the mixer, and what is changed there flows back into the project.
 
+A plugin's presets are listed, searched and loaded like a built-in device's. They are found the way each format
+provides: a CLAP plugin's through its preset-discovery providers, a VST3 plugin's as the `.vstpreset` files in the
+standard preset folders and the programs of its program lists. A big synth has thousands, so they are read in the
+background, in the scanner process, and remembered until the plugin or its preset folders change. Loading one is
+done by the running plugin, as its own preset browser would, while the song plays; it is one undo step, and what
+it comes to is saved with the project. (What a plugin keeps in a format and a browser of its own, without telling
+the host, cannot be listed: Surge XT lists its three thousand patches as a CLAP plugin and none as a VST3.)
+`cargo run -p trill-plugins --example presets -- "clap:Surge XT" warm pad` shows what an installed plugin offers.
+
 **Songwriting**: chords by symbol or Roman numeral, voicings, rhythms, arpeggios, bass lines, drum grooves with
 fills, melodies by scale degree, swing and humanizing, and reading a song's key and chords back from its notes
 (`trill-theory`). Over MCP an assistant says `Am9 | Fmaj9 | Cmaj7 G/B | Em7`, drop-2, house groove, rather than
@@ -205,6 +215,10 @@ Time is in beats. Pitches are MIDI numbers, note names (`"F#3"`) or drum names (
 compactly as `[pitch, start, length, velocity]`. Errors say what to do next: an unknown id comes back with the ids
 that exist, a bad note with its index and the reason.
 
+Presets are part of the device tools, for plugins as for built-in devices: `describe_device` and `get_device` list
+them a page at a time and search them (`preset_query: "warm pad"`, `preset_category: "Pads"`), and `create_track`,
+`add_device` and `update_device` take one by its name, its category and name, or its id.
+
 The HTTP server listens on localhost only and has no password: any program on the machine may use it. Pages in a
 web browser may not; requests that carry a browser's `Origin` are refused.
 
@@ -241,7 +255,8 @@ crates/
   trill-media     Audio file decoding and caching, waveform overviews, sample-rate conversion, WAV writing.
   trill-engine    Realtime engine, offline renderer, analysis, and the Session.
   trill-library   The sound library (scanning, indexing, searching sample folders) and the settings file.
-  trill-plugins   Plugin hosting: scanning in a child process, the plugin main thread, CLAP and VST3.
+  trill-plugins   Plugin hosting: scanning and preset discovery in a child process, the plugin main thread, CLAP
+                  and VST3.
   trill-runtime   What both programs share, built once: session, media cache, library, settings, housekeeping,
                   safety copies of unsaved work.
   trill-theory    Music theory for writing parts: chords, scales, voicings, rhythms, grooves, analysis.
@@ -269,8 +284,10 @@ the graph is swapped on every block). The GUI is tested headlessly with simulate
 
 Working: everything listed above, with tests.
 
-Not yet: running plugins out of process (only scanning is isolated today, so a plugin that crashes while playing
-still takes the app with it; the safety copy is what saves the work), plugin editors on Linux and macOS,
+Not yet: running plugins out of process (only scanning and the reading of presets are isolated today, so a plugin
+that crashes while playing or while it loads a preset still takes the app with it; the safety copy is what saves
+the work), a preset browser for plugins in the window (the session lists, searches and loads them, and so does
+MCP; the device panel shows built-in presets only), plugin editors on Linux and macOS,
 session (clip-launching) view, audio recording (MIDI is recorded; audio is not), recording of the pitch and
 mod wheels (they are heard while playing; clips have nowhere to keep them yet), ASIO, warp markers, plugin
 delay compensation, multi-core rendering. Only Windows has been run so far.

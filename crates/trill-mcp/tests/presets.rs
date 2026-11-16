@@ -417,3 +417,118 @@ async fn the_instructions_say_to_look_for_presets_first() {
         }
     }
 }
+
+// ---- against an installed plugin -------------------------------------------
+
+const SURGE: &str = "clap:org.surge-synth-team.surge-xt";
+
+/// What an assistant asked for a warm pad does, on the real Surge XT:
+/// finds one among its thousands of patches, starts a track from it,
+/// listens, changes its mind, and saves. Prints the calls' replies.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Surge XT (CLAP) installed; run with `cargo test -p trill-mcp --test presets -- --include-ignored --nocapture`"]
+async fn an_assistant_puts_a_warm_pad_on_surge_xt() {
+    use trill_plugins::{ClapConfig, PluginHost, Scanner, Vst3Config};
+    // The plugin host's caches are the test's own, and no preset file of
+    // the user's is read.
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("mcp-presets");
+    let clap =
+        ClapConfig { cache_path: Some(scratch.join("clap.json")), scanner: Scanner::Auto, ..ClapConfig::default() };
+    let vst3 = Vst3Config {
+        cache_path: Some(scratch.join("vst3.json")),
+        scanner: Scanner::Auto,
+        preset_paths: vec![scratch.join("vst3 presets")],
+        ..Vst3Config::default()
+    };
+    let host = PluginHost::with_configs(clap, vst3).unwrap();
+    if !host.clap().descriptors().iter().any(|descriptor| descriptor.uri == SURGE) {
+        eprintln!("skipping: Surge XT is not installed as a CLAP plugin");
+        return;
+    }
+    let folder = tempfile::tempdir().unwrap();
+    let storage = Storage::At {
+        settings: folder.path().join("config").join("settings.json"),
+        library_index: Some(folder.path().join("cache").join("library-index.json")),
+    };
+    let options = RuntimeOptions { audio: AudioBackend::Null { sample_rate: 48_000 }, plugins: None, storage };
+    let parts = Parts { devices: host.factories(), ..Parts::default() };
+    let runtime = Arc::new(Runtime::start_custom(options, parts).unwrap());
+    let server = serve_http(runtime, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let transport =
+        StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(server.url()));
+    let client = &ClientConfig::default().serve(transport).await.unwrap();
+    let said = |call: &str, reply: &Value| eprintln!("\n> {call}\n{reply}");
+
+    // Searched. The first time on a machine the patches take a while to
+    // read, and the reply says so until they are.
+    let search = json!({ "uri": SURGE, "preset_query": "warm pad", "preset_limit": 4 });
+    let mut found = ok(client, "describe_device", search.clone()).await;
+    for _ in 0..20 {
+        if found["presets"].get("status").is_none() {
+            break;
+        }
+        said("describe_device (still reading)", &found["presets"]);
+        found = ok(client, "describe_device", search.clone()).await;
+    }
+    said(&format!("describe_device {search}"), &found["presets"]);
+    let presets = &found["presets"];
+    assert!(presets["total"].as_u64().unwrap() > 500, "{presets}");
+    assert!(presets["matching"].as_u64().unwrap() >= 2, "{presets}");
+    let (first, second) = (&presets["items"][0], &presets["items"][1]);
+    let path = |item: &Value| format!("{}/{}", item["category"].as_str().unwrap(), item["name"].as_str().unwrap());
+
+    // A track that starts from the first, and a chord to hear it by.
+    let arguments = json!({ "name": "Pad", "instrument": SURGE, "preset": path(first) });
+    let track = ok(client, "create_track", arguments.clone()).await;
+    said(&format!("create_track {arguments}"), &track);
+    assert_eq!(track["preset"], first["name"]);
+    let device = track["instrument_device_id"].as_u64().unwrap();
+    let notes = json!([["C3", 0, 4, 90], ["E3", 0, 4, 90], ["G3", 0, 4, 90]]);
+    ok(client, "create_clip", json!({ "track": track["track_id"], "start": 0, "length": 4, "notes": notes })).await;
+    let wav = |name: &str| folder.path().join(name).display().to_string();
+    let with_first = ok(client, "render", json!({ "path": wav("first.wav") })).await;
+    assert!(with_first["peak_db"].as_f64().unwrap() > -60.0, "the pad is heard: {with_first}");
+
+    // Another preset by its id, in place.
+    let arguments = json!({ "device": device, "preset": second["id"] });
+    let updated = ok(client, "update_device", arguments.clone()).await;
+    said(&format!("update_device {arguments}"), &updated);
+    assert_eq!(updated["preset"], path(second));
+    let arguments = json!({ "device": device, "preset_query": "bass", "preset_limit": 3 });
+    let got = ok(client, "get_device", arguments.clone()).await;
+    said(&format!("get_device {arguments}"), &got);
+    assert_eq!(got["preset"], second["name"]);
+    assert_eq!(got["presets"]["items"].as_array().unwrap().len(), 3);
+    let with_second = ok(client, "render", json!({ "path": wav("second.wav") })).await;
+    let loudness = |report: &Value| report["loudness_lufs"].as_f64().unwrap();
+    let (was, is) = (loudness(&with_first), loudness(&with_second));
+    eprintln!("\nloudness: {was:.1} LUFS with '{}', {is:.1} LUFS with '{}'", first["name"], second["name"]);
+    assert!((was - is).abs() > 0.2, "two patches, two sounds");
+
+    // Undone, it is the first again; redone, the second; and the second
+    // is what the project keeps.
+    ok(client, "history", json!({ "action": "undo" })).await;
+    let preset_now = |device: u64| async move {
+        ok(client, "get_device", json!({ "device": device, "query": "volume" })).await["preset"].clone()
+    };
+    assert_eq!(preset_now(device).await, first["name"]);
+    let undone = loudness(&ok(client, "render", json!({ "path": wav("undone.wav") })).await);
+    assert!((undone - was).abs() < 1.5, "{was} LUFS then, {undone} now");
+    ok(client, "history", json!({ "action": "redo" })).await;
+    let song = folder.path().join("song.trill").display().to_string();
+    ok(client, "save_project", json!({ "path": song })).await;
+    ok(client, "new_project", json!({})).await;
+    ok(client, "load_project", json!({ "path": song })).await;
+    assert_eq!(preset_now(device).await, second["name"]);
+    let reopened = loudness(&ok(client, "render", json!({ "path": wav("reopened.wav") })).await);
+    assert!((reopened - is).abs() < 1.5, "{is} LUFS saved, {reopened} reopened");
+
+    // The same plugin as a VST3 lists nothing, and says where to look.
+    let catalog = ok(client, "list_devices", json!({ "query": "Surge XT" })).await;
+    let is_vst3 = |device: &&Value| device["format"] == "vst3" && device["name"] == "Surge XT";
+    if let Some(vst3) = catalog["devices"].as_array().unwrap().iter().find(is_vst3) {
+        let described = ok(client, "describe_device", json!({ "uri": vst3["uri"] })).await;
+        said("describe_device (Surge XT as a VST3)", &described["presets"]);
+        assert!(described["presets"]["note"].as_str().unwrap().contains(SURGE), "{described}");
+    }
+}

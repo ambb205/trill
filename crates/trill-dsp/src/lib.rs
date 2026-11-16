@@ -154,6 +154,13 @@ fn find(uri: &str) -> Option<&'static Builtin> {
     }
 }
 
+/// The presets of the built-in device `uri`, as a list to browse. Straight
+/// from the device's table: a view may ask for it while it draws.
+fn presets(uri: &str) -> Option<trill_core::presets::PresetList> {
+    let presets: Vec<_> = find(uri)?.presets.iter().map(|preset| preset.preset().info()).collect();
+    Some(trill_core::presets::PresetList::ready(presets))
+}
+
 fn create(
     device: &Device,
     sample_rate: f64,
@@ -226,6 +233,10 @@ impl DeviceFactory for Builtins {
             None => Vec::new(),
         }
     }
+
+    fn presets(&self, uri: &str) -> Option<trill_core::presets::PresetList> {
+        presets(uri)
+    }
 }
 
 /// Creates the built-in devices without access to audio files.
@@ -242,6 +253,10 @@ impl DeviceFactory for BuiltinFactory {
 
     fn create(&self, device: &Device, sample_rate: f64, max_block: usize) -> Result<DeviceInstance, DeviceError> {
         create(device, sample_rate, max_block, &SampleSource { loader: None, store: None })
+    }
+
+    fn presets(&self, uri: &str) -> Option<trill_core::presets::PresetList> {
+        presets(uri)
     }
 }
 

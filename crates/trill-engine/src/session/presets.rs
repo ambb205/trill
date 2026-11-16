@@ -40,6 +40,10 @@ impl Session {
     /// ([`PresetList::status`]) and holds what was found so far, or what
     /// was found the last time the program ran. A type that is not known
     /// has no presets.
+    ///
+    /// A caller that would rather wait for a complete list (a tool call,
+    /// never a view) takes [`Session::factory`], lets go of the session,
+    /// and asks the factory with `presets_within`.
     pub fn presets(&self, uri: &str) -> PresetList {
         self.factory.presets(uri).unwrap_or_default()
     }
@@ -82,9 +86,12 @@ impl Session {
     /// Fails, with the device as it was, if there is no such preset (the
     /// error names the nearest ones, or the candidates when a name is not
     /// unique, and says so when the list is still being read) or if the
-    /// plugin does not load it. A plugin that is given a preset may take
-    /// as long over it as the preset needs; this returns when it has
-    /// answered.
+    /// plugin does not load it.
+    ///
+    /// This returns when the plugin has answered: for most presets within
+    /// a few hundredths of a second, for one that brings samples as long
+    /// as those take to read, and with an error after half a minute from
+    /// a plugin that does not answer at all.
     pub fn load_preset(&mut self, id: DeviceId, preset: &str) -> Result<PresetInfo, SessionError> {
         let uri = self.project.device(id)?.uri.clone();
         let info = self.find_preset(&uri, preset)?;
