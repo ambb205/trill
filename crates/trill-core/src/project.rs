@@ -672,6 +672,50 @@ impl Project {
         Ok(())
     }
 
+    /// Copies a track, with its clips, devices, sends and automation, and
+    /// puts the copy right below it. Everything in the copy gets a new id.
+    pub fn duplicate_track(&mut self, id: TrackId) -> Result<TrackId, EditError> {
+        let index = self.track_index(id)?;
+        let mut copy = self.tracks[index].clone();
+        copy.id = TrackId(self.alloc_id());
+        copy.name = format!("{} copy", copy.name);
+        copy.solo = false;
+        for clip in &mut copy.clips {
+            clip.id = ClipId(self.alloc_id());
+        }
+        // Old device id to new, so the copy's automation follows its own devices.
+        let mut devices = Vec::with_capacity(copy.devices.len());
+        for device in &mut copy.devices {
+            let new = DeviceId(self.alloc_id());
+            devices.push((device.id, new));
+            device.id = new;
+        }
+        let lanes: Vec<AutomationLane> = self
+            .automation
+            .iter()
+            .filter_map(|lane| {
+                let target = match &lane.target {
+                    AutomationTarget::TrackVolume { track } if *track == id => {
+                        AutomationTarget::TrackVolume { track: copy.id }
+                    }
+                    AutomationTarget::TrackPan { track } if *track == id => {
+                        AutomationTarget::TrackPan { track: copy.id }
+                    }
+                    AutomationTarget::DeviceParam { device, param } => {
+                        let (_, new) = devices.iter().find(|(old, _)| old == device)?;
+                        AutomationTarget::DeviceParam { device: *new, param: param.clone() }
+                    }
+                    _ => return None,
+                };
+                Some(AutomationLane { target, points: lane.points.clone() })
+            })
+            .collect();
+        self.automation.extend(lanes);
+        let new_id = copy.id;
+        self.tracks.insert(index + 1, copy);
+        Ok(new_id)
+    }
+
     pub fn track_index(&self, id: TrackId) -> Result<usize, EditError> {
         self.tracks.iter().position(|t| t.id == id).ok_or(EditError::TrackNotFound(id))
     }
@@ -792,6 +836,19 @@ impl Project {
         track.clips.push(Clip { id: new_id, start, ..source });
         sort_clips(&mut track.clips);
         Ok(new_id)
+    }
+
+    /// Puts a copy of `clip` on `track` at `start`, with a new id. The clip
+    /// need not be in the project any more, which is what pasting from a
+    /// clipboard requires.
+    pub fn paste_clip(&mut self, track: TrackId, clip: &Clip, start: Beats) -> Result<ClipId, EditError> {
+        validate_span(start, clip.length)?;
+        self.holds_clips(track)?;
+        let id = ClipId(self.alloc_id());
+        let clips = &mut self.track_mut(track)?.clips;
+        clips.push(Clip { id, start, ..clip.clone() });
+        sort_clips(clips);
+        Ok(id)
     }
 
     /// Moves a clip to `start`, and to another track if one is given.
@@ -967,6 +1024,25 @@ impl Project {
             return invalid(format!("there is no marker {index}; the project has {}", self.markers.len()));
         }
         Ok(self.markers.remove(index))
+    }
+
+    /// Moves a marker to `beat` and returns its new index.
+    pub fn move_marker(&mut self, index: usize, beat: Beats) -> Result<usize, EditError> {
+        if !beat.is_finite() || beat < 0.0 {
+            return invalid(format!("marker position {beat} must be >= 0 beats"));
+        }
+        let marker = self.remove_marker(index)?;
+        self.add_marker(beat, marker.name)
+    }
+
+    pub fn rename_marker(&mut self, index: usize, name: impl Into<String>) -> Result<(), EditError> {
+        match self.markers.get_mut(index) {
+            Some(marker) => {
+                marker.name = name.into();
+                Ok(())
+            }
+            None => invalid(format!("there is no marker {index}; the project has {}", self.markers.len())),
+        }
     }
 
     // ---- devices -------------------------------------------------------
@@ -1361,6 +1437,68 @@ mod tests {
         assert_eq!(exported.tracks.len(), 1);
         let starts: Vec<f64> = exported.tracks[0].notes.iter().map(|n| n.start).collect();
         assert_eq!(starts, [4.0, 5.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn a_duplicated_track_is_independent_of_its_original() {
+        let mut project = Project::new("t");
+        let track = project.add_track("Keys");
+        let other = project.add_track("Other");
+        let clip = project.add_midi_clip(track, "c", 0.0, 4.0).unwrap();
+        project.clip_mut(clip).unwrap().add_notes(&[note(60, 0.0)]).unwrap();
+        let synth = project.add_device(ChainRef::Track(track), "builtin:polysynth", "Synth", None).unwrap();
+        project.device_mut(synth).unwrap().params.insert("cutoff".into(), 800.0);
+        let sweep = vec![AutomationPoint::new(0.0, 200.0), AutomationPoint::new(4.0, 2000.0)];
+        project.set_automation(AutomationTarget::DeviceParam { device: synth, param: "cutoff".into() }, sweep).unwrap();
+        project.set_automation(AutomationTarget::TrackVolume { track }, vec![AutomationPoint::new(0.0, -6.0)]).unwrap();
+        project.set_automation(AutomationTarget::MasterVolume, vec![AutomationPoint::new(0.0, 0.0)]).unwrap();
+        project.track_mut(track).unwrap().solo = true;
+
+        let copy = project.duplicate_track(track).unwrap();
+        let order: Vec<TrackId> = project.tracks.iter().map(|t| t.id).collect();
+        assert_eq!(order, [track, copy, other], "the copy sits right below the original");
+        let duplicate = project.track(copy).unwrap();
+        assert_eq!((duplicate.name.as_str(), duplicate.solo), ("Keys copy", false));
+        let (new_clip, new_synth) = (duplicate.clips[0].id, duplicate.devices[0].id);
+        assert!(new_clip != clip && new_synth != synth, "ids are new");
+        assert_eq!(duplicate.clips[0].notes(), project.clip(clip).unwrap().notes());
+        assert_eq!(duplicate.devices[0].params.get("cutoff"), Some(&800.0));
+
+        // The copy has its own automation, pointing at its own device.
+        assert_eq!(project.automation.len(), 5, "three lanes plus the copy's two");
+        let copied = AutomationTarget::DeviceParam { device: new_synth, param: "cutoff".into() };
+        assert!(project.automation.iter().any(|lane| lane.target == copied && lane.points.len() == 2));
+        project.remove_track(copy).unwrap();
+        assert_eq!(project.automation.len(), 3, "removing the copy leaves the original's lanes alone");
+        assert!(project.duplicate_track(TrackId(999)).is_err());
+    }
+
+    #[test]
+    fn clips_paste_from_outside_the_project_and_markers_move() {
+        let mut project = Project::new("t");
+        let track = project.add_track("A");
+        let clip = project.add_midi_clip(track, "riff", 0.0, 2.0).unwrap();
+        project.clip_mut(clip).unwrap().add_notes(&[note(64, 1.0)]).unwrap();
+        // Cut: the clip leaves the project and lives on in a clipboard.
+        let clipboard = project.remove_clip(clip).unwrap();
+        let pasted = project.paste_clip(track, &clipboard, 8.0).unwrap();
+        let again = project.paste_clip(track, &clipboard, 10.0).unwrap();
+        assert!(pasted != clip && again != pasted);
+        let first = project.clip(pasted).unwrap();
+        assert_eq!((first.start, first.length, first.name.as_str(), first.notes().len()), (8.0, 2.0, "riff", 1));
+        let bus = project.add_track_of_kind("Bus", TrackKind::Group);
+        assert!(project.paste_clip(bus, &clipboard, 0.0).is_err());
+
+        project.add_marker(0.0, "Intro").unwrap();
+        project.add_marker(8.0, "Verse").unwrap();
+        project.add_marker(16.0, "Drop").unwrap();
+        assert_eq!(project.move_marker(0, 12.0).unwrap(), 1, "it lands between the other two");
+        project.rename_marker(1, "Build").unwrap();
+        let markers: Vec<(f64, &str)> = project.markers.iter().map(|m| (m.beat, m.name.as_str())).collect();
+        assert_eq!(markers, [(8.0, "Verse"), (12.0, "Build"), (16.0, "Drop")]);
+        assert!(project.move_marker(7, 0.0).is_err() && project.rename_marker(7, "x").is_err());
+        assert!(project.move_marker(0, -1.0).is_err());
+        assert_eq!(project.markers.len(), 3, "a rejected move loses nothing");
     }
 
     #[test]
