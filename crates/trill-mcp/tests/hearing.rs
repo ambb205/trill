@@ -508,8 +508,35 @@ async fn a_snare_on_the_first_sample_of_a_render_sounds_on_superior_drummer_3() 
         .map(|seconds| trill_core::Note { pitch: 38, start: seconds * 2.0, length: 0.25, velocity: 110 })
         .collect();
     project.clip_mut(hit_clip).unwrap().add_notes(&notes).unwrap();
+    // Eight seconds on: a crash and the ride, twice, three seconds apart.
+    // A kit loads its cymbals last, so these are the ones a render that
+    // starts too soon would lose.
+    let cymbal_clip = project.add_midi_clip(drums, "Cymbals", 16.0, 16.0).unwrap();
+    let cymbals: Vec<trill_core::Note> = [(49, 0.0), (51, 1.0), (49, 6.0), (51, 7.0)]
+        .iter()
+        .map(|(pitch, start)| trill_core::Note { pitch: *pitch, start: *start, length: 0.25, velocity: 110 })
+        .collect();
+    project.clip_mut(cymbal_clip).unwrap().add_notes(&cymbals).unwrap();
     let factory = trill_core::device::CompositeFactory::new(host.factories());
     let options = trill_engine::RenderOptions { max_tail_seconds: 1.0, ..trill_engine::RenderOptions::default() };
+
+    // The cymbals first, from the crash on: the first thing this process
+    // asks of the plugin.
+    let from_crash = trill_engine::RenderOptions { start_beat: 16.0, ..options.clone() };
+    let begun = Instant::now();
+    let cold = trill_engine::render::render(&project, &factory, &from_crash).unwrap();
+    let at = [0.0, 0.5, 3.0, 3.5];
+    let cymbal_levels = levels(&cold.left, 48_000.0, &at, 0.3);
+    eprintln!(
+        "cold, from the crash: rendered in {:.1?}; crash, ride, crash, ride at {at:?} s peak at {cymbal_levels:.1?}          dB; waited {:?}",
+        begun.elapsed(),
+        cold.measured.waited
+    );
+    assert!(cymbal_levels[0] > -50.0, "the crash on the first sample sounds: {cymbal_levels:?}");
+    assert!((cymbal_levels[0] - cymbal_levels[2]).abs() < 4.0, "as loud as the one after it: {cymbal_levels:?}");
+    assert!((cymbal_levels[1] - cymbal_levels[3]).abs() < 4.0, "and the ride as its second: {cymbal_levels:?}");
+
+    let options = trill_engine::RenderOptions { end_beat: Some(8.0), ..options };
     let begun = Instant::now();
     let cold = trill_engine::render::render(&project, &factory, &options).unwrap();
     let took = begun.elapsed();
@@ -564,6 +591,27 @@ async fn a_snare_on_the_first_sample_of_a_render_sounds_on_superior_drummer_3() 
     assert!(likes.iter().any(|like| like.contains("low")), "a kick or a tom among them: {likes:?}");
     assert!(likes.iter().any(|like| like.contains("bright")), "and a cymbal or a hat: {likes:?}");
     assert!(size < 20_000, "a map that can be read: {size} bytes");
+
+    // Nothing arrives late: what the drums and the cymbals measure in a
+    // probe made now is what they measure half a minute on.
+    let kit = json!({ "track": drums, "notes": [36, 38, 42, 46, 49, 51, 53, 55, 57, 52, 86], "detail": true });
+    let now = ok(client, "probe", kit.clone()).await;
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let later = ok(client, "probe", kit).await;
+    let level_of = |reply: &Value| -> Vec<(String, f64)> {
+        let entries = reply["heard"].as_array().unwrap().iter();
+        entries.map(|e| (e["notes"].as_str().unwrap().to_string(), e["level_db"].as_f64().unwrap_or(-120.0))).collect()
+    };
+    eprintln!(
+        "the kit now: {:?}
+half a minute on: {:?}",
+        level_of(&now),
+        level_of(&later)
+    );
+    assert_eq!(now["sounding"], later["sounding"], "the same drums sound");
+    for ((name, before), (_, after)) in level_of(&now).iter().zip(level_of(&later)) {
+        assert!((before - after).abs() < 4.0, "{name}: {before} dB now, {after} dB later");
+    }
 }
 
 /// With the installed SWAM Alto Sax 3, which stays silent for seconds

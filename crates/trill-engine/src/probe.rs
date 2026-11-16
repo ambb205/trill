@@ -17,7 +17,7 @@
 
 use crate::analysis::{Analyzer, level_db};
 use crate::graph::MAX_BLOCK;
-use crate::ready::{Opening, OpeningNote, Plugins, Stand, Wait, signature, wait_for};
+use crate::ready::{OPENING_NOTES, Opening, OpeningNote, Plugins, Stand, Wait, signature, wait_for};
 use std::sync::Arc;
 use std::time::Duration;
 use trill_core::device::{DeviceFactory, DeviceInstance, DeviceProcessor, Event, EventKind, Purpose};
@@ -49,9 +49,6 @@ const HIGHEST_HZ: f64 = 4200.0;
 /// How well a sound has to match itself a period later to have a pitch.
 /// Noise comes nowhere near; a plucked string that is dying away does.
 const CLEAR_PITCH: f64 = 0.7;
-/// How many of the notes of a probe the instrument is asked to answer
-/// before it counts as ready.
-const OPENING_NOTES: usize = 12;
 
 /// A note to play.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,6 +119,18 @@ pub struct Heard {
     pub width: f32,
 }
 
+/// Whether devices are ready to be played: see
+/// [`ProbeJob::wait_until_ready`].
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Readiness {
+    /// Whether they answered what they were given, and went on answering
+    /// it alike with nothing loading. `false` after `seconds` of waiting
+    /// means they may still be loading, or do not play those notes at all.
+    pub ready: bool,
+    /// How long it took.
+    pub seconds: f64,
+}
+
 /// What a probe found.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Probed {
@@ -166,6 +175,43 @@ impl ProbeJob {
     /// comes back plays notes for as long as it is kept: several rounds
     /// through one instrument that was made and waited for once.
     pub fn open(&self, first: &[ProbeNote], options: &ProbeOptions) -> Result<Probing, ProbeError> {
+        // The instrument is asked a spread of the notes, with what is held
+        // with each, until it answers and goes on answering alike.
+        let standing: Vec<EventKind> = options.controllers.iter().map(|(kind, value)| kind.event(*value)).collect();
+        let step = first.len().div_ceil(OPENING_NOTES).max(1);
+        let mut opening = Opening::default();
+        for note in first.iter().step_by(step) {
+            for pitch in options.held.iter().chain(&note.with) {
+                opening.notes.push(OpeningNote {
+                    pitch: *pitch,
+                    velocity: velocity_of(100),
+                    controllers: standing.clone(),
+                });
+            }
+            opening.notes.push(OpeningNote {
+                pitch: note.pitch,
+                velocity: velocity_of(note.velocity),
+                controllers: standing.clone(),
+            });
+        }
+        self.open_asking(opening, options)
+    }
+
+    /// Whether the devices are ready to be played, found out on copies of
+    /// them made now: they are given `pitches` (or, with none, a burst of
+    /// noise to pass, which is how an effect is asked) until they answer
+    /// and have stopped changing, as before a render ([`crate::ready`]).
+    /// Waits as long as that takes, up to two minutes while there are
+    /// signs of loading; `patience` is how long nothing at all may happen.
+    pub fn wait_until_ready(&self, pitches: &[u8], patience: Duration) -> Result<Readiness, ProbeError> {
+        let note = |pitch: &u8| OpeningNote { pitch: *pitch, velocity: velocity_of(100), controllers: Vec::new() };
+        let opening = Opening { notes: pitches.iter().map(note).collect(), signal: pitches.is_empty() };
+        let options = ProbeOptions { patience, ..ProbeOptions::default() };
+        let probing = self.open_asking(opening, &options)?;
+        Ok(Readiness { ready: probing.answered, seconds: probing.waited_seconds })
+    }
+
+    fn open_asking(&self, opening: Opening, options: &ProbeOptions) -> Result<Probing, ProbeError> {
         let sample_rate = f64::from(options.sample_rate);
         let mut instances: Vec<DeviceInstance> = Vec::with_capacity(self.devices.len());
         for (index, device) in self.devices.iter().enumerate() {
@@ -203,27 +249,9 @@ impl ProbeJob {
             answered: true,
         };
 
-        // The instrument is asked a spread of the notes, with what is held
-        // with each, until it answers and goes on answering alike.
         let plugins = self.devices.iter().any(|device| Plugins::is_plugin(&device.uri));
         let mut stand = probing.stand();
         if plugins {
-            let step = first.len().div_ceil(OPENING_NOTES).max(1);
-            let mut opening = Opening::default();
-            for note in first.iter().step_by(step) {
-                for pitch in options.held.iter().chain(&note.with) {
-                    opening.notes.push(OpeningNote {
-                        pitch: *pitch,
-                        velocity: velocity_of(100),
-                        controllers: standing.clone(),
-                    });
-                }
-                opening.notes.push(OpeningNote {
-                    pitch: note.pitch,
-                    velocity: velocity_of(note.velocity),
-                    controllers: standing.clone(),
-                });
-            }
             let signature = signature(self.devices.iter(), &opening);
             let mut waits = [Wait::new(stand, opening, signature)];
             wait_for(&mut waits, options.patience);
@@ -310,8 +338,11 @@ fn play(stand: &mut Stand, note: &ProbeNote, options: &ProbeOptions, setting: &[
     let mut off = vec![Event { offset: 0, kind: EventKind::NoteOff { pitch: note.pitch } }];
     off.extend(note.with.iter().map(|pitch| Event { offset: 0, kind: EventKind::NoteOff { pitch: *pitch } }));
     let quiet_frames = stand.frames(QUIET_SECONDS);
+    // Quiet is quiet by the devices' own measure, not by what the note
+    // before left ringing: a note that is taken to be over while it still
+    // rings leaves more ringing for the next, and so on up.
     let peak_so_far = left.iter().chain(&right).fold(0.0f32, |peak, sample| peak.max(sample.abs()));
-    let quiet = floor.max(peak_so_far * 0.003);
+    let quiet = stand.heard_above().max(peak_so_far * 0.003);
     let mut silent = 0;
     stand.run_into(&off, stand.frames(options.tail_seconds.max(QUIET_SECONDS)), |l, r| {
         left.extend_from_slice(l);

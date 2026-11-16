@@ -60,6 +60,10 @@ pub struct Loading {
     pub upper: Duration,
     /// It never answers at all.
     pub never: bool,
+    /// The program grows while it loads, as it does while a sampler reads
+    /// its samples: some megabytes every twentieth of a second, held for
+    /// as long as the instrument lives.
+    pub grows: bool,
 }
 
 /// Makes the scripted instruments, and writes down what each was made for.
@@ -143,7 +147,18 @@ impl DeviceFactory for ScriptedFactory {
         if let Some(saved) = device.state.as_deref().and_then(|state| std::str::from_utf8(state).ok()) {
             patch.load(saved);
         }
+        let samples = Arc::new(Mutex::new(Vec::new()));
+        if self.loading.grows {
+            let (samples, until) = (samples.clone(), born + self.loading.first.max(self.loading.upper));
+            std::thread::spawn(move || {
+                while Instant::now() < until && Arc::strong_count(&samples) > 1 {
+                    samples.lock().push(vec![1u8; 6 * 1024 * 1024]);
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            });
+        }
         let processor = Instrument {
+            _samples: samples,
             kind,
             sample_rate,
             ready: (!self.loading.never).then(|| born + self.loading.first),
@@ -280,6 +295,8 @@ struct Voice {
 }
 
 struct Instrument {
+    /// What it has "loaded": memory that is let go of with it.
+    _samples: Arc<Mutex<Vec<Vec<u8>>>>,
     kind: Kind,
     sample_rate: f64,
     /// When notes are first answered, and notes from middle C up; `None`

@@ -46,14 +46,38 @@
 //! what it was (the plugins, their state, the notes), and the next render
 //! of the same thing waits only a moment for it.
 //!
+//! **Loading shows in memory.** A drum sampler loads its kit one drum
+//! after another, over as much as a minute, and the cymbals come last; a
+//! drum that has not arrived sounds exactly like a key that plays
+//! nothing. So answers alone do not say a kit is complete. What does is
+//! that the program has stopped growing: while samples are being read,
+//! its memory rises by megabytes a second. A plugin is therefore ready
+//! when it has answered alike three times running, for a quarter of a
+//! second or more, *and* the process did not grow meanwhile. While it is
+//! growing, or the answers are still changing, the wait goes on, up to
+//! two minutes; the caller's patience is for how long nothing at all may
+//! happen. (Memory can be asked about on Windows. Elsewhere the answers
+//! have to do.)
+//!
 //! A plugin that was slow to give its first answer is asked to hold its
 //! answers for longer (half as long as it took, up to two seconds): on a
 //! busy machine a sampler's loading stalls, and a stall is not the end.
 //!
+//! **What was ready is remembered** for as long as the program runs: the
+//! plugin, its state, the notes and how it answered them. A render makes
+//! its plugins anew, and a sampler usually finds the samples of its
+//! twin, which is still loaded, without reading them again. A plugin
+//! that answers as it did when it was last found ready, twice and with
+//! the program not growing between the two, is ready without being held
+//! to it for longer. (Once is not enough: a kit whose cymbals have yet to
+//! load answers like the whole kit wherever a drum that has loaded rings
+//! over them.) One that does not is waited for as if for the first time. [`is_loading`] says whether anything in the program seems
+//! to be loading right now, for telling a user so.
+//!
 //! What this cannot see: a plugin that stops changing for longer than
-//! that and is still not done, one whose later notes are not among the
-//! dozen that are rehearsed, and an effect that passes sound before it is
-//! ready to pass it rightly. None of them is worse off than before there
+//! that without the program growing and is still not done, one whose
+//! later notes are not among the thirty-two that are rehearsed, and an
+//! effect that passes sound before it is ready to pass it rightly. None of them is worse off than before there
 //! was any waiting.
 
 use crate::graph::Graph;
@@ -63,8 +87,10 @@ use std::time::{Duration, Instant};
 use trill_core::device::{DeviceCategory, DeviceFactory, DeviceProcessor, Event, EventKind, ProcessInfo};
 use trill_core::{ControllerKind, Device, DeviceId, Project, TimeSignature, TrackId};
 
-/// The most notes of a track's opening that are rehearsed.
-const OPENING_NOTES: usize = 12;
+/// The most notes of a track that are rehearsed: the different pitches it
+/// plays, as they first come. A drum part has a dozen; the cymbals, which
+/// a sampler loads last, must be among them.
+pub const OPENING_NOTES: usize = 32;
 /// Frames in each block a rehearsal processes.
 const BLOCK: usize = 256;
 /// How long each rehearsed note is held, and how long the plugin is
@@ -96,6 +122,13 @@ const SIGNAL_STRETCHES: usize = 3;
 const CHANGING_ANSWERS: u32 = 10;
 /// How long a rehearsal waits between tries.
 const BETWEEN_TRIES: Duration = Duration::from_millis(100);
+/// How many tries in a row must be answered alike.
+const ALIKE_RUNNING: u32 = 3;
+/// The program is loading something while its memory grows faster than
+/// this, in bytes a second: a slow disk reads samples faster.
+const LOADING_BYTES_A_SECOND: f64 = 4.0 * 1024.0 * 1024.0;
+/// How long plugins that show signs of loading are waited for at most.
+const LOADING_LIMIT: Duration = Duration::from_secs(120);
 /// The longest a rehearsed plugin is left to ring out before it is reset:
 /// long enough for a hall to forget a short burst of noise.
 const RING_OUT_SECONDS: f64 = 10.0;
@@ -108,6 +141,68 @@ const REMEMBERED: usize = 256;
 
 /// What did not answer the last time it was asked, by [`signature`].
 static KNOWN_NOT_TO_ANSWER: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+/// What was found ready, by [`signature`], and how it answered then.
+static KNOWN_READY: Mutex<Vec<(u64, Vec<Answer>)>> = Mutex::new(Vec::new());
+
+/// How much memory the program holds, in bytes: what it has in use and
+/// what it has asked for. `None` where that cannot be asked.
+fn memory_held() -> Option<(u64, u64)> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+        use windows::Win32::System::Threading::GetCurrentProcess;
+        let mut counters = PROCESS_MEMORY_COUNTERS::default();
+        let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        // SAFETY: the handle is the pseudo-handle of this process, which is
+        // always valid, and `counters` is a local of the size given.
+        unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) }.ok()?;
+        Some((counters.WorkingSetSize as u64, counters.PagefileUsage as u64))
+    }
+    #[cfg(not(windows))]
+    None
+}
+
+/// Watches the program's memory for the growth that loading samples
+/// makes: it rises past the most it has ever held, and goes on rising.
+/// Memory that is taken and given back, as any busy program does, does
+/// not count.
+struct Growth {
+    /// The most the program has held so far, and when it was last asked.
+    most: Option<((u64, u64), Instant)>,
+}
+
+impl Growth {
+    fn new() -> Self {
+        Self { most: memory_held().map(|held| (held, Instant::now())) }
+    }
+
+    /// Whether the program grew since this was last asked at the rate of
+    /// something being loaded. Always false where memory cannot be asked
+    /// about.
+    fn grew(&mut self) -> bool {
+        let (Some(((in_use, asked), then)), Some(now)) = (self.most, memory_held()) else { return false };
+        let at = Instant::now();
+        let seconds = at.duration_since(then).as_secs_f64();
+        if seconds < 0.05 {
+            return false;
+        }
+        self.most = Some(((in_use.max(now.0), asked.max(now.1)), at));
+        let grown = now.0.saturating_sub(in_use).max(now.1.saturating_sub(asked)) as f64;
+        grown / seconds >= LOADING_BYTES_A_SECOND
+    }
+}
+
+/// Whether something in the program seems to be loading right now: its
+/// memory grew, over the tenth of a second this takes, as it does while a
+/// plugin reads its samples. A sampler that has just been given a kit or a
+/// preset says "yes" here for as long as it is loading, and a moment
+/// longer says nothing. It is the program that is asked, not one device,
+/// and only Windows can be asked: elsewhere the answer is `false`.
+pub fn is_loading() -> bool {
+    let mut growth = Growth::new();
+    std::thread::sleep(Duration::from_millis(100));
+    growth.grew()
+}
 
 /// How waiting for the plugins of one chain went.
 #[derive(Clone, Debug, PartialEq)]
@@ -344,61 +439,107 @@ struct Answer {
     energy: f64,
 }
 
+impl Answer {
+    /// Whether this answer and `other` are one answer: both nothing, or
+    /// both sound of about the same energy. `floor` is what counts as
+    /// nothing.
+    fn like(&self, other: &Answer, floor: f32) -> bool {
+        match (self.peak > floor, other.peak > floor) {
+            (false, false) => true,
+            (true, true) => (10.0 * (self.energy / other.energy).log10()).abs() <= f64::from(SAME_ANSWER_DB),
+            _ => false,
+        }
+    }
+}
+
+fn alike(now: &[Answer], before: &[Answer], floor: f32) -> bool {
+    now.len() == before.len() && now.iter().zip(before).all(|(now, before)| now.like(before, floor))
+}
+
 /// One plugin's wait: what it is asked, and how it has answered so far.
 pub(crate) struct Wait<'a> {
     pub stand: Stand<'a>,
     pub opening: Opening,
-    /// What is waited for, for remembering it if it never answers.
+    /// What is waited for, for remembering how it went.
     pub signature: u64,
-    /// The answers of the last try and when it was made, if it was
-    /// answered at all.
-    last: Option<(Vec<Answer>, Instant)>,
-    /// Since when the answers have been the same.
-    same_since: Option<Instant>,
+    /// The answers of the last try, if it was answered at all.
+    last: Option<Vec<Answer>>,
+    /// How many tries in a row were answered alike with nothing loading,
+    /// and since when.
+    alike: u32,
+    alike_since: Option<Instant>,
     /// How many answers so far were not like the one before.
     changing: u32,
+    /// It answers as it did when it was last found ready.
+    known: bool,
     /// How long after the wait began the first answer came.
     first_answer: Option<Duration>,
+    /// When there was last a sign of life: an answer that was not like
+    /// the one before, or the program growing.
+    stirred: Instant,
     /// When it was found ready, or given up on.
     outcome: Option<(Duration, bool)>,
 }
 
 impl<'a> Wait<'a> {
     pub fn new(stand: Stand<'a>, opening: Opening, signature: u64) -> Self {
-        Self { stand, opening, signature, last: None, same_since: None, changing: 0, first_answer: None, outcome: None }
+        Self {
+            stand,
+            opening,
+            signature,
+            last: None,
+            alike: 0,
+            alike_since: None,
+            changing: 0,
+            known: false,
+            first_answer: None,
+            stirred: Instant::now(),
+            outcome: None,
+        }
     }
 
-    /// One try. Returns whether the wait is over.
-    fn attempt(&mut self, begun: Instant) -> bool {
+    /// One try. `loading` is whether the program grew since the last one;
+    /// `remembered` how this was answered when it was last found ready.
+    /// Returns whether the wait is over.
+    fn attempt(&mut self, begun: Instant, loading: bool, remembered: Option<&[Answer]>) -> bool {
         let floor = self.stand.heard_above();
         let now = Instant::now();
         let answers = self.stand.rehearse(&self.opening);
+        if loading {
+            self.stirred = now;
+        }
         if answers.iter().all(|answer| answer.peak <= floor) {
-            (self.last, self.same_since) = (None, None);
+            (self.last, self.alike, self.alike_since) = (None, 0, None);
             return false;
         }
         let first = *self.first_answer.get_or_insert(begun.elapsed());
-        // Note for note: both silent, or both sounding with about the same
-        // energy.
-        let alike = |now: Answer, before: Answer| match (now.peak > floor, before.peak > floor) {
-            (false, false) => true,
-            (true, true) => (10.0 * (now.energy / before.energy).log10()).abs() <= f64::from(SAME_ANSWER_DB),
-            _ => false,
-        };
-        let before = self.last.take();
-        let same =
-            before.as_ref().is_some_and(|(last, _)| answers.iter().zip(last).all(|(now, before)| alike(*now, *before)));
-        self.changing += u32::from(before.is_some() && !same);
-        self.same_since = match (same, self.same_since, before) {
-            (true, Some(since), _) => Some(since),
-            (true, None, Some((_, at))) => Some(at),
-            _ => None,
-        };
-        self.last = Some((answers, now));
+        // What answers as it did when it was last found ready has one
+        // like answer behind it already, and need not be held for long.
+        let known = remembered.is_some_and(|before| alike(&answers, before, floor));
+        if self.last.is_none() && known && !loading {
+            (self.alike, self.alike_since, self.known) = (1, Some(now), true);
+        }
+        let same = self.last.as_ref().is_some_and(|last| alike(&answers, last, floor));
+        if self.last.is_some() && !same {
+            self.changing += 1;
+            self.stirred = now;
+        }
+        if same && !loading {
+            self.alike += 1;
+            self.alike_since.get_or_insert(now);
+        } else if self.last.is_some() || !self.known {
+            (self.alike, self.alike_since) = (u32::from(!loading), (!loading).then_some(now));
+            self.known &= !loading && known;
+        }
+        self.last = Some(answers);
         // One that was slow to answer at all is given longer to finish.
-        let hold = (first / 2).clamp(SETTLED_FOR, SETTLED_AT_MOST);
-        let settled = self.same_since.is_some_and(|since| now.duration_since(since) >= hold);
-        if settled || self.changing >= CHANGING_ANSWERS {
+        let hold = if self.known { BETWEEN_TRIES } else { (first / 2).clamp(SETTLED_FOR, SETTLED_AT_MOST) };
+        let held = self.alike_since.is_some_and(|since| now.duration_since(since) >= hold);
+        let enough = if self.known { ALIKE_RUNNING - 1 } else { ALIKE_RUNNING };
+        // An instrument that never plays a note the same way twice is
+        // ready all the same, once nothing is being loaded.
+        let never_the_same = self.changing >= CHANGING_ANSWERS && !loading;
+        if (self.alike >= enough && held) || never_the_same {
             self.outcome = Some((begun.elapsed(), true));
         }
         self.outcome.is_some()
@@ -410,26 +551,36 @@ impl<'a> Wait<'a> {
     }
 }
 
-/// Tries every wait in turn until each is over or `patience` has run out,
-/// then settles them all. Waits that are known not to be answered get
-/// [`KNOWN_SILENT`] at most; what was not answered this time is remembered.
+/// Tries every wait in turn until each is over, then settles them all.
+/// A wait is given up on when nothing has stirred for `patience` (no
+/// answer that differs from the last, and the program not growing), or
+/// after [`LOADING_LIMIT`] whatever stirs. Waits that are known not to be
+/// answered get [`KNOWN_SILENT`] at most; how each went is remembered.
 pub(crate) fn wait_for(waits: &mut [Wait], patience: Duration) {
     let begun = Instant::now();
-    let known: Vec<u64> = KNOWN_NOT_TO_ANSWER.lock().clone();
+    let silent: Vec<u64> = KNOWN_NOT_TO_ANSWER.lock().clone();
+    let ready: Vec<(u64, Vec<Answer>)> = KNOWN_READY.lock().clone();
+    let mut growth = Growth::new();
     for wait in waits.iter_mut() {
         wait.stand.hear_noise();
+        wait.stirred = Instant::now();
     }
     loop {
-        let waited = begun.elapsed();
+        let loading = growth.grew();
         let mut pending = false;
         for wait in waits.iter_mut().filter(|wait| wait.outcome.is_none()) {
             let patience = if wait.opening.signal { patience.min(EFFECT_PATIENCE) } else { patience };
-            let limit = if known.contains(&wait.signature) { patience.min(KNOWN_SILENT) } else { patience };
-            if wait.attempt(begun) {
+            let patience = if silent.contains(&wait.signature) { patience.min(KNOWN_SILENT) } else { patience };
+            let remembered = ready.iter().find(|(signature, _)| *signature == wait.signature);
+            if wait.attempt(begun, loading, remembered.map(|(_, answers)| answers.as_slice())) {
                 continue;
             }
-            if waited >= limit {
-                wait.outcome = Some((waited, false));
+            // Given up on: nothing has happened for as long as the caller
+            // has patience, or it has gone on for too long altogether. A
+            // wait that was answered is then taken as it is; one that
+            // never was went unanswered.
+            if wait.stirred.elapsed() >= patience || begun.elapsed() >= LOADING_LIMIT {
+                wait.outcome = Some((begun.elapsed(), wait.last.is_some()));
             } else {
                 pending = true;
             }
@@ -439,17 +590,20 @@ pub(crate) fn wait_for(waits: &mut [Wait], patience: Duration) {
         }
         std::thread::sleep(BETWEEN_TRIES);
     }
-    let mut known = KNOWN_NOT_TO_ANSWER.lock();
+    let (mut silent, mut ready) = (KNOWN_NOT_TO_ANSWER.lock(), KNOWN_READY.lock());
     for wait in waits.iter_mut() {
         wait.stand.settle();
-        let answered = wait.outcome().1;
-        known.retain(|signature| *signature != wait.signature);
-        if !answered {
-            known.push(wait.signature);
+        silent.retain(|signature| *signature != wait.signature);
+        ready.retain(|(signature, _)| *signature != wait.signature);
+        match (wait.outcome().1, wait.last.take()) {
+            (true, Some(answers)) => ready.push((wait.signature, answers)),
+            _ => silent.push(wait.signature),
         }
     }
-    let surplus = known.len().saturating_sub(REMEMBERED);
-    known.drain(..surplus);
+    let surplus = silent.len().saturating_sub(REMEMBERED);
+    silent.drain(..surplus);
+    let surplus = ready.len().saturating_sub(REMEMBERED);
+    ready.drain(..surplus);
 }
 
 /// What identifies a wait: the plugins, their saved states, and what they

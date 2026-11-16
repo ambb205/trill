@@ -23,6 +23,48 @@ pub enum ProbeTarget {
 }
 
 impl Session {
+    /// What it takes to find out whether `device` is ready to be played,
+    /// after it was added, given another preset or had a kit loaded in
+    /// its own window: a snapshot to wait on away from the session, and
+    /// the pitches to ask it (the ones its track plays, or for an
+    /// instrument with no notes yet a spread of the keyboard; none for an
+    /// effect, which is given noise to pass).
+    ///
+    /// ```ignore
+    /// let (job, pitches) = session.lock().readiness_job(device)?;
+    /// // On a thread that may wait, without the session:
+    /// let readiness = job.wait_until_ready(&pitches, Duration::from_secs(10))?;
+    /// ```
+    ///
+    /// What is waited for is a copy of the device, made from its state as
+    /// it is now, not the one that is playing: that one cannot be played
+    /// notes that nobody is to hear. A sampler's copy finds the samples
+    /// its twin has loaded, so the two are ready together; where a plugin
+    /// loads everything again for every copy, this takes as long as that
+    /// does. [`crate::ready::is_loading`] is the quick question instead:
+    /// whether anything in the program is loading right now.
+    pub fn readiness_job(&mut self, device: DeviceId) -> Result<(ProbeJob, Vec<u8>), SessionError> {
+        self.capture_state_of(device);
+        let found = self.project.device(device)?.clone();
+        let track = self.project.tracks.iter().find(|track| track.devices.iter().any(|other| other.id == device));
+        let instrument = track.is_some_and(|track| self.instrument_device(track.id).is_some_and(|i| i.id == device));
+        let mut pitches: Vec<u8> = Vec::new();
+        if instrument {
+            let notes = track.into_iter().flat_map(|track| track.clips.iter()).flat_map(|clip| clip.notes().to_vec());
+            for note in notes {
+                if !pitches.contains(&note.pitch) && pitches.len() < crate::ready::OPENING_NOTES {
+                    pitches.push(note.pitch);
+                }
+            }
+            if pitches.is_empty() {
+                pitches = (24..=96).step_by(6).collect();
+            }
+        }
+        let job =
+            ProbeJob { devices: vec![found], factory: self.factory.clone(), preset: None, tempo: self.project.tempo };
+        Ok((job, pitches))
+    }
+
     /// A snapshot of what `target` names, for a probe to play. Nothing in
     /// the session changes: no undo step, no device added, nothing heard.
     ///
