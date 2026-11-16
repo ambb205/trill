@@ -47,6 +47,9 @@ is not optimized, debug information is limited to file and line (`CARGO_PROFILE_
 session), and on Windows the linker is the one that ships with Rust (`.cargo/config.toml`). Everything from
 scratch, tests included, takes about four minutes on a 16-core machine; after an edit, seconds.
 
+Working in a second checkout (`git worktree add`)? `sh scripts/warm-worktree.sh` there copies the libraries the
+first one has already built, and the first build compiles only Trill's own crates: a minute and a half.
+
 ### Let an AI write a song
 
 While the app is open it serves MCP on `http://127.0.0.1:7777/mcp` (`--mcp-port` changes the port, `--no-mcp` turns
