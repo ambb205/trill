@@ -9,13 +9,17 @@
 //! What a plugin observes (the transport it was given, the threads it was
 //! called on, the buses and parameter changes it received) it records in
 //! [`Seen`], which the tests read back by the instance's serial number.
+//!
+//! Some of the plugins have a view. It draws nothing; what it does is
+//! everything a view does to its host: it negotiates a size, and has a
+//! "user" ([`act`]) who turns its knob and makes it ask for another size.
 
 use super::class_id::ClassId;
 use super::text;
 use std::collections::HashMap;
 use std::ffi::{CStr, c_void};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
 use vst3::Steinberg::Vst::BusDirections_::kInput;
 use vst3::Steinberg::Vst::BusInfo_::BusFlags_::kDefaultActive;
@@ -35,10 +39,11 @@ use vst3::Steinberg::Vst::{
     SpeakerArrangement, String128, TChar, UnitID, UnitInfo, kNoParentUnitId, kNoProgramListId, kRootUnitId,
 };
 use vst3::Steinberg::{
-    FIDString, FUnknown, IBStream, IBStreamTrait, IPlugView, IPluginBaseTrait, IPluginFactory, IPluginFactory2,
+    FIDString, FUnknown, IBStream, IBStreamTrait, IPlugFrame, IPlugFrameTrait, IPlugView, IPlugViewContentScaleSupport,
+    IPlugViewContentScaleSupportTrait, IPlugViewTrait, IPluginBaseTrait, IPluginFactory, IPluginFactory2,
     IPluginFactory2Trait, IPluginFactory3, IPluginFactory3Trait, IPluginFactoryTrait, PClassInfo, PClassInfo2,
-    PClassInfoW, PFactoryInfo, TBool, TUID, int16, int32, kInternalError, kInvalidArgument, kNoInterface,
-    kNotImplemented, kResultFalse, kResultOk, tresult, uint32,
+    PClassInfoW, PFactoryInfo, TBool, TUID, ViewRect, char16, int16, int32, kInternalError, kInvalidArgument,
+    kNoInterface, kNotImplemented, kResultFalse, kResultOk, kResultTrue, tresult, uint32,
 };
 use vst3::{Class, ComPtr, ComRef, ComWrapper, Interface, uid};
 
@@ -72,8 +77,16 @@ pub(crate) mod kind {
     pub(crate) const LOST_CONTROLLER: u8 = 8;
     /// [`MONO_GAIN`] that can be activated once, and never again.
     pub(crate) const FAILS_REACTIVATE: u8 = 9;
+    /// [`MONO_GAIN`] with a view the user may resize, to sizes that are
+    /// multiples of ten pixels and no smaller than half its natural size,
+    /// and which takes its monitor's scale from the host.
+    pub(crate) const EDITOR: u8 = 10;
+    /// [`MONO_GAIN`] with a view of one size that will not hear of scales.
+    pub(crate) const FIXED_EDITOR: u8 = 11;
+    /// [`EDITOR`] whose view cannot be put into a window.
+    pub(crate) const FAILS_ATTACH: u8 = 12;
 
-    pub(crate) const ALL: [u8; 10] = [
+    pub(crate) const ALL: [u8; 13] = [
         IMPULSE,
         MONO_GAIN,
         STEREO_GAIN,
@@ -84,7 +97,15 @@ pub(crate) mod kind {
         SLOW_INIT,
         LOST_CONTROLLER,
         FAILS_REACTIVATE,
+        EDITOR,
+        FIXED_EDITOR,
+        FAILS_ATTACH,
     ];
+}
+
+/// Whether the plugin's edit controller makes a view.
+fn has_view(kind: u8) -> bool {
+    matches!(kind, kind::EDITOR | kind::FIXED_EDITOR | kind::FAILS_ATTACH)
 }
 
 fn is_instrument(kind: u8) -> bool {
@@ -265,6 +286,318 @@ pub(crate) fn controller_lifecycle(serial: u64) -> Vec<&'static str> {
 /// How often a host has given the scripted module its context.
 pub(crate) fn host_contexts() -> u32 {
     HOST_CONTEXTS.load(Ordering::SeqCst)
+}
+
+// ---- the view ----------------------------------------------------------------
+
+/// The view's size at a scale of 1.
+pub(crate) const VIEW_SIZE: (i32, i32) = (300, 200);
+/// What the view rounds the sizes it is offered down to.
+pub(crate) const VIEW_STEP: i32 = 10;
+
+/// Something the user of a view does in it.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) enum Action {
+    /// Turns the gain knob to this normalized value, as one gesture.
+    TurnKnob(f64),
+    /// Makes the view ask its host for this size.
+    Resize(i32, i32),
+}
+
+/// What a view observed, and what it is.
+struct ViewState {
+    kind: u8,
+    /// The values of the controller that made the view.
+    values: Arc<[AtomicU64; PARAMS.len()]>,
+    handler: Option<ComPtr<IComponentHandler>>,
+    frame: Mutex<Option<ComPtr<IPlugFrame>>>,
+    /// The view's own interface, for the calls that pass it along. Not a
+    /// reference: null once the view is gone.
+    this: AtomicPtr<IPlugView>,
+    /// The scale the host gave, as `f32` bits; 0 before it gave one.
+    scale: AtomicU32,
+    width: AtomicI32,
+    height: AtomicI32,
+    /// The window the view was put into, as a number.
+    parent: AtomicUsize,
+    /// The timer the view runs while it is attached, or 0.
+    timer: AtomicUsize,
+    ticks: AtomicU32,
+    /// What the host answered each request for another size.
+    resize_results: Mutex<Vec<tresult>>,
+}
+
+/// What the tests read back about a view.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ViewSeen {
+    pub scale: f32,
+    pub size: (i32, i32),
+    pub parent: usize,
+    pub ticks: u32,
+    pub resize_results: Vec<tresult>,
+}
+
+/// The view most recently made for each instance, by serial.
+static VIEWS: Mutex<Option<HashMap<u64, Arc<ViewState>>>> = Mutex::new(None);
+static VIEW_STEPS: Mutex<Vec<(u64, &'static str)>> = Mutex::new(Vec::new());
+static ACTIONS: Mutex<Vec<(u64, Action)>> = Mutex::new(Vec::new());
+
+fn view_log(serial: u64, step: &'static str) {
+    VIEW_STEPS.lock().unwrap().push((serial, step));
+}
+
+fn view_of(serial: u64) -> Option<Arc<ViewState>> {
+    VIEWS.lock().unwrap().get_or_insert_default().get(&serial).cloned()
+}
+
+/// The calls the views of the instance with this serial have received, in
+/// order. Outlives the views, so their destruction can be observed.
+pub(crate) fn view_steps(serial: u64) -> Vec<&'static str> {
+    VIEW_STEPS.lock().unwrap().iter().filter(|(instance, _)| *instance == serial).map(|(_, step)| *step).collect()
+}
+
+/// What the latest view of the instance with this serial has observed.
+pub(crate) fn view_seen(serial: u64) -> Option<ViewSeen> {
+    let view = view_of(serial)?;
+    Some(ViewSeen {
+        scale: f32::from_bits(view.scale.load(Ordering::Relaxed)),
+        size: (view.width.load(Ordering::Relaxed), view.height.load(Ordering::Relaxed)),
+        parent: view.parent.load(Ordering::Relaxed),
+        ticks: view.ticks.load(Ordering::Relaxed),
+        resize_results: view.resize_results.lock().unwrap().clone(),
+    })
+}
+
+/// Has the user of the view of the instance with this serial do `action`.
+/// The view carries it out on its next timer tick, as a plugin reacts to
+/// its user: from the message loop, with the host free to answer at once.
+pub(crate) fn act(serial: u64, action: Action) {
+    ACTIONS.lock().unwrap().push((serial, action));
+}
+
+/// Has the view do `action` right now. Called from a job on the plugin
+/// main thread, this is a view calling its host back while the host is in
+/// the middle of something.
+pub(crate) fn act_now(serial: u64, action: Action) {
+    if let Some(view) = view_of(serial) {
+        view.perform(action);
+    }
+}
+
+impl ViewState {
+    /// The size the view accepts in place of the one offered: no smaller
+    /// than half its natural size, and a multiple of [`VIEW_STEP`].
+    fn accepted(width: i32, height: i32) -> (i32, i32) {
+        let fit = |length: i32, natural: i32| (length.max(natural / 2) / VIEW_STEP) * VIEW_STEP;
+        (fit(width, VIEW_SIZE.0), fit(height, VIEW_SIZE.1))
+    }
+
+    fn set_size(&self, (width, height): (i32, i32)) {
+        self.width.store(width, Ordering::Relaxed);
+        self.height.store(height, Ordering::Relaxed);
+    }
+
+    fn perform(&self, action: Action) {
+        match action {
+            Action::TurnKnob(value) => {
+                if let Some(index) = param_index(GAIN) {
+                    self.values[index].store(value.to_bits(), Ordering::Relaxed);
+                }
+                if let Some(handler) = &self.handler {
+                    // SAFETY: the handler is the host's live object.
+                    unsafe {
+                        handler.beginEdit(GAIN);
+                        handler.performEdit(GAIN, value);
+                        handler.endEdit(GAIN);
+                    }
+                }
+            }
+            Action::Resize(width, height) => {
+                let frame = self.frame.lock().unwrap().clone();
+                let Some(frame) = frame else { return };
+                let mut rect = ViewRect { left: 0, top: 0, right: width, bottom: height };
+                // SAFETY: the frame is the host's live object, the view
+                // pointer the view's own, and the rectangle a local.
+                let result = unsafe { frame.resizeView(self.this.load(Ordering::Relaxed), &mut rect) };
+                self.resize_results.lock().unwrap().push(result);
+            }
+        }
+    }
+
+    /// Counts a tick of the view's timer, and does what the view's user
+    /// did since the last one.
+    fn tick(&self, serial: u64) {
+        self.ticks.fetch_add(1, Ordering::Relaxed);
+        let mine: Vec<Action> = {
+            let mut actions = ACTIONS.lock().unwrap();
+            let (mine, others) = actions.drain(..).partition(|(instance, _)| *instance == serial);
+            *actions = others;
+            mine.into_iter().map(|(_, action)| action).collect()
+        };
+        for action in mine {
+            self.perform(action);
+        }
+    }
+}
+
+/// The timers real views get from the operating system, in the way a view
+/// that owns no window can have one: a timer of the thread.
+#[cfg(windows)]
+mod view_timer {
+    use super::*;
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer};
+
+    const PERIOD_MS: u32 = 5;
+
+    unsafe extern "system" fn tick(_window: HWND, _message: u32, timer: usize, _time: u32) {
+        let views: Vec<(u64, Arc<ViewState>)> = {
+            let views = VIEWS.lock().unwrap();
+            views.iter().flatten().map(|(serial, view)| (*serial, view.clone())).collect()
+        };
+        for (serial, view) in views {
+            if view.timer.load(Ordering::Relaxed) == timer {
+                view.tick(serial);
+            }
+        }
+    }
+
+    pub(super) fn start(view: &ViewState) {
+        // SAFETY: a timer without a window belongs to the calling thread,
+        // whose message loop calls `tick`.
+        view.timer.store(unsafe { SetTimer(std::ptr::null_mut(), 0, PERIOD_MS, Some(tick)) }, Ordering::Relaxed);
+    }
+
+    pub(super) fn stop(view: &ViewState) {
+        let timer = view.timer.swap(0, Ordering::Relaxed);
+        if timer != 0 {
+            // SAFETY: the timer is one `start` made on this thread.
+            unsafe { KillTimer(std::ptr::null_mut(), timer) };
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod view_timer {
+    pub(super) fn start(_view: &super::ViewState) {}
+
+    pub(super) fn stop(_view: &super::ViewState) {}
+}
+
+/// A scripted plugin's view. With `SCALES` it takes its monitor's scale
+/// from the host; without, it has no interface to be told by.
+struct View<const SCALES: bool> {
+    serial: u64,
+    state: Arc<ViewState>,
+}
+
+impl Class for View<true> {
+    type Interfaces = (IPlugView, IPlugViewContentScaleSupport);
+}
+
+impl Class for View<false> {
+    type Interfaces = (IPlugView,);
+}
+
+impl<const SCALES: bool> Drop for View<SCALES> {
+    fn drop(&mut self) {
+        view_timer::stop(&self.state);
+        self.state.this.store(std::ptr::null_mut(), Ordering::Relaxed);
+        view_log(self.serial, "destroy");
+    }
+}
+
+impl<const SCALES: bool> IPlugViewTrait for View<SCALES> {
+    unsafe fn isPlatformTypeSupported(&self, r#type: FIDString) -> tresult {
+        // SAFETY: the host passes a C string, or null.
+        let supported = !r#type.is_null() && unsafe { CStr::from_ptr(r#type) } == c"HWND";
+        if supported { kResultTrue } else { kResultFalse }
+    }
+
+    unsafe fn attached(&self, parent: *mut c_void, _type: FIDString) -> tresult {
+        if self.state.kind == kind::FAILS_ATTACH {
+            return kResultFalse;
+        }
+        view_log(self.serial, "attached");
+        self.state.parent.store(parent as usize, Ordering::Relaxed);
+        view_timer::start(&self.state);
+        kResultOk
+    }
+
+    unsafe fn removed(&self) -> tresult {
+        view_log(self.serial, "removed");
+        view_timer::stop(&self.state);
+        kResultOk
+    }
+
+    unsafe fn onWheel(&self, _distance: f32) -> tresult {
+        kResultFalse
+    }
+
+    unsafe fn onKeyDown(&self, _key: char16, _key_code: int16, _modifiers: int16) -> tresult {
+        kResultFalse
+    }
+
+    unsafe fn onKeyUp(&self, _key: char16, _key_code: int16, _modifiers: int16) -> tresult {
+        kResultFalse
+    }
+
+    unsafe fn getSize(&self, size: *mut ViewRect) -> tresult {
+        // SAFETY: the host passes its own `ViewRect`.
+        let Some(size) = (unsafe { size.as_mut() }) else { return kInvalidArgument };
+        let (width, height) = (self.state.width.load(Ordering::Relaxed), self.state.height.load(Ordering::Relaxed));
+        *size = ViewRect { left: 0, top: 0, right: width, bottom: height };
+        kResultOk
+    }
+
+    /// Like a real view, takes only sizes it would have offered itself.
+    unsafe fn onSize(&self, new_size: *mut ViewRect) -> tresult {
+        // SAFETY: the host passes its own `ViewRect`.
+        let Some(rect) = (unsafe { new_size.as_ref() }) else { return kInvalidArgument };
+        let size = (rect.right - rect.left, rect.bottom - rect.top);
+        if self.state.kind != kind::FIXED_EDITOR && size != ViewState::accepted(size.0, size.1) {
+            return kResultFalse;
+        }
+        view_log(self.serial, "onSize");
+        self.state.set_size(size);
+        kResultOk
+    }
+
+    unsafe fn onFocus(&self, _state: TBool) -> tresult {
+        kResultFalse
+    }
+
+    unsafe fn setFrame(&self, frame: *mut IPlugFrame) -> tresult {
+        // SAFETY: the host passes its frame, a live object or null.
+        *self.state.frame.lock().unwrap() = unsafe { ComRef::from_raw(frame) }.map(|frame| frame.to_com_ptr());
+        view_log(self.serial, if frame.is_null() { "frame cleared" } else { "frame set" });
+        kResultOk
+    }
+
+    unsafe fn canResize(&self) -> tresult {
+        if self.state.kind == kind::FIXED_EDITOR { kResultFalse } else { kResultTrue }
+    }
+
+    unsafe fn checkSizeConstraint(&self, rect: *mut ViewRect) -> tresult {
+        // SAFETY: the host passes its own `ViewRect`.
+        let Some(rect) = (unsafe { rect.as_mut() }) else { return kInvalidArgument };
+        if self.state.kind == kind::FIXED_EDITOR {
+            return kNotImplemented;
+        }
+        let (width, height) = ViewState::accepted(rect.right - rect.left, rect.bottom - rect.top);
+        (rect.right, rect.bottom) = (rect.left + width, rect.top + height);
+        kResultTrue
+    }
+}
+
+impl<const SCALES: bool> IPlugViewContentScaleSupportTrait for View<SCALES> {
+    unsafe fn setContentScaleFactor(&self, factor: f32) -> tresult {
+        view_log(self.serial, "scale");
+        self.state.scale.store(factor.to_bits(), Ordering::Relaxed);
+        let scaled = |length: i32| (length as f32 * factor).round() as i32;
+        self.state.set_size((scaled(VIEW_SIZE.0), scaled(VIEW_SIZE.1)));
+        kResultOk
+    }
 }
 
 // ---- the module ------------------------------------------------------------
@@ -462,7 +795,9 @@ struct Object<const ROLE: u8> {
     /// Normalized parameter values, as `f64` bits, in `PARAMS` order: the
     /// processor's, and the controller's copy of them.
     processor_values: [AtomicU64; PARAMS.len()],
-    controller_values: [AtomicU64; PARAMS.len()],
+    /// Shared with the views the controller makes, which is where the
+    /// user turns the knobs.
+    controller_values: Arc<[AtomicU64; PARAMS.len()]>,
     host: Mutex<Option<ComPtr<IHostApplication>>>,
     peer: Mutex<Option<ComPtr<IConnectionPoint>>>,
     handler: Mutex<Option<ComPtr<IComponentHandler>>>,
@@ -494,7 +829,7 @@ impl<const ROLE: u8> Object<ROLE> {
             kind,
             serial: AtomicU64::new(serial),
             processor_values: PARAMS.each_ref().map(|param| AtomicU64::new(param.initial.to_bits())),
-            controller_values: PARAMS.each_ref().map(|param| AtomicU64::new(param.initial.to_bits())),
+            controller_values: Arc::new(PARAMS.each_ref().map(|param| AtomicU64::new(param.initial.to_bits()))),
             host: Mutex::new(None),
             peer: Mutex::new(None),
             handler: Mutex::new(None),
@@ -1066,8 +1401,38 @@ impl<const ROLE: u8> IEditControllerTrait for Object<ROLE> {
         kResultOk
     }
 
+    /// Only some of the plugins have a view; the others answer the way a
+    /// plugin without an editor does.
     unsafe fn createView(&self, _name: FIDString) -> *mut IPlugView {
-        std::ptr::null_mut()
+        if !has_view(self.kind) {
+            return std::ptr::null_mut();
+        }
+        let serial = self.serial();
+        let state = Arc::new(ViewState {
+            kind: self.kind,
+            values: self.controller_values.clone(),
+            handler: self.handler.lock().unwrap().clone(),
+            frame: Mutex::new(None),
+            this: AtomicPtr::new(std::ptr::null_mut()),
+            scale: AtomicU32::new(0),
+            width: AtomicI32::new(VIEW_SIZE.0),
+            height: AtomicI32::new(VIEW_SIZE.1),
+            parent: AtomicUsize::new(0),
+            timer: AtomicUsize::new(0),
+            ticks: AtomicU32::new(0),
+            resize_results: Mutex::new(Vec::new()),
+        });
+        VIEWS.lock().unwrap().get_or_insert_default().insert(serial, state.clone());
+        view_log(serial, "create");
+        let view: Option<ComPtr<IPlugView>> = if self.kind == kind::FIXED_EDITOR {
+            ComWrapper::new(View::<false> { serial, state: state.clone() }).to_com_ptr()
+        } else {
+            ComWrapper::new(View::<true> { serial, state: state.clone() }).to_com_ptr()
+        };
+        let Some(view) = view else { return std::ptr::null_mut() };
+        state.this.store(view.as_ptr(), Ordering::Relaxed);
+        // The host receives the reference `into_raw` gives up.
+        view.into_raw()
     }
 }
 

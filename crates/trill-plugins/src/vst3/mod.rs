@@ -38,6 +38,8 @@ mod class_id;
 mod com;
 mod controller;
 mod editor;
+#[cfg(all(test, windows))]
+mod editor_tests;
 mod events;
 mod factory;
 mod host;
