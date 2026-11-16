@@ -16,6 +16,8 @@ use crate::vst3::state;
 /// may be.
 const SHOWN_LINES: usize = 3;
 const SHOWN_WIDTH: usize = 72;
+/// The least text before a NUL that makes a chunk a chunk of text.
+const TEXT_CHUNK: usize = 64;
 
 /// The two halves of a state that a VST3 device saved (its processor's
 /// and its edit controller's); `None` for a state that is not one, such
@@ -34,6 +36,7 @@ pub fn describe_state(bytes: &[u8]) -> String {
     let known = xfer_container(bytes)
         .or_else(|| enveloped(bytes))
         .or_else(|| bank(bytes))
+        .or_else(|| wrapped(bytes))
         .or_else(|| document(bytes, "an XML document"))
         .or_else(|| tree(bytes))
         .or_else(|| packed(bytes))
@@ -105,6 +108,25 @@ fn enveloped(bytes: &[u8]) -> Option<String> {
     })
 }
 
+/// What JUCE's VST3 wrapper ends a state with, after the plugin's own
+/// part: a small tree of its own (whether the plugin is bypassed), the
+/// size of that tree in eight bytes, and these words.
+const JUCE_PRIVATE: &[u8] = b"JUCEPrivateData";
+
+/// The plugin's own part of a state that JUCE's wrapper added its own to.
+fn before_wrapper(bytes: &[u8]) -> Option<&[u8]> {
+    let rest = bytes.strip_suffix(JUCE_PRIVATE)?;
+    let (rest, size) = rest.split_last_chunk::<8>()?;
+    let size = usize::try_from(u64::from_le_bytes(*size)).ok()?;
+    rest.get(..rest.len().checked_sub(size)?)
+}
+
+fn wrapped(bytes: &[u8]) -> Option<String> {
+    let own = before_wrapper(bytes)?;
+    let inside = if own.is_empty() { "nothing of the plugin's own".to_string() } else { describe_state(own) };
+    Some(format!("{inside}; {} bytes that JUCE's wrapper keeps for itself follow it", bytes.len() - own.len()))
+}
+
 /// An old-style VST bank chunk, which wrapped VST2 plugins keep their
 /// state in: `CcnK`, a size, `FBCh`, a version, the plugin's four letters.
 fn bank(bytes: &[u8]) -> Option<String> {
@@ -119,11 +141,21 @@ fn bank(bytes: &[u8]) -> Option<String> {
     // A bank keeps 128 bytes for later before its chunk, a single program
     // 28 for its name.
     let size_at = at + if kind == b"FBCh" { 156 } else { 56 };
-    let size = u32::from_be_bytes(bytes.get(size_at..size_at + 4)?.try_into().ok()?) as usize;
-    let chunk = bytes.get(size_at + 4..(size_at + 4).checked_add(size)?)?;
-    let end = chunk.iter().position(|byte| *byte == 0).unwrap_or(chunk.len());
-    let inside = describe_state(&chunk[..end]);
     let before = if at > 0 { format!(" behind a wrapper's header of {at} bytes") } else { String::new() };
+    let size =
+        bytes.get(size_at..size_at + 4).and_then(|size| Some(u32::from_be_bytes(size.try_into().ok()?) as usize));
+    let chunk = size.and_then(|size| bytes.get(size_at + 4..(size_at + 4).checked_add(size)?));
+    let Some(chunk) = chunk else {
+        return Some(format!(
+            "an old-style VST chunk (CcnK, plugin '{plugin}'){before}, cut short: it says it is longer than what is here"
+        ));
+    };
+    // A chunk that is text ends at its first NUL, and what follows is the
+    // plugin's own; a few readable bytes before a NUL are not that.
+    let end = chunk.iter().position(|byte| *byte == 0).unwrap_or(chunk.len());
+    let worded = || text(&chunk[..end]).filter(|_| end >= TEXT_CHUNK.min(chunk.len()));
+    let inside =
+        xfer_container(chunk).or_else(|| enveloped(chunk)).or_else(worded).unwrap_or_else(|| describe_state(chunk));
     Some(format!("an old-style VST chunk (CcnK, plugin '{plugin}'){before}, and in it {inside}"))
 }
 
@@ -193,7 +225,8 @@ fn strings(bytes: &[u8]) -> Vec<String> {
 }
 
 fn opaque(bytes: &[u8]) -> String {
-    let entropy = entropy(bytes);
+    // (Bytes that are all the same come to minus nothing.)
+    let entropy = entropy(bytes).abs();
     let kind = match entropy {
         e if e > 7.5 => "compressed or encrypted by the look of it",
         e if e < 4.0 => "tables of numbers by the look of it",
@@ -239,6 +272,35 @@ mod tests {
         assert!(drums.starts_with("an old-style VST chunk (CcnK, plugin 'SD3a') behind a wrapper's header of 16 bytes, and in it text, 22 lines; it begins: PlugVersion 3.4.4 | SAMPLER { | HQ {"), "{drums}");
         let amplifier = said(&archetype::preset_file("Lead", "1", &[("gate", "-80")]));
         assert_eq!(amplifier, "a tree in JUCE's binary form: root 'amp-x', 9 nodes with 6 named values");
+
+        // What plugin wrappers put around a state is seen through: a
+        // bank's chunk that is a document in an envelope, and JUCE's own
+        // words after a state of text.
+        let enveloped = Envelope { text: "", tail: &[] }.with("<reverb mix=\"1\" decay=\"0.5\"/>");
+        let chunk = [&[0u8; 128][..], &(enveloped.len() as u32).to_be_bytes(), &enveloped].concat();
+        let bank = [&b"CcnK\0\0\0\0FBCh\0\0\0\x02Ruum\0\0\0\x01\0\0\0\x01"[..], &chunk].concat();
+        assert_eq!(
+            said(&bank),
+            "an old-style VST chunk (CcnK, plugin 'Ruum'), and in it an XML document in JUCE's envelope (VC2!, a length, \
+             the text): root <reverb>, 1 elements with 2 attributes in all"
+        );
+        let private = b"JUCEPrivateData\0\x01\x01Bypass\0\x01\x01\x03\0";
+        let size = (private.len() as u64).to_le_bytes();
+        let wrapped = [&b"{\"format\": \"synth\", \"params\": {}}"[..], private, &size, b"JUCEPrivateData"].concat();
+        assert_eq!(
+            said(&wrapped),
+            "text that looks like JSON, 1 lines; it begins: {\"format\": \"synth\", \"params\": {}}; 52 bytes that JUCE's \
+             wrapper keeps for itself follow it"
+        );
+        assert_eq!(
+            said(&[&private[..], &size, b"JUCEPrivateData"].concat()),
+            "nothing of the plugin's own; 52 bytes that JUCE's wrapper keeps for itself follow it"
+        );
+        assert_eq!(
+            said(&bank[..bank.len() - 8]),
+            "an old-style VST chunk (CcnK, plugin 'Ruum'), cut short: it says it is longer than what is here"
+        );
+        assert!(said(&[0u8; 9]).starts_with("opaque: 9 bytes, tables of numbers by the look of it (0.0 bits"));
 
         // And what else there is.
         assert_eq!(

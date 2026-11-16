@@ -48,13 +48,17 @@ const LOADING_NOTE: &str = "Superior Drummer reads the kit's samples in the back
                             seconds if they were read lately, up to a minute from a cold disk. Until a drum has \
                             arrived its keys are silent. A render and `probe` wait for that.";
 
-/// The preset files of the sound libraries that are installed where
-/// Toontrack's installer puts them: each library a folder of its own
-/// under `Toontrack/Superior/Superior Drummer`, beside the programs.
+/// Where Toontrack's installer puts the sound libraries, each a folder of
+/// its own: `Toontrack/Superior/Superior Drummer`, beside the programs.
+fn library_folders(places: &VendorPlaces) -> Vec<PathBuf> {
+    let folder = |programs: &PathBuf| programs.join("Toontrack").join("Superior").join("Superior Drummer");
+    places.programs.iter().map(folder).collect()
+}
+
+/// The preset files of the sound libraries that are installed.
 fn preset_files(places: &VendorPlaces) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    for programs in &places.programs {
-        let libraries = programs.join("Toontrack").join("Superior").join("Superior Drummer");
+    for libraries in library_folders(places) {
         let Ok(entries) = std::fs::read_dir(&libraries) else { continue };
         let mut found: Vec<PathBuf> =
             entries.flatten().map(|entry| entry.path().join(PRESETS_FILE)).filter(|file| file.is_file()).collect();
@@ -144,9 +148,13 @@ fn key_of(index: usize, name: &str) -> String {
 /// Lists the factory presets of the sound libraries in `places`: each by
 /// its name, under the menu the plugin's own browser has it in.
 pub(crate) fn list(_plugin: &PluginRef, places: &VendorPlaces, sink: &mut dyn Sink) {
+    // A sound library that is installed later brings a file of presets: a
+    // library's few files without an extension are what to look at,
+    // wherever the libraries are or come to be.
+    for libraries in library_folders(places) {
+        sink.watch(Watch { path: libraries, extensions: vec![String::new()] });
+    }
     for file in preset_files(places) {
-        // The one file is what to look at for whether its presets changed.
-        sink.watch(Watch { path: file.clone(), extensions: Vec::new() });
         let Ok(bytes) = read_whole(&file) else { continue };
         let text = latin1(&bytes);
         let listed = presets(&text).into_iter().enumerate().map(|(index, preset)| PresetInfo {
@@ -424,8 +432,17 @@ mod tests {
             other => panic!("{other:?}"),
         };
         assert_eq!((key(0), key(3)), ("0:Ayotte Default".to_string(), "3:Ayotte Default".to_string()));
-        // The file itself is what is watched.
-        assert_eq!(found.watch, [Watch { path: file, extensions: Vec::new() }]);
+        // The folders of sound libraries are what is watched, the one
+        // that is not there too: the files in them that have no extension,
+        // which a library's presets are.
+        let libraries = |programs: &str| dir.path().join(programs).join("Toontrack/Superior/Superior Drummer");
+        let watched = |programs: &str| Watch { path: libraries(programs), extensions: vec![String::new()] };
+        assert_eq!(found.watch, [watched("programs"), watched("no such folder")]);
+        let before = crate::presets::walk::fingerprint(&found.watch);
+        dir.file("programs/Toontrack/Superior/Superior Drummer/SL-Empty/notes.txt", b"not presets");
+        assert_eq!(crate::presets::walk::fingerprint(&found.watch), before);
+        dir.file("programs/Toontrack/Superior/Superior Drummer/SL-New/s3presetconf", &presets_file(&KITS[..1]));
+        assert_ne!(crate::presets::walk::fingerprint(&found.watch), before, "a new library's presets are noticed");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! What installed plugins tell a host about their sound: each parameter's
 //! value in the plugin's own words, the channels they take and give, and
-//! whether they have presets a host can list.
+//! whether they themselves have presets a host can list. (The presets
+//! their makers keep in files are `tests/vendor.rs`'s.)
 //!
 //! These need the plugins named in them and are skipped unless asked for;
 //! a test whose plugin is not installed prints a note and passes. They
@@ -18,14 +19,13 @@ use std::time::{Duration, Instant};
 use trill_core::device::{DeviceFactory, DeviceInstance, ProcessInfo};
 use trill_core::presets::{PresetList, PresetStatus};
 use trill_core::{ChainRef, Project, TimeSignature};
-use trill_plugins::{Scanner, Vst3Config, Vst3Factory};
+use trill_plugins::{Scanner, VendorPlaces, Vst3Config, Vst3Factory};
 
 const TIM_HENSON: &str = "vst3:ABCDEF019182FAEB4E4453504E544858";
 const SERUM_2: &str = "vst3:56534558667350736572756D20320000";
-/// Instruments and an amplifier that keep their presets in their own
-/// windows: three Ample guitars and basses, Superior Drummer 3, and the
-/// amplifier above.
-const WINDOWED: [(&str, &str); 5] = [
+/// Instruments and an amplifier that tell a host of no presets: three
+/// Ample guitars and basses, Superior Drummer 3, and the amplifier above.
+const SILENT_ABOUT_PRESETS: [(&str, &str); 5] = [
     ("Ample Guitar PF", "vst3:ABCDEF019182FAEB4170736441677066"),
     ("Ample Metal Hellrazer", "vst3:ABCDEF019182FAEB41707364416D6872"),
     ("Ample Metal R", "vst3:ABCDEF019182FAEB41707364416D7274"),
@@ -42,13 +42,15 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 /// A VST3 factory over the system's plugins that looks for preset files
-/// in a folder of the test's own: none of the user's are read.
+/// in a folder of the test's own, and not in the makers' folders: none of
+/// the user's are read, and a plugin lists what it tells a host itself.
 fn vst3() -> Vst3Factory {
     let config = Vst3Config {
         scanner: Scanner::Executable(PathBuf::from(env!("CARGO_BIN_EXE_trill-plugin-scan"))),
         cache_path: Some(scratch("vst3").join("scan-cache.json")),
         scan_timeout: Duration::from_secs(60),
         preset_paths: vec![scratch("vst3 presets")],
+        vendor_places: VendorPlaces::default(),
         ..Vst3Config::default()
     };
     Vst3Factory::new(config).expect("the plugin main thread starts")
@@ -217,9 +219,11 @@ fn an_amplifier_is_given_stereo_and_is_mono_inside_until_its_doubler_is_on() {
 
 #[test]
 #[ignore = "needs the Ample guitars, Superior Drummer 3 and Archetype Tim Henson X; run with `cargo test -p trill-plugins --test sounds -- --include-ignored --nocapture --test-threads 1`"]
-fn plugins_that_keep_their_presets_in_their_own_windows_list_none() {
+fn plugins_that_tell_a_host_of_no_presets_list_none_without_their_makers_files() {
+    // Why Trill reads the makers' files: asked through the plugin
+    // interface alone, these have nothing to list.
     let factory = vst3();
-    for (name, uri) in WINDOWED {
+    for (name, uri) in SILENT_ABOUT_PRESETS {
         if !installed(&factory, uri) {
             continue;
         }
@@ -232,7 +236,7 @@ fn plugins_that_keep_their_presets_in_their_own_windows_list_none() {
 
 #[test]
 #[ignore = "needs Serum 2 (VST3); run with `cargo test -p trill-plugins --test sounds -- --include-ignored --nocapture --test-threads 1`"]
-fn a_synth_whose_programs_are_numbered_slots_lists_no_presets() {
+fn a_synth_whose_programs_are_numbered_slots_lists_none_of_them() {
     let factory = vst3();
     if !installed(&factory, SERUM_2) {
         return;
@@ -240,7 +244,7 @@ fn a_synth_whose_programs_are_numbered_slots_lists_no_presets() {
     // It tells a host of 128 programs called "Prog 1" to "Prog 128": the
     // MIDI program numbers it answers to, with nothing behind them until
     // the user maps presets to them in its window. Its real presets are
-    // files of a format of its own.
+    // files of a format of its own, which are not looked for here.
     let list = listed(&factory, SERUM_2);
     assert_eq!((list.len(), &list.status), (0, &PresetStatus::Ready));
 }

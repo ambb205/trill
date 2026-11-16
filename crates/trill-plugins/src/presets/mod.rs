@@ -159,6 +159,7 @@ impl Locator {
 pub(crate) struct Watch {
     pub path: PathBuf,
     /// File extensions without the dot, in lower case. Empty: every file.
+    /// An empty extension among them: the files whose names have none.
     pub extensions: Vec<String>,
 }
 
