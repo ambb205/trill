@@ -72,8 +72,9 @@ impl Drop for HttpServer {
 /// Starts the MCP server on `address` (use port 0 for any free port) on its
 /// own thread and returns once it is listening.
 ///
-/// Bind to a loopback address: the server has no authentication, and anyone
-/// who can reach it can edit the project and write files.
+/// Bind to a loopback address: the server has no authentication, and any
+/// program that can reach it can edit the project and write files. Requests
+/// from web pages are refused (see the allowed origins below).
 pub fn serve_http(runtime: Arc<Runtime>, address: SocketAddr) -> anyhow::Result<HttpServer> {
     let cancel = CancellationToken::new();
     let (ready_tx, ready_rx) = mpsc::channel::<anyhow::Result<SocketAddr>>();
@@ -98,10 +99,20 @@ pub fn serve_http(runtime: Arc<Runtime>, address: SocketAddr) -> anyhow::Result<
             };
             let bound = listener.local_addr().unwrap_or(address);
 
+            // Programs on this machine talk to the server; pages in a
+            // browser must not. A program sends no Origin header; a page
+            // always sends its own, and the only origin allowed is the
+            // server's, which serves no pages. The Host check (on by
+            // default: loopback names only) covers a page that reaches the
+            // address under a name of its own.
+            let own_origins =
+                [format!("http://127.0.0.1:{}", bound.port()), format!("http://localhost:{}", bound.port())];
             let service: StreamableHttpService<TrillServer, LocalSessionManager> = StreamableHttpService::new(
                 move || Ok(TrillServer::new(runtime.clone())),
                 Default::default(),
-                StreamableHttpServerConfig::default().with_cancellation_token(server_cancel.child_token()),
+                StreamableHttpServerConfig::default()
+                    .with_cancellation_token(server_cancel.child_token())
+                    .with_allowed_origins(own_origins),
             );
             let router = axum::Router::new().nest_service(HTTP_PATH, service);
             let _ = ready_tx.send(Ok(bound));

@@ -970,3 +970,50 @@ async fn a_device_without_a_window_says_how_to_edit_it_instead() {
     let error = call(client, "show_device_editor", json!({ "device": 9999 })).await.unwrap_err();
     assert!(error.contains("not found"), "{error}");
 }
+
+/// The status line of the server's answer to a hand-written request: one
+/// that opens an MCP session, sent with the given Host and, perhaps, Origin.
+fn answer_to(server: &HttpServer, host: &str, origin: Option<&str>) -> String {
+    use std::io::{Read, Write};
+    let address = server.url().trim_start_matches("http://").split('/').next().unwrap().to_owned();
+    let body = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "t", "version": "0" } }
+    })
+    .to_string();
+    let origin = origin.map(|origin| format!("Origin: {origin}\r\n")).unwrap_or_default();
+    let request = format!(
+        "POST /mcp HTTP/1.1\r\nHost: {host}\r\n{origin}Content-Type: application/json\r\n\
+         Accept: application/json, text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let mut stream = std::net::TcpStream::connect(&address).unwrap();
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut head = [0u8; 64];
+    let read = stream.read(&mut head).unwrap();
+    String::from_utf8_lossy(&head[..read]).lines().next().unwrap_or_default().to_owned()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn web_pages_are_turned_away_and_local_programs_are_not() {
+    let fixture = connect().await;
+    let server = &fixture._server;
+    let address = server.url().trim_start_matches("http://").split('/').next().unwrap().to_owned();
+    let port = address.rsplit(':').next().unwrap().to_owned();
+
+    // A program on this machine sends no Origin.
+    assert!(answer_to(server, &address, None).contains("200"), "{}", answer_to(server, &address, None));
+    assert!(answer_to(server, &format!("localhost:{port}"), None).contains("200"));
+    // A page in a browser sends its own, whatever it is.
+    for origin in ["https://example.com", "http://localhost:3000", "null", "http://127.0.0.1"] {
+        let answer = answer_to(server, &address, Some(origin));
+        assert!(answer.contains("403"), "a page from {origin} got: {answer}");
+    }
+    // And one that reaches this address under a name of its own (DNS
+    // rebinding) is told by its Host.
+    let answer = answer_to(server, &format!("trill.example.com:{port}"), None);
+    assert!(answer.contains("403"), "a foreign Host got: {answer}");
+    // Being turned away changes nothing for the clients that belong.
+    assert!(ok(&fixture.client, "get_project", json!({})).await["tracks"].as_array().unwrap().is_empty());
+}
