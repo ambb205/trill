@@ -182,11 +182,15 @@ playback, and render analysis (see below).
 **Hearing without ears.** Whoever cannot listen (a script, an assistant) measures instead, and three things make
 that quick and true:
 
-- *A render waits for its plugins.* A sampler goes on loading after it is created, and a modelled instrument
-  goes on waking up; a render that started at once lost the beginning of the song. Plugins are told they are
-  being rendered offline (VST3 process mode, CLAP `render`), and before the first sample each plugin instrument
-  is rehearsed on the notes it is about to play until it answers them the same way for a quarter of a second.
-  Built-in devices are not touched, so their renders are the samples they always were.
+- *A render waits for its plugins.* A sampler goes on loading after it is created (a drum kit one drum after
+  another, for as much as a minute, the cymbals last), a modelled instrument goes on waking up, and an amplifier
+  may pass nothing for a moment; a render that started at once lost the beginning of the song. Plugins are told
+  they are being rendered offline (VST3 process mode, CLAP `render`). Before the first sample each plugin
+  instrument is rehearsed on the notes it is about to play, and each plugin effect on a burst of noise, until it
+  has answered alike three times running for a quarter of a second or more and the program has stopped growing
+  meanwhile: while samples are being read its memory rises, which is what tells a kit that is still loading
+  from one that is complete. Built-in devices are not touched, so their renders are the samples they always
+  were. `Session::readiness_job` asks the same of one device, for a front end that wants to say "still loading".
 - *A render measures everything as it goes*, without keeping a stem per track: the mix (peak, true peak, LUFS,
   stereo correlation, spectral balance), every track after its fader in the same terms, the loudness of every
   section between the markers (or of bar ranges), and how many dB each built-in compressor and limiter took
