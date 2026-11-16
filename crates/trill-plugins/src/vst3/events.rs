@@ -4,13 +4,15 @@
 //! allocation after construction.
 
 use super::com::{interface, write_out};
+use super::params::{MidiParams, PITCH_BEND};
 use crate::exclusive::Exclusive;
 use crate::notes::{HeldKeys, events_in_part};
-use trill_core::device::{self, EventKind, MAX_EVENTS_PER_BLOCK, ProcessInfo};
+use trill_core::device::{self, EventKind, MAX_EVENTS_PER_BLOCK, Pedal, ProcessInfo};
 use vst3::Steinberg::Vst::Event_::EventTypes_::{kNoteOffEvent, kNoteOnEvent};
 use vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_ as flags;
 use vst3::Steinberg::Vst::{
-    Chord, Event, Event__type0, FrameRate, IEventList, IEventListTrait, NoteOffEvent, NoteOnEvent, ProcessContext,
+    Chord, Event, Event__type0, FrameRate, IEventList, IEventListTrait, NoteOffEvent, NoteOnEvent, ParamID,
+    ProcessContext,
 };
 use vst3::Steinberg::{int32, kInvalidArgument, kResultFalse, kResultOk, tresult};
 use vst3::{Class, ComWrapper};
@@ -28,6 +30,8 @@ const MIN_VELOCITY: f32 = 1.0 / 127.0;
 const MAX_NOTE_EVENTS: usize = MAX_EVENTS_PER_BLOCK;
 /// Events needed to silence a plugin on top of that: a note-off per key.
 const MAX_SILENCE_EVENTS: usize = 128;
+/// How many parameters the controllers of one block may set between them.
+pub(crate) const MAX_CONTROLS: usize = 32;
 
 /// The events of one block, in the order they were added: the host's
 /// implementation of `IEventList`.
@@ -151,16 +155,33 @@ pub(crate) struct BlockEvents {
     held: HeldKeys,
     silence: bool,
     list: ComWrapper<EventList>,
+    /// The parameters that stand for MIDI controllers.
+    midi: MidiParams,
+    /// The sustain pedal, worked out here for a plugin that has no
+    /// parameter for it.
+    pedal: Pedal,
+    /// What the controllers of the block last filled set: parameter and
+    /// normalized value, each parameter once. Never grows.
+    controls: Vec<(ParamID, f64)>,
 }
 
 impl BlockEvents {
-    pub(crate) fn new(takes_notes: bool) -> Self {
+    pub(crate) fn new(takes_notes: bool, midi: MidiParams) -> Self {
         Self {
             takes_notes,
             held: HeldKeys::default(),
             silence: false,
             list: EventList::with_capacity(MAX_NOTE_EVENTS + MAX_SILENCE_EVENTS),
+            midi,
+            pedal: Pedal::default(),
+            controls: Vec::with_capacity(MAX_CONTROLS),
         }
+    }
+
+    /// The parameters the controllers of the block last filled set, for
+    /// the block's parameter changes.
+    pub(crate) fn controls(&self) -> &[(ParamID, f64)] {
+        &self.controls
     }
 
     /// The list to pass to `process`. It is the same one for every block.
@@ -177,6 +198,7 @@ impl BlockEvents {
     /// and with it every voice has ended.
     pub(crate) fn forget_notes(&mut self) {
         self.held.take().for_each(drop);
+        self.pedal.clear();
         self.silence = false;
     }
 
@@ -192,7 +214,14 @@ impl BlockEvents {
         events: &[device::Event],
         (start, frames, total): (usize, usize, usize),
     ) -> bool {
-        let Self { takes_notes, held, silence, list } = self;
+        let Self { takes_notes, held, silence, list, midi, pedal, controls } = self;
+        controls.clear();
+        // The last value a controller took in the block is the one sent.
+        let mut set = |id: ParamID, value: f64| match controls.iter().position(|(known, _)| *known == id) {
+            Some(index) => controls[index].1 = value,
+            None if controls.len() < controls.capacity() => controls.push((id, value)),
+            None => {}
+        };
         let filled = list.edit(|queue| {
             queue.events.clear();
             if !*takes_notes {
@@ -212,18 +241,45 @@ impl BlockEvents {
             for (time, kind) in events_in_part(events, start, frames, total) {
                 match kind {
                     EventKind::NoteOn { pitch, velocity } => {
+                        pedal.key_down(pitch);
                         held.press(pitch);
                         queue.note_on(time, position(time), pitch, velocity);
                     }
                     EventKind::NoteOff { pitch } => {
-                        held.release(pitch);
-                        queue.note_off(time, position(time), pitch);
+                        // A plugin with a parameter for the pedal works it
+                        // itself. For one without, the key stays down
+                        // until the pedal comes up.
+                        if midi.param(device::CONTROLLER_SUSTAIN).is_some() || pedal.key_up(pitch) {
+                            held.release(pitch);
+                            queue.note_off(time, position(time), pitch);
+                        }
                     }
                     EventKind::AllNotesOff => {
+                        pedal.clear();
                         for key in held.take() {
                             queue.note_off(time, position(time), key);
                         }
                     }
+                    EventKind::PitchBend { value } => {
+                        if let Some(id) = midi.param(PITCH_BEND) {
+                            let value = if value.is_finite() { value.clamp(-1.0, 1.0) } else { 0.0 };
+                            set(id, (f64::from(value) + 1.0) * 0.5);
+                        }
+                    }
+                    EventKind::Control { controller, value } => match midi.param(controller) {
+                        Some(id) => {
+                            let value = if value.is_finite() { value.clamp(0.0, 1.0) } else { 0.0 };
+                            set(id, f64::from(value));
+                        }
+                        None => {
+                            if let Some(down) = kind.sustain() {
+                                for key in pedal.set(down) {
+                                    held.release(key);
+                                    queue.note_off(time, position(time), key);
+                                }
+                            }
+                        }
+                    },
                 }
             }
             silencing
@@ -354,7 +410,7 @@ mod tests {
 
     #[test]
     fn notes_become_vst3_events_at_their_offsets() {
-        let mut feed = BlockEvents::new(true);
+        let mut feed = BlockEvents::new(true, MidiParams::default());
         let quiet = device::Event { offset: 9, kind: EventKind::NoteOn { pitch: 200, velocity: 0.0001 } };
         let events = [on(3, 60), off(7, 60), quiet];
         assert_eq!(
@@ -368,7 +424,7 @@ mod tests {
 
     #[test]
     fn events_carry_their_position_in_the_song() {
-        let mut feed = BlockEvents::new(true);
+        let mut feed = BlockEvents::new(true, MidiParams::default());
         // 120 BPM at 48 kHz: 24000 frames per beat.
         feed.fill(&info(true, 8.0), &[on(0, 60), on(12_000, 61)], (0, 24_000, 24_000));
         let position = |feed: &BlockEvents, index| {
@@ -389,7 +445,7 @@ mod tests {
 
     #[test]
     fn all_notes_off_releases_exactly_the_held_keys() {
-        let mut feed = BlockEvents::new(true);
+        let mut feed = BlockEvents::new(true, MidiParams::default());
         fill(&mut feed, &[on(0, 60), on(0, 64), on(1, 67), off(2, 64)]);
 
         let flush = device::Event { offset: 9, kind: EventKind::AllNotesOff };
@@ -403,8 +459,65 @@ mod tests {
     }
 
     #[test]
+    fn controllers_become_the_parameters_the_plugin_names_for_them() {
+        // A plugin with parameters for the pedal, the mod wheel and the
+        // pitch wheel, and none for the expression pedal.
+        let midi = MidiParams::of(&[(64, 9_064), (1, 9_001), (PITCH_BEND, 9_129)]);
+        let mut feed = BlockEvents::new(true, midi);
+        let at = |offset: u32, kind: EventKind| device::Event { offset, kind };
+        let events = [
+            on(0, 60),
+            at(1, EventKind::Control { controller: 64, value: 1.0 }),
+            at(2, EventKind::PitchBend { value: 0.25 }),
+            at(3, EventKind::Control { controller: 1, value: 0.5 }),
+            at(4, EventKind::Control { controller: 11, value: 0.9 }),
+            at(5, EventKind::PitchBend { value: -1.0 }),
+            off(6, 60),
+        ];
+        assert_eq!(
+            fill(&mut feed, &events),
+            [(0, "on", 60, 1.0), (6, "off", 60, 0.0)],
+            "the plugin has the pedal, so the key comes up when it comes up"
+        );
+        assert_eq!(feed.controls(), [(9_064, 1.0), (9_129, 0.0), (9_001, 0.5)], "each parameter once, its last value");
+        // The list is the block's: the next block starts empty.
+        fill(&mut feed, &[at(0, EventKind::PitchBend { value: 1.0 })]);
+        assert_eq!(feed.controls(), [(9_129, 1.0)]);
+        fill(&mut feed, &[at(0, EventKind::PitchBend { value: 0.0 })]);
+        assert_eq!(feed.controls(), [(9_129, 0.5)], "the wheel at rest is the middle of the parameter");
+        fill(&mut feed, &[]);
+        assert!(feed.controls().is_empty());
+    }
+
+    #[test]
+    fn the_pedal_is_worked_out_for_a_plugin_that_has_no_parameter_for_it() {
+        let mut feed = BlockEvents::new(true, MidiParams::default());
+        let pedal = |offset: u32, down: bool| device::Event {
+            offset,
+            kind: EventKind::Control { controller: 64, value: if down { 1.0 } else { 0.0 } },
+        };
+        let bend = device::Event { offset: 3, kind: EventKind::PitchBend { value: 0.5 } };
+        assert_eq!(
+            fill(&mut feed, &[on(0, 60), on(0, 64), pedal(1, true), off(2, 60), bend, on(4, 67)]),
+            [(0, "on", 60, 1.0), (0, "on", 64, 1.0), (4, "on", 67, 1.0)],
+            "the key that came up is held"
+        );
+        assert!(feed.controls().is_empty(), "and the wheel has nowhere to go");
+        assert_eq!(
+            fill(&mut feed, &[off(0, 67), on(1, 67), pedal(5, false), off(9, 64)]),
+            [(1, "on", 67, 1.0), (5, "off", 60, 0.0), (9, "off", 64, 0.0)]
+        );
+        // All notes off ends what the pedal holds, and leaves it down.
+        fill(&mut feed, &[pedal(0, true), off(1, 67)]);
+        let flush = device::Event { offset: 2, kind: EventKind::AllNotesOff };
+        assert_eq!(fill(&mut feed, &[flush]), [(2, "off", 67, 0.0)]);
+        assert_eq!(fill(&mut feed, &[on(0, 72), off(1, 72)]), [(0, "on", 72, 1.0)], "still down");
+        assert_eq!(fill(&mut feed, &[pedal(0, false)]), [(0, "off", 72, 0.0)]);
+    }
+
+    #[test]
     fn silencing_happens_once_before_the_blocks_own_notes() {
-        let mut feed = BlockEvents::new(true);
+        let mut feed = BlockEvents::new(true, MidiParams::default());
         fill(&mut feed, &[on(0, 60), on(5, 64)]);
         feed.silence();
         assert!(feed.fill(&info(true, 0.0), &[on(3, 62)], (0, 64, 64)), "this block silences");
@@ -422,14 +535,14 @@ mod tests {
 
     #[test]
     fn a_plugin_without_an_event_bus_gets_no_events() {
-        let mut feed = BlockEvents::new(false);
+        let mut feed = BlockEvents::new(false, MidiParams::default());
         feed.silence();
         assert_eq!(fill(&mut feed, &[on(0, 60)]), []);
     }
 
     #[test]
     fn an_oversized_block_is_fed_in_pieces_without_losing_or_repeating_events() {
-        let mut feed = BlockEvents::new(true);
+        let mut feed = BlockEvents::new(true, MidiParams::default());
         // 100 frames, taken 40 at a time. The last event's offset lies
         // beyond the block.
         let events = [on(0, 60), on(39, 61), on(40, 62), off(79, 60), on(80, 63), off(250, 61)];

@@ -17,6 +17,18 @@ rtrb.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# For taking an output device exclusively (WASAPI), which the audio library
+# does not offer. The same crate and version it brings in itself.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_Multimedia",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 # Fixtures for the audio tests: temporary folders and files.
 tempfile = "3"

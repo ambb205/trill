@@ -94,7 +94,7 @@ impl Vst3Processor {
             inputs: BusBuffers::inputs(&created.buses.inputs, max_block),
             outputs: BusBuffers::outputs(&created.buses.outputs, max_block),
             layout: created.buses,
-            events: BlockEvents::new(created.takes_notes),
+            events: BlockEvents::new(created.takes_notes, created.midi),
             output_events: EventList::with_capacity(0),
             params: BlockParams::new(&created.params, created.links, created.silencing),
             continuous_samples: 0,
@@ -188,7 +188,7 @@ impl Vst3Processor {
         }
 
         let silencing = self.events.fill(info, events, part);
-        self.params.fill(silencing);
+        self.params.fill(silencing, self.events.controls());
         let (input_changes, output_changes) = self.params.lists();
         let mut context = process_context(info, start, self.continuous_samples);
         let mut data = ProcessData {

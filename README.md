@@ -29,7 +29,7 @@ Development builds are optimized (see `[profile.dev]`), because unoptimized audi
 
 ### Building and testing
 
-`cargo test --workspace` runs about 1,100 tests in about a minute. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 1,300 tests in about a minute. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -39,9 +39,14 @@ cargo test -p trill-media -- --include-ignored      # decoding audio files found
 TRILL_TEST_PLUGIN_WINDOWS=1 cargo test -p trill-plugins --test editor_windows -- --test-threads=1   # opens windows
 TRILL_TEST_CLAUDE=1 cargo test -p trill-assistant --test real_cli    # talks to an installed, signed-in Claude Code
 TRILL_TEST_CLAUDE=1 cargo test -p trill-app live_ -- --test-threads=1    # ...through the assistant's panel (seven messages)
+cargo test -p trill-engine --test machine -- --include-ignored --nocapture     # opens this machine's audio outputs (silence only) and prints their latency
+cargo test -p trill-runtime --test machine -- --include-ignored --nocapture    # lists and opens this machine's MIDI inputs
 ```
 
-Run the first two after touching plugin hosting or audio decoding.
+Run the first two after touching plugin hosting or audio decoding, and the last two after touching the audio
+device or MIDI port code. Everything else about devices is tested without any: the engine plays through a
+scripted host whose audio thread is the test itself (`trill_engine::host::scripted`), so a device can be unplugged,
+refuse a format or stop answering, and a recorded note can be checked to the sample.
 
 The build is set up to be quick to repeat: code that only runs while building (procedural macros, build scripts)
 is not optimized, debug information is limited to file and line (`CARGO_PROFILE_DEV_DEBUG=full` for a debugging
@@ -131,6 +136,14 @@ fades, automation of track and master volume, pan and any device parameter with 
 segments, group tracks and return tracks with sends, a metronome, sample-exact transport looping, mute/solo, undo/redo, offline rendering that is bit-identical to
 playback, and render analysis (peak, LUFS, stereo correlation, spectral balance, per-track levels).
 
+**Playing and recording**: every MIDI keyboard that is plugged in plays the armed tracks (or the selected one)
+without a visit to the settings: notes, velocity, pitch wheel, mod wheel and sustain pedal, for built-in
+instruments and plugins alike. A key is placed in its audio buffer by the time it went down, so it is heard a
+fixed moment later rather than whenever the next buffer happens to start. Recording writes what is played into
+clips where it was *heard*: the engine takes the output latency off again, to the sample. A count-in, loop
+recording that layers each pass onto the last, one undo step per take. See
+[Playing and latency](#playing-and-latency).
+
 **Application**: an arrangement with multi-clip editing (move and copy across tracks, trim either edge, split,
 fades, a clipboard, time selection, and deleting, repeating or inserting a stretch of time on every track at
 once), markers, group and return tracks, and automation lanes that are edited by hand or drawn in steps; a piano
@@ -185,7 +198,8 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Music | `write_chords`, `write_drums`, `write_arpeggio`, `write_bass`, `write_melody`, `analyze_music`, `music_reference` |
 | Automation | `set_automation`, `get_automation`, `set_markers` |
 | Arrangement | `edit_time` (remove, repeat or open up a stretch of time on every track at once) |
-| Playback | `transport`, `render` |
+| Playback | `transport` (play, stop, seek, record), `render` |
+| Playing live | `play_notes`, `midi_inputs`, `audio` (device, sample rate, buffer size, latency) |
 
 Time is in beats. Pitches are MIDI numbers, note names (`"F#3"`) or drum names (`"kick"`). Notes can be written
 compactly as `[pitch, start, length, velocity]`. Errors say what to do next: an unknown id comes back with the ids
@@ -193,6 +207,30 @@ that exist, a bad note with its index and the reason.
 
 The HTTP server listens on localhost only and has no password: any program on the machine may use it. Pages in a
 web browser may not; requests that carry a browser's `Origin` are refused.
+
+## Playing and latency
+
+The audio device, its sample rate and its buffer size are chosen while the program runs and remembered; the
+project, its undo history and the playhead are untouched by a change. If the device is not there the next time,
+or refuses the format, or is unplugged while a song plays, Trill opens the nearest thing (down to no device at
+all), says what it did and why, and takes the device up again when it is back. A driver that never answers
+costs a few seconds' wait, not the program.
+
+How short the delay between a key and its sound can be depends on how the device is opened:
+
+- **Shared** (the default): the device also plays every other program, through the system's mixer. On Windows
+  that mixer works in periods of 10 ms and keeps a few of them queued, so the delay is around 30 ms whatever
+  buffer size is asked for.
+- **Exclusive** (Windows; `exclusive` in the audio settings): Trill takes the device for itself and plays it
+  directly, at the buffer size asked for, down to about 3 ms on ordinary hardware. No other program can use the
+  device meanwhile. This is WASAPI's exclusive mode and needs nothing installed.
+- **ASIO** is not built. The audio library Trill uses supports it, but only with Steinberg's ASIO SDK present
+  at build time (downloaded under Steinberg's licence, with LLVM for the bindings), which is too much to ask of
+  everyone who builds Trill. It would be an optional cargo feature, off by default, plus a fourth audio host in
+  `trill-engine/src/host`.
+
+On macOS and Linux the system's own audio (CoreAudio, ALSA) honours the buffer size without any of this; neither
+has been run yet.
 
 ## Architecture
 
@@ -233,7 +271,8 @@ Working: everything listed above, with tests.
 
 Not yet: running plugins out of process (only scanning is isolated today, so a plugin that crashes while playing
 still takes the app with it; the safety copy is what saves the work), plugin editors on Linux and macOS,
-session (clip-launching) view, audio recording, warp markers, MIDI input devices, plugin
+session (clip-launching) view, audio recording (MIDI is recorded; audio is not), recording of the pitch and
+mod wheels (they are heard while playing; clips have nowhere to keep them yet), ASIO, warp markers, plugin
 delay compensation, multi-core rendering. Only Windows has been run so far.
 
 ## Licence

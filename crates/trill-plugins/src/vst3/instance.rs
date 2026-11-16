@@ -85,6 +85,9 @@ pub(crate) struct Created {
     pub takes_notes: bool,
     /// The parameters that stand for MIDI's "all sound off".
     pub silencing: Vec<ParamID>,
+    /// The parameters that stand for the pedal, the wheels and the other
+    /// MIDI controllers.
+    pub midi: params::MidiParams,
     pub links: Arc<ParamLinks>,
     pub editor: Arc<EditorStatus>,
 }
@@ -547,6 +550,7 @@ impl Vst3Thread {
         let table = table.unwrap_or_default();
         let mut listed = table.listed;
         let silencing = instance.controller.as_ref().map(|controller| params::silencing_params(&controller.edit));
+        let midi = instance.controller.as_ref().map(|controller| params::midi_params(&controller.edit));
         let latency = instance.activate()?;
         if let Some(controller) = &instance.controller {
             // Only now are the values settled: some plugins fill in their
@@ -570,6 +574,7 @@ impl Vst3Thread {
             buses,
             takes_notes,
             silencing: silencing.unwrap_or_default(),
+            midi: midi.unwrap_or_default(),
             links,
             editor: instance.editor_status.clone(),
         };

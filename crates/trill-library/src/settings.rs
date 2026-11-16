@@ -33,6 +33,7 @@ pub struct Settings {
     #[serde(serialize_with = "paths::serialize")]
     pub recent_projects: Vec<PathBuf>,
     pub audio: AudioSettings,
+    pub midi: MidiSettings,
     pub ui: UiSettings,
 }
 
@@ -61,6 +62,20 @@ pub struct AudioSettings {
     pub buffer_size: Option<u32>,
     /// Sample rate in hertz.
     pub sample_rate: Option<u32>,
+    /// Whether the output device is taken for this program alone, for the
+    /// shortest latency.
+    pub exclusive: bool,
+    /// Name of the device audio is recorded from.
+    pub input_device: Option<String>,
+}
+
+/// MIDI device preferences.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct MidiSettings {
+    /// Names of the MIDI inputs that are switched off. Every other input
+    /// is listened to, one plugged in for the first time included: a
+    /// keyboard should play without a visit to the settings.
+    pub disabled_inputs: Vec<String>,
 }
 
 /// Interface preferences.
@@ -210,6 +225,11 @@ impl Reader {
             self.value(audio, "audio.output_device", &mut settings.audio.output_device);
             self.value(audio, "audio.buffer_size", &mut settings.audio.buffer_size);
             self.value(audio, "audio.sample_rate", &mut settings.audio.sample_rate);
+            self.value(audio, "audio.exclusive", &mut settings.audio.exclusive);
+            self.value(audio, "audio.input_device", &mut settings.audio.input_device);
+        }
+        if let Some(midi) = self.section(document, "midi") {
+            self.value(midi, "midi.disabled_inputs", &mut settings.midi.disabled_inputs);
         }
         if let Some(ui) = self.section(document, "ui") {
             self.value(ui, "ui.theme", &mut settings.ui.theme);
@@ -346,7 +366,10 @@ mod tests {
                 output_device: Some("Speakers (USB Audio)".into()),
                 buffer_size: Some(256),
                 sample_rate: Some(48_000),
+                exclusive: true,
+                input_device: Some("Line In (USB Audio)".into()),
             },
+            midi: MidiSettings { disabled_inputs: vec!["Loopback".into()] },
             ui: UiSettings { theme: "noir".into(), browser_width: 312.5, window_size: Some([1600.0, 900.0]) },
         }
     }
@@ -394,6 +417,7 @@ mod tests {
         assert_eq!(loaded.settings.library.roots, [PathBuf::from("/a")]);
         assert_eq!(loaded.settings.ui, UiSettings { browser_width: 300.0, ..UiSettings::default() });
         assert_eq!(loaded.settings.audio, AudioSettings::default());
+        assert_eq!(loaded.settings.midi, MidiSettings::default());
         assert!(!with_suffix(&path, ".backup").exists(), "nothing was lost, so nothing is backed up");
     }
 
@@ -404,7 +428,8 @@ mod tests {
         let text = r#"{
             "library": { "roots": ["/a", 7, "/b", ""], "favorites": "none" },
             "recent_projects": ["/songs/x.trill"],
-            "audio": { "output_device": "Speakers", "buffer_size": "big", "sample_rate": 44100 },
+            "audio": { "output_device": "Speakers", "buffer_size": "big", "sample_rate": 44100, "exclusive": "yes" },
+            "midi": { "disabled_inputs": ["Loopback"] },
             "ui": []
         }"#;
         std::fs::write(&path, text).unwrap();
@@ -414,11 +439,16 @@ mod tests {
         assert_eq!(loaded.settings.recent_projects, [PathBuf::from("/songs/x.trill")]);
         assert_eq!(
             loaded.settings.audio,
-            AudioSettings { output_device: Some("Speakers".into()), buffer_size: None, sample_rate: Some(44_100) }
+            AudioSettings {
+                output_device: Some("Speakers".into()),
+                sample_rate: Some(44_100),
+                ..AudioSettings::default()
+            }
         );
+        assert_eq!(loaded.settings.midi.disabled_inputs, ["Loopback"]);
         assert_eq!(loaded.settings.ui, UiSettings::default());
         let warning = loaded.warning.unwrap();
-        for name in ["part of library.roots", "library.favorites", "audio.buffer_size", "ui"] {
+        for name in ["part of library.roots", "library.favorites", "audio.buffer_size", "audio.exclusive", "ui"] {
             assert!(warning.contains(name), "{warning}");
         }
         // The file as it was is kept, because saving will drop those values.

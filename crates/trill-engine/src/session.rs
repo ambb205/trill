@@ -4,7 +4,7 @@
 //! an edit means.
 
 use crate::compile::{Compiler, DeviceBank, Meters, Problem, StandIns};
-use crate::engine::{AudioBackend, Engine, EngineError, Message, StreamInfo};
+use crate::engine::{AudioBackend, AudioSetup, Engine, EngineError, Message, StreamInfo};
 use crate::graph::Meter;
 use crate::render::RenderJob;
 use crate::sources::AudioSources;
@@ -18,6 +18,11 @@ use trill_dsp::{SampleRef, StateError, drumrack, sampler};
 use trill_media::MediaCache;
 
 mod editors;
+mod playing;
+mod take;
+
+pub use playing::{MAX_COUNT_IN_BARS, RecordState, RecordStatus};
+pub use take::TakeClip;
 
 const UNDO_LIMIT: usize = 200;
 const LIMITER_URI: &str = "builtin:limiter";
@@ -34,6 +39,10 @@ pub enum SessionError {
     Engine(#[from] EngineError),
     #[error("{0}")]
     Io(String),
+    /// Arming or recording was asked for and cannot be done as things
+    /// stand; the text says what to do about it.
+    #[error("{0}")]
+    Recording(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -128,6 +137,8 @@ pub struct Session {
     /// `Some(has_step)` while a gesture is open; see [`Session::begin_gesture`].
     gesture: Option<bool>,
     metronome: bool,
+    /// Arming, the selection, and the take being recorded.
+    playing: playing::Playing,
 }
 
 impl Session {
@@ -152,7 +163,20 @@ impl Session {
         media: Arc<MediaCache>,
         backend: AudioBackend,
     ) -> Result<Self, SessionError> {
-        let engine = Engine::start(backend)?;
+        Self::with_audio(factory, media, backend.into())
+    }
+
+    /// [`Session::with_media`], saying which audio device to open and how
+    /// ([`AudioSetup`]): what an application does with the user's saved
+    /// choice. If that device is not there or refuses the format, the
+    /// nearest thing is opened and [`Session::audio_info`] says so; see
+    /// [`Session::set_audio_config`].
+    pub fn with_audio(
+        factory: Arc<dyn DeviceFactory>,
+        media: Arc<MediaCache>,
+        setup: AudioSetup,
+    ) -> Result<Self, SessionError> {
+        let engine = Engine::start_with(setup)?;
         media.set_loader_rate(Some(engine.sample_rate()));
         let mut session = Self {
             project: Project::default(),
@@ -173,6 +197,7 @@ impl Session {
             saved_revision: 0,
             gesture: None,
             metronome: false,
+            playing: playing::Playing::new(),
         };
         session.replace_project(Self::blank_project("Untitled"));
         Ok(session)
@@ -659,8 +684,12 @@ impl Session {
         self.engine.send(Message::Play);
     }
 
+    /// Stops the song. A take that was being recorded ends here: the keys
+    /// still down end with it, and what was played is in the project by
+    /// the time this returns ([`Session::last_take`]).
     pub fn stop(&mut self) {
         self.engine.send(Message::Stop);
+        self.finish_take(true);
     }
 
     pub fn seek(&mut self, beat: f64) {
@@ -671,6 +700,7 @@ impl Session {
     pub fn panic(&mut self) {
         self.engine.send(Message::Stop);
         self.engine.send(Message::Panic);
+        self.finish_take(true);
     }
 
     pub fn transport(&self) -> TransportStatus {
@@ -704,14 +734,19 @@ impl Session {
         self.metronome
     }
 
-    /// Plays a note on a track's instrument right now, for auditioning.
+    /// Plays a note on a track's instrument right now, whether or not the
+    /// track is armed. It sounds like a key of a MIDI keyboard would and,
+    /// while a take is recorded on that track, is recorded like one.
     pub fn note_on(&mut self, track: TrackId, pitch: u8, velocity: u8) {
         let velocity = velocity.clamp(1, 127) as f32 / 127.0;
-        self.engine.send(Message::Live { track, kind: EventKind::NoteOn { pitch: pitch.min(127), velocity } });
+        let now = self.engine.now_ns();
+        self.engine.live().play_on_at(now, track, EventKind::NoteOn { pitch: pitch.min(127), velocity });
     }
 
+    /// Lets go of a note started with [`Session::note_on`].
     pub fn note_off(&mut self, track: TrackId, pitch: u8) {
-        self.engine.send(Message::Live { track, kind: EventKind::NoteOff { pitch: pitch.min(127) } });
+        let now = self.engine.now_ns();
+        self.engine.live().play_on_at(now, track, EventKind::NoteOff { pitch: pitch.min(127) });
     }
 
     // ---- files ---------------------------------------------------------
@@ -780,10 +815,17 @@ impl Session {
     }
 
     /// The session's regular chores; call it a few times a second. Frees
-    /// memory the audio thread has released, and gives clips that were
-    /// playing a stand-in their warped audio once it has been prepared.
+    /// memory the audio thread has released, gives clips that were playing
+    /// a stand-in their warped audio once it has been prepared, writes
+    /// what has been recorded so far into the project, and looks after the
+    /// audio device: one that was lost is replaced by the next best, and
+    /// one that came back is taken up again
+    /// ([`Session::audio_revision`]).
     pub fn housekeeping(&mut self) {
         self.engine.collect_garbage();
+        self.tend_audio();
+        self.recover_lost_messages();
+        self.tend_take();
         if !self.stand_ins.is_empty() && self.audio.finished() != self.stretches_seen {
             self.compile_and_swap();
         }
@@ -811,6 +853,7 @@ impl Session {
     fn replace_project(&mut self, project: Project) {
         self.engine.send(Message::Stop);
         self.engine.send(Message::Seek(0.0));
+        self.abandon_take();
         self.project = project;
         self.undo.clear();
         self.redo.clear();
@@ -819,6 +862,9 @@ impl Session {
         self.bank.devices.clear();
         self.stand_ins = StandIns::default();
         self.compile_and_swap();
+        // Track ids restart too: what was armed or selected was the old
+        // project's.
+        self.send_live_targets();
         self.revision += 1;
         self.saved_revision = self.revision;
     }
@@ -846,6 +892,8 @@ impl Session {
     fn sync(&mut self, old: &Project, scope: Scope) {
         if scope == Scope::Everything {
             self.compile_and_swap();
+            // A track that is gone is no longer armed or played.
+            self.send_live_targets();
         }
 
         // Devices that were already running keep their instance, so changed

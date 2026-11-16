@@ -11,10 +11,17 @@
 //! * the [`Session`];
 //! * the sound [`Library`], opened from the user's settings;
 //! * the settings file itself ([`Runtime::settings`]);
+//! * the audio device the user chose, opened as the settings say, and the
+//!   means to choose another while the program runs
+//!   ([`Runtime::set_audio`]);
+//! * the MIDI inputs: every port that is plugged in and not switched off
+//!   plays the armed tracks ([`Runtime::midi_inputs`]);
 //! * a housekeeping thread that gives the session its regular turn (which
-//!   is what swaps freshly stretched audio into the running graph), writes
-//!   the settings when the library's part of them changes, and keeps a
-//!   safety copy of a project with unsaved changes;
+//!   is what swaps freshly stretched audio into the running graph, writes
+//!   a take into the project as it is recorded, and replaces an audio
+//!   device that was lost), writes the settings when the library's part of
+//!   them changes, and keeps a safety copy of a project with unsaved
+//!   changes;
 //! * those safety copies, and the ones a program that crashed left behind
 //!   ([`Runtime::recoverable`]).
 //!
@@ -36,23 +43,29 @@
 //! ```
 
 mod housekeeping;
+pub mod midi;
 mod recovery;
 mod settings;
 mod sounds;
 
+pub use midi::MidiInputInfo;
 pub use recovery::SafetyCopy;
 pub use settings::Storage;
 pub use sounds::{AddedSound, NewSoundTrack, SoundClip, SoundError, SoundFacts};
 
 use housekeeping::Housekeeper;
+use midi::{MidiBackend, MidiInputs, SystemMidi};
 use parking_lot::Mutex;
 use recovery::SafetyCopies;
 use settings::SettingsFile;
 use std::sync::Arc;
+use std::time::Duration;
 use trill_core::device::{CompositeFactory, DeviceFactory};
 use trill_dsp::Builtins;
-use trill_engine::{AudioBackend, Session, SessionError, SharedSession};
-use trill_library::{Library, SaveError, Settings};
+use trill_engine::{
+    AudioBackend, AudioConfig, AudioDevices, AudioHost, AudioSetup, Session, SessionError, SharedSession, StreamInfo,
+};
+use trill_library::{AudioSettings, Library, SaveError, Settings};
 use trill_media::MediaCache;
 use trill_plugins::{PluginHost, ScanMode, Scanner};
 
@@ -96,14 +109,52 @@ pub enum RuntimeError {
     Thread(std::io::Error),
 }
 
+/// What [`Runtime::start_custom`] can be handed in place of the real
+/// thing. Everything left out is as [`Runtime::start`] has it.
+#[derive(Default)]
+pub struct Parts {
+    /// Devices offered beside the built-in ones and the user's plugins.
+    pub devices: Vec<Box<dyn DeviceFactory>>,
+    /// Who plays the audio, in place of what [`RuntimeOptions::audio`]
+    /// says. The saved audio settings are asked of it.
+    pub audio: Option<Arc<dyn AudioHost>>,
+    /// The MIDI ports, in place of the system's.
+    pub midi: Option<Box<dyn MidiBackend>>,
+}
+
+/// The audio stream: what was asked for and what is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioStatus {
+    /// What the user asked for, which is what the settings keep.
+    pub config: AudioConfig,
+    /// The stream that is running, and in its `warning` why it is not the
+    /// one asked for, when it is not.
+    pub info: StreamInfo,
+    /// How long after the engine renders a frame it is heard, in
+    /// milliseconds, as the device last reported.
+    pub latency_ms: f64,
+    /// Fraction of the audio thread's time budget in use.
+    pub load: f32,
+    /// Changes whenever the stream does; see
+    /// [`Session::audio_revision`](trill_engine::Session::audio_revision).
+    pub revision: u64,
+}
+
+/// How long listing the audio devices may take.
+const DEVICE_LIST_TIMEOUT: Duration = Duration::from_secs(6);
+/// How long a rescan of the MIDI ports is waited for.
+const MIDI_RESCAN_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// The program's shared parts. Front ends hold it in an `Arc` and reach
 /// into the public fields; everything stops when the last holder lets go.
 pub struct Runtime {
     // Field order is drop order. The housekeeping thread holds the session
-    // too, so it is stopped first: the session then ends on the thread that
-    // lets go of the runtime, not on a background thread that happened to
-    // hold the last reference.
+    // too, and so does the thread that watches the MIDI ports, so they are
+    // stopped first: the session then ends on the thread that lets go of
+    // the runtime, not on a background thread that happened to hold the
+    // last reference.
     _housekeeper: Housekeeper,
+    midi: Option<MidiInputs>,
     /// The one open project and the engine playing it.
     pub session: SharedSession,
     /// The cache every audio file is read through.
@@ -114,6 +165,9 @@ pub struct Runtime {
     plugins: Option<PluginHost>,
     settings: Arc<Mutex<SettingsFile>>,
     copies: Arc<Mutex<SafetyCopies>>,
+    /// Who plays the audio: asked for the devices without taking the
+    /// session.
+    audio_host: Arc<dyn AudioHost>,
 }
 
 impl Runtime {
@@ -130,9 +184,36 @@ impl Runtime {
     /// one and need no plugin installed.
     #[doc(hidden)]
     pub fn start_with(options: RuntimeOptions, extra: Vec<Box<dyn DeviceFactory>>) -> Result<Self, RuntimeError> {
+        Self::start_custom(options, Parts { devices: extra, ..Parts::default() })
+    }
+
+    /// [`Runtime::start`] with some of its parts replaced: audio devices
+    /// and MIDI ports that exist only in a test, say, so that what a front
+    /// end does with them can be tested on a machine that has none.
+    pub fn start_custom(options: RuntimeOptions, parts: Parts) -> Result<Self, RuntimeError> {
+        // The settings come first: they say which audio device to open.
+        let (settings, index_path) = SettingsFile::open(&options.storage);
+        if let Some(warning) = settings.warning() {
+            log::warn!("{warning}");
+        }
+        let wanted = audio_config(&settings.current().audio);
+        let audio = match parts.audio {
+            Some(host) => AudioSetup::on(host, wanted),
+            None => AudioSetup::new(options.audio, wanted),
+        };
+        let audio_host = audio.host.clone();
+        // Without an audio device there is nothing for a keyboard to play
+        // through, and a run that must not touch the machine's hardware
+        // must not open its MIDI ports either.
+        let midi_backend: Option<Box<dyn MidiBackend>> = match parts.midi {
+            Some(backend) => Some(backend),
+            None if matches!(options.audio, AudioBackend::Null { .. }) => None,
+            None => Some(Box::new(SystemMidi)),
+        };
+
         let media = Arc::new(MediaCache::default());
         let mut factories: Vec<Box<dyn DeviceFactory>> = vec![Box::new(Builtins::with_loader(media.clone()))];
-        factories.extend(extra);
+        factories.extend(parts.devices);
         let plugins = options.plugins.map(PluginHost::new).transpose().map_err(RuntimeError::Plugins)?;
         if let Some(plugins) = &plugins {
             factories.extend(plugins.factories());
@@ -150,13 +231,24 @@ impl Runtime {
                 .map_err(RuntimeError::Thread)?;
         }
         let factory = Arc::new(CompositeFactory::new(factories));
-        let session = Session::with_media(factory, media.clone(), options.audio)?;
-        let session: SharedSession = Arc::new(Mutex::new(session));
-
-        let (settings, index_path) = SettingsFile::open(&options.storage);
-        if let Some(warning) = settings.warning() {
+        let session = Session::with_audio(factory, media.clone(), audio)?;
+        if let Some(warning) = &session.audio_info().warning {
             log::warn!("{warning}");
         }
+        let live = session.live();
+        let session: SharedSession = Arc::new(Mutex::new(session));
+
+        let midi = match midi_backend {
+            None => None,
+            Some(backend) => {
+                // A port that goes away cannot say its keys came up.
+                let playing = session.clone();
+                let on_lost = Box::new(move || playing.lock().release_live());
+                let disabled = settings.current().midi.disabled_inputs.clone();
+                Some(MidiInputs::start(backend, live, &disabled, on_lost).map_err(RuntimeError::Thread)?)
+            }
+        };
+
         let library = Arc::new(Library::open(&settings.current().library, index_path));
         if let Some(problem) = library.index_problem() {
             log::warn!("the saved library index was not used: {problem}");
@@ -174,7 +266,97 @@ impl Runtime {
         let copies = Arc::new(Mutex::new(copies));
         let settings = Arc::new(Mutex::new(settings));
         let housekeeper = Housekeeper::start(session.clone(), library.clone(), settings.clone(), copies.clone())?;
-        Ok(Self { _housekeeper: housekeeper, session, media, library, plugins, settings, copies })
+        Ok(Self { _housekeeper: housekeeper, midi, session, media, library, plugins, settings, copies, audio_host })
+    }
+
+    // ---- the audio device ----------------------------------------------
+
+    /// The audio devices that could be chosen. This asks the system, which
+    /// takes a moment (and with a driver that does not answer, a few
+    /// seconds, after which the lists come back empty): call it when a
+    /// settings panel opens, not on every frame. The session is not held
+    /// meanwhile.
+    pub fn audio_devices(&self) -> AudioDevices {
+        let host = self.audio_host.clone();
+        let (answer, devices) = std::sync::mpsc::channel();
+        let asked = std::thread::Builder::new().name("audio-devices".into()).spawn(move || {
+            let _ = answer.send(host.devices());
+        });
+        match asked {
+            Ok(_) => devices.recv_timeout(DEVICE_LIST_TIMEOUT).unwrap_or_else(|_| {
+                log::error!("the audio devices could not be listed in time");
+                AudioDevices::default()
+            }),
+            Err(error) => {
+                log::error!("cannot start a thread to list the audio devices: {error}");
+                AudioDevices::default()
+            }
+        }
+    }
+
+    /// The audio stream as it stands: what was asked for, what is running,
+    /// its latency and load. Cheap.
+    pub fn audio_status(&self) -> AudioStatus {
+        let session = self.session.lock();
+        AudioStatus {
+            config: session.audio_config().clone(),
+            info: session.audio_info().clone(),
+            latency_ms: session.output_latency_ms(),
+            load: session.audio_load(),
+            revision: session.audio_revision(),
+        }
+    }
+
+    /// Chooses the audio device, sample rate and buffer size, opens the
+    /// stream now and remembers the choice for the next run. The project
+    /// and the playhead are untouched; see
+    /// [`Session::set_audio_config`](trill_engine::Session::set_audio_config)
+    /// for what a change of sample rate costs.
+    ///
+    /// This does not fail: what cannot be had is replaced by the nearest
+    /// thing, and the status that comes back says what is running and, in
+    /// `info.warning`, why it is not what was asked for. The choice is
+    /// remembered as it was made. The error is for the settings file: the
+    /// stream has changed even if the choice could not be written down.
+    pub fn set_audio(&self, config: AudioConfig) -> (AudioStatus, Result<(), SaveError>) {
+        self.session.lock().set_audio_config(config.clone());
+        let saved = self.update_settings(|settings| settings.audio = audio_settings(&config));
+        (self.audio_status(), saved)
+    }
+
+    // ---- MIDI inputs ---------------------------------------------------
+
+    /// The MIDI inputs: every port that is plugged in, and the ones that
+    /// are switched off even while they are away. As of the last look at
+    /// the ports, which happens once a second; cheap. Empty in a run
+    /// without audio hardware, which opens no MIDI ports either.
+    ///
+    /// What an input that is switched on sends plays the armed tracks, or
+    /// the selected track when none is armed; see
+    /// [`Session::set_armed`](trill_engine::Session::set_armed).
+    pub fn midi_inputs(&self) -> Vec<MidiInputInfo> {
+        self.midi.as_ref().map(MidiInputs::inputs).unwrap_or_default()
+    }
+
+    /// Switches a MIDI input on or off and remembers it. A port is on
+    /// unless it was switched off, one that has never been seen before
+    /// included. Switching off an input that has keys down lets go of
+    /// them. The port is opened or closed in the background;
+    /// [`Runtime::midi_inputs`] shows the outcome a moment later, or at
+    /// once after [`Runtime::rescan_midi_inputs`].
+    pub fn set_midi_input_enabled(&self, name: &str, enabled: bool) -> Result<(), SaveError> {
+        let Some(midi) = &self.midi else { return Ok(()) };
+        midi.set_enabled(name, enabled);
+        let disabled = midi.disabled();
+        self.update_settings(|settings| settings.midi.disabled_inputs = disabled)
+    }
+
+    /// Looks at the MIDI ports now rather than at the next second and
+    /// waits for that (a moment; at most a few seconds if a driver is
+    /// slow). Returns whether the look was finished: if not,
+    /// [`Runtime::midi_inputs`] is as it was.
+    pub fn rescan_midi_inputs(&self) -> bool {
+        self.midi.as_ref().is_none_or(|midi| midi.rescan(MIDI_RESCAN_TIMEOUT))
     }
 
     /// Projects that were not saved before the program last stopped (it
@@ -265,6 +447,34 @@ impl Runtime {
     /// added. Writes nothing when nothing changed.
     pub fn save_library_changes(&self) -> Result<(), SaveError> {
         self.settings.lock().save_library_changes(&self.library).map(|_| ())
+    }
+}
+
+/// Front ends share the runtime between threads.
+const _: () = {
+    const fn shared<T: Send + Sync>() {}
+    shared::<Runtime>();
+};
+
+/// The audio settings as the engine takes them.
+fn audio_config(settings: &AudioSettings) -> AudioConfig {
+    AudioConfig {
+        output: settings.output_device.clone(),
+        input: settings.input_device.clone(),
+        sample_rate: settings.sample_rate,
+        buffer_size: settings.buffer_size,
+        exclusive: settings.exclusive,
+    }
+}
+
+/// What the engine was asked for, as the settings keep it.
+fn audio_settings(config: &AudioConfig) -> AudioSettings {
+    AudioSettings {
+        output_device: config.output.clone(),
+        input_device: config.input.clone(),
+        sample_rate: config.sample_rate,
+        buffer_size: config.buffer_size,
+        exclusive: config.exclusive,
     }
 }
 

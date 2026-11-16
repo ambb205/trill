@@ -7,8 +7,9 @@ use crate::guard::Guard;
 use crate::input::{find_param, parse_notes, parse_param_value, parse_pitch_value, parse_points};
 use crate::requests::*;
 use crate::view::{
-    clip_json, descriptor_json, descriptor_summary_json, device_json, lane_json, param_state_json, project_json, round,
-    samples_json, scan_json, sound_json, track_json, transport_json, warp_name,
+    audio_device_json, audio_json, clip_json, descriptor_json, descriptor_summary_json, device_json, lane_json,
+    midi_input_json, param_state_json, project_json, round, samples_json, scan_json, sound_json, take_json, track_json,
+    transport_json, warp_name,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -19,7 +20,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use trill_core::device::{DeviceCategory, EditorOptions};
+use trill_core::device::{DeviceCategory, EditorOptions, EventKind};
 use trill_core::midi_file;
 use trill_core::project::{AutomationTarget, MAX_TEMPO, MAX_VOLUME_DB, MIN_TEMPO, WarpMode};
 use trill_core::{ChainRef, ClipId, DeviceId, EditError, Project, TrackId, TrackKind};
@@ -33,6 +34,9 @@ const DRUM_RACK_URI: &str = "builtin:drumrack";
 /// most it can ask for.
 const DEFAULT_SOUNDS: usize = 20;
 const MAX_SOUNDS: usize = 200;
+/// The most notes play_notes plays in one call, and the longest it plays for.
+const MAX_LIVE_NOTES: usize = 256;
+const MAX_LIVE_SECONDS: f64 = 60.0;
 /// How long a library scan is waited for before the reply goes out without
 /// it, when the caller does not say, and the longest it can ask for.
 const DEFAULT_SCAN_WAIT: f64 = 15.0;
@@ -72,6 +76,12 @@ is its own length in beats. `transpose` shifts its pitch into the song's key. Un
 recorded speed.
 - A freshly warped clip plays in time but repitched for a moment while it is prepared (get_project shows \
 preparing_clips); renders always wait for the real audio.
+
+Playing and recording live
+- update_track `armed` arms a track: a MIDI keyboard (midi_inputs lists them; every input is on unless switched off) then plays its instrument. With no track armed, a keyboard plays the track selected in the window.
+- transport `record` records what is played on the armed tracks into clips, from the playhead, after a count-in; `stop` ends the take and lists its clips. Recording inside an existing MIDI clip adds to that clip. With the loop on, each pass is layered onto the last. One take is one undo step.
+- play_notes plays notes live through an instrument, as a keyboard would: they are heard now and, during a recording, recorded. It is not how to write a part: create_clip is.
+- audio shows the audio device, its buffer and latency, and changes them.
 
 Musical guidance
 - Vary velocity and use transform_notes to humanize; identical velocities sound mechanical.
@@ -476,6 +486,16 @@ impl TrillServer {
             // The clips are not what was asked about.
             if let Some(fields) = out.as_object_mut() {
                 fields.remove("clips");
+            }
+            Ok(out)
+        });
+        // Arming is the session's, not the project's: no undo step.
+        let reply = reply.and_then(|mut out| {
+            if let Some(armed) = request.armed {
+                session.set_armed(id, armed).map_err(|error| explain(session.project(), error))?;
+            }
+            if session.is_armed(id) {
+                out["armed"] = json!(true);
             }
             Ok(out)
         });
@@ -1376,7 +1396,8 @@ impl TrillServer {
         finish(reply)
     }
 
-    /// Control live playback through the user's speakers: play, stop, seek, or read the playhead.
+    /// Control live playback through the user's speakers: play, stop, seek, read the playhead, or record what
+    /// is played live on the armed tracks.
     #[tool(annotations(title = "Transport"))]
     fn transport(&self, Parameters(request): Parameters<TransportRequest>) -> CallToolResult {
         let mut session = self.session.lock();
@@ -1384,6 +1405,15 @@ impl TrillServer {
             let position = request.position;
             if position.is_some_and(|beat| !beat.is_finite() || beat < 0.0) {
                 return Err("position must be a beat >= 0".to_string());
+            }
+            if let Some(bars) = request.count_in_bars {
+                if bars > trill_engine::MAX_COUNT_IN_BARS {
+                    return Err(format!("count_in_bars is at most {}", trill_engine::MAX_COUNT_IN_BARS));
+                }
+                session.set_count_in(bars);
+            }
+            if let Some(on) = request.metronome {
+                session.set_metronome(on);
             }
             // The audio thread applies commands at its next callback, so the
             // reply states what was asked for rather than a stale reading.
@@ -1398,8 +1428,17 @@ impl TrillServer {
                     commanded(true, position.unwrap_or(current.position_beats))
                 }
                 TransportAction::Stop => {
+                    let recording = session.is_recording();
                     session.stop();
-                    commanded(false, current.position_beats)
+                    let mut out = commanded(false, current.position_beats);
+                    if recording {
+                        // The take is in the project by now.
+                        out["take"] = take_json(session.last_take());
+                        if session.last_take().is_empty() {
+                            out["note"] = json!("Nothing was played during the recording, so no clip was made.");
+                        }
+                    }
+                    out
                 }
                 TransportAction::Seek => {
                     let beat = position.ok_or("seek needs `position`")?;
@@ -1410,10 +1449,202 @@ impl TrillServer {
                     session.panic();
                     commanded(false, current.position_beats)
                 }
+                TransportAction::Record => {
+                    if let Some(beat) = position {
+                        session.seek(beat);
+                    }
+                    session.record().map_err(|error| {
+                        format!("{error}: update_track with `armed: true` arms one (get_project lists the tracks).")
+                    })?;
+                    let from = position.unwrap_or(current.position_beats);
+                    let count_in = if current.playing { 0 } else { session.count_in() };
+                    let mut out = commanded(true, from);
+                    out["recording"] = json!({
+                        "state": if count_in > 0 { "count_in" } else { "recording" },
+                        "tracks": session.armed(),
+                        "count_in_bars": count_in,
+                    });
+                    out
+                }
                 TransportAction::Status => transport_json(&session),
             })
         })();
         finish(reply)
+    }
+
+    /// The audio device: what is playing the sound, at what sample rate, buffer size and latency, and the
+    /// means to change them while the program runs (the project and the playhead are kept; a new sample rate
+    /// stops playback). What cannot be had is replaced by the nearest thing, and `warning` then says why.
+    #[tool(annotations(title = "Audio device"))]
+    async fn audio(&self, Parameters(request): Parameters<AudioRequest>) -> CallToolResult {
+        let runtime = self.runtime.clone();
+        // Listing devices and opening one both wait on the system.
+        let outcome = tokio::task::spawn_blocking(move || -> Reply {
+            match request.action {
+                AudioAction::Status => Ok(audio_json(&runtime.audio_status())),
+                AudioAction::Devices => {
+                    let devices = runtime.audio_devices();
+                    let mut out = audio_json(&runtime.audio_status());
+                    out["outputs"] = devices.outputs.iter().map(audio_device_json).collect();
+                    out["inputs"] = devices.inputs.iter().map(audio_device_json).collect();
+                    if devices.outputs.is_empty() {
+                        out["note"] = json!("No audio output device was found; Trill runs without sound.");
+                    }
+                    Ok(out)
+                }
+                AudioAction::Set => {
+                    let mut config = runtime.audio_status().config;
+                    if let Some(output) = &request.output {
+                        let named = output.trim();
+                        let follow_system = named.is_empty() || named.eq_ignore_ascii_case("default");
+                        config.output = (!follow_system).then(|| named.to_string());
+                    }
+                    if let Some(rate) = request.sample_rate {
+                        config.sample_rate = (rate > 0).then_some(rate);
+                    }
+                    if let Some(frames) = request.buffer_size {
+                        config.buffer_size = (frames > 0).then_some(frames);
+                    }
+                    if let Some(exclusive) = request.exclusive {
+                        config.exclusive = exclusive;
+                    }
+                    let (status, saved) = runtime.set_audio(config);
+                    let mut out = audio_json(&status);
+                    if let Err(error) = saved {
+                        out["not_saved"] = json!(format!("{error}. The change holds for this run only."));
+                    }
+                    if status.info.warning.is_some() {
+                        out["hint"] = json!("`audio` with action \"devices\" lists what can be chosen.");
+                    }
+                    Ok(out)
+                }
+            }
+        })
+        .await;
+        finish(outcome.unwrap_or_else(|error| Err(format!("the audio device did not answer: {error}"))))
+    }
+
+    /// The MIDI inputs (keyboards, pads, controllers) and which are listened to. Every input is on unless
+    /// switched off, one plugged in later included. What they send plays the armed tracks.
+    #[tool(annotations(title = "MIDI inputs"))]
+    async fn midi_inputs(&self, Parameters(request): Parameters<MidiInputsRequest>) -> CallToolResult {
+        let runtime = self.runtime.clone();
+        let outcome = tokio::task::spawn_blocking(move || -> Reply {
+            // As things are now, not as they were a second ago.
+            let looked = runtime.rescan_midi_inputs();
+            let mut note = None;
+            if let MidiInputsAction::Enable | MidiInputsAction::Disable = request.action {
+                let enable = matches!(request.action, MidiInputsAction::Enable);
+                let name = request.name.as_deref().map(str::trim).filter(|name| !name.is_empty());
+                let name = name.ok_or("`enable` and `disable` need `name`: the input, as `list` gives it")?;
+                let known: Vec<String> = runtime.midi_inputs().into_iter().map(|input| input.name).collect();
+                if !known.iter().any(|input| input == name) {
+                    return Err(if known.is_empty() {
+                        format!("There is no MIDI input called '{name}': none is plugged in.")
+                    } else {
+                        format!("There is no MIDI input called '{name}'. Inputs: {}", known.join(", "))
+                    });
+                }
+                if let Err(error) = runtime.set_midi_input_enabled(name, enable) {
+                    note = Some(format!("{error}. The change holds for this run only."));
+                }
+                runtime.rescan_midi_inputs();
+            }
+            let inputs = runtime.midi_inputs();
+            let playing: Vec<u64> = runtime.session.lock().live_tracks().iter().map(|track| track.0).collect();
+            let mut out = json!({
+                "inputs": inputs.iter().map(midi_input_json).collect::<Vec<_>>(),
+                "plays_tracks": playing,
+            });
+            if inputs.is_empty() {
+                out["note"] = json!("No MIDI input is plugged in (and none is opened when Trill runs without audio).");
+            } else if playing.is_empty() {
+                out["note"] = json!("No track is armed, so nothing a keyboard plays is heard: update_track `armed`.");
+            }
+            if !looked {
+                out["stale"] = json!("The MIDI ports did not answer in time; this is how they were before.");
+            }
+            if let Some(note) = note {
+                out["not_saved"] = json!(note);
+            }
+            Ok(out)
+        })
+        .await;
+        finish(outcome.unwrap_or_else(|error| Err(format!("the MIDI inputs could not be read: {error}"))))
+    }
+
+    /// Play notes live through a track's instrument, as a keyboard would: they are heard now, in time at the
+    /// project tempo, and recorded if a recording is running. Returns when the last note has ended. To write
+    /// a part, use create_clip instead.
+    #[tool(annotations(title = "Play notes live"))]
+    async fn play_notes(&self, Parameters(request): Parameters<PlayNotesRequest>) -> CallToolResult {
+        // What to play and when, worked out before anything sounds.
+        let plan = (|| {
+            let notes = parse_notes(&request.notes)?;
+            if notes.is_empty() {
+                return Err("`notes` is empty: give at least one note".to_string());
+            }
+            if notes.len() > MAX_LIVE_NOTES {
+                return Err(format!("play_notes plays at most {MAX_LIVE_NOTES} notes at a time"));
+            }
+            let session = self.session.lock();
+            let track = request.track.map(TrackId);
+            let tracks = match track {
+                Some(track) => {
+                    session.project().track(track).map_err(|error| explain(session.project(), error))?;
+                    vec![track]
+                }
+                None => session.live_tracks(),
+            };
+            if tracks.is_empty() {
+                return Err("No track is armed, so the notes would not be heard. Give `track`, or arm one with \
+                            update_track `armed`."
+                    .to_string());
+            }
+            let seconds_per_beat = 60.0 / session.project().tempo;
+            let mut events: Vec<(f64, bool, u8, u8)> = Vec::with_capacity(notes.len() * 2);
+            for note in &notes {
+                events.push((note.start * seconds_per_beat, true, note.pitch, note.velocity));
+                events.push((note.end() * seconds_per_beat, false, note.pitch, note.velocity));
+            }
+            // Stable: a note that ends where another begins ends first.
+            events.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            let seconds = events.last().map_or(0.0, |event| event.0);
+            if seconds > MAX_LIVE_SECONDS {
+                return Err(format!(
+                    "the notes take {seconds:.0} s to play; play_notes plays for at most {MAX_LIVE_SECONDS} s"
+                ));
+            }
+            Ok((track, tracks, events, seconds))
+        })();
+        let (track, tracks, events, seconds) = match plan {
+            Ok(plan) => plan,
+            Err(message) => return finish(Err(message)),
+        };
+
+        let started = tokio::time::Instant::now();
+        for (at, on, pitch, velocity) in events {
+            tokio::time::sleep_until(started + Duration::from_secs_f64(at)).await;
+            let mut session = self.session.lock();
+            match (track, on) {
+                (Some(track), true) => session.note_on(track, pitch, velocity),
+                (Some(track), false) => session.note_off(track, pitch),
+                (None, true) => {
+                    session.play_live(EventKind::NoteOn { pitch, velocity: f32::from(velocity) / 127.0 });
+                }
+                (None, false) => session.play_live(EventKind::NoteOff { pitch }),
+            }
+        }
+        let session = self.session.lock();
+        let mut out = json!({
+            "played": request.notes.len(),
+            "seconds": round(seconds),
+            "tracks": tracks.iter().map(|track| track.0).collect::<Vec<_>>(),
+        });
+        if session.is_recording() {
+            out["recording"] = json!("The notes are being recorded; transport `stop` ends the take.");
+        }
+        finish(Ok(out))
     }
 
     /// Render the song to a WAV file, faster than real time, and measure it: peak, loudness (LUFS), clipping,

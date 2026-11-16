@@ -14,6 +14,9 @@ trill-library.workspace = true
 trill-media.workspace = true
 trill-plugins.workspace = true
 log.workspace = true
+# MIDI ports. Small, and on Windows built on the `windows` crate the audio
+# side already brings in.
+midir = "0.11"
 parking_lot.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
