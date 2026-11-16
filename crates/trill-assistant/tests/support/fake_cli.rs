@@ -11,8 +11,9 @@
 //!   was started in `launch-auth.json`.
 //! * Anything else is a turn. The program reads its standard input to the
 //!   end, as the real CLI does, records how it was started in
-//!   `launch-<n>.json` (arguments, input, working directory and the
-//!   environment variables the tests care about), and then follows
+//!   `launch-<n>.json` (arguments, input, working directory, the environment
+//!   variables the tests care about, and whether it has a console window),
+//!   and then follows
 //!   `turn-<n>.script`, or `turn.script` if that launch has no script of its
 //!   own.
 //!
@@ -107,8 +108,36 @@ fn record(home: &Path, file: &str, arguments: &[String], input: &str) {
         "input": input,
         "working_directory": std::env::current_dir().ok(),
         "environment": environment,
+        "console_window": has_console_window(),
     });
     fs::write(home.join(file), record.to_string()).expect("the launch record");
+}
+
+/// Whether this process can put a console window on the screen: it has one,
+/// or it shares the console of the program that started it.
+///
+/// A console program started with neither gets a console of its own with no
+/// window, which is what a GUI program must ask for; otherwise Windows opens
+/// a visible console for the child.
+#[cfg(windows)]
+fn has_console_window() -> bool {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetConsoleWindow() -> *mut std::ffi::c_void;
+        fn GetConsoleProcessList(process_list: *mut u32, process_count: u32) -> u32;
+    }
+    let mut sharing = [0u32; 16];
+    // SAFETY: the first function takes no arguments and its result is only
+    // compared with null. The second is given a live buffer and its true
+    // length, and writes at most that many entries.
+    let (window, attached) =
+        unsafe { (GetConsoleWindow(), GetConsoleProcessList(sharing.as_mut_ptr(), sharing.len() as u32)) };
+    !window.is_null() || attached > 1
+}
+
+#[cfg(not(windows))]
+fn has_console_window() -> bool {
+    false
 }
 
 /// Carries out one directive. Returns the exit code if it ends the program.

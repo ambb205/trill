@@ -450,10 +450,12 @@ impl TurnJob {
         });
         let (exit_status, overlong) = self.follow(&mut child, chunks_of(stdout), &mut translator);
 
-        // The process is gone or about to be: closing the tree takes anything
-        // it left behind with it.
         let exit_status = exit_status.or_else(|| self.await_exit(&mut child));
-        drop(self.control.release());
+        // The CLI itself is gone. Whatever it left running goes now, which
+        // also lets go of the error stream read below.
+        if let Some(tree) = self.control.release() {
+            tree.close();
+        }
 
         let cancelled = self.control.is_cancelled();
         if overlong && !cancelled {

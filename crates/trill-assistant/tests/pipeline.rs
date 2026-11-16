@@ -224,6 +224,7 @@ fn the_cli_is_started_confined_to_trill_with_the_message_on_standard_input() {
     }
     assert!(launch.has_argument("--max-turns=80"));
     assert!(!arguments.iter().any(|argument| argument.contains("make it swing")), "the message is not an argument");
+    assert!(!launch.had_console_window(), "no console window appears when the CLI starts");
 
     let servers: Value = serde_json::from_str(&fs::read_to_string(after("--mcp-config")).unwrap()).unwrap();
     assert_eq!(servers, json!({ "mcpServers": { "trill": { "type": "http", "url": "http://127.0.0.1:4321/mcp" } } }));
@@ -569,6 +570,49 @@ fn dropping_the_conversation_stops_the_turn_in_progress() {
     assert!(!stage.helper_is_alive());
 }
 
+/// Windows only: a job object is what makes this hold. Elsewhere the CLI is
+/// left to notice that its output pipe has gone.
+#[cfg(windows)]
+#[test]
+fn the_cli_dies_with_the_program_that_started_it() {
+    let stage = Stage::new("host-killed");
+    stage.script(&script(&[&init(), "child", "hang"]));
+
+    // This test program again, running only the test below, as the "Trill"
+    // that gets killed.
+    let mut host = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "a_host_in_the_middle_of_a_turn", "--ignored", "--nocapture"])
+        .env(HOST_STAGE_VARIABLE, "host-killed")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    stage.await_helper();
+    assert!(stage.helper_is_alive());
+
+    // No destructor runs in a killed process: only the system can clean up.
+    host.kill().unwrap();
+    host.wait().unwrap();
+
+    thread::sleep(Duration::from_millis(200));
+    assert!(!stage.helper_is_alive(), "the CLI and its helper outlived the program that started them");
+}
+
+const HOST_STAGE_VARIABLE: &str = "TRILL_ASSISTANT_TEST_HOST_STAGE";
+
+#[test]
+#[ignore = "run by the_cli_dies_with_the_program_that_started_it, in a process of its own"]
+fn a_host_in_the_middle_of_a_turn() {
+    let Ok(name) = std::env::var(HOST_STAGE_VARIABLE) else { return };
+    let stage = Stage::reopen(&name);
+    let mut conversation = stage.conversation();
+    conversation.send("hello", None).unwrap();
+    loop {
+        // Until killed.
+        let _ = conversation.wait(Duration::from_secs(3600));
+    }
+}
+
 #[test]
 fn a_frame_loop_can_poll_without_ever_waiting() {
     let stage = Stage::new("poll");
@@ -605,10 +649,10 @@ fn detection_reports_a_cli_that_is_ready() {
         r#"{"loggedIn": true, "authMethod": "claude.ai", "email": "someone@example.com", "subscriptionType": "max"}"#,
     );
 
-    let status = detect(Some(&stage.program()), false).expect("ready");
+    let status = detect(&stage.config()).expect("ready");
 
     assert_eq!(status.installation, CliInstallation { path: stage.program(), version: CliVersion::new(2, 1, 325) });
-    assert_eq!(status.login, LoginMethod::ClaudeAccount { plan: Some("max".into()) });
+    assert_eq!(status.login, LoginMethod::Subscription { plan: Some("max".into()) });
     assert!(!format!("{status:?}").contains("someone@example.com"), "account details are not kept");
 }
 
@@ -616,24 +660,25 @@ fn detection_reports_a_cli_that_is_ready() {
 fn detection_says_why_the_assistant_cannot_be_offered() {
     let stage = Stage::new("detect-unavailable");
 
-    assert_eq!(detect(Some(&stage.path("nowhere.exe")), false), Err(Unavailable::NotInstalled));
+    let nowhere = AssistantConfig { cli_path: Some(stage.path("nowhere.exe")), ..stage.config() };
+    assert_eq!(detect(&nowhere), Err(Unavailable::NotInstalled));
 
     stage.write("version.txt", "2.0.5 (Claude Code)");
-    let Err(Unavailable::TooOld { installation, minimum }) = detect(Some(&stage.program()), false) else {
+    let Err(Unavailable::TooOld { installation, minimum }) = detect(&stage.config()) else {
         panic!("expected the CLI to be too old");
     };
     assert_eq!((installation.version, minimum), (CliVersion::new(2, 0, 5), trill_assistant::MINIMUM_CLI_VERSION));
 
     stage.write("version.txt", "Segmentation fault");
-    assert!(matches!(detect(Some(&stage.program()), false), Err(Unavailable::NotWorking { .. })));
+    assert!(matches!(detect(&stage.config()), Err(Unavailable::NotWorking { .. })));
 
     stage.write("version.txt", "2.1.325 (Claude Code)");
     stage.write("auth.json", r#"{"loggedIn": false, "authMethod": "none"}"#);
     stage.write("auth.exit", "1");
-    let Err(reason) = detect(Some(&stage.program()), false) else { panic!("expected nobody to be signed in") };
+    let Err(reason) = detect(&stage.config()) else { panic!("expected nobody to be signed in") };
     assert!(matches!(&reason, Unavailable::NotLoggedIn { installation } if installation.path == stage.program()));
     assert!(reason.to_string().contains("run `claude`"), "{reason}");
 
     stage.write("auth.json", "Not a report at all");
-    assert!(matches!(detect(Some(&stage.program()), false), Err(Unavailable::NotWorking { .. })));
+    assert!(matches!(detect(&stage.config()), Err(Unavailable::NotWorking { .. })));
 }

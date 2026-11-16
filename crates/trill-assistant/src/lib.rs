@@ -79,8 +79,8 @@
 //! use trill_assistant::{AssistantConfig, Conversation, Event, detect};
 //!
 //! // Slow (it starts the CLI twice): do this off the UI thread.
-//! let cli = detect(None, false)?; // Err(reason): show `reason` to the user
 //! let config = AssistantConfig::new("C:/Users/me/AppData/Roaming/Trill/assistant");
+//! let cli = detect(&config)?; // Err(reason): show `reason` to the user
 //! let mut chat = Conversation::new(config, cli.installation)?;
 //!
 //! chat.send("Add a four-bar drum loop", Some("playhead: bar 5\nselected track: Drums"))?;

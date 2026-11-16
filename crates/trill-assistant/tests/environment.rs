@@ -71,13 +71,14 @@ fn variables_that_redirect_authentication_do_not_reach_the_cli() {
 
     // Detection asks the CLI about the login in the same cleaned environment,
     // so that it reports the login a message would actually use.
-    let status = detect(Some(&stage.program()), false).expect("the fake CLI is ready");
-    assert_eq!(status.login, LoginMethod::ClaudeAccount { plan: Some("pro".into()) });
+    let status = detect(&stage.config()).expect("the fake CLI is ready");
+    assert_eq!(status.login, LoginMethod::Subscription { plan: Some("pro".into()) });
     let asked = stage.auth_launch();
     assert_eq!(asked.arguments(), ["auth", "status", "--json"]);
     assert_eq!(asked.variable("ANTHROPIC_API_KEY"), None);
     assert_eq!(asked.variable("CLAUDE_CODE_ENTRYPOINT"), None);
 
-    detect(Some(&stage.program()), true).expect("the fake CLI is ready");
+    let kept = AssistantConfig { keep_redirecting_environment: true, ..stage.config() };
+    detect(&kept).expect("the fake CLI is ready");
     assert_eq!(stage.auth_launch().variable("ANTHROPIC_API_KEY"), Some("placeholder-not-a-key"));
 }

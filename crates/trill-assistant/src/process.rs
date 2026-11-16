@@ -23,6 +23,11 @@ impl ProcessTree {
     pub(crate) fn kill(&self) {
         self.inner.kill();
     }
+
+    /// Gives the tree up once its child has exited. On Windows this kills
+    /// whatever the child left running; elsewhere there is no safe way to
+    /// (see the Unix `Tree`), and leftovers are left alone.
+    pub(crate) fn close(self) {}
 }
 
 /// Starts `command` with no console window and returns it together with the

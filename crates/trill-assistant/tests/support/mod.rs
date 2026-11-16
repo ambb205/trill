@@ -32,6 +32,11 @@ impl Stage {
         Self { directory }
     }
 
+    /// The directory another process set up with [`Stage::new`].
+    pub fn reopen(name: &str) -> Self {
+        Self { directory: Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("stage-{name}")) }
+    }
+
     fn program_in(directory: &Path) -> PathBuf {
         directory.join(if cfg!(windows) { "cli.exe" } else { "cli" })
     }
@@ -69,7 +74,7 @@ impl Stage {
     }
 
     pub fn config(&self) -> AssistantConfig {
-        AssistantConfig::new(self.path("work"))
+        AssistantConfig { cli_path: Some(self.program()), ..AssistantConfig::new(self.path("work")) }
     }
 
     pub fn conversation(&self) -> Conversation {
@@ -136,6 +141,10 @@ impl Launch {
 
     pub fn variable(&self, name: &str) -> Option<&str> {
         self.0["environment"][name].as_str()
+    }
+
+    pub fn had_console_window(&self) -> bool {
+        self.0["console_window"].as_bool().expect("the console flag")
     }
 }
 

@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::config::AssistantConfig;
 use crate::env as hygiene;
 use crate::process;
 
@@ -73,8 +74,9 @@ pub struct CliInstallation {
 /// How the CLI says the user is signed in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginMethod {
-    /// A Claude account, which is what signing in with `claude` gives.
-    ClaudeAccount {
+    /// The user's own Claude account, which is what signing in with `claude`
+    /// gives.
+    Subscription {
         /// The plan as the CLI names it (`"pro"`, `"max"`), when it says.
         /// For display only: it implies nothing about limits.
         plan: Option<String>,
@@ -131,20 +133,19 @@ pub enum Unavailable {
 /// Finds the CLI and checks that it can be used: installed, recent enough,
 /// signed in.
 ///
-/// `cli_path` is a location the user chose; `None` searches `PATH` and the
-/// places the installers use. `keep_redirecting_environment` must match the
-/// [`AssistantConfig`](crate::AssistantConfig) the conversation will use, so
-/// that the login reported is the one a message would actually use.
+/// Pass the configuration the conversation will use: the CLI is asked about
+/// the login in the same environment a message would run in, so that what is
+/// reported is what would be used.
 ///
 /// This starts the CLI twice and takes a second or so. Call it from a
 /// background thread, not from a frame of the UI.
-pub fn detect(cli_path: Option<&Path>, keep_redirecting_environment: bool) -> Result<CliStatus, Unavailable> {
-    let path = match cli_path {
+pub fn detect(config: &AssistantConfig) -> Result<CliStatus, Unavailable> {
+    let path = match &config.cli_path {
         Some(path) => usable(path)?,
         None => find(&candidates(&|name| env::var_os(name)))?,
     };
     let installation = installation(path)?;
-    let login = login(&installation, keep_redirecting_environment)?;
+    let login = login(&installation, config.keep_redirecting_environment)?;
     Ok(CliStatus { installation, login })
 }
 
@@ -268,7 +269,7 @@ fn read_login_report(report: &str) -> Option<LoginReport> {
     }
     let plan = report["subscriptionType"].as_str().filter(|plan| !plan.is_empty()).map(str::to_owned);
     Some(LoginReport::SignedIn(match report["authMethod"].as_str().unwrap_or_default() {
-        "claude.ai" => LoginMethod::ClaudeAccount { plan },
+        "claude.ai" => LoginMethod::Subscription { plan },
         "api_key" => LoginMethod::ApiKey,
         other => LoginMethod::Other(other.to_owned()),
     }))
@@ -304,7 +305,7 @@ mod tests {
             "email": "someone@example.com", "orgName": "Someone", "subscriptionType": "max"}"#;
         let read = read_login_report(report).expect("a report");
 
-        assert_eq!(read, LoginReport::SignedIn(LoginMethod::ClaudeAccount { plan: Some("max".into()) }));
+        assert_eq!(read, LoginReport::SignedIn(LoginMethod::Subscription { plan: Some("max".into()) }));
         assert!(!format!("{read:?}").contains("someone"));
     }
 

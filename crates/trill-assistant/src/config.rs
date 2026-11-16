@@ -77,6 +77,11 @@ impl Effort {
 /// not remember flags between runs.
 #[derive(Debug, Clone)]
 pub struct AssistantConfig {
+    /// Where the CLI is, when the user has pointed Trill at it. `None` lets
+    /// [`detect`](crate::detect) look on `PATH` and in the places the CLI's
+    /// installers use.
+    pub cli_path: Option<PathBuf>,
+
     /// Where Trill's MCP server listens. It must be running before a message
     /// is sent; the turn fails with
     /// [`McpServerUnavailable`](crate::FailureReason::McpServerUnavailable)
@@ -134,6 +139,7 @@ impl AssistantConfig {
         let working_dir = working_dir.into();
         let temp_dir = working_dir.join("tmp");
         Self {
+            cli_path: None,
             mcp_url: DEFAULT_MCP_URL.to_owned(),
             mcp_server_name: DEFAULT_MCP_SERVER_NAME.to_owned(),
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_owned(),
