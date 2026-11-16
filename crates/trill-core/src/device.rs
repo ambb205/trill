@@ -10,9 +10,11 @@
 //! Built-in devices and hosted plugins (CLAP, VST3) both sit behind this API,
 //! so the engine never knows which one it is driving.
 
+use crate::presets::{PresetInfo, PresetList};
 use crate::project::Device;
 use crate::time::TimeSignature;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 /// URI scheme of the devices that ship with the DAW, e.g. `builtin:polysynth`.
 pub const BUILTIN_SCHEME: &str = "builtin";
@@ -59,12 +61,30 @@ impl ParamInfo {
     }
 }
 
-/// A named set of parameter values.
+/// A named set of parameter values: a preset of a device whose whole sound
+/// is its parameters, which is every built-in one. It is listed with the
+/// device type ([`DeviceDescriptor::presets`]) and asked for by its name.
+///
+/// A plugin's presets are not of this kind. They are found some time after
+/// the plugin is, there may be thousands, and only the plugin can load
+/// one; see [`DeviceFactory::presets`], which lists both kinds alike.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Preset {
     pub name: String,
     pub description: String,
     pub params: Vec<(String, f64)>,
+}
+
+impl Preset {
+    /// The preset as a preset list has it: asked for by its name.
+    pub fn info(&self) -> PresetInfo {
+        PresetInfo {
+            id: self.name.clone(),
+            name: self.name.clone(),
+            description: self.description.clone(),
+            ..PresetInfo::default()
+        }
+    }
 }
 
 /// Catalog entry for a device that can be added to a track.
@@ -78,6 +98,8 @@ pub struct DeviceDescriptor {
     pub description: String,
     /// Known up front for built-ins; plugins report theirs once instantiated.
     pub params: Vec<ParamInfo>,
+    /// The presets that are sets of parameter values. Empty for plugins,
+    /// whose presets [`DeviceFactory::presets`] lists.
     pub presets: Vec<Preset>,
 }
 
@@ -270,6 +292,36 @@ pub trait DeviceController: Send {
     fn take_param_edits(&mut self) -> Vec<ParamEdit> {
         Vec::new()
     }
+
+    /// Loads one of the presets its factory lists for the device's type
+    /// ([`DeviceFactory::presets`]), replacing the device's sound the way
+    /// choosing the preset in the device's own browser would. The device
+    /// goes on playing meanwhile.
+    ///
+    /// Returns once the device has taken the preset on, or has said that
+    /// it will: a device may finish loading a moment later, on threads of
+    /// its own. A device that refuses, or cannot be made to answer, is an
+    /// error that says which.
+    fn load_preset(&mut self, preset: &PresetInfo) -> Result<(), PresetLoadError> {
+        let _ = preset;
+        Err(PresetLoadError::Unsupported)
+    }
+}
+
+/// Why a device did not load a preset.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum PresetLoadError {
+    /// The device has no way of being given a preset.
+    #[error("the device cannot load presets")]
+    Unsupported,
+    /// The device refused the preset, or failed while loading it. It may
+    /// have been changed by the attempt.
+    #[error("{0}")]
+    Failed(String),
+    /// The device did not answer. Nothing more can be asked of it for
+    /// now, its state included.
+    #[error("{0}")]
+    Unresponsive(String),
 }
 
 /// How to open a device's editor window.
@@ -377,6 +429,36 @@ pub trait DeviceFactory: Send + Sync {
     fn warnings(&self, _device: &Device) -> Vec<DeviceWarning> {
         Vec::new()
     }
+
+    /// The presets of the device type `uri`, as far as they are known
+    /// right now; `None` if the type is not one of this factory's.
+    ///
+    /// Never waits. Where finding the presets takes time (a plugin's),
+    /// the first call starts that in the background and returns a list
+    /// that says it is still being read; later calls return more of it.
+    ///
+    /// Without an implementation of its own, a factory offers the presets
+    /// its [`descriptors`](Self::descriptors) carry.
+    fn presets(&self, uri: &str) -> Option<PresetList> {
+        let descriptor = self.descriptors().into_iter().find(|descriptor| descriptor.uri == uri)?;
+        Some(PresetList::ready(descriptor.presets.iter().map(Preset::info).collect::<Vec<_>>()))
+    }
+
+    /// [`presets`](Self::presets), waiting up to `timeout` for a list that
+    /// is being read to be complete, and returning what there is by then.
+    /// For callers that may wait, such as a tool call; never for a thread
+    /// the user is waiting on.
+    fn presets_within(&self, uri: &str, timeout: Duration) -> Option<PresetList> {
+        let _ = timeout;
+        self.presets(uri)
+    }
+
+    /// Has the presets of the device type `uri` read again, in the
+    /// background: for presets that were added or removed while the
+    /// program ran. Does nothing for a type whose presets never change.
+    fn refresh_presets(&self, uri: &str) {
+        let _ = uri;
+    }
 }
 
 /// A shared factory is a factory, so one instance can serve several owners.
@@ -391,6 +473,18 @@ impl<T: DeviceFactory + ?Sized> DeviceFactory for std::sync::Arc<T> {
 
     fn warnings(&self, device: &Device) -> Vec<DeviceWarning> {
         (**self).warnings(device)
+    }
+
+    fn presets(&self, uri: &str) -> Option<PresetList> {
+        (**self).presets(uri)
+    }
+
+    fn presets_within(&self, uri: &str, timeout: Duration) -> Option<PresetList> {
+        (**self).presets_within(uri, timeout)
+    }
+
+    fn refresh_presets(&self, uri: &str) {
+        (**self).refresh_presets(uri)
     }
 }
 
@@ -427,5 +521,19 @@ impl DeviceFactory for CompositeFactory {
 
     fn warnings(&self, device: &Device) -> Vec<DeviceWarning> {
         self.factories.iter().flat_map(|factory| factory.warnings(device)).collect()
+    }
+
+    fn presets(&self, uri: &str) -> Option<PresetList> {
+        self.factories.iter().find_map(|factory| factory.presets(uri))
+    }
+
+    fn presets_within(&self, uri: &str, timeout: Duration) -> Option<PresetList> {
+        self.factories.iter().find_map(|factory| factory.presets_within(uri, timeout))
+    }
+
+    fn refresh_presets(&self, uri: &str) {
+        for factory in &self.factories {
+            factory.refresh_presets(uri);
+        }
     }
 }

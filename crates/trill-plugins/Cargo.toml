@@ -17,6 +17,7 @@ clack-extensions = { version = "0.2.0", features = [
     "note-ports",
     "gui",
     "params",
+    "preset-discovery",
     "state",
     "thread-check",
     "timer",
@@ -31,7 +32,8 @@ vst3 = "0.3.0"
 libloading = "0.8"
 
 # The plugin main thread runs a Win32 message loop and hosts the windows
-# of plugin editors, and the scanner process turns off crash dialogs.
+# of plugin editors, the scanner process turns off crash dialogs, and VST3
+# preset files are looked for in the user's documents, wherever those are.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
@@ -39,12 +41,14 @@ windows-sys = { version = "0.61", features = [
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Storage_Xps",
+    "Win32_System_Com",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_LibraryLoader",
     "Win32_System_Ole",
     "Win32_System_Threading",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

@@ -98,6 +98,92 @@ fn platform_paths(var: &dyn Fn(&str) -> Option<OsString>, paths: &mut Vec<PathBu
     paths.push(PathBuf::from("/usr/local/lib/vst3"));
 }
 
+/// The folders VST3 preset files are kept in on this system, per the
+/// VST 3 SDK's "Preset Locations", the user's own first. A plugin's
+/// presets are in `<vendor>/<plugin name>` below each.
+pub(crate) fn preset_paths() -> Vec<PathBuf> {
+    preset_paths_from(|name| std::env::var_os(name), documents_folder())
+}
+
+/// `documents` is where the system says the user's documents are, if it
+/// was asked and knew.
+fn preset_paths_from(env: impl Fn(&str) -> Option<OsString>, documents: Option<PathBuf>) -> Vec<PathBuf> {
+    let var = |name: &str| env(name).filter(|value| !value.is_empty());
+    let mut paths = Vec::new();
+    platform_preset_paths(&var, documents, &mut paths);
+    let mut seen = HashSet::new();
+    paths.retain(|path| seen.insert(path.clone()));
+    paths
+}
+
+#[cfg(windows)]
+fn platform_preset_paths(var: &dyn Fn(&str) -> Option<OsString>, documents: Option<PathBuf>, paths: &mut Vec<PathBuf>) {
+    const FOLDER: &str = "VST3 Presets";
+    let documents = documents.or_else(|| Some(PathBuf::from(var("USERPROFILE")?).join("Documents")));
+    paths.extend(documents.map(|documents| documents.join(FOLDER)));
+    for name in ["APPDATA", "PROGRAMDATA"] {
+        paths.extend(var(name).map(|folder| PathBuf::from(folder).join(FOLDER)));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn platform_preset_paths(
+    var: &dyn Fn(&str) -> Option<OsString>,
+    _documents: Option<PathBuf>,
+    paths: &mut Vec<PathBuf>,
+) {
+    if let Some(home) = var("HOME") {
+        paths.push(PathBuf::from(home).join("Library/Audio/Presets"));
+    }
+    paths.push(PathBuf::from("/Library/Audio/Presets"));
+    paths.push(PathBuf::from("/Network/Library/Audio/Presets"));
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn platform_preset_paths(
+    var: &dyn Fn(&str) -> Option<OsString>,
+    _documents: Option<PathBuf>,
+    paths: &mut Vec<PathBuf>,
+) {
+    if let Some(home) = var("HOME") {
+        paths.push(PathBuf::from(home).join(".vst3").join("presets"));
+    }
+    paths.push(PathBuf::from("/usr/share/vst3/presets"));
+    paths.push(PathBuf::from("/usr/local/share/vst3/presets"));
+}
+
+/// Where the user's documents are. They are often not where the user's
+/// profile would have them: moved to another disk, or into a folder that
+/// is kept in step with a server. The system knows.
+#[cfg(windows)]
+fn documents_folder() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{FOLDERID_Documents, SHGetKnownFolderPath};
+
+    let mut path: *mut u16 = std::ptr::null_mut();
+    // SAFETY: the folder id is a constant and `path` a local the system
+    // fills in with a string it allocated, or leaves null.
+    let result = unsafe { SHGetKnownFolderPath(&FOLDERID_Documents, 0, std::ptr::null_mut(), &mut path) };
+    let found = (result >= 0 && !path.is_null()).then(|| {
+        // SAFETY: on success `path` is a NUL-terminated wide string.
+        let text = unsafe {
+            let length = (0..).take_while(|&index| *path.add(index) != 0).count();
+            std::slice::from_raw_parts(path, length)
+        };
+        PathBuf::from(OsString::from_wide(text))
+    });
+    // SAFETY: the string is the caller's to free, with this function,
+    // whether or not the call succeeded; null is allowed.
+    unsafe { CoTaskMemFree(path.cast()) };
+    found.filter(|path| !path.as_os_str().is_empty())
+}
+
+#[cfg(not(windows))]
+fn documents_folder() -> Option<PathBuf> {
+    None
+}
+
 fn named_vst3(path: &Path) -> bool {
     path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case(PLUGIN_EXTENSION))
 }
@@ -200,6 +286,32 @@ mod tests {
         let vars: HashMap<String, OsString> =
             vars.iter().map(|(name, value)| (name.to_string(), OsString::from(value))).collect();
         search_paths(|name| vars.get(name).cloned())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_preset_folders_follow_the_specification() {
+        let env = |name: &str| match name {
+            "USERPROFILE" => Some(OsString::from(r"C:\Users\me")),
+            "APPDATA" => Some(OsString::from(r"C:\Users\me\AppData\Roaming")),
+            "PROGRAMDATA" => Some(OsString::from(r"C:\ProgramData")),
+            _ => None,
+        };
+        // The documents are where the system says they are, and where a
+        // profile has them only if it does not say.
+        let moved = preset_paths_from(env, Some(PathBuf::from(r"D:\Synced\Documents")));
+        assert_eq!(
+            moved,
+            [
+                PathBuf::from(r"D:\Synced\Documents\VST3 Presets"),
+                PathBuf::from(r"C:\Users\me\AppData\Roaming\VST3 Presets"),
+                PathBuf::from(r"C:\ProgramData\VST3 Presets"),
+            ]
+        );
+        assert_eq!(preset_paths_from(env, None)[0], PathBuf::from(r"C:\Users\me\Documents\VST3 Presets"));
+        assert!(preset_paths_from(|_| None, None).is_empty());
+        // This machine has documents somewhere.
+        assert!(documents_folder().is_some_and(|folder| folder.is_absolute()));
     }
 
     #[cfg(windows)]

@@ -7,9 +7,9 @@ use crate::guard::Guard;
 use crate::input::{find_param, parse_notes, parse_param_value, parse_pitch_value, parse_points};
 use crate::requests::*;
 use crate::view::{
-    audio_device_json, audio_json, clip_json, descriptor_json, descriptor_summary_json, device_json, lane_json,
-    midi_input_json, param_state_json, project_json, round, samples_json, scan_json, sound_json, take_json, track_json,
-    transport_json, warp_name,
+    PresetSearch, audio_device_json, audio_json, clip_json, descriptor_json, descriptor_summary_json, device_json,
+    lane_json, midi_input_json, param_state_json, presets_json, project_json, round, samples_json, scan_json,
+    sound_json, take_json, track_json, transport_json, warp_name,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -20,8 +20,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use trill_core::device::{DeviceCategory, EditorOptions, EventKind};
+use trill_core::device::{BUILTIN_SCHEME, DeviceCategory, DeviceFactory, EditorOptions, EventKind, split_uri};
 use trill_core::midi_file;
+use trill_core::presets::PresetList;
 use trill_core::project::{AutomationTarget, MAX_TEMPO, MAX_VOLUME_DB, MIN_TEMPO, WarpMode};
 use trill_core::{ChainRef, ClipId, DeviceId, EditError, Project, TrackId, TrackKind};
 use trill_engine::{RenderOptions, RenderReport, Session, SessionError, SharedSession};
@@ -41,6 +42,15 @@ const MAX_LIVE_SECONDS: f64 = 60.0;
 /// it, when the caller does not say, and the longest it can ask for.
 const DEFAULT_SCAN_WAIT: f64 = 15.0;
 const MAX_SCAN_WAIT: f64 = 120.0;
+/// Presets listed when the caller does not say how many, and the most it
+/// can ask for.
+const DEFAULT_PRESETS: usize = 20;
+const MAX_PRESETS: usize = 100;
+/// The most presets a reply names without having been asked for any.
+const UNASKED_PRESETS: usize = 24;
+/// How long a tool waits for a plugin's presets to be read before it
+/// answers with what there is.
+const PRESET_WAIT: Duration = Duration::from_secs(20);
 
 const INSTRUCTIONS: &str = "\
 This server controls Trill, a digital audio workstation. You compose, arrange and mix a song by calling tools; the \
@@ -56,6 +66,9 @@ name (\"kick\", \"snare\", \"closed_hat\", \"open_hat\", \"clap\", ...). Velocit
 A good workflow
 1. get_project to see what exists; set_project for tempo and time signature.
 2. create_track per part with an instrument and preset (list_devices shows instruments, effects and presets).
+   A plugin (clap:, vst3:) may have thousands of presets: before programming one by hand, search them with \
+describe_device `preset_query` (\"warm pad\") and give `preset` the name or id to create_track, add_device or \
+update_device.
 3. create_clip with notes. For repeating parts, write one or two bars and set loop_length, or duplicate_clip.
 4. Shape the sound: add_device for effects (reverb, delay, eq, compressor, pump...), update_device for \
 parameters, set_automation for movement such as filter sweeps and fades, update_track for the mix.
@@ -277,6 +290,26 @@ impl TrillServer {
         out
     }
 
+    /// The presets of the device type `uri`, complete if they can be read
+    /// within [`PRESET_WAIT`]. A plugin's presets are read in the
+    /// background, the first time anyone asks; the wait for that is spent
+    /// off the async threads and without the session.
+    async fn presets_of(&self, uri: &str) -> PresetList {
+        let factory = self.session.lock().factory();
+        let uri = uri.to_string();
+        let read = tokio::task::spawn_blocking(move || factory.presets_within(&uri, PRESET_WAIT));
+        read.await.ok().flatten().unwrap_or_default()
+    }
+
+    /// Sees to it that the presets of `uri` have been read, as far as
+    /// that can be done in [`PRESET_WAIT`], before a tool that was given
+    /// a preset looks for it.
+    async fn ready_presets(&self, uri: Option<&str>, preset: &Option<String>) {
+        if let (Some(uri), Some(_)) = (uri, preset) {
+            self.presets_of(uri).await;
+        }
+    }
+
     /// Waits for the running scan, up to what the caller asked for, off
     /// the async threads.
     async fn wait_for_scan(&self, wait_seconds: Option<f64>) {
@@ -414,7 +447,8 @@ impl TrillServer {
     /// `kind` makes a group track (route other tracks through it with update_track `group`) or a return
     /// track (feed it with update_track `send`, and put a shared reverb or delay on it).
     #[tool(annotations(title = "Create track"))]
-    fn create_track(&self, Parameters(request): Parameters<CreateTrackRequest>) -> CallToolResult {
+    async fn create_track(&self, Parameters(request): Parameters<CreateTrackRequest>) -> CallToolResult {
+        self.ready_presets(request.instrument.as_deref(), &request.preset).await;
         let mut session = self.session.lock();
         let reply = (|| {
             if request.preset.is_some() && request.instrument.is_none() {
@@ -438,9 +472,15 @@ impl TrillServer {
             let mut out = json!({ "track_id": track });
             if let Some(uri) = &request.instrument {
                 match session.add_device(ChainRef::Track(track), uri, request.preset.as_deref(), None) {
-                    Ok(device) => out["instrument_device_id"] = json!(device),
+                    Ok(device) => {
+                        out["instrument_device_id"] = json!(device);
+                        if let Some(preset) = session.device_preset(device) {
+                            out["preset"] = json!(preset.name);
+                        }
+                    }
                     Err(error) => {
                         session.undo();
+                        let error = preset_hint(error.to_string(), uri);
                         return Err(format!("{error}. No track was created; list_devices shows what is available."));
                     }
                 }
@@ -511,9 +551,9 @@ impl TrillServer {
         finish(reply)
     }
 
-    /// The catalog of instruments and effects that can be added, with their presets. Built-in devices have
-    /// `builtin:` URIs; installed plugins appear with `clap:` and `vst3:` URIs (a plugin installed in both
-    /// formats is listed once per format; either works).
+    /// The catalog of instruments and effects that can be added. Built-in devices have `builtin:` URIs and are
+    /// listed with their presets; installed plugins appear with `clap:` and `vst3:` URIs (a plugin installed in
+    /// both formats is listed once per format; either works), and `describe_device` lists and searches theirs.
     #[tool(annotations(title = "List devices", read_only_hint = true))]
     fn list_devices(&self, Parameters(request): Parameters<ListDevicesRequest>) -> CallToolResult {
         // Read outside the session lock: the first plugin scan can take
@@ -543,28 +583,66 @@ impl TrillServer {
         finish(reply)
     }
 
-    /// Everything about one device type: what it does, its presets, and every parameter with range and unit.
+    /// Everything about one device type: what it does, every parameter with range and unit, and its presets.
+    /// A plugin may have thousands of presets, so they come a page at a time: `preset_query` searches them
+    /// (name, category, tags, author), `preset_category` keeps to one category, and the reply says how many
+    /// there are, what kinds, and where the next page starts. A plugin's presets are read the first time they
+    /// are asked for, which can take a while; the reply says when they are still being read.
     #[tool(annotations(title = "Describe device", read_only_hint = true))]
-    fn describe_device(&self, Parameters(request): Parameters<DescribeDeviceRequest>) -> CallToolResult {
+    async fn describe_device(&self, Parameters(request): Parameters<DescribeDeviceRequest>) -> CallToolResult {
         let factory = self.session.lock().factory();
-        let reply = factory
-            .descriptors()
-            .iter()
-            .find(|descriptor| descriptor.uri == request.uri)
-            .map(descriptor_json)
-            .ok_or_else(|| format!("unknown device '{}'; list_devices shows what is available", request.uri));
-        finish(reply)
+        let descriptors = factory.descriptors();
+        let Some(descriptor) = descriptors.iter().find(|descriptor| descriptor.uri == request.uri) else {
+            let unknown = format!("unknown device '{}'; list_devices shows what is available", request.uri);
+            return finish(Err(unknown));
+        };
+        let search = PresetSearch {
+            query: request.preset_query.as_deref(),
+            category: request.preset_category.as_deref(),
+            offset: request.preset_offset.unwrap_or(0),
+            limit: request.preset_limit.unwrap_or(DEFAULT_PRESETS).min(MAX_PRESETS),
+        };
+        let list = self.presets_of(&request.uri).await;
+        let mut out = descriptor_json(descriptor);
+        out["presets"] = presets_json(&list, &search);
+        // A plugin that lists no presets in one format may list them in
+        // another: which of its formats a plugin was built to tell a host
+        // of its presets in is its maker's choice.
+        if list.is_empty() && !list.is_reading() {
+            let others: Vec<String> = descriptors
+                .iter()
+                .filter(|other| other.uri != descriptor.uri && is_plugin(&other.uri))
+                .filter(|other| other.name.eq_ignore_ascii_case(&descriptor.name))
+                .filter_map(|other| {
+                    let count = factory.presets(&other.uri)?.len();
+                    Some(match count {
+                        0 => format!("{} (describe_device it to see whether it lists presets)", other.uri),
+                        count => format!("{} lists {count} presets", other.uri),
+                    })
+                })
+                .collect();
+            if !others.is_empty() {
+                out["presets"]["note"] = json!(format!(
+                    "This device offers no presets that can be listed. The same plugin in another format: {}.",
+                    others.join("; ")
+                ));
+            }
+        }
+        finish(Ok(out))
     }
 
-    /// Add an instrument or effect to a track's chain, or to the master chain when `track` is omitted.
+    /// Add an instrument or effect to a track's chain, or to the master chain when `track` is omitted. `preset`
+    /// starts it from one of its presets, a plugin's included (describe_device lists and searches them);
+    /// `params` go on top of the preset.
     #[tool(annotations(title = "Add device"))]
-    fn add_device(&self, Parameters(request): Parameters<AddDeviceRequest>) -> CallToolResult {
+    async fn add_device(&self, Parameters(request): Parameters<AddDeviceRequest>) -> CallToolResult {
+        self.ready_presets(Some(&request.uri), &request.preset).await;
         let mut session = self.session.lock();
         let reply = (|| {
             let chain = request.track.map_or(ChainRef::Master, |track| ChainRef::Track(TrackId(track)));
             let device = session
                 .add_device(chain, &request.uri, request.preset.as_deref(), request.index)
-                .map_err(|error| explain(session.project(), error))?;
+                .map_err(|error| preset_hint(explain(session.project(), error), &request.uri))?;
             if let Some(params) = &request.params
                 && let Err(error) = set_params(&mut session, device, params)
             {
@@ -572,19 +650,36 @@ impl TrillServer {
                 return Err(format!("{error}. The device was not added."));
             }
             let model = session.project().device(device).map_err(|e| e.to_string())?;
-            Ok(json!({ "device_id": device, "name": model.name, "uri": model.uri }))
+            let mut out = json!({ "device_id": device, "name": model.name, "uri": model.uri });
+            if let Some(preset) = &model.preset {
+                out["preset"] = json!(preset.name);
+            }
+            Ok(out)
         })();
         finish(reply)
     }
 
-    /// A device's current parameter values, with ranges and units. For the sample players (builtin:sampler,
-    /// builtin:drumrack) also the audio files they play, per slot, with what is wrong with any that is missing.
+    /// A device's current parameter values, with ranges and units, the preset it was last given, and how many
+    /// presets it can be given. `preset_query` and the other `preset_` arguments search and page those presets,
+    /// as in describe_device. For the sample players (builtin:sampler, builtin:drumrack) also the audio files
+    /// they play, per slot, with what is wrong with any that is missing.
     #[tool(annotations(title = "Get device", read_only_hint = true))]
-    fn get_device(&self, Parameters(request): Parameters<GetDeviceRequest>) -> CallToolResult {
+    async fn get_device(&self, Parameters(request): Parameters<GetDeviceRequest>) -> CallToolResult {
         const LIMIT: usize = 200;
+        let id = DeviceId(request.device);
+        // Asked for presets, the reply waits for them to have been read:
+        // before the session is taken, not while it is held.
+        let presets_wanted = request.preset_query.is_some()
+            || request.preset_category.is_some()
+            || request.preset_offset.is_some()
+            || request.preset_limit.is_some();
+        let uri = self.session.lock().project().device(id).map(|device| device.uri.clone()).ok();
+        let searched = match (&uri, presets_wanted) {
+            (Some(uri), true) => Some(self.presets_of(uri).await),
+            _ => None,
+        };
         let session = self.session.lock();
         let reply = (|| {
-            let id = DeviceId(request.device);
             let project = session.project();
             let model = project.device(id).map_err(|error| explain(project, error))?;
             let states = session.device_params(id).map_err(|error| explain(project, error))?;
@@ -615,6 +710,38 @@ impl TrillServer {
             if session.device_has_editor(id) {
                 out["editor"] = json!(if session.is_device_editor_open(id) { "open" } else { "closed" });
             }
+            if let Some(preset) = &model.preset {
+                out["preset"] = json!(preset.name);
+            }
+            match &searched {
+                Some(list) => {
+                    let search = PresetSearch {
+                        query: request.preset_query.as_deref(),
+                        category: request.preset_category.as_deref(),
+                        offset: request.preset_offset.unwrap_or(0),
+                        limit: request.preset_limit.unwrap_or(DEFAULT_PRESETS).min(MAX_PRESETS),
+                    };
+                    out["presets"] = presets_json(list, &search);
+                }
+                // Not asked for: how many there are, and the presets
+                // themselves only where they are few.
+                None => {
+                    let list = session.presets(&model.uri);
+                    let limit = if list.len() <= UNASKED_PRESETS { UNASKED_PRESETS } else { 0 };
+                    let mut presets = presets_json(&list, &PresetSearch { limit, ..PresetSearch::default() });
+                    if let (0, Some(fields)) = (limit, presets.as_object_mut()) {
+                        fields.remove("items");
+                        fields.remove("kinds");
+                        fields.insert("more".into(), json!("preset_query searches them; preset_offset pages through"));
+                    }
+                    out["presets"] = presets;
+                }
+            }
+            // A reply about presets carries the parameters only if they
+            // were asked about too.
+            if searched.is_some() && request.query.is_none() {
+                return Ok(out);
+            }
             out["param_count"] = json!(matching.len());
             if matching.len() > LIMIT {
                 out["truncated"] = json!(format!("showing the first {LIMIT}; narrow it down with `query`"));
@@ -625,21 +752,29 @@ impl TrillServer {
         finish(reply)
     }
 
-    /// Change a device: switch preset, set parameters, or bypass it.
+    /// Change a device: switch preset, set parameters, or bypass it. A preset replaces the device's sound, a
+    /// plugin's as its own preset browser would (get_device and describe_device list and search them);
+    /// `params` in the same call go on top of it, and the whole call is one undo step.
     #[tool(annotations(title = "Update device"))]
-    fn update_device(&self, Parameters(request): Parameters<UpdateDeviceRequest>) -> CallToolResult {
+    async fn update_device(&self, Parameters(request): Parameters<UpdateDeviceRequest>) -> CallToolResult {
+        let id = DeviceId(request.device);
+        let uri = self.session.lock().project().device(id).map(|device| device.uri.clone()).ok();
+        self.ready_presets(uri.as_deref(), &request.preset).await;
         let mut session = self.session.lock();
         let reply = (|| {
-            let id = DeviceId(request.device);
             // Validate before touching anything, so a bad value changes nothing.
             let resolved = match &request.params {
                 Some(params) => resolve_params(&session, id, params)?,
                 None => Vec::new(),
             };
             session.begin_gesture();
+            let mut loaded = None;
             let result: Result<(), String> = (|| {
                 if let Some(preset) = &request.preset {
-                    session.apply_preset(id, preset).map_err(|error| explain(session.project(), error))?;
+                    let preset = session.load_preset(id, preset).map_err(|error| {
+                        preset_hint(explain(session.project(), error), uri.as_deref().unwrap_or_default())
+                    })?;
+                    loaded = Some(preset.path());
                 }
                 if !resolved.is_empty() {
                     session.set_device_params(id, &resolved).map_err(|error| explain(session.project(), error))?;
@@ -656,7 +791,11 @@ impl TrillServer {
             result?;
             let changed: BTreeMap<String, f64> = resolved.into_iter().collect();
             let model = session.project().device(id).map_err(|e| e.to_string())?;
-            Ok(json!({ "device_id": id, "name": model.name, "enabled": model.enabled, "set": changed }))
+            let mut out = json!({ "device_id": id, "name": model.name, "enabled": model.enabled, "set": changed });
+            if let Some(preset) = loaded {
+                out["preset"] = json!(preset);
+            }
+            Ok(out)
         })();
         finish(reply)
     }
@@ -1823,6 +1962,22 @@ impl TrillServer {
 }
 
 /// Resolves parameter keys and values against a device's parameter list.
+/// Whether `uri` names a plugin rather than a built-in device.
+fn is_plugin(uri: &str) -> bool {
+    split_uri(uri).is_some_and(|(scheme, _)| scheme != BUILTIN_SCHEME)
+}
+
+/// Says where to look when what went wrong is that a plugin has no such
+/// preset, or more than one: its presets are too many to name in an error.
+fn preset_hint(error: String, uri: &str) -> String {
+    let about_presets = error.contains("has no preset '") || error.contains(" presets named '");
+    if about_presets && is_plugin(uri) && !error.contains("available: ") {
+        format!("{error}. describe_device with preset_query searches the presets of '{uri}'")
+    } else {
+        error
+    }
+}
+
 fn resolve_params(
     session: &Session,
     device: DeviceId,

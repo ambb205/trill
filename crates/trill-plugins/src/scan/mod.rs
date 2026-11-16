@@ -15,7 +15,7 @@
 
 pub(crate) mod cache;
 pub(crate) mod catalog;
-mod child;
+pub(crate) mod child;
 
 use cache::{FileStamp, Outcome, ScanCache};
 use serde::{Deserialize, Serialize};
@@ -153,6 +153,10 @@ pub fn probe_file(path: &Path) -> Result<Vec<PluginRecord>, String> {
 /// Prints a [`ScanOutput`] as one line of JSON on stdout and exits with
 /// success, or prints the reason on stderr and exits with failure. A plugin
 /// that crashes the process is reported by the exit status alone.
+///
+/// Started as `trill-plugin-scan --presets <format> <plugin file> <plugin id>`
+/// it reads that plugin's presets instead, and prints them a batch to a
+/// line as it finds them.
 pub fn scanner_main() -> ExitCode {
     ExitCode::from(run_scanner())
 }
@@ -169,9 +173,14 @@ pub fn run_as_scanner_if_requested() {
     }
 }
 
-/// Scans the plugin file named by the only argument. Returns the exit code.
+/// Scans the plugin file named by the only argument, or reads a plugin's
+/// presets. Returns the exit code.
 fn run_scanner() -> u8 {
-    let mut arguments = std::env::args_os().skip(1);
+    let mut arguments = std::env::args_os().skip(1).peekable();
+    if arguments.peek().is_some_and(|first| first == crate::presets::PRESETS_ARGUMENT) {
+        suppress_crash_dialogs();
+        return crate::presets::run_reader(arguments.skip(1));
+    }
     let (Some(path), None) = (arguments.next(), arguments.next()) else {
         eprintln!("usage: {SCANNER_NAME} <plugin file>");
         return 2;

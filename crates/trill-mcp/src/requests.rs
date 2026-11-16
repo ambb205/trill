@@ -66,7 +66,8 @@ pub struct CreateTrackRequest {
     /// Instrument to put on the track, e.g. "builtin:polysynth" or "builtin:drumkit" (see `list_devices`).
     /// Omit for a track that only holds audio clips.
     pub instrument: Option<String>,
-    /// Preset of the instrument, e.g. "warm_pad", "bass", "pluck", "keys" for the poly synth.
+    /// Preset of the instrument, e.g. "warm_pad", "bass", "pluck", "keys" for the poly synth. For a plugin: a
+    /// preset's name, its category and name ("Pads/Warm Pad"), or its id, as `describe_device` lists them.
     pub preset: Option<String>,
     /// Track volume in dB (default 0, at most 6).
     pub volume_db: Option<f32>,
@@ -115,6 +116,15 @@ pub struct ListDevicesRequest {
 pub struct DescribeDeviceRequest {
     /// Device URI from `list_devices`, e.g. "builtin:reverb".
     pub uri: String,
+    /// Words to search the device's presets for, e.g. "warm pad". Each must be in a preset's name, category,
+    /// tags, author or description.
+    pub preset_query: Option<String>,
+    /// Only presets filed under this category or bank; any part of its path will do, e.g. "Pads".
+    pub preset_category: Option<String>,
+    /// Skip this many of the matching presets: the reply's `more` says where the next page starts.
+    pub preset_offset: Option<usize>,
+    /// How many presets to list (default 20, at most 100; 0 for none).
+    pub preset_limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -123,7 +133,8 @@ pub struct AddDeviceRequest {
     pub track: Option<u64>,
     /// Device URI from `list_devices`.
     pub uri: String,
-    /// Preset to start from.
+    /// Preset to start from: its name, its category and name ("Pads/Warm Pad"), or its id, as
+    /// `describe_device` lists them.
     pub preset: Option<String>,
     /// Parameter values to set on top of the preset, by parameter id: numbers in the parameter's units,
     /// true/false for switches, or the choice name for enums (e.g. {"cutoff": 800, "filter_type": "lowpass24"}).
@@ -138,13 +149,23 @@ pub struct GetDeviceRequest {
     pub device: u64,
     /// Only parameters whose id or name contains this text. Useful for plugins with hundreds of parameters.
     pub query: Option<String>,
+    /// Words to search the presets this device can be given for, e.g. "warm pad". With any `preset_` argument
+    /// the reply lists presets, and parameters only if `query` is given too.
+    pub preset_query: Option<String>,
+    /// Only presets filed under this category or bank; any part of its path will do, e.g. "Pads".
+    pub preset_category: Option<String>,
+    /// Skip this many of the matching presets: the reply's `more` says where the next page starts.
+    pub preset_offset: Option<usize>,
+    /// How many presets to list (default 20, at most 100).
+    pub preset_limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct UpdateDeviceRequest {
     /// Device id.
     pub device: u64,
-    /// Preset to switch to. Resets every parameter first; `params` are applied afterwards.
+    /// Preset to switch to: its name, its category and name ("Pads/Warm Pad"), or its id, as `get_device` and
+    /// `describe_device` list them. It replaces the device's sound; `params` are applied on top of it.
     pub preset: Option<String>,
     /// Parameter values by parameter id: numbers in the parameter's units, true/false for switches, or the
     /// choice name for enums.

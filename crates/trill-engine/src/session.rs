@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use trill_core::device::{DeviceDescriptor, DeviceFactory, EventKind, ParamInfo};
+use trill_core::presets::PresetInfo;
 use trill_core::project::AutomationTarget;
 use trill_core::{ChainRef, Device, DeviceId, EditError, Project, TrackId};
 use trill_dsp::{SampleRef, StateError, drumrack, sampler};
@@ -19,6 +20,7 @@ use trill_media::MediaCache;
 
 mod editors;
 mod playing;
+mod presets;
 mod take;
 
 pub use playing::{MAX_COUNT_IN_BARS, RecordState, RecordStatus};
@@ -445,8 +447,14 @@ impl Session {
         if self.project == before {
             return;
         }
-        self.keep_removed_state(&mut before);
+        self.keep_leaving_state(&mut before);
         self.sync(&before, scope);
+        self.make_step(before);
+    }
+
+    /// Makes the change from `before` to the project as it is now an undo
+    /// step. The engine is the caller's to have brought in line.
+    fn make_step(&mut self, before: Project) {
         // Inside a gesture only the state before its first edit is kept.
         if self.gesture != Some(true) {
             self.push_step(before);
@@ -486,7 +494,7 @@ impl Session {
     pub fn undo(&mut self) -> bool {
         let Some(Step { id, project: previous }) = self.undo.pop() else { return false };
         let mut current = std::mem::replace(&mut self.project, previous);
-        self.keep_removed_state(&mut current);
+        self.keep_leaving_state(&mut current);
         self.sync(&current, Scope::Everything);
         self.redo.push(Step { id, project: current });
         self.revision += 1;
@@ -496,15 +504,17 @@ impl Session {
     pub fn redo(&mut self) -> bool {
         let Some(Step { id, project: next }) = self.redo.pop() else { return false };
         let mut current = std::mem::replace(&mut self.project, next);
-        self.keep_removed_state(&mut current);
+        self.keep_leaving_state(&mut current);
         self.sync(&current, Scope::Everything);
         self.undo.push(Step { id, project: current });
         self.revision += 1;
         true
     }
 
-    /// Adds a device, optionally starting from one of its presets. Fails,
-    /// leaving the project untouched, if the device cannot be instantiated.
+    /// Adds a device, optionally starting from one of its presets, asked
+    /// for by name or id as [`Session::load_preset`] takes them. One undo
+    /// step. Fails, leaving the project untouched, if the device cannot be
+    /// instantiated or the preset cannot be found or loaded.
     pub fn add_device(
         &mut self,
         chain: ChainRef,
@@ -518,44 +528,42 @@ impl Session {
             .into_iter()
             .find(|d| d.uri == uri)
             .ok_or_else(|| SessionError::Device(format!("unknown device '{uri}'")))?;
-        let preset_params = match preset {
-            None => Vec::new(),
-            Some(name) => {
-                descriptor.presets.iter().find(|p| p.name == name).map(|p| p.params.clone()).ok_or_else(|| {
-                    let known: Vec<&str> = descriptor.presets.iter().map(|p| p.name.as_str()).collect();
-                    SessionError::Device(format!("'{uri}' has no preset '{name}' (available: {})", known.join(", ")))
-                })?
-            }
-        };
+        // Found before anything is added, so that a preset there is none
+        // of adds nothing.
+        let preset = preset.map(|wanted| self.find_preset(uri, wanted)).transpose()?;
+        // A preset that is a set of parameter values goes into the model
+        // with the device. Any other is the device's own to load, once
+        // there is a device.
+        let values = preset.as_ref().and_then(|info| preset_values(&descriptor, info));
 
         let id = self.edit(|project| {
             let id = project.add_device(chain, uri, descriptor.name.clone(), index)?;
-            project.device_mut(id)?.params.extend(preset_params);
+            if let (Some(info), Some(values)) = (&preset, &values) {
+                let device = project.device_mut(id)?;
+                device.params.extend(values.iter().cloned());
+                device.preset = Some(info.reference());
+            }
             Ok(id)
         })?;
 
-        let failure = self.bank.devices.get(&id).and_then(|meta| meta.error.clone());
-        if let Some(reason) = failure {
+        let failure = self.bank.devices.get(&id).and_then(|meta| meta.error.clone()).map(SessionError::Device);
+        let failure = failure.or_else(|| match (&preset, &values) {
+            (Some(info), None) => self.start_from_preset(id, info).err(),
+            _ => None,
+        });
+        if let Some(error) = failure {
             self.undo();
             self.redo.pop();
-            return Err(SessionError::Device(reason));
+            return Err(error);
         }
         Ok(id)
     }
 
-    /// Resets a device to one of its presets: every parameter returns to
-    /// its default, then the preset's values are applied.
+    /// Gives a device one of its presets, by the preset's name or id. The
+    /// same as [`Session::load_preset`], which also says which preset it
+    /// came to.
     pub fn apply_preset(&mut self, id: DeviceId, preset: &str) -> Result<(), SessionError> {
-        let uri = self.project.device(id)?.uri.clone();
-        let descriptor = self.factory.descriptors().into_iter().find(|d| d.uri == uri);
-        let params = descriptor
-            .and_then(|d| d.presets.into_iter().find(|p| p.name == preset))
-            .map(|p| p.params)
-            .ok_or_else(|| SessionError::Device(format!("'{uri}' has no preset '{preset}'")))?;
-        self.edit_scoped(Scope::ParamsOnly, |project| {
-            project.device_mut(id)?.params = params.into_iter().collect();
-            Ok(())
-        })
+        self.load_preset(id, preset).map(|_| ())
     }
 
     /// Replaces a device's saved state, which for built-in sample players
@@ -672,6 +680,7 @@ impl Session {
                 .ok_or_else(|| EditError::Invalid(format!("{id} has no parameter '{key}'")))?;
             resolved.push((key.clone(), state.info.clamp(*value)));
         }
+        self.remember_plugin_values(id, &states, &resolved);
         self.edit_scoped(Scope::ParamsOnly, |project| {
             project.device_mut(id)?.params.extend(resolved);
             Ok(())
@@ -927,53 +936,104 @@ impl Session {
         }
     }
 
-    /// Before `leaving` goes onto the undo or redo stack, stores the state
-    /// of the plugins it has that the current project does not, so that
-    /// coming back to it restores them as they were.
-    fn keep_removed_state(&mut self, leaving: &mut Project) {
-        let removed: Vec<DeviceId> =
-            leaving.devices().map(|d| d.id).filter(|id| self.project.device(*id).is_err()).collect();
-        for id in removed {
-            let state = self
-                .bank
-                .devices
-                .get(&id)
-                .and_then(|meta| meta.controller.as_ref())
-                .and_then(|controller| controller.lock().save_state());
-            if let (Some(state), Ok(device)) = (state, leaving.device_mut(id)) {
-                device.state = Some(state);
+    /// A plugin keeps its own values, and the project stores only those
+    /// that were set through the session. Before `setting` stores some
+    /// for the first time, this notes what the plugin has them at now
+    /// (`states`), which is what they return to when the setting is
+    /// undone. The values the plugin was created with would not do: it
+    /// may have been given a preset since, or had its knobs turned in its
+    /// own editor.
+    fn remember_plugin_values(&mut self, id: DeviceId, states: &[ParamState], setting: &[(String, f64)]) {
+        let Ok(device) = self.project.device(id) else { return };
+        let Some(meta) = self.bank.devices.get_mut(&id).filter(|meta| meta.controller.is_some()) else { return };
+        for (info, state) in meta.params.iter_mut().zip(states) {
+            if !device.params.contains_key(&info.id) && setting.iter().any(|(key, _)| *key == info.id) {
+                info.default = state.value.clamp(info.min, info.max);
+            }
+        }
+    }
+
+    /// Before `leaving` goes onto the undo or redo stack, stores in it the
+    /// state of the plugins that the project now current will not carry
+    /// on with: those it no longer has, and those it has in another state
+    /// (a preset was loaded, or is being taken back). Coming back to
+    /// `leaving` then restores them as they were at this moment, with
+    /// whatever was done in their editors.
+    fn keep_leaving_state(&mut self, leaving: &mut Project) {
+        let parting: Vec<DeviceId> = leaving
+            .devices()
+            .filter(|device| self.project.device(device.id).map_or(true, |now| now.state != device.state))
+            .map(|device| device.id)
+            .collect();
+        for id in parting {
+            let held = leaving.device(id).ok().and_then(|device| device.state.clone());
+            let Some(captured) = self.news_of_state(id, held.as_ref()) else { continue };
+            let Ok(device) = leaving.device_mut(id) else { continue };
+            if device.state.as_ref() == Some(&captured) {
+                continue;
+            }
+            let stale = device.state.replace(captured.clone());
+            self.correct_history(id, &stale, &captured);
+        }
+    }
+
+    /// What the running plugin behind a device says its state is.
+    fn live_state(&self, id: DeviceId) -> Option<Vec<u8>> {
+        let controller = self.bank.devices.get(&id)?.controller.as_ref()?;
+        controller.lock().save_state()
+    }
+
+    /// [`Session::live_state`], for replacing `held`, the state a project
+    /// holds for the device. `None` also when the plugin was created from
+    /// `held` a moment ago: until it has had time to take that state on,
+    /// what it was given is truer than what it says
+    /// (`DeviceMeta::settling`).
+    fn news_of_state(&self, id: DeviceId, held: Option<&Vec<u8>>) -> Option<Vec<u8>> {
+        if self.bank.devices.get(&id)?.is_settling_into(held) {
+            return None;
+        }
+        self.live_state(id)
+    }
+
+    /// Replaces a device's state in every history entry that holds
+    /// `stale`, the copy the project had until now, by `captured`.
+    ///
+    /// What a plugin changed on its own (in its editor, say) is not part
+    /// of the undo history. Without this, undoing an unrelated edit would
+    /// bring back the old state and reset the plugin.
+    fn correct_history(&mut self, id: DeviceId, stale: &Option<Vec<u8>>, captured: &[u8]) {
+        for step in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            if let Ok(device) = step.project.device_mut(id)
+                && device.state == *stale
+            {
+                device.state = Some(captured.to_vec());
             }
         }
     }
 
     /// Copies each plugin's current state into the project model. This is
-    /// bookkeeping, not an edit: it creates no undo step.
-    ///
-    /// What a plugin changed on its own (in its editor, say) is not part of
-    /// the undo history, so the new state also replaces the stale copy in
-    /// every history entry that still holds it. Otherwise undoing an
-    /// unrelated edit would bring back the old state and reset the plugin.
+    /// bookkeeping, not an edit: it creates no undo step, and the history
+    /// is corrected along with the present ([`Session::correct_history`]).
     fn capture_device_state(&mut self) {
         let ids: Vec<DeviceId> = self.project.devices().map(|d| d.id).collect();
         for id in ids {
-            let Some(meta) = self.bank.devices.get_mut(&id) else { continue };
-            let Some(captured) = meta.controller.as_ref().and_then(|controller| controller.lock().save_state()) else {
-                continue;
-            };
-            let Ok(device) = self.project.device_mut(id) else { continue };
-            if device.state.as_ref() == Some(&captured) {
-                continue;
-            }
-            let stale = device.state.replace(captured.clone());
-            meta.applied_state = Some(captured.clone());
-            for step in self.undo.iter_mut().chain(self.redo.iter_mut()) {
-                if let Ok(device) = step.project.device_mut(id)
-                    && device.state == stale
-                {
-                    device.state = Some(captured.clone());
-                }
-            }
+            self.capture_state_of(id);
         }
+    }
+
+    /// [`Session::capture_device_state`] for one device.
+    fn capture_state_of(&mut self, id: DeviceId) {
+        let held = self.project.device(id).ok().and_then(|device| device.state.clone());
+        let Some(captured) = self.news_of_state(id, held.as_ref()) else { return };
+        let Ok(device) = self.project.device_mut(id) else { return };
+        if device.state.as_ref() == Some(&captured) {
+            return;
+        }
+        let stale = device.state.replace(captured.clone());
+        if let Some(meta) = self.bank.devices.get_mut(&id) {
+            meta.applied_state = Some(captured.clone());
+        }
+        self.correct_history(id, &stale, &captured);
     }
 }
 
@@ -988,6 +1048,12 @@ fn readable<S>(id: DeviceId, state: Result<S, StateError>) -> Result<Option<S>, 
             Err(SessionError::Device(format!("{id}: {error}; its samples can only be changed by that version")))
         }
     }
+}
+
+/// The parameter values a preset stands for, if it is one of the sets of
+/// values `descriptor` carries.
+fn preset_values(descriptor: &DeviceDescriptor, preset: &PresetInfo) -> Option<Vec<(String, f64)>> {
+    descriptor.presets.iter().find(|candidate| candidate.name == preset.id).map(|found| found.params.clone())
 }
 
 fn io_error(path: &Path, error: std::io::Error) -> SessionError {

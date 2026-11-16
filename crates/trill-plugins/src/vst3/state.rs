@@ -17,11 +17,18 @@
 //! `.vstpreset` file it loads in any other VST3 host.
 
 use super::class_id::ClassId;
+use std::io::{Read, Seek, SeekFrom};
 
 const HEADER_ID: &[u8; 4] = b"VST3";
 const LIST_ID: &[u8; 4] = b"List";
 const COMPONENT_CHUNK: &[u8; 4] = b"Comp";
 const CONTROLLER_CHUNK: &[u8; 4] = b"Cont";
+/// A preset's meta information: a small XML document of attributes.
+const INFO_CHUNK: &[u8; 4] = b"Info";
+/// The most meta information read from a preset file, and the most chunks
+/// looked through for it. Both are far beyond what a preset has.
+const MAX_INFO: usize = 64 * 1024;
+const MAX_CHUNKS: usize = 64;
 /// The only version of the format there is.
 const FORMAT_VERSION: i32 = 1;
 /// Header id, version, class id and list offset.
@@ -127,6 +134,55 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<(ClassId, PluginState), String> {
     Ok((class, state))
 }
 
+/// What a preset file says about itself, short of its states.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Glance {
+    /// The plugin the preset is for.
+    pub class: ClassId,
+    /// Its meta information, as the file has it; empty if it has none.
+    pub info: Vec<u8>,
+}
+
+/// Reads which plugin a preset file is for, and its meta information,
+/// without reading the states in it: a few hundred bytes of a file that
+/// may hold megabytes. `None` for a file that is not a VST3 preset.
+pub(crate) fn glance(file: &mut (impl Read + Seek)) -> Option<Glance> {
+    let mut header = [0u8; HEADER_SIZE];
+    file.read_exact(&mut header).ok()?;
+    if &header[..4] != HEADER_ID || i32::from_le_bytes(array(&header[4..8])) != FORMAT_VERSION {
+        return None;
+    }
+    let class = std::str::from_utf8(&header[8..40]).ok().and_then(ClassId::parse)?;
+    // The meta information is optional, and a file whose chunk list is
+    // damaged is still one for this class; loading it will say what is
+    // wrong with it.
+    let info = (|| {
+        let list = u64::try_from(i64::from_le_bytes(array(&header[40..48]))).ok()?;
+        file.seek(SeekFrom::Start(list)).ok()?;
+        let mut head = [0u8; 8];
+        file.read_exact(&mut head).ok()?;
+        if &head[..4] != LIST_ID {
+            return None;
+        }
+        let count = usize::try_from(i32::from_le_bytes(array(&head[4..8]))).ok()?;
+        for _ in 0..count.min(MAX_CHUNKS) {
+            let mut entry = [0u8; ENTRY_SIZE];
+            file.read_exact(&mut entry).ok()?;
+            if &entry[..4] != INFO_CHUNK {
+                continue;
+            }
+            let start = u64::try_from(i64::from_le_bytes(array(&entry[4..12]))).ok()?;
+            let size = usize::try_from(i64::from_le_bytes(array(&entry[12..20]))).ok()?;
+            file.seek(SeekFrom::Start(start)).ok()?;
+            let mut info = Vec::new();
+            file.take(size.min(MAX_INFO) as u64).read_to_end(&mut info).ok()?;
+            return Some(info);
+        }
+        None
+    })();
+    Some(Glance { class, info: info.unwrap_or_default() })
+}
+
 /// `bytes` as an array; the callers slice exactly `N` bytes.
 fn array<const N: usize>(bytes: &[u8]) -> [u8; N] {
     let mut array = [0; N];
@@ -182,6 +238,51 @@ mod tests {
         expected.extend_from_slice(&50i64.to_le_bytes());
         expected.extend_from_slice(&1i64.to_le_bytes());
         assert_eq!(blob, expected);
+    }
+
+    #[test]
+    fn a_glance_tells_whose_preset_a_file_is_without_reading_its_states() {
+        use std::io::Cursor;
+        let blob = encode(class(), &both());
+        assert_eq!(glance(&mut Cursor::new(&blob)), Some(Glance { class: class(), info: Vec::new() }));
+
+        // A preset written by another host, with its meta information.
+        let mut with_info = Vec::new();
+        with_info.extend_from_slice(b"VST3\x01\0\0\0ABCDEF019182FAEB5776737957767331");
+        with_info.extend_from_slice(&57i64.to_le_bytes());
+        with_info.extend_from_slice(b"abc");
+        with_info.extend_from_slice(b"<xml/>");
+        with_info.extend_from_slice(b"List\x02\0\0\0");
+        with_info.extend_from_slice(b"Comp");
+        with_info.extend_from_slice(&48i64.to_le_bytes());
+        with_info.extend_from_slice(&3i64.to_le_bytes());
+        with_info.extend_from_slice(b"Info");
+        with_info.extend_from_slice(&51i64.to_le_bytes());
+        with_info.extend_from_slice(&6i64.to_le_bytes());
+        assert_eq!(glance(&mut Cursor::new(&with_info)).unwrap().info, b"<xml/>");
+
+        // Not a preset file, in any of the ways a file can fail to be.
+        let other: [&[u8]; 4] =
+            [b"", b"VST3", b"some other file, long enough to hold a whole header in it....", &blob[..47]];
+        for bytes in other {
+            assert_eq!(glance(&mut Cursor::new(bytes)), None);
+        }
+        let mut version = blob.clone();
+        version[4] = 2;
+        assert_eq!(glance(&mut Cursor::new(&version)), None);
+        // A chunk list that is cut off or points nowhere costs the meta
+        // information, not the class; and no cut is a panic.
+        for length in HEADER_SIZE..with_info.len() {
+            let cut = glance(&mut Cursor::new(&with_info[..length])).expect("the header is whole");
+            assert_eq!(cut.class, class());
+        }
+        let mut nowhere = with_info.clone();
+        nowhere[40..48].copy_from_slice(&i64::MAX.to_le_bytes());
+        assert_eq!(glance(&mut Cursor::new(&nowhere)).unwrap().info, b"");
+        let mut huge = with_info.clone();
+        let size = huge.len() - 8;
+        huge[size..].copy_from_slice(&i64::MAX.to_le_bytes());
+        assert_eq!(glance(&mut Cursor::new(&huge)).unwrap().info, &huge[51..], "what there is of it");
     }
 
     #[test]

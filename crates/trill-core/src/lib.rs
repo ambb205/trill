@@ -10,6 +10,7 @@ pub mod device;
 pub mod ids;
 pub mod midi_file;
 pub mod pitch;
+pub mod presets;
 pub mod project;
 pub mod time;
 mod time_ops;

@@ -6,12 +6,16 @@ use super::links::ParamLinks;
 use super::params::Mapping;
 use crate::editor::{EDITOR_TIMEOUT, EditorStatus};
 use crate::edits::Edit;
-use crate::main_thread::MainThread;
+use crate::main_thread::{CallError, MainThread};
 use crate::plugin_thread::{PluginThread, keep_for_good};
+use crate::presets::{LOAD_TIMEOUT, Locator, await_arrival};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use trill_core::device::{DeviceController, EditorError, EditorImage, EditorOptions, ParamEdit, ParamEditKind};
+use trill_core::device::{
+    DeviceController, EditorError, EditorImage, EditorOptions, ParamEdit, ParamEditKind, PresetLoadError,
+};
+use trill_core::presets::PresetInfo;
 
 /// How long a plugin may take to serialize its state or report its
 /// parameter values before the request is abandoned.
@@ -133,6 +137,34 @@ impl DeviceController for Vst3Controller {
             );
         }
         edits
+    }
+
+    fn load_preset(&mut self, preset: &PresetInfo) -> Result<(), PresetLoadError> {
+        let instance = self.instance;
+        let locator = Locator::parse(&preset.locator)
+            .filter(|locator| matches!(locator, Locator::Vst3File { .. } | Locator::Vst3Program { .. }))
+            .ok_or_else(|| PresetLoadError::Failed("it is not a preset of a VST3 plugin".into()))?;
+        let before = self.save_state();
+        let loaded = self.main.call(LOAD_TIMEOUT, move |thread| match locator {
+            Locator::Vst3File { path } => thread.vst3.load_preset_file(instance, &path),
+            Locator::Vst3Program { param, index, steps } => thread.vst3.load_program(instance, param, index, steps),
+            _ => Err("it is not a preset of a VST3 plugin".to_string()),
+        });
+        if matches!(loaded, Ok(Ok(()))) {
+            // A program is switched to by the plugin's processor, with its
+            // next block; and plugins take even a state they are handed
+            // on the spot a moment later, on their own time.
+            await_arrival(before.as_deref(), || self.save_state());
+        }
+        match loaded {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(reason)) => Err(PresetLoadError::Failed(reason)),
+            Err(CallError::TimedOut) => Err(PresetLoadError::Unresponsive(format!(
+                "the plugin did not answer within {} s",
+                LOAD_TIMEOUT.as_secs()
+            ))),
+            Err(error) => Err(PresetLoadError::Failed(error.to_string())),
+        }
     }
 }
 

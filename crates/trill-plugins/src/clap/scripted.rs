@@ -43,6 +43,10 @@ use std::io::{Read as _, Write as _};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+mod presets;
+
+pub(crate) use presets::folder as preset_folder;
+
 /// What each scripted plugin does. The number is the `KIND` of
 /// [`Scripted`].
 pub(crate) mod kind {
@@ -82,6 +86,16 @@ pub(crate) mod kind {
     /// the host's.
     pub(crate) const FLOATING_EDITOR: u8 = 13;
 
+    /// An [`IMPULSE`] that can be given presets, in a plugin file that
+    /// brings a provider to tell of them; see `scripted::presets`.
+    pub(crate) const PRESETS: u8 = 14;
+    /// [`PRESETS`], in the same file, which takes a preset on a moment
+    /// after it was told to: with its next block.
+    pub(crate) const LATE_PRESETS: u8 = 15;
+    /// [`PRESETS`] in a file of its own that brings a second provider,
+    /// which fails to start.
+    pub(crate) const BROKEN_PRESETS: u8 = 16;
+
     /// Every kind without an editor that instantiates without delay.
     pub(crate) const ALL: [u8; 8] =
         [IMPULSE, MONO_GAIN, MIDI_IMPULSE, BARE, FAILS_INIT, FAILS_ACTIVATE, FAILS_START, FAILS_PROCESS];
@@ -106,6 +120,9 @@ pub(crate) fn id(kind: u8) -> &'static str {
         kind::FAILS_EDITOR_CREATE => "test.fails-editor-create",
         kind::FAILS_EDITOR_ATTACH => "test.fails-editor-attach",
         kind::FLOATING_EDITOR => "test.floating-editor",
+        kind::PRESETS => "test.presets",
+        kind::LATE_PRESETS => "test.late-presets",
+        kind::BROKEN_PRESETS => "test.broken-presets",
         _ => "test.slow-init",
     }
 }
@@ -114,8 +131,12 @@ fn has_editor(kind: u8) -> bool {
     kind::EDITORS.contains(&kind)
 }
 
+fn has_presets(kind: u8) -> bool {
+    matches!(kind, kind::PRESETS | kind::LATE_PRESETS | kind::BROKEN_PRESETS)
+}
+
 fn is_instrument(kind: u8) -> bool {
-    matches!(kind, kind::IMPULSE | kind::MIDI_IMPULSE)
+    matches!(kind, kind::IMPULSE | kind::MIDI_IMPULSE) || has_presets(kind)
 }
 
 fn has_input(kind: u8) -> bool {
@@ -141,6 +162,10 @@ pub(crate) fn entry(kind: u8) -> &'static EntryDescriptor {
     static FAILS_EDITOR_ATTACH: EntryDescriptor =
         clack_entry!(SinglePluginEntry<Scripted<{ kind::FAILS_EDITOR_ATTACH }>>);
     static FLOATING_EDITOR: EntryDescriptor = clack_entry!(SinglePluginEntry<Scripted<{ kind::FLOATING_EDITOR }>>);
+    // One file with two plugins and their preset provider, and one whose
+    // second provider is broken.
+    static PRESETS: EntryDescriptor = clack_entry!(presets::PresetsEntry<false>);
+    static BROKEN_PRESETS: EntryDescriptor = clack_entry!(presets::PresetsEntry<true>);
     match kind {
         kind::IMPULSE => &IMPULSE,
         kind::MONO_GAIN => &MONO_GAIN,
@@ -155,6 +180,8 @@ pub(crate) fn entry(kind: u8) -> &'static EntryDescriptor {
         kind::FAILS_EDITOR_CREATE => &FAILS_EDITOR_CREATE,
         kind::FAILS_EDITOR_ATTACH => &FAILS_EDITOR_ATTACH,
         kind::FLOATING_EDITOR => &FLOATING_EDITOR,
+        kind::PRESETS | kind::LATE_PRESETS => &PRESETS,
+        kind::BROKEN_PRESETS => &BROKEN_PRESETS,
         _ => &SLOW_INIT,
     }
 }
@@ -335,6 +362,9 @@ pub(crate) struct Shared<'a> {
     /// The editor's timer, or `u32::MAX` while it has none.
     timer: AtomicU32,
     resizable: AtomicBool,
+    /// The gain of a preset the plugin has said it will take on and has
+    /// not yet, as `f64` bits; not a number while there is none.
+    arriving: AtomicU64,
 }
 
 impl<'a> Shared<'a> {
@@ -347,6 +377,7 @@ impl<'a> Shared<'a> {
             outbox: Mutex::new(Vec::new()),
             timer: AtomicU32::new(u32::MAX),
             resizable: AtomicBool::new(true),
+            arriving: AtomicU64::new(f64::NAN.to_bits()),
         };
         shared.set(SERIAL, shared.serial as f64);
         shared
@@ -435,6 +466,9 @@ impl<const KIND: u8> Plugin for Scripted<KIND> {
         }
         if has_editor(KIND) {
             builder.register::<PluginGui>().register::<PluginTimer>();
+        }
+        if has_presets(KIND) {
+            builder.register::<clack_extensions::preset_discovery::PluginPresetLoad>();
         }
     }
 }
@@ -791,6 +825,11 @@ impl<'a, const KIND: u8> PluginAudioProcessor<'a, Shared<'a>, MainThread<'a, KIN
         let shared = self.shared;
         self.blocks += 1;
         shared.set(BLOCKS, self.blocks.into());
+        // A preset the plugin was told to load while it played.
+        let arriving = f64::from_bits(shared.arriving.swap(f64::NAN.to_bits(), Ordering::Relaxed));
+        if !arriving.is_nan() {
+            shared.set(GAIN, arriving);
+        }
         if KIND == kind::FAILS_PROCESS && self.blocks >= 3 {
             return Err(PluginError::Message("scripted to fail while processing"));
         }

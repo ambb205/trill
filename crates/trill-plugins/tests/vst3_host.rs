@@ -369,6 +369,7 @@ fn scanning_inside_the_process_finds_the_same_plugins() {
         scanner: Scanner::InProcess,
         cache_path: None,
         scan_timeout: Duration::from_secs(120),
+        preset_paths: Vec::new(),
     })
     .unwrap();
     assert_eq!(in_process.descriptors(), expected);

@@ -26,7 +26,9 @@ use vst3::Steinberg::Vst::BusInfo_::BusFlags_::kDefaultActive;
 use vst3::Steinberg::Vst::BusTypes_::{kAux, kMain};
 use vst3::Steinberg::Vst::Event_::EventTypes_::{kNoteOffEvent, kNoteOnEvent};
 use vst3::Steinberg::Vst::MediaTypes_::{kAudio, kEvent};
-use vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::{kCanAutomate, kIsHidden, kIsList, kIsReadOnly};
+use vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::{
+    kCanAutomate, kIsHidden, kIsList, kIsProgramChange, kIsReadOnly,
+};
 use vst3::Steinberg::Vst::RestartFlags_::{kLatencyChanged, kParamValuesChanged};
 use vst3::Steinberg::Vst::SymbolicSampleSizes_::kSample32;
 use vst3::Steinberg::Vst::{
@@ -174,13 +176,28 @@ pub(crate) const MANUAL: ParamID = 22;
 /// What the plugin maps MIDI's "all sound off" to.
 pub(crate) const ALL_SOUND_OFF: ParamID = 23;
 
+/// Selects one of [`PROGRAMS`]: the plugin's program parameter. A device
+/// does not list it; programs are a device's presets.
+pub(crate) const PROGRAM: ParamID = 30;
+/// The programs of the plugin's one program list, each with the
+/// (normalized) gain it sets.
+pub(crate) const PROGRAMS: [(&str, f64); 3] = [("Quiet", 0.125), ("Loud", 0.75), ("", 0.25)];
+pub(crate) const PROGRAM_LIST_NAME: &str = "Factory Programs";
+const PROGRAM_LIST: ProgramListID = 7;
+
+/// The gain of the program a value of [`PROGRAM`] selects.
+fn program_gain(value: f64) -> f64 {
+    let steps = (PROGRAMS.len() - 1) as f64;
+    PROGRAMS[(value.clamp(0.0, 1.0) * steps).round() as usize].1
+}
+
 /// The value the "editor" gives [`MANUAL`] when [`SWITCH`] is turned on.
 pub(crate) const MANUAL_EDIT: f64 = 0.625;
 pub(crate) const SHAPES: [&str; 4] = ["Sine", "Saw", "Square", "Noise"];
 const FILTER_1: UnitID = 10;
 const FILTER_2: UnitID = 20;
 
-const PARAMS: [Param; 13] = [
+const PARAMS: [Param; 14] = [
     Param { units: "x", ..param(GAIN, "Gain", 0, 0.5) },
     param(SWITCH, "Switch", 1, 0.0),
     // Declares a default that is not what it starts with, as a plugin with
@@ -198,6 +215,7 @@ const PARAMS: [Param; 13] = [
     Param { flags: kIsReadOnly, ..param(METER, "Meter", 0, 0.0) },
     Param { flags: 0, ..param(MANUAL, "Manual", 0, 0.0) },
     Param { flags: kIsHidden, ..param(ALL_SOUND_OFF, "All Sound Off", 0, 0.0) },
+    Param { flags: kIsProgramChange | kIsHidden, ..param(PROGRAM, "Program", PROGRAMS.len() as int32 - 1, 0.0) },
 ];
 
 /// How many parameters a device should end up listing.
@@ -1197,7 +1215,11 @@ impl<const ROLE: u8> IAudioProcessorTrait for Object<ROLE> {
                     if points > 0 && queue.getPoint(points - 1, &mut offset, &mut value) == kResultOk {
                         observe(serial, |seen| seen.received.push((id, value, offset)));
                         Self::set_value(&self.processor_values, id, value);
-                        gain_given |= id == GAIN;
+                        if id == PROGRAM {
+                            // Switching program is the processor's doing.
+                            Self::set_value(&self.processor_values, GAIN, program_gain(value));
+                        }
+                        gain_given |= id == GAIN || id == PROGRAM;
                         silenced |= id == ALL_SOUND_OFF;
                     }
                 }
@@ -1386,6 +1408,10 @@ impl<const ROLE: u8> IEditControllerTrait for Object<ROLE> {
             return kInvalidArgument;
         }
         Self::set_value(&self.controller_values, id, value);
+        if id == PROGRAM {
+            // The controller shows the program's values as its own.
+            Self::set_value(&self.controller_values, GAIN, program_gain(value));
+        }
         observe(self.serial(), |seen| seen.controller_sets.push((id, value)));
         // The plugin's "editor": turning the switch on moves a control
         // that only the editor can move.
@@ -1529,31 +1555,53 @@ impl<const ROLE: u8> IUnitInfoTrait for Object<ROLE> {
         };
         // SAFETY: the host passes its own `UnitInfo`.
         let Some(info) = (unsafe { info.as_mut() }) else { return kInvalidArgument };
-        (info.id, info.parentUnitId, info.programListId) = (id, parent, kNoProgramListId);
+        let programs = if id == kRootUnitId { PROGRAM_LIST } else { kNoProgramListId };
+        (info.id, info.parentUnitId, info.programListId) = (id, parent, programs);
         text::to_utf16(name, &mut info.name);
         kResultOk
     }
 
     unsafe fn getProgramListCount(&self) -> int32 {
-        0
+        1
     }
 
-    unsafe fn getProgramListInfo(&self, _index: int32, _info: *mut ProgramListInfo) -> tresult {
-        kNotImplemented
+    unsafe fn getProgramListInfo(&self, index: int32, info: *mut ProgramListInfo) -> tresult {
+        // SAFETY: the host passes its own `ProgramListInfo`.
+        let Some(info) = (unsafe { info.as_mut() }).filter(|_| index == 0) else { return kInvalidArgument };
+        (info.id, info.programCount) = (PROGRAM_LIST, PROGRAMS.len() as int32);
+        text::to_utf16(PROGRAM_LIST_NAME, &mut info.name);
+        kResultOk
     }
 
-    unsafe fn getProgramName(&self, _list: ProgramListID, _index: int32, _name: *mut String128) -> tresult {
-        kNotImplemented
+    unsafe fn getProgramName(&self, list: ProgramListID, index: int32, name: *mut String128) -> tresult {
+        let program = usize::try_from(index).ok().and_then(|index| PROGRAMS.get(index));
+        // SAFETY: the host passes its own `String128`.
+        let (Some((program, _)), Some(name), true) = (program, unsafe { name.as_mut() }, list == PROGRAM_LIST) else {
+            return kInvalidArgument;
+        };
+        text::to_utf16(program, name);
+        kResultOk
     }
 
+    /// Only the first program says what kind of sound it is, and only by
+    /// its instrument.
     unsafe fn getProgramInfo(
         &self,
-        _list: ProgramListID,
-        _index: int32,
-        _attribute: vst3::Steinberg::Vst::CString,
-        _value: *mut String128,
+        list: ProgramListID,
+        index: int32,
+        attribute: vst3::Steinberg::Vst::CString,
+        value: *mut String128,
     ) -> tresult {
-        kNotImplemented
+        // SAFETY: the host passes a NUL-terminated attribute id and its
+        // own `String128`.
+        let (attribute, value) = unsafe { (std::ffi::CStr::from_ptr(attribute), value.as_mut()) };
+        match (value, attribute.to_bytes()) {
+            (Some(value), b"MusicalInstrument") if list == PROGRAM_LIST && index == 0 => {
+                text::to_utf16("Synth|Soft Pad", value);
+                kResultOk
+            }
+            _ => kResultFalse,
+        }
     }
 
     unsafe fn hasProgramPitchNames(&self, _list: ProgramListID, _index: int32) -> tresult {

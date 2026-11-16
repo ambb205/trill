@@ -19,6 +19,8 @@
 //! * `host`: the callbacks a plugin may make into its host, and `timers`,
 //!   the timers it may ask the host to run.
 //! * `paths` and `probe`: finding plugin files and reading their descriptors.
+//! * `presets`: finding a plugin's presets through its preset-discovery
+//!   providers.
 
 mod buffers;
 mod controller;
@@ -30,6 +32,9 @@ mod gui_tests;
 mod host;
 mod instance;
 mod paths;
+#[cfg(test)]
+mod preset_tests;
+mod presets;
 mod probe;
 mod processor;
 #[cfg(test)]
@@ -39,8 +44,9 @@ mod tests;
 mod timers;
 
 pub use factory::{ClapConfig, ClapFactory};
-pub(crate) use instance::ClapThread;
+pub(crate) use instance::{ClapThread, host_info};
 pub use paths::{find_plugin_files, standard_search_paths};
+pub(crate) use presets::read_presets;
 pub(crate) use probe::probe;
 
 /// URI scheme of CLAP devices: `clap:<plugin id>`, where the id is the one
