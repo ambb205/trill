@@ -444,9 +444,7 @@ impl Keyboard {
                 // The key went down again without having come up, or the
                 // note is still held by the sustain: it is struck afresh,
                 // and not left with two beginnings and one end.
-                self.stop_where(|note| {
-                    note.key == Some(key) || (note.pitch == pitch && tracks.contains(&note.track))
-                });
+                self.stop_where(|note| note.key == Some(key) || (note.pitch == pitch && tracks.contains(&note.track)));
                 for track in tracks {
                     self.start(track, pitch, key);
                 }
@@ -608,8 +606,7 @@ fn unheard(cx: &Cx, track: &Track) -> Option<Silence> {
 /// plays no notes.
 fn assess(cx: &Cx, paused: Option<Silence>) -> Playing {
     let holds_clips = |track: &&Track| track.kind == TrackKind::Normal;
-    let armed: Vec<&Track> =
-        cx.live.armed.iter().filter_map(|id| cx.snap.track(*id)).filter(holds_clips).collect();
+    let armed: Vec<&Track> = cx.live.armed.iter().filter_map(|id| cx.snap.track(*id)).filter(holds_clips).collect();
     if !armed.is_empty() {
         return assess_armed(cx, &armed, paused);
     }
@@ -665,8 +662,7 @@ fn assess_armed(cx: &Cx, armed: &[&Track], paused: Option<Silence>) -> Playing {
 /// plain to see (a dialog, another window).
 fn paused(ctx: &egui::Context, cx: &Cx, typing: bool) -> Option<Option<Silence>> {
     let focused = cx.keyboard.staged || ctx.input(|input| input.focused);
-    let dialog =
-        cx.jobs.confirm.is_some() || cx.recovery.is_open() || cx.state.shortcuts_open || cx.settings.is_open();
+    let dialog = cx.jobs.confirm.is_some() || cx.recovery.is_open() || cx.state.shortcuts_open || cx.settings.is_open();
     if !focused || dialog {
         Some(None)
     } else if typing {

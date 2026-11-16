@@ -546,7 +546,8 @@ mod tests {
         let options = plain.ui_options();
         assert!(!options.record && !options.show_settings);
 
-        let cli = run(&["--arm", "Keys", "--arm", "Bass", "--record", "--settings", "--audio-scene", "studio"]).unwrap();
+        let cli =
+            run(&["--arm", "Keys", "--arm", "Bass", "--record", "--settings", "--audio-scene", "studio"]).unwrap();
         assert_eq!(cli.audio_scene, Some(AudioScene::Studio));
         let options = cli.ui_options();
         assert!(options.record && options.show_settings);

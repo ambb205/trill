@@ -7,6 +7,7 @@
 //! the editing gestures are tested by area in the modules below.
 
 mod assistant;
+mod audio;
 mod automation;
 mod clips;
 mod editors;
@@ -14,6 +15,7 @@ mod keyboard;
 mod keys;
 mod mixer;
 mod perf;
+mod recording;
 mod recovery;
 mod ruler;
 mod sounds;

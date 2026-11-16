@@ -25,12 +25,12 @@
 
 use super::state::{AudioSummary, Cx};
 use super::status_bar::format_rate;
-use eframe::egui::{self, Align, Align2, Id, Layout, Rect, Sense, Ui, UiBuilder, pos2, vec2};
+use eframe::egui::{self, Align, Align2, Id, Layout, Rect, Response, Sense, Ui, UiBuilder, pos2, vec2};
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use trill_engine::host::{COMMON_BUFFER_SIZES, COMMON_SAMPLE_RATES};
 use trill_engine::{AudioConfig, AudioDevice, AudioDevices};
-use trill_noir::{Chip, MenuItem, TextStyle, Theme, Variant, paint, prose, text};
+use trill_noir::{Chip, Icon, MenuItem, TextStyle, Theme, Variant, fade, paint, prose, text};
 use trill_runtime::MidiInputInfo;
 
 const WIDTH: f32 = 580.0;
@@ -141,9 +141,17 @@ impl Settings {
         &self.draft
     }
 
+    /// Whether the lamp of the MIDI input called `name` is lit at `now`.
     #[cfg(test)]
-    pub fn is_busy(&self) -> bool {
-        self.listing || self.applying || self.rescanning
+    pub fn lamp_is_lit(&self, name: &str, now: f64) -> bool {
+        self.lamps.get(name).is_some_and(|(_, at)| now - at < LAMP_SECONDS)
+    }
+
+    /// Reports, as a worker would, that the system did not answer a look
+    /// at the MIDI ports in time: no scripted port can be that slow.
+    #[cfg(test)]
+    pub fn report_rescan_timed_out(&self) {
+        let _ = self.sender.send(Done::Rescanned(false));
     }
 }
 
@@ -315,6 +323,17 @@ fn running_line(audio: &AudioSummary) -> String {
     )
 }
 
+/// Why the stream is not the one asked for, in the engine's words, and
+/// what happens next: a device that is asked for by name is gone back to
+/// when it returns, since the engine looks for it as long as it is wanted.
+fn fallen_back(audio: &AudioSummary, warning: &str) -> String {
+    let mut words = sentence(warning);
+    if let Some(wanted) = audio.config.output.as_ref().filter(|wanted| audio.info.device.as_ref() != Some(*wanted)) {
+        words.push_str(&format!(" Trill goes back to {wanted} when it is connected again."));
+    }
+    words
+}
+
 /// A sentence as the engine words it, with a capital and a full stop.
 fn sentence(words: &str) -> String {
     let words = words.trim();
@@ -360,6 +379,31 @@ fn paragraph(ui: &mut Ui, theme: &Theme, color: egui::Color32, words: &str) {
     prose::paint(ui, rect.min, galley);
 }
 
+/// A row of the form: a label, what is chosen, and the caret of something
+/// that opens. The choice is set as it is spelled, since a device's name
+/// is its own; the kit's dropdown would set it in capitals.
+fn choice(ui: &Ui, theme: &Theme, rect: Rect, id: Id, label: &str, value: &str, dimmed: bool) -> Response {
+    let response = ui.interact(rect, id, Sense::click());
+    let name = format!("{label}: {value}");
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, !dimmed, &name));
+    let painter = ui.painter_at(rect);
+    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
+    if open {
+        painter.rect_filled(rect, 0.0, theme.selected);
+    } else if response.hovered() && !dimmed {
+        painter.rect_filled(rect, 0.0, theme.hover);
+    }
+    paint::frame(&painter, rect, theme.hairline);
+    let content = Rect::from_min_max(pos2(rect.left() + 8.0, rect.top()), pos2(rect.right() - 20.0, rect.bottom()));
+    let used = text::paint(&painter, content, Align2::LEFT_CENTER, theme.text.label, label, theme.ink_faint);
+    let ink = if dimmed { fade(theme.ink, theme.disabled) } else { theme.ink };
+    let style = TextStyle { size: 12.0, ..theme.text.body };
+    text::paint(&painter, content.with_min_x(content.left() + used + 14.0), Align2::RIGHT_CENTER, style, value, ink);
+    let caret = if dimmed { fade(theme.ink_dim, theme.disabled) } else { theme.ink_dim };
+    trill_noir::paint_icon(&painter, pos2(rect.right() - 10.0, rect.center().y), Icon::CaretDown, caret);
+    response
+}
+
 /// A small button at the right end of a heading.
 fn heading_button(ui: &mut Ui, cx: &mut Cx, row: Rect, label: &str, busy: bool, hint: &str) -> bool {
     let theme = cx.theme;
@@ -392,9 +436,8 @@ pub fn modal(ctx: &egui::Context, cx: &mut Cx) {
         .fill(theme.panel)
         .stroke(egui::Stroke::new(1.0, theme.hairline))
         .inner_margin(egui::Margin::symmetric(18, 14));
-    let modal = egui::Modal::new(Id::unique("audio-settings")).frame(frame).backdrop_color(theme.backdrop).show(
-        ctx,
-        |ui| {
+    let modal =
+        egui::Modal::new(Id::unique("audio-settings")).frame(frame).backdrop_color(theme.backdrop).show(ctx, |ui| {
             ui.set_width(WIDTH);
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             let (title, _) = ui.allocate_exact_size(vec2(WIDTH, 18.0), Sense::hover());
@@ -410,8 +453,7 @@ pub fn modal(ctx: &egui::Context, cx: &mut Cx) {
             running(ui, cx);
             ui.add_space(14.0);
             midi(ui, cx, now);
-        },
-    );
+        });
     if modal.should_close() {
         cx.settings.open = false;
     }
@@ -435,7 +477,7 @@ fn output(ui: &mut Ui, cx: &mut Cx) {
     // The device.
     let (line, _) = ui.allocate_exact_size(vec2(WIDTH, ROW), Sense::hover());
     let label = device_label(&draft, devices.as_ref());
-    let response = trill_noir::dropdown(ui, theme, line, id.with("device"), "Device", &label, busy);
+    let response = choice(ui, theme, line, id.with("device"), "Device", &label, busy);
     cx.hint(&response, "The device Trill plays through");
     if !busy {
         egui::Popup::menu(&response).gap(1.0).show(|ui| {
@@ -467,7 +509,7 @@ fn output(ui: &mut Ui, cx: &mut Cx) {
     let offered = rates(&draft, devices.as_ref());
     let own_rate = "The device\u{2019}s own";
     let rate_label = draft.sample_rate.map_or_else(|| own_rate.to_owned(), |rate| format_rate(rate as f64));
-    let response = trill_noir::dropdown(ui, theme, rate_rect, id.with("rate"), "Sample rate", &rate_label, busy);
+    let response = choice(ui, theme, rate_rect, id.with("rate"), "Sample rate", &rate_label, busy);
     cx.hint(&response, "How many samples a second the device runs at");
     if !busy {
         egui::Popup::menu(&response).gap(1.0).show(|ui| {
@@ -487,8 +529,11 @@ fn output(ui: &mut Ui, cx: &mut Cx) {
     let rate = draft_rate(&draft, devices.as_ref()).map_or(cx.audio.info.sample_rate, |rate| rate as f64);
     let own_buffer = "The device\u{2019}s own";
     let buffer_text = draft.buffer_size.map_or_else(|| own_buffer.to_owned(), |frames| buffer_label(frames, rate));
-    let response = trill_noir::dropdown(ui, theme, buffer_rect, id.with("buffer"), "Buffer", &buffer_text, busy);
-    cx.hint(&response, "How much audio the device asks for at a time: smaller is sooner heard, and harder to keep up with");
+    let response = choice(ui, theme, buffer_rect, id.with("buffer"), "Buffer", &buffer_text, busy);
+    cx.hint(
+        &response,
+        "How much audio the device asks for at a time: smaller is sooner heard, and harder to keep up with",
+    );
     if !busy {
         egui::Popup::menu(&response).gap(1.0).show(|ui| {
             ui.set_min_width(buffer_rect.width());
@@ -534,22 +579,11 @@ fn output(ui: &mut Ui, cx: &mut Cx) {
     // What the list could not say, and what the choice will cost.
     ui.add_space(8.0);
     let found = devices.as_ref().map(|devices| devices.outputs.len());
-    let missing = devices.as_ref().is_some_and(|devices| {
-        draft.output.as_ref().is_some_and(|name| !devices.outputs.iter().any(|device| device.name == *name))
-    });
     if cx.settings.listing && found.is_none() {
         paragraph(ui, theme, theme.ink_dim, "Looking for the audio devices\u{2026}");
     } else if found == Some(0) {
-        let words = "No audio output was found. If one is plugged in, give it a moment and press Refresh. Trill \
-                     goes on without sound until there is one.";
+        let words = "No audio output is connected. If one has just been plugged in, press Refresh in a moment.";
         paragraph(ui, theme, theme.warn, words);
-    } else if missing {
-        let name = draft.output.clone().unwrap_or_default();
-        let words = format!(
-            "{name} is not connected. Trill plays through what is listed under Running now, and goes back to \
-             {name} when it returns."
-        );
-        paragraph(ui, theme, theme.warn, &words);
     }
     let recording = cx.live.take.is_some();
     let changed = draft != cx.audio.config;
@@ -590,21 +624,26 @@ fn running(ui: &mut Ui, cx: &mut Cx) {
     let theme = cx.theme;
     heading(ui, theme, "Running now");
     let info = &cx.audio.info;
-    let (line, _) = ui.allocate_exact_size(vec2(WIDTH, 20.0), Sense::hover());
+    let (line, response) = ui.allocate_exact_size(vec2(WIDTH, 20.0), Sense::hover());
     let name = info.device.clone().unwrap_or_else(|| "No audio device".to_owned());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("Running now: {name}")));
     text::paint(ui.painter(), line, Align2::LEFT_CENTER, theme.text.body, &name, theme.ink);
-    let (line, response) = ui.allocate_exact_size(vec2(WIDTH, 18.0), Sense::hover());
-    let words = if info.device.is_some() {
-        running_line(cx.audio)
-    } else {
-        format!("Trill is running without sound, at {}", format_rate(info.sample_rate))
-    };
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &words));
-    let style = TextStyle { size: 12.0, ..theme.text.body };
-    text::paint(ui.painter(), line, Align2::LEFT_CENTER, style, &words, theme.ink_dim);
+    // A stream that is not what was asked for says why in the engine's
+    // words; a run that was asked to go without sound says that.
+    if info.device.is_some() || info.warning.is_none() {
+        let (line, response) = ui.allocate_exact_size(vec2(WIDTH, 18.0), Sense::hover());
+        let words = if info.device.is_some() {
+            running_line(cx.audio)
+        } else {
+            format!("Trill is running without sound, at {}", format_rate(info.sample_rate))
+        };
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &words));
+        let style = TextStyle { size: 12.0, ..theme.text.body };
+        text::paint(ui.painter(), line, Align2::LEFT_CENTER, style, &words, theme.ink_dim);
+    }
     if let Some(warning) = &info.warning {
         ui.add_space(4.0);
-        paragraph(ui, theme, theme.warn, &sentence(warning));
+        paragraph(ui, theme, theme.warn, &fallen_back(cx.audio, warning));
     }
 }
 
@@ -695,7 +734,11 @@ mod tests {
 
     fn devices() -> AudioDevices {
         AudioDevices {
-            outputs: vec![device("Speakers", true, true), device("Interface", false, true), device("HDMI", false, false)],
+            outputs: vec![
+                device("Speakers", true, true),
+                device("Interface", false, true),
+                device("HDMI", false, false),
+            ],
             inputs: Vec::new(),
         }
     }
@@ -774,7 +817,10 @@ mod tests {
         let asked = AudioConfig { exclusive: true, ..AudioConfig::default() };
         let now = running(asked.clone());
         let smaller = AudioConfig { buffer_size: Some(64), ..asked.clone() };
-        assert_eq!(costs(&smaller, &now, Some(&devices), false), ["The sound stops for a moment while the device is opened."]);
+        assert_eq!(
+            costs(&smaller, &now, Some(&devices), false),
+            ["The sound stops for a moment while the device is opened."]
+        );
         // Taken on another device, it is another device that goes silent.
         let moved = AudioConfig { output: Some("Interface".into()), ..asked };
         assert!(costs(&moved, &now, Some(&devices), false)[0].contains("Interface for Trill alone"));
@@ -797,9 +843,30 @@ mod tests {
 
     #[test]
     fn the_engines_words_are_set_as_sentences() {
-        assert_eq!(sentence("there is no audio device called 'Interface'"), "There is no audio device called 'Interface'.");
+        assert_eq!(
+            sentence("there is no audio device called 'Interface'"),
+            "There is no audio device called 'Interface'."
+        );
         assert_eq!(sentence("  Already one. "), "Already one.");
         assert_eq!(sentence(""), "");
+    }
+
+    #[test]
+    fn a_stream_that_fell_back_says_why_and_what_happens_next() {
+        let wanted = AudioConfig { output: Some("Interface".into()), ..AudioConfig::default() };
+        let now = running(wanted);
+        let words = fallen_back(&now, "there is no audio device called 'Interface'; using Speakers instead");
+        assert_eq!(
+            words,
+            "There is no audio device called 'Interface'; using Speakers instead. Trill goes back to Interface when \
+             it is connected again."
+        );
+        // The system's default has no name to wait for.
+        let plain = running(AudioConfig::default());
+        assert_eq!(fallen_back(&plain, "the device refused 96000 Hz"), "The device refused 96000 Hz.");
+        // And a device that is in use, only not as asked, is not waited for.
+        let here = running(AudioConfig { output: Some("Speakers".into()), ..AudioConfig::default() });
+        assert_eq!(fallen_back(&here, "opened shared"), "Opened shared.");
     }
 
     #[test]

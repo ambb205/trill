@@ -50,8 +50,11 @@ impl AudioScene {
                 ..ScriptedDevice::new(INTERFACE)
             };
             host.add_device(interface);
-            let monitor =
-                ScriptedDevice { sample_rates: vec![48_000], exclusive: false, ..ScriptedDevice::new("Monitor (HDMI)") };
+            let monitor = ScriptedDevice {
+                sample_rates: vec![48_000],
+                exclusive: false,
+                ..ScriptedDevice::new("Monitor (HDMI)")
+            };
             host.add_device(monitor);
             for port in ["Keystation 61", "Launchpad Mini", "Pedalboard"] {
                 midi.plug(port);

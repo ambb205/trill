@@ -299,8 +299,7 @@ impl TrillApp {
                 // left behind, wherever it was ended from.
                 let was_recording = self.live.take.is_some();
                 self.live.update_recording(&session);
-                if was_recording && self.live.take.is_none() && self.take_generation == self.state.project_generation
-                {
+                if was_recording && self.live.take.is_none() && self.take_generation == self.state.project_generation {
                     recording::take_ended(&mut self.state, &self.snapshot, session.last_take());
                 }
                 self.take_generation = self.state.project_generation;

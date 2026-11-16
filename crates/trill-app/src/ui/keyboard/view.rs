@@ -221,7 +221,10 @@ fn plays(ui: &Ui, cx: &mut Cx, cells: &mut Cells, id: Id, width: f32) {
             None => silence.text(),
         },
         None if playing.armed => {
-            format!("The keys play the armed tracks ({}), as a MIDI keyboard does \u{00B7} disarm to play the selected one", playing.name)
+            format!(
+                "The keys play the armed tracks ({}), as a MIDI keyboard does \u{00B7} disarm to play the selected one",
+                playing.name
+            )
         }
         None => {
             format!("The keys play {} on {} \u{00B7} select another track to play it", playing.instrument, playing.name)

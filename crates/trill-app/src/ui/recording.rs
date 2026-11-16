@@ -16,8 +16,8 @@
 //! saved with it and are not undo steps. A take is one undo step.
 
 use super::shortcuts::{self, Command};
-use super::state::{Cx, FocusArea, UiState};
 use super::snapshot::Snapshot;
+use super::state::{Cx, FocusArea, UiState};
 use eframe::egui::{Color32, Id, Rect, Response, Ui};
 use trill_core::device::DeviceCategory;
 use trill_core::{Track, TrackId, TrackKind};
@@ -81,7 +81,9 @@ pub fn arm_chip(ui: &Ui, cx: &mut Cx, track: &Track, rect: Rect, id: Id, quiet: 
     let about = match (armed, recording) {
         (_, true) => "This track is being recorded",
         (true, false) => "Armed: keyboards play this track and Record records it \u{00B7} click to disarm",
-        (false, false) => "Arm: keyboards play this track and Record records it \u{00B7} Ctrl-click keeps the others armed",
+        (false, false) => {
+            "Arm: keyboards play this track and Record records it \u{00B7} Ctrl-click keeps the others armed"
+        }
     };
     cx.hint(&response, about);
     if response.clicked() {
@@ -101,10 +103,16 @@ fn why_not(cx: &Cx) -> String {
             format!("{} is a group and holds no clips. Select or arm a track with an instrument to record.", track.name)
         }
         Some(track) if track.kind == TrackKind::Return => {
-            format!("{} is a return and holds no clips. Select or arm a track with an instrument to record.", track.name)
+            format!(
+                "{} is a return and holds no clips. Select or arm a track with an instrument to record.",
+                track.name
+            )
         }
         Some(track) => {
-            format!("{} has no instrument, so there is nothing to record. Select or arm a track that has one.", track.name)
+            format!(
+                "{} has no instrument, so there is nothing to record. Select or arm a track that has one.",
+                track.name
+            )
         }
     }
 }

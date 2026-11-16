@@ -40,13 +40,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
         (false, _, None) => (theme.ok, "Engine"),
     };
     row.status(engine, state);
-    row.readout("Out", output_name(audio));
-    row.readout("Rate", &format_rate(audio.info.sample_rate));
-    if audio.info.device.is_some() {
-        // What a device does: how much it asks for at a time, and how
-        // long after that is rendered it is heard.
-        row.readout("Buffer", &audio.info.buffer_frames.to_string());
-        row.readout("Latency", &format!("{:.1} ms", audio.latency_ms));
+    for (label, value) in audio_readouts(audio) {
+        row.readout(label, &value);
     }
     let audio_items = Rect::from_min_max(pos2(bar.left(), bar.top()), pos2(row.x - GAP + 6.0, bar.bottom()));
     let plugins = plugin_count(row.cx);
@@ -166,6 +161,18 @@ fn plugin_count(cx: &Cx) -> usize {
     cx.descriptors.iter().filter(|descriptor| is_plugin(&descriptor.uri)).count()
 }
 
+/// The audio stream as the bar reads it out: the device and its sample
+/// rate, and for a real device how much it asks for at a time and how long
+/// after that is rendered it is heard, as the device reports.
+fn audio_readouts(audio: &AudioSummary) -> Vec<(&'static str, String)> {
+    let mut readouts = vec![("Out", output_name(audio).to_owned()), ("Rate", format_rate(audio.info.sample_rate))];
+    if audio.info.device.is_some() {
+        readouts.push(("Buffer", audio.info.buffer_frames.to_string()));
+        readouts.push(("Latency", format!("{:.1} ms", audio.latency_ms)));
+    }
+    readouts
+}
+
 /// The name of the device in use, or how the engine describes going
 /// without one.
 fn output_name(audio: &AudioSummary) -> &str {
@@ -196,6 +203,44 @@ mod tests {
         assert_eq!(without_rate("Speakers (Schiit Unison Modius E)"), "Speakers (Schiit Unison Modius E)");
         assert_eq!(without_rate("none (null backend)"), "none (null backend)");
         assert_eq!(without_rate("Line Out"), "Line Out");
+    }
+
+    #[test]
+    fn the_bar_reads_out_the_stream_that_is_running() {
+        use trill_engine::{AudioConfig, StreamInfo};
+        let mut audio = AudioSummary {
+            config: AudioConfig::default(),
+            info: StreamInfo {
+                sample_rate: 44_100.0,
+                output: "Speakers (Realtek) (44100 Hz)".into(),
+                warning: None,
+                device: Some("Speakers (Realtek)".into()),
+                buffer_frames: 144,
+                exclusive: true,
+                latency_frames: 144,
+            },
+            latency_ms: 5.94,
+            revision: 3,
+        };
+        let said = |audio: &AudioSummary| -> Vec<String> {
+            audio_readouts(audio).into_iter().map(|(label, value)| format!("{label} {value}")).collect()
+        };
+        assert_eq!(said(&audio), ["Out Speakers (Realtek)", "Rate 44.1 kHz", "Buffer 144", "Latency 5.9 ms"]);
+        assert!(!audio.silent());
+
+        // The latency follows the device, without flickering in its last digit.
+        audio.hear_latency(5.99);
+        assert_eq!(audio.latency_ms, 5.94, "a hair's difference is not shown");
+        audio.hear_latency(31.9);
+        assert_eq!(said(&audio)[3], "Latency 31.9 ms");
+
+        // A run without a device has no buffer or latency to speak of.
+        audio.info.device = None;
+        audio.info.output = "none (null backend)".into();
+        assert_eq!(said(&audio), ["Out none (null backend)", "Rate 44.1 kHz"]);
+        assert!(!audio.silent(), "it was asked to go without sound");
+        audio.info.warning = Some("no audio output".into());
+        assert!(audio.silent(), "a device was wanted and none could be opened");
     }
 
     #[test]

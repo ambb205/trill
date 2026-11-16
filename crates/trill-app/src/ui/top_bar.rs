@@ -35,15 +35,8 @@ const SIGNATURE_WIDTH: f32 = 52.0;
 const COUNT_WIDTH: f32 = 66.0;
 /// The song position without its clock, as the narrowest windows show it.
 const POSITION_COMPACT: f32 = 76.0;
-const TRANSPORT_WIDTH: f32 = 5.0 * BUTTON_WIDTH
-    + COUNT_WIDTH
-    + 3.0 * 4.0
-    + 10.0
-    + POSITION_WIDTH
-    + 6.0
-    + TEMPO_WIDTH
-    + 6.0
-    + SIGNATURE_WIDTH;
+const TRANSPORT_WIDTH: f32 =
+    5.0 * BUTTON_WIDTH + COUNT_WIDTH + 3.0 * 4.0 + 10.0 + POSITION_WIDTH + 6.0 + TEMPO_WIDTH + 6.0 + SIGNATURE_WIDTH;
 const TRANSPORT_COMPACT: f32 = TRANSPORT_WIDTH - (POSITION_WIDTH - POSITION_COMPACT);
 const CPU_METER_WIDTH: f32 = 54.0;
 
