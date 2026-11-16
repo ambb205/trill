@@ -217,6 +217,7 @@ fn what_cannot_be_had_is_replaced_by_the_nearest_thing_and_says_so() {
     assert_eq!(info.device.as_deref(), Some("Interface"));
     let warning = info.warning.unwrap();
     assert!(warning.contains("there is no audio device called 'Headphones'"), "{warning}");
+    assert_eq!(warning.matches("Headphones").count(), 1, "the missing device is named once: {warning}");
     assert!(warning.ends_with("Using Interface (48000 Hz) instead."), "{warning}");
 
     // And what can be had, is, without a word.

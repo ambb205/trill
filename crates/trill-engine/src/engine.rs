@@ -1057,7 +1057,13 @@ impl Engine {
                 }
                 Err(error) => {
                     missing |= matches!(error, OpenError::NotFound(_) | OpenError::NoDevice);
-                    refusals.push(format!("{}: {error}", describe(&request)));
+                    // A device that is not there says so, by name. Anything
+                    // else is the refusal of a request, and it is the
+                    // request that needs describing.
+                    refusals.push(match &error {
+                        OpenError::NotFound(_) | OpenError::NoDevice => error.to_string(),
+                        _ => format!("{}: {error}", describe(&request)),
+                    });
                 }
             }
         }
