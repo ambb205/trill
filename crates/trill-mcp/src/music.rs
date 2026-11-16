@@ -1651,7 +1651,7 @@ impl LeftOut {
         if self.moved {
             out.insert("read_at".into(), json!("the octave the instrument sounds at, not the keys in the clip"));
         }
-        (!out.is_empty()).then(|| Value::Object(out))
+        (!out.is_empty()).then_some(Value::Object(out))
     }
 }
 
@@ -1685,7 +1685,7 @@ fn read_lanes(kit: &InstrumentProfile, notes: &[Note], start: f64, bars: usize, 
             (drum, json!(bars.join("|")))
         })
         .collect();
-    (!text.is_empty()).then(|| Value::Object(text))
+    (!text.is_empty()).then_some(Value::Object(text))
 }
 
 fn analyze(session: &Session, request: &AnalyzeMusicRequest) -> Reply {

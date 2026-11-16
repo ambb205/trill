@@ -17,7 +17,10 @@ const AMPLE: &str = "Keyswitches sit under the range and sound nothing: press on
                      held 0.01, never two at once). open, palm_mute, harmonic, tap and pinch_harmonic stay chosen until \
                      another is pressed; slide slides into the next note from below, once; hammer and glide join \
                      notes that overlap (hammer-ons and pull-offs, or a slide along the string) and must be pressed \
-                     before the first of them. The keys above the range play noises, not notes.";
+                     before the first of them. The keys above the range play noises, not notes. This depends on a \
+                     setting of the plugin: with its automatic legato (auto hammer-on) switched on, notes that ring \
+                     over each other are joined without the hammer key as well, which spoils a picked chord and \
+                     makes a fast run over neighbouring keys sound wrong.";
 
 /// What the instruments modelled by Audio Modeling have in common.
 const SWAM: &str = "A physical model, not recordings: it is silent until it is given expression (controller 11), \
@@ -168,9 +171,11 @@ fn ample_metal_ray5() -> InstrumentProfile {
         sounds: sounds(&[("slap", 83), ("pop", 84), ("scratch", 89), ("muting", 91)]),
         articulations,
         range: Some((33, 76)),
+        sounds_octaves: -1,
         notes: format!(
-            "A five-string bass guitar. With open chosen, how hard a note is hit also chooses how it is played: 64 \
-             and up rings, under 64 the string is muted, under 32 dead, and 127 is an accent. {AMPLE}"
+            "A five-string bass guitar that sounds an octave below its keys. With open chosen, how hard a note is \
+             hit also chooses how it is played: 64 and up rings, under 64 the string is muted, under 32 dead, and \
+             127 is an accent. {AMPLE}"
         ),
         ..InstrumentProfile::default()
     }
@@ -245,6 +250,9 @@ mod tests {
                 assert_eq!(profile.articulation(joined).unwrap().lasts, Lasts::Joins, "{name}");
             }
             assert_eq!(profile.role, None, "{name}: a guitar is pitched without being told");
+            // Only the bass sounds an octave from its keys.
+            assert_eq!(profile.sounds_octaves, if uri == RAY5 { -1 } else { 0 }, "{name}");
+            assert!(profile.notes.contains("automatic legato"), "{name}: the setting its switches depend on");
         }
         let key = |uri: &str, name: &str| entry(uri).unwrap().1.articulation(name).and_then(|a| a.key);
         assert_eq!((key(PF, "palm_mute"), key(PF, "tap"), key(PF, "hammer")), (Some(26), Some(22), Some(29)));
