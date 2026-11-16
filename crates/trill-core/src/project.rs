@@ -1343,6 +1343,43 @@ mod tests {
         Note { pitch, start, length: 1.0, velocity: 100 }
     }
 
+    /// A song that is opened and saved must come back as it was, to the last
+    /// bit: positions that drift a hair on every load end up as notes that
+    /// no longer meet the grid or each other. A decimal parser that trades
+    /// exactness for speed gets some of these wrong by one unit in the last
+    /// place.
+    #[test]
+    fn saving_and_loading_changes_no_number_by_even_one_bit() {
+        // The awkward lengths are ones a swung, humanized song really held.
+        let awkward =
+            [0.24300000000000002, 0.20700000000000074, 0.10349999999999682, 0.13800000000000523, 0.1 + 0.2, 1.0 / 3.0];
+        let mut project = Project::new("t");
+        let track = project.add_track("Keys");
+        let clip = project.add_midi_clip(track, "c", 0.0, 4096.0).unwrap();
+        // Many more of the same kind, so that a parser which is wrong only
+        // now and then is still caught.
+        let mut lengths: Vec<Beats> = awkward.to_vec();
+        lengths.extend((1..2000).map(|n| (n as f64 * 0.243).sin().abs() + n as f64 * 1e-3 + 1e-9));
+        let notes: Vec<Note> = lengths
+            .iter()
+            .enumerate()
+            .map(|(n, length)| Note { pitch: 60, start: n as f64 + length / 7.0, length: *length, velocity: 100 })
+            .collect();
+        project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
+        project.set_tempo(123.45600000000002).unwrap();
+
+        let saved = project.to_json();
+        let loaded = Project::from_json(&saved).unwrap();
+        let bits = |project: &Project| -> Vec<(u64, u64)> {
+            let clip = &project.tracks[0].clips[0];
+            clip.timeline_notes().iter().map(|note| (note.start.to_bits(), note.length.to_bits())).collect()
+        };
+        let changed = bits(&project).iter().zip(bits(&loaded)).filter(|(before, after)| *before != after).count();
+        assert_eq!(changed, 0, "of {} notes, {changed} came back different", notes.len());
+        assert_eq!(loaded.tempo.to_bits(), project.tempo.to_bits());
+        assert_eq!(loaded.to_json(), saved, "a second save writes the same file");
+    }
+
     #[test]
     fn notes_stay_sorted_and_validated() {
         let mut project = Project::new("t");

@@ -29,7 +29,9 @@ log = "0.4"
 parking_lot = "0.12"
 rtrb = "0.4"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# float_roundtrip: read every number back as the exact value that was written.
+# Without it one number in seven of a project file comes back a hair off.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = "2"
 
 # Audio DSP is unusable at opt-level 0, so even dev builds are optimized.
