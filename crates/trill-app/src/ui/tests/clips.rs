@@ -370,6 +370,67 @@ fn selected_time_can_be_looped_deleted_and_duplicated() {
     assert_eq!(harness.app.state().toasts.len(), 1);
 }
 
+#[test]
+fn empty_time_is_inserted_where_the_selection_starts() {
+    let (mut harness, [one, ..], [a, b, c]) = with_three_tracks(UiOptions::default());
+    let volume = trill_core::AutomationTarget::TrackVolume { track: one };
+    harness
+        .session
+        .lock()
+        .edit(|project| {
+            project.add_marker(14.0, "Drop")?;
+            let ramp = vec![trill_core::AutomationPoint::new(8.0, -8.0), trill_core::AutomationPoint::new(12.0, -12.0)];
+            project.set_automation(volume.clone(), ramp)
+        })
+        .unwrap();
+    harness.idle(1);
+    // Two beats, from the middle of the clips at bar 3.
+    harness.drag(harness.ruler(10.2, false), harness.ruler(11.9, false));
+    let before = harness.undo_depth();
+
+    harness.key(Modifiers::COMMAND, Key::I);
+    let project = harness.project();
+    assert_eq!(
+        harness.spans(0),
+        [(8.0, 2.0), (12.0, 2.0), (18.0, 4.0)],
+        "A is cut where the time goes in, and its tail and B move along"
+    );
+    assert_eq!(harness.spans(1), [(8.0, 2.0), (12.0, 2.0)], "on every track");
+    assert_eq!((project.clip(a).unwrap().start, project.clip(b).unwrap().start), (8.0, 18.0));
+    assert_eq!(project.clip(c).unwrap().length, 2.0);
+    assert_eq!(project.markers[0].beat, 16.0, "markers after it move too");
+    assert_eq!((project.loop_region.start, project.loop_region.end), (0.0, 18.0));
+    // The envelope holds its value through the new time and then carries on.
+    let points = &project.automation.iter().find(|lane| lane.target == volume).unwrap().points;
+    let value = |beat: f64| trill_core::project::automation_value(points, beat);
+    assert_eq!((value(9.0), value(10.0), value(11.9), value(13.0), value(14.0)), (-9.0, -10.0, -10.0, -11.0, -12.0));
+    assert_eq!(harness.undo_depth(), before + 1, "all of it is one undo step");
+    let selection = harness.app.state().arrangement.time_selection.clone().unwrap();
+    assert_eq!((selection.start, selection.end), (10.0, 12.0), "the selection stays, over the room that was made");
+    assert_eq!(harness.app.state().arrangement.cursor, 10.0);
+
+    harness.key(Modifiers::COMMAND, Key::Z);
+    assert_eq!(harness.spans(0), [(8.0, 4.0), (16.0, 4.0)]);
+    assert_eq!(harness.project().markers[0].beat, 14.0);
+
+    // The Edit menu and the lanes' menu offer it beside the other two.
+    harness.click_label("Edit");
+    harness.click_label("Insert time");
+    assert_eq!(harness.spans(0), [(8.0, 2.0), (12.0, 2.0), (18.0, 4.0)]);
+    harness.right_click(harness.lane(24.0, 2));
+    harness.click_label("Insert time");
+    assert_eq!(harness.spans(0), [(8.0, 2.0), (14.0, 2.0), (20.0, 4.0)], "again, at the same place");
+    assert_eq!(harness.undo_depth(), before + 2);
+
+    // With no time selected there is nothing to go by, and it says so.
+    harness.click(harness.lane(30.0, 2));
+    assert_eq!(harness.app.state().arrangement.time_selection, None);
+    harness.key(Modifiers::COMMAND, Key::I);
+    assert_eq!(harness.spans(0).len(), 3);
+    assert_eq!(harness.app.state().toasts.len(), 1);
+    assert_eq!(harness.undo_depth(), before + 2);
+}
+
 /// One track holding an audio clip over beats 4 to 12.
 fn with_audio_clip() -> (Harness, ClipId) {
     let mut clip = None;

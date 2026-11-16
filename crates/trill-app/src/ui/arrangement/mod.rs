@@ -8,10 +8,11 @@
 //!
 //! The parts: [`rows`] decides which rows there are, [`clips`] paints clips
 //! and [`lanes`] handles what the pointer does to them, [`ops`] holds the
-//! commands on the selection and [`time_ops`] the ones on a stretch of
-//! time, [`envelopes`] is the automation lanes, [`ruler`] the loop, markers
-//! and time selection, [`headers`] the track headers, [`corner`] the grid
-//! and tool controls above them, and [`master`] the master row.
+//! commands on the selection and on a stretch of time (the edits of time
+//! themselves are the model's), [`envelopes`] is the automation lanes,
+//! [`ruler`] the loop, markers and time selection, [`headers`] the track
+//! headers, [`corner`] the grid and tool controls above them, and [`master`]
+//! the master row.
 
 mod clips;
 mod corner;
@@ -23,7 +24,6 @@ mod master;
 pub(super) mod ops;
 mod rows;
 mod ruler;
-mod time_ops;
 
 pub(super) use clips::{audio_room, fade_level};
 pub use envelopes::{delete_selected as delete_selected_points, select_all as select_all_points};

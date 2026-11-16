@@ -731,6 +731,7 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
         Command::LoopSelection => ops::loop_selection(cx),
         Command::DeleteTime => ops::delete_time(cx),
         Command::DuplicateTime => ops::duplicate_time(cx),
+        Command::InsertTime => ops::insert_time(cx),
         Command::AddMarker => ops::add_marker(cx),
         Command::AddTrack => arrangement::add_track(cx),
         Command::GroupTrack => arrangement::group_selected_track(cx),

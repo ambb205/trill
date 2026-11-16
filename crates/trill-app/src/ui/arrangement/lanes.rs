@@ -779,6 +779,9 @@ fn lane_menu(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: Option<TrackI
     if item(ui, "Duplicate time", Command::DuplicateTime, has_time) {
         ops::duplicate_time(cx);
     }
+    if item(ui, "Insert time", Command::InsertTime, has_time) {
+        ops::insert_time(cx);
+    }
 }
 
 /// The field over a clip's name strip while it is being renamed there.

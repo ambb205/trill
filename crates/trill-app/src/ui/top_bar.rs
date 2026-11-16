@@ -174,6 +174,9 @@ fn edit_menu(ui: &mut Ui, cx: &mut Cx) {
     if item(ui, "Duplicate time", Command::DuplicateTime, time) {
         ops::duplicate_time(cx);
     }
+    if item(ui, "Insert time", Command::InsertTime, time) {
+        ops::insert_time(cx);
+    }
     trill_noir::menu_separator(ui, theme);
     if item(ui, "Add track", Command::AddTrack, true) {
         arrangement::add_track(cx);
