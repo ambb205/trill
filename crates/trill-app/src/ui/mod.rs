@@ -37,6 +37,7 @@
 
 mod app;
 mod arrangement;
+mod assistant;
 mod audio_clip;
 mod automation;
 mod brand;
@@ -67,6 +68,7 @@ mod work;
 #[cfg(test)]
 mod tests;
 
+pub use assistant::{Options as AssistantOptions, Scene as AssistantScene};
 pub use state::{BrowserTab, DetailTab};
 
 use anyhow::anyhow;
@@ -120,6 +122,8 @@ pub struct UiOptions {
     pub exit_after: Option<Duration>,
     /// Initial size of the window's content, in points.
     pub window_size: [f32; 2],
+    /// How the assistant's panel starts.
+    pub assistant: AssistantOptions,
 }
 
 impl Default for UiOptions {
@@ -140,6 +144,7 @@ impl Default for UiOptions {
             autoplay: false,
             exit_after: None,
             window_size: [1440.0, 900.0],
+            assistant: AssistantOptions::default(),
         }
     }
 }

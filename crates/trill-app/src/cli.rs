@@ -1,6 +1,6 @@
 //! Command-line options.
 
-use crate::ui::{BrowserTab, DetailTab, UiOptions};
+use crate::ui::{AssistantOptions, AssistantScene, BrowserTab, DetailTab, UiOptions};
 use anyhow::{Context, anyhow, bail};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -31,6 +31,10 @@ Options:
   --no-plugins            Offer only the built-in devices
   --mcp-port <PORT>       Port of the MCP server for AI assistants (default: 7777)
   --no-mcp                Do not start the MCP server
+  --assistant             Start with the assistant's panel open (Ctrl+Shift+A shows it)
+  --assistant-model <NAME>    Model the assistant asks Claude Code for (default: Claude Code's own choice)
+  --assistant-scene <NAME>    Show a canned conversation in the assistant, for screenshots: ready, working,
+                          answered, limit, api-key, signed-out or not-installed
   --screenshot <PATH.png> Render the window to a PNG and exit (implies --null-audio)
   --exit-after <SECONDS>  Close the window by itself after this long
   -h, --help              Show this help
@@ -66,6 +70,10 @@ pub struct Cli {
     pub no_plugins: bool,
     pub no_mcp: bool,
     pub mcp_port: Option<u16>,
+    /// Open the assistant's panel.
+    pub assistant: bool,
+    pub assistant_model: Option<String>,
+    pub assistant_scene: Option<AssistantScene>,
     pub screenshot: Option<PathBuf>,
     pub exit_after: Option<Duration>,
 }
@@ -90,6 +98,16 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
             "--no-plugins" => cli.no_plugins = true,
             "--no-mcp" => cli.no_mcp = true,
             "--no-browser" => cli.no_browser = true,
+            "--assistant" => cli.assistant = true,
+            "--assistant-model" => cli.assistant_model = Some(value("a model name")?),
+            "--assistant-scene" => {
+                let name = value("the name of a scene")?;
+                let known: Vec<&str> = AssistantScene::ALL.iter().map(|(name, _)| *name).collect();
+                let scene = AssistantScene::named(&name);
+                cli.assistant_scene = Some(
+                    scene.with_context(|| format!("unknown scene '{name}' (expected one of {})", known.join(", ")))?,
+                );
+            }
             "--automation" => cli.automation = true,
             "--shortcuts" => cli.shortcuts = true,
             "--also-select" => cli.also_select.push(value("a clip name")?),
@@ -225,6 +243,14 @@ impl Cli {
             autoplay: self.play,
             exit_after: self.exit_after,
             window_size: self.size.unwrap_or(defaults.window_size),
+            assistant: AssistantOptions {
+                open: self.assistant,
+                scene: self.assistant_scene,
+                model: self.assistant_model.clone(),
+                // No address means the server was turned off; one that
+                // could not be listened on is found out in `main`.
+                mcp_off: self.mcp_address().is_none(),
+            },
         }
     }
 }

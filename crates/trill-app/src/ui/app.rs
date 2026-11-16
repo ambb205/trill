@@ -2,6 +2,7 @@
 //! out the panels, handles keyboard shortcuts and decides when to repaint.
 
 use super::arrangement::ops;
+use super::assistant::{self, Assistant};
 use super::files::{self, Confirm, Jobs};
 use super::shortcuts::{self, Command};
 use super::snapshot::{Live, Snapshot};
@@ -51,6 +52,7 @@ pub struct TrillApp {
     // Declared first so that it is dropped first: its workers hold the
     // runtime, which should end here and not on one of their threads.
     sounds: Sounds,
+    assistant: Assistant,
     session: SharedSession,
     snapshot: Snapshot,
     live: Live,
@@ -170,6 +172,7 @@ impl TrillApp {
             }
         });
 
+        let assistant = Assistant::new(ctx, &runtime, &options);
         let now = Instant::now();
         let mut jobs = Jobs::default();
         // Unattended runs must be able to exit without a person answering
@@ -177,6 +180,7 @@ impl TrillApp {
         jobs.quit_confirmed = options.screenshot.is_some() || options.exit_after.is_some();
         Self {
             sounds: Sounds::new(ctx, runtime),
+            assistant,
             session,
             snapshot,
             live: Live::default(),
@@ -215,7 +219,11 @@ impl TrillApp {
         }
         match self.session.try_lock() {
             Some(mut session) => {
-                if session.revision() != self.snapshot.revision {
+                // A save changes no revision, only where the project lives
+                // and whether it has unsaved changes.
+                let saved =
+                    session.is_modified() != self.snapshot.modified || session.path() != self.snapshot.path.as_deref();
+                if session.revision() != self.snapshot.revision || saved {
                     self.snapshot = Snapshot::capture(&session, &params_tracks(&self.state));
                     self.state.reconcile(&self.snapshot.project);
                     self.recheck_problem_files();
@@ -265,6 +273,7 @@ impl TrillApp {
             state: &mut self.state,
             jobs: &mut self.jobs,
             sounds: &mut self.sounds,
+            assistant: &mut self.assistant,
         }
     }
 
@@ -483,6 +492,10 @@ impl TrillApp {
         self.jobs.poll(&mut self.state);
         self.take_reports();
         self.sync(ctx);
+        // Closed and idle, the assistant has nothing to do and is not asked.
+        if self.assistant.wants_tick() {
+            self.assistant.tick(ctx, &self.snapshot, &self.state, &self.live);
+        }
         self.release_audition(ctx);
         // Edits from other front ends arrive without any input event, so an
         // idle window has to look for them.
@@ -529,6 +542,18 @@ impl TrillApp {
                 .show_separator_line(false)
                 .frame(bare)
                 .show(ui, |ui| browser::show(ui, &mut cx));
+        }
+        if cx.assistant.is_open() {
+            // As wide as it is dragged, short of crowding out the rest.
+            let widest =
+                (ui.available_width() - assistant::WINDOW_REST).clamp(assistant::MIN_WIDTH, assistant::MAX_WIDTH);
+            egui::Panel::right("assistant")
+                .resizable(true)
+                .default_size(cx.assistant.width().min(widest))
+                .size_range(assistant::MIN_WIDTH..=widest)
+                .show_separator_line(false)
+                .frame(bare)
+                .show(ui, |ui| assistant::show(ui, &mut cx));
         }
         // The detail panel may take most of the window, but never so much
         // that the arrangement above it disappears.
@@ -615,6 +640,16 @@ impl TrillApp {
     #[cfg(test)]
     pub fn state_mut(&mut self) -> &mut UiState {
         &mut self.state
+    }
+
+    #[cfg(test)]
+    pub fn assistant(&self) -> &Assistant {
+        &self.assistant
+    }
+
+    #[cfg(test)]
+    pub fn assistant_mut(&mut self) -> &mut Assistant {
+        &mut self.assistant
     }
 }
 
@@ -748,6 +783,7 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
         Command::ToggleDraw => toggle_tool(cx, Tool::Draw),
         Command::ToggleBlade => toggle_tool(cx, Tool::Blade),
         Command::ToggleBrowser => cx.state.browser.open = !cx.state.browser.open,
+        Command::ToggleAssistant => cx.assistant.toggle(),
         Command::ShowShortcuts => cx.state.shortcuts_open = !cx.state.shortcuts_open,
     }
 }

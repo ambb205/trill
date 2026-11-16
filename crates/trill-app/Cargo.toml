@@ -11,6 +11,7 @@ name = "trill"
 path = "src/main.rs"
 
 [dependencies]
+trill-assistant.workspace = true
 trill-core.workspace = true
 trill-dsp.workspace = true
 trill-engine.workspace = true

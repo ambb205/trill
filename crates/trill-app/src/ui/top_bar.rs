@@ -210,6 +210,10 @@ fn view_menu(ui: &mut Ui, cx: &mut Cx) {
     if MenuItem::new("Browser").shortcut(&keys(Command::ToggleBrowser)).checked(open).show(ui, theme).clicked() {
         cx.state.browser.open = !open;
     }
+    let shown = cx.assistant.is_open();
+    if MenuItem::new("Assistant").shortcut(&keys(Command::ToggleAssistant)).checked(shown).show(ui, theme).clicked() {
+        cx.assistant.toggle();
+    }
     trill_noir::menu_separator(ui, theme);
     for (tab, label) in [(DetailTab::Clip, "Clip"), (DetailTab::Devices, "Devices"), (DetailTab::Mixer, "Mixer")] {
         if MenuItem::new(label).checked(cx.state.detail_tab == tab).show(ui, theme).clicked() {
@@ -433,6 +437,11 @@ fn status_group(ui: &mut Ui, cx: &mut Cx, bar: Rect) -> f32 {
     let theme = cx.theme;
     let painter = ui.painter().clone();
     let mut right = bar.right() - EDGE;
+
+    // The assistant's panel opens below this corner; its button is here.
+    let toggle = boxed(bar, right - BUTTON_WIDTH, BUTTON_WIDTH);
+    super::assistant::toggle_button(ui, cx, toggle);
+    right = toggle.left() - GAP;
 
     if let Some(url) = cx.mcp_url {
         // The port is what tells two windows apart; the tooltip has the rest.

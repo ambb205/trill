@@ -1,6 +1,7 @@
 //! View state that belongs to the window rather than the project (selection,
 //! zoom, which tab is open) and [`Cx`], the bundle every view is handed.
 
+use super::assistant::Assistant;
 use super::files::Jobs;
 use super::snapshot::{Live, Snapshot};
 use super::sounds::{DropTarget, Sounds};
@@ -642,6 +643,9 @@ pub struct UiState {
     pub gesture_open: bool,
     /// Set when the user dismisses the master's clip indicator.
     pub clear_clip_indicator: bool,
+    /// How many projects this window has had open: it goes up each time
+    /// another one takes the place of the open one.
+    pub project_generation: u64,
 }
 
 impl UiState {
@@ -683,6 +687,7 @@ impl UiState {
             toasts: Toasts::default(),
             gesture_open: false,
             clear_clip_indicator: false,
+            project_generation: 0,
         }
     }
 
@@ -834,7 +839,8 @@ impl UiState {
         browser.search.clear();
         // What was copied in one project can be pasted into the next.
         let clipboard = self.clipboard.take();
-        *self = Self { toasts, browser, clipboard, ..fresh };
+        let project_generation = self.project_generation + 1;
+        *self = Self { toasts, browser, clipboard, project_generation, ..fresh };
     }
 }
 
@@ -889,6 +895,8 @@ pub struct Cx<'a> {
     /// Waveforms, previews, the library and drops: everything that reads
     /// audio files, none of it on this thread.
     pub sounds: &'a mut Sounds,
+    /// The assistant and its panel down the right side.
+    pub assistant: &'a mut Assistant,
 }
 
 impl Cx<'_> {
