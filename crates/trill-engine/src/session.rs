@@ -7,6 +7,7 @@ use crate::compile::{Compiler, DeviceBank, Meters, Problem, StandIns};
 use crate::engine::{AudioBackend, AudioSetup, Engine, EngineError, Message, StreamInfo};
 use crate::graph::Meter;
 use crate::render::RenderJob;
+use crate::saved::{SavedPresets, WithSaved};
 use crate::sources::AudioSources;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -127,6 +128,9 @@ pub struct Session {
     engine: Engine,
     bank: DeviceBank,
     factory: Arc<dyn DeviceFactory>,
+    /// The presets someone saved, which `factory` lists with each device
+    /// type's own.
+    saved: Arc<SavedPresets>,
     meters: Meters,
     audio: AudioSources,
     /// The clips playing a stand-in until their stretched audio is ready.
@@ -183,6 +187,8 @@ impl Session {
     ) -> Result<Self, SessionError> {
         let engine = Engine::start_with(setup)?;
         media.set_loader_rate(Some(engine.sample_rate()));
+        let saved = Arc::new(SavedPresets::default());
+        let factory: Arc<dyn DeviceFactory> = Arc::new(WithSaved::new(factory, saved.clone()));
         let mut session = Self {
             project: Project::default(),
             undo: Vec::new(),
@@ -190,6 +196,7 @@ impl Session {
             groups: Vec::new(),
             last_id: 0,
             factory,
+            saved,
             engine,
             bank: DeviceBank::default(),
             meters: Meters::default(),
@@ -535,14 +542,20 @@ impl Session {
         // of adds nothing.
         let preset = preset.map(|wanted| self.find_preset(uri, wanted)).transpose()?;
         // A preset that is a set of parameter values goes into the model
-        // with the device. Any other is the device's own to load, once
-        // there is a device.
+        // with the device, and so does one that was saved, state and all:
+        // the device is created as the preset has it. Any other is the
+        // device's own to load, once there is a device.
         let values = preset.as_ref().and_then(|info| preset_values(&descriptor, info));
+        let saved = preset.as_ref().map(|info| self.saved_preset(uri, info)).transpose()?.flatten();
 
         let id = self.edit(|project| {
             let id = project.add_device(chain, uri, descriptor.name.clone(), index)?;
-            if let (Some(info), Some(values)) = (&preset, &values) {
-                let device = project.device_mut(id)?;
+            let device = project.device_mut(id)?;
+            if let (Some(info), Some(saved)) = (&preset, &saved) {
+                device.params = saved.params.clone();
+                device.state = saved.state.clone();
+                device.preset = Some(info.reference());
+            } else if let (Some(info), Some(values)) = (&preset, &values) {
                 device.params.extend(values.iter().cloned());
                 device.preset = Some(info.reference());
             }
@@ -550,8 +563,8 @@ impl Session {
         })?;
 
         let failure = self.bank.devices.get(&id).and_then(|meta| meta.error.clone()).map(SessionError::Device);
-        let failure = failure.or_else(|| match (&preset, &values) {
-            (Some(info), None) => self.start_from_preset(id, info).err(),
+        let failure = failure.or_else(|| match (&preset, &values, &saved) {
+            (Some(info), None, None) => self.start_from_preset(id, info).err(),
             _ => None,
         });
         if let Some(error) = failure {

@@ -320,7 +320,8 @@ impl TrillServer {
     /// write wherever it is told.
     pub fn new(runtime: Arc<Runtime>) -> Self {
         let session = runtime.session.clone();
-        Self { session, runtime, tool_router: Self::tool_router() + Self::music_router(), guard: None }
+        let tool_router = Self::tool_router() + Self::music_router() + Self::sound_router();
+        Self { session, runtime, tool_router, guard: None }
     }
 
     /// A server for a client that works beside the user in the window. It
@@ -639,6 +640,8 @@ impl TrillServer {
     /// The catalog of instruments and effects that can be added. Built-in devices have `builtin:` URIs and are
     /// listed with their presets; installed plugins appear with `clap:` and `vst3:` URIs (a plugin installed in
     /// both formats is listed once per format; either works), and `describe_device` lists and searches theirs.
+    /// `preset_count` says how many presets a plugin has, where they have been read; search_presets reads and
+    /// searches them all at once.
     #[tool(annotations(title = "List devices", read_only_hint = true))]
     fn list_devices(&self, Parameters(request): Parameters<ListDevicesRequest>) -> CallToolResult {
         // Read outside the session lock: the first plugin scan can take
@@ -661,7 +664,11 @@ impl TrillServer {
                         [&d.name, &d.vendor, &d.uri].iter().any(|field| field.to_ascii_lowercase().contains(q))
                     })
                 })
-                .map(descriptor_summary_json)
+                .map(|descriptor| {
+                    let mut out = descriptor_summary_json(descriptor);
+                    crate::sounds::known_presets_into(&mut out, factory.as_ref(), descriptor);
+                    out
+                })
                 .collect();
             Ok(json!({ "devices": devices }))
         })();
@@ -706,11 +713,15 @@ impl TrillServer {
                     })
                 })
                 .collect();
-            if !others.is_empty() {
-                out["presets"]["note"] = json!(format!(
-                    "This device offers no presets that can be listed. The same plugin in another format: {}.",
-                    others.join("; ")
-                ));
+            if is_plugin(&descriptor.uri) {
+                out["presets"]["note"] = json!(match others.is_empty() {
+                    true => crate::sounds::NO_PRESETS.to_string(),
+                    false => format!(
+                        "{} The same plugin in another format: {}.",
+                        crate::sounds::NO_PRESETS,
+                        others.join("; ")
+                    ),
+                });
             }
         }
         finish(Ok(out))
@@ -823,6 +834,9 @@ impl TrillServer {
                     }
                     out["presets"] = presets;
                 }
+            }
+            if is_plugin(&model.uri) && out["presets"]["total"] == 0 && out["presets"].get("status").is_none() {
+                out["presets"]["note"] = json!(crate::sounds::NO_PRESETS);
             }
             // A reply about presets carries the parameters only if they
             // were asked about too.
@@ -2230,7 +2244,7 @@ pub(crate) fn add_controller_warnings(
     }
 }
 
-fn is_plugin(uri: &str) -> bool {
+pub(crate) fn is_plugin(uri: &str) -> bool {
     split_uri(uri).is_some_and(|(scheme, _)| scheme != BUILTIN_SCHEME)
 }
 
@@ -2513,7 +2527,11 @@ impl ServerHandler for TrillServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
-            .with_instructions(format!("{INSTRUCTIONS}\n\n{}", crate::music::INSTRUCTIONS))
+            .with_instructions(format!(
+                "{INSTRUCTIONS}\n\n{}\n\n{}",
+                crate::sounds::INSTRUCTIONS,
+                crate::music::INSTRUCTIONS
+            ))
     }
 }
 

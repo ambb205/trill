@@ -12,10 +12,100 @@
 //! [`DeviceController::load_preset`](crate::device::DeviceController::load_preset).
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// What separates the parts of a [`PresetInfo::category`].
 pub const CATEGORY_SEPARATOR: char = '/';
+
+/// The category the presets someone saved are filed under, beside the
+/// ones a device type brings.
+pub const SAVED_CATEGORY: &str = "Saved";
+/// What the locator of a saved preset begins with; its name follows.
+const SAVED_LOCATOR: &str = "saved|";
+/// The longest name a saved preset may have.
+const SAVED_NAME_LENGTH: usize = 80;
+
+/// A device's sound, kept under a name: what a plugin that offers a host
+/// no presets is given instead of them, and what anyone who has found a
+/// sound keeps it as. It belongs to the device type it was saved from and
+/// is listed with that type's own presets, under [`SAVED_CATEGORY`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SavedPreset {
+    /// The device type it is a preset of.
+    pub uri: String,
+    /// What that type was called when the preset was saved, for someone
+    /// reading the file.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub device: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Parameter values by parameter id: all of them for a device whose
+    /// sound is its parameters, and for a plugin the ones that go on top
+    /// of its state.
+    #[serde(default)]
+    pub params: BTreeMap<String, f64>,
+    /// The device's own state, for one that has any: a plugin's patch, a
+    /// sample player's files.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::project::state_base64")]
+    pub state: Option<Vec<u8>>,
+}
+
+impl SavedPreset {
+    /// The preset as a preset list has it.
+    pub fn info(&self) -> PresetInfo {
+        let locator = format!("{SAVED_LOCATOR}{}", self.name);
+        PresetInfo {
+            id: short_id(&locator),
+            name: self.name.clone(),
+            category: SAVED_CATEGORY.to_string(),
+            author: String::new(),
+            tags: self.tags.clone(),
+            description: self.description.clone(),
+            locator,
+        }
+    }
+
+    /// The preset as the text of a file.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).expect("a saved preset is always serializable")
+    }
+
+    /// The preset a file's text holds, or what is wrong with the text.
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        let preset: Self = serde_json::from_str(json).map_err(|error| error.to_string())?;
+        if preset.uri.is_empty() {
+            return Err("it does not say which device it is a preset of".to_string());
+        }
+        Self::checked_name(&preset.name)?;
+        Ok(preset)
+    }
+
+    /// The name `preset` was saved under, if it is a saved preset and not
+    /// one a device type brings.
+    pub fn name_of(preset: &PresetInfo) -> Option<&str> {
+        preset.locator.strip_prefix(SAVED_LOCATOR)
+    }
+
+    /// A name as a preset may be saved under: without the space around
+    /// it; or why it will not do.
+    pub fn checked_name(name: &str) -> Result<String, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a preset needs a name".to_string());
+        }
+        if name.chars().count() > SAVED_NAME_LENGTH {
+            return Err(format!("a preset's name can be {SAVED_NAME_LENGTH} characters at most"));
+        }
+        if let Some(bad) = name.chars().find(|c| c.is_control() || matches!(c, '/' | '\\' | '|')) {
+            return Err(format!("a preset's name cannot have {bad:?} in it"));
+        }
+        Ok(name.to_string())
+    }
+}
 
 /// One preset a device type offers.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,9 +311,27 @@ impl PresetList {
 
     /// The presets that match `query`, a page of them.
     pub fn search(&self, query: &PresetQuery<'_>) -> PresetPage<'_> {
-        let words = words(query.text);
-        let category = query.category.map(parts).filter(|parts| !parts.is_empty());
-        let whole = query.text.trim().to_lowercase();
+        let mut matching = self.matches(query.text, query.category);
+        // Stable: within a rank the list's own order stands.
+        matching.sort_by_key(|(rank, _)| *rank);
+        PresetPage {
+            total: matching.len(),
+            offset: query.offset.min(matching.len()),
+            presets: matching.into_iter().skip(query.offset).take(query.limit).map(|(_, preset)| preset).collect(),
+        }
+    }
+
+    /// Every preset that has the words of `text` (and is filed under
+    /// `category`, if one is given), in the list's own order, each with
+    /// how near a match it is: 0 for a name that is the text, 1 for a name
+    /// that begins with it, 2 for a name that has every word, 3 where the
+    /// category and tags are needed to find them all, 4 where the author
+    /// or the description is. For those who put the matches of several
+    /// lists together; [`search`](Self::search) pages those of one.
+    pub fn matches(&self, text: &str, category: Option<&str>) -> Vec<(u8, &PresetInfo)> {
+        let words = words(text);
+        let category = category.map(parts).filter(|parts| !parts.is_empty());
+        let whole = text.trim().to_lowercase();
 
         let mut matching: Vec<(u8, &PresetInfo)> = Vec::new();
         for preset in self.presets.iter() {
@@ -256,13 +364,7 @@ impl PresetList {
             };
             matching.push((rank, preset));
         }
-        // Stable: within a rank the list's own order stands.
-        matching.sort_by_key(|(rank, _)| *rank);
-        PresetPage {
-            total: matching.len(),
-            offset: query.offset.min(matching.len()),
-            presets: matching.into_iter().skip(query.offset).take(query.limit).map(|(_, preset)| preset).collect(),
-        }
+        matching
     }
 
     /// Every category that has presets, with how many, by name. Presets
@@ -338,6 +440,48 @@ mod tests {
 
     fn names(page: &PresetPage<'_>) -> Vec<String> {
         page.presets.iter().map(|preset| preset.path()).collect()
+    }
+
+    #[test]
+    fn a_saved_preset_is_listed_under_saved_and_keeps_its_state_as_text() {
+        let saved = SavedPreset {
+            uri: "vst3:ABC".into(),
+            device: "Amp".into(),
+            name: "Lead Tone".into(),
+            description: "bright, for solos".into(),
+            tags: vec!["lead".into()],
+            params: [("101".to_string(), 0.25)].into(),
+            state: Some(vec![0, 255, 7]),
+        };
+        let info = saved.info();
+        assert_eq!((info.path().as_str(), info.tags.as_slice()), ("Saved/Lead Tone", &["lead".to_string()][..]));
+        assert_eq!(SavedPreset::name_of(&info), Some("Lead Tone"));
+        assert_eq!(info.id, saved.info().id, "the same every time");
+        assert_ne!(info.id, SavedPreset { name: "Lead Tone 2".into(), ..saved.clone() }.info().id);
+        assert_eq!(SavedPreset::name_of(&preset("Lead Tone", "Factory", "", &[])), None);
+
+        let written = serde_json::to_string(&saved).unwrap();
+        assert!(written.contains(r#""state":"AP8H""#), "{written}");
+        assert_eq!(serde_json::from_str::<SavedPreset>(&written).unwrap(), saved);
+        assert_eq!(SavedPreset::from_json(&saved.to_json()), Ok(saved.clone()));
+        assert!(SavedPreset::from_json("{").is_err() && SavedPreset::from_json(r#"{"uri":"","name":"x"}"#).is_err());
+        assert!(SavedPreset::from_json(r#"{"uri":"builtin:reverb","name":"a/b"}"#).is_err());
+        // What is not there is left out, and is not missed when read.
+        let plain = SavedPreset { uri: "builtin:reverb".into(), name: "Hall".into(), ..SavedPreset::default() };
+        let written = serde_json::to_string(&plain).unwrap();
+        assert_eq!(written, r#"{"uri":"builtin:reverb","name":"Hall","params":{}}"#);
+        assert_eq!(serde_json::from_str::<SavedPreset>(r#"{"uri":"builtin:reverb","name":"Hall"}"#).unwrap(), plain);
+    }
+
+    #[test]
+    fn a_name_to_save_under_is_trimmed_and_checked() {
+        assert_eq!(SavedPreset::checked_name("  Lead Tone  ").as_deref(), Ok("Lead Tone"));
+        assert_eq!(SavedPreset::checked_name(" ").unwrap_err(), "a preset needs a name");
+        assert!(SavedPreset::checked_name("Pads/Warm").unwrap_err().contains("cannot have '/'"));
+        assert!(SavedPreset::checked_name("a|b").is_err() && SavedPreset::checked_name("a\nb").is_err());
+        assert!(SavedPreset::checked_name("a\\b").is_err());
+        assert!(SavedPreset::checked_name(&"x".repeat(81)).unwrap_err().contains("80 characters"));
+        assert!(SavedPreset::checked_name(&"é".repeat(80)).is_ok());
     }
 
     #[test]

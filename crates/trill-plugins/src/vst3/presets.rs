@@ -223,7 +223,7 @@ pub(super) fn programs(
             // The steps of the parameter are the programs it can reach.
             let steps = if selector.steps == 0 { programs.saturating_sub(1) } else { selector.steps };
             let category = tidy(&text::from_utf16(&list.name), NAME_LIMIT);
-            let mut batch = Vec::with_capacity(BATCH);
+            let mut found = Vec::new();
             for index in 0..programs.min(steps + 1) {
                 let mut name: String128 = [0; 128];
                 let named = units.getProgramName(list.id, index as i32, &mut name) == kResultOk;
@@ -237,21 +237,46 @@ pub(super) fn programs(
                         known.then(|| (*attribute, text::from_utf16(&value)))
                     })
                     .collect();
-                batch.push(PresetInfo {
+                found.push(PresetInfo {
                     name: if name.is_empty() { format!("Program {}", index + 1) } else { name },
                     category: category.clone(),
                     tags: sound_tags(attributes.iter().map(|(id, value)| (*id, value.as_str()))),
                     locator: Locator::Vst3Program { param: selector.param, index, steps }.to_text(),
                     ..PresetInfo::default()
                 });
-                if batch.len() == BATCH {
-                    sink.presets(std::mem::take(&mut batch));
-                }
             }
-            sink.presets(batch);
+            // Slots that are only numbered are the MIDI program numbers a
+            // plugin answers to, with nothing behind them the plugin could
+            // name: no presets to choose a sound by.
+            if only_numbered(found.iter().map(|program| program.name.as_str())) {
+                continue;
+            }
+            for batch in found.chunks(BATCH) {
+                sink.presets(batch.to_vec());
+            }
         }
     }
     Ok(())
+}
+
+/// Whether the names of a program list say nothing but each program's
+/// number: `Prog 1`, `Prog 2`, ... or `000`, `001`, ..., one word in front
+/// of a count that runs through the list. Two programs at least: one
+/// program called `Program 1` is one program.
+fn only_numbered<'a>(names: impl Iterator<Item = &'a str>) -> bool {
+    let mut expected: Option<(String, u64)> = None;
+    let mut count = 0;
+    for name in names {
+        let stem = name.trim_end_matches(|c: char| c.is_ascii_digit());
+        let Ok(number) = name[stem.len()..].parse::<u64>() else { return false };
+        let stem = stem.trim().to_lowercase();
+        match &expected {
+            Some((first, next)) if *first != stem || *next != number => return false,
+            _ => expected = Some((stem, number + 1)),
+        }
+        count += 1;
+    }
+    count >= 2
 }
 
 /// The plugin's parameters that select a program.
@@ -396,6 +421,24 @@ mod tests {
         assert!(super::attributes(b"").is_empty());
         assert!(super::attributes(b"<Attribute id=\"cut off").is_empty());
         assert!(super::attributes(&[0xff, 0xfe, b'<', 0]).is_empty());
+    }
+
+    #[test]
+    fn a_list_of_numbered_slots_is_no_list_of_presets() {
+        let numbered = |names: &[&str]| only_numbered(names.iter().copied());
+        // What a synth that only answers MIDI program changes lists.
+        let slots: Vec<String> = (1..=128).map(|n| format!("Prog {n}")).collect();
+        assert!(only_numbered(slots.iter().map(String::as_str)));
+        assert!(numbered(&["Program 0", "Program 1", "Program 2"]));
+        assert!(numbered(&["000", "001", "002"]));
+        assert!(numbered(&["preset 7", "Preset 8"]));
+        // Names are names, also when some end in a number.
+        assert!(!numbered(&["Quiet", "Loud", "Program 3"]));
+        assert!(!numbered(&["Pad 1", "Pad 2", "Bass 1"]));
+        assert!(!numbered(&["Strings 1", "Strings 3"]), "not a count");
+        assert!(!numbered(&["Program 1"]), "one program is a program");
+        assert!(!numbered(&[]));
+        assert!(!numbered(&["99999999999999999999999", "100000000000000000000000"]));
     }
 
     #[test]

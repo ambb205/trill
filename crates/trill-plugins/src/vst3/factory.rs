@@ -274,6 +274,13 @@ impl DeviceFactory for Vst3Factory {
             self.shared.presets.refresh(&plugin);
         }
     }
+
+    fn known_presets(&self, uri: &str) -> Option<PresetList> {
+        match self.preset_source(uri, false)? {
+            Ok(plugin) => self.shared.presets.known(&plugin),
+            Err(_) => None,
+        }
+    }
 }
 
 /// Creates an instance on the plugin main thread, giving up after

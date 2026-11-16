@@ -140,6 +140,8 @@ pub struct AudioStatus {
     pub revision: u64,
 }
 
+/// The folder, beside the settings file, that saved presets are kept in.
+pub const SAVED_PRESETS_FOLDER: &str = "saved-presets";
 /// How long listing the audio devices may take.
 const DEVICE_LIST_TIMEOUT: Duration = Duration::from_secs(6);
 /// How long a rescan of the MIDI ports is waited for.
@@ -234,6 +236,11 @@ impl Runtime {
         let session = Session::with_audio(factory, media.clone(), audio)?;
         if let Some(warning) = &session.audio_info().warning {
             log::warn!("{warning}");
+        }
+        // The presets the user saved are kept beside the settings; where
+        // nothing is kept, they last as long as the program runs.
+        if let Some(folder) = settings.folder() {
+            session.saved_presets().open(folder.join(SAVED_PRESETS_FOLDER));
         }
         let live = session.live();
         let session: SharedSession = Arc::new(Mutex::new(session));

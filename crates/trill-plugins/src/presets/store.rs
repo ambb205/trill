@@ -74,6 +74,9 @@ struct Shared {
     main: MainThread<PluginThread>,
     /// By plugin id.
     listings: Mutex<HashMap<String, Listing>>,
+    /// The plugins (by id) whose cache was looked at without a reading
+    /// being started, and found to say nothing: not looked at again.
+    unknown: Mutex<std::collections::HashSet<String>>,
     /// Signalled whenever a listing changes.
     changed: Condvar,
     /// Held while reading: one plugin at a time. Reading is dominated by
@@ -96,6 +99,7 @@ impl PresetStore {
             settings,
             main,
             listings: Mutex::new(HashMap::new()),
+            unknown: Mutex::new(std::collections::HashSet::new()),
             changed: Condvar::new(),
             turn: Mutex::new(()),
             closed: AtomicBool::new(false),
@@ -116,6 +120,27 @@ impl PresetStore {
         drop(listings);
         self.start(plugin.clone(), false);
         list
+    }
+
+    /// The presets of `plugin` if they are known without anything being
+    /// read: what this run of the program has read (or is reading), or
+    /// what an earlier run left in the cache, if that is still good. No
+    /// reading is started, and no code of the plugin's runs.
+    pub(crate) fn known(&self, plugin: &PluginRef) -> Option<PresetList> {
+        if let Some(listing) = self.shared.listings().get(&plugin.id) {
+            return Some(listing.list.clone());
+        }
+        if self.shared.unknown().contains(&plugin.id) {
+            return None;
+        }
+        let Some(list) = self.shared.cached(plugin) else {
+            self.shared.unknown().insert(plugin.id.clone());
+            return None;
+        };
+        let mut listings = self.shared.listings();
+        // Someone may have started a reading meanwhile; theirs stands.
+        let listing = listings.entry(plugin.id.clone()).or_insert(Listing { list, again: false });
+        Some(listing.list.clone())
     }
 
     /// [`list`](Self::list), waiting up to `timeout` for a list that is
@@ -187,6 +212,10 @@ impl Shared {
         self.listings.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn unknown(&self) -> MutexGuard<'_, std::collections::HashSet<String>> {
+        self.unknown.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn closed(&self) -> bool {
         self.closed.load(Ordering::Relaxed)
     }
@@ -216,6 +245,16 @@ impl Shared {
             self.changed.notify_all();
             return;
         }
+    }
+
+    /// What the cache holds for `plugin`, if it is still good: the plugin
+    /// file is the one that was read and its preset folders are as they
+    /// were.
+    fn cached(&self, plugin: &PluginRef) -> Option<PresetList> {
+        let stamp = FileStamp::of(&plugin.path).ok()?;
+        let file = cache::file(self.settings.cache_folder.as_ref()?, &plugin.uri);
+        let entry = cache::load(&file, &plugin.path, stamp)?;
+        (walk::fingerprint(&entry.watch) == entry.fingerprint).then(|| listed(entry.presets, entry.failure))
     }
 
     /// Shows `presets` as what is known of `plugin` while its presets are
@@ -514,6 +553,45 @@ mod tests {
         std::fs::write(&rig.plugin.path, b"the plugin, version two").unwrap();
         assert_eq!(rig.names(&rig.store()).len(), 4);
         assert_eq!(reads("remembered"), 4);
+    }
+
+    #[test]
+    fn what_is_known_is_told_without_anything_being_read() {
+        let rig = Rig::new("known");
+        // Nobody has read this plugin's presets, in this run or before.
+        let store = rig.store();
+        assert_eq!(store.known(&rig.plugin), None);
+        assert_eq!(store.known(&rig.plugin), None);
+        assert_eq!(reads("known"), 0, "asking what is known reads nothing");
+        // Once they are asked for, what is known is what was read.
+        assert_eq!(rig.names(&store), ["Glass", "Warm"]);
+        assert_eq!(store.known(&rig.plugin).map(|list| list.len()), Some(2));
+
+        // Another run of the program knows them from the cache, and
+        // still has read nothing.
+        let later = rig.store();
+        let known = later.known(&rig.plugin).unwrap();
+        assert_eq!((known.status.clone(), known.len()), (PresetStatus::Ready, 2));
+        assert_eq!(reads("known"), 1);
+        assert_eq!(rig.names(&later), ["Glass", "Warm"]);
+        assert_eq!(reads("known"), 1);
+
+        // A cache that is out of date knows nothing; asking for the list
+        // then reads it.
+        rig.dir.file("plugin/patches/New.patch", b"");
+        let stale = rig.store();
+        assert_eq!(stale.known(&rig.plugin), None);
+        assert_eq!(reads("known"), 1);
+        assert_eq!(rig.names(&stale), ["Glass", "New", "Warm"]);
+        assert_eq!(stale.known(&rig.plugin).map(|list| list.len()), Some(3));
+
+        // While a list is being read, that is what is known of it.
+        let slow = Rig::new("known-slow");
+        slow.slow(150);
+        let store = slow.store();
+        assert!(store.list(&slow.plugin).is_reading());
+        assert!(store.known(&slow.plugin).is_some_and(|list| list.is_reading()));
+        store.wait(&slow.plugin, WAIT);
     }
 
     #[test]
