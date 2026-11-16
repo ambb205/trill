@@ -417,7 +417,6 @@ fn ornamented_lines_are_playable_on_whatever_instrument_they_are_written_for() {
     }
     // Many are refused, as they should be: a release without a bend, a hammer-on with no note before it.
     assert!(performed > 500 && bent > 300 && refused > 500, "{performed} performed, {bent} bent, {refused} refused");
-    let _ = (ORNAMENTS, NAMED, BROKEN);
 }
 
 /// Plays `phrase` as an instrument does: its ornaments as that

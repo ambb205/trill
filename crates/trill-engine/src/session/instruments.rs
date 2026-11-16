@@ -6,7 +6,7 @@ use super::Session;
 use crate::instruments::InstrumentKnowledge;
 use std::sync::Arc;
 use trill_core::device::{DeviceCategory, DeviceDescriptor};
-use trill_core::{ChainRef, Device, InstrumentProfile, Role, TrackId};
+use trill_core::{ChainRef, Device, InstrumentProfile, Project, Role, TrackId, TrackKind};
 
 impl Session {
     /// What is known about instruments by device type: where it is kept is
@@ -45,6 +45,30 @@ impl Session {
         let track = self.project.track(track).ok()?;
         let descriptors = self.factory.descriptors();
         track.devices.iter().find(|device| is_instrument(&descriptors, &device.uri))
+    }
+
+    /// A project that is being opened, with what is known about their
+    /// instruments given to the tracks that say nothing of their notes
+    /// themselves: a song from before that was known, or from a machine
+    /// where it is not, is then written for and read like one made here.
+    /// It is not an edit; the song is as unchanged as any just opened.
+    pub(super) fn with_known_instruments(&self, mut project: Project) -> Project {
+        let descriptors = self.factory.descriptors();
+        for track in &mut project.tracks {
+            if track.kind != TrackKind::Normal || !track.profile.is_empty() {
+                continue;
+            }
+            // Its instrument; or, where the plugin is not installed here, the first device anything is known of.
+            let instrument = track.devices.iter().find(|device| is_instrument(&descriptors, &device.uri));
+            let known = match instrument {
+                Some(device) => self.instruments.of(&device.uri),
+                None => track.devices.iter().find_map(|device| self.instruments.of(&device.uri)),
+            };
+            if let Some(known) = known {
+                track.profile = known.profile;
+            }
+        }
+        project
     }
 
     /// The profile a track should be given along with the instrument

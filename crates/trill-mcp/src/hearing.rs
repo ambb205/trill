@@ -26,6 +26,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use trill_core::InstrumentProfile;
 use trill_core::pitch::{drum_name, pitch_name};
 use trill_core::{ControllerKind, Project, TrackId};
 use trill_engine::probe::{Heard, ProbeNote, ProbeOptions};
@@ -652,7 +653,7 @@ fn spread(values: impl Iterator<Item = f64>, digits: i32) -> Value {
 
 /// One entry of a probe's reply: a note, or a run of notes that measure
 /// alike.
-fn heard_json(run: &[&Heard], velocities: bool, tonal: Option<f64>) -> Value {
+fn heard_json(run: &[&Heard], velocities: bool, tonal: Option<f64>, kit: Option<&InstrumentProfile>) -> Value {
     let first = run[0];
     let pitches: Vec<u8> = run.iter().map(|heard| heard.note.pitch).collect();
     let mut entry = Map::new();
@@ -660,8 +661,13 @@ fn heard_json(run: &[&Heard], velocities: bool, tonal: Option<f64>) -> Value {
     if velocities {
         entry.insert("velocity".into(), json!(first.note.velocity));
     }
-    // What a note is called on a drum kit, where the instrument is one.
-    if let (1, None, Some(name)) = (run.len(), tonal, drum_name(first.note.pitch)) {
+    // What a note is called on a drum kit, where the instrument is one: by the kit's own map
+    // where the track has one, which may keep a drum on another key than General MIDI does.
+    let named = match kit {
+        Some(kit) => Some(kit.drum_name(first.note.pitch)).filter(|name| *name != pitch_name(first.note.pitch)),
+        None => drum_name(first.note.pitch).map(str::to_owned),
+    };
+    if let (1, None, Some(name)) = (run.len(), tonal, named) {
         entry.insert("drum_name".into(), json!(name));
     }
     if !first.sounded {
@@ -721,6 +727,12 @@ fn heard_json(run: &[&Heard], velocities: bool, tonal: Option<f64>) -> Value {
 /// The notes a probe played, as runs of notes that measure alike (or one
 /// by one, with `detail`).
 fn heard_list(heard: &[Heard], detail: bool, tonal: Option<f64>) -> Vec<Value> {
+    heard_list_on(heard, detail, tonal, None)
+}
+
+/// [`heard_list`] for an instrument something is known about: drums are
+/// called what `kit` calls them.
+fn heard_list_on(heard: &[Heard], detail: bool, tonal: Option<f64>, kit: Option<&InstrumentProfile>) -> Vec<Value> {
     let velocities = heard.iter().any(|note| note.note.velocity != heard[0].note.velocity);
     let mut groups: Vec<Vec<&Heard>> = Vec::new();
     for note in heard {
@@ -747,7 +759,7 @@ fn heard_list(heard: &[Heard], detail: bool, tonal: Option<f64>) -> Vec<Value> {
         }
         groups = merged;
     }
-    groups.iter().map(|run| heard_json(run, velocities, tonal)).collect()
+    groups.iter().map(|run| heard_json(run, velocities, tonal, kit)).collect()
 }
 
 /// Whether two notes are one and the same sound: what a sampler plays
@@ -1048,7 +1060,7 @@ impl TrillServer {
     /// change the articulation.
     #[tool(annotations(title = "Probe an instrument", read_only_hint = true))]
     async fn probe(&self, Parameters(request): Parameters<ProbeRequest>) -> CallToolResult {
-        let (job, plan, about) = {
+        let (job, plan, about, kit) = {
             let mut session = self.session.lock();
             let plan = match Plan::of(request, session.audio_info().sample_rate as u32) {
                 Ok(plan) => plan,
@@ -1068,11 +1080,16 @@ impl TrillServer {
             }
             // Whether this is already known, and where to keep what is found.
             about["known"] = json!(crate::instruments::probe_note(&session, &job.devices[0].uri, on_track));
+            // What the keys are called: by the track, or by what is known of an instrument not in the song.
+            let kit: Option<InstrumentProfile> = match on_track {
+                Some(track) => session.project().track(track).ok().map(|track| track.profile.clone()),
+                None => session.instruments().of(&job.devices[0].uri).map(|known| known.profile),
+            };
             about["through"] = match job.devices.len() {
                 1 => json!("the instrument alone"),
                 more => json!(format!("the instrument and the {} device(s) after it", more - 1)),
             };
-            (job, plan, about)
+            (job, plan, about, kit)
         };
         let outcome = tokio::task::spawn_blocking(move || {
             let notes = if plan.switches.is_empty() { plan.notes() } else { plan.switch_notes() };
@@ -1112,7 +1129,8 @@ impl TrillServer {
                 }
             }
             let sounded: Vec<Heard> = heard.iter().filter(|note| note.sounded).cloned().collect();
-            out["heard"] = json!(heard_list(if plan.detail { heard } else { &sounded }, plan.detail, tonal));
+            let listed = if plan.detail { heard } else { &sounded };
+            out["heard"] = json!(heard_list_on(listed, plan.detail, tonal, kit.as_ref()));
             // Keys under the range that make no sound are where instruments
             // keep their keyswitches.
             let lowest = tonal.and_then(|semitones| following(heard, semitones).into_iter().min());

@@ -333,6 +333,11 @@ async fn a_drum_plugin_is_written_for_and_read_as_drums() {
         read["first_bars"]["kick"], "x.......x.......|X.....x.X.......",
         "the bar that was rewritten, then the groove's"
     );
+    // The bars written before the kit said where its china is still hit the old key, which is
+    // no drum of this kit's any more: that is pointed out.
+    assert_eq!(read["drums"]["E3"], 5);
+    let note = read["note"].as_str().unwrap();
+    assert!(note.starts_with("5 hit(s) are on keys this track's kit has no drum name for (E3)"), "{note}");
     // The song's harmony is the keys' alone: no drum note is counted against the key.
     let song = ok(client, "analyze_music", json!({})).await;
     assert_eq!(song["scope"], "song (Keys)");
@@ -633,6 +638,52 @@ async fn ornaments_are_keyswitches_on_an_instrument_that_has_them() {
     let read = ok(client, "analyze_music", json!({ "clip": line["clip_id"] })).await;
     assert_eq!(read["left_out"], json!({ "keyswitches": 6 }));
     assert_eq!(read["pitch_range"], "E3-A4");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_song_from_before_its_instruments_were_known_takes_what_is_known_when_it_is_opened() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let guitar = track(client, "Rhythm", ECLIPSE).await;
+    let kit = track(client, "Drums", SUPERIOR).await;
+    let keys = track(client, "Keys", LEAD).await;
+    // A track that says something of its own keeps it.
+    ok(client, "set_instrument_profile", json!({ "track": keys, "range": ["C2", "C6"], "remember": false })).await;
+    let riff = ok(
+        client,
+        "write_chords",
+        json!({ "track": guitar, "progression": "E5 | G5", "low": "E2", "high": "E4", "inversion": 0,
+                "articulation": "palm_mute" }),
+    )
+    .await;
+    assert_eq!(riff["keyswitches"], json!({ "palm_mute": 1 }));
+
+    // The song as an older Trill wrote it: its tracks say nothing about their instruments.
+    let file = fixture.folder.path().join("older.trill");
+    ok(client, "save_project", json!({ "path": file.display().to_string() })).await;
+    let mut song: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    for track in song["tracks"].as_array_mut().unwrap() {
+        if track["name"] != "Keys" {
+            assert!(track.as_object_mut().unwrap().remove("profile").is_some(), "{}", track["name"]);
+        }
+    }
+    std::fs::write(&file, song.to_string()).unwrap();
+
+    ok(client, "load_project", json!({ "path": file.display().to_string() })).await;
+    let project = ok(client, "get_project", json!({})).await;
+    assert_eq!(project["unsaved_changes"], false, "opening a song does not change it");
+    let rhythm = shown(client, guitar).await;
+    assert!(strings(&rhythm["articulations"]).contains(&"palm_mute".to_string()), "{rhythm}");
+    assert_eq!(shown(client, kit).await["plays"], "drums");
+    assert_eq!(shown(client, keys).await["range"], "C2-C6", "what a track says itself is left alone");
+    let known = ok(client, "get_instrument_profile", json!({ "track": guitar })).await;
+    assert_eq!(known["known"], json!({ "source": "built_in", "same_as_track": true }));
+    // So it is read as it is meant, and written for by name, like a song made today.
+    let read = ok(client, "analyze_music", json!({ "track": guitar })).await;
+    assert_eq!(read["left_out"], json!({ "keyswitches": 1 }));
+    assert_eq!(strings(&read["chords"]), ["1: E5", "2: G5"]);
+    let beat = ok(client, "write_drums", json!({ "track": kit, "lanes": { "wide_open_hat": "x..." } })).await;
+    assert_eq!(notes_of(client, &beat["clip_id"]).await[0].0, 26);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1063,4 +1114,13 @@ async fn the_drums_of_the_installed_superior_drummer_3_are_on_the_keys_its_entry
         assert!(measured(cymbal).0 > measured("closed_hat").0, "{cymbal} rings longer than a closed hat");
     }
     assert!(measured("floor_tom").1 < measured("splash").1, "a floor tom is darker than a splash");
+
+    // General MIDI's high tom key is no tom on this kit, which is why the entry moves the name.
+    let other = ok(client, "probe", json!({ "track": kit, "notes": [50], "tail": 3 })).await;
+    let on_50 = other["heard"][0]["bright_hz"].as_f64().unwrap();
+    eprintln!("   key 50: {}", other["heard"][0]);
+    assert!(other["heard"][0].get("drum_name").is_none(), "and the probe does not call it one");
+    let named = heard.iter().find(|entry| entry["notes"] == "C3 (48)").unwrap();
+    assert_eq!(named["drum_name"], "high_tom", "the probe calls drums what the kit does");
+    assert!(on_50 > 5.0 * measured("high_tom").1, "key 50 is far brighter than a tom: {on_50} Hz");
 }

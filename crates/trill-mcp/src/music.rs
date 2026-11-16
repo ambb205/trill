@@ -1782,6 +1782,21 @@ fn analyze(session: &Session, request: &AnalyzeMusicRequest) -> Reply {
         }
         out["plays"] = json!("drums");
         out["drums"] = json!(counts);
+        // A key the kit has no drum on by any name: what it plays there is anybody's guess.
+        let mut unnamed: Vec<u8> =
+            notes.iter().map(|note| note.pitch).filter(|pitch| kit.drum_name(*pitch) == pitch_name(*pitch)).collect();
+        let hits = unnamed.len();
+        unnamed.sort_unstable();
+        unnamed.dedup();
+        if !unnamed.is_empty() {
+            let keys: Vec<String> = unnamed.iter().map(|pitch| pitch_name(*pitch)).collect();
+            out["note"] = json!(format!(
+                "{hits} hit(s) are on keys this track's kit has no drum name for ({}): it may keep something there \
+                 that General MIDI does not, or nothing. get_instrument_profile shows its map and what is said \
+                 about it; a probe of those keys says what they play.",
+                keys.join(", ")
+            ));
+        }
         if let Some(lanes) = read_lanes(kit, &notes, start, bars.min(2), bar_length) {
             out["first_bars"] = lanes;
         }

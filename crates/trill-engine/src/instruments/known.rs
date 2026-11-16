@@ -198,8 +198,9 @@ fn superior_drummer_3() -> InstrumentProfile {
                 the tip and closed_hat_edge 22 the edge, pedal_hat 44, open_hat 46, wide_open_hat 26. Toms: \
                 high_tom 48, mid_tom 47, low_tom 43 and floor_tom 41. ride 51 and ride_bell 53. The five cymbal \
                 positions are cymbal_1 86, crash 49, splash 55, crash2 57 and china 52; which cymbal hangs in each \
-                depends on the kit, so those names are General MIDI's and not a promise. A kit takes most of a \
-                minute to load its samples."
+                depends on the kit, so those names are General MIDI's and not a promise. General MIDI's \
+                high tom key 50 and tambourine key 54 are neither here: each plays a short, muted cymbal hit. A \
+                kit takes most of a minute to load its samples."
             .to_string(),
         ..InstrumentProfile::default()
     }

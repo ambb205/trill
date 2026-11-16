@@ -816,7 +816,7 @@ impl Session {
 
     pub fn load(&mut self, path: &Path) -> Result<(), SessionError> {
         let json = std::fs::read_to_string(path).map_err(|e| io_error(path, e))?;
-        let project = Project::from_json(&json)?;
+        let project = self.with_known_instruments(Project::from_json(&json)?);
         self.replace_project(project);
         self.path = Some(path.to_path_buf());
         Ok(())
@@ -839,7 +839,7 @@ impl Session {
     /// whether the copy replaces what the file holds.
     pub fn load_recovered(&mut self, copy: &Path, original: Option<&Path>) -> Result<(), SessionError> {
         let json = std::fs::read_to_string(copy).map_err(|e| io_error(copy, e))?;
-        let project = Project::from_json(&json)?;
+        let project = self.with_known_instruments(Project::from_json(&json)?);
         self.replace_project(project);
         self.path = original.map(Path::to_path_buf);
         self.revision += 1;
