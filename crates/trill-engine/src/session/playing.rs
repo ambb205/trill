@@ -284,9 +284,13 @@ impl Session {
         self.engine.live().play_at(now, kind);
     }
 
-    /// Lets go of everything a keyboard is holding: every key, the sustain
-    /// pedal and the pitch wheel, on every track. For when the keyboard
-    /// can no longer do so itself: its port has gone.
+    /// Lets go of everything keyboards are holding: every key, the sustain
+    /// pedal and the pitch wheel, on every track. For when a keyboard can
+    /// no longer do so itself: its port has gone. The engine does not
+    /// know which keyboard a key came from, so the keys of every keyboard
+    /// are let go of, not only the one that went: one more than need be
+    /// rather than one too few. Notes started with [`Session::note_on`]
+    /// are not touched.
     pub fn release_live(&mut self) {
         self.engine.send(Message::ReleaseLive);
     }
