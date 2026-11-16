@@ -92,7 +92,10 @@ pub fn name_field<Target: Copy + PartialEq + Hash + Debug>(
     let awaiting_focus = editing.is_some_and(|state| !state.focused);
     let had_focus = editing.is_some_and(|state| state.focused);
 
-    let id = Id::unique("name-field").with(target);
+    // The target's type is part of the id: ids of different kinds are
+    // plain numbers that may coincide, and two fields with one id would
+    // share their keyboard focus and their cursor.
+    let id = Id::unique("name-field").with(std::any::type_name::<Target>()).with(target);
     let response = trill_noir::text_field(ui, theme, rect, id, &mut text, "");
     if awaiting_focus {
         response.request_focus();

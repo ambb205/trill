@@ -258,7 +258,14 @@ fn click(cx: &mut Cx, geometry: &Geometry, pointer: Pos2, modifiers: egui::Modif
                 cx.state.toggle_clip(hit.track, hit.clip);
             } else {
                 cx.state.select_clip(hit.track, hit.clip);
-                ops::set_cursor(cx, hit.start);
+                // The name strip stands for the clip as a whole; a click
+                // in its body also points at a place in it, which is
+                // where Ctrl+E then splits.
+                let at = match hit.part {
+                    ClipPart::Title => hit.start,
+                    _ => geometry.snap(geometry.beat(pointer.x), modifiers.alt),
+                };
+                ops::set_cursor(cx, at);
             }
             cx.state.arrangement.time_selection = None;
         }

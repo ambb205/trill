@@ -602,13 +602,15 @@ impl UiState {
         if let Some(selection) = &mut view.time_selection {
             selection.tracks.retain(exists);
         }
+        // An empty selection still says which lane is being worked in
+        // (Ctrl+A selects its points), so it goes only with the lane.
+        if view.points.as_ref().is_some_and(|selection| lane_owner(project, &selection.target).is_none()) {
+            view.points = None;
+        }
         if let Some(selection) = &mut view.points {
             let lane = project.automation.iter().find(|lane| lane.target == selection.target);
             let points = lane.map(|lane| lane.points.as_slice()).unwrap_or_default();
             selection.points.retain(|selected| points.contains(selected));
-            if selection.points.is_empty() {
-                view.points = None;
-            }
         }
         if view.renaming_marker.as_ref().is_some_and(|edit| edit.target >= project.markers.len()) {
             view.renaming_marker = None;
@@ -637,9 +639,8 @@ impl UiState {
     }
 }
 
-/// A clip being renamed in the arrangement. A type of its own so that the
-/// field's keyboard focus is not confused with the Clip tab's name field
-/// for the same clip.
+/// A clip being renamed in the arrangement. A type of its own, so that the
+/// field is told apart from the Clip tab's name field for the same clip.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct InlineClip(pub ClipId);
 

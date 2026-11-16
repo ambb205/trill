@@ -3,10 +3,11 @@
 //!
 //! A strip reads top to bottom as the signal flows: the chain's devices,
 //! the sends, pan, then the fader beside its meter, and mute and solo at
-//! the foot. Strips share the detail panel's height, so each gives up its
-//! device list and then its sends before the fader gets too short to use;
-//! with many tracks the strips keep a width that still fits a name and the
-//! row scrolls sideways.
+//! the foot. Every strip is laid out to the same plan, whatever it holds,
+//! so that faders, pans and sends line up across the row. The plan fits
+//! the detail panel's height: the device lists and then the sends give
+//! way before the faders get too short to use. With many tracks the strips
+//! keep a width that still fits a name and the row scrolls sideways.
 
 use super::arrangement::{self, display_order};
 use super::automation;
@@ -40,20 +41,22 @@ enum Channel<'a> {
     Master,
 }
 
-/// How much of a strip's height each part gets.
+/// How much of a strip's height each part gets. One plan for the whole
+/// row, so the strips' controls line up.
 #[derive(Copy, Clone, Debug, PartialEq)]
 struct Budget {
-    /// Devices listed, of those the chain has.
+    /// Rows for devices: as many as the longest chain needs, if they fit.
     devices: usize,
-    /// Sends shown, of the return tracks there are.
+    /// Rows for sends, of the return tracks there are.
     sends: usize,
     fader: f32,
 }
 
-/// Divides `height` (what is left of a strip under its name) between the
-/// device list, `sends` send bars and the fader. The fader keeps
-/// [`MIN_FADER`] if at all possible; sends come before devices, since a
-/// send can be set nowhere else at this size and a device can.
+/// Divides `height` (what is left of a strip under its name) between
+/// `devices` rows of devices, `sends` send bars and the fader. `extras` is
+/// what the rows every strip has take. The fader keeps [`MIN_FADER`] if at
+/// all possible; sends come before devices, since a send can be set
+/// nowhere else at this size and a device can.
 fn budget(height: f32, row: f32, devices: usize, sends: usize, extras: f32) -> Budget {
     let mut left = height - extras - MIN_FADER;
     let fits = |left: f32, wanted: usize| ((left / row).floor().max(0.0) as usize).min(wanted);
@@ -81,6 +84,15 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     let rest = Rect::from_min_max(area.min, pos2(master.left(), area.bottom()));
     let width = strip_width(rest.width(), order.len());
 
+    // The plan every strip follows: rows for the longest chain and for
+    // every return track, then pan, the fader, its readout, mute and solo.
+    let row = theme.metric.bar + theme.metric.gap;
+    let chains = tracks.iter().map(|track| track.devices.len()).chain([cx.snap.project.master.devices.len()]);
+    let returns = tracks.iter().filter(|track| track.kind == TrackKind::Return).count();
+    let under_name = area.height() - (COLOR_BAR + 3.0 + NAME_ROW - 1.0 + PAD);
+    let extras = READOUT_ROW + 2.0 * row + 4.0;
+    let shares = budget(under_name, row, chains.max().unwrap_or(0), returns, extras);
+
     widgets::place(ui, rest, "strips", egui::Layout::left_to_right(egui::Align::Min), |ui| {
         ui.set_clip_rect(rest.intersect(ui.clip_rect()));
         egui::ScrollArea::horizontal().id_salt("mixer").auto_shrink([false, false]).show(ui, |ui| {
@@ -93,16 +105,16 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
                 );
                 // Thirty strips are laid out; only those in view are built.
                 if ui.is_rect_visible(rect) {
-                    strip(ui, cx, Channel::Track(&tracks[*index]), rect, *member);
+                    strip(ui, cx, Channel::Track(&tracks[*index]), rect, *member, shares);
                 }
             }
         });
     });
-    strip(ui, cx, Channel::Master, master, false);
+    strip(ui, cx, Channel::Master, master, false, shares);
     paint::vline(ui.painter(), master.left(), master.y_range(), theme.hairline);
 }
 
-fn strip(ui: &mut Ui, cx: &mut Cx, channel: Channel, rect: Rect, member: bool) {
+fn strip(ui: &mut Ui, cx: &mut Cx, channel: Channel, rect: Rect, member: bool, shares: Budget) {
     let theme = cx.theme;
     let snapshot = cx.snap;
     let (bar, gap) = (theme.metric.bar, theme.metric.gap);
@@ -169,35 +181,27 @@ fn strip(ui: &mut Ui, cx: &mut Cx, channel: Channel, rect: Rect, member: bool) {
     }
     text::paint(&painter, name_room, Align2::LEFT_CENTER, style, name, ink);
 
-    // What is left under the name is shared out from the bottom up: mute
-    // and solo, the readout, the fader; then pan, sends and devices.
-    let returns: Vec<&Track> = match channel {
-        Channel::Track(track) if track.kind != TrackKind::Return => {
-            snapshot.project.tracks.iter().filter(|other| other.kind == TrackKind::Return).collect()
-        }
-        _ => Vec::new(),
-    };
-    let has_pan = matches!(channel, Channel::Track(_));
-    let extras = READOUT_ROW + if has_pan { 2.0 * row } else { 0.0 } + 4.0;
-    let below_name = inner.bottom() - (name_row.bottom() + 3.0);
-    let shares = budget(below_name, row, devices.len(), returns.len(), extras);
-
+    // Under the name every strip keeps the same rows, used or not, so
+    // that what the strips share lines up across the mixer.
     let mut top = name_row.bottom() + 3.0;
     let line = |top: f32| Rect::from_min_size(pos2(inner.left(), top), vec2(inner.width(), bar));
-    top = device_chips(ui, cx, channel, devices, shares.devices, top, inner, id);
+    device_chips(ui, cx, channel, devices, shares.devices, top, inner, id);
+    top += shares.devices as f32 * row;
     if let Channel::Track(track) = channel {
-        for target in returns.iter().take(shares.sends) {
-            arrangement::send_bar(ui, cx, track, target, line(top), id.with(("send", target.id)));
-            top += row;
+        // A return has nowhere to send to; its rows stay empty.
+        let returns = snapshot.project.tracks.iter().filter(|other| other.kind == TrackKind::Return);
+        let sending = track.kind != TrackKind::Return;
+        for (index, target) in returns.take(shares.sends).enumerate().filter(|_| sending) {
+            let rect = line(top + index as f32 * row);
+            arrangement::send_bar(ui, cx, track, target, rect, id.with(("send", target.id)));
         }
-        arrangement::pan_bar(ui, cx, track, line(top), id.with("pan"));
-        top += row;
+        arrangement::pan_bar(ui, cx, track, line(top + shares.sends as f32 * row), id.with("pan"));
     }
+    top += (shares.sends + 1) as f32 * row;
 
     // The fader and its meter, side by side in the middle of the strip.
-    let foot = if has_pan { row } else { 0.0 };
     let fader_area =
-        Rect::from_min_max(pos2(inner.left(), top + 1.0), pos2(inner.right(), inner.bottom() - foot - READOUT_ROW));
+        Rect::from_min_max(pos2(inner.left(), top + 1.0), pos2(inner.right(), inner.bottom() - row - READOUT_ROW));
     if fader_area.height() >= 24.0 {
         let pair = FADER_WIDTH + 5.0 + METER_WIDTH;
         let left = (fader_area.center().x - pair / 2.0).round();
@@ -244,9 +248,9 @@ fn select(cx: &mut Cx, channel: Channel) {
     }
 }
 
-/// The chain's devices as chips, `shown` of them, with a count of the rest.
-/// A click shows that device in the Devices tab. Returns where the next row
-/// goes.
+/// The chain's devices as chips in `shown` rows, the last of which counts
+/// the devices there was no room for. A click shows that device in the
+/// Devices tab.
 #[expect(clippy::too_many_arguments, reason = "a placement call: what to list, how much of it and where")]
 fn device_chips(
     ui: &Ui,
@@ -257,7 +261,7 @@ fn device_chips(
     mut top: f32,
     inner: Rect,
     id: egui::Id,
-) -> f32 {
+) {
     let theme = cx.theme;
     let row = theme.metric.chip + theme.metric.gap;
     // The last row counts the devices it has no room for.
@@ -282,9 +286,7 @@ fn device_chips(
         let rect = Rect::from_min_size(pos2(inner.left(), top), vec2(inner.width(), theme.metric.chip));
         let more = format!("+ {} more", devices.len() - listed);
         text::paint(ui.painter(), rect, Align2::LEFT_CENTER, theme.text.micro, &more, theme.ink_faint);
-        top += row;
     }
-    top
 }
 
 fn chain_of(channel: Channel) -> trill_core::ChainRef {

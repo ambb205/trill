@@ -236,7 +236,7 @@ impl TrillApp {
         let typing = ctx.text_edit_focused() || self.was_typing;
         let mut commands = shortcuts::read(ctx, typing, selection);
         if state.shortcuts_open {
-            commands.retain(|command| *command == Command::ShowShortcuts);
+            commands.retain(|command| matches!(command, Command::ShowShortcuts | Command::Escape));
         }
         commands
     }
@@ -521,7 +521,9 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
             FocusArea::Arrangement => ops::select_all(cx),
         },
         Command::Escape => {
-            if in_notes && !cx.state.selected_notes.is_empty() {
+            if cx.state.shortcuts_open {
+                cx.state.shortcuts_open = false;
+            } else if in_notes && !cx.state.selected_notes.is_empty() {
                 cx.state.selected_notes.clear();
             } else {
                 ops::escape(cx);
