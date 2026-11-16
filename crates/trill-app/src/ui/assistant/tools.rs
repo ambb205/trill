@@ -353,6 +353,15 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
             Some(path) => about("Rendering", "Rendered", &format!("the song to {}", quoted(file_name(path)))),
             None => about("Rendering", "Rendered", "the song"),
         },
+        "measure" => match call.has("tracks") {
+            true => about("Measuring", "Measured", "some of the tracks"),
+            false => about("Measuring", "Measured", "the song"),
+        },
+        "probe" => match (call.track("track"), call.text("device")) {
+            (Some(track), _) => about("Trying out", "Tried out", &format!("the instrument of {track}")),
+            (None, Some(uri)) => about("Trying out", "Tried out", device_kind(uri)),
+            (None, None) => about("Trying out", "Tried out", "an instrument"),
+        },
 
         "save_project" => match call.text("path") {
             Some(path) => about("Saving", "Saved", &format!("the project as {}", quoted(file_name(path)))),
@@ -521,6 +530,10 @@ mod tests {
         assert_eq!(did("load_project", json!({ "path": "songs/day.trill" }), p), "Opened \u{201C}day.trill\u{201D}");
         assert_eq!(did("render", json!({ "path": "mix.wav" }), p), "Rendered the song to \u{201C}mix.wav\u{201D}");
         assert_eq!(did("render", json!({}), p), "Rendered the song");
+        assert_eq!(did("measure", json!({}), p), "Measured the song");
+        assert_eq!(did("measure", json!({ "tracks": [1] }), p), "Measured some of the tracks");
+        assert!(did("probe", json!({ "track": track }), p).starts_with("Tried out the instrument of "));
+        assert_eq!(did("probe", json!({ "device": "builtin:polysynth" }), p), "Tried out polysynth");
         assert_eq!(did("import_midi", json!({ "path": "D:/midi/riff.mid" }), p), "Imported \u{201C}riff.mid\u{201D}");
         assert_eq!(did("export_midi", json!({ "path": "out.mid" }), p), "Exported the song as \u{201C}out.mid\u{201D}");
         assert_eq!(
@@ -584,6 +597,8 @@ mod tests {
             "import_midi",
             "export_midi",
             "render",
+            "measure",
+            "probe",
             "history",
             "create_track",
             "update_track",

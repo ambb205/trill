@@ -197,6 +197,7 @@ impl LiveRig {
             audio: &self.audio,
             stand_ins: Some(&mut self.stand_ins),
             sample_rate: self.processor.sample_rate(),
+            purpose: trill_core::device::Purpose::Playing,
         }
         .compile(project, false);
         self.problems = problems;

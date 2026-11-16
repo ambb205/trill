@@ -514,6 +514,23 @@ fn a_plugin_that_fails_while_running_is_bypassed() {
     assert_eq!(scripted::lifecycle(serial), ["init", "activate", "start", "stop", "deactivate", "destroy"]);
 }
 
+#[test]
+fn a_plugin_made_for_a_render_is_told_so_before_it_is_activated() {
+    use trill_core::device::Purpose;
+    let factory = factory();
+    let mut played = create(&factory, &device(kind::IMPULSE));
+    let mut rendered = factory
+        .create_for(&device(kind::IMPULSE), SR, BLOCK, Purpose::Rendering)
+        .unwrap_or_else(|error| panic!("{error}"));
+    let steps_of = |instance: &mut DeviceInstance| scripted::lifecycle(value(instance, scripted::SERIAL) as u64);
+    let steps = steps_of(&mut played);
+    assert!(!steps.iter().any(|step| step.starts_with("render")), "left as it comes: {steps:?}");
+    let steps = steps_of(&mut rendered);
+    let told = steps.iter().position(|step| *step == "render offline").expect("told it is rendered");
+    let activated = steps.iter().position(|step| *step == "activate").expect("activated");
+    assert!(told < activated, "{steps:?}");
+}
+
 // ---- through the engine --------------------------------------------------
 
 #[test]

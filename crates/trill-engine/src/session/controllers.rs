@@ -112,7 +112,7 @@ impl Session {
         self.instrument_device(track).map(|device| device.id)
     }
 
-    fn instrument_device(&self, track: TrackId) -> Option<&Device> {
+    pub(super) fn instrument_device(&self, track: TrackId) -> Option<&Device> {
         let track = self.project.track(track).ok()?;
         track.devices.iter().find(|device| device.enabled && trill_dsp::is_instrument(&device.uri) != Some(false))
     }
