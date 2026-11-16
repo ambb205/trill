@@ -400,6 +400,10 @@ impl TrillApp {
         // field that just lost the keyboard still has to see it.
         let typing = ctx.text_edit_focused() || self.was_typing;
         let mut commands = shortcuts::read(ctx, typing, selection);
+        // While words are selected in a panel, Ctrl+C means those words.
+        if trill_noir::prose::has_selection(ctx) {
+            commands.retain(|command| !matches!(command, Command::Copy | Command::Cut));
+        }
         if state.shortcuts_open {
             commands.retain(|command| matches!(command, Command::ShowShortcuts | Command::Escape));
         }
@@ -516,7 +520,7 @@ impl TrillApp {
         }
         // Closed and idle, the assistant has nothing to do and is not asked.
         if self.assistant.wants_tick() {
-            self.assistant.tick(ctx, &self.snapshot, &self.state, &self.live);
+            self.assistant.tick(ctx, &self.snapshot, &mut self.state, &self.live);
         }
         self.release_audition(ctx);
         // Edits from other front ends arrive without any input event, so an
@@ -598,7 +602,9 @@ impl TrillApp {
         files::confirm_modal(&ctx, &mut cx);
         recovery::modal(&ctx, &mut cx);
         shortcuts::window(&ctx, &mut cx);
-        let corner = ctx.content_rect().right_bottom() - egui::vec2(12.0, status_bar::HEIGHT + 10.0);
+        // Clear of the assistant's panel: its Send and Stop are in that corner.
+        let aside = if cx.assistant.is_open() { cx.assistant.width() } else { 0.0 };
+        let corner = ctx.content_rect().right_bottom() - egui::vec2(12.0 + aside, status_bar::HEIGHT + 10.0);
         cx.state.toasts.show(&ctx, cx.theme, corner);
 
         // The status bar is laid out before the views that ask for hints,

@@ -11,8 +11,9 @@
 //! commands on the selection and on a stretch of time (the edits of time
 //! themselves are the model's), [`envelopes`] is the automation lanes,
 //! [`ruler`] the loop, markers and time selection, [`headers`] the track
-//! headers, [`corner`] the grid and tool controls above them, and [`master`]
-//! the master row.
+//! headers, [`corner`] the grid and tool controls above them, [`master`]
+//! the master row, and [`reveal`] brings tracks and a stretch of time into
+//! view when something asks for them.
 
 mod clips;
 mod corner;
@@ -22,6 +23,7 @@ mod headers;
 mod lanes;
 mod master;
 pub(super) mod ops;
+mod reveal;
 mod rows;
 mod ruler;
 
@@ -29,6 +31,7 @@ pub(super) use clips::{allowed_length, fade_level};
 pub use envelopes::{delete_selected as delete_selected_points, select_all as select_all_points};
 pub use headers::{add_group_track, add_return_track, add_track, add_track_with, group_selected_track};
 pub(super) use headers::{pan_bar, send_bar};
+pub use reveal::Reveal;
 pub(super) use rows::display_order;
 // Where things are, for the interaction tests that click on them.
 #[cfg(test)]
@@ -258,6 +261,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     scroll_and_zoom(ui, cx, &mut geometry);
     follow_playhead(cx, &mut geometry);
     reveal_lane(cx, &mut geometry);
+    reveal::carry_out(ui, cx, &mut geometry);
     // Commands run before the layout; they go by what it was last frame.
     cx.state.arrangement.step = geometry.step();
     cx.state.arrangement.lanes_width = geometry.lanes.width();

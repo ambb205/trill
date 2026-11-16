@@ -110,6 +110,21 @@ pub fn layout(ui: &Ui, theme: &Theme, style: TextStyle, color: Color32, runs: &[
     ui.painter().layout_job(job)
 }
 
+/// Wraps `code` at `width` in the monospaced face, for a block of its own:
+/// no wash behind it (the block brings its own ground), and lines as they
+/// were typed, a long one continuing on the next row.
+pub fn code_block(ui: &Ui, style: TextStyle, color: Color32, code: &str, width: f32) -> Arc<Galley> {
+    let format = TextFormat {
+        font_id: FontId::new(code_size(style.size), FontFamily::Monospace),
+        color,
+        line_height: Some((style.size * LEADING).round()),
+        ..Default::default()
+    };
+    let mut job = LayoutJob::single_section(code.to_owned(), format);
+    job.wrap.max_width = width.max(40.0);
+    ui.painter().layout_job(job)
+}
+
 /// Wraps `words` at `width` in one face.
 pub fn plain(ui: &Ui, theme: &Theme, style: TextStyle, color: Color32, words: &str, width: f32) -> Arc<Galley> {
     layout(ui, theme, style, color, &[Run::plain(words)], width)
@@ -205,6 +220,25 @@ mod tests {
             // The text is the runs' own, joined: what a copy takes.
             assert!(galley.text().starts_with("The hats now run in sixteenths through Beat A, a little"));
 
+            // A block of code keeps its lines and has no wash of its own.
+            let block = code_block(
+                ui,
+                style,
+                theme.ink,
+                "C  E  G
+  A",
+                180.0,
+            );
+            assert_eq!(
+                (block.text(), block.rows.len()),
+                (
+                    "C  E  G
+  A",
+                    2
+                )
+            );
+            assert!(block.job.sections.iter().all(|section| section.format.background == Color32::TRANSPARENT));
+
             // One face, the same thing in fewer words.
             let single = plain(ui, theme, style, theme.ink, words, 180.0);
             assert_eq!(single.text(), words);
@@ -218,7 +252,12 @@ mod tests {
     fn pointer(at: Pos2, pressed: Option<bool>) -> Vec<Event> {
         match pressed {
             Some(pressed) => {
-                vec![Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE }]
+                vec![Event::PointerButton {
+                    pos: at,
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers: Modifiers::NONE,
+                }]
             }
             None => vec![Event::PointerMoved(at)],
         }
@@ -234,8 +273,8 @@ mod tests {
             let first = plain(ui, theme, theme.text.body, theme.ink, "Kick on one", 300.0);
             let second = plain(ui, theme, theme.text.body, theme.ink, "Snare on two", 300.0);
             let below = origin + vec2(0.0, first.size().y + 10.0);
-            rows[0] = selectable(ui, Id::new("first"), origin, first).rect;
-            rows[1] = selectable(ui, Id::new("second"), below, second).rect;
+            rows[0] = selectable(ui, Id::unique("first"), origin, first).rect;
+            rows[1] = selectable(ui, Id::unique("second"), below, second).rect;
         });
         rows
     }

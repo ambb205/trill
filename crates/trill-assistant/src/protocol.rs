@@ -425,6 +425,7 @@ fn classify_api_error(kind: ApiErrorKind, message: String, resets_at: Option<Sys
         ApiErrorKind::Authentication if lowered.contains("login") || lowered.contains("log in") => {
             FailureReason::NotLoggedIn
         }
+        ApiErrorKind::ModelNotFound => FailureReason::ModelUnavailable { message },
         kind => FailureReason::Api { kind, message },
     }
 }
@@ -436,6 +437,7 @@ fn api_error_kind(name: &str) -> ApiErrorKind {
         "rate_limit" => ApiErrorKind::RateLimit,
         "invalid_request" => ApiErrorKind::InvalidRequest,
         "server_error" => ApiErrorKind::Server,
+        "model_not_found" => ApiErrorKind::ModelNotFound,
         _ => ApiErrorKind::Other,
     }
 }
@@ -749,6 +751,27 @@ mod tests {
             failure_of(&api_error("authentication_failed", said)),
             FailureReason::Api { kind: ApiErrorKind::Authentication, message: said.into() }
         );
+    }
+
+    #[test]
+    fn a_model_the_service_does_not_know_is_a_failure_of_its_own() {
+        // As CLI 2.1.325 reported `--model=not-a-model-name`: the name is
+        // passed on, the service answers 404, and nothing is used.
+        let said = "There's an issue with the selected model (not-a-model-name). It may not exist or you may not \
+                    have access to it. Run --model to pick a different model.";
+        let mut start = init(&["mcp__trill__get_project"], connected());
+        start["model"] = json!("not-a-model-name");
+        let lines = [
+            start,
+            json!({"type":"assistant","error":"model_not_found","is_api_error_message":true,
+                   "message":{"model":"<synthetic>","content":[{"type":"text","text":said}]}}),
+            json!({"type":"result","subtype":"success","is_error":true,"result":said,"num_turns":1,
+                   "total_cost_usd":0,"api_error_status":404}),
+        ];
+        let events = feed(&mut translator(), &lines);
+        let [Event::Started(start)] = events.as_slice() else { panic!("expected a start only, got {events:?}") };
+        assert_eq!(start.model, "not-a-model-name", "the name is reported back as it was given");
+        assert_eq!(failure_of(&lines), FailureReason::ModelUnavailable { message: said.into() });
     }
 
     #[test]

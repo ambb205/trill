@@ -5,7 +5,8 @@
 //! outside the window, as that server does.
 
 use super::*;
-use crate::ui::assistant::testing::{Ending, Item, Offer, Problem, Script, Sent, ToolState, ready};
+use crate::ui::assistant::testing::{AT_WORK, Ending, Item, Offer, Place, Problem, Script, Sent, ToolState, ready};
+use crate::ui::timeline::TimeView;
 use serde_json::json;
 use trill_assistant::{
     ApiErrorKind, CliInstallation, CliVersion, Event, FailureReason, LoginMethod, MINIMUM_CLI_VERSION, Notice,
@@ -500,6 +501,632 @@ fn the_reply_appears_as_it_is_written_and_each_tool_call_is_a_line() {
     assert!(harness.is_on_screen("Send"));
 }
 
+// ---- 4: it shows what it changed ------------------------------------------------------
+
+/// What of the window a turn must leave alone until it has ended: where the
+/// arrangement is scrolled and zoomed to, what is selected, which tab is
+/// open.
+type View = (TimeView, f32, Vec<ClipId>, Option<TrackId>, Option<DeviceId>, DetailTab);
+
+impl Harness {
+    fn view(&self) -> View {
+        let state = self.app.state();
+        let arrangement = &state.arrangement;
+        (
+            arrangement.time,
+            arrangement.scroll_y,
+            state.selected_clips.clone(),
+            state.selected_track,
+            state.selected_device,
+            state.detail_tab,
+        )
+    }
+
+    /// The beats the arrangement shows, from its left edge to its right.
+    fn beats_in_view(&self) -> (f64, f64) {
+        let arrangement = &self.app.state().arrangement;
+        arrangement.time.visible(arrangement.lanes_width)
+    }
+
+    /// Adds a clip to `track` from outside the window, as a tool does, and
+    /// has the script answer the call `id` with it.
+    fn tool_adds_clip(&mut self, script: &Script, id: &str, track: TrackId, name: &str, start: f64) -> ClipId {
+        let clip = self.session.lock().edit(|project| project.add_midi_clip(track, name, start, 8.0)).unwrap();
+        script.say([answer(id, "create_clip", Ok(&format!("{{\"clip_id\":{},\"note_count\":0}}", clip.0)))]);
+        clip
+    }
+}
+
+fn create_clip(id: &str, track: TrackId, name: &str, start: f64) -> Event {
+    call(id, "create_clip", json!({ "track": track.0, "start": start, "length": 8, "name": name }))
+}
+
+#[test]
+fn when_a_turn_has_ended_the_window_shows_what_it_changed_and_not_before() {
+    let options = UiOptions { detail_tab: DetailTab::Mixer, ..Default::default() };
+    let (mut harness, ..) = with_three_tracks(options);
+    // Enough tracks that a new one lands below what the arrangement shows.
+    harness
+        .session
+        .lock()
+        .edit(|project| {
+            for number in 4..=14 {
+                project.add_track(format!("Track {number}"));
+            }
+            Ok(())
+        })
+        .unwrap();
+    let script = Script::ready();
+    harness.open_assistant(&script);
+
+    harness.tell("add a bass part at bar 51");
+    let before = harness.view();
+    assert_eq!((before.1, before.5), (0.0, DetailTab::Mixer));
+    script.say([started(), call("1", "create_track", json!({ "name": "Bass" }))]);
+    harness.idle(2);
+    let bass = harness.session.lock().edit(|project| Ok(project.add_track("Bass"))).unwrap();
+    script.say([
+        answer("1", "create_track", Ok(&format!("{{\"track_id\":{}}}", bass.0))),
+        create_clip("2", bass, "Line", 200.0),
+    ]);
+    harness.idle(2);
+    let line = harness.tool_adds_clip(&script, "2", bass, "Line", 200.0);
+    script.say([text("Added a bass part at bar 51.")]);
+    harness.idle(20);
+    assert!(harness.app.assistant().is_working());
+    assert_eq!(harness.app.snapshot().project.tracks.len(), 15, "the song has changed under the window");
+    assert_eq!(harness.view(), before, "and the view has not moved while the turn is under way");
+
+    script.say([finished()]);
+    harness.idle(30);
+    let state = harness.app.state();
+    assert_eq!(state.selected_clips, [line], "what was made is selected");
+    assert_eq!((state.selected_clip, state.selected_track), (Some(line), Some(bass)));
+    assert_eq!(state.detail_tab, DetailTab::Clip, "and the tab that shows a clip is open on it");
+    let (from, to) = harness.beats_in_view();
+    assert!(from <= 200.0 && to >= 208.0, "the timeline was scrolled to the clip: {from} to {to}");
+    assert_eq!(state.arrangement.time.pixels_per_beat, before.0.pixels_per_beat, "scrolling was enough: no zoom");
+    assert!(state.arrangement.scroll_y > 0.0, "the track list was scrolled down to the new track");
+    assert_eq!(harness.undo_depth(), 3, "showing is not an edit: the song, the tracks, and the turn");
+
+    // A turn that changes nothing moves nothing.
+    let shown = harness.view();
+    harness.tell("what key is it in?");
+    script.say([
+        started(),
+        call("3", "get_project", json!({})),
+        answer("3", "get_project", Ok("{}")),
+        text("C major."),
+        finished(),
+    ]);
+    harness.idle(30);
+    assert_eq!(harness.view(), shown);
+}
+
+#[test]
+fn the_view_is_left_alone_while_the_user_holds_something_or_is_at_work_elsewhere() {
+    let (mut harness, script, tracks, _) = assisted();
+
+    // The user takes hold of a fader while the assistant works, and is
+    // still holding it when the turn ends.
+    harness.tell("add a clip far along");
+    script.say([started(), create_clip("1", tracks[2], "Far", 400.0)]);
+    harness.idle(2);
+    let far = harness.tool_adds_clip(&script, "1", tracks[2], "Far", 400.0);
+    let (grab, pull) = (harness.volume_bar(0, 0.84), harness.volume_bar(0, 0.4));
+    harness.drag_start(Modifiers::NONE, grab, pull);
+    let held = harness.view();
+    script.say([text("Done."), finished()]);
+    harness.idle(10);
+    assert!(!harness.app.assistant().is_working(), "the turn has ended");
+    assert_eq!(harness.view(), held, "the view does not move while something is being dragged");
+    harness.drag_end(pull);
+    harness.idle(60);
+    assert_eq!(harness.view(), held, "and is not sprung on the user when they let go");
+    assert!(harness.project().track(tracks[0]).unwrap().volume_db < -10.0, "the drag was theirs to finish");
+
+    // The turn's own line still leads there, when they want to look.
+    harness.click_label("Show what changed");
+    harness.idle(30);
+    assert_eq!(harness.selected_clips(), [far]);
+    assert_eq!(harness.app.state().detail_tab, DetailTab::Clip);
+    let (from, to) = harness.beats_in_view();
+    assert!(from <= 400.0 && to >= 408.0, "{from} to {to}");
+
+    // A click in the arrangement a moment before the turn ends: they are
+    // at work there, and are left to it.
+    harness.tell("and another");
+    script.say([started(), create_clip("2", tracks[2], "Further", 600.0)]);
+    harness.idle(2);
+    harness.tool_adds_clip(&script, "2", tracks[2], "Further", 600.0);
+    harness.click(harness.lane(from + 1.0, 1));
+    let there = harness.view();
+    assert_eq!(there.3, Some(tracks[1]), "the click selected the second track");
+    script.say([finished()]);
+    harness.idle(30);
+    assert_eq!(harness.view(), there);
+
+    // Having done the same and then waited, they are watching again: the
+    // next turn shows what it made.
+    harness.tell("and one more");
+    script.say([started(), create_clip("3", tracks[2], "Furthest", 800.0)]);
+    harness.idle(2);
+    let furthest = harness.tool_adds_clip(&script, "3", tracks[2], "Furthest", 800.0);
+    harness.click(harness.lane(from + 1.0, 1));
+    harness.idle((AT_WORK / FRAME) as usize + 10);
+    assert_eq!(harness.view(), there, "waiting alone moves nothing");
+    script.say([finished()]);
+    harness.idle(30);
+    assert_eq!(harness.selected_clips(), [furthest]);
+    let (from, to) = harness.beats_in_view();
+    assert!(from <= 800.0 && to >= 808.0, "{from} to {to}");
+}
+
+#[test]
+fn the_line_of_a_call_that_changed_something_leads_to_it() {
+    let (mut harness, script, tracks, _) = assisted();
+    harness.tell("a line for the second track, reverb on the first, the third quieter");
+    script.say([
+        started(),
+        call("1", "get_project", json!({})),
+        answer("1", "get_project", Ok("{}")),
+        create_clip("2", tracks[1], "Line", 24.0),
+    ]);
+    harness.idle(2);
+    let line = harness.tool_adds_clip(&script, "2", tracks[1], "Line", 24.0);
+    script.say([call("3", "add_device", json!({ "track": tracks[0].0, "uri": "builtin:reverb" }))]);
+    harness.idle(2);
+    let reverb = harness.session.lock().add_device(ChainRef::Track(tracks[0]), "builtin:reverb", None, None).unwrap();
+    script.say([
+        answer("3", "add_device", Ok(&format!("{{\"device_id\":{},\"name\":\"Reverb\"}}", reverb.0))),
+        call("4", "update_track", json!({ "track": tracks[2].0, "volume_db": -6 })),
+    ]);
+    harness.idle(2);
+    harness.session.lock().edit(|project| project.set_track_volume(tracks[2], -6.0)).unwrap();
+    script.say([answer("4", "update_track", Ok("{}")), text("Done."), finished()]);
+    harness.idle(30);
+    // Shown as the turn ended: everything it made is selected, and the tab
+    // and the track are those of the device, which came after the clip.
+    assert_eq!(harness.selected_clips(), [line]);
+    assert_eq!(harness.app.state().selected_device, Some(reverb));
+    assert_eq!(
+        (harness.app.state().selected_track, harness.app.state().detail_tab),
+        (Some(tracks[0]), DetailTab::Devices)
+    );
+
+    let tool = |harness: &Harness, name: &str| {
+        let found = harness.items().iter().find_map(|item| match item {
+            Item::Tool(line) if line.tool == name => Some(line.clone()),
+            _ => None,
+        });
+        found.unwrap_or_else(|| panic!("no call to {name}"))
+    };
+    // A call that only read leads nowhere: a click unfolds it, as before.
+    harness.click_label("Read the project");
+    assert!(tool(&harness, "get_project").open && tool(&harness, "get_project").place.is_none());
+    assert_eq!(harness.app.state().selected_track, Some(tracks[0]), "and nothing else happened");
+
+    // The clip's line: the clip, its track, the Clip tab.
+    harness.click_label("Added the clip \u{201C}Line\u{201D} to \u{201C}Two\u{201D}");
+    assert_eq!(harness.selected_clips(), [line]);
+    assert_eq!(
+        (harness.app.state().selected_track, harness.app.state().detail_tab),
+        (Some(tracks[1]), DetailTab::Clip)
+    );
+    assert!(!tool(&harness, "create_clip").open, "going there does not unfold the line");
+    // The track's: the track, where it is; the tab stays.
+    harness.click_label("Changed the volume of \u{201C}Three\u{201D}");
+    assert_eq!(
+        (harness.app.state().selected_track, harness.app.state().detail_tab),
+        (Some(tracks[2]), DetailTab::Clip)
+    );
+    // The device's: its track, the Devices tab, the device chosen in it.
+    harness.click_label("Added reverb to \u{201C}One\u{201D}");
+    assert_eq!(harness.app.state().selected_device, Some(reverb));
+    assert_eq!(
+        (harness.app.state().selected_track, harness.app.state().detail_tab),
+        (Some(tracks[0]), DetailTab::Devices)
+    );
+
+    // What was sent and answered is still a click away, on the caret.
+    harness.click_label("Details of: Added the clip \u{201C}Line\u{201D} to \u{201C}Two\u{201D}");
+    assert!(tool(&harness, "create_clip").open);
+    harness.move_to(harness.labeled("Added the clip \u{201C}Line\u{201D} to \u{201C}Two\u{201D}"));
+    harness.idle(2);
+    assert!(harness.hint().starts_with("Show this in the song"), "{}", harness.hint());
+
+    // Taken back, the clip is gone and its line leads nowhere: a click on
+    // it folds it away again, and the turn offers nothing to show.
+    harness.click_label("Undo");
+    harness.idle(3);
+    assert!(harness.project().clip(line).is_err());
+    assert!(!harness.is_on_screen("Show what changed"), "a turn that was taken back has nothing to show");
+    assert!(!harness.is_on_screen("Details of: Added the clip") && !harness.is_on_screen("Details of: Added reverb"));
+    assert!(harness.is_on_screen("Details of: Changed the volume"), "the track is still there to go to");
+    harness.click_label("Added the clip \u{201C}Line\u{201D} to \u{201C}Two\u{201D}");
+    assert!(!tool(&harness, "create_clip").open);
+    assert!(harness.selected_clips().is_empty());
+    // Brought back, it is the same clip, and the line leads to it again.
+    harness.click_label("Redo");
+    harness.idle(3);
+    harness.click_label("Show what changed");
+    assert_eq!(harness.selected_clips(), [line]);
+    assert_eq!(harness.undo_depth(), 2, "going to see is never an edit");
+}
+
+#[test]
+fn a_turn_whose_calls_do_not_say_is_shown_by_what_differs_in_the_song() {
+    let (mut harness, script, tracks, _) = assisted();
+    assert_eq!(harness.app.state().selected_track, Some(tracks[0]));
+    harness.tell("polish it");
+    // A tool the panel has no words for, and whose answer names nothing.
+    script.say([started(), call("1", "polish_mix", json!({ "amount": 3 }))]);
+    harness.idle(2);
+    harness.session.lock().edit(|project| project.set_track_volume(tracks[2], -9.0)).unwrap();
+    script.say([answer("1", "polish_mix", Ok("polished")), finished()]);
+    harness.idle(10);
+    let Some(Item::End(end)) = harness.items().last() else { panic!("the turn has ended") };
+    assert_eq!(end.places, [Place::Track { id: tracks[2].0, name: "Three".into() }]);
+    assert_eq!(harness.app.state().selected_track, Some(tracks[2]), "the track that differs was gone to");
+    assert!(harness.is_on_screen("Show what changed") && !harness.is_on_screen("Details of:"));
+}
+
+// ---- 5: replies read and copy like text ----------------------------------------------
+
+impl Harness {
+    /// Where the passage of the conversation that reads `words` is.
+    fn passage(&self, words: &str) -> Rect {
+        let found = self.labels.iter().find(|(text, _)| text == words);
+        found.unwrap_or_else(|| panic!("no passage reads {words:?}: {:?}", self.labels)).1
+    }
+
+    /// The labels of what is on show in the assistant's panel.
+    fn said_in_the_panel(&self) -> Vec<&str> {
+        let left = SCREEN.x - self.app.assistant().width();
+        self.labels.iter().filter(|(_, rect)| rect.left() >= left).map(|(text, _)| text.as_str()).collect()
+    }
+}
+
+#[test]
+fn a_reply_is_selected_with_the_mouse_and_copied() {
+    let (mut harness, script, _, clips) = assisted();
+    harness.tell("busier hats");
+    script.say([
+        started(),
+        text("The **hats** now run in `sixteenths`.\n\nThe pad is down a little.\n\n- Kick on one\n- Snare on two"),
+        finished(),
+    ]);
+    harness.idle(3);
+    // Set as it reads: the marks are gone.
+    let (first, second) =
+        (harness.passage("The hats now run in sixteenths."), harness.passage("The pad is down a little."));
+    assert!(second.top() > first.bottom(), "a paragraph under the other");
+
+    // A clip is selected in the arrangement, as it would be.
+    harness.click(harness.lane(9.0, 0));
+    assert_eq!(harness.selected_clips(), [clips[0]]);
+
+    // Dragged across from the start of one paragraph to the end of the
+    // next, and copied.
+    harness.drag(first.left_center() + vec2(1.0, 0.0), second.right_center() - vec2(1.0, 0.0));
+    harness.copy();
+    assert_eq!(harness.clipboard.as_deref(), Some("The hats now run in sixteenths.\n\nThe pad is down a little."));
+    assert!(harness.app.state().clipboard.is_none(), "Ctrl+C meant the words, not the clip that is selected");
+    assert_eq!(harness.selected_clips(), [clips[0]], "and the selection in the song is as it was");
+
+    // Part of a line; and the items of a list come out line under line.
+    harness.drag(first.left_center() + vec2(1.0, 0.0), first.center());
+    harness.copy();
+    let part = harness.clipboard.clone().unwrap();
+    assert!(part.starts_with("The hats") && part.len() < "The hats now run in sixteenths.".len(), "{part:?}");
+    let (kick, snare) = (harness.passage("Kick on one"), harness.passage("Snare on two"));
+    harness.drag(kick.left_center() + vec2(1.0, 0.0), snare.right_center() - vec2(1.0, 0.0));
+    harness.copy();
+    assert_eq!(harness.clipboard.as_deref(), Some("Kick on one\nSnare on two"));
+
+    // A double-click takes a word.
+    harness.settle();
+    harness.double_click(first.left_center() + vec2(4.0, 0.0));
+    harness.copy();
+    assert_eq!(harness.clipboard.as_deref(), Some("The"));
+
+    // The user's own message is text too.
+    let message = harness.passage("You: busier hats");
+    harness.settle();
+    harness.double_click(pos2(message.left() + 16.0, message.bottom() - 16.0));
+    harness.copy();
+    assert_eq!(harness.clipboard.as_deref(), Some("busier"));
+
+    // A click back in the song lets go of the words, and Ctrl+C is the
+    // clip's again.
+    harness.settle();
+    harness.click(harness.lane(9.0, 0));
+    harness.copy();
+    assert_eq!(harness.clipboard.as_deref(), Some("1 clip from Trill"));
+    assert!(harness.app.state().clipboard.is_some());
+    assert_eq!(harness.undo_depth(), 1, "none of it touched the song");
+}
+
+#[test]
+fn the_menu_of_a_reply_copies_all_of_it_as_it_reads() {
+    let (mut harness, script, ..) = assisted();
+    harness.tell("busier hats");
+    let said =
+        "## Done\n\nThe **hats** now run in `sixteenths`.\n\n1. Kick on one\n2. Snare on two\n\n```\nx . x .\n```";
+    script.say([started(), text(said), finished()]);
+    harness.idle(3);
+
+    harness.right_click(harness.passage("The hats now run in sixteenths.").center());
+    harness.click_label("Copy reply");
+    assert_eq!(
+        harness.clipboard.as_deref(),
+        Some("Done\n\nThe hats now run in sixteenths.\n\n1. Kick on one\n2. Snare on two\n\nx . x ."),
+        "the whole reply, without the marks that set it"
+    );
+
+    // The user's message: copied as it was typed, or put back to send again.
+    let message = harness.passage("You: busier hats");
+    harness.right_click(pos2(message.left() + 16.0, message.bottom() - 16.0));
+    harness.click_label("Copy message");
+    assert_eq!(harness.clipboard.as_deref(), Some("busier hats"));
+    harness.right_click(pos2(message.right() - 30.0, message.top() + 6.0));
+    harness.click_label("Put back in the message field");
+    assert_eq!(harness.app.assistant().draft(), "busier hats");
+}
+
+#[test]
+fn markdown_that_arrives_in_pieces_is_shown_without_its_marks_and_set_once() {
+    let (mut harness, script, ..) = assisted();
+    harness.tell("busier hats");
+    script.say([started()]);
+    harness.idle(2);
+    // Cut where a real reply is cut: inside a mark, a word, a fence.
+    let pieces = [
+        "I **dou",
+        "bled** the `ha",
+        "ts`.\n\n- Ki",
+        "ck on *o",
+        "ne*\n- Sna",
+        "re\n\n``",
+        "`\nAm | F\n`",
+        "``\nDo",
+        "ne.",
+    ];
+    let mut set = harness.app.assistant().blocks_set();
+    let mut shown_before = 0;
+    for piece in pieces {
+        script.say([text(piece)]);
+        harness.idle(3);
+        let panel = harness.said_in_the_panel();
+        assert!(
+            !panel.iter().any(|label| label.contains(['*', '`'])),
+            "a mark was shown as it arrived, after {piece:?}: {panel:?}"
+        );
+        let now = harness.app.assistant().blocks_set();
+        assert!(now - set <= 2, "{} blocks were set for {piece:?}: only what changed should be", now - set);
+        set = now;
+        // What is on show only ever grows.
+        let shown: usize = panel.iter().map(|label| label.len()).sum();
+        assert!(shown >= shown_before, "something was taken back after {piece:?}");
+        shown_before = shown;
+    }
+    for words in ["I doubled the hats.", "Kick on one", "Snare", "Am | F", "Done."] {
+        assert!(harness.shows(words), "{words:?} is not on show: {:?}", harness.said_in_the_panel());
+    }
+    // Held back until it is known what they are: half a mark, the start of
+    // a list, of a fence.
+    script.say([text("\n\n1")]);
+    harness.idle(2);
+    assert!(!harness.shows("1"));
+    script.say([text(". Then **")]);
+    harness.idle(2);
+    assert!(harness.shows("Then") && !harness.said_in_the_panel().iter().any(|label| label.contains('*')));
+
+    // Nothing is set again for being looked at.
+    let set = harness.app.assistant().blocks_set();
+    harness.idle(60);
+    assert_eq!(harness.app.assistant().blocks_set(), set);
+
+    // Nor while the panel is closed, however much arrives.
+    harness.key(CTRL_SHIFT, Key::A);
+    assert!(!harness.app.assistant().is_open());
+    script.say([text("loud"), text("** and more"), text(" words, and more still.")]);
+    harness.idle(20);
+    assert_eq!(harness.app.assistant().blocks_set(), set, "a closed panel sets nothing");
+    assert!(harness.reply().ends_with("more still."), "though the reply was taken in");
+    harness.key(CTRL_SHIFT, Key::A);
+    harness.idle(2);
+    assert!(harness.shows("Then loud and more words, and more still."));
+    assert_eq!(harness.app.assistant().blocks_set(), set + 1, "opened again, the one block that grew is set");
+    script.say([finished()]);
+    harness.idle(2);
+}
+
+// ---- 6: the model is chosen in the panel ---------------------------------------------
+
+#[test]
+fn the_model_is_chosen_in_the_panel_and_reaches_the_back_end() {
+    let (mut harness, script, ..) = assisted();
+    assert!(harness.shows("Model: Default"), "the CLI's own choice until another is made");
+    assert_eq!(harness.app.assistant().model_choice(), None);
+    harness.tell("hello");
+    assert_eq!(script.state().models, [None], "no model is asked for: the choice is the CLI's");
+
+    // While the assistant is answering, the model is not to be changed.
+    harness.click_label("Model: Default");
+    harness.idle(3);
+    assert!(!harness.shows("sonnet"), "the list does not open");
+    assert!(harness.app.assistant_mut().choose_model(Some("sonnet")).is_err());
+    script.say([started(), text("Hello."), finished()]);
+    harness.idle(3);
+
+    // The list: the CLI's own choice, the names it takes, a field for any other.
+    harness.click_label("Model: Default");
+    harness.idle(3);
+    assert!(harness.is_on("Default"));
+    for alias in trill_assistant::MODEL_ALIASES {
+        assert!(harness.shows(alias) && !harness.is_on(alias), "{alias}");
+    }
+    assert!(harness.shows("Another model name"));
+    assert!(harness.shows("Answering as test-model"), "what the CLI said it is answering as");
+    // Nothing in the window, the open list included, promises anything.
+    for (label, _) in &harness.labels {
+        let lowered = label.to_lowercase();
+        for promise in ["included", "unlimited", "your plan", "sign in", "log in"] {
+            assert!(!lowered.contains(promise), "the panel says {label:?}");
+        }
+    }
+    harness.click_label("sonnet");
+    harness.idle(3);
+    assert_eq!(harness.app.assistant().model_choice(), Some("sonnet"));
+    assert!(harness.shows("Model: sonnet") && !harness.shows("Default"), "chosen, and the list is put away");
+    let carries =
+        "The model \u{201C}sonnet\u{201D} answers from the next message on. The conversation carries on with it.";
+    assert!(
+        harness.shows(carries),
+        "what happens to the conversation is said in it: {:?}",
+        harness.said_in_the_panel()
+    );
+
+    // The next message is the same conversation, opened again for that model.
+    harness.tell("again");
+    assert_eq!(script.state().opened, [None, Some(conversation_id('a'))], "resumed, not begun anew");
+    assert_eq!(script.state().models, [None, Some("sonnet".to_owned())]);
+    let start = TurnStart { session_id: conversation_id('a'), model: "sonnet-as-named".into(), api_key_source: None };
+    script.say([Event::Started(start), finished()]);
+    harness.idle(3);
+    assert_eq!(harness.app.assistant().conversation(), Some(&conversation_id('a')));
+
+    // A name of the user's own, typed.
+    harness.click_label("Model: sonnet");
+    harness.idle(3);
+    assert!(harness.is_on("sonnet") && harness.shows("Answering as sonnet-as-named"));
+    harness.click_label("Another model name");
+    harness.type_text("claude-haiku-5-5");
+    harness.key(Modifiers::NONE, Key::Enter);
+    harness.idle(3);
+    assert_eq!(harness.app.assistant().model_choice(), Some("claude-haiku-5-5"));
+    assert!(harness.shows("Model: claude-haiku-5-5"));
+    // Changed twice before anything was sent: said once, as it now stands.
+    let notes = harness.items().iter().filter(|item| matches!(item, Item::Note { .. })).count();
+    assert_eq!(notes, 2, "one for each change that a message followed, and for this one: {:?}", harness.items());
+    assert!(harness.shows(
+        "The model \u{201C}claude-haiku-5-5\u{201D} answers from the next message on. The conversation carries on with it."
+    ));
+    // Back to what last answered: there is no change to speak of.
+    harness.click_label("Model: claude-haiku-5-5");
+    harness.idle(3);
+    assert!(harness.is_on("claude-haiku-5-5"), "the name in use is in the list");
+    harness.click_label("sonnet");
+    harness.idle(3);
+    assert_eq!(harness.items().iter().filter(|item| matches!(item, Item::Note { .. })).count(), 1);
+
+    // What could not be a name is refused where it was typed, with the
+    // field still open to put it right and the choice left as it was.
+    harness.click_label("Model: sonnet");
+    harness.idle(3);
+    harness.click_label("Another model name");
+    harness.type_text("two words");
+    harness.key(Modifiers::NONE, Key::Enter);
+    harness.idle(3);
+    assert_eq!(harness.app.assistant().model_choice(), Some("sonnet"));
+    assert!(
+        harness.shows(
+            "\u{201C}two words\u{201D} cannot be the name of a model: it has a space in it, or begins with a dash."
+        ),
+        "{:?}",
+        harness.labels
+    );
+    assert!(harness.app.assistant_mut().choose_model(Some("--resume=x")).is_err());
+
+    // And back to the CLI's own choice, from the list that is still open.
+    harness.click_label("Default");
+    harness.idle(3);
+    assert_eq!(harness.app.assistant().model_choice(), None);
+    harness.tell("once more");
+    assert_eq!(script.state().models.last(), Some(&None));
+    assert_eq!(script.state().opened.len(), 3, "each change opened the conversation again, by its id");
+    assert_eq!(script.state().opened[2], Some(conversation_id('a')));
+}
+
+#[test]
+fn the_chosen_model_is_remembered_from_one_session_to_the_next() {
+    let home = tempfile::tempdir().unwrap();
+    let start = || {
+        let storage = trill_runtime::Storage::At { settings: home.path().join("settings.json"), library_index: None };
+        Arc::new(Runtime::start(RuntimeOptions { storage, ..RuntimeOptions::hermetic() }).unwrap())
+    };
+    let kept = || std::fs::read_to_string(home.path().join("assistant.json")).unwrap();
+
+    let mut harness = Harness::on(start(), UiOptions::default(), |_| {});
+    harness.open_assistant(&Script::ready());
+    harness.click_label("Model: Default");
+    harness.click_label("opus");
+    harness.idle(3);
+    drop(harness);
+    assert!(kept().contains("\"model\": \"opus\""), "{}", kept());
+
+    // The next session starts with it, and asks for it.
+    let mut harness = Harness::on(start(), UiOptions::default(), |_| {});
+    let script = Script::ready();
+    harness.app.assistant_mut().use_script(script.clone());
+    assert_eq!(harness.app.assistant().model_choice(), Some("opus"));
+    harness.idle(3);
+    assert!(harness.shows("Model: opus"));
+    harness.tell("hello");
+    assert_eq!(script.state().models, [Some("opus".to_owned())]);
+    assert!(!harness.items().iter().any(|item| matches!(item, Item::Note { .. })), "nothing changed: nothing to say");
+    drop(harness);
+
+    // A run told on the command line which model to use starts with that
+    // one, and what is remembered stays as it was chosen.
+    let mut options = UiOptions::default();
+    options.assistant.model = Some("haiku".to_owned());
+    let harness = Harness::on(start(), options, |_| {});
+    assert_eq!(harness.app.assistant().model_choice(), Some("haiku"));
+    drop(harness);
+    assert!(kept().contains("\"model\": \"opus\""), "{}", kept());
+
+    // Back to the CLI's own choice: the name goes from the file.
+    let mut harness = Harness::on(start(), UiOptions::default(), |_| {});
+    harness.app.assistant_mut().use_script(Script::ready());
+    harness.idle(3);
+    harness.click_label("Model: opus");
+    harness.click_label("Default");
+    harness.idle(3);
+    drop(harness);
+    assert!(!kept().contains("opus") && !kept().contains("\"model\""), "{}", kept());
+}
+
+#[test]
+fn a_model_that_cannot_be_used_is_said_in_the_clis_words_and_another_can_be_chosen() {
+    let (mut harness, script, ..) = assisted();
+    harness.app.assistant_mut().choose_model(Some("not-a-model-name")).unwrap();
+    harness.idle(2);
+    harness.tell("hello");
+    assert_eq!(script.state().models, [Some("not-a-model-name".to_owned())], "the name goes to the CLI as it is");
+    let said = "There's an issue with the selected model (not-a-model-name). It may not exist or you may not have \
+                access to it. Run --model to pick a different model.";
+    let reason = FailureReason::ModelUnavailable { message: said.into() };
+    script.say([started(), Event::Failed(reason.clone())]);
+    harness.idle(3);
+    assert!(harness.is_on_screen(&reason.to_string()), "{:?}", harness.said_in_the_panel());
+    assert!(
+        reason.to_string().contains(said) && reason.to_string().contains("under the assistant\u{2019}s message field")
+    );
+    assert_eq!(script.state().checks, 1, "nothing is wrong with the CLI: it is not looked for again");
+    assert!(harness.is_on_screen("Send") && harness.is_on_screen("Try again"));
+
+    // Another model, and the same message again.
+    harness.click_label("Model: not-a-model-name");
+    harness.click_label("haiku");
+    harness.idle(3);
+    harness.click_label("Try again");
+    let state = script.state();
+    assert_eq!(state.sent.last().unwrap().message, "hello");
+    assert_eq!(state.models.last(), Some(&Some("haiku".to_owned())));
+}
+
 // ---- the message field ---------------------------------------------------------------
 
 #[test]
@@ -584,9 +1211,12 @@ fn a_new_conversation_starts_over() {
     assert_eq!(script.state().opened, [None, None], "the next message opens a conversation that resumes nothing");
 
     // An example fills the field; it is not sent until the user sends it.
+    // Which examples there are goes by what is selected.
     script.say([started(), finished()]);
     harness.idle(2);
     harness.click_label("New conversation");
+    assert!(!harness.is_on_screen("Make the selected clip busier."), "no clip is selected");
+    harness.click(harness.lane(9.0, 0));
     harness.click_label("Make the selected clip busier.");
     assert_eq!(harness.app.assistant().draft(), "Make the selected clip busier.");
     assert_eq!(script.state().sent.len(), 4);
