@@ -19,7 +19,7 @@ use trill_library::Query;
 use trill_media::{WavFormat, write_wav};
 use trill_runtime::SoundClip;
 
-const WAIT: Duration = Duration::from_secs(60);
+pub(super) const WAIT: Duration = Duration::from_secs(60);
 
 /// A file another program let go of over the window.
 #[derive(Debug)]
@@ -36,7 +36,7 @@ impl egui::DroppedFile for Dropped {
 }
 
 /// Writes `seconds` of a decaying tone and returns the file's path.
-fn tone(path: PathBuf, seconds: f64) -> PathBuf {
+pub(super) fn tone(path: PathBuf, seconds: f64) -> PathBuf {
     let rate = 44_100.0;
     let frames = (seconds * rate) as usize;
     let channel: Vec<f32> = (0..frames)
@@ -87,14 +87,14 @@ impl Pack {
     }
 }
 
-fn sounds_tab() -> UiOptions {
-    UiOptions { browser_tab: BrowserTab::Sounds, ..Default::default() }
+pub(super) fn sounds_tab() -> UiOptions {
+    UiOptions { browser_tab: Some(BrowserTab::Sounds), ..Default::default() }
 }
 
 impl Harness {
     /// Runs frames until the sound workers have nothing left to do and
     /// what they finished has been taken in and drawn.
-    fn settle_work(&mut self) {
+    pub(super) fn settle_work(&mut self) {
         let deadline = Instant::now() + WAIT;
         loop {
             self.idle(2);
@@ -181,7 +181,7 @@ impl Harness {
 fn with_pack(options: UiOptions) -> (Harness, Pack, [TrackId; 2]) {
     let pack = Pack::new();
     let mut tracks = None;
-    let mut harness = Harness::new(UiOptions { browser_tab: BrowserTab::Sounds, ..options }, |session| {
+    let mut harness = Harness::new(UiOptions { browser_tab: Some(BrowserTab::Sounds), ..options }, |session| {
         tracks = Some(session.edit(|project| Ok([project.add_track("One"), project.add_track("Two")])).unwrap());
     });
     harness.add_pack(&pack);
@@ -403,6 +403,59 @@ fn the_keyboard_moves_through_the_list_previews_and_searches() {
     assert_eq!(harness.app.state().focus, FocusArea::Arrangement);
     harness.key(Modifiers::NONE, Key::Space);
     harness.wait_for("playback to start", |session| session.transport().playing);
+}
+
+#[test]
+fn the_browser_is_remembered_from_one_session_to_the_next() {
+    let pack = Pack::new();
+    let home = tempfile::tempdir().unwrap();
+    let start = || {
+        let storage = trill_runtime::Storage::At { settings: home.path().join("settings.json"), library_index: None };
+        let options = RuntimeOptions { storage, ..RuntimeOptions::hermetic() };
+        Arc::new(Runtime::start(options).unwrap())
+    };
+    let remembered = home.path().join("browser.json");
+
+    // The first session: nothing to remember yet, so the browser is as it
+    // starts, and nothing is written for having looked.
+    let mut harness = Harness::on(start(), UiOptions::default(), |_| {});
+    assert_eq!(harness.app.state().browser.tab, BrowserTab::Devices);
+    harness.idle(60);
+    assert!(!remembered.exists());
+    harness.click_label("Sounds");
+    harness.add_pack(&pack);
+    harness.click_label("Test Pack");
+    harness.click_label("Loops");
+    harness.app.state_mut().browser.sounds.search = "bass".into();
+    harness.click(harness.labeled_below("Loop", top_bar::HEIGHT));
+    harness.click_label("Preview on selection");
+    harness.settle_work();
+    assert_eq!(harness.listed(), ["Bass Loop 100bpm"]);
+    // Written once it has stopped changing, by a worker.
+    harness.idle(60);
+    harness.settle_work();
+    assert!(remembered.exists());
+    drop(harness);
+
+    // The next session starts where that one left off, the library's
+    // folder included (that part is the settings').
+    let mut harness = Harness::on(start(), UiOptions::default(), |_| {});
+    assert!(harness.runtime.library.wait_until_idle(WAIT));
+    harness.settle_work();
+    let browser = &harness.app.state().browser;
+    assert_eq!(browser.tab, BrowserTab::Sounds);
+    assert_eq!((browser.sounds.search.as_str(), browser.sounds.form), ("bass", SoundForm::Loop));
+    assert_eq!(browser.sounds.folder.as_deref(), Some(pack.root.join("Loops").as_path()));
+    assert!(!browser.sounds.auto_preview);
+    assert!(harness.is_on_screen("Loops"), "the tree is unfolded down to the folder");
+    assert_eq!(harness.listed(), ["Bass Loop 100bpm"]);
+    // What the command line asks for wins over what was remembered.
+    drop(harness);
+    let options =
+        UiOptions { browser_tab: Some(BrowserTab::Devices), sound_search: Some("kick".into()), ..Default::default() };
+    let harness = Harness::on(start(), options, |_| {});
+    assert_eq!(harness.app.state().browser.tab, BrowserTab::Devices);
+    assert_eq!(harness.app.state().browser.sounds.search, "kick");
 }
 
 // ---- previewing ----------------------------------------------------------
@@ -657,7 +710,7 @@ fn a_rows_menu_copies_the_path_and_shows_the_folder() {
 fn with_instruments(options: UiOptions) -> (Harness, Pack, [TrackId; 3], DeviceId, DeviceId) {
     let pack = Pack::new();
     let mut ids = None;
-    let mut harness = Harness::new(UiOptions { browser_tab: BrowserTab::Sounds, ..options }, |session| {
+    let mut harness = Harness::new(UiOptions { browser_tab: Some(BrowserTab::Sounds), ..options }, |session| {
         let tracks = session
             .edit(|project| Ok([project.add_track("Audio"), project.add_track("Keys"), project.add_track("Kit")]))
             .unwrap();
@@ -840,19 +893,14 @@ fn a_drop_that_fails_changes_nothing_and_says_why() {
 /// drop makes them.
 fn with_audio_clips(options: UiOptions) -> (Harness, Pack, TrackId, Vec<ClipId>) {
     let pack = Pack::new();
-    let mut made = None;
     let files = [pack.kick.clone(), pack.bass_loop.clone(), pack.drum_loop.clone()];
     let harness = Harness::new(options, |_| {});
-    {
-        let track = harness.session.lock().edit(|project| Ok(project.add_track("Audio"))).unwrap();
-        let mut clips = Vec::new();
-        for (index, file) in files.iter().enumerate() {
-            let sound = SoundClip::new(file, track, index as f64 * 8.0);
-            clips.push(harness.runtime.add_sound(&sound).unwrap().clip);
-        }
-        made = Some((track, clips));
-    }
-    let (track, clips) = made.unwrap();
+    let track = harness.session.lock().edit(|project| Ok(project.add_track("Audio"))).unwrap();
+    let clips = files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| harness.runtime.add_sound(&SoundClip::new(file, track, index as f64 * 8.0)).unwrap().clip)
+        .collect();
     (harness, pack, track, clips)
 }
 

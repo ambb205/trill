@@ -29,6 +29,10 @@ const HOUSEKEEPING_INTERVAL: Duration = Duration::from_secs(1);
 const MIN_ARRANGEMENT_HEIGHT: f32 = 200.0;
 /// Frames to let the layout settle before taking a screenshot.
 const SCREENSHOT_SETTLE_FRAMES: u32 = 12;
+/// Frames the browser's tab, search and filters must stay as they are
+/// before they are written down for the next session: not on every key of
+/// a search.
+const REMEMBER_AFTER_FRAMES: u32 = 45;
 /// How long a screenshot waits for the library to be scanned and for the
 /// waveforms on screen to be drawn before it is taken regardless.
 const SCREENSHOT_PATIENCE: Duration = Duration::from_secs(20);
@@ -80,6 +84,12 @@ pub struct TrillApp {
     /// The frame count when the workers were last seen busy, for
     /// screenshots, which wait until what they show has arrived.
     busy_at_frame: u32,
+    /// Where what the browser shows is kept between sessions; `None` in a
+    /// run that keeps nothing.
+    remember_in: Option<std::path::PathBuf>,
+    /// What is written there, what the browser showed on the last frame,
+    /// and the frame it last changed on.
+    remembered: (browser::Remembered, browser::Remembered, u32),
 }
 
 impl TrillApp {
@@ -99,11 +109,21 @@ impl TrillApp {
 
         let mut state = UiState::new(options.detail_tab);
         state.browser.open = options.browser;
-        state.browser.tab = options.browser_tab;
         // The settings are in memory already; nothing is read here.
         let saved_browser_width =
             runtime.settings().ui.browser_width.clamp(BrowserState::MIN_WIDTH, BrowserState::MAX_WIDTH);
         state.browser.width = saved_browser_width;
+        // What the browser showed last time: a file of a few lines, read
+        // once, before the window is up. What the command line asks for
+        // comes after it.
+        let remember_in = runtime.settings_folder();
+        if let Some(remembered) = remember_in.as_deref().and_then(browser::Remembered::load) {
+            remembered.apply(&mut state.browser);
+        }
+        let remembered = browser::Remembered::of(&state.browser);
+        if let Some(tab) = options.browser_tab {
+            state.browser.tab = tab;
+        }
         if let Some(search) = &options.sound_search {
             state.browser.sounds.search = search.clone();
         }
@@ -178,6 +198,8 @@ impl TrillApp {
             was_typing: false,
             saved_browser_width,
             busy_at_frame: 0,
+            remember_in,
+            remembered: (remembered.clone(), remembered, 0),
         }
     }
 
@@ -297,6 +319,29 @@ impl TrillApp {
         let samples = self.snapshot.samples.values().flatten();
         for file in samples.filter(|file| file.problem.is_some()) {
             self.sounds.recheck(&file.path);
+        }
+    }
+
+    /// Writes down what the browser shows, once it has stopped changing,
+    /// for the next session to start from. With `now`, without waiting.
+    fn remember_browser(&mut self, now: bool) {
+        let Some(folder) = self.remember_in.clone() else { return };
+        let current = browser::Remembered::of(&self.state.browser);
+        let (saved, seen, changed_at) = &mut self.remembered;
+        if current != *seen {
+            *seen = current.clone();
+            *changed_at = self.frames;
+        }
+        if current == *saved || (!now && self.frames < *changed_at + REMEMBER_AFTER_FRAMES) {
+            return;
+        }
+        *saved = current.clone();
+        if now {
+            if let Err(reason) = current.save(&folder) {
+                log::warn!("{reason}");
+            }
+        } else {
+            self.sounds.quietly(move |_| current.save(&folder));
         }
     }
 
@@ -519,6 +564,7 @@ impl TrillApp {
 
         self.close_gesture(&ctx);
         self.save_browser_width(&ctx);
+        self.remember_browser(false);
         self.was_typing = ctx.text_edit_focused();
         // Moving things need every frame; everything else waits for input
         // or the idle poll scheduled in `logic`.
@@ -579,6 +625,12 @@ impl eframe::App for TrillApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.frame(ui);
+    }
+
+    /// What the browser shows is written down on the way out, if it
+    /// changed since it last was.
+    fn on_exit(&mut self) {
+        self.remember_browser(true);
     }
 
     /// A screenshot run sees no pointer, so the picture does not depend on

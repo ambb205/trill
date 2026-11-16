@@ -66,6 +66,7 @@ fn library_folders_favorites_and_recents_survive_a_restart() {
 
     let runtime = start(folder.path());
     assert!(runtime.library.roots().is_empty() && runtime.settings_warning().is_none());
+    assert_eq!(runtime.settings_folder(), Some(folder.path().join("config")), "where a front end keeps its own");
     // Starting, looking and asking to save what has not changed write nothing.
     runtime.save_library_changes().unwrap();
     assert!(!settings_file.exists() && !folder.path().join("cache").exists(), "an untouched run leaves no files");
@@ -117,6 +118,7 @@ fn a_hermetic_runtime_reads_and_writes_nothing() {
     let status = runtime.library.scan_status();
     assert!(!status.is_scanning() && status.last.is_none(), "nothing is scanned");
     assert!(runtime.plugins().is_none());
+    assert_eq!(runtime.settings_folder(), None, "nowhere for a front end to keep anything either");
     assert_eq!(runtime.session.lock().audio_info().sample_rate, 48_000.0);
 
     // Settings can still be changed; they last as long as the runtime.

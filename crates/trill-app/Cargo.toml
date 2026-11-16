@@ -24,6 +24,8 @@ trill-runtime.workspace = true
 anyhow.workspace = true
 log.workspace = true
 parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 eframe = "0.37"
 # Native open/save dialogs. They are awaited on a helper thread (see

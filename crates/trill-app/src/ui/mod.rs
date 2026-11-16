@@ -105,8 +105,9 @@ pub struct UiOptions {
     pub theme: &'static str,
     /// Whether the browser is open at startup.
     pub browser: bool,
-    /// What the browser lists at startup.
-    pub browser_tab: BrowserTab,
+    /// What the browser lists at startup; `None` for what it listed when
+    /// the program was last closed.
+    pub browser_tab: Option<BrowserTab>,
     /// What to search the sound library for at startup.
     pub sound_search: Option<String>,
     /// Name of a sound to select once the library has it.
@@ -132,7 +133,7 @@ impl Default for UiOptions {
             mcp_url: None,
             theme: theme_names()[0],
             browser: true,
-            browser_tab: BrowserTab::default(),
+            browser_tab: None,
             sound_search: None,
             select_sound: None,
             screenshot: None,

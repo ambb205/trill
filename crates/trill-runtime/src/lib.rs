@@ -167,6 +167,15 @@ impl Runtime {
         self.settings.lock().with_library(&self.library)
     }
 
+    /// The folder the settings file is kept in, for a front end that keeps
+    /// a small file of its own beside it (what its browser was last
+    /// showing, say). `None` when nothing is kept between runs
+    /// ([`Storage::Nowhere`]): such a file must then not be read or written
+    /// either.
+    pub fn settings_folder(&self) -> Option<std::path::PathBuf> {
+        self.settings.lock().folder().map(std::path::Path::to_path_buf)
+    }
+
     /// What could not be understood in the settings file at startup and
     /// what was done about it, for showing to the user once.
     pub fn settings_warning(&self) -> Option<String> {

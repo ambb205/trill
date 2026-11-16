@@ -4753,6 +4753,8 @@ dependencies = [
  "parking_lot",
  "pollster",
  "rfd",
+ "serde",
+ "serde_json",
  "tempfile",
  "trill-core",
  "trill-dsp",

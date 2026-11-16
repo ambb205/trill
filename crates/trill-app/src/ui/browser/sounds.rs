@@ -706,7 +706,7 @@ fn results(ui: &mut Ui, cx: &mut Cx, area: Rect) {
     let painter = ui.painter().clone();
 
     let (count, total) = match &cx.sounds.search.found {
-        Some(found) => (found.results.len(), found.results.index().count(EntryKind::Audio)),
+        Some(found) => (found.results.len(), found.total),
         None => (0, 0),
     };
     let searching = cx.sounds.search.found.is_none();

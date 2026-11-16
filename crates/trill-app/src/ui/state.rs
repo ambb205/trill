@@ -477,7 +477,7 @@ impl BrowserState {
     pub const MIN_WIDTH: f32 = 220.0;
     pub const MAX_WIDTH: f32 = 520.0;
 
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             open: true,
             width: Self::DEFAULT_WIDTH,

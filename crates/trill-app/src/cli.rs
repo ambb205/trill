@@ -23,7 +23,7 @@ Options:
   --size <WIDTHxHEIGHT>   Initial window size in points (default: 1440x900)
   --theme <noir|graphite> Colors of the window (default: noir)
   --no-browser            Start with the browser hidden (Ctrl+B shows it)
-  --browse <devices|sounds>   What the browser lists first (default: devices)
+  --browse <devices|sounds>   What the browser lists first (default: as it was left)
   --library <FOLDER>      Add a folder of sounds to the library; may be given several times
   --search <TEXT>         Search the sound library for this at startup
   --sound <NAME>          Select the sound with this name in the browser
@@ -55,7 +55,7 @@ pub struct Cli {
     /// Name of the theme to start in.
     pub theme: Option<&'static str>,
     pub no_browser: bool,
-    pub browse: BrowserTab,
+    pub browse: Option<BrowserTab>,
     /// Folders to add to the sound library.
     pub library: Vec<PathBuf>,
     /// What to search the sound library for.
@@ -97,11 +97,11 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
             "--search" => cli.search = Some(value("what to search for")?),
             "--sound" => cli.sound = Some(value("the name of a sound")?),
             "--browse" => {
-                cli.browse = match value("what to list")?.as_str() {
+                cli.browse = Some(match value("what to list")?.as_str() {
                     "devices" => BrowserTab::Devices,
                     "sounds" => BrowserTab::Sounds,
                     other => bail!("the browser cannot list '{other}' (expected 'devices' or 'sounds')"),
-                }
+                })
             }
             "--mcp-port" => {
                 let text = value("a port number")?;
@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn the_browser_can_start_on_the_sound_library() {
         let plain = run(&[]).unwrap();
-        assert_eq!(plain.browse, BrowserTab::Devices);
+        assert_eq!(plain.browse, None, "left to what the browser remembers");
         assert!(plain.library.is_empty() && plain.search.is_none() && plain.sound.is_none());
 
         let cli = run(&[
@@ -394,10 +394,10 @@ mod tests {
         .unwrap();
         assert_eq!(cli.library, [PathBuf::from("packs/drums"), PathBuf::from("packs/loops")]);
         let options = cli.ui_options();
-        assert_eq!(options.browser_tab, BrowserTab::Sounds);
+        assert_eq!(options.browser_tab, Some(BrowserTab::Sounds));
         assert_eq!(options.sound_search.as_deref(), Some("kick"));
         assert_eq!(options.select_sound.as_deref(), Some("Kick Deep 01"));
-        assert_eq!(run(&["--browse", "devices"]).unwrap().browse, BrowserTab::Devices);
+        assert_eq!(run(&["--browse", "devices"]).unwrap().browse, Some(BrowserTab::Devices));
     }
 
     #[test]

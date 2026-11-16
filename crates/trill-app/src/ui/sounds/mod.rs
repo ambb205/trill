@@ -110,6 +110,8 @@ pub struct Found {
     /// The library's generation the answer was read at.
     pub generation: u64,
     pub results: SearchResults,
+    /// How many sounds the library holds, matching or not.
+    pub total: usize,
     /// The sound that was selected when the search began, and where in
     /// the results it is.
     pub selected: Option<PathBuf>,
@@ -262,7 +264,15 @@ impl Sounds {
                     if self.search.in_flight == Some(ticket) {
                         self.search.in_flight = None;
                     }
-                    self.search.found = Some(*results);
+                    // The list on show may hold the last reference to an
+                    // index of a hundred thousand files, which takes
+                    // milliseconds to free: not here.
+                    if let Some(old) = self.search.found.replace(*results) {
+                        self.work.spawn(Priority::Bulk, move || {
+                            drop(old);
+                            Done::Quiet(Ok(()))
+                        });
+                    }
                     self.search.fresh = true;
                 }
                 Done::Preview { ticket, path, result } => {
@@ -386,7 +396,9 @@ impl Sounds {
             // the answer then counts as old and is asked for again.
             let generation = runtime.library.generation();
             let results = runtime.library.search(&query);
-            let mut found = Found { query, generation, results, selected, selected_row: None };
+            // Counted here: it is a pass over every file of the library.
+            let total = results.index().count(trill_library::EntryKind::Audio);
+            let mut found = Found { query, generation, results, total, selected, selected_row: None };
             found.selected_row = found.selected.as_deref().and_then(|path| found.row_of(path));
             Done::Found { ticket, results: Box::new(found) }
         });

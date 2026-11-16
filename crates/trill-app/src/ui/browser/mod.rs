@@ -1,16 +1,19 @@
 //! The browser down the left side. Its two tabs list what can be brought
 //! into the song: [`devices`] (instruments, effects, plugins and their
-//! presets) and [`sounds`] (the sample library).
+//! presets) and [`sounds`] (the sample library). What it was showing is
+//! [`remembered`] from one session to the next.
 
 mod devices;
+mod remembered;
 mod sounds;
 
 use super::state::{BrowserTab, Cx, FocusArea};
 use eframe::egui::{self, Rect, Ui, pos2, vec2};
 use trill_noir::paint;
 
+pub(super) use remembered::Remembered;
 #[cfg(test)]
-pub(in crate::ui) use sounds::{FILTER_BLOCK, PREVIEW_HEIGHT, RESULTS_HEADER, SECTION_HEADER, TREE_ROW};
+pub(in crate::ui) use sounds::query;
 pub(super) use sounds::{choose_file, facts, keys, reveal};
 
 /// Height of the row of tabs.

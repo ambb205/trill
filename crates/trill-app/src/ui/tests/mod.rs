@@ -52,7 +52,12 @@ struct Harness {
 impl Harness {
     /// Opens the window on a project prepared by `setup`.
     fn new(options: UiOptions, setup: impl FnOnce(&mut Session)) -> Self {
-        let runtime = Arc::new(Runtime::start(RuntimeOptions::hermetic()).unwrap());
+        Self::on(Arc::new(Runtime::start(RuntimeOptions::hermetic()).unwrap()), options, setup)
+    }
+
+    /// Opens the window on `runtime`: for tests that give it settings to
+    /// keep, in a folder of their own.
+    fn on(runtime: Arc<Runtime>, options: UiOptions, setup: impl FnOnce(&mut Session)) -> Self {
         setup(&mut runtime.session.lock());
         let session = runtime.session.clone();
         let ctx = egui::Context::default();
