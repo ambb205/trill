@@ -9,7 +9,7 @@ use trill_core::{ChainRef, Project, TrackId};
 use trill_engine::AudioBackend;
 use trill_library::{Query, Settings, Tag};
 use trill_media::{WavFormat, write_wav};
-use trill_runtime::{Runtime, RuntimeOptions, SoundClip, SoundError, Storage};
+use trill_runtime::{NewSoundTrack, Runtime, RuntimeOptions, SoundClip, SoundError, Storage};
 
 const WAIT: Duration = Duration::from_secs(60);
 
@@ -66,6 +66,7 @@ fn library_folders_favorites_and_recents_survive_a_restart() {
 
     let runtime = start(folder.path());
     assert!(runtime.library.roots().is_empty() && runtime.settings_warning().is_none());
+    assert_eq!(runtime.settings_folder(), Some(folder.path().join("config")), "where a front end keeps its own");
     // Starting, looking and asking to save what has not changed write nothing.
     runtime.save_library_changes().unwrap();
     assert!(!settings_file.exists() && !folder.path().join("cache").exists(), "an untouched run leaves no files");
@@ -117,6 +118,7 @@ fn a_hermetic_runtime_reads_and_writes_nothing() {
     let status = runtime.library.scan_status();
     assert!(!status.is_scanning() && status.last.is_none(), "nothing is scanned");
     assert!(runtime.plugins().is_none());
+    assert_eq!(runtime.settings_folder(), None, "nowhere for a front end to keep anything either");
     assert_eq!(runtime.session.lock().audio_info().sample_rate, 48_000.0);
 
     // Settings can still be changed; they last as long as the runtime.
@@ -209,6 +211,51 @@ fn sounds_are_described_previewed_and_placed() {
     let mut session = runtime.session.lock();
     assert!(session.undo() && session.undo() && session.undo());
     assert!(session.project().tracks[0].clips.is_empty());
+}
+
+#[test]
+fn a_sound_on_a_track_of_its_own_is_one_undo_step() {
+    let folder = tempfile::tempdir().unwrap();
+    let (kick, _, bass_loop) = pack(&folder.path().join("samples"));
+    let runtime = start(folder.path());
+    let before = runtime.session.lock().project().clone();
+
+    // The track is named after the file unless told otherwise, goes last
+    // and holds the clip; `track` of the request is not looked at.
+    let sound = SoundClip::new(&bass_loop, TrackId(999), 8.0);
+    let (track, added) = runtime.add_sound_on_new_track(&sound, &NewSoundTrack::default()).unwrap();
+    let named = NewSoundTrack { name: Some("Drums".into()), color: Some(0x4EC9B0) };
+    let (second, _) = runtime.add_sound_on_new_track(&SoundClip::new(&kick, track, 0.0), &named).unwrap();
+    {
+        let session = runtime.session.lock();
+        let project = session.project();
+        let ids: Vec<TrackId> = project.tracks.iter().map(|track| track.id).collect();
+        assert_eq!(ids, [track, second]);
+        let first = project.track(track).unwrap();
+        assert_eq!((first.name.as_str(), first.devices.len(), first.clips.len()), ("Bass Loop 100bpm", 0, 1));
+        assert_eq!((first.clips[0].id, first.clips[0].start), (added.clip, 8.0));
+        let drums = project.track(second).unwrap();
+        assert_eq!((drums.name.as_str(), drums.color, drums.clips.len()), ("Drums", 0x4EC9B0, 1));
+        assert!(session.problems().is_empty(), "{:?}", session.problems());
+    }
+
+    // A sound that cannot be placed leaves no empty track behind.
+    let depth = runtime.session.lock().project().tracks.len();
+    let missing = SoundClip::new(folder.path().join("nothing.wav"), track, 0.0);
+    assert!(runtime.add_sound_on_new_track(&missing, &NewSoundTrack::default()).is_err());
+    let unwarpable = SoundClip { warp: WarpMode::Beats, ..SoundClip::new(&kick, track, 0.0) };
+    assert!(runtime.add_sound_on_new_track(&unwarpable, &NewSoundTrack::default()).is_err());
+    let negative = SoundClip::new(&kick, track, -4.0);
+    assert!(runtime.add_sound_on_new_track(&negative, &NewSoundTrack::default()).is_err());
+    assert_eq!(runtime.session.lock().project().tracks.len(), depth);
+
+    // Track and clip come and go together.
+    let mut session = runtime.session.lock();
+    assert!(session.undo());
+    assert_eq!(session.project().tracks.len(), 1);
+    assert!(session.undo());
+    assert_eq!(session.project(), &before);
+    assert!(!session.undo(), "two sounds were two steps");
 }
 
 #[test]

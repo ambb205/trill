@@ -12,18 +12,19 @@ mod keys;
 mod mixer;
 mod perf;
 mod ruler;
+mod sounds;
 mod tracks;
 
 use super::app::TrillApp;
+use super::state::{BrowserState, BrowserTab};
 use super::{DetailTab, UiOptions, arrangement, browser, detail, devices, piano_roll, status_bar, top_bar};
 use eframe::egui::{self, Event, Key, Modifiers, PointerButton, Pos2, Rect, Vec2, pos2, vec2};
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use trill_core::device::CompositeFactory;
 use trill_core::{ChainRef, ClipId, DeviceId, Note, Project, TrackId};
-use trill_dsp::BuiltinFactory;
-use trill_engine::{AudioBackend, Session, SharedSession};
+use trill_engine::{Session, SharedSession};
+use trill_runtime::{Runtime, RuntimeOptions};
 
 const SCREEN: Vec2 = vec2(1440.0, 900.0);
 const FRAME: f64 = 1.0 / 60.0;
@@ -34,6 +35,9 @@ const GAP: f32 = 3.0;
 struct Harness {
     ctx: egui::Context,
     app: TrillApp,
+    /// What the app runs on: no audio device, no plugins, and nothing of
+    /// the user's read or written.
+    runtime: Arc<Runtime>,
     session: SharedSession,
     time: f64,
     /// Text and rectangle of every labeled widget on the last frame, as
@@ -48,15 +52,19 @@ struct Harness {
 impl Harness {
     /// Opens the window on a project prepared by `setup`.
     fn new(options: UiOptions, setup: impl FnOnce(&mut Session)) -> Self {
-        let factory = Arc::new(CompositeFactory::new(vec![Box::new(BuiltinFactory)]));
-        let mut session = Session::new(factory, AudioBackend::Null { sample_rate: 48_000 }).unwrap();
-        setup(&mut session);
-        let session: SharedSession = Arc::new(Mutex::new(session));
+        Self::on(Arc::new(Runtime::start(RuntimeOptions::hermetic()).unwrap()), options, setup)
+    }
+
+    /// Opens the window on `runtime`: for tests that give it settings to
+    /// keep, in a folder of their own.
+    fn on(runtime: Arc<Runtime>, options: UiOptions, setup: impl FnOnce(&mut Session)) -> Self {
+        setup(&mut runtime.session.lock());
+        let session = runtime.session.clone();
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
-        let app = TrillApp::new(&ctx, session.clone(), options, Arc::default());
+        let app = TrillApp::new(&ctx, runtime.clone(), options, Arc::<Mutex<Option<String>>>::default());
         let mut harness =
-            Self { ctx, app, session, time: 0.0, labels: Vec::new(), values: Vec::new(), clipboard: None };
+            Self { ctx, app, runtime, session, time: 0.0, labels: Vec::new(), values: Vec::new(), clipboard: None };
         // Widgets are hit-tested against where they were on the previous
         // frame, so the layout has to exist before any input arrives.
         harness.idle(3);
@@ -64,7 +72,19 @@ impl Harness {
     }
 
     /// Runs one frame with the given input events, with `modifiers` held.
-    fn step(&mut self, modifiers: Modifiers, mut events: Vec<Event>) {
+    fn step(&mut self, modifiers: Modifiers, events: Vec<Event>) {
+        self.step_with_files(modifiers, events, &[], &[]);
+    }
+
+    /// Runs one frame in which another program holds `hovered` over the
+    /// window, or lets go of `dropped` there.
+    fn step_with_files(
+        &mut self,
+        modifiers: Modifiers,
+        mut events: Vec<Event>,
+        hovered: &[std::path::PathBuf],
+        dropped: &[std::path::PathBuf],
+    ) {
         self.time += FRAME;
         events.insert(0, Event::ModifiersChanged(modifiers));
         let input = egui::RawInput {
@@ -72,9 +92,25 @@ impl Harness {
             time: Some(self.time),
             events,
             focused: true,
+            hovered_files: hovered
+                .iter()
+                .map(|path| egui::HoveredFile { path: Some(path.clone()), ..Default::default() })
+                .collect(),
+            dropped_files: dropped.iter().map(|path| Arc::new(sounds::Dropped(path.clone())) as _).collect(),
             ..Default::default()
         };
         self.app.tick(&self.ctx);
+        // The window never waits for the session: if something else holds
+        // it for a moment (the runtime's housekeeping does, a few times a
+        // second), a frame is painted from what the window already has. A
+        // test's next click must land on what the session holds now, so
+        // here the window is given the time to catch up.
+        let mut tries = 0;
+        while self.app.snapshot().revision != self.session.lock().revision() && tries < 10_000 {
+            std::thread::yield_now();
+            self.app.tick(&self.ctx);
+            tries += 1;
+        }
         let mut output = self.ctx.run_ui(input, |ui| self.app.frame(ui));
         // Nothing is drawn, so the font atlas updates have nowhere to go.
         output.textures_delta.clear();
@@ -256,7 +292,7 @@ impl Harness {
 
     /// Left edge of everything right of the browser.
     fn work_left(&self) -> f32 {
-        if self.app.state().browser.open { browser::WIDTH } else { 0.0 }
+        if self.app.state().browser.open { self.app.state().browser.width } else { 0.0 }
     }
 
     /// Left edge of the arrangement's lanes.
@@ -1037,7 +1073,7 @@ fn a_devices_preset_chip_opens_its_presets() {
 fn the_browser_search_narrows_its_lists_and_ctrl_b_hides_it() {
     let (mut harness, ..) = with_two_tracks(devices_tab());
     assert!(harness.is_on_screen("Reverb") && harness.is_on_screen("Chorus"));
-    harness.click(pos2(browser::WIDTH / 2.0, top_bar::HEIGHT + 24.0 + 8.0 + 11.0));
+    harness.click(pos2(harness.work_left() / 2.0, top_bar::HEIGHT + browser::HEADER + 8.0 + 11.0));
     harness.type_text("rev");
     harness.idle(2);
     assert!(harness.is_on_screen("Reverb"));
@@ -1051,7 +1087,7 @@ fn the_browser_search_narrows_its_lists_and_ctrl_b_hides_it() {
     let lanes_before = harness.lanes_left();
     harness.key(Modifiers::COMMAND, Key::B);
     assert!(!harness.app.state().browser.open);
-    assert_eq!(harness.lanes_left(), lanes_before - browser::WIDTH, "the arrangement takes the room");
+    assert_eq!(harness.lanes_left(), lanes_before - BrowserState::DEFAULT_WIDTH, "the arrangement takes the room");
     assert!(!harness.is_on_screen("Reverb"));
     harness.click_label("View");
     harness.click_label("Browser");
@@ -1191,8 +1227,11 @@ fn the_edit_menu_undoes_and_redoes() {
 fn the_detail_tabs_switch() {
     let (mut harness, ..) = with_two_tracks(UiOptions::default());
     assert_eq!(harness.app.state().detail_tab, DetailTab::Clip);
-    harness.click_label("Devices");
+    // The browser has a tab called Devices too; the detail panel's is the
+    // lower of the two.
+    harness.click_last_label("Devices");
     assert_eq!(harness.app.state().detail_tab, DetailTab::Devices);
+    assert_eq!(harness.app.state().browser.tab, BrowserTab::Devices);
     harness.click_label("Clip");
     assert_eq!(harness.app.state().detail_tab, DetailTab::Clip);
 }

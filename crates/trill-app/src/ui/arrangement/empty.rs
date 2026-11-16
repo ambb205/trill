@@ -2,8 +2,9 @@
 //! begin, by hand or with an assistant.
 
 use super::headers;
+use crate::ui::sounds::DropTarget;
 use crate::ui::state::Cx;
-use crate::ui::widgets;
+use crate::ui::{dragging, widgets};
 use eframe::egui::{self, Align2, Color32, Rect, Sense, Ui, vec2};
 use trill_noir::{Variant, paint, text};
 
@@ -109,6 +110,21 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, area: Rect) {
             text::paint(ui.painter(), address, Align2::LEFT_CENTER, theme.text.value, url, theme.ink);
         }
     });
+}
+
+/// A sound dragged over the empty arrangement starts the song: it lands on
+/// a track of its own at the first bar.
+pub(super) fn sound_drop(ui: &Ui, cx: &mut Cx, area: Rect) {
+    let over = cx.state.sound_drag.as_ref().and_then(|drag| drag.pointer).is_some_and(|pointer| area.contains(pointer));
+    if !over {
+        return;
+    }
+    let count = cx.state.sound_drag.as_ref().map_or(1, |drag| drag.paths.len());
+    let colors = dragging::new_track_colors(cx, count);
+    if let Some(drag) = &mut cx.state.sound_drag {
+        drag.offer(DropTarget::NewTrack { beat: 0.0, colors });
+    }
+    paint::frame(&ui.painter_at(area), area.shrink(4.0), cx.theme.ink);
 }
 
 fn load_demo(cx: &mut Cx) {

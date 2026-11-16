@@ -1,23 +1,17 @@
-//! The browser down the left side: every device that can be added, and the
-//! presets of the device selected in the Devices tab.
+//! The browser's Devices tab: every device that can be added, and the
+//! presets of the device selected in the detail panel's Devices tab.
 //!
 //! Double-clicking a device adds it to the chain the Devices tab shows.
 //! Clicking a preset applies it to the selected device.
 
-use super::state::Cx;
-use super::{arrangement, devices, widgets};
+use super::{EDGE, ROW, SEARCH_BLOCK, SEARCH_HEIGHT};
+use crate::ui::state::Cx;
+use crate::ui::{arrangement, devices, widgets};
 use eframe::egui::{self, Align2, Rect, Role, Sense, Ui, WidgetInfo, pos2, vec2};
 use trill_core::ChainRef;
 use trill_core::device::{BUILTIN_SCHEME, DeviceCategory, DeviceDescriptor, split_uri};
 use trill_noir::{paint, text};
 
-pub const WIDTH: f32 = 204.0;
-const HEADER: f32 = 24.0;
-const EDGE: f32 = 10.0;
-const SEARCH_HEIGHT: f32 = 22.0;
-/// Height of the search field with the space around it.
-const SEARCH_BLOCK: f32 = 8.0 + SEARCH_HEIGHT + 4.0;
-const ROW: f32 = 22.0;
 const SECTION: f32 = 27.0;
 
 /// Which list a device belongs in.
@@ -70,20 +64,11 @@ fn shelf<'a>(descriptors: &'a [DeviceDescriptor], which: Shelf, query: &str) -> 
     found
 }
 
-pub fn show(ui: &mut Ui, cx: &mut Cx) {
+/// The tab, in `area`: the browser below its row of tabs.
+pub(super) fn show(ui: &mut Ui, cx: &mut Cx, area: Rect) {
     let theme = cx.theme;
-    let area = ui.max_rect();
-    let painter = ui.painter().clone();
-    painter.rect_filled(area, 0.0, theme.panel);
-    paint::vline_left_of(&painter, area.right(), area.y_range(), theme.hairline);
-
-    let header = Rect::from_min_size(area.min, vec2(area.width(), HEADER));
-    paint::hline_above(&painter, header.x_range(), header.bottom(), theme.hairline);
-    let title = header.shrink2(vec2(EDGE, 0.0));
-    text::paint(&painter, title, Align2::LEFT_CENTER, theme.text.caps, "Browser", theme.ink_dim);
-
     let search = Rect::from_min_size(
-        pos2(area.left() + EDGE, header.bottom() + 8.0),
+        pos2(area.left() + EDGE, area.top() + 8.0),
         vec2(area.width() - 2.0 * EDGE - 1.0, SEARCH_HEIGHT),
     );
     let id = ui.scope_id().with("search");
@@ -92,7 +77,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     cx.hint(&response, "Type to narrow the lists below");
 
     let lists =
-        Rect::from_min_max(pos2(area.left(), header.bottom() + SEARCH_BLOCK), pos2(area.right() - 1.0, area.bottom()));
+        Rect::from_min_max(pos2(area.left(), area.top() + SEARCH_BLOCK), pos2(area.right() - 1.0, area.bottom()));
     widgets::place(ui, lists, "lists", egui::Layout::top_down(egui::Align::Min), |ui| {
         ui.set_clip_rect(lists.intersect(ui.clip_rect()));
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {

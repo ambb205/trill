@@ -25,6 +25,7 @@ mod rows;
 mod ruler;
 mod time_ops;
 
+pub(super) use clips::{audio_room, fade_level};
 pub use envelopes::{delete_selected as delete_selected_points, select_all as select_all_points};
 pub use headers::{add_group_track, add_return_track, add_track, add_track_with, group_selected_track};
 pub(super) use headers::{pan_bar, send_bar};
@@ -240,7 +241,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     let mut geometry = Geometry::new(area, view, rows, signature);
     if track_count == 0 {
         // Nothing to arrange yet: say how to begin, above the master.
-        empty::show(ui, cx, Rect::from_min_max(area.min, pos2(area.right(), geometry.master.top())));
+        let welcome = Rect::from_min_max(area.min, pos2(area.right(), geometry.master.top()));
+        empty::show(ui, cx, welcome);
+        empty::sound_drop(ui, cx, welcome);
         master::show(ui, cx, &geometry);
         return;
     }

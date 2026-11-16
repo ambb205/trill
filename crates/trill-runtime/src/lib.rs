@@ -20,8 +20,9 @@
 //!
 //! On top of those sit the operations that need more than one of them and
 //! that every front end must do the same way: [`Runtime::sound_facts`],
-//! [`Runtime::preview`] and [`Runtime::add_sound`]. A front end that grew
-//! its own version of these would drift from the other.
+//! [`Runtime::preview`], [`Runtime::add_sound`] and
+//! [`Runtime::add_sound_on_new_track`]. A front end that grew its own
+//! version of these would drift from the other.
 //!
 //! ```no_run
 //! use trill_runtime::{Runtime, RuntimeOptions};
@@ -41,7 +42,7 @@ mod sounds;
 
 pub use recovery::SafetyCopy;
 pub use settings::Storage;
-pub use sounds::{AddedSound, SoundClip, SoundError, SoundFacts};
+pub use sounds::{AddedSound, NewSoundTrack, SoundClip, SoundError, SoundFacts};
 
 use housekeeping::Housekeeper;
 use parking_lot::Mutex;
@@ -222,6 +223,15 @@ impl Runtime {
     /// from the library as it is now.
     pub fn settings(&self) -> Settings {
         self.settings.lock().with_library(&self.library)
+    }
+
+    /// The folder the settings file is kept in, for a front end that keeps
+    /// a small file of its own beside it (what its browser was last
+    /// showing, say). `None` when nothing is kept between runs
+    /// ([`Storage::Nowhere`]): such a file must then not be read or written
+    /// either.
+    pub fn settings_folder(&self) -> Option<std::path::PathBuf> {
+        self.settings.lock().folder().map(std::path::Path::to_path_buf)
     }
 
     /// What could not be understood in the settings file at startup and

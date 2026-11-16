@@ -13,7 +13,7 @@
 //! writes that. Whoever saved last wins for the part they both own, and
 //! nobody loses the parts only the other touches.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use trill_library::{Library, LibrarySettings, SaveError, Settings};
 
 /// Where the settings and the library index are kept between runs.
@@ -79,6 +79,11 @@ impl SettingsFile {
     /// Whether the settings are kept on disk at all.
     fn is_kept(&self) -> bool {
         self.path.is_some()
+    }
+
+    /// The folder the settings file is in; `None` when nothing is kept.
+    pub fn folder(&self) -> Option<&Path> {
+        self.path.as_deref().and_then(Path::parent)
     }
 
     pub fn warning(&self) -> Option<&str> {

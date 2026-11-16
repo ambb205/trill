@@ -5,3 +5,6 @@
 .DS_Store
 # Projects that point at sound files on this machine.
 /examples/local/
+# The sample pack and project the screenshots are made from: written by
+# `cargo run -p trill-app --example sound_fixtures` (see screenshots/render.sh).
+/crates/trill-app/screenshots/sounds/

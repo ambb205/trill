@@ -133,11 +133,84 @@ pub fn width(painter: &Painter, style: TextStyle, text: &str) -> f32 {
     layout(painter, style, text, Color32::PLACEHOLDER, f32::INFINITY).width()
 }
 
+/// What stands for the part cut out of a name.
+pub const ELLIPSIS: char = '\u{2026}';
+
+/// `text` made to fit `max_width` by taking out of its middle: `Kick_Deep`
+/// from a pack called `LongPackName_Kick_Deep_01` reads `Lon\u{2026}Kick_Deep_01`.
+/// For file names, which tend to start alike (with the name of the pack
+/// they came in) and differ further on, so that cutting the end (as
+/// [`layout`] does) leaves a list of identical rows. A quarter of what is
+/// kept is the start and the rest the end, where the kind of sound and its
+/// number usually are. Text that fits comes back as it is.
+pub fn elide_middle(painter: &Painter, style: TextStyle, text: &str, max_width: f32) -> String {
+    if width(painter, style, text) <= max_width {
+        return text.to_owned();
+    }
+    let letters: Vec<char> = text.chars().collect();
+    let cut = |kept: usize| -> String {
+        let head = kept / 4;
+        let tail = kept - head;
+        letters[..head].iter().chain([&ELLIPSIS]).chain(&letters[letters.len() - tail..]).collect()
+    };
+    // The most letters that fit, found by halving: a handful of layouts,
+    // which the painter remembers from frame to frame.
+    let (mut fits, mut too_many) = (0, letters.len());
+    while too_many - fits > 1 {
+        let kept = (fits + too_many) / 2;
+        if width(painter, style, &cut(kept)) <= max_width {
+            fits = kept;
+        } else {
+            too_many = kept;
+        }
+    }
+    cut(fits)
+}
+
+/// Like [`paint`], for a name: text too wide for `rect` loses its middle
+/// rather than its end (see [`elide_middle`]).
+pub fn paint_name(painter: &Painter, rect: Rect, align: Align2, style: TextStyle, text: &str, color: Color32) -> f32 {
+    if rect.width() <= 0.0 || text.is_empty() {
+        return 0.0;
+    }
+    paint(painter, rect, align, style, &elide_middle(painter, style, text, rect.width()), color)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Theme;
     use crate::testing::with_ui;
+
+    #[test]
+    fn names_lose_their_middle_and_keep_both_ends() {
+        with_ui(|ui, theme| {
+            let painter = ui.painter();
+            let style = theme.text.body;
+            let name = "LongPackName_drum_loop_140_swing_Ebm";
+            let whole = width(painter, style, name);
+            assert_eq!(elide_middle(painter, style, name, whole + 1.0), name, "what fits is left alone");
+            assert_eq!(elide_middle(painter, style, "", 50.0), "");
+
+            let cut = elide_middle(painter, style, name, whole * 0.6);
+            assert!(width(painter, style, &cut) <= whole * 0.6, "{cut}");
+            let (head, tail) = cut.split_once(ELLIPSIS).expect("an ellipsis where the middle was");
+            assert!(name.starts_with(head) && name.ends_with(tail), "{cut}");
+            assert!(head.len() >= 3 && tail.len() >= 2 * head.len(), "mostly the end, some of the start: {cut}");
+            // As long as it can be: one more letter would not fit.
+            let more: String = format!("{head}{}{ELLIPSIS}{tail}", &name[head.len()..=head.len()]);
+            assert!(width(painter, style, &more) > whole * 0.6);
+            // Two names that differ only at the end stay different.
+            let other = elide_middle(painter, style, "LongPackName_drum_loop_140_swing_Fm", whole * 0.6);
+            assert_ne!(cut, other);
+
+            // With no room at all, the ellipsis alone.
+            assert_eq!(elide_middle(painter, style, name, 0.0), ELLIPSIS.to_string());
+            // Letters of more than one byte are cut between, never through.
+            let accented = elide_middle(painter, style, "\u{00FC}ber_n\u{00EF}ce_name_here", 40.0);
+            assert!(accented.contains(ELLIPSIS) && accented.chars().count() > 1, "{accented}");
+        });
+    }
 
     #[test]
     fn digits_share_one_width_in_tabular_styles() {

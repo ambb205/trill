@@ -16,6 +16,15 @@ song=examples/first-light.trill
 rough=$out/projects/rough-mix.trill
 rack=$out/projects/drum-rack.trill
 
+# A sample pack and a song made from it, synthesized here so that the
+# pictures of the sound browser show nobody's own library. Written to a
+# folder git ignores; the project names its files by this path, so the
+# pictures must be made from the repository root.
+sounds=$out/sounds
+cargo run -p trill-app --example sound_fixtures -- "$sounds"
+pack="$sounds/Night Shift"
+night=$sounds/night-shift.trill
+
 # shot NAME ARGS...: one window, rendered to NAME.png.
 shot() {
     name=$1
@@ -53,5 +62,17 @@ shot audio-clip-6-8 "$rough" --select "Verse 1"
 shot min-window-problems "$rough" --select Riff --tab devices --size 1060x640
 shot min-window-mixer --demo --tab mixer --automation --size 1060x640
 shot graphite-min-window --demo --automation --size 1060x640 --theme graphite
-# A device without a layout of its own gets the generic one.
-shot generic-layout "$rack" --select Kit --tab devices
+# A drum rack nobody has put a sound on yet.
+shot drum-rack-empty "$rack" --select Kit --tab devices
+
+# Sounds: the library in the browser with a sound chosen, and an audio clip
+# open in the Clip tab; a search beside the drum rack's pads; the sampler
+# with its file; a clip whose file is gone, in a browser with no folders
+# yet; and the same things in the smallest window and the other theme.
+shot sounds-browser "$night" --browse sounds --library "$pack" --sound "Drum Loop Steady 120bpm" --select "Pad Loop"
+shot sounds-drum-rack "$night" --browse sounds --library "$pack" --search kick --select Beat --tab devices
+shot sounds-sampler "$night" --browse sounds --library "$pack" --sound "Pluck C3" --select Riff --tab devices
+shot sounds-missing-file "$night" --browse sounds --select "Lost Take"
+shot min-window-sounds "$night" --browse sounds --library "$pack" --sound "Bass Loop 120bpm Am" --select "Bass Loop"     --size 1060x640
+shot graphite-sounds-browser "$night" --browse sounds --library "$pack" --sound "Drum Loop Steady 120bpm"     --select "Pad Loop" --theme graphite
+shot graphite-sounds-drum-rack "$night" --browse sounds --library "$pack" --search kick --select Beat --tab devices     --theme graphite

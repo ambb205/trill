@@ -21,17 +21,23 @@
 //! Modules: [`app`] is the shell (panels, repaint policy) and
 //! [`shortcuts`] the table of keys it reads. [`top_bar`], [`status_bar`],
 //! [`browser`], [`arrangement`] and [`detail`] (with [`piano_roll`],
-//! [`devices`] and [`mixer`]) are the views; the arrangement is a module
-//! of its own parts. [`automation`] is what the views share about
-//! envelopes. [`device_layouts`] says how each built-in device arranges its
-//! parameters, and [`displays`] draws their small curves from the math in
+//! [`audio_clip`], [`devices`] and [`mixer`]) are the views; the
+//! arrangement and the browser are modules of their own parts.
+//! [`automation`] is what the views share about envelopes.
+//! [`device_layouts`] says how each built-in device arranges its
+//! parameters, [`sample_panels`] draws what the sampler and the drum rack
+//! play, and [`displays`] draws the devices' small curves from the math in
 //! [`response`]. [`files`] runs dialogs, imports and exports off the UI
-//! thread; [`timeline`] and [`units`] hold the pure math; [`colors`] maps
-//! stored track colors to palette hues; and [`widgets`] is the glue between
-//! the views and the kit.
+//! thread, and [`sounds`] does the same for everything that reads audio
+//! files (waveforms, previews, searches, drops) on the workers of
+//! [`work`]; [`dragging`] carries sounds from the browser, or from another
+//! program, to where they are dropped. [`timeline`] and [`units`] hold the
+//! pure math; [`colors`] maps stored track colors to palette hues; and
+//! [`widgets`] is the glue between the views and the kit.
 
 mod app;
 mod arrangement;
+mod audio_clip;
 mod automation;
 mod brand;
 mod browser;
@@ -40,12 +46,15 @@ mod detail;
 mod device_layouts;
 mod devices;
 mod displays;
+mod dragging;
 mod files;
 mod mixer;
 mod piano_roll;
 mod response;
+mod sample_panels;
 mod shortcuts;
 mod snapshot;
+mod sounds;
 mod state;
 mod status_bar;
 mod timeline;
@@ -53,11 +62,12 @@ mod toast;
 mod top_bar;
 mod units;
 mod widgets;
+mod work;
 
 #[cfg(test)]
 mod tests;
 
-pub use state::DetailTab;
+pub use state::{BrowserTab, DetailTab};
 
 use anyhow::anyhow;
 use eframe::egui;
@@ -66,7 +76,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use trill_core::ClipId;
-use trill_engine::SharedSession;
+use trill_runtime::Runtime;
 
 /// The smallest the window can be made: every part of it still fits.
 const MIN_WINDOW_SIZE: [f32; 2] = [1060.0, 640.0];
@@ -93,8 +103,15 @@ pub struct UiOptions {
     pub mcp_url: Option<String>,
     /// Name of the theme to start in; one of [`theme_names`].
     pub theme: &'static str,
-    /// Whether the device browser is open at startup.
+    /// Whether the browser is open at startup.
     pub browser: bool,
+    /// What the browser lists at startup; `None` for what it listed when
+    /// the program was last closed.
+    pub browser_tab: Option<BrowserTab>,
+    /// What to search the sound library for at startup.
+    pub sound_search: Option<String>,
+    /// Name of a sound to select once the library has it.
+    pub select_sound: Option<String>,
     /// Render a few frames, save the window to this PNG and exit.
     pub screenshot: Option<PathBuf>,
     /// Start playback as soon as the window opens.
@@ -116,6 +133,9 @@ impl Default for UiOptions {
             mcp_url: None,
             theme: theme_names()[0],
             browser: true,
+            browser_tab: None,
+            sound_search: None,
+            select_sound: None,
             screenshot: None,
             autoplay: false,
             exit_after: None,
@@ -125,7 +145,7 @@ impl Default for UiOptions {
 }
 
 /// Opens the window and runs until it is closed.
-pub fn run(session: SharedSession, options: UiOptions) -> anyhow::Result<()> {
+pub fn run(runtime: Arc<Runtime>, options: UiOptions) -> anyhow::Result<()> {
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Trill")
@@ -141,7 +161,7 @@ pub fn run(session: SharedSession, options: UiOptions) -> anyhow::Result<()> {
     eframe::run_native(
         "trill",
         native,
-        Box::new(move |creation| Ok(Box::new(app::TrillApp::new(&creation.egui_ctx, session, options, app_failure)))),
+        Box::new(move |creation| Ok(Box::new(app::TrillApp::new(&creation.egui_ctx, runtime, options, app_failure)))),
     )
     .map_err(|error| anyhow!("the window could not be opened: {error}"))?;
 

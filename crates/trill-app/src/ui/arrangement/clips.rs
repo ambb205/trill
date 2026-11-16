@@ -4,14 +4,21 @@
 //!
 //! A MIDI clip shows the notes it actually plays ([`Clip::timeline_notes`],
 //! through the snapshot's cache), so a trimmed or looped clip looks the way
-//! it sounds.
+//! it sounds. An audio clip shows the waveform of the stretch of its file
+//! it plays: where the file is entered, how fast it is run through and
+//! where it ends all show. The waveform comes from a worker
+//! ([`crate::ui::sounds`]); until it has, and for a file that cannot be
+//! read, the clip is hatched instead.
 
 use super::Geometry;
 use super::rows::RowKind;
 use crate::ui::snapshot::Snapshot;
+use crate::ui::sounds::WaveState;
+use crate::ui::state::Cx;
 use crate::ui::timeline::{self, EdgeHit};
 use crate::ui::units;
 use eframe::egui::{Align2, Color32, Mesh, Painter, Pos2, Rect, Shape, Stroke, pos2, vec2};
+use std::sync::Arc;
 use trill_core::project::{AudioContent, ClipContent, MidiContent};
 use trill_core::{Beats, Clip, ClipId, Track, TrackId};
 use trill_noir::{Theme, fade, paint, text};
@@ -116,17 +123,16 @@ pub(super) struct ClipLook {
 /// Paints one clip. Note miniatures go into `notes`, one mesh for the whole
 /// arrangement: thousands of tiny rectangles cost one draw call instead of
 /// one shape each.
-#[expect(clippy::too_many_arguments, reason = "a private paint routine; a struct would only rename the arguments")]
 pub(super) fn paint_clip(
     painter: &Painter,
-    theme: &Theme,
-    snapshot: &Snapshot,
+    cx: &Cx,
     notes: &mut Mesh,
     rect: Rect,
     geometry: &Geometry,
     clip: &Clip,
     look: ClipLook,
 ) {
+    let (theme, snapshot) = (cx.theme, cx.snap);
     let ClipLook { color, ghosted, name_from, .. } = look;
     let lanes = geometry.lanes;
     painter.rect_filled(rect, 0.0, fade(color, if ghosted { 0.06 } else { 0.15 }));
@@ -150,9 +156,82 @@ pub(super) fn paint_clip(
     match &clip.content {
         ClipContent::Midi(midi) => paint_notes(painter, theme, snapshot, notes, content, geometry, clip, midi, ink),
         ClipContent::Audio(audio) => {
-            paint_audio_body(painter, theme, content, rect, &audio.path, ink);
+            paint_audio(painter, cx, content, rect, geometry, clip, audio, ink);
             paint_fades(painter, theme, geometry, rect, clip, audio, look);
         }
+    }
+}
+
+/// Where in its file, in seconds, an audio clip is at timeline position
+/// `beat`. A straight line whatever the warp mode: the clip enters the file
+/// at its offset, and from there every beat covers the same stretch of the
+/// recording (see [`AudioContent`]). This is what puts a waveform under a
+/// clip: trimming the clip's start moves the offset with it, so the picture
+/// stays put, and warping changes how much of the file a beat covers.
+pub(in crate::ui) fn file_second(clip: &Clip, audio: &AudioContent, tempo: f64, beat: Beats) -> f64 {
+    audio.offset_seconds + (beat - clip.start) * audio.seconds_per_beat(tempo)
+}
+
+/// How many beats of the timeline `clip`'s file can fill from where the
+/// clip enters it: the longest the clip can be before it runs off the end
+/// of its recording. `None` for a MIDI clip, and while the file's length
+/// is not known (it has not been read yet, or cannot be).
+pub(in crate::ui) fn audio_room(cx: &Cx, clip: &Clip) -> Option<Beats> {
+    let audio = clip.audio()?;
+    let wave = cx.sounds.known_wave(&audio.path)?;
+    let seconds = (wave.seconds() - audio.offset_seconds).max(0.0);
+    Some(seconds / audio.seconds_per_beat(cx.snap.project.tempo))
+}
+
+/// Draws what an audio clip plays: the waveform of its stretch of the
+/// file, once that has been read, and until then the hatching.
+#[expect(clippy::too_many_arguments, reason = "a private paint routine; a struct would only rename the arguments")]
+fn paint_audio(
+    painter: &Painter,
+    cx: &Cx,
+    content: Rect,
+    clip_rect: Rect,
+    geometry: &Geometry,
+    clip: &Clip,
+    audio: &AudioContent,
+    ink: Color32,
+) {
+    let theme = cx.theme;
+    let name = audio.path.rsplit(['/', '\\']).next().unwrap_or(&audio.path);
+    let wave = match cx.sounds.wave(&audio.path) {
+        WaveState::Ready(wave) => wave,
+        WaveState::Loading => {
+            paint_audio_body(painter, theme, content, clip_rect, None, ink, theme.ink_dim);
+            return;
+        }
+        WaveState::Failed(_) => {
+            // The clip is silent; it says which file it is waiting for.
+            let label = format!("Missing \u{00B7} {name}");
+            paint_audio_body(painter, theme, content, clip_rect, Some(&label), fade(theme.warn, 0.7), theme.warn);
+            return;
+        }
+    };
+    let tempo = cx.snap.project.tempo;
+    let per_beat = audio.seconds_per_beat(tempo);
+    let second_at = |x: f32| file_second(clip, audio, tempo, geometry.beat(x));
+    let columns = trill_noir::waveform_columns(painter, content.width());
+    let found = wave.columns(second_at(content.left())..second_at(content.right()), columns);
+    let bands: Vec<(f32, f32)> = found.iter().map(|column| (column.mixed.min, column.mixed.max)).collect();
+    let area = content.shrink2(vec2(0.0, 2.0f32.min(content.height() / 6.0)));
+    let mut mesh = Mesh::default();
+    let gain = 10f32.powf(audio.gain_db / 20.0);
+    trill_noir::waveform(&mut mesh, area, &bands, gain, fade(ink, 0.9), paint::hair(painter));
+    painter.with_clip_rect(content).add(Shape::mesh(Arc::new(mesh)));
+
+    // Where the recording runs out before the clip does, a mark.
+    let end = clip.start + (wave.seconds() - audio.offset_seconds) / per_beat;
+    let x = geometry.x(end).round();
+    if end < clip.end() - 1e-6 && x > content.left() && x < content.right() {
+        paint::vline(painter, x, content.y_range(), theme.ink_faint);
+    }
+    if cx.snap.clip_problems.contains_key(&clip.id) {
+        // It plays, but not as asked (it could not be stretched).
+        paint::corner_mark(painter, clip_rect, theme.warn);
     }
 }
 
@@ -224,9 +303,17 @@ fn loop_starts(clip: &Clip, midi: &MidiContent, pixels_per_beat: f64) -> Vec<Bea
     (0..count).map(|repeat| clip.start + first + repeat as f64 * period).filter(|start| *start < clip.end()).collect()
 }
 
-/// Audio clips show their file instead of notes: a hatched body with a
-/// center line, so they are told apart at a glance, and the file's name.
-fn paint_audio_body(painter: &Painter, theme: &Theme, content: Rect, clip_rect: Rect, path: &str, ink: Color32) {
+/// An audio clip whose waveform cannot be drawn (yet): a hatched body with
+/// a center line, and `label` on a plate when there is something to say.
+fn paint_audio_body(
+    painter: &Painter,
+    theme: &Theme,
+    content: Rect,
+    clip_rect: Rect,
+    label: Option<&str>,
+    ink: Color32,
+    label_ink: Color32,
+) {
     const HATCH: f32 = 8.0;
     let clipped = painter.with_clip_rect(content);
     let hatch = Stroke::new(1.0, fade(ink, 0.3));
@@ -242,8 +329,7 @@ fn paint_audio_body(painter: &Painter, theme: &Theme, content: Rect, clip_rect: 
     let middle = content.center().y.round();
     paint::hline(&clipped, content.x_range(), middle, fade(ink, 0.8));
 
-    if content.width() > 48.0 {
-        let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    if let Some(name) = label.filter(|_| content.width() > 48.0) {
         let room = Rect::from_min_max(pos2(content.left() + 4.0, middle + 2.0), content.max - vec2(4.0, 2.0));
         if room.height() >= theme.text.micro.size {
             // A plate under the name keeps the hatching from running
@@ -253,7 +339,7 @@ fn paint_audio_body(painter: &Painter, theme: &Theme, content: Rect, clip_rect: 
             let width = text::width(&clipped, file_style, name).min(room.width());
             let plate = Rect::from_min_size(room.min - vec2(2.0, 0.0), vec2(width + 4.0, room.height()));
             clipped.rect_filled(plate, 0.0, theme.bg);
-            text::paint(&clipped, room, Align2::LEFT_CENTER, file_style, name, theme.ink_dim);
+            text::paint(&clipped, room, Align2::LEFT_CENTER, file_style, name, label_ink);
         }
     }
 }
@@ -262,7 +348,7 @@ fn paint_audio_body(painter: &Painter, theme: &Theme, content: Rect, clip_rect: 
 /// the curve the handles draw. The engine ramps the amplitude in a straight
 /// line; drawn on the scale of the faders and meters, where equal steps
 /// sound about equal, that is a curve that rises fast and then levels off.
-fn fade_level(progress: f32) -> f32 {
+pub(in crate::ui) fn fade_level(progress: f32) -> f32 {
     units::db_to_fader(units::gain_to_db(progress.clamp(0.0, 1.0))) / units::db_to_fader(0.0)
 }
 
@@ -426,6 +512,42 @@ mod tests {
         assert!(marks(&project).is_empty());
         project.clip_mut(id).unwrap().set_loop_length(Some(0.1)).unwrap();
         assert!(marks(&project).is_empty());
+    }
+
+    #[test]
+    fn a_waveform_follows_offset_trimming_and_warping() {
+        let mut project = Project::new("t");
+        project.set_tempo(120.0).unwrap();
+        let track = project.add_track("A");
+        let content = AudioContent { offset_seconds: 1.0, ..AudioContent::new("take.wav") };
+        let id = project.add_audio_clip(track, "Take", 4.0, 8.0, content).unwrap();
+        let second = |project: &Project, beat: f64| {
+            let clip = project.clip(id).unwrap();
+            file_second(clip, clip.audio().unwrap(), project.tempo, beat)
+        };
+        // At 120 a beat is half a second; the clip enters a second in.
+        assert_eq!(second(&project, 4.0), 1.0);
+        assert_eq!(second(&project, 6.0), 2.0);
+        assert_eq!(second(&project, 12.0), 5.0);
+
+        // Trimming the start hides the beginning: what is under each beat
+        // of the timeline stays what it was.
+        project.trim_clip_start(id, 6.0).unwrap();
+        assert_eq!(second(&project, 6.0), 2.0);
+        assert_eq!(second(&project, 12.0), 5.0);
+        // So does splitting, for the half that is cut off.
+        let rest = project.split_clip(id, 8.0).unwrap();
+        let half = project.clip(rest).unwrap();
+        assert_eq!(file_second(half, half.audio().unwrap(), 120.0, 8.0), 3.0);
+
+        // Warped, a beat covers a beat of the recording, whatever the
+        // song's tempo; unwarped it covers a beat of the song's.
+        project.set_clip_warp(id, trill_core::project::WarpMode::Beats, Some(60.0), 0.0).unwrap();
+        assert_eq!(second(&project, 7.0), 3.0, "a second per beat at 60");
+        project.set_tempo(90.0).unwrap();
+        assert_eq!(second(&project, 7.0), 3.0);
+        project.set_clip_warp(id, trill_core::project::WarpMode::Off, Some(60.0), 0.0).unwrap();
+        assert!((second(&project, 7.0) - (2.0 + 60.0 / 90.0)).abs() < 1e-12);
     }
 
     #[test]

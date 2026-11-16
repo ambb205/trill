@@ -57,5 +57,10 @@ fn main() -> anyhow::Result<()> {
         options.select_clip = Some(clip);
     }
     options.also_select = cli.clips_to_also_select(session.lock().project())?;
-    ui::run(session, options)
+    // Returns at once; the folders are scanned in the background and the
+    // browser fills in as they are.
+    for folder in &cli.library {
+        runtime.library.add_root(folder);
+    }
+    ui::run(runtime, options)
 }
