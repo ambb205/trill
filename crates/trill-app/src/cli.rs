@@ -35,9 +35,10 @@ Options:
   --mcp-port <PORT>       Port of the MCP server for AI assistants (default: 7777)
   --no-mcp                Do not start the MCP server
   --assistant             Start with the assistant's panel open (Ctrl+Shift+A shows it)
-  --assistant-model <NAME>    Model the assistant asks Claude Code for (default: Claude Code's own choice)
+  --assistant-model <NAME>    Model the assistant asks Claude Code for in this run (default: the one chosen
+                          in its panel, which unless one was chosen is Claude Code's own choice)
   --assistant-scene <NAME>    Show a canned conversation in the assistant, for screenshots: ready, working,
-                          answered, limit, api-key, signed-out or not-installed
+                          answered, markdown, model, limit, api-key, signed-out or not-installed
   --screenshot <PATH.png> Render the window to a PNG and exit (implies --null-audio)
   --exit-after <SECONDS>  Close the window by itself after this long
   -h, --help              Show this help

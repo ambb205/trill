@@ -969,6 +969,14 @@ fn the_model_is_chosen_in_the_panel_and_reaches_the_back_end() {
     }
     assert!(harness.shows("Another model name"));
     assert!(harness.shows("Answering as test-model"), "what the CLI said it is answering as");
+    // The list opens inside the panel, however wide what is in it would be.
+    let panel = SCREEN.x - harness.app.assistant().width()..=SCREEN.x;
+    let (first, last) = (harness.passage("Default"), harness.passage("Answering as test-model"));
+    assert!(panel.contains(&first.left()) && panel.contains(&first.right()), "{first:?} in {panel:?}");
+    assert!(
+        first.top() < last.top() && last.bottom() <= harness.passage("Model: Default").top() + 1.0,
+        "above the chip"
+    );
     // Nothing in the window, the open list included, promises anything.
     for (label, _) in &harness.labels {
         let lowered = label.to_lowercase();
@@ -1620,8 +1628,8 @@ fn what_was_sent_is_what_the_script_saw() {
 
 /// The panel driven against the real thing: the CLI installed and signed in
 /// on this machine, and a real MCP server. These spend the usage of whoever
-/// runs them (five short messages to a small model), so each does nothing
-/// unless asked:
+/// runs them (seven short messages, six of them to the smallest model), so
+/// each does nothing unless asked:
 ///
 /// ```text
 /// TRILL_TEST_CLAUDE=1 cargo test -p trill-app live_ -- --test-threads=1 --nocapture
@@ -1753,6 +1761,72 @@ mod live {
         harness.click_label("Undo");
         assert_eq!(harness.project().clip(zebra).unwrap().name, "Zebra");
         assert!(harness.app.assistant().conversation().is_some());
+    }
+
+    #[test]
+    fn live_the_chosen_model_answers_and_the_window_goes_to_what_it_made() {
+        if !asked_for() {
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let mut tracks = None;
+        let mut harness = start(home.path(), |session| tracks = Some(three_tracks(session).0));
+        let tracks = tracks.unwrap();
+        harness.app.state_mut().detail_tab = DetailTab::Mixer;
+
+        // 1: a model's full name, typed into the chooser (the smallest
+        // model, by the name the CLI itself lists for it). The tool's real
+        // answer is what leads the window to the clip.
+        harness.click_label("Model: haiku");
+        harness.click_label("Another model name");
+        harness.type_text("claude-haiku-5-5");
+        harness.key(Modifiers::NONE, Key::Enter);
+        harness.idle(3);
+        assert_eq!(harness.app.assistant().model_choice(), Some("claude-haiku-5-5"));
+        turn(
+            &mut harness,
+            "On the track named Three, create an empty MIDI clip named Marimba that starts at beat 64 and is 8 beats \
+             long. Make exactly that one change and nothing else, then reply with OK only.",
+        );
+        assert!(matches!(harness.ending().0, Ending::Finished { .. }), "{:?}", harness.ending());
+        let first = harness.app.assistant().reported_model().expect("the CLI names the model").to_owned();
+        eprintln!("  asked for claude-haiku-5-5; the CLI says it answers as {first}");
+        assert!(first.contains("haiku"), "{first}");
+        let project = harness.project();
+        let made = project.track(tracks[2]).unwrap().clips.iter().find(|clip| clip.name == "Marimba");
+        let made = made.unwrap_or_else(|| panic!("no clip named Marimba on Three: {:?}", tools_called(&harness))).id;
+        harness.idle(30);
+        let led = harness.items().iter().any(|item| matches!(item, Item::Tool(line) if line.place.is_some()));
+        assert!(led, "a call's real answer said what it made: {:#?}", harness.items());
+        assert_eq!(harness.selected_clips(), [made], "the window went to the clip when the turn ended");
+        assert_eq!(harness.app.state().selected_track, Some(tracks[2]));
+        assert_eq!(harness.app.state().detail_tab, DetailTab::Clip);
+        let (from, to) = harness.beats_in_view();
+        assert!(from <= 64.0 && to >= 72.0, "the timeline shows the clip: {from} to {to}");
+        let conversation = harness.app.assistant().conversation().cloned().expect("the conversation has an id");
+
+        // 2: another model, by the CLI's name for its family, carries the
+        // same conversation on: it knows what was done before it came.
+        harness.click_label("Model: claude-haiku-5-5");
+        harness.click_label("sonnet");
+        harness.idle(3);
+        assert!(harness.shows(
+            "The model \u{201C}sonnet\u{201D} answers from the next message on. The conversation carries on with it."
+        ));
+        turn(
+            &mut harness,
+            "Without calling any tool: what is the name of the clip you created a moment ago? Reply with the name only.",
+        );
+        assert!(matches!(harness.ending().0, Ending::Finished { .. }), "{:?}", harness.ending());
+        let second = harness.app.assistant().reported_model().expect("the CLI names the model").to_owned();
+        eprintln!("  asked for sonnet; the CLI says it answers as {second}");
+        assert!(second.contains("sonnet") && second != first, "{second}");
+        assert!(
+            harness.reply().to_lowercase().contains("marimba"),
+            "it was not handed the conversation: {}",
+            harness.reply()
+        );
+        assert_eq!(harness.app.assistant().conversation(), Some(&conversation), "it is the same conversation");
     }
 
     #[test]

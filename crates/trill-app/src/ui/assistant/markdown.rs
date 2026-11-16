@@ -1,8 +1,8 @@
 //! Markdown, as far as the assistant writes it in a narrow panel:
 //! paragraphs, **strong** and *emphasized* words, `code` and fenced code
 //! blocks, bullet and numbered lists, headings, quotes, rules, and links,
-//! which are shown as text (the words underlined, the address after them)
-//! and open nothing. Tables, images and HTML are left as they were typed.
+//! which are shown as text (the words, then the address in brackets) and
+//! open nothing. Tables, images and HTML are left as they were typed.
 //!
 //! A reply is read while it is still being written, so [`parse`] takes
 //! whether the text is `open`: more of it may yet come. An open text is
@@ -277,14 +277,13 @@ fn read_inline(chars: &[char], base: Face, hopeful: bool, out: &mut Spans) {
             }
             '[' => match link_at(chars, at) {
                 Some((words_end, address_start, end)) => {
-                    let link = Face { link: true, ..face };
                     let before = out.text().len();
-                    read_inline(&chars[at + 1..words_end], link, false, out);
+                    read_inline(&chars[at + 1..words_end], face, false, out);
                     let words = out.text()[before..].to_owned();
                     let address: String = chars[address_start..end].iter().collect();
                     let address = address.split_whitespace().next().unwrap_or_default();
                     if words.is_empty() {
-                        out.push_str(link, address);
+                        out.push_str(face, address);
                     } else if !address.is_empty() && !words.contains(address) {
                         out.push_str(face, &format!(" ({address})"));
                     }
@@ -297,8 +296,7 @@ fn read_inline(chars: &[char], base: Face, hopeful: bool, out: &mut Spans) {
             },
             '<' => match address_at(chars, at) {
                 Some(end) => {
-                    let link = Face { link: true, ..face };
-                    chars[at + 1..end].iter().for_each(|c| out.push(link, *c));
+                    chars[at + 1..end].iter().for_each(|c| out.push(face, *c));
                     at = end + 1;
                 }
                 None => {
@@ -603,7 +601,6 @@ mod tests {
         Block::Item { mark: mark.to_owned(), depth, spans: vec![plain(text)] }
     }
 
-    const LINK: Face = Face { link: true, ..Face::PLAIN };
     const BOTH: Face = Face { strong: true, emphasis: true, ..Face::PLAIN };
 
     #[test]
@@ -677,18 +674,16 @@ mod tests {
         let read = |text: &str| inline(text, false);
         assert_eq!(
             read("See [the manual](https://example.com/manual) first."),
-            [plain("See "), span(LINK, "the manual"), plain(" (https://example.com/manual) first.")]
+            [plain("See the manual (https://example.com/manual) first.")]
         );
         // The address is not said twice.
-        assert_eq!(read("[https://example.com](https://example.com)"), [span(LINK, "https://example.com")]);
-        assert_eq!(read("<https://example.com>"), [span(LINK, "https://example.com")]);
+        assert_eq!(read("[https://example.com](https://example.com)"), [plain("https://example.com")]);
+        assert_eq!(read("<https://example.com>"), [plain("https://example.com")]);
+        assert_eq!(read("[](https://example.com)"), [plain("https://example.com")]);
         // Brackets that are not a link are brackets.
         assert_eq!(read("the [Verse] and a < b"), [plain("the [Verse] and a < b")]);
         assert_eq!(read("[a] (b)"), [plain("[a] (b)")]);
-        assert_eq!(
-            read("[**bold** words](x)"),
-            [span(Face { strong: true, ..LINK }, "bold"), span(LINK, " words"), plain(" (x)")]
-        );
+        assert_eq!(read("[**bold** words](x)"), [span(Face::STRONG, "bold"), plain(" words (x)")]);
     }
 
     #[test]

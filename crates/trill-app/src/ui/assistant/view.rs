@@ -42,6 +42,8 @@ const UNFOLD: f32 = 28.0;
 const FIELD_ROWS: std::ops::RangeInclusive<usize> = 2..=8;
 /// What the chooser calls leaving the model to the CLI.
 const DEFAULT_MODEL: &str = "Default";
+/// Width of the chooser's list: narrower than the panel at its narrowest.
+const MODEL_MENU: f32 = 236.0;
 
 /// What a click in the conversation asks for, carried out once the
 /// conversation is no longer being read.
@@ -1002,8 +1004,15 @@ fn model_chooser(ui: &mut Ui, cx: &mut Cx, room: Rect) -> f32 {
     let reported = cx.assistant.reported_model().map(str::to_owned);
     let (draft, problem) = (&mut cx.assistant.model_draft, &mut cx.assistant.model_problem);
     let mut chosen: Option<Option<String>> = None;
-    egui::Popup::menu(&response).gap(1.0).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-        ui.set_min_width(236.0);
+    // Above the chip, in line with its left edge: inside the panel. The
+    // list has a field in it, which a click must not close it for.
+    let menu = egui::Popup::menu(&response)
+        .gap(1.0)
+        .align(egui::RectAlign::TOP_START)
+        .width(MODEL_MENU)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    menu.show(|ui| {
+        ui.set_width(MODEL_MENU);
         trill_noir::menu_heading(ui, theme, "Model");
         let about = "The model Claude Code is set up to use, in its own settings.";
         if MenuItem::new(DEFAULT_MODEL).checked(choice.is_none()).detail(about).show(ui, theme).clicked() {

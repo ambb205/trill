@@ -18,7 +18,7 @@
 //! with the mouse across its paragraphs and copied.
 
 use super::markdown::{self, BULLET, Block, Span};
-use eframe::egui::{Galley, Id, Rect, Response, Role, Ui, WidgetInfo, pos2, vec2};
+use eframe::egui::{FontId, Galley, Id, Rect, Response, Role, Ui, WidgetInfo, pos2, vec2};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use trill_noir::prose::{self, Face, Run};
@@ -144,9 +144,16 @@ fn place(ui: &Ui, theme: &Theme, block: &Block, hash: u64, width: f32, edge: f32
         }
         Block::Item { mark, depth, spans } => {
             let read = mark != BULLET;
+            // A number has the room its digits would take at their widest,
+            // so that the items of a list begin in line: "1." is narrower
+            // than "2.", and both stand with their stops in a column.
+            let digits = mark.chars().filter(char::is_ascii_digit).count();
+            let cell = match digits {
+                0 => MARK,
+                _ => (digits as f32 * widest_digit(ui, body.size) + stop_width(ui, body.size) + 7.0).ceil().max(MARK),
+            };
             let mark = prose::plain(ui, theme, body, theme.ink_dim, mark, room);
             let indent = *depth as f32 * NESTING;
-            let cell = (mark.size().x + 6.0).max(MARK);
             let left = edge + indent + cell;
             let galley = prose::layout(ui, theme, body, theme.ink, &runs(spans, keep), width - edge - left);
             (Kind::Item, Some(galley), Some((mark, read)), left, markdown::text_of(spans))
@@ -167,6 +174,17 @@ fn place(ui: &Ui, theme: &Theme, block: &Block, hash: u64, width: f32, edge: f32
         (None, _) => RULE,
     };
     Placed { hash, kind, galley, mark, top: 0.0, left, height, label }
+}
+
+/// Width of the widest digit of the body face at `size`.
+fn widest_digit(ui: &Ui, size: f32) -> f32 {
+    let font = FontId::proportional(size);
+    ui.fonts_mut(|fonts| ('0'..='9').map(|digit| fonts.glyph_width(&font, digit)).fold(0.0, f32::max))
+}
+
+/// Width of the full stop after a list's number.
+fn stop_width(ui: &Ui, size: f32) -> f32 {
+    ui.fonts_mut(|fonts| fonts.glyph_width(&FontId::proportional(size), '.'))
 }
 
 /// The space above a block that follows one of kind `above`.

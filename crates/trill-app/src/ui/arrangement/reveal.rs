@@ -111,7 +111,14 @@ pub(super) fn carry_out(ui: &Ui, cx: &mut Cx, geometry: &mut Geometry) {
     let (top, bottom) = rows
         .fold((f32::INFINITY, f32::NEG_INFINITY), |(top, bottom), row| (top.min(row.top), bottom.max(row.bottom())));
     if top <= bottom {
-        let scroll = scroll_to_show(view.scroll_y, top, bottom, geometry.lanes.height());
+        let mut scroll = scroll_to_show(view.scroll_y, top, bottom, geometry.lanes.height());
+        if scroll > view.scroll_y {
+            // Scrolled down: on to where a row begins, if what was asked
+            // for still shows from its top, so that no row is left cut in
+            // half along the top.
+            let whole = geometry.rows.rows.iter().map(|row| row.top).find(|row_top| *row_top >= scroll);
+            scroll = whole.filter(|row_top| *row_top <= top).unwrap_or(scroll);
+        }
         view.scroll_y = scroll.clamp(0.0, geometry.max_scroll());
         geometry.scroll_y = view.scroll_y;
     }

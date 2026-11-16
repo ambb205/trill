@@ -20,8 +20,10 @@ const GAP: f32 = 14.0;
 /// Height of the boxes in the bar: buttons, readouts.
 const BOX: f32 = 22.0;
 const BUTTON_WIDTH: f32 = 26.0;
-/// The project name gets at most this much of the bar.
+/// The project name gets at most this much of the bar, and in a window too
+/// narrow for everything gives way first, down to this much.
 const NAME_MAX_WIDTH: f32 = 190.0;
+const NAME_MIN_WIDTH: f32 = 44.0;
 /// Where the transport starts when the window is wide enough to choose.
 const TRANSPORT_LEFT: f32 = 372.0;
 const POSITION_WIDTH: f32 = 140.0;
@@ -39,8 +41,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     painter.rect_filled(bar, 0.0, theme.panel);
     paint::hline_above(&painter, bar.x_range(), bar.bottom(), theme.hairline);
 
-    let left_end = project_group(ui, cx, bar);
+    // From the right first: what is left over says how much of a long
+    // project name there is room for.
     let right_start = status_group(ui, cx, bar);
+    let left_end = project_group(ui, cx, bar, right_start - GAP - TRANSPORT_WIDTH - GAP);
 
     // At its usual place when there is room; otherwise squeezed between
     // its neighbors, keeping clear of the menus first.
@@ -54,8 +58,15 @@ fn boxed(bar: Rect, left: f32, width: f32) -> Rect {
     Rect::from_min_size(pos2(left, bar.center().y - BOX / 2.0), vec2(width, BOX))
 }
 
-/// Wordmark, project name and the menus. Returns the x where they end.
-fn project_group(ui: &mut Ui, cx: &mut Cx, bar: Rect) -> f32 {
+/// How wide the project name is set: as wide as it is, up to its share of
+/// the bar, and no wider than `room`, short of a few letters.
+fn name_width(wanted: f32, room: f32) -> f32 {
+    wanted.min(NAME_MAX_WIDTH).min(room.max(NAME_MIN_WIDTH))
+}
+
+/// Wordmark, project name and the menus. Returns the x where they end,
+/// which is by `end` if the name can be cut short enough for that.
+fn project_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, end: f32) -> f32 {
     let theme = cx.theme;
     let painter = ui.painter().clone();
     let mut x = bar.left() + EDGE;
@@ -65,7 +76,12 @@ fn project_group(ui: &mut Ui, cx: &mut Cx, bar: Rect) -> f32 {
     x += text::paint(&painter, row(x), Align2::LEFT_CENTER, theme.text.brand, "TRILL", theme.ink) + GAP;
 
     let name = &cx.snap.project.name;
-    let width = text::width(&painter, theme.text.body, name).min(NAME_MAX_WIDTH);
+    let titles = ["File", "Edit", "View"];
+    let menu_width = |title: &str| (text::width(&painter, theme.text.caps, title) + 14.0).ceil();
+    // What follows the name: the dot of unsaved work, and the menus.
+    let unsaved = if cx.snap.modified { 6.0 + theme.metric.dot } else { 0.0 };
+    let after = unsaved + GAP - 7.0 + titles.iter().map(|title| menu_width(title)).sum::<f32>();
+    let width = name_width(text::width(&painter, theme.text.body, name), end - x - after);
     let name_rect = Rect::from_min_size(pos2(x, bar.top()), vec2(width, bar.height()));
     text::paint(&painter, name_rect, Align2::LEFT_CENTER, theme.text.body, name, theme.ink);
     x += width;
@@ -78,9 +94,9 @@ fn project_group(ui: &mut Ui, cx: &mut Cx, bar: Rect) -> f32 {
     cx.hint(&response, if cx.snap.modified { format!("{location} \u{00B7} unsaved changes") } else { location });
     x += GAP - 7.0;
 
-    for (title, menu) in [("File", file_menu as fn(&mut Ui, &mut Cx)), ("Edit", edit_menu), ("View", view_menu)] {
-        let width = text::width(&painter, theme.text.caps, title) + 14.0;
-        let rect = boxed(bar, x, width.ceil());
+    let menus = [file_menu as fn(&mut Ui, &mut Cx), edit_menu, view_menu];
+    for (title, menu) in titles.into_iter().zip(menus) {
+        let rect = boxed(bar, x, menu_width(title));
         let response = trill_noir::menu_title(ui, theme, rect, ui.scope_id().with(("menu", title)), title);
         egui::Popup::menu(&response).gap(1.0).show(|ui| {
             ui.set_min_width(220.0);
@@ -508,6 +524,15 @@ fn status_group(ui: &mut Ui, cx: &mut Cx, bar: Rect) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_project_name_gives_way_before_anything_overlaps() {
+        assert_eq!(name_width(80.0, 400.0), 80.0, "a short name is as wide as it is");
+        assert_eq!(name_width(500.0, 400.0), NAME_MAX_WIDTH, "a long one has its share of the bar");
+        assert_eq!(name_width(500.0, 120.0), 120.0, "and less in a narrow window");
+        assert_eq!(name_width(80.0, 120.0), 80.0);
+        assert_eq!(name_width(500.0, -30.0), NAME_MIN_WIDTH, "but always a few letters");
+    }
 
     #[test]
     fn dragging_steps_the_time_signature_within_what_the_model_accepts() {

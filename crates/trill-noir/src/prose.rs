@@ -6,10 +6,10 @@
 //! with them: a reply, an explanation, an error in a program's own words.
 //!
 //! A passage is a list of [`Run`]s, each in a [`Face`]: plain, strong
-//! (Inter SemiBold), emphasized (slanted), code (the monospaced face, on a
-//! wash) or a link (underlined; nothing here opens anything). [`layout`]
-//! wraps them at a width, and [`selectable`] paints the result so that it
-//! can be selected like text in any document: drag across it, double-click
+//! (Inter SemiBold), emphasized (slanted) or code (the monospaced face, on
+//! a wash). [`layout`] wraps them at a width, and [`selectable`] paints the
+//! result so that it can be selected like text in any document: drag
+//! across it, double-click
 //! a word, triple-click a line, Shift-click to extend, and Ctrl+C. A
 //! selection runs across every passage painted this way in the same panel,
 //! so several paragraphs can be taken at once; copied, passages a line
@@ -42,12 +42,10 @@ pub struct Face {
     pub emphasis: bool,
     /// In the monospaced face, on a wash.
     pub code: bool,
-    /// Underlined, as a link is. It is shown as one and does nothing.
-    pub link: bool,
 }
 
 impl Face {
-    pub const PLAIN: Face = Face { strong: false, emphasis: false, code: false, link: false };
+    pub const PLAIN: Face = Face { strong: false, emphasis: false, code: false };
     pub const STRONG: Face = Face { strong: true, ..Face::PLAIN };
     pub const EMPHASIS: Face = Face { emphasis: true, ..Face::PLAIN };
     pub const CODE: Face = Face { code: true, ..Face::PLAIN };
@@ -97,7 +95,6 @@ pub fn layout(ui: &Ui, theme: &Theme, style: TextStyle, color: Color32, runs: &[
             line_height: Some(line_height),
             italics: face.emphasis && !face.code,
             background: if face.code { theme.fill } else { Color32::TRANSPARENT },
-            underline: if face.link { Stroke::new(1.0, theme.ink_faint) } else { Stroke::NONE },
             ..Default::default()
         };
         if style.upper && !face.code {

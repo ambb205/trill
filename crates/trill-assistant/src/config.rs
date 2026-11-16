@@ -200,11 +200,12 @@ impl AssistantConfig {
 /// The names the CLI takes for "the newest model of this family", from the
 /// most capable down: its own list, read out of CLI 2.1.325 (whose help
 /// names the first three of them), which also has a few for special uses
-/// (`best`, `opusplan`, and `[1m]` forms). `opus` and `sonnet` were each
-/// asked for in a real turn and answered; `haiku` is what this crate's
-/// real-CLI tests run on; `fable` was not spent a turn on. A CLI that does
-/// not know one passes it on like any other name, and the service refuses
-/// it.
+/// (`best`, `opusplan`, and `[1m]` forms). `fable`, `opus` and `sonnet`
+/// were each asked for in a real turn with that CLI and answered, the CLI
+/// reporting the full name it had made of each (`claude-fable-5-2`,
+/// `claude-opus-5-5`, `claude-sonnet-5-5`); `haiku` is what this crate's
+/// real-CLI tests run on. A CLI that does not know one passes it on like
+/// any other name, and the service refuses it.
 ///
 /// For a chooser to offer beside "whatever the CLI is set up to use"
 /// (`None`) and a name typed by hand. Listing a name promises nothing
