@@ -15,6 +15,12 @@ pub struct AudioStats {
     pub duration_seconds: f64,
     /// Highest sample peak, dBFS. Above 0 means the file would clip.
     pub peak_db: f32,
+    /// The peak between the samples (true peak, by four times
+    /// oversampling), dBFS: what a converter or a lossy encoder makes of
+    /// it, which can be a dB or more above the highest sample. Measured
+    /// for a mix, not for each track of one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub true_peak_db: Option<f32>,
     pub rms_db: f32,
     /// Integrated loudness (ITU-R BS.1770). Streaming targets sit around -14.
     pub loudness_lufs: f32,
@@ -44,32 +50,166 @@ fn to_db(power: f64) -> f32 {
     if power <= 0.0 { FLOOR_DB } else { (10.0 * power.log10()).max(FLOOR_DB as f64) as f32 }
 }
 
+/// A linear level in dB, never below the floor every measurement shares.
+pub fn level_db(linear: f32) -> f32 {
+    to_db(f64::from(linear) * f64::from(linear))
+}
+
 pub fn analyze(left: &[f32], right: &[f32], sample_rate: u32) -> AudioStats {
-    let frames = left.len().min(right.len());
-    let (left, right) = (&left[..frames], &right[..frames]);
+    let mut analyzer = Analyzer::new(sample_rate);
+    analyzer.push(left, right);
+    analyzer.stats()
+}
 
-    let mut peak = 0.0f32;
-    let mut clipped = 0;
-    let (mut sum_ll, mut sum_rr, mut sum_lr) = (0.0f64, 0.0f64, 0.0f64);
-    for (&l, &r) in left.iter().zip(right) {
-        let magnitude = l.abs().max(r.abs());
-        peak = peak.max(magnitude);
-        clipped += usize::from(l.abs() >= 1.0) + usize::from(r.abs() >= 1.0);
-        sum_ll += (l as f64) * (l as f64);
-        sum_rr += (r as f64) * (r as f64);
-        sum_lr += (l as f64) * (r as f64);
+/// Measures audio as it goes by, a block at a time, holding on to a few
+/// numbers a second and none of the audio: a render measures every track
+/// this way without keeping a stem of each.
+///
+/// What comes out is what [`analyze`] gives for the same audio in one
+/// piece, and loudness and peak for any stretch of it afterwards
+/// ([`Analyzer::loudness_between`]): the parts of a song.
+pub struct Analyzer {
+    sample_rate: f64,
+    frames: usize,
+    peak: f32,
+    clipped: usize,
+    sum_ll: f64,
+    sum_rr: f64,
+    sum_lr: f64,
+    /// The loudness weighting of each channel.
+    weighting: [[Weighting; 2]; 2],
+    /// Frames in a tenth of a second, the step loudness is gated in.
+    hop: usize,
+    /// How much of the current step is in, its weighted energy and peak.
+    hop_fill: usize,
+    hop_power: f64,
+    hop_peak: f32,
+    /// The weighted energy and the peak of every whole step so far.
+    hops: Vec<f64>,
+    hop_peaks: Vec<f32>,
+    spectrum: SpectrumMeter,
+    true_peak: Option<[Oversampler; 2]>,
+}
+
+impl Analyzer {
+    pub fn new(sample_rate: u32) -> Self {
+        let rate = f64::from(sample_rate.max(1));
+        Self {
+            sample_rate: rate,
+            frames: 0,
+            peak: 0.0,
+            clipped: 0,
+            sum_ll: 0.0,
+            sum_rr: 0.0,
+            sum_lr: 0.0,
+            weighting: [Weighting::k_weighting(rate), Weighting::k_weighting(rate)],
+            hop: ((0.1 * rate) as usize).max(1),
+            hop_fill: 0,
+            hop_power: 0.0,
+            hop_peak: 0.0,
+            hops: Vec::new(),
+            hop_peaks: Vec::new(),
+            spectrum: SpectrumMeter::new(rate),
+            true_peak: None,
+        }
     }
-    let mean_square = if frames == 0 { 0.0 } else { (sum_ll + sum_rr) / (2.0 * frames as f64) };
-    let denominator = (sum_ll * sum_rr).sqrt();
 
-    AudioStats {
-        duration_seconds: frames as f64 / sample_rate as f64,
-        peak_db: to_db((peak as f64) * (peak as f64)),
-        rms_db: to_db(mean_square),
-        loudness_lufs: loudness(left, right, sample_rate as f64),
-        clipped_samples: clipped,
-        stereo_correlation: if denominator > 0.0 { (sum_lr / denominator) as f32 } else { 1.0 },
-        spectrum: spectrum(left, right, sample_rate as f64),
+    /// Also measures the peak between the samples, where a converter
+    /// would put it: a few dozen multiplications a frame, which is worth
+    /// it for a mix and not for every track of one.
+    pub fn with_true_peak(mut self) -> Self {
+        self.true_peak = Some([Oversampler::new(), Oversampler::new()]);
+        self
+    }
+
+    /// Takes in the next frames. `left` and `right` are equally long.
+    pub fn push(&mut self, left: &[f32], right: &[f32]) {
+        let frames = left.len().min(right.len());
+        for (&l, &r) in left[..frames].iter().zip(&right[..frames]) {
+            let magnitude = l.abs().max(r.abs());
+            self.peak = self.peak.max(magnitude);
+            self.clipped += usize::from(l.abs() >= 1.0) + usize::from(r.abs() >= 1.0);
+            let (l64, r64) = (f64::from(l), f64::from(r));
+            self.sum_ll += l64 * l64;
+            self.sum_rr += r64 * r64;
+            self.sum_lr += l64 * r64;
+
+            let [left_filters, right_filters] = &mut self.weighting;
+            let shelved_left = left_filters[0].tick(l64);
+            let weighted_left = left_filters[1].tick(shelved_left);
+            let shelved_right = right_filters[0].tick(r64);
+            let weighted_right = right_filters[1].tick(shelved_right);
+            self.hop_power += weighted_left * weighted_left + weighted_right * weighted_right;
+            self.hop_peak = self.hop_peak.max(magnitude);
+            self.hop_fill += 1;
+            if self.hop_fill == self.hop {
+                self.hops.push(self.hop_power);
+                self.hop_peaks.push(self.hop_peak);
+                (self.hop_fill, self.hop_power, self.hop_peak) = (0, 0.0, 0.0);
+            }
+        }
+        self.spectrum.push(&left[..frames], &right[..frames]);
+        if let Some([over_left, over_right]) = &mut self.true_peak {
+            over_left.push(&left[..frames]);
+            over_right.push(&right[..frames]);
+        }
+        self.frames += frames;
+    }
+
+    /// How many frames have been taken in.
+    pub fn frames(&self) -> usize {
+        self.frames
+    }
+
+    /// The highest sample so far, linear.
+    pub fn peak(&self) -> f32 {
+        self.peak
+    }
+
+    /// Everything measured so far.
+    pub fn stats(&self) -> AudioStats {
+        let frames = self.frames;
+        let mean_square = if frames == 0 { 0.0 } else { (self.sum_ll + self.sum_rr) / (2.0 * frames as f64) };
+        let denominator = (self.sum_ll * self.sum_rr).sqrt();
+        let between = self.true_peak.as_ref().map(|[left, right]| left.peak().max(right.peak()));
+        AudioStats {
+            duration_seconds: frames as f64 / self.sample_rate,
+            peak_db: level_db(self.peak),
+            // Never below the highest sample: the samples are part of the
+            // signal between them.
+            true_peak_db: between.map(|between| level_db(between.max(self.peak))),
+            rms_db: to_db(mean_square),
+            loudness_lufs: gated_loudness(&self.hops, self.hop),
+            clipped_samples: self.clipped,
+            stereo_correlation: if denominator > 0.0 { (self.sum_lr / denominator) as f32 } else { 1.0 },
+            spectrum: self.spectrum.shares(),
+        }
+    }
+
+    /// Where the energy sits, as one number: the centre of the spectrum
+    /// in Hz. `None` for silence, and for less than a tenth of a second.
+    pub fn brightness_hz(&self) -> Option<f64> {
+        self.spectrum.centroid()
+    }
+
+    /// The whole tenths of a second that lie in the frames `from..to`.
+    fn steps(&self, from: usize, to: usize) -> std::ops::Range<usize> {
+        let first = from.div_ceil(self.hop).min(self.hops.len());
+        let last = (to / self.hop).min(self.hops.len());
+        first..last.max(first)
+    }
+
+    /// The loudness of the frames `from..to` in LUFS, measured as the
+    /// whole is and to the tenth of a second. The floor (-120) for a
+    /// stretch shorter than the 0.4 s loudness is measured over, or silent.
+    pub fn loudness_between(&self, from: usize, to: usize) -> f32 {
+        gated_loudness(&self.hops[self.steps(from, to)], self.hop)
+    }
+
+    /// The highest sample in the frames `from..to`, in dB, to the tenth
+    /// of a second.
+    pub fn peak_between(&self, from: usize, to: usize) -> f32 {
+        level_db(self.hop_peaks[self.steps(from, to)].iter().fold(0.0f32, |peak, hop| peak.max(*hop)))
     }
 }
 
@@ -111,6 +251,7 @@ impl Weighting {
         [shelf, highpass]
     }
 
+    #[inline]
     fn tick(&mut self, input: f64) -> f64 {
         let out = self.b[0] * input + self.b[1] * self.x[0] + self.b[2] * self.x[1]
             - self.a[0] * self.y[0]
@@ -121,35 +262,20 @@ impl Weighting {
     }
 }
 
-/// Integrated loudness in LUFS, with the standard absolute and relative gates.
-fn loudness(left: &[f32], right: &[f32], sample_rate: f64) -> f32 {
-    let block = (0.4 * sample_rate) as usize;
-    let hop = (0.1 * sample_rate) as usize;
-    if left.len() < block || hop == 0 {
+/// Integrated loudness in LUFS, with the standard absolute and relative
+/// gates, from the weighted energy of consecutive tenths of a second
+/// (`hop` frames each): the 0.4 s blocks of BS.1770 are four of them, and
+/// overlap by three.
+fn gated_loudness(hops: &[f64], hop: usize) -> f32 {
+    if hops.len() < 4 {
         return FLOOR_DB;
     }
-
-    let mut weighted_power = vec![0.0f64; left.len()];
-    for channel in [left, right] {
-        let mut filters = Weighting::k_weighting(sample_rate);
-        for (power, &sample) in weighted_power.iter_mut().zip(channel) {
-            let shelved = filters[0].tick(sample as f64);
-            let weighted = filters[1].tick(shelved);
-            *power += weighted * weighted;
-        }
-    }
-
-    let mut blocks = Vec::new();
-    let mut start = 0;
-    while start + block <= weighted_power.len() {
-        blocks.push(weighted_power[start..start + block].iter().sum::<f64>() / block as f64);
-        start += hop;
-    }
-
+    let block = (4 * hop) as f64;
+    let blocks = hops.windows(4).map(|four| four.iter().sum::<f64>() / block);
     let lufs = |power: f64| -0.691 + 10.0 * power.log10();
     let mean = |values: &[f64]| values.iter().sum::<f64>() / values.len() as f64;
 
-    let audible: Vec<f64> = blocks.into_iter().filter(|&p| p > 0.0 && lufs(p) > -70.0).collect();
+    let audible: Vec<f64> = blocks.filter(|&p| p > 0.0 && lufs(p) > -70.0).collect();
     if audible.is_empty() {
         return FLOOR_DB;
     }
@@ -161,40 +287,136 @@ fn loudness(left: &[f32], right: &[f32], sample_rate: f64) -> f32 {
     lufs(mean(&gated)) as f32
 }
 
-/// Energy share per band from an averaged, Hann-windowed power spectrum.
-fn spectrum(left: &[f32], right: &[f32], sample_rate: f64) -> Spectrum {
-    let mut bands = [0.0f64; 5];
-    let window: Vec<f32> =
-        (0..FFT_SIZE).map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / FFT_SIZE as f32).cos()).collect();
-    let mut re = vec![0.0f32; FFT_SIZE];
-    let mut im = vec![0.0f32; FFT_SIZE];
-    let bin_hz = sample_rate / FFT_SIZE as f64;
+/// Energy per band from an averaged, Hann-windowed power spectrum of the
+/// two channels' sum, taken in as the audio goes by.
+struct SpectrumMeter {
+    bin_hz: f64,
+    window: Vec<f32>,
+    /// The last frames of the mono sum, up to one transform's worth.
+    held: Vec<f32>,
+    re: Vec<f32>,
+    im: Vec<f32>,
+    bands: [f64; 5],
+    /// Energy times frequency, and energy: the centre of the spectrum.
+    weighted: f64,
+    energy: f64,
+}
 
-    let mut start = 0;
-    while start + FFT_SIZE <= left.len() {
-        for i in 0..FFT_SIZE {
-            re[i] = (left[start + i] + right[start + i]) * 0.5 * window[i];
-            im[i] = 0.0;
+impl SpectrumMeter {
+    fn new(sample_rate: f64) -> Self {
+        let window = (0..FFT_SIZE)
+            .map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / FFT_SIZE as f32).cos())
+            .collect();
+        Self {
+            bin_hz: sample_rate / FFT_SIZE as f64,
+            window,
+            held: Vec::with_capacity(FFT_SIZE),
+            re: vec![0.0; FFT_SIZE],
+            im: vec![0.0; FFT_SIZE],
+            bands: [0.0; 5],
+            weighted: 0.0,
+            energy: 0.0,
         }
-        fft(&mut re, &mut im);
-        let mut band = 0;
-        for bin in 1..FFT_SIZE / 2 {
-            while bin as f64 * bin_hz >= BAND_EDGES[band] {
-                band += 1;
-            }
-            bands[band] += (re[bin] as f64).powi(2) + (im[bin] as f64).powi(2);
-        }
-        start += FFT_SIZE / 2;
     }
 
-    let total: f64 = bands.iter().sum();
-    let share = |energy: f64| if total > 0.0 { to_db(energy / total) } else { FLOOR_DB };
-    Spectrum {
-        sub_db: share(bands[0]),
-        bass_db: share(bands[1]),
-        mid_db: share(bands[2]),
-        presence_db: share(bands[3]),
-        air_db: share(bands[4]),
+    fn push(&mut self, left: &[f32], right: &[f32]) {
+        for (l, r) in left.iter().zip(right) {
+            self.held.push((l + r) * 0.5);
+            if self.held.len() == FFT_SIZE {
+                self.transform();
+                // The next transform overlaps this one by half.
+                self.held.drain(..FFT_SIZE / 2);
+            }
+        }
+    }
+
+    fn transform(&mut self) {
+        for i in 0..FFT_SIZE {
+            self.re[i] = self.held[i] * self.window[i];
+            self.im[i] = 0.0;
+        }
+        fft(&mut self.re, &mut self.im);
+        let mut band = 0;
+        for bin in 1..FFT_SIZE / 2 {
+            let hz = bin as f64 * self.bin_hz;
+            while hz >= BAND_EDGES[band] {
+                band += 1;
+            }
+            let power = f64::from(self.re[bin]).powi(2) + f64::from(self.im[bin]).powi(2);
+            self.bands[band] += power;
+            self.weighted += power * hz;
+            self.energy += power;
+        }
+    }
+
+    fn shares(&self) -> Spectrum {
+        let total: f64 = self.bands.iter().sum();
+        let share = |energy: f64| if total > 0.0 { to_db(energy / total) } else { FLOOR_DB };
+        Spectrum {
+            sub_db: share(self.bands[0]),
+            bass_db: share(self.bands[1]),
+            mid_db: share(self.bands[2]),
+            presence_db: share(self.bands[3]),
+            air_db: share(self.bands[4]),
+        }
+    }
+
+    fn centroid(&self) -> Option<f64> {
+        (self.energy > 0.0).then(|| self.weighted / self.energy)
+    }
+}
+
+/// Taps of each of the four phases of the interpolator.
+const PHASE_TAPS: usize = 12;
+
+/// Finds the peak between the samples: the signal is interpolated to four
+/// times its rate with a windowed-sinc filter, as BS.1770 describes for
+/// true peak, and the highest of what comes out is kept.
+struct Oversampler {
+    /// The filter, a phase at a time.
+    phases: [[f32; PHASE_TAPS]; 4],
+    /// The last samples, written round.
+    history: [f32; PHASE_TAPS],
+    at: usize,
+    peak: f32,
+}
+
+impl Oversampler {
+    fn new() -> Self {
+        let taps = 4 * PHASE_TAPS;
+        let centre = (taps - 1) as f64 / 2.0;
+        let mut phases = [[0.0f32; PHASE_TAPS]; 4];
+        for tap in 0..taps {
+            let x = (tap as f64 - centre) / 4.0;
+            let sinc = if x.abs() < 1e-12 { 1.0 } else { (PI * x).sin() / (PI * x) };
+            let window = 0.5 - 0.5 * (2.0 * PI * (tap as f64 + 0.5) / taps as f64).cos();
+            phases[tap % 4][tap / 4] = (sinc * window) as f32;
+        }
+        // Each phase passes a steady level unchanged.
+        for phase in &mut phases {
+            let sum: f32 = phase.iter().sum();
+            phase.iter_mut().for_each(|tap| *tap /= sum);
+        }
+        Self { phases, history: [0.0; PHASE_TAPS], at: 0, peak: 0.0 }
+    }
+
+    fn push(&mut self, samples: &[f32]) {
+        for &sample in samples {
+            self.history[self.at] = sample;
+            self.at = (self.at + 1) % PHASE_TAPS;
+            for phase in &self.phases {
+                // The newest sample meets the filter's first tap.
+                let mut sum = 0.0f32;
+                for (tap, weight) in phase.iter().enumerate() {
+                    sum += weight * self.history[(self.at + PHASE_TAPS - 1 - tap) % PHASE_TAPS];
+                }
+                self.peak = self.peak.max(sum.abs());
+            }
+        }
+    }
+
+    fn peak(&self) -> f32 {
+        self.peak
     }
 }
 
@@ -282,6 +504,77 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn audio_taken_in_pieces_measures_as_it_does_whole_and_part_by_part() {
+        // Two seconds loud, two seconds 12 dB quieter, in odd-sized pieces.
+        let mut tone = sine(997.0, 0.5, 2.0, 48_000);
+        tone.extend(sine(997.0, 0.125, 2.0, 48_000));
+        let right: Vec<f32> = tone.iter().map(|sample| sample * 0.5).collect();
+        let whole = analyze(&tone, &right, 48_000);
+        let mut pieces = Analyzer::new(48_000);
+        let mut at = 0;
+        for size in [1usize, 7, 480, 4095, 4097, 31, 1024].iter().cycle() {
+            let end = (at + size).min(tone.len());
+            pieces.push(&tone[at..end], &right[at..end]);
+            at = end;
+            if at == tone.len() {
+                break;
+            }
+        }
+        assert_eq!(pieces.stats(), whole);
+        assert_eq!(pieces.frames(), tone.len());
+
+        // Each half by itself: 12 dB apart, and the loud one louder than
+        // the two together.
+        let (loud, soft) = (pieces.loudness_between(0, 96_000), pieces.loudness_between(96_000, 192_000));
+        assert!((loud - soft - 12.04).abs() < 0.1, "{loud} then {soft}");
+        assert!(loud > whole.loudness_lufs && whole.loudness_lufs > soft);
+        assert!((pieces.peak_between(0, 96_000) + 6.02).abs() < 0.05);
+        assert!((pieces.peak_between(96_000, 192_000) + 18.06).abs() < 0.05);
+        // A stretch too short to have a loudness, or beyond the audio.
+        assert_eq!(pieces.loudness_between(0, 4_800), FLOOR_DB);
+        assert_eq!(pieces.loudness_between(500_000, 600_000), FLOOR_DB);
+        assert_eq!(pieces.peak_between(500_000, 600_000), FLOOR_DB);
+    }
+
+    #[test]
+    fn the_peak_between_the_samples_is_found() {
+        // A sine at a quarter of the sample rate, sampled 45 degrees off
+        // its crests: every sample is 3 dB below the wave's real height.
+        let wave: Vec<f32> = (0..48_000).map(|i| (0.8 * (PI * (i as f64 / 2.0 + 0.25)).sin()) as f32).collect();
+        let plain = analyze(&wave, &wave, 48_000);
+        assert_eq!(plain.true_peak_db, None, "not measured unless asked for");
+        let mut analyzer = Analyzer::new(48_000).with_true_peak();
+        analyzer.push(&wave, &wave);
+        let stats = analyzer.stats();
+        assert!((stats.peak_db + 4.95).abs() < 0.05, "the samples reach {}", stats.peak_db);
+        let true_peak = stats.true_peak_db.unwrap();
+        assert!((true_peak + 1.94).abs() < 0.3, "the wave reaches -1.94 dB: {true_peak}");
+
+        // A wave whose samples sit on its crests has no more to find, and
+        // the true peak is never below the highest sample.
+        let slow = sine(100.0, 0.5, 1.0, 48_000);
+        let mut analyzer = Analyzer::new(48_000).with_true_peak();
+        analyzer.push(&slow, &slow);
+        let stats = analyzer.stats();
+        let true_peak = stats.true_peak_db.unwrap();
+        assert!(true_peak >= stats.peak_db && true_peak - stats.peak_db < 0.1, "{true_peak} against {}", stats.peak_db);
+    }
+
+    #[test]
+    fn brightness_is_the_centre_of_the_spectrum() {
+        let mut low = Analyzer::new(48_000);
+        let tone = sine(200.0, 0.5, 1.0, 48_000);
+        low.push(&tone, &tone);
+        assert!((low.brightness_hz().unwrap() - 200.0).abs() < 20.0, "{:?}", low.brightness_hz());
+        let mut both = Analyzer::new(48_000);
+        let high = sine(5_000.0, 0.5, 1.0, 48_000);
+        let mixed: Vec<f32> = tone.iter().zip(&high).map(|(a, b)| (a + b) * 0.5).collect();
+        both.push(&mixed, &mixed);
+        assert!((both.brightness_hz().unwrap() - 2_600.0).abs() < 100.0, "{:?}", both.brightness_hz());
+        assert_eq!(Analyzer::new(48_000).brightness_hz(), None);
     }
 
     #[test]

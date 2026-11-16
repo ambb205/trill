@@ -378,6 +378,16 @@ impl DeviceFactory for WithSaved {
         self.inner.create(device, sample_rate, max_block)
     }
 
+    fn create_for(
+        &self,
+        device: &Device,
+        sample_rate: f64,
+        max_block: usize,
+        purpose: trill_core::device::Purpose,
+    ) -> Result<DeviceInstance, DeviceError> {
+        self.inner.create_for(device, sample_rate, max_block, purpose)
+    }
+
     fn warnings(&self, device: &Device) -> Vec<DeviceWarning> {
         self.inner.warnings(device)
     }

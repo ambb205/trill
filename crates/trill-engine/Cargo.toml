@@ -26,6 +26,8 @@ windows = { version = "0.62", features = [
     "Win32_Media_KernelStreaming",
     "Win32_Media_Multimedia",
     "Win32_System_Com",
+    # How much memory the process holds: plugins that load samples show in it.
+    "Win32_System_ProcessStatus",
     "Win32_System_Threading",
 ] }
 

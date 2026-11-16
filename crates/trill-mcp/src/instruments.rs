@@ -295,7 +295,9 @@ fn requested(request: &SetInstrumentProfileRequest, base: InstrumentProfile) -> 
             [] => None,
             [low, high] => Some((key_of(&low.0, "range")?, key_of(&high.0, "range")?)),
             _ => {
-                return Err("`range` should be the lowest and highest key, as in [36, 84]; [] takes it away".to_string());
+                return Err(
+                    "`range` should be the lowest and highest key, as in [36, 84]; [] takes it away".to_string()
+                );
             }
         };
     }

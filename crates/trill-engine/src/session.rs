@@ -26,10 +26,12 @@ mod instruments;
 mod params;
 mod playing;
 mod presets;
+mod probing;
 mod take;
 
 pub use controllers::SilentInstrument;
 pub use playing::{MAX_COUNT_IN_BARS, RecordState, RecordStatus};
+pub use probing::ProbeTarget;
 pub use take::TakeClip;
 
 const UNDO_LIMIT: usize = 200;
@@ -917,6 +919,7 @@ impl Session {
             audio: &self.audio,
             stand_ins: Some(&mut self.stand_ins),
             sample_rate,
+            purpose: trill_core::device::Purpose::Playing,
         }
         .compile(&self.project, true);
         self.problems = problems;

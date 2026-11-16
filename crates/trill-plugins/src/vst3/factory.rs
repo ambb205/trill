@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use trill_core::Device;
-use trill_core::device::{DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance, split_uri};
+use trill_core::device::{DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance, Purpose, split_uri};
 use trill_core::presets::PresetList;
 
 /// The VST3 sub-category that marks a plugin as an instrument.
@@ -213,6 +213,16 @@ impl DeviceFactory for Vst3Factory {
     }
 
     fn create(&self, device: &Device, sample_rate: f64, max_block: usize) -> Result<DeviceInstance, DeviceError> {
+        self.create_for(device, sample_rate, max_block, Purpose::Playing)
+    }
+
+    fn create_for(
+        &self,
+        device: &Device,
+        sample_rate: f64,
+        max_block: usize,
+        purpose: Purpose,
+    ) -> Result<DeviceInstance, DeviceError> {
         let class = match split_uri(&device.uri) {
             Some((VST3_SCHEME, class)) => class,
             // Not ours: the application chains factories and tries the next.
@@ -237,6 +247,7 @@ impl DeviceFactory for Vst3Factory {
             values: device.params.iter().filter_map(|(key, value)| Some((key.parse().ok()?, *value))).collect(),
             sample_rate,
             max_block: u32::try_from(max_block).unwrap_or(u32::MAX),
+            offline: purpose == Purpose::Rendering,
         };
 
         let created = instantiate(main, request, CREATE_TIMEOUT).map_err(failed)?;
@@ -432,6 +443,7 @@ mod tests {
             values: Vec::new(),
             sample_rate: 48_000.0,
             max_block: 64,
+            offline: false,
         };
         let main = &factory.shared.main;
         let before = scripted::instances(kind::SLOW_INIT).len();

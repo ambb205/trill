@@ -127,6 +127,8 @@ async fn tools_are_listed_with_schemas() {
         "midi_inputs",
         "play_notes",
         "render",
+        "measure",
+        "probe",
         "history",
         "save_project",
         "load_project",

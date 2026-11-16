@@ -94,6 +94,7 @@ impl Controller {
             audio: &self.audio,
             stand_ins: Some(&mut self.stand_ins),
             sample_rate: SR,
+            purpose: trill_core::device::Purpose::Playing,
         }
         .compile(project, true)
         .0

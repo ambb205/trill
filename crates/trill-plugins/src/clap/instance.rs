@@ -17,6 +17,7 @@ use clack_extensions::latency::PluginLatency;
 use clack_extensions::note_ports::{NoteDialects, NotePortInfoBuffer, PluginNotePorts};
 use clack_extensions::params::{ParamInfoBuffer, ParamInfoFlags, PluginParams};
 use clack_extensions::preset_discovery::PluginPresetLoad;
+use clack_extensions::render::{PluginRender, RenderMode};
 use clack_extensions::state::PluginState;
 use clack_extensions::timer::{PluginTimer, TimerId};
 use clack_host::events::Pckn;
@@ -44,7 +45,7 @@ const FLUSH_GRACE: Duration = Duration::from_secs(1);
 
 /// The standard CLAP extensions a plugin may implement that this host
 /// makes no use of yet, by their identifiers.
-const UNUSED_EXTENSIONS: [&CStr; 16] = [
+const UNUSED_EXTENSIONS: [&CStr; 15] = [
     c"clap.ambisonic/3",
     c"clap.audio-ports-activation/2",
     c"clap.audio-ports-config",
@@ -54,7 +55,6 @@ const UNUSED_EXTENSIONS: [&CStr; 16] = [
     c"clap.param-indication/4",
     c"clap.posix-fd-support",
     c"clap.remote-controls/2",
-    c"clap.render",
     c"clap.state-context/2",
     c"clap.surround/4",
     c"clap.tail",
@@ -86,6 +86,9 @@ pub(crate) struct CreateRequest {
     pub values: Vec<(u32, f64)>,
     pub sample_rate: f64,
     pub max_block: u32,
+    /// The plugin is made for a render, not to be played: one that cares
+    /// about the difference is told so (`clap.render`).
+    pub offline: bool,
 }
 
 /// One parameter of an instance.
@@ -400,6 +403,15 @@ impl ClapThread {
                 }
                 None => log::warn!("[{}] has saved state but cannot load state; ignoring it", request.plugin_id),
             }
+        }
+
+        // Said before the plugin is activated, which is when a sampler
+        // decides how it will get at its samples.
+        if request.offline
+            && let Some(render) = handle.get_extension::<PluginRender>()
+            && render.set(&handle, RenderMode::Offline).is_err()
+        {
+            log::warn!("[{}] would not be set to render offline; it runs as if it were played", request.plugin_id);
         }
 
         let mut specs = params.map(|params| read_params(params, &handle, &request.plugin_id)).unwrap_or_default();

@@ -23,7 +23,7 @@ use std::ptr::null_mut;
 use std::sync::Arc;
 use vst3::Steinberg::Vst::BusDirections_::{kInput, kOutput};
 use vst3::Steinberg::Vst::MediaTypes_::{kAudio, kEvent};
-use vst3::Steinberg::Vst::ProcessModes_::kRealtime;
+use vst3::Steinberg::Vst::ProcessModes_::{kOffline, kRealtime};
 use vst3::Steinberg::Vst::RestartFlags_::{kParamTitlesChanged, kParamValuesChanged};
 use vst3::Steinberg::Vst::SymbolicSampleSizes_::kSample32;
 use vst3::Steinberg::Vst::{
@@ -68,6 +68,14 @@ pub(crate) struct CreateRequest {
     pub values: Vec<(ParamID, f64)>,
     pub sample_rate: f64,
     pub max_block: u32,
+    /// The plugin is made for a render, not to be played: it is set up
+    /// for offline processing.
+    pub offline: bool,
+}
+
+/// The VST3 process mode of a plugin that is rendered (`offline`) or played.
+pub(crate) fn process_mode(offline: bool) -> int32 {
+    if offline { kOffline as int32 } else { kRealtime as int32 }
 }
 
 /// A freshly created, activated instance, ready for the audio thread.
@@ -91,6 +99,9 @@ pub(crate) struct Created {
     pub midi: params::MidiParams,
     pub links: Arc<ParamLinks>,
     pub editor: Arc<EditorStatus>,
+    /// Whether the plugin was set up for offline processing; each block
+    /// then says so too.
+    pub offline: bool,
 }
 
 /// A plugin's edit controller.
@@ -123,6 +134,8 @@ pub(super) struct Instance {
     /// The parameters the device lists, in its order.
     listed: Vec<ParamSpec>,
     active: bool,
+    /// Set up for offline processing: see [`CreateRequest::offline`].
+    offline: bool,
     processor: ComPtr<IAudioProcessor>,
     /// Declared last: the component is the plugin, and is released after
     /// every other reference to it.
@@ -159,6 +172,7 @@ impl Instance {
             links: None,
             listed: Vec::new(),
             active: false,
+            offline: false,
             processor,
             component,
         })
@@ -372,7 +386,7 @@ impl Instance {
             return Err("the plugin cannot process 32-bit float audio".to_string());
         }
         let mut setup = ProcessSetup {
-            processMode: kRealtime as int32,
+            processMode: process_mode(self.offline),
             symbolicSampleSize: kSample32 as int32,
             maxSamplesPerBlock: int32::try_from(max_block.max(1)).unwrap_or(int32::MAX),
             sampleRate: sample_rate,
@@ -545,6 +559,7 @@ impl Vst3Thread {
     pub(crate) fn create(&mut self, request: CreateRequest) -> Result<Created, String> {
         let module = module(&mut self.modules, &self.host, &request.path)?;
         let mut instance = Instance::new(module, &self.host, request.class, &request.name)?;
+        instance.offline = request.offline;
         instance.attach_controller(module, &self.host);
         instance.restore(request.state.as_deref())?;
 
@@ -583,6 +598,7 @@ impl Vst3Thread {
             midi: midi.unwrap_or_default(),
             links,
             editor: instance.editor_status.clone(),
+            offline: request.offline,
         };
         self.instances.insert(id, instance);
         Ok(created)

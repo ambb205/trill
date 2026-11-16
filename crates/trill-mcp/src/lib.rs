@@ -13,6 +13,7 @@
 //! held to the limits described in [`guard`].
 
 mod guard;
+mod hearing;
 mod input;
 mod instruments;
 pub mod logging;
