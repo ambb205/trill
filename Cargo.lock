@@ -4764,6 +4764,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "trill-assistant"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror 2.0.21",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "trill-core"
 version = "0.1.0"
 dependencies = [

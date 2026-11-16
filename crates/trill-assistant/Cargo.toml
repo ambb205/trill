@@ -1,0 +1,29 @@
+[package]
+name = "trill-assistant"
+description = "In-app assistant back end: runs the user's own Claude Code CLI against Trill's MCP server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# A stand-in for the real CLI that replays scripted output. It exists for the
+# tests in `tests/`, which find it through `CARGO_BIN_EXE_*`; nothing ships it.
+[[bin]]
+name = "trill-assistant-fake-cli"
+path = "tests/support/fake_cli.rs"
+test = false
+doc = false
+bench = false
+
+[dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
