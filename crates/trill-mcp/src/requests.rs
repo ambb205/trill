@@ -1,7 +1,7 @@
 //! Tool arguments. Field docs become the JSON-schema descriptions the model
 //! reads, so they are written for that audience.
 
-use crate::input::{NoteInput, PitchInput, PointInput};
+use crate::input::{ControllerPointInput, NoteInput, PitchInput, PointInput};
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 use serde_json::Value;
@@ -194,6 +194,9 @@ pub struct CreateClipRequest {
     /// If set and shorter than `length`, the first `loop_length` beats of notes repeat to fill the clip.
     /// Write one bar of drums, set loop_length to one bar and length to eight bars to get eight bars.
     pub loop_length: Option<f64>,
+    /// Controller curves to put in the clip with the notes, by controller, as set_controllers takes them:
+    /// {"expression": [[0, 50], [4, 110]], "sustain": [[0, 127], [3.5, 0]]}.
+    pub controllers: Option<BTreeMap<String, Vec<ControllerPointInput>>>,
 }
 
 /// How an audio clip follows the project tempo.
@@ -301,6 +304,26 @@ pub struct NotesRequest {
     /// Clip id.
     pub clip: u64,
     pub notes: Vec<NoteInput>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetControllersRequest {
+    /// Clip id.
+    pub clip: u64,
+    /// Read only this controller: a name ("expression", "mod_wheel", "pitch_bend", "sustain", "breath",
+    /// "pressure", "volume") or a controller number. Omit for all the clip has.
+    pub controller: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetControllersRequest {
+    /// Clip id.
+    pub clip: u64,
+    /// The curves to write, by controller: a name ("expression", "mod_wheel", "pitch_bend", "sustain",
+    /// "breath", "pressure", "volume", "pan") or a controller number as a string ("74"). Each replaces the
+    /// clip's curve for that controller; an empty list removes it; controllers not named are left alone.
+    /// For example {"expression": [[0, 40], [3, 110, 0.4], [4, 70]], "sustain": [[0, 127], [3.5, 0]]}.
+    pub controllers: BTreeMap<String, Vec<ControllerPointInput>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -455,6 +478,10 @@ pub struct PlayNotesRequest {
     /// Notes as [pitch, start, length, velocity] or objects, like create_clip takes. `start` is in beats from
     /// now, at the project tempo.
     pub notes: Vec<NoteInput>,
+    /// Controllers to move before the first note, by name or number: {"expression": 100} (0-127; pitch_bend
+    /// -1 to 1). An instrument that waits for expression is silent until it is given some. They stay where
+    /// they are put, and are recorded if a recording is running.
+    pub controllers: Option<BTreeMap<String, f64>>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]

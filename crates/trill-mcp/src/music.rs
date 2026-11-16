@@ -8,8 +8,8 @@
 //! terms what was written, and warnings about what would otherwise go
 //! unnoticed.
 
-use crate::input::{PitchInput, parse_pitch_value};
-use crate::server::{Reply, TrillServer, edit, explain, finish};
+use crate::input::{PitchInput, controller_scale, parse_controller, parse_pitch_value};
+use crate::server::{Reply, TrillServer, add_controller_warnings, edit, explain, finish};
 use crate::view::round;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -19,9 +19,11 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use trill_core::controllers::splice;
 use trill_core::device::{DeviceCategory, DeviceFactory};
 use trill_core::pitch::{drum_name, pitch_name};
-use trill_core::{ClipId, Note, TimeSignature, TrackId, TrackKind};
+use trill_core::project::{AutomationPoint, Segment};
+use trill_core::{ClipId, ControllerKind, Note, TimeSignature, TrackId, TrackKind};
 use trill_dsp::BuiltinFactory;
 use trill_engine::Session;
 use trill_theory::arpeggio::{ArpOrder, Arpeggio, ORDERS};
@@ -29,6 +31,7 @@ use trill_theory::bass::{BassLine, BassStyle, bass_line};
 use trill_theory::chord::QUALITIES;
 use trill_theory::drums::{FillPlan, arrange, drum_names};
 use trill_theory::melody::Phrase;
+use trill_theory::phrasing::{self, Phrasing};
 use trill_theory::progression::{Comping, Progression, RHYTHMS, Rhythm, StrumDirection, comp};
 use trill_theory::steps::LEGEND;
 use trill_theory::timing::{note_value, snap_triplet};
@@ -51,6 +54,10 @@ half_time, shuffle, six_eight, bossa_nova, jazz_swing) with an optional fill, an
 notation, e.g. {\"kick\": \"x...x...x...x...\", \"snare\": \"....x.......x...\"}.
 - write_bass and write_arpeggio: a bass line or an arpeggio that follows the same progression text.
 - write_melody: one line as scale degrees or note names with lengths, e.g. \":0.5 5 6 5 4 3:2 | 1:4\".
+- shape_dynamics: gives a line its dynamics from its notes, as an expression curve in the clip: a rise into each \
+phrase's high point, a swell through long notes, a breath between phrases. Call it after writing a melody for a \
+wind, brass or string instrument (those modelled on breath or a bow make no sound without it), and whenever a \
+line should breathe rather than sit at one level.
 - analyze_music: the key, the chord in each bar, the range and density of a clip, a track or the whole song. Use \
 it to check your work, and to read what the user wrote before adding to it.
 - music_reference: the vocabulary and the notations (chord symbols, scales, voicings, rhythms, grooves, fills). \
@@ -294,6 +301,33 @@ pub struct WriteMelodyRequest {
     pub accent: Option<u8>,
     #[serde(flatten)]
     pub feel: Feel,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ShapeDynamicsRequest {
+    /// Id of the MIDI clip whose notes are to be given dynamics.
+    pub clip: u64,
+    /// The controller to write the curve for: "expression" (default), "breath", "volume", "mod_wheel",
+    /// "pressure" or a controller number. Use the one the instrument listens to.
+    pub controller: Option<String>,
+    /// The level of the line's highest point, 0-127 (default 114). Lower phrases peak below it.
+    pub high: Option<f64>,
+    /// The quietest a sounding note gets, 0-127 (default 57).
+    pub low: Option<f64>,
+    /// The level between phrases, 0-127 (default 0: the instrument falls silent as the player breathes).
+    /// Give it the value of `low` for an instrument that should not dip between phrases.
+    pub rest: Option<f64>,
+    /// How much long notes swell, 0-1 (default 0.5; 0 for none).
+    pub swell: Option<f64>,
+    /// A rest of at least this many beats separates two phrases (default 0.5).
+    pub phrase_gap: Option<f64>,
+    /// Notes at least this many beats long swell (default 2).
+    pub long_note: Option<f64>,
+    /// Shape only the notes starting at or after this beat (relative to the clip); the rest of the curve is
+    /// left as it is.
+    pub start: Option<f64>,
+    /// Shape only the notes starting before this beat (relative to the clip).
+    pub end: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -1142,6 +1176,19 @@ impl TrillServer {
         finish(reply)
     }
 
+    /// Give a line its dynamics from its notes, as a controller curve in the clip (expression unless told
+    /// otherwise). It finds the phrases (notes separated by rests), raises the level into each phrase's
+    /// highest note, swells through long notes and drops to `rest` between phrases, where a player breathes
+    /// or lifts the bow. One call makes a wind, brass or string line breathe; instruments modelled on breath
+    /// or a bow are silent without such a curve. The curve is a few points, which set_controllers can then
+    /// adjust. It replaces the clip's curve for that controller, or only the stretch given by `start` and
+    /// `end`. The same arguments always write the same curve.
+    #[tool(annotations(title = "Shape dynamics"))]
+    fn shape_dynamics(&self, Parameters(request): Parameters<ShapeDynamicsRequest>) -> CallToolResult {
+        let mut session = self.session.lock();
+        finish(shape_dynamics(&mut session, &request))
+    }
+
     /// Read music back: the key (with how sure the estimate is and the runner-up), the chord sounding in each
     /// bar or half bar, pitch range and density. Works on a clip, a track or the whole song. A chord whose
     /// lowest note is not its root is shown as a slash chord (C/E), so a chord part with no bass under it
@@ -1158,6 +1205,112 @@ impl TrillServer {
     fn music_reference(&self, Parameters(request): Parameters<MusicReferenceRequest>) -> CallToolResult {
         finish(reference(request.topic.as_deref()))
     }
+}
+
+/// The body of the shape_dynamics tool.
+fn shape_dynamics(session: &mut Session, request: &ShapeDynamicsRequest) -> Reply {
+    let id = ClipId(request.clip);
+    let kind = match request.controller.as_deref() {
+        Some(name) => parse_controller(name)?,
+        None => ControllerKind::EXPRESSION,
+    };
+    if kind == ControllerKind::PitchBend || kind.is_switch() {
+        return Err(format!(
+            "shape_dynamics writes a level, which {kind} is not; use \"expression\", \"breath\", \"volume\" or another \
+             controller an instrument takes as loudness, and set_controllers for pedals and the pitch wheel"
+        ));
+    }
+    let scale = controller_scale(kind);
+    let defaults = Phrasing::default();
+    let level = |value: Option<f64>, default: f64, what: &str| {
+        within(value, (default * scale).round(), 0.0..=scale, what).map(|value| value / scale)
+    };
+    let wanted = Phrasing {
+        rest: level(request.rest, defaults.rest, "rest")?,
+        low: level(request.low, defaults.low, "low")?,
+        high: level(request.high, defaults.high, "high")?,
+        swell: within(request.swell, defaults.swell, 0.0..=1.0, "swell")?,
+        phrase_gap: within(request.phrase_gap, defaults.phrase_gap, 0.01..=64.0, "phrase_gap")?,
+        long_note: within(request.long_note, defaults.long_note, 0.05..=64.0, "long_note")?,
+    };
+    if wanted.low > wanted.high {
+        return Err(format!(
+            "`low` {} is above `high` {}; give the quietest sounding level as `low`",
+            round(wanted.low * scale),
+            round(wanted.high * scale)
+        ));
+    }
+
+    let project = session.project();
+    let clip = project.clip(id).map_err(|error| explain(project, error))?;
+    let Some(midi) = clip.midi() else { return Err(format!("{id} is an audio clip and has no notes to shape")) };
+    let in_range = |note: &&Note| {
+        request.start.is_none_or(|start| note.start >= start - EPSILON)
+            && request.end.is_none_or(|end| note.start < end - EPSILON)
+    };
+    let notes: Vec<Note> = midi.notes.iter().filter(in_range).copied().collect();
+    if notes.is_empty() {
+        return Err(match (request.start, request.end) {
+            (None, None) => format!("{id} has no notes to shape; write the line first (write_melody, add_notes)"),
+            _ => format!("{id} has no notes starting in that stretch; get_notes shows where they are"),
+        });
+    }
+    let shaped = phrasing::shape(&notes, &wanted);
+
+    // The whole clip: the curve is the line's. A stretch of it: the curve
+    // is written over what was there for that stretch only.
+    let whole = request.start.is_none() && request.end.is_none();
+    let points = if whole {
+        shaped.points.clone()
+    } else {
+        let from = request.start.unwrap_or_else(|| shaped.phrases.first().map_or(0.0, |phrase| phrase.start)).max(0.0);
+        let to = request.end.unwrap_or_else(|| shaped.phrases.last().map_or(from, |phrase| phrase.end)).max(from);
+        let mut piece: Vec<AutomationPoint> = shaped
+            .points
+            .iter()
+            .filter(|point| point.beat >= from - EPSILON && point.beat <= to + EPSILON)
+            .copied()
+            .collect();
+        if piece.first().is_none_or(|first| first.beat > from + EPSILON) {
+            piece.insert(0, AutomationPoint { beat: from, value: wanted.rest, shape: Segment::Hold });
+        }
+        let existing = clip.controller(kind).map(|curve| curve.points.clone()).unwrap_or_default();
+        splice(&existing, from, Some(to), &piece)
+    };
+
+    // Where a beat of the clip's content is in the song, as bar.beat.
+    let bar_length = project.time_signature.beats_per_bar();
+    let (clip_start, offset) = (clip.start, midi.start_offset);
+    let place = |beat: f64| bar_beat((clip_start + beat - offset).max(0.0), bar_length);
+    let phrases: Vec<Value> = shaped
+        .phrases
+        .iter()
+        .map(|phrase| {
+            json!({
+                "from": place(phrase.start),
+                "to": place(phrase.end),
+                "notes": phrase.notes,
+                "peak": format!("{} at {}", name_pitch(phrase.peak_pitch, None), place(phrase.peak_beat)),
+                "peak_level": (phrase.peak_level * scale).round(),
+            })
+        })
+        .collect();
+
+    let count = points.len();
+    edit(session, |project| project.clip_mut(id)?.set_controller(kind, points))?;
+    let mut out = json!({
+        "clip_id": id,
+        "controller": kind.key(),
+        "point_count": count,
+        "phrases": phrases,
+        "levels": {
+            "rest": (wanted.rest * scale).round(),
+            "low": (wanted.low * scale).round(),
+            "high": (wanted.high * scale).round(),
+        },
+    });
+    add_controller_warnings(&mut out, session, id, std::iter::once(kind));
+    Ok(out)
 }
 
 fn analyze(session: &Session, request: &AnalyzeMusicRequest) -> Reply {

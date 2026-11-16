@@ -637,6 +637,10 @@ pub fn splice(
     // Up to the splice the old curve keeps its course...
     let before = value_before(base, from);
     let mut result: Vec<AutomationPoint> = base.iter().filter(|point| point.beat < from).copied().collect();
+    let cut = result.len();
+    if let (Some(last), Some(next)) = (result.last_mut(), base.get(cut)) {
+        last.shape = part_of(last.shape, (from - last.beat) / (next.beat - last.beat));
+    }
     if !result.last().is_some_and(|last| last.shape == Segment::Hold && last.value == before) {
         result.push(AutomationPoint::new(from, before));
     }
@@ -651,12 +655,25 @@ pub fn splice(
     }
     let next = base.partition_point(|point| point.beat <= to);
     let shape = match next.checked_sub(1).map(|index| base[index]) {
-        Some(previous) if next < base.len() => previous.shape,
+        Some(previous) if next < base.len() => {
+            part_of(previous.shape, (base[next].beat - to) / (base[next].beat - previous.beat))
+        }
         _ => Segment::Linear,
     };
     result.push(AutomationPoint { beat: to, value: automation_value(base, to), shape });
     result.extend(base[next..].iter().copied());
     tidied(result)
+}
+
+/// The shape of a stretch cut from either end of a segment of `shape`,
+/// `share` of the segment long: with it the stretch follows exactly the
+/// course the whole segment took there. A bent line bends evenly along its
+/// length, so a part of it is a line bent by that much less.
+fn part_of(shape: Segment, share: f64) -> Segment {
+    match shape {
+        Segment::Curve(bend) if share.is_finite() => Segment::Curve(bend * share.clamp(0.0, 1.0) as f32),
+        shape => shape,
+    }
 }
 
 /// Drops points that say nothing: a repeat of the point before, the middle
@@ -1001,6 +1018,16 @@ mod tests {
         let spliced = splice(&settled, 2.0, Some(4.0), &piece);
         let at = |beat: Beats| automation_value(&spliced, beat);
         assert_eq!((at(1.5), at(2.0), at(3.5), at(4.0), at(9.0)), (0.6, 1.0, 0.5, 0.6, 0.6));
+        // A bent segment that the stretch cuts through keeps its course
+        // on both sides of it, to the last digit a float can tell.
+        let bent = [AutomationPoint { beat: 0.0, value: 0.0, shape: Segment::Curve(0.8) }, point(8.0, 1.0)];
+        let spliced = splice(&bent, 3.0, Some(5.0), &[point(3.0, 0.5), point(4.0, 0.25)]);
+        for beat in [0.5, 1.0, 2.0, 2.99, 5.0, 5.5, 6.0, 7.0, 7.99] {
+            let (was, is) = (automation_value(&bent, beat), automation_value(&spliced, beat));
+            assert!((was - is).abs() < 1e-6, "at beat {beat}: {is} for {was}");
+        }
+        assert_eq!(automation_value(&spliced, 3.5), 0.375);
+
         // One that begins after it is untouched from where it begins.
         let later = [point(6.0, 0.2), point(7.0, 0.9)];
         let spliced = splice(&later, 2.0, Some(4.0), &piece);
