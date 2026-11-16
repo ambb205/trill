@@ -40,6 +40,10 @@ pub enum Command {
     DeleteTime,
     DuplicateTime,
     InsertTime,
+    /// Puts the selected time aside, with what its tracks hold in it.
+    CopyTime,
+    /// Puts the copied time down at the edit cursor, making room for it.
+    PasteTime,
     Quantize,
     AddMarker,
     AddTrack,
@@ -152,7 +156,14 @@ pub const BINDINGS: &[Binding] = &[
     bind(Command::Redo, CTRL, Key::Y, When::NotTyping, Section::Edit, "Redo"),
     bind(Command::Cut, CTRL, Key::X, When::NotTyping, Section::Edit, "Cut the selection"),
     bind(Command::Copy, CTRL, Key::C, When::NotTyping, Section::Edit, "Copy the selection"),
-    bind(Command::Paste, CTRL, Key::V, When::NotTyping, Section::Edit, "Paste at the edit cursor"),
+    bind(
+        Command::Paste,
+        CTRL,
+        Key::V,
+        When::NotTyping,
+        Section::Edit,
+        "Paste at the edit cursor (copied time: over what is there)",
+    ),
     bind(Command::Duplicate, CTRL, Key::D, When::NotTyping, Section::Edit, "Duplicate the selection after itself"),
     bind(Command::Delete, NONE, Key::Delete, When::NotTyping, Section::Edit, "Delete the selection"),
     bind(Command::Delete, NONE, Key::Backspace, When::NotTyping, Section::Edit, "Delete the selection"),
@@ -199,6 +210,22 @@ pub const BINDINGS: &[Binding] = &[
         When::NotTyping,
         Section::Arrangement,
         "Insert empty time, as long as the selection",
+    ),
+    bind(
+        Command::CopyTime,
+        CTRL_SHIFT,
+        Key::C,
+        When::NotTyping,
+        Section::Arrangement,
+        "Copy the selected time, with its automation",
+    ),
+    bind(
+        Command::PasteTime,
+        CTRL_SHIFT,
+        Key::V,
+        When::NotTyping,
+        Section::Arrangement,
+        "Paste the copied time at the edit cursor, making room",
     ),
     bind(Command::AddMarker, NONE, Key::M, When::NotTyping, Section::Arrangement, "Add a marker at the edit cursor"),
     bind(Command::ToggleDraw, NONE, Key::B, When::NotTyping, Section::Arrangement, "Pencil: draw automation in steps"),
@@ -695,6 +722,9 @@ mod tests {
         assert_eq!(commands(CTRL, press(CTRL, Key::E), false, false), [Command::Split]);
         assert_eq!(commands(CTRL_SHIFT, press(CTRL_SHIFT, Key::E), false, false), [Command::ExportWav]);
         assert_eq!(commands(CTRL_SHIFT, press(CTRL_SHIFT, Key::D), false, false), [Command::DuplicateTime]);
+        // With Shift, the clipboard's letters are about time; a backend delivers those as keys.
+        assert_eq!(commands(CTRL_SHIFT, press(CTRL_SHIFT, Key::C), false, false), [Command::CopyTime]);
+        assert_eq!(commands(CTRL_SHIFT, press(CTRL_SHIFT, Key::V), false, false), [Command::PasteTime]);
     }
 
     #[test]

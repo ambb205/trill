@@ -239,6 +239,10 @@ impl DeviceFactory for Builtins {
     fn presets(&self, uri: &str) -> Option<trill_core::presets::PresetList> {
         presets(uri)
     }
+
+    fn plays_drums(&self, uri: &str) -> bool {
+        plays_drums(uri)
+    }
 }
 
 /// Creates the built-in devices without access to audio files.
@@ -260,6 +264,16 @@ impl DeviceFactory for BuiltinFactory {
     fn presets(&self, uri: &str) -> Option<trill_core::presets::PresetList> {
         presets(uri)
     }
+
+    fn plays_drums(&self, uri: &str) -> bool {
+        plays_drums(uri)
+    }
+}
+
+/// Whether `uri` is a built-in instrument whose keys are drums: the drum
+/// kit and the drum rack.
+fn plays_drums(uri: &str) -> bool {
+    find(uri).is_some_and(|builtin| matches!(builtin.key, "drumkit" | "drumrack"))
 }
 
 /// The audio files `device` plays, if it is a built-in sample player with a

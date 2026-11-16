@@ -135,6 +135,8 @@ Musical guidance
 - Give sections contrast: add and remove parts, automate filters and volume, change the drum pattern.
 - Rearranging: edit_time removes, repeats or opens up a stretch of time on every track at once (drop a \
 section, double a chorus, make room for a bridge).
+- Reusing a section: edit_time \"copy\" copies a stretch of time to another place on every track (or some), \
+with automation and controller curves, in one call. Do not duplicate a chorus clip by clip.
 - Every edit can be reversed with history (undo/redo).";
 
 pub(crate) type Reply = Result<Value, String>;
@@ -220,7 +222,11 @@ impl TrillServer {
     /// write wherever it is told.
     pub fn new(runtime: Arc<Runtime>) -> Self {
         let session = runtime.session.clone();
-        let tool_router = Self::tool_router() + Self::music_router() + Self::sound_router() + Self::hearing_router();
+        let tool_router = Self::tool_router()
+            + Self::music_router()
+            + Self::sound_router()
+            + Self::hearing_router()
+            + Self::instrument_router();
         Self { session, runtime, tool_router, guard: None }
     }
 
@@ -815,7 +821,8 @@ impl TrillServer {
     fn create_clip(&self, Parameters(request): Parameters<CreateClipRequest>) -> CallToolResult {
         let mut session = self.session.lock();
         let reply = (|| {
-            let notes = parse_notes(request.notes.as_deref().unwrap_or_default())?;
+            let keys = crate::instruments::TrackKeys::of(&session, TrackId(request.track));
+            let notes = keys.notes(request.notes.as_deref().unwrap_or_default())?;
             let curves = parse_curves(request.controllers.as_ref())?;
             let name = request.name.clone().unwrap_or_else(|| "Clip".to_string());
             let clip = edit(&mut session, |project| {
@@ -1089,7 +1096,7 @@ impl TrillServer {
         let mut session = self.session.lock();
         let id = ClipId(request.clip);
         let reply = (|| {
-            let notes = parse_notes(&request.notes)?;
+            let notes = crate::instruments::TrackKeys::of_clip(&session, id).notes(&request.notes)?;
             let total = edit(&mut session, |project| {
                 let clip = project.clip_mut(id)?;
                 clip.add_notes(&notes)?;
@@ -1108,7 +1115,7 @@ impl TrillServer {
         let mut session = self.session.lock();
         let id = ClipId(request.clip);
         let reply = (|| {
-            let notes = parse_notes(&request.notes)?;
+            let notes = crate::instruments::TrackKeys::of_clip(&session, id).notes(&request.notes)?;
             let count = notes.len();
             edit(&mut session, |project| project.clip_mut(id)?.set_notes(notes))?;
             let mut out = json!({ "note_count": count });
@@ -1123,7 +1130,8 @@ impl TrillServer {
     fn remove_notes(&self, Parameters(request): Parameters<RemoveNotesRequest>) -> CallToolResult {
         let mut session = self.session.lock();
         let reply = (|| {
-            let pitch = request.pitch.as_ref().map(|pitch| parse_pitch_value(&pitch.0)).transpose()?;
+            let keys = crate::instruments::TrackKeys::of_clip(&session, ClipId(request.clip));
+            let pitch = request.pitch.as_ref().map(|pitch| keys.pitch(&pitch.0)).transpose()?;
             let (start, end) = (request.start.unwrap_or(f64::MIN), request.end.unwrap_or(f64::MAX));
             let (removed, remaining) = edit(&mut session, |project| {
                 let clip = project.clip_mut(ClipId(request.clip))?;
@@ -1277,39 +1285,83 @@ impl TrillServer {
     /// empty time. Every track moves together, with automation, markers and the loop, and clips lying across
     /// the edges are cut there. Use it to drop a section, double a chorus or make room for a bridge, instead of
     /// moving clips one by one.
+    /// "copy" copies a stretch to another place in one step: every track or some, with the clips' notes and
+    /// controller curves and the tracks' automation, either making room there or over what is there. Use it
+    /// to bring a chorus back later in the song instead of duplicating its clips one by one.
     #[tool(annotations(title = "Edit time"))]
     fn edit_time(&self, Parameters(request): Parameters<EditTimeRequest>) -> CallToolResult {
         enum Change {
             Delete(f64),
             Duplicate(f64),
             Insert(f64),
+            Copy { end: f64, to: f64 },
         }
         let change = match (request.action.as_str(), request.end, request.length) {
             ("delete", Some(end), _) => Ok(Change::Delete(end)),
             ("duplicate", Some(end), _) => Ok(Change::Duplicate(end)),
             ("insert", _, Some(length)) => Ok(Change::Insert(length)),
-            ("delete" | "duplicate", None, _) => {
+            ("copy", Some(end), _) => match request.to {
+                Some(to) => Ok(Change::Copy { end, to }),
+                None => Err("action \"copy\" needs `to`, the beat the copy starts at".to_string()),
+            },
+            ("delete" | "duplicate" | "copy", None, _) => {
                 Err(format!("action \"{}\" needs `end`, the beat where the stretch ends", request.action))
             }
             ("insert", _, None) => Err("action \"insert\" needs `length`, the number of beats to open up".to_string()),
-            (other, ..) => Err(format!("unknown action '{other}'; use \"delete\", \"duplicate\" or \"insert\"")),
+            (other, ..) => {
+                Err(format!("unknown action '{other}'; use \"delete\", \"duplicate\", \"insert\" or \"copy\""))
+            }
         };
+        let change = change.and_then(|change| match change {
+            Change::Copy { .. } => Ok(change),
+            _ if request.to.is_some() || request.tracks.is_some() || request.make_room.is_some() => Err(format!(
+                "`to`, `tracks` and `make_room` go with action \"copy\"; \"{}\" changes every track",
+                request.action
+            )),
+            _ => Ok(change),
+        });
         let mut session = self.session.lock();
         let reply = change.and_then(|change| {
             edit(&mut session, |project| {
                 let before = project.length_beats();
+                let mut copied = None;
                 match change {
                     Change::Delete(end) => project.delete_time(request.start, end)?,
                     Change::Duplicate(end) => project.duplicate_time(request.start, end)?,
                     Change::Insert(length) => project.insert_time(request.start, length)?,
+                    Change::Copy { end, to } => {
+                        let tracks: Option<Vec<TrackId>> =
+                            request.tracks.as_ref().map(|tracks| tracks.iter().copied().map(TrackId).collect());
+                        let mode = match request.make_room {
+                            Some(false) => trill_core::PasteMode::Replace,
+                            _ => trill_core::PasteMode::Insert,
+                        };
+                        let clips = project.copy_time(request.start, end, to, tracks.as_deref(), mode)?;
+                        // By track, so that what arrived where can be read.
+                        let mut by_track: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+                        for id in &clips {
+                            let track = project.clip_track(*id)?;
+                            by_track.entry(project.track(track)?.name.clone()).or_default().push(id.0);
+                        }
+                        copied = Some(json!({
+                            "from": [round(request.start), round(end)],
+                            "to": [round(to), round(to + end - request.start)],
+                            "made_room": mode == trill_core::PasteMode::Insert,
+                            "clips": by_track,
+                        }));
+                    }
                 }
                 let markers: Vec<Value> =
                     project.markers.iter().map(|m| json!({ "beat": round(m.beat), "name": m.name })).collect();
-                Ok(json!({
+                let mut out = json!({
                     "length_beats": round(project.length_beats()),
                     "was_beats": round(before),
                     "markers": markers,
-                }))
+                });
+                if let Some(copied) = copied {
+                    out["copied"] = copied;
+                }
+                Ok(out)
             })
         });
         finish(reply)
@@ -2380,13 +2432,19 @@ fn add_range_warning(out: &mut Value, session: &Session, clip: ClipId) {
     let Some(midi) = clip.midi() else { return };
     let playable = midi.loop_length.map_or(clip.length, |length| length.min(clip.length));
     let outside = midi.notes.iter().filter(|note| note.start >= playable).count();
+    let mut warnings = Vec::new();
     if outside > 0 {
-        out["warning"] = json!(format!(
+        warnings.push(format!(
             "{outside} note(s) start at or after beat {} of the clip, past its {}, and will not play. \
              Lengthen the clip or move the notes.",
             round(playable),
             if midi.loop_length.is_some() { "loop length" } else { "end" }
         ));
+    }
+    // What the track's instrument cannot play: only keyswitches, notes outside its range.
+    warnings.extend(crate::instruments::profile_warnings(session, clip.id));
+    if !warnings.is_empty() {
+        out["warning"] = json!(warnings.join(" "));
     }
 }
 
@@ -2396,9 +2454,10 @@ impl ServerHandler for TrillServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}",
+                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}",
                 crate::sounds::INSTRUCTIONS,
                 crate::music::INSTRUCTIONS,
+                crate::instruments::INSTRUCTIONS,
                 crate::hearing::INSTRUCTIONS
             ))
     }

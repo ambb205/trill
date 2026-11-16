@@ -408,6 +408,10 @@ impl DeviceFactory for WithSaved {
     fn known_presets(&self, uri: &str) -> Option<PresetList> {
         self.with_saved(uri, self.inner.known_presets(uri))
     }
+
+    fn plays_drums(&self, uri: &str) -> bool {
+        self.inner.plays_drums(uri)
+    }
 }
 
 #[cfg(test)]

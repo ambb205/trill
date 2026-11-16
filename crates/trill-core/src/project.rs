@@ -7,6 +7,7 @@
 
 use crate::controllers::{self, ControllerCurve, ControllerKind, ControllerLane, LaneClip};
 use crate::ids::{ClipId, DeviceId, TrackId};
+use crate::instrument::InstrumentProfile;
 use crate::midi_file::{MidiFile, MidiTrack};
 use crate::presets::PresetRef;
 use crate::time::{Beats, TimeSignature};
@@ -559,6 +560,12 @@ pub struct Track {
     /// mixed in ahead of the chain.
     pub devices: Vec<Device>,
     pub clips: Vec<Clip>,
+    /// What the track's notes mean to its instrument: drums or pitches,
+    /// which keys are drums or keyswitches, its range, the octave it
+    /// sounds at and how far it bends. Empty for an ordinary instrument,
+    /// and then left out of the file.
+    #[serde(default, skip_serializing_if = "InstrumentProfile::is_empty")]
+    pub profile: InstrumentProfile,
 }
 
 impl Track {
@@ -841,6 +848,7 @@ impl Project {
             solo: false,
             devices: Vec::new(),
             clips: Vec::new(),
+            profile: InstrumentProfile::default(),
         });
         id
     }
@@ -974,6 +982,18 @@ impl Project {
             return invalid(format!("pan {pan} is outside -1..=1"));
         }
         self.track_mut(id)?.pan = pan;
+        Ok(())
+    }
+
+    /// Says what the track's notes mean to its instrument; see
+    /// [`InstrumentProfile`]. An empty profile takes it all back.
+    pub fn set_track_profile(&mut self, id: TrackId, profile: InstrumentProfile) -> Result<(), EditError> {
+        let profile = profile.validated()?;
+        let track = self.track_mut(id)?;
+        if track.kind != TrackKind::Normal && !profile.is_empty() {
+            return invalid(format!("{id} is a group or return track: it plays no notes to say anything about"));
+        }
+        track.profile = profile;
         Ok(())
     }
 

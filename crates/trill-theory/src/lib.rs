@@ -15,6 +15,8 @@
 //! | lay a progression out in time and comp  | [`progression`]              |
 //! | break chords up or put a bass under them | [`arpeggio`], [`bass`]      |
 //! | write a line as degrees or note names   | [`melody`]                   |
+//! | bend, slide, hammer on, add vibrato     | [`ornament`]                 |
+//! | ask an instrument for its articulations | [`articulation`]             |
 //! | write drums as a grid, or take a groove | [`steps`], [`drums`], [`grooves`] |
 //! | swing, humanize and shape velocity      | [`expression`]               |
 //! | give a line its swells and its breaths  | [`phrasing`]                 |
@@ -26,6 +28,7 @@
 
 pub mod analysis;
 pub mod arpeggio;
+pub mod articulation;
 pub mod bass;
 pub mod chord;
 pub mod drums;
@@ -33,6 +36,7 @@ pub mod error;
 pub mod expression;
 pub mod grooves;
 pub mod melody;
+pub mod ornament;
 pub mod phrasing;
 pub mod pitch;
 pub mod progression;

@@ -34,16 +34,25 @@ pub fn parse_pitch(name: &str) -> Option<u8> {
     (0..=127).contains(&midi).then_some(midi as u8)
 }
 
-/// Names for the General MIDI drum notes the built-in drum kit plays. The
-/// first name listed for a pitch is its canonical one.
+/// Names for the notes of the General MIDI drum map. The first name listed
+/// for a pitch is its canonical one. A track whose instrument keeps its
+/// drums elsewhere says so in its own map
+/// ([`InstrumentProfile::sounds`](crate::InstrumentProfile)), which is asked
+/// before this one.
 pub const DRUM_NAMES: &[(&str, u8)] = &[
     ("kick", 36),
     ("bd", 36),
+    ("kick2", 35),
     ("rim", 37),
     ("rimshot", 37),
+    ("sidestick", 37),
+    ("side_stick", 37),
+    ("cross_stick", 37),
     ("snare", 38),
     ("sd", 38),
+    ("snare2", 40),
     ("clap", 39),
+    ("floor_tom", 41),
     ("low_tom", 43),
     ("tom_low", 43),
     ("closed_hat", 42),
@@ -59,18 +68,69 @@ pub const DRUM_NAMES: &[(&str, u8)] = &[
     ("high_tom", 50),
     ("tom_high", 50),
     ("crash", 49),
+    ("crash2", 57),
+    ("crash_2", 57),
+    ("china", 52),
+    ("splash", 55),
     ("ride", 51),
+    ("ride_bell", 53),
+    ("bell", 53),
+    ("ride2", 59),
     ("tambourine", 54),
     ("cowbell", 56),
+    ("vibraslap", 58),
+    ("high_bongo", 60),
+    ("low_bongo", 61),
+    ("mute_conga", 62),
+    ("high_conga", 63),
+    ("low_conga", 64),
+    ("high_timbale", 65),
+    ("low_timbale", 66),
+    ("high_agogo", 67),
+    ("low_agogo", 68),
+    ("cabasa", 69),
     ("shaker", 70),
+    ("maracas", 70),
     ("claves", 75),
+    ("wood_block", 76),
+    ("low_wood_block", 77),
+    ("mute_triangle", 80),
+    ("triangle", 81),
 ];
 
-/// Resolves a drum name such as `"kick"` or `"Open Hat"` to its MIDI note.
+/// Drums General MIDI has no note of its own for, each with the General
+/// MIDI drum that stands in for it where a track's own map does not place
+/// it: a kit with one open hi-hat plays that for a half-open one.
+pub const DRUM_STAND_INS: &[(&str, &str)] = &[
+    ("half_open_hat", "open_hat"),
+    ("wide_open_hat", "open_hat"),
+    ("closed_hat_edge", "closed_hat"),
+    ("hat_edge", "closed_hat"),
+    ("tight_hat", "closed_hat"),
+    ("ride_edge", "ride"),
+    ("crash3", "crash2"),
+    ("rack_tom", "high_tom"),
+];
+
+/// A name as names are compared: lower case, with spaces and dashes as
+/// underscores. `"Open Hat"` and `"open-hat"` are `"open_hat"`.
+pub fn name_key(name: &str) -> String {
+    name.trim().chars().map(|c| if c == ' ' || c == '-' { '_' } else { c.to_ascii_lowercase() }).collect()
+}
+
+/// Resolves a drum name such as `"kick"` or `"Open Hat"` to its General
+/// MIDI note.
 pub fn parse_drum(name: &str) -> Option<u8> {
-    let key: String =
-        name.trim().chars().map(|c| if c == ' ' || c == '-' { '_' } else { c.to_ascii_lowercase() }).collect();
+    let key = name_key(name);
     DRUM_NAMES.iter().find(|(drum, _)| *drum == key).map(|(_, pitch)| *pitch)
+}
+
+/// The General MIDI drum that stands in for `name`, a drum the map has no
+/// note for, with its note.
+pub fn drum_stand_in(name: &str) -> Option<(&'static str, u8)> {
+    let key = name_key(name);
+    let (_, stand_in) = DRUM_STAND_INS.iter().find(|(drum, _)| *drum == key)?;
+    Some((stand_in, parse_drum(stand_in)?))
 }
 
 /// The canonical drum name for a MIDI note, if it has one.
@@ -89,7 +149,20 @@ mod tests {
         assert_eq!(parse_drum("closed-hat"), Some(42));
         assert_eq!(parse_drum("gong"), None);
         assert_eq!(drum_name(38), Some("snare"));
-        assert_eq!(drum_name(60), None);
+        assert_eq!(drum_name(100), None);
+        // The cymbals a rock or metal part asks for by name.
+        assert_eq!(
+            (parse_drum("china"), parse_drum("splash"), parse_drum("Ride Bell")),
+            (Some(52), Some(55), Some(53))
+        );
+        assert_eq!(drum_name(52), Some("china"));
+        // General MIDI has one open hi-hat: it stands in for the degrees of openness.
+        assert_eq!(parse_drum("half_open_hat"), None);
+        assert_eq!(drum_stand_in("Half-Open Hat"), Some(("open_hat", 46)));
+        assert_eq!(drum_stand_in("kick"), None);
+        for (name, stand_in) in DRUM_STAND_INS {
+            assert!(parse_drum(name).is_none() && parse_drum(stand_in).is_some(), "{name} -> {stand_in}");
+        }
     }
 
     #[test]

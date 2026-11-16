@@ -12,10 +12,13 @@ use super::{colors, controller_lane, widgets};
 use eframe::egui::{
     self, Align2, Color32, CursorIcon, Mesh, PointerButton, Pos2, Rangef, Rect, Sense, Shape, Ui, pos2, vec2,
 };
+use std::collections::HashMap;
+use std::path::Path;
 use std::time::Instant;
 use trill_core::pitch::pitch_name;
 use trill_core::project::{ClipContent, MidiContent};
-use trill_core::{Beats, Clip, ClipId, Note, TimeSignature, Track};
+use trill_core::{Beats, Clip, ClipId, DeviceId, Note, TimeSignature, Track};
+use trill_engine::SampleFile;
 use trill_noir::{Bar, Chip, Icon, NumberField, Theme, fade, paint, text};
 
 pub(super) const SIDEBAR_WIDTH: f32 = 204.0;
@@ -142,8 +145,62 @@ fn revealed_top(top: f32, rows: f32, low: u8, high: u8) -> f32 {
     if top - rows > low || above - low > rows { low + rows } else { top.max(above) }
 }
 
+/// A name from a drum map as a label: `closed_hat_edge` is "Closed Hat Edge".
+fn words(name: &str) -> String {
+    let capital = |word: &str| {
+        let mut letters = word.chars();
+        letters.next().map(|first| first.to_uppercase().chain(letters).collect::<String>()).unwrap_or_default()
+    };
+    name.split('_').filter(|word| !word.is_empty()).map(capital).collect::<Vec<_>>().join(" ")
+}
+
+/// What the row of `pitch` is called on a drum track: by the track's own
+/// map; on a drum rack by the file on that pad, where `samples` has it;
+/// else as General MIDI calls it, of which the built-in kit plays a part.
+/// `None` for a key that plays no drum anybody knows of.
+fn drum_row_name(track: &Track, samples: &HashMap<DeviceId, Vec<SampleFile>>, pitch: u8) -> Option<String> {
+    let profile = &track.profile;
+    if let Some(name) = profile.sound_name(pitch) {
+        return Some(words(name));
+    }
+    let instrument = track.devices.first();
+    // A pad of a drum rack is the sound that was put on it.
+    let slot = format!("pad {pitch}");
+    let pad = instrument
+        .filter(|device| device.uri == super::sample_panels::DRUM_RACK)
+        .and_then(|rack| samples.get(&rack.id)?.iter().find(|file| file.slot == slot));
+    if let Some(file) = pad {
+        return Path::new(&file.path).file_stem().map(|stem| stem.to_string_lossy().into_owned());
+    }
+    // A drum the track's map keeps on another key is not on this one.
+    let general = trill_core::pitch::drum_name(pitch);
+    if general.is_some_and(|name| profile.sounds.contains_key(name)) {
+        return None;
+    }
+    match instrument {
+        // The built-in kit says what it plays itself, also on the keys it doubles a drum on.
+        Some(device) if device.uri == DRUM_KIT => kit_drum_name(pitch).map(str::to_owned),
+        _ => general.map(words),
+    }
+}
+
+/// What a key of a pitched track is, where the track knows that it is not
+/// a note like the others: a keyswitch, a noise, a key outside the range.
+fn key_meaning(track: &Track, pitch: u8) -> Option<String> {
+    let profile = &track.profile;
+    let key = pitch_name(pitch);
+    if let Some(name) = profile.keyswitch_name(pitch) {
+        return Some(format!("{key} is a keyswitch ({name}): it changes how the notes are played and sounds nothing"));
+    }
+    if let Some(name) = profile.sound_name(pitch) {
+        return Some(format!("{key} plays a noise ({name}), not a note"));
+    }
+    let (low, high) = profile.range.filter(|_| !profile.in_range(pitch))?;
+    Some(format!("{key} is outside what this instrument plays ({}-{})", pitch_name(low), pitch_name(high)))
+}
+
 /// Name of a General MIDI drum the built-in kit plays, for labeling rows.
-fn drum_name(pitch: u8) -> Option<&'static str> {
+fn kit_drum_name(pitch: u8) -> Option<&'static str> {
     Some(match pitch {
         35 | 36 => "Kick",
         37 => "Rim",
@@ -693,7 +750,7 @@ pub fn nudge_selected_notes(cx: &mut Cx, steps: i32, semitones: i32) {
 
 fn roll(ui: &mut Ui, cx: &mut Cx, track: &Track, clip: &Clip, midi: &MidiContent, area: Rect) {
     let signature = cx.snap.project.time_signature;
-    let is_drums = track.devices.first().is_some_and(|device| device.uri == DRUM_KIT);
+    let is_drums = cx.snap.plays_drums(track.id);
     let keys_width = if is_drums { DRUM_KEYS_WIDTH } else { KEYS_WIDTH };
     let view = &mut cx.state.piano;
     let inner = Geometry::new(area, keys_width, view.time, view.pitch, signature, view.snap);
@@ -974,7 +1031,15 @@ fn keys(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, color: Col
     let response = ui.interact(keys, ui.scope_id().with("keys"), Sense::click_and_drag());
     let held = cx.state.audition.map(|audition| audition.pitch);
     let hovered = response.hover_pos().map(|pointer| geometry.pitch_at(pointer.y));
-    cx.hint(&response, "Press a key to hear it \u{00B7} slide to play across keys");
+    // A key that is something other than a note says what it is.
+    let meaning = hovered.and_then(|pitch| match is_drums {
+        true => drum_row_name(track, &cx.snap.samples, pitch).map(|name| format!("{name} ({})", pitch_name(pitch))),
+        false => key_meaning(track, pitch),
+    });
+    match meaning {
+        Some(meaning) => cx.hint(&response, format!("{meaning} \u{00B7} press to hear it")),
+        None => cx.hint(&response, "Press a key to hear it \u{00B7} slide to play across keys"),
+    }
 
     let painter = ui.painter_at(keys);
     let row_height = geometry.pitch.row_height;
@@ -987,7 +1052,8 @@ fn keys(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, color: Col
         let letter = super::keyboard::letter_on(cx.keyboard, theme, pitch, timeline::is_black_key(pitch), lit);
         let state = KeyState { lit, hovered: hovered == Some(pitch), named, letter: letter.filter(|_| named) };
         if is_drums {
-            paint_drum_row(&painter, theme, row, pitch, state, color);
+            let name = drum_row_name(track, &cx.snap.samples, pitch);
+            paint_drum_row(&painter, theme, row, name.as_deref(), state, color);
         } else {
             paint_key(&painter, theme, row, pitch, state, color);
         }
@@ -1048,8 +1114,14 @@ fn paint_key(painter: &egui::Painter, theme: &Theme, row: Rect, pitch: u8, state
 }
 
 /// Drum tracks list their sounds by name instead of showing piano keys.
-fn paint_drum_row(painter: &egui::Painter, theme: &Theme, row: Rect, pitch: u8, state: KeyState, color: Color32) {
-    let name = drum_name(pitch);
+fn paint_drum_row(
+    painter: &egui::Painter,
+    theme: &Theme,
+    row: Rect,
+    name: Option<&str>,
+    state: KeyState,
+    color: Color32,
+) {
     if state.lit {
         painter.rect_filled(row, 0.0, color);
     } else if state.hovered {
@@ -1481,9 +1553,66 @@ mod tests {
 
     #[test]
     fn drum_rows_are_named() {
-        assert_eq!(drum_name(36), Some("Kick"));
-        assert_eq!(drum_name(42), Some("Closed Hat"));
-        assert_eq!(drum_name(60), None);
+        assert_eq!(kit_drum_name(36), Some("Kick"));
+        assert_eq!(kit_drum_name(42), Some("Closed Hat"));
+        assert_eq!(kit_drum_name(60), None);
+    }
+
+    #[test]
+    fn a_drum_tracks_rows_take_their_names_from_its_map_then_from_general_midi() {
+        let mut project = Project::new("Rows");
+        let kit = project.add_track("Kit");
+        let none = HashMap::new();
+        let row = |project: &Project, pitch: u8| drum_row_name(project.track(kit).unwrap(), &none, pitch);
+        // Nothing said: General MIDI, under each drum's first name.
+        assert_eq!(row(&project, 36).as_deref(), Some("Kick"));
+        assert_eq!(row(&project, 52).as_deref(), Some("China"));
+        assert_eq!(row(&project, 22), None, "General MIDI has no drum there");
+
+        // The track's own map: its names on its keys, and a drum it moved is not where it was.
+        let mut profile = project.track(kit).unwrap().profile.clone();
+        profile.sounds = [("closed_hat_edge", 22), ("china", 86)].map(|(name, key)| (name.to_string(), key)).into();
+        project.set_track_profile(kit, profile).unwrap();
+        assert_eq!(row(&project, 22).as_deref(), Some("Closed Hat Edge"));
+        assert_eq!(row(&project, 86).as_deref(), Some("China"));
+        assert_eq!(row(&project, 52), None, "the china is on another key now");
+        assert_eq!(row(&project, 38).as_deref(), Some("Snare"), "the rest is as it was");
+
+        // A drum rack's pad is called after the file on it.
+        let chain = trill_core::ChainRef::Track(kit);
+        let rack = project.add_device(chain, super::super::sample_panels::DRUM_RACK, "Drum Rack", None).unwrap();
+        assert_eq!(drum_row_name(project.track(kit).unwrap(), &none, 48), None, "General MIDI has no drum on 48");
+        let file = SampleFile { slot: "pad 37".into(), path: "C:/Kit/808 rim.wav".into(), problem: None };
+        let samples = HashMap::from([(rack, vec![file])]);
+        let row = |pitch: u8| drum_row_name(project.track(kit).unwrap(), &samples, pitch);
+        assert_eq!(row(37).as_deref(), Some("808 rim"));
+        assert_eq!(row(22).as_deref(), Some("Closed Hat Edge"), "what the track says comes first");
+
+        // The built-in kit names what it plays, also where General MIDI has nothing, and no more.
+        let own = project.add_track("Own kit");
+        project.add_device(trill_core::ChainRef::Track(own), DRUM_KIT, "Drum Kit", None).unwrap();
+        let row = |pitch: u8| drum_row_name(project.track(own).unwrap(), &none, pitch);
+        assert_eq!((row(48).as_deref(), row(44).as_deref()), (Some("High Tom"), Some("Closed Hat")));
+        assert_eq!(row(52), None, "it has no china");
+    }
+
+    #[test]
+    fn a_pitched_tracks_keyswitches_noises_and_range_are_told_apart_from_its_notes() {
+        let mut project = Project::new("Keys");
+        let guitar = project.add_track("Guitar");
+        assert_eq!(key_meaning(project.track(guitar).unwrap(), 26), None, "a track that knows nothing says nothing");
+        let profile = trill_core::InstrumentProfile {
+            articulations: vec![trill_core::Articulation::key("palm_mute", 26)],
+            sounds: [("scrape".to_string(), 101)].into(),
+            range: Some((40, 88)),
+            ..Default::default()
+        };
+        project.set_track_profile(guitar, profile).unwrap();
+        let meaning = |pitch: u8| key_meaning(project.track(guitar).unwrap(), pitch).unwrap_or_default();
+        assert!(meaning(26).starts_with("D1 is a keyswitch (palm_mute)"), "{}", meaning(26));
+        assert!(meaning(101).starts_with("F7 plays a noise (scrape)"), "{}", meaning(101));
+        assert!(meaning(30).contains("outside what this instrument plays (E2-E6)"), "{}", meaning(30));
+        assert_eq!(meaning(60), "", "a note like any other");
     }
 
     fn geometry() -> Geometry {

@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use trill_core::device::DeviceDescriptor;
 use trill_core::{
     AutomationPoint, AutomationTarget, Beats, ChainRef, Clip, ClipId, ControllerKind, DeviceId, EditError, Note,
-    Project, TrackId, TrackKind,
+    Project, TimeExcerpt, TrackId, TrackKind,
 };
 use trill_engine::{AudioConfig, Session, SessionError, SharedSession, StreamInfo};
 use trill_noir::Theme;
@@ -309,6 +309,9 @@ pub enum Clipboard {
     Clips(Vec<CopiedClip>),
     /// Notes, with starts counted from the earliest of them.
     Notes(Vec<Note>),
+    /// A stretch of time: what its tracks held in it, cut to it, with the
+    /// course of their automation.
+    Time(TimeExcerpt),
 }
 
 /// A clip on the clipboard, with where it sat among the others copied

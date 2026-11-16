@@ -371,6 +371,91 @@ fn selected_time_can_be_looped_deleted_and_duplicated() {
 }
 
 #[test]
+fn a_stretch_of_time_is_copied_and_pasted_over_what_is_there_or_making_room() {
+    let (mut harness, [one, two, _], [a, b, c]) = with_three_tracks(UiOptions::default());
+    let volume = trill_core::AutomationTarget::TrackVolume { track: one };
+    harness
+        .session
+        .lock()
+        .edit(|project| {
+            let ramp = vec![trill_core::AutomationPoint::new(8.0, -8.0), trill_core::AutomationPoint::new(12.0, -12.0)];
+            project.set_automation(volume.clone(), ramp)
+        })
+        .unwrap();
+    harness.idle(1);
+    let level = |harness: &Harness, beat: f64| {
+        let project = harness.project();
+        let points = &project.automation.iter().find(|lane| lane.target == volume).unwrap().points;
+        trill_core::project::automation_value(points, beat)
+    };
+    let names = |harness: &Harness, index: usize| -> Vec<String> {
+        harness.project().tracks[index].clips.iter().map(|clip| clip.name.clone()).collect()
+    };
+
+    // Bar 3 on every track: A, C under it, and the first track's fade.
+    harness.drag(harness.ruler(8.2, false), harness.ruler(11.9, false));
+    let before = harness.undo_depth();
+    harness.key(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
+    assert_eq!(harness.undo_depth(), before, "copying edits nothing");
+    assert_eq!(harness.clipboard.as_deref(), Some("1 bar of time from Trill"));
+
+    // Over what is there, at bar 5, where B is.
+    harness.click(harness.ruler(16.1, false));
+    assert_eq!(harness.app.state().arrangement.cursor, 16.0);
+    harness.key(Modifiers::COMMAND, Key::V);
+    assert_eq!(harness.spans(0), [(8.0, 4.0), (16.0, 4.0)]);
+    assert_eq!(names(&harness, 0), ["A", "A"], "a copy of A took B's place");
+    assert!(harness.project().clip(b).is_err());
+    assert_eq!(harness.spans(1), [(8.0, 4.0), (16.0, 4.0)], "on every track it was copied from");
+    assert_eq!((level(&harness, 16.0), level(&harness, 18.0)), (-8.0, -10.0), "the fade came along");
+    assert_eq!(harness.undo_depth(), before + 1, "all of it is one undo step");
+    let selection = harness.app.state().arrangement.time_selection.clone().unwrap();
+    assert_eq!((selection.start, selection.end), (16.0, 20.0), "what was pasted is selected");
+    assert_eq!(harness.app.state().arrangement.cursor, 20.0, "and pasting again would follow on");
+
+    // Making room, at bar 3: everything from there on moves a bar later.
+    harness.click(harness.ruler(8.1, false));
+    harness.key(Modifiers::COMMAND | Modifiers::SHIFT, Key::V);
+    assert_eq!(harness.spans(0), [(8.0, 4.0), (12.0, 4.0), (20.0, 4.0)]);
+    assert_eq!((harness.project().clip(a).unwrap().start, harness.project().clip(c).unwrap().start), (12.0, 12.0));
+    assert_eq!((level(&harness, 10.0), level(&harness, 14.0)), (-10.0, -10.0), "the fade twice over");
+    assert_eq!(harness.undo_depth(), before + 2);
+
+    // The Edit menu and the lanes' menu offer both, beside the other time commands.
+    harness.click_label("Edit");
+    harness.click_label("Paste time");
+    assert_eq!(harness.spans(0).len(), 4, "again, after the last one");
+    harness.right_click(harness.lane(26.0, 2));
+    harness.click_label("Paste over");
+    assert_eq!(harness.undo_depth(), before + 4);
+    harness.key(Modifiers::COMMAND, Key::Z);
+    harness.key(Modifiers::COMMAND, Key::Z);
+    assert_eq!(harness.spans(0), [(8.0, 4.0), (12.0, 4.0), (20.0, 4.0)]);
+
+    // Selected in one track's lane, a stretch is that track's alone.
+    harness.drag(harness.lane(4.2, 1), harness.lane(7.9, 1));
+    assert_eq!(harness.app.state().arrangement.time_selection.clone().unwrap().tracks, [two]);
+    harness.click_label("Edit");
+    harness.click_label("Copy time");
+    harness.click(harness.ruler(12.1, false));
+    harness.key(Modifiers::COMMAND, Key::V);
+    assert_eq!(harness.spans(1), [(8.0, 4.0), (20.0, 4.0)], "the empty bar took the place of the clip at bar 4");
+    assert_eq!(harness.spans(0), [(8.0, 4.0), (12.0, 4.0), (20.0, 4.0)], "and the other tracks were left alone");
+}
+
+#[test]
+fn copying_and_pasting_time_say_what_they_need_when_they_have_nothing_to_go_by() {
+    let (mut harness, ..) = with_three_tracks(UiOptions::default());
+    let before = harness.undo_depth();
+    harness.key(Modifiers::COMMAND | Modifiers::SHIFT, Key::V);
+    assert_eq!(harness.app.state().toasts.len(), 1, "nothing was copied yet");
+    harness.key(Modifiers::COMMAND | Modifiers::SHIFT, Key::C);
+    assert_eq!(harness.app.state().toasts.len(), 2, "no time is selected");
+    assert_eq!(harness.clipboard, None);
+    assert_eq!(harness.undo_depth(), before);
+}
+
+#[test]
 fn empty_time_is_inserted_where_the_selection_starts() {
     let (mut harness, [one, ..], [a, b, c]) = with_three_tracks(UiOptions::default());
     let volume = trill_core::AutomationTarget::TrackVolume { track: one };

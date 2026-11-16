@@ -678,6 +678,15 @@ pub trait DeviceFactory: Send + Sync {
     fn known_presets(&self, uri: &str) -> Option<PresetList> {
         self.presets(uri)
     }
+
+    /// Whether the device type `uri` is a drum instrument: one whose keys
+    /// are drums, not pitches. A track that plays through one is a drum
+    /// track unless it is told otherwise. Never waits, and false for a
+    /// type that is not this factory's.
+    fn plays_drums(&self, uri: &str) -> bool {
+        let _ = uri;
+        false
+    }
 }
 
 /// A shared factory is a factory, so one instance can serve several owners.
@@ -718,6 +727,10 @@ impl<T: DeviceFactory + ?Sized> DeviceFactory for std::sync::Arc<T> {
 
     fn known_presets(&self, uri: &str) -> Option<PresetList> {
         (**self).known_presets(uri)
+    }
+
+    fn plays_drums(&self, uri: &str) -> bool {
+        (**self).plays_drums(uri)
     }
 }
 
@@ -782,6 +795,10 @@ impl DeviceFactory for CompositeFactory {
 
     fn known_presets(&self, uri: &str) -> Option<PresetList> {
         self.factories.iter().find_map(|factory| factory.known_presets(uri))
+    }
+
+    fn plays_drums(&self, uri: &str) -> bool {
+        self.factories.iter().any(|factory| factory.plays_drums(uri))
     }
 }
 

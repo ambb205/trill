@@ -140,14 +140,21 @@ impl JsonSchema for PointInput {
 }
 
 pub fn parse_pitch_value(value: &Value) -> Result<u8, String> {
+    parse_pitch_with(value, &parse_drum, "a drum name (like \"kick\")")
+}
+
+/// Reads a pitch: a number, a note name, or a name that `named` knows a
+/// key for (a track's drums, noises and keyswitches). `expected` says what
+/// such a name could have been, for the error that it is none.
+pub fn parse_pitch_with(value: &Value, named: &dyn Fn(&str) -> Option<u8>, expected: &str) -> Result<u8, String> {
     match value {
         Value::Number(number) => match number.as_f64() {
             Some(n) if n.fract() == 0.0 && (0.0..=127.0).contains(&n) => Ok(n as u8),
             _ => Err(format!("pitch {number} is not a MIDI note number in 0..=127")),
         },
-        Value::String(name) => parse_pitch(name).or_else(|| parse_drum(name)).ok_or_else(|| {
-            format!("'{name}' is not a note name (like \"C4\" or \"F#3\") or a drum name (like \"kick\")")
-        }),
+        Value::String(name) => parse_pitch(name)
+            .or_else(|| named(name))
+            .ok_or_else(|| format!("'{name}' is not a note name (like \"C4\" or \"F#3\") or {expected}")),
         other => Err(format!("pitch must be a number or a string, got {other}")),
     }
 }
@@ -165,7 +172,8 @@ fn velocity(value: Option<&Value>) -> Result<u8, String> {
     Ok(v.round() as u8)
 }
 
-fn parse_note(value: &Value) -> Result<Note, String> {
+fn parse_note(value: &Value, named: &dyn Fn(&str) -> Option<u8>, expected: &str) -> Result<Note, String> {
+    let parse_pitch_value = |value: &Value| parse_pitch_with(value, named, expected);
     let (pitch, start, length, velocity) = match value {
         Value::Object(fields) => {
             let field = |name: &str| fields.get(name).ok_or_else(|| format!("missing '{name}'"));
@@ -190,10 +198,20 @@ fn parse_note(value: &Value) -> Result<Note, String> {
 }
 
 pub fn parse_notes(notes: &[NoteInput]) -> Result<Vec<Note>, String> {
+    parse_notes_with(notes, &parse_drum, "a drum name (like \"kick\")")
+}
+
+/// [`parse_notes`], with the names `named` knows keys for; see
+/// [`parse_pitch_with`].
+pub fn parse_notes_with(
+    notes: &[NoteInput],
+    named: &dyn Fn(&str) -> Option<u8>,
+    expected: &str,
+) -> Result<Vec<Note>, String> {
     notes
         .iter()
         .enumerate()
-        .map(|(index, note)| parse_note(&note.0).map_err(|e| format!("notes[{index}]: {e}")))
+        .map(|(index, note)| parse_note(&note.0, named, expected).map_err(|e| format!("notes[{index}]: {e}")))
         .collect()
 }
 

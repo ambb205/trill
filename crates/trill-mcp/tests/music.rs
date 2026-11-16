@@ -151,9 +151,14 @@ async fn an_agent_writes_a_song_without_spelling_a_note() {
     let beat =
         ok(client, "write_drums", json!({ "track": drums, "groove": "house", "bars": 8, "fill": "build" })).await;
     assert_eq!(beat["created"], true);
-    assert_eq!((beat["bars"].as_u64(), beat["length"].as_f64()), (Some(8), Some(32.0)));
+    assert_eq!((beat["bars"].as_u64(), beat["written_beats"].as_f64()), (Some(8), Some(32.0)));
     assert_eq!(beat["lanes"]["kick"], "X...X...X...X...");
-    assert_eq!(beat["fill"], json!({ "name": "build", "in_bars": [8] }));
+    assert_eq!((beat["fill"]["name"].as_str(), beat["fill"]["in_bars"].clone()), (Some("build"), json!([8])));
+    // The build is a whole bar: it says what of the groove it took the place of.
+    let replaced = &beat["fill"]["bars"][0];
+    assert_eq!((replaced["bar"].as_u64(), replaced["from_beat"].as_f64()), (Some(8), Some(1.0)));
+    assert_eq!(replaced["replaced"], json!({ "clap": 2, "closed_hat": 12, "kick": 4, "open_hat": 4 }));
+    assert_eq!(replaced["played"], json!({ "kick": 4, "snare": 16 }));
     assert_eq!(beat["swing"], 54.0, "the groove brings its own swing");
     assert_eq!(beat["hits"]["kick"], 32, "four on the floor for eight bars, the fill included");
     assert!(beat.get("warnings").is_none(), "{beat}");
@@ -406,9 +411,9 @@ async fn replies_warn_about_what_cannot_be_heard() {
 
     // The wrong kind of instrument for the part, or none.
     let reply = ok(client, "write_chords", json!({ "track": kit, "progression": "C" })).await;
-    assert!(warnings(&reply).contains("instrument is a drum kit: these pitches will trigger drums"), "{reply}");
+    assert!(warnings(&reply).contains("is a drum track: these pitches will trigger drums"), "{reply}");
     let reply = ok(client, "write_drums", json!({ "track": pad, "groove": "rock" })).await;
-    assert!(warnings(&reply).contains("is not a drum kit: these drum notes will play as low pitches"), "{reply}");
+    assert!(warnings(&reply).contains("is not a drum track: these drum notes will play as pitches"), "{reply}");
     let reply = ok(client, "write_bass", json!({ "track": empty, "progression": "C" })).await;
     assert!(warnings(&reply).contains("has no instrument, so this will be silent"), "{reply}");
 
@@ -517,6 +522,11 @@ async fn writing_into_clips_replaces_layers_loops_and_repeats_exactly() {
         ok(client, "write_drums", json!({ "track": kit, "groove": "boom_bap", "clip_length": 64, "name": "Beat" }))
             .await;
     assert_eq!((beat["bars"].as_u64(), beat["loops"].as_str()), (Some(2), Some("8 beats written, looped to fill 64")));
+    // Two lengths, each under its own name: what was written, and the clip it loops in.
+    assert_eq!(
+        (beat["written_beats"].as_f64(), beat["clip_length"].as_f64(), beat.get("length")),
+        (Some(8.0), Some(64.0), None)
+    );
     let clip = ok(client, "get_notes", json!({ "clip": beat["clip_id"] })).await;
     assert_eq!(
         (clip["name"].as_str(), clip["length"].as_f64(), clip["loop_length"].as_f64()),
@@ -577,7 +587,7 @@ async fn writing_into_clips_replaces_layers_loops_and_repeats_exactly() {
     )
     .await;
     assert_eq!(
-        (long["bars"].as_u64(), long["note_count"].as_u64(), long["length"].as_f64()),
+        (long["bars"].as_u64(), long["note_count"].as_u64(), long["written_beats"].as_f64()),
         (Some(5), Some(40), Some(20.0))
     );
     let cut =
@@ -599,9 +609,9 @@ async fn other_meters_keys_and_styles() {
     let beat =
         ok(client, "write_drums", json!({ "track": kit, "groove": "six_eight", "bars": 4, "fill": "six_eight_toms" }))
             .await;
-    assert_eq!((beat["length"].as_f64(), beat.get("warnings")), (Some(12.0), None));
+    assert_eq!((beat["written_beats"].as_f64(), beat.get("warnings")), (Some(12.0), None));
     let chords = ok(client, "write_chords", json!({ "track": keys, "key": "E minor", "progression": "i | bVI bVII | i | V7", "rhythm": "pulse", "bass": "root" })).await;
-    assert_eq!(chords["length"], 12.0);
+    assert_eq!(chords["written_beats"], 12.0);
     let starts: Vec<&str> =
         chords["chords"].as_array().unwrap().iter().map(|chord| chord["at"].as_str().unwrap()).collect();
     assert_eq!(starts, ["1.1", "2.1", "2.2.5", "3.1", "4.1"], "two chords split a 6/8 bar on its second dotted beat");
@@ -620,7 +630,7 @@ async fn other_meters_keys_and_styles() {
     // 7/8, in a flat key: names come back with flats.
     ok(client, "set_project", json!({ "time_signature": "7/8" })).await;
     let odd = ok(client, "write_chords", json!({ "track": keys, "start": 14, "key": "Bb", "progression": "Imaj7 | vi7 | ii7 | V7", "voicing": "drop2", "bass": "root" })).await;
-    assert_eq!(odd["length"], 14.0);
+    assert_eq!(odd["written_beats"], 14.0);
     let names: Vec<&str> =
         odd["chords"].as_array().unwrap().iter().map(|chord| chord["chord"].as_str().unwrap()).collect();
     assert_eq!(names, ["Bbmaj7", "Gm7", "Cm7", "F7"]);
@@ -648,7 +658,20 @@ async fn the_reference_and_analysis_serve_a_reader() {
         overview["topics"].as_array().unwrap().iter().map(|topic| topic["name"].as_str().unwrap()).collect();
     assert_eq!(
         topics,
-        ["chords", "progressions", "scales", "voicings", "rhythms", "arpeggios", "bass", "drums", "grooves", "melody"]
+        [
+            "chords",
+            "progressions",
+            "scales",
+            "voicings",
+            "rhythms",
+            "arpeggios",
+            "bass",
+            "drums",
+            "grooves",
+            "melody",
+            "ornaments",
+            "instruments"
+        ]
     );
     for topic in &topics {
         let page = call(client, "music_reference", json!({ "topic": topic }))
