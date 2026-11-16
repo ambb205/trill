@@ -27,7 +27,8 @@
 //! [`device_layouts`] says how each built-in device arranges its
 //! parameters, [`sample_panels`] draws what the sampler and the drum rack
 //! play, and [`displays`] draws the devices' small curves from the math in
-//! [`response`]. [`files`] runs dialogs, imports and exports off the UI
+//! [`response`]. [`editors`] opens the windows plugins bring with them.
+//! [`files`] runs dialogs, imports and exports off the UI
 //! thread, and [`sounds`] does the same for everything that reads audio
 //! files (waveforms, previews, searches, drops) on the workers of
 //! [`work`]; [`dragging`] carries sounds from the browser, or from another
@@ -47,6 +48,7 @@ mod device_layouts;
 mod devices;
 mod displays;
 mod dragging;
+mod editors;
 mod files;
 mod mixer;
 mod piano_roll;
@@ -118,6 +120,8 @@ pub struct UiOptions {
     pub autoplay: bool,
     /// Close the window by itself after this long.
     pub exit_after: Option<Duration>,
+    /// Name of a device whose own window to open at startup.
+    pub open_editor: Option<String>,
     /// Initial size of the window's content, in points.
     pub window_size: [f32; 2],
 }
@@ -139,8 +143,20 @@ impl Default for UiOptions {
             screenshot: None,
             autoplay: false,
             exit_after: None,
+            open_editor: None,
             window_size: [1440.0, 900.0],
         }
+    }
+}
+
+/// The system's handle of the application's window, as a plugin editor's
+/// owner is named: an `HWND` on Windows. `None` elsewhere, where editors
+/// are not hosted yet.
+fn native_window(creation: &eframe::CreationContext<'_>) -> Option<isize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match creation.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(window) => Some(window.hwnd.get()),
+        _ => None,
     }
 }
 
@@ -161,7 +177,13 @@ pub fn run(runtime: Arc<Runtime>, options: UiOptions) -> anyhow::Result<()> {
     eframe::run_native(
         "trill",
         native,
-        Box::new(move |creation| Ok(Box::new(app::TrillApp::new(&creation.egui_ctx, runtime, options, app_failure)))),
+        Box::new(move |creation| {
+            let mut app = app::TrillApp::new(&creation.egui_ctx, runtime, options, app_failure);
+            // Plugin editors belong to this window: they stay above it and
+            // go where it goes.
+            app.set_native_window(native_window(creation));
+            Ok(Box::new(app))
+        }),
     )
     .map_err(|error| anyhow!("the window could not be opened: {error}"))?;
 

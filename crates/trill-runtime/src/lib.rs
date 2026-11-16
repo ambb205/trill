@@ -121,8 +121,18 @@ impl Runtime {
     /// folders starts catching up with what changed in them since the last
     /// run, and the plugins are scanned, both in the background.
     pub fn start(options: RuntimeOptions) -> Result<Self, RuntimeError> {
+        Self::start_with(options, Vec::new())
+    }
+
+    /// [`Runtime::start`], offering the devices of `extra` beside the
+    /// built-in ones and the user's plugins. For tests of what a front end
+    /// does with a plugin (its editor, say), which hand in a stand-in for
+    /// one and need no plugin installed.
+    #[doc(hidden)]
+    pub fn start_with(options: RuntimeOptions, extra: Vec<Box<dyn DeviceFactory>>) -> Result<Self, RuntimeError> {
         let media = Arc::new(MediaCache::default());
         let mut factories: Vec<Box<dyn DeviceFactory>> = vec![Box::new(Builtins::with_loader(media.clone()))];
+        factories.extend(extra);
         let plugins = options.plugins.map(PluginHost::new).transpose().map_err(RuntimeError::Plugins)?;
         if let Some(plugins) = &plugins {
             factories.extend(plugins.factories());

@@ -12,7 +12,7 @@ use super::automation::{self, Hold};
 use super::device_layouts::{self, Display, Format, Layout, Row};
 use super::state::Cx;
 use super::units::{self, ParamScale};
-use super::{colors, displays, sample_panels};
+use super::{colors, displays, editors, sample_panels};
 use eframe::egui::{self, Align2, Color32, FontId, Id, Rect, Role, Sense, Ui, WidgetInfo, pos2, vec2};
 use trill_core::device::{DeviceCategory, DeviceDescriptor, ParamKind};
 use trill_core::{AutomationTarget, ChainRef, Device, DeviceId};
@@ -248,7 +248,8 @@ fn panel(ui: &mut Ui, cx: &mut Cx, device: &Device, rect: Rect, accent: Color32)
     }
 }
 
-/// Bypass dot, name, preset menu and remove button.
+/// Bypass dot, name, the button for a plugin's own window, preset menu and
+/// remove button.
 fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id, selected: bool) {
     let theme = cx.theme;
     let device_id = device.id;
@@ -308,7 +309,24 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
         name_right = rect.left() - 6.0;
     }
 
-    let name = Rect::from_min_max(pos2(dot_zone.right() + 2.0, header.top()), pos2(name_right, header.bottom()));
+    let mut name = Rect::from_min_max(pos2(dot_zone.right() + 2.0, header.top()), pos2(name_right, header.bottom()));
+    if editors::has(cx, device_id) {
+        // The plugin's own window. Its button follows the name, at the
+        // panel's left: a plugin with hundreds of parameters makes a panel
+        // many screens wide, and this is what its user came for.
+        let label = format!("Editor of {}", device.name);
+        let chip = Chip::new("Editor", editors::is_open(cx, device_id)).quiet(quiet).named(&label);
+        let width = chip.width(ui, theme);
+        let after_name = name.left() + text::width(&painter, theme.text.caps, &device.name) + 8.0;
+        let left = after_name.min(name.right() - width).max(name.left());
+        let rect = Rect::from_min_size(pos2(left, header.center().y - 8.0), vec2(width, 16.0));
+        let response = trill_noir::chip(ui, theme, rect, id.with("editor"), &chip);
+        cx.hint(&response, editors::hint(cx, device_id, &device.name));
+        if response.clicked() {
+            editors::toggle(cx, device_id);
+        }
+        name.max.x = rect.left() - 6.0;
+    }
     let color = if device.enabled { theme.ink } else { quiet };
     text::paint(&painter, name, Align2::LEFT_CENTER, theme.text.caps, &device.name, color);
 }

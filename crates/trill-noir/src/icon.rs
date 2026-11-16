@@ -28,6 +28,8 @@ pub enum Icon {
     Folder,
     /// A sound that plays once: a hit and its decay.
     Hit,
+    /// A window of its own: the editor a plugin brings.
+    Window,
 }
 
 impl Icon {
@@ -49,6 +51,7 @@ impl Icon {
             Icon::StarOn => "Favorite",
             Icon::Folder => "Folder",
             Icon::Hit => "One-shot",
+            Icon::Window => "Editor",
         }
     }
 }
@@ -153,6 +156,12 @@ pub fn paint_icon(painter: &Painter, center: Pos2, icon: Icon, color: Color32) {
                 vec![pos2(center.x - 4.0, floor), pos2(center.x - 4.0, center.y - 5.0), pos2(center.x + 5.0, floor)];
             painter.add(Shape::convex_polygon(points, color, Stroke::NONE));
         }
+        Icon::Window => {
+            // A frame with its title bar filled in.
+            let frame = Rect::from_min_size(center + vec2(-5.0, -4.0), vec2(11.0, 9.0));
+            paint::frame(painter, frame, color);
+            painter.rect_filled(Rect::from_min_size(frame.min, vec2(frame.width(), 3.0)), 0.0, color);
+        }
     }
 }
 
@@ -207,6 +216,7 @@ mod tests {
             Icon::StarOn,
             Icon::Folder,
             Icon::Hit,
+            Icon::Window,
         ];
         crate::testing::with_ui(|ui, theme| {
             for icon in all {

@@ -8,6 +8,7 @@
 
 mod automation;
 mod clips;
+mod editors;
 mod keys;
 mod mixer;
 mod perf;

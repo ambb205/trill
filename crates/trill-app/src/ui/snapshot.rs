@@ -50,6 +50,9 @@ pub struct Snapshot {
     /// Parameters of the devices the Devices tab and the automation lanes
     /// show, or why a device has none (it failed to load).
     pub params: HashMap<DeviceId, Result<Vec<ParamState>, String>>,
+    /// The devices that bring a window of their own (plugins do, built-in
+    /// devices do not), in ascending order.
+    pub editors: Vec<DeviceId>,
     /// What each MIDI clip plays, worked out the first time it is drawn and
     /// kept until the next revision.
     clip_notes: RefCell<HashMap<ClipId, Rc<ClipNotes>>>,
@@ -92,6 +95,12 @@ impl Snapshot {
             .iter()
             .filter_map(|track| session.track_meter(track.id).map(|meter| (track.id, meter)))
             .collect();
+        // Asked of every device, shown or not: the mixer lists them all.
+        // For a built-in device it is a failed lookup and no more.
+        let chains = project.tracks.iter().map(|track| &track.devices).chain([&project.master.devices]);
+        let mut editors: Vec<DeviceId> =
+            chains.flatten().map(|device| device.id).filter(|id| session.device_has_editor(*id)).collect();
+        editors.sort_unstable();
         Self {
             revision: session.revision(),
             can_undo: session.can_undo(),
@@ -103,6 +112,7 @@ impl Snapshot {
             samples,
             params_tracks: shown.iter().map(|track| track.id).collect(),
             params,
+            editors,
             clip_notes: RefCell::default(),
             track_meters,
             master_meter: session.master_meter(),
@@ -162,6 +172,11 @@ impl Snapshot {
     pub fn automated(&self, target: &AutomationTarget, beat: Beats) -> Option<f64> {
         let lane = self.lane(target).filter(|lane| lane.enabled)?;
         Some(trill_core::project::automation_value(&lane.points, beat))
+    }
+
+    /// Whether `device` brings a window of its own to open.
+    pub fn has_editor(&self, device: DeviceId) -> bool {
+        self.editors.binary_search(&device).is_ok()
     }
 
     /// The description of a device's parameter, when the snapshot covers
@@ -246,11 +261,26 @@ pub struct Live {
     /// How many warped clips play a stand-in while their stretched audio
     /// is being made.
     pub preparing: usize,
+    /// The devices whose own windows are open right now. Asked of the
+    /// session every time: the user closes them without telling anyone.
+    pub open_editors: Vec<DeviceId>,
     pub master: MeterState,
     tracks: HashMap<TrackId, MeterState>,
 }
 
 impl Live {
+    /// Whether the editor of `device` is open.
+    pub fn editor_open(&self, device: DeviceId) -> bool {
+        self.open_editors.contains(&device)
+    }
+
+    /// Reads which of the snapshot's editors are open. A handful of
+    /// lookups, and nothing at all for a project without plugins.
+    pub fn update_editors(&mut self, snapshot: &Snapshot, session: &Session) {
+        self.open_editors.clear();
+        self.open_editors.extend(snapshot.editors.iter().copied().filter(|id| session.is_device_editor_open(*id)));
+    }
+
     pub fn track_meter(&self, id: TrackId) -> MeterState {
         self.tracks.get(&id).copied().unwrap_or_default()
     }

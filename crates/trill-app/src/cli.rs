@@ -27,6 +27,7 @@ Options:
   --library <FOLDER>      Add a folder of sounds to the library; may be given several times
   --search <TEXT>         Search the sound library for this at startup
   --sound <NAME>          Select the sound with this name in the browser
+  --editor <DEVICE NAME>  Open this plugin's own window at startup
   --null-audio            Run without an audio device
   --no-plugins            Offer only the built-in devices
   --mcp-port <PORT>       Port of the MCP server for AI assistants (default: 7777)
@@ -62,6 +63,8 @@ pub struct Cli {
     pub search: Option<String>,
     /// Name of a sound to select in the browser.
     pub sound: Option<String>,
+    /// Name of a device whose editor to open.
+    pub editor: Option<String>,
     pub null_audio: bool,
     pub no_plugins: bool,
     pub no_mcp: bool,
@@ -96,6 +99,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
             "--library" => cli.library.push(PathBuf::from(value("a folder")?)),
             "--search" => cli.search = Some(value("what to search for")?),
             "--sound" => cli.sound = Some(value("the name of a sound")?),
+            "--editor" => cli.editor = Some(value("the name of a device")?),
             "--browse" => {
                 cli.browse = Some(match value("what to list")?.as_str() {
                     "devices" => BrowserTab::Devices,
@@ -224,6 +228,7 @@ impl Cli {
             screenshot: self.screenshot.clone(),
             autoplay: self.play,
             exit_after: self.exit_after,
+            open_editor: self.editor.clone(),
             window_size: self.size.unwrap_or(defaults.window_size),
         }
     }
@@ -401,6 +406,13 @@ mod tests {
     }
 
     #[test]
+    fn a_plugins_editor_can_be_asked_for_at_startup() {
+        assert_eq!(run(&[]).unwrap().ui_options().open_editor, None);
+        let cli = run(&["--editor", "Surge XT", "song.trill"]).unwrap();
+        assert_eq!(cli.ui_options().open_editor.as_deref(), Some("Surge XT"));
+    }
+
+    #[test]
     fn help_is_recognized() {
         assert_eq!(parse(["--help".to_owned()]).unwrap(), Parsed::Help);
         assert_eq!(parse(["--demo".to_owned(), "-h".to_owned()]).unwrap(), Parsed::Help);
@@ -418,6 +430,7 @@ mod tests {
             &["--library"],
             &["--search"],
             &["--sound"],
+            &["--editor"],
             &["--size", "big"],
             &["--size", "10x10"],
             &["--theme"],

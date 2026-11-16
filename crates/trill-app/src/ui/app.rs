@@ -2,6 +2,7 @@
 //! out the panels, handles keyboard shortcuts and decides when to repaint.
 
 use super::arrangement::ops;
+use super::editors::{self, Editors};
 use super::files::{self, Confirm, Jobs};
 use super::shortcuts::{self, Command};
 use super::snapshot::{Live, Snapshot};
@@ -55,6 +56,7 @@ pub struct TrillApp {
     snapshot: Snapshot,
     live: Live,
     state: UiState,
+    editors: Editors,
     jobs: Jobs,
     /// The colors, type and metrics the window is painted with.
     theme: Theme,
@@ -173,14 +175,17 @@ impl TrillApp {
         let now = Instant::now();
         let mut jobs = Jobs::default();
         // Unattended runs must be able to exit without a person answering
-        // the "discard changes?" question.
-        jobs.quit_confirmed = options.screenshot.is_some() || options.exit_after.is_some();
+        // the "discard changes?" question, and must not take the keyboard
+        // from whoever is at the machine.
+        let unattended = options.screenshot.is_some() || options.exit_after.is_some();
+        jobs.quit_confirmed = unattended;
         Self {
             sounds: Sounds::new(ctx, runtime),
             session,
             snapshot,
             live: Live::default(),
             state,
+            editors: Editors::new(!unattended),
             jobs,
             theme,
             descriptors: BuiltinFactory.descriptors(),
@@ -233,6 +238,7 @@ impl TrillApp {
                 self.live.set_cpu_load(session.audio_load());
                 self.live.audio_faults = session.audio_faults();
                 self.live.preparing = session.preparing();
+                self.live.update_editors(&self.snapshot, &session);
                 if now.duration_since(self.last_housekeeping) >= HOUSEKEEPING_INTERVAL {
                     session.housekeeping();
                     self.last_housekeeping = now;
@@ -263,6 +269,7 @@ impl TrillApp {
             audio: &self.audio,
             mcp_url: self.options.mcp_url.as_deref(),
             state: &mut self.state,
+            editors: &mut self.editors,
             jobs: &mut self.jobs,
             sounds: &mut self.sounds,
         }
@@ -481,6 +488,7 @@ impl TrillApp {
     /// session and with background work.
     pub fn tick(&mut self, ctx: &egui::Context) {
         self.jobs.poll(&mut self.state);
+        self.editors.poll(&mut self.state.toasts);
         self.take_reports();
         self.sync(ctx);
         self.release_audition(ctx);
@@ -501,9 +509,13 @@ impl TrillApp {
         let typing = ctx.text_edit_focused() || self.was_typing;
         browser::keys(&ctx, &mut self.cx(), typing);
         let commands = self.read_commands(&ctx);
+        let open_editor = self.options.open_editor.take();
         let mut cx = self.cx();
         for command in commands {
             run_command(&ctx, &mut cx, command);
+        }
+        if let Some(name) = open_editor {
+            editors::open_named(&mut cx, &name);
         }
         dragging::begin(&ctx, &mut cx);
 
@@ -575,6 +587,17 @@ impl TrillApp {
             ctx.request_repaint();
         }
         self.automate(&ctx);
+    }
+
+    /// Names the system's window this runs in, for what must belong to it
+    /// (plugin editors).
+    pub fn set_native_window(&mut self, window: Option<isize>) {
+        self.editors.set_owner(window);
+    }
+
+    #[cfg(test)]
+    pub fn editors(&self) -> &Editors {
+        &self.editors
     }
 
     #[cfg(test)]
