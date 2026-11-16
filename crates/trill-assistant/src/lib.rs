@@ -132,6 +132,10 @@
 //!   stored login, silently. See [`REDIRECTING_VARIABLES`].
 //! * A conversation resumes after its CLI was killed: both straight after
 //!   the first event and in the middle of a round of tool calls.
+//! * `--model` takes any name. One the service does not know is passed on
+//!   and refused there (HTTP 404, reported by the CLI as `model_not_found`)
+//!   with nothing used; see [`FailureReason::ModelUnavailable`] and
+//!   [`MODEL_ALIASES`] for what was asked for and answered.
 //!
 //! CLI 2.1.94 was checked to start with the same command line (less
 //! `--permission-prompts`, which it does not know) and to report the same
@@ -149,7 +153,7 @@ mod protocol;
 
 pub use config::{
     AssistantConfig, ConfigError, DEFAULT_MAX_TURNS, DEFAULT_MCP_SERVER_NAME, DEFAULT_MCP_URL, DEFAULT_SYSTEM_PROMPT,
-    Effort,
+    Effort, MODEL_ALIASES, is_model_name,
 };
 pub use conversation::{Conversation, SendError};
 pub use detect::{CliInstallation, CliStatus, CliVersion, LoginMethod, MINIMUM_CLI_VERSION, Unavailable, detect};

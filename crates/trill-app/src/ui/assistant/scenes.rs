@@ -5,8 +5,10 @@
 //! script through the same path a live turn takes: the message is sent to a
 //! scripted back end, the events come back through the panel's own
 //! handling, and where the script says the assistant changed the song, the
-//! song is really changed, inside the turn's undo group. What the picture
-//! shows is therefore what the panel does, not a drawing of it.
+//! song is really changed, inside the turn's undo group, and the call
+//! answers with what it really made. What the picture shows is therefore
+//! what the panel does, not a drawing of it: the reply set from its
+//! Markdown, and the window gone to what the turn changed.
 //!
 //! The scripts are written for `examples/first-light.trill`. On another
 //! song they still play, with whatever track comes first standing in.
@@ -34,6 +36,11 @@ pub enum Scene {
     Working,
     /// A finished turn that changed the song.
     Answered,
+    /// A finished turn that changed nothing and answered at length: every
+    /// kind of thing a reply is set as.
+    Markdown,
+    /// After an answer, with the list of models open.
+    Model,
     /// A turn that ran into the usage limit, after a tool call that failed.
     Limit,
     /// A conversation billed to an API key.
@@ -46,10 +53,12 @@ pub enum Scene {
 
 impl Scene {
     /// Every scene by the name the command line knows it by.
-    pub const ALL: [(&'static str, Scene); 7] = [
+    pub const ALL: [(&'static str, Scene); 9] = [
         ("ready", Scene::Ready),
         ("working", Scene::Working),
         ("answered", Scene::Answered),
+        ("markdown", Scene::Markdown),
+        ("model", Scene::Model),
         ("limit", Scene::Limit),
         ("api-key", Scene::ApiKey),
         ("signed-out", Scene::SignedOut),
@@ -99,21 +108,31 @@ impl Scene {
                     "progression": "Am | F | C | G",
                     "style": "roots",
                 });
-                if let Some(bass) = bass {
-                    write_bass_intro(assistant, bass);
-                }
+                // As the tool answers: with the clip it made.
+                let written = bass.and_then(|bass| write_bass_intro(assistant, bass));
+                let wrote = match written {
+                    Some(clip) => {
+                        format!("{{ \"clip_id\": {}, \"created\": true, \"bars\": 8, \"note_count\": 64 }}", clip.0)
+                    }
+                    None => "{ \"note_count\": 0 }".to_owned(),
+                };
                 script.say([
                     started(self == Scene::ApiKey),
                     call("1", "get_project", json!({})),
                     answer("1", "get_project", Ok("{ \"name\": \"First Light\", \"tempo\": 96, \"tracks\": 7 }")),
                     call("2", "analyze_music", json!({ "track": id(pad.map(|track| track.0)), "start": 0, "end": 32 })),
-                    answer("2", "analyze_music", Ok("{ \"key\": \"A minor\", \"chords\": [\"Am\", \"F\", \"C\", \"G\"] }")),
+                    answer(
+                        "2",
+                        "analyze_music",
+                        Ok("{ \"key\": \"A minor\", \"chords\": [\"Am\", \"F\", \"C\", \"G\"] }"),
+                    ),
                     call("3", "write_bass", write),
-                    answer("3", "write_bass", Ok("{ \"clip_id\": 58, \"notes\": 32 }")),
+                    answer("3", "write_bass", Ok(&wrote)),
                     Event::Text(
-                        "I added an eight-bar line to Bass at bar 1. It plays the root of each pad chord in eighths (A, F, \
-                         C, G, two bars each) and stays below the pad\u{2019}s lowest voice.\n\nIf it crowds the intro, \
-                         halving it to quarter notes would leave more room."
+                        "I added an eight-bar line to **Bass** at bar 1. It follows the pad:\n\n- the root of each \
+                         chord, in eighths\n- **A**, **F**, **C** and **G**, two bars each\n- always below the \
+                         pad\u{2019}s lowest voice\n\nIf it crowds the intro, halving it to quarter notes would leave \
+                         more room."
                             .to_owned(),
                     ),
                     Event::Finished(TurnSummary {
@@ -121,6 +140,44 @@ impl Scene {
                         duration: Duration::from_millis(21_400),
                         usage: TokenUsage { input: 5200, output: 410, cache_read: 0, cache_write: 0 },
                         estimated_cost_usd: Some(0.0312),
+                    }),
+                ]);
+            }
+            Scene::Markdown | Scene::Model => {
+                if self == Scene::Model {
+                    // Chosen before anything is said, so nothing is said of it.
+                    let _ = assistant.choose_model(Some("sonnet"));
+                    assistant.open_model_menu = true;
+                }
+                let question = match self {
+                    Scene::Model => "What key is this in?",
+                    _ => "How would you build up to the drop at bar 17?",
+                };
+                if !assistant.submit(question, &context) {
+                    return;
+                }
+                let said = match self {
+                    Scene::Model => {
+                        "**A minor.** The pad moves through Am, F, C and G, and nothing in the song leaves the key."
+                    }
+                    _ => {
+                        "## Three moves\n\n1. **Clear the low end** for two bars: mute `Bass` from bar 15.\n2. **Build with the \
+                         hats**: sixteenths that open up over the last bar.\n3. **Land it** with a crash on the downbeat \
+                         of bar 17.\n\nA fill for bar 16 that suits 96 BPM:\n\n```\nbeat    1 . . . 2 . . . 3 . . . 4 . . .\nsnare   . \
+                         . . . x . . . . . x . x x x x\n```\n\n> The pad already swells into bar 17, so the build can stay \
+                         *small*.\n\nI have changed nothing yet. More on fills: [grooves and fills](https://example.com/fills)."
+                    }
+                };
+                script.say([
+                    started(false),
+                    call("1", "get_project", json!({})),
+                    answer("1", "get_project", Ok("{ \"name\": \"First Light\", \"tempo\": 96, \"tracks\": 7 }")),
+                    Event::Text(said.to_owned()),
+                    Event::Finished(TurnSummary {
+                        turns: 2,
+                        duration: Duration::from_millis(9_300),
+                        usage: TokenUsage { input: 4100, output: 220, cache_read: 0, cache_write: 0 },
+                        estimated_cost_usd: Some(0.0121),
                     }),
                 ]);
             }
@@ -146,7 +203,7 @@ impl Scene {
                     answer("2", "get_notes", Ok("{ \"notes\": 112 }")),
                     call("3", "add_notes", json!({ "clip": id(beat.map(|clip| clip.0)), "notes": hats })),
                     answer("3", "add_notes", Ok("{ \"added\": 32 }")),
-                    Event::Text("The hats now run in sixteenths through Beat A. Next, the pad.".to_owned()),
+                    Event::Text("The hats now run in sixteenths through **Beat A**. Next, the pad.".to_owned()),
                     call(
                         "4",
                         "update_track",
@@ -203,18 +260,23 @@ fn answer(id: &str, tool: &str, result: Result<&str, &str>) -> Event {
 }
 
 /// What the script's `write_bass` call does: eight bars of roots in
-/// eighths, two bars to a chord.
-fn write_bass_intro(assistant: &Assistant, bass: TrackId) {
+/// eighths, two bars to a chord. Returns the clip it made.
+fn write_bass_intro(assistant: &Assistant, bass: TrackId) -> Option<ClipId> {
     let roots = [33u8, 29, 36, 31];
     let notes: Vec<Note> = (0..64)
         .map(|step| Note { pitch: roots[step / 16], start: step as f64 * 0.5, length: 0.4, velocity: 92 })
         .collect();
     let edit = |project: &mut Project| {
         let clip = project.add_midi_clip(bass, "Bass intro", 0.0, 32.0)?;
-        project.clip_mut(clip)?.add_notes(&notes)
+        project.clip_mut(clip)?.add_notes(&notes)?;
+        Ok(clip)
     };
-    if let Err(error) = assistant.session.lock().edit(edit) {
-        log::warn!("the scene could not write its bass line: {error}");
+    match assistant.session.lock().edit(edit) {
+        Ok(clip) => Some(clip),
+        Err(error) => {
+            log::warn!("the scene could not write its bass line: {error}");
+            None
+        }
     }
 }
 

@@ -45,8 +45,9 @@ can read: the notes, the levels, and the loudness and spectrum figures that rend
 How you answer
 - The chat panel is narrow, so be brief. After working, say in a sentence or two what you changed, using the names \
 the user sees (track and clip names, bar numbers) and not internal ids.
-- Write plain text. The panel does not render Markdown: no headings, bold, tables or code blocks. A short list with \
-dashes is fine.
+- The panel shows simple Markdown: paragraphs, **bold** for a name or a value that matters, short lists, and \
+`code` for something to be typed exactly. Use it sparingly, as in a note to a colleague. No tables, images or HTML \
+(they are shown as typed), and a heading only when an answer really has parts.
 - Talk like a helpful studio colleague, in musical terms (bars, beats, note names), unless the user asks for \
 technical detail.
 - If a request is ambiguous in a way that matters, ask one short question. Otherwise make a sensible musical choice \
@@ -118,6 +119,12 @@ pub struct AssistantConfig {
 
     /// A model alias (`"sonnet"`) or full model name. `None` leaves the
     /// choice to the CLI, which is what the user has set up for themselves.
+    ///
+    /// The CLI takes any name and passes it on; one the service does not
+    /// know, or that the account may not use, fails the turn with
+    /// [`ModelUnavailable`](crate::FailureReason::ModelUnavailable) before
+    /// anything is used. Whether a model is included in the user's plan is
+    /// the service's to say and never this crate's. See [`MODEL_ALIASES`].
     pub model: Option<String>,
 
     /// `None` leaves the CLI's default.
@@ -180,11 +187,7 @@ impl AssistantConfig {
         if !(self.mcp_url.starts_with("http://") || self.mcp_url.starts_with("https://")) {
             return Err(ConfigError::McpUrl(self.mcp_url.clone()));
         }
-        if let Some(model) = &self.model
-            && (model.is_empty()
-                || model.starts_with('-')
-                || model.chars().any(|c| c.is_whitespace() || c.is_control()))
-        {
+        if let Some(model) = self.model.as_ref().filter(|model| !is_model_name(model)) {
             return Err(ConfigError::Model(model.clone()));
         }
         if self.max_turns == Some(0) {
@@ -192,6 +195,29 @@ impl AssistantConfig {
         }
         Ok(())
     }
+}
+
+/// The names the CLI takes for "the newest model of this family", from the
+/// most capable down: its own list, read out of CLI 2.1.325 (whose help
+/// names the first three of them), which also has a few for special uses
+/// (`best`, `opusplan`, and `[1m]` forms). `fable`, `opus` and `sonnet`
+/// were each asked for in a real turn with that CLI and answered, the CLI
+/// reporting the full name it had made of each (`claude-fable-5-2`,
+/// `claude-opus-5-5`, `claude-sonnet-5-5`); `haiku` is what this crate's
+/// real-CLI tests run on. A CLI that does not know one passes it on like
+/// any other name, and the service refuses it.
+///
+/// For a chooser to offer beside "whatever the CLI is set up to use"
+/// (`None`) and a name typed by hand. Listing a name promises nothing
+/// about the user's plan.
+pub const MODEL_ALIASES: &[&str] = &["fable", "opus", "sonnet", "haiku"];
+
+/// Whether `name` can be given to the CLI as a model: not empty, not
+/// something the command line would take for an option, and without spaces
+/// or control characters. Not whether such a model exists: only the service
+/// knows that.
+pub fn is_model_name(name: &str) -> bool {
+    !(name.is_empty() || name.starts_with('-') || name.chars().any(|c| c.is_whitespace() || c.is_control()))
 }
 
 /// Whether `name` is made of letters, digits, `_` and `-` only, as the names
@@ -264,6 +290,22 @@ mod tests {
     }
 
     #[test]
+    fn a_model_name_is_anything_the_command_line_takes_as_one() {
+        for name in MODEL_ALIASES.iter().copied().chain(["claude-haiku-5-5", "opus[1m]", "us.vendor.model-v1:0"]) {
+            assert!(is_model_name(name), "{name:?}");
+            let config = AssistantConfig { model: Some(name.to_owned()), ..AssistantConfig::new("data") };
+            assert_eq!(config.validate(), Ok(()), "{name:?}");
+        }
+        for name in ["", "-m", "--resume=x", "son net", "sonnet\n", "a\tb"] {
+            assert!(!is_model_name(name), "{name:?}");
+        }
+        let mut unique = MODEL_ALIASES.to_vec();
+        unique.dedup();
+        assert_eq!(unique.len(), MODEL_ALIASES.len());
+        assert!(MODEL_ALIASES.iter().all(|alias| !alias.contains("claude")), "aliases name a family, not the maker");
+    }
+
+    #[test]
     fn the_default_prompt_covers_what_the_assistant_must_know() {
         for phrase in [
             "Trill",
@@ -273,7 +315,8 @@ mod tests {
             "transform_notes",
             "be brief",
             "a single Undo",
-            "plain text",
+            "simple Markdown",
+            "No tables",
         ] {
             assert!(DEFAULT_SYSTEM_PROMPT.contains(phrase), "the default prompt lost {phrase:?}");
         }

@@ -32,6 +32,8 @@ pub enum Icon {
     Window,
     /// The keyboard one types on, played as an instrument.
     Keyboard,
+    /// Leads somewhere: an arrow up and to the right.
+    GoTo,
 }
 
 impl Icon {
@@ -55,6 +57,7 @@ impl Icon {
             Icon::Hit => "One-shot",
             Icon::Window => "Editor",
             Icon::Keyboard => "Computer keyboard",
+            Icon::GoTo => "Go to",
         }
     }
 }
@@ -176,6 +179,14 @@ pub fn paint_icon(painter: &Painter, center: Pos2, icon: Icon, color: Color32) {
             }
             paint::hline(painter, Rangef::new(case.left() + 4.0, case.right() - 4.0), case.top() + 6.0, color);
         }
+        Icon::GoTo => {
+            // A shaft from the bottom left to the corner at the top right,
+            // and the two strokes of the head along that corner's edges.
+            let corner = center + vec2(4.0, -4.0);
+            painter.line_segment([center + vec2(-3.5, 4.5), corner + vec2(-0.5, 1.5)], Stroke::new(1.0, color));
+            paint::hline(painter, Rangef::new(corner.x - 5.0, corner.x + 1.0), corner.y, color);
+            paint::vline(painter, corner.x, Rangef::new(corner.y, corner.y + 6.0), color);
+        }
     }
 }
 
@@ -232,6 +243,7 @@ mod tests {
             Icon::Hit,
             Icon::Window,
             Icon::Keyboard,
+            Icon::GoTo,
         ];
         crate::testing::with_ui(|ui, theme| {
             for icon in all {

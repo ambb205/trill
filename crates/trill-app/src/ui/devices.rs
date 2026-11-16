@@ -74,6 +74,15 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
         let mut left = rack.left() + RACK_PADDING;
         for (device, width) in devices.iter().zip(widths) {
             let rect = Rect::from_min_size(pos2(left, rack.top() + RACK_PADDING), vec2(width, panel_height));
+            if cx.state.reveal_device == Some(device.id) {
+                // Asked into view. Once more on the next frame if the
+                // device's parameters, which decide how wide the panels
+                // are, have yet to arrive.
+                ui.scroll_to_rect(rect, None);
+                if snap.params.contains_key(&device.id) {
+                    cx.state.reveal_device = None;
+                }
+            }
             if ui.is_rect_visible(rect) {
                 panel(ui, cx, device, rect, accent);
             }

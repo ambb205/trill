@@ -81,9 +81,14 @@ pub trait Backend {
     fn check(&mut self, ctx: &egui::Context);
     /// The answer to the last [`Backend::check`], once.
     fn checked(&mut self) -> Option<Result<Ready, Problem>>;
-    /// Opens a conversation: a new one, or the one `resume` names. Nothing
+    /// Opens a conversation: a new one, or the one `resume` names, to be
+    /// answered by `model` (`None` leaves the choice to the CLI). Nothing
     /// runs until its first message.
-    fn open(&mut self, ready: &Ready, resume: Option<SessionId>) -> Result<Box<dyn Chat>, String>;
+    ///
+    /// A conversation is answered by the model it was opened with. To have
+    /// another model carry it on, it is opened again with its id and the
+    /// other model: the CLI then hands that model everything said so far.
+    fn open(&mut self, ready: &Ready, resume: Option<SessionId>, model: Option<&str>) -> Result<Box<dyn Chat>, String>;
 }
 
 // ---- the user's own CLI ---------------------------------------------------
@@ -107,9 +112,6 @@ pub struct Installed {
     /// The folder the settings are in. Everything of the assistant's goes
     /// in `assistant` under it.
     folder: PathBuf,
-    /// The model to ask for; `None` leaves the choice to the CLI, which is
-    /// what the user has set up there.
-    model: Option<String>,
     app_server: McpServer,
     /// A server started for the assistant because the window had none. It
     /// stops when this is dropped.
@@ -125,12 +127,8 @@ struct Checked {
 }
 
 impl Installed {
-    pub fn new(runtime: Arc<Runtime>, folder: PathBuf, model: Option<String>, app_server: McpServer) -> Self {
-        Self { runtime, folder, model, app_server, own_server: None, answer: None }
-    }
-
-    fn config(&self, mcp_url: &str) -> AssistantConfig {
-        config(&self.folder, mcp_url, self.model.clone())
+    pub fn new(runtime: Arc<Runtime>, folder: PathBuf, app_server: McpServer) -> Self {
+        Self { runtime, folder, app_server, own_server: None, answer: None }
     }
 }
 
@@ -177,7 +175,8 @@ impl Backend for Installed {
         // The thread holds the runtime only to hand it to a server it has
         // to start, so the runtime never ends on it.
         let runtime = may_start.then(|| self.runtime.clone());
-        let config = self.config("http://127.0.0.1:0/assistant");
+        // Looking for the CLI asks nothing of any model.
+        let config = config(&self.folder, "http://127.0.0.1:0/assistant", None);
         let ctx = ctx.clone();
 
         let spawned = std::thread::Builder::new().name("assistant-check".into()).spawn(move || {
@@ -230,8 +229,8 @@ impl Backend for Installed {
         Some(answer.result)
     }
 
-    fn open(&mut self, ready: &Ready, resume: Option<SessionId>) -> Result<Box<dyn Chat>, String> {
-        let config = self.config(&ready.mcp_url);
+    fn open(&mut self, ready: &Ready, resume: Option<SessionId>, model: Option<&str>) -> Result<Box<dyn Chat>, String> {
+        let config = config(&self.folder, &ready.mcp_url, model.map(str::to_owned));
         let installation = ready.cli.installation.clone();
         let conversation = match resume {
             Some(session) => Conversation::resume(config, installation, session),
@@ -271,7 +270,7 @@ impl Backend for Nowhere {
         Some(Err(Problem::NoFolder))
     }
 
-    fn open(&mut self, _ready: &Ready, _resume: Option<SessionId>) -> Result<Box<dyn Chat>, String> {
+    fn open(&mut self, _: &Ready, _: Option<SessionId>, _: Option<&str>) -> Result<Box<dyn Chat>, String> {
         Err(Problem::NoFolder.to_string())
     }
 }
@@ -303,6 +302,8 @@ pub struct ScriptState {
     pub cancels: usize,
     /// The conversations opened, each with the id it was to resume.
     pub opened: Vec<Option<SessionId>>,
+    /// The model each of them was opened for; `None` is the CLI's choice.
+    pub models: Vec<Option<String>>,
     /// The id the conversation goes by once a turn has started.
     pub session: Option<SessionId>,
     busy: bool,
@@ -380,9 +381,18 @@ impl Backend for Script {
         }
     }
 
-    fn open(&mut self, _ready: &Ready, resume: Option<SessionId>) -> Result<Box<dyn Chat>, String> {
+    fn open(
+        &mut self,
+        _ready: &Ready,
+        resume: Option<SessionId>,
+        model: Option<&str>,
+    ) -> Result<Box<dyn Chat>, String> {
+        // What the real one refuses, this one refuses in the same words.
+        let asked = AssistantConfig { model: model.map(str::to_owned), ..AssistantConfig::new("nowhere") };
+        Conversation::new(asked, _ready.cli.installation.clone()).map_err(|error| error.to_string())?;
         let mut state = self.0.lock();
         state.opened.push(resume.clone());
+        state.models.push(model.map(str::to_owned));
         if resume.is_some() {
             state.session = resume;
         }
@@ -477,7 +487,7 @@ mod tests {
     fn a_run_without_a_folder_says_so() {
         let mut backend = Nowhere;
         assert_eq!(backend.checked(), Some(Err(Problem::NoFolder)));
-        assert!(backend.open(&ready(), None).is_err());
+        assert!(backend.open(&ready(), None, None).is_err());
         assert!(Problem::NoFolder.to_string().contains("settings folder"));
     }
 
@@ -499,7 +509,7 @@ mod tests {
         assert_eq!(backend.checked(), Some(Ok(ready())));
         assert_eq!(script.state().checks, 2);
 
-        let mut chat = backend.open(&ready(), None).unwrap();
+        let mut chat = backend.open(&ready(), None, Some("haiku")).unwrap();
         assert_eq!(chat.poll(), None);
         assert_eq!(chat.send("  ", None), Err(SendError::EmptyMessage));
         chat.send("hello", Some("tempo: 120")).unwrap();
@@ -513,5 +523,11 @@ mod tests {
         let state = script.state();
         assert_eq!(state.sent[0], Sent { message: "hello".into(), context: Some("tempo: 120".into()) });
         assert_eq!((state.sent.len(), state.cancels, state.opened.len()), (2, 1, 1));
+        assert_eq!(state.models, [Some("haiku".to_owned())], "the model it was opened for is on record");
+        drop(state);
+        // A name the command line would take for an option opens nothing.
+        let refused = backend.open(&ready(), None, Some("--dangerously-skip-permissions")).err().expect("refused");
+        assert!(refused.contains("is not a model name"), "{refused}");
+        assert_eq!(script.state().opened.len(), 1);
     }
 }

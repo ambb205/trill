@@ -7,8 +7,10 @@
 //! CLI keeps a record of its own for the assistant's memory; that one is
 //! never read here.)
 
+use super::places::{self, Place};
 use super::tools;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 use trill_assistant::{Event, FailureReason, Notice, TurnSummary};
 use trill_core::Project;
@@ -54,6 +56,14 @@ pub struct ToolLine {
     /// Whether the line is unfolded to show the two above.
     #[serde(skip)]
     pub open: bool,
+    /// What in the song the call made or changed, if it did and said so:
+    /// where the line leads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<Place>,
+    /// The arguments as they came, until the call has answered: what it
+    /// changed is read from the two together.
+    #[serde(skip)]
+    pub arguments: serde_json::Value,
 }
 
 impl ToolLine {
@@ -119,6 +129,18 @@ pub struct TurnEnd {
     /// the session that made it, so it is not kept between runs.
     #[serde(skip)]
     pub step: Option<UndoStep>,
+    /// What the turn changed, where its calls did not say: read off the
+    /// song before and after. Empty when the lines of the turn lead there
+    /// themselves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub places: Vec<Place>,
+}
+
+impl TurnEnd {
+    /// A turn that ended so, having changed nothing.
+    pub fn unchanged(ending: Ending) -> Self {
+        Self { ending, changed: false, step: None, places: Vec::new() }
+    }
 }
 
 /// One thing in the conversation.
@@ -147,9 +169,33 @@ pub enum Item {
 }
 
 /// The conversation so far.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Transcript {
     pub items: Vec<Item>,
+    /// Tells this conversation's items from any other's, and from its own
+    /// once they are no longer where they were: it changes when the oldest
+    /// are let go. What the panel keeps about an item by its place in the
+    /// list (how its text was set) holds for one epoch.
+    pub epoch: u64,
+}
+
+/// An epoch no conversation has had.
+fn new_epoch() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+impl Default for Transcript {
+    fn default() -> Self {
+        Self { items: Vec::new(), epoch: new_epoch() }
+    }
+}
+
+impl PartialEq for Transcript {
+    /// Two conversations are the same if the same was said in them.
+    fn eq(&self, other: &Self) -> bool {
+        self.items == other.items
+    }
 }
 
 /// `text`, cut to what is kept of a tool's arguments or answer.
@@ -253,22 +299,29 @@ impl Transcript {
             },
             Event::ToolCallStarted { id, tool, input } => {
                 let wording = tools::describe(tool, input, project);
-                let input = serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
+                let pretty = serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
                 self.items.push(Item::Tool(ToolLine {
                     id: id.clone(),
                     tool: tool.clone(),
                     doing: wording.doing,
                     did: wording.did,
                     state: ToolState::Running,
-                    input: detail(&input),
+                    input: detail(&pretty),
                     output: String::new(),
                     open: false,
+                    place: None,
+                    arguments: input.clone(),
                 }));
             }
             Event::ToolCallFinished { id, tool, result } => {
                 let (state, output) = match result {
                     Ok(answer) => (ToolState::Done, detail(answer)),
                     Err(error) => (ToolState::Failed, detail(error)),
+                };
+                // Read from the whole answer, not from what is kept of it.
+                let made = |arguments: &serde_json::Value| match result {
+                    Ok(answer) => places::of_call(tool, arguments, answer),
+                    Err(_) => None,
                 };
                 let running = self.items.iter_mut().rev().find_map(|item| match item {
                     Item::Tool(line) if line.id == *id && line.state == ToolState::Running => Some(line),
@@ -278,6 +331,7 @@ impl Transcript {
                     Some(line) => {
                         line.state = state;
                         line.output = output;
+                        line.place = made(&std::mem::take(&mut line.arguments));
                     }
                     // The start was never seen: the end alone still says
                     // what was done.
@@ -292,6 +346,8 @@ impl Transcript {
                             input: String::new(),
                             output,
                             open: false,
+                            place: made(&serde_json::Value::Null),
+                            arguments: serde_json::Value::Null,
                         }));
                     }
                 }
@@ -340,8 +396,84 @@ impl Transcript {
         while self.items.len() > MAX_ITEMS {
             let next = self.items.iter().skip(1).position(|item| matches!(item, Item::User { .. }));
             match next {
-                Some(index) => drop(self.items.drain(..=index)),
+                Some(index) => {
+                    self.items.drain(..=index);
+                    // Nothing is where it was.
+                    self.epoch = new_epoch();
+                }
                 None => break,
+            }
+        }
+    }
+
+    /// Where the turn that the item at `at` belongs to, or closes, begins:
+    /// after the message that opened it.
+    fn turn_start(&self, at: usize) -> usize {
+        let before = &self.items[..at.min(self.items.len())];
+        before.iter().rposition(|item| matches!(item, Item::User { .. } | Item::End(_))).map_or(0, |index| index + 1)
+    }
+
+    /// What the turn closed by the line at `end` changed in the song, in
+    /// the order it did: where each of its calls leads, then what its
+    /// closing line adds.
+    pub fn turn_places(&self, end: usize) -> impl Iterator<Item = &Place> {
+        let lines = self.items[self.turn_start(end)..end.min(self.items.len())].iter().filter_map(|item| match item {
+            Item::Tool(line) => line.place.as_ref(),
+            _ => None,
+        });
+        let closing = match self.items.get(end) {
+            Some(Item::End(end)) => end.places.as_slice(),
+            _ => &[],
+        };
+        lines.chain(closing)
+    }
+
+    /// Settles where the lines of the turn under way lead, as it ends and
+    /// against the song as it then is: see [`Place::settled`].
+    pub fn settle_places(&mut self, project: &Project) {
+        let start = self.turn_start(self.items.len());
+        for item in &mut self.items[start..] {
+            if let Item::Tool(line) = item {
+                line.place = line.place.take().and_then(|place| place.settled(project));
+            }
+        }
+    }
+
+    /// Whether `event` is the answer of a call that put another project in
+    /// place of the open one: one was loaded, begun, or brought back. Ask
+    /// before the event is applied, while the call's arguments are at hand.
+    pub fn opens_another_project(&self, event: &Event) -> bool {
+        let Event::ToolCallFinished { id, tool, result: Ok(_) } = event else { return false };
+        match tool.as_str() {
+            "load_project" | "new_project" => true,
+            "recover_project" => self.items.iter().rev().any(|item| {
+                matches!(item, Item::Tool(line) if line.id == *id
+                    && line.arguments.get("action").and_then(serde_json::Value::as_str) == Some("open"))
+            }),
+            _ => false,
+        }
+    }
+
+    /// Forgets where every line leads: the project they led into has been
+    /// replaced by another, in which the same ids name other things.
+    pub fn forget_places(&mut self) {
+        for item in &mut self.items {
+            match item {
+                Item::Tool(line) => line.place = None,
+                Item::End(end) => end.places.clear(),
+                _ => {}
+            }
+        }
+    }
+
+    /// For a conversation read back another day: keeps only the places
+    /// that still name the same things in `project`.
+    pub fn keep_places_in(&mut self, project: &Project) {
+        for item in &mut self.items {
+            match item {
+                Item::Tool(line) => line.place = line.place.take().filter(|place| place.is_the_same_in(project)),
+                Item::End(end) => end.places.retain(|place| place.is_the_same_in(project)),
+                _ => {}
             }
         }
     }
@@ -355,14 +487,14 @@ impl Transcript {
     /// closed mid-turn is closed here; text that makes no sense is no
     /// conversation.
     pub fn from_json(text: &str) -> Option<Self> {
-        let mut transcript = Self { items: serde_json::from_str(text).ok()? };
+        let mut transcript = Self { items: serde_json::from_str(text).ok()?, epoch: new_epoch() };
         let open = transcript.items.iter().rev().find_map(|item| match item {
             Item::End(_) => Some(false),
             Item::User { .. } => Some(true),
             _ => None,
         });
         if open == Some(true) {
-            transcript.end(TurnEnd { ending: Ending::Stopped, changed: false, step: None });
+            transcript.end(TurnEnd::unchanged(Ending::Stopped));
         }
         Some(transcript)
     }
@@ -414,7 +546,7 @@ mod tests {
     }
 
     fn end(ending: Ending) -> TurnEnd {
-        TurnEnd { ending, changed: false, step: None }
+        TurnEnd::unchanged(ending)
     }
 
     fn tool(item: &Item) -> &ToolLine {
@@ -587,7 +719,7 @@ mod tests {
             usage: TokenUsage::default(),
             estimated_cost_usd: Some(0.0123),
         };
-        transcript.end(TurnEnd { ending: finished(&summary), changed: true, step: None });
+        transcript.end(TurnEnd { changed: true, ..TurnEnd::unchanged(finished(&summary)) });
 
         let read = Transcript::from_json(&transcript.to_json()).expect("it reads back");
         assert_eq!(read.items.len(), 4);
@@ -611,6 +743,84 @@ mod tests {
     }
 
     #[test]
+    fn a_calls_line_leads_to_what_it_made_for_as_long_as_that_is_the_same_thing() {
+        let mut project = Project::new("t");
+        let bass = project.add_track("Bass");
+        let mut transcript = Transcript::default();
+        transcript.push_user("a bass line");
+        transcript.apply(&started("a", "get_project", json!({})), &project);
+        transcript.apply(&finished_call("a", "get_project", Ok("{}")), &project);
+        transcript.apply(&started("b", "create_clip", json!({ "track": bass.0, "name": "Line" })), &project);
+        assert_eq!(tool(&transcript.items[2]).place, None, "a call that has not answered leads nowhere yet");
+        let line = project.add_midi_clip(bass, "Line", 0.0, 8.0).unwrap();
+        // The answer in full is what is read, long as it may be.
+        let answer = format!("{{\"padding\":\"{}\",\"clip_id\":{}}}", "x".repeat(MAX_DETAIL), line.0);
+        transcript.apply(&finished_call("b", "create_clip", Ok(&answer)), &project);
+        transcript.apply(&started("c", "create_clip", json!({ "track": 999 })), &project);
+        transcript.apply(&finished_call("c", "create_clip", Err("track 999 was not found")), &project);
+        transcript.apply(&started("d", "update_clip", json!({ "clip": 4242, "name": "Gone" })), &project);
+        transcript.apply(&finished_call("d", "update_clip", Ok("{}")), &project);
+
+        assert_eq!(tool(&transcript.items[1]).place, None, "reading changes nothing");
+        assert!(tool(&transcript.items[2]).place.is_some());
+        assert_eq!(tool(&transcript.items[3]).place, None, "a call that failed made nothing");
+        // As the turn ends, the lines are settled against the song: one
+        // that names what is not there leads nowhere, the others are given
+        // the names things go by.
+        transcript.settle_places(&project);
+        let made = Place::Clips { clips: vec![(line.0, "Line".into())] };
+        assert_eq!(tool(&transcript.items[2]).place, Some(made.clone()));
+        assert_eq!(tool(&transcript.items[4]).place, None);
+        assert_eq!(transcript.turn_places(transcript.items.len()).collect::<Vec<_>>(), [&made]);
+        let track = Place::Track { id: bass.0, name: "Bass".into() };
+        transcript.end(TurnEnd { changed: true, places: vec![track.clone()], ..TurnEnd::unchanged(Ending::Stopped) });
+        let end = transcript.items.len() - 1;
+        assert_eq!(
+            transcript.turn_places(end).collect::<Vec<_>>(),
+            [&made, &track],
+            "the lines, then the closing line"
+        );
+
+        // The next turn's places are its own.
+        transcript.push_user("and louder");
+        transcript.apply(&started("e", "update_track", json!({ "track": bass.0, "volume_db": 2 })), &project);
+        transcript.apply(&finished_call("e", "update_track", Ok("{}")), &project);
+        assert_eq!(transcript.turn_places(transcript.items.len()).count(), 1);
+        assert_eq!(transcript.turn_places(end).count(), 2);
+
+        // Kept and read back, they lead where they led, as long as what
+        // they name is still that: a clip that goes by another name now
+        // may be another clip.
+        let mut read = Transcript::from_json(&transcript.to_json()).expect("it reads back");
+        assert_eq!(tool(&read.items[2]).place, Some(made.clone()));
+        assert_ne!(read.epoch, transcript.epoch, "and it is a conversation of its own to whoever keeps things by it");
+        read.keep_places_in(&project);
+        assert_eq!(read.turn_places(end).count(), 2);
+        project.clip_mut(line).unwrap().name = "Another".into();
+        read.keep_places_in(&project);
+        assert_eq!(tool(&read.items[2]).place, None);
+        assert_eq!(read.turn_places(end).collect::<Vec<_>>(), [&track]);
+        // Another project in place of this one: nothing leads anywhere.
+        let loaded = finished_call("f", "load_project", Ok("{}"));
+        assert!(transcript.opens_another_project(&loaded) && !transcript.opens_another_project(&text("load_project")));
+        assert!(!transcript.opens_another_project(&finished_call("f", "load_project", Err("refused"))));
+        assert!(!transcript.opens_another_project(&finished_call("f", "save_project", Ok("{}"))));
+        transcript.apply(&started("g", "recover_project", json!({ "action": "list" })), &project);
+        assert!(!transcript.opens_another_project(&finished_call("g", "recover_project", Ok("{}"))));
+        transcript.apply(&started("h", "recover_project", json!({ "action": "open", "index": 0 })), &project);
+        assert!(transcript.opens_another_project(&finished_call("h", "recover_project", Ok("{}"))));
+        transcript.forget_places();
+        assert_eq!(transcript.turn_places(end).count() + transcript.turn_places(transcript.items.len()).count(), 0);
+
+        // A conversation kept before lines led anywhere reads as before.
+        let old = r#"[{"kind":"user","text":"hi"},{"kind":"tool","tool":"create_clip","doing":"a","did":"b",
+            "state":"done","input":"{}","output":"{}"},{"kind":"end","how":"stopped","changed":true}]"#;
+        let old = Transcript::from_json(old).expect("an older conversation");
+        assert_eq!(tool(&old.items[1]).place, None);
+        assert_eq!(old.turn_places(2).count(), 0);
+    }
+
+    #[test]
     fn long_answers_are_cut_and_old_exchanges_let_go() {
         let project = Project::new("t");
         let mut transcript = Transcript::default();
@@ -626,8 +836,16 @@ mod tests {
             transcript.apply(&text("ok"), &project);
         }
         assert!(transcript.items.len() <= MAX_ITEMS);
+        assert_ne!(transcript.epoch, Transcript::default().epoch);
+        let before = transcript.epoch;
+        transcript.push_user("one more");
+        transcript.apply(&text("ok"), &project);
+        assert_ne!(
+            transcript.epoch, before,
+            "letting go of the oldest moves every item: what was kept by place is void"
+        );
         assert!(matches!(&transcript.items[0], Item::User { .. }), "it still begins with a message");
-        assert_eq!(transcript.last_message(), Some(format!("message {}", MAX_ITEMS - 1).as_str()));
+        assert_eq!(transcript.last_message(), Some("one more"));
     }
 
     #[test]

@@ -38,7 +38,7 @@ cargo test -p trill-plugins -- --include-ignored    # against the CLAP and VST3 
 cargo test -p trill-media -- --include-ignored      # decoding audio files found in this machine's usual folders
 TRILL_TEST_PLUGIN_WINDOWS=1 cargo test -p trill-plugins --test editor_windows -- --test-threads=1   # opens windows
 TRILL_TEST_CLAUDE=1 cargo test -p trill-assistant --test real_cli    # talks to an installed, signed-in Claude Code
-TRILL_TEST_CLAUDE=1 cargo test -p trill-app live_ -- --test-threads=1    # ...through the assistant's panel (five messages)
+TRILL_TEST_CLAUDE=1 cargo test -p trill-app live_ -- --test-threads=1    # ...through the assistant's panel (seven messages)
 ```
 
 Run the first two after touching plugin hosting or audio decoding.
@@ -80,8 +80,14 @@ client outside the window cannot have:
 - every message goes with what you are looking at (the selected track, clips, notes and device, the time
   selection, the playhead, the loop, the open tab), so "make this busier" has a "this";
 - everything it changes while answering one message is one undo step, with an Undo on the turn itself;
-- the reply appears as it is written, each tool call is a line in plain words that unfolds to what was sent and
-  answered, and Stop ends the turn.
+- when it has finished, what it made or edited is selected and brought into view (unless you are busy elsewhere in
+  the window at that moment), and each tool call's line leads to what the call changed;
+- the reply appears as it is written, set from its Markdown, and can be selected and copied like any text; each
+  tool call is a line in plain words that unfolds to what was sent and answered, and Stop ends the turn.
+
+Which model answers is chosen under the message field: Claude Code's own choice, one of the names it takes
+(`fable`, `opus`, `sonnet`, `haiku`), or any name you type. It is passed to Claude Code as it is; what your account
+can use is for Claude Code to say.
 
 Trill never asks for, reads or stores a login: if Claude Code is not installed or not signed in, the panel says so
 and what to do about it in a terminal. Conversations are kept per project beside the settings and taken up again

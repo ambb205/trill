@@ -1,9 +1,9 @@
 //! What the assistant's panel keeps between runs, beside the settings:
 //!
-//! * `assistant.json`: whether the panel was open and how wide, and for each
-//!   project file the id of the conversation about it. The id is how a
-//!   conversation is taken up again; it is the CLI's name for it, not a
-//!   credential.
+//! * `assistant.json`: whether the panel was open and how wide, the model
+//!   chosen in it, and for each project file the id of the conversation
+//!   about it. The id is how a conversation is taken up again; it is the
+//!   CLI's name for it, not a credential.
 //! * `assistant/transcripts/<id>.json`: the conversation as the panel
 //!   showed it, to read back.
 //!
@@ -47,13 +47,17 @@ struct Kept {
 struct Remembered {
     open: bool,
     width: f32,
+    /// The model chosen in the panel, by the name the CLI is given; absent
+    /// while the choice is left to the CLI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
     /// By project file.
     conversations: BTreeMap<String, Kept>,
 }
 
 impl Default for Remembered {
     fn default() -> Self {
-        Self { open: false, width: super::DEFAULT_WIDTH, conversations: BTreeMap::new() }
+        Self { open: false, width: super::DEFAULT_WIDTH, model: None, conversations: BTreeMap::new() }
     }
 }
 
@@ -173,6 +177,20 @@ impl Store {
         }
     }
 
+    /// The model chosen in the panel; `None` while the choice is the
+    /// CLI's. A name that could not be given to the CLI (the file was
+    /// edited by hand) is no choice.
+    pub fn model(&self) -> Option<&str> {
+        self.remembered.model.as_deref().filter(|name| trill_assistant::is_model_name(name))
+    }
+
+    pub fn set_model(&mut self, model: Option<&str>) {
+        if self.remembered.model.as_deref() != model {
+            self.remembered.model = model.map(str::to_owned);
+            self.save();
+        }
+    }
+
     /// The conversation about `project`, if one is remembered.
     pub fn conversation(&self, project: &Path) -> Option<SessionId> {
         SessionId::parse(&self.remembered.conversations.get(&key(project))?.session)
@@ -193,6 +211,17 @@ impl Store {
             }
         }
         self.save();
+    }
+
+    /// Lets go of `session` as the conversation about `project`, keeping
+    /// what was kept of it: the conversation has gone on to another
+    /// project. Nothing happens if the project's conversation is another.
+    pub fn release(&mut self, project: &Path, session: &SessionId) {
+        let key = key(project);
+        if self.remembered.conversations.get(&key).is_some_and(|kept| kept.session == session.as_str()) {
+            self.remembered.conversations.remove(&key);
+            self.save();
+        }
     }
 
     /// Forgets the conversation about `project`, and what was kept of it.
@@ -329,20 +358,23 @@ mod tests {
         let mut store = open(home.path());
         assert_eq!(store.panel(), (false, crate::ui::assistant::DEFAULT_WIDTH), "closed until it is asked for");
         assert_eq!(store.conversation(Path::new("songs/a.trill")), None);
+        assert_eq!(store.model(), None, "the model is the CLI's choice until one is chosen");
         store.flush();
         assert!(!home.path().join(FILE).exists(), "nothing is written for having looked");
 
         store.set_panel(true, 412.0);
+        store.set_model(Some("sonnet"));
         store.remember(Path::new("songs/a.trill"), &id('a'));
         store.remember(Path::new("songs/b.trill"), &id('b'));
         let mut transcript = Transcript::default();
         transcript.push_user("make it swing");
-        transcript.end(TurnEnd { ending: Ending::Stopped, changed: false, step: None });
+        transcript.end(TurnEnd::unchanged(Ending::Stopped));
         store.keep_transcript(&id('a'), &transcript);
         drop(store);
 
         let mut store = open(home.path());
         assert_eq!(store.panel(), (true, 412.0));
+        assert_eq!(store.model(), Some("sonnet"));
         assert_eq!(store.conversation(Path::new("songs/a.trill")), Some(id('a')));
         assert_eq!(store.conversation(Path::new("songs/b.trill")), Some(id('b')));
         assert_eq!(store.conversation(Path::new("songs/c.trill")), None);
@@ -353,6 +385,13 @@ mod tests {
         assert_eq!(wait_for_loaded(&mut store), (id('a'), Some(transcript)));
         store.load_transcript(&id('b'));
         assert_eq!(wait_for_loaded(&mut store), (id('b'), None), "none was kept for that one");
+
+        // Back to the CLI's own choice: the name is gone from the file.
+        store.set_model(None);
+        store.flush();
+        let kept = std::fs::read_to_string(home.path().join(FILE)).unwrap();
+        assert!(!kept.contains("model") && !kept.contains("sonnet"), "{kept}");
+        assert_eq!(open(home.path()).model(), None);
     }
 
     #[test]
@@ -373,11 +412,22 @@ mod tests {
         assert!(transcripts.join(format!("{}.json", id('b'))).exists());
         assert_eq!(std::fs::read_dir(&transcripts).unwrap().count(), 1, "and no temporary file is left behind");
 
-        store.forget(project);
+        // A conversation that goes on to another project is let go of
+        // here and keeps its record.
+        let other = Path::new("songs/b.trill");
+        store.release(project, &id('a'));
+        assert_eq!(store.conversation(project), Some(id('b')), "only the conversation named is let go of");
+        store.release(project, &id('b'));
+        store.remember(other, &id('b'));
         store.flush();
-        assert_eq!(store.conversation(project), None);
+        assert_eq!((store.conversation(project), store.conversation(other)), (None, Some(id('b'))));
+        assert!(transcripts.join(format!("{}.json", id('b'))).exists(), "what was kept of it stays");
+
+        store.forget(other);
+        store.flush();
+        assert_eq!(store.conversation(other), None);
         assert_eq!(std::fs::read_dir(&transcripts).unwrap().count(), 0);
-        assert_eq!(open(home.path()).conversation(project), None);
+        assert_eq!(open(home.path()).conversation(other), None);
     }
 
     #[test]
@@ -435,11 +485,12 @@ mod tests {
         assert_eq!(open(home.path()).panel(), (false, crate::ui::assistant::DEFAULT_WIDTH));
         // Names this version does not know are ignored, and an id that is
         // not an id is no conversation.
-        let text = r#"{ "open": true, "new_in_version_nine": 1,
+        let text = r#"{ "open": true, "new_in_version_nine": 1, "model": "--dangerously-skip-permissions",
             "conversations": { "x": { "session": "--resume=evil" } } }"#;
         std::fs::write(home.path().join(FILE), text).unwrap();
         let store = open(home.path());
         assert!(store.panel().0);
+        assert_eq!(store.model(), None, "a name the command line would take for an option is no model");
         assert_eq!(store.remembered.conversations.len(), 1);
         assert!(store.remembered.conversations.values().all(|kept| SessionId::parse(&kept.session).is_none()));
 

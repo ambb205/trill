@@ -87,19 +87,24 @@ shot graphite-sounds-browser "$night" --browse sounds --library "$pack" --sound 
 shot graphite-sounds-drum-rack "$night" --browse sounds --library "$pack" --search kick --select Beat --tab devices     --theme graphite
 
 # The assistant's panel: ready, in the middle of a turn, after a turn that
-# changed the song, at a usage limit after a tool call that failed, with
-# nobody signed in, with no CLI, and in the smallest window with the notice
-# that an API key is being billed. What it shows is a scripted conversation
+# changed the song (the window has gone to the clip it wrote), after an
+# answer that uses every kind of Markdown the panel sets, with the list of
+# models open, at a usage limit after a tool call that failed, with nobody
+# signed in, with no CLI, and in the smallest window with the notice that
+# an API key is being billed. What it shows is a scripted conversation
 # played through the panel's own handling of a turn; no CLI is started, and
 # where the script changes the song, the song is changed.
 shot assistant-ready "$song" --select Lead --assistant-scene ready
 shot assistant-working "$song" --select "Beat A" --assistant-scene working
-shot assistant-answered "$song" --select Bass --assistant-scene answered
+shot assistant-answered "$song" --select Lead --tab mixer --assistant-scene answered
+shot assistant-markdown "$song" --select Lead --assistant-scene markdown
+shot assistant-model "$song" --select Lead --assistant-scene model
 shot assistant-limit "$song" --select Lead --assistant-scene limit
 shot assistant-signed-out "$song" --select Lead --assistant-scene signed-out
 shot assistant-not-installed "$song" --select Lead --assistant-scene not-installed
 shot min-window-assistant "$song" --select Bass --assistant-scene api-key --size 1060x640
-shot graphite-assistant-answered "$song" --select Bass --assistant-scene answered --theme graphite
+shot graphite-assistant-answered "$song" --select Lead --tab mixer --assistant-scene answered --theme graphite
+shot graphite-assistant-markdown "$song" --select Lead --assistant-scene markdown --theme graphite
 
 # The computer keyboard played as an instrument: a chord held on the lead,
 # lit in the strip and on the piano roll's keys; a kick and a hat held on a

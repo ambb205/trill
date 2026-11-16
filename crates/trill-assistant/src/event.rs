@@ -191,6 +191,9 @@ pub enum ApiErrorKind {
     RateLimit,
     InvalidRequest,
     Server,
+    /// The model asked for is not one the service knows, or not one the
+    /// account may use.
+    ModelNotFound,
     /// Not classified, which includes the network being unreachable.
     Other,
 }
@@ -252,6 +255,19 @@ pub enum FailureReason {
     #[error("The assistant stopped after {limit} steps. Ask it to continue if it was not finished.")]
     TurnLimitReached { limit: u32 },
 
+    /// The model that was asked for cannot be used: the service does not
+    /// know the name, or the account has no access to that model. Nothing
+    /// was used. Which of the two it is, the service does not say, and
+    /// nothing is concluded here about what the user's plan includes.
+    #[error(
+        "Claude Code could not use the model that was asked for. It said: {message} In Trill, the model is chosen \
+         under the assistant\u{2019}s message field."
+    )]
+    ModelUnavailable {
+        /// The CLI's own words, which name the model.
+        message: String,
+    },
+
     /// The service refused or failed the request.
     #[error("Claude Code could not complete the request: {message}")]
     Api { kind: ApiErrorKind, message: String },
@@ -301,6 +317,13 @@ mod tests {
 
         let tools = FailureReason::UnexpectedTools { tools: vec!["Bash".into(), "Read".into()] };
         assert!(tools.to_string().contains("(Bash, Read)"));
+
+        let model = FailureReason::ModelUnavailable { message: "There's an issue with the selected model (x).".into() };
+        assert_eq!(
+            model.to_string(),
+            "Claude Code could not use the model that was asked for. It said: There's an issue with the selected \
+             model (x). In Trill, the model is chosen under the assistant\u{2019}s message field."
+        );
     }
 
     #[test]

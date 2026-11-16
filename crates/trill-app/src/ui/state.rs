@@ -226,6 +226,8 @@ pub struct ArrangementState {
     pub lane_search: String,
     /// A lane to bring into view once the layout knows where it is.
     pub reveal: Option<AutomationTarget>,
+    /// Tracks and a stretch of time to bring into view likewise.
+    pub show: Option<super::arrangement::Reveal>,
     /// The grid step and the width of the lanes as of the last frame, for
     /// commands that run before the arrangement is laid out: what arrow
     /// keys nudge by, and what "zoom to fit" fits into.
@@ -261,6 +263,7 @@ impl ArrangementState {
             renaming_marker: None,
             lane_search: String::new(),
             reveal: None,
+            show: None,
             step: 1.0,
             lanes_width: 900.0,
         }
@@ -611,6 +614,8 @@ pub struct UiState {
     /// The device whose presets the browser lists; one of the chain the
     /// Devices tab shows.
     pub selected_device: Option<DeviceId>,
+    /// A device for the Devices tab to scroll its rack to.
+    pub reveal_device: Option<DeviceId>,
     pub detail_tab: DetailTab,
     pub focus: FocusArea,
     pub arrangement: ArrangementState,
@@ -660,6 +665,7 @@ impl UiState {
             selected_clips: Vec::new(),
             selected_notes: Vec::new(),
             selected_device: None,
+            reveal_device: None,
             detail_tab,
             focus: FocusArea::default(),
             arrangement: ArrangementState::new(),
