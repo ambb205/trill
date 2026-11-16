@@ -13,6 +13,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-# For reading and writing WAV files in the examples, and for rendering
-# through the real engine in the integration tests.
+# For rendering through the real engine in the integration tests, and for
+# reading and writing audio files in the examples.
 trill-engine.workspace = true
+trill-media.workspace = true

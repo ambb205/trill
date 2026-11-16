@@ -5,10 +5,10 @@ use std::time::Duration;
 use trill_core::project::{AudioContent, AutomationPoint, AutomationTarget};
 use trill_core::{ChainRef, ClipId, Note, Project, TrackId};
 use trill_dsp::BuiltinFactory;
-use trill_engine::audio_file::{AudioCache, write_wav};
 use trill_engine::compile::{Compiler, DeviceBank, Meters};
 use trill_engine::render::{RenderOptions, render};
-use trill_engine::{AudioBackend, Processor, Session};
+use trill_engine::{AudioBackend, AudioSources, Processor, Session};
+use trill_media::WavFormat;
 
 const SR: u32 = 48_000;
 
@@ -47,6 +47,16 @@ fn options() -> RenderOptions {
 
 fn seconds(range: std::ops::Range<f64>) -> std::ops::Range<usize> {
     (range.start * SR as f64) as usize..(range.end * SR as f64) as usize
+}
+
+/// Writes a mono signal as a WAV file at `sample_rate`.
+fn write_wav(path: &std::path::Path, sample_rate: u32, samples: &[f32]) {
+    let buffer = trill_core::audio::AudioBuffer {
+        sample_rate: sample_rate as f64,
+        left: samples.to_vec(),
+        right: samples.to_vec(),
+    };
+    trill_media::write_wav(path, &buffer, WavFormat::Float32).unwrap();
 }
 
 #[test]
@@ -100,13 +110,14 @@ fn swapping_graphs_mid_playback_changes_nothing() {
     project.add_device(ChainRef::Master, "builtin:limiter", "Limiter", None).unwrap();
 
     let run = |swap_every_block: bool| {
-        let (mut bank, mut meters, mut audio) = (DeviceBank::default(), Meters::default(), AudioCache::default());
+        let (mut bank, mut meters, audio) = (DeviceBank::default(), Meters::default(), AudioSources::default());
         let mut compile = |project: &Project| {
             Compiler {
                 factory: &BuiltinFactory,
                 bank: &mut bank,
                 meters: &mut meters,
-                audio: &mut audio,
+                audio: &audio,
+                stand_ins: None,
                 sample_rate: SR as f64,
             }
             .compile(project, true)
@@ -146,12 +157,13 @@ fn output_does_not_depend_on_the_block_size() {
     clip_with(&mut project, drums, 0.0, 8.0, &hits);
 
     let run = |block: usize| {
-        let (mut bank, mut meters, mut audio) = (DeviceBank::default(), Meters::default(), AudioCache::default());
+        let (mut bank, mut meters, audio) = (DeviceBank::default(), Meters::default(), AudioSources::default());
         let (graph, _) = Compiler {
             factory: &BuiltinFactory,
             bank: &mut bank,
             meters: &mut meters,
-            audio: &mut audio,
+            audio: &audio,
+            stand_ins: None,
             sample_rate: SR as f64,
         }
         .compile(&project, true);
@@ -182,12 +194,13 @@ fn loop_wraps_on_the_exact_sample() {
     // One beat at 120 BPM is 24000 frames.
     project.set_loop(true, 0.0, 1.0).unwrap();
 
-    let (mut bank, mut meters, mut audio) = (DeviceBank::default(), Meters::default(), AudioCache::default());
+    let (mut bank, mut meters, audio) = (DeviceBank::default(), Meters::default(), AudioSources::default());
     let (graph, _) = Compiler {
         factory: &BuiltinFactory,
         bank: &mut bank,
         meters: &mut meters,
-        audio: &mut audio,
+        audio: &audio,
+        stand_ins: None,
         sample_rate: SR as f64,
     }
     .compile(&project, true);
@@ -265,7 +278,7 @@ fn audio_clips_play_in_time_and_in_tune() {
     // One second of 440 Hz at 44.1 kHz, so the engine has to resample.
     let tone: Vec<f32> =
         (0..44_100).map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44_100.0).sin() * 0.5).collect();
-    write_wav(&path, 44_100, &tone, &tone).unwrap();
+    write_wav(&path, 44_100, &tone);
 
     let mut project = Project::new("t");
     let track = project.add_track("Audio");
@@ -471,7 +484,7 @@ fn audio_fades_and_master_automation_shape_the_level() {
     let path = dir.join("tone.wav");
     let tone: Vec<f32> =
         (0..96_000).map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 48_000.0).sin() * 0.5).collect();
-    write_wav(&path, 48_000, &tone, &tone).unwrap();
+    write_wav(&path, 48_000, &tone);
 
     let mut project = Project::new("t");
     let track = project.add_track("Audio");

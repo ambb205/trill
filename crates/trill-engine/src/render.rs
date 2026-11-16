@@ -2,15 +2,17 @@
 //! as the CPU allows.
 
 use crate::analysis::{AudioStats, analyze};
-use crate::audio_file::{AudioCache, AudioFileError, write_wav};
 use crate::compile::{Compiler, DeviceBank, Meters, Problem};
 use crate::graph::MAX_BLOCK;
 use crate::processor::Processor;
+use crate::sources::AudioSources;
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Arc;
+use trill_core::audio::AudioBuffer;
 use trill_core::device::DeviceFactory;
 use trill_core::{Project, TrackId};
+use trill_media::{MediaError, WavFormat, write_wav};
 
 /// Output below this level counts as silence when trimming the tail.
 const SILENCE: f32 = 1e-5;
@@ -38,7 +40,7 @@ pub enum RenderError {
     #[error("nothing to render: the range {start}..{end} beats is empty")]
     EmptyRange { start: f64, end: f64 },
     #[error(transparent)]
-    File(#[from] AudioFileError),
+    File(#[from] MediaError),
 }
 
 pub struct Rendered {
@@ -73,20 +75,23 @@ pub struct RenderReport {
 pub struct RenderJob {
     pub project: Project,
     pub factory: Arc<dyn DeviceFactory>,
+    /// The session's decoded files and stretched audio, so that the render
+    /// decodes and stretches nothing the session already has.
+    pub audio: AudioSources,
 }
 
 impl RenderJob {
     pub fn render(&self, options: &RenderOptions) -> Result<Rendered, RenderError> {
-        render(&self.project, self.factory.as_ref(), options)
+        render_from(&self.project, self.factory.as_ref(), &self.audio, options)
     }
 
-    /// Renders to a WAV file and measures the result.
+    /// Renders to a 24-bit WAV file and measures the result.
     pub fn render_to_file(&self, path: &Path, options: &RenderOptions) -> Result<RenderReport, RenderError> {
-        let rendered = self.render(options)?;
-        write_wav(path, rendered.sample_rate, &rendered.left, &rendered.right)?;
-        let stats = analyze(&rendered.left, &rendered.right, rendered.sample_rate);
-        let tracks = rendered
-            .track_peaks
+        let Rendered { sample_rate, left, right, track_peaks, problems } = self.render(options)?;
+        let audio = AudioBuffer { sample_rate: f64::from(sample_rate), left, right };
+        write_wav(path, &audio, WavFormat::Int24)?;
+        let stats = analyze(&audio.left, &audio.right, sample_rate);
+        let tracks = track_peaks
             .iter()
             .map(|(id, peak)| TrackLevel {
                 track: *id,
@@ -96,18 +101,34 @@ impl RenderJob {
             .collect();
         Ok(RenderReport {
             path: path.display().to_string(),
-            sample_rate: rendered.sample_rate,
+            sample_rate,
             stats,
             tracks,
-            problems: rendered.problems.iter().map(ToString::to_string).collect(),
+            problems: problems.iter().map(ToString::to_string).collect(),
         })
     }
 }
 
-/// Renders `project` with freshly created devices.
+/// Renders `project` with freshly created devices, reading its audio files
+/// through caches of its own. A session's renders share the session's
+/// caches instead: see [`RenderJob`].
 pub fn render(
     project: &Project,
     factory: &dyn DeviceFactory,
+    options: &RenderOptions,
+) -> Result<Rendered, RenderError> {
+    render_from(project, factory, &AudioSources::default(), options)
+}
+
+/// Renders `project` with freshly created devices and the audio of `audio`.
+///
+/// A render never plays a stand-in: clips are stretched, or waited for,
+/// before the first sample is made, so the same project always renders to
+/// the same samples.
+fn render_from(
+    project: &Project,
+    factory: &dyn DeviceFactory,
+    audio: &AudioSources,
     options: &RenderOptions,
 ) -> Result<Rendered, RenderError> {
     let start = options.start_beat.max(0.0);
@@ -120,9 +141,9 @@ pub fn render(
 
     let mut bank = DeviceBank::default();
     let mut meters = Meters::default();
-    let mut audio = AudioCache::default();
-    let (graph, problems) = Compiler { factory, bank: &mut bank, meters: &mut meters, audio: &mut audio, sample_rate }
-        .compile(project, false);
+    let (graph, problems) =
+        Compiler { factory, bank: &mut bank, meters: &mut meters, audio, stand_ins: None, sample_rate }
+            .compile(project, false);
 
     let mut processor = Processor::new(sample_rate);
     drop(processor.swap_graph(graph));

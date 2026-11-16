@@ -4781,6 +4781,7 @@ dependencies = [
  "thiserror 2.0.21",
  "trill-core",
  "trill-engine",
+ "trill-media",
 ]
 
 [[package]]
@@ -4788,14 +4789,15 @@ name = "trill-engine"
 version = "0.1.0"
 dependencies = [
  "cpal",
- "hound",
  "log",
  "parking_lot",
  "rtrb",
  "serde",
+ "tempfile",
  "thiserror 2.0.21",
  "trill-core",
  "trill-dsp",
+ "trill-media",
 ]
 
 [[package]]

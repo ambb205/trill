@@ -9,10 +9,14 @@ license.workspace = true
 [dependencies]
 trill-core.workspace = true
 trill-dsp.workspace = true
+trill-media.workspace = true
 cpal.workspace = true
-hound.workspace = true
 log.workspace = true
 parking_lot.workspace = true
 rtrb.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# Fixtures for the audio tests: temporary folders and files.
+tempfile = "3"

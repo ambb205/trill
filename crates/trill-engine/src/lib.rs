@@ -7,7 +7,6 @@
 //! * [`Engine`] owns the audio thread and the lock-free queues to it.
 
 pub mod analysis;
-pub mod audio_file;
 pub mod compile;
 pub mod engine;
 pub mod graph;
@@ -15,6 +14,8 @@ mod monitor;
 pub mod processor;
 pub mod render;
 pub mod session;
+pub mod sources;
+mod stretcher;
 
 pub use analysis::AudioStats;
 pub use compile::Problem;
@@ -22,7 +23,8 @@ pub use engine::{AudioBackend, Engine, EngineError, StreamInfo};
 pub use graph::{MAX_BLOCK, Meter};
 pub use processor::Processor;
 pub use render::{RenderError, RenderJob, RenderOptions, RenderReport, Rendered};
-pub use session::{ParamState, Session, SessionError, TransportStatus};
+pub use session::{ParamState, SampleFile, Session, SessionError, TransportStatus};
+pub use sources::AudioSources;
 
 /// A session shared between front ends.
 pub type SharedSession = std::sync::Arc<parking_lot::Mutex<Session>>;

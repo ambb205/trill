@@ -4,7 +4,7 @@
 //! processor drives realtime playback and offline rendering, so a bounce is
 //! exactly what you heard.
 
-use crate::graph::{AudioData, Chain, Graph, MAX_BLOCK, TrackNode, TrackState};
+use crate::graph::{AudioData, Chain, Graph, MAX_BLOCK, RegionAudio, TrackNode, TrackState};
 use crate::monitor::{Beats, Monitor};
 use trill_core::device::{Event, EventKind, MAX_EVENTS_PER_BLOCK, ProcessInfo};
 use trill_core::project::{MIN_VOLUME_DB, automation_value};
@@ -17,6 +17,8 @@ const NOTE_ON_LIMIT: usize = EVENT_CAPACITY - 512;
 const LIVE_CAPACITY: usize = 128;
 /// Fade applied at the edges of audio clips to avoid clicks.
 const CLIP_FADE_SECONDS: f64 = 0.003;
+/// Length of the cross-fade from a stand-in to the audio that replaces it.
+const HAND_OVER_SECONDS: f64 = 0.01;
 
 pub struct Processor {
     graph: Box<Graph>,
@@ -269,7 +271,14 @@ impl Processor {
             }
             if playing {
                 collect_notes(track, start_beat, end_beat, beats_per_frame, frames, events);
-                render_audio(track, start_beat, beats_per_frame, self.sample_rate, left, right);
+                let block = Block {
+                    start_beat,
+                    beats_per_frame,
+                    anchor_frames: self.anchor_beat / beats_per_frame,
+                    elapsed: self.frames,
+                    sample_rate: self.sample_rate,
+                };
+                render_audio(track, &block, left, right);
             }
 
             run_chain(&mut track.chain, &info, events, left, right);
@@ -482,48 +491,115 @@ fn collect_notes(
     }
 }
 
-/// Mixes the audio clips of `track` into the block.
-fn render_audio(
-    track: &TrackNode,
+/// Where a block lies on the timeline.
+struct Block {
     start_beat: f64,
     beats_per_frame: f64,
+    /// The transport's anchor in output frames from beat 0, and the frames
+    /// played since. Their sum is the block's first frame. They are kept
+    /// apart because the anchor has a fraction and the count does not: a
+    /// position rounded from the anchor alone rounds the same way in every
+    /// block, where one rounded from the sum could flip between blocks.
+    anchor_frames: f64,
+    elapsed: u64,
     sample_rate: f64,
-    left: &mut [f32],
-    right: &mut [f32],
-) {
-    let frames = left.len();
-    let end_beat = start_beat + frames as f64 * beats_per_frame;
-    let fade = CLIP_FADE_SECONDS * sample_rate;
+}
 
-    for region in &track.audio {
-        if region.end <= start_beat || region.start >= end_beat {
+/// Reads a region's audio for the frames of one block.
+enum Reader<'a> {
+    /// One frame of audio per output frame: frames are copied.
+    Copy { left: &'a [f32], right: &'a [f32], first: i64 },
+    /// Any other speed: linear interpolation.
+    Interpolate { left: &'a [f32], right: &'a [f32], first: f64, step: f64 },
+}
+
+impl<'a> Reader<'a> {
+    fn new(audio: &'a RegionAudio, block: &Block) -> Self {
+        let frames = audio.data.frames();
+        let (left, right) = (&audio.data.left[..frames], &audio.data.right[..frames]);
+        if audio.step == 1.0 {
+            // Snapping to whole frames moves the clip by at most half a
+            // sample and plays the file exactly as it is stored.
+            let first = (audio.origin + block.anchor_frames).round() as i64 + block.elapsed as i64;
+            Self::Copy { left, right, first }
+        } else {
+            let first = audio.origin + (block.anchor_frames + block.elapsed as f64) * audio.step;
+            Self::Interpolate { left, right, first, step: audio.step }
+        }
+    }
+
+    /// The audio for frame `i` of the block; silence outside the file.
+    #[inline]
+    fn at(&self, i: usize) -> (f32, f32) {
+        match *self {
+            Self::Copy { left, right, first } => match usize::try_from(first + i as i64) {
+                Ok(index) if index < left.len() => (left[index], right[index]),
+                _ => (0.0, 0.0),
+            },
+            Self::Interpolate { left, right, first, step } => {
+                let position = first + i as f64 * step;
+                if position < 0.0 {
+                    return (0.0, 0.0);
+                }
+                let index = position as usize;
+                if index + 1 >= left.len() {
+                    return (0.0, 0.0);
+                }
+                let fraction = (position - index as f64) as f32;
+                (
+                    left[index] + (left[index + 1] - left[index]) * fraction,
+                    right[index] + (right[index + 1] - right[index]) * fraction,
+                )
+            }
+        }
+    }
+}
+
+/// Mixes the audio clips of `track` into the block.
+fn render_audio(track: &mut TrackNode, block: &Block, left: &mut [f32], right: &mut [f32]) {
+    let frames = left.len();
+    let end_beat = block.start_beat + frames as f64 * block.beats_per_frame;
+    let guard = CLIP_FADE_SECONDS * block.sample_rate;
+    let hand_over = (HAND_OVER_SECONDS * block.sample_rate) as u32;
+
+    for region in &mut track.audio {
+        if region.end <= block.start_beat || region.start >= end_beat {
             continue;
         }
-        let data = &region.data;
-        let available = data.left.len().min(data.right.len());
-        let ratio = data.sample_rate / sample_rate;
         // Output frames between the clip start and this block (negative if
         // the clip starts inside the block).
-        let elapsed = (start_beat - region.start) / beats_per_frame;
-        let length = (region.end - region.start) / beats_per_frame;
-        // The clip's own fades, never shorter than the click guard.
-        let fade_in = (region.fade_in / beats_per_frame).max(fade);
-        let fade_out = (region.fade_out / beats_per_frame).max(fade);
-        let first = (-elapsed).ceil().max(0.0) as usize;
-        let last = ((length - elapsed).ceil().max(0.0) as usize).min(frames);
+        let elapsed = (block.start_beat - region.start) / block.beats_per_frame;
+        let length = (region.end - region.start) / block.beats_per_frame;
+        // The clip's own fades, never shorter than the click guard except
+        // where the clip joins a neighbour and there is no edge to guard.
+        let fade_in = (region.fade_in / block.beats_per_frame).max(if region.joins_previous { 0.0 } else { guard });
+        let fade_out = (region.fade_out / block.beats_per_frame).max(if region.joins_next { 0.0 } else { guard });
+        // Both edges are worked out the same way from a timeline position,
+        // so that where one clip ends on the beat another starts on, the
+        // frame at the seam belongs to exactly one of them.
+        let frame_of = |beat: f64| ((beat - block.start_beat) / block.beats_per_frame).ceil().max(0.0) as usize;
+        let first = frame_of(region.start);
+        let last = frame_of(region.end).min(frames);
 
+        let audio = Reader::new(&region.audio, block);
+        let replaced = region.replaces.as_ref().map(|audio| Reader::new(audio, block));
         for i in first..last {
             let t = elapsed + i as f64;
-            let source = region.offset_frames + t * ratio;
-            let index = source as usize;
-            if index + 1 >= available {
-                break;
+            let (mut sample_left, mut sample_right) = audio.at(i);
+            if let Some(replaced) = &replaced
+                && region.blended < hand_over
+            {
+                let (old_left, old_right) = replaced.at(i);
+                let mix = region.blended as f32 / hand_over as f32;
+                sample_left = old_left + (sample_left - old_left) * mix;
+                sample_right = old_right + (sample_right - old_right) * mix;
+                region.blended += 1;
             }
-            let fraction = (source - index as f64) as f32;
-            let envelope = (t / fade_in).min((length - t) / fade_out).clamp(0.0, 1.0) as f32;
-            let gain = region.gain * envelope;
-            left[i] += (data.left[index] + (data.left[index + 1] - data.left[index]) * fraction) * gain;
-            right[i] += (data.right[index] + (data.right[index + 1] - data.right[index]) * fraction) * gain;
+            let rise = if fade_in > 0.0 { t / fade_in } else { 1.0 };
+            let fall = if fade_out > 0.0 { (length - t) / fade_out } else { 1.0 };
+            let gain = region.gain * rise.min(fall).clamp(0.0, 1.0) as f32;
+            left[i] += sample_left * gain;
+            right[i] += sample_right * gain;
         }
     }
 }

@@ -1,4 +1,4 @@
-//! Time-stretches a WAV file and measures what that did to it.
+//! Time-stretches an audio file and measures what that did to it.
 //!
 //! ```text
 //! cargo run -p trill-dsp --release --example stretch -- <in.wav> <out.wav> <ratio> [beats|tonal|repitch] [semitones]
@@ -14,7 +14,7 @@ use std::time::Instant;
 use trill_core::audio::AudioBuffer;
 use trill_dsp::fft::{RealFft, hann};
 use trill_dsp::stretch::{Onset, StretchMode, StretchOptions, detect_onsets, stretch};
-use trill_engine::audio_file::{read_wav, write_wav};
+use trill_media::{WavFormat, decode, write_wav};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -33,7 +33,7 @@ fn main() {
         mode,
     };
 
-    let input = read_wav(Path::new(&args[0])).unwrap_or_else(|error| panic!("{error}"));
+    let input = decode(Path::new(&args[0])).unwrap_or_else(|error| panic!("{error}"));
     // Best of three, so a busy machine does not pass for a slow algorithm.
     let mut elapsed = f64::MAX;
     let mut output = AudioBuffer::default();
@@ -42,8 +42,7 @@ fn main() {
         output = stretch(&input, &options);
         elapsed = elapsed.min(start.elapsed().as_secs_f64());
     }
-    write_wav(Path::new(&args[1]), output.sample_rate as u32, &output.left, &output.right)
-        .unwrap_or_else(|error| panic!("{error}"));
+    write_wav(Path::new(&args[1]), &output, WavFormat::Int24).unwrap_or_else(|error| panic!("{error}"));
 
     let ratio = output.frames() as f64 / input.frames().max(1) as f64;
     println!("input    {:.3} s at {} Hz, {} frames", input.seconds(), input.sample_rate, input.frames());

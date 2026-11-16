@@ -25,17 +25,46 @@ pub(crate) struct NoteEvent {
 /// Decoded audio, shared between clips that use the same file.
 pub type AudioData = trill_core::audio::AudioBuffer;
 
+/// Audio, and where in it each moment of the timeline falls.
+///
+/// The mapping is anchored to the timeline rather than to the clip, so that
+/// two clips cut from one (a split) read exactly the same frames at the
+/// same moments as the whole did.
+#[derive(Clone)]
+pub(crate) struct RegionAudio {
+    pub data: Arc<AudioData>,
+    /// The position in `data`, in frames, that beat 0 of the timeline
+    /// corresponds to: output frame `n`, counted from beat 0, plays
+    /// position `origin + n * step`. Usually negative or far past the
+    /// start; only the part under the clip is ever read.
+    pub origin: f64,
+    /// Frames of `data` per output frame. Exactly 1 for everything but
+    /// stand-ins and tempos beyond what the stretcher covers, and then
+    /// frames are copied rather than interpolated.
+    pub step: f64,
+}
+
 pub(crate) struct AudioRegion {
     pub start: f64,
     pub end: f64,
-    /// Source position at the start of the clip, in source frames.
-    pub offset_frames: f64,
-    /// Fade lengths in beats; the processor never fades faster than its
-    /// own click guard.
+    /// Fade lengths in beats. The processor never fades an edge faster than
+    /// its own click guard, unless the edge joins a neighbour.
     pub fade_in: f64,
     pub fade_out: f64,
+    /// The clip carries straight on from the clip before it, or into the
+    /// one after it: the same audio, continuing where the other stops. Such
+    /// an edge needs no click guard, and getting one would put a dip in the
+    /// middle of what was one clip before it was split.
+    pub joins_previous: bool,
+    pub joins_next: bool,
     pub gain: f32,
-    pub data: Arc<AudioData>,
+    pub audio: RegionAudio,
+    /// The stand-in this audio takes over from, if the previous graph was
+    /// playing one for the clip. The first block that plays the region
+    /// cross-fades from it, so the hand-over does not click.
+    pub replaces: Option<RegionAudio>,
+    /// Frames of that cross-fade played so far.
+    pub blended: u32,
 }
 
 pub(crate) struct DeviceSlot {

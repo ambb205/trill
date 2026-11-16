@@ -3,19 +3,24 @@
 //! server and tests all go through here, so they cannot disagree about what
 //! an edit means.
 
-use crate::audio_file::AudioCache;
-use crate::compile::{Compiler, DeviceBank, Meters, Problem};
+use crate::compile::{Compiler, DeviceBank, Meters, Problem, StandIns};
 use crate::engine::{AudioBackend, Engine, EngineError, Message, StreamInfo};
 use crate::graph::Meter;
 use crate::render::RenderJob;
+use crate::sources::AudioSources;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use trill_core::device::{DeviceDescriptor, DeviceFactory, EventKind, ParamInfo};
 use trill_core::project::AutomationTarget;
-use trill_core::{ChainRef, DeviceId, EditError, Project, TrackId};
+use trill_core::{ChainRef, Device, DeviceId, EditError, Project, TrackId};
+use trill_dsp::{SampleRef, StateError, drumrack, sampler};
+use trill_media::MediaCache;
 
 const UNDO_LIMIT: usize = 200;
 const LIMITER_URI: &str = "builtin:limiter";
+const SAMPLER_URI: &str = "builtin:sampler";
+const DRUM_RACK_URI: &str = "builtin:drumrack";
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -42,6 +47,17 @@ pub struct ParamState {
     pub value: f64,
 }
 
+/// An audio file a sample-playing device uses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SampleFile {
+    /// What the device uses it for: `sample` on a sampler, `pad 36` on a
+    /// drum rack.
+    pub slot: String,
+    pub path: String,
+    /// Why the file is not playing, if it is not.
+    pub problem: Option<String>,
+}
+
 /// How much of the engine an edit can have affected.
 #[derive(Copy, Clone, PartialEq)]
 enum Scope {
@@ -64,7 +80,12 @@ pub struct Session {
     bank: DeviceBank,
     factory: Arc<dyn DeviceFactory>,
     meters: Meters,
-    audio: AudioCache,
+    audio: AudioSources,
+    /// The clips playing a stand-in until their stretched audio is ready.
+    stand_ins: StandIns,
+    /// How many stretches had ended when the graph was last compiled. More
+    /// since then means a stand-in may be ready to be replaced.
+    stretches_seen: u64,
     problems: Vec<Problem>,
     path: Option<PathBuf>,
     /// Bumped on every change to the project, so views know when to refresh.
@@ -76,9 +97,29 @@ pub struct Session {
 }
 
 impl Session {
-    /// Starts the audio engine and opens an empty project.
+    /// Starts the audio engine and opens an empty project, reading audio
+    /// files through a cache of its own.
+    ///
+    /// An application wants [`Session::with_media`] instead, so that the
+    /// session, the sample-playing devices and the browser decode each file
+    /// once between them.
     pub fn new(factory: Arc<dyn DeviceFactory>, backend: AudioBackend) -> Result<Self, SessionError> {
+        Self::with_media(factory, Arc::new(MediaCache::default()), backend)
+    }
+
+    /// Starts the audio engine and opens an empty project. Audio clips are
+    /// read through `media`, which should be the loader `factory` gives its
+    /// sample players (`trill_dsp::Builtins::with_loader`).
+    ///
+    /// The cache is told the engine's sample rate, so that what it hands
+    /// those devices is already converted to it.
+    pub fn with_media(
+        factory: Arc<dyn DeviceFactory>,
+        media: Arc<MediaCache>,
+        backend: AudioBackend,
+    ) -> Result<Self, SessionError> {
         let engine = Engine::start(backend)?;
+        media.set_loader_rate(Some(engine.sample_rate()));
         let mut session = Self {
             project: Project::default(),
             undo: Vec::new(),
@@ -87,7 +128,9 @@ impl Session {
             engine,
             bank: DeviceBank::default(),
             meters: Meters::default(),
-            audio: AudioCache::default(),
+            audio: AudioSources::new(media),
+            stand_ins: StandIns::default(),
+            stretches_seen: 0,
             problems: Vec::new(),
             path: None,
             revision: 0,
@@ -137,10 +180,37 @@ impl Session {
         self.engine.faults()
     }
 
-    /// Problems from the last compile: plugins that failed to load, missing
-    /// audio files. The project still plays without them.
+    /// What is wrong with the project as it plays now: plugins that failed
+    /// to load, samples and audio files that are missing or unreadable. The
+    /// project still plays without them. A problem goes away when the
+    /// project is next changed after its cause has.
     pub fn problems(&self) -> &[Problem] {
         &self.problems
+    }
+
+    /// The cache this session reads audio files through. Front ends use it
+    /// for the same files: waveforms, previews, lengths.
+    pub fn media(&self) -> &Arc<MediaCache> {
+        self.audio.media()
+    }
+
+    /// How many audio clips are playing a stand-in (in time, but repitched)
+    /// because their warped audio is still being prepared. They switch to
+    /// the real thing as [`Session::housekeeping`] finds it ready.
+    pub fn preparing(&self) -> usize {
+        self.stand_ins.len()
+    }
+
+    /// The audio files a sample-playing device uses, with what is wrong
+    /// with each. Empty for devices that play no samples.
+    pub fn sample_files(&self, id: DeviceId) -> Result<Vec<SampleFile>, SessionError> {
+        let device = self.project.device(id)?;
+        let warnings = self.bank.devices.get(&id).map(|meta| meta.warnings.as_slice()).unwrap_or_default();
+        let files = trill_dsp::sample_refs(device).into_iter().map(|SampleRef { slot, path }| {
+            let warning = warnings.iter().find(|warning| warning.slot.as_deref() == Some(slot.as_str()));
+            SampleFile { problem: warning.map(|warning| warning.message.clone()), slot, path }
+        });
+        Ok(files.collect())
     }
 
     pub fn can_undo(&self) -> bool {
@@ -345,6 +415,95 @@ impl Session {
         }
     }
 
+    /// Gives a sampler (`builtin:sampler`) the file it plays, or empties it
+    /// with `None`.
+    ///
+    /// One undo step. The device is created again from its new state, with
+    /// its parameter values as they were, and the song keeps playing. Fails,
+    /// changing nothing, if the device is not a sampler or the file cannot
+    /// be read.
+    pub fn set_sampler_file(&mut self, id: DeviceId, path: Option<&str>) -> Result<(), SessionError> {
+        let device = self.sample_device(id, SAMPLER_URI, "sampler")?;
+        let current = readable(id, sampler::State::from_device_state(device.state.as_deref()))?;
+        let mut state = current.clone().unwrap_or_default();
+        if let Some(path) = path {
+            self.check_sample(path)?;
+        }
+        state.path = path.map(str::to_string);
+        if current.as_ref() == Some(&state) {
+            return Ok(());
+        }
+        self.replace_sample_state(id, state.to_bytes())
+    }
+
+    /// Puts a file on the pad of a drum rack (`builtin:drumrack`) that
+    /// `note` plays, or empties the pad with `None`. The pads are notes
+    /// 36 to 51; see `trill_dsp::drumrack`.
+    ///
+    /// One undo step, like [`Session::set_sampler_file`], and with the same
+    /// guarantees.
+    pub fn set_pad_file(&mut self, id: DeviceId, note: u8, path: Option<&str>) -> Result<(), SessionError> {
+        let device = self.sample_device(id, DRUM_RACK_URI, "drum rack")?;
+        let current = readable(id, drumrack::State::from_device_state(device.state.as_deref()))?;
+        let mut state = current.clone().unwrap_or_default();
+        let pads = drumrack::PAD_NOTES;
+        if !pads.contains(&note) {
+            return Err(SessionError::Device(format!(
+                "a drum rack has no pad for note {note}; its pads are notes {} to {}",
+                pads.start(),
+                pads.end()
+            )));
+        }
+        match path {
+            Some(path) => {
+                self.check_sample(path)?;
+                state.set_pad(note, path).map_err(|error| SessionError::Device(error.to_string()))?;
+            }
+            None => {
+                state.clear_pad(note);
+            }
+        }
+        if current.as_ref() == Some(&state) {
+            return Ok(());
+        }
+        self.replace_sample_state(id, state.to_bytes())
+    }
+
+    /// The device `id`, if it is a `uri`.
+    fn sample_device(&self, id: DeviceId, uri: &str, what: &str) -> Result<&Device, SessionError> {
+        let device = self.project.device(id)?;
+        if device.uri == uri {
+            Ok(device)
+        } else {
+            Err(SessionError::Device(format!(
+                "{id} ({}) is not a {what}, so it has no sample to set; add a {uri} device for that",
+                device.name
+            )))
+        }
+    }
+
+    /// Refuses a sample that cannot be read, in words that say so: what a
+    /// device does with a bad file is play silence, which helps nobody who
+    /// has just chosen it.
+    fn check_sample(&self, path: &str) -> Result<(), SessionError> {
+        match self.audio.media().audio(Path::new(path)) {
+            Ok(_) => Ok(()),
+            Err(error) => Err(SessionError::Io(format!("{error}; the device keeps the sample it had"))),
+        }
+    }
+
+    /// Stores a sample player's new state as one undo step, and takes the
+    /// step back if the device cannot be created from it.
+    fn replace_sample_state(&mut self, id: DeviceId, state: Vec<u8>) -> Result<(), SessionError> {
+        let revision = self.revision;
+        let result = self.set_device_state(id, Some(state));
+        if result.is_err() && self.revision != revision {
+            self.undo();
+            self.redo.pop();
+        }
+        result
+    }
+
     /// Sets parameters by id, in plain units. Values are clamped to range.
     pub fn set_device_params(&mut self, id: DeviceId, values: &[(String, f64)]) -> Result<(), SessionError> {
         let states = self.device_params(id)?;
@@ -458,12 +617,32 @@ impl Session {
     /// A snapshot that can be rendered without holding the session.
     pub fn render_job(&mut self) -> RenderJob {
         self.capture_device_state();
-        RenderJob { project: self.project.clone(), factory: self.factory.clone() }
+        RenderJob { project: self.project.clone(), factory: self.factory.clone(), audio: self.audio.clone() }
     }
 
-    /// Frees memory the audio thread has released. Call periodically.
+    /// The session's regular chores; call it a few times a second. Frees
+    /// memory the audio thread has released, and gives clips that were
+    /// playing a stand-in their warped audio once it has been prepared.
     pub fn housekeeping(&mut self) {
         self.engine.collect_garbage();
+        if !self.stand_ins.is_empty() && self.audio.finished() != self.stretches_seen {
+            self.compile_and_swap();
+        }
+    }
+
+    /// Waits until no clip is playing a stand-in any more, or `timeout` has
+    /// passed, and returns whether none is. For tests and tools: it blocks
+    /// whoever holds the session, which a front end must not do. Those call
+    /// [`Session::housekeeping`] and watch [`Session::preparing`].
+    pub fn wait_until_prepared(&mut self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while !self.stand_ins.is_empty() {
+            if !self.audio.wait_for_progress(self.stretches_seen, deadline) {
+                return false;
+            }
+            self.housekeeping();
+        }
+        true
     }
 
     // ---- internals -----------------------------------------------------
@@ -477,9 +656,9 @@ impl Session {
         self.undo.clear();
         self.redo.clear();
         // Ids restart in every project; nothing running may be mistaken for
-        // a device of the new one.
+        // a device or a clip of the new one.
         self.bank.devices.clear();
-        self.audio.forget_failures();
+        self.stand_ins = StandIns::default();
         self.compile_and_swap();
         self.revision += 1;
         self.saved_revision = self.revision;
@@ -487,11 +666,15 @@ impl Session {
 
     fn compile_and_swap(&mut self) {
         let sample_rate = self.engine.sample_rate();
+        // Read before compiling: a stretch that ends while the compile runs
+        // may be too late for it, and must still count as news afterwards.
+        self.stretches_seen = self.audio.finished();
         let (graph, problems) = Compiler {
             factory: self.factory.as_ref(),
             bank: &mut self.bank,
             meters: &mut self.meters,
-            audio: &mut self.audio,
+            audio: &self.audio,
+            stand_ins: Some(&mut self.stand_ins),
             sample_rate,
         }
         .compile(&self.project, true);
@@ -583,6 +766,19 @@ impl Session {
                     device.state = Some(captured.clone());
                 }
             }
+        }
+    }
+}
+
+/// The state document of a sample player, for changing. `None` for one that
+/// cannot be parsed: it has nothing in it worth keeping and is replaced by
+/// a fresh one. One from a newer version of the program is left alone.
+fn readable<S>(id: DeviceId, state: Result<S, StateError>) -> Result<Option<S>, SessionError> {
+    match state {
+        Ok(state) => Ok(Some(state)),
+        Err(StateError::Invalid(_)) => Ok(None),
+        Err(error @ StateError::TooNew { .. }) => {
+            Err(SessionError::Device(format!("{id}: {error}; its samples can only be changed by that version")))
         }
     }
 }

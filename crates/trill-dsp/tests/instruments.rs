@@ -210,10 +210,10 @@ fn the_engine_renders_a_sampler_track_at_the_right_times_and_pitches() {
     }
     assert!(out.left == out.right, "a mono sample, centered, stays mono");
 
-    // The render made its own instance; both shared one prepared sample and
-    // the file was decoded as often as the loader chose to (it is asked once
-    // per instance, and once more by `sample_problems` above).
-    assert_eq!(loader.loads(), 2);
+    // The loader is asked for the file when the render creates its instance,
+    // again when the engine asks the factory what is wrong with the device,
+    // and once more by `sample_problems` above. Caching is the loader's job.
+    assert_eq!(loader.loads(), 3);
     // Rendering again gives the same audio, bit for bit.
     let again = render(&project, &factory, &options()).unwrap();
     assert!(again.left == out.left && again.right == out.right);
@@ -253,9 +253,12 @@ fn the_engine_renders_a_drum_rack_pattern() {
         .unwrap();
 
     let out = render(&project, &factory, &options()).unwrap();
-    assert!(out.problems.is_empty(), "a missing sample must not fail the device: {:?}", out.problems);
     let problems = sample_problems(project.device(id).unwrap(), loader.as_ref());
     assert_eq!(problems, ["pad 49: cannot load 'missing.wav': 'missing.wav' does not exist"]);
+    // The engine reports the same thing, against the pad, and the device is
+    // not failed by it.
+    let reported = Problem::Sample { device: id, slot: Some("pad 49".into()), reason: problems[0].clone() };
+    assert_eq!(out.problems, [reported], "a missing sample must be reported and must not fail the device");
 
     let beat = |beats: f64| (beats * 0.5 * SR) as usize;
     // Kick on beat 0: 60 Hz, ringing well past its 0.1-beat note.

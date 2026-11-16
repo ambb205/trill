@@ -2,18 +2,26 @@
 //! side, never on the audio thread, so it is free to allocate and to load
 //! plugins and audio files.
 
-use crate::audio_file::AudioCache;
 use crate::graph::{
-    AudioRegion, Bus, Chain, DeviceSlot, Graph, MAX_BLOCK, MasterNode, Meter, NoteEvent, ParamAutomation, TrackNode,
-    TrackState,
+    AudioRegion, Bus, Chain, DeviceSlot, Graph, MAX_BLOCK, MasterNode, Meter, NoteEvent, ParamAutomation, RegionAudio,
+    TrackNode, TrackState,
 };
+use crate::sources::AudioSources;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use trill_core::device::{DeviceController, DeviceFactory, ParamInfo};
+use trill_core::device::{DeviceController, DeviceFactory, DeviceWarning, ParamInfo};
 use trill_core::project::{AutomationTarget, Clip, ClipContent};
-use trill_core::{Device, DeviceId, Project, Track, TrackId, TrackKind};
+use trill_core::{ClipId, Device, DeviceId, Project, Track, TrackId, TrackKind};
 use trill_dsp::util::db_to_gain;
+
+/// How far apart, in beats, the end of one clip and the start of the next
+/// may be and still count as touching. Splitting a clip computes the two
+/// from each other, which can leave them a rounding error apart.
+const TOUCHING_BEATS: f64 = 1e-9;
+/// How far apart, in frames, two clips' positions in the same audio may be
+/// and still count as one continuing the other.
+const CONTINUOUS_FRAMES: f64 = 1e-3;
 
 /// What the controller knows about a device whose processor lives on the
 /// audio thread.
@@ -31,6 +39,9 @@ pub struct DeviceMeta {
     /// Why the device could not be created, if it could not. Such a device
     /// stays in the project and passes audio through.
     pub error: Option<String>,
+    /// What the factory found wrong with the device when it was created,
+    /// short of failing: samples it plays without.
+    pub warnings: Vec<DeviceWarning>,
 }
 
 /// The devices that exist in the running graph.
@@ -46,18 +57,46 @@ pub struct Meters {
     pub master: Arc<Meter>,
 }
 
+/// The clips of the running graph that play a stand-in while their
+/// stretched audio is being made (see [`AudioSources`]). Kept across
+/// compiles, like the device bank, so that the graph which finally gets the
+/// real audio can fade over from what was playing.
+#[derive(Default)]
+pub struct StandIns {
+    playing: HashMap<ClipId, RegionAudio>,
+}
+
+impl StandIns {
+    /// How many clips are playing a stand-in.
+    pub fn len(&self) -> usize {
+        self.playing.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.playing.is_empty()
+    }
+}
+
 /// Something that went wrong while compiling but did not stop it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Problem {
+    /// The device could not be created; audio passes through where it sits.
     Device { device: DeviceId, reason: String },
-    AudioFile { path: String, reason: String },
+    /// The device runs, without the sample in `slot` (or, with no slot,
+    /// without any: its saved state is unreadable). `reason` names the slot.
+    Sample { device: DeviceId, slot: Option<String>, reason: String },
+    /// The clip's file cannot be read, so the clip is silent, or cannot be
+    /// stretched, so it plays repitched. `reason` names the file.
+    AudioFile { clip: ClipId, path: String, reason: String },
 }
 
 impl std::fmt::Display for Problem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Problem::Device { device, reason } => write!(f, "{device}: {reason}"),
-            Problem::AudioFile { path, reason } => write!(f, "audio file '{path}': {reason}"),
+            Problem::Device { device, reason } | Problem::Sample { device, reason, .. } => {
+                write!(f, "{device}: {reason}")
+            }
+            Problem::AudioFile { clip, reason, .. } => write!(f, "{clip}: {reason}"),
         }
     }
 }
@@ -66,7 +105,12 @@ pub struct Compiler<'a> {
     pub factory: &'a dyn DeviceFactory,
     pub bank: &'a mut DeviceBank,
     pub meters: &'a mut Meters,
-    pub audio: &'a mut AudioCache,
+    pub audio: &'a AudioSources,
+    /// `Some` for a graph that will be heard live: clips whose stretched
+    /// audio is not ready get stand-ins, recorded here, and the work is
+    /// left to the background. `None` for a graph that is rendered: the
+    /// compile waits until every clip has its real audio.
+    pub stand_ins: Option<&'a mut StandIns>,
     pub sample_rate: f64,
 }
 
@@ -76,29 +120,62 @@ impl Compiler<'_> {
     pub fn compile(&mut self, project: &Project, looping: bool) -> (Box<Graph>, Vec<Problem>) {
         let mut problems = Vec::new();
         let routing = Routing::of(project);
+        let frames_per_beat = 60.0 * self.sample_rate / project.tempo;
+        let live = self.stand_ins.is_some();
+        // The stretched audio this graph plays or waits for, and the clips
+        // that have a stand-in meanwhile.
+        let mut wanted = HashSet::new();
+        let mut waiting = HashMap::new();
 
         let mut tracks = Vec::with_capacity(project.tracks.len());
         for track in &project.tracks {
             let mut notes = Vec::new();
             let mut audio = Vec::new();
             for clip in track.clips.iter().filter(|clip| !clip.muted) {
-                match &clip.content {
-                    ClipContent::Midi(_) => flatten_notes(clip, &mut notes),
-                    ClipContent::Audio(content) => match self.audio.load(&content.path) {
-                        Ok(data) => audio.push(AudioRegion {
-                            start: clip.start,
-                            end: clip.end(),
-                            offset_frames: content.offset_seconds * data.sample_rate,
-                            fade_in: content.fade_in,
-                            fade_out: content.fade_out,
-                            gain: db_to_gain(content.gain_db),
-                            data,
-                        }),
-                        Err(reason) => problems.push(Problem::AudioFile { path: content.path.clone(), reason }),
-                    },
-                }
+                let content = match &clip.content {
+                    ClipContent::Midi(_) => {
+                        flatten_notes(clip, &mut notes);
+                        continue;
+                    }
+                    ClipContent::Audio(content) => content,
+                };
+                let report = |reason| Problem::AudioFile { clip: clip.id, path: content.path.clone(), reason };
+                let found = match self.audio.clip_audio(content, project.tempo, self.sample_rate, !live) {
+                    Ok(found) => found,
+                    Err(reason) => {
+                        problems.push(report(reason));
+                        continue;
+                    }
+                };
+                problems.extend(found.problem.map(report));
+                wanted.extend(found.key);
+                let region_audio = RegionAudio {
+                    origin: content.offset_seconds * found.frames_per_second
+                        - clip.start * frames_per_beat * found.step,
+                    step: found.step,
+                    data: found.data,
+                };
+                let replaces = if found.stand_in {
+                    waiting.insert(clip.id, region_audio.clone());
+                    None
+                } else {
+                    self.stand_ins.as_ref().and_then(|stand_ins| stand_ins.playing.get(&clip.id).cloned())
+                };
+                audio.push(AudioRegion {
+                    start: clip.start,
+                    end: clip.end(),
+                    fade_in: content.fade_in,
+                    fade_out: content.fade_out,
+                    joins_previous: false,
+                    joins_next: false,
+                    gain: db_to_gain(content.gain_db),
+                    audio: region_audio,
+                    replaces,
+                    blended: 0,
+                });
             }
             notes.sort_by(|a, b| a.start.total_cmp(&b.start));
+            join_continuations(&mut audio);
 
             let meter = self.meters.tracks.entry(track.id).or_default().clone();
             tracks.push(TrackNode {
@@ -144,6 +221,10 @@ impl Compiler<'_> {
         self.bank.devices.retain(|id, _| live_devices.contains(id));
         let live_tracks: HashSet<TrackId> = project.tracks.iter().map(|track| track.id).collect();
         self.meters.tracks.retain(|id, _| live_tracks.contains(id));
+        if let Some(stand_ins) = self.stand_ins.as_deref_mut() {
+            stand_ins.playing = waiting;
+            self.audio.set_wanted(wanted);
+        }
 
         let region = project.loop_region;
         let graph = Graph {
@@ -173,11 +254,14 @@ impl Compiler<'_> {
     }
 
     fn slot(&mut self, device: &Device, problems: &mut Vec<Problem>) -> DeviceSlot {
-        let running = self
-            .bank
-            .devices
-            .get(&device.id)
-            .is_some_and(|meta| meta.uri == device.uri && meta.applied_state == device.state);
+        let running = self.bank.devices.get(&device.id).is_some_and(|meta| {
+            meta.uri == device.uri
+                && meta.applied_state == device.state
+                // A device that came up short is looked at again on every
+                // compile. If what is wrong with it has changed (a missing
+                // sample is back), it is created afresh to pick that up.
+                && (meta.warnings.is_empty() || meta.warnings == self.factory.warnings(device))
+        });
         let processor = if running {
             None
         } else {
@@ -191,13 +275,12 @@ impl Compiler<'_> {
                             controller: instance.controller.map(Mutex::new),
                             applied_state: device.state.clone(),
                             error: None,
+                            warnings: self.factory.warnings(device),
                         },
                     );
                     Some(instance.processor)
                 }
                 Err(error) => {
-                    let reason = error.to_string();
-                    problems.push(Problem::Device { device: device.id, reason: reason.clone() });
                     self.bank.devices.insert(
                         device.id,
                         DeviceMeta {
@@ -205,14 +288,68 @@ impl Compiler<'_> {
                             params: Vec::new(),
                             controller: None,
                             applied_state: device.state.clone(),
-                            error: Some(reason),
+                            error: Some(error.to_string()),
+                            warnings: Vec::new(),
                         },
                     );
                     None
                 }
             }
         };
+        // Reported on every compile, not only the one that found them: the
+        // problems of a project are those of its current graph.
+        if let Some(meta) = self.bank.devices.get(&device.id) {
+            problems
+                .extend(meta.error.iter().map(|reason| Problem::Device { device: device.id, reason: reason.clone() }));
+            problems.extend(meta.warnings.iter().map(|warning| Problem::Sample {
+                device: device.id,
+                slot: warning.slot.clone(),
+                reason: warning.message.clone(),
+            }));
+        }
         DeviceSlot { id: device.id, processor, enabled: device.enabled }
+    }
+}
+
+/// Finds the clips that carry straight on from another (the halves of a
+/// split, typically) and joins them, so that together they play exactly
+/// what one clip over the same span would: the same frames, with no fade
+/// at the seam.
+fn join_continuations(regions: &mut [AudioRegion]) {
+    let mut ends: Vec<(f64, usize)> = regions.iter().enumerate().map(|(index, region)| (region.end, index)).collect();
+    ends.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // Earliest first, so that a chain of clips all take up the first one's
+    // position in the audio.
+    let mut order: Vec<usize> = (0..regions.len()).collect();
+    order.sort_by(|a, b| regions[*a].start.total_cmp(&regions[*b].start));
+
+    for later in order {
+        let start = regions[later].start;
+        let first = ends.partition_point(|(end, _)| *end < start - TOUCHING_BEATS);
+        let earlier = ends[first..].iter().take_while(|(end, _)| *end <= start + TOUCHING_BEATS).map(|(_, i)| *i).find(
+            |&earlier| {
+                let (a, b) = (&regions[earlier], &regions[later]);
+                earlier != later
+                    && a.start < b.start
+                    && a.fade_out == 0.0
+                    && b.fade_in == 0.0
+                    && a.gain == b.gain
+                    && a.audio.step == b.audio.step
+                    && Arc::ptr_eq(&a.audio.data, &b.audio.data)
+                    && (a.audio.origin - b.audio.origin).abs() <= CONTINUOUS_FRAMES
+            },
+        );
+        if let Some(earlier) = earlier {
+            let (end, origin) = (regions[earlier].end, regions[earlier].audio.origin);
+            regions[earlier].joins_next = true;
+            let region = &mut regions[later];
+            region.joins_previous = true;
+            // Exactly the same mapping and no gap or overlap, down to the
+            // last bit: the two were computed separately and may differ by
+            // a rounding error, which is enough to move a frame.
+            region.start = end;
+            region.audio.origin = origin;
+        }
     }
 }
 
