@@ -41,6 +41,7 @@ const NOTE_CHANNEL: u16 = 0;
 const MIDI_NOTE_ON: u8 = 0x90;
 const MIDI_NOTE_OFF: u8 = 0x80;
 const MIDI_CONTROL_CHANGE: u8 = 0xB0;
+const MIDI_CHANNEL_PRESSURE: u8 = 0xD0;
 const MIDI_PITCH_BEND: u8 = 0xE0;
 const MIDI_ALL_SOUND_OFF: u8 = 120;
 /// Most note events delivered to a plugin in one block; more are dropped.
@@ -116,6 +117,13 @@ impl EventQueue {
     pub(crate) fn control(&mut self, time: u32, controller: u8, value: f32) {
         let value = if value.is_finite() { (value.clamp(0.0, 1.0) * 127.0).round() as u8 } else { 0 };
         let message = [MIDI_CONTROL_CHANGE | NOTE_CHANNEL as u8, controller & 0x7F, value];
+        self.push(Queued::Midi(MidiEvent::new(time, NOTE_PORT, message)));
+    }
+
+    /// Channel pressure, `value` 0..=1, for a port that takes MIDI.
+    pub(crate) fn pressure(&mut self, time: u32, value: f32) {
+        let value = if value.is_finite() { (value.clamp(0.0, 1.0) * 127.0).round() as u8 } else { 0 };
+        let message = [MIDI_CHANNEL_PRESSURE | NOTE_CHANNEL as u8, value, 0];
         self.push(Queued::Midi(MidiEvent::new(time, NOTE_PORT, message)));
     }
 
@@ -297,6 +305,11 @@ impl BlockEvents {
                 EventKind::PitchBend { value } => {
                     if port.midi {
                         self.queue.pitch_bend(time, value);
+                    }
+                }
+                EventKind::ChannelPressure { value } => {
+                    if port.midi {
+                        self.queue.pressure(time, value);
                     }
                 }
                 EventKind::Control { controller, value } => {
@@ -772,5 +785,15 @@ mod tests {
         let event = transport(&broken, 100);
         assert_eq!(event.tempo, 120.0);
         assert_eq!(event.song_pos_beats.to_float(), 0.0);
+    }
+
+    #[test]
+    fn pressure_on_the_keys_goes_to_a_port_that_takes_midi() {
+        let pressure = |offset: u32, value: f32| Event { offset, kind: EventKind::ChannelPressure { value } };
+        let events = [pressure(3, 0.5), pressure(9, 7.0), pressure(12, f32::NAN)];
+        let mut feed = BlockEvents::new(Vec::new(), Some(NotePort { dialect: NoteDialect::Clap, midi: true }));
+        assert_eq!(midi(feed.fill(&events, 0, 64, 64)), [(3, [0xD0, 64, 0]), (9, [0xD0, 127, 0]), (12, [0xD0, 0, 0])]);
+        let mut feed = BlockEvents::new(Vec::new(), CLAP_PORT);
+        assert_eq!(feed.fill(&events, 0, 64, 64).len(), 0, "a port that takes only notes has no use for it");
     }
 }

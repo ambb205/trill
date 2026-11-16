@@ -37,6 +37,7 @@
 //! A rack's files are fixed for the life of the instance. To change one,
 //! write a new state into the project and create the device again.
 
+use crate::level::ChannelLevel;
 use crate::loading::{SampleRef, SampleSource, StateError, decode, encode};
 use crate::params::{ParamDef, ParamValues, float, int};
 use crate::playhead::{LoopSpec, Playhead};
@@ -303,7 +304,15 @@ impl Voice {
         Self { active: false, pad: 0, head: None, envelope: 0.0, velocity_gain: 0.0, age: 0, fade: FadeOut::idle() }
     }
 
-    fn render(&mut self, pad: &PadSettings, sample: &Sample, volume: f32, out_left: &mut [f32], out_right: &mut [f32]) {
+    /// `levels` is the channel's level at each frame.
+    fn render(
+        &mut self,
+        pad: &PadSettings,
+        sample: &Sample,
+        (volume, levels): (f32, &[f32]),
+        out_left: &mut [f32],
+        out_right: &mut [f32],
+    ) {
         let Some(head) = self.head.as_mut() else {
             self.active = false;
             return;
@@ -311,9 +320,9 @@ impl Voice {
         head.set_rate(sample, pad.rate);
         let gain = self.velocity_gain * pad.level * volume;
         let (gain_left, gain_right) = (gain * pad.pan_left, gain * pad.pan_right);
-        for (out_left, out_right) in out_left.iter_mut().zip(out_right.iter_mut()) {
+        for (frame, (out_left, out_right)) in out_left.iter_mut().zip(out_right.iter_mut()).enumerate() {
             let (left, right) = head.next(sample, &LoopSpec::OFF);
-            let level = self.envelope * self.fade.tick();
+            let level = self.envelope * self.fade.tick() * levels[frame];
             self.envelope *= pad.decay;
             *out_left += left * level * gain_left;
             *out_right += right * level * gain_right;
@@ -334,6 +343,8 @@ pub struct DrumRack {
     sample_rate: f64,
     voices: [Voice; VOICES],
     clock: u64,
+    /// Channel volume and expression.
+    level: ChannelLevel,
 }
 
 impl DrumRack {
@@ -354,6 +365,7 @@ impl DrumRack {
             sample_rate: 48_000.0,
             voices: [Voice::idle(); VOICES],
             clock: 0,
+            level: ChannelLevel::new(),
         }
     }
 
@@ -422,12 +434,14 @@ impl DrumRack {
         let mut pos = 0;
         while pos < left.len() {
             let len = (left.len() - pos).min(CONTROL_BLOCK);
+            let mut levels = [1.0f32; CONTROL_BLOCK];
+            self.level.fill(&mut levels[..len], self.sample_rate as f32);
             for voice in self.voices.iter_mut().filter(|voice| voice.active) {
                 match self.samples[voice.pad].as_deref() {
                     Some(sample) => voice.render(
                         &self.pads[voice.pad],
                         sample,
-                        self.volume,
+                        (self.volume, &levels[..len]),
                         &mut left[pos..pos + len],
                         &mut right[pos..pos + len],
                     ),
@@ -438,11 +452,17 @@ impl DrumRack {
         }
     }
 
-    /// Only note-ons matter: a drum rings for as long as its sample does,
-    /// whatever the note length, and through a stop of the transport.
+    /// Of the notes only note-ons matter: a drum rings for as long as its
+    /// sample does, whatever the note length, and through a stop of the
+    /// transport. Volume and expression set the level of the whole rack.
     fn handle(&mut self, kind: EventKind) {
-        if let EventKind::NoteOn { pitch, velocity } = kind {
-            self.trigger(pitch, velocity);
+        match kind {
+            EventKind::NoteOn { pitch, velocity } => self.trigger(pitch, velocity),
+            EventKind::Control { controller, value } => {
+                let sounding = self.voices.iter().any(|voice| voice.active);
+                self.level.control(controller, value, sounding);
+            }
+            _ => {}
         }
     }
 }
@@ -480,6 +500,7 @@ impl DeviceProcessor for DrumRack {
     }
 
     fn reset(&mut self) {
+        self.level.settle();
         for voice in &mut self.voices {
             voice.active = false;
         }
@@ -696,5 +717,20 @@ mod tests {
         device.reset();
         let (left, _) = run(&mut device, SR, 256, 500, &[]);
         assert_eq!(peak(&left), 0.0);
+    }
+
+    #[test]
+    fn expression_and_volume_set_the_level_of_the_rack() {
+        let level = |events: &[(usize, EventKind)]| {
+            let mut rack = constant_rack(48_000, &[]);
+            peak(&run(&mut rack, SR, 256, 4_800, events).0)
+        };
+        let control = |controller: u8, value: f32| EventKind::Control { controller, value };
+        let full = level(&[(1_000, HIT(36))]);
+        assert!(full > 0.05);
+        assert!((level(&[(0, control(11, 0.5)), (1_000, HIT(36))]) / full - 0.25).abs() < 1e-3);
+        assert!((level(&[(0, control(7, 0.5)), (1_000, HIT(36))]) / full - 0.25).abs() < 1e-3);
+        assert_eq!(level(&[(0, control(11, 0.0)), (1_000, HIT(36))]), 0.0);
+        assert_eq!(level(&[(0, control(11, 1.0)), (1_000, HIT(36))]), full);
     }
 }

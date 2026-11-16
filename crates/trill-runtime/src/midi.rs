@@ -94,7 +94,9 @@ pub fn parse(message: &[u8]) -> Option<EventKind> {
             let value = if centred >= 0 { centred as f32 / 8191.0 } else { centred as f32 / 8192.0 };
             Some(EventKind::PitchBend { value })
         }
-        // Aftertouch, program changes and system messages are not played.
+        // Pressure on the whole keyboard; pressure on one key is not played.
+        0xD0 => Some(EventKind::ChannelPressure { value: first as f32 / 127.0 }),
+        // Program changes and system messages are not played either.
         _ => None,
     }
 }
@@ -569,10 +571,13 @@ mod tests {
         let Some(EventKind::PitchBend { value }) = parse(&[0xE0, 0, 96]) else { panic!("a bend") };
         assert!((value - 0.5).abs() < 0.001, "{value}");
 
-        // Not played: aftertouch, program change, system messages, and
-        // anything cut short.
+        assert_eq!(parse(&[0xD3, 127]), Some(EventKind::ChannelPressure { value: 1.0 }));
+        assert_eq!(parse(&[0xD0, 0]), Some(EventKind::ChannelPressure { value: 0.0 }));
+
+        // Not played: pressure on one key, program change, system messages,
+        // and anything cut short.
         for message in
-            [&[0xD0, 50][..], &[0xA0, 60, 50], &[0xC0, 5], &[0xF8], &[0xF0, 1, 2, 0xF7], &[0x90, 60], &[0x90], &[]]
+            [&[0xA0, 60, 50][..], &[0xC0, 5], &[0xF8], &[0xF0, 1, 2, 0xF7], &[0x90, 60], &[0x90], &[0xD0], &[]]
         {
             assert_eq!(parse(message), None, "{message:?}");
         }

@@ -13,9 +13,9 @@ use super::snapshot::Snapshot;
 use super::state::{Cx, LaneOwner, lane_owner};
 use super::units::{self, ParamScale};
 use eframe::egui::{self, Rect, Ui};
-use trill_core::AutomationTarget;
 use trill_core::device::{ParamInfo, ParamKind};
 use trill_core::project::automation_value;
+use trill_core::{AutomationTarget, ControllerKind};
 use trill_noir::{Automation, BarOutput, MenuItem, paint};
 
 /// How an envelope's values map onto the height of its lane, and how they
@@ -28,6 +28,9 @@ pub enum Scale {
     /// -1 (left) to 1 (right).
     Pan,
     Param(ParamInfo),
+    /// A MIDI controller in a clip: 0 to 127 as the controller counts,
+    /// the pitch wheel from fully down to fully up, a pedal up or down.
+    Controller(ControllerKind),
 }
 
 impl Scale {
@@ -49,6 +52,10 @@ impl Scale {
             Scale::Volume => units::db_to_fader(value as f32),
             Scale::Pan => ((value as f32 + 1.0) / 2.0).clamp(0.0, 1.0),
             Scale::Param(info) => ParamScale::of(info).normalize(info, value) as f32,
+            Scale::Controller(kind) => {
+                let (low, high) = kind.range();
+                (((value - low) / (high - low)) as f32).clamp(0.0, 1.0)
+            }
         }
     }
 
@@ -64,6 +71,15 @@ impl Scale {
                 if pan.abs() < 0.03 { 0.0 } else { pan }
             }
             Scale::Param(info) => ParamScale::of(info).denormalize(info, position as f64),
+            // A pedal is down or up; the wheel moves in hundredths, with a
+            // dead zone that makes its rest easy to find again; every
+            // other controller in the 128 steps MIDI gives it.
+            Scale::Controller(kind) if kind.is_switch() => f64::from(u8::from(position >= 0.5)),
+            Scale::Controller(ControllerKind::PitchBend) => {
+                let bend = ((position.clamp(0.0, 1.0) * 2.0 - 1.0) as f64 * 100.0).round() / 100.0;
+                if bend.abs() < 0.03 { 0.0 } else { bend }
+            }
+            Scale::Controller(_) => (position.clamp(0.0, 1.0) as f64 * 127.0).round() / 127.0,
         }
     }
 
@@ -72,6 +88,9 @@ impl Scale {
             Scale::Volume => units::format_db(value as f32),
             Scale::Pan => units::format_pan(value as f32),
             Scale::Param(info) => units::format_param(info, value),
+            Scale::Controller(kind) if kind.is_switch() => if value >= 0.5 { "Down" } else { "Up" }.to_owned(),
+            Scale::Controller(ControllerKind::PitchBend) => format!("{:+.0} %", value * 100.0),
+            Scale::Controller(_) => format!("{:.0}", value * 127.0),
         }
     }
 
@@ -82,13 +101,18 @@ impl Scale {
             Scale::Volume => units::db_to_fader(0.0),
             Scale::Pan => 0.5,
             Scale::Param(info) => self.position(info.default),
+            Scale::Controller(kind) => self.position(kind.rest().unwrap_or(0.0)),
         }
     }
 
     /// True for switches and choices, whose values come in steps: a line
     /// between two of them could only be heard as a jump.
     pub fn stepped(&self) -> bool {
-        matches!(self, Scale::Param(info) if info.kind != ParamKind::Float)
+        match self {
+            Scale::Param(info) => info.kind != ParamKind::Float,
+            Scale::Controller(kind) => kind.is_switch(),
+            _ => false,
+        }
     }
 
     /// True when equal distances in the lane are equal differences in
@@ -96,7 +120,7 @@ impl Scale {
     pub fn linear(&self) -> bool {
         match self {
             Scale::Volume => false,
-            Scale::Pan => true,
+            Scale::Pan | Scale::Controller(_) => true,
             Scale::Param(info) => ParamScale::of(info) == ParamScale::Linear,
         }
     }

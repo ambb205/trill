@@ -1,16 +1,30 @@
-//! Standard MIDI Files (`.mid`): reading the notes out of one, and writing
-//! notes to one.
+//! Standard MIDI Files (`.mid`): reading the notes and the controllers out
+//! of one, and writing them to one.
 //!
-//! Only what a song needs is kept: notes with their timing in beats, track
-//! names, the first tempo and the first time signature. Controllers, pitch
-//! bend and program changes are skipped.
+//! Only what a song needs is kept: notes with their timing in beats, the
+//! movement of controllers, the pitch wheel and channel pressure, track
+//! names, the first tempo and the first time signature. Program changes
+//! and key pressure are skipped, and so are the controllers that are not
+//! movements but messages: bank select, data entry, the registered and
+//! non-registered parameter numbers, and the fine halves of fourteen-bit
+//! controllers (32 to 63).
+//!
+//! A file holds a controller as the values it took, one event at a time. A
+//! clip holds it as a curve. Reading thins the events to breakpoints
+//! ([`controllers::thin`]); writing samples the curve at every tick and
+//! writes an event wherever its value, in the file's resolution, changes.
 
+use crate::controllers::{self, ControllerCurve, ControllerKind, GESTURE_GAP_SECONDS, THIN_TOLERANCE};
 use crate::project::Note;
 use crate::time::TimeSignature;
 use std::collections::BTreeMap;
 
 /// Ticks per quarter note in files this module writes.
 const WRITE_DIVISION: u16 = 480;
+/// The same, for those who sample a curve the way a written file will.
+pub(crate) const TICKS_PER_BEAT: f64 = WRITE_DIVISION as f64;
+/// The tempo a file is taken to have until it says otherwise.
+const DEFAULT_TEMPO: f64 = 120.0;
 /// The General MIDI drum channel (channel 10, counted from zero).
 const DRUM_CHANNEL: u8 = 9;
 
@@ -40,6 +54,9 @@ pub struct MidiTrack {
     pub drums: bool,
     /// Sorted by start; positions are in beats from the start of the file.
     pub notes: Vec<Note>,
+    /// The controllers the track moves, one curve each in the order of
+    /// [`ControllerKind`], over beats from the start of the file.
+    pub controllers: Vec<ControllerCurve>,
 }
 
 impl MidiFile {
@@ -142,6 +159,8 @@ fn parse_track(chunk: &[u8], ticks_per_beat: f64, file: &mut MidiFile) -> Result
     // Per channel: the notes finished so far, and those still sounding by pitch.
     let mut notes: BTreeMap<u8, Vec<Note>> = BTreeMap::new();
     let mut sounding: BTreeMap<(u8, u8), Vec<Sounding>> = BTreeMap::new();
+    // Per channel and controller: where it was put, and when, in beats.
+    let mut moves: BTreeMap<(u8, ControllerKind), Vec<(f64, f64)>> = BTreeMap::new();
 
     let finish = |channel: u8, pitch: u8, started: Sounding, end: u64, notes: &mut BTreeMap<u8, Vec<Note>>| {
         let length = (end.saturating_sub(started.start).max(1)) as f64 / ticks_per_beat;
@@ -218,6 +237,20 @@ fn parse_track(chunk: &[u8], ticks_per_beat: f64, file: &mut MidiFile) -> Result
                             finish(channel, pitch, started, tick, &mut notes);
                         }
                     }
+                    kind @ (0xB0 | 0xD0 | 0xE0) => {
+                        let moved = match kind {
+                            0xB0 => read_controller(first_data & 0x7F)
+                                .map(|controller| (controller, f64::from(second_data & 0x7F) / 127.0)),
+                            0xD0 => Some((ControllerKind::Pressure, f64::from(first_data & 0x7F) / 127.0)),
+                            _ => {
+                                let raw = i32::from(first_data & 0x7F) | i32::from(second_data & 0x7F) << 7;
+                                Some((ControllerKind::PitchBend, bend_value(raw)))
+                            }
+                        };
+                        if let Some((controller, value)) = moved {
+                            moves.entry((channel, controller)).or_default().push((tick as f64 / ticks_per_beat, value));
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -232,6 +265,8 @@ fn parse_track(chunk: &[u8], ticks_per_beat: f64, file: &mut MidiFile) -> Result
         }
     }
 
+    // How long a controller rests before its next movement is a new one.
+    let gap = GESTURE_GAP_SECONDS * file.tempo.unwrap_or(DEFAULT_TEMPO) / 60.0;
     let several = notes.len() > 1;
     for (channel, mut notes) in notes {
         notes.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.pitch.cmp(&b.pitch)));
@@ -240,10 +275,75 @@ fn parse_track(chunk: &[u8], ticks_per_beat: f64, file: &mut MidiFile) -> Result
             (false, true) => format!("{name} ({})", channel + 1),
             (false, false) => name.clone(),
         };
-        file.tracks.push(MidiTrack { name, drums: channel == DRUM_CHANNEL, notes });
+        let controllers = moves
+            .range((channel, ControllerKind::Controller(0))..=(channel, ControllerKind::PitchBend))
+            .map(|((_, controller), events)| ControllerCurve {
+                controller: *controller,
+                points: controllers::thin(events, controller.is_switch(), THIN_TOLERANCE, gap),
+            })
+            .filter(|curve| !curve.points.is_empty())
+            .collect();
+        file.tracks.push(MidiTrack { name, drums: channel == DRUM_CHANNEL, notes, controllers });
     }
     Ok(())
 }
+
+/// The controller a control change with `number` moves, if it is one a
+/// clip keeps: see the module documentation for those that are not.
+fn read_controller(number: u8) -> Option<ControllerKind> {
+    match number {
+        0 | 6 | 32..=63 | 96..=101 => None,
+        number => ControllerKind::numbered(number),
+    }
+}
+
+/// The pitch wheel's fourteen bits as -1..=1. The top of the range is one
+/// step short of the bottom's, so each side is scaled to reach exactly 1.
+fn bend_value(raw: i32) -> f64 {
+    let centred = raw - 8192;
+    if centred >= 0 { f64::from(centred) / 8191.0 } else { f64::from(centred) / 8192.0 }
+}
+
+/// A controller's value as the bytes of the event that sets it on
+/// `channel`, and as a number to tell one such value from the next.
+fn controller_bytes(kind: ControllerKind, channel: u8, value: f64) -> (u32, [u8; 3], usize) {
+    let seven = |value: f64| (value.clamp(0.0, 1.0) * 127.0).round() as u8;
+    match kind {
+        ControllerKind::Controller(number) => {
+            (u32::from(seven(value)), [0xB0 | channel, number & 0x7F, seven(value)], 3)
+        }
+        ControllerKind::Pressure => (u32::from(seven(value)), [0xD0 | channel, seven(value), 0], 2),
+        ControllerKind::PitchBend => {
+            let value = value.clamp(-1.0, 1.0);
+            let raw = (8192.0 + if value >= 0.0 { value * 8191.0 } else { value * 8192.0 }).round() as u32;
+            (raw, [0xE0 | channel, (raw & 0x7F) as u8, (raw >> 7) as u8 & 0x7F], 3)
+        }
+    }
+}
+
+/// The events that make a file's reader hear `curve`: one wherever its
+/// value, in the file's resolution, changes from one tick to the next.
+fn controller_events(curve: &ControllerCurve, channel: u8, out: &mut Vec<(u64, u8, [u8; 3], usize)>) {
+    let Some(last) = curve.points.last() else { return };
+    let ticks = (last.beat.max(0.0) * TICKS_PER_BEAT).round() as u64;
+    // A reader takes what springs back to be at rest already.
+    let mut written = curve.controller.rest().map(|rest| controller_bytes(curve.controller, channel, rest).0);
+    for tick in 0..=ticks {
+        let value = curve.value_at(tick as f64 / TICKS_PER_BEAT);
+        let (step, bytes, length) = controller_bytes(curve.controller, channel, value);
+        if written != Some(step) {
+            written = Some(step);
+            out.push((tick, CONTROLLER_ORDER, bytes, length));
+        }
+    }
+}
+
+/// Where the kinds of event go when they share a tick: a note is let go
+/// of before a controller moves, and a controller has moved before a note
+/// is struck, so that a note begins at the level meant for it.
+const NOTE_OFF_ORDER: u8 = 0;
+const CONTROLLER_ORDER: u8 = 1;
+const NOTE_ON_ORDER: u8 = 2;
 
 fn write_variable(out: &mut Vec<u8>, value: u32) {
     let mut groups = [0u8; 5];
@@ -299,24 +399,31 @@ pub fn write(file: &MidiFile) -> Vec<u8> {
     for track in &file.tracks {
         let channel = if track.drums { DRUM_CHANNEL } else { 0 };
         let to_tick = |beats: f64| (beats.max(0.0) * WRITE_DIVISION as f64).round() as u64;
-        // (tick, is note-on, pitch, velocity); at one tick, offs go first so
-        // a repeated note is released before it is struck again.
-        let mut events: Vec<(u64, bool, u8, u8)> = Vec::with_capacity(track.notes.len() * 2);
+        // (tick, order within the tick, bytes, how many of them); at one
+        // tick, offs go first so a repeated note is released before it is
+        // struck again.
+        let mut events: Vec<(u64, u8, [u8; 3], usize)> = Vec::with_capacity(track.notes.len() * 2);
         for note in &track.notes {
             let start = to_tick(note.start);
             let end = to_tick(note.end()).max(start + 1);
-            events.push((start, true, note.pitch, note.velocity));
-            events.push((end, false, note.pitch, 0));
+            events.push((start, NOTE_ON_ORDER, [0x90 | channel, note.pitch & 0x7F, note.velocity & 0x7F], 3));
+            events.push((end, NOTE_OFF_ORDER, [0x80 | channel, note.pitch & 0x7F, 0], 3));
         }
-        events.sort_by_key(|&(tick, on, pitch, _)| (tick, on, pitch));
+        for curve in &track.controllers {
+            controller_events(curve, channel, &mut events);
+        }
+        // Stable, so a controller's events keep the order they were made in.
+        events.sort_by_key(|&(tick, order, bytes, _)| {
+            (tick, order, if order == CONTROLLER_ORDER { 0 } else { bytes[1] })
+        });
 
         let mut body = Vec::new();
         meta(&mut body, 0x03, track.name.as_bytes());
         let mut last = 0u64;
-        for (tick, on, pitch, velocity) in events {
+        for (tick, _, bytes, length) in events {
             write_variable(&mut body, (tick - last).min(0x0FFF_FFFF) as u32);
             last = tick;
-            body.extend_from_slice(&[if on { 0x90 } else { 0x80 } | channel, pitch & 0x7F, velocity & 0x7F]);
+            body.extend_from_slice(&bytes[..length]);
         }
         meta(&mut body, 0x2F, &[]);
         write_chunk(&mut out, b"MTrk", &body);
@@ -327,6 +434,7 @@ pub fn write(file: &MidiFile) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::{AutomationPoint, Segment};
 
     fn note(pitch: u8, start: f64, length: f64, velocity: u8) -> Note {
         Note { pitch, start, length, velocity }
@@ -347,11 +455,13 @@ mod tests {
                         note(64, 1.5, 0.25, 127),
                         note(67, 4.0, 2.0, 1),
                     ],
+                    controllers: Vec::new(),
                 },
                 MidiTrack {
                     name: "Drums".into(),
                     drums: true,
                     notes: vec![note(36, 0.0, 0.25, 110), note(38, 1.0, 0.25, 90)],
+                    controllers: Vec::new(),
                 },
             ],
         };
@@ -389,9 +499,11 @@ mod tests {
         track.extend_from_slice(&[0x00, 0xFF, 0x03, 0x04, b'B', b'a', b'n', b'd']);
         track.extend_from_slice(&[0x00, 0x90, 48, 100]);
         track.extend_from_slice(&[0x00, 0x99, 36, 120]);
-        // A controller and a program change in between must be skipped.
-        track.extend_from_slice(&[0x10, 0xB0, 7, 100]);
+        // A program change, a bank select and key pressure in between
+        // must be skipped.
+        track.extend_from_slice(&[0x10, 0xB0, 0, 3]);
         track.extend_from_slice(&[0x00, 0xC0, 5]);
+        track.extend_from_slice(&[0x00, 0xA0, 48, 90]);
         track.extend_from_slice(&[0x50, 0x89, 36, 0]);
         track.extend_from_slice(&[0x60, 0xFF, 0x2F, 0x00]);
         let mut bytes = Vec::new();
@@ -434,5 +546,96 @@ mod tests {
             write_variable(&mut bytes, value);
             assert_eq!(Reader { bytes: &bytes, at: 0 }.variable().unwrap(), value);
         }
+    }
+
+    fn point(beat: f64, value: f64) -> AutomationPoint {
+        AutomationPoint::new(beat, value)
+    }
+
+    fn step(beat: f64, value: f64) -> AutomationPoint {
+        AutomationPoint { beat, value, shape: Segment::Hold }
+    }
+
+    fn curve(controller: ControllerKind, points: &[AutomationPoint]) -> ControllerCurve {
+        ControllerCurve { controller, points: points.to_vec() }
+    }
+
+    #[test]
+    fn controllers_are_written_as_events_and_read_back_as_curves() {
+        let written = MidiTrack {
+            name: "Sax".into(),
+            drums: false,
+            notes: vec![note(60, 0.0, 4.0, 100)],
+            controllers: vec![
+                curve(ControllerKind::EXPRESSION, &[point(0.0, 0.25), point(4.0, 1.0), step(4.0, 0.5)]),
+                curve(ControllerKind::SUSTAIN, &[step(1.0, 1.0), step(3.0, 0.0)]),
+                curve(ControllerKind::Pressure, &[point(2.0, 0.0), point(3.0, 1.0)]),
+                curve(ControllerKind::PitchBend, &[point(0.0, 0.0), point(1.0, 1.0), step(2.0, -1.0), step(2.5, 0.0)]),
+            ],
+        };
+        let bytes = write(&MidiFile { tempo: Some(120.0), time_signature: None, tracks: vec![written.clone()] });
+        let file = parse(&bytes).unwrap();
+        let read = &file.tracks[0];
+        assert_eq!(read.notes, written.notes);
+        let kinds: Vec<ControllerKind> = read.controllers.iter().map(|curve| curve.controller).collect();
+        assert_eq!(kinds, written.controllers.iter().map(|curve| curve.controller).collect::<Vec<_>>());
+
+        // Each curve comes back as a few breakpoints that do what the
+        // written one did: within a step of the file's resolution in
+        // value, and a tick in time.
+        for (was, is) in written.controllers.iter().zip(&read.controllers) {
+            assert!(is.points.len() <= was.points.len() + 3, "{}: {:?}", was.controller, is.points);
+            let tolerance = if was.controller == ControllerKind::PitchBend { 0.01 } else { 1.5 / 127.0 };
+            for n in 0..200 {
+                // Just off the ticks, where a step has happened in both.
+                let beat = n as f64 / 40.0 + 0.004;
+                let (wanted, got) = (was.value_at(beat), is.value_at(beat));
+                assert!((wanted - got).abs() <= tolerance, "{} at beat {beat}: {got} for {wanted}", was.controller);
+            }
+        }
+        let pedal = &read.controllers[1];
+        assert_eq!(pedal.points, [step(1.0, 1.0), step(3.0, 0.0)], "a pedal's steps are exact");
+        assert_eq!(read.controllers[0].points[0], point(0.0, 32.0 / 127.0), "the level a part starts at is written");
+        assert_eq!(read.controllers[0].points.last(), Some(&point(4.0, 64.0 / 127.0)));
+
+        // In the file: the expression a note starts at comes before the
+        // note, a pedal that is up to begin with is not said to be, and the
+        // wheel has all its fourteen bits.
+        let track = &bytes[bytes.windows(4).rposition(|chunk| chunk == b"MTrk").unwrap() + 8..];
+        let name_end = 4 + "Sax".len();
+        assert_eq!(&track[name_end..name_end + 8], &[0x00, 0xB0, 11, 32, 0x00, 0x90, 60, 100]);
+        let has = |needle: &[u8]| track.windows(needle.len()).any(|window| window == needle);
+        assert!(!has(&[0xB0, 64, 0, 0x00]) || has(&[0xB0, 64, 127]), "no pedal-up before the pedal first goes down");
+        assert!(has(&[0xE0, 0x7F, 0x7F]) && has(&[0xE0, 0x00, 0x00]), "the wheel reaches both its ends");
+        assert!(has(&[0xD0, 127]), "pressure is a two-byte message");
+    }
+
+    #[test]
+    fn reads_controllers_in_running_status_and_skips_what_is_not_a_movement() {
+        let mut track = Vec::new();
+        track.extend_from_slice(&[0x00, 0x90, 60, 100]);
+        // Bank select, data entry and a registered parameter number: messages, not movements.
+        track.extend_from_slice(&[0x00, 0xB0, 0, 1, 0x00, 32, 2, 0x00, 101, 0, 0x00, 100, 0, 0x00, 6, 12]);
+        // The mod wheel in running status, a tick apart: one gesture.
+        track.extend_from_slice(&[0x00, 0xB0, 1, 0]);
+        for value in 1..=64u8 {
+            track.extend_from_slice(&[0x01, 1, value * 2 - 1]);
+        }
+        // All notes off is no controller either.
+        track.extend_from_slice(&[0x10, 123, 0]);
+        track.extend_from_slice(&[0x00, 0xE0, 0x00, 0x40, 0x30, 0x00, 0x60, 0x10, 0x80, 60, 0]);
+        track.extend_from_slice(&[0x00, 0xFF, 0x2F, 0x00]);
+        let mut bytes = Vec::new();
+        write_chunk(&mut bytes, b"MThd", &[0, 0, 0, 1, 0, 96]);
+        write_chunk(&mut bytes, b"MTrk", &track);
+
+        let file = parse(&bytes).unwrap();
+        let controllers = &file.tracks[0].controllers;
+        let kinds: Vec<String> = controllers.iter().map(|curve| curve.controller.key()).collect();
+        assert_eq!(kinds, ["mod_wheel", "pitch_bend"]);
+        assert_eq!(controllers[0].points, [point(0.0, 0.0), point(64.0 / 96.0, 1.0)], "64 events, one line");
+        let bend = &controllers[1];
+        assert_eq!(bend.value_at(0.0), 0.0);
+        assert!((bend.value_at(1.5) - 0.5).abs() < 0.01, "{:?}", bend.points);
     }
 }

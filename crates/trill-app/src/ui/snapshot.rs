@@ -14,9 +14,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use trill_core::device::ControllerSupport;
 use trill_core::project::AutomationLane;
 use trill_core::{AutomationPoint, AutomationTarget, Beats, Clip, ClipId, DeviceId, Note, Project, Track, TrackId};
-use trill_engine::{Meter, ParamState, Problem, RecordStatus, SampleFile, Session};
+use trill_engine::{Meter, ParamState, Problem, RecordStatus, SampleFile, Session, SilentInstrument};
 
 /// What a MIDI clip plays, as the arrangement draws it.
 pub struct ClipNotes {
@@ -53,6 +54,9 @@ pub struct Snapshot {
     /// The devices that bring a window of their own (plugins do, built-in
     /// devices do not), in ascending order.
     pub editors: Vec<DeviceId>,
+    /// Which MIDI controllers the instrument of each track does something
+    /// with, where that is known.
+    controller_support: HashMap<TrackId, ControllerSupport>,
     /// What each MIDI clip plays, worked out the first time it is drawn and
     /// kept until the next revision.
     clip_notes: RefCell<HashMap<ClipId, Rc<ClipNotes>>>,
@@ -62,6 +66,12 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Which MIDI controllers the instrument of `track` does something
+    /// with: [`ControllerSupport::Unknown`] where that cannot be said.
+    pub fn controller_support(&self, track: TrackId) -> ControllerSupport {
+        self.controller_support.get(&track).cloned().unwrap_or_default()
+    }
+
     /// Copies what the views need out of the session. `devices_for` are the
     /// tracks whose device parameters to include (see [`Self::covers`]).
     pub fn capture(session: &Session, devices_for: &[TrackId]) -> Self {
@@ -101,7 +111,10 @@ impl Snapshot {
         let mut editors: Vec<DeviceId> =
             chains.flatten().map(|device| device.id).filter(|id| session.device_has_editor(*id)).collect();
         editors.sort_unstable();
+        let controller_support =
+            project.tracks.iter().map(|track| (track.id, session.controller_support(track.id))).collect();
         Self {
+            controller_support,
             revision: session.revision(),
             can_undo: session.can_undo(),
             can_redo: session.can_redo(),
@@ -269,6 +282,9 @@ pub struct Live {
     pub armed: Vec<TrackId>,
     /// The take being counted in or recorded, while one is.
     pub take: Option<RecordStatus>,
+    /// The tracks whose instrument has been given notes and has put out
+    /// nothing in answer, with which instrument that is.
+    pub silent: Vec<(TrackId, SilentInstrument)>,
     /// Bars of count-in before a take that starts from a stopped song.
     pub count_in: u32,
     pub master: MeterState,
@@ -286,6 +302,20 @@ impl Live {
     pub fn update_editors(&mut self, snapshot: &Snapshot, session: &Session) {
         self.open_editors.clear();
         self.open_editors.extend(snapshot.editors.iter().copied().filter(|id| session.is_device_editor_open(*id)));
+    }
+
+    /// The instrument of `track`, if it is being given notes and stays
+    /// silent.
+    pub fn silent_instrument(&self, track: TrackId) -> Option<&SilentInstrument> {
+        self.silent.iter().find(|(id, _)| *id == track).map(|(_, silent)| silent)
+    }
+
+    /// Reads which instruments are given notes and stay silent: a number
+    /// per track, and no more where all is well.
+    pub fn update_silent(&mut self, snapshot: &Snapshot, session: &Session) {
+        self.silent.clear();
+        let tracks = snapshot.project.tracks.iter();
+        self.silent.extend(tracks.filter_map(|track| Some((track.id, session.silent_instrument(track.id)?))));
     }
 
     /// Reads what is armed and whether a take is running.

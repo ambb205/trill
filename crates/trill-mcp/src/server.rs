@@ -4,12 +4,15 @@
 //! reach.
 
 use crate::guard::Guard;
-use crate::input::{find_param, parse_notes, parse_param_value, parse_pitch_value, parse_points};
+use crate::input::{
+    ControllerPointInput, controller_scale, find_param, parse_controller, parse_controller_points, parse_notes,
+    parse_param_value, parse_pitch_value, parse_points,
+};
 use crate::requests::*;
 use crate::view::{
-    PresetSearch, audio_device_json, audio_json, clip_json, descriptor_json, descriptor_summary_json, device_json,
-    lane_json, midi_input_json, param_state_json, presets_json, project_json, round, samples_json, scan_json,
-    sound_json, take_json, track_json, transport_json, warp_name,
+    PresetSearch, audio_device_json, audio_json, clip_json, controller_json, descriptor_json, descriptor_summary_json,
+    device_json, lane_json, midi_input_json, param_state_json, presets_json, project_json, round, samples_json,
+    scan_json, sound_json, take_json, track_json, transport_json, warp_name,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -23,8 +26,9 @@ use std::time::Duration;
 use trill_core::device::{BUILTIN_SCHEME, DeviceCategory, DeviceFactory, EditorOptions, EventKind, split_uri};
 use trill_core::midi_file;
 use trill_core::presets::PresetList;
+use trill_core::project::AutomationPoint;
 use trill_core::project::{AutomationTarget, MAX_TEMPO, MAX_VOLUME_DB, MIN_TEMPO, WarpMode};
-use trill_core::{ChainRef, ClipId, DeviceId, EditError, Project, TrackId, TrackKind};
+use trill_core::{ChainRef, ClipId, ControllerKind, DeviceId, EditError, Project, TrackId, TrackKind};
 use trill_engine::render::TrackLevel;
 use trill_engine::{RenderOptions, RenderReport, Session, SessionError, SharedSession};
 use trill_library::{EntryKind, Key, Query, Tag, Tags, suggested_locations};
@@ -63,6 +67,9 @@ Conventions
 name (\"kick\", \"snare\", \"closed_hat\", \"open_hat\", \"clap\", ...). Velocity is 1-127.
 - Every track, clip and device has an integer id, returned when it is created and listed by get_project.
 - Note positions inside a clip are relative to the clip start.
+- A MIDI clip also holds controller curves beside its notes: expression, mod_wheel, pitch_bend, sustain, \
+breath, pressure, volume, or any controller number. Their values are 0-127 (pitch_bend: -1 to 1) and their beats \
+are relative to the clip start. They loop, trim, split and move with the clip.
 
 A good workflow
 1. get_project to see what exists; set_project for tempo and time signature.
@@ -70,11 +77,12 @@ A good workflow
    A plugin (clap:, vst3:) may have thousands of presets: before programming one by hand, search them with \
 describe_device `preset_query` (\"warm pad\") and give `preset` the name or id to create_track, add_device or \
 update_device.
-   Instruments modelled on breath or a bow (solo winds, brass, strings) are silent until their expression is \
-raised, as a saxophone is without air: find the parameter with get_device (query \"expr\"), set it with \
-update_device, and give each phrase a shape with set_automation on it (a swell into a long note, a fall at the \
-end). render names any track that had notes and made no sound.
 3. create_clip with notes. For repeating parts, write one or two bars and set loop_length, or duplicate_clip.
+   Instruments modelled on breath or a bow (solo winds, brass, strings) are silent until they are given \
+expression, as a saxophone is without air. After writing such a line, call shape_dynamics on its clip: it reads \
+the phrases from the notes and writes an expression curve that rises into the high points, swells through long \
+notes and breathes between phrases. set_controllers writes or adjusts a curve point by point (a pedal, a pitch \
+bend, vibrato on the mod wheel). render names any track that had notes and made no sound.
 4. Shape the sound: add_device for effects (reverb, delay, eq, compressor, pump...), update_device for \
 parameters, set_automation for movement such as filter sweeps and fades, update_track for the mix.
 5. render writes a WAV and reports loudness, peak, spectral balance and per-track levels. You cannot hear, so \
@@ -202,7 +210,8 @@ const SILENT_DB: f32 = -119.0;
 /// no sound, each with what to try. A part that is silent in a full mix is
 /// easy to miss in the numbers, and the usual cause with a plugin is not a
 /// mistake in the song: instruments modelled on breath or a bow wait for an
-/// expression controller, as a saxophone waits for air.
+/// expression controller, as a saxophone waits for air. The answer to that
+/// is a curve in the clip.
 fn silent_track_notes(project: &Project, levels: &[TrackLevel], start: f64, end: Option<f64>) -> Vec<String> {
     let soloing = project.tracks.iter().any(|track| track.solo);
     let mut notes = Vec::new();
@@ -217,13 +226,25 @@ fn silent_track_notes(project: &Project, levels: &[TrackLevel], start: f64, end:
             continue;
         }
         let plugin = track.devices.iter().find(|device| device.enabled && !device.uri.starts_with("builtin:"));
+        // Whether the clips that played were given air already.
+        let breathes = |clip: &trill_core::Clip| {
+            [ControllerKind::EXPRESSION, ControllerKind::BREATH].iter().any(|kind| clip.controller(*kind).is_some())
+        };
+        let expressive = track.clips.iter().any(|clip| !clip.muted && playing(clip) && breathes(clip));
         notes.push(match plugin {
+            Some(device) if expressive => format!(
+                "'{}' has clips here but made no sound, though they have an expression curve. Its instrument is \
+                 the plugin {} (device {}). Check that the curve is above zero where the notes are (get_controllers), \
+                 that the notes are in the instrument's range, and that it has a sound loaded (get_device); or try \
+                 one of its presets.",
+                track.name, device.name, device.id.0
+            ),
             Some(device) => format!(
-                "'{}' has clips here but made no sound. Its instrument is the plugin {} (device {}). Some instruments, \
-                 those modelled on breath or a bow among them, are silent until their expression is raised: look for \
-                 it with get_device (query \"expr\", \"breath\" or \"dynam\"), set it with update_device, and \
-                 shape phrases with set_automation on that parameter. If that is not it, try a preset, or check the \
-                 notes are in the instrument's range.",
+                "'{}' has clips here but made no sound. Its instrument is the plugin {} (device {}). Instruments \
+                 modelled on breath or a bow are silent until they are given expression: call shape_dynamics on \
+                 each of its clips (it writes an expression curve from the notes), or write one with \
+                 set_controllers, such as {{\"expression\": [[0, 90]]}}. If that is not it, try a preset, or check \
+                 the notes are in the instrument's range.",
                 track.name, device.name, device.id.0
             ),
             None => format!(
@@ -863,6 +884,7 @@ impl TrillServer {
         let mut session = self.session.lock();
         let reply = (|| {
             let notes = parse_notes(request.notes.as_deref().unwrap_or_default())?;
+            let curves = parse_curves(request.controllers.as_ref())?;
             let name = request.name.clone().unwrap_or_else(|| "Clip".to_string());
             let clip = edit(&mut session, |project| {
                 let id = project.add_midi_clip(TrackId(request.track), name, request.start, request.length)?;
@@ -871,9 +893,16 @@ impl TrillServer {
                 if let Some(loop_length) = request.loop_length {
                     clip.set_loop_length(Some(loop_length))?;
                 }
+                for (kind, points) in &curves {
+                    clip.set_controller(*kind, points.clone())?;
+                }
                 Ok(id)
             })?;
             let mut out = json!({ "clip_id": clip, "note_count": notes.len() });
+            if !curves.is_empty() {
+                out["controllers"] = curves.iter().map(|(kind, _)| kind.key()).collect();
+                add_controller_warnings(&mut out, &session, clip, curves.iter().map(|(kind, _)| *kind));
+            }
             add_range_warning(&mut out, &session, clip);
             Ok(out)
         })();
@@ -1053,6 +1082,72 @@ impl TrillServer {
             .clip(ClipId(request.clip))
             .map(|clip| clip_json(clip, project.time_signature.beats_per_bar(), true))
             .map_err(|error| explain(project, error));
+        finish(reply)
+    }
+
+    /// Read the controller curves of a MIDI clip: the movement of expression, the mod wheel, the pitch wheel,
+    /// the pedals and any other MIDI controller over the clip, as points [beat, value, shape?].
+    #[tool(annotations(title = "Get controllers", read_only_hint = true))]
+    fn get_controllers(&self, Parameters(request): Parameters<GetControllersRequest>) -> CallToolResult {
+        let session = self.session.lock();
+        let project = session.project();
+        let reply = (|| {
+            let wanted = request.controller.as_deref().map(parse_controller).transpose()?;
+            let clip = project.clip(ClipId(request.clip)).map_err(|error| explain(project, error))?;
+            if clip.midi().is_none() {
+                return Err(format!("{} is an audio clip and has no controllers", clip.id));
+            }
+            let curves: Vec<Value> = clip
+                .controllers()
+                .iter()
+                .filter(|curve| wanted.is_none_or(|kind| curve.controller == kind))
+                .map(|curve| controller_json(curve, true))
+                .collect();
+            let mut out = json!({ "clip_id": clip.id, "length": round(clip.length), "controllers": curves });
+            if let (Some(kind), true) = (wanted, curves_is_empty(&out)) {
+                out["note"] =
+                    json!(format!("the clip has no {kind} curve; set_controllers or shape_dynamics writes one"));
+            }
+            Ok(out)
+        })();
+        finish(reply)
+    }
+
+    /// Write controller curves into a MIDI clip: expression, the mod wheel, the pitch wheel, the sustain pedal,
+    /// breath, pressure or any MIDI controller, each as a few points with straight, held or bent segments
+    /// between them. Each curve replaces the clip's curve for that controller; an empty list removes it. A
+    /// curve says where its controller is at every moment of the clip: it stays at its last point's value,
+    /// and before its first point at that point's value (a pedal or the pitch wheel is at rest until its first
+    /// point). After the clip ends, pedals and the pitch wheel return to rest and other controllers stay where
+    /// the clip left them. To give a melody its dynamics, shape_dynamics is quicker than points.
+    #[tool(annotations(title = "Set controllers"))]
+    fn set_controllers(&self, Parameters(request): Parameters<SetControllersRequest>) -> CallToolResult {
+        let mut session = self.session.lock();
+        let id = ClipId(request.clip);
+        let reply = (|| {
+            if request.controllers.is_empty() {
+                return Err(
+                    "`controllers` is empty: give at least one, such as {\"expression\": [[0, 90]]}".to_string()
+                );
+            }
+            let curves = parse_curves(Some(&request.controllers))?;
+            let written = edit(&mut session, |project| {
+                let clip = project.clip_mut(id)?;
+                for (kind, points) in &curves {
+                    clip.set_controller(*kind, points.clone())?;
+                }
+                Ok(clip.controllers().iter().map(|curve| controller_json(curve, false)).collect::<Vec<Value>>())
+            })?;
+            let removed: Vec<String> =
+                curves.iter().filter(|(_, points)| points.is_empty()).map(|(kind, _)| kind.key()).collect();
+            let mut out = json!({ "clip_id": id, "controllers": written });
+            if !removed.is_empty() {
+                out["removed"] = json!(removed);
+            }
+            let kept = curves.iter().filter(|(_, points)| !points.is_empty()).map(|(kind, _)| *kind);
+            add_controller_warnings(&mut out, &session, id, kept);
+            Ok(out)
+        })();
         finish(reply)
     }
 
@@ -1768,6 +1863,17 @@ impl TrillServer {
         // What to play and when, worked out before anything sounds.
         let plan = (|| {
             let notes = parse_notes(&request.notes)?;
+            let mut moves = Vec::new();
+            for (name, value) in request.controllers.iter().flatten() {
+                let kind = parse_controller(name)?;
+                let (low, high) = kind.range();
+                let position = value / controller_scale(kind);
+                if !position.is_finite() || position < low || position > high {
+                    let scale = controller_scale(kind);
+                    return Err(format!("{kind} value {value} is outside {}..={}", low * scale, high * scale));
+                }
+                moves.push((kind, position));
+            }
             if notes.is_empty() {
                 return Err("`notes` is empty: give at least one note".to_string());
             }
@@ -1802,13 +1908,23 @@ impl TrillServer {
                     "the notes take {seconds:.0} s to play; play_notes plays for at most {MAX_LIVE_SECONDS} s"
                 ));
             }
-            Ok((track, tracks, events, seconds))
+            Ok((track, tracks, events, seconds, moves))
         })();
-        let (track, tracks, events, seconds) = match plan {
+        let (track, tracks, events, seconds, moves) = match plan {
             Ok(plan) => plan,
             Err(message) => return finish(Err(message)),
         };
 
+        // The controllers first: a note sounds at the level it finds.
+        {
+            let mut session = self.session.lock();
+            for (kind, position) in &moves {
+                match track {
+                    Some(track) => session.send_controller(track, *kind, *position),
+                    None => session.play_live(kind.event(*position as f32)),
+                }
+            }
+        }
         let started = tokio::time::Instant::now();
         for (at, on, pitch, velocity) in events {
             tokio::time::sleep_until(started + Duration::from_secs_f64(at)).await;
@@ -1869,7 +1985,8 @@ impl TrillServer {
         })
     }
 
-    /// Bring a MIDI file into the song: each part becomes a new track with an instrument and one clip.
+    /// Bring a MIDI file into the song: each part becomes a new track with an instrument and one clip, with
+    /// its notes and its controllers (expression, the wheels, the pedals) as curves.
     #[tool(annotations(title = "Import MIDI file"))]
     fn import_midi(&self, Parameters(request): Parameters<ImportMidiRequest>) -> CallToolResult {
         let mut session = self.session.lock();
@@ -1907,7 +2024,7 @@ impl TrillServer {
                         .map_err(|error| error.to_string())?;
                     let project = session.project();
                     let clip = project.clip(part.clip).map_err(|e| e.to_string())?;
-                    out.push(json!({
+                    let mut entry = json!({
                         "track_id": part.track,
                         "name": project.track(part.track).map_err(|e| e.to_string())?.name,
                         "instrument_device_id": device,
@@ -1915,7 +2032,11 @@ impl TrillServer {
                         "note_count": clip.notes().len(),
                         "length": round(clip.length),
                         "drums": part.drums,
-                    }));
+                    });
+                    if !clip.controllers().is_empty() {
+                        entry["controllers"] = clip.controllers().iter().map(|curve| curve.controller.key()).collect();
+                    }
+                    out.push(entry);
                 }
                 Ok(out)
             })();
@@ -1926,8 +2047,8 @@ impl TrillServer {
         finish(reply)
     }
 
-    /// Write the song's notes to a Standard MIDI File, one track per track, exactly as they sound (loops
-    /// repeated, trims applied).
+    /// Write the song's notes and controller curves to a Standard MIDI File, one track per track, exactly as
+    /// they sound (loops repeated, trims applied).
     #[tool(annotations(title = "Export MIDI file"))]
     fn export_midi(&self, Parameters(request): Parameters<ExportMidiRequest>) -> CallToolResult {
         let session = self.session.lock();
@@ -1944,7 +2065,13 @@ impl TrillServer {
             }
             std::fs::write(&path, midi_file::write(&file)).map_err(|error| format!("{}: {error}", path.display()))?;
             let notes: usize = file.tracks.iter().map(|track| track.notes.len()).sum();
-            Ok(json!({ "path": path.display().to_string(), "tracks": file.tracks.len(), "notes": notes }))
+            let curves: usize = file.tracks.iter().map(|track| track.controllers.len()).sum();
+            Ok(json!({
+                "path": path.display().to_string(),
+                "tracks": file.tracks.len(),
+                "notes": notes,
+                "controller_curves": curves,
+            }))
         })();
         finish(reply)
     }
@@ -2016,6 +2143,75 @@ impl TrillServer {
 
 /// Resolves parameter keys and values against a device's parameter list.
 /// Whether `uri` names a plugin rather than a built-in device.
+/// The curves a tool was given, by controller, as a clip keeps them.
+fn parse_curves(
+    curves: Option<&BTreeMap<String, Vec<ControllerPointInput>>>,
+) -> Result<Vec<(ControllerKind, Vec<AutomationPoint>)>, String> {
+    let mut parsed: Vec<(ControllerKind, Vec<AutomationPoint>)> = Vec::new();
+    for (name, points) in curves.into_iter().flatten() {
+        let kind = parse_controller(name)?;
+        if parsed.iter().any(|(known, _)| *known == kind) {
+            return Err(format!("{kind} is given twice (as '{name}' and under another name)"));
+        }
+        let points = parse_controller_points(kind, points).map_err(|error| format!("{name}: {error}"))?;
+        parsed.push((kind, points));
+    }
+    // In the controllers' own order, whatever order they were named in.
+    parsed.sort_by_key(|(kind, _)| *kind);
+    Ok(parsed)
+}
+
+fn curves_is_empty(out: &Value) -> bool {
+    out["controllers"].as_array().is_none_or(Vec::is_empty)
+}
+
+/// Says what cannot be heard from the reply alone about curves just
+/// written to `clip`: an instrument that is known not to respond to one of
+/// them, and points that lie past what the clip plays.
+pub(crate) fn add_controller_warnings(
+    out: &mut Value,
+    session: &Session,
+    clip: ClipId,
+    kinds: impl Iterator<Item = ControllerKind>,
+) {
+    let project = session.project();
+    let (Ok(found), Ok(track)) = (project.clip(clip), project.clip_track(clip)) else { return };
+    let support = session.controller_support(track);
+    let mut warnings: Vec<String> = Vec::new();
+    for kind in kinds {
+        if support.responds_to(kind) == Some(false) {
+            let known = match &support {
+                trill_core::device::ControllerSupport::Listed(kinds) if !kinds.is_empty() => {
+                    format!(" It responds to: {}.", kinds.iter().map(|kind| kind.key()).collect::<Vec<_>>().join(", "))
+                }
+                _ => String::new(),
+            };
+            warnings.push(format!(
+                "The instrument on this track does not respond to {kind}, so this curve will not be heard.{known}"
+            ));
+        }
+        let playable =
+            found.midi().and_then(|midi| midi.loop_length).map_or(found.length, |length| length.min(found.length));
+        let offset = found.midi().map_or(0.0, |midi| midi.start_offset);
+        let late = found
+            .controller(kind)
+            .is_some_and(|curve| curve.points.iter().any(|point| point.beat > offset + playable + 1e-6));
+        if late {
+            warnings.push(format!(
+                "Some points of the {kind} curve lie after beat {} of the clip, past what it plays; lengthen the clip \
+                 with update_clip or move them earlier.",
+                round(offset + playable)
+            ));
+        }
+    }
+    if support == trill_core::device::ControllerSupport::Unknown && session.instrument(track).is_none() {
+        warnings.push(format!("Track {} has no instrument, so nothing responds to these controllers yet.", track.0));
+    }
+    if !warnings.is_empty() {
+        out["warnings"] = json!(warnings);
+    }
+}
+
 fn is_plugin(uri: &str) -> bool {
     split_uri(uri).is_some_and(|(scheme, _)| scheme != BUILTIN_SCHEME)
 }
@@ -2146,14 +2342,25 @@ mod tests {
 
         let notes = silent_track_notes(&project, &levels, 0.0, Some(16.0));
         assert_eq!(notes.len(), 2, "{notes:#?}");
-        // A plugin: the likely cause and the tools that fix it.
+        // A plugin: the likely cause and the tools that fix it, which is a
+        // curve in the clip.
         assert!(notes[0].starts_with("'Sax' has clips here but made no sound."), "{}", notes[0]);
-        for word in ["expression", "get_device", "update_device", "set_automation"] {
+        for word in ["expression", "shape_dynamics", "set_controllers"] {
             assert!(notes[0].contains(word), "{word}: {}", notes[0]);
         }
+        assert!(!notes[0].contains("set_automation") && !notes[0].contains("update_device"), "{}", notes[0]);
         // A built-in device: what can be wrong with those.
         assert!(notes[1].starts_with("'Kit' has clips here but made no sound."), "{}", notes[1]);
         assert!(!notes[1].contains("expression"));
+
+        // A plugin whose clips have an expression curve already and is
+        // silent all the same is not told to write one.
+        let clip = project.track(sax).unwrap().clips[0].id;
+        let level = vec![AutomationPoint::new(0.0, 0.0)];
+        project.clip_mut(clip).unwrap().set_controller(ControllerKind::EXPRESSION, level).unwrap();
+        let notes = silent_track_notes(&project, &levels, 0.0, Some(16.0));
+        assert!(notes[0].contains("though they have an expression curve"), "{}", notes[0]);
+        assert!(notes[0].contains("get_controllers") && !notes[0].contains("shape_dynamics"), "{}", notes[0]);
 
         // The whole song: the late clip counts now. A solo elsewhere, and
         // nothing that was silenced on purpose is news.

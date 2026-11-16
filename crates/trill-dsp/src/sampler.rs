@@ -32,6 +32,7 @@
 //! write a new state into the project and create the device again.
 
 use crate::define_params;
+use crate::level::ChannelLevel;
 use crate::loading::{SampleRef, SampleSource, StateError, decode, encode};
 use crate::params::{ParamValues, PresetDef, boolean, choice, float, int};
 use crate::playhead::{LoopMode, LoopSpec, Playhead};
@@ -277,11 +278,12 @@ impl Voice {
         self.active && !self.fade.fading()
     }
 
-    /// `bend` is the pitch wheel, as a ratio of frequencies.
+    /// `bend` is the pitch wheel, as a ratio of frequencies, and `levels`
+    /// the channel's level at each frame.
     fn render(
         &mut self,
         d: &Derived,
-        (sample, bend): (&Sample, f64),
+        (sample, bend, levels): (&Sample, f64, &[f32]),
         sample_rate: f32,
         out_left: &mut [f32],
         out_right: &mut [f32],
@@ -296,14 +298,14 @@ impl Voice {
             self.filter.set(d.cutoff * 2f32.powf(octaves), d.q, sample_rate);
         }
 
-        for (out_left, out_right) in out_left.iter_mut().zip(out_right.iter_mut()) {
+        for (frame, (out_left, out_right)) in out_left.iter_mut().zip(out_right.iter_mut()).enumerate() {
             let amp = self.amp.tick(&d.amp);
             self.filt.tick(&d.filt);
             let (mut left, mut right) = head.next(sample, &d.looping);
             if let Some(mode) = d.filter {
                 (left, right) = self.filter.tick(mode, left, right);
             }
-            let level = amp * self.velocity_gain * self.fade.tick();
+            let level = amp * self.velocity_gain * self.fade.tick() * levels[frame];
             *out_left += left * level * d.gain_left;
             *out_right += right * level * d.gain_right;
         }
@@ -324,6 +326,8 @@ pub struct Sampler {
     pedal: Pedal,
     /// The pitch wheel, as a ratio of frequencies.
     bend: f64,
+    /// Channel volume and expression.
+    level: ChannelLevel,
 }
 
 impl Sampler {
@@ -339,6 +343,7 @@ impl Sampler {
             clock: 0,
             pedal: Pedal::default(),
             bend: 1.0,
+            level: ChannelLevel::new(),
         }
     }
 
@@ -461,13 +466,18 @@ impl Sampler {
                 let semitones = if value.is_finite() { value.clamp(-1.0, 1.0) * PITCH_BEND_SEMITONES } else { 0.0 };
                 self.bend = 2f64.powf(f64::from(semitones) / 12.0);
             }
-            EventKind::Control { .. } => {
+            EventKind::Control { controller, value } => {
                 if let Some(down) = kind.sustain() {
                     for pitch in self.pedal.set(down) {
                         self.note_off(pitch);
                     }
+                } else {
+                    let sounding = self.voices.iter().any(|voice| voice.active);
+                    self.level.control(controller, value, sounding);
                 }
             }
+            // The mod wheel and pressure have nothing to act on here.
+            EventKind::ChannelPressure { .. } => {}
         }
     }
 
@@ -477,10 +487,12 @@ impl Sampler {
         let mut pos = 0;
         while pos < left.len() {
             let len = (left.len() - pos).min(CONTROL_BLOCK);
+            let mut levels = [1.0f32; CONTROL_BLOCK];
+            self.level.fill(&mut levels[..len], sample_rate);
             for voice in self.voices.iter_mut().filter(|voice| voice.active) {
                 voice.render(
                     &self.derived,
-                    (sample, self.bend),
+                    (sample, self.bend, &levels[..len]),
                     sample_rate,
                     &mut left[pos..pos + len],
                     &mut right[pos..pos + len],
@@ -551,6 +563,7 @@ impl DeviceProcessor for Sampler {
 
     fn reset(&mut self) {
         self.pedal.clear();
+        self.level.settle();
         for voice in &mut self.voices {
             voice.kill();
         }
@@ -861,5 +874,24 @@ mod tests {
         device.prepare(SR, 512);
         let (left, _) = run(&mut device, SR, 256, 2_000, &[(0, ON(60))]);
         assert_eq!(peak(&left), 0.0);
+    }
+
+    #[test]
+    fn expression_and_volume_set_the_level_of_a_sample() {
+        let file = sine(261.63, SR, 96_000);
+        let looped = with(PLAIN, &[("loop_mode", 1.0), ("release", 0.01)]);
+        let level = |events: &[(usize, EventKind)]| {
+            let mut device = sampler(file.clone(), &looped);
+            let (left, _) = run(&mut device, SR, 256, 24_000, events);
+            rms(&left[12_000..])
+        };
+        let control = |controller: u8, value: f32| EventKind::Control { controller, value };
+        let full = level(&[(0, ON(60))]);
+        assert!((level(&[(0, control(11, 0.5)), (0, ON(60))]) / full - 0.25).abs() < 1e-3);
+        assert!((level(&[(0, control(7, 0.5)), (0, ON(60))]) / full - 0.25).abs() < 1e-3);
+        assert_eq!(level(&[(0, control(11, 0.0)), (0, ON(60))]), 0.0);
+        assert_eq!(level(&[(0, control(11, 1.0)), (0, ON(60))]), full, "at the top it is the sample as it was");
+        // Moved while the note sounds, it is where it was put a moment later.
+        assert!((level(&[(0, ON(60)), (6_000, control(11, 0.5))]) / full - 0.25).abs() < 1e-3);
     }
 }

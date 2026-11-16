@@ -24,19 +24,30 @@ use vst3::Steinberg::Vst::{
 use vst3::Steinberg::{int32, kResultFalse, kResultOk, tresult};
 use vst3::{Class, ComWrapper};
 
-/// The changes of one parameter within a block.
+/// The most points a queue keeps for one block: enough for a controller
+/// that a clip moves, which the engine reports every 32 frames of a block
+/// of at most 512, with some to spare.
+pub(crate) const MAX_POINTS: usize = 24;
+
+/// The changes of one parameter within a block: a curve of points across
+/// it, in the order they were added.
 ///
-/// VST3 lets a queue hold a curve of points across the block. This host
-/// sets parameters at the start of a block and only wants to know where
-/// the plugin left them at its end, so a queue remembers a single point,
-/// the last one added, however many were.
+/// A parameter set by hand or by automation gets one point, at the start
+/// of the block. One that stands for a MIDI controller gets a point
+/// wherever the controller moved, so that a swell in a clip reaches the
+/// plugin as the slope it is and not as a step per block. Of what a plugin
+/// reports back, the host wants to know where it left the parameter: the
+/// last point.
+///
+/// A queue that is full gives its last place to each further point, so
+/// where the parameter ends up is never lost.
 pub(crate) struct ParamQueue {
     id: AtomicU32,
-    /// How many points were added; only the last is kept.
+    /// How many points are held.
     points: AtomicI32,
-    offset: AtomicI32,
-    /// The last point's value, as `f64` bits.
-    value: AtomicU64,
+    offsets: [AtomicI32; MAX_POINTS],
+    /// Each point's value, as `f64` bits.
+    values: [AtomicU64; MAX_POINTS],
 }
 
 impl Class for ParamQueue {
@@ -48,8 +59,8 @@ impl ParamQueue {
         ComWrapper::new(Self {
             id: AtomicU32::new(0),
             points: AtomicI32::new(0),
-            offset: AtomicI32::new(0),
-            value: AtomicU64::new(0),
+            offsets: std::array::from_fn(|_| AtomicI32::new(0)),
+            values: std::array::from_fn(|_| AtomicU64::new(0)),
         })
     }
 
@@ -59,18 +70,40 @@ impl ParamQueue {
         self.points.store(0, Ordering::Relaxed);
     }
 
+    /// Adds a point and returns its index.
     fn add(&self, offset: int32, value: ParamValue) -> int32 {
-        self.offset.store(offset, Ordering::Relaxed);
-        self.value.store(value.to_bits(), Ordering::Relaxed);
-        self.points.fetch_add(1, Ordering::Relaxed)
+        let index = (self.count() as usize).min(MAX_POINTS - 1);
+        self.offsets[index].store(offset, Ordering::Relaxed);
+        self.values[index].store(value.to_bits(), Ordering::Relaxed);
+        self.points.store(index as int32 + 1, Ordering::Relaxed);
+        index as int32
+    }
+
+    /// Puts the parameter at `value` from `offset` on: in place of the
+    /// last point if that is where it is, as a new point otherwise.
+    fn put(&self, offset: int32, value: ParamValue) {
+        match self.count() as usize {
+            held if held > 0 && self.offsets[held - 1].load(Ordering::Relaxed) == offset => {
+                self.values[held - 1].store(value.to_bits(), Ordering::Relaxed);
+            }
+            _ => {
+                self.add(offset, value);
+            }
+        }
     }
 
     fn count(&self) -> int32 {
-        self.points.load(Ordering::Relaxed).max(0)
+        self.points.load(Ordering::Relaxed).clamp(0, MAX_POINTS as int32)
     }
 
+    fn point(&self, index: usize) -> (int32, ParamValue) {
+        let index = index.min(MAX_POINTS - 1);
+        (self.offsets[index].load(Ordering::Relaxed), f64::from_bits(self.values[index].load(Ordering::Relaxed)))
+    }
+
+    /// The last point; meaningful only for a queue that holds one.
     fn last(&self) -> (int32, ParamValue) {
-        (self.offset.load(Ordering::Relaxed), f64::from_bits(self.value.load(Ordering::Relaxed)))
+        self.point((self.count() as usize).saturating_sub(1))
     }
 }
 
@@ -83,12 +116,11 @@ impl IParamValueQueueTrait for ParamQueue {
         self.count()
     }
 
-    /// Every index that exists answers with the point that was kept.
     unsafe fn getPoint(&self, index: int32, sample_offset: *mut int32, value: *mut ParamValue) -> tresult {
         if !(0..self.count()).contains(&index) {
             return kResultFalse;
         }
-        let (offset, point) = self.last();
+        let (offset, point) = self.point(index as usize);
         // SAFETY: each pointer is null or the caller's variable of that type.
         unsafe {
             write_out(sample_offset, offset);
@@ -155,17 +187,16 @@ impl ParamChanges {
         self.claim(id).map(|(_, queue)| queue.add(0, value)).is_some()
     }
 
-    /// Sets parameter `id` to `value` from the start of the block, whether
-    /// or not it has been set in this block already. Returns whether there
-    /// was room.
-    pub(crate) fn set(&self, id: ParamID, value: ParamValue) -> bool {
-        match self.in_use().iter().find(|queue| queue.id.load(Ordering::Relaxed) == id) {
-            Some(queue) => {
-                queue.add(0, value);
-                true
-            }
-            None => self.push(id, value),
-        }
+    /// Puts parameter `id` at `value` from frame `offset` of the block on,
+    /// whether or not it has been set in this block already: the latest
+    /// word on that frame, and a further point on a later one. Offsets
+    /// come in order. Returns whether there was room.
+    pub(crate) fn put(&self, id: ParamID, offset: int32, value: ParamValue) -> bool {
+        let queue = match self.in_use().iter().find(|queue| queue.id.load(Ordering::Relaxed) == id) {
+            Some(queue) => Some(queue),
+            None => self.claim(id).map(|(_, queue)| queue),
+        };
+        queue.map(|queue| queue.put(offset, value)).is_some()
     }
 
     /// Calls `each` with the parameter and final value of every queue that
@@ -298,9 +329,10 @@ impl BlockParams {
     }
 
     /// Builds the parameter changes of the next block. `controls` are the
-    /// parameters the block's MIDI controllers set, with normalized
-    /// values; `silence` adds the plugin's "all sound off".
-    pub(crate) fn fill(&mut self, silence: bool, controls: &[(ParamID, f64)]) {
+    /// parameters the block's MIDI controllers set: parameter, frame of
+    /// the block and normalized value, in order of frame. `silence` adds
+    /// the plugin's "all sound off".
+    pub(crate) fn fill(&mut self, silence: bool, controls: &[(ParamID, u32, f64)]) {
         self.input.clear();
         self.output.clear();
         // What the user changed in the plugin's own editor since the last
@@ -313,9 +345,10 @@ impl BlockParams {
         });
         // What was played on the wheels and the pedal comes after what was
         // set by hand: it is the later word on a parameter both touch.
-        for &(id, value) in controls {
-            self.input.set(id, value);
-            // The plugin's controller hears of it like any other change.
+        for &(id, offset, value) in controls {
+            self.input.put(id, int32::try_from(offset).unwrap_or(int32::MAX), value);
+            // The plugin's controller hears of it like any other change;
+            // of several in a block, the last is what it is left with.
             if let Some(slot) = self.links.slot(id) {
                 self.links.to_controller.post(slot, value);
             }
@@ -590,5 +623,53 @@ mod tests {
         assert!(!input.is_null() && !output.is_null());
         assert_eq!(sent(&feed), []);
         feed.collect();
+    }
+
+    /// Every point of the list's queue `index`, as the plugin reads them.
+    fn points(list: &ComPtr<IParameterChanges>, index: int32) -> Vec<(int32, f64)> {
+        // SAFETY: the list is live, the queue is one of its own, and the
+        // out-parameters are local variables.
+        unsafe {
+            let queue = ComRef::from_raw(list.getParameterData(index)).expect("a queue for the index");
+            (0..queue.getPointCount())
+                .map(|point| {
+                    let (mut offset, mut value) = (-1, f64::NAN);
+                    assert_eq!(queue.getPoint(point, &mut offset, &mut value), kResultOk);
+                    (offset, value)
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn a_controller_that_moves_through_a_block_reaches_the_plugin_as_a_curve() {
+        let (changes, list) = list(4);
+        // A parameter set by hand, and then moved by its controller: the
+        // controller's is the later word on the block's first frame, and a
+        // further point wherever it moved after that.
+        assert!(changes.push(7, 0.25));
+        for (offset, value) in [(0, 0.5), (32, 0.6), (64, 0.7), (64, 0.75)] {
+            assert!(changes.put(7, offset, value));
+        }
+        assert!(changes.put(9, 480, 1.0), "a parameter nothing else set gets a queue of its own");
+        assert_eq!(points(&list, 0), [(0, 0.5), (32, 0.6), (64, 0.75)]);
+        assert_eq!(points(&list, 1), [(480, 1.0)]);
+
+        // More points than a queue keeps: each further one takes the last
+        // place, so where the parameter ends up is never lost.
+        changes.clear();
+        for step in 0..40 {
+            assert!(changes.put(3, step * 16, f64::from(step) / 40.0));
+        }
+        let kept = points(&list, 0);
+        assert_eq!(kept.len(), MAX_POINTS);
+        assert_eq!(kept.last(), Some(&(39 * 16, 39.0 / 40.0)));
+        assert!(kept.windows(2).all(|pair| pair[0].0 < pair[1].0), "{kept:?}");
+        let mut seen = Vec::new();
+        changes.for_each(|id, value| seen.push((id, value)));
+        assert_eq!(seen, [(3, 39.0 / 40.0)]);
+        // A full list has no queue for another parameter, and says so.
+        let (full, _) = self::list(1);
+        assert!(full.put(1, 0, 0.5) && !full.put(2, 0, 0.5));
     }
 }

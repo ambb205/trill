@@ -174,6 +174,18 @@ shot keyboard-shortcuts --demo --shortcuts --keyboard
 shot min-window-keyboard "$song" --select Bass --hold zadg --size 1060x640
 shot graphite-keyboard-playing "$song" --select Lead --hold adg --theme graphite
 
+# Controllers in clips: the lane under the piano roll's notes showing the
+# melody's expression, with a dot on the chip of each controller the clip
+# holds; the mod wheel, in steps and ramps; a controller nothing is written
+# for yet; the computer keyboard's strip with its expression and mod wheel
+# beside the lane; the smallest window; and the other theme.
+shot controllers-expression --demo --select Melody --lane expression
+shot controllers-mod-wheel --demo --select Melody --lane mod_wheel
+shot controllers-empty --demo --select Melody --lane pitch_bend
+shot controllers-keyboard --demo --select Melody --lane expression --hold adg
+shot min-window-controllers --demo --select Melody --lane expression --keyboard --size 1060x640
+shot graphite-controllers-expression --demo --select Melody --lane expression --theme graphite
+
 # Recording: a track armed and a take being counted in, in the arrangement
 # and in the mixer, and the same in the smallest window, where the transport
 # gives up its clock. Then the Audio and MIDI panel on made-up hardware: a

@@ -17,6 +17,7 @@
 //! | write a line as degrees or note names   | [`melody`]                   |
 //! | write drums as a grid, or take a groove | [`steps`], [`drums`], [`grooves`] |
 //! | swing, humanize and shape velocity      | [`expression`]               |
+//! | give a line its swells and its breaths  | [`phrasing`]                 |
 //! | find the key and the chords of a passage | [`analysis`]                |
 //!
 //! Every notation is documented at the top of its module, and every parser
@@ -32,6 +33,7 @@ pub mod error;
 pub mod expression;
 pub mod grooves;
 pub mod melody;
+pub mod phrasing;
 pub mod pitch;
 pub mod progression;
 pub mod roman;
@@ -49,6 +51,7 @@ pub use error::{Error, Result};
 pub use expression::{Dynamics, Humanize, Level, Rng, Swing};
 pub use grooves::{FILLS, Fill, GROOVES, Groove};
 pub use melody::Phrase;
+pub use phrasing::{Phrasing, Shaped};
 pub use pitch::{Interval, Letter, NoteName};
 pub use progression::{Comping, Progression, Rhythm, Span, StrumDirection};
 pub use scale::{Scale, ScaleKind, Snap};

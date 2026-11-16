@@ -147,6 +147,11 @@ pub(crate) enum Captured {
     /// to reach its block. During a count-in that is before the take's
     /// start.
     Event { track: TrackId, kind: EventKind, beat: f64, pass: u32 },
+    /// Where the hand had left a controller on a recorded track as the
+    /// song started rolling (after [`Captured::Rolling`]): the take begins
+    /// with it there. Only controllers that are away from rest, or have
+    /// none, are reported.
+    Standing { track: TrackId, kind: trill_core::ControllerKind, value: f32, pass: u32 },
     /// The take has begun: the count-in, if there was one, is over and the
     /// song is rolling from `beat`.
     Rolling { beat: f64 },

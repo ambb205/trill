@@ -206,11 +206,14 @@ impl Compiler<'_> {
             join_continuations(&mut audio);
 
             let meter = self.meters.tracks.entry(track.id).or_default().clone();
+            let chain = self.chain(&track.devices, project, &mut problems);
             tracks.push(TrackNode {
                 id: track.id,
                 notes,
+                controllers: track.controller_lanes(),
+                fresh_devices: chain.devices.iter().any(|slot| slot.processor.is_some()),
                 audio,
-                chain: self.chain(&track.devices, project, &mut problems),
+                chain,
                 volume_db: track.volume_db,
                 pan: track.pan,
                 audible: routing.audible(project, track),

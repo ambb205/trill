@@ -209,7 +209,7 @@ impl DeviceFactory for ClapFactory {
             created.id,
             plugin_id.to_string(),
             created.editor.clone(),
-            created.feedback.clone(),
+            (created.feedback.clone(), created.notes.is_some_and(|port| port.midi)),
         );
         let processor = ClapProcessor::new(
             main.clone(),

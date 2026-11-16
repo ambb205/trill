@@ -568,13 +568,20 @@ mod tests {
                     name: "Lead".into(),
                     drums: false,
                     notes: vec![note(60, 0.0), note(64, 5.0)],
+                    controllers: Vec::new(),
                 },
                 trill_core::midi_file::MidiTrack {
                     name: String::new(),
                     drums: true,
                     notes: vec![note(36, 0.0), note(38, 1.0)],
+                    controllers: Vec::new(),
                 },
-                trill_core::midi_file::MidiTrack { name: "Empty".into(), drums: false, notes: Vec::new() },
+                trill_core::midi_file::MidiTrack {
+                    name: "Empty".into(),
+                    drums: false,
+                    notes: Vec::new(),
+                    controllers: Vec::new(),
+                },
             ],
         }
     }

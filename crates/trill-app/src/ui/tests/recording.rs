@@ -9,13 +9,14 @@
 
 use super::*;
 use crate::ui::KeyboardOptions;
-use crate::ui::keyboard::Sent;
-use trill_core::TrackKind;
+use crate::ui::keyboard::{Sent, Silence};
+use crate::ui::state::LaneShown;
 use trill_core::device::{
     DeviceCategory, DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance, DeviceProcessor, Event as Played,
     EventKind, ProcessInfo,
 };
 use trill_core::project::Device;
+use trill_core::{ControllerKind, TrackKind};
 use trill_engine::RecordState;
 use trill_engine::host::scripted::ScriptedHost;
 use trill_runtime::midi::scripted::ScriptedMidi;
@@ -32,9 +33,18 @@ const BUFFER: usize = 480;
 pub(super) struct Heard(Mutex<Vec<(DeviceId, EventKind)>>);
 
 impl Heard {
-    /// What was heard since the last call, without the housekeeping every
-    /// instrument is sent when the engine starts or stops.
+    /// The notes heard since the last call: without the housekeeping every
+    /// instrument is sent when the engine starts or stops, and without the
+    /// controllers (the computer keyboard gives a track its expression
+    /// before the first note it plays there).
     pub(super) fn take(&self) -> Vec<(DeviceId, EventKind)> {
+        let notes = |kind: &EventKind| matches!(kind, EventKind::NoteOn { .. } | EventKind::NoteOff { .. });
+        self.everything().into_iter().filter(|(_, kind)| notes(kind)).collect()
+    }
+
+    /// Everything heard since the last call but the housekeeping, the
+    /// controllers among the notes in the order they came.
+    pub(super) fn everything(&self) -> Vec<(DeviceId, EventKind)> {
         let heard = std::mem::take(&mut *self.0.lock());
         heard.into_iter().filter(|(_, kind)| !matches!(kind, EventKind::AllNotesOff)).collect()
     }
@@ -627,4 +637,392 @@ fn held_notes_end_when_the_audio_device_changes() {
     let sent = &harness.app.keyboard().sent;
     let ends = sent.iter().filter(|message| matches!(message, Sent::Off(..))).count();
     assert_eq!((sent.len(), ends), (6, 3), "every note that was started was ended: {sent:?}");
+}
+
+// ---- controllers: what the keyboard gives a track, takes, and silence ---------------
+
+fn control(kind: ControllerKind, step: u8) -> EventKind {
+    kind.event(f32::from(step) / 127.0)
+}
+
+/// The clip's curve for `kind` as beats in the clip and steps of 127.
+fn curve_of(harness: &Harness, clip: ClipId, kind: ControllerKind) -> Vec<(f64, i32)> {
+    let project = harness.project();
+    let points = project.clip(clip).unwrap().controller(kind).map(|curve| curve.points.clone()).unwrap_or_default();
+    points.iter().map(|point| (point.beat, (point.value * 127.0).round() as i32)).collect()
+}
+
+#[test]
+fn an_instrument_hears_the_keyboards_expression_before_the_first_note() {
+    let (mut harness, stage, [keys, ..]) = with_trio(true);
+    let on_keys = probe(&harness, keys);
+    let expression = ControllerKind::EXPRESSION;
+    let wheel = ControllerKind::MOD_WHEEL;
+
+    // Typed: the instrument is given breath, then the note. One that is
+    // silent until it has expression sounds from the first key.
+    harness.step(Modifiers::NONE, vec![key(Key::A, true)]);
+    stage.run(&mut harness, 2 * BUFFER);
+    assert_eq!(
+        stage.heard.everything(),
+        [(on_keys, control(expression, 127)), (on_keys, control(wheel, 0)), (on_keys, on(60))],
+        "in that order"
+    );
+
+    // Less of it under the held note, and some wheel.
+    harness.key(Modifiers::NONE, Key::B);
+    harness.key(Modifiers::NONE, Key::Comma);
+    stage.run(&mut harness, 2 * BUFFER);
+    assert_eq!(stage.heard.everything(), [(on_keys, control(expression, 120)), (on_keys, control(wheel, 10))]);
+
+    // Switched off: the note ends, and the instrument is left with full
+    // expression and its wheel at rest.
+    harness.key(Modifiers::COMMAND, Key::K);
+    stage.run(&mut harness, 2 * BUFFER);
+    let mut heard = stage.heard.everything();
+    heard.sort_by_key(|(_, kind)| !matches!(kind, EventKind::NoteOff { .. }));
+    assert_eq!(heard, [(on_keys, off(60)), (on_keys, control(expression, 127)), (on_keys, control(wheel, 0))]);
+    harness.step(Modifiers::NONE, vec![key(Key::A, false)]);
+    stage.run(&mut harness, 2 * BUFFER);
+    assert_eq!(stage.heard.everything(), []);
+}
+
+#[test]
+fn a_take_records_the_keyboards_controllers_and_the_lane_shows_them_going_down() {
+    let (mut harness, stage, [keys, ..]) = with_trio(true);
+    let depth = harness.undo_depth();
+    harness.idle(2);
+    // A note before the take: from here on the track has the keyboard's
+    // expression, and a take begins with it standing there.
+    harness.key(Modifiers::NONE, Key::A);
+    stage.run(&mut harness, 2 * BUFFER);
+    harness.click_label("Arm Keys");
+    harness.key(Modifiers::NONE, Key::F9);
+    stage.run(&mut harness, 4 * BEAT + BUFFER);
+    assert_eq!(recording(&harness), RecordState::Recording);
+
+    // A note held from a beat in. Under it the wheel goes up in three
+    // steps, a quarter of a beat apart, and then expression down in two.
+    stage.run(&mut harness, BEAT);
+    harness.step(Modifiers::NONE, vec![key(Key::A, true)]);
+    stage.run(&mut harness, BEAT / 2);
+    for _ in 0..3 {
+        harness.key(Modifiers::NONE, Key::Comma);
+        stage.run(&mut harness, BEAT / 4);
+    }
+    for _ in 0..2 {
+        harness.key(Modifiers::NONE, Key::B);
+        stage.run(&mut harness, BEAT / 4);
+    }
+
+    // The take is still running, and its clip is what the Clip tab shows:
+    // the lane, asked for the wheel, has the curve so far.
+    assert_eq!(recording(&harness), RecordState::Recording);
+    let clip = harness.project().track(keys).unwrap().clips[0].id;
+    assert_eq!(harness.app.state().selected_clip, Some(clip), "the take's clip is shown as it is written");
+    harness.click_label("Mod wheel lane");
+    harness.idle(2);
+    assert!(harness.is_on_screen("Mod wheel curve"));
+    let so_far = curve_of(&harness, clip, ControllerKind::MOD_WHEEL);
+    assert_eq!(so_far.iter().map(|(_, step)| *step).collect::<Vec<_>>(), [0, 10, 20, 30], "{so_far:?}");
+    assert_eq!(so_far[0].0, 0.0, "at rest from the start of the take");
+    assert!((so_far[1].0 - 1.5).abs() < 0.1 && (so_far[3].0 - 2.0).abs() < 0.1, "where they were played: {so_far:?}");
+    // One more step, and the lane has it a moment later.
+    harness.key(Modifiers::NONE, Key::Comma);
+    stage.run(&mut harness, BEAT / 4);
+    assert_eq!(curve_of(&harness, clip, ControllerKind::MOD_WHEEL).len(), 5);
+    // The chip of what the take has written says so without being opened.
+    harness.move_to(harness.labeled("Expression lane"));
+    harness.idle(1);
+    assert!(harness.hint().contains("the clip has a curve for it"), "{}", harness.hint());
+
+    harness.step(Modifiers::NONE, vec![key(Key::A, false)]);
+    stage.run(&mut harness, BEAT / 4);
+    harness.key(Modifiers::NONE, Key::Space);
+    stage.run(&mut harness, 2 * BUFFER);
+    assert_eq!(recording(&harness), RecordState::Idle);
+
+    // What was played is in the clip: the note, the expression it was
+    // played with from the take's first moment, and the wheel.
+    let project = harness.project();
+    let taken = project.clip(clip).unwrap();
+    assert_eq!(taken.notes().len(), 1);
+    let expression = curve_of(&harness, clip, ControllerKind::EXPRESSION);
+    assert_eq!(expression.iter().map(|(_, step)| *step).collect::<Vec<_>>(), [127, 120, 110], "{expression:?}");
+    assert_eq!(expression[0].0, 0.0, "it stood at full as the take began");
+    let at = |kind: ControllerKind, beat: f64| (taken.controller(kind).unwrap().value_at(beat) * 127.0).round() as i32;
+    assert_eq!((at(ControllerKind::EXPRESSION, 1.0), at(ControllerKind::EXPRESSION, 3.5)), (127, 110));
+    assert_eq!((at(ControllerKind::MOD_WHEEL, 1.0), at(ControllerKind::MOD_WHEEL, 3.5)), (0, 40));
+    assert_eq!(harness.selected_clips(), [clip]);
+
+    // The whole take, controllers and all, is one undo step.
+    assert_eq!(harness.undo_depth(), depth + 1);
+    harness.key(Modifiers::COMMAND, Key::Z);
+    assert!(harness.project().track(keys).unwrap().clips.is_empty());
+}
+
+#[test]
+fn a_midi_keyboards_wheel_and_pedal_appear_in_the_lane_as_they_are_recorded() {
+    let (mut harness, stage, [keys, ..]) = with_trio(false);
+    harness.idle(2);
+    harness.click_label("Arm Keys");
+    harness.key(Modifiers::NONE, Key::F9);
+    stage.run(&mut harness, 4 * BEAT + BUFFER);
+    assert_eq!(recording(&harness), RecordState::Recording);
+
+    // A note, the pedal down under it, and the pitch wheel pushed up.
+    stage.run(&mut harness, BEAT);
+    stage.midi.send("Keystation", &[0x90, 60, 100]);
+    stage.run(&mut harness, BEAT / 4);
+    stage.midi.send("Keystation", &[0xB0, 64, 127]);
+    stage.run(&mut harness, BEAT / 4);
+    for step in 1..=8u8 {
+        // 14 bits, centre 8192: up to half way in eight reports.
+        let value = 8192 + u16::from(step) * 512;
+        stage.midi.send("Keystation", &[0xE0, (value & 0x7F) as u8, (value >> 7) as u8]);
+        stage.run(&mut harness, BEAT / 16);
+    }
+
+    // Still recording: the clip is in the piano roll and its lane has
+    // the pedal and the wheel, each under its chip.
+    assert_eq!(recording(&harness), RecordState::Recording);
+    let clip = harness.project().track(keys).unwrap().clips[0].id;
+    assert_eq!(harness.app.state().selected_clip, Some(clip));
+    harness.click_label("Sustain lane");
+    harness.idle(2);
+    assert!(harness.is_on_screen("Sustain curve"));
+    // (When each arrived is not looked at: a port's messages are stamped
+    // with the machine's clock, which is not the scripted device's. The
+    // test before this one has the places, from the computer keyboard.)
+    let pedal = curve_of(&harness, clip, ControllerKind::SUSTAIN);
+    assert_eq!(pedal.last().map(|(_, step)| *step), Some(127), "down: {pedal:?}");
+    harness.click_label("Pitch wheel lane");
+    harness.idle(2);
+    assert!(harness.is_on_screen("Pitch wheel curve"));
+    let project = harness.project();
+    let wheel = project.clip(clip).unwrap().controller(ControllerKind::PitchBend).expect("the wheel so far");
+    let reached = wheel.points.last().unwrap().value;
+    assert!((reached - 0.5).abs() < 0.05, "half way up by now: {:?}", wheel.points);
+
+    // The take ends with the pedal down and the wheel up: both are let go
+    // of there, in the clip as on the instrument.
+    stage.midi.send("Keystation", &[0x80, 60, 0]);
+    stage.run(&mut harness, BEAT / 4);
+    harness.key(Modifiers::NONE, Key::Space);
+    stage.run(&mut harness, 2 * BUFFER);
+    let project = harness.project();
+    let taken = project.clip(clip).unwrap();
+    let last = |kind: ControllerKind| taken.controller(kind).unwrap().points.last().unwrap().value;
+    assert_eq!((last(ControllerKind::SUSTAIN), last(ControllerKind::PitchBend)), (0.0, 0.0));
+    assert!(taken.controller(ControllerKind::EXPRESSION).is_none(), "a MIDI keyboard says nothing it was not made to");
+}
+
+#[test]
+fn an_instrument_that_is_given_notes_and_stays_silent_is_pointed_out_where_one_looks() {
+    // A clip with a long note on a track whose instrument (the probe)
+    // never puts anything out, like a modelled sax without its breath.
+    let (mut harness, stage, [keys, bass, _]) = with_trio(false);
+    let clip = harness
+        .session
+        .lock()
+        .edit(|project| {
+            let clip = project.add_midi_clip(keys, "Line", 0.0, 8.0)?;
+            project.clip_mut(clip)?.add_notes(&[Note { pitch: 60, start: 3.0, length: 4.0, velocity: 100 }])?;
+            Ok(clip)
+        })
+        .unwrap();
+    harness.idle(2);
+    harness.click(harness.lane(2.0, 0));
+    harness.idle(2);
+    assert_eq!(harness.app.state().selected_clip, Some(clip));
+    let notice = "Probe is given notes and stays silent";
+    let mark = format!("Keys: {notice}");
+    assert!(!harness.is_on_screen(notice) && !harness.is_on_screen(&mark));
+
+    // The song plays from where the click put the playhead, a beat ahead
+    // of the note. Half a second of silence under the note is not said
+    // anything about; after a second of it the track and the lane both
+    // say so.
+    harness.key(Modifiers::NONE, Key::Space);
+    stage.run(&mut harness, 2 * BEAT);
+    assert!(harness.session.lock().transport().playing);
+    assert_eq!(stage.heard.take().len(), 1, "the note has begun");
+    assert!(!harness.is_on_screen(&mark), "not yet: an instrument may take a moment");
+    stage.run(&mut harness, 2 * BEAT);
+    harness.idle(2);
+    assert!(harness.is_on_screen(&mark), "on the track's header: {:?}", harness.labels);
+    assert!(harness.is_on_screen(notice), "and in the lane's strip under the notes");
+    assert!(!harness.is_on_screen("Bass: Probe is given notes and stays silent"), "only the track that is");
+
+    // It says what to do, and a click goes there.
+    harness.move_to(harness.labeled(&mark));
+    harness.idle(2);
+    let advice = harness.hint();
+    assert!(advice.contains("wait for expression") && advice.contains("computer keyboard"), "{advice}");
+    harness.click_label(notice);
+    harness.idle(2);
+    assert_eq!(harness.app.state().piano.lane, LaneShown::Controller(ControllerKind::EXPRESSION));
+    assert!(harness.is_on_screen("Expression curve"));
+
+    // It stays after the song stops: that is when one looks.
+    harness.key(Modifiers::NONE, Key::Space);
+    stage.run(&mut harness, 2 * BUFFER);
+    harness.idle(2);
+    assert!(harness.is_on_screen(&mark));
+    // From the header of a track that is not the one being looked at, the
+    // click selects the track as well.
+    harness.click(harness.header(1, 120.0, 14.0));
+    assert_eq!(harness.app.state().selected_track, Some(bass));
+    harness.app.state_mut().piano.lane = LaneShown::Velocity;
+    harness.click_label(&mark);
+    harness.idle(1);
+    assert_eq!(harness.app.state().selected_track, Some(keys));
+    assert_eq!(harness.app.state().piano.lane, LaneShown::Controller(ControllerKind::EXPRESSION));
+}
+
+#[test]
+fn the_keyboards_strip_says_when_what_it_plays_makes_no_sound() {
+    let (mut harness, stage, _) = with_trio(true);
+    let silence = |harness: &Harness| harness.app.keyboard().playing().silence.clone();
+    harness.step(Modifiers::NONE, vec![key(Key::A, true)]);
+    stage.run(&mut harness, BEAT);
+    assert_eq!(silence(&harness), None, "half a second in, nothing is said");
+    stage.run(&mut harness, 2 * BEAT);
+    harness.idle(1);
+    assert_eq!(silence(&harness), Some(Silence::Unanswered("Probe".to_owned())));
+    harness.move_to(harness.labeled("Octave down") - vec2(60.0, 0.0));
+    harness.idle(2);
+    assert_eq!(
+        harness.hint(),
+        "Probe is given notes and makes no sound \u{00B7} it may have no sound loaded, or its expression or volume is \
+         at nothing"
+    );
+    // The keys go on playing it all the same: it may answer yet.
+    harness.step(Modifiers::NONE, vec![key(Key::A, false)]);
+    harness.step(Modifiers::NONE, vec![key(Key::D, true)]);
+    stage.run(&mut harness, 2 * BUFFER);
+    assert_eq!(stage.heard.take().last().map(|(_, kind)| *kind), Some(on(64)));
+}
+
+// ---- the real thing ----------------------------------------------------------------
+
+/// SWAM Alto Sax 3, as a VST3 plugin: silent until it is given expression.
+const SWAM_SAX: &str = "vst3:565354575361337377616D20616C746F";
+
+/// The window's own code on the installed instrument the feature was asked
+/// for, without a window: the plugin is hosted with no editor, the audio
+/// device is the scripted one, and the keys are events handed to a frame.
+/// Nothing of the user's is read beside the plugin itself.
+///
+/// ```sh
+/// cargo test -p trill-app a_modelled_saxophone -- --include-ignored --nocapture
+/// ```
+#[test]
+#[ignore = "needs SWAM Alto Sax 3 (VST3) installed; run with `cargo test -p trill-app a_modelled_saxophone -- --include-ignored --nocapture`"]
+fn a_modelled_saxophone_sounds_when_it_is_simply_typed_on() {
+    use trill_plugins::{ClapConfig, PluginHost, Scanner, Vst3Config};
+    let scratch = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp/app-controllers");
+    let clap =
+        ClapConfig { cache_path: Some(scratch.join("clap.json")), scanner: Scanner::Auto, ..ClapConfig::default() };
+    let vst3 = Vst3Config {
+        cache_path: Some(scratch.join("vst3.json")),
+        scanner: Scanner::Auto,
+        preset_paths: vec![scratch.join("vst3 presets")],
+        ..Vst3Config::default()
+    };
+    let plugins = PluginHost::with_configs(clap, vst3).unwrap();
+    if !plugins.vst3().descriptors().iter().any(|descriptor| descriptor.uri == SWAM_SAX) {
+        eprintln!("skipping: {SWAM_SAX} is not installed on this machine");
+        return;
+    }
+    let host = ScriptedHost::with_speakers();
+    let parts = Parts {
+        devices: plugins.factories(),
+        audio: Some(Arc::new(host.clone())),
+        midi: Some(Box::new(ScriptedMidi::new())),
+    };
+    let runtime = Runtime::start_custom(RuntimeOptions::hermetic(), parts).unwrap();
+    let mut sax = None;
+    let mut harness = Harness::on(Arc::new(runtime), UiOptions::default(), |session| {
+        let track = session.edit(|project| Ok(project.add_track("Sax"))).unwrap();
+        session.add_device(ChainRef::Track(track), SWAM_SAX, None, None).unwrap();
+        sax = Some(track);
+    });
+    let sax = sax.unwrap();
+    let clock = host.clone();
+    harness.app.keyboard_mut().set_clock(Arc::new(move || clock.now_ns()));
+    let run = |harness: &mut Harness, seconds: f64| {
+        for _ in 0..(seconds * 100.0) as usize {
+            host.advance(BUFFER);
+        }
+        harness.session.lock().housekeeping();
+        harness.idle(2);
+    };
+    // The loudest the output has been since it was last asked, in dB.
+    host.keep_output();
+    let peak = |_: &Harness| {
+        let (left, right) = host.take_output();
+        let loudest = left.iter().chain(&right).fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+        20.0 * f64::from(loudest).max(1e-6).log10()
+    };
+    let notices = |harness: &Harness| -> Vec<String> {
+        harness.labels.iter().map(|(text, _)| text.clone()).filter(|text| text.contains("is given notes")).collect()
+    };
+    // The plugin goes on waking up for a moment after it is loaded, and
+    // is silent whatever it is given until it has: a few seconds of the
+    // machine's own time, which a window gets by being looked at.
+    for _ in 0..30 {
+        std::thread::sleep(Duration::from_millis(100));
+        run(&mut harness, 0.05);
+    }
+    peak(&harness);
+
+    // A note as a MIDI keyboard without an expression pedal sends it: the
+    // saxophone stays silent, and the window says so on the track.
+    harness.session.lock().note_on(sax, 64, 100);
+    run(&mut harness, 1.5);
+    let unblown = peak(&harness);
+    let said = notices(&harness);
+    harness.session.lock().note_off(sax, 64);
+    run(&mut harness, 0.3);
+    peak(&harness);
+
+    // The computer keyboard is switched on and the same note typed.
+    harness.key(Modifiers::COMMAND, Key::K);
+    assert!(harness.app.keyboard().is_on());
+    harness.step(Modifiers::NONE, vec![key(Key::D, true)]);
+    run(&mut harness, 1.5);
+    let typed = peak(&harness);
+    let said_while_typing = notices(&harness);
+    // Under the held note, expression down to 60 with the B key.
+    for _ in 0..7 {
+        harness.key(Modifiers::NONE, Key::B);
+    }
+    assert_eq!(harness.app.keyboard().expression(), 60);
+    run(&mut harness, 1.0);
+    peak(&harness);
+    run(&mut harness, 1.0);
+    let softer = peak(&harness);
+    // And down to nothing.
+    for _ in 0..6 {
+        harness.key(Modifiers::NONE, Key::B);
+    }
+    assert_eq!(harness.app.keyboard().expression(), 0);
+    // The instrument's own room rings on for a while after the breath.
+    run(&mut harness, 2.5);
+    peak(&harness);
+    run(&mut harness, 1.0);
+    let none = peak(&harness);
+    harness.step(Modifiers::NONE, vec![key(Key::D, false)]);
+    run(&mut harness, 0.2);
+
+    eprintln!("a note without expression: {unblown:.1} dB, and the window says {said:?}");
+    eprintln!("the same note typed on the computer keyboard: {typed:.1} dB, and the window says {said_while_typing:?}");
+    eprintln!("with expression at 60: {softer:.1} dB; at 0: {none:.1} dB");
+    assert!(unblown < -80.0, "silent without expression: {unblown:.1} dB");
+    assert!(said.iter().any(|text| text.starts_with("Sax: ")), "the track is marked: {said:?}");
+    assert!(typed > -40.0, "typed, it sounds: {typed:.1} dB");
+    assert!(said_while_typing.is_empty(), "and nothing is said about a silence there is not: {said_while_typing:?}");
+    assert!(softer < typed - 3.0, "less expression is less sound: {softer:.1} dB after {typed:.1} dB");
+    assert!(none < typed - 30.0, "and none is next to nothing: {none:.1} dB");
 }

@@ -11,7 +11,7 @@ use crate::ui::KeyboardOptions;
 use crate::ui::assistant::testing::Script;
 use crate::ui::keyboard::{Sent, Silence};
 use crate::ui::state::{FocusArea, Tool};
-use trill_core::TrackKind;
+use trill_core::{ControllerKind, TrackKind};
 
 const CTRL: Modifiers = Modifiers::COMMAND;
 const ALT: Modifiers = Modifiers::ALT;
@@ -124,6 +124,73 @@ fn let_go_of_the_chord(harness: &mut Harness) {
         up(harness, key);
     }
     assert_eq!(log(harness), before, "a key that holds no note stops none");
+}
+
+const EXPRESSION: ControllerKind = ControllerKind::EXPRESSION;
+const MOD_WHEEL: ControllerKind = ControllerKind::MOD_WHEEL;
+
+/// Every controller the keyboard has sent to the session, in order, in
+/// steps of 127.
+fn controls(harness: &Harness) -> Vec<(TrackId, ControllerKind, u8)> {
+    harness.app.keyboard().controls.clone()
+}
+
+fn forget_controls(harness: &mut Harness) {
+    harness.app.keyboard_mut().controls.clear();
+}
+
+/// Where a controller is when no keyboard has it anywhere else: full
+/// expression, the mod wheel down.
+fn at_rest(kind: ControllerKind) -> u8 {
+    if kind == EXPRESSION { 127 } else { 0 }
+}
+
+/// What the keyboard holds and what it has sent agree: the last word each
+/// track had about a controller is what the keyboard has written down for
+/// it, and for a track it has written nothing down for, rest. A controller
+/// cannot be moved and forgotten.
+#[track_caller]
+fn assert_controllers_accounted_for(harness: &Harness, context: &str) {
+    let keyboard = harness.app.keyboard();
+    let told = keyboard.told();
+    let mut last: Vec<((TrackId, ControllerKind), u8)> = Vec::new();
+    for (track, kind, value) in &keyboard.controls {
+        match last.iter_mut().find(|(which, _)| *which == (*track, *kind)) {
+            Some(entry) => entry.1 = *value,
+            None => last.push(((*track, *kind), *value)),
+        }
+    }
+    for ((track, kind), value) in last {
+        let held = told
+            .iter()
+            .find(|(on, ..)| *on == track)
+            .and_then(|(_, expression, mod_wheel)| if kind == EXPRESSION { *expression } else { *mod_wheel });
+        let expected = held.unwrap_or(at_rest(kind));
+        assert_eq!(value, expected, "{context}: {kind:?} on {track:?} was left at {value}; told {told:?}");
+    }
+    if !keyboard.is_on() {
+        assert!(told.is_empty(), "{context}: switched off with controllers held: {told:?}");
+    }
+}
+
+/// The keyboard holds no controller anywhere, and every one it moved is
+/// back at rest.
+#[track_caller]
+fn assert_all_given_back(harness: &Harness) {
+    assert_eq!(harness.app.keyboard().told(), [], "the keyboard still holds controllers");
+    assert_controllers_accounted_for(harness, "given back");
+}
+
+/// Holds a chord on `track` with the expression turned down to 100 and the
+/// mod wheel up at 20, and forgets what was sent to get there.
+fn play_with_controllers(harness: &mut Harness, track: TrackId) {
+    hold_a_chord(harness);
+    for key in [Key::B, Key::B, Key::B, Key::Comma, Key::Comma] {
+        harness.key(NONE, key);
+    }
+    assert_eq!(harness.app.keyboard().told(), [(track, Some(100), Some(20))]);
+    assert_eq!(sounding(harness).len(), 3, "the chord goes on under them");
+    forget_controls(harness);
 }
 
 /// How the news that the window is no longer typed into arrives.
@@ -410,12 +477,13 @@ fn switched_on_alt_with_a_letter_is_the_shortcut_the_letter_had() {
     harness.key(ALT, Key::C);
     assert_eq!(harness.app.state().arrangement.tool, Tool::Blade, "Alt+C is the blade");
 
-    // Keys the keyboard does not use are what they were, as is every
-    // chord that had a modifier of its own.
-    harness.key(NONE, Key::B);
-    assert_eq!(harness.app.state().arrangement.tool, Tool::Draw, "B is still the pencil");
-    harness.key(NONE, Key::M);
-    assert_eq!(harness.project().markers.len(), 1, "M still adds a marker");
+    // So are the letters that step expression and the mod wheel.
+    harness.key(ALT, Key::B);
+    assert_eq!(harness.app.state().arrangement.tool, Tool::Draw, "Alt+B is the pencil");
+    harness.key(ALT, Key::M);
+    assert_eq!(harness.project().markers.len(), 1, "Alt+M adds a marker");
+    assert_eq!((harness.app.keyboard().expression(), harness.app.keyboard().mod_wheel()), (127, 0), "and step nothing");
+    // Every chord that had a modifier of its own is what it was.
     harness.key(CTRL, Key::T);
     assert_eq!(harness.project().tracks.len(), 4, "Ctrl+T still adds a track");
     harness.key(CTRL, Key::Z);
@@ -912,6 +980,8 @@ fn whatever_is_done_every_note_that_starts_also_ends() {
                 let key = fingers.remove(random(fingers.len()));
                 up(&mut harness, key);
             }
+            // With no finger to lift: a step of expression or of the wheel.
+            42..=60 => harness.key(NONE, [Key::B, Key::N, Key::M, Key::Comma][random(4)]),
             72..=76 => harness.key(NONE, [Key::Z, Key::X][random(2)]),
             77..=80 => {
                 pedal = !pedal;
@@ -937,7 +1007,7 @@ fn whatever_is_done_every_note_that_starts_also_ends() {
                 type_letter(&mut harness, Key::A, "a");
                 harness.key(NONE, Key::Escape);
             }
-            95 => harness.key(NONE, [Key::C, Key::V][random(2)]),
+            95 => harness.key(NONE, [Key::C, Key::V, Key::B, Key::Comma, Key::N, Key::M][random(6)]),
             96..=97 => {
                 // A track is armed or disarmed, as an assistant might:
                 // the keys then play other tracks than a moment ago.
@@ -983,6 +1053,14 @@ fn whatever_is_done_every_note_that_starts_also_ends() {
         }
         let tracks = &keyboard.playing().tracks;
         assert!(known.iter().all(|(on, _)| tracks.contains(on)), "step {step}: a note sounds on a track not played");
+        // And the same care for controllers: every one the keyboard moved
+        // is where it holds it, on a track it plays, or back at rest.
+        assert_controllers_accounted_for(&harness, &format!("step {step}"));
+        let held = keyboard.told();
+        assert!(
+            held.iter().all(|(on, ..)| tracks.contains(on)),
+            "step {step}: a controller is held on a track not played"
+        );
     }
 
     // The player takes their hands away.
@@ -993,6 +1071,285 @@ fn whatever_is_done_every_note_that_starts_also_ends() {
     assert_all_ended(&harness);
     let started = log(&harness).iter().filter(|message| matches!(message, Sent::On(..))).count();
     assert!(started > 150, "the run did play: {started} notes");
+    // And switch the keyboard off: nothing is left where it was put.
+    if harness.app.keyboard().is_on() {
+        harness.key(CTRL, Key::K);
+    }
+    assert_all_given_back(&harness);
+    let moved = controls(&harness).len();
+    assert!(moved > 60, "the run did move controllers: {moved} messages");
+}
+
+// ---- expression and the mod wheel ---------------------------------------------------
+
+#[test]
+fn a_track_is_given_expression_before_the_first_note_typed_on_it() {
+    let (mut harness, [keys, bass, _]) = playing();
+    assert_eq!(controls(&harness), [], "switched on, the keyboard has said nothing yet");
+    assert_eq!((harness.app.keyboard().expression(), harness.app.keyboard().mod_wheel()), (127, 0));
+
+    // The first note: the track is told the keyboard's expression (full)
+    // and where its wheel is (at rest), so that an instrument which waits
+    // for breath sounds when it is simply typed on.
+    down(&mut harness, Key::A);
+    assert_eq!(controls(&harness), [(keys, EXPRESSION, 127), (keys, MOD_WHEEL, 0)]);
+    assert_eq!(log(&harness), [Sent::On(keys, 60, 100)]);
+    up(&mut harness, Key::A);
+    harness.key(NONE, Key::D);
+    harness.key(NONE, Key::G);
+    assert_eq!(controls(&harness).len(), 2, "once: the track has them from then on");
+
+    // Another track is told when it is first played, and the one left
+    // behind is owed nothing: it was at full and at rest.
+    harness.click(harness.header(1, 120.0, 14.0));
+    assert_eq!(controls(&harness).len(), 2);
+    assert_eq!(harness.app.keyboard().told(), []);
+    harness.key(NONE, Key::A);
+    assert_eq!(controls(&harness)[2..], [(bass, EXPRESSION, 127), (bass, MOD_WHEEL, 0)]);
+
+    // Back on the first, it is told again: something else may have moved
+    // its controllers since.
+    harness.click(harness.header(0, 120.0, 14.0));
+    harness.key(NONE, Key::A);
+    assert_eq!(controls(&harness)[4..], [(keys, EXPRESSION, 127), (keys, MOD_WHEEL, 0)]);
+}
+
+#[test]
+fn b_and_n_step_expression_and_m_and_comma_the_mod_wheel() {
+    let (mut harness, [keys, ..]) = playing();
+    // Before a note is played they are set and shown, and nothing is sent.
+    harness.key(NONE, Key::B);
+    assert_eq!(harness.app.keyboard().expression(), 120);
+    assert!(harness.is_on_screen("Expression 120") && harness.is_on_screen("Mod wheel 0"), "{:?}", harness.labels);
+    assert_eq!(controls(&harness), []);
+    assert_eq!(harness.app.state().arrangement.tool, Tool::Pointer, "B is no pencil while the keyboard plays");
+
+    // The first note brings what they are by now.
+    down(&mut harness, Key::A);
+    assert_eq!(controls(&harness), [(keys, EXPRESSION, 120), (keys, MOD_WHEEL, 0)]);
+    forget_controls(&mut harness);
+
+    // Under a held note every step is heard at once.
+    harness.key(NONE, Key::B);
+    harness.key(NONE, Key::B);
+    harness.key(NONE, Key::N);
+    assert_eq!(controls(&harness), [(keys, EXPRESSION, 110), (keys, EXPRESSION, 100), (keys, EXPRESSION, 110)]);
+    forget_controls(&mut harness);
+    harness.key(NONE, Key::Comma);
+    harness.key(NONE, Key::Comma);
+    harness.key(NONE, Key::M);
+    assert_eq!(controls(&harness), [(keys, MOD_WHEEL, 10), (keys, MOD_WHEEL, 20), (keys, MOD_WHEEL, 10)]);
+    assert!(harness.project().markers.is_empty(), "M adds no marker while the keyboard plays");
+    assert_eq!(sounding(&harness), [(keys, 60)], "the note goes on under them");
+    assert_eq!(log(&harness), [Sent::On(keys, 60, 100)]);
+
+    // A key held down keeps stepping, as the velocity's does.
+    forget_controls(&mut harness);
+    let repeat = Event::Key { key: Key::B, physical_key: None, pressed: true, repeat: true, modifiers: NONE };
+    harness.step(NONE, vec![key_event(Key::B, true)]);
+    harness.step(NONE, vec![repeat.clone()]);
+    harness.step(NONE, vec![repeat]);
+    up(&mut harness, Key::B);
+    assert_eq!(controls(&harness), [(keys, EXPRESSION, 100), (keys, EXPRESSION, 90), (keys, EXPRESSION, 80)]);
+
+    // The strip's own keys do the same, and it shows where both are.
+    forget_controls(&mut harness);
+    harness.click_label("More expression");
+    harness.click_label("Mod wheel up");
+    harness.click_label("Mod wheel down");
+    harness.click_label("Less expression");
+    harness.click_label("Less expression");
+    assert_eq!(
+        controls(&harness),
+        [
+            (keys, EXPRESSION, 90),
+            (keys, MOD_WHEEL, 20),
+            (keys, MOD_WHEEL, 10),
+            (keys, EXPRESSION, 80),
+            (keys, EXPRESSION, 70)
+        ]
+    );
+    harness.idle(1);
+    assert!(harness.is_on_screen("Expression 70") && harness.is_on_screen("Mod wheel 10"), "{:?}", harness.labels);
+    harness.move_to(harness.labeled("Less expression") + vec2(30.0, 0.0));
+    harness.idle(2);
+    assert!(harness.hint().contains("B gives less and N more"), "{}", harness.hint());
+
+    // At nothing, the strip says why nothing sounds.
+    for _ in 0..8 {
+        harness.key(NONE, Key::B);
+    }
+    assert_eq!(harness.app.keyboard().expression(), 0);
+    harness.move_to(harness.labeled("Less expression") + vec2(30.0, 0.0));
+    harness.idle(2);
+    assert_eq!(harness.hint(), "Expression is at 0: nothing sounds \u{00B7} N gives more");
+
+    // With a modifier held the letters are not the keyboard's.
+    forget_controls(&mut harness);
+    harness.key(CTRL, Key::B);
+    harness.key(Modifiers::SHIFT, Key::N);
+    assert_eq!(controls(&harness), []);
+    assert_eq!(harness.app.keyboard().expression(), 0);
+}
+
+#[test]
+fn controllers_are_given_back_when_the_switch_goes_off() {
+    // By its shortcut.
+    let (mut harness, [keys, ..]) = playing();
+    play_with_controllers(&mut harness, keys);
+    harness.key(CTRL, Key::K);
+    assert!(!harness.app.keyboard().is_on());
+    assert_all_ended(&harness);
+    assert_all_given_back(&harness);
+    assert_eq!(controls(&harness), [(keys, EXPRESSION, 127), (keys, MOD_WHEEL, 0)], "full again, and at rest");
+    let_go_of_the_chord(&mut harness);
+
+    // By its button.
+    let (mut harness, [keys, ..]) = playing();
+    play_with_controllers(&mut harness, keys);
+    harness.click_label("Computer keyboard");
+    assert_all_given_back(&harness);
+    let_go_of_the_chord(&mut harness);
+
+    // Switched on again, the keyboard is as it was left, and a track
+    // hears of it with the next note, not before.
+    forget_controls(&mut harness);
+    harness.click_label("Computer keyboard");
+    harness.idle(1);
+    assert_eq!((harness.app.keyboard().expression(), harness.app.keyboard().mod_wheel()), (100, 20));
+    assert_eq!(controls(&harness), []);
+    down(&mut harness, Key::A);
+    assert_eq!(controls(&harness), [(keys, EXPRESSION, 100), (keys, MOD_WHEEL, 20)]);
+
+    // A keyboard at full and at rest owes nothing, and sends nothing.
+    let (mut harness, [keys, ..]) = playing();
+    hold_a_chord(&mut harness);
+    assert_eq!(controls(&harness), [(keys, EXPRESSION, 127), (keys, MOD_WHEEL, 0)]);
+    harness.key(CTRL, Key::K);
+    assert_all_given_back(&harness);
+    assert_eq!(controls(&harness).len(), 2, "nothing was anywhere but where it belongs");
+}
+
+#[test]
+fn controllers_are_given_back_when_another_track_is_selected() {
+    let (mut harness, [keys, bass, empty]) = playing();
+    play_with_controllers(&mut harness, keys);
+    harness.click(harness.header(1, 120.0, 14.0));
+    assert_eq!(harness.app.state().selected_track, Some(bass));
+    assert_all_ended(&harness);
+    assert_all_given_back(&harness);
+    assert_eq!(controls(&harness), [(keys, EXPRESSION, 127), (keys, MOD_WHEEL, 0)], "on the track they were moved on");
+    let_go_of_the_chord(&mut harness);
+
+    // What is played next is played there, with the keyboard as it is.
+    forget_controls(&mut harness);
+    down(&mut harness, Key::A);
+    assert_eq!(controls(&harness), [(bass, EXPRESSION, 100), (bass, MOD_WHEEL, 20)]);
+
+    // The selection moved by something other than a click, to a track
+    // with nothing to play.
+    harness.app.state_mut().select_track(empty);
+    harness.idle(1);
+    assert_all_given_back(&harness);
+
+    // Armed from elsewhere, under held keys: the keys play that track now.
+    let (mut harness, [keys, bass, _]) = playing();
+    play_with_controllers(&mut harness, keys);
+    harness.session.lock().set_armed(bass, true).unwrap();
+    harness.idle(1);
+    assert_all_ended(&harness);
+    assert_all_given_back(&harness);
+}
+
+#[test]
+fn controllers_are_given_back_when_the_window_is_no_longer_typed_into() {
+    for how in [Lost::Seen, Lost::Hidden, Lost::FrameOnly] {
+        let (mut harness, [keys, ..]) = playing();
+        play_with_controllers(&mut harness, keys);
+        lose_focus(&mut harness, how);
+        assert_all_ended(&harness);
+        assert_all_given_back(&harness);
+        assert_eq!(controls(&harness), [(keys, EXPRESSION, 127), (keys, MOD_WHEEL, 0)], "{how:?}");
+        // Said once, however long the window stays away.
+        lose_focus(&mut harness, how);
+        lose_focus(&mut harness, Lost::Hidden);
+        assert_eq!(controls(&harness).len(), 2, "{how:?}");
+
+        // Typed into again, the next note brings the keyboard's own back.
+        forget_controls(&mut harness);
+        harness.step(NONE, vec![Event::WindowFocused(true)]);
+        let_go_of_the_chord(&mut harness);
+        assert_eq!(controls(&harness), [], "{how:?}");
+        down(&mut harness, Key::S);
+        assert_eq!(controls(&harness), [(keys, EXPRESSION, 100), (keys, MOD_WHEEL, 20)], "{how:?}");
+    }
+}
+
+#[test]
+fn controllers_are_given_back_when_something_else_takes_the_keyboard() {
+    // A search field.
+    let (mut harness, [keys, ..]) = playing();
+    play_with_controllers(&mut harness, keys);
+    harness.click(device_search(&harness));
+    assert_all_given_back(&harness);
+    // What is typed there steps nothing.
+    type_letter(&mut harness, Key::B, "b");
+    type_letter(&mut harness, Key::M, "m");
+    assert_eq!((harness.app.keyboard().expression(), harness.app.keyboard().mod_wheel()), (100, 20));
+
+    // A dialog.
+    let (mut harness, [keys, ..]) = playing();
+    play_with_controllers(&mut harness, keys);
+    harness.key(NONE, Key::F1);
+    assert!(harness.app.state().shortcuts_open);
+    assert_all_given_back(&harness);
+
+    // Another project, from the window and from elsewhere.
+    let (mut harness, [keys, ..]) = playing();
+    play_with_controllers(&mut harness, keys);
+    harness.session.lock().new_project();
+    harness.idle(1);
+    assert_all_given_back(&harness);
+
+    // The track goes, or its instrument does.
+    let (mut harness, [keys, ..]) = playing();
+    play_with_controllers(&mut harness, keys);
+    let synth = harness.project().track(keys).unwrap().devices[0].id;
+    harness.session.lock().edit(|project| project.remove_device(synth).map(drop)).unwrap();
+    harness.idle(1);
+    assert_all_given_back(&harness);
+
+    // The program exits.
+    let (mut harness, [keys, ..]) = playing();
+    play_with_controllers(&mut harness, keys);
+    eframe::App::on_exit(&mut harness.app);
+    assert_all_ended(&harness);
+    assert_all_given_back(&harness);
+}
+
+#[test]
+fn a_note_asked_for_with_the_mouse_is_given_expression_too() {
+    let (mut harness, [keys, ..]) = playing();
+    let picture = harness.all_labeled("Computer keyboard keys")[0];
+    let first = pos2(picture.left() + 0.5 * picture.width() / 11.0, picture.bottom() - 4.0);
+    harness.move_to(first);
+    harness.button(first, PointerButton::Primary, true);
+    harness.idle(1);
+    assert_eq!(controls(&harness), [(keys, EXPRESSION, 127), (keys, MOD_WHEEL, 0)]);
+    harness.button(first, PointerButton::Primary, false);
+    harness.idle(2);
+
+    // Switched off, the mouse's notes are plain notes: the keyboard has
+    // no part in them and moves no controller.
+    let (mut harness, _, _, _) = with_two_tracks(UiOptions::default());
+    harness.click(harness.lane(10.0, 0));
+    harness.idle(2);
+    let key = pos2(harness.note_cell(0.0, 60).x - 20.0, harness.note_cell(0.0, 60).y);
+    harness.button(key, PointerButton::Primary, true);
+    harness.idle(1);
+    assert!(harness.app.state().audition.is_some(), "the piano roll's key sounds");
+    assert_eq!(controls(&harness), []);
+    harness.button(key, PointerButton::Primary, false);
 }
 
 // ---- the player can see what they are doing ----------------------------------------

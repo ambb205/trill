@@ -404,4 +404,64 @@ mod tests {
         assert_eq!(values(&lane(&volume), &[8.0, 10.0, 12.0, 20.0]), [-4.0, -4.0, -4.0, 4.0]);
         assert_eq!(lane(&pan), envelope(&[(0.0, -1.0), (1.0, 0.0)]), "it ended before the new time");
     }
+
+    /// The project of [`project`], with a swell over the whole of the long
+    /// clip (0 at beat 4, 1 at beat 12) and a pedal held from 6 to 10.
+    fn expressive() -> (Project, TrackId) {
+        let (mut project, track, [_, long, _]) = project();
+        let clip = project.clip_mut(long).unwrap();
+        clip.set_controller(crate::ControllerKind::EXPRESSION, envelope(&[(0.0, 0.0), (8.0, 1.0)])).unwrap();
+        let hold = crate::Segment::Hold;
+        let pedal = vec![
+            AutomationPoint { beat: 2.0, value: 1.0, shape: hold },
+            AutomationPoint { beat: 6.0, value: 0.0, shape: hold },
+        ];
+        clip.set_controller(crate::ControllerKind::SUSTAIN, pedal).unwrap();
+        (project, track)
+    }
+
+    /// What the expression and the pedal are worth on the track at `beat`.
+    fn worth(project: &Project, track: TrackId, beat: Beats) -> (f64, f64) {
+        let lanes = project.track(track).unwrap().controller_lanes();
+        let at = |kind| lanes.iter().find(|lane| lane.kind == kind).unwrap().value_at(beat);
+        (at(crate::ControllerKind::EXPRESSION), at(crate::ControllerKind::SUSTAIN))
+    }
+
+    #[test]
+    fn controllers_follow_their_clips_through_every_edit_of_time() {
+        // Cut 6..10 out of the swell: each side plays what it played, the
+        // pedal that was down over the cut is down where its clip still is.
+        let (before, track) = expressive();
+        let mut project = before.clone();
+        project.delete_time(6.0, 10.0).unwrap();
+        for beat in [4.0, 5.0, 5.75] {
+            assert_eq!(worth(&project, track, beat), worth(&before, track, beat), "before the cut, at {beat}");
+        }
+        for beat in [6.0, 7.0, 7.75] {
+            assert_eq!(worth(&project, track, beat), worth(&before, track, beat + 4.0), "after the cut, at {beat}");
+        }
+        assert!((worth(&project, track, 5.9).0 - 0.2375).abs() < 1e-12);
+        assert_eq!(worth(&project, track, 6.0), (0.75, 0.0));
+
+        // Repeat 6..10: the stretch is heard twice, curve and pedal alike.
+        let mut project = before.clone();
+        project.duplicate_time(6.0, 10.0).unwrap();
+        for beat in [6.0, 7.5, 9.75] {
+            assert_eq!(worth(&project, track, beat), worth(&before, track, beat), "the first time, at {beat}");
+            assert_eq!(worth(&project, track, beat + 4.0), worth(&before, track, beat), "the second time, at {beat}");
+        }
+        for beat in [14.0, 15.5] {
+            assert_eq!(worth(&project, track, beat), worth(&before, track, beat - 4.0), "what followed, at {beat}");
+        }
+
+        // Open up four beats at 8: the swell stops there, waits, and goes on;
+        // the pedal, which was down, comes up over the empty time.
+        let mut project = before.clone();
+        project.insert_time(8.0, 4.0).unwrap();
+        assert_eq!(worth(&project, track, 7.5), worth(&before, track, 7.5));
+        assert_eq!(worth(&project, track, 10.0), (0.5, 0.0), "held where the swell had got to; no pedal over nothing");
+        for beat in [12.0, 13.0, 15.5] {
+            assert_eq!(worth(&project, track, beat), worth(&before, track, beat - 4.0), "after the room, at {beat}");
+        }
+    }
 }

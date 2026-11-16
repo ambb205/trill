@@ -618,8 +618,12 @@ mod tests {
         assert_eq!(while_playing(alt, Key::K), [Command::ToggleMetronome]);
         assert_eq!(while_playing(alt, Key::L), [Command::ToggleLoop]);
         assert_eq!(while_playing(alt, Key::Z), [Command::ZoomToSelection]);
-        // And only there: the bare letter is a note, taken before this.
-        for key in [Key::A, Key::C, Key::F, Key::K, Key::L, Key::Z] {
+        assert_eq!(while_playing(alt, Key::M), [Command::AddMarker]);
+        assert_eq!(while_playing(alt, Key::B), [Command::ToggleDraw]);
+        // And only there: the bare letter is a note, or a step of the
+        // octave, the velocity, expression or the mod wheel, taken before
+        // this.
+        for key in [Key::A, Key::C, Key::F, Key::K, Key::L, Key::Z, Key::M, Key::B] {
             assert!(while_playing(NONE, key).is_empty(), "{key:?}");
         }
         // What had modifiers of its own, and the keys that play nothing,
@@ -628,8 +632,6 @@ mod tests {
         assert_eq!(while_playing(CTRL, Key::Z), [Command::Undo]);
         assert_eq!(while_playing(CTRL, Key::A), [Command::SelectAll]);
         assert_eq!(while_playing(CTRL, Key::K), [Command::ToggleKeyboard]);
-        assert_eq!(while_playing(NONE, Key::M), [Command::AddMarker]);
-        assert_eq!(while_playing(NONE, Key::B), [Command::ToggleDraw]);
         assert_eq!(while_playing(NONE, Key::Space), [Command::TogglePlay]);
         assert_eq!(while_playing(NONE, Key::Num0), [Command::MuteClips]);
         // Alt with a letter is no new chord to learn: a chord has always

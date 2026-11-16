@@ -422,7 +422,8 @@ impl Session {
         self.playing.takes = self.playing.takes.wrapping_add(1);
         let id = self.playing.takes;
         let group = self.begin_group();
-        self.playing.take = Some(ActiveTake { take: Take::new(id, &tracks, loop_region, bar), group });
+        self.playing.take =
+            Some(ActiveTake { take: Take::new(id, &tracks, loop_region, bar, self.project.tempo), group });
         self.playing.last_take.clear();
         self.engine.send(Message::Record {
             take: id,

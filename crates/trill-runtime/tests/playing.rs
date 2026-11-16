@@ -162,17 +162,20 @@ fn a_keyboard_that_is_plugged_in_plays_without_being_asked() {
     midi.send("Keystation", &[0xE0, 0, 96]);
     midi.send("Keystation", &[0xB0, 1, 127]);
     midi.send("Keystation", &[0xB0, 64, 127]);
-    // Active sensing and aftertouch are counted, not played.
+    // Pressure on the keys arrives too. Active sensing is counted, not
+    // played.
     midi.send("Keystation", &[0xFE]);
-    midi.send("Keystation", &[0xD0, 40]);
-    let played = hears(&heard, 3);
+    midi.send("Keystation", &[0xD0, 127]);
+    let played = hears(&heard, 4);
     assert!(matches!(played[0], EventKind::PitchBend { value } if (value - 0.5).abs() < 0.001), "{played:?}");
     assert_eq!(played[1], EventKind::Control { controller: 1, value: 1.0 });
     assert_eq!(played[2].sustain(), Some(true));
+    assert_eq!(played[3], EventKind::ChannelPressure { value: 1.0 });
     assert_eq!(runtime.midi_inputs()[0].events, 6, "the lamp has something to go by");
     midi.send("Keystation", &[0xB0, 64, 0]);
     midi.send("Keystation", &[0xE0, 0, 64]);
-    hears(&heard, 2);
+    midi.send("Keystation", &[0xD0, 0]);
+    hears(&heard, 3);
 
     // A second device is plugged in while the program runs.
     midi.plug("Pads");

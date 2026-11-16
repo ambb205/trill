@@ -2,7 +2,9 @@
 //! reader that pays per token: compact, but with the ids and positions it
 //! needs to plan its next call.
 
+use crate::input::controller_scale;
 use serde_json::{Value, json};
+use trill_core::ControllerCurve;
 use trill_core::device::{DeviceCategory, DeviceDescriptor, ParamInfo, ParamKind};
 use trill_core::pitch::pitch_name;
 use trill_core::presets::{CATEGORY_SEPARATOR, PresetInfo, PresetList, PresetQuery, PresetStatus};
@@ -26,6 +28,43 @@ pub fn note_json(note: &Note) -> Value {
         "length": round(note.length),
         "velocity": note.velocity,
     })
+}
+
+/// A controller's curve in a clip: what it is called, and its points as
+/// `[beat, value, shape?]` in the values tools take (0 to 127; the pitch
+/// wheel -1 to 1).
+pub fn controller_json(curve: &ControllerCurve, include_points: bool) -> Value {
+    let kind = curve.controller;
+    let scale = controller_scale(kind);
+    let values = || curve.points.iter().map(|point| point.value * scale);
+    let (low, high) = (values().fold(f64::INFINITY, f64::min), values().fold(f64::NEG_INFINITY, f64::max));
+    let mut out = json!({
+        "controller": kind.key(),
+        "point_count": curve.points.len(),
+        "range": format!("{}..{}", round(low), round(high)),
+    });
+    if let (Some(number), true) = (kind.number(), kind.name().is_some()) {
+        out["number"] = json!(number);
+    }
+    if include_points {
+        out["points"] = curve
+            .points
+            .iter()
+            .map(|point| {
+                let (beat, value) = (round(point.beat), round(point.value * scale));
+                match point.shape {
+                    // A pedal steps unless it says otherwise, so that is
+                    // what needs no saying.
+                    Segment::Hold if kind.is_switch() => json!([beat, value]),
+                    Segment::Linear if kind.is_switch() => json!([beat, value, "linear"]),
+                    Segment::Linear => json!([beat, value]),
+                    Segment::Hold => json!([beat, value, "hold"]),
+                    Segment::Curve(bend) => json!([beat, value, round(bend as f64)]),
+                }
+            })
+            .collect();
+    }
+    out
 }
 
 pub fn clip_json(clip: &Clip, beats_per_bar: f64, include_notes: bool) -> Value {
@@ -57,6 +96,10 @@ pub fn clip_json(clip: &Clip, beats_per_bar: f64, include_notes: bool) -> Value 
             }
             if include_notes {
                 fields.insert("notes".into(), midi.notes.iter().map(note_json).collect());
+            }
+            if !midi.controllers.is_empty() {
+                let curves = midi.controllers.iter().map(|curve| controller_json(curve, include_notes));
+                fields.insert("controllers".into(), curves.collect());
             }
         }
         ClipContent::Audio(audio) => {
@@ -272,7 +315,15 @@ pub fn recording_json(session: &Session) -> Option<Value> {
 pub fn take_json(clips: &[TakeClip]) -> Value {
     clips
         .iter()
-        .map(|clip| json!({ "track_id": clip.track, "clip_id": clip.clip, "notes": clip.notes, "new_clip": clip.created }))
+        .map(|clip| {
+            json!({
+                "track_id": clip.track,
+                "clip_id": clip.clip,
+                "notes": clip.notes,
+                "controllers": clip.controllers.iter().map(|kind| kind.key()).collect::<Vec<_>>(),
+                "new_clip": clip.created,
+            })
+        })
         .collect()
 }
 

@@ -10,10 +10,10 @@ use rmcp::schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::Deserialize;
 use serde_json::Value;
 use std::borrow::Cow;
-use trill_core::Note;
 use trill_core::device::{ParamInfo, ParamKind};
 use trill_core::pitch::{parse_drum, parse_pitch};
 use trill_core::project::{AutomationPoint, Segment};
+use trill_core::{ControllerKind, Note};
 
 const DEFAULT_VELOCITY: u8 = 100;
 
@@ -72,6 +72,36 @@ impl JsonSchema for PitchInput {
             "description": "MIDI note number 0-127 (60 = C4 = middle C), a note name such as \"C4\" or \"F#3\", or a \
                 drum name such as \"kick\".",
             "type": ["integer", "string"]
+        })
+    }
+}
+
+/// A point of a controller's curve in a clip, as an object or a
+/// `[beat, value]` pair.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(transparent)]
+pub struct ControllerPointInput(pub Value);
+
+impl JsonSchema for ControllerPointInput {
+    fn schema_name() -> Cow<'static, str> {
+        "ControllerPoint".into()
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "description": "A point of a controller's curve: {beat, value, shape?} or [beat, value, shape?]. `beat`                 is measured from the beginning of the clip, like a note's start. `value` is 0-127, as on any MIDI                 controller (64 is half way; fractions are fine), except for pitch_bend, which runs from -1 (wheel                 fully down) to 1 (fully up) with 0 at rest. `shape` says how the value travels from this point to                 the next: omit it for a straight line (a pedal such as sustain steps instead), \"hold\" to stay                 put and jump at the next point, or a number from -1 to 1 to bend the line (positive starts slowly                 and finishes fast, like a crescendo that grows; negative the reverse).",
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "beat": { "type": "number", "minimum": 0 },
+                        "value": { "type": "number" },
+                        "shape": { "type": ["string", "number"] }
+                    },
+                    "required": ["beat", "value"]
+                },
+                { "type": "array", "items": { "type": ["number", "string"] }, "minItems": 2, "maxItems": 3 }
+            ]
         })
     }
 }
@@ -167,9 +197,10 @@ pub fn parse_notes(notes: &[NoteInput]) -> Result<Vec<Note>, String> {
         .collect()
 }
 
-fn parse_shape(value: Option<&Value>) -> Result<Segment, String> {
+/// `unsaid` is the shape of a point that does not give one.
+fn parse_shape(value: Option<&Value>, unsaid: Segment) -> Result<Segment, String> {
     match value {
-        None | Some(Value::Null) => Ok(Segment::Linear),
+        None | Some(Value::Null) => Ok(unsaid),
         Some(Value::String(name)) => match name.trim().to_ascii_lowercase().as_str() {
             "linear" => Ok(Segment::Linear),
             "hold" | "step" => Ok(Segment::Hold),
@@ -186,11 +217,64 @@ fn parse_shape(value: Option<&Value>) -> Result<Segment, String> {
 }
 
 pub fn parse_points(points: &[PointInput]) -> Result<Vec<AutomationPoint>, String> {
+    parse_point_values(points.iter().map(|point| &point.0), Segment::Linear)
+}
+
+/// What a controller is called in a tool's arguments: a name or a number.
+pub fn parse_controller(text: &str) -> Result<ControllerKind, String> {
+    ControllerKind::parse(text).ok_or_else(|| {
+        format!(
+            "'{text}' is not a controller. Use a name (\"expression\", \"mod_wheel\", \"pitch_bend\", \"sustain\", \
+             \"breath\", \"pressure\", \"volume\", \"pan\") or a controller number from 0 to 119."
+        )
+    })
+}
+
+/// What tools multiply a controller's position by: controllers run from 0
+/// to 127 as on any MIDI gear, the pitch wheel from -1 to 1.
+pub fn controller_scale(kind: ControllerKind) -> f64 {
+    if kind == ControllerKind::PitchBend { 1.0 } else { 127.0 }
+}
+
+/// The points of a curve for `kind`, with their values as a clip keeps
+/// them. A pedal's points step unless they say otherwise.
+pub fn parse_controller_points(
+    kind: ControllerKind,
+    points: &[ControllerPointInput],
+) -> Result<Vec<AutomationPoint>, String> {
+    let unsaid = if kind.is_switch() { Segment::Hold } else { Segment::Linear };
+    let mut parsed = parse_point_values(points.iter().map(|point| &point.0), unsaid)?;
+    let scale = controller_scale(kind);
+    let (low, high) = kind.range();
+    for (index, point) in parsed.iter_mut().enumerate() {
+        if !point.beat.is_finite() || point.beat < 0.0 {
+            return Err(format!(
+                "points[{index}]: beat {} must be >= 0 (beats are counted from the clip's start)",
+                point.beat
+            ));
+        }
+        let position = point.value / scale;
+        if !position.is_finite() || position < low - 1e-9 || position > high + 1e-9 {
+            return Err(format!(
+                "points[{index}]: {kind} value {} is outside {}..={}",
+                point.value,
+                low * scale,
+                high * scale
+            ));
+        }
+        point.value = position.clamp(low, high);
+    }
+    Ok(parsed)
+}
+
+fn parse_point_values<'a>(
+    points: impl Iterator<Item = &'a Value>,
+    unsaid: Segment,
+) -> Result<Vec<AutomationPoint>, String> {
     points
-        .iter()
         .enumerate()
         .map(|(index, point)| {
-            let (beat, value, shape) = match &point.0 {
+            let (beat, value, shape) = match point {
                 Value::Object(fields) => (fields.get("beat"), fields.get("value"), fields.get("shape")),
                 Value::Array(items) if (2..=3).contains(&items.len()) => (items.first(), items.get(1), items.get(2)),
                 _ => (None, None, None),
@@ -198,7 +282,7 @@ pub fn parse_points(points: &[PointInput]) -> Result<Vec<AutomationPoint>, Strin
             let located = |error: String| format!("points[{index}]: {error}");
             match (beat.and_then(Value::as_f64), value.and_then(Value::as_f64)) {
                 (Some(beat), Some(value)) => {
-                    Ok(AutomationPoint { beat, value, shape: parse_shape(shape).map_err(located)? })
+                    Ok(AutomationPoint { beat, value, shape: parse_shape(shape, unsaid).map_err(located)? })
                 }
                 _ => Err(located("expected {beat, value, shape?} or [beat, value, shape?]".to_string())),
             }
@@ -303,6 +387,38 @@ mod tests {
         assert!(bad(json!([[0, 1, "wobbly"]])).starts_with("points[0]: shape 'wobbly'"));
         assert!(bad(json!([[0, 1], [1, 2, 3]])).starts_with("points[1]: shape 3 is outside"));
         assert!(bad(json!([[0]])).contains("expected"));
+    }
+
+    #[test]
+    fn controller_points_are_in_midi_values_and_a_pedal_steps() {
+        let points = |kind: ControllerKind, value: Value| {
+            parse_controller_points(kind, &serde_json::from_value::<Vec<ControllerPointInput>>(value).unwrap())
+        };
+        let swell =
+            points(ControllerKind::EXPRESSION, json!([[0, 0], [2, 63.5, 0.5], { "beat": 4, "value": 127 }])).unwrap();
+        assert_eq!(swell[0], AutomationPoint::new(0.0, 0.0));
+        assert_eq!((swell[1].value, swell[1].shape), (0.5, Segment::Curve(0.5)));
+        assert_eq!(swell[2], AutomationPoint::new(4.0, 1.0));
+        // A pedal's points step unless they say otherwise.
+        let pedal = points(ControllerKind::SUSTAIN, json!([[0, 127], [3.5, 0], [4, 127, "linear"]])).unwrap();
+        assert_eq!((pedal[0].shape, pedal[1].shape, pedal[2].shape), (Segment::Hold, Segment::Hold, Segment::Linear));
+        // The wheel is the one thing not counted to 127.
+        let bend = points(ControllerKind::PitchBend, json!([[0, -1], [1, 0.5]])).unwrap();
+        assert_eq!((bend[0].value, bend[1].value), (-1.0, 0.5));
+
+        let error = points(ControllerKind::EXPRESSION, json!([[0, 64], [1, 200]])).unwrap_err();
+        assert_eq!(error, "points[1]: expression value 200 is outside 0..=127");
+        assert!(points(ControllerKind::PitchBend, json!([[0, 64]])).unwrap_err().contains("outside -1..=1"));
+        assert!(points(ControllerKind::EXPRESSION, json!([[-1, 64]])).unwrap_err().contains("beat -1 must be >= 0"));
+        assert!(points(ControllerKind::EXPRESSION, json!([[0]])).unwrap_err().contains("expected"));
+
+        assert_eq!(parse_controller("Mod Wheel"), Ok(ControllerKind::MOD_WHEEL));
+        assert_eq!(parse_controller("74"), Ok(ControllerKind::Controller(74)));
+        assert!(parse_controller("wobble").unwrap_err().contains("\"expression\""));
+        assert_eq!(
+            (controller_scale(ControllerKind::BREATH), controller_scale(ControllerKind::PitchBend)),
+            (127.0, 1.0)
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! ids). The model knows nothing about audio; the engine compiles it into a
 //! render graph.
 
+use crate::controllers::{self, ControllerCurve, ControllerKind, ControllerLane, LaneClip};
 use crate::ids::{ClipId, DeviceId, TrackId};
 use crate::midi_file::{MidiFile, MidiTrack};
 use crate::presets::PresetRef;
@@ -88,6 +89,36 @@ pub struct MidiContent {
     /// can be dragged back. With a loop, playback wraps at `loop_length`.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub start_offset: Beats,
+    /// The movement of controllers (expression, the wheels, the pedals)
+    /// through the content: at most one curve per controller, in the order
+    /// of [`ControllerKind`]. They loop and are trimmed with the notes. See
+    /// [`controllers`](crate::controllers) for what a controller is worth
+    /// at any moment of the song.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub controllers: Vec<ControllerCurve>,
+}
+
+impl MidiContent {
+    /// The curve for `kind`, if the content has one.
+    pub fn controller(&self, kind: ControllerKind) -> Option<&ControllerCurve> {
+        self.controllers.iter().find(|curve| curve.controller == kind)
+    }
+
+    /// The length of the loop, if the content loops.
+    pub fn period(&self) -> Option<Beats> {
+        self.loop_length.filter(|length| *length > 0.0).map(|length| length.max(MIN_LOOP_BEATS))
+    }
+
+    /// Where in the content a clip is `position` beats after its start:
+    /// the start offset applied and the loop wrapped round. Notes and
+    /// controller points at that beat are what is playing then.
+    pub fn content_beat(&self, position: Beats) -> Beats {
+        let at = self.start_offset.max(0.0) + position;
+        match self.period() {
+            Some(period) => at.rem_euclid(period),
+            None => at,
+        }
+    }
 }
 
 fn is_zero(value: &Beats) -> bool {
@@ -346,6 +377,49 @@ impl Clip {
         }
     }
 
+    /// The controller curves the clip holds, in the order of
+    /// [`ControllerKind`]. Empty for an audio clip.
+    pub fn controllers(&self) -> &[ControllerCurve] {
+        self.midi().map_or(&[], |midi| midi.controllers.as_slice())
+    }
+
+    /// The clip's curve for `kind`, if it has one.
+    pub fn controller(&self, kind: ControllerKind) -> Option<&ControllerCurve> {
+        self.midi().and_then(|midi| midi.controller(kind))
+    }
+
+    /// Replaces the clip's curve for `kind` with `points`, whose beats are
+    /// measured from where the content begins, like the starts of notes,
+    /// and whose values lie within [`ControllerKind::range`]. No points
+    /// removes the curve. The points need not be in order.
+    pub fn set_controller(&mut self, kind: ControllerKind, points: Vec<AutomationPoint>) -> Result<(), EditError> {
+        let id = self.id;
+        let points = controllers::validated(kind, points)?;
+        let ClipContent::Midi(midi) = &mut self.content else {
+            return invalid(format!("{id} is an audio clip and has no controllers"));
+        };
+        midi.controllers.retain(|curve| curve.controller != kind);
+        if !points.is_empty() {
+            let index = midi.controllers.partition_point(|curve| curve.controller < kind);
+            midi.controllers.insert(index, ControllerCurve { controller: kind, points });
+        }
+        Ok(())
+    }
+
+    /// Where in the clip's content the timeline position `beat` falls, if
+    /// the clip is a MIDI clip and lies there.
+    pub fn content_beat(&self, beat: Beats) -> Option<Beats> {
+        let midi = self.midi()?;
+        (beat >= self.start && beat < self.end()).then(|| midi.content_beat(beat - self.start))
+    }
+
+    /// What the clip's curve for `kind` is worth at the timeline position
+    /// `beat`; `None` where the clip does not lie or has no such curve.
+    pub fn controller_value_at(&self, kind: ControllerKind, beat: Beats) -> Option<f64> {
+        let content = self.content_beat(beat)?;
+        self.controller(kind).map(|curve| curve.value_at(content))
+    }
+
     /// Adds notes, keeping them sorted.
     pub fn add_notes(&mut self, notes: &[Note]) -> Result<(), EditError> {
         for note in notes {
@@ -485,6 +559,38 @@ pub struct Track {
     /// mixed in ahead of the chain.
     pub devices: Vec<Device>,
     pub clips: Vec<Clip>,
+}
+
+impl Track {
+    /// What each controller that a clip of this track moves is worth over
+    /// the whole song, one lane per controller in the order of
+    /// [`ControllerKind`]. Muted clips take no part. This is the one
+    /// definition of it (see [`controllers`](crate::controllers)): the
+    /// engine plays these lanes and the exporters write them.
+    pub fn controller_lanes(&self) -> Vec<ControllerLane> {
+        let playing = || self.clips.iter().filter(|clip| !clip.muted).filter_map(|clip| Some((clip, clip.midi()?)));
+        let mut kinds: Vec<ControllerKind> =
+            playing().flat_map(|(_, midi)| midi.controllers.iter().map(|curve| curve.controller)).collect();
+        kinds.sort();
+        kinds.dedup();
+        kinds
+            .into_iter()
+            .map(|kind| {
+                let clips: Vec<LaneClip<'_>> = playing()
+                    .filter_map(|(clip, midi)| {
+                        Some(LaneClip {
+                            start: clip.start,
+                            end: clip.end(),
+                            offset: midi.start_offset.max(0.0),
+                            period: midi.period(),
+                            curve: midi.controller(kind)?,
+                        })
+                    })
+                    .collect();
+                controllers::lane_of(kind, &clips)
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1019,9 +1125,13 @@ impl Project {
                 let shortfall = -(midi.start_offset + delta);
                 if !looped && shortfall > 0.0 {
                     // Make room before the first beat by sliding the notes
-                    // later, so they still sound where they did.
+                    // later, so they still sound where they did, and the
+                    // controller curves with them.
                     for note in &mut midi.notes {
                         note.start += shortfall;
+                    }
+                    for point in midi.controllers.iter_mut().flat_map(|curve| curve.points.iter_mut()) {
+                        point.beat += shortfall;
                     }
                     advance = -midi.start_offset;
                 }
@@ -1119,9 +1229,10 @@ impl Project {
     // ---- MIDI files ----------------------------------------------------
 
     /// Adds the contents of a MIDI file at `at`: one new track with one clip
-    /// per track of the file that has notes. Returns the new track and clip
-    /// ids with whether each is a drum part, so the caller can give them
-    /// instruments. The project's tempo is left alone.
+    /// per track of the file that has notes, with its controllers' curves.
+    /// Returns the new track and clip ids with whether each is a drum
+    /// part, so the caller can give them instruments. The project's tempo
+    /// is left alone.
     pub fn import_midi(&mut self, file: &MidiFile, at: Beats) -> Result<Vec<ImportedPart>, EditError> {
         if !at.is_finite() || at < 0.0 {
             return invalid(format!("start {at} must be >= 0 beats"));
@@ -1130,20 +1241,30 @@ impl Project {
         let mut parts = Vec::new();
         for (index, part) in file.tracks.iter().enumerate().filter(|(_, part)| !part.notes.is_empty()) {
             let name = if part.name.is_empty() { format!("MIDI {}", index + 1) } else { part.name.clone() };
-            let end = part.notes.iter().map(Note::end).fold(0.0, f64::max);
+            // The part lasts as long as anything in it moves.
+            let last_point = part.controllers.iter().filter_map(|curve| curve.points.last()).map(|point| point.beat);
+            let end = part.notes.iter().map(Note::end).chain(last_point).fold(0.0, f64::max);
             // Whole bars, so the clip sits on the grid.
             let length = ((end / bar).ceil().max(1.0)) * bar;
             let track = self.add_track(name.clone());
             let clip = self.add_midi_clip(track, name, at, length)?;
-            self.clip_mut(clip)?.add_notes(&part.notes)?;
+            {
+                let clip = self.clip_mut(clip)?;
+                clip.add_notes(&part.notes)?;
+                for curve in &part.controllers {
+                    clip.set_controller(curve.controller, curve.points.clone())?;
+                }
+            }
             parts.push(ImportedPart { track, clip, drums: part.drums });
         }
         Ok(parts)
     }
 
-    /// The song's MIDI as a file: one track per project track that has MIDI
-    /// clips, with every note where it sounds on the timeline.
+    /// The song's MIDI as a file: one track per project track that has
+    /// notes, with every note where it sounds on the timeline and every
+    /// controller as it moves there ([`Track::controller_lanes`]).
     pub fn export_midi(&self) -> MidiFile {
+        let length = self.length_beats();
         let tracks = self
             .tracks
             .iter()
@@ -1155,7 +1276,8 @@ impl Project {
                 }
                 sort_notes(&mut notes);
                 let drums = track.devices.iter().any(|device| device.uri.contains("drum"));
-                Some(MidiTrack { name: track.name.clone(), drums, notes })
+                let controllers = track.controller_lanes().iter().filter_map(|lane| lane_curve(lane, length)).collect();
+                Some(MidiTrack { name: track.name.clone(), drums, notes, controllers })
             })
             .collect();
         MidiFile { tempo: Some(self.tempo), time_signature: Some(self.time_signature), tracks }
@@ -1352,6 +1474,28 @@ impl Project {
         }
         Ok(project)
     }
+}
+
+/// A lane as one curve over the song up to `length`, in the resolution of a
+/// MIDI file: a lane is pieces of several clips' curves, looped and
+/// offset, which a file has no way of saying.
+fn lane_curve(lane: &ControllerLane, length: Beats) -> Option<ControllerCurve> {
+    let step = 1.0 / crate::midi_file::TICKS_PER_BEAT;
+    let ticks = (length.min(lane.end()) / step).ceil() as u64 + 1;
+    let mut events: Vec<(Beats, f64)> = Vec::new();
+    for tick in 0..=ticks {
+        let beat = tick as f64 * step;
+        let value = lane.value_at(beat);
+        if events.last().is_none_or(|(_, last)| *last != value) {
+            events.push((beat, value));
+        }
+    }
+    // A controller that never leaves rest need not be written.
+    if events.iter().all(|(_, value)| Some(*value) == lane.kind.rest()) {
+        return None;
+    }
+    let points = controllers::thin(&events, lane.kind.is_switch(), controllers::THIN_TOLERANCE / 4.0, 4.0 * step);
+    Some(ControllerCurve { controller: lane.kind, points })
 }
 
 fn sort_clips(clips: &mut [Clip]) {
@@ -1742,9 +1886,14 @@ mod tests {
             tempo: Some(140.0),
             time_signature: None,
             tracks: vec![
-                MidiTrack { name: "Lead".into(), drums: false, notes: vec![note(60, 0.0), note(64, 3.5)] },
-                MidiTrack { name: String::new(), drums: false, notes: vec![] },
-                MidiTrack { name: String::new(), drums: true, notes: vec![note(36, 0.0)] },
+                MidiTrack {
+                    name: "Lead".into(),
+                    drums: false,
+                    notes: vec![note(60, 0.0), note(64, 3.5)],
+                    controllers: vec![],
+                },
+                MidiTrack { name: String::new(), drums: false, notes: vec![], controllers: vec![] },
+                MidiTrack { name: String::new(), drums: true, notes: vec![note(36, 0.0)], controllers: vec![] },
             ],
         };
         let parts = project.import_midi(&file, 6.0).unwrap();
@@ -1889,5 +2038,259 @@ mod tests {
         assert!(project.set_track_volume(track, 12.0).is_err());
         project.set_track_volume(track, -200.0).unwrap();
         assert_eq!(project.track(track).unwrap().volume_db, MIN_VOLUME_DB);
+    }
+
+    fn point(beat: Beats, value: f64) -> AutomationPoint {
+        AutomationPoint::new(beat, value)
+    }
+
+    fn step(beat: Beats, value: f64) -> AutomationPoint {
+        AutomationPoint { beat, value, shape: Segment::Hold }
+    }
+
+    /// What `kind` is worth on `track` at `beat`, as the engine plays it.
+    fn worth(project: &Project, track: TrackId, kind: ControllerKind, beat: Beats) -> f64 {
+        let lanes = project.track(track).unwrap().controller_lanes();
+        lanes.iter().find(|lane| lane.kind == kind).expect("the track moves it").value_at(beat)
+    }
+
+    /// One track with a clip over 8..16 whose expression rises from 0 at its
+    /// first beat to 1 at its last, a pedal that is down from its third beat
+    /// to its sixth, and a note.
+    fn expressive() -> (Project, TrackId, ClipId) {
+        let mut project = Project::new("t");
+        let track = project.add_track("Sax");
+        let clip = project.add_midi_clip(track, "c", 8.0, 8.0).unwrap();
+        let c = project.clip_mut(clip).unwrap();
+        c.add_notes(&[note(60, 0.0), note(62, 4.0)]).unwrap();
+        c.set_controller(ControllerKind::EXPRESSION, vec![point(0.0, 0.0), point(8.0, 1.0)]).unwrap();
+        c.set_controller(ControllerKind::SUSTAIN, vec![step(2.0, 1.0), step(5.0, 0.0)]).unwrap();
+        (project, track, clip)
+    }
+
+    #[test]
+    fn a_clip_holds_one_curve_per_controller() {
+        let (mut project, track, clip) = expressive();
+        let c = project.clip_mut(clip).unwrap();
+        c.set_controller(ControllerKind::PitchBend, vec![point(4.0, -1.0), point(0.0, 0.5)]).unwrap();
+        c.set_controller(ControllerKind::MOD_WHEEL, vec![point(0.0, 0.25)]).unwrap();
+        let kinds: Vec<String> = c.controllers().iter().map(|curve| curve.controller.key()).collect();
+        assert_eq!(kinds, ["mod_wheel", "expression", "sustain", "pitch_bend"], "in the controllers' own order");
+        assert_eq!(c.controller(ControllerKind::PitchBend).unwrap().points[0].beat, 0.0, "points are put in order");
+
+        // Writing a controller again replaces its curve; no points remove it.
+        c.set_controller(ControllerKind::MOD_WHEEL, vec![point(1.0, 0.75)]).unwrap();
+        assert_eq!(c.controller(ControllerKind::MOD_WHEEL).unwrap().points, [point(1.0, 0.75)]);
+        c.set_controller(ControllerKind::MOD_WHEEL, vec![]).unwrap();
+        assert!(c.controller(ControllerKind::MOD_WHEEL).is_none() && c.controllers().len() == 3);
+
+        // A curve that makes no sense changes nothing.
+        let before = c.clone();
+        assert!(c.set_controller(ControllerKind::EXPRESSION, vec![point(0.0, 1.5)]).is_err());
+        assert!(c.set_controller(ControllerKind::EXPRESSION, vec![point(-1.0, 0.5)]).is_err());
+        assert!(c.set_controller(ControllerKind::Controller(123), vec![point(0.0, 0.5)]).is_err());
+        assert_eq!(*c, before);
+        let audio = project.add_audio_clip(track, "a", 0.0, 4.0, AudioContent::new("a.wav")).unwrap();
+        let error = project.clip_mut(audio).unwrap().set_controller(ControllerKind::EXPRESSION, vec![point(0.0, 0.5)]);
+        assert!(error.unwrap_err().to_string().contains("audio clip"));
+        assert!(project.clip(audio).unwrap().controllers().is_empty());
+
+        // Read at a place on the timeline: only where the clip lies.
+        let c = project.clip(clip).unwrap();
+        assert_eq!(c.controller_value_at(ControllerKind::EXPRESSION, 12.0), Some(0.5));
+        assert_eq!(c.controller_value_at(ControllerKind::SUSTAIN, 12.0), Some(1.0));
+        assert_eq!(
+            c.controller_value_at(ControllerKind::SUSTAIN, 9.0),
+            Some(0.0),
+            "up until the point that puts it down"
+        );
+        assert_eq!(c.controller_value_at(ControllerKind::EXPRESSION, 7.9), None);
+        assert_eq!(c.controller_value_at(ControllerKind::EXPRESSION, 16.0), None);
+        assert_eq!(c.controller_value_at(ControllerKind::BREATH, 12.0), None);
+    }
+
+    #[test]
+    fn a_clip_without_controllers_is_saved_as_before_and_old_files_load() {
+        let mut project = Project::new("t");
+        let track = project.add_track("Keys");
+        let clip = project.add_midi_clip(track, "c", 0.0, 4.0).unwrap();
+        project.clip_mut(clip).unwrap().add_notes(&[note(60, 0.0)]).unwrap();
+        let plain = project.to_json();
+        assert!(!plain.contains("controllers"), "nothing new in the file of a clip that has none");
+        // That file is what every project saved before controllers existed
+        // looks like.
+        assert_eq!(Project::from_json(&plain).unwrap(), project);
+
+        let c = project.clip_mut(clip).unwrap();
+        c.set_controller(ControllerKind::EXPRESSION, vec![point(0.0, 0.25), step(2.0, 0.5), point(4.0, 1.0)]).unwrap();
+        c.set_controller(
+            ControllerKind::PitchBend,
+            vec![AutomationPoint { beat: 1.0, value: -0.5, shape: Segment::Curve(0.5) }],
+        )
+        .unwrap();
+        let saved = project.to_json();
+        assert!(saved.contains("\"controller\": 11") && saved.contains("\"controller\": \"pitch_bend\""), "{saved}");
+        let loaded = Project::from_json(&saved).unwrap();
+        assert_eq!(loaded, project);
+        assert_eq!(loaded.to_json(), saved, "a second save writes the same file");
+        // Taking the curves out again leaves the file as it was.
+        let c = project.clip_mut(clip).unwrap();
+        c.set_controller(ControllerKind::EXPRESSION, vec![]).unwrap();
+        c.set_controller(ControllerKind::PitchBend, vec![]).unwrap();
+        assert_eq!(project.to_json(), plain);
+    }
+
+    #[test]
+    fn controllers_go_wherever_their_clip_goes() {
+        let (mut project, track, clip) = expressive();
+        let other = project.add_track("Other");
+        let expression = ControllerKind::EXPRESSION;
+        let curves = project.clip(clip).unwrap().controllers().to_vec();
+
+        // Moved: the curve is heard at the new place.
+        project.move_clip(clip, None, 16.0).unwrap();
+        assert_eq!((worth(&project, track, expression, 20.0), worth(&project, track, expression, 8.0)), (0.5, 0.0));
+        project.move_clip(clip, Some(other), 8.0).unwrap();
+        assert!(project.track(track).unwrap().controller_lanes().is_empty());
+        assert_eq!(worth(&project, other, expression, 12.0), 0.5);
+        project.move_clip(clip, Some(track), 8.0).unwrap();
+
+        // Copied, pasted, and copied with its track: each copy has the curves.
+        let copy = project.duplicate_clip(clip, 32.0, None).unwrap();
+        assert_eq!(project.clip(copy).unwrap().controllers(), curves);
+        assert_eq!(worth(&project, track, expression, 36.0), 0.5);
+        let clipboard = project.clip(clip).unwrap().clone();
+        let pasted = project.paste_clip(other, &clipboard, 0.0).unwrap();
+        assert_eq!(project.clip(pasted).unwrap().controllers(), curves);
+        let twin = project.duplicate_track(track).unwrap();
+        assert_eq!(project.track(twin).unwrap().clips[0].controllers(), curves);
+        // A copy is its own: changing it leaves the original alone.
+        project.clip_mut(copy).unwrap().set_controller(expression, vec![point(0.0, 1.0)]).unwrap();
+        assert_eq!(project.clip(clip).unwrap().controllers(), curves);
+
+        // A muted clip moves nothing.
+        project.remove_clip(copy).unwrap();
+        project.clip_mut(clip).unwrap().muted = true;
+        assert!(project.track(track).unwrap().controller_lanes().is_empty());
+    }
+
+    #[test]
+    fn splitting_and_trimming_keep_what_the_controllers_do() {
+        let (mut project, track, clip) = expressive();
+        let (expression, pedal) = (ControllerKind::EXPRESSION, ControllerKind::SUSTAIN);
+        let inside: Vec<Beats> = (0..32).map(|n| 8.0 + n as f64 * 0.25).collect();
+        let heard = |project: &Project, kind| -> Vec<f64> {
+            inside.iter().map(|beat| worth(project, track, kind, *beat)).collect()
+        };
+        let (was_expression, was_pedal) = (heard(&project, expression), heard(&project, pedal));
+        assert_eq!((was_expression[8], was_pedal[8], was_pedal[20]), (0.25, 1.0, 0.0));
+
+        // Split in the middle of the swell and of the pedal: together the
+        // two halves do exactly what the whole did.
+        let second = project.split_clip(clip, 11.0).unwrap();
+        assert_eq!(project.clip(second).unwrap().controllers(), project.clip(clip).unwrap().controllers());
+        assert_eq!(heard(&project, expression), was_expression);
+        assert_eq!(heard(&project, pedal), was_pedal);
+        assert_eq!(worth(&project, track, pedal, 16.0), 0.0);
+
+        // Trimmed in from the left and pulled back out: nothing is lost.
+        project.trim_clip_start(second, 13.0).unwrap();
+        assert_eq!(worth(&project, track, expression, 14.0), 0.75, "what is left plays what it played");
+        assert_eq!(worth(&project, track, expression, 12.0), 0.375, "the gap holds where the first half stopped");
+        assert_eq!(worth(&project, track, pedal, 12.0), 0.0, "and the pedal comes up at the first half's end");
+        project.trim_clip_start(second, 11.0).unwrap();
+        assert_eq!(heard(&project, expression), was_expression);
+        assert_eq!(heard(&project, pedal), was_pedal);
+
+        // Shortened from the right and lengthened again.
+        project.set_clip_span(second, 11.0, 2.0).unwrap();
+        assert_eq!((worth(&project, track, expression, 12.0), worth(&project, track, expression, 15.0)), (0.5, 0.625));
+        project.set_clip_span(second, 11.0, 5.0).unwrap();
+        assert_eq!(heard(&project, expression), was_expression);
+
+        // Pulled out to the left past where the content begins: the notes
+        // are slid to make room, and the curves with them.
+        project.trim_clip_start(clip, 6.0).unwrap();
+        assert_eq!(project.clip(clip).unwrap().notes()[0].start, 2.0);
+        assert_eq!(project.clip(clip).unwrap().controller(expression).unwrap().points[0], point(2.0, 0.0));
+        assert_eq!(heard(&project, expression)[..12], was_expression[..12]);
+        assert_eq!(worth(&project, track, expression, 7.0), 0.0, "the new room holds the curve's first value");
+    }
+
+    #[test]
+    fn controllers_loop_with_their_clip() {
+        let (mut project, track, clip) = expressive();
+        let expression = ControllerKind::EXPRESSION;
+        // The first two beats of the swell, four times over.
+        project.clip_mut(clip).unwrap().set_loop_length(Some(2.0)).unwrap();
+        let at = |project: &Project, beat| worth(project, track, expression, beat);
+        assert_eq!(
+            (at(&project, 8.0), at(&project, 9.0), at(&project, 10.0), at(&project, 13.0)),
+            (0.0, 0.125, 0.0, 0.125)
+        );
+        assert_eq!(at(&project, 16.0), 0.25, "left where the last pass ended");
+        // Trimming a looped clip keeps the loop's phase, for the curve too.
+        project.trim_clip_start(clip, 9.0).unwrap();
+        assert_eq!((at(&project, 9.0), at(&project, 10.0), at(&project, 11.0)), (0.125, 0.0, 0.125));
+        // And a split leaves both halves in phase.
+        let second = project.split_clip(clip, 12.5).unwrap();
+        assert_eq!((at(&project, 12.0), at(&project, 12.5), at(&project, 13.0)), (0.0, 0.0625, 0.125));
+        assert_eq!(project.clip(second).unwrap().midi().unwrap().start_offset, 0.5);
+        assert_eq!(project.clip(clip).unwrap().content_beat(11.5), Some(1.5));
+        assert_eq!(project.clip(clip).unwrap().content_beat(12.5), None);
+    }
+
+    #[test]
+    fn midi_files_carry_controllers_both_ways() {
+        let (mut project, track, clip) = expressive();
+        let c = project.clip_mut(clip).unwrap();
+        c.set_controller(
+            ControllerKind::PitchBend,
+            vec![point(0.0, 0.0), point(2.0, -1.0), step(2.0, 0.0), point(6.0, 0.5)],
+        )
+        .unwrap();
+        c.set_controller(ControllerKind::Pressure, vec![point(4.0, 0.0), point(5.0, 0.75)]).unwrap();
+
+        let bytes = crate::midi_file::write(&project.export_midi());
+        let file = crate::midi_file::parse(&bytes).unwrap();
+        assert_eq!(file.tracks.len(), 1);
+        let kinds: Vec<String> = file.tracks[0].controllers.iter().map(|curve| curve.controller.key()).collect();
+        assert_eq!(kinds, ["expression", "sustain", "pressure", "pitch_bend"]);
+        let points: usize = file.tracks[0].controllers.iter().map(|curve| curve.points.len()).sum();
+        assert!(points < 40, "{points} points: curves come back as breakpoints, not as every event");
+
+        let mut imported = Project::new("in");
+        let parts = imported.import_midi(&file, 0.0).unwrap();
+        let back = parts[0].track;
+        // Every controller does in the imported song what it did in the
+        // exported one, to within a step of a MIDI controller and a tick.
+        for kind in [ControllerKind::EXPRESSION, ControllerKind::PitchBend, ControllerKind::Pressure] {
+            for n in 0..96 {
+                let beat = 8.0 + n as f64 / 12.0 + 0.01;
+                let (was, is) = (worth(&project, track, kind, beat), worth(&imported, back, kind, beat));
+                assert!((was - is).abs() < 0.02, "{kind} at beat {beat}: {is} for {was}");
+            }
+        }
+        for (beat, down) in [(9.9, 0.0), (10.01, 1.0), (12.9, 1.0), (13.01, 0.0), (15.9, 0.0)] {
+            assert_eq!(worth(&imported, back, ControllerKind::SUSTAIN, beat), down, "the pedal at beat {beat}");
+        }
+        assert_eq!(worth(&imported, back, ControllerKind::PitchBend, 10.01), 0.0, "the wheel's leap back survives");
+        let clip = imported.clip(parts[0].clip).unwrap();
+        assert_eq!((clip.start, clip.length, clip.notes().len()), (0.0, 16.0, 2));
+
+        // A looped, offset clip is written as it sounds: the file knows
+        // nothing of loops.
+        let (mut project, track, clip) = expressive();
+        project.clip_mut(clip).unwrap().set_loop_length(Some(2.0)).unwrap();
+        let file = crate::midi_file::parse(&crate::midi_file::write(&project.export_midi())).unwrap();
+        let mut imported = Project::new("in");
+        let back = imported.import_midi(&file, 0.0).unwrap()[0].track;
+        for beat in [8.5, 9.5, 10.5, 13.5, 15.5] {
+            let (was, is) = (
+                worth(&project, track, ControllerKind::EXPRESSION, beat),
+                worth(&imported, back, ControllerKind::EXPRESSION, beat),
+            );
+            assert!((was - is).abs() < 0.02, "at beat {beat}: {is} for {was}");
+        }
     }
 }

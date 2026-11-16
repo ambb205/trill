@@ -18,11 +18,13 @@ use trill_core::{ChainRef, Device, DeviceId, EditError, Project, TrackId};
 use trill_dsp::{SampleRef, StateError, drumrack, sampler};
 use trill_media::MediaCache;
 
+mod controllers;
 mod editors;
 mod playing;
 mod presets;
 mod take;
 
+pub use controllers::SilentInstrument;
 pub use playing::{MAX_COUNT_IN_BARS, RecordState, RecordStatus};
 pub use take::TakeClip;
 

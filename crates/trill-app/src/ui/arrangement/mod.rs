@@ -9,7 +9,8 @@
 //! The parts: [`rows`] decides which rows there are, [`clips`] paints clips
 //! and [`lanes`] handles what the pointer does to them, [`ops`] holds the
 //! commands on the selection and on a stretch of time (the edits of time
-//! themselves are the model's), [`envelopes`] is the automation lanes,
+//! themselves are the model's), [`envelopes`] is the automation lanes
+//! (and what the piano roll's controller lane shares with them),
 //! [`ruler`] the loop, markers and time selection, [`headers`] the track
 //! headers, [`corner`] the grid and tool controls above them, [`master`]
 //! the master row, and [`reveal`] brings tracks and a stretch of time into
@@ -18,7 +19,7 @@
 mod clips;
 mod corner;
 mod empty;
-mod envelopes;
+pub(super) mod envelopes;
 mod headers;
 mod lanes;
 mod master;

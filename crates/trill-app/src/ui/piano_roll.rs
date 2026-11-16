@@ -1,13 +1,14 @@
 //! The Clip tab: properties of the selected clip and a piano roll for its
-//! notes, with their velocities along the bottom.
+//! notes, with a lane along the bottom that shows their velocities or one
+//! of the clip's MIDI controllers (`controller_lane`).
 //!
 //! Notes have no ids, so selection and drags identify them by value. A drag
 //! keeps the notes as they were when it began and derives every step from
 //! those originals, replacing the previous step's notes in the project.
 
-use super::state::{AUDITION_LENGTH, Clipboard, Cx, FocusArea, NoteDrag};
+use super::state::{AUDITION_LENGTH, Clipboard, Cx, FocusArea, LaneShown, NoteDrag};
 use super::timeline::{self, GridLevel, PitchView, Snap, SpanHit, TimeView};
-use super::{colors, widgets};
+use super::{colors, controller_lane, widgets};
 use eframe::egui::{
     self, Align2, Color32, CursorIcon, Mesh, PointerButton, Pos2, Rangef, Rect, Sense, Shape, Ui, pos2, vec2,
 };
@@ -24,8 +25,11 @@ pub(super) const KEYS_WIDTH: f32 = 44.0;
 /// name instead.
 const DRUM_KEYS_WIDTH: f32 = 88.0;
 pub(super) const RULER_HEIGHT: f32 = 18.0;
-/// Height of the velocity lane under the notes.
-pub(super) const VELOCITY_LANE: f32 = 46.0;
+/// Height of the lane under the notes, below its strip of choices: tall
+/// enough to draw a curve in.
+pub(super) const VELOCITY_LANE: f32 = 56.0;
+/// Height of the strip that says what the lane shows.
+pub(super) const LANE_HEADER: f32 = controller_lane::HEADER;
 /// Space kept clear above the tallest stem and below every stem's foot.
 const STEM_HEADROOM: f32 = 8.0;
 const STEM_FOOT: f32 = 4.0;
@@ -169,7 +173,10 @@ struct Geometry {
     ruler: Rect,
     keys: Rect,
     grid: Rect,
-    /// The velocity lane, across the full width under keys and grid.
+    /// The strip above the lane that says what it shows, across the full
+    /// width under keys and grid.
+    lane_header: Rect,
+    /// The lane (velocities, or a controller's curve), under its strip.
     velocity: Rect,
     time: TimeView,
     pitch: PitchView,
@@ -190,13 +197,16 @@ impl Geometry {
         let split_x = area.left() + keys_width;
         let split_y = area.top() + RULER_HEIGHT;
         // A panel dragged very short gives the lane up before the notes.
-        let lane = if area.height() >= RULER_HEIGHT + VELOCITY_LANE + 60.0 { VELOCITY_LANE } else { 0.0 };
+        let roomy = area.height() >= RULER_HEIGHT + LANE_HEADER + VELOCITY_LANE + 60.0;
+        let (strip, lane) = if roomy { (LANE_HEADER, VELOCITY_LANE) } else { (0.0, 0.0) };
         let lane_top = area.bottom() - lane;
+        let strip_top = lane_top - strip;
         Self {
             corner: Rect::from_min_max(area.min, pos2(split_x, split_y)),
             ruler: Rect::from_min_max(pos2(split_x, area.top()), pos2(area.right(), split_y)),
-            keys: Rect::from_min_max(pos2(area.left(), split_y), pos2(split_x, lane_top)),
-            grid: Rect::from_min_max(pos2(split_x, split_y), pos2(area.right(), lane_top)),
+            keys: Rect::from_min_max(pos2(area.left(), split_y), pos2(split_x, strip_top)),
+            grid: Rect::from_min_max(pos2(split_x, split_y), pos2(area.right(), strip_top)),
+            lane_header: Rect::from_min_max(pos2(area.left(), strip_top), pos2(area.right(), lane_top)),
             velocity: Rect::from_min_max(pos2(area.left(), lane_top), area.max),
             time,
             pitch,
@@ -526,6 +536,7 @@ fn sidebar(ui: &mut Ui, cx: &mut Cx, clip: &Clip, rect: Rect) {
             Some((low, high)) => {
                 format!("{} notes \u{00B7} {} \u{2013} {}", midi.notes.len(), pitch_name(low), pitch_name(high))
             }
+            None if !midi.controllers.is_empty() => "No notes \u{00B7} controllers only".to_owned(),
             None => "No notes yet \u{00B7} click the grid to add one".to_owned(),
         };
         text::paint(ui.painter(), foot, Align2::LEFT_CENTER, theme.text.micro, &summary, theme.ink_faint);
@@ -693,8 +704,9 @@ fn roll(ui: &mut Ui, cx: &mut Cx, track: &Track, clip: &Clip, midi: &MidiContent
         view.framed = Some(clip.id);
         // A long clip that repeats a short phrase is framed on the phrase,
         // with a little of the repeat in view to show that it loops.
-        let phrase = midi.loop_length.map_or(clip.length, |length| (length * 1.25).min(clip.length));
-        view.time.fit(0.0, phrase, inner.grid.width());
+        let (from, to) = sounding_span(clip, midi);
+        let phrase = midi.loop_length.map_or(to - from, |length| (length * 1.25).min(clip.length));
+        view.time.fit(from, from + phrase, inner.grid.width());
         let (low, high) = timeline::pitch_range(&midi.notes).unwrap_or((57, 69));
         let rows = (high - low) as f32 + 9.0;
         view.pitch.row_height = (inner.grid.height() / rows).clamp(8.0, 12.0).round();
@@ -721,7 +733,24 @@ fn roll(ui: &mut Ui, cx: &mut Cx, track: &Track, clip: &Clip, midi: &MidiContent
     corner(ui, cx, &geometry);
     grid_interaction(ui, cx, &geometry, track, clip, &midi.notes, &response);
     if geometry.velocity.height() > 0.0 {
-        velocity_lane(ui, cx, &geometry, color, clip, midi);
+        let frame = controller_lane::Frame {
+            header: geometry.lane_header,
+            body: geometry.velocity,
+            grid_left: geometry.grid.left(),
+            time: geometry.time,
+            snap: geometry.snap,
+            cell: geometry.line_step(),
+            signature,
+            color,
+            sounding: sounding_span(clip, midi),
+            playhead: playhead_x(cx, &geometry, clip),
+        };
+        controller_lane::header(ui, cx, &frame, track, clip);
+        // What the strip was just asked to show is shown in this frame.
+        match cx.state.piano.lane {
+            LaneShown::Velocity => velocity_lane(ui, cx, &geometry, color, clip, midi),
+            LaneShown::Controller(kind) => controller_lane::show(ui, cx, &frame, clip, kind),
+        }
     }
 }
 
@@ -754,10 +783,25 @@ fn note_fill(color: Color32, velocity: u8) -> Color32 {
     fade(color, 0.45 + velocity as f32 / 230.0)
 }
 
-/// How much of the notes plays: up to the loop length if the clip loops,
-/// else up to the clip's end.
-fn sounding_length(clip: &Clip, midi: &MidiContent) -> Beats {
-    midi.loop_length.map_or(clip.length, |length| length.min(clip.length))
+/// The part of the clip's content that plays, from and to: the loop if the
+/// clip loops, else from where a trimmed clip starts in its content to
+/// where it ends there.
+fn sounding_span(clip: &Clip, midi: &MidiContent) -> (Beats, Beats) {
+    match midi.loop_length {
+        Some(length) => (0.0, length.min(clip.length)),
+        None => (midi.start_offset.max(0.0), midi.start_offset.max(0.0) + clip.length),
+    }
+}
+
+/// Shades what lies outside `span` in `area`: the part of the content
+/// that does not play. Returns the x of the span's end.
+pub(super) fn shade_outside(painter: &egui::Painter, area: Rect, from_x: f32, to_x: f32, shade: Color32) {
+    if from_x > area.left() {
+        painter.rect_filled(Rect::from_min_max(area.min, pos2(from_x.min(area.right()), area.bottom())), 0.0, shade);
+    }
+    if to_x < area.right() {
+        painter.rect_filled(Rect::from_min_max(pos2(to_x.max(area.left()), area.top()), area.max), 0.0, shade);
+    }
 }
 
 fn paint_grid(ui: &Ui, cx: &Cx, geometry: &Geometry, color: Color32, clip: &Clip, midi: &MidiContent) {
@@ -795,7 +839,7 @@ fn paint_grid(ui: &Ui, cx: &Cx, geometry: &Geometry, color: Color32, clip: &Clip
         paint::vline(&painter, geometry.x(beat).round(), grid.y_range(), color);
     });
 
-    let sounding = sounding_length(clip, midi);
+    let (from, to) = sounding_span(clip, midi);
     let mut bodies = Mesh::default();
     let mut outlines = Vec::new();
     for note in &midi.notes {
@@ -810,7 +854,7 @@ fn paint_grid(ui: &Ui, cx: &Cx, geometry: &Geometry, color: Color32, clip: &Clip
         // A pixel of the grid shows between neighbors and between rows.
         let body = Rect::from_min_max(rect.min + vec2(0.0, 1.0), rect.max - vec2(1.0, 0.0));
         let mut fill = note_fill(color, note.velocity);
-        if note.start >= sounding {
+        if note.start >= to || note.end() <= from {
             fill = fade(fill, 0.35);
         }
         bodies.add_colored_rect(body.intersect(grid), fill);
@@ -823,11 +867,14 @@ fn paint_grid(ui: &Ui, cx: &Cx, geometry: &Geometry, color: Color32, clip: &Clip
         paint::frame(&painter, outline, theme.ink);
     }
 
-    // Past the end of the clip (or of its loop) nothing new plays.
-    let end_x = geometry.x(sounding).round();
+    // Past the end of the clip (or of its loop) nothing new plays, and
+    // nothing of what a trimmed clip hides before its start.
+    let (start_x, end_x) = (geometry.x(from).round(), geometry.x(to).round());
+    shade_outside(&painter, grid, start_x, end_x, theme.shade);
+    if start_x > grid.left() {
+        paint::vline(&painter, start_x, grid.y_range(), theme.hairline);
+    }
     if end_x < grid.right() {
-        let beyond = Rect::from_min_max(pos2(end_x.max(grid.left()), grid.top()), grid.max);
-        painter.rect_filled(beyond, 0.0, theme.shade);
         paint::vline(
             &painter,
             end_x,
@@ -846,16 +893,15 @@ fn paint_grid(ui: &Ui, cx: &Cx, geometry: &Geometry, color: Color32, clip: &Clip
 
     paint::vline(&painter, geometry.x(cx.state.piano.cursor).round(), grid.y_range(), theme.ink_faint);
     // The song's playhead, mapped into the clip (and around its loop).
-    if let Some(x) = playhead_x(cx, geometry, clip, sounding) {
+    if let Some(x) = playhead_x(cx, geometry, clip) {
         paint::vline(&painter, x, grid.y_range(), theme.signal);
     }
 }
 
-/// Where the song's playhead falls in the clip's own time, if it is inside
-/// the clip.
-fn playhead_x(cx: &Cx, geometry: &Geometry, clip: &Clip, sounding: Beats) -> Option<f32> {
-    let position = cx.live.position - clip.start;
-    (position >= 0.0 && position < clip.length).then(|| geometry.x(position % sounding.max(SHORTEST_NOTE)).round())
+/// Where the song's playhead falls in the clip's own time (around its
+/// loop, and past what a trimmed clip hides), if it is inside the clip.
+fn playhead_x(cx: &Cx, geometry: &Geometry, clip: &Clip) -> Option<f32> {
+    clip.content_beat(cx.live.position).map(|beat| geometry.x(beat).round())
 }
 
 /// The roll's ruler. A click on it places the cursor that pasted notes go
@@ -903,9 +949,10 @@ fn paint_ruler(ui: &Ui, cx: &Cx, geometry: &Geometry, clip: &Clip, midi: &MidiCo
     });
 
     // A line along the ruler's foot marks the part of the clip that plays.
+    let (from, to) = sounding_span(clip, midi);
     let span = Rect::from_min_max(
-        pos2(geometry.x(0.0).round(), ruler.bottom() - 2.0),
-        pos2(geometry.x(sounding_length(clip, midi)).round(), ruler.bottom()),
+        pos2(geometry.x(from).round(), ruler.bottom() - 2.0),
+        pos2(geometry.x(to).round(), ruler.bottom()),
     );
     painter.rect_filled(span, 0.0, if midi.loop_length.is_some() { theme.ink_dim } else { theme.ghost });
 
@@ -1067,14 +1114,11 @@ fn velocity_lane(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, color: Color32, 
 
     let painter = ui.painter_at(lane);
     painter.rect_filled(lane, 0.0, theme.panel);
-    paint::hline(&painter, lane.x_range(), lane.top(), theme.hairline);
-    let gutter = Rect::from_min_max(lane.min + vec2(6.0, 4.0), pos2(geometry.grid.left() - 4.0, lane.top() + 18.0));
-    text::paint(&painter, gutter, Align2::LEFT_CENTER, theme.text.micro, "Vel", theme.ink_faint);
     paint::vline_left_of(&painter, geometry.grid.left(), lane.y_range(), theme.hairline);
 
     let painter = painter.with_clip_rect(stems);
     let (first_beat, last_beat) = geometry.time.visible(stems.width());
-    let sounding = sounding_length(clip, midi);
+    let (from, to) = sounding_span(clip, midi);
     let foot = lane.bottom() - STEM_FOOT;
     // Selected stems are drawn last, so they are not hidden by a neighbor
     // that starts at the same time.
@@ -1084,7 +1128,7 @@ fn velocity_lane(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, color: Color32, 
         for note in notes {
             let x = geometry.x(note.start).round();
             let top = geometry.stem_top(note.velocity).round();
-            let ink = match (lit, note.start >= sounding) {
+            let ink = match (lit, note.start >= to || note.start < from) {
                 (true, _) => theme.ink,
                 (false, false) => color,
                 (false, true) => fade(color, 0.35),
@@ -1093,7 +1137,7 @@ fn velocity_lane(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, color: Color32, 
             painter.rect_filled(Rect::from_min_size(pos2(x - 1.0, top - 2.0), vec2(4.0, 4.0)), 0.0, ink);
         }
     }
-    if let Some(x) = playhead_x(cx, geometry, clip, sounding) {
+    if let Some(x) = playhead_x(cx, geometry, clip) {
         paint::vline(&painter, x, lane.y_range(), theme.signal);
     }
 
@@ -1443,8 +1487,9 @@ mod tests {
     }
 
     fn geometry() -> Geometry {
-        // Twenty rows of notes between the ruler and the velocity lane.
-        let area = Rect::from_min_size(pos2(200.0, 500.0), vec2(800.0, RULER_HEIGHT + 240.0 + VELOCITY_LANE));
+        // Twenty rows of notes between the ruler and the lane.
+        let area =
+            Rect::from_min_size(pos2(200.0, 500.0), vec2(800.0, RULER_HEIGHT + 240.0 + LANE_HEADER + VELOCITY_LANE));
         let pitch = PitchView { top: 72.0, row_height: 12.0 };
         Geometry::new(
             area,
@@ -1470,15 +1515,18 @@ mod tests {
     }
 
     #[test]
-    fn the_velocity_lane_sits_under_keys_and_grid() {
+    fn the_lane_and_its_strip_sit_under_keys_and_grid() {
         let g = geometry();
-        assert_eq!(g.velocity.top(), g.grid.bottom());
+        assert_eq!(g.lane_header.top(), g.grid.bottom());
+        assert_eq!((g.lane_header.height(), g.velocity.top()), (LANE_HEADER, g.lane_header.bottom()));
         assert_eq!(g.velocity.height(), VELOCITY_LANE);
         assert_eq!((g.velocity.left(), g.velocity.right()), (g.keys.left(), g.grid.right()));
-        // A panel dragged very short keeps the notes and drops the lane.
+        assert_eq!((g.lane_header.left(), g.lane_header.right()), (g.keys.left(), g.grid.right()));
+        // A panel dragged very short keeps the notes and drops the lane,
+        // strip and all.
         let short = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 100.0));
         let cramped = Geometry { ..Geometry::new(short, KEYS_WIDTH, g.time, g.pitch, g.signature, Snap::Sixteenth) };
-        assert_eq!(cramped.velocity.height(), 0.0);
+        assert_eq!((cramped.velocity.height(), cramped.lane_header.height()), (0.0, 0.0));
         assert_eq!(cramped.grid.bottom(), short.bottom());
     }
 

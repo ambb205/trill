@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use trill_core::controllers::{CONTROLLER_KINDS, ControllerKind, ControllerLane};
 use trill_core::device::{DeviceProcessor, EventKind};
 use trill_core::project::AutomationPoint;
 use trill_core::{DeviceId, TimeSignature, TrackId};
@@ -95,6 +96,9 @@ pub(crate) struct Chain {
 pub struct Meter {
     left: AtomicU32,
     right: AtomicU32,
+    /// For how many frames the track has been given notes that nothing
+    /// answered: see [`Meter::unanswered_frames`].
+    unanswered: AtomicU32,
 }
 
 impl Meter {
@@ -118,7 +122,25 @@ impl Meter {
     pub fn peek(&self) -> (f32, f32) {
         (f32::from_bits(self.left.load(Ordering::Relaxed)), f32::from_bits(self.right.load(Ordering::Relaxed)))
     }
+
+    pub(crate) fn set_unanswered(&self, frames: u32) {
+        self.unanswered.store(frames, Ordering::Relaxed);
+    }
+
+    /// For how many frames notes have sounded on the track without its
+    /// devices putting out anything at all, ahead of its fader. It counts
+    /// from the first note of a phrase, only until something is heard, and
+    /// goes back to zero as soon as something is; it stays where it is
+    /// when the notes end in silence. An instrument that rings out under a
+    /// long note has answered and is not counted.
+    pub fn unanswered_frames(&self) -> u32 {
+        self.unanswered.load(Ordering::Relaxed)
+    }
 }
+
+/// The controllers that return to rest when let go of, by
+/// [`ControllerKind::index`]: the pedals, channel pressure, the pitch wheel.
+const SPRUNG: [usize; 8] = [64, 65, 66, 67, 68, 69, 128, 129];
 
 /// Per-track state that must survive a graph swap.
 pub(crate) struct TrackState {
@@ -136,11 +158,30 @@ pub(crate) struct TrackState {
     /// Those of them a keyboard holds, which it lets go of when the track
     /// stops being one it plays.
     pub routed_held: u128,
-    /// Whether the sustain pedal is down, and the pitch wheel off centre.
-    pub live_sustain: bool,
-    pub live_bent: bool,
+    /// Where the hand has put each controller, by
+    /// [`ControllerKind::index`]; not a number where it has not moved one,
+    /// or the song has taken it back. While a controller is the hand's,
+    /// the song's curve for it is not played.
+    pub live: [f32; CONTROLLER_KINDS],
+    /// What the song last told the instrument each controller is at; not
+    /// a number where it has said nothing that still stands.
+    pub sent: [f32; CONTROLLER_KINDS],
+    /// Set to have the next block tell the instrument everything again: it
+    /// is new, or was reset, and knows nothing of what it was told.
+    pub resend: bool,
+    /// Set when the graph changed: a controller the song moved may have
+    /// lost its curve.
+    pub lanes_changed: bool,
     /// Set to have the next block let go of what the keyboard holds.
     pub release_routed: bool,
+    /// Whether notes were sounding in the block before, whether anything
+    /// has been heard since they began, and for how many frames nothing
+    /// has: see [`Meter::unanswered_frames`].
+    pub had_notes: bool,
+    pub answered: bool,
+    pub unanswered: u32,
+    /// What the meter was last told of that.
+    pub unanswered_told: u32,
 }
 
 impl Default for TrackState {
@@ -153,17 +194,43 @@ impl Default for TrackState {
             primed: false,
             live_held: 0,
             routed_held: 0,
-            live_sustain: false,
-            live_bent: false,
+            live: [f32::NAN; CONTROLLER_KINDS],
+            sent: [f32::NAN; CONTROLLER_KINDS],
+            resend: false,
+            lanes_changed: false,
             release_routed: false,
+            had_notes: false,
+            answered: true,
+            unanswered: 0,
+            unanswered_told: u32::MAX,
         }
     }
 }
 
 impl TrackState {
-    /// Whether a keyboard has anything to let go of here.
+    /// Whether a keyboard has anything to let go of here: a key, or a
+    /// pedal or a wheel that it left away from rest.
     pub fn holds_routed(&self) -> bool {
-        self.routed_held != 0 || self.live_sustain || self.live_bent
+        self.routed_held != 0 || SPRUNG.iter().any(|&index| !self.live[index].is_nan())
+    }
+
+    /// Lets go of the pedals and the wheels the hand left somewhere:
+    /// `released` is told each one that was away from rest, to put it
+    /// back. From here on they are the song's again.
+    pub fn release_sprung(&mut self, mut released: impl FnMut(ControllerKind)) {
+        for index in SPRUNG {
+            let value = std::mem::replace(&mut self.live[index], f32::NAN);
+            if value.is_nan() {
+                continue;
+            }
+            // Whatever the song said last, it must say again.
+            self.sent[index] = f32::NAN;
+            if value != 0.0
+                && let Some(kind) = ControllerKind::from_index(index)
+            {
+                released(kind);
+            }
+        }
     }
 
     /// Keeps track of what is held as `kind` is played by hand; `routed`
@@ -183,10 +250,11 @@ impl TrackState {
                 self.routed_held &= !key;
             }
             EventKind::AllNotesOff => self.forget_live(),
-            EventKind::PitchBend { value } => self.live_bent = value != 0.0,
-            EventKind::Control { .. } => {
-                if let Some(down) = kind.sustain() {
-                    self.live_sustain = down;
+            EventKind::PitchBend { .. } | EventKind::Control { .. } | EventKind::ChannelPressure { .. } => {
+                // From now on it is where the hand put it, not where the
+                // song would have it.
+                if let Some((controller, value)) = ControllerKind::of_event(kind) {
+                    self.live[controller.index()] = if value.is_finite() { value } else { 0.0 };
                 }
             }
         }
@@ -205,6 +273,11 @@ pub(crate) struct TrackNode {
     pub id: TrackId,
     /// Sorted by start.
     pub notes: Vec<NoteEvent>,
+    /// What each controller the track's clips move is worth over the song.
+    pub controllers: Vec<ControllerLane>,
+    /// Whether the graph came with a device of this track created anew,
+    /// which has yet to be told where its controllers are.
+    pub fresh_devices: bool,
     pub audio: Vec<AudioRegion>,
     pub chain: Chain,
     pub volume_db: f32,
@@ -300,6 +373,10 @@ impl Graph {
         for track in &mut self.tracks {
             if let Some(previous) = old.tracks.iter_mut().find(|t| t.id == track.id) {
                 std::mem::swap(&mut track.state, &mut previous.state);
+                track.state.lanes_changed = true;
+            }
+            if track.fresh_devices {
+                track.state.resend = true;
             }
         }
         self.master.gain = old.master.gain;

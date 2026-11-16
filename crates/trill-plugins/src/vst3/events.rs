@@ -4,7 +4,7 @@
 //! allocation after construction.
 
 use super::com::{interface, write_out};
-use super::params::{MidiParams, PITCH_BEND};
+use super::params::{AFTERTOUCH, MidiParams, PITCH_BEND};
 use crate::exclusive::Exclusive;
 use crate::notes::{HeldKeys, events_in_part};
 use trill_core::device::{self, EventKind, MAX_EVENTS_PER_BLOCK, Pedal, ProcessInfo};
@@ -32,6 +32,10 @@ const MAX_NOTE_EVENTS: usize = MAX_EVENTS_PER_BLOCK;
 const MAX_SILENCE_EVENTS: usize = 128;
 /// How many parameters the controllers of one block may set between them.
 pub(crate) const MAX_CONTROLS: usize = 32;
+/// How many times, all told, the controllers of one block may set them: a
+/// handful of controllers moving all through a block. One that finds no
+/// room still has its last value kept, in place of its one before.
+const MAX_CONTROL_POINTS: usize = 256;
 
 /// The events of one block, in the order they were added: the host's
 /// implementation of `IEventList`.
@@ -160,9 +164,9 @@ pub(crate) struct BlockEvents {
     /// The sustain pedal, worked out here for a plugin that has no
     /// parameter for it.
     pedal: Pedal,
-    /// What the controllers of the block last filled set: parameter and
-    /// normalized value, each parameter once. Never grows.
-    controls: Vec<(ParamID, f64)>,
+    /// What the controllers of the block last filled set: parameter, frame
+    /// and normalized value, in the order they were set. Never grows.
+    controls: Vec<(ParamID, u32, f64)>,
 }
 
 impl BlockEvents {
@@ -174,13 +178,13 @@ impl BlockEvents {
             list: EventList::with_capacity(MAX_NOTE_EVENTS + MAX_SILENCE_EVENTS),
             midi,
             pedal: Pedal::default(),
-            controls: Vec::with_capacity(MAX_CONTROLS),
+            controls: Vec::with_capacity(MAX_CONTROL_POINTS),
         }
     }
 
-    /// The parameters the controllers of the block last filled set, for
-    /// the block's parameter changes.
-    pub(crate) fn controls(&self) -> &[(ParamID, f64)] {
+    /// The parameters the controllers of the block last filled set, each
+    /// with the frame it was set at, for the block's parameter changes.
+    pub(crate) fn controls(&self) -> &[(ParamID, u32, f64)] {
         &self.controls
     }
 
@@ -216,11 +220,19 @@ impl BlockEvents {
     ) -> bool {
         let Self { takes_notes, held, silence, list, midi, pedal, controls } = self;
         controls.clear();
-        // The last value a controller took in the block is the one sent.
-        let mut set = |id: ParamID, value: f64| match controls.iter().position(|(known, _)| *known == id) {
-            Some(index) => controls[index].1 = value,
-            None if controls.len() < controls.capacity() => controls.push((id, value)),
-            None => {}
+        // Every value a controller took in the block is sent, at its frame:
+        // a plugin follows a swell as the slope it is. Where there is no
+        // room, or two fall on one frame, the later takes the earlier's
+        // place.
+        let mut set = |id: ParamID, time: u32, value: f64| {
+            let last = controls.iter().rposition(|(known, ..)| *known == id);
+            match last {
+                Some(index) if controls[index].1 == time || controls.len() >= controls.capacity() => {
+                    controls[index] = (id, controls[index].1.max(time), value);
+                }
+                _ if controls.len() < controls.capacity() => controls.push((id, time, value)),
+                _ => {}
+            }
         };
         let filled = list.edit(|queue| {
             queue.events.clear();
@@ -263,13 +275,19 @@ impl BlockEvents {
                     EventKind::PitchBend { value } => {
                         if let Some(id) = midi.param(PITCH_BEND) {
                             let value = if value.is_finite() { value.clamp(-1.0, 1.0) } else { 0.0 };
-                            set(id, (f64::from(value) + 1.0) * 0.5);
+                            set(id, time, (f64::from(value) + 1.0) * 0.5);
+                        }
+                    }
+                    EventKind::ChannelPressure { value } => {
+                        if let Some(id) = midi.param(AFTERTOUCH) {
+                            let value = if value.is_finite() { value.clamp(0.0, 1.0) } else { 0.0 };
+                            set(id, time, f64::from(value));
                         }
                     }
                     EventKind::Control { controller, value } => match midi.param(controller) {
                         Some(id) => {
                             let value = if value.is_finite() { value.clamp(0.0, 1.0) } else { 0.0 };
-                            set(id, f64::from(value));
+                            set(id, time, f64::from(value));
                         }
                         None => {
                             if let Some(down) = kind.sustain() {
@@ -479,12 +497,16 @@ mod tests {
             [(0, "on", 60, 1.0), (6, "off", 60, 0.0)],
             "the plugin has the pedal, so the key comes up when it comes up"
         );
-        assert_eq!(feed.controls(), [(9_064, 1.0), (9_129, 0.0), (9_001, 0.5)], "each parameter once, its last value");
+        assert_eq!(
+            feed.controls(),
+            [(9_064, 1, 1.0), (9_129, 2, 0.625), (9_001, 3, 0.5), (9_129, 5, 0.0)],
+            "each where it happened, in order"
+        );
         // The list is the block's: the next block starts empty.
         fill(&mut feed, &[at(0, EventKind::PitchBend { value: 1.0 })]);
-        assert_eq!(feed.controls(), [(9_129, 1.0)]);
+        assert_eq!(feed.controls(), [(9_129, 0, 1.0)]);
         fill(&mut feed, &[at(0, EventKind::PitchBend { value: 0.0 })]);
-        assert_eq!(feed.controls(), [(9_129, 0.5)], "the wheel at rest is the middle of the parameter");
+        assert_eq!(feed.controls(), [(9_129, 0, 0.5)], "the wheel at rest is the middle of the parameter");
         fill(&mut feed, &[]);
         assert!(feed.controls().is_empty());
     }
@@ -647,5 +669,44 @@ mod tests {
         assert_eq!(context.tempo, 120.0);
         assert_eq!(context.projectTimeMusic, 0.0);
         assert_eq!((context.projectTimeSamples, context.sampleRate), (0, 0.0));
+    }
+
+    #[test]
+    fn a_swell_and_the_pressure_on_the_keys_are_set_where_they_happen() {
+        let midi = MidiParams::of(&[(11, 9_011), (AFTERTOUCH, 9_128)]);
+        let mut feed = BlockEvents::new(true, midi);
+        let at = |offset: u32, kind: EventKind| device::Event { offset, kind };
+        // Expression as the engine sends a clip's curve: a value every 32
+        // frames. All of them reach the plugin, each at its frame.
+        let mut events: Vec<device::Event> = (0..16)
+            .map(|step| at(step * 32, EventKind::Control { controller: 11, value: step as f32 / 16.0 }))
+            .collect();
+        events.push(at(500, EventKind::ChannelPressure { value: 0.5 }));
+        events.push(at(501, EventKind::ChannelPressure { value: f32::NAN }));
+        feed.fill(&info(true, 0.0), &events, (0, 512, 512));
+        let expression: Vec<(u32, f64)> =
+            feed.controls().iter().filter(|control| control.0 == 9_011).map(|control| (control.1, control.2)).collect();
+        assert_eq!(expression.len(), 16);
+        assert_eq!((expression[0], expression[8], expression[15]), ((0, 0.0), (256, 0.5), (480, 0.9375)));
+        assert_eq!(feed.controls()[16..], [(9_128, 500, 0.5), (9_128, 501, 0.0)]);
+
+        // A block cut in two: each part gets what falls in it, counted from
+        // its own first frame.
+        feed.fill(&info(true, 0.0), &events, (256, 256, 512));
+        assert_eq!(feed.controls()[0], (9_011, 0, 0.5));
+        assert_eq!(feed.controls().last(), Some(&(9_128, 245, 0.0)));
+
+        // More movement than there is room for: the newest value takes the
+        // place of the one before it, and the last is never lost.
+        let flood: Vec<device::Event> = (0..400)
+            .map(|frame| at(frame, EventKind::Control { controller: 11, value: frame as f32 / 400.0 }))
+            .collect();
+        feed.fill(&info(true, 0.0), &flood, (0, 512, 512));
+        assert_eq!(feed.controls().len(), MAX_CONTROL_POINTS);
+        assert_eq!(feed.controls().last(), Some(&(9_011, 399, f64::from(399.0f32 / 400.0))));
+        // A plugin without a parameter for pressure is not sent it.
+        let mut plain = BlockEvents::new(true, MidiParams::default());
+        plain.fill(&info(true, 0.0), &events, (0, 512, 512));
+        assert!(plain.controls().is_empty());
     }
 }

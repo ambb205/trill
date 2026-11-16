@@ -10,6 +10,9 @@
 //! * a track gets an arm control when it has an instrument to play;
 //! * asked to record with nothing armed, the window arms the selected
 //!   track if that can be played, and says why not if it cannot;
+//! * while a take is written, the Clip tab shows its clip, so the notes
+//!   and the wheels and pedals moved are seen going down as they are
+//!   played;
 //! * when a take ends, what it wrote is selected.
 //!
 //! Neither arming nor the count-in is part of the project: they are not
@@ -195,6 +198,21 @@ pub fn describe(cx: &Cx, take: &RecordStatus) -> String {
             format!("Recording{on}{pass} \u{00B7} {notes} so far \u{00B7} {stop} or Stop ends the take")
         }
     }
+}
+
+/// A take is writing into `clips`: the one on the selected track (or the
+/// first, when that track is not recorded) becomes the clip the Clip tab
+/// shows, so that what is played is seen going down there, the controller
+/// lane's curve with the notes. Once per take: someone who then looks at
+/// another clip is left to.
+pub fn take_writes(state: &mut UiState, snapshot: &Snapshot, clips: &[TakeClip]) {
+    let on_selected = clips.iter().find(|clip| Some(clip.track) == state.selected_track);
+    let Some(wanted) = on_selected.or(clips.first()) else { return };
+    if state.take_shown == Some(wanted.clip) || snapshot.clip(wanted.clip).is_none() {
+        return;
+    }
+    state.take_shown = Some(wanted.clip);
+    state.select_clips(vec![wanted.clip]);
 }
 
 /// A take has ended: what it wrote is selected, so that the Clip tab shows
