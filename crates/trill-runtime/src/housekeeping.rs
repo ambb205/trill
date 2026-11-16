@@ -2,6 +2,7 @@
 //! not a window is open to do them.
 
 use crate::RuntimeError;
+use crate::recovery::{self, SafetyCopies};
 use crate::settings::SettingsFile;
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
@@ -16,6 +17,9 @@ use trill_library::Library;
 const TICK: Duration = Duration::from_millis(200);
 /// Ticks between looks at whether the settings need writing.
 const SETTINGS_EVERY: u32 = 5;
+/// Ticks between looks at whether the project needs a new safety copy:
+/// twenty seconds, which is then the most that a crash can cost.
+const COPY_EVERY: u32 = 100;
 
 /// Owns the thread and stops it when dropped.
 pub(crate) struct Housekeeper {
@@ -28,6 +32,7 @@ impl Housekeeper {
         session: SharedSession,
         library: Arc<Library>,
         settings: Arc<Mutex<SettingsFile>>,
+        copies: Arc<Mutex<SafetyCopies>>,
     ) -> Result<Self, RuntimeError> {
         let stop = Arc::new((Mutex::new(false), Condvar::new()));
         let signal = stop.clone();
@@ -56,6 +61,9 @@ impl Housekeeper {
                     tick = tick.wrapping_add(1);
                     if tick.is_multiple_of(SETTINGS_EVERY) {
                         save_if_changed(&library, &settings);
+                    }
+                    if tick.is_multiple_of(COPY_EVERY) {
+                        recovery::refresh(&session, &copies);
                     }
                 }
             })

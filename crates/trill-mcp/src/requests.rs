@@ -458,6 +458,15 @@ pub struct DeviceEditorRequest {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct RecoverProjectRequest {
+    /// "list" (default) shows what was lost; "open" brings one back in place of the open project;
+    /// "discard" deletes one for good.
+    pub action: Option<String>,
+    /// Which one, by its `index` in the list. Needed for "open" and "discard".
+    pub index: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct NewProjectRequest {
     pub name: Option<String>,
 }

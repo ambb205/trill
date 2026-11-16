@@ -23,6 +23,8 @@ OPTIONS:
     --http [ADDR]        Serve MCP over HTTP instead (default 127.0.0.1:7777)
     --no-audio           Do not open an audio device; rendering still works
     --no-plugins         Offer only the built-in devices
+    --scratch            Keep nothing between runs: no settings, no sound library,
+                         no safety copies of unsaved work
     --project <FILE>     Open a project file at startup
     -h, --help           Show this help";
 
@@ -35,11 +37,18 @@ struct Options {
     transport: Transport,
     audio: AudioBackend,
     plugins: bool,
+    storage: Storage,
     project: Option<PathBuf>,
 }
 
 fn parse_args() -> anyhow::Result<Option<Options>> {
-    let mut options = Options { transport: Transport::Stdio, audio: AudioBackend::Auto, plugins: true, project: None };
+    let mut options = Options {
+        transport: Transport::Stdio,
+        audio: AudioBackend::Auto,
+        plugins: true,
+        storage: Storage::User,
+        project: None,
+    };
     let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -55,6 +64,7 @@ fn parse_args() -> anyhow::Result<Option<Options>> {
             }
             "--no-audio" => options.audio = AudioBackend::Null { sample_rate: 48_000 },
             "--no-plugins" => options.plugins = false,
+            "--scratch" => options.storage = Storage::Nowhere,
             "--project" => {
                 options.project = Some(args.next().context("--project needs a file")?.into());
             }
@@ -82,7 +92,7 @@ fn main() -> anyhow::Result<()> {
     let runtime = Runtime::start(RuntimeOptions {
         audio: options.audio,
         plugins: options.plugins.then_some(Scanner::CurrentExecutable),
-        storage: Storage::User,
+        storage: options.storage,
     })?;
     {
         let mut session = runtime.session.lock();

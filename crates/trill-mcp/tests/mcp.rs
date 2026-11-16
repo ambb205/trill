@@ -34,13 +34,21 @@ impl Fixture {
 }
 
 async fn connect() -> Fixture {
-    let folder = tempfile::tempdir().unwrap();
+    connect_in(tempfile::tempdir().unwrap()).await
+}
+
+/// A runtime that keeps everything it keeps under `folder`.
+fn options_in(folder: &std::path::Path) -> RuntimeOptions {
     let storage = Storage::At {
-        settings: folder.path().join("config").join("settings.json"),
-        library_index: Some(folder.path().join("cache").join("library-index.json")),
+        settings: folder.join("config").join("settings.json"),
+        library_index: Some(folder.join("cache").join("library-index.json")),
     };
-    let options = RuntimeOptions { audio: AudioBackend::Null { sample_rate: 48_000 }, plugins: None, storage };
-    let runtime = Arc::new(Runtime::start(options).unwrap());
+    RuntimeOptions { audio: AudioBackend::Null { sample_rate: 48_000 }, plugins: None, storage }
+}
+
+/// A server and a client of it, with whatever `folder` already holds.
+async fn connect_in(folder: tempfile::TempDir) -> Fixture {
+    let runtime = Arc::new(Runtime::start(options_in(folder.path())).unwrap());
     let server = serve_http(runtime.clone(), "127.0.0.1:0".parse().unwrap()).unwrap();
     let transport =
         StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(server.url()));
@@ -103,6 +111,7 @@ async fn tools_are_listed_with_schemas() {
         "set_sample",
         "edit_time",
         "show_device_editor",
+        "recover_project",
         "transport",
         "render",
         "history",
@@ -1016,4 +1025,59 @@ async fn web_pages_are_turned_away_and_local_programs_are_not() {
     assert!(answer.contains("403"), "a foreign Host got: {answer}");
     // Being turned away changes nothing for the clients that belong.
     assert!(ok(&fixture.client, "get_project", json!({})).await["tracks"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn projects_lost_to_a_crash_are_listed_brought_back_and_discarded() {
+    // Two programs died here with unsaved work before this one started.
+    let folder = tempfile::tempdir().unwrap();
+    for name in ["Night Shift", "Scrap"] {
+        let lost = Runtime::start(options_in(folder.path())).unwrap();
+        lost.session
+            .lock()
+            .edit(|project| {
+                project.name = name.into();
+                project.add_track("Bass");
+                Ok(())
+            })
+            .unwrap();
+        lost.refresh_safety_copy();
+        lost.abandon();
+    }
+    let fixture = connect_in(folder).await;
+    let client = &fixture.client;
+
+    let project = ok(client, "get_project", json!({})).await;
+    assert!(project["recoverable"].as_str().unwrap().contains("recover_project"), "{project}");
+    let list = ok(client, "recover_project", json!({})).await;
+    let index_of = |list: &Value, name: &str| -> u64 {
+        let unsaved = list["unsaved"].as_array().unwrap();
+        unsaved.iter().find(|entry| entry["name"] == name).unwrap_or_else(|| panic!("{name} in {list}"))["index"]
+            .as_u64()
+            .unwrap()
+    };
+    assert_eq!(list["unsaved"].as_array().unwrap().len(), 2);
+    assert_eq!(list["unsaved"][0]["minutes_ago"], 0);
+
+    // Asking for the impossible says what is possible.
+    let error = call(client, "recover_project", json!({ "action": "open" })).await.unwrap_err();
+    assert!(error.contains("`index`"), "{error}");
+    let error = call(client, "recover_project", json!({ "action": "open", "index": 7 })).await.unwrap_err();
+    assert!(error.contains("no project 7") && error.contains("index 0 to 1"), "{error}");
+    let error = call(client, "recover_project", json!({ "action": "restore", "index": 0 })).await.unwrap_err();
+    assert!(error.contains("unknown action"), "{error}");
+    assert_eq!(ok(client, "recover_project", json!({})).await["unsaved"].as_array().unwrap().len(), 2);
+
+    let gone = ok(client, "recover_project", json!({ "action": "discard", "index": index_of(&list, "Scrap") })).await;
+    assert_eq!(gone["discarded"], "Scrap");
+    assert_eq!(gone["unsaved"].as_array().unwrap().len(), 1);
+
+    let back = ok(client, "recover_project", json!({ "action": "open", "index": 0 })).await;
+    assert_eq!((&back["recovered"], &back["name"]), (&json!("Night Shift"), &json!("Night Shift")));
+    assert_eq!(back["tracks"][0]["name"], "Bass");
+    assert_eq!(back["unsaved_changes"], true);
+    assert!(ok(client, "get_project", json!({})).await.get("recoverable").is_none());
+    assert_eq!(ok(client, "recover_project", json!({})).await["unsaved"], json!([]));
+    let error = call(client, "recover_project", json!({ "action": "open", "index": 0 })).await.unwrap_err();
+    assert!(error.contains("nothing to recover"), "{error}");
 }

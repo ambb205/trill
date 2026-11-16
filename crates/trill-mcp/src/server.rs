@@ -317,8 +317,15 @@ impl TrillServer {
     /// transport state and any problems. Call this first, and again whenever you need current ids.
     #[tool(annotations(title = "Get project", read_only_hint = true))]
     fn get_project(&self, Parameters(request): Parameters<GetProjectRequest>) -> CallToolResult {
+        let lost = self.runtime.recoverable().len();
         let session = self.session.lock();
-        finish(Ok(project_json(&session, request.include_notes)))
+        let mut out = project_json(&session, request.include_notes);
+        if lost > 0 {
+            out["recoverable"] = json!(format!(
+                "{lost} project(s) were not saved before the program last stopped. recover_project lists them."
+            ));
+        }
+        finish(Ok(out))
     }
 
     /// Change song-wide settings: name, tempo, time signature, loop region, master volume.
@@ -1044,6 +1051,51 @@ impl TrillServer {
             }
             Ok(json!({ "device": id, "editor": if session.is_device_editor_open(id) { "open" } else { "closed" } }))
         })();
+        finish(reply)
+    }
+
+    /// Projects that were not saved before the program last stopped (a crash, a power cut): list them, bring
+    /// one back, or delete one. A project that is brought back replaces the open one and has unsaved changes;
+    /// save_project writes it. Ask the user before discarding anything.
+    #[tool(annotations(title = "Recover project"))]
+    fn recover_project(&self, Parameters(request): Parameters<RecoverProjectRequest>) -> CallToolResult {
+        let lost = self.runtime.recoverable();
+        let listed = |lost: &[trill_runtime::SafetyCopy]| -> Vec<Value> {
+            lost.iter()
+                .enumerate()
+                .map(|(index, copy)| {
+                    let minutes = copy.made.elapsed().map_or(0, |age| age.as_secs() / 60);
+                    json!({
+                        "index": index,
+                        "name": copy.name,
+                        "file": copy.original.as_ref().map(|path| path.display().to_string()),
+                        "minutes_ago": minutes,
+                    })
+                })
+                .collect()
+        };
+        let chosen = || {
+            let index = request.index.ok_or("give the `index` of the project, from action \"list\"")?;
+            lost.get(index).ok_or_else(|| match lost.len() {
+                0 => "there is nothing to recover".to_string(),
+                count => format!("there is no project {index}; the list has {count} (index 0 to {})", count - 1),
+            })
+        };
+        let reply = match request.action.as_deref().unwrap_or("list") {
+            "list" => Ok(json!({ "unsaved": listed(&lost) })),
+            "open" => chosen().and_then(|copy| {
+                self.runtime.recover(copy).map_err(|error| error.to_string())?;
+                let session = self.session.lock();
+                let mut out = project_json(&session, false);
+                out["recovered"] = json!(copy.name);
+                Ok(out)
+            }),
+            "discard" => chosen().map(|copy| {
+                self.runtime.discard(copy);
+                json!({ "discarded": copy.name, "unsaved": listed(&self.runtime.recoverable()) })
+            }),
+            other => Err(format!("unknown action '{other}'; use \"list\", \"open\" or \"discard\"")),
+        };
         finish(reply)
     }
 

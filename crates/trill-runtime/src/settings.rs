@@ -65,6 +65,12 @@ impl SettingsFile {
         (Self { path, written_library: current.library.clone(), current, warning }, index)
     }
 
+    /// The folder for safety copies of unsaved projects: beside the
+    /// settings, or nowhere when nothing is kept on disk.
+    pub fn recovery_folder(&self) -> Option<PathBuf> {
+        Some(self.path.as_ref()?.parent()?.join("recovery"))
+    }
+
     /// The settings as read or last saved.
     pub fn current(&self) -> &Settings {
         &self.current

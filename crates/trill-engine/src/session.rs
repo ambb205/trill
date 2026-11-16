@@ -619,6 +619,30 @@ impl Session {
         Ok(())
     }
 
+    /// The text `save` would write right now, with every device's state as
+    /// it is, without saving: where the project lives and whether it has
+    /// unsaved changes stay as they were. For keeping a copy in case the
+    /// program does not live to save it.
+    pub fn snapshot_json(&mut self) -> String {
+        self.absorb_editor_edits();
+        self.capture_device_state();
+        self.project.to_json()
+    }
+
+    /// Opens `copy`, a project file kept for safety, in place of a project
+    /// that was lost with the program. It takes the lost project's place
+    /// on disk (`original`) without being written there: the project
+    /// counts as changed, and it is the user who decides, by saving,
+    /// whether the copy replaces what the file holds.
+    pub fn load_recovered(&mut self, copy: &Path, original: Option<&Path>) -> Result<(), SessionError> {
+        let json = std::fs::read_to_string(copy).map_err(|e| io_error(copy, e))?;
+        let project = Project::from_json(&json)?;
+        self.replace_project(project);
+        self.path = original.map(Path::to_path_buf);
+        self.revision += 1;
+        Ok(())
+    }
+
     /// A snapshot that can be rendered without holding the session.
     pub fn render_job(&mut self) -> RenderJob {
         self.capture_device_state();

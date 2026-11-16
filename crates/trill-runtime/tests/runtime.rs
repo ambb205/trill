@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use trill_core::audio::AudioBuffer;
 use trill_core::project::WarpMode;
-use trill_core::{ChainRef, TrackId};
+use trill_core::{ChainRef, Project, TrackId};
 use trill_engine::AudioBackend;
 use trill_library::{Query, Settings, Tag};
 use trill_media::{WavFormat, write_wav};
@@ -226,4 +226,236 @@ fn dropping_the_runtime_stops_its_thread_and_leaves_the_session_usable() {
     assert!(session.lock().problems().is_empty());
     // Nothing about the library changed, so no settings file was written.
     assert!(!folder.path().join("config").exists(), "a run that changes no setting leaves no file behind");
+}
+
+// ---- safety copies ---------------------------------------------------------
+
+/// What kinds of file a runtime started in `folder` has in its recovery
+/// folder, which sits beside its settings.
+fn kept(folder: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(folder.join("config").join("recovery")) else { return Vec::new() };
+    let mut kinds: Vec<String> =
+        entries.flatten().filter_map(|entry| Some(entry.path().extension()?.to_string_lossy().into_owned())).collect();
+    kinds.sort();
+    kinds
+}
+
+/// The one project file in the recovery folder.
+fn copy_in(folder: &Path) -> PathBuf {
+    let entries = std::fs::read_dir(folder.join("config").join("recovery")).unwrap();
+    let mut copies =
+        entries.flatten().map(|entry| entry.path()).filter(|path| path.extension().is_some_and(|e| e == "trill"));
+    let copy = copies.next().expect("a safety copy");
+    assert!(copies.next().is_none(), "more than one safety copy");
+    copy
+}
+
+fn project_at(path: &Path) -> Project {
+    Project::from_json(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+#[test]
+fn unsaved_work_is_copied_and_the_copy_goes_when_it_is_saved_or_the_program_leaves() {
+    let folder = tempfile::tempdir().unwrap();
+    let runtime = start(folder.path());
+    // An untouched project needs no copy, and nothing is made for it.
+    runtime.refresh_safety_copy();
+    assert!(!folder.path().join("config").join("recovery").exists());
+
+    track(&runtime);
+    runtime.refresh_safety_copy();
+    assert_eq!(kept(folder.path()), ["json", "lock", "trill"]);
+    let copy = copy_in(folder.path());
+    assert_eq!(project_at(&copy).tracks.len(), 1);
+
+    // Nothing changed since: the copy is not written again.
+    let written = std::fs::metadata(&copy).unwrap().modified().unwrap();
+    std::thread::sleep(Duration::from_millis(30));
+    runtime.refresh_safety_copy();
+    assert_eq!(std::fs::metadata(&copy).unwrap().modified().unwrap(), written);
+    // A change is.
+    runtime.session.lock().edit(|project| project.set_tempo(97.0)).unwrap();
+    runtime.refresh_safety_copy();
+    assert_eq!(project_at(&copy).tempo, 97.0);
+    assert!(runtime.session.lock().is_modified(), "keeping a copy is not saving");
+    assert_eq!(runtime.session.lock().path(), None);
+
+    // Saved: there is nothing left to lose, and the copy goes.
+    let song = folder.path().join("song.trill");
+    runtime.session.lock().save(&song).unwrap();
+    runtime.refresh_safety_copy();
+    assert_eq!(kept(folder.path()), ["lock"]);
+    // Changed again: copied again.
+    track(&runtime);
+    runtime.refresh_safety_copy();
+    assert_eq!(project_at(&copy_in(folder.path())).tracks.len(), 2);
+
+    // Nobody else is offered the copy of a program that is still running.
+    assert!(runtime.recoverable().is_empty());
+    let second = start(folder.path());
+    assert!(second.recoverable().is_empty());
+    drop(second);
+    assert_eq!(kept(folder.path()), ["json", "lock", "trill"], "the first program's copy is untouched");
+
+    // Leaving in the ordinary way takes everything along.
+    drop(runtime);
+    assert!(kept(folder.path()).is_empty());
+    assert_eq!(project_at(&song).tracks.len(), 1, "and the file holds what was saved, no more");
+}
+
+/// Not a test of its own: `a_project_lost_to_a_crash_is_offered_back` runs
+/// it in a second process, which makes a project, changes it and dies.
+#[test]
+#[ignore = "run by a_project_lost_to_a_crash_is_offered_back, in a process of its own"]
+fn a_program_that_dies_with_unsaved_work() {
+    let Some(folder) = std::env::var_os("TRILL_TEST_DYING_IN").map(PathBuf::from) else { return };
+    let runtime = start(&folder);
+    {
+        let mut session = runtime.session.lock();
+        session
+            .edit(|project| {
+                project.name = "Night Shift".into();
+                project.add_track("Kept");
+                Ok(())
+            })
+            .unwrap();
+        session.save(&folder.join("song.trill")).unwrap();
+        session
+            .edit(|project| {
+                project.add_track("Bass");
+                project.set_tempo(97.0)
+            })
+            .unwrap();
+    }
+    runtime.refresh_safety_copy();
+    // No goodbye: nothing is dropped, nothing is tidied away.
+    std::process::exit(3);
+}
+
+#[test]
+fn a_project_lost_to_a_crash_is_offered_back() {
+    let folder = tempfile::tempdir().unwrap();
+    let song = folder.path().join("song.trill");
+    let died = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "a_program_that_dies_with_unsaved_work", "--ignored"])
+        .env("TRILL_TEST_DYING_IN", folder.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(died.code(), Some(3), "the other process was meant to die its own way");
+    assert_eq!(project_at(&song).tracks.len(), 1, "the file has what was saved; the rest died with the program");
+    assert_eq!(kept(folder.path()), ["json", "lock", "trill"]);
+
+    let runtime = start(folder.path());
+    let lost = runtime.recoverable();
+    assert_eq!(lost.len(), 1);
+    assert_eq!((lost[0].name.as_str(), lost[0].original.as_deref()), ("Night Shift", Some(song.as_path())));
+    assert!(lost[0].made.elapsed().unwrap() < Duration::from_secs(120));
+    // A second program started now is not offered the same project, and
+    // its leaving does not take the copy away.
+    let second = start(folder.path());
+    assert!(second.recoverable().is_empty());
+    drop(second);
+    assert_eq!(runtime.recoverable(), lost);
+    // Nothing has happened to the open project yet.
+    assert!(runtime.session.lock().project().tracks.is_empty());
+
+    runtime.recover(&lost[0]).unwrap();
+    {
+        let session = runtime.session.lock();
+        let names: Vec<&str> = session.project().tracks.iter().map(|track| track.name.as_str()).collect();
+        assert_eq!((names, session.project().tempo), (vec!["Kept", "Bass"], 97.0));
+        assert_eq!(session.path(), Some(song.as_path()), "it takes its place again");
+        assert!(session.is_modified(), "but is not written there until the user saves");
+    }
+    assert_eq!(project_at(&song).tracks.len(), 1);
+    assert!(runtime.recoverable().is_empty());
+    // It is this program's to keep safe now: one copy, its own.
+    assert_eq!(kept(folder.path()), ["json", "lock", "trill"]);
+    assert_eq!(project_at(&copy_in(folder.path())).tracks.len(), 2);
+
+    runtime.session.lock().save(&song).unwrap();
+    drop(runtime);
+    assert!(kept(folder.path()).is_empty());
+    assert_eq!(project_at(&song).tracks.len(), 2);
+    assert!(start(folder.path()).recoverable().is_empty(), "nothing is offered twice");
+}
+
+#[test]
+fn a_lost_project_waits_until_the_user_decides_and_can_be_thrown_away() {
+    let folder = tempfile::tempdir().unwrap();
+    let first = start(folder.path());
+    track(&first);
+    first.refresh_safety_copy();
+    first.abandon();
+
+    // Left alone, it is offered again the next time.
+    let second = start(folder.path());
+    let lost = second.recoverable();
+    assert_eq!(lost.len(), 1);
+    drop(second);
+    let third = start(folder.path());
+    assert_eq!(third.recoverable(), lost);
+    // Thrown away, it is gone for good.
+    third.discard(&lost[0]);
+    assert!(third.recoverable().is_empty());
+    assert!(kept(folder.path()).is_empty());
+    assert!(third.recover(&lost[0]).is_err(), "there is nothing left to open");
+    drop(third);
+    assert!(start(folder.path()).recoverable().is_empty());
+}
+
+#[test]
+fn what_a_crash_left_half_done_is_handled_too() {
+    // A copy without its description is offered under what little is known.
+    let folder = tempfile::tempdir().unwrap();
+    let first = start(folder.path());
+    track(&first);
+    first.refresh_safety_copy();
+    let copy = copy_in(folder.path());
+    first.abandon();
+    std::fs::remove_file(copy.with_extension("json")).unwrap();
+    let second = start(folder.path());
+    let lost = second.recoverable();
+    assert_eq!((lost.len(), lost[0].name.as_str(), lost[0].original.as_deref()), (1, "Untitled", None));
+    second.recover(&lost[0]).unwrap();
+    assert_eq!(second.session.lock().project().tracks.len(), 1);
+    drop(second);
+
+    // A program that died with everything saved left only its lock, which
+    // the next one clears away without a word.
+    let folder = tempfile::tempdir().unwrap();
+    let first = start(folder.path());
+    track(&first);
+    first.refresh_safety_copy();
+    first.session.lock().save(&folder.path().join("song.trill")).unwrap();
+    first.refresh_safety_copy();
+    first.abandon();
+    assert_eq!(kept(folder.path()), ["lock"]);
+    assert!(start(folder.path()).recoverable().is_empty());
+    assert!(kept(folder.path()).is_empty());
+
+    // And a copy that is no project at all is refused, not opened.
+    let folder = tempfile::tempdir().unwrap();
+    let first = start(folder.path());
+    track(&first);
+    first.refresh_safety_copy();
+    let copy = copy_in(folder.path());
+    first.abandon();
+    std::fs::write(&copy, "{ not a project").unwrap();
+    let second = start(folder.path());
+    let lost = second.recoverable();
+    assert!(second.recover(&lost[0]).is_err());
+    assert!(second.session.lock().project().tracks.is_empty(), "the open project is left as it was");
+    assert_eq!(second.recoverable(), lost, "and the copy is kept for a human to look at");
+}
+
+#[test]
+fn a_runtime_that_keeps_nothing_keeps_no_safety_copies_either() {
+    let runtime = Runtime::start(RuntimeOptions::hermetic()).unwrap();
+    track(&runtime);
+    runtime.refresh_safety_copy();
+    assert!(runtime.recoverable().is_empty());
+    assert!(runtime.session.lock().is_modified());
 }

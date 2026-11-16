@@ -12,8 +12,11 @@
 //! * the sound [`Library`], opened from the user's settings;
 //! * the settings file itself ([`Runtime::settings`]);
 //! * a housekeeping thread that gives the session its regular turn (which
-//!   is what swaps freshly stretched audio into the running graph) and
-//!   writes the settings when the library's part of them changes.
+//!   is what swaps freshly stretched audio into the running graph), writes
+//!   the settings when the library's part of them changes, and keeps a
+//!   safety copy of a project with unsaved changes;
+//! * those safety copies, and the ones a program that crashed left behind
+//!   ([`Runtime::recoverable`]).
 //!
 //! On top of those sit the operations that need more than one of them and
 //! that every front end must do the same way: [`Runtime::sound_facts`],
@@ -32,14 +35,17 @@
 //! ```
 
 mod housekeeping;
+mod recovery;
 mod settings;
 mod sounds;
 
+pub use recovery::SafetyCopy;
 pub use settings::Storage;
 pub use sounds::{AddedSound, SoundClip, SoundError, SoundFacts};
 
 use housekeeping::Housekeeper;
 use parking_lot::Mutex;
+use recovery::SafetyCopies;
 use settings::SettingsFile;
 use std::sync::Arc;
 use trill_core::device::{CompositeFactory, DeviceFactory};
@@ -106,6 +112,7 @@ pub struct Runtime {
     pub library: Arc<Library>,
     plugins: Option<PluginHost>,
     settings: Arc<Mutex<SettingsFile>>,
+    copies: Arc<Mutex<SafetyCopies>>,
 }
 
 impl Runtime {
@@ -149,9 +156,60 @@ impl Runtime {
         if !library.roots().is_empty() {
             library.rescan();
         }
+        let copies = SafetyCopies::open(settings.recovery_folder());
+        for copy in copies.orphans() {
+            log::warn!("'{}' was not saved before the program last stopped; a copy was kept", copy.name);
+        }
+        let copies = Arc::new(Mutex::new(copies));
         let settings = Arc::new(Mutex::new(settings));
-        let housekeeper = Housekeeper::start(session.clone(), library.clone(), settings.clone())?;
-        Ok(Self { _housekeeper: housekeeper, session, media, library, plugins, settings })
+        let housekeeper = Housekeeper::start(session.clone(), library.clone(), settings.clone(), copies.clone())?;
+        Ok(Self { _housekeeper: housekeeper, session, media, library, plugins, settings, copies })
+    }
+
+    /// Projects that were not saved before the program last stopped (it
+    /// crashed, or was killed), most recent first. A front end shows them
+    /// once at startup and lets the user choose: [`Runtime::recover`] or
+    /// [`Runtime::discard`]. Left alone, they are offered again next time.
+    pub fn recoverable(&self) -> Vec<SafetyCopy> {
+        self.copies.lock().orphans()
+    }
+
+    /// Opens a project that was lost with the program. It comes back as it
+    /// was when its last safety copy was made (at most twenty seconds
+    /// before the end), in the place of the file it was opened from but not
+    /// yet written there: it has unsaved changes, and saving is the user's
+    /// to do.
+    pub fn recover(&self, copy: &SafetyCopy) -> Result<(), SessionError> {
+        self.session.lock().load_recovered(&copy.file, copy.original.as_deref())?;
+        // From here the project is this program's to keep safe. Only when
+        // it has a copy of its own is the old one let go.
+        recovery::refresh(&self.session, &self.copies);
+        let mut copies = self.copies.lock();
+        if copies.copied().is_some() {
+            copies.discard(copy);
+        }
+        Ok(())
+    }
+
+    /// Deletes a project that was lost with the program, for good.
+    pub fn discard(&self, copy: &SafetyCopy) {
+        self.copies.lock().discard(copy);
+    }
+
+    /// Brings the safety copy of the open project up to date now rather
+    /// than at the housekeeping thread's next look: made anew if there are
+    /// unsaved changes it lacks, removed if there are none. Cheap when
+    /// nothing changed. For a front end about to do something risky.
+    pub fn refresh_safety_copy(&self) {
+        recovery::refresh(&self.session, &self.copies);
+    }
+
+    /// Ends this runtime the way a crash would: nothing is tidied away,
+    /// and the safety copy stays where it is. For tests of what the next
+    /// program finds.
+    #[doc(hidden)]
+    pub fn abandon(self) {
+        self.copies.lock().abandon();
     }
 
     /// The plugin host, when plugins are on: for rescanning and for what
