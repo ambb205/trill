@@ -35,7 +35,7 @@ use trill_core::Device;
 use trill_core::audio::AudioLoader;
 use trill_core::device::{
     BUILTIN_SCHEME, DeviceCategory, DeviceController, DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance,
-    DeviceProcessor, split_uri,
+    DeviceProcessor, DeviceWarning, split_uri,
 };
 
 /// Makes a sample player from its stored state, loading its files. Fails
@@ -217,6 +217,15 @@ impl DeviceFactory for Builtins {
         let source = SampleSource { loader: self.loader.as_deref(), store: Some(&self.samples) };
         create(device, sample_rate, max_block, &source)
     }
+
+    /// The sample players' missing and unreadable files; see
+    /// [`sample_warnings`].
+    fn warnings(&self, device: &Device) -> Vec<DeviceWarning> {
+        match &self.loader {
+            Some(loader) => sample_warnings(device, loader.as_ref()),
+            None => Vec::new(),
+        }
+    }
 }
 
 /// Creates the built-in devices without access to audio files.
@@ -256,25 +265,38 @@ pub fn sample_refs(device: &Device) -> Vec<SampleRef> {
 /// a device to tell the user. Loaders cache what they load (failures
 /// included), so asking again costs little.
 pub fn sample_problems(device: &Device, loader: &dyn AudioLoader) -> Vec<String> {
+    sample_warnings(device, loader).into_iter().map(|warning| warning.message).collect()
+}
+
+/// [`sample_problems`] with each message tied to the slot it is about
+/// (`sample`, `pad 38`), for callers that show problems beside the slot.
+/// A state that cannot be read at all concerns no slot in particular.
+pub fn sample_warnings(device: &Device, loader: &dyn AudioLoader) -> Vec<DeviceWarning> {
     let Some(Create::Sampled { references, .. }) = find(&device.uri).map(|builtin| builtin.create) else {
         return Vec::new();
     };
     let references = match references(device.state.as_deref()) {
         Ok(references) => references,
-        Err(error) => return vec![format!("{error}; the device is empty until its samples are set again")],
+        Err(error) => {
+            let message = format!("{error}; the device is empty until its samples are set again");
+            return vec![DeviceWarning { slot: None, message }];
+        }
     };
-    let mut problems = Vec::new();
+    let mut warnings = Vec::new();
     for SampleRef { slot, path } in references {
         // A drum rack entry for a note outside the pads is kept in the
         // document but never played.
         let pad = slot.strip_prefix("pad ").and_then(|note| note.parse::<u8>().ok());
-        if pad.is_some_and(|note| !drumrack::PAD_NOTES.contains(&note)) {
-            problems.push(format!("{slot} does not exist (pads are notes 36-51), so '{path}' is never played"));
+        let message = if pad.is_some_and(|note| !drumrack::PAD_NOTES.contains(&note)) {
+            format!("{slot} does not exist (pads are notes 36-51), so '{path}' is never played")
         } else if let Err(reason) = loader.load(&path) {
-            problems.push(format!("{slot}: cannot load '{path}': {reason}"));
-        }
+            format!("{slot}: cannot load '{path}': {reason}")
+        } else {
+            continue;
+        };
+        warnings.push(DeviceWarning { slot: Some(slot), message });
     }
-    problems
+    warnings
 }
 
 #[cfg(test)]

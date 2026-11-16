@@ -172,6 +172,18 @@ pub enum DeviceError {
     LoadFailed { uri: String, reason: String },
 }
 
+/// Something wrong with a device that did not stop it from being created:
+/// it runs, with a part of it missing. A sampler whose file has gone is the
+/// model case: the project must still open and play everything else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceWarning {
+    /// The part of the device it concerns, such as `pad 38` of a drum rack;
+    /// `None` when it concerns the device as a whole.
+    pub slot: Option<String>,
+    /// What is wrong, in words for the user, naming the slot.
+    pub message: String,
+}
+
 /// Creates devices from their model description. Implemented by the built-in
 /// device registry and by each plugin host; the app composes them.
 pub trait DeviceFactory: Send + Sync {
@@ -181,6 +193,14 @@ pub trait DeviceFactory: Send + Sync {
     /// Instantiates `device`, restores its saved state and parameter values,
     /// and prepares it for `sample_rate`.
     fn create(&self, device: &Device, sample_rate: f64, max_block: usize) -> Result<DeviceInstance, DeviceError>;
+
+    /// What is wrong with `device` as this factory would create it, short
+    /// of failing to create it. Empty when all is well, and for devices of
+    /// other factories. Called off the audio thread, and often: it should
+    /// cost little when nothing has changed.
+    fn warnings(&self, _device: &Device) -> Vec<DeviceWarning> {
+        Vec::new()
+    }
 }
 
 /// A shared factory is a factory, so one instance can serve several owners.
@@ -191,6 +211,10 @@ impl<T: DeviceFactory + ?Sized> DeviceFactory for std::sync::Arc<T> {
 
     fn create(&self, device: &Device, sample_rate: f64, max_block: usize) -> Result<DeviceInstance, DeviceError> {
         (**self).create(device, sample_rate, max_block)
+    }
+
+    fn warnings(&self, device: &Device) -> Vec<DeviceWarning> {
+        (**self).warnings(device)
     }
 }
 
@@ -223,5 +247,9 @@ impl DeviceFactory for CompositeFactory {
             }
         }
         Err(DeviceError::Unknown(device.uri.clone()))
+    }
+
+    fn warnings(&self, device: &Device) -> Vec<DeviceWarning> {
+        self.factories.iter().flat_map(|factory| factory.warnings(device)).collect()
     }
 }

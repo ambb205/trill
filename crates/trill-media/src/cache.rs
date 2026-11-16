@@ -80,7 +80,7 @@ enum Slot {
 struct Item {
     /// The file's identity when this was produced; `None` if it could not
     /// be examined (usually because it does not exist).
-    stamp: Option<Stamp>,
+    stamp: Option<FileStamp>,
     used: u64,
     content: Content,
 }
@@ -123,15 +123,23 @@ fn audio_bytes(audio: &AudioBuffer) -> usize {
     (audio.left.len() + audio.right.len()) * size_of::<f32>()
 }
 
-/// What identifies a version of a file without reading it.
-#[derive(Copy, Clone, PartialEq, Eq)]
-struct Stamp {
+/// What identifies a version of a file without reading it: its size and
+/// when it was last modified. Two stamps of a path that compare equal mean
+/// the file has, as far as anyone can cheaply tell, not changed in between.
+///
+/// The cache keys what it holds by this, and so can anything derived from a
+/// file's audio (stretched copies, analyses) that should be made again when
+/// the file is.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FileStamp {
     len: u64,
     modified: Option<SystemTime>,
 }
 
-impl Stamp {
-    fn of(path: &Path) -> Option<Self> {
+impl FileStamp {
+    /// The stamp of the file at `path` as it is now, or `None` if it cannot
+    /// be examined (usually because it does not exist).
+    pub fn of(path: &Path) -> Option<Self> {
         let metadata = std::fs::metadata(path).ok()?;
         Some(Self { len: metadata.len(), modified: metadata.modified().ok() })
     }
@@ -181,7 +189,7 @@ impl MediaCache {
         // A conversion already made answers without touching the original,
         // which is then free to age out of the cache.
         let key = Key { path: path.to_path_buf(), product: Product::AudioAt(rate) };
-        let stamp = Stamp::of(path);
+        let stamp = FileStamp::of(path);
         if let Lookup::Hit(Ok(converted)) = self.state.lock().lookup(&key, stamp, &Content::audio) {
             return Ok(converted);
         }
@@ -250,7 +258,7 @@ impl MediaCache {
         wrap: impl FnOnce(Arc<T>) -> Content,
         produce: impl FnOnce() -> Result<Arc<T>, MediaError>,
     ) -> Result<Arc<T>, MediaError> {
-        let stamp = Stamp::of(path);
+        let stamp = FileStamp::of(path);
         let key = Key { path: path.to_path_buf(), product };
 
         let mut state = self.state.lock();
@@ -327,7 +335,12 @@ impl State {
     /// Looks `key` up, counting a hit as a use. Audio that had been
     /// released but is still alive goes back onto the budget: it is in use
     /// again.
-    fn lookup<T>(&mut self, key: &Key, stamp: Option<Stamp>, read: &impl Fn(&Content) -> Option<Arc<T>>) -> Lookup<T> {
+    fn lookup<T>(
+        &mut self,
+        key: &Key,
+        stamp: Option<FileStamp>,
+        read: &impl Fn(&Content) -> Option<Arc<T>>,
+    ) -> Lookup<T> {
         self.clock += 1;
         let clock = self.clock;
         let item = match self.items.get_mut(key) {

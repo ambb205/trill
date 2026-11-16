@@ -25,7 +25,7 @@ mod resample;
 mod wav;
 mod wav_vorbis;
 
-pub use cache::{CacheStats, MediaCache};
+pub use cache::{CacheStats, FileStamp, MediaCache};
 pub use decode::{AUDIO_EXTENSIONS, AudioInfo, decode, is_audio_file, probe};
 pub use error::MediaError;
 pub use peaks::{MinMax, PeakColumn, Peaks, scan_columns};
