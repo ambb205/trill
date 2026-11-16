@@ -12,6 +12,7 @@ pub mod midi_file;
 pub mod pitch;
 pub mod project;
 pub mod time;
+mod time_ops;
 
 pub use ids::{ClipId, DeviceId, TrackId};
 pub use project::{
