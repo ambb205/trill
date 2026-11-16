@@ -166,6 +166,9 @@ pub(crate) struct BlockEvents {
     notes: Option<NotePort>,
     held: HeldKeys,
     silence: bool,
+    /// The note events of blocks the plugin could not be given, waiting
+    /// for the next one it can. Never grows beyond its capacity.
+    deferred: Vec<EventKind>,
     queue: EventQueue,
 }
 
@@ -182,7 +185,8 @@ impl BlockEvents {
             notes,
             held: HeldKeys::default(),
             silence: false,
-            queue: EventQueue::with_capacity(count + MAX_NOTE_EVENTS + MAX_SILENCE_EVENTS),
+            deferred: Vec::with_capacity(MAX_NOTE_EVENTS),
+            queue: EventQueue::with_capacity(count + 2 * MAX_NOTE_EVENTS + MAX_SILENCE_EVENTS),
         }
     }
 
@@ -209,6 +213,15 @@ impl BlockEvents {
     pub(crate) fn forget_notes(&mut self) {
         self.held.take().for_each(drop);
         self.silence = false;
+        self.deferred.clear();
+    }
+
+    /// Keeps the note events of a block the plugin could not be given, to
+    /// deliver them at the start of the next. A key that was released
+    /// during such a block would otherwise stay down for good.
+    pub(crate) fn defer(&mut self, events: &[Event]) {
+        let room = self.deferred.capacity() - self.deferred.len();
+        self.deferred.extend(events.iter().take(room).map(|event| event.kind));
     }
 
     /// Builds the events for the frames `start..start + frames` of a block
@@ -230,7 +243,10 @@ impl BlockEvents {
             self.queue.silence(port, &mut self.held);
         }
 
-        for (time, kind) in events_in_part(events, start, frames, total) {
+        // What earlier blocks could not deliver comes first, in order.
+        let deferred = self.deferred.len();
+        let late = (0..deferred).map(|index| (0, self.deferred[index]));
+        for (time, kind) in late.chain(events_in_part(events, start, frames, total)) {
             match kind {
                 EventKind::NoteOn { pitch, velocity } => {
                     self.held.press(pitch);
@@ -247,6 +263,7 @@ impl BlockEvents {
                 }
             }
         }
+        self.deferred.clear();
         &self.queue
     }
 }
@@ -518,6 +535,31 @@ mod tests {
         feed.silence();
         feed.forget_notes();
         assert_eq!(feed.fill(&[Event { offset: 0, kind: EventKind::AllNotesOff }], 0, 64, 64).len(), 0);
+    }
+
+    #[test]
+    fn the_notes_of_a_block_that_was_not_processed_arrive_with_the_next() {
+        let mut feed = BlockEvents::new(Vec::new(), CLAP_PORT);
+        feed.fill(&[on(0, 60)], 0, 64, 64);
+        // The plugin was busy for two blocks: a key went down in one and
+        // the first key was released in the other.
+        feed.defer(&[on(40, 64)]);
+        feed.defer(&[off(3, 60)]);
+        assert_eq!(
+            listing(feed.fill(&[on(9, 67)], 0, 64, 64)),
+            [(0, "on", 64, 1.0), (0, "off", 60, 0.0), (9, "on", 67, 1.0)]
+        );
+        assert_eq!(feed.fill(&[], 0, 64, 64).len(), 0, "delivered once");
+        // The keys that are down are known as if nothing had happened.
+        let flush = Event { offset: 0, kind: EventKind::AllNotesOff };
+        assert_eq!(listing(feed.fill(&[flush], 0, 64, 64)), [(0, "off", 64, 0.0), (0, "off", 67, 0.0)]);
+
+        // More than can be kept is dropped rather than growing the buffer.
+        let storage = feed.deferred.as_ptr();
+        for _ in 0..MAX_NOTE_EVENTS + 10 {
+            feed.defer(&[on(0, 60)]);
+        }
+        assert_eq!((feed.deferred.len(), feed.deferred.as_ptr()), (MAX_NOTE_EVENTS, storage));
     }
 
     #[test]

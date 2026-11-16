@@ -21,7 +21,7 @@ use clack_host::events::Pckn;
 use clack_host::events::event_types::ParamValueEvent;
 use clack_host::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,6 +33,28 @@ use trill_core::device::{ParamInfo, ParamKind};
 /// the engine processes, so that a plugin which is being processed is
 /// left to its audio thread.
 const FLUSH_GRACE: Duration = Duration::from_millis(150);
+
+/// The standard CLAP extensions a plugin may implement that this host
+/// makes no use of yet, by their identifiers.
+const UNUSED_EXTENSIONS: [&CStr; 17] = [
+    c"clap.ambisonic/3",
+    c"clap.audio-ports-activation/2",
+    c"clap.audio-ports-config",
+    c"clap.configurable-audio-ports/1",
+    c"clap.context-menu/1",
+    c"clap.note-name",
+    c"clap.param-indication/4",
+    c"clap.posix-fd-support",
+    c"clap.preset-load/2",
+    c"clap.remote-controls/2",
+    c"clap.render",
+    c"clap.state-context/2",
+    c"clap.surround/4",
+    c"clap.tail",
+    c"clap.thread-pool",
+    c"clap.track-info/1",
+    c"clap.voice-info",
+];
 
 /// Identifies a plugin instance on the plugin main thread. Never reused.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -234,6 +256,9 @@ pub(crate) struct ClapThread {
     next_id: u64,
     /// Scratch space for the timers that are due in one round of idling.
     due_timers: Vec<TimerId>,
+    /// The plugins whose unused abilities have been logged, so that each
+    /// is listed once and not for every instance.
+    described: HashSet<String>,
 }
 
 impl ThreadState for ClapThread {
@@ -245,6 +270,7 @@ impl ThreadState for ClapThread {
             instances: HashMap::new(),
             next_id: 1,
             due_timers: Vec::new(),
+            described: HashSet::new(),
         }
     }
 
@@ -320,6 +346,9 @@ impl ClapThread {
         let gui: Option<PluginGui> = handle.get_extension();
         let timer: Option<PluginTimer> = handle.get_extension();
         let has_editor = gui.is_some_and(|gui| gui::is_embeddable(gui, &handle));
+        if self.described.insert(request.plugin_id.clone()) {
+            log_unused_extensions(&handle, &request.plugin_id);
+        }
 
         // An empty state is what `save_state` never returns; treat it as
         // "nothing saved" rather than handing the plugin zero bytes.
@@ -443,6 +472,29 @@ impl ClapThread {
         let params = instance.params?;
         let handle = instance.plugin.plugin_handle();
         instance.param_ids.iter().map(|&param| params.get_value(&handle, param)).collect()
+    }
+}
+
+/// Logs which of the standard extensions this host makes no use of the
+/// plugin implements: what the plugin could do that it is not asked to.
+///
+/// This is the nearest thing to a list of unmet requests that can be had.
+/// What a plugin asks *of the host* and does not get cannot be listed: the
+/// bindings answer those queries without saying which they were.
+fn log_unused_extensions(plugin: &PluginMainThreadHandle, plugin_id: &str) {
+    let Some(get_extension) = plugin.as_raw().get_extension else { return };
+    let offered: Vec<&str> = UNUSED_EXTENSIONS
+        .iter()
+        // SAFETY: the plugin is live, this is its main thread, and the
+        // identifier is a C string constant. The extension is only asked
+        // for; what the plugin returns is not dereferenced.
+        .filter(|id| !unsafe { get_extension(plugin.as_raw_ptr(), id.as_ptr()) }.is_null())
+        // "clap.tail" and "clap.surround/4" alike: the name without the
+        // prefix and the version.
+        .filter_map(|id| id.to_str().ok()?.strip_prefix("clap.")?.split('/').next())
+        .collect();
+    if !offered.is_empty() {
+        log::info!("[{plugin_id}] also implements {}, which this host does not use yet", offered.join(", "));
     }
 }
 

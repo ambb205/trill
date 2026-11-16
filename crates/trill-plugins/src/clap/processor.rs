@@ -185,9 +185,10 @@ impl DeviceProcessor for ClapProcessor {
             return;
         }
         // The processor is this thread's to use except for the moment in
-        // which the main thread flushes a plugin that it took to be idle;
-        // a block that falls into such a moment passes its input through.
-        self.audio.try_with(|audio| {
+        // which the main thread flushes a plugin that it took to be idle.
+        // A block that falls into such a moment passes its input through,
+        // and its notes are kept for the next.
+        let processed = self.audio.try_with(|audio| {
             let Some(audio) = audio else { return };
             let _audio_thread = AudioContext::enter();
             // The engine never exceeds `max_block`, the size the plugin was
@@ -200,6 +201,9 @@ impl DeviceProcessor for ClapProcessor {
                 start = end;
             }
         });
+        if processed.is_none() {
+            self.block.events.defer(events);
+        }
     }
 
     /// CLAP's `reset` is meant to do exactly this, but plugins built on
