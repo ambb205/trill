@@ -172,17 +172,32 @@ pub struct CreateClipRequest {
     pub loop_length: Option<f64>,
 }
 
+/// How an audio clip follows the project tempo.
+#[derive(Copy, Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WarpInput {
+    /// Plays at the speed and pitch it was recorded at, whatever the project tempo.
+    Off,
+    /// Follows the tempo by playing faster or slower; the pitch moves with it, like a record.
+    Repitch,
+    /// Follows the tempo and keeps the pitch, keeping drum hits sharp: for drums and rhythmic loops.
+    Beats,
+    /// Follows the tempo and keeps the pitch, keeping sustained sound smooth: for chords, pads, bass, vocals.
+    Tonal,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateAudioClipRequest {
     /// Track id.
     pub track: u64,
-    /// Path of a WAV file.
+    /// Path of an audio file: WAV, AIFF, FLAC, MP3 or Ogg Vorbis. `search_sounds` finds them.
     pub path: String,
     /// Position on the timeline in beats.
     pub start: f64,
-    /// Length in beats. Defaults to the length of the file at the current tempo.
+    /// Length in beats. Defaults to the whole file (from `offset_seconds` on): for a warped clip that is the
+    /// number of beats in the recording, otherwise its duration at the current tempo.
     pub length: Option<f64>,
-    /// Where in the file to start, in seconds.
+    /// Where in the file to start, in seconds of the recording.
     pub offset_seconds: Option<f64>,
     /// Clip gain in dB.
     pub gain_db: Option<f32>,
@@ -191,6 +206,14 @@ pub struct CreateAudioClipRequest {
     /// Fade-out length in beats.
     pub fade_out: Option<f64>,
     pub name: Option<String>,
+    /// "off" (default), "repitch", "beats" or "tonal". Anything but "off" makes the clip follow the project
+    /// tempo: N beats of the loop fill N beats of the song. Use "beats" for drums, "tonal" for melodic material.
+    pub warp: Option<WarpInput>,
+    /// The tempo the file was recorded at, in BPM. Leave it out when the file name says it ("... 124bpm ...");
+    /// warping a file whose name does not is an error until you give it.
+    pub source_tempo: Option<f64>,
+    /// Pitch shift in semitones (-24 to 24) without changing speed. Needs warp "beats" or "tonal".
+    pub transpose: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -214,6 +237,13 @@ pub struct UpdateClipRequest {
     pub muted: Option<bool>,
     /// Move the clip to this track.
     pub track: Option<u64>,
+    /// Audio clips: "off", "repitch", "beats" or "tonal" (see create_audio_clip). The clip keeps its place and
+    /// length; the reply says if that no longer matches its audio.
+    pub warp: Option<WarpInput>,
+    /// Audio clips: the tempo the file was recorded at, in BPM.
+    pub source_tempo: Option<f64>,
+    /// Audio clips: pitch shift in semitones (-24 to 24). Needs warp "beats" or "tonal".
+    pub transpose: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -408,4 +438,90 @@ pub struct SetMarkersRequest {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct NewProjectRequest {
     pub name: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct SearchSoundsRequest {
+    /// Words to look for, in any order and letter case, in file names, folder names, tags, tempo ("140bpm") and
+    /// key ("f#m"): e.g. "deep kick", "808", "piano loop 90bpm". Omit to list everything the filters allow.
+    pub text: Option<String>,
+    /// Only sounds carrying every one of these tags. Drums: kick, snare, clap, hat, tom, cymbal, perc, drum.
+    /// Tonal: 808, bass, lead, pad, pluck, keys, guitar, synth, strings, brass, bell, chord, arp, stab, vocal.
+    /// Effects: fx, riser, impact, atmosphere, foley. Form: loop, one-shot, fill.
+    pub tags: Option<Vec<String>>,
+    /// "audio" (default), "midi", "project", "preset" or "any".
+    pub kind: Option<String>,
+    /// Only sounds whose tempo is known and at least this many BPM.
+    pub tempo_min: Option<f32>,
+    /// Only sounds whose tempo is known and at most this many BPM.
+    pub tempo_max: Option<f32>,
+    /// Only sounds in this key, e.g. "Am", "F# minor", "C".
+    pub key: Option<String>,
+    /// Only sounds at least this long, in seconds.
+    pub seconds_min: Option<f64>,
+    /// Only sounds at most this long, in seconds (1.5 keeps to single hits).
+    pub seconds_max: Option<f64>,
+    /// Only sounds in this folder of the library or the folders beneath it.
+    pub folder: Option<String>,
+    /// Only sounds the user has marked as favorites.
+    #[serde(default)]
+    pub favorites_only: bool,
+    /// The most results to return (default 20, at most 200). The reply says how many matched in all.
+    pub limit: Option<usize>,
+}
+
+#[derive(Copy, Clone, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LibraryAction {
+    /// The library's folders, how many files it lists, and whether a scan is running.
+    Status,
+    /// Add `path` to the library and scan it.
+    AddFolder,
+    /// Take `path` out of the library. Nothing on disk is touched.
+    RemoveFolder,
+    /// Look again for new, changed and deleted files in every folder.
+    Rescan,
+    /// Folders on this machine that probably hold samples (Splice, DAW packs, a Samples folder), to offer the user.
+    Suggestions,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LibraryRequest {
+    pub action: LibraryAction,
+    /// The folder, for `add_folder` and `remove_folder`.
+    pub path: Option<String>,
+    /// For `add_folder` and `rescan`: how long to wait for the scan before replying, in seconds (default 15, at
+    /// most 120). A scan that takes longer carries on in the background; `status` shows its progress.
+    pub wait_seconds: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct PreviewSoundRequest {
+    /// The audio file to play through the user's speakers, over the song. Omit to stop the preview.
+    pub path: Option<String>,
+    /// Preview level in dB (default 0, at most 6).
+    pub gain_db: Option<f32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetSampleRequest {
+    /// Id of a `builtin:sampler` or `builtin:drumrack` device.
+    pub device: u64,
+    /// Drum racks only: which pad, as a MIDI note 36-51 or a drum name ("kick" = 36, "snare" = 38,
+    /// "closed_hat" = 42, "open_hat" = 46, "clap" = 39, "crash" = 49...). Notes written with the same name or
+    /// number then play this sample.
+    pub pad: Option<PitchInput>,
+    /// The audio file to load, or null to empty the sampler or pad. Must be given, one or the other.
+    #[serde(default, deserialize_with = "present")]
+    #[schemars(with = "Option<String>")]
+    pub path: Option<Option<String>>,
+}
+
+/// Reads a field that may be null but must be written: absent stays `None`, null becomes `Some(None)`.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer).map(Some)
 }

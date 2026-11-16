@@ -5,9 +5,10 @@
 use serde_json::{Value, json};
 use trill_core::device::{DeviceCategory, DeviceDescriptor, ParamInfo, ParamKind};
 use trill_core::pitch::pitch_name;
-use trill_core::project::{AutomationLane, AutomationTarget, Clip, ClipContent, Segment};
+use trill_core::project::{AutomationLane, AutomationTarget, Clip, ClipContent, Segment, WarpMode};
 use trill_core::{Device, Note, Project, Track, TrackKind};
-use trill_engine::{ParamState, Session};
+use trill_engine::{ParamState, SampleFile, Session};
+use trill_library::{Entry, ScanStatus};
 
 /// Rounds for display so replies do not carry float noise.
 pub fn round(value: f64) -> f64 {
@@ -64,7 +65,93 @@ pub fn clip_json(clip: &Clip, beats_per_bar: f64, include_notes: bool) -> Value 
                 fields.insert("fade_in".into(), json!(round(audio.fade_in)));
                 fields.insert("fade_out".into(), json!(round(audio.fade_out)));
             }
+            if audio.warp != WarpMode::Off {
+                fields.insert("warp".into(), json!(warp_name(audio.warp)));
+            }
+            if let Some(tempo) = audio.source_tempo {
+                fields.insert("source_tempo".into(), json!(round(tempo)));
+            }
+            if audio.transpose != 0.0 {
+                fields.insert("transpose".into(), json!(round(audio.transpose)));
+            }
         }
+    }
+    out
+}
+
+pub fn warp_name(warp: WarpMode) -> &'static str {
+    match warp {
+        WarpMode::Off => "off",
+        WarpMode::Repitch => "repitch",
+        WarpMode::Beats => "beats",
+        WarpMode::Tonal => "tonal",
+    }
+}
+
+/// The files a sample-playing device uses, each with what is wrong with it.
+pub fn samples_json(files: &[SampleFile]) -> Value {
+    files
+        .iter()
+        .map(|file| {
+            let mut out = json!({ "slot": file.slot, "path": file.path });
+            if let Some(problem) = &file.problem {
+                out["problem"] = json!(problem);
+            }
+            out
+        })
+        .collect()
+}
+
+/// One library entry, for search results.
+pub fn sound_json(entry: &Entry, favorite: bool) -> Value {
+    let mut out = json!({ "path": entry.path.display().to_string(), "name": entry.name });
+    let fields = out.as_object_mut().expect("object literal");
+    if entry.kind != trill_library::EntryKind::Audio {
+        fields.insert("kind".into(), json!(entry.kind.label()));
+    }
+    if let Some(seconds) = entry.seconds() {
+        fields.insert("seconds".into(), json!((seconds * 1e3).round() / 1e3));
+    }
+    if let Some(tempo) = entry.tempo {
+        fields.insert("tempo".into(), json!(tempo));
+    }
+    if let Some(key) = entry.key {
+        fields.insert("key".into(), json!(key.name()));
+    }
+    if !entry.tags.is_empty() {
+        fields.insert("tags".into(), entry.tags.iter().map(|tag| tag.label()).collect());
+    }
+    if favorite {
+        fields.insert("favorite".into(), json!(true));
+    }
+    out
+}
+
+/// Whether the library is scanning and how far it has got.
+pub fn scan_json(status: &ScanStatus) -> Value {
+    let mut out = json!({ "scanning": status.is_scanning() });
+    if status.is_scanning() {
+        out["progress"] = json!({
+            "phase": format!("{:?}", status.phase).to_lowercase(),
+            "folders_listed": status.folders,
+            "files_found": status.files,
+            "headers_read": status.headers_read,
+            "headers_to_read": status.headers_to_read,
+        });
+    }
+    if let Some(last) = &status.last {
+        let mut scan = json!({
+            "files": last.files,
+            "unreadable": last.unreadable,
+            "seconds": (last.elapsed.as_secs_f64() * 100.0).round() / 100.0,
+        });
+        if last.cancelled {
+            scan["cancelled"] = json!(true);
+        }
+        if !last.problems.is_empty() {
+            scan["problems"] = json!(last.problems);
+        }
+        out["last_scan"] = scan;
     }
     out
 }
@@ -189,6 +276,10 @@ pub fn project_json(session: &Session, include_notes: bool) -> Value {
     let problems: Vec<String> = session.problems().iter().map(ToString::to_string).collect();
     if !problems.is_empty() {
         out["problems"] = json!(problems);
+    }
+    // Warped clips play in time but repitched until their audio is ready.
+    if session.preparing() > 0 {
+        out["preparing_clips"] = json!(session.preparing());
     }
     if let Some(warning) = &info.warning {
         out["audio_warning"] = json!(warning);

@@ -221,8 +221,6 @@ fn dropping_the_runtime_stops_its_thread_and_leaves_the_session_usable() {
     let sample = tone(folder.path().join("a.wav"), 0.1);
     session.lock().set_sampler_file(device, Some(&sample.display().to_string())).unwrap();
     assert!(session.lock().problems().is_empty());
-    assert!(
-        !folder.path().join("config").join("settings.json").exists()
-            || Settings::load(&folder.path().join("config").join("settings.json")).warning.is_none()
-    );
+    // Nothing about the library changed, so no settings file was written.
+    assert!(!folder.path().join("config").exists(), "a run that changes no setting leaves no file behind");
 }

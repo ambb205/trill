@@ -4759,6 +4759,7 @@ dependencies = [
  "trill-mcp",
  "trill-noir",
  "trill-plugins",
+ "trill-runtime",
  "winresource",
 ]
 
@@ -4822,16 +4823,18 @@ dependencies = [
  "anyhow",
  "axum",
  "log",
- "parking_lot",
  "rmcp",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
  "trill-core",
- "trill-dsp",
  "trill-engine",
+ "trill-library",
+ "trill-media",
  "trill-plugins",
+ "trill-runtime",
 ]
 
 [[package]]

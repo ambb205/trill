@@ -8,10 +8,9 @@ use anyhow::{Context, bail};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use trill_core::device::{CompositeFactory, DeviceFactory};
-use trill_dsp::BuiltinFactory;
-use trill_engine::{AudioBackend, Session, SharedSession};
-use trill_plugins::{PluginHost, ScanMode, Scanner};
+use trill_engine::AudioBackend;
+use trill_plugins::Scanner;
+use trill_runtime::{Runtime, RuntimeOptions, Storage};
 
 const USAGE: &str = "\
 trill-mcp: Trill without a window, controlled over the Model Context Protocol
@@ -77,39 +76,32 @@ fn main() -> anyhow::Result<()> {
     // To stderr: with the stdio transport, stdout belongs to the protocol.
     trill_mcp::logging::init_stderr();
 
-    // device factories
-    let mut factories: Vec<Box<dyn DeviceFactory>> = vec![Box::new(BuiltinFactory)];
-    if options.plugins {
-        // CLAP and VST3 plugins, each scanned in a process of its own.
-        let plugins = PluginHost::new(Scanner::CurrentExecutable).context("cannot start the plugin host")?;
-        factories.extend(plugins.factories());
-        // The first scan of a machine's plugins takes seconds; do it now, in
-        // the background, rather than on the first tool call that needs it.
-        std::thread::Builder::new().name("plugin-scan".into()).spawn(move || {
-            plugins.scan(ScanMode::UseCache);
-            for failure in plugins.scan_failures() {
-                log::warn!("skipped plugin {}: {}", failure.path.display(), failure.reason);
-            }
-        })?;
+    // The session, the sound library and the user's settings: the same
+    // ones the window uses. CLAP and VST3 plugins are scanned in a second
+    // process of this executable.
+    let runtime = Runtime::start(RuntimeOptions {
+        audio: options.audio,
+        plugins: options.plugins.then_some(Scanner::CurrentExecutable),
+        storage: Storage::User,
+    })?;
+    {
+        let mut session = runtime.session.lock();
+        let audio = session.audio_info().clone();
+        log::info!("audio output: {}", audio.output);
+        if let Some(warning) = &audio.warning {
+            log::warn!("{warning}");
+        }
+        if let Some(path) = &options.project {
+            session.load(path).with_context(|| format!("cannot open {}", path.display()))?;
+            log::info!("opened {}", path.display());
+        }
     }
-    let factory = Arc::new(CompositeFactory::new(factories));
-
-    let mut session = Session::new(factory, options.audio)?;
-    let audio = session.audio_info().clone();
-    log::info!("audio output: {}", audio.output);
-    if let Some(warning) = &audio.warning {
-        log::warn!("{warning}");
-    }
-    if let Some(path) = &options.project {
-        session.load(path).with_context(|| format!("cannot open {}", path.display()))?;
-        log::info!("opened {}", path.display());
-    }
-    let session: SharedSession = Arc::new(parking_lot::Mutex::new(session));
+    let runtime = Arc::new(runtime);
 
     match options.transport {
-        Transport::Stdio => trill_mcp::serve_stdio(session),
+        Transport::Stdio => trill_mcp::serve_stdio(runtime),
         Transport::Http(address) => {
-            let server = trill_mcp::serve_http(session, address)?;
+            let server = trill_mcp::serve_http(runtime, address)?;
             log::info!("MCP server listening on {}", server.url());
             // Serve until the process is stopped.
             loop {

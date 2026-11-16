@@ -184,11 +184,11 @@ impl Runtime {
 }
 
 impl Drop for Runtime {
-    /// Leaves the settings on disk as they are in memory. The housekeeping
-    /// thread stops when its field is dropped, right after this.
+    /// Saves the library's folders, favorites and recently used files if
+    /// they changed since the housekeeping thread last looked. Nothing is
+    /// written otherwise: a run that changed nothing leaves no trace. The
+    /// thread itself stops when its field is dropped, right after this.
     fn drop(&mut self) {
-        if let Err(error) = self.save_settings() {
-            log::warn!("{error}");
-        }
+        housekeeping::save_if_changed(&self.library, &self.settings);
     }
 }

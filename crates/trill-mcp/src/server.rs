@@ -1,12 +1,13 @@
 //! The MCP tools. Each one is a thin adapter from a request to calls on the
-//! shared [`Session`](trill_engine::Session); no musical logic lives here that
-//! the GUI could not also reach.
+//! shared [`Runtime`]: its session, its sound library and the operations
+//! that join them. No musical logic lives here that the GUI could not also
+//! reach.
 
 use crate::input::{find_param, parse_notes, parse_param_value, parse_pitch_value, parse_points};
 use crate::requests::*;
 use crate::view::{
     clip_json, descriptor_json, descriptor_summary_json, device_json, lane_json, param_state_json, project_json, round,
-    track_json, transport_json,
+    samples_json, scan_json, sound_json, track_json, transport_json, warp_name,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -15,12 +16,26 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 use trill_core::device::DeviceCategory;
 use trill_core::midi_file;
-use trill_core::project::{AudioContent, AutomationTarget, MAX_TEMPO, MAX_VOLUME_DB, MIN_TEMPO};
+use trill_core::project::{AutomationTarget, MAX_TEMPO, MAX_VOLUME_DB, MIN_TEMPO, WarpMode};
 use trill_core::{ChainRef, ClipId, DeviceId, EditError, Project, TrackId, TrackKind};
-use trill_engine::audio_file::read_wav;
 use trill_engine::{RenderOptions, RenderReport, Session, SessionError, SharedSession};
+use trill_library::{EntryKind, Key, Query, Tag, Tags, suggested_locations};
+use trill_runtime::{Runtime, SoundClip, SoundError};
+
+const SAMPLER_URI: &str = "builtin:sampler";
+const DRUM_RACK_URI: &str = "builtin:drumrack";
+/// Search results returned when the caller does not say how many, and the
+/// most it can ask for.
+const DEFAULT_SOUNDS: usize = 20;
+const MAX_SOUNDS: usize = 200;
+/// How long a library scan is waited for before the reply goes out without
+/// it, when the caller does not say, and the longest it can ask for.
+const DEFAULT_SCAN_WAIT: f64 = 15.0;
+const MAX_SCAN_WAIT: f64 = 120.0;
 
 const INSTRUCTIONS: &str = "\
 This server controls Trill, a digital audio workstation. You compose, arrange and mix a song by calling tools; the \
@@ -41,6 +56,21 @@ A good workflow
 parameters, set_automation for movement such as filter sweeps and fades, update_track for the mix.
 5. render writes a WAV and reports loudness, peak, spectral balance and per-track levels. You cannot hear, so \
 read those numbers and adjust.
+
+Working with the user's own sounds
+- search_sounds looks through the user's sample library (drum hits, loops, one-shots) by words, tags, tempo, key \
+and length, and returns file paths. If the library has no folders yet, `library` suggests where samples are on \
+this machine and adds folders.
+- preview_sound plays a file to the user and tells you its length, tempo and key.
+- Drum hits: create_track with instrument \"builtin:drumrack\", then set_sample once per pad (\"kick\", \"snare\", \
+\"closed_hat\"...) and write the pattern with create_clip using the same drum names. For one sound played across \
+the keyboard use \"builtin:sampler\" and set_sample.
+- Loops: create_audio_clip on a track without an instrument. Give warp \"beats\" (drums) or \"tonal\" (melodic) so \
+the loop follows the project tempo: its beats then line up with the song's, at any tempo, and its default length \
+is its own length in beats. `transpose` shifts its pitch into the song's key. Unwarped clips play at their \
+recorded speed.
+- A freshly warped clip plays in time but repitched for a moment while it is prepared (get_project shows \
+preparing_clips); renders always wait for the real audio.
 
 Musical guidance
 - Vary velocity and use transform_notes to humanize; identical velocities sound mechanical.
@@ -163,14 +193,116 @@ fn render_reply(report: &RenderReport) -> Value {
 
 #[derive(Clone)]
 pub struct TrillServer {
+    runtime: Arc<Runtime>,
+    /// The runtime's session, which most tools need and nothing else.
     session: SharedSession,
     tool_router: ToolRouter<Self>,
 }
 
 impl TrillServer {
-    pub fn new(session: SharedSession) -> Self {
-        Self { session, tool_router: Self::tool_router() }
+    pub fn new(runtime: Arc<Runtime>) -> Self {
+        Self { session: runtime.session.clone(), runtime, tool_router: Self::tool_router() }
     }
+
+    /// What a `library` reply always carries: the folders, how much is in
+    /// them, and whether a scan is running.
+    fn library_status(&self) -> Value {
+        let library = &self.runtime.library;
+        let index = library.index();
+        let mut out = scan_json(&library.scan_status());
+        out["folders"] = library.roots().iter().map(|root| json!(root.display().to_string())).collect();
+        out["files"] = json!(index.len());
+        out["sounds"] = json!(index.count(EntryKind::Audio));
+        out["favorites"] = json!(library.favorites().len());
+        if let Some(problem) = library.index_problem() {
+            out["index_problem"] = json!(problem);
+        }
+        if library.roots().is_empty() {
+            out["hint"] = json!(
+                "The library has no folders. `suggestions` lists where samples usually are on this machine; \
+                 `add_folder` adds one. Ask the user which folders they want."
+            );
+        }
+        out
+    }
+
+    /// Waits for the running scan, up to what the caller asked for, off
+    /// the async threads.
+    async fn wait_for_scan(&self, wait_seconds: Option<f64>) {
+        let seconds = wait_seconds.unwrap_or(DEFAULT_SCAN_WAIT);
+        let seconds = if seconds.is_finite() { seconds.clamp(0.0, MAX_SCAN_WAIT) } else { DEFAULT_SCAN_WAIT };
+        let library = self.runtime.library.clone();
+        let _ = tokio::task::spawn_blocking(move || library.wait_until_idle(Duration::from_secs_f64(seconds))).await;
+    }
+}
+
+/// The folder a tool was asked about, or why it will not do.
+fn folder_argument(path: Option<&str>, action: &str) -> Result<PathBuf, String> {
+    let path = path.map(str::trim).filter(|path| !path.is_empty());
+    let path = path.ok_or_else(|| format!("{action} needs `path`: the folder"))?;
+    Ok(std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path)))
+}
+
+fn list_folders(folders: &[PathBuf]) -> String {
+    if folders.is_empty() {
+        "The library has no folders.".to_string()
+    } else {
+        let shown: Vec<String> = folders.iter().map(|folder| folder.display().to_string()).collect();
+        format!("The library's folders: {}", shown.join(", "))
+    }
+}
+
+fn warp_mode(input: WarpInput) -> WarpMode {
+    match input {
+        WarpInput::Off => WarpMode::Off,
+        WarpInput::Repitch => WarpMode::Repitch,
+        WarpInput::Beats => WarpMode::Beats,
+        WarpInput::Tonal => WarpMode::Tonal,
+    }
+}
+
+/// The library query a search request describes.
+fn sound_query(request: &SearchSoundsRequest, folder: Option<PathBuf>) -> Result<Query, String> {
+    let mut tags = Tags::EMPTY;
+    for label in request.tags.iter().flatten() {
+        let tag = Tag::from_label(label.trim()).ok_or_else(|| {
+            let known: Vec<&str> = Tag::all().map(Tag::label).collect();
+            format!("'{label}' is not a tag. Tags: {}", known.join(", "))
+        })?;
+        tags.insert(tag);
+    }
+    let kind = match request.kind.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        None | Some("audio" | "sound" | "sounds") => Some(EntryKind::Audio),
+        Some("midi") => Some(EntryKind::Midi),
+        Some("project") => Some(EntryKind::Project),
+        Some("preset") => Some(EntryKind::Preset),
+        Some("any" | "all") => None,
+        Some(other) => {
+            return Err(format!("kind '{other}' should be \"audio\", \"midi\", \"project\", \"preset\" or \"any\""));
+        }
+    };
+    let key = match request.key.as_deref() {
+        None => None,
+        Some(text) => Some(Key::parse(text).ok_or_else(|| {
+            format!("'{text}' is not a key; write it like \"Am\", \"F# minor\", \"Bb\" or \"C major\"")
+        })?),
+    };
+    let tempo = (request.tempo_min.is_some() || request.tempo_max.is_some())
+        .then(|| request.tempo_min.unwrap_or(0.0)..=request.tempo_max.unwrap_or(f32::MAX));
+    let seconds = (request.seconds_min.is_some() || request.seconds_max.is_some())
+        .then(|| request.seconds_min.unwrap_or(0.0)..=request.seconds_max.unwrap_or(f64::MAX));
+    Ok(Query {
+        text: request.text.clone().unwrap_or_default(),
+        kind,
+        tags,
+        tempo,
+        key,
+        seconds,
+        folder,
+        favorites_only: request.favorites_only,
+        include_unreadable: false,
+        limit: Some(request.limit.unwrap_or(DEFAULT_SOUNDS).clamp(1, MAX_SOUNDS)),
+    })
 }
 
 #[tool_router]
@@ -377,7 +509,8 @@ impl TrillServer {
         finish(reply)
     }
 
-    /// A device's current parameter values, with ranges and units.
+    /// A device's current parameter values, with ranges and units. For the sample players (builtin:sampler,
+    /// builtin:drumrack) also the audio files they play, per slot, with what is wrong with any that is missing.
     #[tool(annotations(title = "Get device", read_only_hint = true))]
     fn get_device(&self, Parameters(request): Parameters<GetDeviceRequest>) -> CallToolResult {
         const LIMIT: usize = 200;
@@ -404,6 +537,13 @@ impl TrillServer {
                 ChainRef::Master => json!("master"),
                 ChainRef::Track(track) => json!({ "track": track }),
             };
+            if [SAMPLER_URI, DRUM_RACK_URI].contains(&model.uri.as_str()) {
+                let files = session.sample_files(id).map_err(|error| explain(project, error))?;
+                if files.is_empty() {
+                    out["samples_hint"] = json!("No sample loaded, so the device is silent. Use set_sample.");
+                }
+                out["samples"] = samples_json(&files);
+            }
             out["param_count"] = json!(matching.len());
             if matching.len() > LIMIT {
                 out["truncated"] = json!(format!("showing the first {LIMIT}; narrow it down with `query`"));
@@ -482,38 +622,48 @@ impl TrillServer {
         finish(reply)
     }
 
-    /// Place a WAV file on a track as an audio clip. It plays at its original speed and pitch.
+    /// Place an audio file (WAV, AIFF, FLAC, MP3, Ogg) on a track as an audio clip. By default it plays at its
+    /// recorded speed and pitch. With `warp` it follows the project tempo instead, which is what a loop needs:
+    /// its beats land on the song's beats and stay there when the tempo changes.
     #[tool(annotations(title = "Create audio clip"))]
     fn create_audio_clip(&self, Parameters(request): Parameters<CreateAudioClipRequest>) -> CallToolResult {
-        let mut session = self.session.lock();
-        let reply = (|| {
-            let path = Path::new(&request.path);
-            let data = read_wav(path).map_err(|error| error.to_string())?;
-            let offset = request.offset_seconds.unwrap_or(0.0);
-            let seconds = data.left.len() as f64 / data.sample_rate - offset;
-            if seconds <= 0.0 {
-                return Err(format!("offset_seconds {offset} is past the end of the file"));
+        let sound = SoundClip {
+            length: request.length,
+            name: request.name.clone(),
+            offset_seconds: request.offset_seconds.unwrap_or(0.0),
+            gain_db: request.gain_db.unwrap_or(0.0),
+            fade_in: request.fade_in.unwrap_or(0.0),
+            fade_out: request.fade_out.unwrap_or(0.0),
+            warp: request.warp.map_or(WarpMode::Off, warp_mode),
+            source_tempo: request.source_tempo,
+            transpose: request.transpose.unwrap_or(0.0),
+            ..SoundClip::new(&request.path, TrackId(request.track), request.start)
+        };
+        let reply = match self.runtime.add_sound(&sound) {
+            Ok(added) => {
+                let session = self.session.lock();
+                let mut out = json!({
+                    "clip_id": added.clip,
+                    "length": round(added.length),
+                    "file_seconds": round(added.file_seconds),
+                });
+                if let Some(tempo) = added.source_tempo {
+                    out["source_tempo"] = json!(round(tempo));
+                }
+                if sound.warp != WarpMode::Off {
+                    out["warp"] = json!(warp_name(sound.warp));
+                }
+                add_audio_notes(&mut out, &self.runtime, &session, added.clip);
+                Ok(out)
             }
-            let length = request.length.unwrap_or(seconds * session.project().tempo / 60.0);
-            let name = request.name.clone().unwrap_or_else(|| {
-                path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_else(|| "Audio".into())
-            });
-            let content = AudioContent {
-                offset_seconds: offset,
-                gain_db: request.gain_db.unwrap_or(0.0),
-                fade_in: request.fade_in.unwrap_or(0.0),
-                fade_out: request.fade_out.unwrap_or(0.0),
-                ..AudioContent::new(request.path.clone())
-            };
-            let clip = edit(&mut session, |project| {
-                project.add_audio_clip(TrackId(request.track), name, request.start, length, content)
-            })?;
-            Ok(json!({ "clip_id": clip, "length": round(length), "file_seconds": round(seconds) }))
-        })();
+            Err(SoundError::Session(error)) => Err(explain(self.session.lock().project(), error)),
+            Err(error) => Err(error.to_string()),
+        };
         finish(reply)
     }
 
-    /// Rename, move, resize, loop or mute a clip, or move it to another track.
+    /// Rename, move, resize, loop or mute a clip, or move it to another track. For audio clips also: fades, and
+    /// how the clip follows the project tempo (warp, source_tempo, transpose).
     #[tool(annotations(title = "Update clip"))]
     fn update_clip(&self, Parameters(request): Parameters<UpdateClipRequest>) -> CallToolResult {
         let mut session = self.session.lock();
@@ -522,7 +672,32 @@ impl TrillServer {
             if request.trim_start.is_some() && request.start.is_some() {
                 return Err("give either `start` (move the clip) or `trim_start` (move its left edge), not both".into());
             }
+            let warping = request.warp.is_some() || request.source_tempo.is_some() || request.transpose.is_some();
+            // A clip being warped needs its recording's tempo. If it has
+            // none and none is given, its file name is asked.
+            let named_tempo = match session.project().clip(id).ok().and_then(|clip| clip.audio()) {
+                Some(audio) if warping && audio.source_tempo.is_none() && request.source_tempo.is_none() => {
+                    self.runtime.sound_facts(Path::new(&audio.path)).ok().and_then(|facts| facts.tempo)
+                }
+                _ => None,
+            };
             edit(&mut session, |project| {
+                if warping {
+                    let Some(audio) = project.clip(id)?.audio() else {
+                        return Err(EditError::Invalid(format!("{id} is a MIDI clip; only audio clips can be warped")));
+                    };
+                    let warp = request.warp.map_or(audio.warp, warp_mode);
+                    let source_tempo = request.source_tempo.or(audio.source_tempo).or(named_tempo);
+                    if warp != WarpMode::Off && source_tempo.is_none() {
+                        return Err(EditError::Invalid(format!(
+                            "'{}' does not say in its name what tempo it was recorded at, so it cannot follow the \
+                             project's; give `source_tempo` (its BPM)",
+                            audio.path
+                        )));
+                    }
+                    let transpose = request.transpose.unwrap_or(audio.transpose);
+                    project.set_clip_warp(id, warp, source_tempo, transpose)?;
+                }
                 if let Some(edge) = request.trim_start {
                     project.trim_clip_start(id, edge)?;
                 }
@@ -559,6 +734,7 @@ impl TrillServer {
             let mut out = clip_json(project.clip(id).map_err(|e| e.to_string())?, beats_per_bar, false);
             out["track"] = json!(project.clip_track(id).map_err(|e| e.to_string())?);
             add_range_warning(&mut out, &session, id);
+            add_audio_notes(&mut out, &self.runtime, &session, id);
             Ok(out)
         })();
         finish(reply)
@@ -792,6 +968,224 @@ impl TrillServer {
         finish(reply)
     }
 
+    /// Search the user's sample library: drum hits, loops, one-shots, vocals. Returns file paths with each
+    /// sound's length in seconds, tempo, key and tags (read from file and folder names, so not every file has
+    /// them), best match first. Feed the paths to preview_sound, set_sample or create_audio_clip.
+    #[tool(annotations(title = "Search sounds", read_only_hint = true))]
+    fn search_sounds(&self, Parameters(request): Parameters<SearchSoundsRequest>) -> CallToolResult {
+        let library = &self.runtime.library;
+        let reply = (|| {
+            let folder = match request.folder.as_deref() {
+                None => None,
+                Some(text) => {
+                    let folder = folder_argument(Some(text), "the folder filter")?;
+                    if library.index().find_folder(&folder).is_none() {
+                        return Err(format!(
+                            "'{}' is not a folder of the library. {}",
+                            folder.display(),
+                            list_folders(&library.roots())
+                        ));
+                    }
+                    Some(folder)
+                }
+            };
+            let query = sound_query(&request, folder)?;
+            let results = library.search(&query);
+            let sounds: Vec<Value> =
+                results.entries().map(|entry| sound_json(entry, library.is_favorite(&entry.path))).collect();
+            let mut out = json!({ "total": results.total(), "sounds": sounds });
+            if results.total() > results.len() {
+                out["truncated"] = json!(format!(
+                    "showing the best {} of {}; raise `limit` (up to {MAX_SOUNDS}) or narrow the search",
+                    results.len(),
+                    results.total()
+                ));
+            }
+            if library.roots().is_empty() {
+                out["hint"] = json!(
+                    "The library has no folders, so there is nothing to find. Use the library tool: `suggestions` \
+                     lists where samples are on this machine and `add_folder` adds one."
+                );
+            } else if library.scan_status().is_scanning() {
+                out["hint"] =
+                    json!("The library is still being scanned; more may turn up. `library` status shows progress.");
+            } else if results.is_empty() {
+                out["hint"] = json!("Nothing matched. Try fewer words or filters; names are matched literally.");
+            }
+            Ok(out)
+        })();
+        finish(reply)
+    }
+
+    /// Manage the folders the sample library covers: see its status, add or remove a folder, rescan, or list
+    /// folders on this machine that probably hold samples. Folders are remembered between runs. Adding a folder
+    /// only reads it; nothing on disk is ever changed.
+    #[tool(annotations(title = "Sound library"))]
+    async fn library(&self, Parameters(request): Parameters<LibraryRequest>) -> CallToolResult {
+        let library = &self.runtime.library;
+        let reply = match request.action {
+            LibraryAction::Status => Ok(self.library_status()),
+            LibraryAction::Suggestions => {
+                let roots = library.roots();
+                let found: Vec<Value> = suggested_locations()
+                    .into_iter()
+                    .map(|place| {
+                        let mut out = json!({ "label": place.label, "path": place.path.display().to_string() });
+                        if roots.iter().any(|root| place.path.starts_with(root)) {
+                            out["in_library"] = json!(true);
+                        }
+                        out
+                    })
+                    .collect();
+                let mut out = json!({ "suggestions": found });
+                if found.is_empty() {
+                    out["hint"] =
+                        json!("No well-known sample folders were found. Ask the user where their samples are.");
+                }
+                Ok(out)
+            }
+            LibraryAction::AddFolder => match folder_argument(request.path.as_deref(), "add_folder") {
+                Ok(folder) if !folder.is_dir() => Err(format!(
+                    "'{}' is not a folder on this machine; check the path (`suggestions` lists likely ones)",
+                    folder.display()
+                )),
+                Ok(folder) => {
+                    let added = library.add_root(&folder);
+                    if added {
+                        self.wait_for_scan(request.wait_seconds).await;
+                    }
+                    let mut out = self.library_status();
+                    out["added"] = json!(added);
+                    if !added {
+                        out["note"] = json!("That folder was already covered by the library.");
+                    }
+                    Ok(out)
+                }
+                Err(error) => Err(error),
+            },
+            LibraryAction::RemoveFolder => match folder_argument(request.path.as_deref(), "remove_folder") {
+                Ok(folder) if library.remove_root(&folder) => {
+                    let mut out = self.library_status();
+                    out["removed"] = json!(folder.display().to_string());
+                    Ok(out)
+                }
+                Ok(folder) => Err(format!(
+                    "'{}' is not one of the library's folders. {}",
+                    folder.display(),
+                    list_folders(&library.roots())
+                )),
+                Err(error) => Err(error),
+            },
+            LibraryAction::Rescan => {
+                library.rescan();
+                self.wait_for_scan(request.wait_seconds).await;
+                Ok(self.library_status())
+            }
+        };
+        // The folders are settings. Saving now, rather than at the next
+        // look of the housekeeping thread, means "added" is true on disk
+        // by the time the caller reads it.
+        let reply = reply.map(|mut out| {
+            if let Err(error) = self.runtime.save_settings() {
+                out["warning"] = json!(format!("{error}; the change will be lost when the program closes"));
+            }
+            out
+        });
+        finish(reply)
+    }
+
+    /// Play an audio file to the user through the speakers, over the song, without adding it to the project;
+    /// call it without `path` to stop. The reply describes the sound (length, tempo, key, tags) since you
+    /// cannot hear it.
+    #[tool(annotations(title = "Preview sound"))]
+    async fn preview_sound(&self, Parameters(request): Parameters<PreviewSoundRequest>) -> CallToolResult {
+        let Some(path) = request.path.filter(|path| !path.trim().is_empty()) else {
+            self.runtime.stop_preview();
+            return finish(Ok(json!({ "playing": false })));
+        };
+        let gain_db = request.gain_db.unwrap_or(0.0);
+        if !gain_db.is_finite() || gain_db > MAX_VOLUME_DB {
+            return finish(Err(format!("gain_db {gain_db} is above the {MAX_VOLUME_DB} dB maximum")));
+        }
+        // Decoding a long file takes a moment; it must not hold up the
+        // other tools.
+        let runtime = self.runtime.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let path = Path::new(&path);
+            let facts = runtime.sound_facts(path)?;
+            runtime.preview(path, gain_db).map(|_| facts)
+        })
+        .await;
+        finish(match outcome {
+            Ok(Ok(facts)) => {
+                let mut out = json!({
+                    "playing": true,
+                    "seconds": round(facts.seconds),
+                    "sample_rate": facts.sample_rate,
+                    "channels": facts.channels,
+                });
+                if let Some(tempo) = facts.tempo {
+                    out["tempo"] = json!(round(tempo));
+                    out["beats"] = json!(round(facts.seconds * tempo / 60.0));
+                }
+                if let Some(key) = facts.key {
+                    out["key"] = json!(key.name());
+                }
+                if !facts.tags.is_empty() {
+                    out["tags"] = facts.tags.iter().map(|tag| tag.label()).collect();
+                }
+                Ok(out)
+            }
+            Ok(Err(error)) => Err(format!("{error}. Nothing is playing; search_sounds lists files that exist.")),
+            Err(error) => Err(format!("the preview did not start: {error}")),
+        })
+    }
+
+    /// Give a sample player its audio file: a `builtin:sampler` its one sound, or a pad of a `builtin:drumrack`
+    /// (say which with `pad`). `path: null` empties the sampler or the pad. The device keeps its parameter
+    /// values, and the change is one undo step.
+    #[tool(annotations(title = "Set sample"))]
+    fn set_sample(&self, Parameters(request): Parameters<SetSampleRequest>) -> CallToolResult {
+        let mut session = self.session.lock();
+        let reply = (|| {
+            let id = DeviceId(request.device);
+            let Some(path) = &request.path else {
+                return Err("set_sample needs `path`: the audio file to load, or null to empty the slot".to_string());
+            };
+            let path = path.as_deref();
+            let project = session.project();
+            let model = project.device(id).map_err(|error| explain(project, error))?;
+            let (uri, name) = (model.uri.clone(), model.name.clone());
+            let changed = match (uri.as_str(), &request.pad) {
+                (DRUM_RACK_URI, Some(pad)) => {
+                    let note = parse_pitch_value(&pad.0)?;
+                    session.set_pad_file(id, note, path)
+                }
+                (DRUM_RACK_URI, None) => {
+                    return Err(format!(
+                        "{id} is a drum rack; say which pad with `pad`: a note 36-51 or a drum name such as \"kick\""
+                    ));
+                }
+                (SAMPLER_URI, Some(_)) => {
+                    return Err(format!(
+                        "{id} is a sampler and has one sample; leave out `pad` (pads are for drum racks)"
+                    ));
+                }
+                (SAMPLER_URI, None) => session.set_sampler_file(id, path),
+                _ => {
+                    return Err(format!(
+                        "{id} ({name}) plays no samples. set_sample works on {SAMPLER_URI} and {DRUM_RACK_URI} devices; \
+                         add one with add_device or create_track."
+                    ));
+                }
+            };
+            changed.map_err(|error| explain(session.project(), error))?;
+            let files = session.sample_files(id).map_err(|error| explain(session.project(), error))?;
+            Ok(json!({ "device_id": id, "name": name, "samples": samples_json(&files) }))
+        })();
+        finish(reply)
+    }
+
     /// Control live playback through the user's speakers: play, stop, seek, or read the playhead.
     #[tool(annotations(title = "Transport"))]
     fn transport(&self, Parameters(request): Parameters<TransportRequest>) -> CallToolResult {
@@ -1019,6 +1413,40 @@ fn resolve_params(
 fn set_params(session: &mut Session, device: DeviceId, params: &BTreeMap<String, Value>) -> Result<(), String> {
     let resolved = resolve_params(session, device, params)?;
     session.set_device_params(device, &resolved).map_err(|error| error.to_string())
+}
+
+/// What a caller who cannot hear should know about an audio clip it has
+/// just made or changed: settings that have no effect as they stand, a
+/// clip longer than its audio, audio still being prepared.
+fn add_audio_notes(out: &mut Value, runtime: &Runtime, session: &Session, clip: ClipId) {
+    let project = session.project();
+    let Ok(clip) = project.clip(clip) else { return };
+    let Some(audio) = clip.audio() else { return };
+    let mut notes = Vec::new();
+    if audio.transpose != 0.0 && !audio.warp.keeps_pitch() {
+        notes.push(format!(
+            "transpose has no effect with warp \"{}\"; set warp to \"beats\" or \"tonal\" to shift the pitch",
+            warp_name(audio.warp)
+        ));
+    }
+    if let Ok(facts) = runtime.sound_facts(Path::new(&audio.path)) {
+        let audio_beats = (facts.seconds - audio.offset_seconds).max(0.0) / audio.seconds_per_beat(project.tempo);
+        out["audio_beats"] = json!(round(audio_beats));
+        if clip.length > audio_beats + 1e-3 {
+            notes.push(format!(
+                "the clip is {} beats long but its audio ends after {}; the rest is silent (set length to {} to fit)",
+                round(clip.length),
+                round(audio_beats),
+                round(audio_beats)
+            ));
+        }
+    }
+    if session.preparing() > 0 && audio.warp != WarpMode::Off {
+        notes.push("the warped audio is being prepared; until then playback is in time but repitched".to_string());
+    }
+    if !notes.is_empty() {
+        out["notes"] = json!(notes);
+    }
 }
 
 /// Notes that start at or past the end of their clip never play. Say so,

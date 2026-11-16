@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use trill_core::{ClipId, Project};
 use trill_engine::AudioBackend;
+use trill_plugins::Scanner;
+use trill_runtime::{RuntimeOptions, Storage};
 
 pub const USAGE: &str = "\
 Usage: trill [OPTIONS] [PROJECT.trill]
@@ -141,6 +143,18 @@ impl Cli {
         !self.no_plugins && self.screenshot.is_none()
     }
 
+    /// How to start the session and everything around it. Plugins are
+    /// scanned in a second process of this executable. A screenshot run
+    /// touches nothing of the user's: no plugins, no settings read or
+    /// written, no library, so it comes out the same on every machine.
+    pub fn runtime_options(&self) -> RuntimeOptions {
+        RuntimeOptions {
+            audio: self.audio_backend(),
+            plugins: self.plugins_enabled().then_some(Scanner::CurrentExecutable),
+            storage: if self.screenshot.is_some() { Storage::Nowhere } else { Storage::User },
+        }
+    }
+
     /// The local address the MCP server should listen on, if any. A
     /// screenshot run starts no server unless a port is asked for.
     pub fn mcp_address(&self) -> Option<std::net::SocketAddr> {
@@ -206,6 +220,26 @@ mod tests {
         assert!(!shot.plugins_enabled());
         assert_eq!(shot.mcp_address(), None);
         assert!(run(&["--screenshot", "out.png", "--mcp-port", "9000"]).unwrap().mcp_address().is_some());
+    }
+
+    #[test]
+    fn the_runtime_follows_the_options_and_screenshots_are_hermetic() {
+        let ordinary = run(&[]).unwrap().runtime_options();
+        assert_eq!(ordinary.audio, AudioBackend::Auto);
+        assert!(matches!(ordinary.plugins, Some(Scanner::CurrentExecutable)));
+        assert_eq!(ordinary.storage, Storage::User, "an ordinary run keeps the user's settings and library");
+
+        let quiet = run(&["--null-audio", "--no-plugins"]).unwrap().runtime_options();
+        assert_eq!(quiet.audio, AudioBackend::Null { sample_rate: 48_000 });
+        assert!(quiet.plugins.is_none());
+        assert_eq!(quiet.storage, Storage::User);
+
+        // A screenshot must look the same everywhere: nothing of the
+        // user's is read, written, scanned or hosted.
+        let shot = run(&["--screenshot", "out.png", "--demo"]).unwrap().runtime_options();
+        assert_eq!(shot.audio, AudioBackend::Null { sample_rate: 48_000 });
+        assert!(shot.plugins.is_none());
+        assert_eq!(shot.storage, Storage::Nowhere);
     }
 
     #[test]

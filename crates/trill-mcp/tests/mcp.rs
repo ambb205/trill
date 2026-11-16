@@ -7,27 +7,45 @@ use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use trill_dsp::BuiltinFactory;
-use trill_engine::{AudioBackend, Session, SharedSession};
+use trill_core::audio::AudioBuffer;
+use trill_engine::{AudioBackend, SharedSession};
 use trill_mcp::{HttpServer, serve_http};
+use trill_media::{WavFormat, decode, write_wav};
+use trill_runtime::{Runtime, RuntimeOptions, Storage};
 
 type Client = RunningService<RoleClient, ClientConfig>;
 
 struct Fixture {
     session: SharedSession,
+    runtime: Arc<Runtime>,
     client: Client,
     _server: HttpServer,
+    /// Holds the runtime's settings and library index, and whatever files
+    /// a test makes. Nothing of the user's is read or written.
+    folder: tempfile::TempDir,
+}
+
+impl Fixture {
+    fn settings_file(&self) -> PathBuf {
+        self.folder.path().join("config").join("settings.json")
+    }
 }
 
 async fn connect() -> Fixture {
-    let session = Session::new(Arc::new(BuiltinFactory), AudioBackend::Null { sample_rate: 48_000 }).unwrap();
-    let session: SharedSession = Arc::new(parking_lot::Mutex::new(session));
-    let server = serve_http(session.clone(), "127.0.0.1:0".parse().unwrap()).unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let storage = Storage::At {
+        settings: folder.path().join("config").join("settings.json"),
+        library_index: Some(folder.path().join("cache").join("library-index.json")),
+    };
+    let options = RuntimeOptions { audio: AudioBackend::Null { sample_rate: 48_000 }, plugins: None, storage };
+    let runtime = Arc::new(Runtime::start(options).unwrap());
+    let server = serve_http(runtime.clone(), "127.0.0.1:0".parse().unwrap()).unwrap();
     let transport =
         StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(server.url()));
     let client = ClientConfig::default().serve(transport).await.unwrap();
-    Fixture { session, client, _server: server }
+    Fixture { session: runtime.session.clone(), runtime, client, _server: server, folder }
 }
 
 /// Calls a tool. `Ok` holds the parsed JSON reply; `Err` holds the message
@@ -79,6 +97,10 @@ async fn tools_are_listed_with_schemas() {
         "transform_notes",
         "set_automation",
         "get_automation",
+        "search_sounds",
+        "library",
+        "preview_sound",
+        "set_sample",
         "transport",
         "render",
         "history",
@@ -92,6 +114,19 @@ async fn tools_are_listed_with_schemas() {
         assert!(tool.description.as_ref().is_some_and(|d| d.len() > 20), "{} needs a description", tool.name);
         let schema = serde_json::to_value(&tool.input_schema).unwrap();
         assert_eq!(schema["type"], "object", "{} has no object schema", tool.name);
+    }
+    // The sound tools teach their own vocabulary: tags, warp modes, pads.
+    let schema_of =
+        |name: &str| serde_json::to_string(&tools.iter().find(|tool| tool.name == name).unwrap().input_schema).unwrap();
+    assert!(schema_of("search_sounds").contains("one-shot") && schema_of("search_sounds").contains("tempo_min"));
+    for mode in ["off", "repitch", "beats", "tonal"] {
+        assert!(schema_of("create_audio_clip").contains(mode) && schema_of("update_clip").contains(mode), "{mode}");
+    }
+    assert!(schema_of("set_sample").contains("closed_hat") && schema_of("library").contains("add_folder"));
+    let info = fixture.client.peer_info().unwrap();
+    let instructions = info.instructions.clone().unwrap_or_default();
+    for word in ["search_sounds", "preview_sound", "builtin:drumrack", "set_sample", "create_audio_clip", "warp"] {
+        assert!(instructions.contains(word), "the instructions should mention {word}");
     }
     let create_clip = tools.iter().find(|tool| tool.name == "create_clip").unwrap();
     let schema = serde_json::to_string(&create_clip.input_schema).unwrap();
@@ -498,4 +533,362 @@ async fn tracks_can_share_a_reverb_and_a_group() {
         ok(client, "update_track", json!({ "track": keys, "group": 0, "send": { "to": verb, "level_db": null } }))
             .await;
     assert!(direct.get("group").is_none() && direct.get("sends").is_none(), "{direct}");
+}
+
+const SR: f64 = 48_000.0;
+
+fn write(path: PathBuf, samples: Vec<f32>) -> String {
+    let buffer = AudioBuffer { sample_rate: SR, left: samples.clone(), right: samples };
+    write_wav(&path, &buffer, WavFormat::Int24).unwrap();
+    path.display().to_string()
+}
+
+/// A drum hit: a tone at `hz` dying away over about `seconds`.
+fn hit(hz: f64, seconds: f64) -> Vec<f32> {
+    (0..(seconds * SR) as usize)
+        .map(|n| {
+            let t = n as f64 / SR;
+            ((std::f64::consts::TAU * hz * t).sin() * 0.8 * (-t * 5.0 / seconds).exp()) as f32
+        })
+        .collect()
+}
+
+/// `beats` beats at `tempo` with a click half way through each.
+fn click_loop(tempo: f64, beats: usize) -> Vec<f32> {
+    let beat = 60.0 / tempo * SR;
+    let mut signal = vec![0.0f32; (beats as f64 * beat).round() as usize];
+    for index in 0..beats {
+        let at = ((index as f64 + 0.5) * beat).round() as usize;
+        for (offset, value) in [0.9f32, -0.7, 0.4, -0.2].into_iter().enumerate() {
+            signal[at + offset] = value;
+        }
+    }
+    signal
+}
+
+struct Pack {
+    root: PathBuf,
+    kick: String,
+    snare: String,
+    hat: String,
+    drum_loop: String,
+    bass_loop: String,
+}
+
+/// A small sample pack, named the way packs are.
+fn pack(folder: &Path) -> Pack {
+    let root = folder.join("My Samples");
+    let tone: Vec<f32> = (0..(2.4 * SR) as usize)
+        .map(|n| ((std::f64::consts::TAU * 110.0 * n as f64 / SR).sin() * 0.4) as f32)
+        .collect();
+    Pack {
+        kick: write(root.join("Drums").join("Kick 01.wav"), hit(60.0, 0.3)),
+        snare: write(root.join("Drums").join("Snare Tight.wav"), hit(1_000.0, 0.2)),
+        hat: write(root.join("Drums").join("Closed Hat.wav"), hit(6_000.0, 0.05)),
+        drum_loop: write(root.join("Loops").join("Drum Loop 100bpm.wav"), click_loop(100.0, 8)),
+        bass_loop: write(root.join("Loops").join("Bass Loop 100bpm Am.wav"), tone),
+        root,
+    }
+}
+
+fn names(reply: &Value) -> Vec<&str> {
+    reply["sounds"].as_array().unwrap().iter().map(|sound| sound["name"].as_str().unwrap()).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_finds_sounds_builds_a_beat_and_warps_a_loop() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let pack = pack(fixture.folder.path());
+    let root = pack.root.display().to_string();
+
+    // An empty library says what to do about it.
+    let empty = ok(client, "search_sounds", json!({ "text": "kick" })).await;
+    assert_eq!(empty["total"], 0);
+    assert!(empty["hint"].as_str().unwrap().contains("add_folder"), "{empty}");
+    let status = ok(client, "library", json!({ "action": "status" })).await;
+    assert_eq!((status["folders"].as_array().unwrap().len(), status["scanning"].as_bool()), (0, Some(false)));
+    assert!(ok(client, "library", json!({ "action": "suggestions" })).await["suggestions"].is_array());
+
+    // Adding the folder scans it, and it is remembered on disk at once.
+    let added = ok(client, "library", json!({ "action": "add_folder", "path": root })).await;
+    assert_eq!(
+        (added["added"].as_bool(), added["scanning"].as_bool(), added["sounds"].as_u64()),
+        (Some(true), Some(false), Some(5))
+    );
+    assert_eq!(added["folders"], json!([root]));
+    let saved = trill_library::Settings::load(&fixture.settings_file()).settings;
+    assert_eq!(saved.library.roots, std::slice::from_ref(&pack.root), "the folder is in the settings file");
+    let again = ok(client, "library", json!({ "action": "add_folder", "path": root })).await;
+    assert_eq!(again["added"], false);
+
+    // Finding: by word, by tag and tempo, by key, by length.
+    let kicks = ok(client, "search_sounds", json!({ "text": "kick" })).await;
+    assert_eq!(names(&kicks), ["Kick 01"]);
+    assert_eq!(kicks["sounds"][0]["path"], pack.kick);
+    assert!((kicks["sounds"][0]["seconds"].as_f64().unwrap() - 0.3).abs() < 0.001);
+    assert!(kicks["sounds"][0]["tags"].as_array().unwrap().contains(&json!("kick")), "{kicks}");
+    let loops = ok(client, "search_sounds", json!({ "tags": ["loop"], "tempo_min": 90, "tempo_max": 110 })).await;
+    assert_eq!(names(&loops), ["Bass Loop 100bpm Am", "Drum Loop 100bpm"]);
+    assert_eq!((loops["sounds"][0]["tempo"].as_f64(), loops["sounds"][0]["key"].as_str()), (Some(100.0), Some("Am")));
+    assert_eq!(names(&ok(client, "search_sounds", json!({ "key": "A minor" })).await), ["Bass Loop 100bpm Am"]);
+    let hits = ok(client, "search_sounds", json!({ "seconds_max": 1.0, "folder": pack.root.join("Drums") })).await;
+    assert_eq!(hits["total"], 3);
+    let few = ok(client, "search_sounds", json!({ "limit": 2 })).await;
+    assert_eq!((few["total"].as_u64(), few["sounds"].as_array().unwrap().len()), (Some(5), 2));
+    assert!(few["truncated"].as_str().unwrap().contains("2 of 5"));
+
+    // Previewing plays it to the user and says what it is.
+    let preview = ok(client, "preview_sound", json!({ "path": pack.bass_loop, "gain_db": -6 })).await;
+    assert_eq!(
+        (preview["playing"].as_bool(), preview["tempo"].as_f64(), preview["key"].as_str()),
+        (Some(true), Some(100.0), Some("Am"))
+    );
+    assert!(
+        (preview["seconds"].as_f64().unwrap() - 2.4).abs() < 0.001
+            && (preview["beats"].as_f64().unwrap() - 4.0).abs() < 0.01
+    );
+    for _ in 0..200 {
+        if fixture.session.lock().is_auditioning() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(fixture.session.lock().is_auditioning(), "the preview is playing");
+    assert_eq!(ok(client, "preview_sound", json!({})).await["playing"], false);
+    assert_eq!(fixture.runtime.library.recent(), [PathBuf::from(&pack.bass_loop)]);
+
+    // A drum rack from the found hits, and a beat written with drum names.
+    ok(client, "set_project", json!({ "tempo": 120 })).await;
+    let limiter = ok(client, "get_project", json!({})).await["master"]["devices"][0]["id"].as_u64().unwrap();
+    // The limiter's look-ahead would shift every measurement below.
+    ok(client, "delete_device", json!({ "device": limiter })).await;
+    let drums = ok(client, "create_track", json!({ "name": "Drums", "instrument": "builtin:drumrack" })).await;
+    let (drum_track, rack) = (drums["track_id"].as_u64().unwrap(), drums["instrument_device_id"].as_u64().unwrap());
+    let empty_rack = ok(client, "get_device", json!({ "device": rack, "query": "pad36" })).await;
+    assert!(empty_rack["samples"].as_array().unwrap().is_empty() && empty_rack["samples_hint"].is_string());
+    ok(client, "set_sample", json!({ "device": rack, "pad": "kick", "path": pack.kick })).await;
+    ok(client, "set_sample", json!({ "device": rack, "pad": "snare", "path": pack.snare })).await;
+    let loaded = ok(client, "set_sample", json!({ "device": rack, "pad": 42, "path": pack.hat })).await;
+    assert_eq!(
+        loaded["samples"],
+        json!([
+            { "slot": "pad 36", "path": pack.kick },
+            { "slot": "pad 38", "path": pack.snare },
+            { "slot": "pad 42", "path": pack.hat },
+        ])
+    );
+    ok(
+        client,
+        "create_clip",
+        json!({
+            "track": drum_track, "start": 0, "length": 8, "loop_length": 4,
+            "notes": [["kick", 0, 0.25], ["kick", 2, 0.25], ["snare", 1, 0.25], ["snare", 3, 0.25],
+                      ["closed_hat", 0.5, 0.1], ["closed_hat", 1.5, 0.1], ["closed_hat", 2.5, 0.1], ["closed_hat", 3.5, 0.1]],
+        }),
+    )
+    .await;
+
+    // The drum loop, warped: its eight beats become eight beats of the song.
+    let loop_track = ok(client, "create_track", json!({ "name": "Loop" })).await["track_id"].as_u64().unwrap();
+    let placed = ok(
+        client,
+        "create_audio_clip",
+        json!({ "track": loop_track, "path": pack.drum_loop, "start": 0, "warp": "beats" }),
+    )
+    .await;
+    assert_eq!(
+        (placed["length"].as_f64(), placed["source_tempo"].as_f64(), placed["warp"].as_str()),
+        (Some(8.0), Some(100.0), Some("beats"))
+    );
+    assert_eq!(placed["audio_beats"], 8.0);
+    let loop_clip = placed["clip_id"].as_u64().unwrap();
+
+    // The bass loop goes in plain first, then is warped and transposed.
+    let bass_track = ok(client, "create_track", json!({ "name": "Bass" })).await["track_id"].as_u64().unwrap();
+    let plain =
+        ok(client, "create_audio_clip", json!({ "track": bass_track, "path": pack.bass_loop, "start": 0 })).await;
+    assert!((plain["length"].as_f64().unwrap() - 4.8).abs() < 0.001, "2.4 s is 4.8 beats at 120 BPM: {plain}");
+    assert!(plain.get("warp").is_none() && plain.get("notes").is_none(), "{plain}");
+    let bass_clip = plain["clip_id"].as_u64().unwrap();
+    let warped = ok(client, "update_clip", json!({ "clip": bass_clip, "warp": "tonal" })).await;
+    assert_eq!(
+        (warped["warp"].as_str(), warped["source_tempo"].as_f64(), warped["audio_beats"].as_f64()),
+        (Some("tonal"), Some(100.0), Some(4.0))
+    );
+    assert!(warped["notes"][0].as_str().unwrap().contains("set length to 4"), "{warped}");
+    let fitted = ok(client, "update_clip", json!({ "clip": bass_clip, "length": 4, "transpose": 3 })).await;
+    assert_eq!((fitted["length"].as_f64(), fitted["transpose"].as_f64()), (Some(4.0), Some(3.0)));
+    ok(client, "duplicate_clip", json!({ "clip": bass_clip })).await;
+
+    let project = ok(client, "get_project", json!({})).await;
+    let shown = &project["tracks"][1]["clips"][0];
+    assert_eq!(
+        (shown["type"].as_str(), shown["warp"].as_str(), shown["source_tempo"].as_f64()),
+        (Some("audio"), Some("beats"), Some(100.0))
+    );
+    assert!(project.get("problems").is_none(), "{project}");
+
+    // Render and read the numbers back.
+    let wav = fixture.folder.path().join("beat.wav");
+    let report = ok(client, "render", json!({ "path": wav.display().to_string(), "max_tail_seconds": 1 })).await;
+    assert!(report["problems"].as_array().unwrap().is_empty(), "{report}");
+    assert!((report["duration_seconds"].as_f64().unwrap() - 4.0).abs() < 0.3, "8 beats at 120 BPM: {report}");
+    let peak = report["peak_db"].as_f64().unwrap();
+    assert!((-12.0..=6.0).contains(&peak), "an implausible peak of {peak} dB");
+    let levels: Vec<(String, f64)> = report["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|track| (track["name"].as_str().unwrap().to_string(), track["peak_db"].as_f64().unwrap()))
+        .collect();
+    assert!(levels.iter().all(|(_, level)| (-20.0..=3.0).contains(level)), "every track should be heard: {levels:?}");
+
+    // Soloed, the warped loop's clicks are on the half beats of the song.
+    ok(client, "update_track", json!({ "track": loop_track, "solo": true })).await;
+    ok(client, "render", json!({ "path": wav.display().to_string(), "max_tail_seconds": 1 })).await;
+    let audio = decode(&wav).unwrap();
+    let clicks: Vec<f64> = audio
+        .left
+        .iter()
+        .enumerate()
+        .filter(|(n, sample)| sample.abs() > 0.5 && (*n == 0 || audio.left[n - 1].abs() <= 0.5))
+        .map(|(n, _)| n as f64 / SR)
+        .filter({
+            let mut last = -1.0;
+            move |time| std::mem::replace(&mut last, *time) + 0.02 < *time
+        })
+        .collect();
+    assert_eq!(clicks.len(), 8, "{clicks:?}");
+    for (index, time) in clicks.iter().enumerate() {
+        let expected = (index as f64 + 0.5) * 0.5;
+        assert!((time - expected).abs() < 0.001, "click {index} at {time:.4} s, wanted {expected}");
+    }
+    ok(client, "update_track", json!({ "track": loop_track, "solo": false })).await;
+
+    // Changing the tempo keeps the loop on the beat, and the clip its length.
+    ok(client, "set_project", json!({ "tempo": 90 })).await;
+    let slower = ok(client, "update_clip", json!({ "clip": loop_clip, "name": "Break" })).await;
+    assert_eq!((slower["length"].as_f64(), slower["audio_beats"].as_f64()), (Some(8.0), Some(8.0)));
+
+    // Every sound edit is a step of the history.
+    ok(client, "history", json!({ "action": "undo", "steps": 2 })).await;
+    assert_eq!(ok(client, "get_project", json!({})).await["tempo"], 120.0);
+    let pads = ok(client, "set_sample", json!({ "device": rack, "pad": "closed_hat", "path": null })).await;
+    assert_eq!(pads["samples"].as_array().unwrap().len(), 2, "null empties the pad");
+    ok(client, "history", json!({ "action": "undo" })).await;
+    assert_eq!(
+        ok(client, "get_device", json!({ "device": rack, "query": "volume" })).await["samples"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+
+    // A sampler takes one sound; a file that goes missing is reported
+    // against its slot, here and in the project overview.
+    let keys = ok(client, "create_track", json!({ "name": "Keys", "instrument": "builtin:sampler" })).await;
+    let sampler = keys["instrument_device_id"].as_u64().unwrap();
+    let one = ok(client, "set_sample", json!({ "device": sampler, "path": pack.bass_loop })).await;
+    assert_eq!(one["samples"], json!([{ "slot": "sample", "path": pack.bass_loop }]));
+    let file = fixture.folder.path().join("song.trill");
+    ok(client, "save_project", json!({ "path": file.display().to_string() })).await;
+    std::fs::remove_file(&pack.snare).unwrap();
+    let reloaded = ok(client, "load_project", json!({ "path": file.display().to_string() })).await;
+    let problems = reloaded["problems"].as_array().unwrap();
+    assert!(problems.len() == 1 && problems[0].as_str().unwrap().contains("pad 38"), "{problems:?}");
+    let broken = ok(client, "get_device", json!({ "device": rack, "query": "volume" })).await;
+    assert!(broken["samples"][1]["problem"].as_str().unwrap().contains("Snare Tight.wav"), "{broken}");
+    assert!(broken["samples"][0].get("problem").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sound_tools_say_what_is_wrong_and_change_nothing() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let pack = pack(fixture.folder.path());
+    ok(client, "library", json!({ "action": "add_folder", "path": pack.root.display().to_string() })).await;
+    let synth = ok(client, "create_track", json!({ "name": "Synth", "instrument": "builtin:polysynth" })).await;
+    let (track, synth) = (synth["track_id"].as_u64().unwrap(), synth["instrument_device_id"].as_u64().unwrap());
+    let midi = ok(client, "create_clip", json!({ "track": track, "start": 0, "length": 4 })).await["clip_id"]
+        .as_u64()
+        .unwrap();
+    let rack = ok(client, "add_device", json!({ "track": track, "uri": "builtin:drumrack" })).await["device_id"]
+        .as_u64()
+        .unwrap();
+    let sampler = ok(client, "add_device", json!({ "track": track, "uri": "builtin:sampler" })).await["device_id"]
+        .as_u64()
+        .unwrap();
+    let audio =
+        ok(client, "create_audio_clip", json!({ "track": track, "path": pack.kick, "start": 8 })).await["clip_id"]
+            .as_u64()
+            .unwrap();
+    let before = fixture.session.lock().project().clone();
+    let roots = fixture.runtime.library.roots();
+    let nowhere = fixture.folder.path().join("nowhere").display().to_string();
+    let missing = pack.root.join("Drums").join("Gone.wav").display().to_string();
+
+    let mistakes: Vec<(&'static str, Value, &str)> = vec![
+        ("search_sounds", json!({ "tags": ["drumz"] }), "is not a tag. Tags: kick, snare"),
+        ("search_sounds", json!({ "key": "H sharp" }), "is not a key"),
+        ("search_sounds", json!({ "kind": "video" }), "\"audio\", \"midi\""),
+        ("search_sounds", json!({ "folder": nowhere }), "is not a folder of the library. The library's folders:"),
+        ("library", json!({ "action": "add_folder" }), "add_folder needs `path`"),
+        ("library", json!({ "action": "add_folder", "path": nowhere }), "is not a folder on this machine"),
+        ("library", json!({ "action": "remove_folder", "path": nowhere }), "is not one of the library's folders"),
+        ("preview_sound", json!({ "path": missing }), "does not exist"),
+        ("preview_sound", json!({ "path": pack.kick, "gain_db": 40 }), "above the 6 dB maximum"),
+        ("set_sample", json!({ "device": synth, "path": pack.kick }), "plays no samples"),
+        ("set_sample", json!({ "device": rack, "path": pack.kick }), "say which pad"),
+        ("set_sample", json!({ "device": rack, "pad": "cowbell", "path": pack.kick }), "no pad for note 56"),
+        ("set_sample", json!({ "device": rack, "pad": "kick", "path": missing }), "does not exist"),
+        ("set_sample", json!({ "device": rack, "pad": "kick" }), "needs `path`"),
+        ("set_sample", json!({ "device": rack, "pad": "boom", "path": pack.kick }), "is not a note name"),
+        ("set_sample", json!({ "device": sampler, "pad": "kick", "path": pack.kick }), "leave out `pad`"),
+        ("set_sample", json!({ "device": 999, "path": pack.kick }), "device 999 not found. Existing devices:"),
+        ("create_audio_clip", json!({ "track": track, "path": missing, "start": 0 }), "does not exist"),
+        (
+            "create_audio_clip",
+            json!({ "track": track, "path": pack.kick, "start": 0, "warp": "beats" }),
+            "source tempo",
+        ),
+        (
+            "create_audio_clip",
+            json!({ "track": 999, "path": pack.kick, "start": 0 }),
+            "track 999 not found. Existing tracks:",
+        ),
+        (
+            "create_audio_clip",
+            json!({ "track": track, "path": pack.kick, "start": 0, "offset_seconds": 5 }),
+            "past the end",
+        ),
+        (
+            "create_audio_clip",
+            json!({ "track": track, "path": pack.kick, "start": 0, "transpose": 40 }),
+            "transpose 40 is outside",
+        ),
+        ("update_clip", json!({ "clip": midi, "warp": "beats" }), "only audio clips can be warped"),
+        ("update_clip", json!({ "clip": audio, "warp": "tonal" }), "give `source_tempo`"),
+        ("update_clip", json!({ "clip": audio, "source_tempo": 5 }), "source tempo 5 is outside"),
+    ];
+    for (tool, arguments, expected) in mistakes {
+        let error = call(client, tool, arguments.clone()).await.expect_err(expected);
+        assert!(error.contains(expected), "{tool} {arguments}: '{error}' should mention '{expected}'");
+    }
+    assert_eq!(fixture.session.lock().project(), &before, "failed calls must not change the project");
+    assert_eq!(fixture.runtime.library.roots(), roots, "nor the library");
+    assert!(!fixture.session.lock().is_auditioning());
+
+    // Settings that are accepted but have no effect are pointed out.
+    let odd = ok(client, "update_clip", json!({ "clip": audio, "transpose": 5 })).await;
+    assert!(odd["notes"][0].as_str().unwrap().contains("transpose has no effect"), "{odd}");
+    // With the tempo given, the kick can be warped after all.
+    let warped = ok(client, "update_clip", json!({ "clip": audio, "warp": "tonal", "source_tempo": 120 })).await;
+    assert_eq!((warped["warp"].as_str(), warped["transpose"].as_f64()), (Some("tonal"), Some(5.0)));
+
+    // Removing the folder empties the library and the settings.
+    let removed =
+        ok(client, "library", json!({ "action": "remove_folder", "path": pack.root.display().to_string() })).await;
+    assert_eq!((removed["folders"].as_array().unwrap().len(), removed["sounds"].as_u64()), (0, Some(0)));
+    assert!(trill_library::Settings::load(&fixture.settings_file()).settings.library.roots.is_empty());
 }
