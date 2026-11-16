@@ -565,15 +565,22 @@ fn paused(ctx: &egui::Context, cx: &Cx, typing: bool) -> Option<Option<Silence>>
     }
 }
 
-/// Stops the notes that no longer have what they were played on: another
-/// project is open, or another track is the one being played.
-fn stop_the_orphaned(cx: &mut Cx) {
+/// Looks at where things stand: works out what the keys play, and stops
+/// the notes that must not go on. Those are the notes that no longer have
+/// what they were played on (another project is open, or another track is
+/// the one being played), and all of them once something else has the
+/// keyboard. Returns whether the keyboard is listening.
+fn look(ctx: &egui::Context, cx: &mut Cx, typing: bool) -> bool {
+    let paused = paused(ctx, cx, typing);
+    let listening = paused.is_none();
+    cx.keyboard.playing = assess(cx, paused.flatten());
     let keyboard = &mut *cx.keyboard;
     let moved = keyboard.sounding.iter().any(|note| Some(note.track) != keyboard.playing.track);
-    if moved || keyboard.generation != cx.state.project_generation {
+    if !listening || moved || keyboard.generation != cx.state.project_generation {
         keyboard.release_all(cx.session);
     }
     keyboard.generation = cx.state.project_generation;
+    listening
 }
 
 /// What happened to the keys this frame: one went down (and whether as a
@@ -590,15 +597,7 @@ enum Change {
 /// says a text field has the keyboard.
 pub fn keys(ctx: &egui::Context, cx: &mut Cx, typing: bool) {
     cx.keyboard.frames += 1;
-    let paused = paused(ctx, cx, typing);
-    let is_paused = paused.is_some();
-    cx.keyboard.playing = assess(cx, paused.flatten());
-    stop_the_orphaned(cx);
-    if !cx.keyboard.on {
-        return;
-    }
-    if is_paused {
-        cx.keyboard.release_all(cx.session);
+    if !look(ctx, cx, typing) || !cx.keyboard.on {
         return;
     }
 
@@ -663,15 +662,7 @@ pub fn keys(ctx: &egui::Context, cx: &mut Cx, typing: bool) {
 /// must before the frame is over, and the settings are written down once
 /// they have settled.
 pub fn settle(ctx: &egui::Context, cx: &mut Cx) {
-    let typing = ctx.text_edit_focused();
-    let paused = paused(ctx, cx, typing);
-    let is_paused = paused.is_some();
-    let playing = assess(cx, paused.flatten());
-    cx.keyboard.playing.track = playing.track;
-    stop_the_orphaned(cx);
-    if is_paused {
-        cx.keyboard.release_all(cx.session);
-    }
+    look(ctx, cx, ctx.text_edit_focused());
     cx.keyboard.remember(false, Some(&mut *cx.sounds));
 }
 

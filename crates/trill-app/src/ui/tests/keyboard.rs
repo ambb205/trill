@@ -683,6 +683,25 @@ fn notes_stop_when_the_window_is_no_longer_typed_into() {
 }
 
 #[test]
+fn a_note_begun_just_before_the_window_lost_the_keyboard_is_ended_there() {
+    // Away and back between two frames, as after the window was hidden:
+    // the key that went down before leaving sends its key-up elsewhere,
+    // so its note ends where the keyboard was lost; what goes down after
+    // coming back plays.
+    let (mut harness, [keys, ..]) = playing();
+    let events = vec![
+        key_event(Key::A, true),
+        Event::WindowFocused(false),
+        Event::WindowFocused(true),
+        key_event(Key::D, true),
+    ];
+    harness.step(NONE, events);
+    assert_eq!(log(&harness), [Sent::On(keys, 60, 100), Sent::Off(keys, 60), Sent::On(keys, 64, 100)]);
+    up(&mut harness, Key::D);
+    assert_all_ended(&harness);
+}
+
+#[test]
 fn nothing_plays_in_a_window_that_is_not_typed_into() {
     // Key events do not reach a window without the keyboard; were one to,
     // it would start nothing that no key-up could be counted on to end.

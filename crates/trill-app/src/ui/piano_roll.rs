@@ -1425,11 +1425,11 @@ mod tests {
 
     #[test]
     fn the_view_moves_no_further_than_it_takes_to_show_a_range() {
-        // Twenty rows, C4 to F5 (60..=77) wanted.
-        assert_eq!(revealed_top(84.0, 20.0, 60, 77), 84.0, "in view already (64 up to 84): left alone");
-        assert_eq!(revealed_top(90.0, 20.0, 60, 77), 80.0, "too high: down until the lowest key is the bottom row");
-        assert_eq!(revealed_top(70.0, 20.0, 60, 77), 78.0, "too low: up until the highest key is the top row");
-        assert_eq!(revealed_top(78.0, 20.0, 60, 77), 78.0);
+        // Twenty-four rows, C4 to F5 (60..=77) wanted.
+        assert_eq!(revealed_top(84.0, 24.0, 60, 77), 84.0, "in view already (60 up to 84): left alone");
+        assert_eq!(revealed_top(90.0, 24.0, 60, 77), 84.0, "too high: down until the lowest key is the bottom row");
+        assert_eq!(revealed_top(70.0, 24.0, 60, 77), 78.0, "too low: up until the highest key is the top row");
+        assert_eq!(revealed_top(78.0, 24.0, 60, 77), 78.0);
         // A view too short for the range shows it from the bottom.
         assert_eq!(revealed_top(100.0, 12.0, 60, 77), 72.0);
         assert_eq!(revealed_top(40.0, 12.0, 60, 77), 72.0);

@@ -101,6 +101,20 @@ shot assistant-not-installed "$song" --select Lead --assistant-scene not-install
 shot min-window-assistant "$song" --select Bass --assistant-scene api-key --size 1060x640
 shot graphite-assistant-answered "$song" --select Bass --assistant-scene answered --theme graphite
 
+# The computer keyboard played as an instrument: a chord held on the lead,
+# lit in the strip and on the piano roll's keys; two drums held on a drum
+# track; what the strip says when the selected track has nothing to play
+# and when there is no track at all; the shortcut reference while it is on
+# (the letters it plays are listed with Alt); the smallest window, where
+# the strip gives up its picture of the keys last; and the other theme.
+shot keyboard-playing "$song" --select Lead --hold adg
+shot keyboard-drums --demo --select Beat --hold ad
+shot keyboard-no-instrument "$rough" --select "Verse 1" --keyboard
+shot keyboard-no-track --keyboard
+shot keyboard-shortcuts --demo --shortcuts --keyboard
+shot min-window-keyboard "$song" --select Bass --hold adg --size 1060x640
+shot graphite-keyboard-playing "$song" --select Lead --hold adg --theme graphite
+
 # Staged for the last pictures, in a folder git ignores: two projects that
 # their program did not live to save, in a profile folder of their own (so
 # the offer shows nobody's real work, and nothing of the user's is read),
