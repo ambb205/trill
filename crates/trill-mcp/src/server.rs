@@ -25,6 +25,7 @@ use trill_core::midi_file;
 use trill_core::presets::PresetList;
 use trill_core::project::{AutomationTarget, MAX_TEMPO, MAX_VOLUME_DB, MIN_TEMPO, WarpMode};
 use trill_core::{ChainRef, ClipId, DeviceId, EditError, Project, TrackId, TrackKind};
+use trill_engine::render::TrackLevel;
 use trill_engine::{RenderOptions, RenderReport, Session, SessionError, SharedSession};
 use trill_library::{EntryKind, Key, Query, Tag, Tags, suggested_locations};
 use trill_runtime::{Runtime, SoundClip, SoundError};
@@ -69,6 +70,10 @@ A good workflow
    A plugin (clap:, vst3:) may have thousands of presets: before programming one by hand, search them with \
 describe_device `preset_query` (\"warm pad\") and give `preset` the name or id to create_track, add_device or \
 update_device.
+   Instruments modelled on breath or a bow (solo winds, brass, strings) are silent until their expression is \
+raised, as a saxophone is without air: find the parameter with get_device (query \"expr\"), set it with \
+update_device, and give each phrase a shape with set_automation on it (a swell into a long note, a fall at the \
+end). render names any track that had notes and made no sound.
 3. create_clip with notes. For repeating parts, write one or two bars and set loop_length, or duplicate_clip.
 4. Shape the sound: add_device for effects (reverb, delay, eq, compressor, pump...), update_device for \
 parameters, set_automation for movement such as filter sweeps and fades, update_track for the mix.
@@ -190,31 +195,74 @@ fn default_render_path(session: &Session) -> PathBuf {
     folder.join(format!("{name}-{stamp}.wav"))
 }
 
-/// The render report plus plain-language observations about it.
-fn render_reply(report: &RenderReport) -> Value {
-    let stats = &report.stats;
+/// What a level at or below this is called: nothing at all.
+const SILENT_DB: f32 = -119.0;
+
+/// The tracks that had something to play in the rendered stretch and made
+/// no sound, each with what to try. A part that is silent in a full mix is
+/// easy to miss in the numbers, and the usual cause with a plugin is not a
+/// mistake in the song: instruments modelled on breath or a bow wait for an
+/// expression controller, as a saxophone waits for air.
+fn silent_track_notes(project: &Project, levels: &[TrackLevel], start: f64, end: Option<f64>) -> Vec<String> {
+    let soloing = project.tracks.iter().any(|track| track.solo);
     let mut notes = Vec::new();
-    if stats.peak_db <= -119.0 {
-        notes.push("The render is silent. Check that tracks have instruments, clips have notes, and nothing is muted.");
+    for level in levels.iter().filter(|level| level.peak_db <= SILENT_DB) {
+        let Ok(track) = project.track(level.track) else { continue };
+        // Silenced on purpose is not news.
+        if track.mute || (soloing && !track.solo) || track.clips.iter().all(|clip| clip.muted) {
+            continue;
+        }
+        let playing = |clip: &trill_core::Clip| clip.end() > start && end.is_none_or(|end| clip.start < end);
+        if !track.clips.iter().any(|clip| !clip.muted && playing(clip)) {
+            continue;
+        }
+        let plugin = track.devices.iter().find(|device| device.enabled && !device.uri.starts_with("builtin:"));
+        notes.push(match plugin {
+            Some(device) => format!(
+                "'{}' has clips here but made no sound. Its instrument is the plugin {} (device {}). Some instruments, \
+                 those modelled on breath or a bow among them, are silent until their expression is raised: look for \
+                 it with get_device (query \"expr\", \"breath\" or \"dynam\"), set it with update_device, and \
+                 shape phrases with set_automation on that parameter. If that is not it, try a preset, or check the \
+                 notes are in the instrument's range.",
+                track.name, device.name, device.id.0
+            ),
+            None => format!(
+                "'{}' has clips here but made no sound. Check that it has an instrument, that the instrument has a \
+                 sound loaded (get_device), and that its volume and its group are up.",
+                track.name
+            ),
+        });
+    }
+    notes
+}
+
+/// The render report plus plain-language observations about it.
+fn render_reply(report: &RenderReport, silent_tracks: Vec<String>) -> Value {
+    let stats = &report.stats;
+    let mut notes: Vec<String> = Vec::new();
+    let mut note = |text: &str| notes.push(text.to_owned());
+    if stats.peak_db <= SILENT_DB {
+        note("The render is silent. Check that tracks have instruments, clips have notes, and nothing is muted.");
     } else {
         if stats.clipped_samples > 0 {
-            notes.push("The output clips. Lower track volumes or keep a limiter last on the master.");
+            note("The output clips. Lower track volumes or keep a limiter last on the master.");
         }
         if stats.loudness_lufs < -20.0 {
-            notes.push("Quiet master (streaming targets are around -14 LUFS). Raise track levels or the limiter gain.");
+            note("Quiet master (streaming targets are around -14 LUFS). Raise track levels or the limiter gain.");
         } else if stats.loudness_lufs > -8.0 {
-            notes.push("Very loud master; it may sound crushed. Consider lowering the limiter gain.");
+            note("Very loud master; it may sound crushed. Consider lowering the limiter gain.");
         }
         if stats.stereo_correlation < 0.0 {
-            notes.push("Negative stereo correlation: parts may cancel in mono. Reduce width or chorus depth.");
+            note("Negative stereo correlation: parts may cancel in mono. Reduce width or chorus depth.");
         }
         if stats.spectrum.sub_db > -3.0 {
-            notes.push("Most of the energy is below 60 Hz. Thin out the sub bass or kick.");
+            note("Most of the energy is below 60 Hz. Thin out the sub bass or kick.");
         }
         if stats.spectrum.presence_db < -30.0 && stats.spectrum.air_db < -30.0 {
-            notes.push("Very little energy above 2 kHz; the mix may sound dull. Open filters or add brighter parts.");
+            note("Very little energy above 2 kHz; the mix may sound dull. Open filters or add brighter parts.");
         }
     }
+    notes.extend(silent_tracks);
     let mut out = serde_json::to_value(report).unwrap_or_else(|_| json!({}));
     out["notes"] = json!(notes);
     out
@@ -1808,9 +1856,14 @@ impl TrillServer {
             };
             (session.render_job(), path, options)
         };
-        let outcome = tokio::task::spawn_blocking(move || job.render_to_file(&path, &options)).await;
+        let outcome = tokio::task::spawn_blocking(move || {
+            let report = job.render_to_file(&path, &options)?;
+            let silent = silent_track_notes(&job.project, &report.tracks, options.start_beat, options.end_beat);
+            Ok::<_, trill_engine::render::RenderError>((report, silent))
+        })
+        .await;
         finish(match outcome {
-            Ok(Ok(report)) => Ok(render_reply(&report)),
+            Ok(Ok((report, silent))) => Ok(render_reply(&report, silent)),
             Ok(Err(error)) => Err(error.to_string()),
             Err(error) => Err(format!("the render did not finish: {error}")),
         })
@@ -2056,5 +2109,57 @@ impl ServerHandler for TrillServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!("{INSTRUCTIONS}\n\n{}", crate::music::INSTRUCTIONS))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_track_that_had_notes_and_made_no_sound_is_named_with_what_to_try() {
+        let mut project = Project::new("t");
+        let mut track = |name: &str, uri: &str, clip_at: Option<f64>| {
+            let id = project.add_track(name);
+            project.add_device(ChainRef::Track(id), uri, name, None).unwrap();
+            if let Some(start) = clip_at {
+                project.add_midi_clip(id, "c", start, 4.0).unwrap();
+            }
+            id
+        };
+        let sax = track("Sax", "vst3:ABCDEF", Some(0.0));
+        let kit = track("Kit", "builtin:drumrack", Some(0.0));
+        let keys = track("Keys", "builtin:polysynth", Some(0.0));
+        let later = track("Later", "vst3:ABCDEF", Some(64.0));
+        let empty = track("Empty", "vst3:ABCDEF", None);
+        let muted = track("Muted", "vst3:ABCDEF", Some(0.0));
+        project.track_mut(muted).unwrap().mute = true;
+        let level = |track: TrackId, peak_db: f32| TrackLevel { track, name: String::new(), peak_db };
+        let levels = [
+            level(sax, -120.0),
+            level(kit, -120.0),
+            level(keys, -9.0),
+            level(later, -120.0),
+            level(empty, -120.0),
+            level(muted, -120.0),
+        ];
+
+        let notes = silent_track_notes(&project, &levels, 0.0, Some(16.0));
+        assert_eq!(notes.len(), 2, "{notes:#?}");
+        // A plugin: the likely cause and the tools that fix it.
+        assert!(notes[0].starts_with("'Sax' has clips here but made no sound."), "{}", notes[0]);
+        for word in ["expression", "get_device", "update_device", "set_automation"] {
+            assert!(notes[0].contains(word), "{word}: {}", notes[0]);
+        }
+        // A built-in device: what can be wrong with those.
+        assert!(notes[1].starts_with("'Kit' has clips here but made no sound."), "{}", notes[1]);
+        assert!(!notes[1].contains("expression"));
+
+        // The whole song: the late clip counts now. A solo elsewhere, and
+        // nothing that was silenced on purpose is news.
+        let notes = silent_track_notes(&project, &levels, 0.0, None);
+        assert!(notes.iter().any(|note| note.starts_with("'Later'")), "{notes:#?}");
+        project.track_mut(keys).unwrap().solo = true;
+        assert!(silent_track_notes(&project, &levels, 0.0, None).is_empty());
     }
 }
