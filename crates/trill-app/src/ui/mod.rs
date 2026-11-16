@@ -23,7 +23,9 @@
 //! [`browser`], [`arrangement`] and [`detail`] (with [`piano_roll`],
 //! [`audio_clip`], [`devices`] and [`mixer`]) are the views; the
 //! arrangement and the browser are modules of their own parts.
-//! [`automation`] is what the views share about envelopes. [`keyboard`]
+//! [`automation`] is what the views share about envelopes, and
+//! [`controller_lane`] the lane under the piano roll's notes that edits a
+//! clip's MIDI controllers with the same gestures. [`keyboard`]
 //! is the computer keyboard played as an instrument, [`recording`] the
 //! window's part in arming tracks and recording takes, and
 //! [`audio_settings`] the Audio and MIDI panel.
@@ -49,6 +51,7 @@ mod automation;
 mod brand;
 mod browser;
 mod colors;
+mod controller_lane;
 mod detail;
 mod device_layouts;
 mod devices;

@@ -13,6 +13,10 @@
 //! and swaps them for the previous step's in the project, inside one undo
 //! gesture; the swap is done against the project as it is at that moment,
 //! so an edit made elsewhere meanwhile is kept.
+//!
+//! The first part of this file, the envelope as geometry, is shared with
+//! the controller lane of the piano roll (`controller_lane`), which edits a
+//! clip's controller curves with the same gestures.
 
 use super::Geometry;
 use crate::ui::automation::{self, Choice, Scale};
@@ -28,16 +32,16 @@ use trill_noir::{Icon, MenuItem, fade, paint, text};
 
 /// Space kept clear above the highest and below the lowest value, so a
 /// point at either extreme is whole.
-const PAD: f32 = 6.0;
+pub(in crate::ui) const PAD: f32 = 6.0;
 /// Side of a point's square.
-const POINT: f32 = 5.0;
+pub(in crate::ui) const POINT: f32 = 5.0;
 /// How close, in pixels, the pointer must be to a point or a line to grab
 /// it.
 const POINT_GRAB: f32 = 6.0;
 const LINE_GRAB: f32 = 5.0;
 /// Distance between samples of a curved segment, in pixels.
 const CURVE_STEP: f32 = 3.0;
-const LINE_WIDTH: f32 = 1.25;
+pub(in crate::ui) const LINE_WIDTH: f32 = 1.25;
 /// Where a lane header's content starts: indented under its track's name.
 const HEADER_INDENT: f32 = 26.0;
 /// Where the switch of a lane's envelope is, from the header's left edge:
@@ -53,12 +57,12 @@ const SEARCH_ABOVE: usize = 14;
 
 /// Where a lane's beats and values are on screen.
 #[derive(Clone, Debug)]
-struct LaneMap {
-    rect: Rect,
+pub(in crate::ui) struct LaneMap {
+    pub rect: Rect,
     /// Screen x of the view's origin beat.
-    left: f32,
-    time: timeline::TimeView,
-    scale: Scale,
+    pub left: f32,
+    pub time: timeline::TimeView,
+    pub scale: Scale,
 }
 
 impl LaneMap {
@@ -66,44 +70,44 @@ impl LaneMap {
         Self { rect, left: geometry.lanes.left(), time: geometry.time, scale }
     }
 
-    fn x(&self, beat: Beats) -> f32 {
+    pub fn x(&self, beat: Beats) -> f32 {
         self.time.beat_to_x(self.left, beat)
     }
 
-    fn beat(&self, x: f32) -> Beats {
+    pub fn beat(&self, x: f32) -> Beats {
         self.time.x_to_beat(self.left, x).max(0.0)
     }
 
     /// Pixels between the lowest and the highest value.
-    fn travel(&self) -> f32 {
+    pub fn travel(&self) -> f32 {
         (self.rect.height() - 2.0 * PAD).max(1.0)
     }
 
     /// Screen y of height `position` (0 at the bottom, 1 at the top).
-    fn y_at(&self, position: f32) -> f32 {
+    pub fn y_at(&self, position: f32) -> f32 {
         self.rect.bottom() - PAD - position.clamp(0.0, 1.0) * self.travel()
     }
 
-    fn y(&self, value: f64) -> f32 {
+    pub fn y(&self, value: f64) -> f32 {
         self.y_at(self.scale.position(value))
     }
 
     /// Height in the lane of screen position `y`.
-    fn position(&self, y: f32) -> f32 {
+    pub fn position(&self, y: f32) -> f32 {
         ((self.rect.bottom() - PAD - y) / self.travel()).clamp(0.0, 1.0)
     }
 
-    fn value(&self, y: f32) -> f64 {
+    pub fn value(&self, y: f32) -> f64 {
         self.scale.value(self.position(y))
     }
 
-    fn point(&self, point: &AutomationPoint) -> Pos2 {
+    pub fn point(&self, point: &AutomationPoint) -> Pos2 {
         pos2(self.x(point.beat), self.y(point.value))
     }
 }
 
 /// The point nearest to `position`, if one is within reach.
-fn point_at(points: &[AutomationPoint], map: &LaneMap, position: Pos2) -> Option<AutomationPoint> {
+pub(in crate::ui) fn point_at(points: &[AutomationPoint], map: &LaneMap, position: Pos2) -> Option<AutomationPoint> {
     let distance = |point: &AutomationPoint| {
         let at = map.point(point);
         (at.x - position.x).abs().max((at.y - position.y).abs())
@@ -121,7 +125,11 @@ fn point_at(points: &[AutomationPoint], map: &LaneMap, position: Pos2) -> Option
 
 /// The line under `position`: the two points it joins. `None` over a step
 /// (which is moved by its points) and off the ends of the envelope.
-fn segment_at(points: &[AutomationPoint], map: &LaneMap, position: Pos2) -> Option<[AutomationPoint; 2]> {
+pub(in crate::ui) fn segment_at(
+    points: &[AutomationPoint],
+    map: &LaneMap,
+    position: Pos2,
+) -> Option<[AutomationPoint; 2]> {
     let beat = map.time.x_to_beat(map.left, position.x);
     let next = points.partition_point(|point| point.beat <= beat);
     if next == 0 || next == points.len() {
@@ -133,7 +141,11 @@ fn segment_at(points: &[AutomationPoint], map: &LaneMap, position: Pos2) -> Opti
 
 /// `points` without one instance of each point in `remove`, plus `add`,
 /// in time order.
-fn replaced(points: &[AutomationPoint], remove: &[AutomationPoint], add: &[AutomationPoint]) -> Vec<AutomationPoint> {
+pub(in crate::ui) fn replaced(
+    points: &[AutomationPoint],
+    remove: &[AutomationPoint],
+    add: &[AutomationPoint],
+) -> Vec<AutomationPoint> {
     let mut result = points.to_vec();
     for point in remove {
         if let Some(index) = result.iter().position(|candidate| candidate == point) {
@@ -148,7 +160,7 @@ fn replaced(points: &[AutomationPoint], remove: &[AutomationPoint], add: &[Autom
 /// `originals` moved by `beats` in time and `height` up the lane, held back
 /// as a group so none passes a point of `others` (the rest of the envelope)
 /// or the start of the song, and each kept inside the scale.
-fn moved(
+pub(in crate::ui) fn moved(
     originals: &[AutomationPoint],
     others: &[AutomationPoint],
     beats: Beats,
@@ -176,7 +188,7 @@ fn moved(
 /// The bend a line takes when it is dragged `up` pixels in a lane whose
 /// values span `travel` pixels. Dragging up bows the line upward whichever
 /// way it runs, so the sign depends on whether it rises or falls.
-fn bend(up: f32, travel: f32, rising: bool) -> f32 {
+pub(in crate::ui) fn bend(up: f32, travel: f32, rising: bool) -> f32 {
     let amount = (up / (travel * 0.5).max(1.0)).clamp(-1.0, 1.0);
     // A positive bend starts slowly: on a rising line that bows downward.
     if rising { -amount } else { amount }
@@ -186,7 +198,13 @@ fn bend(up: f32, travel: f32, rising: bool) -> f32 {
 /// `first` to `last` (their starts, in either order), each `step` beats
 /// long. What the stroke passes over is replaced; where it ends the
 /// envelope carries on as it was.
-fn drawn(points: &[AutomationPoint], first: Beats, last: Beats, step: Beats, value: f64) -> Vec<AutomationPoint> {
+pub(in crate::ui) fn drawn(
+    points: &[AutomationPoint],
+    first: Beats,
+    last: Beats,
+    step: Beats,
+    value: f64,
+) -> Vec<AutomationPoint> {
     let (from, to) = (first.min(last), first.max(last) + step);
     let within = |point: &&AutomationPoint| point.beat >= from - 1e-9 && point.beat < to - 1e-9;
     let mut result: Vec<AutomationPoint> = points.iter().filter(|point| !within(point)).copied().collect();
@@ -222,7 +240,12 @@ fn arriving(points: &[AutomationPoint], beat: Beats) -> f64 {
 
 /// The points of `points` inside the box spanned by two corners, each a
 /// beat and a height in the lane.
-fn points_in_box(points: &[AutomationPoint], scale: &Scale, a: (Beats, f32), b: (Beats, f32)) -> Vec<AutomationPoint> {
+pub(in crate::ui) fn points_in_box(
+    points: &[AutomationPoint],
+    scale: &Scale,
+    a: (Beats, f32),
+    b: (Beats, f32),
+) -> Vec<AutomationPoint> {
     let (first, last) = (a.0.min(b.0), a.0.max(b.0));
     let (low, high) = (a.1.min(b.1), a.1.max(b.1));
     let inside = |point: &&AutomationPoint| {
@@ -320,6 +343,23 @@ fn paint_envelope(
     // gives up its hue, which goes to the value the user holds.
     let (held, color) = if off { (Some(color), fade(theme.ink_faint, 0.55)) } else { (None, color) };
 
+    let selected = cx.state.arrangement.points.as_ref().filter(|selection| selection.target == *target);
+    let chosen = selected.map(|selection| selection.points.as_slice()).unwrap_or_default();
+    // A tint between the envelope and the lane's floor, as the displays
+    // of the devices have under their curves. An envelope that is off
+    // carries none: nothing is filled by it.
+    paint_curve(painter, map, points, color, (!off).then(|| fade(color, 0.10)));
+    paint_points(painter, map, points, chosen, color, cx.theme.ink);
+    if let (Some(hue), Some(value)) = (held, resting) {
+        paint_resting(painter, map, value, hue);
+    }
+}
+
+/// The line an envelope draws across the lane of `map`, through every
+/// value it takes there: held before its first point and after its last,
+/// stepped where a point holds, and bent where a segment is.
+pub(in crate::ui) fn curve_path(map: &LaneMap, points: &[AutomationPoint]) -> Vec<Pos2> {
+    let rect = map.rect;
     let (first_beat, last_beat) = (map.beat(rect.left()), map.time.x_to_beat(map.left, rect.right()));
     // The points on screen, and one on either side for the lines that
     // enter and leave the view.
@@ -353,16 +393,24 @@ fn paint_envelope(
     if last.beat < last_beat {
         path.push(pos2(rect.right(), map.y(last.value)));
     }
+    path
+}
 
-    // A tint between the envelope and the lane's floor, as the displays
-    // of the devices have under their curves. An envelope that is off
-    // carries none: nothing is filled by it.
-    if !off {
-        let tint = fade(color, 0.10);
+/// Paints the line of an envelope (`points` must not be empty) in `color`,
+/// over a `tint` between it and the lane's floor if one is given.
+pub(in crate::ui) fn paint_curve(
+    painter: &egui::Painter,
+    map: &LaneMap,
+    points: &[AutomationPoint],
+    color: Color32,
+    tint: Option<Color32>,
+) {
+    let path = curve_path(map, points);
+    if let Some(tint) = tint {
         let mut fill = Mesh::default();
         for (index, point) in path.iter().enumerate() {
             fill.colored_vertex(*point, tint);
-            fill.colored_vertex(pos2(point.x, rect.bottom()), tint);
+            fill.colored_vertex(pos2(point.x, map.rect.bottom()), tint);
             if index > 0 {
                 let first = 2 * index as u32;
                 fill.add_triangle(first - 2, first - 1, first);
@@ -372,15 +420,28 @@ fn paint_envelope(
         painter.add(Shape::mesh(fill));
     }
     painter.add(Shape::line(path, Stroke::new(LINE_WIDTH, color)));
+}
 
-    let selected = cx.state.arrangement.points.as_ref().filter(|selection| selection.target == *target);
+/// Paints the squares of the points on screen: in `color`, and those of
+/// `chosen` (the selected ones) larger and in `ink`.
+pub(in crate::ui) fn paint_points(
+    painter: &egui::Painter,
+    map: &LaneMap,
+    points: &[AutomationPoint],
+    chosen: &[AutomationPoint],
+    color: Color32,
+    ink: Color32,
+) {
+    let rect = map.rect;
+    let (first_beat, last_beat) = (map.beat(rect.left()), map.time.x_to_beat(map.left, rect.right()));
+    let from = points.partition_point(|point| point.beat < first_beat);
     let mut squares = Mesh::default();
     let mut outlined = Vec::new();
-    for point in visible.iter().filter(|point| point.beat >= first_beat && point.beat <= last_beat) {
+    for point in points[from..].iter().take_while(|point| point.beat <= last_beat) {
         let center = map.point(point);
         let corner = pos2((center.x - POINT / 2.0).round(), (center.y - POINT / 2.0).round());
         let square = Rect::from_min_size(corner, vec2(POINT, POINT));
-        if selected.is_some_and(|selection| selection.points.contains(point)) {
+        if chosen.contains(point) {
             outlined.push(square);
         } else {
             squares.add_colored_rect(square, color);
@@ -388,10 +449,7 @@ fn paint_envelope(
     }
     painter.add(Shape::mesh(squares));
     for square in outlined {
-        painter.rect_filled(square.expand(1.0), 0.0, cx.theme.ink);
-    }
-    if let (Some(hue), Some(value)) = (held, resting) {
-        paint_resting(painter, map, value, hue);
+        painter.rect_filled(square.expand(1.0), 0.0, ink);
     }
 }
 

@@ -17,8 +17,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use trill_core::device::DeviceDescriptor;
 use trill_core::{
-    AutomationPoint, AutomationTarget, Beats, ChainRef, Clip, ClipId, DeviceId, EditError, Note, Project, TrackId,
-    TrackKind,
+    AutomationPoint, AutomationTarget, Beats, ChainRef, Clip, ClipId, ControllerKind, DeviceId, EditError, Note,
+    Project, TrackId, TrackKind,
 };
 use trill_engine::{AudioConfig, Session, SessionError, SharedSession, StreamInfo};
 use trill_noir::Theme;
@@ -44,6 +44,9 @@ pub enum FocusArea {
     PianoRoll,
     /// An automation lane; commands act on its selected points.
     Automation,
+    /// The controller lane under the piano roll's notes; commands act on
+    /// the selected points of the curve it shows.
+    Controllers,
     /// The browser's list of sounds: arrows move through it, Enter and
     /// Space preview, and typing searches.
     Browser,
@@ -351,11 +354,30 @@ pub enum NoteDrag {
     },
 }
 
+/// What the lane under the piano roll's notes shows.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum LaneShown {
+    /// How hard each note is hit.
+    #[default]
+    Velocity,
+    /// The clip's curve for one MIDI controller.
+    Controller(ControllerKind),
+}
+
 pub struct PianoRollState {
     pub time: TimeView,
     pub pitch: PitchView,
     pub snap: Snap,
     pub drag: Option<NoteDrag>,
+    /// What the lane under the notes shows. It stays as chosen from clip
+    /// to clip: someone shaping expression goes on shaping expression.
+    pub lane: LaneShown,
+    /// The selected points of the curve the lane shows.
+    pub lane_points: Vec<AutomationPoint>,
+    /// What a drag in the controller lane is doing.
+    pub lane_drag: Option<LaneDrag>,
+    /// What is typed into the search of the lane's chooser.
+    pub lane_search: String,
     /// The clip the view was last framed on, so selecting another clip
     /// reframes once and then leaves the user's zoom alone.
     pub framed: Option<ClipId>,
@@ -675,6 +697,10 @@ impl UiState {
                 pitch: PitchView { top: 84.0, row_height: 12.0 },
                 snap: Snap::Sixteenth,
                 drag: None,
+                lane: LaneShown::default(),
+                lane_points: Vec::new(),
+                lane_drag: None,
+                lane_search: String::new(),
                 framed: None,
                 note_length: 0.25,
                 note_velocity: super::piano_roll::DEFAULT_VELOCITY,
@@ -761,6 +787,8 @@ impl UiState {
         if self.selected_clip != clip {
             self.selected_clip = clip;
             self.selected_notes.clear();
+            self.piano.lane_points.clear();
+            self.piano.lane_drag = None;
         }
     }
 
@@ -787,8 +815,18 @@ impl UiState {
             Some(Ok(clip)) => {
                 let notes = clip.notes();
                 self.selected_notes.retain(|selected| notes.contains(selected));
+                // The points of the curve the lane shows, as far as they
+                // are still there.
+                let curve = match self.piano.lane {
+                    LaneShown::Controller(kind) => clip.controller(kind).map(|curve| curve.points.as_slice()),
+                    LaneShown::Velocity => None,
+                };
+                self.piano.lane_points.retain(|selected| curve.is_some_and(|points| points.contains(selected)));
             }
-            _ => self.selected_notes.clear(),
+            _ => {
+                self.selected_notes.clear();
+                self.piano.lane_points.clear();
+            }
         }
         if self.selected_track.is_none() {
             self.selected_track = project.tracks.first().map(|track| track.id);

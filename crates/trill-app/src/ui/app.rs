@@ -13,7 +13,8 @@ use super::snapshot::{Live, Snapshot};
 use super::sounds::{Dropped, Report, Sounds};
 use super::state::{AudioSummary, BrowserState, BrowserTab, Cx, FocusArea, LaneOwner, Tool, UiState, lane_owner};
 use super::{
-    UiOptions, arrangement, automation, browser, detail, dragging, piano_roll, recording, status_bar, top_bar,
+    UiOptions, arrangement, automation, browser, controller_lane, detail, dragging, piano_roll, recording, status_bar,
+    top_bar,
 };
 use eframe::egui;
 use parking_lot::Mutex;
@@ -274,6 +275,7 @@ impl TrillApp {
                 self.live.audio_faults = session.audio_faults();
                 self.live.preparing = session.preparing();
                 self.live.update_editors(&self.snapshot, &session);
+                self.live.update_silent(&self.snapshot, &session);
                 // The session's chores (a take written into the project, a
                 // lost audio device replaced) are the runtime's
                 // housekeeping thread's to do: looking for another device
@@ -455,6 +457,7 @@ impl TrillApp {
             FocusArea::Arrangement => !state.selected_clips.is_empty(),
             FocusArea::PianoRoll => !state.selected_notes.is_empty(),
             FocusArea::Automation => state.arrangement.points.as_ref().is_some_and(|chosen| !chosen.points.is_empty()),
+            FocusArea::Controllers => !state.piano.lane_points.is_empty(),
             // The arrows belong to the list; see `browser::keys`.
             FocusArea::Browser => false,
         };
@@ -911,12 +914,14 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
             FocusArea::PianoRoll if !cx.state.selected_notes.is_empty() => piano_roll::delete_selected_notes(cx),
             FocusArea::PianoRoll => {}
             FocusArea::Automation => arrangement::delete_selected_points(cx),
+            FocusArea::Controllers => controller_lane::delete_selected(cx),
             FocusArea::Arrangement => ops::delete_selection(cx),
             FocusArea::Browser => {}
         },
         Command::SelectAll => match focus {
             FocusArea::PianoRoll => piano_roll::select_all_notes(cx),
             FocusArea::Automation => arrangement::select_all_points(cx),
+            FocusArea::Controllers => controller_lane::select_all(cx),
             FocusArea::Arrangement | FocusArea::Browser => ops::select_all(cx),
         },
         Command::Escape => {
