@@ -66,7 +66,9 @@ fn library_folders_favorites_and_recents_survive_a_restart() {
 
     let runtime = start(folder.path());
     assert!(runtime.library.roots().is_empty() && runtime.settings_warning().is_none());
-    assert!(!settings_file.exists(), "starting writes nothing");
+    // Starting, looking and asking to save what has not changed write nothing.
+    runtime.save_library_changes().unwrap();
+    assert!(!settings_file.exists() && !folder.path().join("cache").exists(), "an untouched run leaves no files");
     assert!(runtime.library.add_root(&samples));
     assert!(runtime.library.wait_until_idle(WAIT));
     assert_eq!(runtime.library.search(&Query::text("kick")).len(), 1);
@@ -101,7 +103,7 @@ fn library_folders_favorites_and_recents_survive_a_restart() {
     other.ui.theme = "graphite".into();
     other.save(&settings_file).unwrap();
     assert!(runtime.library.remove_root(&samples));
-    runtime.save_settings().unwrap();
+    runtime.save_library_changes().unwrap();
     let saved = Settings::load(&settings_file).settings;
     assert!(saved.library.roots.is_empty());
     assert_eq!((saved.ui.theme.as_str(), saved.ui.browser_width), ("graphite", 333.0));
@@ -120,7 +122,8 @@ fn a_hermetic_runtime_reads_and_writes_nothing() {
     // Settings can still be changed; they last as long as the runtime.
     runtime.update_settings(|settings| settings.ui.theme = "graphite".into()).unwrap();
     assert_eq!(runtime.settings().ui.theme, "graphite");
-    runtime.save_settings().unwrap();
+    runtime.library.set_favorite(Path::new("somewhere/kick.wav"), true);
+    runtime.save_library_changes().unwrap();
 }
 
 #[test]

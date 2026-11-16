@@ -1082,11 +1082,11 @@ impl TrillServer {
                 Ok(self.library_status())
             }
         };
-        // The folders are settings. Saving now, rather than at the next
-        // look of the housekeeping thread, means "added" is true on disk
-        // by the time the caller reads it.
+        // The folders are settings. Saving a change now, rather than at the
+        // next look of the housekeeping thread, means "added" is true on
+        // disk by the time the caller reads it. Looking saves nothing.
         let reply = reply.map(|mut out| {
-            if let Err(error) = self.runtime.save_settings() {
+            if let Err(error) = self.runtime.save_library_changes() {
                 out["warning"] = json!(format!("{error}; the change will be lost when the program closes"));
             }
             out

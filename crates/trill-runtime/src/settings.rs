@@ -71,7 +71,7 @@ impl SettingsFile {
     }
 
     /// Whether the settings are kept on disk at all.
-    pub fn is_kept(&self) -> bool {
+    fn is_kept(&self) -> bool {
         self.path.is_some()
     }
 
@@ -84,9 +84,15 @@ impl SettingsFile {
         Settings { library: library.settings(), ..self.current.clone() }
     }
 
-    /// Whether the library's part has changed since it was last written.
-    pub fn library_changed(&self, library: &Library) -> bool {
-        self.is_kept() && library.settings() != self.written_library
+    /// Writes the settings if the library's folders, favorites or recently
+    /// used files are not what was last written, and says whether it did.
+    /// Nothing changed means nothing written: a program that was only
+    /// looked at leaves no file behind.
+    pub fn save_library_changes(&mut self, library: &Library) -> Result<bool, SaveError> {
+        if !self.is_kept() || library.settings() == self.written_library {
+            return Ok(false);
+        }
+        self.update(library, |_| ()).map(|()| true)
     }
 
     /// Applies `change` to the settings and writes them, with the library's

@@ -609,6 +609,8 @@ async fn an_agent_finds_sounds_builds_a_beat_and_warps_a_loop() {
     let status = ok(client, "library", json!({ "action": "status" })).await;
     assert_eq!((status["folders"].as_array().unwrap().len(), status["scanning"].as_bool()), (0, Some(false)));
     assert!(ok(client, "library", json!({ "action": "suggestions" })).await["suggestions"].is_array());
+    ok(client, "library", json!({ "action": "rescan" })).await;
+    assert!(!fixture.settings_file().exists(), "looking at the library must not write the user's settings");
 
     // Adding the folder scans it, and it is remembered on disk at once.
     let added = ok(client, "library", json!({ "action": "add_folder", "path": root })).await;

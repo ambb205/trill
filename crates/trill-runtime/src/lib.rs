@@ -106,10 +106,9 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Builds everything and starts the audio engine. With
-    /// [`Storage::User`] the library starts catching up with what changed
-    /// on disk since the last run; the plugins are scanned in the
-    /// background either way.
+    /// Builds everything and starts the audio engine. A library that has
+    /// folders starts catching up with what changed in them since the last
+    /// run, and the plugins are scanned, both in the background.
     pub fn start(options: RuntimeOptions) -> Result<Self, RuntimeError> {
         let media = Arc::new(MediaCache::default());
         let mut factories: Vec<Box<dyn DeviceFactory>> = vec![Box::new(Builtins::with_loader(media.clone()))];
@@ -141,7 +140,10 @@ impl Runtime {
         if let Some(problem) = library.index_problem() {
             log::warn!("the saved library index was not used: {problem}");
         }
-        if settings.is_kept() {
+        // Catch up with what changed on disk since the last run. With no
+        // folders there is nothing to catch up with, and a scan would only
+        // write an empty index.
+        if !library.roots().is_empty() {
             library.rescan();
         }
         let settings = Arc::new(Mutex::new(settings));
@@ -176,10 +178,12 @@ impl Runtime {
         self.settings.lock().update(&self.library, change)
     }
 
-    /// Saves the settings now, rather than at the housekeeping thread's
-    /// next look. For a front end that is about to report "saved".
-    pub fn save_settings(&self) -> Result<(), SaveError> {
-        self.settings.lock().update(&self.library, |_| ())
+    /// Saves the library's folders, favorites and recently used files now
+    /// if they have changed, rather than at the housekeeping thread's next
+    /// look. For a front end that is about to tell someone a folder was
+    /// added. Writes nothing when nothing changed.
+    pub fn save_library_changes(&self) -> Result<(), SaveError> {
+        self.settings.lock().save_library_changes(&self.library).map(|_| ())
     }
 }
 

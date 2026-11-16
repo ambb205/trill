@@ -69,14 +69,11 @@ impl Drop for Housekeeper {
     }
 }
 
-/// Writes the settings if the library's folders, favorites or recently used
-/// files are not what was last written: adding a folder in any front end is
-/// then remembered without that front end having to say so.
+/// Writes the settings if the library's part of them has changed: adding a
+/// folder in any front end is then remembered without that front end
+/// having to say so. A failure is logged; there is nobody here to tell.
 pub(crate) fn save_if_changed(library: &Library, settings: &Mutex<SettingsFile>) {
-    let mut settings = settings.lock();
-    if settings.library_changed(library)
-        && let Err(error) = settings.update(library, |_| ())
-    {
+    if let Err(error) = settings.lock().save_library_changes(library) {
         log::warn!("{error}");
     }
 }
