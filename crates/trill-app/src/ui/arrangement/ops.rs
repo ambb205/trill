@@ -2,9 +2,10 @@
 //! menu and the context menus all call. Each is one undo step.
 
 use super::rows::Rows;
+use crate::ui::shortcuts::{self, Command};
 use crate::ui::snapshot::Snapshot;
 use crate::ui::state::{Clipboard, CopiedClip, Cx, InlineClip, TextEditState, TimeSelection, Tool, UiState};
-use trill_core::{Beats, Clip, ClipId, Track, TrackId, TrackKind};
+use trill_core::{Beats, Clip, ClipId, PasteMode, Track, TrackId, TrackKind};
 
 /// The selected clips that still exist, each with its track.
 fn selected<'a>(snapshot: &'a Snapshot, state: &UiState) -> Vec<(&'a Track, &'a Clip)> {
@@ -102,8 +103,11 @@ pub fn cut(cx: &mut Cx) {
 
 /// Pastes the copied clips at the edit cursor, the topmost of them on the
 /// selected track, and moves the cursor past them so pasting again follows
-/// on.
+/// on. A copied stretch of time goes over what its tracks hold there.
 pub fn paste(cx: &mut Cx) {
+    if matches!(cx.state.clipboard, Some(Clipboard::Time(_))) {
+        return paste_time(cx, PasteMode::Replace);
+    }
     let Some(Clipboard::Clips(copied)) = cx.state.clipboard.clone() else { return };
     let lanes = clip_tracks(cx);
     let base = cx.state.selected_track.and_then(|track| lanes.iter().position(|id| *id == track));
@@ -250,6 +254,52 @@ pub fn insert_time(cx: &mut Cx) {
     if cx.edit(|project| project.insert_time(start, end - start)).is_some() {
         // The selection stays where it is, over the room that was made.
         cx.state.arrangement.cursor = start;
+    }
+}
+
+/// Puts the selected time aside: what the tracks it was selected on hold in
+/// it (every track, for a selection drawn on the ruler), cut to it, and the
+/// course of their automation through it. The song is not changed.
+pub fn copy_time(cx: &mut Cx) {
+    let Some((start, end)) = selected_span(cx) else {
+        cx.state.toasts.info("Select the time to copy first: drag in an empty lane or on the ruler");
+        return;
+    };
+    let selection = cx.state.arrangement.time_selection.as_ref();
+    let tracks = selection.map(|selection| selection.tracks.clone()).filter(|tracks| !tracks.is_empty());
+    match cx.snap.project.excerpt(start, end, tracks.as_deref()) {
+        Ok(excerpt) => {
+            let beats = end - start;
+            let bars = beats / cx.snap.project.time_signature.beats_per_bar();
+            let long = if bars >= 1.0 && bars.fract() == 0.0 {
+                format!("{bars} bar{}", if bars == 1.0 { "" } else { "s" })
+            } else {
+                format!("{beats} beats")
+            };
+            cx.state.copied_text = Some(format!("{long} of time from Trill"));
+            cx.state.clipboard = Some(Clipboard::Time(excerpt));
+        }
+        Err(error) => cx.state.toasts.error(error.to_string()),
+    }
+}
+
+/// Puts the copied time down at the edit cursor, on the tracks it was
+/// taken from: making room for it on every track, or over what those
+/// tracks hold there. What was pasted is selected, and the cursor moves
+/// past it so pasting again follows on.
+pub fn paste_time(cx: &mut Cx, mode: PasteMode) {
+    let Some(Clipboard::Time(excerpt)) = cx.state.clipboard.clone() else {
+        let keys = shortcuts::keys(Command::CopyTime);
+        cx.state.toasts.info(format!("Copy a stretch of time first: select it and press {keys}"));
+        return;
+    };
+    let cursor = cx.state.arrangement.cursor;
+    if cx.edit(|project| project.paste_time(&excerpt, cursor, mode)).is_some() {
+        let end = cursor + excerpt.length;
+        let tracks = excerpt.tracks.unwrap_or_default();
+        cx.state.clear_clip_selection();
+        cx.state.arrangement.time_selection = Some(TimeSelection { start: cursor, end, tracks });
+        cx.state.arrangement.cursor = end;
     }
 }
 

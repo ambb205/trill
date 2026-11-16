@@ -6,6 +6,7 @@
 use crate::compile::{Compiler, DeviceBank, Meters, Problem, StandIns};
 use crate::engine::{AudioBackend, AudioSetup, Engine, EngineError, Message, StreamInfo};
 use crate::graph::Meter;
+use crate::instruments::InstrumentKnowledge;
 use crate::render::RenderJob;
 use crate::saved::{SavedPresets, WithSaved};
 use crate::sources::AudioSources;
@@ -21,6 +22,7 @@ use trill_media::MediaCache;
 
 mod controllers;
 mod editors;
+mod instruments;
 mod params;
 mod playing;
 mod presets;
@@ -133,6 +135,9 @@ pub struct Session {
     /// The presets someone saved, which `factory` lists with each device
     /// type's own.
     saved: Arc<SavedPresets>,
+    /// What is known about instruments by device type, which a track is
+    /// given along with its instrument.
+    instruments: Arc<InstrumentKnowledge>,
     meters: Meters,
     audio: AudioSources,
     /// The clips playing a stand-in until their stretched audio is ready.
@@ -199,6 +204,7 @@ impl Session {
             last_id: 0,
             factory,
             saved,
+            instruments: Arc::new(InstrumentKnowledge::default()),
             engine,
             bank: DeviceBank::default(),
             meters: Meters::default(),
@@ -534,12 +540,14 @@ impl Session {
         preset: Option<&str>,
         index: Option<usize>,
     ) -> Result<DeviceId, SessionError> {
-        let descriptor = self
-            .factory
-            .descriptors()
-            .into_iter()
+        let descriptors = self.factory.descriptors();
+        let descriptor = descriptors
+            .iter()
             .find(|d| d.uri == uri)
+            .cloned()
             .ok_or_else(|| SessionError::Device(format!("unknown device '{uri}'")))?;
+        // A track's first instrument brings what is known about its keys.
+        let profile = self.profile_for_new_instrument(chain, &descriptor, &descriptors);
         // Found before anything is added, so that a preset there is none
         // of adds nothing.
         let preset = preset.map(|wanted| self.find_preset(uri, wanted)).transpose()?;
@@ -560,6 +568,9 @@ impl Session {
             } else if let (Some(info), Some(values)) = (&preset, &values) {
                 device.params.extend(values.iter().cloned());
                 device.preset = Some(info.reference());
+            }
+            if let Some((track, profile)) = profile {
+                project.set_track_profile(track, profile)?;
             }
             Ok(id)
         })?;
@@ -805,7 +816,7 @@ impl Session {
 
     pub fn load(&mut self, path: &Path) -> Result<(), SessionError> {
         let json = std::fs::read_to_string(path).map_err(|e| io_error(path, e))?;
-        let project = Project::from_json(&json)?;
+        let project = self.with_known_instruments(Project::from_json(&json)?);
         self.replace_project(project);
         self.path = Some(path.to_path_buf());
         Ok(())
@@ -828,7 +839,7 @@ impl Session {
     /// whether the copy replaces what the file holds.
     pub fn load_recovered(&mut self, copy: &Path, original: Option<&Path>) -> Result<(), SessionError> {
         let json = std::fs::read_to_string(copy).map_err(|e| io_error(copy, e))?;
-        let project = Project::from_json(&json)?;
+        let project = self.with_known_instruments(Project::from_json(&json)?);
         self.replace_project(project);
         self.path = original.map(Path::to_path_buf);
         self.revision += 1;

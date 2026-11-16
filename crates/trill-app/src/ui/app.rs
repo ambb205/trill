@@ -959,6 +959,8 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
         Command::DeleteTime => ops::delete_time(cx),
         Command::DuplicateTime => ops::duplicate_time(cx),
         Command::InsertTime => ops::insert_time(cx),
+        Command::CopyTime => ops::copy_time(cx),
+        Command::PasteTime => ops::paste_time(cx, trill_core::PasteMode::Insert),
         Command::AddMarker => ops::add_marker(cx),
         Command::AddTrack => arrangement::add_track(cx),
         Command::GroupTrack => arrangement::group_selected_track(cx),

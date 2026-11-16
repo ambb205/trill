@@ -425,6 +425,7 @@ pub fn project_json(session: &Session, include_notes: bool) -> Value {
                     out["armed"] = json!(true);
                 }
                 out["devices"] = json!(chain_json(session, &track.devices));
+                crate::instruments::describe_track(session, track.id, &mut out);
                 out
             })
             .collect::<Vec<_>>(),

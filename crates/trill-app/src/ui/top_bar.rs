@@ -203,14 +203,15 @@ fn edit_menu(ui: &mut Ui, cx: &mut Cx) {
     // These act on the clips; the same keys act on notes while the piano
     // roll is being worked in.
     let clips = !cx.state.selected_clips.is_empty();
-    let pasteable = matches!(cx.state.clipboard, Some(Clipboard::Clips(_)));
+    let holds_time = matches!(cx.state.clipboard, Some(Clipboard::Time(_)));
+    let pasteable = holds_time || matches!(cx.state.clipboard, Some(Clipboard::Clips(_)));
     if item(ui, "Cut", Command::Cut, clips) {
         ops::cut(cx);
     }
     if item(ui, "Copy", Command::Copy, clips) {
         ops::copy(cx);
     }
-    if item(ui, "Paste", Command::Paste, pasteable) {
+    if item(ui, if holds_time { "Paste over" } else { "Paste" }, Command::Paste, pasteable) {
         ops::paste(cx);
     }
     if item(ui, "Duplicate", Command::Duplicate, clips) {
@@ -241,6 +242,12 @@ fn edit_menu(ui: &mut Ui, cx: &mut Cx) {
     }
     if item(ui, "Insert time", Command::InsertTime, time) {
         ops::insert_time(cx);
+    }
+    if item(ui, "Copy time", Command::CopyTime, time) {
+        ops::copy_time(cx);
+    }
+    if item(ui, "Paste time", Command::PasteTime, holds_time) {
+        ops::paste_time(cx, trill_core::PasteMode::Insert);
     }
     trill_noir::menu_separator(ui, theme);
     if item(ui, "Add track", Command::AddTrack, true) {

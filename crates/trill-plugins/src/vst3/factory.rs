@@ -20,6 +20,9 @@ use trill_core::presets::PresetList;
 
 /// The VST3 sub-category that marks a plugin as an instrument.
 const INSTRUMENT_CATEGORY: &str = "Instrument";
+/// The VST3 sub-category of an instrument whose keys are drums
+/// ("Instrument|Drum").
+const DRUM_CATEGORY: &str = "Drum";
 /// File name of the scan cache inside the application's cache directory.
 const CACHE_FILE: &str = "vst3-plugins.json";
 
@@ -30,6 +33,7 @@ static FORMAT: Format = Format {
     find_files: find_plugin_files,
     probe,
     is_instrument: |record| record.features.iter().any(|category| category == INSTRUMENT_CATEGORY),
+    plays_drums: |record| record.features.iter().any(|category| category == DRUM_CATEGORY),
     // A VST3 class describes itself only by its sub-categories.
     description: |record| match record.features.as_slice() {
         [] => "VST3 plugin".to_string(),
@@ -304,6 +308,13 @@ impl DeviceFactory for Vst3Factory {
             Err(_) => None,
         }
     }
+
+    fn plays_drums(&self, uri: &str) -> bool {
+        match split_uri(uri) {
+            Some((VST3_SCHEME, class_id)) => self.shared.installed.catalog().plays_drums(class_id),
+            _ => false,
+        }
+    }
 }
 
 /// Creates an instance on the plugin main thread, giving up after
@@ -375,6 +386,8 @@ mod tests {
             features: features.iter().map(|feature| feature.to_string()).collect(),
         };
         assert!((FORMAT.is_instrument)(&record(&["Instrument", "Synth"])));
+        assert!((FORMAT.plays_drums)(&record(&["Instrument", "Drum"])), "a drum instrument says so");
+        assert!(!(FORMAT.plays_drums)(&record(&["Instrument", "Synth"])));
         assert!((FORMAT.is_instrument)(&record(&["Fx", "Instrument"])));
         assert!(!(FORMAT.is_instrument)(&record(&["Fx", "Reverb"])));
         assert!(!(FORMAT.is_instrument)(&record(&["instrument"])), "sub-categories are case-sensitive");

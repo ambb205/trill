@@ -29,6 +29,8 @@ pub(crate) struct Format {
     pub probe: fn(&Path) -> Result<Vec<PluginRecord>, String>,
     /// Whether a plugin is an instrument rather than an effect.
     pub is_instrument: fn(&PluginRecord) -> bool,
+    /// Whether a plugin says it is a drum instrument: its keys are drums.
+    pub plays_drums: fn(&PluginRecord) -> bool,
     /// The description a plugin is listed with.
     pub description: fn(&PluginRecord) -> String,
 }
@@ -72,6 +74,8 @@ pub(crate) struct Installed {
     pub name: String,
     pub vendor: String,
     pub instrument: bool,
+    /// Whether it calls itself a drum instrument.
+    pub drums: bool,
 }
 
 /// What the last scan found.
@@ -107,7 +111,8 @@ impl Catalog {
                 params: Vec::new(),
                 presets: Vec::new(),
             });
-            let installed = Installed { path, name: record.name, vendor: record.vendor, instrument };
+            let drums = instrument && (format.plays_drums)(&record);
+            let installed = Installed { path, name: record.name, vendor: record.vendor, instrument, drums };
             catalog.plugins.insert(record.id, installed);
         }
         // Scan order is an accident of the file system; lists read better
@@ -123,6 +128,12 @@ impl Catalog {
             0 => "the plugin is not installed".to_string(),
             count => format!("the plugin is not installed ({count} plugin files could not be scanned)"),
         })
+    }
+
+    /// Whether the installed plugin with this id calls itself a drum
+    /// instrument.
+    pub(crate) fn plays_drums(&self, id: &str) -> bool {
+        self.plugins.get(id).is_some_and(|installed| installed.drums)
     }
 
     /// How many plugins were found.
@@ -281,6 +292,7 @@ mod tests {
             if id == "broken" { Err("it is broken".to_string()) } else { Ok(vec![record(&id, &id, &[])]) }
         },
         is_instrument: |record| record.features.iter().any(|feature| feature == "synth"),
+        plays_drums: |record| record.features.iter().any(|feature| feature == "drum"),
         description: |record| format!("About {}", record.name),
     };
 

@@ -20,6 +20,8 @@ use trill_core::presets::PresetList;
 
 /// The CLAP feature that marks a plugin as an instrument.
 const INSTRUMENT_FEATURE: &str = "instrument";
+/// The CLAP features that mark an instrument as one whose keys are drums.
+const DRUM_FEATURES: [&str; 2] = ["drum", "drum-machine"];
 /// File name of the scan cache inside the application's cache directory.
 const CACHE_FILE: &str = "clap-plugins.json";
 
@@ -30,6 +32,7 @@ static FORMAT: Format = Format {
     find_files: find_plugin_files,
     probe,
     is_instrument: |record| record.features.iter().any(|feature| feature == INSTRUMENT_FEATURE),
+    plays_drums: |record| record.features.iter().any(|feature| DRUM_FEATURES.contains(&feature.as_str())),
     description: |record| record.description.clone(),
 };
 
@@ -271,6 +274,13 @@ impl DeviceFactory for ClapFactory {
             Err(_) => None,
         }
     }
+
+    fn plays_drums(&self, uri: &str) -> bool {
+        match split_uri(uri) {
+            Some((CLAP_SCHEME, plugin_id)) => self.shared.installed.catalog().plays_drums(plugin_id),
+            _ => false,
+        }
+    }
 }
 
 /// Creates an instance on the plugin main thread, giving up after
@@ -325,6 +335,9 @@ mod tests {
             features: features.iter().map(|feature| feature.to_string()).collect(),
         };
         assert!((FORMAT.is_instrument)(&record(&["stereo", "instrument"])));
+        assert!((FORMAT.plays_drums)(&record(&["instrument", "drum"])));
+        assert!((FORMAT.plays_drums)(&record(&["instrument", "drum-machine", "stereo"])));
+        assert!(!(FORMAT.plays_drums)(&record(&["instrument", "synthesizer"])));
         assert!(!(FORMAT.is_instrument)(&record(&["audio-effect", "reverb"])));
         assert!(!(FORMAT.is_instrument)(&record(&[])));
         assert_eq!((FORMAT.description)(&record(&[])), "About X", "a plugin is listed with its own description");

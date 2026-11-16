@@ -11,7 +11,7 @@ use crate::ui::sounds::DropTarget;
 use crate::ui::state::{ArrangeDrag, ArrangementState, Cx, FocusArea, LaneOwner, TextEditState, TrackDrop};
 use crate::ui::{colors, recording, units, widgets};
 use eframe::egui::{self, Align2, CursorIcon, PointerButton, Rect, Sense, Ui, UiBuilder, pos2, vec2};
-use trill_core::{AutomationTarget, ChainRef, Track, TrackId, TrackKind};
+use trill_core::{AutomationTarget, ChainRef, Role, Track, TrackId, TrackKind};
 use trill_noir::{Bar, Chip, Icon, MenuItem, TRACK_HUES, fade, paint, text};
 
 /// Width of the color strip down a header's left edge.
@@ -470,6 +470,20 @@ fn start_rename(cx: &mut Cx, track: &Track) {
     cx.state.renaming_track = Some(TextEditState { target: track.id, text: track.name.clone(), focused: false });
 }
 
+/// Says whether a track's notes are drums or pitches. A track that says
+/// what its instrument says anyway is left saying nothing, so that it
+/// follows the instrument if that is changed, and the song's file stays as
+/// it was.
+fn set_plays_drums(cx: &mut Cx, track: TrackId, drums: bool) {
+    let by_instrument = cx.snap.has_drum_instrument(track);
+    let role = (drums != by_instrument).then_some(if drums { Role::Drums } else { Role::Pitched });
+    cx.edit(|project| {
+        let mut profile = project.track(track)?.profile.clone();
+        profile.role = role;
+        project.set_track_profile(track, profile)
+    });
+}
+
 fn track_menu(ui: &mut Ui, cx: &mut Cx, track: &Track) {
     let theme = cx.theme;
     let snapshot = cx.snap;
@@ -491,6 +505,13 @@ fn track_menu(ui: &mut Ui, cx: &mut Cx, track: &Track) {
     if MenuItem::new(label).shortcut(&shortcuts::keys(Command::ToggleAutomation)).show(ui, theme).clicked() {
         cx.state.select_track(id);
         automation::toggle_lanes(cx, LaneOwner::Track(id));
+    }
+    if track.kind == TrackKind::Normal {
+        let drums = snapshot.plays_drums(id);
+        let detail = "Its notes are drums, named in the piano roll and written by name, not pitches";
+        if MenuItem::new("Plays drums").checked(drums).detail(detail).show(ui, theme).clicked() {
+            set_plays_drums(cx, id, !drums);
+        }
     }
     trill_noir::menu_separator(ui, theme);
 

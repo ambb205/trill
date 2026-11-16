@@ -129,6 +129,8 @@ async fn tools_are_listed_with_schemas() {
         "render",
         "measure",
         "probe",
+        "get_instrument_profile",
+        "set_instrument_profile",
         "history",
         "save_project",
         "load_project",
@@ -986,6 +988,105 @@ async fn time_is_cut_repeated_and_opened_up_across_the_song() {
         assert!(error.contains(expected), "{arguments}: {error}");
     }
     assert_eq!(spans(&ok(client, "get_project", json!({})).await), spans(&before));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stretch_of_time_is_copied_to_another_place_on_every_track_or_some() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let make = |name: &'static str| async move {
+        ok(client, "create_track", json!({ "name": name, "instrument": "builtin:polysynth" })).await["track_id"]
+            .as_u64()
+            .unwrap()
+    };
+    let (keys, bass) = (make("Keys").await, make("Bass").await);
+    // A verse (0..16) and a chorus (16..32) on both tracks; the chorus swells on the keys.
+    for (track, pitch) in [(keys, 60), (bass, 36)] {
+        for (name, start) in [("Verse", 0.0), ("Chorus", 16.0)] {
+            let notes: Vec<Value> = (0..16).map(|beat| json!([pitch + start as u64 / 16 * 7, beat, 0.5])).collect();
+            let clip = json!({ "track": track, "name": name, "start": start, "length": 16, "notes": notes });
+            ok(client, "create_clip", clip).await;
+        }
+    }
+    let project = ok(client, "get_project", json!({})).await;
+    let chorus = project["tracks"][0]["clips"][1]["id"].clone();
+    ok(client, "set_controllers", json!({ "clip": chorus, "controllers": { "expression": [[0, 40], [16, 120]] } }))
+        .await;
+    let volume = json!({ "type": "track_volume", "track": keys });
+    ok(client, "set_automation", json!({ "target": volume, "points": [[0, -12], [16, -12], [32, 0], [64, 0]] })).await;
+    ok(client, "set_markers", json!({ "markers": [{ "beat": 0, "name": "Verse" }, { "beat": 16, "name": "Chorus" }] }))
+        .await;
+    let spans = |project: &Value, track: usize| -> Vec<(String, f64, f64)> {
+        let clips = project["tracks"][track]["clips"].as_array().unwrap();
+        let span = |clip: &Value| {
+            (
+                clip["name"].as_str().unwrap().to_string(),
+                clip["start"].as_f64().unwrap(),
+                clip["length"].as_f64().unwrap(),
+            )
+        };
+        clips.iter().map(span).collect()
+    };
+    let named = |name: &str, start: f64, length: f64| (name.to_string(), start, length);
+
+    // The chorus again after itself, on every track, in one call: it makes room, so the song grows.
+    let copied = ok(client, "edit_time", json!({ "action": "copy", "start": 16, "end": 32, "to": 32 })).await;
+    assert_eq!((copied["was_beats"].as_f64(), copied["length_beats"].as_f64()), (Some(32.0), Some(48.0)));
+    assert_eq!(copied["copied"]["from"], json!([16.0, 32.0]));
+    assert_eq!(
+        (copied["copied"]["to"].clone(), copied["copied"]["made_room"].clone()),
+        (json!([32.0, 48.0]), json!(true))
+    );
+    assert_eq!(copied["copied"]["clips"].as_object().unwrap().len(), 2, "one clip on each track: {copied}");
+    let project = ok(client, "get_project", json!({})).await;
+    for track in 0..2 {
+        let expected = [named("Verse", 0.0, 16.0), named("Chorus", 16.0, 16.0), named("Chorus", 32.0, 16.0)];
+        assert_eq!(spans(&project, track), expected);
+    }
+    // The copy carries the chorus's own curve, and the track's automation through it.
+    let again = project["tracks"][0]["clips"][2]["id"].clone();
+    let curves = ok(client, "get_controllers", json!({ "clip": again })).await;
+    assert_eq!(curves["controllers"][0]["controller"], "expression");
+    assert_eq!(curves["controllers"][0]["points"], json!([[0.0, 40.0], [16.0, 120.0]]));
+    let lanes = ok(client, "get_automation", json!({})).await;
+    let points = lanes["automation"][0]["points"].as_array().unwrap();
+    // Two points on one beat are a step: the later one is where the envelope goes on from.
+    let at = |beat: f64| {
+        points.iter().rev().find(|point| point[0].as_f64() == Some(beat)).map(|point| point[1].as_f64().unwrap())
+    };
+    assert_eq!((at(32.0), at(48.0)), (Some(-12.0), Some(0.0)), "the rise is heard again: {points:?}");
+
+    // Over what is there, on one track only: the bass plays its chorus under the verse; nothing moves.
+    let over = ok(
+        client,
+        "edit_time",
+        json!({ "action": "copy", "start": 16, "end": 24, "to": 4, "tracks": [bass], "make_room": false }),
+    )
+    .await;
+    assert_eq!((over["length_beats"].as_f64(), over["copied"]["made_room"].clone()), (Some(48.0), json!(false)));
+    let project = ok(client, "get_project", json!({})).await;
+    assert_eq!(spans(&project, 0).len(), 3, "the keys are as they were");
+    assert_eq!(
+        spans(&project, 1)[..3],
+        [named("Verse", 0.0, 4.0), named("Chorus", 4.0, 8.0), named("Verse", 12.0, 4.0)]
+    );
+    assert_eq!(project["markers"].as_array().unwrap().len(), 2, "markers are not copied");
+
+    // One undo step each; and what cannot be done says what is missing and changes nothing.
+    ok(client, "history", json!({ "action": "undo" })).await;
+    assert_eq!(spans(&ok(client, "get_project", json!({})).await, 1).len(), 3);
+    let before = ok(client, "get_project", json!({})).await;
+    for (arguments, expected) in [
+        (json!({ "action": "copy", "start": 16, "end": 32 }), "needs `to`"),
+        (json!({ "action": "copy", "start": 16, "to": 32 }), "needs `end`"),
+        (json!({ "action": "copy", "start": 16, "end": 32, "to": -4 }), "must be >= 0"),
+        (json!({ "action": "copy", "start": 16, "end": 32, "to": 0, "tracks": [999] }), "track 999 not found"),
+        (json!({ "action": "delete", "start": 16, "end": 32, "tracks": [1] }), "go with action \"copy\""),
+    ] {
+        let error = call(client, "edit_time", arguments.clone()).await.unwrap_err();
+        assert!(error.contains(expected), "{arguments}: {error}");
+    }
+    assert_eq!(ok(client, "get_project", json!({})).await["tracks"], before["tracks"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
