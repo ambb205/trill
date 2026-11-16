@@ -7,8 +7,8 @@
 //! `trill-plugins`, `tests/vendor.rs`.) An entry is data: to
 //! add one, measure the plugin (the probe tool plays a key and says what
 //! sounded), then write what was found as the others are written. The
-//! opt-in tests in `tests/known_instruments.rs` play some of these entries
-//! on the installed plugins.
+//! opt-in tests in `trill-mcp`, `tests/instruments.rs`, play some of these
+//! entries on the installed plugins.
 
 use trill_core::{Articulation, InstrumentProfile, Lasts, Role};
 
