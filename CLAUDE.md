@@ -12,7 +12,7 @@ this file is the map, so that a task needs only the files it touches.
 ```sh
 cargo run -p trill-app -- --demo                    # the window, on a built-in song
 cargo run -p trill-mcp -- --no-audio --scratch      # no window: MCP on stdio, nothing read or kept
-cargo test --workspace                              # about 1,500 tests, a few minutes once built
+cargo test --workspace                              # about 1,650 tests, a few minutes once built
 cargo test -p trill-engine --test playing           # one integration test file
 cargo test -p trill-app a_take_is_counted_in        # tests whose name contains this (the app's are in its binary)
 cargo test -p trill-core time_ops -- --nocapture
@@ -55,7 +55,7 @@ on the samples.
 
 | Crate | What lives there |
 |---|---|
-| `trill-core` | The model and nothing else: `project.rs` (`Project`, tracks, clips, automation, every edit), `time_ops.rs`, `device.rs` (the device API, `EventKind`), `presets.rs`, `midi_file.rs`. No audio or UI dependencies. |
+| `trill-core` | The model and nothing else: `project.rs` (`Project`, tracks, clips with their notes and controller curves, automation, every edit), `time_ops.rs`, `device.rs` (the device API, `EventKind`), `presets.rs`, `midi_file.rs`. No audio or UI dependencies. |
 | `trill-dsp` | The built-in devices (`synth`, `drums`, `sampler`, `drumrack`, `effects/`) and offline time-stretching. `lib.rs` is the registry. |
 | `trill-media` | Decoding audio files, the shared `MediaCache`, waveform peaks, resampling, WAV writing. |
 | `trill-library` | The sample library (scan, index, search, tags from file names) and the settings file. |
@@ -78,7 +78,8 @@ on the samples.
   scroll, zoom, tabs) and ways to act. `cx.edit(|project| …)` is one undo step. A drag is wrapped in
   `Session::begin_gesture`/`end_gesture` so it is one step; an assistant's whole turn in `begin_group`/`end_group`.
 - `shortcuts.rs` is one table that the key handling, the menus and the F1 reference all read.
-- Areas: `arrangement/` (lanes, clips, headers, ruler, automation envelopes), `piano_roll.rs`, `devices.rs` with
+- Areas: `arrangement/` (lanes, clips, headers, ruler, automation envelopes), `piano_roll.rs` (notes, and the lane of
+  velocities and controller curves under them), `devices.rs` with
   `device_layouts.rs`, `mixer.rs`, `browser/` and `sounds/`, `audio_clip.rs`, `sample_panels.rs`, `recording.rs`,
   `audio_settings.rs`, `keyboard/` (the computer keyboard as a MIDI keyboard), `assistant/` (the chat panel),
   `recovery.rs`, `files.rs`.
