@@ -128,9 +128,7 @@ impl Session {
             PresetLookup::Missing { similar } => {
                 let all: Vec<&PresetInfo> = list.presets.iter().collect();
                 let known = match (&list.status, list.len()) {
-                    (PresetStatus::Reading, 0) => {
-                        "its presets are still being read; ask again in a moment".to_string()
-                    }
+                    (PresetStatus::Reading, 0) => "its presets are still being read; ask again in a moment".to_string(),
                     (PresetStatus::Reading, found) => format!(
                         "its presets are still being read, {found} so far; ask again in a moment. Nearest so far: {}",
                         if similar.is_empty() { "none".to_string() } else { named(&similar) }

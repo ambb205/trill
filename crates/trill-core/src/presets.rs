@@ -130,7 +130,9 @@ pub enum PresetLookup<'a> {
     /// category (`Pads/Warm`) or their id.
     Ambiguous(Vec<&'a PresetInfo>),
     /// There is none. `similar` are the nearest things there are.
-    Missing { similar: Vec<&'a PresetInfo> },
+    Missing {
+        similar: Vec<&'a PresetInfo>,
+    },
 }
 
 /// How many near misses a failed lookup comes back with.
@@ -279,11 +281,7 @@ fn words(text: &str) -> Vec<String> {
 
 /// The parts of a category path, lowered.
 fn parts(category: &str) -> Vec<String> {
-    category
-        .split(CATEGORY_SEPARATOR)
-        .map(|part| part.trim().to_lowercase())
-        .filter(|part| !part.is_empty())
-        .collect()
+    category.split(CATEGORY_SEPARATOR).map(|part| part.trim().to_lowercase()).filter(|part| !part.is_empty()).collect()
 }
 
 /// Whether `category` has the parts `wanted` in a row, anywhere along it.
@@ -379,8 +377,7 @@ mod tests {
     #[test]
     fn pages_say_how_many_there_are_in_all() {
         let list = list();
-        let page =
-            |offset, limit| list.search(&PresetQuery { text: "", category: None, offset, limit });
+        let page = |offset, limit| list.search(&PresetQuery { text: "", category: None, offset, limit });
         let first = page(0, 3);
         assert_eq!((first.total, first.offset, first.presets.len()), (7, 0, 3));
         let last = page(6, 3);
@@ -459,7 +456,10 @@ mod tests {
         let ready = list();
         assert!(!ready.is_reading());
         assert_eq!(ready.len(), 7);
-        assert_eq!(ready.presets[0].reference(), PresetRef { id: ready.presets[0].id.clone(), name: "Warm Pad".into() });
+        assert_eq!(
+            ready.presets[0].reference(),
+            PresetRef { id: ready.presets[0].id.clone(), name: "Warm Pad".into() }
+        );
         assert_eq!(PresetList::default().status, PresetStatus::Ready);
     }
 }

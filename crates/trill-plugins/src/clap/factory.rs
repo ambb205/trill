@@ -6,6 +6,7 @@ use super::processor::ClapProcessor;
 use super::{CLAP_SCHEME, find_plugin_files, probe, standard_search_paths};
 use crate::main_thread::MainThread;
 use crate::plugin_thread::{self, CREATE_TIMEOUT, PluginThread, plugin_thread};
+use crate::presets::store::{PluginRef, PresetFormat, PresetStore};
 use crate::scan::catalog::{Format, Inventory, Settings};
 use crate::scan::{self, ScanFailure, ScanMode, Scanner};
 use std::path::PathBuf;
@@ -13,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use trill_core::Device;
 use trill_core::device::{DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance, split_uri};
+use trill_core::presets::PresetList;
 
 /// The CLAP feature that marks a plugin as an instrument.
 const INSTRUMENT_FEATURE: &str = "instrument";
@@ -29,6 +31,14 @@ static FORMAT: Format = Format {
     description: |record| record.description.clone(),
 };
 
+/// How the presets of CLAP plugins are found: all of them through the
+/// plugin's own preset-discovery providers.
+static PRESETS: PresetFormat = PresetFormat {
+    scheme: CLAP_SCHEME,
+    read_files: |_plugin, _folders, _sink| {},
+    read_in_thread: |thread, path, id, sink| thread.clap.read_presets(path, id, sink),
+};
+
 /// Where and how [`ClapFactory`] looks for plugins.
 #[derive(Clone, Debug)]
 pub struct ClapConfig {
@@ -39,8 +49,12 @@ pub struct ClapConfig {
     /// so that a plugin which crashes while loading cannot crash the DAW.
     pub scanner: Scanner,
     /// Where scan results are kept between runs. `None` disables the cache.
+    /// What is found of each plugin's presets is kept in a folder
+    /// `presets` beside this file.
     pub cache_path: Option<PathBuf>,
     /// Longest a single plugin file may take to scan before it is skipped.
+    /// Reading a plugin's presets, of which there may be thousands, is
+    /// given six times as long.
     pub scan_timeout: Duration,
 }
 
@@ -90,6 +104,7 @@ pub struct ClapFactory {
 struct Shared {
     main: MainThread<PluginThread>,
     installed: Inventory,
+    presets: PresetStore,
 }
 
 impl ClapFactory {
@@ -99,8 +114,19 @@ impl ClapFactory {
     /// Fails only if the operating system cannot start a thread.
     pub fn new(config: ClapConfig) -> std::io::Result<Self> {
         let main = plugin_thread()?;
-        let installed = Inventory::new(&FORMAT, config.into(), main.clone());
-        Ok(Self { shared: Arc::new(Shared { main, installed }) })
+        let settings: Settings = config.into();
+        let presets = PresetStore::new(&PRESETS, settings.preset_settings(Vec::new()), main.clone());
+        let installed = Inventory::new(&FORMAT, settings, main.clone());
+        Ok(Self { shared: Arc::new(Shared { main, installed, presets }) })
+    }
+
+    /// The installed plugin `uri` names, as the plugin whose presets are
+    /// wanted. `None` for a URI of another format; an error, which is the
+    /// list to answer with, when the plugin is not installed or (unless
+    /// `scan` says to wait for it) plugins have not been scanned yet.
+    fn preset_source(&self, uri: &str, scan: bool) -> Option<Result<PluginRef, PresetList>> {
+        let (CLAP_SCHEME, plugin_id) = split_uri(uri)? else { return None };
+        Some(self.shared.installed.preset_source(plugin_id, scan))
     }
 
     /// Looks for plugins again. With [`ScanMode::UseCache`] only new and
@@ -194,6 +220,29 @@ impl DeviceFactory for ClapFactory {
             max_block,
         );
         Ok(DeviceInstance { processor: Box::new(processor), params, controller: Some(Box::new(controller)) })
+    }
+
+    /// The presets the plugin's preset-discovery providers tell of. They
+    /// are read in the scanner process the first time they are asked for,
+    /// and from the cache after that.
+    fn presets(&self, uri: &str) -> Option<PresetList> {
+        Some(match self.preset_source(uri, false)? {
+            Ok(plugin) => self.shared.presets.list(&plugin),
+            Err(list) => list,
+        })
+    }
+
+    fn presets_within(&self, uri: &str, timeout: Duration) -> Option<PresetList> {
+        Some(match self.preset_source(uri, true)? {
+            Ok(plugin) => self.shared.presets.wait(&plugin, timeout),
+            Err(list) => list,
+        })
+    }
+
+    fn refresh_presets(&self, uri: &str) {
+        if let Some(Ok(plugin)) = self.preset_source(uri, false) {
+            self.shared.presets.refresh(&plugin);
+        }
     }
 }
 

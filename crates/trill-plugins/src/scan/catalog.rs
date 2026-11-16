@@ -8,11 +8,13 @@
 use super::{PluginRecord, ScanFailure, ScanJob, ScanMode, ScanResults, Scanner, scan_files};
 use crate::main_thread::MainThread;
 use crate::plugin_thread::PluginThread;
+use crate::presets::store::PluginRef;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 use trill_core::device::{DeviceCategory, DeviceDescriptor};
+use trill_core::presets::PresetList;
 
 /// What tells one plugin format from another while its plugins are scanned
 /// and listed.
@@ -41,11 +43,28 @@ pub(crate) struct Settings {
     pub scan_timeout: Duration,
 }
 
+impl Settings {
+    /// Where and how the presets of the plugins these settings find are
+    /// read: by the same scanner, cached beside the scan cache, and given
+    /// more time, since a plugin has more presets than a file has
+    /// plugins. `folders` are where the format keeps preset files.
+    pub(crate) fn preset_settings(&self, folders: Vec<PathBuf>) -> crate::presets::store::Settings {
+        let beside = self.cache_path.as_ref().and_then(|path| path.parent());
+        crate::presets::store::Settings {
+            scanner: self.scanner.clone(),
+            cache_folder: beside.map(|folder| folder.join(crate::presets::cache::FOLDER)),
+            timeout: self.scan_timeout * crate::presets::store::PRESET_PATIENCE,
+            folders,
+        }
+    }
+}
+
 /// An installed plugin.
 pub(crate) struct Installed {
     /// The plugin file it was found in.
     pub path: PathBuf,
     pub name: String,
+    pub vendor: String,
     pub instrument: bool,
 }
 
@@ -82,7 +101,8 @@ impl Catalog {
                 params: Vec::new(),
                 presets: Vec::new(),
             });
-            catalog.plugins.insert(record.id, Installed { path, name: record.name, instrument });
+            let installed = Installed { path, name: record.name, vendor: record.vendor, instrument };
+            catalog.plugins.insert(record.id, installed);
         }
         // Scan order is an accident of the file system; lists read better
         // by name.
@@ -102,6 +122,19 @@ impl Catalog {
     /// How many plugins were found.
     pub(crate) fn len(&self) -> usize {
         self.plugins.len()
+    }
+
+    /// The installed plugin with this id, as the plugin whose presets are
+    /// wanted.
+    pub(crate) fn plugin_ref(&self, scheme: &str, id: &str) -> Option<PluginRef> {
+        let installed = self.plugins.get(id)?;
+        Some(PluginRef {
+            uri: format!("{scheme}:{id}"),
+            id: id.to_string(),
+            path: installed.path.clone(),
+            name: installed.name.clone(),
+            vendor: installed.vendor.clone(),
+        })
     }
 }
 
@@ -142,6 +175,25 @@ impl Inventory {
         match self.current() {
             Some(catalog) => catalog,
             None => self.scan_locked(ScanMode::UseCache),
+        }
+    }
+
+    /// The catalog if there is one already. Never scans, so never waits
+    /// for longer than a scan takes to hand its result over.
+    pub(crate) fn scanned(&self) -> Option<Arc<Catalog>> {
+        self.current()
+    }
+
+    /// The installed plugin `id`, as the plugin whose presets are wanted;
+    /// or the list to answer with when there is no asking the plugin: an
+    /// empty one for a plugin that is not installed, and one that is
+    /// still being read while plugins have not been scanned (unless
+    /// `scan` says to scan, and wait for that, now).
+    pub(crate) fn preset_source(&self, id: &str, scan: bool) -> Result<PluginRef, PresetList> {
+        let catalog = if scan { Some(self.catalog()) } else { self.scanned() };
+        match catalog {
+            None => Err(PresetList::reading(Vec::new())),
+            Some(catalog) => catalog.plugin_ref(self.format.scheme, id).ok_or_else(PresetList::default),
         }
     }
 

@@ -1,9 +1,11 @@
 //! Runs the scanner executable on one plugin file, under a timeout.
 
 use super::{PluginRecord, ScanOutput};
+use std::ffi::OsStr;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -39,11 +41,39 @@ impl Failure {
 /// Scans `plugin` in a child process. Whatever the plugin does to that
 /// process (crash, hang, exit), the result here is only an `Err`.
 pub(super) fn run(scanner: &Path, plugin: &Path, timeout: Duration) -> Result<Vec<PluginRecord>, Failure> {
+    let finished = run_process(scanner, &[plugin.as_os_str()], timeout, None).map_err(Failure::Scanner)?;
+    interpret(finished.status, &finished.stdout, &finished.stderr, timeout).map_err(Failure::Plugin)
+}
+
+/// What a scanner process left behind.
+pub(crate) struct Finished {
+    /// `None` when the process was stopped: it ran out of time, or was no
+    /// longer wanted.
+    pub status: Option<ExitStatus>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    /// Whether it was stopped because it was no longer wanted.
+    pub cancelled: bool,
+}
+
+/// Runs the scanner executable with `arguments` and collects what it
+/// prints. It is stopped after `timeout`, or as soon as `cancel` is set.
+/// An error is about the scanner itself: it could not be run.
+pub(crate) fn run_process(
+    scanner: &Path,
+    arguments: &[&OsStr],
+    timeout: Duration,
+    cancel: Option<&AtomicBool>,
+) -> Result<Finished, String> {
     let mut command = Command::new(scanner);
-    command.arg(plugin).env(super::SCANNER_ENV, "1").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .args(arguments)
+        .env(super::SCANNER_ENV, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     hide_console(&mut command);
-    let mut child =
-        command.spawn().map_err(|error| Failure::Scanner(format!("cannot start the plugin scanner: {error}")))?;
+    let mut child = command.spawn().map_err(|error| format!("cannot start the plugin scanner: {error}"))?;
 
     // Drain both pipes on their own threads: a child that fills a pipe
     // nobody reads would block forever and look like a hang.
@@ -51,19 +81,23 @@ pub(super) fn run(scanner: &Path, plugin: &Path, timeout: Duration) -> Result<Ve
     let stderr = child.stderr.take().map(drain);
 
     let deadline = Instant::now() + timeout;
+    let mut cancelled = false;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
+            Ok(None) => {
+                cancelled = cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed));
+                if cancelled || Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                thread::sleep(POLL_INTERVAL);
             }
-            Ok(None) => thread::sleep(POLL_INTERVAL),
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(Failure::Scanner(format!("lost track of the plugin scanner: {error}")));
+                return Err(format!("lost track of the plugin scanner: {error}"));
             }
         }
     };
@@ -71,8 +105,7 @@ pub(super) fn run(scanner: &Path, plugin: &Path, timeout: Duration) -> Result<Ve
     let collect = |pipe: Option<Receiver<Vec<u8>>>| {
         pipe.and_then(|bytes| bytes.recv_timeout(PIPE_GRACE).ok()).unwrap_or_default()
     };
-    let (stdout, stderr) = (collect(stdout), collect(stderr));
-    interpret(status, &stdout, &stderr, timeout).map_err(Failure::Plugin)
+    Ok(Finished { status, stdout: collect(stdout), stderr: collect(stderr), cancelled })
 }
 
 /// Reads `pipe` to its end on a helper thread. The thread is not joined: it
@@ -121,18 +154,22 @@ fn interpret(
             Ok(output.plugins)
         }
         (None, None) => Err(format!("the scan timed out after {:.0} s", timeout.as_secs_f64())),
-        (None, Some(status)) => {
-            let stderr = String::from_utf8_lossy(stderr);
-            let detail = stderr.lines().rev().map(str::trim).find(|line| !line.is_empty());
-            Err(match detail {
-                Some(detail) if !status.success() => {
-                    let detail: String = detail.chars().take(MAX_REASON_CHARS).collect();
-                    format!("{detail} (scanner {status})")
-                }
-                _ if status.success() => "the plugin scanner reported nothing".to_string(),
-                _ => format!("the plugin crashed the scanner ({status})"),
-            })
+        (None, Some(status)) => Err(explain_exit(status, stderr)),
+    }
+}
+
+/// Why a scanner process that reported no result ended as it did, from
+/// its exit status and the last thing it wrote to its error output.
+pub(crate) fn explain_exit(status: ExitStatus, stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let detail = stderr.lines().rev().map(str::trim).find(|line| !line.is_empty());
+    match detail {
+        Some(detail) if !status.success() => {
+            let detail: String = detail.chars().take(MAX_REASON_CHARS).collect();
+            format!("{detail} (scanner {status})")
         }
+        _ if status.success() => "the plugin scanner reported nothing".to_string(),
+        _ => format!("the plugin crashed the scanner ({status})"),
     }
 }
 

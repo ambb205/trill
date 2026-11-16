@@ -94,6 +94,7 @@ mod tests {
             scanner: Scanner::InProcess,
             cache_path: Some(dir.path().join("vst3.json")),
             scan_timeout: Duration::from_secs(5),
+            preset_paths: Vec::new(),
         };
         PluginHost::with_configs(clap, vst3).unwrap()
     }

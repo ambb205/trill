@@ -22,11 +22,14 @@ use clack_extensions::note_ports::{HostNotePorts, HostNotePortsImpl, NoteDialect
 use clack_extensions::params::{
     HostParams, HostParamsImplMainThread, HostParamsImplShared, ParamClearFlags, ParamRescanFlags,
 };
+use clack_extensions::preset_discovery::preset_data::Location;
+use clack_extensions::preset_discovery::{HostPresetLoad, HostPresetLoadImpl};
 use clack_extensions::state::{HostState, HostStateImpl};
 use clack_extensions::thread_check::{HostThreadCheck, HostThreadCheckImpl};
 use clack_extensions::timer::{HostTimer, HostTimerImpl, TimerId};
 use clack_host::prelude::*;
 use std::cell::{Cell, RefCell};
+use std::ffi::CStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
@@ -78,7 +81,8 @@ impl HostHandlers for TrillHost {
             .register::<HostNotePorts>()
             .register::<HostLatency>()
             .register::<HostGui>()
-            .register::<HostTimer>();
+            .register::<HostTimer>()
+            .register::<HostPresetLoad>();
     }
 }
 
@@ -299,11 +303,20 @@ impl HostGuiImpl for HostShared {
 pub(crate) struct HostMainThread<'a> {
     shared: &'a HostShared,
     timers: RefCell<Timers>,
+    /// What the plugin said went wrong with the preset it was last asked
+    /// to load, until someone takes it.
+    preset_error: RefCell<Option<String>>,
 }
 
 impl<'a> HostMainThread<'a> {
     pub(crate) fn new(shared: &'a HostShared) -> Self {
-        Self { shared, timers: RefCell::new(Timers::default()) }
+        Self { shared, timers: RefCell::new(Timers::default()), preset_error: RefCell::new(None) }
+    }
+
+    /// What the plugin reported about a preset that failed to load, since
+    /// the last call.
+    pub(crate) fn take_preset_error(&self) -> Option<String> {
+        self.preset_error.try_borrow_mut().ok()?.take()
     }
 
     /// Appends the plugin's timers that are due at `now` to `due`.
@@ -348,6 +361,27 @@ impl HostTimerImpl for HostMainThread<'_> {
 
     fn unregister_timer(&self, timer_id: TimerId) -> Result<(), HostError> {
         if self.timers()?.unregister(timer_id) { Ok(()) } else { Err(HostError::Message("no such timer")) }
+    }
+}
+
+impl HostPresetLoadImpl for HostMainThread<'_> {
+    /// Kept for whoever asked for the preset: the plugin's own words on
+    /// why it did not load are the best there are.
+    fn on_error(&self, _location: Location, _load_key: Option<&CStr>, os_error: i32, message: Option<&CStr>) {
+        let message = message.map(|message| message.to_string_lossy().trim().to_string()).unwrap_or_default();
+        let reason = match (message.is_empty(), os_error) {
+            (false, _) => message,
+            (true, 0) => return,
+            (true, code) => std::io::Error::from_raw_os_error(code).to_string(),
+        };
+        if let Ok(mut error) = self.preset_error.try_borrow_mut() {
+            *error = Some(reason);
+        }
+    }
+
+    fn loaded(&self, _location: Location, _load_key: Option<&CStr>) {
+        // Which preset a device has is the session's to know: it is the
+        // one that asked for it.
     }
 }
 
@@ -474,6 +508,24 @@ mod tests {
         shared.closed(true);
         shared.set_editor_open(false);
         assert_eq!(shared.take_editor_requests(), EditorRequests::default());
+    }
+
+    #[test]
+    fn what_a_plugin_says_about_a_preset_it_could_not_load_is_kept_once() {
+        let shared = HostShared::new("com.acme.synth");
+        let handler = HostMainThread::new(&shared);
+        assert_eq!(handler.take_preset_error(), None);
+        handler.on_error(Location::Plugin, None, 0, Some(c"  the patch is from a newer version \n"));
+        assert_eq!(handler.take_preset_error().as_deref(), Some("the patch is from a newer version"));
+        assert_eq!(handler.take_preset_error(), None);
+
+        // Without words, the system's error says what it can; without
+        // either there is nothing to keep.
+        handler.on_error(Location::File { path: c"missing.fxp" }, Some(c"key"), 2, None);
+        assert!(handler.take_preset_error().is_some_and(|reason| !reason.is_empty()));
+        handler.on_error(Location::Plugin, None, 0, Some(c""));
+        assert_eq!(handler.take_preset_error(), None);
+        handler.loaded(Location::Plugin, None);
     }
 
     #[test]

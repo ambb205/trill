@@ -11,6 +11,7 @@ use super::host::{ComponentHandler, HostApplication};
 use super::links::ParamLinks;
 use super::module::Module;
 use super::params::{self, ParamSpec};
+use super::presets;
 use super::state::{self, PluginState};
 use super::stream::MemoryStream;
 use crate::editor::{EditorStatus, Placement};
@@ -130,7 +131,12 @@ pub(super) struct Instance {
 
 impl Instance {
     /// Creates and initializes the component of `class`.
-    fn new(module: &Module, host: &ComWrapper<HostApplication>, class: ClassId, name: &str) -> Result<Self, String> {
+    pub(super) fn new(
+        module: &Module,
+        host: &ComWrapper<HostApplication>,
+        class: ClassId,
+        name: &str,
+    ) -> Result<Self, String> {
         let component: ComPtr<IComponent> =
             create_instance(module.factory(), class).ok_or("the module cannot create the plugin")?;
         let processor = component.cast::<IAudioProcessor>().ok_or("the plugin does not process audio")?;
@@ -162,7 +168,7 @@ impl Instance {
     /// connects it to the component. A plugin whose controller cannot be
     /// had is hosted without one: it processes audio, but has no
     /// parameters.
-    fn attach_controller(&mut self, module: &Module, host: &ComWrapper<HostApplication>) {
+    pub(super) fn attach_controller(&mut self, module: &Module, host: &ComWrapper<HostApplication>) {
         // The component of a simple plugin is its own controller.
         let (edit, separate) = match self.component.cast::<IEditController>() {
             Some(edit) => (edit, false),
@@ -508,7 +514,7 @@ fn module<'a>(
 
 /// Tells a module that has just been loaded who its host is, if it is of
 /// a kind that wants to know.
-fn introduce(module: Module, host: &ComWrapper<HostApplication>) -> Module {
+pub(super) fn introduce(module: Module, host: &ComWrapper<HostApplication>) -> Module {
     if let Some(factory) = module.factory().cast::<IPluginFactory3>() {
         // SAFETY: the factory is live, and the host context outlives every
         // module.
@@ -624,5 +630,55 @@ impl Vst3Thread {
         let controller = instance.controller.as_ref()?;
         instance.sync_controller();
         Some(params::values(&controller.edit, &instance.listed))
+    }
+
+    /// Lists the programs of the plugin of class `class` in the module at
+    /// `path`, here on the plugin main thread: what is done when there is
+    /// no scanner process to do it in. The plugin is created for the
+    /// asking and destroyed again.
+    pub(crate) fn read_presets(
+        &mut self,
+        path: &Path,
+        class: &str,
+        sink: &mut dyn crate::presets::Sink,
+    ) -> Result<(), String> {
+        let class = ClassId::parse(class).ok_or_else(|| format!("'{class}' is not a VST3 class id"))?;
+        let module = module(&mut self.modules, &self.host, path)?;
+        presets::programs(module, &self.host, class, sink)
+    }
+
+    /// Has an instance take on the states in the preset file at `path`,
+    /// as it plays.
+    pub(crate) fn load_preset_file(&mut self, id: InstanceId, path: &Path) -> Result<(), String> {
+        let bytes = std::fs::read(path).map_err(|error| format!("cannot read '{}': {error}", path.display()))?;
+        if bytes.is_empty() {
+            return Err(format!("'{}' is empty", path.display()));
+        }
+        let instance = self.instances.get_mut(&id).ok_or("the plugin instance no longer exists")?;
+        // A preset file is a saved state by another name, and is handed
+        // to the plugin the same way.
+        instance.restore(Some(&bytes)).map_err(|reason| reason.replace("saved state", "preset"))
+    }
+
+    /// Has an instance switch to program `index` of the `steps + 1` its
+    /// parameter `param` selects. Like every parameter change, it reaches
+    /// the plugin's processor with its next block.
+    pub(crate) fn load_program(
+        &mut self,
+        id: InstanceId,
+        param: ParamID,
+        index: u32,
+        steps: u32,
+    ) -> Result<(), String> {
+        let instance = self.instances.get(&id).ok_or("the plugin instance no longer exists")?;
+        let (Some(controller), Some(links)) = (&instance.controller, &instance.links) else {
+            return Err("the plugin has no programs to choose from".to_string());
+        };
+        let slot = links.slot(param).ok_or("the plugin no longer has the parameter its programs are chosen by")?;
+        let value = presets::program_value(index, steps);
+        // SAFETY: the controller is live, on the plugin main thread.
+        unsafe { controller.edit.setParamNormalized(param, value) };
+        links.to_processor.post(slot, value);
+        Ok(())
     }
 }

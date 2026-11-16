@@ -7,6 +7,7 @@ use super::processor::Vst3Processor;
 use super::{VST3_SCHEME, find_plugin_files, probe, standard_search_paths};
 use crate::main_thread::MainThread;
 use crate::plugin_thread::{self, CREATE_TIMEOUT, PluginThread, plugin_thread};
+use crate::presets::store::{PluginRef, PresetFormat, PresetStore};
 use crate::scan::catalog::{Format, Inventory, Settings};
 use crate::scan::{self, ScanFailure, ScanMode, Scanner};
 use std::path::PathBuf;
@@ -14,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use trill_core::Device;
 use trill_core::device::{DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance, split_uri};
+use trill_core::presets::PresetList;
 
 /// The VST3 sub-category that marks a plugin as an instrument.
 const INSTRUMENT_CATEGORY: &str = "Instrument";
@@ -34,6 +36,14 @@ static FORMAT: Format = Format {
     },
 };
 
+/// How the presets of VST3 plugins are found: preset files in the
+/// format's folders, and the programs a plugin lists itself.
+static PRESETS: PresetFormat = PresetFormat {
+    scheme: VST3_SCHEME,
+    read_files: super::presets::preset_files,
+    read_in_thread: |thread, path, class, sink| thread.vst3.read_presets(path, class, sink),
+};
+
 /// Where and how [`Vst3Factory`] looks for plugins.
 #[derive(Clone, Debug)]
 pub struct Vst3Config {
@@ -45,25 +55,35 @@ pub struct Vst3Config {
     /// so that a plugin which crashes while loading cannot crash the DAW.
     pub scanner: Scanner,
     /// Where scan results are kept between runs. `None` disables the cache.
+    /// What is found of each plugin's presets is kept in a folder
+    /// `presets` beside this file.
     pub cache_path: Option<PathBuf>,
     /// Longest a single plugin file may take to scan before it is skipped.
+    /// Reading a plugin's presets, of which there may be thousands, is
+    /// given six times as long.
     pub scan_timeout: Duration,
+    /// The folders `.vstpreset` files are looked for in, the user's own
+    /// first. A plugin's presets are in `<vendor>/<plugin name>` below
+    /// each, in whatever folders the user sorts them into.
+    pub preset_paths: Vec<PathBuf>,
 }
 
 impl Default for Vst3Config {
-    /// The standard VST3 directories of this system and a cache in the
-    /// user's cache directory.
+    /// The standard VST3 directories of this system, plugins and presets,
+    /// and a cache in the user's cache directory.
     fn default() -> Self {
         Self {
             search_paths: standard_search_paths(),
             scanner: Scanner::Auto,
             cache_path: scan::cache::default_directory().map(|directory| directory.join(CACHE_FILE)),
             scan_timeout: Duration::from_secs(20),
+            preset_paths: super::standard_preset_paths(),
         }
     }
 }
 
 impl From<Vst3Config> for Settings {
+    /// Everything but the preset folders, which are the preset store's.
     fn from(config: Vst3Config) -> Self {
         Self {
             search_paths: config.search_paths,
@@ -101,6 +121,7 @@ pub struct Vst3Factory {
 struct Shared {
     main: MainThread<PluginThread>,
     installed: Inventory,
+    presets: PresetStore,
 }
 
 impl Vst3Factory {
@@ -108,10 +129,25 @@ impl Vst3Factory {
     /// scanned or loaded until the factory is first used.
     ///
     /// Fails only if the operating system cannot start a thread.
-    pub fn new(config: Vst3Config) -> std::io::Result<Self> {
+    pub fn new(mut config: Vst3Config) -> std::io::Result<Self> {
         let main = plugin_thread()?;
-        let installed = Inventory::new(&FORMAT, config.into(), main.clone());
-        Ok(Self { shared: Arc::new(Shared { main, installed }) })
+        let folders = std::mem::take(&mut config.preset_paths);
+        let settings: Settings = config.into();
+        let presets = PresetStore::new(&PRESETS, settings.preset_settings(folders), main.clone());
+        let installed = Inventory::new(&FORMAT, settings, main.clone());
+        Ok(Self { shared: Arc::new(Shared { main, installed, presets }) })
+    }
+
+    /// The installed plugin `uri` names, as the plugin whose presets are
+    /// wanted. `None` for a URI of another format; an error, which is the
+    /// list to answer with, when the plugin is not installed or (unless
+    /// `scan` says to wait for it) plugins have not been scanned yet.
+    fn preset_source(&self, uri: &str, scan: bool) -> Option<Result<PluginRef, PresetList>> {
+        let (VST3_SCHEME, class) = split_uri(uri)? else { return None };
+        // Written out again, the id has the catalog's case whatever the
+        // URI's was. What is no class id names no plugin.
+        let Some(class) = ClassId::parse(class) else { return Some(Err(PresetList::default())) };
+        Some(self.shared.installed.preset_source(&class.to_string(), scan))
     }
 
     /// Looks for plugins again. With [`ScanMode::UseCache`] only new and
@@ -142,7 +178,16 @@ impl Vst3Factory {
             scanner: Scanner::InProcess,
             cache_path: None,
             scan_timeout: Duration::from_secs(5),
+            preset_paths: Vec::new(),
         };
+        Self::with_modules_in(config, modules)
+    }
+
+    /// [`with_modules`](Self::with_modules), configured by `config`.
+    pub(crate) fn with_modules_in(
+        config: Vst3Config,
+        modules: Vec<(&'static str, vst3::ComPtr<vst3::Steinberg::IPluginFactory>)>,
+    ) -> Self {
         let factory = Self::new(config).expect("the plugin main thread starts");
         let mut plugins = Vec::new();
         for (name, module) in modules {
@@ -205,6 +250,30 @@ impl DeviceFactory for Vst3Factory {
         .map_err(failed)?;
         Ok(DeviceInstance { processor: Box::new(processor), params, controller: Some(Box::new(controller)) })
     }
+
+    /// The plugin's preset files in the format's preset folders, and the
+    /// programs of its program lists. The files are found without the
+    /// plugin; the lists are read in the scanner process the first time
+    /// they are asked for, and from the cache after that.
+    fn presets(&self, uri: &str) -> Option<PresetList> {
+        Some(match self.preset_source(uri, false)? {
+            Ok(plugin) => self.shared.presets.list(&plugin),
+            Err(list) => list,
+        })
+    }
+
+    fn presets_within(&self, uri: &str, timeout: Duration) -> Option<PresetList> {
+        Some(match self.preset_source(uri, true)? {
+            Ok(plugin) => self.shared.presets.wait(&plugin, timeout),
+            Err(list) => list,
+        })
+    }
+
+    fn refresh_presets(&self, uri: &str) {
+        if let Some(Ok(plugin)) = self.preset_source(uri, false) {
+            self.shared.presets.refresh(&plugin);
+        }
+    }
 }
 
 /// Creates an instance on the plugin main thread, giving up after
@@ -234,6 +303,7 @@ mod tests {
             scanner: Scanner::Auto,
             cache_path: Some(dir.path().join("cache.json")),
             scan_timeout: Duration::from_secs(5),
+            preset_paths: Vec::new(),
         })
         .unwrap()
     }

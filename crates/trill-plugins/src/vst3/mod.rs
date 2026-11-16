@@ -24,6 +24,8 @@
 //! * `host`: the objects a plugin is given to call back into.
 //! * `module`, `paths` and `probe`: loading plugin files, finding them and
 //!   reading their classes.
+//! * `presets`: finding a plugin's preset files and the programs of its
+//!   program lists.
 //! * `class_id`, `params`, `state`, `stream`, `text`: VST3's ids,
 //!   parameters, saved state and strings, translated to and from the
 //!   DAW's terms.
@@ -48,6 +50,7 @@ mod links;
 mod module;
 mod params;
 mod paths;
+mod presets;
 mod probe;
 mod processor;
 #[cfg(test)]
@@ -62,6 +65,8 @@ pub use factory::{Vst3Config, Vst3Factory};
 pub(crate) use instance::Vst3Thread;
 pub(crate) use paths::is_plugin_file;
 pub use paths::{find_plugin_files, standard_search_paths};
+pub(crate) use presets::read_presets;
+pub use presets::standard_preset_paths;
 pub(crate) use probe::probe;
 
 /// URI scheme of VST3 devices: `vst3:<class id>`, where the class id is

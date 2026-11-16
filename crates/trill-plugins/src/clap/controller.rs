@@ -3,13 +3,18 @@
 
 use super::events::ParamFeedback;
 use super::instance::InstanceId;
+use super::presets::Address;
 use crate::editor::{EDITOR_TIMEOUT, EditorStatus};
 use crate::edits::Edit;
-use crate::main_thread::MainThread;
+use crate::main_thread::{CallError, MainThread};
 use crate::plugin_thread::{PluginThread, keep_for_good};
+use crate::presets::{LOAD_TIMEOUT, Locator, await_arrival};
 use std::sync::Arc;
 use std::time::Duration;
-use trill_core::device::{DeviceController, EditorError, EditorImage, EditorOptions, ParamEdit, ParamEditKind};
+use trill_core::device::{
+    DeviceController, EditorError, EditorImage, EditorOptions, ParamEdit, ParamEditKind, PresetLoadError,
+};
+use trill_core::presets::PresetInfo;
 
 /// How long a plugin may take to serialize its state or report its
 /// parameter values before the request is abandoned.
@@ -121,6 +126,25 @@ impl DeviceController for ClapController {
             );
         }
         edits
+    }
+
+    fn load_preset(&mut self, preset: &PresetInfo) -> Result<(), PresetLoadError> {
+        let address = Locator::parse(&preset.locator).as_ref().and_then(Address::of);
+        let address = address.ok_or_else(|| PresetLoadError::Failed("it is not a preset of a CLAP plugin".into()))?;
+        let instance = self.instance;
+        let before = self.save_state();
+        match self.main.call(LOAD_TIMEOUT, move |thread| thread.clap.load_preset(instance, &address)) {
+            Ok(Ok(())) => {
+                await_arrival(before.as_deref(), || self.save_state());
+                Ok(())
+            }
+            Ok(Err(reason)) => Err(PresetLoadError::Failed(reason)),
+            Err(CallError::TimedOut) => Err(PresetLoadError::Unresponsive(format!(
+                "the plugin did not answer within {} s",
+                LOAD_TIMEOUT.as_secs()
+            ))),
+            Err(error) => Err(PresetLoadError::Failed(error.to_string())),
+        }
     }
 }
 

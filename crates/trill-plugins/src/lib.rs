@@ -14,6 +14,8 @@
 //! * [`scan`]: format-independent scanning: the crash-isolated scanner
 //!   process, the on-disk cache of its results and the catalog built from
 //!   them.
+//! * `presets`: finding the presets a plugin offers: read in the scanner
+//!   process too, in the background, and cached beside the scan.
 //! * `main_thread` and `plugin_thread`: the single thread on which every
 //!   plugin's main-thread calls are made, whichever thread the DAW asked
 //!   from and whichever format the plugin is.
@@ -25,9 +27,10 @@
 //! * `edits` and `exclusive`: how the audio-thread and main-thread halves
 //!   of a hosted plugin pass things to each other without waiting.
 //!
-//! Hosting happens in the DAW's own process. Only *scanning* is isolated
-//! in a child process; a plugin that crashes while instantiated or while
-//! processing audio takes the DAW with it.
+//! Hosting happens in the DAW's own process. Only *scanning* and reading
+//! a plugin's list of presets are isolated in a child process; a plugin
+//! that crashes while instantiated, while processing audio or while it
+//! loads a preset takes the DAW with it.
 //!
 //! # Example
 //!
@@ -60,6 +63,7 @@ mod main_thread;
 mod notes;
 mod plugin_host;
 mod plugin_thread;
+mod presets;
 pub mod scan;
 mod signal;
 #[cfg(test)]

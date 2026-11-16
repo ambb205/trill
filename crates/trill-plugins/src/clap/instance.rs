@@ -6,6 +6,7 @@
 use super::events::{NoteDialect, NotePort, ParamFeedback, ParamOutput};
 use super::gui;
 use super::host::{AudioContext, HostMainThread, HostShared, TrillHost};
+use super::presets::{self, Address};
 use crate::editor::{EditorStatus, HostedEditor, Placement};
 use crate::exclusive::Exclusive;
 use crate::main_thread::ThreadState;
@@ -14,6 +15,7 @@ use clack_extensions::gui::PluginGui;
 use clack_extensions::latency::PluginLatency;
 use clack_extensions::note_ports::{NoteDialects, NotePortInfoBuffer, PluginNotePorts};
 use clack_extensions::params::{ParamInfoBuffer, ParamInfoFlags, PluginParams};
+use clack_extensions::preset_discovery::PluginPresetLoad;
 use clack_extensions::state::PluginState;
 use clack_extensions::timer::{PluginTimer, TimerId};
 use clack_host::events::Pckn;
@@ -41,7 +43,7 @@ const FLUSH_GRACE: Duration = Duration::from_secs(1);
 
 /// The standard CLAP extensions a plugin may implement that this host
 /// makes no use of yet, by their identifiers.
-const UNUSED_EXTENSIONS: [&CStr; 17] = [
+const UNUSED_EXTENSIONS: [&CStr; 16] = [
     c"clap.ambisonic/3",
     c"clap.audio-ports-activation/2",
     c"clap.audio-ports-config",
@@ -50,7 +52,6 @@ const UNUSED_EXTENSIONS: [&CStr; 17] = [
     c"clap.note-name",
     c"clap.param-indication/4",
     c"clap.posix-fd-support",
-    c"clap.preset-load/2",
     c"clap.remote-controls/2",
     c"clap.render",
     c"clap.state-context/2",
@@ -135,6 +136,7 @@ pub(super) struct Instance {
     latency: Option<PluginLatency>,
     pub(super) gui: Option<PluginGui>,
     timer: Option<PluginTimer>,
+    preset_load: Option<PluginPresetLoad>,
     /// In parameter-list order.
     param_ids: Vec<ClapId>,
     audio: Arc<AudioSlot>,
@@ -266,11 +268,17 @@ pub(crate) struct ClapThread {
     described: HashSet<String>,
 }
 
+/// How this host introduces itself to plugins, and to their preset
+/// providers.
+pub(crate) fn host_info() -> HostInfo {
+    let version = CString::new(env!("CARGO_PKG_VERSION")).unwrap_or_default();
+    HostInfo::new_from_cstring(c"Trill".into(), c"Trill".into(), c"".into(), version)
+}
+
 impl ThreadState for ClapThread {
     fn new() -> Self {
-        let version = CString::new(env!("CARGO_PKG_VERSION")).unwrap_or_default();
         Self {
-            host_info: HostInfo::new_from_cstring(c"Trill".into(), c"Trill".into(), c"".into(), version),
+            host_info: host_info(),
             entries: HashMap::new(),
             instances: HashMap::new(),
             next_id: 1,
@@ -349,6 +357,7 @@ impl ClapThread {
         let latency: Option<PluginLatency> = handle.get_extension();
         let gui: Option<PluginGui> = handle.get_extension();
         let timer: Option<PluginTimer> = handle.get_extension();
+        let preset_load: Option<PluginPresetLoad> = handle.get_extension();
         let has_editor = gui.is_some_and(|gui| gui::is_embeddable(gui, &handle));
         if self.described.insert(request.plugin_id.clone()) {
             log_unused_extensions(&handle, &request.plugin_id);
@@ -408,6 +417,7 @@ impl ClapThread {
             latency,
             gui,
             timer,
+            preset_load,
             param_ids,
             audio: audio.clone(),
             feedback: feedback.clone(),
@@ -476,6 +486,37 @@ impl ClapThread {
         let params = instance.params?;
         let handle = instance.plugin.plugin_handle();
         instance.param_ids.iter().map(|&param| params.get_value(&handle, param)).collect()
+    }
+
+    /// Has the providers of the plugin file at `path` tell of the presets
+    /// of the plugin `plugin_id`, here on the plugin main thread: what is
+    /// done when there is no scanner process to do it in.
+    pub(crate) fn read_presets(
+        &mut self,
+        path: &Path,
+        plugin_id: &str,
+        sink: &mut dyn crate::presets::Sink,
+    ) -> Result<(), String> {
+        let entry = self.entry(path)?;
+        presets::discover(&entry, &self.host_info, plugin_id, sink)
+    }
+
+    /// Has an instance load the preset at `address`, as it plays. An
+    /// error is the plugin's refusal, in its own words where it gave any.
+    pub(crate) fn load_preset(&mut self, id: InstanceId, address: &Address) -> Result<(), String> {
+        let instance = self.instances.get_mut(&id).ok_or("the plugin instance no longer exists")?;
+        let load = instance
+            .preset_load
+            .ok_or("the plugin cannot be given a preset by its host (it has no CLAP preset-load extension)")?;
+        // Whatever it said about an earlier preset is not about this one.
+        instance.plugin.access_handler(|handler| handler.take_preset_error());
+        let loaded = load.load_from_location(&instance.plugin.plugin_handle(), address.location(), address.key());
+        let said = instance.plugin.access_handler(|handler| handler.take_preset_error());
+        match (loaded, said) {
+            (Ok(()), _) => Ok(()),
+            (Err(_), Some(reason)) => Err(format!("the plugin could not load it: {reason}")),
+            (Err(_), None) => Err("the plugin refused it without saying why".to_string()),
+        }
     }
 }
 
