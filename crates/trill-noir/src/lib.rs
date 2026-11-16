@@ -25,6 +25,8 @@
 //!   displays (on [`Plot`]) from its project snapshot.
 //! * The [`waveform`] was written here: it draws pixel columns it is given
 //!   into a mesh the caller owns, so that many can be painted as one.
+//! * So was [`prose`]: running text that wraps, mixes faces (Inter SemiBold
+//!   for strong text was added for it) and can be selected and copied.
 //!
 //! Nothing here knows about audio or projects.
 
@@ -40,6 +42,7 @@ mod menu;
 mod meter;
 pub mod paint;
 mod plot;
+pub mod prose;
 mod style;
 #[cfg(test)]
 mod testing;

@@ -1,5 +1,5 @@
-//! Sets egui up for the kit: Inter as the typeface and a style that makes
-//! egui's own widgets (text fields, menus, tooltips, scroll bars, dialogs)
+//! Sets egui up for the kit: Inter as the typeface (SemiBold beside it for
+//! strong running text) and a style that makes egui's own widgets (text fields, menus, tooltips, scroll bars, dialogs)
 //! match the custom-painted ones: square corners, hairlines, flat fills and
 //! no shadows.
 
@@ -9,6 +9,7 @@ use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId,
 use std::sync::Arc;
 
 const INTER: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.otf");
+const INTER_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold.otf");
 
 /// Installs the typeface and `theme`'s style on `ctx`. Call at startup and
 /// again whenever the theme changes.
@@ -19,11 +20,18 @@ pub fn install(ctx: &egui::Context, theme: &Theme) {
 }
 
 /// Inter leads the proportional family; egui's bundled fonts stay behind
-/// it for the symbols Inter does not have.
+/// it for the symbols Inter does not have. Strong running text has a
+/// family of its own, the same with Inter SemiBold in front. The
+/// monospaced family is egui's.
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
     fonts.font_data.insert("inter".to_owned(), Arc::new(FontData::from_static(INTER)));
-    fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "inter".to_owned());
+    fonts.font_data.insert("inter-semibold".to_owned(), Arc::new(FontData::from_static(INTER_SEMIBOLD)));
+    let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
+    proportional.insert(0, "inter".to_owned());
+    let mut strong = proportional.clone();
+    strong.insert(0, "inter-semibold".to_owned());
+    fonts.families.insert(FontFamily::Name(crate::prose::STRONG.into()), strong);
     ctx.set_fonts(fonts);
 }
 
