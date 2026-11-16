@@ -145,9 +145,11 @@ fn load_one_that_sounds_different(
     before: Sound,
 ) -> (PresetInfo, Sound) {
     for preset in candidates.iter().take(8) {
+        let started = Instant::now();
         session.load_preset(device, &preset.id).unwrap_or_else(|error| panic!("{}: {error}", preset.path()));
+        let took = started.elapsed();
         let after = rendered(session);
-        eprintln!("{}: {after:?}", preset.path());
+        eprintln!("{} loaded in {took:.0?}: {after:?}", preset.path());
         if !after.like(before) && after.peak > 1e-3 {
             return ((*preset).clone(), after);
         }
