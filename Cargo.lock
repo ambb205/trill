@@ -4872,6 +4872,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "trill-runtime"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "parking_lot",
+ "tempfile",
+ "thiserror 2.0.21",
+ "trill-core",
+ "trill-dsp",
+ "trill-engine",
+ "trill-library",
+ "trill-media",
+ "trill-plugins",
+]
+
+[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

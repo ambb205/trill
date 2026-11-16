@@ -1,0 +1,194 @@
+//! Everything a front end needs, constructed once.
+//!
+//! The window and the MCP server are two faces of the same program. What
+//! they share is built here, in one place and one way:
+//!
+//! * one [`MediaCache`], through which the engine, the sample-playing
+//!   devices, previews and waveforms all read audio files, so a file is
+//!   decoded once however many of them use it;
+//! * the device factories: the built-in devices loading through that
+//!   cache, and the user's plugins;
+//! * the [`Session`](trill_engine::Session);
+//! * the sound [`Library`], opened from the user's settings;
+//! * the settings file itself ([`Runtime::settings`]);
+//! * a housekeeping thread that gives the session its regular turn (which
+//!   is what swaps freshly stretched audio into the running graph) and
+//!   writes the settings when the library's part of them changes.
+//!
+//! On top of those sit the operations that need more than one of them and
+//! that every front end must do the same way: [`Runtime::sound_facts`],
+//! [`Runtime::preview`] and [`Runtime::add_sound`]. A front end that grew
+//! its own version of these would drift from the other.
+//!
+//! ```no_run
+//! use trill_runtime::{Runtime, RuntimeOptions};
+//!
+//! # fn main() -> Result<(), trill_runtime::RuntimeError> {
+//! let runtime = std::sync::Arc::new(Runtime::start(RuntimeOptions::default())?);
+//! runtime.library.add_root("D:/Samples".as_ref());
+//! runtime.session.lock().play();
+//! # Ok(())
+//! # }
+//! ```
+
+mod housekeeping;
+mod settings;
+mod sounds;
+
+pub use settings::Storage;
+pub use sounds::{AddedSound, SoundClip, SoundError, SoundFacts};
+
+use housekeeping::Housekeeper;
+use parking_lot::Mutex;
+use settings::SettingsFile;
+use std::sync::Arc;
+use trill_core::device::{CompositeFactory, DeviceFactory};
+use trill_dsp::Builtins;
+use trill_engine::{AudioBackend, Session, SessionError, SharedSession};
+use trill_library::{Library, SaveError, Settings};
+use trill_media::MediaCache;
+use trill_plugins::{PluginHost, ScanMode, Scanner};
+
+/// How to start the program's shared parts.
+#[derive(Clone, Debug)]
+pub struct RuntimeOptions {
+    /// Where the audio goes.
+    pub audio: AudioBackend,
+    /// How to scan the user's plugins, or `None` to offer only the devices
+    /// that ship with the program.
+    pub plugins: Option<Scanner>,
+    /// Where settings and the library index are kept.
+    pub storage: Storage,
+}
+
+impl Default for RuntimeOptions {
+    /// An ordinary run: the default audio device, the user's plugins
+    /// (scanned in a `trill-plugin-scan` process) and the user's settings.
+    fn default() -> Self {
+        Self { audio: AudioBackend::Auto, plugins: Some(Scanner::Auto), storage: Storage::User }
+    }
+}
+
+impl RuntimeOptions {
+    /// A run that touches nothing outside the process: no audio device, no
+    /// plugins, no settings read or written, an empty library. What a
+    /// screenshot or a demonstration wants, so that it looks the same on
+    /// every machine.
+    pub fn hermetic() -> Self {
+        Self { audio: AudioBackend::Null { sample_rate: 48_000 }, plugins: None, storage: Storage::Nowhere }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RuntimeError {
+    #[error("could not start the plugin host: {0}")]
+    Plugins(std::io::Error),
+    #[error("could not start the audio engine: {0}")]
+    Session(#[from] SessionError),
+    #[error("could not start a background thread: {0}")]
+    Thread(std::io::Error),
+}
+
+/// The program's shared parts. Front ends hold it in an `Arc` and reach
+/// into the public fields; everything stops when the last holder lets go.
+pub struct Runtime {
+    /// The one open project and the engine playing it.
+    pub session: SharedSession,
+    /// The cache every audio file is read through.
+    pub media: Arc<MediaCache>,
+    /// The sound library. Changes to its folders, favorites and recently
+    /// used files are saved with the settings without further ado.
+    pub library: Arc<Library>,
+    plugins: Option<PluginHost>,
+    settings: Arc<Mutex<SettingsFile>>,
+    /// Stops the housekeeping thread when the runtime goes.
+    _housekeeper: Housekeeper,
+}
+
+impl Runtime {
+    /// Builds everything and starts the audio engine. With
+    /// [`Storage::User`] the library starts catching up with what changed
+    /// on disk since the last run; the plugins are scanned in the
+    /// background either way.
+    pub fn start(options: RuntimeOptions) -> Result<Self, RuntimeError> {
+        let media = Arc::new(MediaCache::default());
+        let mut factories: Vec<Box<dyn DeviceFactory>> = vec![Box::new(Builtins::with_loader(media.clone()))];
+        let plugins = options.plugins.map(PluginHost::new).transpose().map_err(RuntimeError::Plugins)?;
+        if let Some(plugins) = &plugins {
+            factories.extend(plugins.factories());
+            // The first scan of a machine's plugins takes seconds. It runs
+            // in the background; the catalog fills in when it is done.
+            let scanning = plugins.clone();
+            std::thread::Builder::new()
+                .name("plugin-scan".into())
+                .spawn(move || {
+                    scanning.scan(ScanMode::UseCache);
+                    for failure in scanning.scan_failures() {
+                        log::warn!("skipped plugin {}: {}", failure.path.display(), failure.reason);
+                    }
+                })
+                .map_err(RuntimeError::Thread)?;
+        }
+        let factory = Arc::new(CompositeFactory::new(factories));
+        let session = Session::with_media(factory, media.clone(), options.audio)?;
+        let session: SharedSession = Arc::new(Mutex::new(session));
+
+        let (settings, index_path) = SettingsFile::open(&options.storage);
+        if let Some(warning) = settings.warning() {
+            log::warn!("{warning}");
+        }
+        let library = Arc::new(Library::open(&settings.current().library, index_path));
+        if let Some(problem) = library.index_problem() {
+            log::warn!("the saved library index was not used: {problem}");
+        }
+        if settings.is_kept() {
+            library.rescan();
+        }
+        let settings = Arc::new(Mutex::new(settings));
+        let housekeeper = Housekeeper::start(session.clone(), library.clone(), settings.clone())?;
+        Ok(Self { session, media, library, plugins, settings, _housekeeper: housekeeper })
+    }
+
+    /// The plugin host, when plugins are on: for rescanning and for what
+    /// could not be scanned.
+    pub fn plugins(&self) -> Option<&PluginHost> {
+        self.plugins.as_ref()
+    }
+
+    /// The user's settings as they stand, with the library's part taken
+    /// from the library as it is now.
+    pub fn settings(&self) -> Settings {
+        self.settings.lock().with_library(&self.library)
+    }
+
+    /// What could not be understood in the settings file at startup and
+    /// what was done about it, for showing to the user once.
+    pub fn settings_warning(&self) -> Option<String> {
+        self.settings.lock().warning().map(str::to_string)
+    }
+
+    /// Changes the settings and saves them. For the parts that belong to a
+    /// front end (theme, window size, recent projects); the library's part
+    /// is the library's own and is overwritten with it on every save.
+    ///
+    /// With [`Storage::Nowhere`] the change lasts as long as the runtime.
+    pub fn update_settings(&self, change: impl FnOnce(&mut Settings)) -> Result<(), SaveError> {
+        self.settings.lock().update(&self.library, change)
+    }
+
+    /// Saves the settings now, rather than at the housekeeping thread's
+    /// next look. For a front end that is about to report "saved".
+    pub fn save_settings(&self) -> Result<(), SaveError> {
+        self.settings.lock().update(&self.library, |_| ())
+    }
+}
+
+impl Drop for Runtime {
+    /// Leaves the settings on disk as they are in memory. The housekeeping
+    /// thread stops when its field is dropped, right after this.
+    fn drop(&mut self) {
+        if let Err(error) = self.save_settings() {
+            log::warn!("{error}");
+        }
+    }
+}

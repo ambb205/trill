@@ -14,6 +14,7 @@ trill-dsp = { path = "crates/trill-dsp" }
 trill-engine = { path = "crates/trill-engine" }
 trill-library = { path = "crates/trill-library" }
 trill-plugins = { path = "crates/trill-plugins" }
+trill-runtime = { path = "crates/trill-runtime" }
 trill-mcp = { path = "crates/trill-mcp" }
 trill-media = { path = "crates/trill-media" }
 trill-noir = { path = "crates/trill-noir" }

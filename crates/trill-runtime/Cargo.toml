@@ -1,0 +1,21 @@
+[package]
+name = "trill-runtime"
+description = "Everything a front end needs, constructed once: the session, the media cache, the sound library and the settings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+trill-core.workspace = true
+trill-dsp.workspace = true
+trill-engine.workspace = true
+trill-library.workspace = true
+trill-media.workspace = true
+trill-plugins.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
