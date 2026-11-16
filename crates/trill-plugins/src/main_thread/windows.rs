@@ -369,3 +369,115 @@ impl Drop for Announcer {
         }
     }
 }
+
+/// What the tests of the plugin thread need of Windows: message loops and
+/// windows that are not this module's.
+#[cfg(test)]
+pub(super) mod testing {
+    use super::*;
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW;
+
+    /// What an [`echo_window`] answers [`send`] with.
+    pub(crate) const ECHO: isize = 42;
+    const PING: u32 = WM_APP + 0x3A2;
+    static PINGS: AtomicUsize = AtomicUsize::new(0);
+
+    thread_local! {
+        /// What [`from_message_handling`] has yet to run on this thread.
+        static DEFERRED: RefCell<Vec<Box<dyn FnOnce()>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Runs a message loop on the calling thread for `duration`, the way
+    /// Windows does while a window is dragged or a dialog is up: every
+    /// message is dispatched to its window, whoever that is. `running` is
+    /// set for as long as the loop runs.
+    pub(crate) fn foreign_loop(duration: Duration, running: &AtomicBool) {
+        let end = Instant::now() + duration;
+        running.store(true, Ordering::SeqCst);
+        // SAFETY: as in `Pump::wait` and `Pump::dispatch`.
+        unsafe {
+            let mut message: MSG = std::mem::zeroed();
+            while Instant::now() < end {
+                MsgWaitForMultipleObjectsEx(0, null(), 2, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+                while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+            }
+        }
+        running.store(false, Ordering::SeqCst);
+    }
+
+    /// Has `body` run on the calling thread the next time it dispatches
+    /// messages, as the handler of one: the place a plugin's window
+    /// procedure runs in.
+    pub(crate) fn from_message_handling(body: impl FnOnce() + 'static) {
+        unsafe extern "system" fn run(_window: HWND, _message: u32, timer: usize, _time: u32) {
+            // SAFETY: the timer is the one that is firing, on its thread.
+            unsafe { KillTimer(null_mut(), timer) };
+            let deferred = DEFERRED.take();
+            for body in deferred {
+                body();
+            }
+        }
+        DEFERRED.with_borrow_mut(|deferred| deferred.push(Box::new(body)));
+        // SAFETY: a timer without a window belongs to the calling thread,
+        // whose message loop calls `run`.
+        unsafe { SetTimer(null_mut(), 0, 1, Some(run)) };
+    }
+
+    /// A window of the calling thread that answers [`send`] with [`ECHO`]
+    /// and counts how often it was asked. Returned as an integer, so that
+    /// a job can take it along; destroyed with [`destroy`].
+    pub(crate) fn echo_window() -> isize {
+        unsafe extern "system" fn echo(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+            if message == PING {
+                PINGS.fetch_add(1, Ordering::SeqCst);
+                return ECHO;
+            }
+            // SAFETY: the arguments are passed on as they were given.
+            unsafe { DefWindowProcW(window, message, wparam, lparam) }
+        }
+        static CLASS: OnceLock<Vec<u16>> = OnceLock::new();
+        let class = CLASS.get_or_init(|| {
+            let name: Vec<u16> = "TrillPluginThreadTestEcho\0".encode_utf16().collect();
+            // SAFETY: as in `service_class`.
+            unsafe {
+                let class = WNDCLASSEXW {
+                    cbSize: size_of::<WNDCLASSEXW>() as u32,
+                    lpfnWndProc: Some(echo),
+                    hInstance: GetModuleHandleW(null()),
+                    lpszClassName: name.as_ptr(),
+                    ..std::mem::zeroed()
+                };
+                RegisterClassExW(&class);
+            }
+            name
+        });
+        // SAFETY: the class is registered and its name NUL-terminated.
+        let window = unsafe {
+            let module = GetModuleHandleW(null());
+            CreateWindowExW(0, class.as_ptr(), null(), 0, 0, 0, 0, 0, HWND_MESSAGE, null_mut(), module, null())
+        };
+        assert!(!window.is_null(), "the test window could not be created");
+        window as isize
+    }
+
+    /// Asks an [`echo_window`] of any thread, and waits for its answer.
+    pub(crate) fn send(window: isize) -> isize {
+        // SAFETY: sending a message to a window, alive or not, is sound.
+        unsafe { SendMessageW(window as HWND, PING, 0, 0) }
+    }
+
+    /// How often echo windows were asked so far.
+    pub(crate) fn pings() -> usize {
+        PINGS.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn destroy(window: isize) {
+        // SAFETY: the window is one `echo_window` made on this thread.
+        unsafe { DestroyWindow(window as HWND) };
+    }
+}

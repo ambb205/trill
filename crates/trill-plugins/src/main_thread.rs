@@ -540,20 +540,24 @@ mod tests {
         thread: ThreadId,
         jobs: usize,
         idles: usize,
+        /// The idles that were told they run inside a loop of someone
+        /// else's.
+        nested_idles: usize,
         busy: bool,
     }
 
     impl ThreadState for Counter {
         fn new() -> Self {
-            Self { thread: thread::current().id(), jobs: 0, idles: 0, busy: false }
+            Self { thread: thread::current().id(), jobs: 0, idles: 0, nested_idles: 0, busy: false }
         }
 
         fn wants_idle(&self) -> bool {
             self.busy
         }
 
-        fn idle(&mut self, _nested: bool) {
+        fn idle(&mut self, nested: bool) {
             self.idles += 1;
+            self.nested_idles += usize::from(nested);
         }
     }
 
@@ -718,5 +722,130 @@ mod tests {
         thread::sleep(IDLE_INTERVAL * 8);
         let idles = main.call(WAIT, |state| state.idles).unwrap();
         assert!(idles >= 4, "expected periodic idling, got {idles}");
+    }
+
+    #[test]
+    fn the_state_is_lent_only_on_its_own_thread_and_only_while_free() {
+        assert_eq!(with_current(|state: &mut Counter| state.jobs), None, "this is not a plugin thread");
+
+        let main = MainThread::<Counter>::spawn("test-main").unwrap();
+        // A job has the state, so nothing it calls can have it too.
+        assert_eq!(main.call(WAIT, |_| with_current(|state: &mut Counter| state.jobs)), Ok(None));
+        // Nor is it lent as another type than it is.
+        assert_eq!(main.call(WAIT, |_| with_current(|_: &mut Tenant| ()).is_some()), Ok(false));
+    }
+
+    #[cfg(windows)]
+    mod windows {
+        use super::*;
+        use crate::main_thread::os_events::testing;
+        use crate::test_support::eventually;
+        use std::sync::atomic::AtomicBool;
+
+        /// A flag that says whether a test's foreign loop is running, and
+        /// a way to read it that a job can take along.
+        fn loop_flag() -> (Arc<AtomicBool>, impl Fn() -> bool + Clone + Send + 'static) {
+            let running = Arc::new(AtomicBool::new(false));
+            let reader = running.clone();
+            (running, move || reader.load(Ordering::SeqCst))
+        }
+
+        #[test]
+        fn message_handling_is_lent_the_state_and_can_hurry_the_idle() {
+            static LENT: AtomicBool = AtomicBool::new(false);
+            let main = MainThread::<Counter>::spawn("test-main").unwrap();
+            let idles = main.call(WAIT, |state| state.idles).unwrap();
+            // What a window procedure does: it runs between jobs, on the
+            // thread, and asks for the state.
+            main.call(WAIT, |_| {
+                testing::from_message_handling(|| {
+                    LENT.store(with_current(|state: &mut Counter| state.jobs += 100).is_some(), Ordering::SeqCst);
+                    request_idle();
+                });
+            })
+            .unwrap();
+            assert!(eventually(WAIT, || LENT.load(Ordering::SeqCst)));
+            assert!(main.call(WAIT, |state| state.jobs).unwrap() >= 100);
+            // The thread does not idle by itself (`busy` is off): the
+            // jobs so far account for three idles, the request for one
+            // more, and reading the count comes before its own.
+            assert!(eventually(WAIT, || main.call(WAIT, |state| state.idles).unwrap() >= idles + 4));
+        }
+
+        #[test]
+        fn the_queue_is_served_inside_a_loop_the_thread_did_not_start() {
+            let main = MainThread::<Counter>::spawn("test-main").unwrap();
+            let (running, in_loop) = loop_flag();
+            // A loop of someone else's, started from message handling the
+            // way dragging a window starts one.
+            main.call(WAIT, move |_| {
+                testing::from_message_handling(move || testing::foreign_loop(Duration::from_millis(600), &running));
+            })
+            .unwrap();
+            assert!(eventually(WAIT, &in_loop));
+
+            // An ordinary job does not wait for the loop to end, and the
+            // idle after it is told where it is.
+            let asked = in_loop.clone();
+            let served_inside = main.call(WAIT, move |state| {
+                state.jobs += 1;
+                asked()
+            });
+            assert_eq!(served_inside, Ok(true));
+            assert!(main.call(WAIT, |state| state.nested_idles).unwrap() >= 1);
+
+            // A job that must find the thread at rest is held back until
+            // the loop is over, and what was queued behind it keeps its
+            // place.
+            let behind = {
+                let (main, asked) = (main.clone(), in_loop.clone());
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(50));
+                    main.call(WAIT, move |_| asked())
+                })
+            };
+            assert_eq!(main.call_at_rest(WAIT, move |_| in_loop()), Ok(false));
+            assert_eq!(behind.join().unwrap(), Ok(false), "a later job overtook one that was held");
+        }
+
+        #[test]
+        fn a_job_that_runs_a_message_loop_keeps_the_queue_waiting() {
+            let main = MainThread::<Counter>::spawn("test-main").unwrap();
+            // A plugin that puts up a dialog from inside a call: the job
+            // is not over, so nothing else may touch the state.
+            let (running, in_loop) = loop_flag();
+            let looping = {
+                let main = main.clone();
+                thread::spawn(move || {
+                    main.call(WAIT, move |_| testing::foreign_loop(Duration::from_millis(300), &running))
+                })
+            };
+            assert!(eventually(WAIT, &in_loop));
+            assert_eq!(main.call(WAIT, move |_| in_loop()), Ok(false), "a job ran inside another");
+            assert_eq!(looping.join().unwrap(), Ok(()));
+        }
+
+        #[test]
+        fn a_caller_that_owns_windows_answers_them_while_it_waits() {
+            let main = MainThread::<Counter>::spawn("test-main").unwrap();
+            // The plugin thread sends a message to a window of the thread
+            // that is waiting for it, as it does when an editor belongs to
+            // that window. A caller that just blocked would never answer.
+            let window = testing::echo_window();
+            let before = testing::pings();
+            let answer = main.call(Duration::from_secs(5), move |_| testing::send(window));
+            assert_eq!(answer, Ok(testing::ECHO));
+            assert_eq!(testing::pings(), before + 1);
+
+            // The same through the rendezvous of `call_claimed`.
+            let claimed = main.call_claimed(Duration::from_secs(5), move |_| testing::send(window), |_, _| ());
+            assert_eq!(claimed, Ok(testing::ECHO));
+            // A panicking job still fails its caller at once, not at the
+            // timeout.
+            let started = Instant::now();
+            assert_eq!(main.call(WAIT, |_| -> u32 { panic!("deliberate") }), Err(CallError::Failed));
+            assert!(started.elapsed() < WAIT / 2);
+            testing::destroy(window);
+        }
     }
 }
