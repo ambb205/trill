@@ -50,6 +50,8 @@ mod links;
 mod module;
 mod params;
 mod paths;
+#[cfg(test)]
+mod preset_tests;
 mod presets;
 mod probe;
 mod processor;
