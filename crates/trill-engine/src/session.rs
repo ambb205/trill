@@ -707,11 +707,11 @@ impl Session {
     /// Plays a note on a track's instrument right now, for auditioning.
     pub fn note_on(&mut self, track: TrackId, pitch: u8, velocity: u8) {
         let velocity = velocity.clamp(1, 127) as f32 / 127.0;
-        self.engine.send(Message::Live { track, kind: EventKind::NoteOn { pitch: pitch.min(127), velocity } });
+        self.engine.live().play_on(track, EventKind::NoteOn { pitch: pitch.min(127), velocity });
     }
 
     pub fn note_off(&mut self, track: TrackId, pitch: u8) {
-        self.engine.send(Message::Live { track, kind: EventKind::NoteOff { pitch: pitch.min(127) } });
+        self.engine.live().play_on(track, EventKind::NoteOff { pitch: pitch.min(127) });
     }
 
     // ---- files ---------------------------------------------------------

@@ -739,6 +739,7 @@ impl PolySynth {
             EventKind::NoteOn { pitch, velocity } => self.note_on(pitch, velocity),
             EventKind::NoteOff { pitch } => self.note_off(pitch),
             EventKind::AllNotesOff => self.all_notes_off(),
+            EventKind::PitchBend { .. } | EventKind::Control { .. } => {}
         }
     }
 

@@ -7,11 +7,15 @@
 //! * [`Engine`] owns the audio thread and the lock-free queues to it.
 
 pub mod analysis;
+mod clock;
 pub mod compile;
 pub mod engine;
 pub mod graph;
+pub mod host;
+pub mod live;
 mod monitor;
 pub mod processor;
+mod queue;
 pub mod render;
 pub mod session;
 pub mod sources;
@@ -19,8 +23,10 @@ mod stretcher;
 
 pub use analysis::AudioStats;
 pub use compile::Problem;
-pub use engine::{AudioBackend, Engine, EngineError, StreamInfo};
+pub use engine::{AudioBackend, AudioSetup, Engine, EngineError, StreamInfo};
 pub use graph::{MAX_BLOCK, Meter};
+pub use host::{AudioConfig, AudioDevice, AudioDevices, AudioHost};
+pub use live::LiveSender;
 pub use processor::Processor;
 pub use render::{RenderError, RenderJob, RenderOptions, RenderReport, Rendered};
 pub use session::{ParamState, SampleFile, Session, SessionError, TransportStatus};

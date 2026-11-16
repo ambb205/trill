@@ -261,6 +261,7 @@ impl BlockEvents {
                         self.queue.note_off(port.dialect, time, key);
                     }
                 }
+                EventKind::PitchBend { .. } | EventKind::Control { .. } => {}
             }
         }
         self.deferred.clear();

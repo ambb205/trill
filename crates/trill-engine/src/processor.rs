@@ -4,7 +4,9 @@
 //! processor drives realtime playback and offline rendering, so a bounce is
 //! exactly what you heard.
 
+use crate::engine::RecordPhase;
 use crate::graph::{AudioData, Chain, Graph, MAX_BLOCK, RegionAudio, TrackNode, TrackState};
+use crate::live::{Captured, LiveTarget, TrackSet};
 use crate::monitor::{Beats, Monitor};
 use trill_core::device::{Event, EventKind, MAX_EVENTS_PER_BLOCK, ProcessInfo};
 use trill_core::project::{MIN_VOLUME_DB, automation_value};
@@ -14,11 +16,50 @@ use trill_dsp::util::{db_to_gain, pan_gains};
 const EVENT_CAPACITY: usize = MAX_EVENTS_PER_BLOCK;
 /// Leave room for the note-offs that follow a burst of note-ons.
 const NOTE_ON_LIMIT: usize = EVENT_CAPACITY - 512;
-const LIVE_CAPACITY: usize = 128;
+/// Live events held for one callback. A player with ten fingers, two feet
+/// and a pitch wheel does not come near it.
+const LIVE_CAPACITY: usize = 1024;
 /// Fade applied at the edges of audio clips to avoid clicks.
 const CLIP_FADE_SECONDS: f64 = 0.003;
 /// Length of the cross-fade from a stand-in to the audio that replaces it.
 const HAND_OVER_SECONDS: f64 = 0.01;
+
+/// Which sounding notes to release at the start of the next block.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Flush {
+    Nothing,
+    /// The notes of the song, because it jumped (a seek, the loop coming
+    /// round). What is being played by hand is left alone: a chord held
+    /// across the loop point keeps sounding.
+    Song,
+    /// Everything, held keys included: the transport stopped.
+    Everything,
+}
+
+/// Something played by hand, waiting for its block.
+#[derive(Copy, Clone)]
+struct LiveEvent {
+    target: LiveTarget,
+    kind: EventKind,
+    /// Frames from the start of the next `process` call.
+    offset: u32,
+    /// How many frames before the frame it is placed at it was played.
+    early: f64,
+}
+
+/// A take in progress.
+#[derive(Copy, Clone)]
+struct Recording {
+    tracks: TrackSet,
+    /// Frames of count-in still to go; the song starts when it reaches 0.
+    count_in: u64,
+    /// Added to the count-in's positions for the metronome, a whole number
+    /// of bars, so that counting in to the start of the song does not ask
+    /// it for clicks at negative positions.
+    click_shift: f64,
+    /// How many times the loop has come round during the take.
+    pass: u32,
+}
 
 pub struct Processor {
     graph: Box<Graph>,
@@ -28,10 +69,12 @@ pub struct Processor {
     /// Anchoring keeps positions exact however long playback runs.
     anchor_beat: f64,
     frames: u64,
-    /// Release every sounding note at the start of the next block.
-    flush: bool,
-    /// Notes played live (auditioning), delivered at the next block.
-    live: Vec<(TrackId, EventKind)>,
+    /// What to release at the start of the next block.
+    flush: Flush,
+    /// What was played by hand since the last callback.
+    live: Vec<LiveEvent>,
+    /// The tracks a keyboard plays.
+    live_targets: TrackSet,
     events: Vec<Event>,
     track_left: Vec<f32>,
     track_right: Vec<f32>,
@@ -39,6 +82,17 @@ pub struct Processor {
     mix_right: Vec<f32>,
     /// The audition voice and the metronome, heard but never rendered.
     monitor: Monitor,
+    /// Frames between rendering a frame and hearing it.
+    output_latency: f64,
+    recording: Option<Recording>,
+    /// Where what is recorded goes; `None` when rendering offline.
+    capture: Option<rtrb::Producer<Captured>>,
+    /// Frames played since the song position last jumped (or playback
+    /// began), and where the song was just before: for telling where the
+    /// song was heard to be a moment ago.
+    continuity: u64,
+    before_jump: f64,
+    jump_was_wrap: bool,
 }
 
 impl Processor {
@@ -49,14 +103,21 @@ impl Processor {
             playing: false,
             anchor_beat: 0.0,
             frames: 0,
-            flush: false,
+            flush: Flush::Nothing,
             live: Vec::with_capacity(LIVE_CAPACITY),
+            live_targets: TrackSet::default(),
             events: Vec::with_capacity(EVENT_CAPACITY),
             track_left: vec![0.0; MAX_BLOCK],
             track_right: vec![0.0; MAX_BLOCK],
             mix_left: vec![0.0; MAX_BLOCK],
             mix_right: vec![0.0; MAX_BLOCK],
             monitor: Monitor::new(sample_rate),
+            output_latency: 0.0,
+            recording: None,
+            capture: None,
+            continuity: 0,
+            before_jump: 0.0,
+            jump_was_wrap: false,
         }
     }
 
@@ -78,26 +139,44 @@ impl Processor {
     }
 
     pub fn play(&mut self) {
-        self.playing = true;
+        if !self.playing {
+            self.playing = true;
+            self.jumped(self.position(), false);
+        }
     }
 
     /// Stops the transport. Sounding notes are released and tails ring out.
+    /// A take that was being recorded ends here.
     pub fn stop(&mut self) {
+        if let Some(recording) = self.recording.take() {
+            self.report(Captured::Stopped { beat: self.position(), pass: recording.pass });
+            self.flush = Flush::Everything;
+        }
         if self.playing {
             self.playing = false;
-            self.flush = true;
+            self.flush = Flush::Everything;
         }
     }
 
     pub fn seek(&mut self, beat: f64) {
+        let before = self.position();
         self.anchor_beat = beat.max(0.0);
         self.frames = 0;
-        self.flush = true;
+        self.flush = self.flush.max(Flush::Song);
+        self.jumped(before, false);
+    }
+
+    /// Notes that the song position is no longer where the frames played
+    /// so far lead to: it was at `before` and is now somewhere else.
+    fn jumped(&mut self, before: f64, wrap: bool) {
+        self.continuity = 0;
+        self.before_jump = before;
+        self.jump_was_wrap = wrap;
     }
 
     /// Silences everything immediately, including reverb and delay tails.
     pub fn panic(&mut self) {
-        self.flush = true;
+        self.flush = Flush::Everything;
         for track in &mut self.graph.tracks {
             for slot in &mut track.chain.devices {
                 if let Some(processor) = slot.processor.as_mut() {
@@ -142,10 +221,93 @@ impl Processor {
         self.monitor.set_metronome(on);
     }
 
-    /// Queues a live note for `track`. Dropped if the queue is full.
+    /// How long after a frame is rendered it is heard, in frames. Takes are
+    /// written where the player heard the song to be, which is this much
+    /// behind where the engine is.
+    pub fn set_output_latency(&mut self, frames: u32) {
+        self.output_latency = frames as f64;
+    }
+
+    /// Where a take's events are reported. Returns where they went before.
+    pub(crate) fn set_capture(
+        &mut self,
+        capture: Option<rtrb::Producer<Captured>>,
+    ) -> Option<rtrb::Producer<Captured>> {
+        std::mem::replace(&mut self.capture, capture)
+    }
+
+    fn report(&mut self, captured: Captured) {
+        if let Some(capture) = &mut self.capture {
+            // A full queue loses the report: nobody is collecting.
+            let _ = capture.push(captured);
+        }
+    }
+
+    /// Plays `kind` on `track` at the start of the next block. Dropped if
+    /// more is waiting than the processor holds.
     pub fn live_event(&mut self, track: TrackId, kind: EventKind) {
-        if self.live.len() < self.live.capacity() {
-            self.live.push((track, kind));
+        self.live_on(track, kind, 0, 0.0);
+    }
+
+    /// Plays `kind` on `track`, `offset` frames into the next call to
+    /// [`Processor::process`]. It was played `early` frames before that
+    /// frame. Returns `false` if it was dropped for want of room.
+    pub(crate) fn live_on(&mut self, track: TrackId, kind: EventKind, offset: u32, early: f64) -> bool {
+        self.push_live(LiveEvent { target: LiveTarget::Track(track), kind, offset, early })
+    }
+
+    /// Like [`Processor::live_on`], on the tracks a keyboard plays.
+    pub(crate) fn live_routed(&mut self, kind: EventKind, offset: u32, early: f64) -> bool {
+        self.push_live(LiveEvent { target: LiveTarget::Routed, kind, offset, early })
+    }
+
+    fn push_live(&mut self, event: LiveEvent) -> bool {
+        let room = self.live.len() < self.live.capacity();
+        if room {
+            self.live.push(event);
+        }
+        room
+    }
+
+    /// Sets the tracks a keyboard plays. A track that no longer is one lets
+    /// go of what the keyboard was holding on it.
+    pub(crate) fn set_live_targets(&mut self, targets: TrackSet) {
+        for track in &mut self.graph.tracks {
+            if self.live_targets.contains(track.id) && !targets.contains(track.id) {
+                track.state.release_routed |= track.state.holds_routed();
+            }
+        }
+        self.live_targets = targets;
+    }
+
+    /// Lets go of everything a keyboard is holding, on every track.
+    pub(crate) fn release_live(&mut self) {
+        for track in &mut self.graph.tracks {
+            track.state.release_routed |= track.state.holds_routed();
+        }
+    }
+
+    /// Starts a take on `tracks`. If the song is stopped it starts playing,
+    /// after `count_in_beats` of metronome; if it is playing, the take
+    /// begins where the song is.
+    pub(crate) fn record(&mut self, tracks: TrackSet, count_in_beats: f64) {
+        let signature = self.graph.time_signature;
+        let bar = signature.numerator as f64 * 4.0 / signature.denominator as f64;
+        let count_in_beats = if self.playing || !count_in_beats.is_finite() { 0.0 } else { count_in_beats.max(0.0) };
+        let count_in = (count_in_beats / self.beats_per_frame()).round() as u64;
+        let click_shift = if bar > 0.0 { (count_in_beats / bar).ceil() * bar } else { 0.0 };
+        self.recording = Some(Recording { tracks, count_in, click_shift, pass: 0 });
+        if count_in == 0 {
+            self.play();
+            self.report(Captured::Rolling { beat: self.position() });
+        }
+    }
+
+    pub(crate) fn record_phase(&self) -> RecordPhase {
+        match &self.recording {
+            None => RecordPhase::Off,
+            Some(recording) if recording.count_in > 0 => RecordPhase::CountIn,
+            Some(_) => RecordPhase::Rolling,
         }
     }
 
@@ -171,6 +333,14 @@ impl Processor {
         while done < total {
             let mut frames = (total - done).min(MAX_BLOCK);
 
+            // End the block exactly where a count-in ends, so the song
+            // starts on the sample.
+            let counting = self.recording.map_or(0, |recording| recording.count_in);
+            let starts = counting > 0 && counting <= frames as u64;
+            if starts {
+                frames = counting as usize;
+            }
+
             // End the block exactly at the loop end so the wrap is sample
             // accurate.
             let mut wrap = None;
@@ -190,27 +360,56 @@ impl Processor {
             }
 
             let limit = wrap.map(|(_, end)| end);
-            self.process_block(&mut left[done..done + frames], &mut right[done..done + frames], limit);
+            self.process_block(&mut left[done..done + frames], &mut right[done..done + frames], limit, done);
             done += frames;
 
             if self.playing {
                 self.frames += frames as u64;
+                self.continuity += frames as u64;
                 if let Some((start, _)) = wrap {
                     // Restart exactly on the loop start. The block above ran
                     // to the first frame at or past the loop end, so a loop
                     // is at most one frame longer than its length in beats,
                     // and a note sitting on the loop start is never missed.
+                    let reached = self.position();
                     self.anchor_beat = start;
                     self.frames = 0;
-                    self.flush = true;
+                    self.flush = self.flush.max(Flush::Song);
+                    self.jumped(reached, true);
+                    let pass = self.recording.as_mut().map(|recording| {
+                        recording.pass += 1;
+                        recording.pass
+                    });
+                    if let Some(pass) = pass {
+                        self.report(Captured::Wrapped { pass });
+                    }
                 }
             }
+            if let Some(recording) = &mut self.recording {
+                recording.count_in -= (frames as u64).min(recording.count_in);
+            }
+            if starts {
+                self.play();
+                self.report(Captured::Rolling { beat: self.position() });
+            }
         }
+
+        // What was placed in this call has been played; anything placed
+        // beyond it waits for the next.
+        let played = total as u32;
+        self.live.retain_mut(|event| {
+            let waiting = event.offset >= played;
+            if waiting {
+                event.offset -= played;
+            }
+            waiting
+        });
     }
 
-    /// Renders one block. `limit` caps the beat range that may trigger
-    /// notes, so nothing past a loop end sounds before the wrap.
-    fn process_block(&mut self, out_left: &mut [f32], out_right: &mut [f32], limit: Option<f64>) {
+    /// Renders one block, which begins `block_start` frames into the
+    /// current call to `process`. `limit` caps the beat range that may
+    /// trigger notes, so nothing past a loop end sounds before the wrap.
+    fn process_block(&mut self, out_left: &mut [f32], out_right: &mut [f32], limit: Option<f64>, block_start: usize) {
         let frames = out_left.len();
         let start_beat = self.position();
         let beats_per_frame = self.beats_per_frame();
@@ -227,8 +426,22 @@ impl Processor {
             position_beats: start_beat,
             loop_range: self.graph.loop_region,
         };
-        let flush = std::mem::take(&mut self.flush);
+        let flush = std::mem::replace(&mut self.flush, Flush::Nothing);
         let playing = self.playing;
+        let block = block_start as u32..(block_start + frames) as u32;
+        let has_live = self.live.iter().any(|event| block.contains(&event.offset));
+        // Where a take's events are written: see `Heard`.
+        let heard = self.recording.map(|recording| Heard {
+            tracks: recording.tracks,
+            pass: recording.pass,
+            start_beat,
+            beats_per_frame,
+            count_in: recording.count_in as f64,
+            latency: self.output_latency,
+            continuity: self.continuity as f64,
+            before_jump: self.before_jump,
+            jump_was_wrap: self.jump_was_wrap,
+        });
 
         let mix_left = &mut self.mix_left[..frames];
         let mix_right = &mut self.mix_right[..frames];
@@ -259,14 +472,39 @@ impl Processor {
 
             let events = &mut self.events;
             events.clear();
-            if flush {
-                events.push(Event { offset: 0, kind: EventKind::AllNotesOff });
-                track.state.active_until = [-1.0; 128];
-                track.state.active_count = 0;
+            release_notes(track, flush, events);
+            let recorded = heard.as_ref().filter(|heard| heard.tracks.contains(track.id));
+            let mut by_hand = false;
+            if std::mem::take(&mut track.state.release_routed) {
+                by_hand = true;
+                let id = track.id;
+                release_routed(track, events, |kind| {
+                    if let (Some(heard), Some(capture)) = (recorded, &mut self.capture) {
+                        let (beat, pass) = heard.at(0, 0.0);
+                        let _ = capture.push(Captured::Event { track: id, kind, beat, pass });
+                    }
+                });
             }
-            for (id, kind) in &self.live {
-                if *id == track.id {
-                    events.push(Event { offset: 0, kind: *kind });
+            if has_live {
+                for event in self.live.iter().filter(|event| block.contains(&event.offset)) {
+                    let routed = event.target == LiveTarget::Routed;
+                    let plays = match event.target {
+                        LiveTarget::Routed => self.live_targets.contains(track.id),
+                        LiveTarget::Track(id) => id == track.id,
+                    };
+                    if !plays || events.len() >= EVENT_CAPACITY {
+                        continue;
+                    }
+                    by_hand = true;
+                    let offset = event.offset - block.start;
+                    track.state.played(event.kind, routed);
+                    events.push(Event { offset, kind: event.kind });
+                    let keeps = matches!(event.kind, EventKind::NoteOn { .. } | EventKind::NoteOff { .. })
+                        || event.kind.sustain().is_some();
+                    if let (true, Some(heard), Some(capture)) = (keeps, recorded, &mut self.capture) {
+                        let (beat, pass) = heard.at(offset, event.early);
+                        let _ = capture.push(Captured::Event { track: track.id, kind: event.kind, beat, pass });
+                    }
                 }
             }
             if playing {
@@ -279,6 +517,12 @@ impl Processor {
                     sample_rate: self.sample_rate,
                 };
                 render_audio(track, &block, left, right);
+            }
+            if by_hand {
+                // What is played by hand comes at any offset, and the
+                // song's notes were added after it: devices want one list
+                // in order. Ties keep the order they were added in.
+                sort_by_offset(events);
             }
 
             run_chain(&mut track.chain, &info, events, left, right);
@@ -329,7 +573,6 @@ impl Processor {
                 }
             }
         }
-        self.live.clear();
 
         let master = &mut self.graph.master;
         run_chain(&mut master.chain, &info, &[], mix_left, mix_right);
@@ -351,13 +594,130 @@ impl Processor {
         master.meter.record(peak_left, peak_right);
 
         let signature = self.graph.time_signature;
-        let beats = playing.then(|| Beats {
-            start: start_beat,
+        let beats_from = |start: f64| Beats {
+            start,
             per_frame: beats_per_frame,
             count: 4.0 / signature.denominator as f64,
             counts_per_bar: signature.numerator as u32,
-        });
-        self.monitor.mix(out_left, out_right, beats);
+        };
+        match self.recording.filter(|recording| recording.count_in > 0) {
+            // A count-in clicks whether or not the metronome is on, on the
+            // song's own grid running up to where the take starts.
+            Some(recording) => {
+                let before = recording.count_in as f64 * beats_per_frame;
+                self.monitor.mix(
+                    out_left,
+                    out_right,
+                    Some(beats_from(start_beat - before + recording.click_shift)),
+                    true,
+                );
+            }
+            None => self.monitor.mix(out_left, out_right, playing.then(|| beats_from(start_beat)), false),
+        }
+    }
+}
+
+/// What it takes to say where the song was *heard* to be when something
+/// was played: the take is written there, not where the engine had got to.
+///
+/// The engine runs ahead of the speakers by the output latency, and an
+/// event reaches its block a moment after it was played. Both are known to
+/// the frame, so both are taken off again. If that reaches back past a
+/// jump of the song position (the loop coming round, a seek, the start of
+/// playback), the answer is on the far side of the jump: a note played as
+/// the loop was heard to end belongs at the loop's end, in the pass before.
+struct Heard {
+    tracks: TrackSet,
+    pass: u32,
+    start_beat: f64,
+    beats_per_frame: f64,
+    /// Frames of count-in left at the start of the block.
+    count_in: f64,
+    latency: f64,
+    /// Frames played since the last jump, at the start of the block.
+    continuity: f64,
+    before_jump: f64,
+    jump_was_wrap: bool,
+}
+
+impl Heard {
+    /// The heard position, and the loop pass it belongs to, of an event
+    /// placed `offset` frames into the block and played `early` frames
+    /// before that.
+    fn at(&self, offset: u32, early: f64) -> (f64, u32) {
+        let offset = offset as f64;
+        let back = early + self.latency;
+        if self.count_in > 0.0 {
+            // The song stands still at the take's start, which is this many
+            // frames away.
+            let until_start = (self.count_in - offset).max(0.0);
+            return (self.start_beat - (until_start + back) * self.beats_per_frame, self.pass);
+        }
+        let since_jump = self.continuity + offset;
+        if back <= since_jump {
+            (self.start_beat + (offset - back) * self.beats_per_frame, self.pass)
+        } else {
+            let pass = if self.jump_was_wrap { self.pass.saturating_sub(1) } else { self.pass };
+            (self.before_jump - (back - since_jump) * self.beats_per_frame, pass)
+        }
+    }
+}
+
+/// Releases what `flush` asks of a track at the start of a block.
+fn release_notes(track: &mut TrackNode, flush: Flush, events: &mut Vec<Event>) {
+    let state = &mut track.state;
+    match flush {
+        Flush::Nothing => {}
+        // The song's notes go; the keys held by hand stay down.
+        Flush::Song if state.live_held != 0 => {
+            if state.active_count > 0 {
+                for pitch in 0..128usize {
+                    if state.active_until[pitch] >= 0.0 && state.live_held & (1 << pitch) == 0 {
+                        events.push(Event { offset: 0, kind: EventKind::NoteOff { pitch: pitch as u8 } });
+                    }
+                }
+            }
+            state.active_until = [-1.0; 128];
+            state.active_count = 0;
+        }
+        Flush::Song | Flush::Everything => {
+            events.push(Event { offset: 0, kind: EventKind::AllNotesOff });
+            state.active_until = [-1.0; 128];
+            state.active_count = 0;
+            state.forget_live();
+        }
+    }
+}
+
+/// Lets go of what a keyboard was holding on a track: every key, the
+/// sustain pedal and the pitch wheel. `released` is told each event.
+fn release_routed(track: &mut TrackNode, events: &mut Vec<Event>, mut released: impl FnMut(EventKind)) {
+    let state = &mut track.state;
+    let mut push = |kind: EventKind| {
+        events.push(Event { offset: 0, kind });
+        released(kind);
+    };
+    let held = std::mem::take(&mut state.routed_held);
+    state.live_held &= !held;
+    for pitch in (0..128u8).filter(|pitch| held & (1 << pitch) != 0) {
+        push(EventKind::NoteOff { pitch });
+    }
+    if std::mem::take(&mut state.live_sustain) {
+        push(EventKind::Control { controller: trill_core::device::CONTROLLER_SUSTAIN, value: 0.0 });
+    }
+    if std::mem::take(&mut state.live_bent) {
+        push(EventKind::PitchBend { value: 0.0 });
+    }
+}
+
+/// Stable insertion sort by offset: the lists are short and nearly sorted.
+fn sort_by_offset(events: &mut [Event]) {
+    for i in 1..events.len() {
+        let mut j = i;
+        while j > 0 && events[j - 1].offset > events[j].offset {
+            events.swap(j - 1, j);
+            j -= 1;
+        }
     }
 }
 
@@ -682,7 +1042,7 @@ mod tests {
                 match event.kind {
                     EventKind::NoteOn { pitch, .. } => out.push((frame, true, pitch)),
                     EventKind::NoteOff { pitch } => out.push((frame, false, pitch)),
-                    EventKind::AllNotesOff => {}
+                    _ => {}
                 }
             }
         }

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use trill_core::device::DeviceProcessor;
+use trill_core::device::{DeviceProcessor, EventKind};
 use trill_core::project::AutomationPoint;
 use trill_core::{DeviceId, TimeSignature, TrackId};
 
@@ -130,11 +130,74 @@ pub(crate) struct TrackState {
     /// False until the first block, so the fader starts at its target
     /// instead of ramping up from silence.
     pub primed: bool,
+    /// The keys held by hand on this track, a bit per pitch: through a
+    /// keyboard or [`Session::note_on`](crate::Session::note_on).
+    pub live_held: u128,
+    /// Those of them a keyboard holds, which it lets go of when the track
+    /// stops being one it plays.
+    pub routed_held: u128,
+    /// Whether the sustain pedal is down, and the pitch wheel off centre.
+    pub live_sustain: bool,
+    pub live_bent: bool,
+    /// Set to have the next block let go of what the keyboard holds.
+    pub release_routed: bool,
 }
 
 impl Default for TrackState {
     fn default() -> Self {
-        Self { active_until: [-1.0; 128], active_count: 0, gain_left: 0.0, gain_right: 0.0, primed: false }
+        Self {
+            active_until: [-1.0; 128],
+            active_count: 0,
+            gain_left: 0.0,
+            gain_right: 0.0,
+            primed: false,
+            live_held: 0,
+            routed_held: 0,
+            live_sustain: false,
+            live_bent: false,
+            release_routed: false,
+        }
+    }
+}
+
+impl TrackState {
+    /// Whether a keyboard has anything to let go of here.
+    pub fn holds_routed(&self) -> bool {
+        self.routed_held != 0 || self.live_sustain || self.live_bent
+    }
+
+    /// Keeps track of what is held as `kind` is played by hand; `routed`
+    /// when it came from a keyboard.
+    pub fn played(&mut self, kind: EventKind, routed: bool) {
+        match kind {
+            EventKind::NoteOn { pitch, .. } => {
+                let key = 1u128 << pitch.min(127);
+                self.live_held |= key;
+                if routed {
+                    self.routed_held |= key;
+                }
+            }
+            EventKind::NoteOff { pitch } => {
+                let key = 1u128 << pitch.min(127);
+                self.live_held &= !key;
+                self.routed_held &= !key;
+            }
+            EventKind::AllNotesOff => self.forget_live(),
+            EventKind::PitchBend { value } => self.live_bent = value != 0.0,
+            EventKind::Control { .. } => {
+                if let Some(down) = kind.sustain() {
+                    self.live_sustain = down;
+                }
+            }
+        }
+    }
+
+    /// Nothing is held by hand any more: everything was released.
+    pub fn forget_live(&mut self) {
+        self.live_held = 0;
+        self.routed_held = 0;
+        self.live_sustain = false;
+        self.live_bent = false;
     }
 }
 

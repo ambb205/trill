@@ -108,7 +108,39 @@ pub enum EventKind {
     NoteOff {
         pitch: u8,
     },
+    /// Releases every note, whatever holds it: a sustain pedal that is down
+    /// counts as lifted, and the pitch wheel as back at rest.
     AllNotesOff,
+    /// The pitch wheel, from -1 (fully down) to 1 (fully up); 0 at rest.
+    /// How far that bends is the instrument's business: two semitones each
+    /// way unless it says otherwise.
+    PitchBend {
+        value: f32,
+    },
+    /// A MIDI controller: `controller` is its number (0..=127) and `value`
+    /// its position, 0..=1. The mod wheel is [`CONTROLLER_MOD_WHEEL`] and
+    /// the sustain pedal [`CONTROLLER_SUSTAIN`], down from 0.5 up. An
+    /// instrument ignores the controllers it has no use for.
+    Control {
+        controller: u8,
+        value: f32,
+    },
+}
+
+/// The controller number of the mod wheel in [`EventKind::Control`].
+pub const CONTROLLER_MOD_WHEEL: u8 = 1;
+/// The controller number of the sustain pedal in [`EventKind::Control`].
+pub const CONTROLLER_SUSTAIN: u8 = 64;
+
+impl EventKind {
+    /// Whether the event is a sustain pedal going down (`Some(true)`) or
+    /// coming up (`Some(false)`).
+    pub fn sustain(&self) -> Option<bool> {
+        match *self {
+            EventKind::Control { controller: CONTROLLER_SUSTAIN, value } => Some(value >= 0.5),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]

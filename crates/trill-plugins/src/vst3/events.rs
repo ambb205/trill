@@ -224,6 +224,7 @@ impl BlockEvents {
                             queue.note_off(time, position(time), key);
                         }
                     }
+                    EventKind::PitchBend { .. } | EventKind::Control { .. } => {}
                 }
             }
             silencing

@@ -433,6 +433,7 @@ impl Sampler {
             // One-shot notes are released too: stopping the transport
             // should not leave a long sample playing to its end.
             EventKind::AllNotesOff => self.voices.iter_mut().filter(|voice| voice.active).for_each(Voice::release),
+            EventKind::PitchBend { .. } | EventKind::Control { .. } => {}
         }
     }
 

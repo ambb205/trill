@@ -4504,6 +4504,7 @@ dependencies = [
  "trill-core",
  "trill-dsp",
  "trill-media",
+ "windows",
 ]
 
 [[package]]

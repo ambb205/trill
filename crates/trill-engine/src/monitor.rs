@@ -104,10 +104,11 @@ impl Monitor {
     }
 
     /// Adds the monitor's sounds to a block. `beats` is given while the
-    /// transport is running.
-    pub fn mix(&mut self, left: &mut [f32], right: &mut [f32], beats: Option<Beats>) {
+    /// transport is running or counting in; `count_in` makes it click with
+    /// the metronome switched off.
+    pub fn mix(&mut self, left: &mut [f32], right: &mut [f32], beats: Option<Beats>, count_in: bool) {
         self.mix_audition(left, right);
-        match beats.filter(|_| self.metronome) {
+        match beats.filter(|_| self.metronome || count_in) {
             Some(beats) => self.mix_clicks(left, right, beats),
             // Let a click that has started ring out after a stop.
             None => self.ring_click(left, right, 0),
@@ -221,7 +222,7 @@ mod tests {
         let mut beats = beats;
         while done < frames {
             let n = (frames - done).min(480);
-            monitor.mix(&mut left[done..done + n], &mut right[done..done + n], beats);
+            monitor.mix(&mut left[done..done + n], &mut right[done..done + n], beats, false);
             if let Some(b) = &mut beats {
                 b.start += n as f64 * b.per_frame;
             }
