@@ -1,16 +1,19 @@
 //! The application shell: keeps the snapshot in step with the session, lays
 //! out the panels, handles keyboard shortcuts and decides when to repaint.
 
+use super::arrangement::ops;
 use super::files::{self, Confirm, Jobs};
+use super::shortcuts::{self, Command};
 use super::snapshot::{Live, Snapshot};
-use super::state::{AudioSummary, Cx, FocusArea, UiState};
-use super::{UiOptions, arrangement, browser, detail, piano_roll, status_bar, top_bar};
-use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
+use super::state::{AudioSummary, Cx, FocusArea, LaneOwner, Tool, UiState, lane_owner};
+use super::{UiOptions, arrangement, automation, browser, detail, piano_roll, status_bar, top_bar};
+use eframe::egui;
 use parking_lot::Mutex;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
+use trill_core::TrackId;
 use trill_core::device::{DeviceDescriptor, DeviceFactory};
 use trill_dsp::BuiltinFactory;
 use trill_engine::SharedSession;
@@ -21,7 +24,7 @@ const IDLE_POLL: Duration = Duration::from_millis(100);
 const HOUSEKEEPING_INTERVAL: Duration = Duration::from_secs(1);
 /// Height the arrangement keeps however tall the detail panel is made:
 /// the ruler, two tracks and the master.
-const MIN_ARRANGEMENT_HEIGHT: f32 = 180.0;
+const MIN_ARRANGEMENT_HEIGHT: f32 = 200.0;
 /// Frames to let the layout settle before taking a screenshot.
 const SCREENSHOT_SETTLE_FRAMES: u32 = 12;
 
@@ -33,28 +36,6 @@ enum Capture {
     Pending(Arc<Mutex<Option<Result<(), String>>>>),
     /// The window has been asked to close.
     Done,
-}
-
-/// A command issued from the keyboard.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum Command {
-    Undo,
-    Redo,
-    New,
-    Open,
-    Save,
-    SaveAs,
-    Export,
-    TogglePlay,
-    ToggleLoop,
-    Rewind,
-    AddTrack,
-    Duplicate,
-    Delete,
-    SelectAll,
-    ToggleBrowser,
-    /// Move the selected notes by grid steps and semitones.
-    Nudge(i32, i32),
 }
 
 pub struct TrillApp {
@@ -84,6 +65,8 @@ pub struct TrillApp {
     last_housekeeping: Instant,
     /// The window title last sent, to avoid resending it every frame.
     title: String,
+    /// Whether a text field had the keyboard when the last frame ended.
+    was_typing: bool,
 }
 
 impl TrillApp {
@@ -102,12 +85,25 @@ impl TrillApp {
 
         let mut state = UiState::new(options.detail_tab);
         state.browser.open = options.browser;
+        state.shortcuts_open = options.show_shortcuts;
         let (snapshot, factory, audio) = {
             let mut guard = session.lock();
-            let first = Snapshot::capture(&guard, None);
+            let first = Snapshot::capture(&guard, &[]);
             state.reconcile(&first.project);
             if let Some((track, clip)) = options.select_clip.and_then(|id| first.clip(id)) {
                 state.select_clip(track.id, clip.id);
+            }
+            for (track, clip) in options.also_select.iter().filter_map(|id| first.clip(*id)) {
+                if !state.is_clip_selected(clip.id) {
+                    state.toggle_clip(track.id, clip.id);
+                }
+            }
+            if options.show_automation {
+                for lane in &first.project.automation {
+                    if let Some(owner) = lane_owner(&first.project, &lane.target) {
+                        state.arrangement.open_lane(owner, lane.target.clone());
+                    }
+                }
             }
             if options.autoplay {
                 guard.play();
@@ -119,8 +115,8 @@ impl TrillApp {
                 warning: info.warning.clone(),
             };
             // Captured again now that the selection is known, so it covers
-            // the selected track's devices.
-            (Snapshot::capture(&guard, state.selected_track), guard.factory(), audio)
+            // the devices of the tracks on show.
+            (Snapshot::capture(&guard, &params_tracks(&state)), guard.factory(), audio)
         };
         let (catalog_tx, catalog) = mpsc::channel();
         let repaint = ctx.clone();
@@ -155,6 +151,7 @@ impl TrillApp {
             last_meter_update: now,
             last_housekeeping: now,
             title: String::new(),
+            was_typing: false,
         }
     }
 
@@ -171,17 +168,19 @@ impl TrillApp {
         match self.session.try_lock() {
             Some(mut session) => {
                 if session.revision() != self.snapshot.revision {
-                    self.snapshot = Snapshot::capture(&session, self.state.selected_track);
+                    self.snapshot = Snapshot::capture(&session, &params_tracks(&self.state));
                     self.state.reconcile(&self.snapshot.project);
                 }
-                // The selection moved (by the user, or by `reconcile` just
-                // now): cover the newly selected track's devices.
-                if self.snapshot.params_track != self.state.selected_track {
-                    self.snapshot = Snapshot::capture(&session, self.state.selected_track);
+                // The selection moved or a lane was opened (by the user,
+                // or by `reconcile` just now): cover the devices now shown.
+                let wanted = params_tracks(&self.state);
+                if !self.snapshot.covers(&wanted) {
+                    self.snapshot = Snapshot::capture(&session, &wanted);
                 }
                 let transport = session.transport();
                 self.live.playing = transport.playing;
                 self.live.position = transport.position_beats;
+                self.live.metronome = session.metronome();
                 self.live.set_cpu_load(session.audio_load());
                 self.live.audio_faults = session.audio_faults();
                 if now.duration_since(self.last_housekeeping) >= HOUSEKEEPING_INTERVAL {
@@ -216,6 +215,30 @@ impl TrillApp {
             state: &mut self.state,
             jobs: &mut self.jobs,
         }
+    }
+
+    /// The commands for the keys pressed this frame. A question on screen
+    /// takes the keyboard; the shortcut reference lets only its own key
+    /// through, which closes it.
+    fn read_commands(&self, ctx: &egui::Context) -> Vec<Command> {
+        if self.jobs.confirm.is_some() {
+            return Vec::new();
+        }
+        let state = &self.state;
+        let selection = match state.focus {
+            FocusArea::Arrangement => !state.selected_clips.is_empty(),
+            FocusArea::PianoRoll => !state.selected_notes.is_empty(),
+            FocusArea::Automation => state.arrangement.points.as_ref().is_some_and(|chosen| !chosen.points.is_empty()),
+        };
+        // The key that ends typing (Escape, Enter) takes the focus away
+        // before this runs, and must not then be read as a shortcut: the
+        // field that just lost the keyboard still has to see it.
+        let typing = ctx.text_edit_focused() || self.was_typing;
+        let mut commands = shortcuts::read(ctx, typing, selection);
+        if state.shortcuts_open {
+            commands.retain(|command| *command == Command::ShowShortcuts);
+        }
+        commands
     }
 
     /// Releases auditioned notes whose time is up or whose key was let go.
@@ -322,7 +345,7 @@ impl TrillApp {
         self.guard_close(&ctx);
         self.update_title(&ctx);
 
-        let commands = if self.jobs.confirm.is_some() { Vec::new() } else { read_shortcuts(&ctx, &self.state) };
+        let commands = self.read_commands(&ctx);
         let mut cx = self.cx();
         for command in commands {
             run_command(&ctx, &mut cx, command);
@@ -364,6 +387,7 @@ impl TrillApp {
         egui::CentralPanel::no_frame().show(ui, |ui| arrangement::show(ui, &mut cx));
 
         files::confirm_modal(&ctx, &mut cx);
+        shortcuts::window(&ctx, &mut cx);
         let corner = ctx.content_rect().right_bottom() - egui::vec2(12.0, status_bar::HEIGHT + 10.0);
         cx.state.toasts.show(&ctx, cx.theme, corner);
 
@@ -372,6 +396,10 @@ impl TrillApp {
         if self.state.hint.end_frame() {
             ctx.request_repaint();
         }
+        // What copy and cut left for the system clipboard.
+        if let Some(text) = self.state.copied_text.take() {
+            ctx.copy_text(text);
+        }
         if let Some(theme) = self.state.theme_request.take().and_then(Theme::named) {
             trill_noir::install(&ctx, &theme);
             self.theme = theme;
@@ -379,6 +407,7 @@ impl TrillApp {
         }
 
         self.close_gesture(&ctx);
+        self.was_typing = ctx.text_edit_focused();
         // Moving things need every frame; everything else waits for input
         // or the idle poll scheduled in `logic`.
         if self.live.playing || self.live.meters_moving() || self.state.audition.is_some() {
@@ -442,91 +471,96 @@ fn is_pointer_event(event: &egui::Event) -> bool {
     )
 }
 
-/// Collects the commands for the keys pressed this frame. Single keys and
-/// editing shortcuts are left alone while a text field has the keyboard.
-fn read_shortcuts(ctx: &egui::Context, state: &UiState) -> Vec<Command> {
-    const COMMAND_SHIFT: Modifiers = Modifiers::COMMAND.plus(Modifiers::SHIFT);
-    // More specific chords first: a chord also matches one with fewer
-    // modifiers.
-    let always = [
-        (COMMAND_SHIFT, Key::S, Command::SaveAs),
-        (Modifiers::COMMAND, Key::S, Command::Save),
-        (Modifiers::COMMAND, Key::O, Command::Open),
-        (Modifiers::COMMAND, Key::N, Command::New),
-        (Modifiers::COMMAND, Key::E, Command::Export),
-    ];
-    let unless_typing = [
-        (COMMAND_SHIFT, Key::Z, Command::Redo),
-        (Modifiers::COMMAND, Key::Y, Command::Redo),
-        (Modifiers::COMMAND, Key::Z, Command::Undo),
-        (Modifiers::COMMAND, Key::T, Command::AddTrack),
-        (Modifiers::COMMAND, Key::D, Command::Duplicate),
-        (Modifiers::COMMAND, Key::B, Command::ToggleBrowser),
-        (Modifiers::NONE, Key::Space, Command::TogglePlay),
-        (Modifiers::NONE, Key::L, Command::ToggleLoop),
-        (Modifiers::NONE, Key::Home, Command::Rewind),
-        (Modifiers::NONE, Key::Delete, Command::Delete),
-        (Modifiers::NONE, Key::Backspace, Command::Delete),
-    ];
-    // Only claimed while notes are selected in the piano roll; otherwise
-    // these keys keep their usual meaning.
-    let with_notes = [
-        (Modifiers::COMMAND, Key::A, Command::SelectAll),
-        (Modifiers::NONE, Key::ArrowLeft, Command::Nudge(-1, 0)),
-        (Modifiers::NONE, Key::ArrowRight, Command::Nudge(1, 0)),
-        (Modifiers::NONE, Key::ArrowUp, Command::Nudge(0, 1)),
-        (Modifiers::NONE, Key::ArrowDown, Command::Nudge(0, -1)),
-    ];
-
-    let typing = ctx.text_edit_focused();
-    let in_piano_roll = state.focus == FocusArea::PianoRoll && state.selected_clip.is_some();
-    let mut commands = Vec::new();
-    ctx.input_mut(|input| {
-        let mut collect = |bindings: &[(Modifiers, Key, Command)]| {
-            for (modifiers, key, command) in bindings {
-                if input.consume_shortcut(&KeyboardShortcut::new(*modifiers, *key)) {
-                    commands.push(*command);
-                }
-            }
-        };
-        collect(&always);
-        if !typing {
-            if in_piano_roll {
-                collect(&with_notes);
-            }
-            collect(&unless_typing);
-        }
+/// The tracks whose devices the snapshot should describe: the selected
+/// one, for the Devices tab, and every track with an automation lane open,
+/// whose parameters the lanes draw. Ascending and without repeats, as
+/// [`Snapshot::covers`] expects.
+fn params_tracks(state: &UiState) -> Vec<TrackId> {
+    let lanes = state.arrangement.lanes.iter().filter_map(|lane| match lane.owner {
+        LaneOwner::Track(track) => Some(track),
+        LaneOwner::Master => None,
     });
-    commands
+    let mut tracks: Vec<TrackId> = state.selected_track.into_iter().chain(lanes).collect();
+    tracks.sort_by_key(|track| track.0);
+    tracks.dedup();
+    tracks
 }
 
+/// Carries out a command from the keyboard. Editing commands go to the pane
+/// the user last worked in.
 fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
+    let focus = cx.state.focus;
+    let in_notes = focus == FocusArea::PianoRoll && cx.state.selected_clip.is_some();
     match command {
-        Command::Undo => drop(cx.with_session(|session| session.undo())),
-        Command::Redo => drop(cx.with_session(|session| session.redo())),
         Command::New => files::new_project(cx),
         Command::Open => files::open(ctx, cx),
         Command::Save => files::save(ctx, cx),
         Command::SaveAs => files::save_as(ctx, cx),
-        Command::Export => files::export_wav(ctx, cx),
-        Command::TogglePlay => top_bar::toggle_play(cx),
-        Command::ToggleLoop => top_bar::toggle_loop(cx),
-        Command::Rewind => cx.with_session(|session| session.seek(0.0)),
-        Command::AddTrack => arrangement::add_track(cx),
-        Command::Duplicate => arrangement::duplicate_selected_clip(cx),
-        // Delete acts on notes when they are what the user is working on,
-        // otherwise on the selected clip.
-        Command::Delete => {
-            if cx.state.focus == FocusArea::PianoRoll && !cx.state.selected_notes.is_empty() {
-                piano_roll::delete_selected_notes(cx);
-            } else if cx.state.focus == FocusArea::Arrangement {
-                arrangement::delete_selected_clip(cx);
+        Command::ExportWav => files::export_wav(ctx, cx),
+        Command::Undo => drop(cx.with_session(|session| session.undo())),
+        Command::Redo => drop(cx.with_session(|session| session.redo())),
+        Command::Cut if in_notes => piano_roll::cut_notes(cx),
+        Command::Cut => ops::cut(cx),
+        Command::Copy if in_notes => piano_roll::copy_notes(cx),
+        Command::Copy => ops::copy(cx),
+        Command::Paste if in_notes => piano_roll::paste_notes(cx),
+        Command::Paste => ops::paste(cx),
+        Command::Duplicate if in_notes && !cx.state.selected_notes.is_empty() => piano_roll::duplicate_notes(cx),
+        Command::Duplicate => ops::duplicate_selection(cx),
+        // Delete acts on what the user is working on: notes, points or
+        // clips.
+        Command::Delete => match focus {
+            FocusArea::PianoRoll if !cx.state.selected_notes.is_empty() => piano_roll::delete_selected_notes(cx),
+            FocusArea::PianoRoll => {}
+            FocusArea::Automation => arrangement::delete_selected_points(cx),
+            FocusArea::Arrangement => ops::delete_selection(cx),
+        },
+        Command::SelectAll => match focus {
+            FocusArea::PianoRoll => piano_roll::select_all_notes(cx),
+            FocusArea::Automation => arrangement::select_all_points(cx),
+            FocusArea::Arrangement => ops::select_all(cx),
+        },
+        Command::Escape => {
+            if in_notes && !cx.state.selected_notes.is_empty() {
+                cx.state.selected_notes.clear();
+            } else {
+                ops::escape(cx);
             }
         }
-        Command::SelectAll => piano_roll::select_all_notes(cx),
+        Command::Nudge(steps, semitones) if in_notes => piano_roll::nudge_selected_notes(cx, steps, semitones),
+        Command::Nudge(steps, _) => ops::nudge(cx, steps),
+        Command::Quantize => piano_roll::quantize(cx),
+        Command::Split => ops::split_at_cursor(cx),
+        Command::MuteClips => ops::toggle_mute(cx),
+        Command::RenameClip => ops::rename_selected(cx),
+        Command::LoopSelection => ops::loop_selection(cx),
+        Command::DeleteTime => ops::delete_time(cx),
+        Command::DuplicateTime => ops::duplicate_time(cx),
+        Command::AddMarker => ops::add_marker(cx),
+        Command::AddTrack => arrangement::add_track(cx),
+        Command::GroupTrack => arrangement::group_selected_track(cx),
+        Command::ToggleAutomation => match cx.state.selected_track.filter(|_| !cx.state.master_selected) {
+            Some(track) => automation::toggle_lanes(cx, LaneOwner::Track(track)),
+            None => automation::toggle_lanes(cx, LaneOwner::Master),
+        },
+        Command::TogglePlay => top_bar::toggle_play(cx),
+        Command::Rewind => cx.with_session(|session| session.seek(0.0)),
+        Command::ToggleLoop => top_bar::toggle_loop(cx),
+        Command::ToggleMetronome => top_bar::toggle_metronome(cx),
+        Command::ToggleFollow => cx.state.arrangement.follow = !cx.state.arrangement.follow,
+        Command::ZoomToSelection => arrangement::zoom_to_selection(ctx, cx),
+        Command::ZoomToSong => arrangement::zoom_to_song(ctx, cx),
+        Command::ToggleDraw => toggle_tool(cx, Tool::Draw),
+        Command::ToggleBlade => toggle_tool(cx, Tool::Blade),
         Command::ToggleBrowser => cx.state.browser.open = !cx.state.browser.open,
-        Command::Nudge(steps, semitones) => piano_roll::nudge_selected_notes(cx, steps, semitones),
+        Command::ShowShortcuts => cx.state.shortcuts_open = !cx.state.shortcuts_open,
     }
+}
+
+/// Takes `tool` up, or puts it away if it is the one in hand.
+fn toggle_tool(cx: &mut Cx, tool: Tool) {
+    let current = &mut cx.state.arrangement.tool;
+    *current = if *current == tool { Tool::Pointer } else { tool };
 }
 
 /// Writes the window's pixels to `path` as a PNG.

@@ -224,6 +224,46 @@ impl Snap {
     }
 }
 
+/// The grid of the arrangement: the one that follows the zoom, or a fixed
+/// note value.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum GridChoice {
+    /// As fine as the zoom shows, never coarser than a bar.
+    #[default]
+    Adaptive,
+    Fixed(Snap),
+}
+
+impl GridChoice {
+    /// The choices in menu order.
+    pub const ALL: [GridChoice; 8] = [
+        GridChoice::Adaptive,
+        GridChoice::Fixed(Snap::Quarter),
+        GridChoice::Fixed(Snap::Eighth),
+        GridChoice::Fixed(Snap::Sixteenth),
+        GridChoice::Fixed(Snap::ThirtySecond),
+        GridChoice::Fixed(Snap::EighthTriplet),
+        GridChoice::Fixed(Snap::SixteenthTriplet),
+        GridChoice::Fixed(Snap::Off),
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GridChoice::Adaptive => "Auto",
+            GridChoice::Fixed(snap) => snap.label(),
+        }
+    }
+
+    /// The spacing things snap to, given the spacing `adaptive` that the
+    /// zoom suggests. `None` when the grid is off.
+    pub fn step(self, adaptive: Beats) -> Option<Beats> {
+        match self {
+            GridChoice::Adaptive => Some(adaptive),
+            GridChoice::Fixed(snap) => snap.step(),
+        }
+    }
+}
+
 /// Rounds `beat` to the nearest multiple of `step`, never below zero.
 pub fn snap_round(beat: Beats, step: Option<Beats>) -> Beats {
     match step {
@@ -315,7 +355,7 @@ pub fn format_clock(beat: Beats, tempo: f64) -> String {
     format!("{}:{:04.1}", minutes as u64, seconds - minutes * 60.0)
 }
 
-/// Which part of a clip or note the pointer is over.
+/// Which part of a note the pointer is over.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SpanHit {
     Body,
@@ -323,15 +363,60 @@ pub enum SpanHit {
     End,
 }
 
-/// Hit-tests a horizontal span `left..right` at `x`. The resize handle is
-/// `handle` pixels wide, but never more than a third of the span so short
-/// items can still be grabbed by the body.
-pub fn span_hit(x: f32, left: f32, right: f32, handle: f32) -> Option<SpanHit> {
+/// Which part of a clip the pointer is over, when both of its edges trim.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum EdgeHit {
+    Start,
+    Body,
+    End,
+}
+
+/// Hit-tests a span `left..right` whose two edges are handles `handle`
+/// pixels wide. The handles never take more than a quarter of the span
+/// each, so half of even the shortest item is left for moving it.
+pub fn edge_hit(x: f32, left: f32, right: f32, handle: f32) -> Option<EdgeHit> {
     if x < left || x > right {
         return None;
     }
-    let handle = handle.min((right - left) / 3.0);
-    Some(if x >= right - handle { SpanHit::End } else { SpanHit::Body })
+    let handle = handle.min((right - left) / 4.0);
+    Some(if x >= right - handle {
+        EdgeHit::End
+    } else if x < left + handle {
+        EdgeHit::Start
+    } else {
+        EdgeHit::Body
+    })
+}
+
+/// A view on its way from one zoom and scroll position to another: what
+/// makes "zoom to fit" glide instead of jump.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Glide {
+    pub from: TimeView,
+    pub to: TimeView,
+    /// When it began, in seconds of the UI's clock.
+    pub started: f64,
+}
+
+impl Glide {
+    pub const SECONDS: f64 = 0.16;
+
+    /// The view at time `now`, and whether the glide has arrived. Zoom is
+    /// interpolated in ratios, so every frame scales by the same factor.
+    pub fn at(&self, now: f64) -> (TimeView, bool) {
+        let progress = ((now - self.started) / Self::SECONDS).clamp(0.0, 1.0);
+        if progress >= 1.0 {
+            return (self.to, true);
+        }
+        // Ease out: fast away from where it was, gentle on arrival.
+        let eased = 1.0 - (1.0 - progress).powi(3);
+        let ratio = self.to.pixels_per_beat / self.from.pixels_per_beat;
+        let view = TimeView {
+            origin: self.from.origin + (self.to.origin - self.from.origin) * eased,
+            pixels_per_beat: self.from.pixels_per_beat * ratio.powf(eased),
+        };
+        (view, false)
+    }
 }
 
 /// Vertical mapping between pitches and pixels in the piano roll.
@@ -606,15 +691,42 @@ mod tests {
     }
 
     #[test]
-    fn spans_have_a_resize_handle_at_the_end() {
-        assert_eq!(span_hit(9.0, 10.0, 110.0, 8.0), None);
-        assert_eq!(span_hit(10.0, 10.0, 110.0, 8.0), Some(SpanHit::Body));
-        assert_eq!(span_hit(101.0, 10.0, 110.0, 8.0), Some(SpanHit::Body));
-        assert_eq!(span_hit(103.0, 10.0, 110.0, 8.0), Some(SpanHit::End));
-        assert_eq!(span_hit(111.0, 10.0, 110.0, 8.0), None);
-        // A 9 px item keeps two thirds of its width for moving.
-        assert_eq!(span_hit(15.0, 10.0, 19.0, 8.0), Some(SpanHit::Body));
-        assert_eq!(span_hit(17.0, 10.0, 19.0, 8.0), Some(SpanHit::End));
+    fn both_edges_of_a_clip_are_handles() {
+        assert_eq!(edge_hit(9.0, 10.0, 110.0, 6.0), None);
+        assert_eq!(edge_hit(10.0, 10.0, 110.0, 6.0), Some(EdgeHit::Start));
+        assert_eq!(edge_hit(15.9, 10.0, 110.0, 6.0), Some(EdgeHit::Start));
+        assert_eq!(edge_hit(16.0, 10.0, 110.0, 6.0), Some(EdgeHit::Body));
+        assert_eq!(edge_hit(103.9, 10.0, 110.0, 6.0), Some(EdgeHit::Body));
+        assert_eq!(edge_hit(104.0, 10.0, 110.0, 6.0), Some(EdgeHit::End));
+        assert_eq!(edge_hit(110.5, 10.0, 110.0, 6.0), None);
+        // An 8 px clip keeps its middle half for moving.
+        assert_eq!(edge_hit(11.0, 10.0, 18.0, 6.0), Some(EdgeHit::Start));
+        assert_eq!(edge_hit(14.0, 10.0, 18.0, 6.0), Some(EdgeHit::Body));
+        assert_eq!(edge_hit(17.0, 10.0, 18.0, 6.0), Some(EdgeHit::End));
+    }
+
+    #[test]
+    fn the_grid_choice_is_adaptive_fixed_or_off() {
+        assert_eq!(GridChoice::default(), GridChoice::Adaptive);
+        assert_eq!(GridChoice::Adaptive.step(2.0), Some(2.0), "whatever the zoom shows");
+        assert_eq!(GridChoice::Fixed(Snap::Sixteenth).step(2.0), Some(0.25));
+        assert_eq!(GridChoice::Fixed(Snap::Off).step(2.0), None);
+        let labels: Vec<&str> = GridChoice::ALL.iter().map(|choice| choice.label()).collect();
+        assert_eq!(labels, ["Auto", "1/4", "1/8", "1/16", "1/32", "1/8T", "1/16T", "Off"]);
+    }
+
+    #[test]
+    fn a_glide_arrives_exactly_and_passes_through_the_middle() {
+        let from = TimeView { origin: 0.0, pixels_per_beat: 10.0 };
+        let to = TimeView { origin: 32.0, pixels_per_beat: 40.0 };
+        let glide = Glide { from, to, started: 5.0 };
+        assert_eq!(glide.at(5.0), (from, false));
+        let (middle, arrived) = glide.at(5.0 + Glide::SECONDS / 2.0);
+        assert!(!arrived);
+        assert!(middle.origin > 16.0 && middle.origin < 32.0, "eased out, so past halfway: {}", middle.origin);
+        assert!(middle.pixels_per_beat > 10.0 && middle.pixels_per_beat < 40.0);
+        assert_eq!(glide.at(5.0 + Glide::SECONDS), (to, true));
+        assert_eq!(glide.at(99.0), (to, true));
     }
 
     #[test]

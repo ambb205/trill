@@ -12,8 +12,11 @@ Usage: trill [OPTIONS] [PROJECT.trill]
 
 Options:
   --demo                  Start with the built-in demo song
-  --tab <clip|devices>    Detail tab to show first (default: clip)
+  --tab <clip|devices|mixer>  Detail tab to show first (default: clip)
   --select <CLIP NAME>    Select the first clip with this name at startup
+  --also-select <NAME>    Select this clip as well; may be given several times
+  --automation            Start with a lane open for every automation envelope
+  --shortcuts             Start with the shortcut reference open
   --play                  Start playback when the window opens
   --size <WIDTHxHEIGHT>   Initial window size in points (default: 1440x900)
   --theme <noir|graphite> Colors of the window (default: noir)
@@ -35,6 +38,12 @@ pub struct Cli {
     pub tab: DetailTab,
     /// Name of a clip to select at startup.
     pub select: Option<String>,
+    /// Names of more clips to select with it.
+    pub also_select: Vec<String>,
+    /// Unfold a lane for every automation envelope.
+    pub automation: bool,
+    /// Open the shortcut reference.
+    pub shortcuts: bool,
     pub play: bool,
     pub size: Option<[f32; 2]>,
     /// Name of the theme to start in.
@@ -68,6 +77,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
             "--no-plugins" => cli.no_plugins = true,
             "--no-mcp" => cli.no_mcp = true,
             "--no-browser" => cli.no_browser = true,
+            "--automation" => cli.automation = true,
+            "--shortcuts" => cli.shortcuts = true,
+            "--also-select" => cli.also_select.push(value("a clip name")?),
             "--mcp-port" => {
                 let text = value("a port number")?;
                 cli.mcp_port = Some(text.parse().with_context(|| format!("'{text}' is not a port number"))?);
@@ -76,7 +88,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
                 cli.tab = match value("a tab name")?.as_str() {
                     "clip" => DetailTab::Clip,
                     "devices" => DetailTab::Devices,
-                    other => bail!("unknown tab '{other}' (expected 'clip' or 'devices')"),
+                    "mixer" => DetailTab::Mixer,
+                    other => bail!("unknown tab '{other}' (expected 'clip', 'devices' or 'mixer')"),
                 }
             }
             "--select" => cli.select = Some(value("a clip name")?),
@@ -108,6 +121,13 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
     Ok(Parsed::Run(cli))
 }
 
+/// The first clip of the project called `name`.
+fn clip_named(project: &Project, name: &str) -> anyhow::Result<ClipId> {
+    let mut clips = project.tracks.iter().flat_map(|track| track.clips.iter());
+    let clip = clips.find(|clip| clip.name == name).with_context(|| format!("no clip is named '{name}'"))?;
+    Ok(clip.id)
+}
+
 fn parse_size(text: &str) -> anyhow::Result<[f32; 2]> {
     let parsed =
         text.split_once(['x', 'X']).and_then(|(width, height)| Some([width.parse().ok()?, height.parse().ok()?]));
@@ -129,10 +149,12 @@ impl Cli {
 
     /// The clip `--select` names, if the option was given.
     pub fn clip_to_select(&self, project: &Project) -> anyhow::Result<Option<ClipId>> {
-        let Some(name) = &self.select else { return Ok(None) };
-        let mut clips = project.tracks.iter().flat_map(|track| track.clips.iter());
-        let clip = clips.find(|clip| clip.name == *name).with_context(|| format!("no clip is named '{name}'"))?;
-        Ok(Some(clip.id))
+        self.select.as_deref().map(|name| clip_named(project, name)).transpose()
+    }
+
+    /// The clips `--also-select` names.
+    pub fn clips_to_also_select(&self, project: &Project) -> anyhow::Result<Vec<ClipId>> {
+        self.also_select.iter().map(|name| clip_named(project, name)).collect()
     }
 
     /// Whether to host third-party plugins. Screenshots show only what
@@ -155,6 +177,9 @@ impl Cli {
         UiOptions {
             detail_tab: self.tab,
             select_clip: None,
+            also_select: Vec::new(),
+            show_automation: self.automation,
+            show_shortcuts: self.shortcuts,
             mcp_url: None,
             theme: self.theme.unwrap_or(defaults.theme),
             browser: !self.no_browser,
@@ -272,6 +297,25 @@ mod tests {
     }
 
     #[test]
+    fn the_views_to_start_in_can_be_chosen() {
+        let cli = run(&["--tab", "mixer", "--automation", "--shortcuts", "--also-select", "A", "--also-select", "B"])
+            .unwrap();
+        assert_eq!(cli.tab, DetailTab::Mixer);
+        assert_eq!(cli.also_select, ["A", "B"]);
+        let options = cli.ui_options();
+        assert!(options.show_automation && options.show_shortcuts);
+        let plain = run(&[]).unwrap().ui_options();
+        assert!(!plain.show_automation && !plain.show_shortcuts && plain.also_select.is_empty());
+
+        let mut project = Project::new("t");
+        let track = project.add_track("A");
+        let a = project.add_midi_clip(track, "A", 0.0, 4.0).unwrap();
+        let b = project.add_midi_clip(track, "B", 4.0, 4.0).unwrap();
+        assert_eq!(cli.clips_to_also_select(&project).unwrap(), [a, b]);
+        assert!(run(&["--also-select", "C"]).unwrap().clips_to_also_select(&project).is_err());
+    }
+
+    #[test]
     fn help_is_recognized() {
         assert_eq!(parse(["--help".to_owned()]).unwrap(), Parsed::Help);
         assert_eq!(parse(["--demo".to_owned(), "-h".to_owned()]).unwrap(), Parsed::Help);
@@ -282,7 +326,8 @@ mod tests {
         for args in [
             &["--frobnicate"][..],
             &["--tab"],
-            &["--tab", "mixer"],
+            &["--tab", "sequencer"],
+            &["--also-select"],
             &["--size", "big"],
             &["--size", "10x10"],
             &["--theme"],

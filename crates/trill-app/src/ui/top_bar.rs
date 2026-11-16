@@ -2,9 +2,12 @@
 //! the left, then the transport and its readouts, and on the right the
 //! audio thread's load and the MCP address.
 
-use super::state::{Cx, DetailTab};
-use super::{arrangement, brand, files, piano_roll, timeline};
+use super::arrangement::ops;
+use super::shortcuts::{self, Command};
+use super::state::{Clipboard, Cx, DetailTab};
+use super::{arrangement, brand, files, timeline};
 use eframe::egui::{self, Align2, Id, Rect, Sense, Ui, pos2, vec2};
+use trill_core::TimeSignature;
 use trill_core::project::{MAX_TEMPO, MIN_TEMPO};
 use trill_noir::{Chip, Icon, MenuItem, NumberField, TextStyle, Theme, paint, text};
 
@@ -26,7 +29,7 @@ const POSITION_WIDTH: f32 = 140.0;
 const TEMPO_WIDTH: f32 = 106.0;
 const SIGNATURE_WIDTH: f32 = 52.0;
 const TRANSPORT_WIDTH: f32 =
-    3.0 * BUTTON_WIDTH + 2.0 * 4.0 + 10.0 + POSITION_WIDTH + 6.0 + TEMPO_WIDTH + 6.0 + SIGNATURE_WIDTH;
+    4.0 * BUTTON_WIDTH + 3.0 * 4.0 + 10.0 + POSITION_WIDTH + 6.0 + TEMPO_WIDTH + 6.0 + SIGNATURE_WIDTH;
 const CPU_METER_WIDTH: f32 = 54.0;
 
 pub fn show(ui: &mut Ui, cx: &mut Cx) {
@@ -90,63 +93,148 @@ fn project_group(ui: &mut Ui, cx: &mut Cx, bar: Rect) -> f32 {
 
 fn file_menu(ui: &mut Ui, cx: &mut Cx) {
     let theme = cx.theme;
-    if MenuItem::new("New project").shortcut("Ctrl+N").show(ui, theme).clicked() {
+    let item = |ui: &mut Ui, label: &str, command: Command, enabled: bool| {
+        MenuItem::new(label).shortcut(&shortcuts::keys(command)).enabled(enabled).show(ui, theme).clicked()
+    };
+    if item(ui, "New project", Command::New, true) {
         files::new_project(cx);
     }
-    if MenuItem::new("Open\u{2026}").shortcut("Ctrl+O").show(ui, theme).clicked() {
+    if item(ui, "Open\u{2026}", Command::Open, true) {
         files::open(ui.ctx(), cx);
     }
     trill_noir::menu_separator(ui, theme);
-    if MenuItem::new("Save").shortcut("Ctrl+S").show(ui, theme).clicked() {
+    if item(ui, "Save", Command::Save, true) {
         files::save(ui.ctx(), cx);
     }
-    if MenuItem::new("Save as\u{2026}").shortcut("Ctrl+Shift+S").show(ui, theme).clicked() {
+    if item(ui, "Save as\u{2026}", Command::SaveAs, true) {
         files::save_as(ui.ctx(), cx);
     }
     trill_noir::menu_separator(ui, theme);
+    if MenuItem::new("Import MIDI\u{2026}").show(ui, theme).clicked() {
+        files::import_midi(ui.ctx(), cx);
+    }
+    if MenuItem::new("Export MIDI\u{2026}").show(ui, theme).clicked() {
+        files::export_midi(ui.ctx(), cx);
+    }
     let idle = cx.jobs.exporting().is_none();
-    if MenuItem::new("Export WAV\u{2026}").shortcut("Ctrl+E").enabled(idle).show(ui, theme).clicked() {
+    if item(ui, "Export WAV\u{2026}", Command::ExportWav, idle) {
         files::export_wav(ui.ctx(), cx);
     }
 }
 
 fn edit_menu(ui: &mut Ui, cx: &mut Cx) {
     let theme = cx.theme;
-    if MenuItem::new("Undo").shortcut("Ctrl+Z").enabled(cx.snap.can_undo).show(ui, theme).clicked() {
+    let item = |ui: &mut Ui, label: &str, command: Command, enabled: bool| {
+        MenuItem::new(label).shortcut(&shortcuts::keys(command)).enabled(enabled).show(ui, theme).clicked()
+    };
+    if item(ui, "Undo", Command::Undo, cx.snap.can_undo) {
         cx.with_session(|session| session.undo());
     }
-    if MenuItem::new("Redo").shortcut("Ctrl+Shift+Z").enabled(cx.snap.can_redo).show(ui, theme).clicked() {
+    if item(ui, "Redo", Command::Redo, cx.snap.can_redo) {
         cx.with_session(|session| session.redo());
     }
     trill_noir::menu_separator(ui, theme);
-    let clip = cx.state.selected_clip.is_some();
-    if MenuItem::new("Duplicate clip").shortcut("Ctrl+D").enabled(clip).show(ui, theme).clicked() {
-        arrangement::duplicate_selected_clip(cx);
+
+    // These act on the clips; the same keys act on notes while the piano
+    // roll is being worked in.
+    let clips = !cx.state.selected_clips.is_empty();
+    let pasteable = matches!(cx.state.clipboard, Some(Clipboard::Clips(_)));
+    if item(ui, "Cut", Command::Cut, clips) {
+        ops::cut(cx);
     }
-    if MenuItem::new("Delete clip").shortcut("Del").enabled(clip).show(ui, theme).clicked() {
-        arrangement::delete_selected_clip(cx);
+    if item(ui, "Copy", Command::Copy, clips) {
+        ops::copy(cx);
     }
-    let notes = clip && cx.state.detail_tab == DetailTab::Clip;
-    if MenuItem::new("Select all notes").shortcut("Ctrl+A").enabled(notes).show(ui, theme).clicked() {
-        piano_roll::select_all_notes(cx);
+    if item(ui, "Paste", Command::Paste, pasteable) {
+        ops::paste(cx);
+    }
+    if item(ui, "Duplicate", Command::Duplicate, clips) {
+        ops::duplicate_selection(cx);
+    }
+    if item(ui, "Delete", Command::Delete, clips) {
+        ops::delete_selection(cx);
+    }
+    if item(ui, "Select all clips", Command::SelectAll, true) {
+        ops::select_all(cx);
     }
     trill_noir::menu_separator(ui, theme);
-    if MenuItem::new("Add track").shortcut("Ctrl+T").show(ui, theme).clicked() {
+    if item(ui, "Split at the edit cursor", Command::Split, true) {
+        ops::split_at_cursor(cx);
+    }
+    if item(ui, "Mute or unmute clips", Command::MuteClips, clips) {
+        ops::toggle_mute(cx);
+    }
+    let time = ops::selected_span(cx).is_some();
+    if item(ui, "Loop the selection", Command::LoopSelection, time) {
+        ops::loop_selection(cx);
+    }
+    if item(ui, "Delete time", Command::DeleteTime, time) {
+        ops::delete_time(cx);
+    }
+    if item(ui, "Duplicate time", Command::DuplicateTime, time) {
+        ops::duplicate_time(cx);
+    }
+    trill_noir::menu_separator(ui, theme);
+    if item(ui, "Add track", Command::AddTrack, true) {
         arrangement::add_track(cx);
+    }
+    if MenuItem::new("Add group track").show(ui, theme).clicked() {
+        arrangement::add_group_track(cx);
+    }
+    if MenuItem::new("Add return track").show(ui, theme).clicked() {
+        arrangement::add_return_track(cx);
+    }
+    trill_noir::menu_separator(ui, theme);
+    if item(ui, "Add marker", Command::AddMarker, true) {
+        ops::add_marker(cx);
+    }
+    // Every marker, to jump to.
+    let signature = cx.snap.project.time_signature;
+    let markers = cx.snap.project.markers.clone();
+    if !markers.is_empty() {
+        trill_noir::menu_heading(ui, theme, "Go to marker");
+    }
+    for marker in markers {
+        let at = timeline::format_position(marker.beat, signature);
+        if MenuItem::new(&marker.name).shortcut(&at).show(ui, theme).clicked() {
+            cx.state.arrangement.cursor = marker.beat;
+            cx.with_session(|session| session.seek(marker.beat));
+        }
     }
 }
 
 fn view_menu(ui: &mut Ui, cx: &mut Cx) {
     let theme = cx.theme;
     let open = cx.state.browser.open;
-    if MenuItem::new("Browser").shortcut("Ctrl+B").checked(open).show(ui, theme).clicked() {
+    let keys = shortcuts::keys;
+    if MenuItem::new("Browser").shortcut(&keys(Command::ToggleBrowser)).checked(open).show(ui, theme).clicked() {
         cx.state.browser.open = !open;
     }
     trill_noir::menu_separator(ui, theme);
-    for (tab, label) in [(DetailTab::Clip, "Clip"), (DetailTab::Devices, "Devices")] {
+    for (tab, label) in [(DetailTab::Clip, "Clip"), (DetailTab::Devices, "Devices"), (DetailTab::Mixer, "Mixer")] {
         if MenuItem::new(label).checked(cx.state.detail_tab == tab).show(ui, theme).clicked() {
             cx.state.detail_tab = tab;
         }
+    }
+    trill_noir::menu_separator(ui, theme);
+    if MenuItem::new("Zoom to the selection").shortcut(&keys(Command::ZoomToSelection)).show(ui, theme).clicked() {
+        arrangement::zoom_to_selection(ui.ctx(), cx);
+    }
+    if MenuItem::new("Zoom to the whole song").shortcut(&keys(Command::ZoomToSong)).show(ui, theme).clicked() {
+        arrangement::zoom_to_song(ui.ctx(), cx);
+    }
+    let follow = cx.state.arrangement.follow;
+    if MenuItem::new("Follow the playhead")
+        .shortcut(&keys(Command::ToggleFollow))
+        .checked(follow)
+        .show(ui, theme)
+        .clicked()
+    {
+        cx.state.arrangement.follow = !follow;
+    }
+    trill_noir::menu_separator(ui, theme);
+    if MenuItem::new("Shortcuts").shortcut(&keys(Command::ShowShortcuts)).show(ui, theme).clicked() {
+        cx.state.shortcuts_open = true;
     }
     trill_noir::menu_separator(ui, theme);
     trill_noir::menu_heading(ui, theme, "Theme");
@@ -163,7 +251,7 @@ fn capitalized(name: &str) -> String {
     letters.next().map_or_else(String::new, |first| first.to_uppercase().chain(letters).collect())
 }
 
-/// Play, stop, loop, then position, tempo and time signature.
+/// Play, stop, loop and metronome, then position, tempo and time signature.
 fn transport_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, left: f32) {
     let theme = cx.theme;
     let id = ui.scope_id().with("transport");
@@ -193,6 +281,14 @@ fn transport_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, left: f32) {
     cx.hint(&response, "Loop the region marked on the ruler \u{00B7} L");
     if response.clicked() {
         toggle_loop(cx);
+    }
+    let metronome = cx.live.metronome;
+    let color = if metronome { theme.ink } else { theme.ink_dim };
+    let rect = button(&mut x);
+    let response = trill_noir::icon_button(ui, theme, rect, id.with("metronome"), Icon::Metronome, metronome, color);
+    cx.hint(&response, "Metronome: a click on every beat while the song plays \u{00B7} K");
+    if response.clicked() {
+        toggle_metronome(cx);
     }
     x += 6.0;
 
@@ -233,12 +329,79 @@ fn transport_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, left: f32) {
     }
     x += TEMPO_WIDTH + 6.0;
 
-    let meter = boxed(bar, x, SIGNATURE_WIDTH);
-    paint::frame(&painter, meter, theme.hairline);
+    time_signature(ui, cx, boxed(bar, x, SIGNATURE_WIDTH), id.with("signature"));
+}
+
+/// The signatures the time signature's menu offers.
+const SIGNATURES: [(u8, u8); 12] =
+    [(2, 4), (3, 4), (4, 4), (5, 4), (6, 4), (7, 4), (3, 8), (5, 8), (6, 8), (7, 8), (9, 8), (12, 8)];
+/// The note values a beat can be, as dragging steps through them.
+const DENOMINATORS: [u8; 4] = [2, 4, 8, 16];
+/// Pixels of drag per step of the time signature.
+const SIGNATURE_STEP: f32 = 9.0;
+
+/// The signature `steps` drag steps from `start`, changing its beats per
+/// bar (`numerator` true) or the note value of a beat.
+fn stepped_signature(start: TimeSignature, numerator: bool, steps: i32) -> (u8, u8) {
+    if numerator {
+        ((start.numerator as i32 + steps).clamp(1, 32) as u8, start.denominator)
+    } else {
+        let index = DENOMINATORS.iter().position(|value| *value == start.denominator).unwrap_or(1) as i32;
+        let index = (index + steps).clamp(0, DENOMINATORS.len() as i32 - 1);
+        (start.numerator, DENOMINATORS[index as usize])
+    }
+}
+
+/// The time signature: a click offers the usual ones, and dragging either
+/// number up or down changes it.
+fn time_signature(ui: &mut Ui, cx: &mut Cx, rect: Rect, id: Id) {
+    let theme = cx.theme;
+    let signature = cx.snap.project.time_signature;
+    let response = ui.interact(rect, id, Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Time signature"));
+    let painter = ui.painter_at(rect);
+    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
+    if open {
+        painter.rect_filled(rect, 0.0, theme.selected);
+    } else if response.hovered() || response.dragged() {
+        painter.rect_filled(rect, 0.0, theme.hover);
+    }
+    paint::frame(&painter, rect, theme.hairline);
     let shown = format!("{} / {}", signature.numerator, signature.denominator);
-    text::paint(&painter, meter, Align2::CENTER_CENTER, theme.text.readout, &shown, theme.ink);
-    let response = ui.interact(meter, id.with("signature"), Sense::hover());
-    cx.hint(&response, "Time signature");
+    text::paint(&painter, rect, Align2::CENTER_CENTER, theme.text.readout, &shown, theme.ink);
+    cx.hint(&response, "Time signature \u{00B7} click to choose, or drag either number up or down");
+
+    // A drag is measured from where it began, on the number it began on.
+    let memory = id.with("drag");
+    if response.drag_started()
+        && let Some(press) = ui.input(|input| input.pointer.press_origin())
+    {
+        cx.begin_gesture();
+        ui.data_mut(|data| data.insert_temp(memory, (signature, press.x < rect.center().x)));
+    }
+    if response.dragged()
+        && let Some(travel) = response.total_drag_delta()
+        && let Some((start, numerator)) = ui.data(|data| data.get_temp::<(TimeSignature, bool)>(memory))
+    {
+        let (beats, note) = stepped_signature(start, numerator, (-travel.y / SIGNATURE_STEP).round() as i32);
+        if (beats, note) != (signature.numerator, signature.denominator) {
+            cx.edit(|project| project.set_time_signature(beats, note));
+        }
+    }
+
+    egui::Popup::menu(&response).gap(1.0).show(|ui| {
+        ui.set_min_width(110.0);
+        for (index, (beats, note)) in SIGNATURES.into_iter().enumerate() {
+            // The simple meters, then the ones counted in eighths.
+            if index == 6 {
+                trill_noir::menu_separator(ui, theme);
+            }
+            let current = (signature.numerator, signature.denominator) == (beats, note);
+            if MenuItem::new(&format!("{beats} / {note}")).checked(current).show(ui, theme).clicked() {
+                cx.edit(|project| project.set_time_signature(beats, note));
+            }
+        }
+    });
 }
 
 /// Stops playback; pressing stop again returns to the start of the song.
@@ -255,6 +418,13 @@ pub fn toggle_play(cx: &mut Cx) {
 pub fn toggle_loop(cx: &mut Cx) {
     let region = cx.snap.project.loop_region;
     cx.edit(|project| project.set_loop(!region.enabled, region.start, region.end));
+}
+
+/// Switches the metronome on or off. It belongs to the session, not the
+/// project: it is neither saved nor undone.
+pub fn toggle_metronome(cx: &mut Cx) {
+    let on = !cx.live.metronome;
+    cx.with_session(|session| session.set_metronome(on));
 }
 
 /// CPU load and the MCP chip, laid out from the right edge. Returns the x
@@ -314,4 +484,27 @@ fn status_group(ui: &mut Ui, cx: &mut Cx, bar: Rect) -> f32 {
     let response = ui.interact(group, Id::unique("cpu-load"), Sense::hover());
     cx.hint(&response, "Share of the audio thread\u{2019}s time budget in use");
     label.left()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dragging_steps_the_time_signature_within_what_the_model_accepts() {
+        let four_four = TimeSignature::default();
+        assert_eq!(stepped_signature(four_four, true, 3), (7, 4));
+        assert_eq!(stepped_signature(four_four, true, -9), (1, 4), "at least one beat in a bar");
+        assert_eq!(stepped_signature(four_four, true, 99), (32, 4));
+        assert_eq!(stepped_signature(four_four, false, 1), (4, 8));
+        assert_eq!(stepped_signature(four_four, false, -1), (4, 2));
+        assert_eq!(stepped_signature(four_four, false, 9), (4, 16));
+        for (beats, note) in SIGNATURES {
+            assert!(TimeSignature::new(beats, note).is_some(), "{beats}/{note}");
+        }
+        for steps in -40..40 {
+            let (beats, note) = stepped_signature(four_four, steps % 2 == 0, steps);
+            assert!(TimeSignature::new(beats, note).is_some(), "{beats}/{note}");
+        }
+    }
 }

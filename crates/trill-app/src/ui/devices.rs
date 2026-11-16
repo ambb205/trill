@@ -9,10 +9,10 @@
 use super::device_layouts::{self, Display, Format, Layout, Row};
 use super::state::Cx;
 use super::units::{self, ParamScale};
-use super::{colors, displays};
+use super::{automation, colors, displays};
 use eframe::egui::{self, Align2, Color32, FontId, Id, Rect, Role, Sense, Ui, WidgetInfo, pos2, vec2};
 use trill_core::device::{DeviceCategory, DeviceDescriptor, ParamKind};
-use trill_core::{ChainRef, Device, DeviceId};
+use trill_core::{AutomationTarget, ChainRef, Device, DeviceId};
 use trill_engine::ParamState;
 use trill_noir::{Bar, Chip, Icon, MenuItem, paint, text};
 
@@ -390,6 +390,8 @@ fn rows(ui: &mut Ui, cx: &mut Cx, body: &Body, rows: &[Row], left: f32, mut top:
                     if response.clicked() {
                         set_param(cx, body.device.id, param, if on { 0.0 } else { 1.0 });
                     }
+                    let target = param_target(body, param);
+                    response.context_menu(|ui| automation::menu_items(ui, cx, &target));
                     x = chip_rect.right() + gap - 1.0;
                 }
             }
@@ -445,38 +447,57 @@ fn set_param(cx: &mut Cx, device: DeviceId, param: &ParamState, value: f64) {
     }
 }
 
-/// A numeric parameter as a Bar.
+/// What automating `param` of the body's device is called in the project.
+fn param_target(body: &Body, param: &ParamState) -> AutomationTarget {
+    AutomationTarget::DeviceParam { device: body.device.id, param: param.info.id.clone() }
+}
+
+/// A numeric parameter as a Bar. While an envelope drives the parameter
+/// the bar shows what the envelope says at the playhead, carries the
+/// automation mark, and opens the lane instead of editing.
 fn param_bar(ui: &mut Ui, cx: &mut Cx, body: &Body, param: &ParamState, label: &str, format: Format, rect: Rect) {
     let info = &param.info;
     let scale = ParamScale::of(info);
+    let target = param_target(body, param);
+    let driven = automation::driven(cx, &target);
+    let value = driven.unwrap_or(param.value);
     let word = |value: f64| match format {
         Format::NoteValue => device_layouts::note_value(value).map(str::to_owned),
         Format::NoteName => Some(trill_core::pitch::pitch_name(value.round().clamp(0.0, 127.0) as u8)),
         Format::Auto => None,
     };
-    let shown = word(param.value).unwrap_or_else(|| units::format_param(info, param.value));
-    let mut bar = Bar::new(label, &shown, scale.normalize(info, param.value) as f32)
+    let shown = word(value).unwrap_or_else(|| units::format_param(info, value));
+    let mut bar = Bar::new(label, &shown, scale.normalize(info, value) as f32)
         .default(scale.normalize(info, info.default) as f32)
-        .dimmed(body.dimmed);
+        .dimmed(body.dimmed)
+        .automated(driven.is_some());
     // A range that straddles zero fills from its zero point outward.
     if info.min < 0.0 && info.max > 0.0 {
         bar = bar.bipolar(scale.normalize(info, 0.0) as f32);
     }
     let output = trill_noir::bar(ui, cx.theme, rect, body.id.with(("param", &info.id)), &bar);
-    cx.hint(
-        &output.response,
-        format!(
-            "{} \u{00B7} {shown} \u{00B7} drag to set, Ctrl-drag for fine, double-click for the default",
-            units::short_param_name(&info.name)
-        ),
-    );
-    if output.pressed {
-        cx.begin_gesture();
+    if driven.is_some() {
+        cx.hint(&output.response, automation::DRIVEN_HINT);
+        if output.pressed {
+            automation::show_lane(cx, target.clone());
+        }
+    } else {
+        cx.hint(
+            &output.response,
+            format!(
+                "{} \u{00B7} {shown} \u{00B7} drag to set, Ctrl-drag for fine, right-click to automate",
+                units::short_param_name(&info.name)
+            ),
+        );
+        if output.pressed {
+            cx.begin_gesture();
+        }
+        if let Some(position) = output.frac {
+            let value = if output.reset { info.default } else { scale.denormalize(info, position as f64) };
+            set_param(cx, body.device.id, param, value);
+        }
     }
-    if let Some(position) = output.frac {
-        let value = if output.reset { info.default } else { scale.denormalize(info, position as f64) };
-        set_param(cx, body.device.id, param, value);
-    }
+    output.response.context_menu(|ui| automation::menu_items(ui, cx, &target));
 }
 
 // ---- the generic layout ----------------------------------------------------

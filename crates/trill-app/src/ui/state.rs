@@ -3,12 +3,16 @@
 
 use super::files::Jobs;
 use super::snapshot::{Live, Snapshot};
-use super::timeline::{PitchView, Snap, TimeView};
+use super::timeline::{Glide, GridChoice, PitchView, Snap, TimeView};
 use super::toast::Toasts;
 use eframe::egui;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use trill_core::device::DeviceDescriptor;
-use trill_core::{Beats, ChainRef, ClipId, DeviceId, EditError, Note, Project, TrackId};
+use trill_core::{
+    AutomationPoint, AutomationTarget, Beats, ChainRef, Clip, ClipId, DeviceId, EditError, Note, Project, TrackId,
+    TrackKind,
+};
 use trill_engine::{Session, SessionError, SharedSession};
 use trill_noir::Theme;
 
@@ -20,6 +24,8 @@ pub enum DetailTab {
     Clip,
     /// The device chain of the selected track, and the master's.
     Devices,
+    /// A channel strip for every track.
+    Mixer,
 }
 
 /// Which pane keyboard commands such as Delete apply to: the one the user
@@ -29,39 +35,275 @@ pub enum FocusArea {
     #[default]
     Arrangement,
     PianoRoll,
+    /// An automation lane; commands act on its selected points.
+    Automation,
+}
+
+/// What the pointer does in the arrangement.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum Tool {
+    /// Select, move and trim.
+    #[default]
+    Pointer,
+    /// The pencil: writes automation in steps of the grid.
+    Draw,
+    /// The blade: a click splits the clip under it.
+    Blade,
+}
+
+/// Where a clip was when a move began. Every step of the move is computed
+/// from here, so rounding cannot build up along the way.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct ClipOrigin {
+    pub clip: ClipId,
+    pub track: TrackId,
+    pub start: Beats,
+}
+
+/// Which fade of an audio clip a handle sets.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FadeEnd {
+    In,
+    Out,
+}
+
+/// Where a dragged track header would land.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TrackDrop {
+    /// The track it goes in front of; `None` puts it last.
+    pub before: Option<TrackId>,
+    /// The group it joins there.
+    pub group: Option<TrackId>,
+}
+
+/// What a drag in an automation lane is doing. Points have no ids, so like
+/// notes they are followed by value: `current` is what the last step left in
+/// the project.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LaneDrag {
+    /// Moving the selected points. `press` is where the pointer went down.
+    Points {
+        originals: Vec<AutomationPoint>,
+        current: Vec<AutomationPoint>,
+        grabbed: AutomationPoint,
+        press: egui::Pos2,
+    },
+    /// Moving a line by both of its ends, or bending it with Alt held.
+    Segment { originals: [AutomationPoint; 2], current: [AutomationPoint; 2], press: egui::Pos2, bend: bool },
+    /// Rubber-band selection, from the lane position where it began: a beat
+    /// and a height in the lane (0 at the bottom, 1 at the top).
+    Band { origin: (Beats, f32), kept: Vec<AutomationPoint> },
+    /// The pencil. `last` is the grid cell it wrote on the previous frame,
+    /// so a fast stroke leaves no cell out.
+    Draw { last: Beats },
 }
 
 /// What a drag in the arrangement is doing.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ArrangeDrag {
-    /// `grab_offset` is how far into the clip it was grabbed, so the clip
-    /// does not jump to the pointer.
-    MoveClip {
-        clip: ClipId,
+    /// Moving the selected clips together. `grab_offset` is how far into the
+    /// grabbed clip the pointer is, so it does not jump to the pointer;
+    /// `applied` is the shift in beats and lanes the project already has.
+    MoveClips {
+        grabbed: ClipId,
         grab_offset: Beats,
+        origins: Vec<ClipOrigin>,
+        applied: (Beats, i32),
     },
-    ResizeClip {
+    TrimStart {
         clip: ClipId,
     },
-    /// Scrubbing the playhead along the ruler.
-    Seek,
+    TrimEnd {
+        clip: ClipId,
+    },
+    Fade {
+        clip: ClipId,
+        end: FadeEnd,
+    },
+    /// Rubber band over the lanes, from where it began: a beat and a height
+    /// in the track list. `kept` is the selection it adds to (Shift held).
+    Band {
+        anchor: Beats,
+        anchor_y: f32,
+        kept: Vec<ClipId>,
+    },
+    /// Selecting time along the ruler.
+    RulerSelect {
+        anchor: Beats,
+    },
     MoveLoop {
         grab_offset: Beats,
     },
-    /// Dragging one end of the loop region; `anchor` is the end that stays.
+    /// Dragging one end of the loop region, or drawing a new one; `anchor`
+    /// is the end that stays.
     StretchLoop {
         anchor: Beats,
     },
+    MoveMarker {
+        index: usize,
+    },
+    /// Dragging a track header to another place in the list.
+    MoveTrack {
+        track: TrackId,
+        drop: Option<TrackDrop>,
+    },
+    Lane {
+        target: AutomationTarget,
+        drag: LaneDrag,
+    },
+}
+
+/// A stretch of the timeline picked out for looping, zooming or cutting.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TimeSelection {
+    pub start: Beats,
+    pub end: Beats,
+    /// The tracks whose lanes show it; empty when it was drawn on the ruler
+    /// and spans them all.
+    pub tracks: Vec<TrackId>,
+}
+
+/// Whose lane an automation envelope is shown in.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum LaneOwner {
+    Track(TrackId),
+    Master,
+}
+
+/// An automation lane the user has unfolded.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LaneView {
+    pub owner: LaneOwner,
+    pub target: AutomationTarget,
+    pub height: f32,
+}
+
+/// The selected points of one envelope, by value: points have no ids.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PointSelection {
+    pub target: AutomationTarget,
+    pub points: Vec<AutomationPoint>,
 }
 
 pub struct ArrangementState {
     pub time: TimeView,
+    /// A zoom-to-fit in progress; `time` follows it until it arrives.
+    pub glide: Option<Glide>,
     /// Vertical scroll of the track list, in pixels.
     pub scroll_y: f32,
     pub drag: Option<ArrangeDrag>,
     /// False until the view has been zoomed to show the whole song, which
     /// happens once per project.
     pub framed: bool,
+    pub grid: GridChoice,
+    /// Whether edits land on the grid. Alt suspends it during a drag.
+    pub snap: bool,
+    /// Whether the view pages along with the playhead.
+    pub follow: bool,
+    /// The edit cursor: where pasting, splitting and new markers go.
+    pub cursor: Beats,
+    pub time_selection: Option<TimeSelection>,
+    /// Height of a track nobody has resized: the vertical zoom.
+    pub track_height: f32,
+    /// Tracks dragged to a height of their own.
+    pub heights: HashMap<TrackId, f32>,
+    /// Group tracks whose members are folded away.
+    pub folded: HashSet<TrackId>,
+    pub lanes: Vec<LaneView>,
+    pub points: Option<PointSelection>,
+    pub tool: Tool,
+    pub renaming_marker: Option<TextEditState<usize>>,
+    /// What is typed in the lane chooser's search field.
+    pub lane_search: String,
+    /// A lane to bring into view once the layout knows where it is.
+    pub reveal: Option<AutomationTarget>,
+    /// The grid step and the width of the lanes as of the last frame, for
+    /// commands that run before the arrangement is laid out: what arrow
+    /// keys nudge by, and what "zoom to fit" fits into.
+    pub step: Beats,
+    pub lanes_width: f32,
+}
+
+impl ArrangementState {
+    pub const DEFAULT_TRACK_HEIGHT: f32 = 60.0;
+    pub const MIN_TRACK_HEIGHT: f32 = 26.0;
+    pub const MAX_TRACK_HEIGHT: f32 = 240.0;
+    pub const DEFAULT_LANE_HEIGHT: f32 = 58.0;
+    pub const MIN_LANE_HEIGHT: f32 = 30.0;
+
+    fn new() -> Self {
+        Self {
+            time: TimeView::new(22.0),
+            glide: None,
+            scroll_y: 0.0,
+            drag: None,
+            framed: false,
+            grid: GridChoice::default(),
+            snap: true,
+            follow: true,
+            cursor: 0.0,
+            time_selection: None,
+            track_height: Self::DEFAULT_TRACK_HEIGHT,
+            heights: HashMap::new(),
+            folded: HashSet::new(),
+            lanes: Vec::new(),
+            points: None,
+            tool: Tool::default(),
+            renaming_marker: None,
+            lane_search: String::new(),
+            reveal: None,
+            step: 1.0,
+            lanes_width: 900.0,
+        }
+    }
+
+    /// Height of `track`'s row.
+    pub fn height_of(&self, track: TrackId) -> f32 {
+        self.heights.get(&track).copied().unwrap_or(self.track_height)
+    }
+
+    /// Whether `target`'s lane is unfolded.
+    pub fn lane_open(&self, target: &AutomationTarget) -> bool {
+        self.lanes.iter().any(|lane| lane.target == *target)
+    }
+
+    /// Unfolds a lane for `target` under `owner`, unless it is open already.
+    pub fn open_lane(&mut self, owner: LaneOwner, target: AutomationTarget) {
+        if !self.lane_open(&target) {
+            self.lanes.push(LaneView { owner, target, height: Self::DEFAULT_LANE_HEIGHT });
+        }
+    }
+
+    pub fn close_lane(&mut self, target: &AutomationTarget) {
+        self.lanes.retain(|lane| lane.target != *target);
+        if self.points.as_ref().is_some_and(|selection| selection.target == *target) {
+            self.points = None;
+        }
+    }
+
+    /// Zooms and scrolls towards `to` over a few frames, starting at `now`.
+    pub fn glide_to(&mut self, to: TimeView, now: f64) {
+        self.glide = (to != self.time).then_some(Glide { from: self.time, to, started: now });
+    }
+}
+
+/// What copy and cut put aside for paste.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Clipboard {
+    Clips(Vec<CopiedClip>),
+    /// Notes, with starts counted from the earliest of them.
+    Notes(Vec<Note>),
+}
+
+/// A clip on the clipboard, with where it sat among the others copied
+/// with it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CopiedClip {
+    pub clip: Clip,
+    /// Beats after the earliest copied clip.
+    pub offset: Beats,
+    /// Clip lanes below the topmost copied clip.
+    pub lane: usize,
 }
 
 /// What a drag in the piano roll's note grid is doing.
@@ -108,6 +350,9 @@ pub struct PianoRollState {
     pub note_length: Beats,
     /// Velocity given to new notes: the last one set in the sidebar.
     pub note_velocity: u8,
+    /// Where pasted notes go, in beats from the clip's start. Set by a
+    /// click on the roll's ruler.
+    pub cursor: Beats,
 }
 
 /// A note being auditioned through the selected track's instrument.
@@ -174,7 +419,11 @@ pub struct UiState {
     /// True while the master is what the Devices tab shows and the browser
     /// adds to, rather than the selected track.
     pub master_selected: bool,
+    /// The clip the Clip tab shows: the one selected last.
     pub selected_clip: Option<ClipId>,
+    /// Every selected clip, `selected_clip` among them, in the order they
+    /// were selected.
+    pub selected_clips: Vec<ClipId>,
     /// Selected notes of the selected clip, by value: notes have no ids.
     pub selected_notes: Vec<Note>,
     /// The device whose presets the browser lists; one of the chain the
@@ -186,7 +435,16 @@ pub struct UiState {
     pub piano: PianoRollState,
     pub renaming_track: Option<TextEditState<TrackId>>,
     pub renaming_clip: Option<TextEditState<ClipId>>,
+    /// A clip being renamed on its own name strip in the arrangement.
+    pub renaming_clip_inline: Option<TextEditState<InlineClip>>,
     pub audition: Option<Audition>,
+    pub clipboard: Option<Clipboard>,
+    /// Text for the system clipboard, set by copy and cut. A windowing
+    /// backend only reports a paste while the system clipboard holds text,
+    /// so the app leaves a note of what it copied there.
+    pub copied_text: Option<String>,
+    /// Whether the shortcut reference is up.
+    pub shortcuts_open: bool,
     pub browser: BrowserState,
     pub hint: Hint,
     /// Name of a theme chosen from the View menu; the app switches to it
@@ -205,11 +463,12 @@ impl UiState {
             selected_track: None,
             master_selected: false,
             selected_clip: None,
+            selected_clips: Vec::new(),
             selected_notes: Vec::new(),
             selected_device: None,
             detail_tab,
             focus: FocusArea::default(),
-            arrangement: ArrangementState { time: TimeView::new(22.0), scroll_y: 0.0, drag: None, framed: false },
+            arrangement: ArrangementState::new(),
             piano: PianoRollState {
                 time: TimeView::new(48.0),
                 pitch: PitchView { top: 84.0, row_height: 12.0 },
@@ -218,10 +477,15 @@ impl UiState {
                 framed: None,
                 note_length: 0.25,
                 note_velocity: super::piano_roll::DEFAULT_VELOCITY,
+                cursor: 0.0,
             },
             renaming_track: None,
             renaming_clip: None,
+            renaming_clip_inline: None,
             audition: None,
+            clipboard: None,
+            copied_text: None,
+            shortcuts_open: false,
             browser: BrowserState { open: true, search: String::new() },
             hint: Hint::default(),
             theme_request: None,
@@ -257,18 +521,50 @@ impl UiState {
         }
     }
 
-    /// Selects a clip and the track it is on.
+    /// Selects one clip, and the track it is on.
     pub fn select_clip(&mut self, track: TrackId, clip: ClipId) {
         self.select_track(track);
-        if self.selected_clip != Some(clip) {
-            self.selected_clip = Some(clip);
+        self.selected_clips = vec![clip];
+        self.show_clip(Some(clip));
+    }
+
+    /// Adds a clip to the selection, or takes it out if it is in it.
+    pub fn toggle_clip(&mut self, track: TrackId, clip: ClipId) {
+        match self.selected_clips.iter().position(|selected| *selected == clip) {
+            Some(index) => {
+                self.selected_clips.remove(index);
+                self.show_clip(self.selected_clips.last().copied());
+            }
+            None => {
+                self.select_track(track);
+                self.selected_clips.push(clip);
+                self.show_clip(Some(clip));
+            }
+        }
+    }
+
+    /// Selects exactly `clips`; the last of them is the one the Clip tab
+    /// shows.
+    pub fn select_clips(&mut self, clips: Vec<ClipId>) {
+        self.show_clip(clips.last().copied());
+        self.selected_clips = clips;
+    }
+
+    /// Makes `clip` the one the Clip tab shows.
+    fn show_clip(&mut self, clip: Option<ClipId>) {
+        if self.selected_clip != clip {
+            self.selected_clip = clip;
             self.selected_notes.clear();
         }
     }
 
     pub fn clear_clip_selection(&mut self) {
-        self.selected_clip = None;
-        self.selected_notes.clear();
+        self.selected_clips.clear();
+        self.show_clip(None);
+    }
+
+    pub fn is_clip_selected(&self, clip: ClipId) -> bool {
+        self.selected_clips.contains(&clip)
     }
 
     /// Drops selections that point at things that no longer exist, after
@@ -277,18 +573,46 @@ impl UiState {
         if self.selected_track.is_some_and(|id| project.track(id).is_err()) {
             self.selected_track = None;
         }
+        self.selected_clips.retain(|id| project.clip(*id).is_ok());
+        if self.selected_clip.is_some_and(|id| !self.selected_clips.contains(&id)) {
+            self.show_clip(self.selected_clips.last().copied());
+        }
         match self.selected_clip.map(|id| project.clip(id)) {
             Some(Ok(clip)) => {
                 let notes = clip.notes();
                 self.selected_notes.retain(|selected| notes.contains(selected));
             }
-            Some(Err(_)) => self.clear_clip_selection(),
-            None => self.selected_notes.clear(),
+            _ => self.selected_notes.clear(),
         }
         if self.selected_track.is_none() {
             self.selected_track = project.tracks.first().map(|track| track.id);
         }
+        self.reconcile_arrangement(project);
         self.resolve_device(project);
+    }
+
+    /// The arrangement's share of [`Self::reconcile`]: lanes, heights,
+    /// folds and selections that named something now gone.
+    fn reconcile_arrangement(&mut self, project: &Project) {
+        let view = &mut self.arrangement;
+        let exists = |id: &TrackId| project.track(*id).is_ok();
+        view.heights.retain(|id, _| exists(id));
+        view.folded.retain(|id| project.track(*id).is_ok_and(|track| track.kind == TrackKind::Group));
+        view.lanes.retain(|lane| lane_owner(project, &lane.target) == Some(lane.owner));
+        if let Some(selection) = &mut view.time_selection {
+            selection.tracks.retain(exists);
+        }
+        if let Some(selection) = &mut view.points {
+            let lane = project.automation.iter().find(|lane| lane.target == selection.target);
+            let points = lane.map(|lane| lane.points.as_slice()).unwrap_or_default();
+            selection.points.retain(|selected| points.contains(selected));
+            if selection.points.is_empty() {
+                view.points = None;
+            }
+        }
+        if view.renaming_marker.as_ref().is_some_and(|edit| edit.target >= project.markers.len()) {
+            view.renaming_marker = None;
+        }
     }
 
     /// Keeps the selected device one of the shown chain: by default its
@@ -307,7 +631,30 @@ impl UiState {
         let fresh = Self::new(self.detail_tab);
         let toasts = std::mem::take(&mut self.toasts);
         let browser = BrowserState { open: self.browser.open, search: String::new() };
-        *self = Self { toasts, browser, ..fresh };
+        // What was copied in one project can be pasted into the next.
+        let clipboard = self.clipboard.take();
+        *self = Self { toasts, browser, clipboard, ..fresh };
+    }
+}
+
+/// A clip being renamed in the arrangement. A type of its own so that the
+/// field's keyboard focus is not confused with the Clip tab's name field
+/// for the same clip.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct InlineClip(pub ClipId);
+
+/// The track (or the master) whose lanes show `target`'s envelope, or
+/// `None` when what it automates no longer exists.
+pub fn lane_owner(project: &Project, target: &AutomationTarget) -> Option<LaneOwner> {
+    match target {
+        AutomationTarget::TrackVolume { track } | AutomationTarget::TrackPan { track } => {
+            project.track(*track).ok().map(|track| LaneOwner::Track(track.id))
+        }
+        AutomationTarget::DeviceParam { device, .. } => match project.device_chain(*device).ok()? {
+            ChainRef::Track(track) => Some(LaneOwner::Track(track)),
+            ChainRef::Master => Some(LaneOwner::Master),
+        },
+        AutomationTarget::MasterVolume => Some(LaneOwner::Master),
     }
 }
 
@@ -512,5 +859,109 @@ mod tests {
         state.reset_for_new_project();
         assert!(!state.browser.open, "the browser stays as the user left it");
         assert!(state.browser.search.is_empty());
+    }
+
+    #[test]
+    fn clips_are_added_to_and_taken_out_of_the_selection() {
+        let mut state = UiState::new(DetailTab::Clip);
+        state.select_clip(TrackId(1), ClipId(10));
+        state.toggle_clip(TrackId(2), ClipId(20));
+        assert_eq!(state.selected_clips, [ClipId(10), ClipId(20)]);
+        assert_eq!(state.selected_clip, Some(ClipId(20)), "the Clip tab shows the one selected last");
+        assert_eq!(state.selected_track, Some(TrackId(2)));
+        assert!(state.is_clip_selected(ClipId(10)) && !state.is_clip_selected(ClipId(30)));
+
+        state.toggle_clip(TrackId(2), ClipId(20));
+        assert_eq!(state.selected_clips, [ClipId(10)]);
+        assert_eq!(state.selected_clip, Some(ClipId(10)), "taking the shown clip out shows the one before it");
+
+        state.select_clips(vec![ClipId(30), ClipId(40)]);
+        assert_eq!((state.selected_clips.len(), state.selected_clip), (2, Some(ClipId(40))));
+        state.select_clip(TrackId(1), ClipId(10));
+        assert_eq!(state.selected_clips, [ClipId(10)], "a plain selection replaces the rest");
+        state.clear_clip_selection();
+        assert!(state.selected_clips.is_empty() && state.selected_clip.is_none());
+    }
+
+    #[test]
+    fn reconcile_keeps_what_is_left_of_a_multi_selection() {
+        let mut project = Project::new("t");
+        let track = project.add_track("A");
+        let first = project.add_midi_clip(track, "a", 0.0, 4.0).unwrap();
+        let second = project.add_midi_clip(track, "b", 4.0, 4.0).unwrap();
+        let mut state = UiState::new(DetailTab::Clip);
+        state.select_clips(vec![first, second]);
+
+        project.remove_clip(second).unwrap();
+        state.reconcile(&project);
+        assert_eq!(state.selected_clips, [first]);
+        assert_eq!(state.selected_clip, Some(first), "the Clip tab moves to a clip that still exists");
+        project.remove_clip(first).unwrap();
+        state.reconcile(&project);
+        assert!(state.selected_clips.is_empty() && state.selected_clip.is_none());
+    }
+
+    #[test]
+    fn lanes_folds_and_point_selections_follow_what_they_show() {
+        let mut project = Project::new("t");
+        let track = project.add_track("A");
+        let group = project.add_track_of_kind("G", TrackKind::Group);
+        let synth = project.add_device(ChainRef::Track(track), "builtin:polysynth", "Synth", None).unwrap();
+        let limiter = project.add_device(ChainRef::Master, "builtin:limiter", "Limiter", None).unwrap();
+        let cutoff = AutomationTarget::DeviceParam { device: synth, param: "cutoff".into() };
+        let ceiling = AutomationTarget::DeviceParam { device: limiter, param: "ceiling".into() };
+        let volume = AutomationTarget::TrackVolume { track };
+        assert_eq!(lane_owner(&project, &cutoff), Some(LaneOwner::Track(track)));
+        assert_eq!(lane_owner(&project, &ceiling), Some(LaneOwner::Master));
+        assert_eq!(lane_owner(&project, &AutomationTarget::MasterVolume), Some(LaneOwner::Master));
+        assert_eq!(lane_owner(&project, &AutomationTarget::TrackPan { track: TrackId(999) }), None);
+
+        let points = vec![AutomationPoint::new(0.0, 500.0), AutomationPoint::new(4.0, 2000.0)];
+        project.set_automation(cutoff.clone(), points.clone()).unwrap();
+        let mut state = UiState::new(DetailTab::Clip);
+        let view = &mut state.arrangement;
+        view.open_lane(LaneOwner::Track(track), cutoff.clone());
+        view.open_lane(LaneOwner::Track(track), cutoff.clone());
+        view.open_lane(LaneOwner::Track(track), volume.clone());
+        view.open_lane(LaneOwner::Master, ceiling.clone());
+        assert_eq!(view.lanes.len(), 3, "a lane is opened once");
+        view.folded.insert(group);
+        view.heights.insert(track, 90.0);
+        view.points = Some(PointSelection { target: cutoff.clone(), points: points.clone() });
+        view.time_selection = Some(TimeSelection { start: 0.0, end: 4.0, tracks: vec![track, group] });
+        assert_eq!(view.height_of(track), 90.0);
+        assert_eq!(view.height_of(group), ArrangementState::DEFAULT_TRACK_HEIGHT);
+
+        // One of the two selected points is edited away elsewhere.
+        project.set_automation(cutoff.clone(), points[..1].to_vec()).unwrap();
+        state.reconcile(&project);
+        assert_eq!(state.arrangement.points.as_ref().unwrap().points, points[..1]);
+
+        // The synth goes: its lane and the selection in it go with it.
+        project.remove_device(synth).unwrap();
+        state.reconcile(&project);
+        let targets: Vec<&AutomationTarget> = state.arrangement.lanes.iter().map(|lane| &lane.target).collect();
+        assert_eq!(targets, [&volume, &ceiling]);
+        assert_eq!(state.arrangement.points, None);
+
+        project.remove_track(track).unwrap();
+        project.remove_track(group).unwrap();
+        state.reconcile(&project);
+        let view = &state.arrangement;
+        assert_eq!(view.lanes.len(), 1, "the master's lane stays");
+        assert!(view.folded.is_empty() && view.heights.is_empty());
+        assert!(view.time_selection.as_ref().unwrap().tracks.is_empty());
+    }
+
+    #[test]
+    fn closing_a_lane_drops_the_points_selected_in_it() {
+        let mut state = UiState::new(DetailTab::Clip);
+        let target = AutomationTarget::MasterVolume;
+        let view = &mut state.arrangement;
+        view.open_lane(LaneOwner::Master, target.clone());
+        assert!(view.lane_open(&target));
+        view.points = Some(PointSelection { target: target.clone(), points: vec![AutomationPoint::new(0.0, 0.0)] });
+        view.close_lane(&target);
+        assert!(!view.lane_open(&target) && view.points.is_none());
     }
 }

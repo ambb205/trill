@@ -1,20 +1,29 @@
-//! Project files and exports: New, Open, Save, Save As, Export WAV.
+//! Project files, imports and exports: New, Open, Save, Save As, Import
+//! and Export MIDI, Export WAV.
 //!
 //! Native dialogs block until the user answers, and loading, saving and
 //! rendering touch the disk, so all of that runs on helper threads. A thread
 //! reports back through a channel that [`Jobs::poll`] drains each frame; the
 //! UI thread never waits on any of it.
 
+use super::colors;
 use super::state::{Cx, UiState};
 use super::toast::ToastKind;
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
-use trill_engine::{RenderOptions, RenderReport, SharedSession};
+use trill_core::midi_file::{self, MidiFile};
+use trill_core::project::ImportedPart;
+use trill_core::{Beats, ChainRef};
+use trill_engine::{RenderOptions, RenderReport, Session, SessionError, SharedSession};
 use trill_noir::{Variant, paint, text};
 
 pub const PROJECT_EXTENSION: &str = "trill";
+const MIDI_EXTENSIONS: [&str; 2] = ["mid", "midi"];
+/// What imported parts play through, so they are heard at once.
+const DRUM_INSTRUMENT: &str = "builtin:drumkit";
+const MELODIC_INSTRUMENT: &str = "builtin:polysynth";
 
 /// What a helper thread reports back.
 enum Event {
@@ -25,6 +34,9 @@ enum Event {
     /// The export dialog was answered and rendering has begun.
     ExportStarted(PathBuf),
     Exported(Result<RenderReport, String>),
+    /// The name of the MIDI file read and how many tracks it became.
+    MidiImported(Result<(String, usize), String>),
+    MidiExported(Result<PathBuf, String>),
 }
 
 /// An action that would throw away unsaved changes and waits for the user
@@ -97,6 +109,22 @@ impl Jobs {
                             state.toasts.lasting(kind, export_summary(&report), Duration::from_secs(14));
                         }
                         Err(error) => state.toasts.error(format!("Export failed: {error}")),
+                    }
+                }
+                Event::MidiImported(result) => {
+                    self.dialog_open = false;
+                    match result {
+                        Ok((name, 0)) => state.toasts.info(format!("{name} has no notes to import")),
+                        Ok((name, 1)) => state.toasts.success(format!("Imported 1 track from {name}")),
+                        Ok((name, count)) => state.toasts.success(format!("Imported {count} tracks from {name}")),
+                        Err(error) => state.toasts.error(format!("Could not import the MIDI file: {error}")),
+                    }
+                }
+                Event::MidiExported(result) => {
+                    self.dialog_open = false;
+                    match result {
+                        Ok(path) => state.toasts.success(format!("Exported {}", file_name(&path))),
+                        Err(error) => state.toasts.error(format!("Could not export MIDI: {error}")),
                     }
                 }
             }
@@ -225,6 +253,96 @@ fn render(session: &SharedSession, path: &Path) -> Result<RenderReport, String> 
     };
     let options = RenderOptions { sample_rate, ..RenderOptions::default() };
     job.render_to_file(path, &options).map_err(|error| error.to_string())
+}
+
+/// Asks for a MIDI file and adds its parts as new tracks at the edit
+/// cursor.
+pub fn import_midi(ctx: &egui::Context, cx: &mut Cx) {
+    if std::mem::replace(&mut cx.jobs.dialog_open, true) {
+        return;
+    }
+    let session = cx.session.clone();
+    let at = cx.state.arrangement.cursor;
+    let mut dialog = rfd::AsyncFileDialog::new().set_title("Import MIDI").add_filter("MIDI file", &MIDI_EXTENSIONS);
+    if let Some(folder) = cx.snap.path.as_deref().and_then(Path::parent) {
+        dialog = dialog.set_directory(folder);
+    }
+    cx.jobs.spawn(ctx, move |report| {
+        report(match pollster::block_on(dialog.pick_file()) {
+            Some(file) => Event::MidiImported(read_midi(&session, file.path(), at)),
+            None => Event::DialogCancelled,
+        });
+    });
+}
+
+/// Reads the MIDI file at `path` and imports it at beat `at`. Returns the
+/// file's name and how many tracks it became.
+fn read_midi(session: &SharedSession, path: &Path, at: Beats) -> Result<(String, usize), String> {
+    let bytes = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let file = midi_file::parse(&bytes).map_err(|error| format!("{}: {error}", file_name(path)))?;
+    let parts = import_midi_file(&mut session.lock(), &file, at).map_err(|error| error.to_string())?;
+    Ok((file_name(path), parts.len()))
+}
+
+/// Adds the parts of a MIDI file as new tracks at beat `at`, each with an
+/// instrument so it sounds right away (a drum kit for drum parts, a synth
+/// for the rest) and the next hue of the palette, all as one undo step.
+pub fn import_midi_file(session: &mut Session, file: &MidiFile, at: Beats) -> Result<Vec<ImportedPart>, SessionError> {
+    session.begin_gesture();
+    let first = session.project().tracks.len();
+    let imported = session.edit(|project| {
+        let parts = project.import_midi(file, at)?;
+        for (offset, part) in parts.iter().enumerate() {
+            project.track_mut(part.track)?.color = colors::new_track_color(first + offset);
+        }
+        Ok(parts)
+    });
+    let result = imported.and_then(|parts| {
+        for part in &parts {
+            let instrument = if part.drums { DRUM_INSTRUMENT } else { MELODIC_INSTRUMENT };
+            session.add_device(ChainRef::Track(part.track), instrument, None, None)?;
+        }
+        Ok(parts)
+    });
+    session.end_gesture();
+    result
+}
+
+/// Asks where to put a MIDI file and writes the song's notes into it.
+pub fn export_midi(ctx: &egui::Context, cx: &mut Cx) {
+    if std::mem::replace(&mut cx.jobs.dialog_open, true) {
+        return;
+    }
+    let session = cx.session.clone();
+    let mut dialog = rfd::AsyncFileDialog::new()
+        .set_title("Export MIDI")
+        .add_filter("MIDI file", &MIDI_EXTENSIONS)
+        .set_file_name(format!("{}.mid", file_stem_for(&cx.snap.project.name)));
+    if let Some(folder) = cx.snap.path.as_deref().and_then(Path::parent) {
+        dialog = dialog.set_directory(folder);
+    }
+    cx.jobs.spawn(ctx, move |report| {
+        report(match pollster::block_on(dialog.save_file()) {
+            Some(file) => Event::MidiExported(write_midi(&session, &with_midi_extension(file.path()))),
+            None => Event::DialogCancelled,
+        });
+    });
+}
+
+/// Writes every MIDI note of the song, where it sounds, to `path`.
+fn write_midi(session: &SharedSession, path: &Path) -> Result<PathBuf, String> {
+    let file = session.lock().project().export_midi();
+    if file.tracks.is_empty() {
+        return Err("the song has no MIDI notes to export".to_owned());
+    }
+    std::fs::write(path, midi_file::write(&file)).map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(path.to_path_buf())
+}
+
+/// `path` ending in `.mid`, unless it already names a MIDI file.
+fn with_midi_extension(path: &Path) -> PathBuf {
+    let named = |extension: &&str| path.extension().is_some_and(|existing| existing.eq_ignore_ascii_case(extension));
+    if MIDI_EXTENSIONS.iter().any(named) { path.to_path_buf() } else { with_extension(path, "mid") }
 }
 
 fn project_dialog(title: &str, current: Option<&Path>) -> rfd::AsyncFileDialog {
@@ -482,6 +600,84 @@ mod tests {
         assert!(error.contains("nothing to render"), "{error}");
     }
 
+    /// A two-part MIDI file: a melody and a drum pattern.
+    fn midi_song() -> MidiFile {
+        let note = |pitch: u8, start: f64| trill_core::Note { pitch, start, length: 0.5, velocity: 100 };
+        MidiFile {
+            tempo: Some(100.0),
+            time_signature: None,
+            tracks: vec![
+                trill_core::midi_file::MidiTrack {
+                    name: "Lead".into(),
+                    drums: false,
+                    notes: vec![note(60, 0.0), note(64, 5.0)],
+                },
+                trill_core::midi_file::MidiTrack {
+                    name: String::new(),
+                    drums: true,
+                    notes: vec![note(36, 0.0), note(38, 1.0)],
+                },
+                trill_core::midi_file::MidiTrack { name: "Empty".into(), drums: false, notes: Vec::new() },
+            ],
+        }
+    }
+
+    #[test]
+    fn importing_midi_adds_playable_tracks_as_one_undo_step() {
+        let session = shared_session();
+        session.lock().edit(|project| Ok(project.add_track("Existing"))).unwrap();
+        let parts = import_midi_file(&mut session.lock(), &midi_song(), 8.0).unwrap();
+        assert_eq!(parts.len(), 2, "a part without notes makes no track");
+
+        let project = session.lock().project().clone();
+        assert_eq!(project.tracks.len(), 3);
+        let (lead, drums) = (&project.tracks[1], &project.tracks[2]);
+        assert_eq!((lead.name.as_str(), lead.devices[0].uri.as_str()), ("Lead", MELODIC_INSTRUMENT));
+        assert_eq!(drums.devices[0].uri, DRUM_INSTRUMENT, "the drum part gets a drum kit");
+        assert_eq!((lead.clips[0].start, lead.clips[0].length), (8.0, 8.0), "at the cursor, in whole bars");
+        assert_eq!(lead.clips[0].notes().len(), 2);
+        assert_eq!(lead.color, colors::new_track_color(1), "the next hues of the palette");
+        assert_eq!(drums.color, colors::new_track_color(2));
+        assert_eq!(project.tempo, 120.0, "the song keeps its tempo");
+
+        assert!(session.lock().undo());
+        assert_eq!(session.lock().project().tracks.len(), 1, "tracks, clips and instruments go in one step");
+    }
+
+    #[test]
+    fn a_midi_file_survives_a_round_trip_through_disk() {
+        let scratch = Scratch::new("midi");
+        let session = shared_session();
+        let empty = write_midi(&session, &scratch.0.join("empty.mid")).unwrap_err();
+        assert!(empty.contains("no MIDI notes"), "{empty}");
+
+        import_midi_file(&mut session.lock(), &midi_song(), 0.0).unwrap();
+        let path = scratch.0.join("song.mid");
+        assert_eq!(write_midi(&session, &path), Ok(path.clone()));
+
+        session.lock().new_project();
+        assert_eq!(read_midi(&session, &path, 4.0), Ok(("song.mid".to_owned(), 2)));
+        let project = session.lock().project().clone();
+        let starts: Vec<f64> = project.tracks[0].clips[0].timeline_notes().iter().map(|note| note.start).collect();
+        assert_eq!(starts, [4.0, 9.0], "the notes, moved to where the file was imported");
+        assert_eq!(project.tracks[1].devices[0].uri, DRUM_INSTRUMENT, "the drum part is still one");
+
+        let broken = scratch.0.join("broken.mid");
+        std::fs::write(&broken, b"not a midi file").unwrap();
+        let error = read_midi(&session, &broken, 0.0).unwrap_err();
+        assert!(error.contains("broken.mid"), "{error}");
+        assert_eq!(session.lock().project().tracks.len(), 2, "a failed import changes nothing");
+        assert!(read_midi(&session, &scratch.0.join("missing.mid"), 0.0).is_err());
+    }
+
+    #[test]
+    fn exported_midi_files_get_a_midi_extension() {
+        assert_eq!(with_midi_extension(Path::new("song")), PathBuf::from("song.mid"));
+        assert_eq!(with_midi_extension(Path::new("song.mid")), PathBuf::from("song.mid"));
+        assert_eq!(with_midi_extension(Path::new("song.MIDI")), PathBuf::from("song.MIDI"));
+        assert_eq!(with_midi_extension(Path::new("song.v2")), PathBuf::from("song.v2.mid"));
+    }
+
     #[test]
     fn results_from_helper_threads_reach_the_state() {
         let mut jobs = Jobs::default();
@@ -497,5 +693,13 @@ mod tests {
         jobs.poll(&mut state);
         assert_eq!(jobs.exporting(), None);
         assert_eq!(state.toasts.len(), 2);
+
+        jobs.dialog_open = true;
+        jobs.sender.send(Event::MidiImported(Ok(("beat.mid".into(), 3)))).unwrap();
+        jobs.poll(&mut state);
+        assert!(!jobs.dialog_open, "the dialog is done, so another may open");
+        jobs.sender.send(Event::MidiExported(Err("read-only folder".into()))).unwrap();
+        jobs.poll(&mut state);
+        assert_eq!(state.toasts.len(), 4);
     }
 }

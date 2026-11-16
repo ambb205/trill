@@ -74,5 +74,6 @@ fn main() -> anyhow::Result<()> {
     if let Some(clip) = cli.clip_to_select(session.lock().project())? {
         options.select_clip = Some(clip);
     }
+    options.also_select = cli.clips_to_also_select(session.lock().project())?;
     ui::run(session, options)
 }
