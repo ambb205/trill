@@ -12,8 +12,15 @@ pub enum Icon {
     Plus,
     Minus,
     Close,
-    /// The caret of a dropdown.
+    /// The caret of a dropdown, and of something unfolded.
     CaretDown,
+    /// The caret of something folded shut.
+    CaretRight,
+    Metronome,
+    /// The pencil that draws automation.
+    Pencil,
+    /// The blade that splits clips.
+    Split,
 }
 
 impl Icon {
@@ -27,6 +34,10 @@ impl Icon {
             Icon::Minus => "Less",
             Icon::Close => "Remove",
             Icon::CaretDown => "Open",
+            Icon::CaretRight => "Closed",
+            Icon::Metronome => "Metronome",
+            Icon::Pencil => "Draw",
+            Icon::Split => "Split",
         }
     }
 }
@@ -67,6 +78,38 @@ pub fn paint_icon(painter: &Painter, center: Pos2, icon: Icon, color: Color32) {
         Icon::CaretDown => {
             let points = vec![center + vec2(-3.5, -2.0), center + vec2(3.5, -2.0), center + vec2(0.0, 2.0)];
             painter.add(Shape::convex_polygon(points, color, Stroke::NONE));
+        }
+        Icon::CaretRight => {
+            let points = vec![center + vec2(-2.0, -3.5), center + vec2(2.0, 0.0), center + vec2(-2.0, 3.5)];
+            painter.add(Shape::convex_polygon(points, color, Stroke::NONE));
+        }
+        Icon::Metronome => {
+            // The case, narrower at the top, and the pendulum leaning in it.
+            let stroke = Stroke::new(1.0, color);
+            let middle = center + vec2(0.5, 0.5);
+            let case = vec![
+                middle + vec2(-4.0, 5.0),
+                middle + vec2(-1.5, -5.0),
+                middle + vec2(1.5, -5.0),
+                middle + vec2(4.0, 5.0),
+            ];
+            painter.add(Shape::closed_line(case, stroke));
+            painter.line_segment([middle + vec2(-0.5, 3.0), middle + vec2(3.5, -4.0)], stroke);
+        }
+        Icon::Pencil => {
+            // A shaft from the top right down to a point at the bottom left.
+            let middle = center + vec2(0.5, 0.5);
+            painter.line_segment([middle + vec2(-2.0, 2.0), middle + vec2(4.0, -4.0)], Stroke::new(2.5, color));
+            let tip = vec![middle + vec2(-5.0, 5.0), middle + vec2(-4.0, 1.5), middle + vec2(-1.5, 4.0)];
+            painter.add(Shape::convex_polygon(tip, color, Stroke::NONE));
+        }
+        Icon::Split => {
+            // A cut line with the two halves it leaves pointing at it.
+            paint::vline(painter, center.x, Rangef::new(center.y - 5.0, center.y + 6.0), color);
+            let left = vec![center + vec2(-6.0, -3.0), center + vec2(-2.0, 0.5), center + vec2(-6.0, 4.0)];
+            let right = vec![center + vec2(7.0, -3.0), center + vec2(3.0, 0.5), center + vec2(7.0, 4.0)];
+            painter.add(Shape::convex_polygon(left, color, Stroke::NONE));
+            painter.add(Shape::convex_polygon(right, color, Stroke::NONE));
         }
     }
 }

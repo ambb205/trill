@@ -9,7 +9,7 @@
 //! [`vline_left_of`] end at it. Whatever is filled up to the same
 //! coordinate meets the line exactly, at any scale.
 
-use egui::{Color32, Painter, Pos2, Rangef, Rect, pos2};
+use egui::{Color32, Painter, Pos2, Rangef, Rect, Shape, Stroke, pos2};
 
 /// Thickness of a hairline, in points.
 pub fn hair(painter: &Painter) -> f32 {
@@ -63,6 +63,19 @@ pub fn frame(painter: &Painter, rect: Rect, color: Color32) {
     let sides = Rangef::new(snap(painter, rect.top()) + hair, snap(painter, rect.bottom()) - hair);
     vline(painter, rect.left(), sides, color);
     vline_left_of(painter, rect.right(), sides, color);
+}
+
+/// Side of a [`corner_mark`], in points.
+const CORNER_MARK: f32 = 5.0;
+
+/// A small triangle in the top right corner of `rect`, just inside its
+/// frame: the mark of a control that something other than the user drives.
+/// It stays clear of text set with the kit's padding.
+pub fn corner_mark(painter: &Painter, rect: Rect, color: Color32) {
+    let hair = hair(painter);
+    let corner = pos2(snap(painter, rect.right()) - hair, snap(painter, rect.top()) + hair);
+    let points = vec![corner - egui::vec2(CORNER_MARK, 0.0), corner, corner + egui::vec2(0.0, CORNER_MARK)];
+    painter.add(Shape::convex_polygon(points, color, Stroke::NONE));
 }
 
 /// The square of a status dot `side` points wide, vertically centered on

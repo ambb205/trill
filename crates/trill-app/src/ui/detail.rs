@@ -1,7 +1,7 @@
 //! The detail panel along the bottom: a row of tabs and the tab it selects.
 
 use super::state::{Cx, DetailTab};
-use super::{colors, devices, piano_roll, widgets};
+use super::{colors, devices, mixer, piano_roll, widgets};
 use eframe::egui::{Align, Align2, Layout, Rect, Ui, pos2, vec2};
 use trill_core::ChainRef;
 use trill_noir::{paint, text};
@@ -29,7 +29,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     // The tabs sit between the two rules, so the active one's underline
     // replaces the lower rule under it.
     let mut left = bar.left();
-    for (tab, title) in [(DetailTab::Clip, "Clip"), (DetailTab::Devices, "Devices")] {
+    for (tab, title) in [(DetailTab::Clip, "Clip"), (DetailTab::Devices, "Devices"), (DetailTab::Mixer, "Mixer")] {
         let rect = Rect::from_min_size(
             pos2(left, bar.top() + 1.0),
             vec2(trill_noir::tab_width(ui, theme, title), TAB_BAR - 1.0),
@@ -39,6 +39,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
         let about = match tab {
             DetailTab::Clip => "The selected clip and its notes",
             DetailTab::Devices => "The devices of the selected track, or of the master",
+            DetailTab::Mixer => "A channel strip for every track, and the master\u{2019}s",
         };
         cx.hint(&response, about);
         if response.clicked() {
@@ -58,6 +59,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
                 ChainRef::Master => Some((theme.ink, "Master".to_owned())),
                 ChainRef::Track(_) => track.map(|track| (colors::track_color(theme, track.color), track.name.clone())),
             },
+            // The mixer shows every track; it has no one subject.
+            DetailTab::Mixer => None,
         };
     if let Some((color, subject)) = subject {
         // A point to spare, so a width that rounds up does not cut the name.
@@ -85,6 +88,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
         match cx.state.detail_tab {
             DetailTab::Clip => piano_roll::show(ui, cx),
             DetailTab::Devices => devices::show(ui, cx),
+            DetailTab::Mixer => mixer::show(ui, cx),
         }
     });
 }

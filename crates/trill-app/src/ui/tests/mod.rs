@@ -2,6 +2,17 @@
 //! session, with pointer and keyboard events fed in as a windowing backend
 //! would. They check what the user's gestures do to the project, including
 //! that each drag is a single undo step.
+//!
+//! This module holds the harness and the tests of the window as a whole;
+//! the editing gestures are tested by area in the modules below.
+
+mod automation;
+mod clips;
+mod keys;
+mod mixer;
+mod perf;
+mod ruler;
+mod tracks;
 
 use super::app::TrillApp;
 use super::{DetailTab, UiOptions, arrangement, browser, detail, devices, piano_roll, status_bar, top_bar};
@@ -28,6 +39,10 @@ struct Harness {
     /// Text and rectangle of every labeled widget on the last frame, as
     /// reported to assistive technology.
     labels: Vec<(String, Rect)>,
+    /// Label and position (0..=1) of every bar and fader on the last frame.
+    values: Vec<(String, f64)>,
+    /// What the app last put on the system clipboard.
+    clipboard: Option<String>,
 }
 
 impl Harness {
@@ -40,7 +55,8 @@ impl Harness {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
         let app = TrillApp::new(&ctx, session.clone(), options, Arc::default());
-        let mut harness = Self { ctx, app, session, time: 0.0, labels: Vec::new() };
+        let mut harness =
+            Self { ctx, app, session, time: 0.0, labels: Vec::new(), values: Vec::new(), clipboard: None };
         // Widgets are hit-tested against where they were on the previous
         // frame, so the layout has to exist before any input arrives.
         harness.idle(3);
@@ -62,6 +78,11 @@ impl Harness {
         let mut output = self.ctx.run_ui(input, |ui| self.app.frame(ui));
         // Nothing is drawn, so the font atlas updates have nowhere to go.
         output.textures_delta.clear();
+        for command in output.platform_output.commands.drain(..) {
+            if let egui::OutputCommand::CopyText(text) = command {
+                self.clipboard = Some(text);
+            }
+        }
         if let Some(update) = output.platform_output.accesskit_update.take() {
             let labeled = update.nodes.iter().filter_map(|(_, node)| {
                 let bounds = node.bounds()?;
@@ -73,6 +94,14 @@ impl Harness {
                 Some((node.label().or(node.value())?.to_owned(), rect))
             });
             self.labels = labeled.collect();
+            // Bars and faders, in reading order like the labels.
+            let sliders = update.nodes.iter().filter_map(|(_, node)| {
+                let bounds = node.bounds()?;
+                Some((node.label()?.to_owned(), node.numeric_value()?, (bounds.y0, bounds.x0)))
+            });
+            let mut sliders: Vec<_> = sliders.collect();
+            sliders.sort_by(|(.., a), (.., b)| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+            self.values = sliders.into_iter().map(|(label, value, _)| (label, value)).collect();
             // The update lists nodes in no particular order; reading order
             // makes "the first button labeled X" mean something.
             self.labels.sort_by(|(_, a), (_, b)| a.top().total_cmp(&b.top()).then(a.left().total_cmp(&b.left())));
@@ -116,6 +145,21 @@ impl Harness {
         self.idle(3);
         let position = self.labeled(label);
         self.click(position);
+    }
+
+    /// Clicks the last widget, in reading order, with this label: the row
+    /// of a menu that opened below a control of the same name.
+    fn click_last_label(&mut self, label: &str) {
+        self.idle(3);
+        let position =
+            self.all_labeled(label).last().unwrap_or_else(|| panic!("nothing is labeled '{label}'")).center();
+        self.click(position);
+    }
+
+    /// Lets enough time pass that the next click is not taken for the
+    /// second of a double-click.
+    fn settle(&mut self) {
+        self.idle(30);
     }
 
     fn double_click_label(&mut self, label: &str) {
@@ -293,6 +337,142 @@ impl Harness {
         let top = devices::PANEL_HEADER + devices::BODY_TOP + devices::SECTION_HEADER + 2.0 * GAP;
         self.first_panel() + vec2(devices::BODY_PADDING + width * fraction, top + row as f32 * (BAR + GAP) + BAR / 2.0)
     }
+}
+
+/// What the newer tests add to the harness: modifiers on pointer gestures,
+/// the clipboard, the wheel, and where the arrangement's newer parts are.
+impl Harness {
+    fn button_holding(&mut self, modifiers: Modifiers, position: Pos2, button: PointerButton, pressed: bool) {
+        let event = Event::PointerButton { pos: position, button, pressed, modifiers };
+        self.step(modifiers, vec![event]);
+    }
+
+    /// A click with `modifiers` held.
+    fn click_holding(&mut self, modifiers: Modifiers, position: Pos2) {
+        self.step(modifiers, vec![Event::PointerMoved(position)]);
+        self.button_holding(modifiers, position, PointerButton::Primary, true);
+        self.button_holding(modifiers, position, PointerButton::Primary, false);
+        self.idle(1);
+    }
+
+    fn right_click(&mut self, position: Pos2) {
+        self.click_with(position, PointerButton::Secondary);
+    }
+
+    /// Presses at `from` and moves to `to` over several frames with
+    /// `modifiers` held, leaving the button down.
+    fn drag_start(&mut self, modifiers: Modifiers, from: Pos2, to: Pos2) {
+        self.step(modifiers, vec![Event::PointerMoved(from)]);
+        self.button_holding(modifiers, from, PointerButton::Primary, true);
+        for step in 1..=8 {
+            self.step(modifiers, vec![Event::PointerMoved(from + (to - from) * (step as f32 / 8.0))]);
+        }
+    }
+
+    /// Lets go of a drag begun with [`Self::drag_start`].
+    fn drag_end(&mut self, position: Pos2) {
+        self.button(position, PointerButton::Primary, false);
+        self.idle(1);
+    }
+
+    /// A whole drag with `modifiers` held.
+    fn drag_holding(&mut self, modifiers: Modifiers, from: Pos2, to: Pos2) {
+        self.drag_start(modifiers, from, to);
+        self.button_holding(modifiers, to, PointerButton::Primary, false);
+        self.idle(1);
+    }
+
+    /// Turns the wheel `lines` over `position` with `modifiers` held, and
+    /// lets the smooth scrolling run out.
+    fn wheel(&mut self, modifiers: Modifiers, position: Pos2, lines: f32) {
+        self.step(modifiers, vec![Event::PointerMoved(position)]);
+        let wheel = Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: vec2(0.0, lines),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
+            modifiers,
+        };
+        self.step(modifiers, vec![wheel]);
+        for _ in 0..20 {
+            self.step(modifiers, Vec::new());
+        }
+        self.idle(1);
+    }
+
+    /// Ctrl+C as a windowing backend delivers it: a clipboard event, not a
+    /// key press.
+    fn copy(&mut self) {
+        self.step(Modifiers::COMMAND, vec![Event::Copy]);
+        self.idle(1);
+    }
+
+    fn cut(&mut self) {
+        self.step(Modifiers::COMMAND, vec![Event::Cut]);
+        self.idle(1);
+    }
+
+    /// Ctrl+V: the backend hands over whatever text the system clipboard
+    /// holds, which is what the app last put there.
+    fn paste(&mut self) {
+        let text = self.clipboard.clone().expect("something was copied");
+        self.step(Modifiers::COMMAND, vec![Event::Paste(text)]);
+        self.idle(1);
+    }
+
+    /// Screen y of a height in the arrangement's track list.
+    fn content_y(&self, y: f32) -> f32 {
+        top_bar::HEIGHT + arrangement::RULER_HEIGHT + y
+    }
+
+    /// A point at `beat`, `y` down the arrangement's track list: for rows
+    /// that are not all one height, such as automation lanes.
+    fn lanes_at(&self, beat: f64, y: f32) -> Pos2 {
+        pos2(self.lane(beat, 0).x, self.content_y(y))
+    }
+
+    /// A point in the ruler's marker strip at `beat`.
+    fn marker_strip(&self, beat: f64) -> Pos2 {
+        pos2(self.lane(beat, 0).x, top_bar::HEIGHT + arrangement::LOOP_STRIP + arrangement::MARKER_STRIP / 2.0)
+    }
+
+    /// The clips of the track at `index`, as (start, length) pairs.
+    fn spans(&self, index: usize) -> Vec<(f64, f64)> {
+        self.project().tracks[index].clips.iter().map(|clip| (clip.start, clip.length)).collect()
+    }
+
+    fn selected_clips(&self) -> Vec<ClipId> {
+        self.app.state().selected_clips.clone()
+    }
+
+    fn hint(&self) -> String {
+        self.app.state().hint.text().to_owned()
+    }
+}
+
+/// Three tracks. The first has clips at bars 3 and 5 (beats 8 and 16), each
+/// a bar long with a note on its second beat; the second has one at bar 3.
+fn three_tracks(session: &mut Session) -> ([TrackId; 3], [ClipId; 3]) {
+    session
+        .edit(|project| {
+            let tracks = [project.add_track("One"), project.add_track("Two"), project.add_track("Three")];
+            let note = [Note { pitch: 60, start: 1.0, length: 1.0, velocity: 100 }];
+            let mut clips = Vec::new();
+            for (track, name, start) in [(tracks[0], "A", 8.0), (tracks[0], "B", 16.0), (tracks[1], "C", 8.0)] {
+                let clip = project.add_midi_clip(track, name, start, 4.0)?;
+                project.clip_mut(clip)?.add_notes(&note)?;
+                clips.push(clip);
+            }
+            Ok((tracks, [clips[0], clips[1], clips[2]]))
+        })
+        .unwrap()
+}
+
+fn with_three_tracks(options: UiOptions) -> (Harness, [TrackId; 3], [ClipId; 3]) {
+    let mut ids = None;
+    let harness = Harness::new(options, |session| ids = Some(three_tracks(session)));
+    let (tracks, clips) = ids.unwrap();
+    (harness, tracks, clips)
 }
 
 /// Two tracks; the first has a one-bar clip at bar 3 holding one note.
@@ -738,7 +918,7 @@ fn an_empty_project_offers_ways_to_start() {
     assert!(harness.project().tracks.is_empty());
     harness.click_label("Open demo song");
     let project = harness.project();
-    assert_eq!((project.name.as_str(), project.tracks.len()), ("Night Drive", 5));
+    assert_eq!((project.name.as_str(), project.tracks.len()), ("Night Drive", 7));
     let selected = harness.app.state().selected_clip.expect("the demo selects a clip");
     assert_eq!(project.clip(selected).unwrap().name, "Arp A");
 }
@@ -1122,64 +1302,4 @@ fn piano_keys_audition_while_held() {
     harness.idle(2);
     assert_eq!(held(&harness), None, "releasing the mouse releases the note");
     assert_eq!(harness.undo_depth(), 1, "auditioning edits nothing");
-}
-
-/// Not a correctness test: prints how long a frame takes with thousands of
-/// notes on screen. Run with `cargo test -p trill-app -- --ignored frame_cost`.
-#[test]
-#[ignore = "a measurement, not an assertion"]
-fn frame_cost_with_thousands_of_notes() {
-    let mut harness = Harness::new(UiOptions::default(), |session| {
-        session
-            .edit(|project| {
-                for track in 0..8 {
-                    let id = project.add_track(format!("Track {track}"));
-                    for clip in 0..4 {
-                        let clip = project.add_midi_clip(id, "Clip", clip as f64 * 16.0, 16.0)?;
-                        let notes: Vec<Note> = (0..250)
-                            .map(|n| Note {
-                                pitch: 36 + ((n * 7 + track * 5) % 48) as u8,
-                                start: n as f64 * 0.0625,
-                                length: 0.0625,
-                                velocity: 40 + (n % 80) as u8,
-                            })
-                            .collect();
-                        project.clip_mut(clip)?.set_notes(notes)?;
-                    }
-                }
-                Ok(())
-            })
-            .unwrap();
-    });
-    // Select a clip so the piano roll is busy too.
-    harness.click(harness.lane(4.0, 0));
-    harness.idle(5);
-    let notes: usize =
-        harness.project().tracks.iter().flat_map(|track| &track.clips).map(|clip| clip.notes().len()).sum();
-
-    let frames = 120;
-    let started = Instant::now();
-    let mut tessellation = Duration::ZERO;
-    for _ in 0..frames {
-        harness.time += FRAME;
-        let input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SCREEN)),
-            time: Some(harness.time),
-            focused: true,
-            ..Default::default()
-        };
-        harness.app.tick(&harness.ctx);
-        let mut output = harness.ctx.run_ui(input, |ui| harness.app.frame(ui));
-        output.textures_delta.clear();
-        let before = Instant::now();
-        let primitives = harness.ctx.tessellate(output.shapes, output.pixels_per_point);
-        tessellation += before.elapsed();
-        assert!(!primitives.is_empty());
-    }
-    let per_frame = started.elapsed() / frames;
-    eprintln!(
-        "{notes} notes in the project: {:.2} ms per frame, of which {:.2} ms tessellation",
-        per_frame.as_secs_f64() * 1000.0,
-        (tessellation / frames).as_secs_f64() * 1000.0
-    );
 }

@@ -7,12 +7,25 @@
 //! snapshot, which costs one project clone per edit and lets the session
 //! lock be released before any painting starts.
 
+use super::timeline;
 use super::units::{METER_FLOOR_DB, gain_to_db};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
-use trill_core::{Clip, ClipId, DeviceId, Project, Track, TrackId};
+use trill_core::{AutomationPoint, AutomationTarget, Beats, Clip, ClipId, DeviceId, Note, Project, Track, TrackId};
 use trill_engine::{Meter, ParamState, Session};
+
+/// What a MIDI clip plays, as the arrangement draws it.
+pub struct ClipNotes {
+    /// The notes at their places on the timeline: offset, loop and trim
+    /// resolved by [`Clip::timeline_notes`].
+    pub notes: Vec<Note>,
+    /// Lowest and highest pitch of everything in the clip, heard or not, so
+    /// the picture does not rescale while an edge is being trimmed.
+    pub range: Option<(u8, u8)>,
+}
 
 /// The project and everything derived from it, as of one revision.
 pub struct Snapshot {
@@ -24,24 +37,30 @@ pub struct Snapshot {
     pub path: Option<PathBuf>,
     /// Compile problems (plugins that failed to load, missing audio files).
     pub problems: Vec<String>,
-    /// Which track's devices `params` covers, besides the master's.
-    pub params_track: Option<TrackId>,
-    /// Parameters of the devices the Devices tab shows, or why a device has
-    /// none (it failed to load).
+    /// The tracks whose devices `params` covers, besides the master's, in
+    /// ascending order.
+    pub params_tracks: Vec<TrackId>,
+    /// Parameters of the devices the Devices tab and the automation lanes
+    /// show, or why a device has none (it failed to load).
     pub params: HashMap<DeviceId, Result<Vec<ParamState>, String>>,
+    /// What each MIDI clip plays, worked out the first time it is drawn and
+    /// kept until the next revision.
+    clip_notes: RefCell<HashMap<ClipId, Rc<ClipNotes>>>,
     /// Meter handles, in track order. Reading a meter needs no lock.
     track_meters: Vec<(TrackId, Arc<Meter>)>,
     master_meter: Arc<Meter>,
 }
 
 impl Snapshot {
-    /// Copies what the views need out of the session. `devices_for` is the
-    /// track whose device parameters to include.
-    pub fn capture(session: &Session, devices_for: Option<TrackId>) -> Self {
+    /// Copies what the views need out of the session. `devices_for` are the
+    /// tracks whose device parameters to include (see [`Self::covers`]).
+    pub fn capture(session: &Session, devices_for: &[TrackId]) -> Self {
         let project = session.project().clone();
-        let shown_track = devices_for.and_then(|id| project.track(id).ok());
-        let params = shown_track
-            .into_iter()
+        let mut shown: Vec<&Track> = devices_for.iter().filter_map(|id| project.track(*id).ok()).collect();
+        shown.sort_by_key(|track| track.id.0);
+        shown.dedup_by_key(|track| track.id);
+        let params = shown
+            .iter()
             .flat_map(|track| track.devices.iter())
             .chain(project.master.devices.iter())
             .map(|device| (device.id, session.device_params(device.id).map_err(|error| error.to_string())))
@@ -58,8 +77,9 @@ impl Snapshot {
             modified: session.is_modified(),
             path: session.path().map(PathBuf::from),
             problems: session.problems().iter().map(ToString::to_string).collect(),
-            params_track: shown_track.map(|track| track.id),
+            params_tracks: shown.iter().map(|track| track.id).collect(),
             params,
+            clip_notes: RefCell::default(),
             track_meters,
             master_meter: session.master_meter(),
             project,
@@ -80,6 +100,40 @@ impl Snapshot {
             .tracks
             .iter()
             .find_map(|track| track.clips.iter().find(|clip| clip.id == id).map(|clip| (track, clip)))
+    }
+
+    /// True if `params` covers exactly the devices of `wanted` (ascending,
+    /// without repeats) that still exist. When it does not, the snapshot is
+    /// taken again.
+    pub fn covers(&self, wanted: &[TrackId]) -> bool {
+        let existing = wanted.iter().filter(|id| self.track(**id).is_some());
+        existing.eq(self.params_tracks.iter())
+    }
+
+    /// What `clip` plays, for drawing it. Computed once per clip and
+    /// revision: a song has thousands of notes and is painted every frame.
+    pub fn clip_notes(&self, clip: &Clip) -> Rc<ClipNotes> {
+        let mut cache = self.clip_notes.borrow_mut();
+        let entry = cache.entry(clip.id).or_insert_with(|| {
+            Rc::new(ClipNotes { notes: clip.timeline_notes(), range: timeline::pitch_range(clip.notes()) })
+        });
+        entry.clone()
+    }
+
+    /// The envelope that automates `target`, if there is one.
+    pub fn envelope(&self, target: &AutomationTarget) -> Option<&[AutomationPoint]> {
+        self.project.automation.iter().find(|lane| lane.target == *target).map(|lane| lane.points.as_slice())
+    }
+
+    /// What `target`'s envelope says at `beat`; `None` if it has none.
+    pub fn automated(&self, target: &AutomationTarget, beat: Beats) -> Option<f64> {
+        self.envelope(target).map(|points| trill_core::project::automation_value(points, beat))
+    }
+
+    /// The description of a device's parameter, when the snapshot covers
+    /// the device.
+    pub fn param(&self, device: DeviceId, param: &str) -> Option<&ParamState> {
+        self.params.get(&device)?.as_ref().ok()?.iter().find(|state| state.info.id == param)
     }
 }
 
@@ -148,6 +202,7 @@ impl MeterState {
 #[derive(Default)]
 pub struct Live {
     pub playing: bool,
+    pub metronome: bool,
     /// Song position in beats.
     pub position: f64,
     /// Smoothed fraction of the audio thread's time budget in use.
@@ -244,7 +299,7 @@ mod tests {
     #[test]
     fn capture_reflects_the_session() {
         let mut session = session();
-        let before = Snapshot::capture(&session, None);
+        let before = Snapshot::capture(&session, &[]);
         assert!(before.project.tracks.is_empty());
         assert!(!before.can_undo && !before.modified);
         // A blank project has a limiter on the master, and its parameters
@@ -261,23 +316,34 @@ mod tests {
             })
             .unwrap();
 
-        let after = Snapshot::capture(&session, Some(track));
+        let after = Snapshot::capture(&session, &[track]);
         assert!(after.revision > before.revision);
         assert!(after.can_undo && after.modified);
         assert_eq!(after.track_index(track), Some(0));
         assert_eq!(after.track(track).unwrap().name, "Lead");
         let (owner, found) = after.clip(clip).unwrap();
         assert_eq!((owner.id, found.name.as_str(), found.notes().len()), (track, "Riff", 1));
-        assert_eq!(after.params_track, Some(track));
+        assert_eq!(after.params_tracks, [track]);
+        assert!(after.covers(&[track]) && !after.covers(&[]));
         let synth_params = after.params[&synth].as_ref().unwrap();
         assert!(synth_params.iter().any(|param| param.info.id == "cutoff"));
 
         // Without a track selected only the master's devices are covered.
-        let master_only = Snapshot::capture(&session, None);
+        let master_only = Snapshot::capture(&session, &[]);
         assert!(!master_only.params.contains_key(&synth));
-        // A track that no longer exists is not an error.
-        let stale = Snapshot::capture(&session, Some(TrackId(9999)));
-        assert_eq!(stale.params_track, None);
+        assert!(master_only.param(synth, "cutoff").is_none());
+        assert_eq!(after.param(synth, "cutoff").unwrap().info.id, "cutoff");
+        // A track that no longer exists is not an error, and asking for it
+        // again does not make the snapshot look out of date.
+        let stale = Snapshot::capture(&session, &[TrackId(9999), track, track]);
+        assert_eq!(stale.params_tracks, [track]);
+        assert!(stale.covers(&[track, TrackId(9999)]));
+
+        // What a clip plays is worked out once and shared.
+        let (_, clip_ref) = after.clip(clip).unwrap();
+        let notes = after.clip_notes(clip_ref);
+        assert_eq!((notes.notes.len(), notes.notes[0].start, notes.range), (1, 4.0, Some((60, 60))));
+        assert!(Rc::ptr_eq(&notes, &after.clip_notes(clip_ref)));
     }
 
     #[test]
@@ -285,12 +351,29 @@ mod tests {
         let mut session = session();
         let track = session.edit(|project| Ok(project.add_track("A"))).unwrap();
         let mut live = Live::default();
-        live.update_meters(&Snapshot::capture(&session, None), 0.016);
+        live.update_meters(&Snapshot::capture(&session, &[]), 0.016);
         assert_eq!(live.track_meter(track), MeterState::default());
         assert!(!live.meters_moving());
 
         session.edit(|project| project.remove_track(track).map(|_| ())).unwrap();
-        live.update_meters(&Snapshot::capture(&session, None), 0.016);
+        live.update_meters(&Snapshot::capture(&session, &[]), 0.016);
         assert!(live.tracks.is_empty());
+    }
+
+    #[test]
+    fn envelopes_are_looked_up_by_what_they_automate() {
+        let mut session = session();
+        let track = session.edit(|project| Ok(project.add_track("A"))).unwrap();
+        let volume = AutomationTarget::TrackVolume { track };
+        session
+            .edit(|project| {
+                let points = vec![AutomationPoint::new(0.0, -12.0), AutomationPoint::new(4.0, 0.0)];
+                project.set_automation(volume.clone(), points)
+            })
+            .unwrap();
+        let snapshot = Snapshot::capture(&session, &[]);
+        assert_eq!(snapshot.envelope(&volume).unwrap().len(), 2);
+        assert_eq!(snapshot.automated(&volume, 2.0), Some(-6.0));
+        assert_eq!(snapshot.automated(&AutomationTarget::TrackPan { track }, 2.0), None);
     }
 }

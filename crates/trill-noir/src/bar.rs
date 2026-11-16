@@ -24,12 +24,13 @@ pub struct Bar<'a> {
     default: f32,
     dimmed: bool,
     compact: bool,
+    automated: bool,
 }
 
 impl<'a> Bar<'a> {
     /// A bar reading `value`, filled from the left up to `frac` (0..=1).
     pub fn new(label: &'a str, value: &'a str, frac: f32) -> Self {
-        Self { label, value, frac, origin: None, default: 0.0, dimmed: false, compact: false }
+        Self { label, value, frac, origin: None, default: 0.0, dimmed: false, compact: false, automated: false }
     }
 
     /// A bar for a cell too narrow for a label: the value is centered and
@@ -56,6 +57,13 @@ impl<'a> Bar<'a> {
     /// It still works.
     pub fn dimmed(mut self, dimmed: bool) -> Self {
         self.dimmed = dimmed;
+        self
+    }
+
+    /// Marks the bar's corner in the signal color: an envelope, not the
+    /// user, is setting this value.
+    pub fn automated(mut self, automated: bool) -> Self {
+        self.automated = automated;
         self
     }
 }
@@ -135,6 +143,9 @@ fn paint_bar(ui: &Ui, theme: &Theme, rect: Rect, bar: &Bar, frac: f32, active: b
         painter.rect_filled(rect, 0.0, theme.hover);
     }
     paint::frame(&painter, rect, theme.hairline);
+    if bar.automated {
+        paint::corner_mark(&painter, rect, theme.signal);
+    }
 
     let opacity = if bar.dimmed { theme.disabled } else { 1.0 };
     if bar.compact {

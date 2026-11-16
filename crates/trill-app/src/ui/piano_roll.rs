@@ -5,7 +5,7 @@
 //! keeps the notes as they were when it began and derives every step from
 //! those originals, replacing the previous step's notes in the project.
 
-use super::state::{AUDITION_LENGTH, Cx, FocusArea, NoteDrag};
+use super::state::{AUDITION_LENGTH, Clipboard, Cx, FocusArea, NoteDrag};
 use super::timeline::{self, GridLevel, PitchView, Snap, SpanHit, TimeView};
 use super::{colors, units, widgets};
 use eframe::egui::{
@@ -505,11 +505,9 @@ fn sidebar(ui: &mut Ui, cx: &mut Cx, clip: &Clip, rect: Rect) {
     };
     let scope = if selected > 0 { "the selected notes" } else { "every note" };
     let response = action(ui, "Quantize");
-    cx.hint(&response, format!("Move {scope} onto the grid"));
-    if response.clicked()
-        && let Some(step) = step
-    {
-        reshape_notes(cx, clip_id, &midi.notes, |notes| quantized_notes(notes, step));
+    cx.hint(&response, format!("Move {scope} onto the grid \u{00B7} Ctrl+U"));
+    if response.clicked() {
+        quantize(cx);
     }
     let response = action(ui, "Legato");
     cx.hint(&response, format!("Hold {scope} until the next one starts"));
@@ -582,6 +580,83 @@ pub fn delete_selected_notes(cx: &mut Cx) {
     }
 }
 
+/// `notes` with their starts counted from the earliest of them: how notes
+/// go onto the clipboard, ready to be put down anywhere.
+fn rebased_notes(notes: &[Note]) -> Vec<Note> {
+    let earliest = notes.iter().map(|note| note.start).fold(f64::INFINITY, f64::min);
+    notes.iter().map(|note| Note { start: note.start - earliest, ..*note }).collect()
+}
+
+/// How long a group of notes is, from the first start to the last end,
+/// rounded up to whole grid steps so that repeats of it stay in time.
+fn phrase_length(notes: &[Note], step: Option<Beats>) -> Beats {
+    let start = notes.iter().map(|note| note.start).fold(f64::INFINITY, f64::min);
+    let end = notes.iter().map(Note::end).fold(f64::NEG_INFINITY, f64::max);
+    let length = (end - start).max(0.0);
+    match step {
+        Some(step) if step > 0.0 => ((length / step) - 1e-9).ceil().max(1.0) * step,
+        _ => length,
+    }
+}
+
+/// Puts the selected notes on the clipboard.
+pub fn copy_notes(cx: &mut Cx) {
+    if cx.state.selected_notes.is_empty() {
+        return;
+    }
+    let notes = rebased_notes(&cx.state.selected_notes);
+    let count = notes.len();
+    cx.state.copied_text =
+        Some(if count == 1 { "1 note from Trill".to_owned() } else { format!("{count} notes from Trill") });
+    cx.state.clipboard = Some(Clipboard::Notes(notes));
+}
+
+pub fn cut_notes(cx: &mut Cx) {
+    copy_notes(cx);
+    delete_selected_notes(cx);
+}
+
+/// Pastes the copied notes at the roll's cursor, selects them, and moves
+/// the cursor past them so pasting again follows on.
+pub fn paste_notes(cx: &mut Cx) {
+    let Some(clip) = cx.state.selected_clip else { return };
+    let Some(Clipboard::Notes(copied)) = cx.state.clipboard.clone() else { return };
+    let step = cx.state.piano.snap.step();
+    let at = timeline::snap_round(cx.state.piano.cursor, step);
+    let pasted: Vec<Note> = copied.iter().map(|note| Note { start: note.start + at, ..*note }).collect();
+    if swap_notes(cx, clip, &[], &pasted) {
+        cx.state.piano.cursor = at + phrase_length(&pasted, step);
+        cx.state.selected_notes = pasted;
+    }
+}
+
+/// Copies the selected notes to right after themselves and selects the
+/// copies, so repeating the command writes a phrase out again and again.
+pub fn duplicate_notes(cx: &mut Cx) {
+    let Some(clip) = cx.state.selected_clip else { return };
+    let chosen = cx.state.selected_notes.clone();
+    if chosen.is_empty() {
+        return;
+    }
+    let length = phrase_length(&chosen, cx.state.piano.snap.step());
+    let copies: Vec<Note> = chosen.iter().map(|note| Note { start: note.start + length, ..*note }).collect();
+    if swap_notes(cx, clip, &[], &copies) {
+        cx.state.selected_notes = copies;
+    }
+}
+
+/// Moves the selected notes (or all of them, with none selected) onto the
+/// grid: `Ctrl+U`, and the sidebar's Quantize.
+pub fn quantize(cx: &mut Cx) {
+    let Some(step) = cx.state.piano.snap.step() else {
+        cx.state.toasts.info("Choose a grid to quantize to: it is off");
+        return;
+    };
+    let Some((_, clip)) = cx.state.selected_clip.and_then(|id| cx.snap.clip(id)) else { return };
+    let (id, all) = (clip.id, clip.notes().to_vec());
+    reshape_notes(cx, id, &all, |notes| quantized_notes(notes, step));
+}
+
 pub fn select_all_notes(cx: &mut Cx) {
     if let Some((_, clip)) = cx.state.selected_clip.and_then(|id| cx.snap.clip(id)) {
         cx.state.selected_notes = clip.notes().to_vec();
@@ -631,7 +706,7 @@ fn roll(ui: &mut Ui, cx: &mut Cx, track: &Track, clip: &Clip, midi: &MidiContent
 
     let response = ui.interact(geometry.grid, ui.scope_id().with("notes"), Sense::click_and_drag());
     paint_grid(ui, cx, &geometry, color, clip, midi);
-    paint_ruler(ui, cx, &geometry, clip, midi);
+    ruler(ui, cx, &geometry, clip, midi);
     keys(ui, cx, &geometry, track, color, is_drums);
     corner(ui, cx, &geometry);
     grid_interaction(ui, cx, &geometry, track, clip, &midi.notes, &response);
@@ -759,6 +834,7 @@ fn paint_grid(ui: &Ui, cx: &Cx, geometry: &Geometry, color: Color32, clip: &Clip
         paint::frame(&painter, band, theme.ink_dim);
     }
 
+    paint::vline(&painter, geometry.x(cx.state.piano.cursor).round(), grid.y_range(), theme.ink_faint);
     // The song's playhead, mapped into the clip (and around its loop).
     if let Some(x) = playhead_x(cx, geometry, clip, sounding) {
         paint::vline(&painter, x, grid.y_range(), theme.signal);
@@ -770,6 +846,22 @@ fn paint_grid(ui: &Ui, cx: &Cx, geometry: &Geometry, color: Color32, clip: &Clip
 fn playhead_x(cx: &Cx, geometry: &Geometry, clip: &Clip, sounding: Beats) -> Option<f32> {
     let position = cx.live.position - clip.start;
     (position >= 0.0 && position < clip.length).then(|| geometry.x(position % sounding.max(SHORTEST_NOTE)).round())
+}
+
+/// The roll's ruler. A click on it places the cursor that pasted notes go
+/// to.
+fn ruler(ui: &Ui, cx: &mut Cx, geometry: &Geometry, clip: &Clip, midi: &MidiContent) {
+    let response = ui.interact(geometry.ruler, ui.scope_id().with("roll-ruler"), Sense::click());
+    cx.hint(&response, "Click to place the cursor \u{00B7} Ctrl+V pastes notes there");
+    if response.clicked()
+        && let Some(pointer) = response.interact_pointer_pos()
+    {
+        cx.state.focus = FocusArea::PianoRoll;
+        let free = ui.input(|input| input.modifiers.alt);
+        let step = if free { None } else { geometry.snap };
+        cx.state.piano.cursor = timeline::snap_round(geometry.beat(pointer.x), step);
+    }
+    paint_ruler(ui, cx, geometry, clip, midi);
 }
 
 fn paint_ruler(ui: &Ui, cx: &Cx, geometry: &Geometry, clip: &Clip, midi: &MidiContent) {
@@ -806,6 +898,14 @@ fn paint_ruler(ui: &Ui, cx: &Cx, geometry: &Geometry, clip: &Clip, midi: &MidiCo
         pos2(geometry.x(sounding_length(clip, midi)).round(), ruler.bottom()),
     );
     painter.rect_filled(span, 0.0, if midi.loop_length.is_some() { theme.ink_dim } else { theme.ghost });
+
+    // The cursor: a notch on the ruler's foot, over its line in the grid.
+    let x = geometry.x(cx.state.piano.cursor).round();
+    if x >= ruler.left() && x <= ruler.right() {
+        let tip = pos2(x + 0.5, ruler.bottom());
+        let notch = vec![tip + vec2(-4.0, -5.0), tip + vec2(4.0, -5.0), tip];
+        painter.add(Shape::convex_polygon(notch, theme.ink_dim, egui::Stroke::NONE));
+    }
 }
 
 /// The keyboard down the left side. Press a key to hear it.
@@ -1242,6 +1342,23 @@ mod tests {
         // Overlapping notes are shortened to meet the next one too.
         assert_eq!(legato_notes(&[note(60, 0.0, 3.0), note(62, 1.0, 1.0)])[0].length, 1.0);
         assert!(legato_notes(&[]).is_empty());
+    }
+
+    #[test]
+    fn copied_notes_are_counted_from_their_first() {
+        let chord = [note(60, 2.5, 1.0), note(64, 3.0, 0.5), note(67, 4.25, 1.0)];
+        assert_eq!(rebased_notes(&chord), [note(60, 0.0, 1.0), note(64, 0.5, 0.5), note(67, 1.75, 1.0)]);
+        assert!(rebased_notes(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_phrase_is_as_long_as_the_grid_steps_it_covers() {
+        let chord = [note(60, 2.5, 1.0), note(64, 3.0, 0.5), note(67, 4.25, 1.0)];
+        assert_eq!(phrase_length(&chord, None), 2.75);
+        assert_eq!(phrase_length(&chord, Some(0.25)), 2.75);
+        assert_eq!(phrase_length(&chord, Some(1.0)), 3.0, "rounded up, so repeats stay on the beat");
+        assert_eq!(phrase_length(&[note(60, 1.0, 2.0)], Some(1.0)), 2.0, "an exact fit is not rounded further");
+        assert_eq!(phrase_length(&[note(60, 1.0, 0.01)], Some(0.25)), 0.25);
     }
 
     #[test]

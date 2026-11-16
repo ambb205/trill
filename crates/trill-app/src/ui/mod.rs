@@ -18,17 +18,21 @@
 //! Views place those widgets by hand, at exact rectangles, and never pick a
 //! color or a font size of their own.
 //!
-//! Modules: [`app`] is the shell (panels, shortcuts, repaint policy).
-//! [`top_bar`], [`status_bar`], [`browser`], [`arrangement`] and [`detail`]
-//! (with [`piano_roll`] and [`devices`]) are the views. [`device_layouts`]
-//! says how each built-in device arranges its parameters, and [`displays`]
-//! draws their small curves from the math in [`response`]. [`files`] runs
-//! dialogs and exports off the UI thread; [`timeline`] and [`units`] hold
-//! the pure math; [`colors`] maps stored track colors to palette hues; and
-//! [`widgets`] is the glue between the views and the kit.
+//! Modules: [`app`] is the shell (panels, repaint policy) and
+//! [`shortcuts`] the table of keys it reads. [`top_bar`], [`status_bar`],
+//! [`browser`], [`arrangement`] and [`detail`] (with [`piano_roll`],
+//! [`devices`] and [`mixer`]) are the views; the arrangement is a module
+//! of its own parts. [`automation`] is what the views share about
+//! envelopes. [`device_layouts`] says how each built-in device arranges its
+//! parameters, and [`displays`] draws their small curves from the math in
+//! [`response`]. [`files`] runs dialogs, imports and exports off the UI
+//! thread; [`timeline`] and [`units`] hold the pure math; [`colors`] maps
+//! stored track colors to palette hues; and [`widgets`] is the glue between
+//! the views and the kit.
 
 mod app;
 mod arrangement;
+mod automation;
 mod brand;
 mod browser;
 mod colors;
@@ -37,8 +41,10 @@ mod device_layouts;
 mod devices;
 mod displays;
 mod files;
+mod mixer;
 mod piano_roll;
 mod response;
+mod shortcuts;
 mod snapshot;
 mod state;
 mod status_bar;
@@ -77,6 +83,12 @@ pub struct UiOptions {
     pub detail_tab: DetailTab,
     /// A clip to select at startup.
     pub select_clip: Option<ClipId>,
+    /// More clips to select with it.
+    pub also_select: Vec<ClipId>,
+    /// Unfold a lane for every envelope the project has.
+    pub show_automation: bool,
+    /// Open with the shortcut reference up.
+    pub show_shortcuts: bool,
     /// Address of the MCP server AI assistants can connect to, if it runs.
     pub mcp_url: Option<String>,
     /// Name of the theme to start in; one of [`theme_names`].
@@ -98,6 +110,9 @@ impl Default for UiOptions {
         Self {
             detail_tab: DetailTab::default(),
             select_clip: None,
+            also_select: Vec::new(),
+            show_automation: false,
+            show_shortcuts: false,
             mcp_url: None,
             theme: theme_names()[0],
             browser: true,
