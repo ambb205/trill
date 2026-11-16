@@ -207,7 +207,7 @@ pub const BINDINGS: &[Binding] = &[
         Key::A,
         When::NotTyping,
         Section::Tracks,
-        "Show or hide the selected track\u{2019}s automation",
+        "Show or hide the track\u{2019}s automation",
     ),
     bind(Command::TogglePlay, NONE, Key::Space, When::NotTyping, Section::Transport, "Play or stop"),
     bind(Command::Rewind, NONE, Key::Home, When::NotTyping, Section::Transport, "Return to the start"),

@@ -97,9 +97,13 @@ pub fn label_for(semitone: u8) -> Option<&'static str> {
     NOTES.iter().find(|playing| playing.role == Role::Note(semitone)).map(|playing| playing.label)
 }
 
-/// The key named `label`, for options that name keys by their letters.
-pub fn key_labeled(label: &str) -> Option<Key> {
-    NOTES.iter().find(|playing| playing.label.eq_ignore_ascii_case(label)).map(|playing| playing.key)
+/// The key with `letter` on it, for options that name keys by their
+/// letters: a note, or one of the keys that move the octave and the
+/// velocity.
+pub fn key_lettered(letter: char) -> Option<Key> {
+    let mut buffer = [0; 4];
+    let label: &str = letter.encode_utf8(&mut buffer);
+    NOTES.iter().chain(&CONTROLS).find(|playing| playing.label.eq_ignore_ascii_case(label)).map(|playing| playing.key)
 }
 
 /// The label of a control key.
@@ -133,7 +137,7 @@ pub fn reference() -> Vec<(String, String)> {
         ("Octave down, up".to_owned(), pair(Role::Octave(-1), Role::Octave(1))),
         ("Softer, louder".to_owned(), pair(Role::Velocity(-1), Role::Velocity(1))),
         ("Sustain, while held".to_owned(), control(Role::Sustain).to_owned()),
-        ("The shortcut a playing letter had".to_owned(), "Alt+letter".to_owned()),
+        ("Shortcuts on those letters, while on".to_owned(), "Alt+letter".to_owned()),
     ]
 }
 
@@ -192,11 +196,12 @@ mod tests {
 
     #[test]
     fn keys_are_found_by_their_letters() {
-        assert_eq!(key_labeled("a"), Some(Key::A));
-        assert_eq!(key_labeled("K"), Some(Key::K));
-        assert_eq!(key_labeled(";"), Some(Key::Semicolon));
-        assert_eq!(key_labeled("z"), None, "Z changes the octave: it is not a note");
-        assert_eq!(key_labeled("q"), None);
+        assert_eq!(key_lettered('a'), Some(Key::A));
+        assert_eq!(key_lettered('K'), Some(Key::K));
+        assert_eq!(key_lettered(';'), Some(Key::Semicolon));
+        assert_eq!(key_lettered('z'), Some(Key::Z), "the octave keys have letters too");
+        assert_eq!(key_lettered('q'), None);
+        assert_eq!(key_lettered('T'), Some(Key::T), "T is the F sharp, not the start of Tab");
     }
 
     #[test]

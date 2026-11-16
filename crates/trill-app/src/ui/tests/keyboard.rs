@@ -1005,7 +1005,7 @@ fn the_strip_says_what_plays_and_why_nothing_sounds() {
     assert!(harness.app.state().arrangement.lanes.is_empty(), "A is not a shortcut again for being silent");
     harness.move_to(harness.labeled("Octave down") - vec2(60.0, 0.0));
     harness.idle(2);
-    assert_eq!(harness.hint(), "Empty has no instrument \u{00B7} add one");
+    assert_eq!(harness.hint(), "Empty has no instrument \u{00B7} add one from the browser");
 
     // Muted, and silenced by another track's solo: played all the same,
     // so that it sounds the moment it is let through.
@@ -1116,9 +1116,23 @@ fn the_piano_roll_follows_the_octave() {
         row > grid_top && row < grid_bottom
     };
     let framed = harness.app.state().piano.pitch;
+    assert!(!in_view(&harness, 77), "the clip was framed on its one note, below the top of the keyboard's range");
 
-    // Two octaves down, out of what the clip was framed on: the keys the
-    // keyboard now plays are brought into view.
+    // Switching the keyboard off and on moves nothing: the view stays on
+    // the notes being looked at.
+    harness.key(CTRL, Key::K);
+    harness.key(CTRL, Key::K);
+    harness.idle(2);
+    assert!(harness.app.keyboard().is_on());
+    assert_eq!(harness.app.state().piano.pitch, framed);
+
+    // Moving the keys is asking to see them. An octave up, they are
+    // brought into view by as little as it takes; two octaves down from
+    // the start, the same.
+    harness.key(NONE, Key::X);
+    harness.idle(2);
+    assert!(in_view(&harness, 72) && in_view(&harness, 89), "{:?}", harness.app.state().piano.pitch);
+    harness.key(NONE, Key::Z);
     harness.key(NONE, Key::Z);
     harness.key(NONE, Key::Z);
     harness.idle(2);

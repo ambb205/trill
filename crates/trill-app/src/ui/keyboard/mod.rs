@@ -61,17 +61,22 @@ const REMEMBER_AFTER_FRAMES: u32 = 45;
 pub struct Options {
     /// Start with it on, whatever was remembered.
     pub on: bool,
-    /// Keys held down from the first frame on, for pictures of the keyboard
-    /// being played. Nothing lets go of them.
+    /// Keys pressed in the first frame and never let go, for pictures of
+    /// the keyboard being played. The octave and velocity keys among them
+    /// do what a press of them does.
     pub hold: Vec<Key>,
 }
 
 impl Options {
-    /// The keys named by `letters`, as `--hold` takes them: `"adg"`.
+    /// The keys named by `letters`, as `--hold` takes them: `"adg"` is a
+    /// chord, `"zzat"` a kick and a hat two octaves down.
     pub fn holding(letters: &str) -> Result<Vec<Key>, String> {
         let key = |letter: char| {
-            layout::key_labeled(&letter.to_string()).ok_or_else(|| {
-                format!("'{letter}' is not a key that plays a note (the keys are A W S E D F T G Y H U J K O L P ; ')")
+            layout::key_lettered(letter).ok_or_else(|| {
+                format!(
+                    "'{letter}' is not a key of the computer keyboard (A W S E D F T G Y H U J K O L P ; ' are its \
+                     notes, Z and X move the octave, C and V the velocity)"
+                )
             })
         };
         letters.chars().filter(|letter| !letter.is_whitespace()).map(key).collect()
@@ -106,18 +111,43 @@ pub enum Silence {
 }
 
 impl Silence {
-    /// What to tell the player, in the few words the strip has room for.
-    pub fn text(&self) -> String {
+    /// What to tell the player, in the few words the strip has room for:
+    /// the name of the track it is about, when it is about one, and what
+    /// is the matter. Read one after the other they are a sentence; they
+    /// are apart so that a long name gives way before the reason does.
+    pub fn parts(&self) -> (Option<&str>, String) {
+        fn about<'a>(name: &'a str, matter: &str) -> (Option<&'a str>, String) {
+            (Some(name), matter.to_owned())
+        }
         match self {
-            Silence::Typing => "Paused while you type".to_owned(),
-            Silence::Searching => "Paused \u{00B7} typing searches the sounds".to_owned(),
-            Silence::NoTrack => "No track selected \u{00B7} click one to play it".to_owned(),
-            Silence::Group(name) => format!("{name} is a group \u{00B7} it has no instrument"),
-            Silence::Return(name) => format!("{name} is a return \u{00B7} it has no instrument"),
-            Silence::NoInstrument(name) => format!("{name} has no instrument \u{00B7} add one"),
-            Silence::Muted(name) => format!("{name} is muted"),
-            Silence::Soloed(name) => format!("{name} is silent \u{00B7} another track is soloed"),
-            Silence::NoOutput => "No audio output \u{00B7} nothing will be heard".to_owned(),
+            Silence::Typing => (None, "Paused while you type".to_owned()),
+            Silence::Searching => (None, "Paused \u{00B7} typing searches the sounds".to_owned()),
+            Silence::NoTrack => {
+                let keys = super::shortcuts::keys(super::shortcuts::Command::AddTrack);
+                (None, format!("No track to play yet \u{00B7} {keys} adds one"))
+            }
+            Silence::Group(name) => about(name, " is a group and plays no notes"),
+            Silence::Return(name) => about(name, " is a return and plays no notes"),
+            Silence::NoInstrument(name) => about(name, " has no instrument"),
+            Silence::Muted(name) => about(name, " is muted"),
+            Silence::Soloed(name) => about(name, " is silenced by a solo"),
+            Silence::NoOutput => (None, "No audio output \u{00B7} nothing will be heard".to_owned()),
+        }
+    }
+
+    /// The whole sentence.
+    pub fn text(&self) -> String {
+        let (name, matter) = self.parts();
+        format!("{}{matter}", name.unwrap_or_default())
+    }
+
+    /// What can be done about it, where that is not plain.
+    pub fn advice(&self) -> Option<&'static str> {
+        match self {
+            Silence::NoInstrument(_) => Some("add one from the browser"),
+            Silence::Group(_) | Silence::Return(_) => Some("select a track with an instrument"),
+            Silence::Soloed(_) => Some("solo this track too, or end the solo"),
+            _ => None,
         }
     }
 }
@@ -157,8 +187,8 @@ pub struct Keyboard {
     playing: Playing,
     /// The project the notes were started in.
     generation: u64,
-    /// The frame the octave last changed on: the piano roll brings the
-    /// keys' range into view, if it is on screen to do it.
+    /// The frame the keys last moved to another octave on: the piano roll
+    /// brings their range into view, if it is on screen to do it.
     moved_at: Option<u32>,
     /// Keys the command line holds down, until they have been pressed.
     hold: Vec<Key>,
@@ -200,7 +230,8 @@ impl Keyboard {
             sustain: false,
             playing: Playing::default(),
             generation: 0,
-            moved_at: None,
+            // Played for a picture, the keys are in it from the start.
+            moved_at: (!options.hold.is_empty()).then_some(0),
             hold: options.hold.clone(),
             staged: !options.hold.is_empty(),
             folder,
@@ -269,10 +300,12 @@ impl Keyboard {
         (self.on && pitch >= self.lowest).then(|| layout::label_for(pitch - self.lowest)).flatten()
     }
 
-    /// True once after the octave changed, for the piano roll to follow:
-    /// in the frame of the change or the one after it, depending on which
-    /// of the two was laid out first. A piano roll that was not on screen
-    /// then does not jump when it next is.
+    /// True once after the keys moved to another octave, for the piano
+    /// roll to bring them into view: in the frame it happened in or the
+    /// one after, depending on which of the two was laid out first. A
+    /// piano roll that was not on screen then does not jump when it next
+    /// is. Switching the keyboard on moves nothing: the view stays on the
+    /// notes being looked at, and shows the keys' letters where they are.
     pub fn take_reveal(&mut self) -> bool {
         self.moved_at.take().is_some_and(|frame| self.frames.saturating_sub(frame) <= 1)
     }
@@ -747,8 +780,9 @@ mod tests {
         assert_eq!(Options::holding("adg").unwrap(), [Key::A, Key::D, Key::G]);
         assert_eq!(Options::holding("A k ;").unwrap(), [Key::A, Key::K, Key::Semicolon]);
         assert!(Options::holding("").unwrap().is_empty());
-        let error = Options::holding("az").unwrap_err();
-        assert!(error.contains("'z'") && error.contains("A W S E"), "{error}");
+        assert_eq!(Options::holding("zzat").unwrap(), [Key::Z, Key::Z, Key::A, Key::T], "the octave keys first");
+        let error = Options::holding("aq").unwrap_err();
+        assert!(error.contains("'q'") && error.contains("A W S E"), "{error}");
     }
 
     #[test]
@@ -796,7 +830,13 @@ mod tests {
         ];
         for reason in reasons {
             assert!(reason.text().len() > 10, "{reason:?}");
+            let (about, matter) = reason.parts();
+            assert_eq!(about.is_some(), reason.text().starts_with("Lead"), "{reason:?}");
+            assert!(about.is_none() || matter.starts_with(' '), "the two parts read as a sentence: {reason:?}");
         }
-        assert_eq!(Silence::NoInstrument(name()).text(), "Lead has no instrument \u{00B7} add one");
+        assert_eq!(Silence::NoInstrument(name()).text(), "Lead has no instrument");
+        assert_eq!(Silence::NoInstrument(name()).advice(), Some("add one from the browser"));
+        assert_eq!(Silence::NoTrack.text(), "No track to play yet \u{00B7} Ctrl+T adds one");
+        assert_eq!(Silence::Muted(name()).advice(), None, "what to do about a mute is plain");
     }
 }

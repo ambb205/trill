@@ -39,7 +39,8 @@ Options:
   --assistant-scene <NAME>    Show a canned conversation in the assistant, for screenshots: ready, working,
                           answered, limit, api-key, signed-out or not-installed
   --keyboard              Start with the computer keyboard playing notes (Ctrl+K switches it)
-  --hold <KEYS>           Hold these keys of it down, for screenshots: adg is a C major chord
+  --hold <KEYS>           Hold these keys of it down, for screenshots: adg is a C major chord, and
+                          zzat a kick and a hat two octaves down
   --screenshot <PATH.png> Render the window to a PNG and exit (implies --null-audio)
   --exit-after <SECONDS>  Close the window by itself after this long
   -h, --help              Show this help
@@ -495,6 +496,7 @@ mod tests {
         assert!(run(&["--keyboard"]).unwrap().ui_options().keyboard.on);
         let held = run(&["--hold", "adg"]).unwrap().ui_options().keyboard.hold;
         assert_eq!(held.len(), 3);
+        assert_eq!(run(&["--hold", "zzat"]).unwrap().ui_options().keyboard.hold.len(), 4);
         let error = run(&["--hold", "aq"]).unwrap_err().to_string();
         assert!(error.contains("'q'"), "{error}");
         assert!(USAGE.contains("--keyboard") && USAGE.contains("--hold"));
@@ -527,7 +529,7 @@ mod tests {
             &["--sound"],
             &["--editor"],
             &["--hold"],
-            &["--hold", "z"],
+            &["--hold", "q"],
             &["--profile"],
             &["--size", "big"],
             &["--size", "10x10"],

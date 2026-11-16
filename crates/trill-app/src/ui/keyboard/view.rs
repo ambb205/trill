@@ -192,7 +192,15 @@ fn plays(ui: &Ui, cx: &mut Cx, cells: &mut Cells, id: Id, width: f32) {
     match &playing.silence {
         Some(silence) => {
             let left = paint::hollow_dot(cells.painter, value.left_center(), theme.metric.dot, theme.warn) + 6.0;
-            text::paint(cells.painter, value.with_min_x(left), Align2::LEFT_CENTER, style, &silence.text(), theme.warn);
+            let mut room = value.with_min_x(left);
+            // A long name is cut short before what is the matter is.
+            let (name, matter) = silence.parts();
+            if let Some(name) = name {
+                let matter_width = text::width(cells.painter, style, &matter).ceil();
+                let name_room = room.with_max_x((room.right() - matter_width).max(room.left() + 40.0));
+                room.min.x += text::paint(cells.painter, name_room, Align2::LEFT_CENTER, style, name, theme.warn);
+            }
+            text::paint(cells.painter, room, Align2::LEFT_CENTER, style, &matter, theme.warn);
         }
         None => {
             let stored = playing.track.and_then(|track| cx.snap.track(track)).map_or(0, |track| track.color);
@@ -206,7 +214,10 @@ fn plays(ui: &Ui, cx: &mut Cx, cells: &mut Cells, id: Id, width: f32) {
     }
     let response = ui.interact(whole, id.with("plays"), Sense::hover());
     let about = match &playing.silence {
-        Some(silence) => silence.text(),
+        Some(silence) => match silence.advice() {
+            Some(advice) => format!("{} \u{00B7} {advice}", silence.text()),
+            None => silence.text(),
+        },
         None => {
             format!("The keys play {} on {} \u{00B7} select another track to play it", playing.instrument, playing.name)
         }
