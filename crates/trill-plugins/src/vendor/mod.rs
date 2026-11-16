@@ -14,6 +14,8 @@
 //! from, which is how a load is known to have worked:
 //!
 //! * [`serum`]: Serum 2's `.SerumPreset` files (Xfer's container, [`xfer`]).
+//! * [`ample`]: the preset files of Ample Sound's guitars and basses, which
+//!   are the XML document the plugin's state is.
 //!
 //! A reader takes files Trill did not write. It reads no more of a file
 //! than it has set aside room for, checks every length it is told against
@@ -23,11 +25,14 @@
 //!
 //! Nothing is ever written to a vendor's folders.
 
+pub(crate) mod ample;
 mod cbor;
 pub(crate) mod child;
+mod juce;
 mod places;
 pub(crate) mod serum;
 mod xfer;
+mod xml;
 
 pub use child::VENDOR_PRESET_ARGUMENT;
 pub(crate) use child::run_builder;
@@ -51,18 +56,23 @@ const MAX_FILE: u64 = 256 * 1024 * 1024;
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Format {
     Serum2,
+    Ample,
 }
+
+/// Every format there is.
+const FORMATS: [Format; 2] = [Format::Serum2, Format::Ample];
 
 impl Format {
     /// The format's name in a preset's locator.
     pub(crate) fn tag(self) -> &'static str {
         match self {
             Format::Serum2 => "serum2",
+            Format::Ample => "ample",
         }
     }
 
     pub(crate) fn parse(tag: &str) -> Option<Self> {
-        [Format::Serum2].into_iter().find(|format| format.tag() == tag)
+        FORMATS.into_iter().find(|format| format.tag() == tag)
     }
 
     /// The format the vendor of `plugin` keeps its presets in, if it is
@@ -71,6 +81,7 @@ impl Format {
     pub(crate) fn of(plugin: &PluginRef) -> Option<Self> {
         match plugin.id.as_str() {
             serum::CLASS => Some(Format::Serum2),
+            id if ample::is_ours(id) => Some(Format::Ample),
             _ => None,
         }
     }
@@ -102,6 +113,7 @@ pub(crate) struct Built {
 pub(crate) fn list(plugin: &PluginRef, places: &VendorPlaces, sink: &mut dyn Sink) {
     match Format::of(plugin) {
         Some(Format::Serum2) => serum::list(plugin, places, sink),
+        Some(Format::Ample) => ample::list(plugin, places, sink),
         None => {}
     }
 }
@@ -117,6 +129,7 @@ pub(crate) fn build(format: Format, file: &Path, key: Option<&str>, current: &Pl
     let bytes = read_whole(file)?;
     match format {
         Format::Serum2 => serum::build(&bytes, current),
+        Format::Ample => ample::build(&bytes, current),
     }
     .map_err(|reason| format!("'{}' cannot be loaded: {reason}", file.display()))
 }
@@ -127,6 +140,7 @@ pub(crate) fn build(format: Format, file: &Path, key: Option<&str>, current: &Pl
 pub(crate) fn missing<'a>(format: Format, marks: &'a [Mark], state: &PluginState) -> Vec<&'a Mark> {
     let shown = |mark: &Mark| match format {
         Format::Serum2 => serum::shown(state, &mark.name),
+        Format::Ample => ample::shown(state, &mark.name),
     };
     marks.iter().filter(|mark| shown(mark).is_none_or(|value| !same_value(&value, &mark.value))).collect()
 }
@@ -194,7 +208,7 @@ mod tests {
 
     #[test]
     fn formats_are_named_in_locators() {
-        for format in [Format::Serum2] {
+        for format in FORMATS {
             assert_eq!(Format::parse(format.tag()), Some(format));
         }
         assert_eq!(Format::parse("vst3-file"), None);
