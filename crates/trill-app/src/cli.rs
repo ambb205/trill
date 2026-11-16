@@ -72,7 +72,7 @@ pub struct Cli {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Parsed {
-    Run(Cli),
+    Run(Box<Cli>),
     Help,
 }
 
@@ -141,7 +141,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
     if cli.demo && cli.project.is_some() {
         bail!("--demo cannot be combined with a project file");
     }
-    Ok(Parsed::Run(cli))
+    Ok(Parsed::Run(Box::new(cli)))
 }
 
 /// The first clip of the project called `name`.
@@ -235,7 +235,7 @@ mod tests {
 
     fn run(args: &[&str]) -> anyhow::Result<Cli> {
         match parse(args.iter().map(|arg| arg.to_string()))? {
-            Parsed::Run(cli) => Ok(cli),
+            Parsed::Run(cli) => Ok(*cli),
             Parsed::Help => bail!("help requested"),
         }
     }

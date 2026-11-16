@@ -231,7 +231,7 @@ fn floating_label(ctx: &egui::Context, cx: &Cx, drag: &SoundDrag) {
     let Some(pointer) = drag.pointer else { return };
     let theme = cx.theme;
     let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::unique("sound-drag")));
-    let width = (text::width(&painter, theme.text.body, &drag.label) + 16.0).min(260.0);
+    let width = (text::width(&painter, theme.text.body, &drag.label) + 16.0).min(320.0);
     let screen = ctx.content_rect();
     let corner = pointer + vec2(14.0, 12.0);
     let left = corner.x.min(screen.right() - width - 4.0);
@@ -240,7 +240,7 @@ fn floating_label(ctx: &egui::Context, cx: &Cx, drag: &SoundDrag) {
     painter.rect_filled(plate, 0.0, theme.raised);
     paint::frame(&painter, plate, if drag.target.is_some() { theme.ink_dim } else { theme.hairline });
     let ink = if drag.target.is_some() { theme.ink } else { theme.ink_dim };
-    text::paint(&painter, plate.shrink2(vec2(8.0, 0.0)), Align2::LEFT_CENTER, theme.text.body, &drag.label, ink);
+    text::paint_name(&painter, plate.shrink2(vec2(8.0, 0.0)), Align2::LEFT_CENTER, theme.text.body, &drag.label, ink);
 }
 
 /// Where the pointer is while another program drags files over the

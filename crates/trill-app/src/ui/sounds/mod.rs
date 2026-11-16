@@ -247,10 +247,24 @@ impl Sounds {
         self.waves.peek(path)
     }
 
-    /// True while workers are busy or have answers waiting. A screenshot
-    /// waits for this to clear.
+    /// True while something the window shows is still on its way: a scan
+    /// of the library, the answer to a search, a waveform drawn as a
+    /// placeholder, a drop. A screenshot waits for this to clear. Work that
+    /// goes on for as long as the window is open (looking again for a file
+    /// that is missing) does not count.
+    pub fn is_waiting(&self) -> bool {
+        self.waves.is_loading()
+            || self.search.in_flight.is_some()
+            || !self.pending.is_empty()
+            || self.preview.loading.is_some()
+            || self.runtime.library.scan_status().is_scanning()
+    }
+
+    /// True while the workers have anything at all to do, or a scan runs:
+    /// for tests, which wait until nothing more can arrive.
+    #[cfg(test)]
     pub fn is_busy(&self) -> bool {
-        !self.work.is_idle() || self.waves.has_requests() || self.runtime.library.scan_status().is_scanning()
+        !self.work.is_idle() || self.waves.is_loading() || self.runtime.library.scan_status().is_scanning()
     }
 
     /// Takes in what the workers finished and sends them what the last

@@ -33,15 +33,15 @@ pub(in crate::ui) const TREE_ROW: f32 = 20.0;
 /// Height of the line above the list: how many sounds, and the columns.
 pub(in crate::ui) const RESULTS_HEADER: f32 = 20.0;
 /// Height of the strip along the bottom that shows the chosen sound.
-pub(in crate::ui) const PREVIEW_HEIGHT: f32 = 104.0;
+pub(in crate::ui) const PREVIEW_HEIGHT: f32 = 124.0;
 /// How far a level of the folder tree is set in.
 const INDENT: f32 = 12.0;
 /// Widths of the columns at the right of a row: length, tempo, key, and
 /// the favorite mark.
-const LENGTH_COLUMN: f32 = 44.0;
-const TEMPO_COLUMN: f32 = 30.0;
-const KEY_COLUMN: f32 = 32.0;
-const STAR_COLUMN: f32 = 20.0;
+const LENGTH_COLUMN: f32 = 46.0;
+const TEMPO_COLUMN: f32 = 28.0;
+const KEY_COLUMN: f32 = 31.0;
+const STAR_COLUMN: f32 = 18.0;
 /// The share of the tab the folder tree may take before it scrolls.
 const TREE_SHARE: f32 = 0.3;
 /// How close to the song's tempo "song tempo" means, in beats per minute.
@@ -836,14 +836,10 @@ fn sound_row(ui: &mut Ui, cx: &mut Cx, id: egui::Id, rect: Rect, sound: &SoundRo
             right -= width;
         }
         let name = Rect::from_min_max(pos2(rect.left() + EDGE + 16.0, rect.top()), pos2(right - 4.0, rect.bottom()));
-        text::paint(
-            painter,
-            name,
-            Align2::LEFT_CENTER,
-            theme.text.body,
-            &sound.name,
-            if lit { theme.ink } else { theme.ink_dim },
-        );
+        // Packs name their files alike at the start; what tells two rows
+        // apart is further on, so a name too long loses its middle.
+        let ink = if lit { theme.ink } else { theme.ink_dim };
+        text::paint_name(painter, name, Align2::LEFT_CENTER, theme.text.body, &sound.name, ink);
     }
 
     if response.hovered() {
@@ -852,6 +848,14 @@ fn sound_row(ui: &mut Ui, cx: &mut Cx, id: egui::Id, rect: Rect, sound: &SoundRo
             sound.name
         ));
     }
+    // The whole name and where the file is, for a row too narrow to say.
+    let response = response.on_hover_ui(|ui| {
+        ui.set_max_width(420.0);
+        ui.label(egui::RichText::new(&sound.name).color(theme.ink));
+        if let Some(folder) = sound.path.parent() {
+            ui.label(egui::RichText::new(folder.display().to_string()).color(theme.ink_dim));
+        }
+    });
     cx.hint(&star_response, if favorite { "A favorite \u{00B7} click to unmark" } else { "Mark as a favorite" });
     if star_response.clicked() {
         toggle_favorite(cx, &sound.path, favorite);
@@ -985,13 +989,21 @@ fn preview_strip(ui: &mut Ui, cx: &mut Cx, area: Rect) {
     painter.rect_filled(area, 0.0, theme.bg);
     paint::hline(&painter, area.x_range(), area.top(), theme.hairline);
     let inner = area.shrink2(vec2(EDGE, 0.0));
+    // From the top: the name, the waveform, what is known about the file,
+    // and how previews are played.
     let top_line = Rect::from_min_size(pos2(inner.left(), area.top() + 6.0), vec2(inner.width(), 18.0));
+    let controls =
+        Rect::from_min_max(pos2(inner.left(), area.bottom() - 24.0), pos2(inner.right(), area.bottom() - 6.0));
+    let facts_line =
+        Rect::from_min_max(pos2(inner.left(), controls.top() - 19.0), pos2(inner.right(), controls.top() - 3.0));
+    let wave =
+        Rect::from_min_max(pos2(inner.left(), top_line.bottom() + 5.0), pos2(inner.right(), facts_line.top() - 2.0));
 
     // Auto-preview and the volume are there whether or not a sound is.
     let auto = cx.state.browser.sounds.auto_preview;
     let spec = Chip::new("Auto", auto).named("Preview on selection");
     let width = spec.width(ui, theme);
-    let auto_rect = Rect::from_min_size(pos2(top_line.right() - width, top_line.top()), vec2(width, theme.metric.chip));
+    let auto_rect = Rect::from_min_size(pos2(controls.right() - width, controls.top()), vec2(width, theme.metric.chip));
     let response = trill_noir::chip(ui, theme, auto_rect, id.with("auto"), &spec);
     cx.hint(&response, "Play a sound as soon as it is selected");
     if response.clicked() {
@@ -1000,11 +1012,8 @@ fn preview_strip(ui: &mut Ui, cx: &mut Cx, area: Rect) {
     let gain = cx.state.browser.sounds.preview_gain_db;
     let (low, high) = PREVIEW_GAIN;
     let shown = units::format_db(gain);
-    let volume = Rect::from_min_max(
-        pos2(auto_rect.left() - 3.0 - 62.0, top_line.top()),
-        pos2(auto_rect.left() - 3.0, top_line.top() + theme.metric.bar),
-    );
-    let bar = Bar::compact("Preview volume", &shown, (gain - low) / (high - low)).default((-6.0 - low) / (high - low));
+    let volume = Rect::from_min_max(controls.min, pos2(auto_rect.left() - 3.0, controls.top() + theme.metric.bar));
+    let bar = Bar::new("Preview volume", &shown, (gain - low) / (high - low)).default((-6.0 - low) / (high - low));
     let output = trill_noir::bar(ui, theme, volume, id.with("volume"), &bar);
     cx.hint(
         &output.response,
@@ -1016,20 +1025,10 @@ fn preview_strip(ui: &mut Ui, cx: &mut Cx, area: Rect) {
     }
 
     let Some(path) = cx.state.browser.sounds.selected.clone() else {
-        let room = Rect::from_min_max(pos2(inner.left(), top_line.top()), pos2(volume.left() - 6.0, top_line.bottom()));
-        text::paint(&painter, room, Align2::LEFT_CENTER, theme.text.caps, "Preview", theme.ink_faint);
-        let wave = wave_rect(area, inner);
+        text::paint(&painter, top_line, Align2::LEFT_CENTER, theme.text.caps, "Preview", theme.ink_faint);
         paint::hline(&painter, wave.x_range(), wave.center().y, theme.ghost);
-        let line =
-            Rect::from_min_max(pos2(inner.left(), wave.bottom() + 2.0), pos2(inner.right(), area.bottom() - 4.0));
-        text::paint(
-            &painter,
-            line,
-            Align2::LEFT_CENTER,
-            theme.text.micro,
-            "Select a sound to hear it",
-            theme.ink_faint,
-        );
+        let words = "Select a sound to hear it";
+        text::paint(&painter, facts_line, Align2::LEFT_CENTER, theme.text.micro, words, theme.ink_faint);
         return;
     };
     let playing = cx.sounds.preview.position(&path);
@@ -1048,17 +1047,13 @@ fn preview_strip(ui: &mut Ui, cx: &mut Cx, area: Rect) {
     if response.clicked() {
         toggle_preview(cx, &path, playing.is_some() || loading);
     }
-    let name =
-        Rect::from_min_max(pos2(button.right() + 6.0, top_line.top()), pos2(volume.left() - 6.0, top_line.bottom()));
-    text::paint(&painter, name, Align2::LEFT_CENTER, theme.text.body, &file_stem(&path), theme.ink);
+    let name = Rect::from_min_max(pos2(button.right() + 6.0, top_line.top()), top_line.max);
+    text::paint_name(&painter, name, Align2::LEFT_CENTER, theme.text.body, &file_stem(&path), theme.ink);
 
-    let wave = wave_rect(area, inner);
     let response = ui.interact(wave, id.with("wave"), Sense::click_and_drag());
     response.widget_info(|| WidgetInfo::labeled(Role::Button, true, "Preview waveform"));
     cx.hint(&response, "Click to play \u{00B7} drag into the song, onto a sampler or onto a pad");
     let state = cx.sounds.wave(&path.to_string_lossy());
-    let facts_line =
-        Rect::from_min_max(pos2(inner.left(), wave.bottom() + 2.0), pos2(inner.right(), area.bottom() - 4.0));
     match &state {
         WaveState::Ready(data) => {
             let columns = trill_noir::waveform_columns(&painter, wave.width());
@@ -1108,11 +1103,6 @@ fn preview_strip(ui: &mut Ui, cx: &mut Cx, area: Rect) {
     } else if response.clicked() {
         toggle_preview(cx, &path, playing.is_some() || loading);
     }
-}
-
-/// Where the waveform sits in the strip.
-fn wave_rect(area: Rect, inner: Rect) -> Rect {
-    Rect::from_min_max(pos2(inner.left(), area.top() + 30.0), pos2(inner.right(), area.bottom() - 22.0))
 }
 
 fn toggle_preview(cx: &mut Cx, path: &Path, sounding: bool) {

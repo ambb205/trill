@@ -313,7 +313,7 @@ fn folders_are_added_browsed_rescanned_and_removed() {
     let mut harness = Harness::new(sounds_tab(), |_| {});
     assert!(harness.is_on_screen("Add folder\u{2026}"));
     harness.add_pack(&pack);
-    assert_eq!(harness.runtime.library.roots(), [pack.root.clone()]);
+    assert_eq!(harness.runtime.library.roots(), std::slice::from_ref(&pack.root));
     assert!(!harness.is_on_screen("Add folder\u{2026}"));
     assert!(harness.is_on_screen("All folders") && harness.is_on_screen("Test Pack"));
     assert_eq!(harness.app.state().toasts.len(), 1, "adding a folder is confirmed");
@@ -932,7 +932,12 @@ fn nothing_is_decoded_on_the_ui_thread() {
     harness.click(harness.lane(1.0, 0));
     harness.carry_sound("HH Closed", harness.lane(26.0, 0));
     harness.drag_end(harness.lane(26.0, 0));
-    harness.step_with_files(Modifiers::NONE, vec![Event::PointerMoved(harness.lane(29.0, 0))], &[], &[fresh.clone()]);
+    harness.step_with_files(
+        Modifiers::NONE,
+        vec![Event::PointerMoved(harness.lane(29.0, 0))],
+        &[],
+        std::slice::from_ref(&fresh),
+    );
     harness.wheel(Modifiers::COMMAND, harness.lane(8.0, 0), 2.0);
     harness.wheel(Modifiers::NONE, harness.lane(8.0, 0), -3.0);
     harness.idle(30);

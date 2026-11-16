@@ -98,6 +98,7 @@ impl Work {
 
     /// True while nothing is queued or running. What finished may still be
     /// waiting to be collected.
+    #[cfg(test)]
     pub fn is_idle(&self) -> bool {
         let queue = self.shared.queue.lock();
         queue.urgent.is_empty() && queue.bulk.is_empty() && queue.running == 0

@@ -31,7 +31,7 @@ pub const DRUM_RACK: &str = "builtin:drumrack";
 /// Width of the sampler's column that shows its file.
 pub(super) const SAMPLE_COLUMN: f32 = 230.0;
 /// Size of a pad of the drum rack, and the space between pads.
-pub(super) const PAD: egui::Vec2 = egui::Vec2::new(88.0, 56.0);
+pub(super) const PAD: egui::Vec2 = egui::Vec2::new(102.0, 56.0);
 pub(super) const PAD_GAP: f32 = 3.0;
 const PADS_ACROSS: usize = 4;
 /// Width of the column of the selected pad's controls, and of the rack's.
@@ -153,7 +153,7 @@ pub(super) fn sampler_sample(ui: &mut Ui, cx: &mut Cx, body: &Body, column: Rect
             }
             let room = name_row.with_max_x(clear.left() - 4.0);
             let ink = if body.dimmed { fade(theme.ink, theme.disabled) } else { theme.ink };
-            text::paint(&painter, room, Align2::LEFT_CENTER, theme.text.body, &file_stem(Path::new(path)), ink);
+            text::paint_name(&painter, room, Align2::LEFT_CENTER, theme.text.body, &file_stem(Path::new(path)), ink);
         }
         None => {
             text::paint(&painter, name_row, Align2::LEFT_CENTER, theme.text.body, "No sample", theme.ink_faint);
@@ -373,22 +373,19 @@ fn pad(ui: &mut Ui, cx: &mut Cx, body: &Body, rect: Rect, note: u8, selected: bo
         // The file, or that there is none.
         let line = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 18.0), inner.max);
         let failed = file.as_ref().is_some_and(|file| file.problem.is_some());
-        match &name {
-            Some(name) => {
-                let style = trill_noir::TextStyle { size: 12.0, ..theme.text.body };
-                let ink = match (failed, body.dimmed) {
-                    (true, _) => theme.warn,
-                    (false, true) => fade(theme.ink, theme.disabled),
-                    (false, false) => theme.ink,
-                };
-                text::paint(&painter, line, Align2::LEFT_CENTER, style, name, ink);
-                // A loaded pad carries the track's color.
-                let accent = if body.dimmed { fade(body.accent, theme.disabled) } else { body.accent };
-                let strip = Rect::from_min_max(pos2(rect.left(), rect.bottom() - 2.0), rect.max);
-                painter.rect_filled(strip, 0.0, if failed { theme.warn } else { accent });
-            }
-            // An empty pad says so by having nothing on it.
-            None => {}
+        // An empty pad says so by having nothing on it.
+        if let Some(name) = &name {
+            let style = trill_noir::TextStyle { size: 12.0, ..theme.text.body };
+            let ink = match (failed, body.dimmed) {
+                (true, _) => theme.warn,
+                (false, true) => fade(theme.ink, theme.disabled),
+                (false, false) => theme.ink,
+            };
+            text::paint_name(&painter, line, Align2::LEFT_CENTER, style, name, ink);
+            // A loaded pad carries the track's color.
+            let accent = if body.dimmed { fade(body.accent, theme.disabled) } else { body.accent };
+            let strip = Rect::from_min_max(pos2(rect.left(), rect.bottom() - 2.0), rect.max);
+            painter.rect_filled(strip, 0.0, if failed { theme.warn } else { accent });
         }
     }
 

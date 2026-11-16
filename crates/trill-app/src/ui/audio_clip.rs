@@ -20,8 +20,11 @@ use trill_core::project::{AudioContent, ClipContent, MAX_TEMPO, MAX_TRANSPOSE, M
 use trill_core::{Clip, ClipId, EditError, Project, Track};
 use trill_noir::{Bar, Chip, NumberField, Theme, fade, paint, text};
 
-/// Height of the row of warp controls.
+/// Height of a row of the warp controls.
 pub(super) const TOOLBAR: f32 = 30.0;
+/// The width below which the warp controls take two rows: the modes on
+/// the first, the source tempo and the transposition on the second.
+const TOOLBAR_ONE_ROW: f32 = 760.0;
 /// Height of the ruler above the waveform.
 const RULER: f32 = 18.0;
 /// Height of the line under the waveform that names the file.
@@ -32,6 +35,9 @@ const GAIN: (f32, f32) = (-36.0, 24.0);
 const CLOSEST: f64 = 0.004;
 /// Points along a fade's curve.
 const FADE_STEPS: usize = 24;
+
+/// Picks the range of one channel, or of the mix, out of a column.
+type Channel = fn(&trill_media::PeakColumn) -> (f32, f32);
 
 const WARP_MODES: [(WarpMode, &str, &str); 4] = [
     (WarpMode::Off, "Off", "Plays at the speed and pitch it was recorded at, whatever the song\u{2019}s tempo"),
@@ -162,7 +168,8 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, track: &Track, clip: &Clip, audio: 
     let theme = cx.theme;
     let painter = ui.painter_at(area);
     painter.rect_filled(area, 0.0, theme.bg);
-    let toolbar_rect = Rect::from_min_size(area.min, vec2(area.width(), TOOLBAR));
+    let rows = if area.width() < TOOLBAR_ONE_ROW { 2.0 } else { 1.0 };
+    let toolbar_rect = Rect::from_min_size(area.min, vec2(area.width(), rows * TOOLBAR - (rows - 1.0) * 6.0));
     painter.rect_filled(toolbar_rect, 0.0, theme.panel);
     paint::hline_above(&painter, toolbar_rect.x_range(), toolbar_rect.bottom(), theme.hairline);
     let state = cx.sounds.wave(&audio.path);
@@ -201,15 +208,16 @@ fn toolbar(ui: &mut Ui, cx: &mut Cx, clip: &Clip, audio: &AudioContent, state: &
     let id = ui.scope_id().with("audio-toolbar");
     let clip_id = clip.id;
     let chip = theme.metric.chip;
-    let top = (bar.center().y - chip / 2.0).round();
+    let two_rows = bar.height() > TOOLBAR;
+    let mut top = bar.top() + ((TOOLBAR - chip) / 2.0).round();
     let painter = ui.painter().clone();
     let mut x = bar.left() + 12.0;
-    let label = |x: &mut f32, word: &str| {
-        let room = Rect::from_min_max(pos2(*x, bar.top()), bar.max);
+    let label = |x: &mut f32, top: f32, word: &str| {
+        let room = Rect::from_min_max(pos2(*x, top), pos2(bar.right(), top + chip));
         *x += text::paint(&painter, room, Align2::LEFT_CENTER, theme.text.micro, word, theme.ink_faint) + 6.0;
     };
 
-    label(&mut x, "Warp");
+    label(&mut x, top, "Warp");
     let labels: Vec<&str> = WARP_MODES.iter().map(|(_, label, _)| *label).collect();
     let current = WARP_MODES.iter().position(|(mode, ..)| *mode == audio.warp);
     let width = trill_noir::chip_row_width(ui, theme, &labels);
@@ -245,6 +253,13 @@ fn toolbar(ui: &mut Ui, cx: &mut Cx, clip: &Clip, audio: &AudioContent, state: &
         }
     }
     x += width + 14.0;
+    // In a narrow tab what is going on with the clip is said here, after
+    // the modes, and the rest moves to a row of its own.
+    let status_room = Rect::from_min_max(pos2(x, top), pos2(bar.right() - 12.0, top + chip));
+    if two_rows {
+        x = bar.left() + 12.0;
+        top += TOOLBAR - 6.0;
+    }
 
     // The tempo of the recording: what a warped clip follows the song with.
     let warped = audio.warp != WarpMode::Off;
@@ -327,7 +342,8 @@ fn toolbar(ui: &mut Ui, cx: &mut Cx, clip: &Clip, audio: &AudioContent, state: &
     x = rect.right() + 16.0;
 
     // What is going on with the clip, at the right.
-    let room = Rect::from_min_max(pos2(x, bar.top()), pos2(bar.right() - 12.0, bar.bottom()));
+    let room =
+        if two_rows { status_room } else { Rect::from_min_max(pos2(x, top), pos2(bar.right() - 12.0, top + chip)) };
     let problem = cx.snap.clip_problems.get(&clip.id);
     let stretched = warped && audio.source_tempo.is_some();
     if matches!(state, WaveState::Failed(_)) {
@@ -396,7 +412,8 @@ fn file_row(ui: &mut Ui, cx: &mut Cx, clip: &Clip, audio: &AudioContent, state: 
     let content = Rect::from_min_max(pos2(row.left() + 12.0, row.top()), pos2(right - 8.0, row.bottom()));
     // A file name keeps its case: it is a name, not a label.
     let name_style = trill_noir::TextStyle { size: 12.0, ..theme.text.body };
-    let used = text::paint(&painter, content, Align2::LEFT_CENTER, name_style, &file_name(&path), theme.ink_dim);
+    let name_room = content.with_max_x(content.left() + content.width() * 0.6);
+    let used = text::paint_name(&painter, name_room, Align2::LEFT_CENTER, name_style, &file_name(&path), theme.ink_dim);
     let rest = content.with_min_x(content.left() + used + 12.0);
     let (words, color) = match state {
         WaveState::Ready(wave) => (browser::facts(&wave.facts), theme.ink_faint),
@@ -577,7 +594,7 @@ fn waveform(
         second >= clip_start && second < clip_end
     };
     let stereo = wave.facts.channels >= 2 && body.height() >= 110.0;
-    let lanes: Vec<(Rect, fn(&trill_media::PeakColumn) -> (f32, f32))> = if stereo {
+    let lanes: Vec<(Rect, Channel)> = if stereo {
         let (upper, lower) = body.split_top_bottom_at_fraction(0.5);
         paint::hline(&painter, body.x_range(), upper.bottom(), theme.hairline);
         vec![

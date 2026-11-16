@@ -733,6 +733,18 @@ fn clip_menu(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, clip: ClipId, beat: 
     if item(ui, "Zoom to the selection", Command::ZoomToSelection) {
         super::zoom_to_selection(ui.ctx(), cx);
     }
+    // An audio clip's file: to hear it on its own, or to carry it from the
+    // browser onto a pad or into a sampler.
+    let file = cx.snap.clip(clip).and_then(|(_, clip)| clip.audio()).map(|audio| std::path::PathBuf::from(&audio.path));
+    if let Some(file) = file {
+        trill_noir::menu_separator(ui, theme);
+        if MenuItem::new("Show its file in the browser").show(ui, theme).clicked() {
+            crate::ui::browser::choose_file(cx, file.clone());
+        }
+        if MenuItem::new("Show its file in the file manager").show(ui, theme).clicked() {
+            crate::ui::browser::reveal(cx, file);
+        }
+    }
 }
 
 fn lane_menu(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: Option<TrackId>, beat: Beats) {

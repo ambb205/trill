@@ -176,8 +176,11 @@ impl Waves {
         self.slots.borrow().get(path).and_then(|slot| slot.state.ready().cloned())
     }
 
-    pub fn has_requests(&self) -> bool {
-        !self.wanted.borrow().is_empty()
+    /// Whether a file is being read for the first time: something on
+    /// screen is still a placeholder. A file that failed and is being
+    /// tried again does not count; that goes on for as long as it is shown.
+    pub fn is_loading(&self) -> bool {
+        self.slots.borrow().values().any(|slot| matches!(slot.state, WaveState::Loading))
     }
 
     /// The files asked for since the last call, and the start of a new
@@ -270,16 +273,19 @@ mod tests {
         let mut waves = Waves::default();
         assert!(matches!(waves.get("a.wav"), WaveState::Loading));
         assert!(matches!(waves.get("a.wav"), WaveState::Loading));
-        assert!(waves.has_requests());
+        assert!(waves.is_loading());
         assert_eq!(waves.take_requests(), ["a.wav"]);
+        assert!(waves.is_loading(), "until the answer is in");
         assert!(waves.take_requests().is_empty(), "asked once, however often it is drawn");
         assert!(waves.peek("a.wav").is_none());
 
         waves.store("a.wav", Err("gone".into()));
         assert_eq!(waves.get("a.wav").failure(), Some("gone"));
+        assert!(!waves.is_loading());
         assert!(waves.take_requests().is_empty(), "not again straight away");
         waves.slots.get_mut().get_mut("a.wav").unwrap().retry_at = Some(Instant::now());
         assert_eq!(waves.get("a.wav").failure(), Some("gone"), "the old answer stands while it is retried");
+        assert!(!waves.is_loading(), "a retry is not a placeholder on screen");
         assert_eq!(waves.take_requests(), ["a.wav"]);
 
         waves.store("a.wav", Ok(Arc::new(WaveData::of(&step(), facts(1.0)))));

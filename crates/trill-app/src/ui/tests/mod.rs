@@ -100,6 +100,17 @@ impl Harness {
             ..Default::default()
         };
         self.app.tick(&self.ctx);
+        // The window never waits for the session: if something else holds
+        // it for a moment (the runtime's housekeeping does, a few times a
+        // second), a frame is painted from what the window already has. A
+        // test's next click must land on what the session holds now, so
+        // here the window is given the time to catch up.
+        let mut tries = 0;
+        while self.app.snapshot().revision != self.session.lock().revision() && tries < 10_000 {
+            std::thread::yield_now();
+            self.app.tick(&self.ctx);
+            tries += 1;
+        }
         let mut output = self.ctx.run_ui(input, |ui| self.app.frame(ui));
         // Nothing is drawn, so the font atlas updates have nowhere to go.
         output.textures_delta.clear();

@@ -224,6 +224,19 @@ const GESTURES: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "Sounds",
+        &[
+            ("Click a sound", "Hear it; Esc stops it"),
+            ("Arrows", "Move through the list"),
+            ("Enter or Space", "Play it again"),
+            ("Type", "Search"),
+            ("Drag onto a track", "An audio clip where it lands"),
+            ("Drag below the tracks", "A new audio track"),
+            ("Drag onto a pad or a sampler", "It plays that sound"),
+            ("Double-click", "Add at the edit cursor"),
+        ],
+    ),
+    (
         "Ruler and view",
         &[
             ("Click the ruler", "Move the edit cursor"),
