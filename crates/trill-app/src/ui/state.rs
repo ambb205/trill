@@ -2,6 +2,7 @@
 //! zoom, which tab is open) and [`Cx`], the bundle every view is handed.
 
 use super::assistant::Assistant;
+use super::audio_settings::Settings;
 use super::editors::Editors;
 use super::files::Jobs;
 use super::keyboard::Keyboard;
@@ -19,7 +20,7 @@ use trill_core::{
     AutomationPoint, AutomationTarget, Beats, ChainRef, Clip, ClipId, DeviceId, EditError, Note, Project, TrackId,
     TrackKind,
 };
-use trill_engine::{Session, SessionError, SharedSession};
+use trill_engine::{AudioConfig, Session, SessionError, SharedSession, StreamInfo};
 use trill_noir::Theme;
 
 /// The tabs of the detail panel.
@@ -873,13 +874,50 @@ pub fn lane_owner(project: &Project, target: &AutomationTarget) -> Option<LaneOw
     }
 }
 
-/// The audio output, as it was when the engine started.
+/// The audio stream as it is: what was asked of the hardware and what is
+/// running. The window's own copy, read again whenever the session says
+/// the stream changed, so that nothing on screen has to ask the session.
+#[derive(Clone, Debug, PartialEq)]
 pub struct AudioSummary {
-    /// Name and sample rate of the output, as the engine describes it.
-    pub output: String,
-    pub sample_rate: f64,
-    /// Set when no audio device could be opened and nothing will be heard.
-    pub warning: Option<String>,
+    /// What was asked for, which is what the settings keep.
+    pub config: AudioConfig,
+    /// The stream that is running, with the sentence that says why it is
+    /// not what was asked for, when it is not.
+    pub info: StreamInfo,
+    /// How long after the engine renders a frame it is heard, in
+    /// milliseconds, as the device reports it. Steadied: the device's
+    /// figure moves a little all the time, and a number that flickers in
+    /// its last digit says nothing.
+    pub latency_ms: f64,
+    /// The session's count of changes to the stream when this was read.
+    pub revision: u64,
+}
+
+impl AudioSummary {
+    /// How far the device's figure has to move before the one shown does.
+    const LATENCY_STEP_MS: f64 = 0.3;
+
+    pub fn of(session: &Session) -> Self {
+        Self {
+            config: session.audio_config().clone(),
+            info: session.audio_info().clone(),
+            latency_ms: session.output_latency_ms(),
+            revision: session.audio_revision(),
+        }
+    }
+
+    /// Takes in the latency the device reports now.
+    pub fn hear_latency(&mut self, latency_ms: f64) {
+        if (latency_ms - self.latency_ms).abs() >= Self::LATENCY_STEP_MS {
+            self.latency_ms = latency_ms;
+        }
+    }
+
+    /// True when nothing can be heard: a device was wanted and none could
+    /// be opened. A run that was asked to go without one is not that.
+    pub fn silent(&self) -> bool {
+        self.info.device.is_none() && self.info.warning.is_some()
+    }
 }
 
 /// How long an auditioned note sounds when triggered by a click.
@@ -913,6 +951,8 @@ pub struct Cx<'a> {
     pub assistant: &'a mut Assistant,
     /// The computer keyboard, played as an instrument.
     pub keyboard: &'a mut Keyboard,
+    /// The Audio and MIDI panel.
+    pub settings: &'a mut Settings,
 }
 
 impl Cx<'_> {

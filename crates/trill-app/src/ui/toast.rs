@@ -65,6 +65,12 @@ impl Toasts {
         self.items.len()
     }
 
+    /// What the messages on show say, oldest first.
+    #[cfg(test)]
+    pub fn texts(&self) -> Vec<&str> {
+        self.items.iter().map(|toast| toast.text.as_str()).collect()
+    }
+
     /// Paints the messages, newest at the bottom, above `bottom_right`.
     /// Click a message to dismiss it.
     pub fn show(&mut self, ctx: &egui::Context, theme: &Theme, bottom_right: egui::Pos2) {

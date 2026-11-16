@@ -1,10 +1,11 @@
 //! Command-line options.
 
+use crate::audio_scene::AudioScene;
 use crate::ui::{AssistantOptions, AssistantScene, BrowserTab, DetailTab, KeyboardOptions, UiOptions};
 use anyhow::{Context, anyhow, bail};
 use std::path::PathBuf;
 use std::time::Duration;
-use trill_core::{ClipId, Project};
+use trill_core::{ClipId, Project, TrackId};
 use trill_engine::AudioBackend;
 use trill_plugins::Scanner;
 use trill_runtime::{RuntimeOptions, Storage};
@@ -40,9 +41,16 @@ Options:
   --assistant-scene <NAME>    Show a canned conversation in the assistant, for screenshots: ready, working,
                           answered, markdown, model, limit, api-key, signed-out or not-installed
   --keyboard              Start with the computer keyboard playing notes (Ctrl+K switches it)
+  --arm <TRACK NAME>      Arm this track at startup; may be given several times
+  --record                Start recording on the armed tracks when the window opens (F9 does it)
+  --settings              Start with the Audio and MIDI panel open (Ctrl+, shows it)
+  --audio-scene <NAME>    Show made-up audio and MIDI devices in that panel, for screenshots:
+                          studio, fallback or none
   --hold <KEYS>           Hold these keys of it down, for screenshots: adg is a C major chord, and
                           zzat a kick and a hat two octaves down
   --screenshot <PATH.png> Render the window to a PNG and exit (implies --null-audio)
+  --real-audio            With --screenshot: open this machine's audio output and MIDI inputs
+                          all the same, to see the window on real hardware (nothing is played)
   --exit-after <SECONDS>  Close the window by itself after this long
   -h, --help              Show this help
 ";
@@ -87,7 +95,17 @@ pub struct Cli {
     pub assistant_scene: Option<AssistantScene>,
     /// How the computer keyboard starts, when not as it was left.
     pub keyboard: KeyboardOptions,
+    /// Names of tracks to arm at startup.
+    pub arm: Vec<String>,
+    /// Start a take when the window opens.
+    pub record: bool,
+    /// Open the Audio and MIDI panel.
+    pub settings: bool,
+    /// Made-up audio and MIDI devices to show in it.
+    pub audio_scene: Option<AudioScene>,
     pub screenshot: Option<PathBuf>,
+    /// With a screenshot: open the machine's own devices all the same.
+    pub real_audio: bool,
     pub exit_after: Option<Duration>,
 }
 
@@ -108,6 +126,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
             "--demo" => cli.demo = true,
             "--play" => cli.play = true,
             "--null-audio" => cli.null_audio = true,
+            "--real-audio" => cli.real_audio = true,
             "--no-plugins" => cli.no_plugins = true,
             "--no-mcp" => cli.no_mcp = true,
             "--no-browser" => cli.no_browser = true,
@@ -122,6 +141,17 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
                 );
             }
             "--keyboard" => cli.keyboard.on = true,
+            "--arm" => cli.arm.push(value("a track name")?),
+            "--record" => cli.record = true,
+            "--settings" => cli.settings = true,
+            "--audio-scene" => {
+                let name = value("the name of a scene")?;
+                let known: Vec<&str> = AudioScene::ALL.iter().map(|(name, _)| *name).collect();
+                let scene = AudioScene::named(&name);
+                cli.audio_scene = Some(
+                    scene.with_context(|| format!("unknown scene '{name}' (expected one of {})", known.join(", ")))?,
+                );
+            }
             "--hold" => {
                 let keys = value("the keys to hold")?;
                 cli.keyboard.hold = KeyboardOptions::holding(&keys).map_err(|reason| anyhow!(reason))?;
@@ -199,9 +229,10 @@ fn parse_size(text: &str) -> anyhow::Result<[f32; 2]> {
 }
 
 impl Cli {
-    /// Screenshots run without audio hardware so they work on any machine.
+    /// Screenshots run without audio hardware so they work on any machine;
+    /// `--real-audio` is for the one that is to show this machine's.
     pub fn audio_backend(&self) -> AudioBackend {
-        if self.null_audio || self.screenshot.is_some() {
+        if self.null_audio || (self.screenshot.is_some() && !self.real_audio) {
             AudioBackend::Null { sample_rate: 48_000 }
         } else {
             AudioBackend::Auto
@@ -283,7 +314,18 @@ impl Cli {
                 mcp_off: self.mcp_address().is_none(),
             },
             keyboard: self.keyboard.clone(),
+            show_settings: self.settings,
+            record: self.record,
         }
+    }
+
+    /// The tracks `--arm` names.
+    pub fn tracks_to_arm(&self, project: &Project) -> anyhow::Result<Vec<TrackId>> {
+        let named = |name: &String| {
+            let track = project.tracks.iter().find(|track| track.name == *name);
+            track.map(|track| track.id).with_context(|| format!("no track is named '{name}'"))
+        };
+        self.arm.iter().map(named).collect()
     }
 }
 
@@ -501,6 +543,48 @@ mod tests {
         let error = run(&["--hold", "aq"]).unwrap_err().to_string();
         assert!(error.contains("'q'"), "{error}");
         assert!(USAGE.contains("--keyboard") && USAGE.contains("--hold"));
+    }
+
+    #[test]
+    fn arming_recording_and_the_audio_panel_can_be_asked_for_at_startup() {
+        let plain = run(&[]).unwrap();
+        assert!(plain.arm.is_empty() && !plain.record && !plain.settings && plain.audio_scene.is_none());
+        let options = plain.ui_options();
+        assert!(!options.record && !options.show_settings);
+
+        let cli =
+            run(&["--arm", "Keys", "--arm", "Bass", "--record", "--settings", "--audio-scene", "studio"]).unwrap();
+        assert_eq!(cli.audio_scene, Some(AudioScene::Studio));
+        let options = cli.ui_options();
+        assert!(options.record && options.show_settings);
+        let mut project = Project::new("t");
+        let keys = project.add_track("Keys");
+        let bass = project.add_track("Bass");
+        assert_eq!(cli.tracks_to_arm(&project).unwrap(), [keys, bass]);
+        let error = run(&["--arm", "Tuba"]).unwrap().tracks_to_arm(&project).unwrap_err().to_string();
+        assert!(error.contains("Tuba"), "{error}");
+        for (name, scene) in AudioScene::ALL {
+            assert_eq!(run(&["--audio-scene", name]).unwrap().audio_scene, Some(scene));
+            assert!(USAGE.contains(name), "the help does not list the scene '{name}'");
+        }
+        let error = run(&["--audio-scene", "stadium"]).unwrap_err().to_string();
+        assert!(error.contains("stadium") && error.contains("fallback"), "{error}");
+        assert!(run(&["--arm"]).is_err() && run(&["--audio-scene"]).is_err());
+    }
+
+    #[test]
+    fn a_picture_shows_this_machines_devices_only_when_asked_to() {
+        let null = AudioBackend::Null { sample_rate: 48_000 };
+        assert_eq!(run(&["--screenshot", "out.png", "--settings"]).unwrap().audio_backend(), null);
+        let real = run(&["--screenshot", "out.png", "--settings", "--real-audio"]).unwrap();
+        assert_eq!(real.audio_backend(), AudioBackend::Auto);
+        // Still nothing of the user's: no plugins, no settings, no server.
+        assert!(!real.plugins_enabled() && real.mcp_address().is_none());
+        assert_eq!(real.runtime_options().storage, Storage::Nowhere);
+        // And the switch that turns audio off wins over it.
+        assert_eq!(run(&["--screenshot", "out.png", "--real-audio", "--null-audio"]).unwrap().audio_backend(), null);
+        assert_eq!(run(&["--real-audio"]).unwrap().audio_backend(), AudioBackend::Auto, "without a picture, as ever");
+        assert!(USAGE.contains("--real-audio"));
     }
 
     #[test]

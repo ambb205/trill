@@ -16,7 +16,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use trill_core::project::AutomationLane;
 use trill_core::{AutomationPoint, AutomationTarget, Beats, Clip, ClipId, DeviceId, Note, Project, Track, TrackId};
-use trill_engine::{Meter, ParamState, Problem, SampleFile, Session};
+use trill_engine::{Meter, ParamState, Problem, RecordStatus, SampleFile, Session};
 
 /// What a MIDI clip plays, as the arrangement draws it.
 pub struct ClipNotes {
@@ -264,6 +264,13 @@ pub struct Live {
     /// The devices whose own windows are open right now. Asked of the
     /// session every time: the user closes them without telling anyone.
     pub open_editors: Vec<DeviceId>,
+    /// The armed tracks, in the order they were armed: where keyboards
+    /// play and what a take records. The session's, not the project's.
+    pub armed: Vec<TrackId>,
+    /// The take being counted in or recorded, while one is.
+    pub take: Option<RecordStatus>,
+    /// Bars of count-in before a take that starts from a stopped song.
+    pub count_in: u32,
     pub master: MeterState,
     tracks: HashMap<TrackId, MeterState>,
 }
@@ -279,6 +286,15 @@ impl Live {
     pub fn update_editors(&mut self, snapshot: &Snapshot, session: &Session) {
         self.open_editors.clear();
         self.open_editors.extend(snapshot.editors.iter().copied().filter(|id| session.is_device_editor_open(*id)));
+    }
+
+    /// Reads what is armed and whether a take is running.
+    pub fn update_recording(&mut self, session: &Session) {
+        if self.armed != session.armed() {
+            self.armed = session.armed().to_vec();
+        }
+        self.take = session.is_recording().then(|| session.record_status());
+        self.count_in = session.count_in();
     }
 
     pub fn track_meter(&self, id: TrackId) -> MeterState {

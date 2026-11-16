@@ -1,9 +1,19 @@
 //! The computer keyboard as an instrument: while it is switched on, the two
-//! middle rows of letters play the selected track.
+//! middle rows of letters play like a MIDI keyboard.
 //!
 //! [`keys`] runs first in a frame, before anything else reads the keyboard,
-//! and sends each note to the session there and then: a key event and its
-//! note are in the same frame, with nothing queued between them.
+//! and sends each note to the audio thread there and then, through the same
+//! way in a MIDI port uses ([`LiveSender`]): nothing is queued between a
+//! key event and its note, and no lock is waited for, so a session that is
+//! busy with something else (a save, an edit from an assistant, a change of
+//! audio device) does not hold a note up or freeze the window under it.
+//!
+//! **Where the keys play** is where any keyboard plays, by the session's own
+//! rule: the armed tracks, or the selected track when none is armed. The
+//! notes are sent to each of those tracks by name, so every one of them has
+//! an end this module owns, whatever else is being played beside it. While
+//! a take is recorded on those tracks they are recorded like a MIDI
+//! keyboard's.
 //!
 //! **The rule for letters.** While the keyboard is on, a letter it uses is a
 //! note, and the shortcut that letter had is the same letter with Alt held
@@ -15,13 +25,14 @@
 //! **No note is left sounding.** Every note that is started is written down
 //! in [`Keyboard::sounding`] and every way of stopping goes through that
 //! list, so a note cannot be started and forgotten. Notes stop when their
-//! key comes up; and all of them stop when the keyboard is switched off,
-//! when what they play changes (another track selected, the track or its
-//! instrument gone, another project), when a text field, a dialog or the
-//! list of sounds takes the keyboard, when the window is no longer the one
-//! typed into, and when the program exits. An octave change lets go of the
-//! keys held through it. The sustain key keeps notes whose keys came up,
-//! until it comes up itself.
+//! key comes up; a track's notes stop when the keys no longer play it
+//! (another track selected, a track armed or disarmed, the track or its
+//! instrument gone); and all of them stop when the keyboard is switched
+//! off, when another project is opened, when the audio device changes,
+//! when a text field, a dialog or the list of sounds takes the keyboard,
+//! when the window is no longer the one typed into, and when the program
+//! exits. An octave change lets go of the keys held through it. The
+//! sustain key keeps notes whose keys came up, until it comes up itself.
 //!
 //! What is in [`layout`] says which key does what; [`remembered`] keeps
 //! the switch, the octave and the velocity between sessions; [`view`]
@@ -39,10 +50,15 @@ use eframe::egui::{self, Event, Key};
 use layout::Role;
 use remembered::Remembered;
 use std::path::PathBuf;
-use trill_core::device::{DeviceCategory, DeviceDescriptor};
+use std::sync::Arc;
+use trill_core::device::{DeviceCategory, DeviceDescriptor, EventKind};
 use trill_core::pitch::pitch_name;
 use trill_core::{Device, Track, TrackId, TrackKind};
-use trill_engine::{Session, SharedSession};
+use trill_engine::LiveSender;
+
+/// The clock live input is stamped with: the engine's own, except in a test
+/// whose audio device keeps a clock of its own.
+pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 /// The pitch of the lowest key when nothing was remembered: middle C.
 pub const DEFAULT_LOWEST: u8 = 60;
@@ -155,9 +171,12 @@ impl Silence {
 /// What the keys play as of this frame.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Playing {
-    /// The track notes go to.
-    pub track: Option<TrackId>,
-    /// Its name and its instrument's, for the strip.
+    /// The tracks notes go to: the armed ones, or the selected one when
+    /// none is armed. Empty when a note would come to nothing.
+    pub tracks: Vec<TrackId>,
+    /// Whether those are armed tracks, and not merely the selected one.
+    pub armed: bool,
+    /// Their names for the strip, and the instrument when it is one track.
     pub name: String,
     pub instrument: String,
     /// Why nothing is heard, when nothing is.
@@ -185,8 +204,13 @@ pub struct Keyboard {
     sustain: bool,
     /// What the keys play, as worked out at the start of the frame.
     playing: Playing,
-    /// The project the notes were started in.
+    /// The way to the audio thread, which takes no lock.
+    live: LiveSender,
+    clock: Clock,
+    /// The project the notes were started in, and the audio stream they
+    /// were started on.
     generation: u64,
+    audio_revision: u64,
     /// The frame the keys last moved to another octave on: the piano roll
     /// brings their range into view, if it is on screen to do it.
     moved_at: Option<u32>,
@@ -213,8 +237,8 @@ pub struct Keyboard {
 
 impl Keyboard {
     /// The keyboard as it was left in `folder`, or as the command line
-    /// asks for it.
-    pub fn new(folder: Option<PathBuf>, options: &Options) -> Self {
+    /// asks for it, playing through `live`.
+    pub fn new(folder: Option<PathBuf>, options: &Options, live: LiveSender) -> Self {
         let saved = folder.as_deref().and_then(Remembered::load).unwrap_or_default();
         let lowest = if saved.lowest.is_multiple_of(12) && saved.lowest <= HIGHEST_LOWEST {
             saved.lowest
@@ -229,7 +253,10 @@ impl Keyboard {
             sounding: Vec::new(),
             sustain: false,
             playing: Playing::default(),
+            live,
+            clock: Arc::new(trill_engine::host::now_ns),
             generation: 0,
+            audio_revision: 0,
             // Played for a picture, the keys are in it from the start.
             moved_at: (!options.hold.is_empty()).then_some(0),
             hold: options.hold.clone(),
@@ -311,25 +338,20 @@ impl Keyboard {
     }
 
     /// Switches the keyboard on or off. Off, nothing is left sounding.
-    pub fn toggle(&mut self, session: &SharedSession) {
+    pub fn toggle(&mut self) {
         self.on = !self.on;
         if !self.on {
-            self.release_all(session);
+            self.release_all();
         }
     }
 
-    /// Moves the keys `octaves` up or down, as far as there are notes:
-    /// what a click on the strip does, as `Z` and `X` do.
-    pub fn shift_octave(&mut self, octaves: i8, session: &SharedSession) {
-        self.shift(&mut session.lock(), octaves);
-    }
-
-    /// The keys held through an octave change are let go: they would come
-    /// up as other notes than they went down as.
-    fn shift(&mut self, session: &mut Session, octaves: i8) {
+    /// Moves the keys `octaves` up or down, as far as there are notes.
+    /// The keys held through it are let go: they would come up as other
+    /// notes than they went down as.
+    pub fn shift_octave(&mut self, octaves: i8) {
         let lowest = (self.lowest as i16 + 12 * octaves as i16).clamp(0, HIGHEST_LOWEST as i16) as u8;
         if lowest != self.lowest {
-            self.let_go_of_keys(session);
+            self.let_go(|note| note.key.is_some());
             self.lowest = lowest;
             self.moved_at = Some(self.frames);
         }
@@ -342,98 +364,103 @@ impl Keyboard {
     }
 
     /// Stops every note this keyboard started.
-    pub fn release_all(&mut self, session: &SharedSession) {
+    pub fn release_all(&mut self) {
         self.sustain = false;
-        if !self.sounding.is_empty() {
-            self.stop_where(&mut session.lock(), |_| true);
-        }
+        self.stop_where(|_| true);
     }
 
     /// The window is told whether it is the one typed into before a frame
     /// is run, and also while it is hidden and no frame is: notes do not
     /// outlast its losing the keyboard, seen or not.
-    pub fn window(&mut self, input: &egui::RawInput, session: &SharedSession) {
+    pub fn window(&mut self, input: &egui::RawInput) {
         let lost = input.events.iter().any(|event| matches!(event, Event::WindowFocused(false)));
         if (lost || !input.focused) && !self.staged {
-            self.release_all(session);
+            self.release_all();
         }
     }
 
     /// The program is closing: nothing is left sounding, and the settings
     /// are written down if they changed since they last were.
-    pub fn close(&mut self, session: &SharedSession) {
-        self.release_all(session);
+    pub fn close(&mut self) {
+        self.release_all();
         self.remember(true, None);
     }
 
-    fn start(&mut self, session: &mut Session, track: TrackId, pitch: u8, key: Key) {
-        session.note_on(track, pitch, self.velocity);
-        self.sounding.push(Sounding { track, pitch, key: Some(key) });
-        #[cfg(test)]
-        self.sent.push(Sent::On(track, pitch, self.velocity));
+    /// Starts a note on `track`. A note the audio thread had no room for
+    /// was not started, and is not written down as one.
+    fn start(&mut self, track: TrackId, pitch: u8, key: Key) {
+        let kind = EventKind::NoteOn { pitch, velocity: self.velocity.clamp(1, 127) as f32 / 127.0 };
+        if self.live.play_on_at((self.clock)(), track, kind) {
+            self.sounding.push(Sounding { track, pitch, key: Some(key) });
+            #[cfg(test)]
+            self.sent.push(Sent::On(track, pitch, self.velocity));
+        }
     }
 
-    fn stop(&mut self, session: &mut Session, track: TrackId, pitch: u8) {
-        session.note_off(track, pitch);
+    /// Ends a note on `track`. If the audio thread has no room even for
+    /// that, it lets go of every note itself (see [`LiveSender`]).
+    fn stop(&mut self, track: TrackId, pitch: u8) {
+        self.live.play_on_at((self.clock)(), track, EventKind::NoteOff { pitch });
         #[cfg(test)]
         self.sent.push(Sent::Off(track, pitch));
     }
 
     /// Stops the notes `which` picks out, and forgets them.
-    fn stop_where(&mut self, session: &mut Session, which: impl Fn(&Sounding) -> bool) {
+    fn stop_where(&mut self, which: impl Fn(&Sounding) -> bool) {
+        if !self.sounding.iter().any(&which) {
+            return;
+        }
         let (stopped, kept): (Vec<Sounding>, Vec<Sounding>) =
             std::mem::take(&mut self.sounding).into_iter().partition(|note| which(note));
         self.sounding = kept;
         for note in stopped {
-            self.stop(session, note.track, note.pitch);
+            self.stop(note.track, note.pitch);
         }
     }
 
     /// Lets go of the keys `which` picks out: their notes stop, unless the
     /// sustain holds them.
-    fn let_go(&mut self, session: &mut Session, which: impl Fn(&Sounding) -> bool) {
+    fn let_go(&mut self, which: impl Fn(&Sounding) -> bool) {
         if self.sustain {
             for note in self.sounding.iter_mut().filter(|note| which(note)) {
                 note.key = None;
             }
         } else {
-            self.stop_where(session, which);
+            self.stop_where(which);
         }
     }
 
-    fn let_go_of_keys(&mut self, session: &mut Session) {
-        self.let_go(session, |note| note.key.is_some());
-    }
-
-    fn press(&mut self, session: &mut Session, key: Key, role: Role, repeat: bool) {
+    fn press(&mut self, key: Key, role: Role, repeat: bool) {
         match role {
             // A held key repeats; a held note does not start again.
             Role::Note(_) | Role::Octave(_) | Role::Sustain if repeat => {}
             Role::Note(semitone) => {
-                let Some(track) = self.playing.track else { return };
                 let pitch = self.lowest as u16 + semitone as u16;
                 if pitch > 127 {
                     return;
                 }
                 let pitch = pitch as u8;
+                let tracks = self.playing.tracks.clone();
                 // The key went down again without having come up, or the
                 // note is still held by the sustain: it is struck afresh,
                 // and not left with two beginnings and one end.
-                self.stop_where(session, |note| note.key == Some(key) || (note.track, note.pitch) == (track, pitch));
-                self.start(session, track, pitch, key);
+                self.stop_where(|note| note.key == Some(key) || (note.pitch == pitch && tracks.contains(&note.track)));
+                for track in tracks {
+                    self.start(track, pitch, key);
+                }
             }
-            Role::Octave(octaves) => self.shift(session, octaves),
+            Role::Octave(octaves) => self.shift_octave(octaves),
             Role::Velocity(steps) => self.step_velocity(steps),
             Role::Sustain => self.sustain = true,
         }
     }
 
-    fn lift(&mut self, session: &mut Session, key: Key, role: Role) {
+    fn lift(&mut self, key: Key, role: Role) {
         match role {
-            Role::Note(_) => self.let_go(session, |note| note.key == Some(key)),
+            Role::Note(_) => self.let_go(|note| note.key == Some(key)),
             Role::Sustain => {
                 self.sustain = false;
-                self.stop_where(session, |note| note.key.is_none());
+                self.stop_where(|note| note.key.is_none());
             }
             Role::Octave(_) | Role::Velocity(_) => {}
         }
@@ -475,6 +502,13 @@ impl Keyboard {
                 }
             }
         }
+    }
+
+    /// Stamps what is played with `clock` from now on: the clock of an
+    /// audio device that exists only in a test.
+    #[cfg(test)]
+    pub fn set_clock(&mut self, clock: Clock) {
+        self.clock = clock;
     }
 
     /// Every note that was started and not stopped, in the order started.
@@ -547,9 +581,35 @@ fn searching(state: &UiState) -> bool {
     state.browser.open && state.browser.tab == BrowserTab::Sounds && state.focus == FocusArea::Browser
 }
 
-/// What the keys would play now: the selected track, also while the
-/// master is what the Devices tab shows, since the master plays no notes.
+/// Why notes played on `track` would not be heard though it has an
+/// instrument, if they would not.
+fn unheard(cx: &Cx, track: &Track) -> Option<Silence> {
+    let group = track.group.and_then(|id| cx.snap.track(id));
+    let soloed = track.solo || group.is_some_and(|group| group.solo);
+    if cx.audio.silent() {
+        Some(Silence::NoOutput)
+    } else if track.mute {
+        Some(Silence::Muted(track.name.clone()))
+    } else if let Some(group) = group.filter(|group| group.mute) {
+        Some(Silence::Muted(group.name.clone()))
+    } else if !soloed && cx.snap.project.tracks.iter().any(|other| other.solo) {
+        Some(Silence::Soloed(track.name.clone()))
+    } else {
+        None
+    }
+}
+
+/// What the keys would play now. Where a keyboard plays is the session's
+/// rule ([`trill_engine::Session::live_tracks`]): the armed tracks, or the
+/// selected one when none is armed. The selected track stays the one
+/// played while the master is what the Devices tab shows, since the master
+/// plays no notes.
 fn assess(cx: &Cx, paused: Option<Silence>) -> Playing {
+    let holds_clips = |track: &&Track| track.kind == TrackKind::Normal;
+    let armed: Vec<&Track> = cx.live.armed.iter().filter_map(|id| cx.snap.track(*id)).filter(holds_clips).collect();
+    if !armed.is_empty() {
+        return assess_armed(cx, &armed, paused);
+    }
     let Some(track) = cx.state.selected_track.and_then(|id| cx.snap.track(id)) else {
         return Playing { silence: Some(paused.unwrap_or(Silence::NoTrack)), ..Playing::default() };
     };
@@ -561,25 +621,40 @@ fn assess(cx: &Cx, paused: Option<Silence>) -> Playing {
     };
     let instrument = instrument(track, cx.descriptors);
     let (Some(instrument), None) = (instrument, &unplayable) else {
+        // Not heard and, unarmed, not recorded: a note would come to
+        // nothing, so none is sent.
         let silence = paused.or(unplayable).unwrap_or(Silence::NoInstrument(name.clone()));
-        return Playing { track: None, name, instrument: String::new(), silence: Some(silence) };
+        return Playing { name, silence: Some(silence), ..Playing::default() };
     };
     // Played all the same, and not heard: say so.
-    let group = track.group.and_then(|id| cx.snap.track(id));
-    let soloed = track.solo || group.is_some_and(|group| group.solo);
-    let soloed_elsewhere = !soloed && cx.snap.project.tracks.iter().any(|other| other.solo);
-    let unheard = if cx.audio.warning.is_some() {
-        Some(Silence::NoOutput)
-    } else if track.mute {
-        Some(Silence::Muted(name.clone()))
-    } else if let Some(group) = group.filter(|group| group.mute) {
-        Some(Silence::Muted(group.name.clone()))
-    } else if soloed_elsewhere {
-        Some(Silence::Soloed(name.clone()))
-    } else {
-        None
+    let silence = paused.or_else(|| unheard(cx, track));
+    Playing { tracks: vec![track.id], armed: false, name, instrument: instrument.name.clone(), silence }
+}
+
+/// What the keys play while tracks are armed: all of them, with or without
+/// an instrument, since a take records what is played on an armed track
+/// either way.
+fn assess_armed(cx: &Cx, armed: &[&Track], paused: Option<Silence>) -> Playing {
+    let name = match armed {
+        [only] => only.name.clone(),
+        [first, second] => format!("{}, {}", first.name, second.name),
+        [first, rest @ ..] => format!("{} + {} more", first.name, rest.len()),
+        [] => String::new(),
     };
-    Playing { track: Some(track.id), name, instrument: instrument.name.clone(), silence: paused.or(unheard) }
+    let playable: Vec<(&Track, &Device)> =
+        armed.iter().filter_map(|track| Some((*track, instrument(track, cx.descriptors)?))).collect();
+    let instrument = match (armed, playable.as_slice()) {
+        ([_], [(_, device)]) => device.name.clone(),
+        _ => String::new(),
+    };
+    // Silent only if none of them would be heard.
+    let silence = paused.or_else(|| match playable.first() {
+        None => Some(Silence::NoInstrument(armed[0].name.clone())),
+        Some((first, _)) => {
+            playable.iter().all(|(track, _)| unheard(cx, track).is_some()).then(|| unheard(cx, first)).flatten()
+        }
+    });
+    Playing { tracks: armed.iter().map(|track| track.id).collect(), armed: true, name, instrument, silence }
 }
 
 /// Why the keyboard is not listening at all, apart from being off: `Some`
@@ -587,7 +662,8 @@ fn assess(cx: &Cx, paused: Option<Silence>) -> Playing {
 /// plain to see (a dialog, another window).
 fn paused(ctx: &egui::Context, cx: &Cx, typing: bool) -> Option<Option<Silence>> {
     let focused = cx.keyboard.staged || ctx.input(|input| input.focused);
-    if !focused || cx.jobs.confirm.is_some() || cx.recovery.is_open() || cx.state.shortcuts_open {
+    let dialog = cx.jobs.confirm.is_some() || cx.recovery.is_open() || cx.state.shortcuts_open || cx.settings.is_open();
+    if !focused || dialog {
         Some(None)
     } else if typing {
         Some(Some(Silence::Typing))
@@ -599,20 +675,26 @@ fn paused(ctx: &egui::Context, cx: &Cx, typing: bool) -> Option<Option<Silence>>
 }
 
 /// Looks at where things stand: works out what the keys play, and stops
-/// the notes that must not go on. Those are the notes that no longer have
-/// what they were played on (another project is open, or another track is
-/// the one being played), and all of them once something else has the
-/// keyboard. Returns whether the keyboard is listening.
+/// the notes that must not go on. Those are the notes on a track the keys
+/// no longer play (another one is selected, or armed), and all of them once
+/// something else has the keyboard, another project is open or the audio
+/// device has changed. Returns whether the keyboard is listening.
 fn look(ctx: &egui::Context, cx: &mut Cx, typing: bool) -> bool {
     let paused = paused(ctx, cx, typing);
     let listening = paused.is_none();
     cx.keyboard.playing = assess(cx, paused.flatten());
     let keyboard = &mut *cx.keyboard;
-    let moved = keyboard.sounding.iter().any(|note| Some(note.track) != keyboard.playing.track);
-    if !listening || moved || keyboard.generation != cx.state.project_generation {
-        keyboard.release_all(cx.session);
+    let another_project = keyboard.generation != cx.state.project_generation;
+    // A new stream starts in silence: the engine let go of everything.
+    let another_stream = keyboard.audio_revision != cx.audio.revision;
+    if !listening || another_project || another_stream {
+        keyboard.release_all();
+    } else {
+        let tracks = keyboard.playing.tracks.clone();
+        keyboard.stop_where(|note| !tracks.contains(&note.track));
     }
     keyboard.generation = cx.state.project_generation;
+    keyboard.audio_revision = cx.audio.revision;
     listening
 }
 
@@ -672,20 +754,16 @@ pub fn keys(ctx: &egui::Context, cx: &mut Cx, typing: bool) {
         return;
     }
     let keyboard = &mut *cx.keyboard;
-    let mut session = cx.session.lock();
     for key in held {
         if let Some(role) = layout::role(key) {
-            keyboard.press(&mut session, key, role, false);
+            keyboard.press(key, role, false);
         }
     }
     for change in changes {
         match change {
-            Change::Down(key, role, repeat) => keyboard.press(&mut session, key, role, repeat),
-            Change::Up(key, role) => keyboard.lift(&mut session, key, role),
-            Change::Lost => {
-                keyboard.sustain = false;
-                keyboard.stop_where(&mut session, |_| true);
-            }
+            Change::Down(key, role, repeat) => keyboard.press(key, role, repeat),
+            Change::Up(key, role) => keyboard.lift(key, role),
+            Change::Lost => keyboard.release_all(),
         }
     }
 }
@@ -707,6 +785,12 @@ pub fn range_name(keyboard: &Keyboard) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A way in to an engine nobody listens to: these tests play nothing.
+    fn sender() -> LiveSender {
+        let backend = trill_engine::AudioBackend::Null { sample_rate: 48_000 };
+        trill_engine::Session::new(Arc::new(trill_dsp::BuiltinFactory), backend).unwrap().live()
+    }
 
     #[test]
     fn velocity_steps_along_tens_between_the_softest_and_the_loudest() {
@@ -733,7 +817,7 @@ mod tests {
 
     #[test]
     fn it_starts_as_it_was_left_and_ignores_what_makes_no_sense() {
-        let fresh = Keyboard::new(None, &Options::default());
+        let fresh = Keyboard::new(None, &Options::default(), sender());
         assert!(!fresh.is_on(), "off until it is switched on");
         assert_eq!((fresh.lowest(), fresh.highest(), fresh.velocity()), (60, 77, 100));
         assert_eq!(range_name(&fresh), "C4 \u{2013} F5");
@@ -741,24 +825,24 @@ mod tests {
 
         let folder = tempfile::tempdir().unwrap();
         Remembered { on: true, lowest: 36, velocity: 70, key_map: false }.save(folder.path()).unwrap();
-        let left = Keyboard::new(Some(folder.path().to_path_buf()), &Options::default());
+        let left = Keyboard::new(Some(folder.path().to_path_buf()), &Options::default(), sender());
         assert!(left.is_on() && !left.shows_key_map());
         assert_eq!((left.lowest(), left.velocity()), (36, 70));
 
         // A lowest key that is no C, or beyond the last octave, and a
         // velocity of nothing.
         Remembered { on: false, lowest: 61, velocity: 0, key_map: true }.save(folder.path()).unwrap();
-        let odd = Keyboard::new(Some(folder.path().to_path_buf()), &Options::default());
+        let odd = Keyboard::new(Some(folder.path().to_path_buf()), &Options::default(), sender());
         assert_eq!((odd.lowest(), odd.velocity()), (60, 1));
         Remembered { on: false, lowest: 120, velocity: 100, key_map: true }.save(folder.path()).unwrap();
-        assert_eq!(Keyboard::new(Some(folder.path().to_path_buf()), &Options::default()).lowest(), 60);
+        assert_eq!(Keyboard::new(Some(folder.path().to_path_buf()), &Options::default(), sender()).lowest(), 60);
     }
 
     #[test]
     fn the_command_line_switches_it_on_and_held_keys_are_not_remembered() {
         let folder = tempfile::tempdir().unwrap();
         let options = Options { on: true, hold: Vec::new() };
-        let mut keyboard = Keyboard::new(Some(folder.path().to_path_buf()), &options);
+        let mut keyboard = Keyboard::new(Some(folder.path().to_path_buf()), &options, sender());
         assert!(keyboard.is_on());
         // Asked for, it is the user's from then on: it is on, and that is
         // what the next session starts with.
@@ -769,7 +853,7 @@ mod tests {
         let staged = tempfile::tempdir().unwrap();
         Remembered::default().save(staged.path()).unwrap();
         let options = Options { on: false, hold: Options::holding("adg").unwrap() };
-        let mut keyboard = Keyboard::new(Some(staged.path().to_path_buf()), &options);
+        let mut keyboard = Keyboard::new(Some(staged.path().to_path_buf()), &options, sender());
         assert!(keyboard.is_on());
         keyboard.remember(true, None);
         assert_eq!(Remembered::load(staged.path()), Some(Remembered::default()), "the file is as it was");
@@ -787,7 +871,7 @@ mod tests {
 
     #[test]
     fn the_letter_on_a_pitch_follows_the_octave() {
-        let mut keyboard = Keyboard::new(None, &Options { on: true, hold: Vec::new() });
+        let mut keyboard = Keyboard::new(None, &Options { on: true, hold: Vec::new() }, sender());
         assert_eq!(keyboard.letter(60), Some("A"));
         assert_eq!(keyboard.letter(61), Some("W"));
         assert_eq!(keyboard.letter(72), Some("K"));

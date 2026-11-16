@@ -3,6 +3,7 @@
 // A release build is a windowed program: no console window behind it.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod audio_scene;
 mod cli;
 mod demo;
 mod ui;
@@ -27,7 +28,15 @@ fn main() -> anyhow::Result<()> {
     // The session, the media cache, the sound library and the settings,
     // shared by the window and the MCP server. It lives until the window
     // closes; dropping it saves the settings.
-    let runtime = Arc::new(Runtime::start(cli.runtime_options()).context("could not start Trill")?);
+    // A scene puts made-up audio and MIDI devices in the hardware's place.
+    let started = match cli.audio_scene {
+        Some(scene) => Runtime::start_custom(cli.runtime_options(), scene.parts()),
+        None => Runtime::start(cli.runtime_options()),
+    };
+    let runtime = Arc::new(started.context("could not start Trill")?);
+    if let Some(scene) = cli.audio_scene {
+        scene.stage(&runtime);
+    }
     let session = runtime.session.clone();
 
     // services
@@ -57,6 +66,10 @@ fn main() -> anyhow::Result<()> {
         options.select_clip = Some(clip);
     }
     options.also_select = cli.clips_to_also_select(session.lock().project())?;
+    let armed = cli.tracks_to_arm(session.lock().project())?;
+    for track in armed {
+        session.lock().set_armed(track, true).context("could not arm a track")?;
+    }
     // Returns at once; the folders are scanned in the background and the
     // browser fills in as they are.
     for folder in &cli.library {

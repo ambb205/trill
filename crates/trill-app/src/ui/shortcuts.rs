@@ -57,6 +57,9 @@ pub enum Command {
     ToggleBrowser,
     ToggleAssistant,
     ToggleKeyboard,
+    /// Starts a take, or ends the one being recorded.
+    Record,
+    AudioSettings,
     ShowShortcuts,
 }
 
@@ -143,6 +146,7 @@ pub const BINDINGS: &[Binding] = &[
     bind(Command::Save, CTRL, Key::S, When::Always, Section::File, "Save"),
     bind(Command::SaveAs, CTRL_SHIFT, Key::S, When::Always, Section::File, "Save as"),
     bind(Command::ExportWav, CTRL_SHIFT, Key::E, When::Always, Section::File, "Export the song as WAV"),
+    bind(Command::AudioSettings, CTRL, Key::Comma, When::Always, Section::File, "Audio and MIDI settings"),
     bind(Command::Undo, CTRL, Key::Z, When::NotTyping, Section::Edit, "Undo"),
     bind(Command::Redo, CTRL_SHIFT, Key::Z, When::NotTyping, Section::Edit, "Redo"),
     bind(Command::Redo, CTRL, Key::Y, When::NotTyping, Section::Edit, "Redo"),
@@ -210,6 +214,7 @@ pub const BINDINGS: &[Binding] = &[
         "Show or hide the track\u{2019}s automation",
     ),
     bind(Command::TogglePlay, NONE, Key::Space, When::NotTyping, Section::Transport, "Play or stop"),
+    bind(Command::Record, NONE, Key::F9, When::NotTyping, Section::Transport, "Record, or end the take"),
     bind(Command::Rewind, NONE, Key::Home, When::NotTyping, Section::Transport, "Return to the start"),
     bind(Command::ToggleLoop, NONE, Key::L, When::NotTyping, Section::Transport, "Loop on or off"),
     bind(Command::ToggleMetronome, NONE, Key::K, When::NotTyping, Section::Transport, "Metronome on or off"),
@@ -302,6 +307,7 @@ fn chord_label(modifiers: Modifiers, key: Key) -> String {
     label.push_str(match key {
         Key::Delete => "Del",
         Key::Escape => "Esc",
+        Key::Comma => ",",
         other => other.name(),
     });
     label

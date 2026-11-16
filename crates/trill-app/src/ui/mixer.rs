@@ -13,7 +13,7 @@
 use super::arrangement::{self, display_order};
 use super::automation::{self, Hold};
 use super::state::{Cx, DetailTab};
-use super::{colors, editors, units, widgets};
+use super::{colors, editors, recording, units, widgets};
 use eframe::egui::{self, Align2, Color32, Rect, Sense, Ui, pos2, vec2};
 use trill_core::{AutomationTarget, Device, Track, TrackId, TrackKind};
 use trill_noir::{Chip, Fader, Icon, fade, paint, text};
@@ -348,13 +348,19 @@ fn set_volume(cx: &mut Cx, channel: Channel, volume: f32) {
     }
 }
 
-/// Mute and solo, each half the strip wide.
+/// Mute, solo and arm, each a third of the strip wide. The arm control's
+/// place is kept on the strips that have none, so the others line up.
 fn mute_and_solo(ui: &Ui, cx: &mut Cx, track: &Track, row: Rect, id: egui::Id, quiet: Color32) {
     let theme = cx.theme;
-    let half = ((row.width() - theme.metric.gap) / 2.0).floor();
-    let left = Rect::from_min_size(row.min, vec2(half, row.height()));
-    let right = Rect::from_min_max(pos2(left.right() + theme.metric.gap, row.top()), row.max);
+    let third = ((row.width() - 2.0 * theme.metric.gap) / 3.0).floor();
+    let left = Rect::from_min_size(row.min, vec2(third, row.height()));
+    let right = Rect::from_min_size(pos2(left.right() + theme.metric.gap, row.top()), vec2(third, row.height()));
+    let arm = Rect::from_min_max(pos2(right.right() + theme.metric.gap, row.top()), row.max);
     let track_id: TrackId = track.id;
+    if recording::armable(cx, track) {
+        let name = format!("Arm {} in the mixer", track.name);
+        recording::arm_chip(ui, cx, track, arm, id.with("arm"), quiet, &name);
+    }
 
     let name = format!("Mute {} in the mixer", track.name);
     let chip = Chip::new("M", track.mute).accent(theme.warn).quiet(quiet).named(&name);

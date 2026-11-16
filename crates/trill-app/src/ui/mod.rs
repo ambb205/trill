@@ -24,7 +24,9 @@
 //! [`audio_clip`], [`devices`] and [`mixer`]) are the views; the
 //! arrangement and the browser are modules of their own parts.
 //! [`automation`] is what the views share about envelopes. [`keyboard`]
-//! is the computer keyboard played as an instrument.
+//! is the computer keyboard played as an instrument, [`recording`] the
+//! window's part in arming tracks and recording takes, and
+//! [`audio_settings`] the Audio and MIDI panel.
 //! [`device_layouts`] says how each built-in device arranges its
 //! parameters, [`sample_panels`] draws what the sampler and the drum rack
 //! play, and [`displays`] draws the devices' small curves from the math in
@@ -42,6 +44,7 @@ mod app;
 mod arrangement;
 mod assistant;
 mod audio_clip;
+mod audio_settings;
 mod automation;
 mod brand;
 mod browser;
@@ -56,6 +59,7 @@ mod files;
 mod keyboard;
 mod mixer;
 mod piano_roll;
+mod recording;
 mod recovery;
 mod response;
 mod sample_panels;
@@ -135,6 +139,10 @@ pub struct UiOptions {
     pub assistant: AssistantOptions,
     /// How the computer keyboard starts, when not as it was left.
     pub keyboard: KeyboardOptions,
+    /// Open with the Audio and MIDI panel up.
+    pub show_settings: bool,
+    /// Start a take on the armed tracks as soon as the window opens.
+    pub record: bool,
 }
 
 impl Default for UiOptions {
@@ -158,6 +166,8 @@ impl Default for UiOptions {
             window_size: [1440.0, 900.0],
             assistant: AssistantOptions::default(),
             keyboard: KeyboardOptions::default(),
+            show_settings: false,
+            record: false,
         }
     }
 }

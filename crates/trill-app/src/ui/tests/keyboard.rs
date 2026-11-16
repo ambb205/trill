@@ -938,6 +938,16 @@ fn whatever_is_done_every_note_that_starts_also_ends() {
                 harness.key(NONE, Key::Escape);
             }
             95 => harness.key(NONE, [Key::C, Key::V][random(2)]),
+            96..=97 => {
+                // A track is armed or disarmed, as an assistant might:
+                // the keys then play other tracks than a moment ago.
+                let track = tracks[random(3)];
+                let mut session = harness.session.lock();
+                let armed = session.is_armed(track);
+                let _ = session.set_armed(track, !armed);
+                drop(session);
+                harness.idle(1);
+            }
             _ => harness.idle(1 + random(3)),
         }
         // Now and then the player puts things right and plays on, or most
@@ -971,8 +981,8 @@ fn whatever_is_done_every_note_that_starts_also_ends() {
         if !keyboard.is_on() {
             assert!(known.is_empty(), "step {step}: switched off with notes sounding");
         }
-        let track = keyboard.playing().track;
-        assert!(known.iter().all(|(on, _)| Some(*on) == track), "step {step}: a note sounds on a track not played");
+        let tracks = &keyboard.playing().tracks;
+        assert!(known.iter().all(|(on, _)| tracks.contains(on)), "step {step}: a note sounds on a track not played");
     }
 
     // The player takes their hands away.
@@ -1022,7 +1032,7 @@ fn the_strip_says_what_plays_and_why_nothing_sounds() {
     assert_eq!(playing(&harness).silence, Some(Silence::Soloed("Keys".to_owned())));
     harness.click(harness.header(1, 120.0, 14.0));
     harness.idle(1);
-    assert_eq!((playing(&harness).track, playing(&harness).silence), (Some(bass), None));
+    assert_eq!((playing(&harness).tracks, playing(&harness).silence), (vec![bass], None));
 
     // A group mixes other tracks and plays no notes of its own.
     let group = harness.session.lock().edit(|project| Ok(project.add_track_of_kind("Bus", TrackKind::Group))).unwrap();
