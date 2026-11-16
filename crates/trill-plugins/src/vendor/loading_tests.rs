@@ -240,19 +240,19 @@ fn a_preset_that_cannot_be_loaded_says_why_and_leaves_the_plugin_as_it_was() {
     let presets: Vec<PresetInfo> =
         ["Gone", "Damaged", "Old", "Refused", "Ignored"].map(|name| rig.preset(kind::KEEPS_AMPLE, name)).into();
     // After they were listed: one file is deleted, one is overwritten
-    // with something else, and one turns out to be from another version.
+    // with something else, and one with settings the plugin has none of.
     std::fs::remove_file(&gone).unwrap();
     std::fs::write(&damaged, b"<AMG_STATE Ver=\"4.0.0\"><Parameter Name=\"x\" Value=\"1\"/><Broken").unwrap();
     rig.dir.file(
         &format!("{AMPLE}/Old.amhstate"),
-        ample::document("Old", "3.0.0", "AMHBg", &tune, &[("M-Master Vol", "0.5")]).as_bytes(),
+        ample::document("Old", "2.0.0", "AMHBg", &tune, &[("Wah", "1"), ("Fuzz", "2")]).as_bytes(),
     );
 
     let mut instance = rig.create(kind::KEEPS_AMPLE, Some(&started));
     let reasons = [
         "Gone.amhstate' cannot be read: ",
         "Damaged.amhstate' cannot be loaded: the tag 'Broken' is not closed",
-        "Old.amhstate' cannot be loaded: it was saved by version 3.0.0 of the plugin, and the one installed is version 4.1.0",
+        "Old.amhstate' cannot be loaded: none of its settings is one this plugin has",
         "the plugin rejected the preset's state",
         "the plugin was handed the preset and did not take it: its state does not show 1 of the 1 settings the preset gives it ('Amp' among them)",
     ];

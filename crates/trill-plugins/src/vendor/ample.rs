@@ -179,11 +179,6 @@ fn state_document(state: &PluginState) -> Result<(Envelope<'_>, Document), Strin
     Ok((envelope, document))
 }
 
-/// The first number of a version: `4` of `4.1.0`.
-fn major(version: &str) -> &str {
-    version.split('.').next().unwrap_or_default().trim()
-}
-
 /// The tuning file's path for another set of samples: the file is named
 /// after the set (`Tune_Default.AMHBg`).
 fn tune_for(path: &str, library: &str) -> Option<String> {
@@ -201,12 +196,6 @@ pub(crate) fn build(file: &[u8], current: &PluginState) -> Result<Built, String>
     if theirs.kind != ours.kind {
         return Err(format!("it is a preset of another instrument (its settings are '{}')", theirs.kind));
     }
-    if major(&theirs.version) != major(&ours.version) {
-        return Err(format!(
-            "it was saved by version {} of the plugin, and the one installed is version {}",
-            theirs.version, ours.version
-        ));
-    }
 
     let mut edits: Vec<(Range<usize>, String)> = Vec::new();
     let mut marks = Vec::new();
@@ -219,8 +208,20 @@ pub(crate) fn build(file: &[u8], current: &PluginState) -> Result<Built, String>
             marks.push(Mark { name: setting.name.clone(), value: theirs.value.clone() });
         }
     }
+    // The instruments' own folders hold presets saved by the version
+    // before (3.7 beside 4.1), all of whose settings the plugin still
+    // has: what tells a preset of this plugin is that, not its version.
     if known == 0 {
         return Err("none of its settings is one this plugin has".to_string());
+    }
+    if known * 2 < theirs.settings.len() {
+        return Err(format!(
+            "it is not a preset of this plugin, or of a version of it this one can take (version {}; the plugin \
+             is version {} and has {known} of its {} settings)",
+            theirs.version,
+            ours.version,
+            theirs.settings.len()
+        ));
     }
     if let (Some(name), Some(theirs)) = (&ours.name, &theirs.name) {
         edits.push((name.at.clone(), xml::escape(&theirs.value)));
@@ -473,10 +474,18 @@ mod tests {
         );
         let bass = document("Funk", "4.0.0", "AMRFg", tune, &OURS).replace("AMG_STATE", "ABG_STATE");
         assert_eq!(wrong(&bass), "it is a preset of another instrument (its settings are 'ABG_STATE')");
-        let old = document("Old", "3.2.0", "AMHBg", tune, &OURS);
-        assert_eq!(wrong(&old), "it was saved by version 3.2.0 of the plugin, and the one installed is version 4.1.0");
+        // A preset from the version before is taken, as the plugin takes
+        // it: all its settings are still there.
+        let old = document("Old", "3.7.0", "AMHBg", tune, &OURS);
+        assert!(build(old.as_bytes(), &current).is_ok());
         let foreign = document("Foreign", "4.0.0", "AMHBg", tune, &[("Something Else", "1")]);
         assert_eq!(wrong(&foreign), "none of its settings is one this plugin has");
+        let mostly = [("M-Master Vol", "0.5"), ("Wah", "1"), ("Fuzz", "2"), ("Octaver", "3")];
+        assert_eq!(
+            wrong(&document("Mostly Foreign", "2.0.0", "AMHBg", tune, &mostly)),
+            "it is not a preset of this plugin, or of a version of it this one can take (version 2.0.0; the plugin is \
+             version 4.1.0 and has 1 of its 4 settings)"
+        );
         // A plugin whose state is something else.
         let preset = document("Fine", "4.0.0", "AMHBg", tune, &OURS);
         let opaque = PluginState { component: b"opaque bytes".to_vec(), controller: Vec::new() };
