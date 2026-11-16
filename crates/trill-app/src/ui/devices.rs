@@ -8,10 +8,11 @@
 //! device (a plugin) gets the generic layout: its parameters in declared
 //! order, flowing into as many columns as they need.
 
+use super::automation::{self, Hold};
 use super::device_layouts::{self, Display, Format, Layout, Row};
 use super::state::Cx;
 use super::units::{self, ParamScale};
-use super::{automation, colors, displays, sample_panels};
+use super::{colors, displays, sample_panels};
 use eframe::egui::{self, Align2, Color32, FontId, Id, Rect, Role, Sense, Ui, WidgetInfo, pos2, vec2};
 use trill_core::device::{DeviceCategory, DeviceDescriptor, ParamKind};
 use trill_core::{AutomationTarget, ChainRef, Device, DeviceId};
@@ -381,44 +382,27 @@ fn rows(ui: &mut Ui, cx: &mut Cx, body: &Body, rows: &[Row], left: f32, mut top:
             }
             Row::Choice { id, labels } => {
                 if let Some(param) = body.param(id) {
-                    let current = param.value.round().max(0.0) as usize;
-                    let chips = body.id.with(("choice", *id));
-                    let (clicked, _) =
-                        trill_noir::chip_row(ui, theme, rect.min, width, chips, labels, Some(current), body.dimmed);
                     hint_row(ui, cx, rect, &param.info.name);
-                    if let Some(index) = clicked {
-                        set_param(cx, body.device.id, param, index as f64);
-                    }
+                    let chips = body.id.with(("choice", *id));
+                    choice_chips(ui, cx, body, param, labels, None, rect.min, width, chips);
                 }
             }
             Row::Toggles(toggles) => {
                 let mut x = rect.left();
                 for (id, label) in *toggles {
                     let Some(param) = body.param(id) else { continue };
-                    let on = param.value >= 0.5;
-                    let chip = Chip::new(label, on).dimmed(body.dimmed);
-                    let chip_rect = Rect::from_min_size(pos2(x, top), vec2(chip.width(ui, theme), theme.metric.chip));
-                    let response = trill_noir::chip(ui, theme, chip_rect, body.id.with(("toggle", *id)), &chip);
-                    cx.hint(&response, units::short_param_name(&param.info.name));
-                    if response.clicked() {
-                        set_param(cx, body.device.id, param, if on { 0.0 } else { 1.0 });
-                    }
-                    let target = param_target(body, param);
-                    response.context_menu(|ui| automation::menu_items(ui, cx, &target));
+                    let width = Chip::new(label, false).width(ui, theme);
+                    let chip_rect = Rect::from_min_size(pos2(x, top), vec2(width, theme.metric.chip));
+                    toggle_chip(ui, cx, body, param, label, chip_rect, body.id.with(("toggle", *id)));
                     x = chip_rect.right() + gap - 1.0;
                 }
             }
             Row::Picks { id, picks } => {
                 if let Some(param) = body.param(id) {
-                    let labels: Vec<&str> = picks.iter().map(|(label, _)| *label).collect();
-                    let current = picks.iter().position(|(_, value)| (value - param.value).abs() < 1e-6);
-                    let chips = body.id.with(("picks", *id));
-                    let (clicked, _) =
-                        trill_noir::chip_row(ui, theme, rect.min, width, chips, &labels, current, body.dimmed);
                     hint_row(ui, cx, rect, &param.info.name);
-                    if let Some(index) = clicked {
-                        set_param(cx, body.device.id, param, picks[index].1);
-                    }
+                    let (labels, values): (Vec<&str>, Vec<f64>) = picks.iter().copied().unzip();
+                    let chips = body.id.with(("picks", *id));
+                    choice_chips(ui, cx, body, param, &labels, Some(&values), rect.min, width, chips);
                 }
             }
             Row::Pages(pages) => {
@@ -466,8 +450,9 @@ fn param_target(body: &Body, param: &ParamState) -> AutomationTarget {
 }
 
 /// A numeric parameter as a Bar. While an envelope drives the parameter
-/// the bar shows what the envelope says at the playhead, carries the
-/// automation mark, and opens the lane instead of editing.
+/// the bar shows what the envelope says at the playhead and carries the
+/// automation mark; dragging it takes hold of the parameter (see
+/// [`automation::respond`]).
 pub(super) fn param_bar(
     ui: &mut Ui,
     cx: &mut Cx,
@@ -480,8 +465,8 @@ pub(super) fn param_bar(
     let info = &param.info;
     let scale = ParamScale::of(info);
     let target = param_target(body, param);
-    let driven = automation::driven(cx, &target);
-    let value = driven.unwrap_or(param.value);
+    let hold = Hold::of(cx, &target);
+    let value = hold.driven().unwrap_or(param.value);
     let word = |value: f64| match format {
         Format::NoteValue => device_layouts::note_value(value).map(str::to_owned),
         Format::NoteName => Some(trill_core::pitch::pitch_name(value.round().clamp(0.0, 127.0) as u8)),
@@ -491,34 +476,71 @@ pub(super) fn param_bar(
     let mut bar = Bar::new(label, &shown, scale.normalize(info, value) as f32)
         .default(scale.normalize(info, info.default) as f32)
         .dimmed(body.dimmed)
-        .automated(driven.is_some());
+        .automation(hold.mark());
     // A range that straddles zero fills from its zero point outward.
     if info.min < 0.0 && info.max > 0.0 {
         bar = bar.bipolar(scale.normalize(info, 0.0) as f32);
     }
     let output = trill_noir::bar(ui, cx.theme, rect, body.id.with(("param", &info.id)), &bar);
-    if driven.is_some() {
-        cx.hint(&output.response, automation::DRIVEN_HINT);
-        if output.pressed {
-            automation::show_lane(cx, target.clone());
-        }
-    } else {
-        cx.hint(
-            &output.response,
-            format!(
-                "{} \u{00B7} {shown} \u{00B7} drag to set, Ctrl-drag for fine, right-click to automate",
-                units::short_param_name(&info.name)
-            ),
-        );
-        if output.pressed {
-            cx.begin_gesture();
-        }
-        if let Some(position) = output.frac {
-            let value = if output.reset { info.default } else { scale.denormalize(info, position as f64) };
-            set_param(cx, body.device.id, param, value);
-        }
+    let what = format!("{} \u{00B7} {shown}", units::short_param_name(&info.name));
+    let gestures = "drag to set, Ctrl-drag for fine, right-click to automate";
+    if let Some(position) = automation::respond(cx, &target, hold, &output, &what, gestures) {
+        let value = if output.reset { info.default } else { scale.denormalize(info, position as f64) };
+        set_param(cx, body.device.id, param, value);
     }
-    output.response.context_menu(|ui| automation::menu_items(ui, cx, &target));
+}
+
+/// A parameter that is one of a few things, as the chips to choose it by:
+/// the chip of the value it has is on. Like a Bar it shows what its
+/// envelope says while one drives it, and choosing takes hold of it.
+#[expect(clippy::too_many_arguments, reason = "a placement call: which parameter, its chips and where they go")]
+fn choice_chips(
+    ui: &Ui,
+    cx: &mut Cx,
+    body: &Body,
+    param: &ParamState,
+    labels: &[&str],
+    values: Option<&[f64]>,
+    origin: egui::Pos2,
+    width: f32,
+    id: Id,
+) {
+    let theme = cx.theme;
+    let target = param_target(body, param);
+    let hold = Hold::of(cx, &target);
+    let shown = hold.driven().unwrap_or(param.value);
+    // The chips stand for these values, or for 0, 1, 2 and so on.
+    let value_of = |index: usize| values.map_or(index as f64, |values| values[index]);
+    let current = match values {
+        Some(values) => values.iter().position(|value| (value - shown).abs() < 1e-6),
+        None => Some(shown.round().max(0.0) as usize),
+    };
+    let (clicked, _) = trill_noir::chip_row(ui, theme, origin, width, id, labels, current, body.dimmed);
+    if let Some(index) = clicked {
+        automation::take_hold(cx, &target, hold);
+        set_param(cx, body.device.id, param, value_of(index));
+    }
+    // The row is the control: its corner carries the mark.
+    let chips = Rect::from_min_size(origin, vec2(trill_noir::chip_row_width(ui, theme, labels), theme.metric.chip));
+    automation::mark(ui, cx, &target, hold, chips, id, units::short_param_name(&param.info.name));
+}
+
+/// A switch as a chip, with what its automation has to say; see
+/// [`choice_chips`].
+fn toggle_chip(ui: &Ui, cx: &mut Cx, body: &Body, param: &ParamState, label: &str, rect: Rect, id: Id) {
+    let target = param_target(body, param);
+    let hold = Hold::of(cx, &target);
+    let on = hold.driven().unwrap_or(param.value) >= 0.5;
+    let chip = Chip::new(label, on).dimmed(body.dimmed);
+    let response = trill_noir::chip(ui, cx.theme, rect, id, &chip);
+    let name = units::short_param_name(&param.info.name);
+    cx.hint(&response, hold.hint(name, "click to switch, right-click to automate"));
+    if response.clicked() {
+        automation::take_hold(cx, &target, hold);
+        set_param(cx, body.device.id, param, if on { 0.0 } else { 1.0 });
+    }
+    response.context_menu(|ui| automation::menu_items(ui, cx, &target));
+    automation::mark(ui, cx, &target, hold, rect, id, name);
 }
 
 // ---- the generic layout ----------------------------------------------------
@@ -562,23 +584,11 @@ fn generic_body(ui: &mut Ui, cx: &mut Cx, body: &Body, area: Rect) {
         match &info.kind {
             ParamKind::Float | ParamKind::Int => param_bar(ui, cx, body, param, label, Format::Auto, rect),
             ParamKind::Bool => {
-                let on = param.value >= 0.5;
-                let chip = Chip::new(label, on).dimmed(body.dimmed);
-                let width = chip.width(ui, theme).min(rect.width());
-                let response = trill_noir::chip(
-                    ui,
-                    theme,
-                    rect.with_max_x(rect.left() + width),
-                    body.id.with(("param", &info.id)),
-                    &chip,
-                );
-                cx.hint(&response, info.name.clone());
-                if response.clicked() {
-                    set_param(cx, body.device.id, param, if on { 0.0 } else { 1.0 });
-                }
+                let width = Chip::new(label, false).width(ui, theme).min(rect.width());
+                let chip_rect = rect.with_max_x(rect.left() + width);
+                toggle_chip(ui, cx, body, param, label, chip_rect, body.id.with(("param", &info.id)));
             }
             ParamKind::Enum(choices) => {
-                let current = param.value.round().max(0.0) as usize;
                 let id = body.id.with(("param", &info.id));
                 // A few short choices sit side by side after the name; more,
                 // or longer ones, go behind a dropdown.
@@ -590,18 +600,18 @@ fn generic_body(ui: &mut Ui, cx: &mut Cx, body: &Body, area: Rect) {
                     let ink =
                         if body.dimmed { trill_noir::fade(theme.ink_faint, theme.disabled) } else { theme.ink_faint };
                     text::paint(ui.painter(), rect, Align2::LEFT_CENTER, theme.text.label, label, ink);
-                    let origin = pos2(rect.right() - width, rect.top());
-                    let (clicked, _) =
-                        trill_noir::chip_row(ui, theme, origin, width + 1.0, id, &labels, Some(current), body.dimmed);
                     hint_row(ui, cx, rect, &info.name);
-                    if let Some(index) = clicked {
-                        set_param(cx, body.device.id, param, index as f64);
-                    }
+                    let origin = pos2(rect.right() - width, rect.top());
+                    choice_chips(ui, cx, body, param, &labels, None, origin, width + 1.0, id);
                     continue;
                 }
-                let shown = units::format_param(info, param.value);
+                let target = param_target(body, param);
+                let hold = Hold::of(cx, &target);
+                let value = hold.driven().unwrap_or(param.value);
+                let current = value.round().max(0.0) as usize;
+                let shown = units::format_param(info, value);
                 let response = trill_noir::dropdown(ui, theme, rect, id, label, &shown, body.dimmed);
-                cx.hint(&response, info.name.clone());
+                cx.hint(&response, hold.hint(&info.name, "click to choose"));
                 let mut chosen = None;
                 egui::Popup::menu(&response).gap(1.0).show(|ui| {
                     ui.set_min_width(rect.width());
@@ -614,8 +624,10 @@ fn generic_body(ui: &mut Ui, cx: &mut Cx, body: &Body, area: Rect) {
                     });
                 });
                 if let Some(value) = chosen {
+                    automation::take_hold(cx, &target, hold);
                     set_param(cx, body.device.id, param, value);
                 }
+                automation::mark(ui, cx, &target, hold, rect, id, label);
             }
         }
     }

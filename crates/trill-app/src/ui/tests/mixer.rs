@@ -82,16 +82,56 @@ fn sends_are_set_from_the_strips() {
     assert_eq!((sent.len(), sent[0].to), (1, returns));
     assert!((sent[0].level_db).abs() < 1.5, "85% of the way along is unity: {}", sent[0].level_db);
     assert_eq!(harness.undo_depth(), before + 1);
+}
 
-    // An automated volume shows in the strip and opens its lane.
+#[test]
+fn a_strips_fader_takes_hold_of_an_automated_volume() {
+    let mut first = None;
+    let mut harness = Harness::new(mixer_tab(), |session| first = Some(two_tracks(session).0));
+    let first = first.unwrap();
     let target = trill_core::AutomationTarget::TrackVolume { track: first };
     let points = vec![trill_core::AutomationPoint::new(0.0, -20.0)];
-    harness.session.lock().edit(|project| project.set_automation(target.clone(), points)).unwrap();
+    harness.session.lock().edit(|project| project.set_automation(target.clone(), points.clone())).unwrap();
     harness.idle(2);
+    let lane_on = |harness: &Harness| harness.project().automation[0].enabled;
+    let volume = |harness: &Harness| harness.project().track(first).unwrap().volume_db;
+    let off_mark = "Automation of Volume of One is off";
+
+    // The fader shows what the envelope says, not the volume the track
+    // was left at.
+    let at_minus_20 = crate::ui::units::db_to_fader(-20.0) as f64;
+    assert!((harness.shown("Volume of One") - at_minus_20).abs() < 0.01, "{}", harness.shown("Volume of One"));
+    assert_eq!(volume(&harness), 0.0);
+    assert!(!harness.is_on_screen(off_mark));
+
+    // Dragged, it is the user's: the envelope is switched off, kept, and
+    // the fader stays where it is put.
+    let before = harness.undo_depth();
     let fader = harness.all_labeled("Volume of One")[0];
     harness.drag(fader.center(), fader.center_top() + vec2(0.0, 6.0));
-    assert_eq!(harness.project().track(first).unwrap().volume_db, 0.0, "the fader left the volume alone");
-    assert_eq!(harness.app.state().arrangement.lanes[0].target, target);
+    assert!(volume(&harness) > 3.0, "{}", volume(&harness));
+    assert!(!lane_on(&harness));
+    assert_eq!(harness.project().automation[0].points, points, "the envelope itself is untouched");
+    assert_eq!(harness.undo_depth(), before + 1, "taking hold and the drag are one undo step");
+    assert!(harness.shown("Volume of One") > 0.9, "the fader shows the volume it was given");
+    assert!(harness.app.state().arrangement.lanes.is_empty(), "nothing is unfolded behind the user's back");
+
+    // The mark in the fader's corner is the way back, in one click.
+    harness.settle();
+    harness.click_label(off_mark);
+    assert!(lane_on(&harness));
+    assert!(volume(&harness) > 3.0, "the volume set by hand is kept for the next time");
+    harness.idle(1);
+    assert!((harness.shown("Volume of One") - at_minus_20).abs() < 0.01, "the envelope sets the fader again");
+    assert!(!harness.is_on_screen(off_mark));
+
+    // Undo walks back through it: off again, then as it was at the start.
+    harness.key(Modifiers::COMMAND, Key::Z);
+    assert!(!lane_on(&harness));
+    harness.key(Modifiers::COMMAND, Key::Z);
+    assert!(lane_on(&harness));
+    assert_eq!(volume(&harness), 0.0, "one step gives back both the envelope and the volume");
+    assert_eq!(harness.undo_depth(), before);
 }
 
 #[test]

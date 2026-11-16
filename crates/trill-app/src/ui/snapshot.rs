@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use trill_core::project::AutomationLane;
 use trill_core::{AutomationPoint, AutomationTarget, Beats, Clip, ClipId, DeviceId, Note, Project, Track, TrackId};
 use trill_engine::{Meter, ParamState, Problem, SampleFile, Session};
 
@@ -143,14 +144,24 @@ impl Snapshot {
         entry.clone()
     }
 
-    /// The envelope that automates `target`, if there is one.
-    pub fn envelope(&self, target: &AutomationTarget) -> Option<&[AutomationPoint]> {
-        self.project.automation.iter().find(|lane| lane.target == *target).map(|lane| lane.points.as_slice())
+    /// The lane that automates `target`, if there is one: its envelope, and
+    /// whether it is switched on.
+    pub fn lane(&self, target: &AutomationTarget) -> Option<&AutomationLane> {
+        self.project.automation.iter().find(|lane| lane.target == *target)
     }
 
-    /// What `target`'s envelope says at `beat`; `None` if it has none.
+    /// The envelope that automates `target`, if there is one, switched on
+    /// or not.
+    pub fn envelope(&self, target: &AutomationTarget) -> Option<&[AutomationPoint]> {
+        self.lane(target).map(|lane| lane.points.as_slice())
+    }
+
+    /// What `target`'s envelope makes of it at `beat`: what is heard.
+    /// `None` if it has no envelope, or one that is switched off, in which
+    /// case the target stays where it is set by hand.
     pub fn automated(&self, target: &AutomationTarget, beat: Beats) -> Option<f64> {
-        self.envelope(target).map(|points| trill_core::project::automation_value(points, beat))
+        let lane = self.lane(target).filter(|lane| lane.enabled)?;
+        Some(trill_core::project::automation_value(&lane.points, beat))
     }
 
     /// The description of a device's parameter, when the snapshot covers
@@ -401,5 +412,12 @@ mod tests {
         assert_eq!(snapshot.envelope(&volume).unwrap().len(), 2);
         assert_eq!(snapshot.automated(&volume, 2.0), Some(-6.0));
         assert_eq!(snapshot.automated(&AutomationTarget::TrackPan { track }, 2.0), None);
+
+        // Switched off, the envelope is still there and says nothing.
+        session.edit(|project| project.set_automation_enabled(&volume, false)).unwrap();
+        let snapshot = Snapshot::capture(&session, &[]);
+        assert_eq!(snapshot.envelope(&volume).unwrap().len(), 2);
+        assert!(snapshot.lane(&volume).is_some_and(|lane| !lane.enabled));
+        assert_eq!(snapshot.automated(&volume, 2.0), None);
     }
 }

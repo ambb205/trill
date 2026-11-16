@@ -5,6 +5,7 @@
 //! Shift makes a drag fine, a double-click restores the default and the
 //! wheel is left alone.
 
+use crate::automation::{Automation, automation_mark};
 use crate::bar::BarOutput;
 use crate::paint;
 use crate::theme::Theme;
@@ -21,14 +22,14 @@ pub struct Fader<'a> {
     name: &'a str,
     frac: f32,
     default: f32,
-    automated: bool,
+    automation: Automation,
 }
 
 impl<'a> Fader<'a> {
     /// A fader at `frac` (0 at the bottom, 1 at the top). `name` is what
     /// assistive technology calls it.
     pub fn new(name: &'a str, frac: f32) -> Self {
-        Self { name, frac, default: 0.0, automated: false }
+        Self { name, frac, default: 0.0, automation: Automation::None }
     }
 
     /// The position a double-click restores. It is marked with a notch.
@@ -37,10 +38,11 @@ impl<'a> Fader<'a> {
         self
     }
 
-    /// Marks the fader's corner in the signal color: an envelope, not the
-    /// user, is setting this value.
-    pub fn automated(mut self, automated: bool) -> Self {
-        self.automated = automated;
+    /// Marks the fader's corner for the envelope that can drive it: filled
+    /// while it sets this value, an outline that takes a click while it is
+    /// switched off.
+    pub fn automation(mut self, automation: Automation) -> Self {
+        self.automation = automation;
         self
     }
 }
@@ -100,11 +102,9 @@ pub fn fader(ui: &Ui, theme: &Theme, rect: Rect, id: Id, fader: &Fader) -> BarOu
         }
         let cap = Rect::from_min_max(pos2(rect.left(), cap_top), pos2(rect.right(), cap_top + CAP));
         painter.rect_filled(cap, 0.0, theme.ink);
-        if fader.automated {
-            paint::corner_mark(&painter, rect, theme.signal);
-        }
     }
-    BarOutput { response, frac, pressed, reset }
+    let mark = automation_mark(ui, theme, rect, id, fader.automation, fader.name);
+    BarOutput { response, frac, pressed, reset, mark }
 }
 
 #[cfg(test)]
