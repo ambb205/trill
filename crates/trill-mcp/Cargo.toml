@@ -28,7 +28,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time",
 tokio-util = "0.7"
 
 [dev-dependencies]
-rmcp = { version = "3.10", features = ["client", "transport-streamable-http-client-reqwest", "reqwest"] }
+# Without rmcp's "reqwest" feature, which adds TLS (and a C crypto library
+# that takes minutes to build): the tests only talk to localhost.
+rmcp = { version = "3.10", features = ["client", "transport-streamable-http-client-reqwest"] }
 # Fixtures: sample folders and settings in temporary places, audio written to them.
 tempfile = "3"
 trill-media.workspace = true

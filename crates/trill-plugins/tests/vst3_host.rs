@@ -203,6 +203,7 @@ fn eventually(limit: Duration, mut condition: impl FnMut() -> bool) -> bool {
 // ---- scanning ------------------------------------------------------------
 
 #[test]
+#[ignore = "needs the plugins installed on this machine; run with `cargo test -p trill-plugins -- --include-ignored`"]
 fn the_scanner_process_survives_and_lists_every_installed_plugin() {
     let files = find_plugin_files(&standard_search_paths());
     if files.is_empty() {
@@ -292,6 +293,7 @@ fn the_scanner_process_survives_and_lists_every_installed_plugin() {
 /// it. Plugins built with a recent SDK ship a `moduleinfo.json` that lists
 /// their classes in that form, which is independent evidence.
 #[test]
+#[ignore = "needs the plugins installed on this machine; run with `cargo test -p trill-plugins -- --include-ignored`"]
 fn class_ids_are_written_as_the_plugins_own_module_info_lists_them() {
     let factory = factory();
     let uris: Vec<String> = factory.descriptors().into_iter().map(|descriptor| descriptor.uri).collect();
@@ -326,6 +328,7 @@ fn class_ids_are_written_as_the_plugins_own_module_info_lists_them() {
 
 /// What the DAW falls back to when the scanner executable is missing.
 #[test]
+#[ignore = "needs the plugins installed on this machine; run with `cargo test -p trill-plugins -- --include-ignored`"]
 fn scanning_inside_the_process_finds_the_same_plugins() {
     // Scanning in this process loads the plugins into it, so only the
     // directories of the plugins named above are searched, and only if
@@ -382,6 +385,7 @@ fn scanning_inside_the_process_finds_the_same_plugins() {
 }
 
 #[test]
+#[ignore = "needs the plugins installed on this machine; run with `cargo test -p trill-plugins -- --include-ignored`"]
 fn the_plugin_host_offers_both_formats_from_one_scan_setup() {
     let clap =
         ClapConfig { scanner: scanner(), cache_path: Some(scratch("host-clap-cache.json")), ..ClapConfig::default() };
@@ -415,6 +419,7 @@ fn the_plugin_host_offers_both_formats_from_one_scan_setup() {
 // ---- instantiating -------------------------------------------------------
 
 #[test]
+#[ignore = "needs the plugins installed on this machine; run with `cargo test -p trill-plugins -- --include-ignored`"]
 fn every_plugin_reports_its_parameters() {
     let factory = factory();
     for name in ALL {
@@ -463,6 +468,7 @@ fn every_plugin_reports_its_parameters() {
 }
 
 #[test]
+#[ignore = "needs the plugins installed on this machine; run with `cargo test -p trill-plugins -- --include-ignored`"]
 fn instruments_add_to_the_buffer_and_effects_replace_it() {
     let factory = factory();
     for name in INSTRUMENTS {
@@ -516,6 +522,7 @@ fn render_options() -> RenderOptions {
 }
 
 #[test]
+#[ignore = "needs the plugins installed on this machine; run with `cargo test -p trill-plugins -- --include-ignored`"]
 fn an_offline_render_plays_the_plugin_at_the_right_time() {
     let factory = factory();
     let devices = composite(&factory);
@@ -541,6 +548,7 @@ fn an_offline_render_plays_the_plugin_at_the_right_time() {
 }
 
 #[test]
+#[ignore = "needs the plugins installed on this machine; run with `cargo test -p trill-plugins -- --include-ignored`"]
 fn changing_a_parameter_changes_the_sound() {
     let factory = factory();
     let devices = composite(&factory);
@@ -582,6 +590,7 @@ fn changing_a_parameter_changes_the_sound() {
 // ---- state ---------------------------------------------------------------
 
 #[test]
+#[ignore = "needs the plugins installed on this machine; run with `cargo test -p trill-plugins -- --include-ignored`"]
 fn saved_state_restores_into_a_new_instance() {
     let factory = factory();
     for name in ALL {
@@ -669,6 +678,7 @@ fn saved_state_restores_into_a_new_instance() {
 // ---- voices --------------------------------------------------------------
 
 #[test]
+#[ignore = "needs the plugins installed on this machine; run with `cargo test -p trill-plugins -- --include-ignored`"]
 fn all_notes_off_and_reset_end_sounding_notes() {
     let factory = factory();
     for name in INSTRUMENTS {
@@ -709,6 +719,7 @@ fn all_notes_off_and_reset_end_sounding_notes() {
 }
 
 #[test]
+#[ignore = "needs the plugins installed on this machine; run with `cargo test -p trill-plugins -- --include-ignored`"]
 fn a_plugin_can_be_prepared_again_for_another_sample_rate() {
     let factory = factory();
     for name in INSTRUMENTS {
@@ -751,6 +762,7 @@ fn a_plugin_can_be_prepared_again_for_another_sample_rate() {
 // ---- lifecycle -----------------------------------------------------------
 
 #[test]
+#[ignore = "needs the plugins installed on this machine; run with `cargo test -p trill-plugins -- --include-ignored`"]
 fn many_instances_come_and_go() {
     within(Duration::from_secs(600), || {
         let factory = factory();
@@ -799,6 +811,7 @@ fn many_instances_come_and_go() {
 }
 
 #[test]
+#[ignore = "needs the plugins installed on this machine; run with `cargo test -p trill-plugins -- --include-ignored`"]
 fn devices_outlive_the_factory_that_made_them() {
     within(Duration::from_secs(300), || {
         let factory = factory();
@@ -839,6 +852,7 @@ fn add_looping_track(session: &mut Session, name: &str) -> trill_core::TrackId {
 }
 
 #[test]
+#[ignore = "needs the plugins installed on this machine; run with `cargo test -p trill-plugins -- --include-ignored`"]
 fn a_session_hosts_a_plugin_and_shuts_down_cleanly() {
     within(Duration::from_secs(300), || {
         let plugins = factory();
@@ -908,6 +922,7 @@ fn a_session_hosts_a_plugin_and_shuts_down_cleanly() {
 }
 
 #[test]
+#[ignore = "needs the plugins installed on this machine; run with `cargo test -p trill-plugins -- --include-ignored`"]
 fn clap_and_vst3_instances_coexist_in_one_session() {
     within(Duration::from_secs(300), || {
         let clap = ClapConfig {

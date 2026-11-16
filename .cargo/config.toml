@@ -1,0 +1,4 @@
+# The linker that ships with the Rust toolchain. On Windows it links several
+# times faster than Microsoft's, which matters with forty-odd test programs.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"

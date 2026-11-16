@@ -644,6 +644,7 @@ fn find_real_files(folders: &[PathBuf], per_folder: usize) -> Vec<(&'static str,
 }
 
 #[test]
+#[ignore = "reads audio files from this machine's folders; run with `cargo test -p trill-media -- --include-ignored`"]
 fn real_files_from_this_machine_decode() {
     let found = find_real_files(&real_media_folders(), 25);
     for (extension, files) in &found {
@@ -743,6 +744,7 @@ fn lengths_of_vorbis_wav(path: &Path) -> Option<(u64, Option<u64>)> {
 /// all, and where its oddities were found, so they are the test of it: every
 /// one must come out as long as its stream is, to the frame.
 #[test]
+#[ignore = "reads audio files from this machine's folders; run with `cargo test -p trill-media -- --include-ignored`"]
 fn fl_studio_samples_decode_to_their_full_length() {
     let mut samples: Vec<(PathBuf, u64, Option<u64>)> = Vec::new();
     for folder in real_media_folders() {

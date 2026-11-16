@@ -27,6 +27,26 @@ cargo test --workspace               # the test suite
 
 Development builds are optimized (see `[profile.dev]`), because unoptimized audio code cannot keep up in real time.
 
+### Building and testing
+
+`cargo test --workspace` runs about 1,100 tests in about a minute. It needs nothing installed and touches nothing
+outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
+asked for:
+
+```sh
+cargo test -p trill-plugins -- --include-ignored    # against the CLAP and VST3 plugins installed here (minutes)
+cargo test -p trill-media -- --include-ignored      # decoding audio files found in this machine's usual folders
+TRILL_TEST_PLUGIN_WINDOWS=1 cargo test -p trill-plugins --test editor_windows -- --test-threads=1   # opens windows
+TRILL_TEST_CLAUDE=1 cargo test -p trill-assistant --test real_cli    # talks to an installed, signed-in Claude Code
+```
+
+Run the first two after touching plugin hosting or audio decoding.
+
+The build is set up to be quick to repeat: code that only runs while building (procedural macros, build scripts)
+is not optimized, debug information is limited to file and line (`CARGO_PROFILE_DEV_DEBUG=full` for a debugging
+session), and on Windows the linker is the one that ships with Rust (`.cargo/config.toml`). Everything from
+scratch, tests included, takes about four minutes on a 16-core machine; after an edit, seconds.
+
 ### Let an AI write a song
 
 While the app is open it serves MCP on `http://127.0.0.1:7777/mcp` (`--mcp-port` changes the port, `--no-mcp` turns
