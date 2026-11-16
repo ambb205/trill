@@ -38,7 +38,8 @@ Options:
   --assistant-model <NAME>    Model the assistant asks Claude Code for in this run (default: the one chosen
                           in its panel, which unless one was chosen is Claude Code's own choice)
   --assistant-scene <NAME>    Show a canned conversation in the assistant, for screenshots: ready, working,
-                          answered, markdown, model, limit, api-key, signed-out or not-installed
+                          answered, markdown, model, effort, song, song-done, limit, api-key, signed-out
+                          or not-installed
   --keyboard              Start with the computer keyboard playing notes (Ctrl+K switches it)
   --hold <KEYS>           Hold these keys of it down, for screenshots: adg is a C major chord, and
                           zzat a kick and a hat two octaves down

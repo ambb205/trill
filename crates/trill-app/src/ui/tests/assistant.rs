@@ -5,12 +5,14 @@
 //! outside the window, as that server does.
 
 use super::*;
-use crate::ui::assistant::testing::{AT_WORK, Ending, Item, Offer, Place, Problem, Script, Sent, ToolState, ready};
+use crate::ui::assistant::testing::{
+    AT_WORK, Ending, Item, Offer, Place, Problem, Script, Sent, Setup, ToolState, ready,
+};
 use crate::ui::timeline::TimeView;
 use serde_json::json;
 use trill_assistant::{
     ApiErrorKind, CliInstallation, CliVersion, Event, FailureReason, LoginMethod, MINIMUM_CLI_VERSION, Notice,
-    SessionId, TokenUsage, TurnStart, TurnSummary, Unavailable,
+    PlanChange, PlanStep, Progress, SessionId, StepStatus, TokenUsage, TurnStart, TurnSummary, Unavailable, WebLookup,
 };
 
 const CTRL_SHIFT: Modifiers = Modifiers::COMMAND.plus(Modifiers::SHIFT);
@@ -381,7 +383,9 @@ fn a_failed_turn_closes_its_group_too() {
     harness.idle(3);
 
     assert!(!harness.app.assistant().is_working());
-    assert_eq!(harness.ending(), (Ending::Failed { text: failure.to_string(), offer: Offer::TryAgain }, true));
+    // It had used a tool, so what is offered is to carry on: asking again
+    // would ask for what is done a second time.
+    assert_eq!(harness.ending(), (Ending::Failed { text: failure.to_string(), offer: Offer::Continue }, true));
     assert!(harness.is_on_screen("Claude Code could not complete the request: Overloaded"));
     assert_eq!(harness.undo_depth(), depth + 1);
     harness.session.lock().edit(|project| project.set_tempo(100.0)).unwrap();
@@ -1374,7 +1378,10 @@ fn a_turn_limit_offers_to_continue() {
     harness.session.lock().edit(|project| project.set_track_volume(tracks[0], -2.0)).unwrap();
     script.say([answer("1", "update_track", Ok("{}")), Event::Failed(FailureReason::TurnLimitReached { limit: 80 })]);
     harness.idle(3);
-    assert!(harness.is_on_screen("The assistant stopped after 80 steps. Ask it to continue if it was not finished."));
+    assert!(harness.is_on_screen(
+        "The assistant stopped at the limit of 80 steps for one request. It can carry on from where it is; the \
+         limit is there to catch an assistant going round in circles."
+    ));
     assert!(harness.ending().1, "what it did so far stays done, as one step");
     assert!(harness.shows("Undo"));
 
@@ -1705,6 +1712,513 @@ fn what_was_sent_is_what_the_script_saw() {
     let sent: Sent = script.state().sent[0].clone();
     assert_eq!(sent.message, "trim me");
     assert!(sent.context.is_some_and(|context| context.starts_with("project: ")));
+}
+
+// ---- a long request, a plan, the web, and what is chosen for them -----------------------
+
+fn progress(steps: u32, cost: Option<f64>, costed: u32) -> Event {
+    Event::Progress(Progress { steps, estimated_cost_usd: cost, costed_steps: costed })
+}
+
+fn planned(id: &str, title: &str, doing: Option<&str>) -> Event {
+    Event::Plan(PlanChange::Added { id: id.to_owned(), title: title.to_owned(), doing: doing.map(str::to_owned) })
+}
+
+fn stands(id: &str, status: StepStatus) -> Event {
+    Event::Plan(PlanChange::Changed { id: id.to_owned(), status: Some(status), title: None, doing: None })
+}
+
+fn looks_up(id: &str, lookup: WebLookup) -> Event {
+    Event::WebStarted { id: id.to_owned(), lookup }
+}
+
+fn found(id: &str, result: Result<&str, &str>) -> Event {
+    Event::WebFinished { id: id.to_owned(), result: result.map(str::to_owned).map_err(str::to_owned) }
+}
+
+impl Harness {
+    /// Whether something on screen is labeled with words that begin so.
+    fn shows_start(&self, start: &str) -> bool {
+        self.labels.iter().any(|(text, _)| text.starts_with(start))
+    }
+
+    /// Plays `steps` steps of a long request from `from` on: each a round of
+    /// the model's with a tool call in it, with the back end saying how far
+    /// it has come, starting another run of the CLI every hundred steps and
+    /// learning then what the run before cost (1.25 each). Every tenth step
+    /// changes the song, from outside the window, as the MCP server does.
+    fn work_through(&mut self, script: &Script, track: TrackId, from: u32, steps: u32) {
+        for step in from..from + steps {
+            let runs_done = (step - 1) / 100;
+            let cost = (runs_done > 0).then(|| f64::from(runs_done) * 1.25);
+            if step > 1 && step % 100 == 1 {
+                script.say([progress(step - 1, cost, step - 1), started()]);
+            }
+            let id = format!("step-{step}");
+            script.say([
+                progress(step, cost, runs_done * 100),
+                call(&id, "update_track", json!({ "track": track.0, "volume_db": -1 })),
+            ]);
+            if step % 10 == 0 {
+                self.idle(1);
+                let volume = -(step as f32) / 20.0;
+                self.session.lock().edit(|project| project.set_track_volume(track, volume)).unwrap();
+            }
+            script.say([answer(&id, "update_track", Ok("{}"))]);
+        }
+        self.idle(2);
+    }
+}
+
+#[test]
+fn a_request_four_times_as_long_as_a_message_used_to_be_allowed_runs_to_its_end_as_one_undo_step() {
+    let (mut harness, script, tracks, _) = assisted();
+    let before = harness.project();
+    let depth = harness.undo_depth();
+
+    harness.tell("write a whole song");
+    script.say([started()]);
+    // Eighty steps is where a message used to stop and offer Continue.
+    harness.work_through(&script, tracks[0], 1, 150);
+    assert!(harness.app.assistant().is_working(), "well past the old limit, and still at work");
+    assert!(
+        harness.shows("Working\u{2026} \u{00B7} Step 150 of 1,000 \u{00B7} est. $1.25 to step 100"),
+        "how far it has come and what the first hundred steps cost: {:?}",
+        harness.said_in_the_panel()
+    );
+    assert!(harness.is_on_screen("Stop") && !harness.shows("Continue"), "there is nothing to click, and Stop is there");
+
+    harness.work_through(&script, tracks[0], 151, 170);
+    let summary = TurnSummary {
+        turns: 320,
+        duration: Duration::from_secs(31 * 60 + 4),
+        usage: TokenUsage::default(),
+        estimated_cost_usd: Some(4.1),
+    };
+    script.say([text("The song is written."), Event::Finished(summary)]);
+    harness.idle(3);
+
+    // It ran to its end by itself: one message sent, one conversation, no
+    // Stop, no Continue.
+    let state = script.state();
+    assert_eq!((state.sent.len(), state.opened.len(), state.cancels), (1, 1, 0));
+    assert_eq!(state.sent[0].message, "write a whole song");
+    drop(state);
+    assert_eq!(harness.ending(), (Ending::Finished { seconds: 1864.0, steps: 320, estimated_cost: Some(4.1) }, true));
+    assert!(
+        harness.is_on_screen("Changed the song \u{00B7} 31 min 4 s \u{00B7} 320 steps \u{00B7} est. $4.10"),
+        "{:?}",
+        harness.said_in_the_panel()
+    );
+    assert_eq!(harness.items().iter().filter(|item| matches!(item, Item::Tool(_))).count(), 320);
+
+    // And all of it, thirty-two changes to the song over four runs of the
+    // CLI, is one step: one Undo takes it back.
+    assert_ne!(harness.project(), before);
+    assert_eq!(harness.undo_depth(), depth + 1);
+    harness.click_label("Undo");
+    assert_eq!(harness.project(), before);
+}
+
+#[test]
+fn stop_ends_a_long_request_at_once_with_what_it_did_as_one_step_and_what_it_took() {
+    let (mut harness, script, tracks, _) = assisted();
+    let before = harness.project();
+    let depth = harness.undo_depth();
+
+    harness.tell("write a whole song");
+    script.say([started()]);
+    harness.work_through(&script, tracks[0], 1, 130);
+    script.say([progress(131, Some(1.25), 100), call("render", "render", json!({}))]);
+    harness.idle(2);
+    assert!(harness.shows_start("Working\u{2026} \u{00B7} Step 131 of 1,000"));
+
+    harness.click_last_label("Stop");
+    assert_eq!(script.state().cancels, 1);
+    harness.idle(2);
+    assert!(harness.shows_start("Stopping\u{2026}"));
+    script.say([Event::Cancelled]);
+    harness.idle(3);
+
+    assert!(!harness.app.assistant().is_working());
+    let Some(Item::End(end)) = harness.items().last() else { panic!("the turn is closed") };
+    assert_eq!((&end.ending, end.changed), (&Ending::Stopped, true));
+    // What it had taken when it was stopped, as far as the back end said:
+    // the estimate is the CLI's for the run that had ended.
+    let spent = end.spent.clone().expect("a turn that had got going says what it took");
+    assert_eq!((spent.steps, spent.estimated_cost, spent.costed_steps), (131, Some(1.25), 100));
+    assert!(
+        harness.labels.iter().any(|(label, _)| label.starts_with("Stopped \u{00B7} Changed the song \u{00B7} ")
+            && label.ends_with(" \u{00B7} 131 steps \u{00B7} est. $1.25 to step 100")),
+        "{:?}",
+        harness.said_in_the_panel()
+    );
+    // Nothing carries on behind the user's back.
+    harness.idle(10);
+    assert_eq!(script.state().sent.len(), 1);
+
+    assert_eq!(harness.undo_depth(), depth + 1, "thirteen changes, one step");
+    harness.click_label("Undo");
+    assert_eq!(harness.project(), before);
+
+    // The conversation goes on from there.
+    harness.tell("carry on from the bass");
+    assert_eq!(script.state().sent.len(), 2);
+    assert_eq!(script.state().opened.len(), 1, "in the conversation that was stopped");
+}
+
+#[test]
+fn a_request_that_fails_after_it_has_done_work_offers_to_carry_on_and_not_to_start_again() {
+    let (mut harness, script, tracks, _) = assisted();
+    harness.tell("write a whole song");
+    script.say([started()]);
+    harness.work_through(&script, tracks[0], 1, 12);
+    let reason = FailureReason::UsageLimitReached {
+        message: "You've hit your session limit \u{00B7} resets 3:00pm".into(),
+        resets_at: None,
+    };
+    script.say([Event::Failed(reason.clone())]);
+    harness.idle(3);
+
+    assert_eq!(harness.ending(), (Ending::Failed { text: reason.to_string(), offer: Offer::Continue }, true));
+    assert!(harness.shows("Continue") && !harness.shows("Try again"), "the request must not be made a second time");
+    assert!(harness.shows("Undo"), "what it did is one step all the same");
+    harness.click_label("Continue");
+    assert_eq!(script.state().sent[1].message, "Continue.");
+}
+
+#[test]
+fn the_plan_is_a_checklist_that_fills_in_as_the_work_proceeds() {
+    let (mut harness, script, tracks, _) = assisted();
+    assert!(!harness.shows_start("Plan:"), "no plan, no checklist");
+
+    harness.tell("write a song");
+    script.say([
+        started(),
+        text("Here is the plan."),
+        planned("1", "Set tempo and key", Some("Setting tempo and key")),
+        planned("2", "Write the drums", Some("Writing the drums")),
+        planned("3", "Render and check", None),
+    ]);
+    harness.idle(3);
+    assert!(harness.shows("Plan: 0 of 3 done"));
+    for step in ["Set tempo and key: to do", "Write the drums: to do", "Render and check: to do"] {
+        assert!(harness.shows(step), "{step}: {:?}", harness.said_in_the_panel());
+    }
+    assert!(
+        !harness.items().iter().any(|item| matches!(item, Item::Tool(_))),
+        "the plan is the checklist, not lines in the conversation"
+    );
+    // It stands between the conversation and the message field.
+    let (plan, field) = (harness.passage("Plan: 0 of 3 done"), harness.app.assistant().field());
+    assert!(harness.passage("Here is the plan.").bottom() <= plan.top() && plan.bottom() < field.top());
+
+    // A step in hand reads as what is being done; done, it is ticked.
+    script.say([stands("1", StepStatus::InProgress)]);
+    harness.idle(2);
+    assert!(harness.shows("Setting tempo and key: in hand") && harness.shows("Plan: 0 of 3 done"));
+    script.say([
+        call("a", "set_project", json!({ "tempo": 122 })),
+        answer("a", "set_project", Ok("{}")),
+        stands("1", StepStatus::Done),
+        stands("2", StepStatus::InProgress),
+    ]);
+    harness.idle(2);
+    assert!(harness.shows("Plan: 1 of 3 done"));
+    assert!(harness.shows("Set tempo and key: done") && harness.shows("Writing the drums: in hand"));
+
+    // Steps are worded anew and dropped as the assistant changes its mind,
+    // and the list is what the CLI says it is when the assistant reads it.
+    let reworded = PlanChange::Changed {
+        id: "3".into(),
+        status: None,
+        title: Some("Render and read the mix".into()),
+        doing: None,
+    };
+    script.say([Event::Plan(reworded)]);
+    harness.idle(2);
+    assert!(harness.shows("Render and read the mix: to do") && !harness.shows_start("Render and check"));
+    let step = |id: &str, title: &str, status| PlanStep { id: id.into(), title: title.into(), status };
+    script.say([Event::Plan(PlanChange::Listed(vec![
+        step("1", "Set tempo and key", StepStatus::Done),
+        step("2", "Write the drums", StepStatus::InProgress),
+        step("4", "Write the bass", StepStatus::Pending),
+    ]))]);
+    harness.idle(2);
+    assert!(harness.shows("Plan: 1 of 3 done") && harness.shows("Write the bass: to do"));
+    assert!(harness.shows("Writing the drums: in hand"), "how a step reads while it is done is kept");
+    assert!(!harness.shows_start("Render and read the mix"), "a step the CLI no longer lists is gone");
+    script.say([Event::Plan(PlanChange::Removed { id: "4".into() })]);
+    harness.idle(2);
+    assert!(harness.shows("Plan: 1 of 2 done") && !harness.shows_start("Write the bass"));
+
+    // Folded, it is its heading; unfolded, the steps are back.
+    harness.click_label("Plan: 1 of 2 done");
+    harness.idle(2);
+    assert!(harness.shows("Plan: 1 of 2 done") && !harness.shows("Set tempo and key: done"));
+    harness.click_label("Plan: 1 of 2 done");
+    harness.idle(2);
+    assert!(harness.shows("Set tempo and key: done"));
+
+    // Stopped half way, the plan stays as it stood, with nothing in hand.
+    harness.click_last_label("Stop");
+    script.say([Event::Cancelled]);
+    harness.idle(3);
+    assert!(harness.shows("Plan: 1 of 2 done") && harness.shows("Writing the drums: begun"));
+    // The next request may carry it on: it is kept.
+    harness.tell("carry on");
+    harness.idle(2);
+    assert!(harness.shows("Plan: 1 of 2 done"));
+    script.say([started(), stands("2", StepStatus::Done), text("All done."), finished()]);
+    harness.idle(3);
+    assert!(harness.shows("Plan: 2 of 2 done") && harness.shows("Write the drums: done"), "read once it is done");
+
+    // A plan that was carried out belongs to its request: the next one
+    // starts without it.
+    harness.session.lock().edit(|project| project.set_track_volume(tracks[0], -1.0)).unwrap();
+    harness.tell("thanks");
+    harness.idle(2);
+    assert!(!harness.shows_start("Plan:"));
+}
+
+#[test]
+fn the_web_is_on_shown_and_listed_in_use_and_switched_off_it_is_not_offered_at_all() {
+    let (mut harness, script, ..) = assisted();
+    assert!(harness.app.assistant().web() && harness.is_on("Web research"), "on until it is switched off");
+
+    harness.tell("what is a tresillo?");
+    assert!(script.state().setups[0].web);
+    script.say([started(), looks_up("w1", WebLookup::Search { query: "tresillo rhythm pattern".into() })]);
+    harness.idle(2);
+    // Every search and every page is a line, by its query or its address,
+    // from the moment it is asked for.
+    assert!(harness.shows("Searching the web for \u{201C}tresillo rhythm pattern\u{201D}\u{2026}"));
+    let question = "How is it counted?".to_owned();
+    script.say([
+        found("w1", Ok("Web search results for query: \"tresillo rhythm pattern\"")),
+        looks_up(
+            "w2",
+            WebLookup::Page { url: "https://example.com/rhythm/tresillo".into(), question: question.clone() },
+        ),
+        found("w2", Ok("Three notes over eight sixteenths: 3 + 3 + 2.")),
+        looks_up("w3", WebLookup::Page { url: "https://example.org/missing/".into(), question }),
+        found("w3", Err("Request failed with status code 404")),
+    ]);
+    harness.idle(2);
+    assert!(harness.shows("Searched the web for \u{201C}tresillo rhythm pattern\u{201D}"));
+    assert!(harness.shows("Read example.com/rhythm/tresillo"));
+    assert!(harness.shows("Reading example.org/missing: failed"), "{:?}", harness.said_in_the_panel());
+    // What was asked of the page and what came back are a click away.
+    harness.click_label("Read example.com/rhythm/tresillo");
+    harness.idle(2);
+    let Some(Item::Tool(page)) = harness.items().iter().find(|item| matches!(item, Item::Tool(line) if line.open))
+    else {
+        panic!("the line unfolds")
+    };
+    assert_eq!(page.tool, "WebFetch", "by the name the CLI has for it");
+    assert_eq!(page.input, "https://example.com/rhythm/tresillo\n\nHow is it counted?");
+    assert_eq!(page.output, "Three notes over eight sixteenths: 3 + 3 + 2.");
+
+    // While the assistant is answering, the switch stays as it is.
+    harness.click_label("Web research");
+    harness.idle(2);
+    assert!(harness.app.assistant().web(), "a turn is answered with what it began with");
+    script.say([text("Three, three, two."), finished()]);
+    harness.idle(3);
+
+    // Switched off: it shows, and the conversation is opened again, by its
+    // id, without the web.
+    harness.click_label("Web research");
+    harness.idle(2);
+    assert!(!harness.app.assistant().web() && !harness.is_on("Web research"));
+    harness.tell("and a habanera?");
+    let state = script.state();
+    assert_eq!(state.opened, [None, Some(conversation_id('a'))], "the same conversation, opened again");
+    assert_eq!(state.setups.iter().map(|setup| setup.web).collect::<Vec<_>>(), [true, false]);
+}
+
+#[test]
+fn the_thinking_effort_is_chosen_beside_the_model_and_reaches_the_back_end() {
+    use trill_assistant::Effort;
+    let (mut harness, script, ..) = assisted();
+    assert!(harness.shows("Effort: Default"), "the CLI's own until one is chosen");
+    // Beside the model chooser, on its line.
+    let (model, effort) = (harness.passage("Model: Default"), harness.passage("Effort: Default"));
+    assert!(model.right() <= effort.left() && (model.center().y - effort.center().y).abs() < 1.0);
+    harness.tell("hello");
+    assert_eq!(script.state().setups[0].effort, None, "no effort is asked for");
+
+    // Not while the assistant is answering.
+    harness.click_label("Effort: Default");
+    harness.idle(3);
+    assert!(!harness.shows("xhigh"), "the list does not open");
+    assert!(harness.app.assistant_mut().choose_effort(Some(Effort::Max)).is_err());
+    script.say([started(), text("Hello."), finished()]);
+    harness.idle(3);
+
+    // The list: the CLI's own, and the levels its `--effort` takes.
+    harness.click_label("Effort: Default");
+    harness.idle(3);
+    assert!(harness.is_on("Default"));
+    for effort in Effort::ALL {
+        assert!(harness.shows(effort.name()) && !harness.is_on(effort.name()), "{}", effort.name());
+    }
+    harness.click_label("high");
+    harness.idle(3);
+    assert_eq!(harness.app.assistant().effort_choice(), Some(Effort::High));
+    assert!(harness.shows("Effort: high") && !harness.shows("xhigh"), "chosen, and the list is put away");
+
+    // It takes hold with the next message, in the same conversation.
+    harness.tell("again");
+    let state = script.state();
+    assert_eq!(state.opened, [None, Some(conversation_id('a'))]);
+    assert_eq!(state.setups[1].effort, Some(Effort::High));
+    assert_eq!(state.setups[1].model, None, "the model is as it was");
+    drop(state);
+    script.say([started(), finished()]);
+    harness.idle(3);
+    // And it is said where the model that answers is said.
+    let header = harness.passage("New conversation");
+    harness.move_to(pos2(SCREEN.x - harness.app.assistant().width() + 40.0, header.center().y));
+    harness.idle(2);
+    assert!(harness.hint().contains("answering as test-model at high effort"), "{}", harness.hint());
+
+    // Back to the CLI's own.
+    harness.click_label("Effort: high");
+    harness.click_label("Default");
+    harness.idle(3);
+    harness.tell("once more");
+    assert_eq!(script.state().setups[2].effort, None);
+}
+
+#[test]
+fn the_step_limit_is_in_sight_and_can_be_moved() {
+    let (mut harness, script, tracks, _) = assisted();
+    assert!(harness.shows("Limit: 1,000 steps"), "the bound on one request is said, not hidden");
+    assert_eq!(harness.app.assistant().step_limit(), trill_assistant::DEFAULT_MAX_TURNS);
+
+    harness.click_label("Limit: 1,000 steps");
+    harness.idle(3);
+    for offered in ["250 steps", "500 steps", "1,000 steps", "2,000 steps"] {
+        assert!(harness.shows(offered), "{offered}");
+    }
+    assert!(harness.is_on("1,000 steps"));
+    harness.click_label("250 steps");
+    harness.idle(3);
+    assert_eq!(harness.app.assistant().step_limit(), 250);
+    assert!(harness.shows("Limit: 250 steps"));
+
+    // It is what the back end is given, and what the turn counts against.
+    harness.tell("write the whole arrangement");
+    assert_eq!(script.state().setups[0].step_limit, 250);
+    script.say([started()]);
+    harness.work_through(&script, tracks[0], 1, 30);
+    assert!(harness.shows_start("Working\u{2026} \u{00B7} Step 30 of 250"), "{:?}", harness.said_in_the_panel());
+    // Not to be changed under a turn's feet.
+    assert!(harness.app.assistant_mut().set_step_limit(2000).is_err());
+
+    // At the limit the turn ends, with what it did one step, and offers to
+    // carry on: with the same limit again.
+    script.say([progress(250, Some(2.5), 250), Event::Failed(FailureReason::TurnLimitReached { limit: 250 })]);
+    harness.idle(3);
+    assert!(harness.shows_start("The assistant stopped at the limit of 250 steps for one request."));
+    assert!(harness.shows("Undo"));
+    harness.click_label("Continue");
+    assert_eq!(script.state().sent[1].message, "Continue.");
+    assert_eq!(script.state().opened.len(), 1, "in the same conversation, opened as it was");
+}
+
+#[test]
+fn a_conversation_that_outgrows_the_model_is_summarised_in_plain_sight_and_the_turn_goes_on() {
+    let (mut harness, script, tracks, _) = assisted();
+    harness.tell("write a whole song");
+    script.say([started()]);
+    harness.work_through(&script, tracks[0], 1, 20);
+    script.say([Event::Notice(Notice::Compacting)]);
+    harness.idle(2);
+    assert!(harness.shows_start("The conversation has grown past what the model can hold at once. Claude Code is"));
+
+    script.say([Event::Notice(Notice::Compacted { tokens_before: Some(985_053), tokens_after: Some(644) })]);
+    harness.idle(2);
+    let notes: Vec<&str> = harness
+        .items()
+        .iter()
+        .filter_map(|item| if let Item::Note { text, .. } = item { Some(text.as_str()) } else { None })
+        .collect();
+    assert_eq!(
+        notes,
+        ["The conversation had grown past what the model can hold at once (985,053 tokens), so Claude Code \
+          summarised the earlier part (644 tokens now) and is carrying on. The song and the plan are untouched; \
+          what the assistant remembers of its early steps is now the summary."],
+        "one line, which says what happened"
+    );
+    assert!(harness.shows(notes[0]));
+    assert!(harness.app.assistant().is_working(), "and the turn goes on by itself");
+
+    harness.work_through(&script, tracks[0], 21, 5);
+    script.say([text("Carried on."), finished()]);
+    harness.idle(3);
+    assert!(matches!(harness.ending(), (Ending::Finished { .. }, true)));
+    assert_eq!(script.state().sent.len(), 1);
+}
+
+#[test]
+fn what_is_chosen_under_the_message_field_is_remembered_from_one_session_to_the_next() {
+    use trill_assistant::Effort;
+    let home = tempfile::tempdir().unwrap();
+    let start = || {
+        let storage = trill_runtime::Storage::At { settings: home.path().join("settings.json"), library_index: None };
+        Arc::new(Runtime::start(RuntimeOptions { storage, ..RuntimeOptions::hermetic() }).unwrap())
+    };
+    let kept = || std::fs::read_to_string(home.path().join("assistant.json")).unwrap();
+
+    let mut harness = Harness::on(start(), UiOptions::default(), |_| {});
+    harness.open_assistant(&Script::ready());
+    harness.click_label("Effort: Default");
+    harness.click_label("xhigh");
+    harness.idle(3);
+    harness.click_label("Web research");
+    harness.idle(2);
+    harness.click_label("Limit: 1,000 steps");
+    harness.click_label("2,000 steps");
+    harness.idle(3);
+    drop(harness);
+    let file = kept();
+    assert!(file.contains("\"effort\": \"xhigh\"") && file.contains("\"web\": false"), "{file}");
+    assert!(file.contains("\"step_limit\": 2000"), "{file}");
+
+    // The next session starts with all three, shows them, and opens its
+    // conversation with them.
+    let mut harness = Harness::on(start(), UiOptions::default(), |_| {});
+    let script = Script::ready();
+    harness.app.assistant_mut().use_script(script.clone());
+    harness.idle(3);
+    let assistant = harness.app.assistant();
+    assert_eq!(
+        (assistant.effort_choice(), assistant.web(), assistant.step_limit()),
+        (Some(Effort::ExtraHigh), false, 2000)
+    );
+    assert!(harness.shows("Effort: xhigh") && harness.shows("Limit: 2,000 steps") && !harness.is_on("Web research"));
+    harness.tell("hello");
+    assert_eq!(
+        script.state().setups,
+        [Setup { model: None, effort: Some(Effort::ExtraHigh), web: false, step_limit: 2000 }]
+    );
+    script.say([started(), finished()]);
+    harness.idle(3);
+
+    // Put back as they were, they go from the file again.
+    harness.click_label("Effort: xhigh");
+    harness.click_label("Default");
+    harness.idle(3);
+    harness.click_label("Web research");
+    harness.idle(2);
+    harness.click_label("Limit: 2,000 steps");
+    harness.click_label("1,000 steps");
+    harness.idle(3);
+    drop(harness);
+    let file = kept();
+    assert!(!file.contains("effort") && !file.contains("step_limit") && file.contains("\"web\": true"), "{file}");
 }
 
 // ---- against the CLI installed on this machine ------------------------------------------

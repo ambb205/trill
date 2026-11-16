@@ -22,8 +22,31 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
-use trill_assistant::{AssistantConfig, CliStatus, Conversation, Event, SendError, SessionId, Unavailable};
+use trill_assistant::{
+    AssistantConfig, CliStatus, Conversation, DEFAULT_MAX_TURNS, Effort, Event, SendError, SessionId, Unavailable,
+};
 use trill_runtime::Runtime;
+
+/// How a conversation is to be answered: what the panel lets the user
+/// choose. A conversation is opened with one of these and keeps to it; to
+/// change any of it, the conversation is opened again by its id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Setup {
+    /// The model the CLI is asked for; `None` leaves the choice to the CLI.
+    pub model: Option<String>,
+    /// How hard the model is asked to think; `None` leaves that to the CLI.
+    pub effort: Option<Effort>,
+    /// Whether the assistant may search the web and read pages.
+    pub web: bool,
+    /// The most steps one request may take.
+    pub step_limit: u32,
+}
+
+impl Default for Setup {
+    fn default() -> Self {
+        Self { model: None, effort: None, web: true, step_limit: DEFAULT_MAX_TURNS }
+    }
+}
 
 /// Everything a conversation needs to start.
 #[derive(Clone, Debug, PartialEq)]
@@ -82,13 +105,13 @@ pub trait Backend {
     /// The answer to the last [`Backend::check`], once.
     fn checked(&mut self) -> Option<Result<Ready, Problem>>;
     /// Opens a conversation: a new one, or the one `resume` names, to be
-    /// answered by `model` (`None` leaves the choice to the CLI). Nothing
-    /// runs until its first message.
+    /// answered as `setup` says. Nothing runs until its first message.
     ///
-    /// A conversation is answered by the model it was opened with. To have
-    /// another model carry it on, it is opened again with its id and the
-    /// other model: the CLI then hands that model everything said so far.
-    fn open(&mut self, ready: &Ready, resume: Option<SessionId>, model: Option<&str>) -> Result<Box<dyn Chat>, String>;
+    /// A conversation is answered by the model it was opened with, with the
+    /// tools it was opened with. To have another model carry it on, or to
+    /// give or take the web, it is opened again with its id: the CLI then
+    /// hands over everything said so far.
+    fn open(&mut self, ready: &Ready, resume: Option<SessionId>, setup: &Setup) -> Result<Box<dyn Chat>, String>;
 }
 
 // ---- the user's own CLI ---------------------------------------------------
@@ -134,13 +157,18 @@ impl Installed {
 
 /// How the CLI is run. `working_dir` is a folder of Trill's own that never
 /// changes (the CLI files conversations by it), never the project's. No
-/// tool is withheld: the door the assistant comes in by sees to what the
-/// tools that take a path may do.
-fn config(settings_folder: &Path, mcp_url: &str, model: Option<String>) -> AssistantConfig {
+/// tool of Trill's is withheld: the door the assistant comes in by sees to
+/// what the tools that take a path may do. Of the CLI's own tools it has
+/// the ones for keeping a plan and, if the user leaves the switch on, the
+/// ones for the web; never one that reaches a file or runs a program.
+fn config(settings_folder: &Path, mcp_url: &str, setup: &Setup) -> AssistantConfig {
     let folder = settings_folder.join("assistant");
     AssistantConfig {
         mcp_url: mcp_url.to_owned(),
-        model,
+        model: setup.model.clone(),
+        effort: setup.effort,
+        web: setup.web,
+        max_turns: Some(setup.step_limit),
         temp_dir: folder.join("tmp"),
         ..AssistantConfig::new(folder.join("work"))
     }
@@ -176,7 +204,7 @@ impl Backend for Installed {
         // to start, so the runtime never ends on it.
         let runtime = may_start.then(|| self.runtime.clone());
         // Looking for the CLI asks nothing of any model.
-        let config = config(&self.folder, "http://127.0.0.1:0/assistant", None);
+        let config = config(&self.folder, "http://127.0.0.1:0/assistant", &Setup::default());
         let ctx = ctx.clone();
 
         let spawned = std::thread::Builder::new().name("assistant-check".into()).spawn(move || {
@@ -229,8 +257,8 @@ impl Backend for Installed {
         Some(answer.result)
     }
 
-    fn open(&mut self, ready: &Ready, resume: Option<SessionId>, model: Option<&str>) -> Result<Box<dyn Chat>, String> {
-        let config = config(&self.folder, &ready.mcp_url, model.map(str::to_owned));
+    fn open(&mut self, ready: &Ready, resume: Option<SessionId>, setup: &Setup) -> Result<Box<dyn Chat>, String> {
+        let config = config(&self.folder, &ready.mcp_url, setup);
         let installation = ready.cli.installation.clone();
         let conversation = match resume {
             Some(session) => Conversation::resume(config, installation, session),
@@ -270,7 +298,7 @@ impl Backend for Nowhere {
         Some(Err(Problem::NoFolder))
     }
 
-    fn open(&mut self, _: &Ready, _: Option<SessionId>, _: Option<&str>) -> Result<Box<dyn Chat>, String> {
+    fn open(&mut self, _: &Ready, _: Option<SessionId>, _: &Setup) -> Result<Box<dyn Chat>, String> {
         Err(Problem::NoFolder.to_string())
     }
 }
@@ -304,6 +332,8 @@ pub struct ScriptState {
     pub opened: Vec<Option<SessionId>>,
     /// The model each of them was opened for; `None` is the CLI's choice.
     pub models: Vec<Option<String>>,
+    /// Everything each of them was opened with.
+    pub setups: Vec<Setup>,
     /// The id the conversation goes by once a turn has started.
     pub session: Option<SessionId>,
     busy: bool,
@@ -381,18 +411,14 @@ impl Backend for Script {
         }
     }
 
-    fn open(
-        &mut self,
-        _ready: &Ready,
-        resume: Option<SessionId>,
-        model: Option<&str>,
-    ) -> Result<Box<dyn Chat>, String> {
+    fn open(&mut self, ready: &Ready, resume: Option<SessionId>, setup: &Setup) -> Result<Box<dyn Chat>, String> {
         // What the real one refuses, this one refuses in the same words.
-        let asked = AssistantConfig { model: model.map(str::to_owned), ..AssistantConfig::new("nowhere") };
-        Conversation::new(asked, _ready.cli.installation.clone()).map_err(|error| error.to_string())?;
+        let asked = config(Path::new("nowhere"), &ready.mcp_url, setup);
+        Conversation::new(asked, ready.cli.installation.clone()).map_err(|error| error.to_string())?;
         let mut state = self.0.lock();
         state.opened.push(resume.clone());
-        state.models.push(model.map(str::to_owned));
+        state.models.push(setup.model.clone());
+        state.setups.push(setup.clone());
         if resume.is_some() {
             state.session = resume;
         }
@@ -448,7 +474,8 @@ mod tests {
 
     #[test]
     fn the_cli_works_in_a_folder_of_trills_own_with_every_tool() {
-        let config = config(Path::new("settings"), "http://127.0.0.1:9000/assistant", Some("haiku".into()));
+        let haiku = Setup { model: Some("haiku".into()), ..Setup::default() };
+        let config = config(Path::new("settings"), "http://127.0.0.1:9000/assistant", &haiku);
         assert_eq!(config.working_dir, Path::new("settings").join("assistant").join("work"));
         assert_eq!(config.temp_dir, Path::new("settings").join("assistant").join("tmp"));
         assert_eq!(config.mcp_url, "http://127.0.0.1:9000/assistant");
@@ -457,7 +484,104 @@ mod tests {
         assert_eq!(config.cli_path, None, "the CLI is the one the user installed, wherever that is");
         assert!(!config.keep_redirecting_environment);
         // With no model named, the choice is the CLI's.
-        assert_eq!(super::config(Path::new("settings"), "http://127.0.0.1:1/assistant", None).model, None);
+        assert_eq!(super::config(Path::new("settings"), "http://127.0.0.1:1/assistant", &Setup::default()).model, None);
+    }
+
+    #[test]
+    fn what_the_user_chose_is_what_the_cli_is_run_with() {
+        use trill_assistant::{DEFAULT_MAX_TURNS, PLAN_TOOLS};
+        // As the panel starts out: the web on, a plan, the CLI's own effort,
+        // and a limit on one request that a whole song stays well inside.
+        let usual = config(Path::new("settings"), "http://127.0.0.1:9000/assistant", &Setup::default());
+        assert!(usual.web && usual.plan);
+        assert_eq!((usual.effort, usual.max_turns), (None, Some(DEFAULT_MAX_TURNS)));
+        // Several times the eighty steps one message used to be allowed.
+        const { assert!(DEFAULT_MAX_TURNS >= 5 * 80) };
+        assert_eq!(usual.cli_tools(), ["TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "WebFetch", "WebSearch"]);
+
+        let chosen = Setup { model: None, effort: Some(Effort::High), web: false, step_limit: 250 };
+        let config = config(Path::new("settings"), "http://127.0.0.1:9000/assistant", &chosen);
+        assert_eq!((config.effort, config.max_turns, config.web), (Some(Effort::High), Some(250), false));
+        // With the web off its tools are not asked for at all; the plan,
+        // which reaches nothing, stays.
+        assert_eq!(config.cli_tools(), PLAN_TOOLS);
+    }
+
+    /// One request to a server on this machine, as a program that is not an
+    /// MCP client would make it, and the status line of the answer.
+    fn request(address: SocketAddr, request: &str) -> String {
+        use std::io::{Read, Write};
+        let mut stream = TcpStream::connect(address).expect("the server");
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut answer = Vec::new();
+        let mut buffer = [0u8; 2048];
+        // The first line is enough, and a stream of events never ends.
+        while !answer.contains(&b'\n') {
+            match stream.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => answer.extend_from_slice(&buffer[..read]),
+            }
+        }
+        String::from_utf8_lossy(&answer).lines().next().unwrap_or_default().to_owned()
+    }
+
+    /// The web tools fetch pages, and Trill's server is on this machine
+    /// with a door that is not guarded (`/mcp`) beside the assistant's. A
+    /// page that talked the assistant into fetching `http://127.0.0.1:.../mcp`
+    /// must get nothing done there. Three things stand in the way, and the
+    /// two that are Trill's are checked here:
+    ///
+    /// * the CLI's page reader asks for everything over HTTPS, whatever was
+    ///   written, and refuses `localhost` (recorded in `trill-assistant`,
+    ///   `tests/fixtures/web_lookups.jsonl`); the server speaks plain HTTP,
+    ///   so no request of the reader's ever reaches it as a request;
+    /// * a request that only reads (GET) calls no tool: a tool call is a
+    ///   POST with a body, in a session the server has opened;
+    /// * a request that says it comes from a web page (an `Origin`) is
+    ///   refused, whatever it asks.
+    #[test]
+    fn nothing_a_page_reader_can_send_drives_the_server() {
+        let runtime = Arc::new(Runtime::start(trill_runtime::RuntimeOptions::hermetic()).unwrap());
+        let before = runtime.session.lock().project().clone();
+        let server = trill_mcp::serve_http(runtime.clone(), SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let (address, host) = (server.address(), server.address().to_string());
+
+        for door in [trill_mcp::HTTP_PATH, trill_mcp::ASSISTANT_PATH] {
+            // What a browser, or a page reader, sends for an address.
+            let get = format!("GET {door} HTTP/1.1\r\nHost: {host}\r\nAccept: text/html,*/*\r\n\r\n");
+            let status = request(address, &get);
+            assert!(status.contains(" 4"), "a plain GET of {door} is refused: {status:?}");
+            // With the words a tool call would need, in the address.
+            let get = format!(
+                "GET {door}?method=tools/call&name=new_project HTTP/1.1\r\nHost: {host}\r\nAccept: */*\r\n\r\n"
+            );
+            assert!(request(address, &get).contains(" 4"), "{door}");
+            // As an MCP client asks for the server's stream of events,
+            // without a session of its own: nothing to listen to.
+            let get = format!("GET {door} HTTP/1.1\r\nHost: {host}\r\nAccept: text/event-stream\r\n\r\n");
+            assert!(request(address, &get).contains(" 4"), "{door}");
+
+            // A page's own request, which a reader does not make but a
+            // browser would: refused for where it says it comes from.
+            let body =
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"new_project","arguments":{}}}"#;
+            let post = format!(
+                "POST {door} HTTP/1.1\r\nHost: {host}\r\nOrigin: https://example.com\r\nContent-Type: application/json\r\n\
+                 Accept: application/json, text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let status = request(address, &post);
+            assert!(status.contains(" 403"), "a request from a web page is refused at {door}: {status:?}");
+            // And under a name of the page's own for this machine.
+            let get = format!("GET {door} HTTP/1.1\r\nHost: evil.example.com\r\nAccept: */*\r\n\r\n");
+            assert!(request(address, &get).contains(" 4"), "{door}");
+        }
+        // What a reader that insists on HTTPS sends is not a request at all.
+        let hello = request(address, "\u{16}\u{3}\u{1}\u{0}\u{5}hello");
+        assert!(hello.is_empty() || hello.contains(" 400"), "{hello:?}");
+
+        assert_eq!(*runtime.session.lock().project(), before, "and the song is as it was");
     }
 
     #[test]
@@ -487,7 +611,7 @@ mod tests {
     fn a_run_without_a_folder_says_so() {
         let mut backend = Nowhere;
         assert_eq!(backend.checked(), Some(Err(Problem::NoFolder)));
-        assert!(backend.open(&ready(), None, None).is_err());
+        assert!(backend.open(&ready(), None, &Setup::default()).is_err());
         assert!(Problem::NoFolder.to_string().contains("settings folder"));
     }
 
@@ -509,7 +633,8 @@ mod tests {
         assert_eq!(backend.checked(), Some(Ok(ready())));
         assert_eq!(script.state().checks, 2);
 
-        let mut chat = backend.open(&ready(), None, Some("haiku")).unwrap();
+        let haiku = Setup { model: Some("haiku".into()), effort: Some(Effort::Low), ..Setup::default() };
+        let mut chat = backend.open(&ready(), None, &haiku).unwrap();
         assert_eq!(chat.poll(), None);
         assert_eq!(chat.send("  ", None), Err(SendError::EmptyMessage));
         chat.send("hello", Some("tempo: 120")).unwrap();
@@ -524,9 +649,11 @@ mod tests {
         assert_eq!(state.sent[0], Sent { message: "hello".into(), context: Some("tempo: 120".into()) });
         assert_eq!((state.sent.len(), state.cancels, state.opened.len()), (2, 1, 1));
         assert_eq!(state.models, [Some("haiku".to_owned())], "the model it was opened for is on record");
+        assert_eq!(state.setups, [haiku], "and everything else it was opened with");
         drop(state);
         // A name the command line would take for an option opens nothing.
-        let refused = backend.open(&ready(), None, Some("--dangerously-skip-permissions")).err().expect("refused");
+        let flag = Setup { model: Some("--dangerously-skip-permissions".into()), ..Setup::default() };
+        let refused = backend.open(&ready(), None, &flag).err().expect("refused");
         assert!(refused.contains("is not a model name"), "{refused}");
         assert_eq!(script.state().opened.len(), 1);
     }

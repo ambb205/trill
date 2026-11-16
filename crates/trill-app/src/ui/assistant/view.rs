@@ -1,20 +1,25 @@
-//! The panel itself: a header, the conversation, and at the foot the
-//! message field with the model that will answer, or in its place the
-//! reason the assistant cannot be used.
+//! The panel itself: a header, the conversation, the assistant's plan while
+//! it has one, and at the foot the message field with what the next message
+//! is answered with (the model, how hard it thinks, whether it may use the
+//! web, how many steps it may take), or in its place the reason the
+//! assistant cannot be used.
 //!
 //! It is laid out like the rest of the window, not like a messenger: the
 //! user's messages are section strips, the assistant's reply is running
 //! text set from its Markdown, each tool call is a row with a status mark
 //! that leads to what the call changed and unfolds to its arguments and its
-//! answer, and a turn closes with a line that says what it cost in time and
-//! whether it changed the song, with the way to what it changed and the
-//! Undo for it.
+//! answer (a search of the web or a page read is such a row too, by its
+//! query or its address), and a turn closes with a line that says what it
+//! cost in time and whether it changed the song, with the way to what it
+//! changed and the Undo for it. A turn under way says how long it has run,
+//! which step it is on of how many it may take, and what the CLI estimates
+//! it has cost.
 //!
 //! What is said in the conversation is text like any other: it can be
 //! selected with the mouse, across passages, and copied.
 
-use super::transcript::{self, Ending, Item, Offer, Tone, ToolLine, ToolState, TurnEnd};
-use super::{Assistant, Billing, Problem, Readiness, Reversal, context, markdown, places, reply};
+use super::transcript::{self, Ending, Item, Offer, Step, StepState, Tone, ToolLine, ToolState, TurnEnd};
+use super::{Assistant, Billing, Problem, Readiness, Reversal, Working, context, markdown, places, reply};
 use crate::ui::shortcuts::{self, Command};
 use crate::ui::state::{Cx, FocusArea, UiState};
 use crate::ui::widgets;
@@ -23,7 +28,7 @@ use eframe::egui::{
     self, Align, Align2, Color32, FontId, Id, Key, KeyboardShortcut, Layout, Modifiers, Rangef, Rect, Response, Role,
     Sense, Shape, Stroke, Ui, WidgetInfo, pos2, vec2,
 };
-use trill_assistant::{MODEL_ALIASES, Unavailable};
+use trill_assistant::{DEFAULT_TURNS_PER_RUN, Effort, MODEL_ALIASES, Unavailable};
 use trill_core::Project;
 use trill_noir::prose;
 use trill_noir::{Chip, Icon, MenuItem, TextStyle, Theme, Variant, paint, text};
@@ -44,6 +49,21 @@ const FIELD_ROWS: std::ops::RangeInclusive<usize> = 2..=8;
 const DEFAULT_MODEL: &str = "Default";
 /// Width of the chooser's list: narrower than the panel at its narrowest.
 const MODEL_MENU: f32 = 236.0;
+/// What the chooser calls leaving the effort to the CLI.
+const DEFAULT_EFFORT: &str = "Default";
+/// Height of the plan's heading, and of one of its steps.
+const PLAN_HEAD: f32 = 24.0;
+const PLAN_STEP: f32 = 20.0;
+/// The plan shows this many steps and scrolls beyond.
+const PLAN_STEPS: usize = 6;
+/// Space under the plan's last step.
+const PLAN_FOOT: f32 = 6.0;
+/// Width of a list of a few short things to choose from.
+const SHORT_MENU: f32 = 172.0;
+/// Room the conversation keeps however long the plan is.
+const CONVERSATION_REST: f32 = 96.0;
+/// A turn of this many steps or more says how many it took.
+const MANY_STEPS: u32 = 10;
 
 /// What a click in the conversation asks for, carried out once the
 /// conversation is no longer being read.
@@ -174,9 +194,16 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
         _ => card_height(ui, cx, area.width()),
     };
     let foot = Rect::from_min_max(pos2(area.left(), (area.bottom() - foot_height).max(top)), area.max);
-    let body = Rect::from_min_max(pos2(area.left(), top), pos2(area.right(), foot.top()));
+    // The plan stands between the conversation and the foot, where it stays
+    // in sight however long the conversation grows.
+    let planned = plan_height(cx).min((foot.top() - top - CONVERSATION_REST).max(0.0));
+    let plan_rect = Rect::from_min_max(pos2(area.left(), foot.top() - planned), pos2(area.right(), foot.top()));
+    let body = Rect::from_min_max(pos2(area.left(), top), pos2(area.right(), plan_rect.top()));
     painter.rect_filled(body, 0.0, theme.bg);
     conversation(ui, cx, body);
+    if planned >= PLAN_HEAD {
+        plan(ui, cx, plan_rect);
+    }
     paint::hline(&painter, foot.x_range(), foot.top(), theme.hairline);
     match cx.assistant.readiness {
         Readiness::Ready(_) => composer(ui, cx, foot),
@@ -208,14 +235,24 @@ fn header(ui: &mut Ui, cx: &mut Cx, bar: Rect) {
         (Readiness::Ready(_), true, false) => (theme.info, "Working\u{2026}"),
         (Readiness::Ready(_), false, _) => (theme.ok, "Ready"),
     };
+    // Which step a turn is on stays in sight here, wherever the
+    // conversation is scrolled to.
+    let step = assistant.working().filter(|now| now.steps > 0 && word.starts_with("Working"));
+    let word = match step {
+        Some(now) => format!("{word} step {}", transcript::format_count(now.steps)),
+        None => word.to_owned(),
+    };
     x = paint::dot(&painter, pos2(x + 10.0, bar.center().y), theme.metric.dot, color) + 5.0;
     let status = Rect::from_min_max(pos2(x, bar.top()), pos2(fresh_rect.left() - 8.0, bar.bottom()));
-    let used = text::paint(&painter, status, Align2::LEFT_CENTER, theme.text.micro, word, theme.ink_faint);
+    let used = text::paint(&painter, status, Align2::LEFT_CENTER, theme.text.micro, &word, theme.ink_faint);
     let about = match &assistant.readiness {
         Readiness::Ready(ready) => {
             let model = assistant.model.as_ref().map(|model| format!(", answering as {model}")).unwrap_or_default();
+            let effort = assistant.effort_choice.map(|effort| format!(" at {} effort", effort.name()));
+            let effort = effort.filter(|_| !model.is_empty()).unwrap_or_default();
             format!(
-                "Uses your installed Claude Code {} and its sign-in{model}; messages count against your usage there",
+                "Uses your installed Claude Code {} and its sign-in{model}{effort}; messages count against your usage \
+                 there",
                 ready.cli.installation.version
             )
         }
@@ -296,8 +333,8 @@ fn conversation(ui: &mut Ui, cx: &mut Cx, body: Rect) {
                     Item::End(end) => ended(ui, theme, state, assistant, index, end, leads(index), &mut actions),
                 }
             }
-            if let Some(seconds) = assistant.working_for() {
-                working(ui, theme, assistant.is_stopping(), seconds);
+            if let Some(now) = assistant.working() {
+                working(ui, theme, state, assistant.is_stopping(), now);
             }
             ui.add_space(10.0);
             if std::mem::take(&mut assistant.reveal_end) {
@@ -357,6 +394,8 @@ fn starting_points(project: &Project, state: &UiState) -> Vec<&'static str> {
     if project.tracks.is_empty() {
         return vec![
             "Start a laid-back beat at 90 BPM: drums, a bass line and a few chords.",
+            "Write a whole song: about two minutes of melodic house in A minor, with an intro, a build, a drop and \
+             an outro.",
             "Set up tracks for drums, bass, keys and a lead, with sounds that go together.",
             "What can you do in a song?",
         ];
@@ -389,7 +428,10 @@ fn welcome(ui: &mut Ui, theme: &Theme, state: &mut UiState, project: &Project, r
          where the playhead and the loop are and which tab is open, so \u{201C}this\u{201D} means what you are looking \
          at.",
         "Everything it changes while answering one message is undone with one Undo, and when it has finished you \
-         are shown what it changed.",
+         are shown what it changed. Ask for a whole song and it plans the work, shows the plan here and carries on \
+         to the end; Stop ends it at any point.",
+        "With Web on, below, it may search the web and read pages for what it does not know. Each search and each \
+         page is listed as it happens.",
         "It runs the Claude Code installed on this computer, signed in as you are there. Messages count against \
          your usage there.",
     ];
@@ -716,7 +758,8 @@ fn ended(
         right = left - 8.0;
     }
 
-    // What happened, from the left.
+    // What happened, from the left; then what it took, the figures that
+    // matter least last, for they are the first to give way.
     let mut parts: Vec<String> = Vec::new();
     match (&end.ending, end.changed, reversal) {
         (_, true, Some(Reversal::Redo(_))) => parts.push("Undone".to_owned()),
@@ -725,29 +768,59 @@ fn ended(
         (Ending::Failed { .. }, false, _) => {}
         (Ending::Finished { .. }, false, _) => {}
     }
+    let mut costed = false;
     match &end.ending {
-        Ending::Finished { seconds, estimated_cost, .. } => {
+        Ending::Finished { seconds, steps, estimated_cost } => {
             parts.push(transcript::format_seconds(*seconds));
+            if *steps >= MANY_STEPS {
+                parts.push(transcript::format_steps(*steps));
+            }
             if let Some(dollars) = estimated_cost {
                 parts.push(transcript::format_estimate(*dollars));
+                costed = true;
             }
         }
         Ending::Stopped => parts.insert(0, "Stopped".to_owned()),
         Ending::Failed { .. } => parts.insert(0, "Did not finish".to_owned()),
     }
-    let room = Rect::from_min_max(pos2(row.left() + EDGE, row.top()), pos2(right, row.bottom()));
-    // In a narrow panel the figures give way before the words are cut.
-    let whole = parts.join(" \u{00B7} ");
-    let mut shown = parts.len();
-    let fits =
-        |count: usize| text::width(&painter, theme.text.micro, &parts[..count].join(" \u{00B7} ")) <= room.width();
-    while shown > 1 && !fits(shown) {
-        shown -= 1;
+    // A turn that did not finish, by what was known of it on the way.
+    if let Some(spent) = &end.spent {
+        parts.push(transcript::format_seconds(spent.seconds));
+        parts.push(transcript::format_steps(spent.steps));
+        if let Some(dollars) = spent.estimated_cost {
+            parts.push(transcript::format_estimate_so_far(dollars, spent.costed_steps, spent.steps));
+            costed = true;
+        }
     }
-    let summary = parts[..shown].join(" \u{00B7} ");
+    let room = Rect::from_min_max(pos2(row.left() + EDGE, row.top()), pos2(right, row.bottom()));
+    // What does not fit beside the chips goes on a line of its own under
+    // them, where only a very narrow panel is too narrow for it; there the
+    // last figures give way before anything is cut.
+    let whole = parts.join(" \u{00B7} ");
+    let said = |from: usize, to: usize| parts[from..to].join(" \u{00B7} ");
+    let wide = |words: &str| text::width(&painter, theme.text.micro, words);
+    let mut beside = parts.len();
+    while beside > 1 && wide(&said(0, beside)) > room.width() {
+        beside -= 1;
+    }
     let color = if end.changed { theme.ink_dim } else { theme.ink_faint };
-    let used = text::paint(&painter, room, Align2::LEFT_CENTER, theme.text.micro, &summary, color);
-    let sensed = Rect::from_min_size(room.min, vec2(used, room.height()));
+    let used = text::paint(&painter, room, Align2::LEFT_CENTER, theme.text.micro, &said(0, beside), color);
+    let mut sensed = Rect::from_min_size(room.min, vec2(used, room.height()));
+    let mut shown = beside;
+    if beside < parts.len() {
+        let (under, _) = ui.allocate_exact_size(vec2(ui.available_width(), 16.0), Sense::hover());
+        let under = Rect::from_min_max(
+            pos2(under.left() + EDGE, under.top() - 4.0),
+            pos2(under.right() - EDGE, under.bottom() - 4.0),
+        );
+        shown = parts.len();
+        while shown > beside + 1 && wide(&said(beside, shown)) > under.width() {
+            shown -= 1;
+        }
+        let used =
+            text::paint(&painter, under, Align2::LEFT_CENTER, theme.text.micro, &said(beside, shown), theme.ink_faint);
+        sensed = sensed.union(Rect::from_min_size(under.min, vec2(used, under.height())));
+    }
     let response = ui.interact(sensed, id.with("summary"), Sense::hover());
     response.widget_info(|| WidgetInfo::labeled(Role::Label, true, &whole));
     let mut about = Vec::new();
@@ -757,7 +830,7 @@ fn ended(
     if matches!(reversal, Some(Reversal::Buried)) && assistant.turn.is_none() {
         about.push("Other changes were made since: Edit \u{203A} Undo steps back to this one");
     }
-    if matches!(end.ending, Ending::Finished { estimated_cost: Some(_), .. }) {
+    if costed {
         about.push(
             "The cost is Claude Code\u{2019}s own estimate at API prices, not a charge: a subscription is not billed \
              per message",
@@ -769,18 +842,187 @@ fn ended(
     ui.add_space(8.0);
 }
 
-/// The line at the end of a turn that is still under way.
-fn working(ui: &mut Ui, theme: &Theme, stopping: bool, seconds: u64) {
+/// The end of a turn that is still under way, in two lines: that it is
+/// working and for how long; under that, which step it is on of how many
+/// it may take, and what the CLI estimates it has cost so far.
+fn working(ui: &mut Ui, theme: &Theme, state: &mut UiState, stopping: bool, now: Working) {
     ui.add_space(4.0);
-    let (row, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
+    let figures = working_figures(now);
+    let height = if figures.is_empty() { ROW } else { ROW + 16.0 };
+    let (area, response) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+    let row = area.with_max_y(area.top() + ROW);
     let word = if stopping { "Stopping\u{2026}" } else { "Working\u{2026}" };
-    response.widget_info(|| WidgetInfo::labeled(Role::Label, true, word));
+    let elapsed = transcript::format_seconds(now.seconds as f32);
+    let whole = std::iter::once(word.to_owned()).chain(figures.iter().cloned()).collect::<Vec<_>>().join(" \u{00B7} ");
+    response.widget_info(|| WidgetInfo::labeled(Role::Label, true, &whole));
     let painter = ui.painter();
     paint::dot(painter, pos2(row.left() + EDGE, row.center().y), theme.metric.dot, theme.info);
     let room = Rect::from_min_max(pos2(row.left() + INDENT, row.top()), pos2(row.right() - EDGE, row.bottom()));
     text::paint(painter, room, Align2::LEFT_CENTER, theme.text.micro, word, theme.ink_dim);
-    let elapsed = transcript::format_seconds(seconds as f32);
     text::paint(painter, room, Align2::RIGHT_CENTER, theme.text.value, &elapsed, theme.ink_faint);
+    if !figures.is_empty() {
+        // In a very narrow panel the estimate gives way before the step.
+        let under = Rect::from_min_max(pos2(room.left(), row.bottom() - 3.0), pos2(room.right(), area.bottom()));
+        let said = |count: usize| figures[..count].join(" \u{00B7} ");
+        let mut shown = figures.len();
+        while shown > 1 && text::width(painter, theme.text.value, &said(shown)) > under.width() {
+            shown -= 1;
+        }
+        text::paint(painter, under, Align2::LEFT_CENTER, theme.text.value, &said(shown), theme.ink_faint);
+    }
+    let mut about = vec![format!(
+        "A step is one round of the assistant thinking and using tools; a request may take {} of them, which is \
+         set under the message field",
+        transcript::format_count(now.limit)
+    )];
+    if now.steps > 0 {
+        about.push(format!(
+            "The cost is Claude Code\u{2019}s own estimate at API prices, not a charge. It reports one about every \
+             {DEFAULT_TURNS_PER_RUN} steps, so the figure is behind by the steps since"
+        ));
+    }
+    hint(state, &response, about.join(" \u{00B7} "));
+}
+
+/// Which step a turn under way is on of how many it may take, and what the
+/// CLI has said it cost so far, each once it is known.
+fn working_figures(now: Working) -> Vec<String> {
+    let mut figures = Vec::new();
+    if now.steps > 0 {
+        let (step, limit) = (transcript::format_count(now.steps), transcript::format_count(now.limit));
+        figures.push(format!("Step {step} of {limit}"));
+    }
+    if let Some((dollars, costed)) = now.cost {
+        figures.push(transcript::format_estimate_so_far(dollars, costed, now.steps));
+    }
+    figures
+}
+
+// ---- the plan ---------------------------------------------------------------------
+
+/// How much of the panel the assistant's plan takes: nothing while there is
+/// none, its heading alone when folded, and otherwise a few of its steps.
+fn plan_height(cx: &Cx) -> f32 {
+    let plan = &cx.assistant.transcript.plan;
+    if plan.is_empty() {
+        0.0
+    } else if cx.assistant.plan_folded {
+        PLAN_HEAD
+    } else {
+        PLAN_HEAD + plan.steps.len().min(PLAN_STEPS) as f32 * PLAN_STEP + PLAN_FOOT
+    }
+}
+
+/// The mark before a step of the plan: an empty box for one still to do, a
+/// box with its middle filled for the one in hand, a tick for one done.
+fn step_mark(painter: &egui::Painter, center: egui::Pos2, state: StepState, theme: &Theme) {
+    let center = pos2(center.x.round(), center.y.round());
+    let frame = Rect::from_center_size(center, vec2(9.0, 9.0));
+    match state {
+        StepState::Pending => paint::frame(painter, frame, theme.ink_faint),
+        StepState::Doing => {
+            paint::frame(painter, frame, theme.info);
+            painter.rect_filled(Rect::from_center_size(center, vec2(3.0, 3.0)), 0.0, theme.info);
+        }
+        StepState::Done => {
+            let stroke = Stroke::new(1.5, theme.ok);
+            let (low, turn, high) = (center + vec2(-4.0, 0.0), center + vec2(-1.0, 3.0), center + vec2(4.5, -3.5));
+            painter.line_segment([low, turn], stroke);
+            painter.line_segment([turn, high], stroke);
+        }
+    }
+}
+
+/// The assistant's plan for what it was asked, as a checklist: the steps it
+/// wrote down, ticked off as it goes, the one in hand marked. It is the
+/// panel's copy of the list the CLI keeps for the model.
+fn plan(ui: &mut Ui, cx: &mut Cx, rect: Rect) {
+    let theme = cx.theme;
+    let painter = ui.painter().clone();
+    painter.rect_filled(rect, 0.0, theme.panel);
+    paint::hline(&painter, rect.x_range(), rect.top(), theme.hairline);
+    let steps: Vec<Step> = cx.assistant.transcript.plan.steps.clone();
+    let done = cx.assistant.transcript.plan.done();
+    let current = cx.assistant.transcript.plan.current().cloned();
+    let folded = cx.assistant.plan_folded;
+    let working = cx.assistant.is_working();
+
+    // The heading: how far the plan has come, and the fold.
+    let head = Rect::from_min_size(rect.min, vec2(rect.width(), PLAN_HEAD));
+    let id = ui.scope_id().with("assistant-plan");
+    let response = ui.interact(head, id, Sense::click());
+    let count = format!("{done} of {}", steps.len());
+    response.widget_info(|| WidgetInfo::selected(Role::Button, true, !folded, format!("Plan: {count} done")));
+    if response.hovered() {
+        painter.rect_filled(head.with_min_y(head.top() + paint::hair(&painter)), 0.0, theme.hover);
+    }
+    let caret = pos2(head.right() - EDGE - 3.0, head.center().y);
+    let caret_color = if response.hovered() { theme.ink } else { theme.ink_faint };
+    trill_noir::paint_icon(&painter, caret, if folded { Icon::CaretRight } else { Icon::CaretDown }, caret_color);
+    let mut room = Rect::from_min_max(pos2(head.left() + EDGE, head.top()), pos2(caret.x - 10.0, head.bottom()));
+    room.min.x += text::paint(&painter, room, Align2::LEFT_CENTER, theme.text.caps, "Plan", theme.ink) + 10.0;
+    room.min.x += text::paint(&painter, room, Align2::LEFT_CENTER, theme.text.micro, &count, theme.ink_faint) + 12.0;
+    // Folded, the heading says what is in hand.
+    if let (true, Some(step)) = (folded, &current) {
+        let style = TextStyle { size: 12.0, ..theme.text.body };
+        let color = if step.state == StepState::Doing && working { theme.ink } else { theme.ink_dim };
+        text::paint(&painter, room, Align2::LEFT_CENTER, style, step.words(), color);
+    }
+    cx.hint(
+        &response,
+        "The assistant\u{2019}s plan for what you asked: it writes the steps down and ticks them off as it goes \u{00B7} \
+         click to fold",
+    );
+    if response.clicked() {
+        cx.assistant.plan_folded = !folded;
+    }
+    if folded {
+        return;
+    }
+
+    // The steps. When another comes into hand it is brought into view.
+    let in_hand = current.as_ref().map(|step| step.id.clone());
+    let reveal = (cx.assistant.plan_shown != in_hand).then(|| in_hand.clone()).flatten();
+    cx.assistant.plan_shown = in_hand;
+    // A whole number of steps shows, so that none is cut through.
+    let rows = ((rect.bottom() - PLAN_FOOT - head.bottom()) / PLAN_STEP).floor().max(1.0);
+    let list = Rect::from_min_size(pos2(rect.left(), head.bottom()), vec2(rect.width(), rows * PLAN_STEP));
+    widgets::place(ui, list, "assistant-plan-steps", Layout::top_down(Align::Min), |ui| {
+        ui.set_clip_rect(list.intersect(ui.clip_rect()));
+        egui::ScrollArea::vertical().id_salt("assistant-plan-scroll").auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            let style = TextStyle { size: 12.0, ..theme.text.body };
+            for step in &steps {
+                let (row, response) = ui.allocate_exact_size(vec2(ui.available_width(), PLAN_STEP), Sense::hover());
+                let (state, color) = match step.state {
+                    StepState::Done => ("done", theme.ink_faint),
+                    // In hand only while the assistant is at work: a plan
+                    // left half done is not being worked on.
+                    StepState::Doing if working => ("in hand", theme.ink),
+                    StepState::Doing => ("begun", theme.ink_dim),
+                    StepState::Pending => ("to do", theme.ink_dim),
+                };
+                let words = step.words();
+                response.widget_info(|| WidgetInfo::labeled(Role::Label, true, format!("{words}: {state}")));
+                if reveal.as_deref() == Some(step.id.as_str()) {
+                    // With the step after it, to see what comes next; and
+                    // no further than it takes, so the list moves by whole
+                    // steps.
+                    ui.scroll_to_rect(row.with_max_y(row.bottom() + PLAN_STEP), None);
+                }
+                if ui.is_rect_visible(row) {
+                    let painter = ui.painter();
+                    step_mark(painter, pos2(row.left() + EDGE + 4.0, row.center().y), step.state, theme);
+                    let room = Rect::from_min_max(
+                        pos2(row.left() + INDENT + 4.0, row.top()),
+                        pos2(row.right() - EDGE, row.bottom()),
+                    );
+                    text::paint(painter, room, Align2::LEFT_CENTER, style, words, color);
+                }
+                response.on_hover_text(&step.title);
+            }
+        });
+    });
 }
 
 // ---- the foot: the message field ------------------------------------------------
@@ -805,7 +1047,8 @@ fn field_width(theme: &Theme, width: f32) -> f32 {
 
 fn composer_height(ui: &Ui, cx: &Cx, width: f32) -> f32 {
     let rows = draft_rows(ui, cx.theme, &cx.assistant.draft, field_width(cx.theme, width));
-    8.0 + 16.0 + 4.0 + rows as f32 * field_row(ui, cx.theme) + 10.0 + 8.0 + cx.theme.metric.control + 9.0
+    let (send, switches) = (8.0 + cx.theme.metric.control, 6.0 + cx.theme.metric.chip);
+    8.0 + 16.0 + 4.0 + rows as f32 * field_row(ui, cx.theme) + 10.0 + send + switches + 9.0
 }
 
 /// What the assistant will be told, the field to type in, and Send or Stop.
@@ -925,15 +1168,25 @@ fn composer(ui: &mut Ui, cx: &mut Cx, foot: Rect) {
         (false, _) => "Send the message \u{00B7} Enter",
     };
     cx.hint(&clicked, about);
-    // The model that will answer, at the left; and what the keys do, if
-    // there is room left for it.
+    // The model that will answer and how hard it is to think, at the left.
+    // In a narrow panel the two share what room there is.
     let room = bottom.with_max_x(clicked.rect.left() - 8.0);
-    let taken = model_chooser(ui, cx, room);
+    let effort_width = effort_width(ui, cx);
+    let model_room = room.with_max_x((room.right() - effort_width - 6.0).max(room.left() + room.width() / 2.0));
+    let taken = model_chooser(ui, cx, model_room);
+    let gap = if taken > 0.0 { 6.0 } else { 0.0 };
+    effort_chooser(ui, cx, room.with_min_x(room.left() + taken + gap), effort_width);
+
+    // Under them: whether the assistant may use the web, the most steps one
+    // request may take, and what the keys do, if there is room left for it.
+    let second = Rect::from_min_size(pos2(inner.left(), bottom.bottom() + 6.0), vec2(inner.width(), theme.metric.chip));
+    let taken = web_switch(ui, cx, second);
+    let taken = taken + 6.0 + step_limit_chooser(ui, cx, second.with_min_x(second.left() + taken + 6.0));
     let legends: &[&str] = match busy {
         true => &["Send when it has finished"],
         false => &["Enter sends \u{00B7} Shift+Enter new line", "Enter sends"],
     };
-    let room = room.with_min_x(room.left() + taken + 10.0);
+    let room = second.with_min_x(second.left() + taken + 10.0);
     let fitting = legends.iter().find(|legend| text::width(&painter, theme.text.micro, legend) <= room.width());
     if let Some(legend) = fitting {
         text::paint(&painter, room, Align2::RIGHT_CENTER, theme.text.micro, legend, theme.ink_faint);
@@ -1087,6 +1340,182 @@ fn model_chooser(ui: &mut Ui, cx: &mut Cx, room: Rect) -> f32 {
     width
 }
 
+/// Width the effort chooser would like.
+fn effort_width(ui: &Ui, cx: &Cx) -> f32 {
+    let theme = cx.theme;
+    let value = cx.assistant.effort_choice().map_or(DEFAULT_EFFORT, Effort::name);
+    trill_noir::dropdown_width(ui, theme, value)
+        + text::width(ui.painter(), theme.text.label, "Effort")
+        + theme.metric.pad
+        + 3.0
+}
+
+/// The chooser of how hard the model thinks about the next message, at the
+/// left of `room` and `wanted` wide if there is room for that: a chip that
+/// reads the choice and opens the list.
+///
+/// The list is "Default" (whatever the CLI does by itself for the model)
+/// and the levels the CLI's `--effort` takes. What a level does, and
+/// whether a model has it, is the CLI's and the service's to say.
+fn effort_chooser(ui: &mut Ui, cx: &mut Cx, room: Rect, wanted: f32) {
+    let theme = cx.theme;
+    let width = wanted.min(room.width());
+    if width < 72.0 {
+        return;
+    }
+    let choice = cx.assistant.effort_choice();
+    let value = choice.map_or(DEFAULT_EFFORT, Effort::name);
+    let busy = cx.assistant.is_working();
+    let rect = Rect::from_min_size(
+        pos2(room.left(), room.center().y - theme.metric.chip / 2.0),
+        vec2(width, theme.metric.chip),
+    );
+    let id = Id::unique("assistant-effort");
+    let response = trill_noir::dropdown(ui, theme, rect, id, "Effort", value, busy);
+    let asked = match choice {
+        Some(effort) => format!("Thinking effort: Claude Code is asked for \u{201C}{}\u{201D}", effort.name()),
+        None => "Thinking effort: left to Claude Code".to_owned(),
+    };
+    let then = match busy {
+        true => "it can be changed once the assistant has finished",
+        false => "more effort thinks longer before each step and uses more \u{00B7} click to choose",
+    };
+    cx.hint(&response, format!("{asked} \u{00B7} {then}"));
+
+    let popup = egui::Popup::default_response_id(&response);
+    if std::mem::take(&mut cx.assistant.open_effort_menu) {
+        egui::Popup::open_id(ui.ctx(), popup);
+    }
+    if busy {
+        egui::Popup::close_id(ui.ctx(), popup);
+        return;
+    }
+    let mut chosen: Option<Option<Effort>> = None;
+    egui::Popup::menu(&response).gap(1.0).align(egui::RectAlign::TOP_START).width(SHORT_MENU).show(|ui| {
+        ui.set_width(SHORT_MENU);
+        trill_noir::menu_heading(ui, theme, "Thinking effort");
+        let about = "Whatever Claude Code does by itself for the model that answers.";
+        if MenuItem::new(DEFAULT_EFFORT).checked(choice.is_none()).detail(about).show(ui, theme).clicked() {
+            chosen = Some(None);
+        }
+        let about = "Asks Claude Code for this level. Higher levels think longer before each step and use more of \
+                     your usage; what a model makes of a level is for Claude Code to say.";
+        for effort in Effort::ALL {
+            let checked = choice == Some(effort);
+            if MenuItem::new(effort.name()).checked(checked).detail(about).show(ui, theme).clicked() {
+                chosen = Some(Some(effort));
+            }
+        }
+    });
+    if let Some(effort) = chosen {
+        match cx.assistant.choose_effort(effort) {
+            Ok(()) => cx.assistant.focus_composer = true,
+            Err(reason) => cx.state.toasts.info(reason),
+        }
+    }
+}
+
+/// The switch that lets the assistant use the web, at the left of `row`: a
+/// chip that says which way it is. Returns the width it took.
+///
+/// On, the assistant is offered the CLI's web search and page reading for
+/// what Trill does not know, and every use of them is a line in the
+/// conversation. Off, they are not offered to it at all.
+fn web_switch(ui: &mut Ui, cx: &mut Cx, row: Rect) -> f32 {
+    let theme = cx.theme;
+    let on = cx.assistant.web();
+    let busy = cx.assistant.is_working();
+    let label = if on { "Web on" } else { "Web off" };
+    let chip = Chip::new(label, on).dot(if on { theme.ok } else { theme.ghost }).named("Web research").dimmed(busy);
+    let width = chip.width(ui, theme);
+    let rect =
+        Rect::from_min_size(pos2(row.left(), row.center().y - theme.metric.chip / 2.0), vec2(width, theme.metric.chip));
+    let response = trill_noir::chip(ui, theme, rect, Id::unique("assistant-web"), &chip);
+    let about = match (on, busy) {
+        (true, false) => {
+            "Web research is on: the assistant may search the web and read pages for what it does not know, and \
+             each search and page is listed in the conversation \u{00B7} click to switch it off"
+        }
+        (false, false) => {
+            "Web research is off: the assistant is given no way to reach the web \u{00B7} click to switch it on"
+        }
+        (true, true) => "Web research is on \u{00B7} it can be switched off once the assistant has finished",
+        (false, true) => "Web research is off \u{00B7} it can be switched on once the assistant has finished",
+    };
+    cx.hint(&response, about);
+    if response.clicked()
+        && let Err(reason) = cx.assistant.set_web(!on)
+    {
+        cx.state.toasts.info(reason);
+    }
+    width
+}
+
+/// The chooser of how many steps one request may take, at the left of
+/// `room`. Returns the width it took.
+///
+/// A step is one round of the assistant thinking and using tools. A whole
+/// song takes a few hundred; the limit is what stops an assistant that
+/// goes round in circles, and at it the turn ends with Continue on offer.
+fn step_limit_chooser(ui: &mut Ui, cx: &mut Cx, room: Rect) -> f32 {
+    let theme = cx.theme;
+    let limit = cx.assistant.step_limit();
+    let value = transcript::format_steps(limit);
+    let busy = cx.assistant.is_working();
+    let label_width = text::width(ui.painter(), theme.text.label, "Limit") + theme.metric.pad + 3.0;
+    let width = (trill_noir::dropdown_width(ui, theme, &value) + label_width).min(room.width());
+    if width < 88.0 {
+        return 0.0;
+    }
+    let rect = Rect::from_min_size(
+        pos2(room.left(), room.center().y - theme.metric.chip / 2.0),
+        vec2(width, theme.metric.chip),
+    );
+    let response = trill_noir::dropdown(ui, theme, rect, Id::unique("assistant-steps"), "Limit", &value, busy);
+    let then = match busy {
+        true => "it can be changed once the assistant has finished",
+        false => "click to change",
+    };
+    cx.hint(
+        &response,
+        format!(
+            "One request may take {value}: a step is one round of thinking and using tools, and a whole song takes \
+             a few hundred. At the limit the assistant stops and offers to continue \u{00B7} {then}"
+        ),
+    );
+    let popup = egui::Popup::default_response_id(&response);
+    if busy {
+        egui::Popup::close_id(ui.ctx(), popup);
+        return width;
+    }
+    let mut chosen = None;
+    egui::Popup::menu(&response).gap(1.0).align(egui::RectAlign::TOP_START).width(SHORT_MENU).show(|ui| {
+        ui.set_width(SHORT_MENU);
+        trill_noir::menu_heading(ui, theme, "Most steps");
+        let about = "At the limit the assistant stops, with what it did still done, and offers to continue. It is \
+                     there to catch an assistant going round in circles.";
+        let mut offered = super::STEP_LIMITS.to_vec();
+        if !offered.contains(&limit) {
+            // A limit set by hand in the settings file.
+            offered.push(limit);
+            offered.sort_unstable();
+        }
+        for steps in offered {
+            let words = transcript::format_steps(steps);
+            if MenuItem::new(&words).checked(steps == limit).detail(about).show(ui, theme).clicked() {
+                chosen = Some(steps);
+            }
+        }
+    });
+    if let Some(steps) = chosen {
+        match cx.assistant.set_step_limit(steps) {
+            Ok(()) => cx.assistant.focus_composer = true,
+            Err(reason) => cx.state.toasts.info(reason),
+        }
+    }
+    width
+}
+
 // ---- the foot: why the assistant cannot be used -------------------------------------
 
 /// The heading and the words for the state the assistant is in while it
@@ -1171,6 +1600,7 @@ mod tests {
         let begin = starting_points(&empty, &state);
         assert!(begin[0].starts_with("Start a laid-back beat"), "{begin:?}");
         assert!(!begin.iter().any(|point| point.contains("selected")), "there is nothing to select yet");
+        assert!(begin.iter().any(|point| point.starts_with("Write a whole song")), "a long request is among them");
 
         let mut song = Project::new("Night Drive");
         let lead = song.add_track("Lead");

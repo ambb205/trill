@@ -146,6 +146,10 @@ shot assistant-working "$song" --select "Beat A" --assistant-scene working
 shot assistant-answered "$song" --select Lead --tab mixer --assistant-scene answered
 shot assistant-markdown "$song" --select Lead --assistant-scene markdown
 shot assistant-model "$song" --select Lead --assistant-scene model
+shot assistant-effort "$song" --select Lead --assistant-scene effort
+shot assistant-song "$song" --select Bass --assistant-scene song
+shot assistant-song-done "$song" --select Bass --assistant-scene song-done
+shot min-window-assistant-song "$song" --select Bass --assistant-scene song --size 1060x640
 shot assistant-limit "$song" --select Lead --assistant-scene limit
 shot assistant-signed-out "$song" --select Lead --assistant-scene signed-out
 shot assistant-not-installed "$song" --select Lead --assistant-scene not-installed
