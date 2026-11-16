@@ -2,14 +2,16 @@
 //! a rack of panels, left to right in signal order.
 //!
 //! A built-in device is laid out by its entry in [`device_layouts`]: named
-//! sections in columns, with small displays. Any other device (a plugin)
-//! gets the generic layout: its parameters in declared order, flowing into
-//! as many columns as they need.
+//! sections in columns, with small displays. The two that play audio files
+//! also show them ([`sample_panels`]): the sampler in a column ahead of its
+//! parameters, the drum rack as a grid of pads in place of them. Any other
+//! device (a plugin) gets the generic layout: its parameters in declared
+//! order, flowing into as many columns as they need.
 
 use super::device_layouts::{self, Display, Format, Layout, Row};
 use super::state::Cx;
 use super::units::{self, ParamScale};
-use super::{automation, colors, displays};
+use super::{automation, colors, displays, sample_panels};
 use eframe::egui::{self, Align2, Color32, FontId, Id, Rect, Role, Sense, Ui, WidgetInfo, pos2, vec2};
 use trill_core::device::{DeviceCategory, DeviceDescriptor, ParamKind};
 use trill_core::{AutomationTarget, ChainRef, Device, DeviceId};
@@ -40,7 +42,7 @@ const CHIP_CHOICES: usize = 5;
 const FILTER_ABOVE: usize = 40;
 /// What the tallest column of a built-in layout needs. A rack shorter than
 /// this scrolls rather than cutting panels off.
-const MIN_BODY_HEIGHT: f32 = 245.0;
+pub(super) const MIN_BODY_HEIGHT: f32 = 245.0;
 const MIN_PANEL_HEIGHT: f32 = PANEL_HEADER + BODY_TOP + MIN_BODY_HEIGHT + BODY_BOTTOM;
 /// Narrowest a panel may be: room for a name, a preset and the remove
 /// button.
@@ -158,6 +160,10 @@ fn layout_width(layout: &Layout) -> f32 {
 
 fn panel_width(cx: &Cx, device: &Device, panel_height: f32) -> f32 {
     let width = match (device_layouts::layout_for(&device.uri), cx.snap.params.get(&device.id)) {
+        _ if device.uri == sample_panels::DRUM_RACK => sample_panels::drum_rack_width() + 2.0 * BODY_PADDING,
+        (Some(layout), _) if device.uri == sample_panels::SAMPLER => {
+            layout_width(layout) + sample_panels::SAMPLE_COLUMN + COLUMN_GAP
+        }
         (Some(layout), _) => layout_width(layout),
         (None, Some(Ok(params))) => {
             let metric = cx.theme.metric;
@@ -172,18 +178,18 @@ fn panel_width(cx: &Cx, device: &Device, panel_height: f32) -> f32 {
 }
 
 /// What the controls of one device share.
-struct Body<'a> {
-    device: &'a Device,
-    params: &'a [ParamState],
+pub(super) struct Body<'a> {
+    pub device: &'a Device,
+    pub params: &'a [ParamState],
     /// The hue of the track the device is on.
-    accent: Color32,
+    pub accent: Color32,
     /// The device is bypassed: its controls step back but still work.
-    dimmed: bool,
-    id: Id,
+    pub dimmed: bool,
+    pub id: Id,
 }
 
 impl Body<'_> {
-    fn param(&self, id: &str) -> Option<&ParamState> {
+    pub fn param(&self, id: &str) -> Option<&ParamState> {
         self.params.iter().find(|param| param.info.id == id)
     }
 
@@ -220,6 +226,13 @@ fn panel(ui: &mut Ui, cx: &mut Cx, device: &Device, rect: Rect, accent: Color32)
         Some(Ok(params)) => {
             let body_of = Body { device, params, accent, dimmed: !device.enabled, id };
             match device_layouts::layout_for(&device.uri) {
+                _ if device.uri == sample_panels::DRUM_RACK => sample_panels::drum_rack(ui, cx, &body_of, body, rect),
+                Some(layout) if device.uri == sample_panels::SAMPLER => {
+                    // The file it plays, then its parameters.
+                    let (sample, rest) = body.split_left_right_at_x(body.left() + sample_panels::SAMPLE_COLUMN);
+                    sample_panels::sampler_sample(ui, cx, &body_of, sample, rect);
+                    laid_out_body(ui, cx, &body_of, layout, rest.with_min_x(rest.left() + COLUMN_GAP));
+                }
                 Some(layout) => laid_out_body(ui, cx, &body_of, layout, body),
                 None => generic_body(ui, cx, &body_of, body),
             }
@@ -455,7 +468,15 @@ fn param_target(body: &Body, param: &ParamState) -> AutomationTarget {
 /// A numeric parameter as a Bar. While an envelope drives the parameter
 /// the bar shows what the envelope says at the playhead, carries the
 /// automation mark, and opens the lane instead of editing.
-fn param_bar(ui: &mut Ui, cx: &mut Cx, body: &Body, param: &ParamState, label: &str, format: Format, rect: Rect) {
+pub(super) fn param_bar(
+    ui: &mut Ui,
+    cx: &mut Cx,
+    body: &Body,
+    param: &ParamState,
+    label: &str,
+    format: Format,
+    rect: Rect,
+) {
     let info = &param.info;
     let scale = ParamScale::of(info);
     let target = param_target(body, param);

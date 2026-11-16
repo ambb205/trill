@@ -3,10 +3,12 @@
 
 use super::files::Jobs;
 use super::snapshot::{Live, Snapshot};
+use super::sounds::{DropTarget, Sounds};
 use super::timeline::{Glide, GridChoice, PitchView, Snap, TimeView};
 use super::toast::Toasts;
 use eframe::egui;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use trill_core::device::DeviceDescriptor;
 use trill_core::{
@@ -37,6 +39,9 @@ pub enum FocusArea {
     PianoRoll,
     /// An automation lane; commands act on its selected points.
     Automation,
+    /// The browser's list of sounds: arrows move through it, Enter and
+    /// Space preview, and typing searches.
+    Browser,
 }
 
 /// What the pointer does in the arrangement.
@@ -364,11 +369,184 @@ pub struct Audition {
     pub release_at: Option<Instant>,
 }
 
-/// The device browser down the left side.
+/// What the browser lists.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum BrowserTab {
+    /// Instruments, effects, plugins and presets.
+    #[default]
+    Devices,
+    /// The sound library.
+    Sounds,
+}
+
+/// Whether the browser lists one-shots, loops or both.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum SoundForm {
+    #[default]
+    Any,
+    OneShot,
+    Loop,
+}
+
+/// The tempos the browser lists.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub enum TempoFilter {
+    #[default]
+    Any,
+    /// Within a few beats per minute of the song's tempo.
+    Song,
+    /// From the first to the second, in beats per minute.
+    Between(f32, f32),
+}
+
+/// The Sounds tab of the browser: what is searched for and what is chosen.
+pub struct SoundBrowser {
+    pub search: String,
+    pub form: SoundForm,
+    /// Only sounds of this kind: kicks, pads, vocals.
+    pub tag: Option<trill_library::Tag>,
+    pub tempo: TempoFilter,
+    pub key: Option<trill_library::Key>,
+    pub favorites: bool,
+    /// Only sounds in this folder of the library or beneath it.
+    pub folder: Option<PathBuf>,
+    /// Folders of the tree that are unfolded.
+    pub expanded: HashSet<PathBuf>,
+    /// Whether the folder tree is shown at all.
+    pub folders_open: bool,
+    /// The chosen sound: the one the preview strip shows.
+    pub selected: Option<PathBuf>,
+    /// Where it is in the list, when it is in it.
+    pub selected_row: Option<usize>,
+    /// Play a sound as soon as it is chosen.
+    pub auto_preview: bool,
+    pub preview_gain_db: f32,
+    /// Bring the chosen row into view on the next frame.
+    pub reveal: bool,
+    /// Give the search field the keyboard on the next frame.
+    pub focus_search: bool,
+    /// The folder the "add folder" dialog last added, to open beside it
+    /// next time.
+    pub last_added: Option<PathBuf>,
+    /// Whether the search field had the keyboard on the last frame.
+    pub search_focused: bool,
+    /// Name of a sound to choose as soon as the list has it.
+    pub pending_select: Option<String>,
+}
+
+impl Default for SoundBrowser {
+    fn default() -> Self {
+        Self {
+            search: String::new(),
+            form: SoundForm::Any,
+            tag: None,
+            tempo: TempoFilter::Any,
+            key: None,
+            favorites: false,
+            folder: None,
+            expanded: HashSet::new(),
+            folders_open: true,
+            selected: None,
+            selected_row: None,
+            auto_preview: true,
+            preview_gain_db: -6.0,
+            reveal: false,
+            focus_search: false,
+            last_added: None,
+            search_focused: false,
+            pending_select: None,
+        }
+    }
+}
+
+/// The browser down the left side.
 pub struct BrowserState {
     pub open: bool,
-    /// What is typed in the search field; narrows the lists.
+    /// Its width as last laid out, in points.
+    pub width: f32,
+    /// Where it was on the last frame.
+    pub rect: egui::Rect,
+    pub tab: BrowserTab,
+    /// What is typed in the devices' search field; narrows the lists.
     pub search: String,
+    pub sounds: SoundBrowser,
+}
+
+impl BrowserState {
+    pub const DEFAULT_WIDTH: f32 = 280.0;
+    pub const MIN_WIDTH: f32 = 220.0;
+    pub const MAX_WIDTH: f32 = 520.0;
+
+    fn new() -> Self {
+        Self {
+            open: true,
+            width: Self::DEFAULT_WIDTH,
+            rect: egui::Rect::NOTHING,
+            tab: BrowserTab::default(),
+            search: String::new(),
+            sounds: SoundBrowser::default(),
+        }
+    }
+}
+
+/// Where sounds being dragged came from.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum DragSource {
+    /// A row of the browser, or its preview strip.
+    Browser,
+    /// Files dragged in from another program.
+    System,
+}
+
+/// Sounds being dragged towards the song.
+///
+/// The views that can take them say so while the pointer is over them, by
+/// setting `target`; the app carries the drop out when the button is let
+/// go. Nothing is read from disk for any of this.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SoundDrag {
+    pub source: DragSource,
+    pub paths: Vec<PathBuf>,
+    /// What to call it while it is in the air: the first file's name.
+    pub label: String,
+    /// Length of the first file in seconds, its tempo and what kind of
+    /// sound it is, as far as the library knows: for drawing how long the
+    /// clip will be.
+    pub seconds: Option<f64>,
+    pub tempo: Option<f64>,
+    pub tags: trill_library::Tags,
+    /// Where the pointer is; `None` when the system does not say (files
+    /// from another program, on some platforms, until they are let go).
+    pub pointer: Option<egui::Pos2>,
+    /// Where it would land if let go now.
+    pub target: Option<DropTarget>,
+    /// Why it cannot be dropped where the pointer is, for the hint.
+    pub refusal: Option<&'static str>,
+}
+
+impl SoundDrag {
+    /// The length in beats the first clip would have on a track.
+    pub fn beats(&self, project_tempo: f64, fallback: Beats) -> Beats {
+        match self.seconds {
+            Some(seconds) => super::sounds::dropped_length(seconds, self.tags, self.tempo, project_tempo),
+            None => fallback,
+        }
+    }
+
+    /// Offers `target` as the place the drag would land.
+    pub fn offer(&mut self, target: DropTarget) {
+        self.target = Some(target);
+        self.refusal = None;
+    }
+}
+
+/// Files let go over the window by another program, waiting for the system
+/// to say where the pointer is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SystemDrop {
+    pub paths: Vec<PathBuf>,
+    /// Frames it has waited.
+    pub waited: u32,
 }
 
 /// The one-line hint in the status bar: what the thing under the pointer is
@@ -446,6 +624,15 @@ pub struct UiState {
     /// Whether the shortcut reference is up.
     pub shortcuts_open: bool,
     pub browser: BrowserState,
+    /// Sounds on their way from the browser, or from another program, to
+    /// wherever they are dropped.
+    pub sound_drag: Option<SoundDrag>,
+    pub system_drop: Option<SystemDrop>,
+    /// The pad each drum rack's panel shows the controls of, by its note.
+    pub selected_pads: HashMap<DeviceId, u8>,
+    /// How much of its file the audio clip panel shows: the clip it was
+    /// last framed on, and the seconds at its left and right edges.
+    pub audio_view: Option<(ClipId, f64, f64)>,
     pub hint: Hint,
     /// Name of a theme chosen from the View menu; the app switches to it
     /// once the frame is over.
@@ -486,7 +673,11 @@ impl UiState {
             clipboard: None,
             copied_text: None,
             shortcuts_open: false,
-            browser: BrowserState { open: true, search: String::new() },
+            browser: BrowserState::new(),
+            sound_drag: None,
+            system_drop: None,
+            selected_pads: HashMap::new(),
+            audio_view: None,
             hint: Hint::default(),
             theme_request: None,
             toasts: Toasts::default(),
@@ -587,6 +778,10 @@ impl UiState {
         if self.selected_track.is_none() {
             self.selected_track = project.tracks.first().map(|track| track.id);
         }
+        self.selected_pads.retain(|device, _| project.device(*device).is_ok());
+        if self.audio_view.is_some_and(|(clip, ..)| self.selected_clip != Some(clip)) {
+            self.audio_view = None;
+        }
         self.reconcile_arrangement(project);
         self.resolve_device(project);
     }
@@ -632,7 +827,11 @@ impl UiState {
     pub fn reset_for_new_project(&mut self) {
         let fresh = Self::new(self.detail_tab);
         let toasts = std::mem::take(&mut self.toasts);
-        let browser = BrowserState { open: self.browser.open, search: String::new() };
+        // The browser is the user's, not the project's: it stays as it is,
+        // apart from the devices' search, which narrowed lists for a chain
+        // that no longer exists.
+        let mut browser = std::mem::replace(&mut self.browser, BrowserState::new());
+        browser.search.clear();
         // What was copied in one project can be pasted into the next.
         let clipboard = self.clipboard.take();
         *self = Self { toasts, browser, clipboard, ..fresh };
@@ -687,6 +886,9 @@ pub struct Cx<'a> {
     pub mcp_url: Option<&'a str>,
     pub state: &'a mut UiState,
     pub jobs: &'a mut Jobs,
+    /// Waveforms, previews, the library and drops: everything that reads
+    /// audio files, none of it on this thread.
+    pub sounds: &'a mut Sounds,
 }
 
 impl Cx<'_> {
@@ -857,9 +1059,15 @@ mod tests {
 
         state.browser.open = false;
         state.browser.search = "rev".to_owned();
+        state.browser.tab = BrowserTab::Sounds;
+        state.browser.width = 333.0;
+        state.browser.sounds.search = "kick".to_owned();
+        state.browser.sounds.form = SoundForm::Loop;
         state.reset_for_new_project();
         assert!(!state.browser.open, "the browser stays as the user left it");
         assert!(state.browser.search.is_empty());
+        assert_eq!((state.browser.tab, state.browser.width), (BrowserTab::Sounds, 333.0));
+        assert_eq!((state.browser.sounds.search.as_str(), state.browser.sounds.form), ("kick", SoundForm::Loop));
     }
 
     #[test]

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use trill_core::{AutomationPoint, AutomationTarget, Beats, Clip, ClipId, DeviceId, Note, Project, Track, TrackId};
-use trill_engine::{Meter, ParamState, Session};
+use trill_engine::{Meter, ParamState, Problem, SampleFile, Session};
 
 /// What a MIDI clip plays, as the arrangement draws it.
 pub struct ClipNotes {
@@ -37,6 +37,12 @@ pub struct Snapshot {
     pub path: Option<PathBuf>,
     /// Compile problems (plugins that failed to load, missing audio files).
     pub problems: Vec<String>,
+    /// Why each audio clip that is not playing as it should is not: its
+    /// file is missing or unreadable, or could not be stretched.
+    pub clip_problems: HashMap<ClipId, String>,
+    /// The files of the sample-playing devices `params` covers, with what
+    /// is wrong with each.
+    pub samples: HashMap<DeviceId, Vec<SampleFile>>,
     /// The tracks whose devices `params` covers, besides the master's, in
     /// ascending order.
     pub params_tracks: Vec<TrackId>,
@@ -65,6 +71,21 @@ impl Snapshot {
             .chain(project.master.devices.iter())
             .map(|device| (device.id, session.device_params(device.id).map_err(|error| error.to_string())))
             .collect();
+        let clip_problems = session
+            .problems()
+            .iter()
+            .filter_map(|problem| match problem {
+                Problem::AudioFile { clip, reason, .. } => Some((*clip, reason.clone())),
+                _ => None,
+            })
+            .collect();
+        let samples = shown
+            .iter()
+            .flat_map(|track| track.devices.iter())
+            .chain(project.master.devices.iter())
+            .filter(|device| crate::ui::sample_panels::plays_samples(&device.uri))
+            .filter_map(|device| Some((device.id, session.sample_files(device.id).ok()?)))
+            .collect();
         let track_meters = project
             .tracks
             .iter()
@@ -77,6 +98,8 @@ impl Snapshot {
             modified: session.is_modified(),
             path: session.path().map(PathBuf::from),
             problems: session.problems().iter().map(ToString::to_string).collect(),
+            clip_problems,
+            samples,
             params_tracks: shown.iter().map(|track| track.id).collect(),
             params,
             clip_notes: RefCell::default(),
@@ -209,6 +232,9 @@ pub struct Live {
     pub cpu_load: f32,
     /// Audio callbacks that panicked and were replaced by silence.
     pub audio_faults: u32,
+    /// How many warped clips play a stand-in while their stretched audio
+    /// is being made.
+    pub preparing: usize,
     pub master: MeterState,
     tracks: HashMap<TrackId, MeterState>,
 }

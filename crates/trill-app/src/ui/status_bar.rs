@@ -38,6 +38,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
         (true, 1) => row.status(theme.info, "1 plugin"),
         (true, count) => row.status(theme.info, &format!("{count} plugins")),
     }
+    match row.cx.live.preparing {
+        0 => {}
+        1 => row.status(theme.info, "Preparing 1 warped clip\u{2026}"),
+        count => row.status(theme.info, &format!("Preparing {count} warped clips\u{2026}")),
+    }
     if let Some(path) = row.cx.jobs.exporting() {
         let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         row.status(theme.info, &format!("Rendering {name}\u{2026}"));

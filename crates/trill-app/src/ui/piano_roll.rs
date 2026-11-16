@@ -7,7 +7,7 @@
 
 use super::state::{AUDITION_LENGTH, Clipboard, Cx, FocusArea, NoteDrag};
 use super::timeline::{self, GridLevel, PitchView, Snap, SpanHit, TimeView};
-use super::{colors, units, widgets};
+use super::{colors, widgets};
 use eframe::egui::{
     self, Align2, Color32, CursorIcon, Mesh, PointerButton, Pos2, Rangef, Rect, Sense, Shape, Ui, pos2, vec2,
 };
@@ -289,17 +289,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
 
     match &clip.content {
         ClipContent::Midi(midi) => roll(ui, cx, track, clip, midi, roll_rect),
-        ClipContent::Audio(audio) => {
-            let name = audio.path.rsplit(['/', '\\']).next().unwrap_or(&audio.path);
-            let detail = format!(
-                "{} \u{00B7} starts {:.2} s into the file \u{00B7} gain {}. Audio clips have no notes to edit.",
-                audio.path,
-                audio.offset_seconds,
-                units::format_db(audio.gain_db)
-            );
-            // A file name keeps its case: it is a name, not a label.
-            placeholder(ui, theme, roll_rect, theme.text.body, name, &detail);
-        }
+        ClipContent::Audio(audio) => super::audio_clip::show(ui, cx, track, clip, audio, roll_rect),
     }
 }
 
@@ -315,7 +305,7 @@ fn placeholder(ui: &Ui, theme: &Theme, area: Rect, title_style: trill_noir::Text
 }
 
 /// Stacks the sidebar's controls from the top, each as wide as the column.
-struct Stack {
+pub(super) struct Stack {
     left: f32,
     width: f32,
     top: f32,
@@ -324,14 +314,14 @@ struct Stack {
 
 impl Stack {
     /// The next row, `height` tall.
-    fn row(&mut self, height: f32) -> Rect {
+    pub(super) fn row(&mut self, height: f32) -> Rect {
         let rect = Rect::from_min_size(pos2(self.left, self.top), vec2(self.width, height));
         self.top += height + self.gap;
         rect
     }
 
     /// A section heading: micro caps over a rule.
-    fn heading(&mut self, ui: &Ui, theme: &Theme, title: &str, first: bool) {
+    pub(super) fn heading(&mut self, ui: &Ui, theme: &Theme, title: &str, first: bool) {
         if !first {
             self.top += 4.0;
         }
@@ -402,7 +392,11 @@ fn sidebar(ui: &mut Ui, cx: &mut Cx, clip: &Clip, rect: Rect) {
         cx.begin_gesture();
     }
     if let Some(length) = output.value {
-        let (start, length) = (clip.start, timeline::snap_round(length, step).max(step.unwrap_or(SHORTEST_NOTE)));
+        let (start, mut length) = (clip.start, timeline::snap_round(length, step).max(step.unwrap_or(SHORTEST_NOTE)));
+        // An audio clip does not grow past the end of its file.
+        if let Some(room) = super::arrangement::audio_room(cx, clip).filter(|_| length > clip.length) {
+            length = length.min(room.max(clip.length));
+        }
         if length != clip.length {
             cx.edit(|project| project.set_clip_span(clip_id, start, length));
         }
@@ -450,7 +444,10 @@ fn sidebar(ui: &mut Ui, cx: &mut Cx, clip: &Clip, rect: Rect) {
         }
     }
 
-    let Some(midi) = clip.midi() else { return };
+    let midi = match &clip.content {
+        ClipContent::Midi(midi) => midi,
+        ClipContent::Audio(audio) => return super::audio_clip::sidebar(ui, cx, clip, audio, &mut stack),
+    };
 
     stack.heading(ui, theme, "Grid", false);
     // Straight note values on one line, triplets and "off" on the next.

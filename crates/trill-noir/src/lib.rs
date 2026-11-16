@@ -20,9 +20,11 @@
 //! * The Bar follows the app's gestures: a double-click restores the
 //!   default, and Ctrl as well as Shift makes a drag fine. The [`Fader`] is
 //!   the same control stood on end, for mixer strips.
-//! * The knob, keyboard, piano roll, step lane, scope, spectrum and
-//!   waveform widgets were left behind; the app draws its own piano roll
-//!   and response displays (on [`Plot`]) from its project snapshot.
+//! * The knob, keyboard, piano roll, step lane, scope and spectrum widgets
+//!   were left behind; the app draws its own piano roll and response
+//!   displays (on [`Plot`]) from its project snapshot.
+//! * The [`waveform`] was written here: it draws pixel columns it is given
+//!   into a mesh the caller owns, so that many can be painted as one.
 //!
 //! Nothing here knows about audio or projects.
 
@@ -42,15 +44,17 @@ mod style;
 mod testing;
 pub mod text;
 mod theme;
+mod waveform;
 
 pub use bar::{Bar, BarOutput, bar};
 pub use button::{Variant, bare_icon_button, button, icon_button, tab, tab_width};
 pub use chip::{Chip, chip, chip_row, chip_row_width};
 pub use fader::{Fader, fader};
 pub use field::{NumberField, NumberOutput, number_field, text_field};
-pub use icon::Icon;
+pub use icon::{Icon, paint_icon};
 pub use menu::{MenuItem, dropdown, dropdown_width, menu_heading, menu_separator, menu_title};
 pub use meter::{Levels, Zones, mini_meter, stereo_meter};
 pub use plot::Plot;
 pub use style::install;
 pub use theme::{Metrics, TRACK_HUES, TextStyle, Theme, Type, fade};
+pub use waveform::{Column, waveform, waveform_columns};

@@ -1,6 +1,6 @@
 //! Command-line options.
 
-use crate::ui::{DetailTab, UiOptions};
+use crate::ui::{BrowserTab, DetailTab, UiOptions};
 use anyhow::{Context, anyhow, bail};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -22,7 +22,11 @@ Options:
   --play                  Start playback when the window opens
   --size <WIDTHxHEIGHT>   Initial window size in points (default: 1440x900)
   --theme <noir|graphite> Colors of the window (default: noir)
-  --no-browser            Start with the device browser hidden (Ctrl+B shows it)
+  --no-browser            Start with the browser hidden (Ctrl+B shows it)
+  --browse <devices|sounds>   What the browser lists first (default: devices)
+  --library <FOLDER>      Add a folder of sounds to the library; may be given several times
+  --search <TEXT>         Search the sound library for this at startup
+  --sound <NAME>          Select the sound with this name in the browser
   --null-audio            Run without an audio device
   --no-plugins            Offer only the built-in devices
   --mcp-port <PORT>       Port of the MCP server for AI assistants (default: 7777)
@@ -51,6 +55,13 @@ pub struct Cli {
     /// Name of the theme to start in.
     pub theme: Option<&'static str>,
     pub no_browser: bool,
+    pub browse: BrowserTab,
+    /// Folders to add to the sound library.
+    pub library: Vec<PathBuf>,
+    /// What to search the sound library for.
+    pub search: Option<String>,
+    /// Name of a sound to select in the browser.
+    pub sound: Option<String>,
     pub null_audio: bool,
     pub no_plugins: bool,
     pub no_mcp: bool,
@@ -82,6 +93,16 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
             "--automation" => cli.automation = true,
             "--shortcuts" => cli.shortcuts = true,
             "--also-select" => cli.also_select.push(value("a clip name")?),
+            "--library" => cli.library.push(PathBuf::from(value("a folder")?)),
+            "--search" => cli.search = Some(value("what to search for")?),
+            "--sound" => cli.sound = Some(value("the name of a sound")?),
+            "--browse" => {
+                cli.browse = match value("what to list")?.as_str() {
+                    "devices" => BrowserTab::Devices,
+                    "sounds" => BrowserTab::Sounds,
+                    other => bail!("the browser cannot list '{other}' (expected 'devices' or 'sounds')"),
+                }
+            }
             "--mcp-port" => {
                 let text = value("a port number")?;
                 cli.mcp_port = Some(text.parse().with_context(|| format!("'{text}' is not a port number"))?);
@@ -197,6 +218,9 @@ impl Cli {
             mcp_url: None,
             theme: self.theme.unwrap_or(defaults.theme),
             browser: !self.no_browser,
+            browser_tab: self.browse,
+            sound_search: self.search.clone(),
+            select_sound: self.sound.clone(),
             screenshot: self.screenshot.clone(),
             autoplay: self.play,
             exit_after: self.exit_after,
@@ -350,6 +374,33 @@ mod tests {
     }
 
     #[test]
+    fn the_browser_can_start_on_the_sound_library() {
+        let plain = run(&[]).unwrap();
+        assert_eq!(plain.browse, BrowserTab::Devices);
+        assert!(plain.library.is_empty() && plain.search.is_none() && plain.sound.is_none());
+
+        let cli = run(&[
+            "--browse",
+            "sounds",
+            "--library",
+            "packs/drums",
+            "--library",
+            "packs/loops",
+            "--search",
+            "kick",
+            "--sound",
+            "Kick Deep 01",
+        ])
+        .unwrap();
+        assert_eq!(cli.library, [PathBuf::from("packs/drums"), PathBuf::from("packs/loops")]);
+        let options = cli.ui_options();
+        assert_eq!(options.browser_tab, BrowserTab::Sounds);
+        assert_eq!(options.sound_search.as_deref(), Some("kick"));
+        assert_eq!(options.select_sound.as_deref(), Some("Kick Deep 01"));
+        assert_eq!(run(&["--browse", "devices"]).unwrap().browse, BrowserTab::Devices);
+    }
+
+    #[test]
     fn help_is_recognized() {
         assert_eq!(parse(["--help".to_owned()]).unwrap(), Parsed::Help);
         assert_eq!(parse(["--demo".to_owned(), "-h".to_owned()]).unwrap(), Parsed::Help);
@@ -362,6 +413,11 @@ mod tests {
             &["--tab"],
             &["--tab", "sequencer"],
             &["--also-select"],
+            &["--browse"],
+            &["--browse", "presets"],
+            &["--library"],
+            &["--search"],
+            &["--sound"],
             &["--size", "big"],
             &["--size", "10x10"],
             &["--theme"],

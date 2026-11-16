@@ -7,18 +7,26 @@
 //! every step from those, inside one undo gesture. Clips are followed by
 //! id, so an edit made elsewhere in the middle of a drag at worst removes a
 //! clip from it.
+//!
+//! The lanes are also where sounds land: while one is dragged over them
+//! (see [`crate::ui::dragging`]) they offer the track and the place under
+//! the pointer, or a new track below the last one, and draw the clip that
+//! would be made.
 
 use super::clips::{self, ClipHit, ClipLook, ClipPart};
 use super::rows::RowKind;
 use super::{Geometry, envelopes, ops};
 use crate::ui::shortcuts::{self, Command};
+use crate::ui::sounds::DropTarget;
 use crate::ui::state::{
     ArrangeDrag, ClipOrigin, Clipboard, Cx, DetailTab, FadeEnd, FocusArea, InlineClip, TimeSelection, Tool,
 };
-use crate::ui::{colors, timeline, widgets};
-use eframe::egui::{self, CursorIcon, Mesh, PointerButton, Pos2, Rect, Response, Sense, Shape, Ui, pos2, vec2};
+use crate::ui::{colors, dragging, timeline, widgets};
+use eframe::egui::{
+    self, Align2, Color32, CursorIcon, Mesh, PointerButton, Pos2, Rect, Response, Sense, Shape, Ui, pos2, vec2,
+};
 use trill_core::{Beats, Clip, ClipId, TrackId, TrackKind};
-use trill_noir::{MenuItem, paint};
+use trill_noir::{MenuItem, fade, paint, text};
 
 /// What a right-click in the lanes was on, kept while its menu is open.
 #[derive(Clone, Debug, PartialEq)]
@@ -52,6 +60,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry) {
     }
     paint_overlays(ui, cx, geometry, &response);
     interact(ui, cx, geometry, &response);
+    sound_drop(ui, cx, geometry);
     context_menu(ui, cx, geometry, &response);
     rename_field(ui, cx, geometry);
 }
@@ -114,7 +123,7 @@ fn paint_rows(ui: &Ui, cx: &Cx, geometry: &Geometry, hovered: Option<ClipId>) {
                 handles: hovered == Some(clip.id) || cx.state.is_clip_selected(clip.id),
                 renaming: renaming == Some(clip.id),
             };
-            clips::paint_clip(&painter, theme, cx.snap, &mut notes, rect, geometry, clip, look);
+            clips::paint_clip(&painter, cx, &mut notes, rect, geometry, clip, look);
         }
     }
     painter.add(Shape::mesh(notes));
@@ -396,7 +405,13 @@ fn drag(ui: &Ui, cx: &mut Cx, geometry: &Geometry, pointer: Pos2, free: bool) {
             ui.set_cursor_icon(CursorIcon::ResizeHorizontal);
             let Some((_, current)) = snapshot.clip(clip) else { return };
             let end = geometry.snap(geometry.beat(pointer.x), free);
-            let (start, length) = (current.start, (end - current.start).max(geometry.min_clip_length(free)));
+            let (start, mut length) = (current.start, (end - current.start).max(geometry.min_clip_length(free)));
+            // An audio clip stops growing where its file ends: beyond that
+            // there is nothing to play. One that is already longer (the
+            // tempo changed under it) may stay so, but not grow.
+            if let Some(room) = clips::audio_room(cx, current).filter(|_| length > current.length) {
+                length = length.min(room.max(current.length));
+            }
             if (current.length - length).abs() >= 1e-9 {
                 cx.edit(|project| project.set_clip_span(clip, start, length));
             }
@@ -518,6 +533,110 @@ fn band(cx: &mut Cx, geometry: &Geometry, pointer: Pos2, free: bool, anchor: Bea
     view.cursor = start;
     let tracks = crossed.iter().map(|index| tracks[*index].id).collect();
     view.time_selection = (end > start).then_some(TimeSelection { start, end, tracks });
+}
+
+// ---- sounds being dropped --------------------------------------------------
+
+/// Height of the band below the last track that stands for the track a
+/// drop there would make.
+const NEW_TRACK_BAND: f32 = super::TRACK_HEIGHT;
+
+/// While a sound is dragged over the lanes: offers the place under the
+/// pointer and draws the clip that would be made there. Drops still on
+/// their way (the file is being read) keep their ghost until they land.
+fn sound_drop(ui: &Ui, cx: &mut Cx, geometry: &Geometry) {
+    let theme = cx.theme;
+    let lanes = geometry.lanes;
+    let painter = ui.painter_at(lanes);
+    let tracks = &cx.snap.project.tracks;
+    let project_tempo = cx.snap.project.tempo;
+    let bar = geometry.beats_per_bar;
+    // The row a new track would get: right under the last one.
+    let new_row = |beat: Beats, length: Beats| {
+        let top = geometry.screen_y(geometry.rows.height);
+        let left = geometry.x(beat).round();
+        let right = (geometry.x(beat + length).round() - 1.0).max(left + 12.0);
+        Rect::from_min_max(pos2(left, top + 1.0), pos2(right, top + NEW_TRACK_BAND - 2.0))
+    };
+    let on_track = |track: TrackId, beat: Beats, length: Beats| {
+        let index = cx.snap.track_index(track)?;
+        let row = geometry.rows.track(index)?;
+        let top = geometry.screen_y(row.top);
+        let left = geometry.x(beat).round();
+        let right = (geometry.x(beat + length).round() - 1.0).max(left + 12.0);
+        let color = colors::track_color(theme, tracks[index].color);
+        Some((Rect::from_min_max(pos2(left, top + 1.0), pos2(right, top + row.height - 2.0)), color))
+    };
+
+    for pending in &cx.sounds.pending {
+        let length = if pending.length > 0.0 { pending.length } else { bar };
+        match &pending.target {
+            DropTarget::Lane { track, beat } => {
+                if let Some((rect, color)) = on_track(*track, *beat, length) {
+                    ghost(&painter, theme, rect, color, &pending.label, false);
+                }
+            }
+            DropTarget::NewTrack { beat, colors } => {
+                let color = colors.first().map_or(theme.ink_dim, |stored| colors::track_color(theme, *stored));
+                ghost(&painter, theme, new_row(*beat, length), color, &pending.label, false);
+            }
+            _ => {}
+        }
+    }
+
+    let free = ui.input(|input| input.modifiers.alt);
+    let Some(drag) = &mut cx.state.sound_drag else { return };
+    let Some(pointer) = drag.pointer.filter(|pointer| lanes.contains(*pointer)) else { return };
+    let beat = geometry.snap(geometry.beat(pointer.x), free);
+    let length = drag.beats(project_tempo, bar);
+    let label = drag.label.clone();
+    match geometry.row_at(pointer.y) {
+        Some(row) => {
+            let index = match row.kind {
+                RowKind::Track { index, .. } => index,
+                RowKind::Lane { track, .. } => track,
+            };
+            let track = &tracks[index];
+            if track.kind != TrackKind::Normal {
+                drag.refusal = Some("Audio goes on a track that holds clips, not on a group or a return");
+                return;
+            }
+            drag.offer(DropTarget::Lane { track: track.id, beat });
+            if let Some((rect, color)) = on_track(track.id, beat, length) {
+                ghost(&painter, theme, rect, color, &label, true);
+            }
+        }
+        None => {
+            let count = drag.paths.len();
+            let colors = dragging::new_track_colors(cx, count);
+            let color = colors::track_color(theme, colors[0]);
+            // The band says a track will appear; the ghost, where on it.
+            let top = geometry.screen_y(geometry.rows.height);
+            let band = Rect::from_x_y_ranges(lanes.x_range(), top..=top + NEW_TRACK_BAND);
+            painter.rect_filled(band, 0.0, theme.hover);
+            paint::hline_above(&painter, band.x_range(), band.bottom(), theme.hairline);
+            let caption = Rect::from_min_max(band.min + vec2(8.0, 0.0), band.max - vec2(8.0, 0.0));
+            text::paint(&painter, caption, Align2::RIGHT_CENTER, theme.text.micro, "New audio track", theme.ink_faint);
+            ghost(&painter, theme, new_row(beat, length), color, &label, true);
+            if let Some(drag) = &mut cx.state.sound_drag {
+                drag.offer(DropTarget::NewTrack { beat, colors });
+            }
+        }
+    }
+}
+
+/// The outline of a clip that does not exist yet. `live` while it follows
+/// the pointer; stepped back while its file is still being read.
+fn ghost(painter: &egui::Painter, theme: &trill_noir::Theme, rect: Rect, color: Color32, label: &str, live: bool) {
+    painter.rect_filled(rect, 0.0, fade(color, if live { 0.22 } else { 0.10 }));
+    let title = clips::title_rect(rect);
+    painter.rect_filled(title, 0.0, fade(color, if live { 0.75 } else { 0.35 }));
+    paint::frame(painter, rect, if live { theme.ink } else { theme.ink_faint });
+    if rect.width() > 18.0 {
+        let room = Rect::from_min_max(pos2(title.left() + 4.0, title.top()), pos2(title.right() - 3.0, title.bottom()));
+        let ink = if live { theme.on_accent } else { theme.ink_dim };
+        text::paint(painter, room, Align2::LEFT_CENTER, theme.text.micro, label, ink);
+    }
 }
 
 // ---- menus and renaming ----------------------------------------------------

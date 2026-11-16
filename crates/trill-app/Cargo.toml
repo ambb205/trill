@@ -14,7 +14,9 @@ path = "src/main.rs"
 trill-core.workspace = true
 trill-dsp.workspace = true
 trill-engine.workspace = true
+trill-library.workspace = true
 trill-mcp.workspace = true
+trill-media.workspace = true
 trill-noir.workspace = true
 trill-plugins.workspace = true
 trill-runtime.workspace = true
@@ -30,6 +32,10 @@ rfd = "0.18"
 pollster = "1"
 # Encodes `--screenshot` output.
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+# Sample packs for the interaction tests, away from the user's own.
+tempfile = "3"
 
 [build-dependencies]
 # Embeds the icon in the Windows executable.

@@ -1,0 +1,617 @@
+{
+  "format_version": 1,
+  "name": "Night Shift",
+  "tempo": 120.0,
+  "time_signature": {
+    "numerator": 4,
+    "denominator": 4
+  },
+  "loop_region": {
+    "enabled": false,
+    "start": 0.0,
+    "end": 16.0
+  },
+  "tracks": [
+    {
+      "id": 1,
+      "name": "Drums",
+      "color": 15898954,
+      "volume_db": 0.0,
+      "pan": 0.0,
+      "mute": false,
+      "solo": false,
+      "devices": [],
+      "clips": [
+        {
+          "id": 2,
+          "name": "Drum Loop Steady",
+          "start": 0.0,
+          "length": 8.0,
+          "muted": false,
+          "content": {
+            "type": "audio",
+            "path": "crates/trill-app/screenshots/sounds/Night Shift/Loops/Drum Loop Steady 120bpm.wav",
+            "offset_seconds": 0.0,
+            "gain_db": 0.0,
+            "warp": "beats",
+            "source_tempo": 120.0
+          }
+        },
+        {
+          "id": 3,
+          "name": "Drum Loop Busy",
+          "start": 8.0,
+          "length": 8.0,
+          "muted": false,
+          "content": {
+            "type": "audio",
+            "path": "crates/trill-app/screenshots/sounds/Night Shift/Loops/Drum Loop Busy 120bpm.wav",
+            "offset_seconds": 0.0,
+            "gain_db": 0.0,
+            "warp": "beats",
+            "source_tempo": 120.0
+          }
+        },
+        {
+          "id": 4,
+          "name": "Drum Loop Steady",
+          "start": 16.0,
+          "length": 8.0,
+          "muted": false,
+          "content": {
+            "type": "audio",
+            "path": "crates/trill-app/screenshots/sounds/Night Shift/Loops/Drum Loop Steady 120bpm.wav",
+            "offset_seconds": 0.0,
+            "gain_db": 0.0,
+            "warp": "beats",
+            "source_tempo": 120.0
+          }
+        },
+        {
+          "id": 5,
+          "name": "Crash",
+          "start": 24.0,
+          "length": 3.2,
+          "muted": false,
+          "content": {
+            "type": "audio",
+            "path": "crates/trill-app/screenshots/sounds/Night Shift/Drums/Cymbals/Crash Bright 01.wav",
+            "offset_seconds": 0.0,
+            "gain_db": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "name": "Bass",
+      "color": 5688562,
+      "volume_db": 0.0,
+      "pan": 0.0,
+      "mute": false,
+      "solo": false,
+      "devices": [],
+      "clips": [
+        {
+          "id": 7,
+          "name": "Bass Loop",
+          "start": 0.0,
+          "length": 8.0,
+          "muted": false,
+          "content": {
+            "type": "audio",
+            "path": "crates/trill-app/screenshots/sounds/Night Shift/Loops/Bass Loop 120bpm Am.wav",
+            "offset_seconds": 0.0,
+            "gain_db": 0.0,
+            "warp": "tonal",
+            "source_tempo": 120.0
+          }
+        },
+        {
+          "id": 8,
+          "name": "Bass Loop",
+          "start": 8.0,
+          "length": 8.0,
+          "muted": false,
+          "content": {
+            "type": "audio",
+            "path": "crates/trill-app/screenshots/sounds/Night Shift/Loops/Bass Loop 120bpm Am.wav",
+            "offset_seconds": 0.0,
+            "gain_db": 0.0,
+            "warp": "tonal",
+            "source_tempo": 120.0
+          }
+        },
+        {
+          "id": 9,
+          "name": "Bass Loop",
+          "start": 16.0,
+          "length": 8.0,
+          "muted": false,
+          "content": {
+            "type": "audio",
+            "path": "crates/trill-app/screenshots/sounds/Night Shift/Loops/Bass Loop 120bpm Am.wav",
+            "offset_seconds": 0.0,
+            "gain_db": 0.0,
+            "warp": "tonal",
+            "source_tempo": 120.0
+          }
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "name": "Pad",
+      "color": 12282841,
+      "volume_db": 0.0,
+      "pan": 0.0,
+      "mute": false,
+      "solo": false,
+      "devices": [],
+      "clips": [
+        {
+          "id": 11,
+          "name": "Pad Loop",
+          "start": 0.0,
+          "length": 16.0,
+          "muted": false,
+          "content": {
+            "type": "audio",
+            "path": "crates/trill-app/screenshots/sounds/Night Shift/Loops/Pad Loop 100bpm F#m.wav",
+            "offset_seconds": 0.0,
+            "gain_db": -3.0,
+            "fade_in": 3.0,
+            "fade_out": 4.0,
+            "warp": "tonal",
+            "source_tempo": 100.0,
+            "transpose": -2.0
+          }
+        },
+        {
+          "id": 12,
+          "name": "Riser",
+          "start": 16.0,
+          "length": 8.0,
+          "muted": false,
+          "content": {
+            "type": "audio",
+            "path": "crates/trill-app/screenshots/sounds/Night Shift/FX/Riser Noise 4 Bars.wav",
+            "offset_seconds": 4.0,
+            "gain_db": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "name": "Vocal chops",
+      "color": 7327639,
+      "volume_db": 0.0,
+      "pan": 0.0,
+      "mute": false,
+      "solo": false,
+      "devices": [],
+      "clips": [
+        {
+          "id": 14,
+          "name": "Vocal Chop",
+          "start": 2.0,
+          "length": 0.9,
+          "muted": false,
+          "content": {
+            "type": "audio",
+            "path": "crates/trill-app/screenshots/sounds/Night Shift/Vocals/Vocal Chop Ah 01.wav",
+            "offset_seconds": 0.0,
+            "gain_db": 0.0
+          }
+        },
+        {
+          "id": 15,
+          "name": "Vocal Chop",
+          "start": 3.5,
+          "length": 0.9,
+          "muted": false,
+          "content": {
+            "type": "audio",
+            "path": "crates/trill-app/screenshots/sounds/Night Shift/Vocals/Vocal Chop Ah 01.wav",
+            "offset_seconds": 0.0,
+            "gain_db": 0.0
+          }
+        },
+        {
+          "id": 16,
+          "name": "Vocal Chop",
+          "start": 6.0,
+          "length": 0.9,
+          "muted": false,
+          "content": {
+            "type": "audio",
+            "path": "crates/trill-app/screenshots/sounds/Night Shift/Vocals/Vocal Chop Ah 01.wav",
+            "offset_seconds": 0.0,
+            "gain_db": 0.0
+          }
+        },
+        {
+          "id": 17,
+          "name": "Vocal Chop",
+          "start": 10.0,
+          "length": 0.9,
+          "muted": false,
+          "content": {
+            "type": "audio",
+            "path": "crates/trill-app/screenshots/sounds/Night Shift/Vocals/Vocal Chop Ah 01.wav",
+            "offset_seconds": 0.0,
+            "gain_db": 0.0
+          }
+        },
+        {
+          "id": 18,
+          "name": "Vocal Chop",
+          "start": 11.5,
+          "length": 0.9,
+          "muted": false,
+          "content": {
+            "type": "audio",
+            "path": "crates/trill-app/screenshots/sounds/Night Shift/Vocals/Vocal Chop Ah 01.wav",
+            "offset_seconds": 0.0,
+            "gain_db": 0.0
+          }
+        },
+        {
+          "id": 19,
+          "name": "Vocal Chop",
+          "start": 14.0,
+          "length": 0.9,
+          "muted": false,
+          "content": {
+            "type": "audio",
+            "path": "crates/trill-app/screenshots/sounds/Night Shift/Vocals/Vocal Chop Ah 01.wav",
+            "offset_seconds": 0.0,
+            "gain_db": 0.0
+          }
+        },
+        {
+          "id": 20,
+          "name": "Vocal Chop",
+          "start": 18.0,
+          "length": 0.9,
+          "muted": false,
+          "content": {
+            "type": "audio",
+            "path": "crates/trill-app/screenshots/sounds/Night Shift/Vocals/Vocal Chop Ah 01.wav",
+            "offset_seconds": 0.0,
+            "gain_db": 0.0
+          }
+        },
+        {
+          "id": 21,
+          "name": "Vocal Chop",
+          "start": 19.5,
+          "length": 0.9,
+          "muted": false,
+          "content": {
+            "type": "audio",
+            "path": "crates/trill-app/screenshots/sounds/Night Shift/Vocals/Vocal Chop Ah 01.wav",
+            "offset_seconds": 0.0,
+            "gain_db": 0.0
+          }
+        },
+        {
+          "id": 22,
+          "name": "Lost Take",
+          "start": 22.0,
+          "length": 4.0,
+          "muted": false,
+          "content": {
+            "type": "audio",
+            "path": "crates/trill-app/screenshots/sounds/Night Shift/Vocals/Lead Take 03.wav",
+            "offset_seconds": 0.0,
+            "gain_db": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "name": "Kit",
+      "color": 15423319,
+      "volume_db": 0.0,
+      "pan": 0.0,
+      "mute": false,
+      "solo": false,
+      "devices": [
+        {
+          "id": 24,
+          "uri": "builtin:drumrack",
+          "name": "Drum Rack",
+          "enabled": true,
+          "params": {},
+          "state": "ewogICJ2ZXJzaW9uIjogMSwKICAicGFkcyI6IFsKICAgIHsKICAgICAgIm5vdGUiOiAzNiwKICAgICAgInBhdGgiOiAiY3JhdGVzL3RyaWxsLWFwcC9zY3JlZW5zaG90cy9zb3VuZHMvTmlnaHQgU2hpZnQvRHJ1bXMvS2lja3MvS2ljayBEZWVwIDAxLndhdiIKICAgIH0sCiAgICB7CiAgICAgICJub3RlIjogMzgsCiAgICAgICJwYXRoIjogImNyYXRlcy90cmlsbC1hcHAvc2NyZWVuc2hvdHMvc291bmRzL05pZ2h0IFNoaWZ0L0RydW1zL1NuYXJlcy9TbmFyZSBUaWdodCAwMS53YXYiCiAgICB9LAogICAgewogICAgICAibm90ZSI6IDM5LAogICAgICAicGF0aCI6ICJjcmF0ZXMvdHJpbGwtYXBwL3NjcmVlbnNob3RzL3NvdW5kcy9OaWdodCBTaGlmdC9EcnVtcy9DbGFwcy9DbGFwIFdpZGUgMDEud2F2IgogICAgfSwKICAgIHsKICAgICAgIm5vdGUiOiA0MiwKICAgICAgInBhdGgiOiAiY3JhdGVzL3RyaWxsLWFwcC9zY3JlZW5zaG90cy9zb3VuZHMvTmlnaHQgU2hpZnQvRHJ1bXMvSGF0cy9ISCBDbG9zZWQgMDEud2F2IgogICAgfSwKICAgIHsKICAgICAgIm5vdGUiOiA0NSwKICAgICAgInBhdGgiOiAiY3JhdGVzL3RyaWxsLWFwcC9zY3JlZW5zaG90cy9zb3VuZHMvTmlnaHQgU2hpZnQvRHJ1bXMvVG9tcy9Ub20gTWlkIDAxLndhdiIKICAgIH0sCiAgICB7CiAgICAgICJub3RlIjogNDYsCiAgICAgICJwYXRoIjogImNyYXRlcy90cmlsbC1hcHAvc2NyZWVuc2hvdHMvc291bmRzL05pZ2h0IFNoaWZ0L0RydW1zL0hhdHMvSGF0IE9wZW4gMDEud2F2IgogICAgfSwKICAgIHsKICAgICAgIm5vdGUiOiA0OSwKICAgICAgInBhdGgiOiAiY3JhdGVzL3RyaWxsLWFwcC9zY3JlZW5zaG90cy9zb3VuZHMvTmlnaHQgU2hpZnQvRHJ1bXMvQ3ltYmFscy9DcmFzaCBCcmlnaHQgMDEud2F2IgogICAgfQogIF0KfQ=="
+        }
+      ],
+      "clips": [
+        {
+          "id": 25,
+          "name": "Beat",
+          "start": 0.0,
+          "length": 24.0,
+          "muted": false,
+          "content": {
+            "type": "midi",
+            "notes": [
+              {
+                "pitch": 36,
+                "start": 0.0,
+                "length": 0.25,
+                "velocity": 110
+              },
+              {
+                "pitch": 42,
+                "start": 0.0,
+                "length": 0.25,
+                "velocity": 90
+              },
+              {
+                "pitch": 42,
+                "start": 0.5,
+                "length": 0.25,
+                "velocity": 60
+              },
+              {
+                "pitch": 38,
+                "start": 1.0,
+                "length": 0.25,
+                "velocity": 100
+              },
+              {
+                "pitch": 42,
+                "start": 1.0,
+                "length": 0.25,
+                "velocity": 90
+              },
+              {
+                "pitch": 42,
+                "start": 1.5,
+                "length": 0.25,
+                "velocity": 60
+              },
+              {
+                "pitch": 36,
+                "start": 2.0,
+                "length": 0.25,
+                "velocity": 110
+              },
+              {
+                "pitch": 42,
+                "start": 2.0,
+                "length": 0.25,
+                "velocity": 90
+              },
+              {
+                "pitch": 36,
+                "start": 2.5,
+                "length": 0.25,
+                "velocity": 110
+              },
+              {
+                "pitch": 42,
+                "start": 2.5,
+                "length": 0.25,
+                "velocity": 60
+              },
+              {
+                "pitch": 38,
+                "start": 3.0,
+                "length": 0.25,
+                "velocity": 100
+              },
+              {
+                "pitch": 42,
+                "start": 3.0,
+                "length": 0.25,
+                "velocity": 90
+              },
+              {
+                "pitch": 42,
+                "start": 3.5,
+                "length": 0.25,
+                "velocity": 60
+              },
+              {
+                "pitch": 46,
+                "start": 3.5,
+                "length": 0.25,
+                "velocity": 80
+              },
+              {
+                "pitch": 36,
+                "start": 4.0,
+                "length": 0.25,
+                "velocity": 110
+              },
+              {
+                "pitch": 42,
+                "start": 4.0,
+                "length": 0.25,
+                "velocity": 90
+              },
+              {
+                "pitch": 42,
+                "start": 4.5,
+                "length": 0.25,
+                "velocity": 60
+              },
+              {
+                "pitch": 38,
+                "start": 5.0,
+                "length": 0.25,
+                "velocity": 100
+              },
+              {
+                "pitch": 42,
+                "start": 5.0,
+                "length": 0.25,
+                "velocity": 90
+              },
+              {
+                "pitch": 42,
+                "start": 5.5,
+                "length": 0.25,
+                "velocity": 60
+              },
+              {
+                "pitch": 36,
+                "start": 6.0,
+                "length": 0.25,
+                "velocity": 110
+              },
+              {
+                "pitch": 42,
+                "start": 6.0,
+                "length": 0.25,
+                "velocity": 90
+              },
+              {
+                "pitch": 36,
+                "start": 6.5,
+                "length": 0.25,
+                "velocity": 110
+              },
+              {
+                "pitch": 42,
+                "start": 6.5,
+                "length": 0.25,
+                "velocity": 60
+              },
+              {
+                "pitch": 38,
+                "start": 7.0,
+                "length": 0.25,
+                "velocity": 100
+              },
+              {
+                "pitch": 42,
+                "start": 7.0,
+                "length": 0.25,
+                "velocity": 90
+              },
+              {
+                "pitch": 42,
+                "start": 7.5,
+                "length": 0.25,
+                "velocity": 60
+              },
+              {
+                "pitch": 46,
+                "start": 7.5,
+                "length": 0.25,
+                "velocity": 80
+              }
+            ],
+            "loop_length": 8.0
+          }
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "name": "Keys",
+      "color": 15911244,
+      "volume_db": 0.0,
+      "pan": 0.0,
+      "mute": false,
+      "solo": false,
+      "devices": [
+        {
+          "id": 27,
+          "uri": "builtin:sampler",
+          "name": "Sampler",
+          "enabled": true,
+          "params": {
+            "end": 82.0,
+            "release": 0.4,
+            "start": 2.0
+          },
+          "state": "ewogICJ2ZXJzaW9uIjogMSwKICAicGF0aCI6ICJjcmF0ZXMvdHJpbGwtYXBwL3NjcmVlbnNob3RzL3NvdW5kcy9OaWdodCBTaGlmdC9LZXlzL1BsdWNrIEMzLndhdiIKfQ=="
+        }
+      ],
+      "clips": [
+        {
+          "id": 28,
+          "name": "Riff",
+          "start": 8.0,
+          "length": 16.0,
+          "muted": false,
+          "content": {
+            "type": "midi",
+            "notes": [
+              {
+                "pitch": 57,
+                "start": 0.0,
+                "length": 0.45,
+                "velocity": 96
+              },
+              {
+                "pitch": 60,
+                "start": 0.5,
+                "length": 0.45,
+                "velocity": 96
+              },
+              {
+                "pitch": 64,
+                "start": 1.0,
+                "length": 0.45,
+                "velocity": 96
+              },
+              {
+                "pitch": 60,
+                "start": 1.5,
+                "length": 0.45,
+                "velocity": 96
+              },
+              {
+                "pitch": 55,
+                "start": 2.0,
+                "length": 0.45,
+                "velocity": 96
+              },
+              {
+                "pitch": 59,
+                "start": 2.5,
+                "length": 0.45,
+                "velocity": 96
+              },
+              {
+                "pitch": 62,
+                "start": 3.0,
+                "length": 0.45,
+                "velocity": 96
+              },
+              {
+                "pitch": 59,
+                "start": 3.5,
+                "length": 0.45,
+                "velocity": 96
+              }
+            ],
+            "loop_length": 4.0
+          }
+        }
+      ]
+    }
+  ],
+  "master": {
+    "volume_db": 0.0,
+    "devices": [
+      {
+        "id": 29,
+        "uri": "builtin:limiter",
+        "name": "Limiter",
+        "enabled": true,
+        "params": {}
+      }
+    ]
+  },
+  "automation": [],
+  "next_id": 30
+}

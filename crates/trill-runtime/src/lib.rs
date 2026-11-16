@@ -17,8 +17,9 @@
 //!
 //! On top of those sit the operations that need more than one of them and
 //! that every front end must do the same way: [`Runtime::sound_facts`],
-//! [`Runtime::preview`] and [`Runtime::add_sound`]. A front end that grew
-//! its own version of these would drift from the other.
+//! [`Runtime::preview`], [`Runtime::add_sound`] and
+//! [`Runtime::add_sound_on_new_track`]. A front end that grew its own
+//! version of these would drift from the other.
 //!
 //! ```no_run
 //! use trill_runtime::{Runtime, RuntimeOptions};
@@ -36,7 +37,7 @@ mod settings;
 mod sounds;
 
 pub use settings::Storage;
-pub use sounds::{AddedSound, SoundClip, SoundError, SoundFacts};
+pub use sounds::{AddedSound, NewSoundTrack, SoundClip, SoundError, SoundFacts};
 
 use housekeeping::Housekeeper;
 use parking_lot::Mutex;

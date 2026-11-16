@@ -5,8 +5,9 @@ use super::arrangement::ops;
 use super::files::{self, Confirm, Jobs};
 use super::shortcuts::{self, Command};
 use super::snapshot::{Live, Snapshot};
-use super::state::{AudioSummary, Cx, FocusArea, LaneOwner, Tool, UiState, lane_owner};
-use super::{UiOptions, arrangement, automation, browser, detail, piano_roll, status_bar, top_bar};
+use super::sounds::{Dropped, Report, Sounds};
+use super::state::{AudioSummary, BrowserState, BrowserTab, Cx, FocusArea, LaneOwner, Tool, UiState, lane_owner};
+use super::{UiOptions, arrangement, automation, browser, detail, dragging, piano_roll, status_bar, top_bar};
 use eframe::egui;
 use parking_lot::Mutex;
 use std::num::NonZeroUsize;
@@ -18,6 +19,7 @@ use trill_core::device::{DeviceDescriptor, DeviceFactory};
 use trill_dsp::BuiltinFactory;
 use trill_engine::SharedSession;
 use trill_noir::Theme;
+use trill_runtime::Runtime;
 
 /// How often an idle window checks the session for edits made elsewhere.
 const IDLE_POLL: Duration = Duration::from_millis(100);
@@ -27,6 +29,9 @@ const HOUSEKEEPING_INTERVAL: Duration = Duration::from_secs(1);
 const MIN_ARRANGEMENT_HEIGHT: f32 = 200.0;
 /// Frames to let the layout settle before taking a screenshot.
 const SCREENSHOT_SETTLE_FRAMES: u32 = 12;
+/// How long a screenshot waits for the library to be scanned and for the
+/// waveforms on screen to be drawn before it is taken regardless.
+const SCREENSHOT_PATIENCE: Duration = Duration::from_secs(20);
 
 /// Where an unattended run (`--screenshot`, `--exit-after`) stands.
 enum Capture {
@@ -39,6 +44,9 @@ enum Capture {
 }
 
 pub struct TrillApp {
+    // Declared first so that it is dropped first: its workers hold the
+    // runtime, which should end here and not on one of their threads.
+    sounds: Sounds,
     session: SharedSession,
     snapshot: Snapshot,
     live: Live,
@@ -67,15 +75,21 @@ pub struct TrillApp {
     title: String,
     /// Whether a text field had the keyboard when the last frame ended.
     was_typing: bool,
+    /// The browser's width as the settings have it.
+    saved_browser_width: f32,
+    /// The frame count when the workers were last seen busy, for
+    /// screenshots, which wait until what they show has arrived.
+    busy_at_frame: u32,
 }
 
 impl TrillApp {
     pub fn new(
         ctx: &egui::Context,
-        session: SharedSession,
+        runtime: Arc<Runtime>,
         options: UiOptions,
         failure: Arc<Mutex<Option<String>>>,
     ) -> Self {
+        let session = runtime.session.clone();
         let theme = Theme::named(options.theme).unwrap_or_else(Theme::noir);
         trill_noir::install(ctx, &theme);
         // Edits are made from inside the UI pass. By default egui may run a
@@ -85,6 +99,15 @@ impl TrillApp {
 
         let mut state = UiState::new(options.detail_tab);
         state.browser.open = options.browser;
+        state.browser.tab = options.browser_tab;
+        // The settings are in memory already; nothing is read here.
+        let saved_browser_width =
+            runtime.settings().ui.browser_width.clamp(BrowserState::MIN_WIDTH, BrowserState::MAX_WIDTH);
+        state.browser.width = saved_browser_width;
+        if let Some(search) = &options.sound_search {
+            state.browser.sounds.search = search.clone();
+        }
+        state.browser.sounds.pending_select = options.select_sound.clone();
         state.shortcuts_open = options.show_shortcuts;
         let (snapshot, factory, audio) = {
             let mut guard = session.lock();
@@ -133,6 +156,7 @@ impl TrillApp {
         // the "discard changes?" question.
         jobs.quit_confirmed = options.screenshot.is_some() || options.exit_after.is_some();
         Self {
+            sounds: Sounds::new(ctx, runtime),
             session,
             snapshot,
             live: Live::default(),
@@ -152,6 +176,8 @@ impl TrillApp {
             last_housekeeping: now,
             title: String::new(),
             was_typing: false,
+            saved_browser_width,
+            busy_at_frame: 0,
         }
     }
 
@@ -183,6 +209,7 @@ impl TrillApp {
                 self.live.metronome = session.metronome();
                 self.live.set_cpu_load(session.audio_load());
                 self.live.audio_faults = session.audio_faults();
+                self.live.preparing = session.preparing();
                 if now.duration_since(self.last_housekeeping) >= HOUSEKEEPING_INTERVAL {
                     session.housekeeping();
                     self.last_housekeeping = now;
@@ -214,7 +241,59 @@ impl TrillApp {
             mcp_url: self.options.mcp_url.as_deref(),
             state: &mut self.state,
             jobs: &mut self.jobs,
+            sounds: &mut self.sounds,
         }
+    }
+
+    /// Takes in what the sound workers finished: says what went wrong,
+    /// selects what was dropped, and passes on what was chosen in a dialog.
+    fn take_reports(&mut self) {
+        for report in self.sounds.pump() {
+            match report {
+                Report::Info(text) => self.state.toasts.info(text),
+                Report::Error(text) => self.state.toasts.error(text),
+                Report::FolderAdded(folder) => {
+                    let name = folder.file_name().map_or_else(|| folder.display().to_string(), |name| {
+                        name.to_string_lossy().into_owned()
+                    });
+                    self.state.toasts.success(format!("Added {name} to the library"));
+                    self.state.browser.sounds.last_added = Some(folder);
+                }
+                Report::Picked(path, target) => {
+                    let label = super::sounds::file_stem(&path);
+                    self.sounds.drop_files(vec![path], target, label, 0.0);
+                }
+                Report::Dropped(Dropped::Clips(clips)) => {
+                    // Shown by the next snapshot; selected now, so that
+                    // the Clip tab opens on what was just dropped.
+                    if let Some((track, _)) = clips.last() {
+                        self.state.select_track(*track);
+                    }
+                    self.state.select_clips(clips.into_iter().map(|(_, clip)| clip).collect());
+                    self.state.arrangement.time_selection = None;
+                    self.state.focus = FocusArea::Arrangement;
+                }
+                Report::Dropped(Dropped::Sample { device, .. }) => self.state.selected_device = Some(device),
+                Report::Dropped(Dropped::Pads { device, notes }) => {
+                    self.state.selected_device = Some(device);
+                    if let Some(note) = notes.last() {
+                        self.state.selected_pads.insert(device, *note);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Remembers the browser's width once it has stopped being dragged.
+    fn save_browser_width(&mut self, ctx: &egui::Context) {
+        let width = self.state.browser.width.round();
+        if width == self.saved_browser_width || ctx.input(|input| input.pointer.any_down()) {
+            return;
+        }
+        self.saved_browser_width = width;
+        self.sounds.quietly(move |runtime| {
+            runtime.update_settings(|settings| settings.ui.browser_width = width).map_err(|error| error.to_string())
+        });
     }
 
     /// The commands for the keys pressed this frame. A question on screen
@@ -229,6 +308,8 @@ impl TrillApp {
             FocusArea::Arrangement => !state.selected_clips.is_empty(),
             FocusArea::PianoRoll => !state.selected_notes.is_empty(),
             FocusArea::Automation => state.arrangement.points.as_ref().is_some_and(|chosen| !chosen.points.is_empty()),
+            // The arrows belong to the list; see `browser::keys`.
+            FocusArea::Browser => false,
         };
         // The key that ends typing (Escape, Enter) takes the focus away
         // before this runs, and must not then be read as a shortcut: the
@@ -285,8 +366,14 @@ impl TrillApp {
         if let Some(path) = self.options.screenshot.clone() {
             // Playing takes a moment to show on the meters.
             let settle = if self.options.autoplay { Duration::from_millis(1800) } else { Duration::from_millis(400) };
+            // What is still on its way (a scan, a waveform) should be in
+            // the picture: wait for the workers, then a few frames more.
+            if self.sounds.is_busy() && elapsed < SCREENSHOT_PATIENCE {
+                self.busy_at_frame = self.frames;
+            }
+            let settled = self.frames >= self.busy_at_frame + SCREENSHOT_SETTLE_FRAMES;
             match &self.capture {
-                Capture::NotRequested if self.frames >= SCREENSHOT_SETTLE_FRAMES && elapsed >= settle => {
+                Capture::NotRequested if settled && elapsed >= settle => {
                     let outcome = Arc::new(Mutex::new(None));
                     let (slot, waker) = (outcome.clone(), ctx.clone());
                     ctx.request_screenshot(move |image| {
@@ -331,6 +418,7 @@ impl TrillApp {
     /// session and with background work.
     pub fn tick(&mut self, ctx: &egui::Context) {
         self.jobs.poll(&mut self.state);
+        self.take_reports();
         self.sync(ctx);
         self.release_audition(ctx);
         // Edits from other front ends arrive without any input event, so an
@@ -345,11 +433,16 @@ impl TrillApp {
         self.guard_close(&ctx);
         self.update_title(&ctx);
 
+        // The sound browser's keys come first: while its list is being
+        // worked in, Space and the letters are its own.
+        let typing = ctx.text_edit_focused() || self.was_typing;
+        browser::keys(&ctx, &mut self.cx(), typing);
         let commands = self.read_commands(&ctx);
         let mut cx = self.cx();
         for command in commands {
             run_command(&ctx, &mut cx, command);
         }
+        dragging::begin(&ctx, &mut cx);
 
         // Panels are claimed from the outside in: the bars, the browser
         // down the left, the detail panel under what is left, and the
@@ -367,8 +460,9 @@ impl TrillApp {
             .show(ui, |ui| status_bar::show(ui, &mut cx));
         if cx.state.browser.open {
             egui::Panel::left("browser")
-                .exact_size(browser::WIDTH)
-                .resizable(false)
+                .resizable(true)
+                .default_size(cx.state.browser.width)
+                .size_range(BrowserState::MIN_WIDTH..=BrowserState::MAX_WIDTH)
                 .show_separator_line(false)
                 .frame(bare)
                 .show(ui, |ui| browser::show(ui, &mut cx));
@@ -386,6 +480,7 @@ impl TrillApp {
             .show(ui, |ui| detail::show(ui, &mut cx));
         egui::CentralPanel::no_frame().show(ui, |ui| arrangement::show(ui, &mut cx));
 
+        dragging::end(&ctx, &mut cx);
         files::confirm_modal(&ctx, &mut cx);
         shortcuts::window(&ctx, &mut cx);
         let corner = ctx.content_rect().right_bottom() - egui::vec2(12.0, status_bar::HEIGHT + 10.0);
@@ -407,10 +502,12 @@ impl TrillApp {
         }
 
         self.close_gesture(&ctx);
+        self.save_browser_width(&ctx);
         self.was_typing = ctx.text_edit_focused();
         // Moving things need every frame; everything else waits for input
         // or the idle poll scheduled in `logic`.
-        if self.live.playing || self.live.meters_moving() || self.state.audition.is_some() {
+        let previewing = self.sounds.preview.is_playing() && self.state.browser.tab == BrowserTab::Sounds;
+        if self.live.playing || self.live.meters_moving() || self.state.audition.is_some() || previewing {
             ctx.request_repaint();
         }
         self.automate(&ctx);
@@ -434,6 +531,16 @@ impl TrillApp {
     #[cfg(test)]
     pub fn catalog_ready(&self) -> bool {
         self.catalog_ready
+    }
+
+    #[cfg(test)]
+    pub fn sounds(&self) -> &Sounds {
+        &self.sounds
+    }
+
+    #[cfg(test)]
+    pub fn state_mut(&mut self) -> &mut UiState {
+        &mut self.state
     }
 }
 
@@ -514,15 +621,19 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
             FocusArea::PianoRoll => {}
             FocusArea::Automation => arrangement::delete_selected_points(cx),
             FocusArea::Arrangement => ops::delete_selection(cx),
+            FocusArea::Browser => {}
         },
         Command::SelectAll => match focus {
             FocusArea::PianoRoll => piano_roll::select_all_notes(cx),
             FocusArea::Automation => arrangement::select_all_points(cx),
-            FocusArea::Arrangement => ops::select_all(cx),
+            FocusArea::Arrangement | FocusArea::Browser => ops::select_all(cx),
         },
         Command::Escape => {
             if cx.state.shortcuts_open {
                 cx.state.shortcuts_open = false;
+            } else if cx.sounds.preview.is_playing() || cx.sounds.preview.loading.is_some() {
+                // A sound being auditioned is the first thing Escape ends.
+                cx.sounds.stop_preview();
             } else if in_notes && !cx.state.selected_notes.is_empty() {
                 cx.state.selected_notes.clear();
             } else {

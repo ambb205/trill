@@ -76,6 +76,15 @@ impl SoundClip {
     }
 }
 
+/// A track to make for a sound: see [`Runtime::add_sound_on_new_track`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NewSoundTrack {
+    /// `None` names the track after the file.
+    pub name: Option<String>,
+    /// 0xRRGGBB; `None` takes the color the project hands out next.
+    pub color: Option<u32>,
+}
+
 /// The clip [`Runtime::add_sound`] made.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AddedSound {
@@ -175,14 +184,36 @@ impl Runtime {
     /// if the file cannot be read, if warping is asked for and no tempo is
     /// to be had, or if the project refuses the clip.
     pub fn add_sound(&self, sound: &SoundClip) -> Result<AddedSound, SoundError> {
+        self.place_sound(sound, None).map(|(_, added)| added)
+    }
+
+    /// Like [`Runtime::add_sound`], on a track made for the sound: what
+    /// dropping a file below the last track does. The new track goes last,
+    /// holds no devices (audio clips need none) and is returned with the
+    /// clip. `sound.track` is not looked at. Track and clip are one undo
+    /// step, and a failure leaves neither behind.
+    pub fn add_sound_on_new_track(
+        &self,
+        sound: &SoundClip,
+        track: &NewSoundTrack,
+    ) -> Result<(TrackId, AddedSound), SoundError> {
+        self.place_sound(sound, Some(track))
+    }
+
+    /// The body of both: on `sound.track`, or on a track made as `new_track`
+    /// says.
+    fn place_sound(
+        &self,
+        sound: &SoundClip,
+        new_track: Option<&NewSoundTrack>,
+    ) -> Result<(TrackId, AddedSound), SoundError> {
         let path = absolute(&sound.path);
         let facts = self.sound_facts(&path)?;
         let file_name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         let source_tempo = sound.source_tempo.or(facts.tempo);
         if sound.warp != WarpMode::Off && source_tempo.is_none() {
             return Err(SoundError::Invalid(format!(
-                "'{file_name}' does not say in its name what tempo it was recorded at, so it cannot follow the \
-                 project's. Give its tempo in BPM as the source tempo, or leave warp off."
+                "'{file_name}' does not say in its name what tempo it was recorded at, so it cannot follow the                  project's. Give its tempo in BPM as the source tempo, or leave warp off."
             )));
         }
         let remaining = facts.seconds - sound.offset_seconds;
@@ -203,16 +234,27 @@ impl Runtime {
             source_tempo,
             transpose: sound.transpose,
         };
-        let name = sound.name.clone().unwrap_or_else(|| {
-            path.file_stem().map_or_else(|| "Audio".to_string(), |stem| stem.to_string_lossy().into_owned())
-        });
+        let stem = path.file_stem().map_or_else(|| "Audio".to_string(), |stem| stem.to_string_lossy().into_owned());
+        let name = sound.name.clone().unwrap_or_else(|| stem.clone());
 
         let mut session = self.session.lock();
         let length = sound.length.unwrap_or(remaining / content.seconds_per_beat(session.project().tempo));
-        let clip = session.edit(|project| project.add_audio_clip(sound.track, name, sound.start, length, content))?;
+        let (track, clip) = session.edit(|project| {
+            let track = match new_track {
+                Some(new_track) => {
+                    let track = project.add_track(new_track.name.clone().unwrap_or(stem));
+                    if let Some(color) = new_track.color {
+                        project.track_mut(track)?.color = color;
+                    }
+                    track
+                }
+                None => sound.track,
+            };
+            Ok((track, project.add_audio_clip(track, name, sound.start, length, content)?))
+        })?;
         drop(session);
         self.library.mark_used(&path);
-        Ok(AddedSound { clip, length, file_seconds: facts.seconds, source_tempo })
+        Ok((track, AddedSound { clip, length, file_seconds: facts.seconds, source_tempo }))
     }
 }
 

@@ -7,6 +7,7 @@ use super::rows::{self, RowKind};
 use super::{Geometry, envelopes};
 use crate::ui::automation;
 use crate::ui::shortcuts::{self, Command};
+use crate::ui::sounds::DropTarget;
 use crate::ui::state::{ArrangeDrag, ArrangementState, Cx, FocusArea, LaneOwner, TextEditState, TrackDrop};
 use crate::ui::{colors, units, widgets};
 use eframe::egui::{self, Align2, CursorIcon, PointerButton, Rect, Sense, Ui, UiBuilder, pos2, vec2};
@@ -269,6 +270,34 @@ fn header(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, number: 
     let levels = widgets::levels(cx.live.track_meter(track.id));
     trill_noir::stereo_meter(&painter, theme, parts.meter, levels, widgets::meter_zones());
     resize_track(ui, cx, track, rect, id);
+    sound_drop(ui, cx, geometry, track, rect);
+}
+
+/// A sound dragged over a header goes to the track as a whole: into its
+/// sampler, onto its drum rack, or as a clip at the edit cursor.
+fn sound_drop(ui: &Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, rect: Rect) {
+    let visible = rect.intersect(geometry.headers);
+    let over = cx.state.sound_drag.as_ref().and_then(|drag| drag.pointer).is_some_and(|pointer| visible.contains(pointer));
+    if !over {
+        return;
+    }
+    let instrument = crate::ui::sample_panels::instrument(cx, track);
+    let beat = cx.state.arrangement.cursor;
+    let Some(drag) = &mut cx.state.sound_drag else { return };
+    match instrument {
+        Some(device) if device.uri == crate::ui::sample_panels::SAMPLER => {
+            drag.offer(DropTarget::Sampler { device: device.id });
+        }
+        Some(device) if device.uri == crate::ui::sample_panels::DRUM_RACK => {
+            drag.offer(DropTarget::Rack { device: device.id });
+        }
+        _ if track.kind == TrackKind::Normal => drag.offer(DropTarget::Lane { track: track.id, beat }),
+        _ => {
+            drag.refusal = Some("Audio goes on a track that holds clips, not on a group or a return");
+            return;
+        }
+    }
+    paint::frame(ui.painter(), rect.with_max_y(rect.bottom() - 1.0), cx.theme.ink);
 }
 
 /// The volume bar of a track. While an envelope drives the volume the bar
