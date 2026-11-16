@@ -188,8 +188,11 @@ fn an_ample_preset_is_laid_over_what_the_running_plugin_has() {
     assert_eq!(ample::shown(&state, "M-Master Vol").as_deref(), Some("0.8"));
     assert_eq!(ample::shown(&state, "Only Ours").as_deref(), Some("7"));
     assert_eq!(ample::shown(&state, ample::LIBRARY).as_deref(), Some("AMHNk"));
-    // Other samples take a while to read, and whoever asked is told once.
-    assert!(note(&mut instance).unwrap().contains("reads those samples in the background"));
+    // Other samples take a while to read, and the preset has hammer-ons
+    // that nobody asked for switched on: whoever asked is told once.
+    let said = note(&mut instance).unwrap();
+    assert!(said.contains("reads those samples in the background"), "{said}");
+    assert!(said.contains("The preset has \"Auto Legato\" at 1"), "{said}");
     assert_eq!(note(&mut instance), None);
 }
 

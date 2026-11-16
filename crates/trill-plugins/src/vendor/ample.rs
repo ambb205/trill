@@ -35,6 +35,8 @@ const MAKER: &str = "ABCDEF019182FAEB41707364";
 const ROOT_ROOM: usize = 4096;
 /// The setting that says which set of samples is in use.
 pub(crate) const LIBRARY: &str = "DBName";
+/// The setting that joins notes nobody asked to be joined.
+const LEGATO: &str = "Auto Legato";
 /// What the plugin goes on doing when it is switched to other samples.
 const LIBRARY_NOTE: &str = "the plugin reads those samples in the background: for some seconds its notes are silent \
                             or cut short";
@@ -254,6 +256,20 @@ pub(crate) fn build(file: &[u8], current: &PluginState) -> Result<Built, String>
         }
     }
 
+    // The one setting that changes how a part has to be written, which
+    // nearly every preset of the maker's leaves on.
+    let joins =
+        theirs.setting(LEGATO).filter(|legato| ours.setting(LEGATO).is_some() && !same_value(&legato.value, "0"));
+    if let Some(legato) = joins {
+        let said = format!(
+            "The preset has \"{LEGATO}\" at {}: a note that begins while a neighbouring one still rings is joined to \
+             it (hammered on) without being asked, which spoils a picked chord. Set that parameter to 0 to have \
+             every note picked.",
+            legato.value
+        );
+        note = Some(note.map_or(said.clone(), |note| format!("{note} {said}")));
+    }
+
     let component = envelope.with(&xml::replace(envelope.text, edits));
     Ok(Built { state: PluginState { component, controller: current.controller.clone() }, marks, note })
 }
@@ -430,7 +446,12 @@ mod tests {
         let marks: Vec<(&str, &str)> =
             built.marks.iter().map(|mark| (mark.name.as_str(), mark.value.as_str())).collect();
         assert_eq!(marks, [("M-Master Vol", "0.8"), ("AMP-Cabinet Mic1 Index", "Dyn<609>")]);
-        assert_eq!(built.note, None);
+        // Hammer-ons that nobody asked for are said, since the preset has
+        // them on; a preset that has them off says nothing.
+        let note = built.note.unwrap();
+        assert!(note.starts_with("The preset has \"Auto Legato\" at 1.0: ") && note.contains("to 0"), "{note}");
+        let picked = document("Picked", "4.0.0", "AMHBg", &tune, &[("M-Master Vol", "0.8"), ("Auto Legato", "0")]);
+        assert_eq!(build(picked.as_bytes(), &current).unwrap().note, None);
         assert_eq!(shown(&built.state, "AMP-Cabinet Mic1 Index").as_deref(), Some("Dyn<609>"));
         assert_eq!(shown(&built.state, "Only Ours").as_deref(), Some("7"), "what the preset does not name stays");
         assert_eq!(shown(&built.state, LIBRARY).as_deref(), Some("AMHBg"));

@@ -2,7 +2,9 @@
 //! were measured, matched by the plugin's id.
 //!
 //! Every fact here was found by playing the plugin and measuring what came
-//! out, over many songs written for these instruments. An entry is data: to
+//! out, over many songs written for these instruments. (What is said of
+//! the Ample instruments' automatic legato is measured by an opt-in test of
+//! `trill-plugins`, `tests/vendor.rs`.) An entry is data: to
 //! add one, measure the plugin (the probe tool plays a key and says what
 //! sounded), then write what was found as the others are written. The
 //! opt-in tests in `tests/known_instruments.rs` play some of these entries
@@ -17,10 +19,14 @@ const AMPLE: &str = "Keyswitches sit under the range and sound nothing: press on
                      held 0.01, never two at once). open, palm_mute, harmonic, tap and pinch_harmonic stay chosen until \
                      another is pressed; slide slides into the next note from below, once; hammer and glide join \
                      notes that overlap (hammer-ons and pull-offs, or a slide along the string) and must be pressed \
-                     before the first of them. The keys above the range play noises, not notes. This depends on a \
-                     setting of the plugin: with its automatic legato (auto hammer-on) switched on, notes that ring \
-                     over each other are joined without the hammer key as well, which spoils a picked chord and \
-                     makes a fast run over neighbouring keys sound wrong.";
+                     before the first of them. The keys above the range play noises, not notes. This depends on \
+                     the plugin's parameter \"Auto Legato\", its automatic legato. At 1, where the guitars start \
+                     and where nearly every preset of the maker's leaves it, a note that begins while a \
+                     neighbouring one still rings (up to four keys above it) is hammered on without the hammer key \
+                     as well, which spoils a picked chord and makes a fast run over neighbouring keys sound wrong; \
+                     at 2 the bass joins such notes another way. Set it to 0 so that only the keys join notes: \
+                     update_device with params {\"Auto Legato\": \"0\"}, and again after giving the device a \
+                     preset, which brings its own value.";
 
 /// What the instruments modelled by Audio Modeling have in common.
 const SWAM: &str = "A physical model, not recordings: it is silent until it is given expression (controller 11), \

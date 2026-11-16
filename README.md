@@ -164,8 +164,10 @@ Trill then asks the plugin for its state again and looks for the preset's settin
 did not take (a damaged file, a version this reader does not know, a plugin that refuses) is a sentence that names
 it, and the device keeps the sound it had. The files are read in the scanner process, in bounded sizes, and nothing
 is ever written to a maker's folder. Where a preset makes the plugin read samples for a while (a drum kit, a
-guitar's other set of samples) the reply says so; a probe, a measurement and a render wait for it. A folder or a
-product that is not there is simply no presets.
+guitar's other set of samples) the reply says so; a probe, a measurement and a render wait for it. It also says
+when an Ample preset switches the instrument's automatic legato on, as nearly all of them do: notes that ring over
+each other are then hammered on unasked, until the parameter "Auto Legato" is set to 0. A folder or a product that
+is not there is simply no presets.
 
 **Saved presets**: any device's sound can be kept under a name: a plugin's state with everything that was set in
 its own window, a built-in device's every parameter. That is how a plugin whose presets are neither told to the

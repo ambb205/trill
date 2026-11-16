@@ -22,11 +22,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use trill_core::device::{CompositeFactory, DeviceFactory};
 use trill_core::presets::{PresetList, PresetStatus};
-use trill_core::{ChainRef, DeviceId, TrackId};
+use trill_core::{ChainRef, DeviceId, Note, TrackId};
 use trill_dsp::BuiltinFactory;
 use trill_engine::probe::{Heard, ProbeNote, ProbeOptions};
 use trill_engine::session::ProbeTarget;
-use trill_engine::{AudioBackend, Session};
+use trill_engine::{AudioBackend, RenderOptions, Session};
 use trill_plugins::{Scanner, Vst3Config, Vst3Factory};
 
 const SERUM_2: &str = "vst3:56534558667350736572756D20320000";
@@ -444,5 +444,118 @@ fn an_archetypes_presets_are_listed_and_a_loaded_one_is_heard() {
             said(&preset.name, &heard);
             heard_to_differ(&preset.path(), &default, &heard);
         }
+    }
+}
+
+/// What the second of two notes sounds like when it begins while the first
+/// still rings: the quarter of a second from where it starts, and how loud
+/// its first 80 ms are against the first note's (in dB). `switch` is a
+/// keyswitch to press just before the first note.
+fn second_note(session: &mut Session, track: TrackId, low: u8, interval: u8, switch: Option<u8>) -> (Vec<f32>, f64) {
+    let (first_at, second_at) = (1.0, 3.0);
+    let mut notes = vec![
+        Note { pitch: low, start: first_at, length: 4.0, velocity: 100 },
+        Note { pitch: low + interval, start: second_at, length: 2.0, velocity: 100 },
+    ];
+    notes.extend(switch.map(|key| Note { pitch: key, start: first_at - 0.03, length: 0.01, velocity: 100 }));
+    session
+        .edit(|project| {
+            let clips: Vec<_> = project.track(track)?.clips.iter().map(|clip| clip.id).collect();
+            for clip in clips {
+                project.remove_clip(clip)?;
+            }
+            let clip = project.add_midi_clip(track, "two notes", 0.0, 5.0)?;
+            project.clip_mut(clip)?.add_notes(&notes)
+        })
+        .unwrap();
+    let seconds_a_beat = 60.0 / session.project().tempo;
+    let options = RenderOptions {
+        end_beat: Some(5.0),
+        max_tail_seconds: 0.5,
+        patience: Duration::from_secs(90),
+        ..RenderOptions::default()
+    };
+    let rendered = session.render_job().render(&options).unwrap();
+    let rate = f64::from(rendered.sample_rate);
+    let mono: Vec<f32> = rendered.left.iter().zip(&rendered.right).map(|(left, right)| (left + right) / 2.0).collect();
+    let at = |seconds: f64| ((seconds * rate) as usize).min(mono.len());
+    let peak = |from: f64| mono[at(from)..at(from + 0.08)].iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    let db = |level: f32| 20.0 * f64::from(level.max(1e-9)).log10();
+    let (first, second) = (first_at * seconds_a_beat, second_at * seconds_a_beat);
+    assert!(db(peak(first)) > -60.0, "the first note is heard");
+    (mono[at(second)..at(second + 0.25)].to_vec(), db(peak(second)) - db(peak(first)))
+}
+
+/// How alike two stretches of sound are, sample for sample: 1 for the
+/// same, about 0 for two that have nothing to do with each other.
+fn alike(one: &[f32], other: &[f32]) -> f64 {
+    let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(a, b)| f64::from(*a) * f64::from(*b)).sum::<f64>();
+    dot(one, other) / (dot(one, one) * dot(other, other)).sqrt().max(1e-12)
+}
+
+/// What the Ample instruments' "Auto Legato" does and how it is switched
+/// off, which the shipped instrument profiles tell a model: at 1 (where
+/// the guitars start, and where most of the maker's presets leave it) a
+/// note that begins while another rings close by is hammered on, as if
+/// the hammer key had been pressed; at 0 it is picked.
+#[test]
+#[ignore = "needs the Ample Sound instruments and their presets; run with `cargo test -p trill-plugins --test vendor -- --include-ignored --nocapture --test-threads 1`"]
+fn an_ample_instruments_automatic_legato_joins_notes_that_ring_over_each_other_until_it_is_0() {
+    let factory = vst3();
+    // A key of each to play, and its hammer keyswitch.
+    let played = [(64, 29), (64, 29), (64, 17), (57, 29)];
+    for ((name, uri, preset), (low, hammer)) in AMPLE.into_iter().zip(played) {
+        if !installed(&factory, uri) {
+            continue;
+        }
+        eprintln!("{name}");
+        listed(&factory, uri);
+        let mut session = session(&factory);
+        let track = session.edit(|project| Ok(project.add_track("Guitar"))).unwrap();
+        let device = session.add_device(ChainRef::Track(track), uri, None, None).unwrap();
+        let params = session.device_params(device).unwrap();
+        let index = params.iter().position(|param| param.info.name == "Auto Legato").expect("a parameter of that name");
+        let id = params[index].info.id.clone();
+        let shown = |session: &Session| {
+            let value = session.device_params(device).unwrap()[index].value;
+            session.device_param_texts(device, &[(index, value)]).unwrap().remove(0)
+        };
+        let set = |session: &mut Session, text: &str| {
+            let value = session.device_param_value(device, index, text).unwrap().expect("a value it shows");
+            session.set_device_params(device, &[(id.clone(), value)]).unwrap();
+            assert_eq!(shown(session), text, "{name}");
+        };
+        eprintln!("  'Auto Legato' is parameter {id}, and as the instrument comes it shows {}", shown(&session));
+        for interval in [2, 4] {
+            set(&mut session, "0");
+            let (hammered, hammered_db) = second_note(&mut session, track, low, interval, Some(hammer));
+            let (again, _) = second_note(&mut session, track, low, interval, Some(hammer));
+            eprintln!(
+                "  a note {interval} keys up, hammered on by its keyswitch: begins {hammered_db:+.1} dB against the first                  (played twice, {:.2} alike)",
+                alike(&hammered, &again)
+            );
+            for text in ["0", "1", "2"] {
+                set(&mut session, text);
+                let (heard, db) = second_note(&mut session, track, low, interval, None);
+                // (The instrument has more than one recording of a
+                // hammer-on, and takes them in turn.)
+                let like = alike(&heard, &hammered).max(alike(&heard, &again));
+                eprintln!(
+                    "    at {text}, no keyswitch: begins {db:+.1} dB against the first, {like:.2} like the hammered one"
+                );
+                match text {
+                    "0" => assert!(like < 0.65, "{name}: at 0 the note is picked, not hammered on ({like:.2})"),
+                    "1" => assert!(like > 0.8, "{name}: at 1 the note is hammered on unasked ({like:.2})"),
+                    _ => {}
+                }
+            }
+        }
+        // One of the maker's presets puts it back where the preset has it.
+        set(&mut session, "0");
+        session.apply_preset(device, preset).unwrap_or_else(|error| panic!("{name}: {error}"));
+        eprintln!("  set to 0 and then given the preset '{preset}', it shows {}", shown(&session));
+        assert_eq!(shown(&session), "1", "{name}: '{preset}' has it on");
+        let note = session.take_preset_note(device).unwrap_or_default();
+        assert!(note.contains("The preset has \"Auto Legato\" at 1"), "{name}: the reply says so: {note}");
     }
 }

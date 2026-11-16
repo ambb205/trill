@@ -39,8 +39,9 @@ whichever way the plugin keeps them, the files of its maker's own format include
 amplifier presets, synth patches), so give every plugin instrument and amplifier a preset before touching a \
 parameter, and say in a sentence which you chose. Then probe it once (see below): a preset's name does not say \
 what its notes sound like or which keys it answers to.
-- A reply's `note` after a preset says what the plugin goes on doing: a drum sampler or a sampled guitar reads \
-its samples for seconds, up to a minute, silent until it has. probe, measure and render wait for that.
+- A reply's `note` after a preset says what to know about it: that a drum sampler or a sampled guitar reads its \
+samples for seconds, up to a minute, silent until it has (probe, measure and render wait for that), or that the \
+preset switched a setting on that changes how a part is played.
 - A few plugins still list no presets: they keep them where a host cannot read them, and only the user can choose \
 one, in the plugin's own window (show_device_editor opens it). Then save_preset keeps that sound under a name. \
 save_preset also keeps a sound you have shaped by parameter. Saved presets are found by search_presets and given \
@@ -54,8 +55,9 @@ is) and widen the sound with a parameter of their own, such as a doubler: look f
 - Some plugins have settings in their saved state that no parameter reaches (an Ample guitar has 250: its \
 effects, pedals, amplifier channels and strummer): get_device counts them (`settings_count`) and its `query` \
 finds them by name beside the parameters, and update_device `settings` sets them.
-- One parameter that matters for writing: the Ample guitars and basses come with \"Auto Legato\" at 1, which \
-turns notes that overlap into hammer-ons and slides. For a picked chord or a strum that is to ring, set it to 0.";
+- One parameter that matters for writing: the Ample guitars come with \"Auto Legato\" at 1, and nearly every \
+preset of theirs and of the bass puts it there, which hammers a note on to a neighbouring one that still rings. \
+For a picked chord or a strum that is to ring, set it to 0 (update_device params), again after every preset.";
 
 /// How many presets a search lists when the caller does not say, and the
 /// most it can ask for.
