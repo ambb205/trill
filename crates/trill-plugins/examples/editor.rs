@@ -328,7 +328,8 @@ fn run(options: &Options) -> Result<ExitCode, String> {
                 break;
             }
             let elapsed = started.elapsed();
-            if wants_picture && drawn.is_none() && elapsed >= looked + LOOK {
+            let watching = wants_picture || options.drag.is_some();
+            if watching && drawn.is_none() && elapsed >= options.settle.max(looked + LOOK) {
                 looked = elapsed;
                 let asked = Instant::now();
                 let image = controller.capture_editor();
@@ -345,12 +346,12 @@ fn run(options: &Options) -> Result<ExitCode, String> {
             // was asked for and has drawn, or patience runs out.
             let ready = elapsed >= options.settle
                 && (drawn.is_some_and(|drawn| elapsed >= drawn + LOOK) || elapsed >= options.settle + PATIENCE);
-            if !dragged && elapsed >= options.settle {
+            if !dragged && ready {
                 dragged = true;
                 let [x1, y1, x2, y2] = options.drag.unwrap_or_default();
                 println!("drag: from {x1},{y1} to {x2},{y2}: {}", platform::drag(&title, (x1, y1), (x2, y2)));
                 // What the drag did shows in the picture.
-                drawn = drawn.map(|_| elapsed + LOOK);
+                drawn = Some(elapsed + Duration::from_millis(600));
             } else if !captured && ready {
                 captured = true;
                 let path = options.screenshot.as_deref().unwrap_or(Path::new(""));

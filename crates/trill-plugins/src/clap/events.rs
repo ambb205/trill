@@ -280,11 +280,11 @@ pub(crate) struct ParamOutput<'a>(pub &'a ParamFeedback);
 impl OutputEventBuffer for ParamOutput<'_> {
     fn try_push(&mut self, event: &UnknownEvent) -> Result<(), TryPushError> {
         let (id, edit) = match event.as_core_event() {
-            // A value for one voice only is modulation, not the
-            // parameter's value.
-            Some(CoreEventSpace::ParamValue(event)) if event.pckn() == Pckn::match_all() => {
-                (event.param_id(), Edit::Value(event.value()))
-            }
+            // Whatever note the event is addressed to: CLAP lets a value
+            // target one voice, but what plugins report to their host is
+            // the parameter's value, and those built on JUCE address it
+            // to "port 0, channel 0, key 0" where the wildcard was meant.
+            Some(CoreEventSpace::ParamValue(event)) => (event.param_id(), Edit::Value(event.value())),
             Some(CoreEventSpace::ParamGestureBegin(event)) => (event.param_id(), Edit::Begin),
             Some(CoreEventSpace::ParamGestureEnd(event)) => (event.param_id(), Edit::End),
             _ => return Ok(()),
@@ -556,14 +556,19 @@ mod tests {
         events.try_push(ParamValueEvent::new(3, ClapId::new(7), whole, 0.25)).unwrap();
         events.try_push(ParamValueEvent::new(4, ClapId::new(100), whole, -6.0)).unwrap();
         events.try_push(ParamGestureEndEvent::new(9, ClapId::new(7))).unwrap();
-        // None of these says anything about a parameter of this device.
+        // A value addressed the way plugins built on JUCE address theirs:
+        // to zeros, where CLAP has -1 for "the whole parameter".
+        let zeros = Pckn::new(0u16, 0u16, 0u16, 0u32);
+        events.try_push(ParamValueEvent::new(0, ClapId::new(100), zeros, 3.0)).unwrap();
+        // Neither of these says anything about a parameter of this device.
         events.try_push(ParamValueEvent::new(0, ClapId::new(999), whole, 1.0)).unwrap();
-        events.try_push(ParamValueEvent::new(0, ClapId::new(7), note_address(60), 1.0)).unwrap();
         events.try_push(NoteOnEvent::new(0, note_address(60), 1.0)).unwrap();
 
         let mut edits = Vec::new();
         assert!(!feedback.edits.drain(|index, edit| edits.push((index, edit))));
-        assert_eq!(edits, [(1, Edit::Begin), (1, Edit::Value(0.25)), (0, Edit::Value(-6.0)), (1, Edit::End)]);
+        let expected =
+            [(1, Edit::Begin), (1, Edit::Value(0.25)), (0, Edit::Value(-6.0)), (1, Edit::End), (0, Edit::Value(3.0))];
+        assert_eq!(edits, expected);
     }
 
     #[test]
