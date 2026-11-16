@@ -29,6 +29,7 @@
 //! stderr <text>      write text and a newline to stderr
 //! sleep <ms>         wait
 //! child              start a helper that outlives this process (see below)
+//!                    and wait until it is running
 //! hang               wait until killed
 //! exit <code>        exit with a code; the default at the end is 0
 //! ```
@@ -165,6 +166,11 @@ fn follow(home: &Path, name: &str, rest: &str) -> Option<ExitCode> {
             let program = std::env::current_exe().expect("this program");
             #[expect(clippy::zombie_processes, reason = "the helper is meant to outlive this process")]
             let _helper = Command::new(program).arg(HEARTBEAT_ARGUMENT).spawn().expect("the helper");
+            // Not until the helper is seen to run: a test that stops this
+            // process straight away must still find a helper to check on.
+            while !home.join("heartbeat").exists() {
+                thread::sleep(Duration::from_millis(5));
+            }
         }
         "hang" => loop {
             thread::sleep(Duration::from_secs(3600));

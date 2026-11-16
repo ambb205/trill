@@ -110,12 +110,28 @@ impl Stage {
         }
     }
 
-    /// Whether the helper is still running, judged by its heartbeat.
+    /// Whether the helper is running, judged by its heartbeat. A helper on a
+    /// busy machine gets a few seconds to show that it is; one that has been
+    /// killed is believed after a second of silence.
     pub fn helper_is_alive(&self) -> bool {
+        self.heartbeat_changes_within(Duration::from_secs(5))
+    }
+
+    /// Whether the helper has stopped: its heartbeat stays as it is.
+    pub fn helper_has_stopped(&self) -> bool {
+        !self.heartbeat_changes_within(Duration::from_secs(1))
+    }
+
+    fn heartbeat_changes_within(&self, window: Duration) -> bool {
         let beat = || fs::read_to_string(self.path("heartbeat")).unwrap_or_default();
-        let before = beat();
-        thread::sleep(Duration::from_millis(250));
-        beat() != before
+        let (before, deadline) = (beat(), Instant::now() + window);
+        while Instant::now() < deadline {
+            if beat() != before {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        false
     }
 }
 
