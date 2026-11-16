@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use trill_core::device::{
-    ControllerSupport, DeviceController, EditorError, EditorImage, EditorOptions, ParamEdit, ParamEditKind,
-    PresetLoadError,
+    ChannelLayout, ControllerSupport, DeviceController, EditorError, EditorImage, EditorOptions, ParamEdit,
+    ParamEditKind, PresetLoadError,
 };
 use trill_core::presets::PresetInfo;
 
@@ -41,6 +41,10 @@ pub(crate) struct Vst3Controller {
     listed: HashMap<usize, (usize, Mapping)>,
     /// The MIDI controllers the plugin has named a parameter for.
     support: ControllerSupport,
+    /// The channels of the plugin's main buses.
+    channels: ChannelLayout,
+    /// The value the plugin calls each listed parameter's default.
+    defaults: Vec<f64>,
 }
 
 impl Vst3Controller {
@@ -54,6 +58,11 @@ impl Vst3Controller {
             links: created.links.clone(),
             listed: listed.collect(),
             support: created.midi.support(),
+            channels: ChannelLayout {
+                inputs: created.buses.inputs.first().copied().unwrap_or(0),
+                outputs: created.buses.outputs.first().copied().unwrap_or(0),
+            },
+            defaults: created.params.iter().map(|spec| spec.declared).collect(),
         }
     }
 }
@@ -61,6 +70,27 @@ impl Vst3Controller {
 impl DeviceController for Vst3Controller {
     fn controller_support(&self) -> ControllerSupport {
         self.support.clone()
+    }
+
+    fn channels(&self) -> Option<ChannelLayout> {
+        Some(self.channels)
+    }
+
+    fn param_defaults(&self) -> Option<Vec<f64>> {
+        Some(self.defaults.clone())
+    }
+
+    fn param_texts(&mut self, values: &[(usize, f64)]) -> Vec<Option<String>> {
+        let (instance, asked) = (self.instance, values.to_vec());
+        let count = values.len();
+        self.main
+            .call(REQUEST_TIMEOUT, move |thread| thread.vst3.param_texts(instance, &asked))
+            .unwrap_or_else(|_| vec![None; count])
+    }
+
+    fn param_value(&mut self, index: usize, text: &str) -> Option<f64> {
+        let (instance, text) = (self.instance, text.to_string());
+        self.main.call(REQUEST_TIMEOUT, move |thread| thread.vst3.param_value(instance, index, &text)).ok().flatten()
     }
 
     fn save_state(&mut self) -> Option<Vec<u8>> {

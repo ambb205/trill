@@ -644,6 +644,8 @@ pub struct UiState {
     pub arrangement: ArrangementState,
     pub piano: PianoRollState,
     pub renaming_track: Option<TextEditState<TrackId>>,
+    /// The name being typed for a preset of this device's sound.
+    pub naming_preset: Option<TextEditState<DeviceId>>,
     pub renaming_clip: Option<TextEditState<ClipId>>,
     /// A clip being renamed on its own name strip in the arrangement.
     pub renaming_clip_inline: Option<TextEditState<InlineClip>>,
@@ -710,6 +712,7 @@ impl UiState {
                 cursor: 0.0,
             },
             renaming_track: None,
+            naming_preset: None,
             renaming_clip: None,
             renaming_clip_inline: None,
             audition: None,

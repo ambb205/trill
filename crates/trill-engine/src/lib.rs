@@ -17,6 +17,7 @@ mod monitor;
 pub mod processor;
 mod queue;
 pub mod render;
+pub mod saved;
 pub mod session;
 pub mod sources;
 mod stretcher;
@@ -29,6 +30,7 @@ pub use host::{AudioConfig, AudioDevice, AudioDevices, AudioHost};
 pub use live::LiveSender;
 pub use processor::Processor;
 pub use render::{RenderError, RenderJob, RenderOptions, RenderReport, Rendered};
+pub use saved::{Saved, SavedPresets};
 pub use session::{
     MAX_COUNT_IN_BARS, ParamState, RecordState, RecordStatus, SampleFile, Session, SessionError, SilentInstrument,
     TakeClip, TransportStatus,

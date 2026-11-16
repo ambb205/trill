@@ -632,6 +632,24 @@ impl Vst3Thread {
         Some(params::values(&controller.edit, &instance.listed))
     }
 
+    /// What the plugin shows for each `(parameter index, plain value)` of
+    /// the parameters the device lists, or `None` where it shows nothing.
+    pub(crate) fn param_texts(&mut self, id: InstanceId, values: &[(usize, f64)]) -> Vec<Option<String>> {
+        let found = self.instances.get(&id).and_then(|instance| Some((instance, instance.controller.as_ref()?)));
+        let Some((instance, controller)) = found else { return vec![None; values.len()] };
+        values
+            .iter()
+            .map(|&(index, value)| params::text(&controller.edit, instance.listed.get(index)?, value))
+            .collect()
+    }
+
+    /// The plain value of the listed parameter at `index` that the plugin
+    /// shows as `text`.
+    pub(crate) fn param_value(&mut self, id: InstanceId, index: usize, text: &str) -> Option<f64> {
+        let instance = self.instances.get(&id)?;
+        params::value_of(&instance.controller.as_ref()?.edit, instance.listed.get(index)?, text)
+    }
+
     /// Lists the programs of the plugin of class `class` in the module at
     /// `path`, here on the plugin main thread: what is done when there is
     /// no scanner process to do it in. The plugin is created for the

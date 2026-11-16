@@ -491,7 +491,7 @@ fn enabled_default() -> bool {
     true
 }
 
-mod state_base64 {
+pub(crate) mod state_base64 {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
     use serde::{Deserialize, Deserializer, Serializer};

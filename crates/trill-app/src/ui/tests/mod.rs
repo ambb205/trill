@@ -1114,6 +1114,56 @@ fn a_devices_preset_chip_opens_its_presets() {
 }
 
 #[test]
+fn a_devices_sound_is_saved_from_its_preset_menu_and_given_back() {
+    let mut harness = Harness::new(devices_tab(), |_| {});
+    harness.key(Modifiers::COMMAND, Key::T);
+    harness.idle(2);
+    let synth = |harness: &Harness| harness.project().tracks[0].devices[0].clone();
+    // Found before the session is taken: `synth` takes it too.
+    let device = synth(&harness).id;
+    harness.session.lock().set_device_params(device, &[("cutoff".into(), 432.0)]).unwrap();
+    harness.idle(2);
+
+    // The menu in the device's header offers to save the sound; its name
+    // is typed where the device's name is.
+    harness.click_last_label("Preset");
+    harness.click_label("Save preset\u{2026}");
+    harness.idle(2);
+    assert!(harness.app.state().naming_preset.is_some(), "the name is being typed");
+    harness.type_text("Dark Pad");
+    harness.key(Modifiers::NONE, Key::Enter);
+    harness.idle(3);
+    assert!(harness.app.state().naming_preset.is_none());
+    let saved = harness.session.lock().saved_presets().list("builtin:polysynth");
+    assert_eq!(saved.iter().map(|preset| preset.name.as_str()).collect::<Vec<_>>(), ["Dark Pad"]);
+    assert_eq!(synth(&harness).preset.map(|preset| preset.name), Some("Dark Pad".to_string()));
+    // The header says which preset the device is on, and the browser
+    // lists it with the synth's own.
+    assert_eq!(harness.all_labeled("Dark Pad").len(), 2, "the browser's row and the menu in the header");
+
+    // Another preset, then the saved one again from the browser: the
+    // sound comes back whole.
+    harness.click_label("bass");
+    assert_ne!(synth(&harness).params.get("cutoff"), Some(&432.0));
+    harness.idle(2);
+    assert_eq!(harness.all_labeled("Dark Pad").len(), 1, "the header shows the preset the device is on now");
+    harness.click_label("Dark Pad");
+    assert_eq!(synth(&harness).params.get("cutoff"), Some(&432.0));
+
+    // Escape leaves nothing saved, and the name it offers is the one the
+    // device is on.
+    harness.idle(2);
+    harness.click_last_label("Dark Pad");
+    harness.click_label("Save preset\u{2026}");
+    harness.idle(2);
+    assert_eq!(harness.app.state().naming_preset.as_ref().map(|edit| edit.text.as_str()), Some("Dark Pad"));
+    harness.key(Modifiers::NONE, Key::Escape);
+    harness.idle(2);
+    assert!(harness.app.state().naming_preset.is_none());
+    assert_eq!(harness.session.lock().saved_presets().len(), 1);
+}
+
+#[test]
 fn the_browser_search_narrows_its_lists_and_ctrl_b_hides_it() {
     let (mut harness, ..) = with_two_tracks(devices_tab());
     assert!(harness.is_on_screen("Reverb") && harness.is_on_screen("Chorus"));

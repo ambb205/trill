@@ -10,6 +10,7 @@ use super::presets::{self, Address};
 use crate::editor::{EditorStatus, HostedEditor, Placement};
 use crate::exclusive::Exclusive;
 use crate::main_thread::ThreadState;
+use crate::param_text::{self, Values};
 use clack_extensions::audio_ports::{AudioPortInfoBuffer, PluginAudioPorts};
 use clack_extensions::gui::PluginGui;
 use clack_extensions::latency::PluginLatency;
@@ -93,6 +94,9 @@ pub(crate) struct ParamSpec {
     pub info: ParamInfo,
     /// False for parameters the plugin only reports (meters and the like).
     pub writable: bool,
+    /// The value the plugin itself calls the default. `info.default` is
+    /// replaced by the value the instance starts with.
+    pub declared: f64,
 }
 
 /// Channel count of each audio port, in port order. Port 0 is the main one.
@@ -139,6 +143,8 @@ pub(super) struct Instance {
     preset_load: Option<PluginPresetLoad>,
     /// In parameter-list order.
     param_ids: Vec<ClapId>,
+    /// The values each parameter can take, in the same order.
+    param_values: Vec<Values>,
     audio: Arc<AudioSlot>,
     feedback: Arc<ParamFeedback>,
     /// Since when the plugin has been waiting for a flush that no block
@@ -239,6 +245,28 @@ impl Instance {
         });
         deactivate(&mut self.plugin, stopped);
     }
+}
+
+impl Instance {
+    /// What the plugin shows for `value` of its parameter at `index`.
+    fn param_text(&mut self, index: usize, value: f64) -> Option<String> {
+        let (params, param) = (self.params?, *self.param_ids.get(index)?);
+        let mut buffer = [0u8; 256];
+        let text = params.value_to_text(&self.plugin.plugin_handle(), param, value, &mut buffer).ok()?;
+        let end = text.iter().position(|byte| *byte == 0).unwrap_or(text.len());
+        let text = String::from_utf8_lossy(&text[..end]).trim().to_string();
+        (!text.is_empty()).then_some(text)
+    }
+}
+
+/// Whether a plugin shows `shown` for what was asked for as `asked`: the
+/// same text, or the same number.
+fn same_text(shown: &str, asked: &str) -> bool {
+    let canonical = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    canonical(shown) == canonical(asked)
+        || matches!((param_text::number(shown), param_text::number(asked)),
+            (Some((shown, unit)), Some((asked, asked_unit)))
+                if (asked_unit.is_empty() || unit == asked_unit) && (shown - asked).abs() <= 1e-9 * asked.abs().max(1.0))
 }
 
 impl Drop for Instance {
@@ -405,6 +433,14 @@ impl ClapThread {
         let id = InstanceId(self.next_id);
         self.next_id += 1;
         let param_ids: Vec<ClapId> = specs.iter().map(|spec| spec.id).collect();
+        let param_values = specs
+            .iter()
+            .map(|spec| match spec.info.kind {
+                // A stepped parameter that starts at 0 counts its steps.
+                ParamKind::Int if spec.info.min == 0.0 => Values::Steps(spec.info.max as u32),
+                _ => Values::Range(spec.info.min, spec.info.max),
+            })
+            .collect();
         let feedback = Arc::new(ParamFeedback::new(&param_ids));
         let audio = Arc::new(Exclusive::new(Some(activated.processor.into())));
         let editor_status = EditorStatus::new(has_editor);
@@ -419,6 +455,7 @@ impl ClapThread {
             timer,
             preset_load,
             param_ids,
+            param_values,
             audio: audio.clone(),
             feedback: feedback.clone(),
             flush_waiting: None,
@@ -486,6 +523,31 @@ impl ClapThread {
         let params = instance.params?;
         let handle = instance.plugin.plugin_handle();
         instance.param_ids.iter().map(|&param| params.get_value(&handle, param)).collect()
+    }
+
+    /// What the plugin shows for each `(parameter index, value)`, or
+    /// `None` where it shows nothing.
+    pub(crate) fn param_texts(&mut self, id: InstanceId, values: &[(usize, f64)]) -> Vec<Option<String>> {
+        let Some(instance) = self.instances.get_mut(&id) else { return vec![None; values.len()] };
+        values.iter().map(|&(index, value)| instance.param_text(index, value)).collect()
+    }
+
+    /// The value of the parameter at `index` that the plugin shows as
+    /// `text`: by the plugin's own account if it gives one, and otherwise
+    /// found among what it shows for its values.
+    pub(crate) fn param_value(&mut self, id: InstanceId, index: usize, text: &str) -> Option<f64> {
+        let instance = self.instances.get_mut(&id)?;
+        let (params, param) = (instance.params?, *instance.param_ids.get(index)?);
+        let values = *instance.param_values.get(index)?;
+        let asked = CString::new(text.trim()).ok().and_then(|text| {
+            params.text_to_value(&instance.plugin.plugin_handle(), param, &text).filter(|value| value.is_finite())
+        });
+        // A plugin's own answer counts only if it shows that value the
+        // way it was asked for: asked for something they do not know,
+        // plugins answer with the nearest end of the range, or with 0.
+        let confirmed =
+            asked.filter(|value| instance.param_text(index, *value).is_some_and(|shown| same_text(&shown, text)));
+        confirmed.or_else(|| param_text::find(text, values, |value| instance.param_text(index, value)))
     }
 
     /// Has the providers of the plugin file at `path` tell of the presets
@@ -636,6 +698,7 @@ fn read_params(params: PluginParams, handle: &PluginMainThreadHandle, plugin_id:
             let (min, max, default) = sanitize_range(param.range);
             ParamSpec {
                 id: param.id,
+                declared: default,
                 writable: !param.flags.contains(ParamInfoFlags::IS_READONLY),
                 info: ParamInfo {
                     id: param.id.to_string(),
@@ -743,6 +806,7 @@ mod tests {
     fn spec(id: u32, min: f64, max: f64, writable: bool) -> ParamSpec {
         ParamSpec {
             id: ClapId::new(id),
+            declared: min,
             writable,
             info: ParamInfo {
                 id: id.to_string(),

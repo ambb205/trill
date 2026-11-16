@@ -204,6 +204,76 @@ fn parameters_are_listed_mapped_and_told_apart() {
     assert_eq!((param(scripted::CUTOFF_1).default, param(scripted::CUTOFF_2).default), (0.25, 0.75));
 }
 
+#[test]
+fn a_value_is_shown_in_the_plugins_words_and_found_from_them() {
+    let factory = factory();
+    let mut instance = create(&factory, &device(kind::STEREO_GAIN));
+    let at = |id| index(&instance, id);
+    let (gain, switch, shape) = (at(scripted::GAIN), at(scripted::SWITCH), at(scripted::SHAPE));
+    let (voices, unnamed) = (at(scripted::VOICES), at(scripted::UNNAMED));
+    let (cutoff, echo) = (at(scripted::CUTOFF_1), at(scripted::ECHO));
+    let controller = instance.controller.as_mut().unwrap();
+    let text = |text: &str| Some(text.to_string());
+
+    // The unit the plugin keeps apart is put after the number, and not put
+    // twice where the plugin says it in the text. Steps are asked about by
+    // their number. A value the plugin has no text for has none.
+    let asked = [(gain, 0.5), (switch, 1.0), (shape, 2.0), (voices, 16.0), (cutoff, 0.0), (echo, 0.25)];
+    assert_eq!(
+        controller.param_texts(&asked),
+        [text("1.00 x"), text("On"), text("Square"), text("17 voices"), text("20 Hz"), text("25 %")]
+    );
+    assert_eq!(controller.param_texts(&[(unnamed, 2.0), (9999, 0.0)]), [None, None]);
+
+    // The plugin reads its own gain from a bare number: it is asked with
+    // the unit taken off as well.
+    assert_eq!(controller.param_value(gain, "1.5 x"), Some(0.75));
+    assert_eq!(controller.param_value(gain, "1.5"), Some(0.75));
+    // Beyond its range it answers with the end of it, which is not what
+    // was asked for.
+    assert_eq!(controller.param_value(gain, "9 x"), None);
+    // What it does not convert is found among what it shows: a choice or a
+    // switch by its name, a step by its number, a frequency by bisection.
+    assert_eq!(controller.param_value(shape, "noise"), Some(3.0));
+    assert_eq!(controller.param_value(shape, "Triangle"), None);
+    assert_eq!((controller.param_value(switch, "on"), controller.param_value(switch, "Off")), (Some(1.0), Some(0.0)));
+    assert_eq!(controller.param_value(voices, "17 voices"), Some(16.0));
+    assert_eq!(controller.param_value(voices, "128"), Some(127.0));
+    assert_eq!(controller.param_value(voices, "129"), None);
+    let found = controller.param_value(cutoff, "1000 Hz").unwrap();
+    assert_eq!(controller.param_texts(&[(cutoff, found)]), [text("1000 Hz")]);
+    assert!((found - 0.566).abs() < 0.01, "{found}");
+    assert_eq!(controller.param_value(unnamed, "2"), None, "nothing is shown to find it by");
+
+    // Asked about the echo, the plugin says 0 whatever the text. That is
+    // believed only where it shows 0 as what was asked for.
+    assert_eq!(controller.param_value(echo, "0 %"), Some(0.0));
+    let found = controller.param_value(echo, "40%").unwrap();
+    assert_eq!(controller.param_texts(&[(echo, found)]), [text("40 %")]);
+    assert_eq!(controller.param_value(echo, "140 %"), None);
+}
+
+#[test]
+fn a_plugin_says_what_channels_it_has_and_what_its_own_defaults_are() {
+    let factory = factory();
+    let layout = |kind| create(&factory, &device(kind)).controller.as_ref().unwrap().channels().unwrap();
+    assert_eq!(layout(kind::STEREO_GAIN).describe(), "stereo in, stereo out");
+    assert_eq!(layout(kind::MONO_GAIN).describe(), "mono in, mono out");
+    assert!(layout(kind::MONO_GAIN).folds_input() && !layout(kind::STEREO_GAIN).folds_input());
+    assert_eq!(layout(kind::IMPULSE).describe(), "no audio in, mono out");
+
+    // A parameter is listed with the value it started with as its default
+    // (the second shape); the plugin's own default is the one it declares
+    // (the third).
+    let instance = create(&factory, &device(kind::STEREO_GAIN));
+    let defaults = instance.controller.as_ref().unwrap().param_defaults().unwrap();
+    assert_eq!(defaults.len(), instance.params.len());
+    let shape = index(&instance, scripted::SHAPE);
+    assert_eq!((instance.params[shape].default, defaults[shape]), (1.0, 2.0));
+    let voices = index(&instance, scripted::VOICES);
+    assert_eq!((instance.params[voices].default, defaults[voices]), (16.0, 16.0));
+}
+
 // ---- audio and events ----------------------------------------------------
 
 #[test]

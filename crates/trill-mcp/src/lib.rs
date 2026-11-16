@@ -18,6 +18,7 @@ pub mod logging;
 mod music;
 mod requests;
 mod server;
+mod sounds;
 mod view;
 
 pub use server::TrillServer;

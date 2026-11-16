@@ -20,8 +20,10 @@
 //! what it would say in between is the sound it had.
 
 use super::{Session, SessionError, preset_values};
+use crate::saved::{Saved, SavedPresets};
+use std::sync::Arc;
 use trill_core::device::PresetLoadError;
-use trill_core::presets::{PresetInfo, PresetList, PresetLookup, PresetRef, PresetStatus};
+use trill_core::presets::{PresetInfo, PresetList, PresetLookup, PresetRef, PresetStatus, SavedPreset};
 use trill_core::{DeviceId, EditError};
 
 /// The most presets an error names, as what there is or what is near:
@@ -95,6 +97,10 @@ impl Session {
     pub fn load_preset(&mut self, id: DeviceId, preset: &str) -> Result<PresetInfo, SessionError> {
         let uri = self.project.device(id)?.uri.clone();
         let info = self.find_preset(&uri, preset)?;
+        if let Some(saved) = self.saved_preset(&uri, &info)? {
+            self.load_saved_preset(id, &info, saved)?;
+            return Ok(info);
+        }
         let values = self.factory.descriptors().iter().find(|d| d.uri == uri).and_then(|d| preset_values(d, &info));
         match values {
             Some(values) => self.edit_scoped(super::Scope::ParamsOnly, |project| {
@@ -106,6 +112,135 @@ impl Session {
             None => self.load_plugin_preset(id, &info)?,
         }
         Ok(info)
+    }
+
+    /// The presets that were saved, of every device type: where they are
+    /// kept is the store's to be told ([`SavedPresets::open`]), which an
+    /// application does once, when it starts. Until then, and in a
+    /// session that is to leave nothing behind, they are kept in memory.
+    pub fn saved_presets(&self) -> &Arc<SavedPresets> {
+        &self.saved
+    }
+
+    /// Saves a device's sound as it is now as a preset of its type, under
+    /// `name`, in place of the saved preset of that name if there is one.
+    /// From then on the preset is listed with the type's own, under
+    /// "Saved", and given to a device like any other: by its name.
+    ///
+    /// What is saved is everything the device would be saved with in a
+    /// project: a plugin's state, with what was done in its own window, a
+    /// sample player's files, and every parameter value of a device whose
+    /// sound is its parameters.
+    ///
+    /// The device is marked as being on the preset, which is one undo
+    /// step; the preset itself stays when that is undone.
+    pub fn save_preset(
+        &mut self,
+        id: DeviceId,
+        name: &str,
+        description: &str,
+        tags: &[String],
+    ) -> Result<Saved, SessionError> {
+        let name = SavedPreset::checked_name(name).map_err(SessionError::Device)?;
+        let (uri, device_name) = {
+            let device = self.project.device(id)?;
+            (device.uri.clone(), device.name.clone())
+        };
+        let meta = self.bank.devices.get(&id).ok_or(EditError::DeviceNotFound(id))?;
+        if let Some(error) = &meta.error {
+            return Err(SessionError::Device(format!("{id} is unavailable, so there is no sound to save: {error}")));
+        }
+        let plugin = meta.controller.is_some();
+        // What a plugin has is asked of it now; what the project holds for
+        // it may be from before its editor was last used.
+        self.absorb_editor_edits();
+        self.capture_state_of(id);
+        let device = self.project.device(id)?;
+        let params = if plugin {
+            device.params.clone()
+        } else {
+            // Every value, so that loading the preset leaves nothing of
+            // the sound the device had before.
+            self.device_params(id)?.into_iter().map(|state| (state.info.id, state.value)).collect()
+        };
+        // A plugin that hands a host no state, with nothing set on it
+        // from here: a preset of that would be a name and no sound.
+        if plugin && device.state.is_none() && params.is_empty() {
+            return Err(SessionError::Device(format!(
+                "{id} ({device_name}) gives a host no state to keep, and none of its parameters was set from here, \
+                 so there is no sound to save"
+            )));
+        }
+        let type_name = self.factory.descriptors().into_iter().find(|d| d.uri == uri).map(|d| d.name);
+        let preset = SavedPreset {
+            uri,
+            device: type_name.unwrap_or(device_name),
+            name,
+            description: description.trim().to_string(),
+            tags: tags.iter().map(|tag| tag.trim().to_string()).filter(|tag| !tag.is_empty()).collect(),
+            params,
+            state: device.state.clone(),
+        };
+        let saved = self.saved.save(preset).map_err(SessionError::Io)?;
+        let reference = saved.info.reference();
+        self.edit_scoped(super::Scope::ParamsOnly, |project| {
+            project.device_mut(id)?.preset = Some(reference);
+            Ok(())
+        })?;
+        // The list of this type's presets is another one now.
+        self.revision += 1;
+        Ok(saved)
+    }
+
+    /// Removes the preset saved under `name` for the device type `uri`,
+    /// and says whether there was one.
+    pub fn delete_saved_preset(&mut self, uri: &str, name: &str) -> bool {
+        let removed = self.saved.delete(uri, name);
+        if removed {
+            self.revision += 1;
+        }
+        removed
+    }
+
+    /// The saved preset that `info`, a preset of the device type `uri`,
+    /// stands for; `None` for a preset the type brings itself.
+    pub(super) fn saved_preset(&self, uri: &str, info: &PresetInfo) -> Result<Option<SavedPreset>, SessionError> {
+        self.saved.load(uri, info).map_err(SessionError::Io)
+    }
+
+    /// Gives a device a preset that was saved: its parameter values and
+    /// its state become the preset's, as one undo step. A device with a
+    /// state of its own is created again from the preset's, which is how
+    /// a plugin takes a state on whole; the song keeps playing meanwhile.
+    fn load_saved_preset(&mut self, id: DeviceId, info: &PresetInfo, saved: SavedPreset) -> Result<(), SessionError> {
+        let name = self.project.device(id)?.name.clone();
+        let meta = self.bank.devices.get(&id).ok_or(EditError::DeviceNotFound(id))?;
+        if let Some(error) = &meta.error {
+            return Err(SessionError::Device(format!("{id} is unavailable: {error}")));
+        }
+        // What was done in a plugin's editor until now belongs to the time
+        // before the preset, and so does the state it is in.
+        self.absorb_editor_edits();
+        self.capture_state_of(id);
+        let revision = self.revision;
+        self.edit(|project| {
+            let device = project.device_mut(id)?;
+            device.params = saved.params;
+            device.state = saved.state;
+            device.preset = Some(info.reference());
+            Ok(())
+        })?;
+        if let Some(reason) = self.bank.devices.get(&id).and_then(|meta| meta.error.clone()) {
+            if self.revision != revision {
+                self.undo();
+                self.redo.pop();
+            }
+            return Err(SessionError::Device(format!(
+                "{id} ({name}) could not be started from the saved preset '{}': {reason}. The device is as it was",
+                info.name
+            )));
+        }
+        Ok(())
     }
 
     /// The preset of the device type `uri` that `wanted` asks for, or an
@@ -861,5 +996,130 @@ mod tests {
         assert!(session.redo());
         assert_eq!(plugins.patch(device), "glass");
         plugins.wait_for_value(device, 1, 0.5);
+    }
+
+    #[test]
+    fn a_plugins_sound_is_saved_under_a_name_and_given_to_any_device_of_its_type() {
+        let (mut session, plugins) = session();
+        let device = session.add_device(ChainRef::Master, URI, Some("Glass"), None).unwrap();
+        // The sound was worked on: in the plugin's own editor, and through
+        // the DAW.
+        plugins.tweak(device);
+        session.set_device_params(device, &[("drive".into(), 0.9)]).unwrap();
+        let step = session.undo_step();
+
+        let tags = ["bright".to_string(), " ".to_string()];
+        let saved = session.save_preset(device, " My Glass ", "for the chorus", &tags).unwrap();
+        assert_eq!((saved.info.path().as_str(), saved.replaced, &saved.file), ("Saved/My Glass", false, &None));
+        assert_eq!(saved.info.tags, ["bright"]);
+        // It is listed with the plugin's own, in front of them, and the
+        // device is on it; nothing about the plugin changed.
+        let list = session.presets(URI);
+        assert_eq!(list.len(), presets().len() + 1);
+        assert_eq!(list.presets[0], saved.info);
+        assert_eq!(session.device_preset(device), Some(&saved.info.reference()));
+        assert_eq!((plugins.patch(device), plugins.plugin(device).tweaks, plugins.created()), ("glass".into(), 1, 1));
+        assert_ne!(session.undo_step(), step, "being on the preset is a step");
+
+        // Another device starts from it: the patch, the knob that was
+        // turned in the editor, and the value set through the DAW.
+        let second = session.add_device(ChainRef::Master, URI, Some("my glass"), None).unwrap();
+        assert_eq!((plugins.patch(second), plugins.plugin(second).tweaks), ("glass".into(), 1));
+        assert_eq!(model(&session, second).params.get("drive"), Some(&0.9));
+        assert_eq!(session.device_preset(second).unwrap().name, "My Glass");
+        assert!(session.undo());
+        assert!(session.project().device(second).is_err(), "one step for the device and its preset");
+
+        // A device that has another sound is given it in place of that, as
+        // one step.
+        let third = session.add_device(ChainRef::Master, URI, Some("Deep Bass"), None).unwrap();
+        plugins.tweak(third);
+        let step = session.undo_step();
+        let loaded = session.load_preset(third, "Saved/My Glass").unwrap();
+        assert_eq!(loaded, saved.info);
+        assert_eq!((plugins.patch(third), plugins.plugin(third).tweaks), ("glass".into(), 1));
+        assert_eq!(model(&session, third).params.get("drive"), Some(&0.9));
+        assert!(session.undo());
+        assert_eq!(session.undo_step(), step);
+        assert_eq!((plugins.patch(third), plugins.plugin(third).tweaks), ("deep bass".into(), 1));
+        assert!(model(&session, third).params.is_empty());
+        assert_eq!(session.device_preset(third).unwrap().name, "Deep Bass");
+        assert!(session.redo());
+        assert_eq!(plugins.patch(third), "glass");
+
+        // Saved again under that name, it is replaced; removed, it is gone
+        // from the list.
+        let again = session.save_preset(third, "MY GLASS", "", &[]).unwrap();
+        assert!(again.replaced);
+        assert_eq!(session.presets(URI).len(), presets().len() + 1);
+        assert!(session.delete_saved_preset(URI, "my glass") && !session.delete_saved_preset(URI, "my glass"));
+        assert_eq!(session.presets(URI).len(), presets().len());
+        let error = message(session.load_preset(third, "My Glass").unwrap_err());
+        assert!(error.contains("has no preset 'My Glass'"), "{error}");
+    }
+
+    #[test]
+    fn a_built_in_devices_sound_is_saved_with_every_value_it_has() {
+        let (mut session, _plugins) = session();
+        let synth = session.add_device(ChainRef::Master, SYNTH, Some("warm_pad"), None).unwrap();
+        session.set_device_params(synth, &[("cutoff".into(), 432.0)]).unwrap();
+        let values = |session: &Session, id| -> Vec<f64> {
+            session.device_params(id).unwrap().iter().map(|state| state.value).collect()
+        };
+        let sound = values(&session, synth);
+
+        let saved = session.save_preset(synth, "Dark Pad", "", &[]).unwrap();
+        let list = session.presets(SYNTH);
+        assert_eq!(list.presets[0].path(), "Saved/Dark Pad");
+        assert!(list.find("warm_pad") != PresetLookup::Missing { similar: Vec::new() }, "its own are still there");
+
+        // Whatever the device is given next, the saved sound comes back
+        // whole: also the values that were at their defaults.
+        session.load_preset(synth, "sub_bass").unwrap();
+        assert_ne!(values(&session, synth), sound);
+        session.load_preset(synth, "dark pad").unwrap();
+        assert_eq!(values(&session, synth), sound);
+        assert_eq!(session.device_preset(synth), Some(&saved.info.reference()));
+        assert!(session.undo());
+        assert_eq!(session.device_preset(synth).unwrap().name, "sub_bass");
+
+        let other = session.add_device(ChainRef::Master, SYNTH, Some("Dark Pad"), None).unwrap();
+        assert_eq!(values(&session, other), sound);
+        // It is a preset of the synth, not of anything else.
+        let error =
+            message(session.add_device(ChainRef::Master, "builtin:reverb", Some("Dark Pad"), None).unwrap_err());
+        assert!(error.contains("has no preset 'Dark Pad'"), "{error}");
+    }
+
+    #[test]
+    fn a_preset_is_not_saved_without_a_name_or_a_device() {
+        let (mut session, _plugins) = session();
+        let device = session.add_device(ChainRef::Master, URI, None, None).unwrap();
+        let step = session.undo_step();
+        for (name, reason) in [("  ", "needs a name"), ("Pads/Mine", "cannot have '/'")] {
+            let error = message(session.save_preset(device, name, "", &[]).unwrap_err());
+            assert!(error.contains(reason), "{error}");
+        }
+        assert!(session.save_preset(DeviceId(999), "Mine", "", &[]).is_err());
+        assert!(session.saved_presets().is_empty());
+        assert_eq!(session.undo_step(), step);
+    }
+
+    #[test]
+    fn saved_presets_are_kept_in_the_folder_the_store_is_given() {
+        let folder = tempfile::tempdir().unwrap();
+        let (mut session, plugins) = session();
+        session.saved_presets().open(folder.path().to_path_buf());
+        let device = session.add_device(ChainRef::Master, URI, Some("Deep Bass"), None).unwrap();
+        plugins.tweak(device);
+        let saved = session.save_preset(device, "Low End", "", &[]).unwrap();
+        assert!(saved.file.as_ref().is_some_and(|file| file.starts_with(folder.path()) && file.exists()));
+
+        // Another run of the program finds it there.
+        let (mut later, later_plugins) = self::session();
+        later.saved_presets().open(folder.path().to_path_buf());
+        assert_eq!(later.presets(URI).presets[0], saved.info);
+        let device = later.add_device(ChainRef::Master, URI, Some("Low End"), None).unwrap();
+        assert_eq!((later_plugins.patch(device), later_plugins.plugin(device).tweaks), ("deep bass".into(), 1));
     }
 }

@@ -59,6 +59,95 @@ impl ParamInfo {
             _ => v.round(),
         }
     }
+
+    /// The value as a reader takes it in: the choice's name, `On` or
+    /// `Off`, or the number with its unit (`900 Hz`, `-6 dB`). This is what
+    /// a device that has no display of its own is shown with; a plugin has
+    /// its own word for each value
+    /// ([`DeviceController::param_texts`]).
+    pub fn display(&self, value: f64) -> String {
+        match &self.kind {
+            ParamKind::Enum(choices) => {
+                choices.get(value.round().max(0.0) as usize).cloned().unwrap_or_else(|| trimmed(value))
+            }
+            ParamKind::Bool => if value >= 0.5 { "On" } else { "Off" }.to_string(),
+            _ if self.unit.is_empty() => trimmed(value),
+            _ => format!("{} {}", trimmed(value), self.unit),
+        }
+    }
+
+    /// The value `text` names, the other way round from
+    /// [`display`](Self::display): a choice by its name, a switch by
+    /// `on`/`off`, a number with or without the unit. `None` for text that
+    /// is none of those; the value is not checked against the range.
+    pub fn parse(&self, text: &str) -> Option<f64> {
+        let text = text.trim();
+        match &self.kind {
+            ParamKind::Enum(choices) => {
+                choices.iter().position(|choice| choice.trim().eq_ignore_ascii_case(text)).map(|index| index as f64)
+            }
+            _ => {
+                match text.to_ascii_lowercase().as_str() {
+                    "on" | "true" | "yes" => return Some(1.0),
+                    "off" | "false" | "no" => return Some(0.0),
+                    _ => {}
+                }
+                // `-6 dB`, `-6dB` and `-6` are all the number.
+                let unit = self.unit.trim();
+                let lowered = text.to_lowercase();
+                let number = match lowered.strip_suffix(&unit.to_lowercase()) {
+                    Some(number) if !unit.is_empty() => number.trim_end(),
+                    _ => lowered.as_str(),
+                };
+                number.parse::<f64>().ok().filter(|value| value.is_finite())
+            }
+        }
+    }
+}
+
+/// A number without the digits that say nothing: `900`, `0.25`, `-6.5`.
+fn trimmed(value: f64) -> String {
+    let rounded = (value * 1e4).round() / 1e4;
+    // `-0` reads as a mistake.
+    format!("{}", if rounded == 0.0 { 0.0 } else { rounded })
+}
+
+/// How many channels a device takes and gives. A device is always handed
+/// a stereo signal and hands one back; this says what happens to it on the
+/// way: a device with one input channel is given both sides mixed, and one
+/// with one output channel plays the same on both sides.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ChannelLayout {
+    /// Channels of the device's main input; 0 for a device that takes no
+    /// audio, as most instruments do.
+    pub inputs: u32,
+    /// Channels of its main output.
+    pub outputs: u32,
+}
+
+impl ChannelLayout {
+    pub const STEREO: Self = Self { inputs: 2, outputs: 2 };
+
+    /// Whether what goes in on the left and on the right is mixed into one
+    /// channel before the device sees it.
+    pub fn folds_input(&self) -> bool {
+        self.inputs == 1
+    }
+
+    /// The layout in words: `mono in, stereo out`.
+    pub fn describe(&self) -> String {
+        let word = |channels: u32| match channels {
+            1 => "mono".to_string(),
+            2 => "stereo".to_string(),
+            channels => format!("{channels} channels"),
+        };
+        match (self.inputs, self.outputs) {
+            (0, 0) => "no audio in or out".to_string(),
+            (0, outputs) => format!("no audio in, {} out", word(outputs)),
+            (inputs, 0) => format!("{} in, no audio out", word(inputs)),
+            (inputs, outputs) => format!("{} in, {} out", word(inputs), word(outputs)),
+        }
+    }
 }
 
 /// A named set of parameter values: a preset of a device whose whole sound
@@ -317,6 +406,39 @@ pub trait DeviceController: Send {
     fn controller_support(&self) -> ControllerSupport {
         ControllerSupport::Unknown
     }
+
+    /// How many channels the device takes and gives, if it is not the
+    /// stereo in and out every device is driven with. Cheap.
+    fn channels(&self) -> Option<ChannelLayout> {
+        None
+    }
+
+    /// What the device itself shows for values of its parameters: for
+    /// each `(position in the parameter list, value in plain units)`, the
+    /// text (`-6.0 dB`, `SM57`, `On`), or `None` where it has none of its
+    /// own. One call for many, since a plugin has to be asked on a thread
+    /// of its own.
+    fn param_texts(&mut self, values: &[(usize, f64)]) -> Vec<Option<String>> {
+        vec![None; values.len()]
+    }
+
+    /// The value of the parameter at `index` that the device shows as
+    /// `text`, in plain units: the other way round from
+    /// [`param_texts`](Self::param_texts). `None` if the device cannot say,
+    /// or knows no such value.
+    fn param_value(&mut self, index: usize, text: &str) -> Option<f64> {
+        let _ = (index, text);
+        None
+    }
+
+    /// The value the device itself calls each parameter's default, in
+    /// parameter-list order and plain units, where that differs from what
+    /// [`DeviceInstance::params`] carries: a plugin's list carries the
+    /// values it was created with, which are those of whatever patch it
+    /// has. `None` for a device whose list has the real defaults.
+    fn param_defaults(&self) -> Option<Vec<f64>> {
+        None
+    }
 }
 
 /// Why a device did not load a preset.
@@ -495,6 +617,16 @@ pub trait DeviceFactory: Send + Sync {
     fn refresh_presets(&self, uri: &str) {
         let _ = uri;
     }
+
+    /// The presets of the device type `uri` as far as they are known
+    /// without anything having to be read: what was read in this run of
+    /// the program, or is remembered from an earlier one. `None` for a
+    /// type that is not this factory's, and for one whose presets nobody
+    /// has read yet. Never starts a read, so it is the one to ask about
+    /// every device there is.
+    fn known_presets(&self, uri: &str) -> Option<PresetList> {
+        self.presets(uri)
+    }
 }
 
 /// A shared factory is a factory, so one instance can serve several owners.
@@ -521,6 +653,10 @@ impl<T: DeviceFactory + ?Sized> DeviceFactory for std::sync::Arc<T> {
 
     fn refresh_presets(&self, uri: &str) {
         (**self).refresh_presets(uri)
+    }
+
+    fn known_presets(&self, uri: &str) -> Option<PresetList> {
+        (**self).known_presets(uri)
     }
 }
 
@@ -571,5 +707,63 @@ impl DeviceFactory for CompositeFactory {
         for factory in &self.factories {
             factory.refresh_presets(uri);
         }
+    }
+
+    fn known_presets(&self, uri: &str) -> Option<PresetList> {
+        self.factories.iter().find_map(|factory| factory.known_presets(uri))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn param(unit: &str, kind: ParamKind) -> ParamInfo {
+        ParamInfo {
+            id: "p".into(),
+            name: "P".into(),
+            min: -100.0,
+            max: 20_000.0,
+            default: 0.0,
+            unit: unit.into(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn a_value_is_displayed_as_a_reader_takes_it_in_and_read_back_from_that() {
+        let cutoff = param("Hz", ParamKind::Float);
+        assert_eq!(cutoff.display(900.0), "900 Hz");
+        assert_eq!(cutoff.display(0.123_456), "0.1235 Hz");
+        assert_eq!(cutoff.display(-0.000_001), "0 Hz", "not -0");
+        for text in ["900 Hz", "900hz", " 900 ", "900.0 HZ"] {
+            assert_eq!(cutoff.parse(text), Some(900.0), "{text}");
+        }
+        assert_eq!(param("dB", ParamKind::Float).parse("-6 dB"), Some(-6.0));
+        assert_eq!(cutoff.parse("loud"), None);
+        assert_eq!(cutoff.parse("900 dB"), None, "another unit is another thing");
+        assert_eq!(cutoff.parse("inf"), None);
+
+        let plain = param("", ParamKind::Int);
+        assert_eq!((plain.display(3.0), plain.parse("3")), ("3".to_string(), Some(3.0)));
+
+        let switch = param("", ParamKind::Bool);
+        assert_eq!((switch.display(1.0), switch.display(0.0)), ("On".to_string(), "Off".to_string()));
+        assert_eq!((switch.parse("ON"), switch.parse("off"), switch.parse("1")), (Some(1.0), Some(0.0), Some(1.0)));
+
+        let wave = param("", ParamKind::Enum(vec!["Sine".into(), "Saw".into()]));
+        assert_eq!((wave.display(1.0), wave.display(7.0)), ("Saw".to_string(), "7".to_string()));
+        assert_eq!((wave.parse(" saw "), wave.parse("Square"), wave.parse("1")), (Some(1.0), None, None));
+    }
+
+    #[test]
+    fn a_channel_layout_is_said_in_words() {
+        assert_eq!(ChannelLayout::STEREO.describe(), "stereo in, stereo out");
+        let amp = ChannelLayout { inputs: 1, outputs: 2 };
+        assert_eq!(amp.describe(), "mono in, stereo out");
+        assert!(amp.folds_input() && !ChannelLayout::STEREO.folds_input());
+        assert_eq!(ChannelLayout { inputs: 0, outputs: 2 }.describe(), "no audio in, stereo out");
+        assert_eq!(ChannelLayout { inputs: 2, outputs: 6 }.describe(), "stereo in, 6 channels out");
+        assert_eq!(ChannelLayout { inputs: 0, outputs: 0 }.describe(), "no audio in or out");
     }
 }

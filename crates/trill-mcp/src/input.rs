@@ -292,19 +292,55 @@ fn parse_point_values<'a>(
 
 /// Finds a parameter by id, or failing that by display name.
 pub fn find_param<'a>(params: &'a [ParamInfo], key: &str) -> Result<&'a ParamInfo, String> {
+    find_param_index(params, key).map(|index| &params[index])
+}
+
+/// The most parameters an error about a parameter names.
+const NAMED_PARAMS: usize = 40;
+
+/// Finds a parameter's place in the list: by its id, by its name, or by
+/// words that only one name has ("cab l type" for "Cherubs Amp Cab L Mic
+/// Type"). Words that several names have are an error that names them.
+pub fn find_param_index(params: &[ParamInfo], key: &str) -> Result<usize, String> {
     let wanted = key.trim();
-    params
-        .iter()
-        .find(|info| info.id == wanted)
-        .or_else(|| params.iter().find(|info| info.id.eq_ignore_ascii_case(wanted)))
-        .or_else(|| params.iter().find(|info| info.name.eq_ignore_ascii_case(wanted)))
-        .ok_or_else(|| {
-            let mut known: Vec<&str> = params.iter().map(|info| info.id.as_str()).take(40).collect();
-            if params.len() > known.len() {
-                known.push("...");
-            }
-            format!("no parameter '{key}'. Parameters: {}", known.join(", "))
+    let position = |matches: &dyn Fn(&ParamInfo) -> bool| params.iter().position(matches);
+    if let Some(index) = position(&|info| info.id == wanted)
+        .or_else(|| position(&|info| info.id.eq_ignore_ascii_case(wanted)))
+        .or_else(|| position(&|info| info.name.eq_ignore_ascii_case(wanted)))
+    {
+        return Ok(index);
+    }
+    let words: Vec<String> = wanted.split_whitespace().map(str::to_lowercase).collect();
+    let having: Vec<usize> = (0..params.len())
+        .filter(|index| {
+            let name = params[*index].name.to_lowercase();
+            !words.is_empty() && words.iter().all(|word| name.contains(word.as_str()))
         })
+        .collect();
+    // Plugins give their parameters numbers for ids, which say nothing:
+    // those are named by name, with the id to ask for one by.
+    let numbered = params.iter().all(|info| info.id.parse::<u64>().is_ok());
+    let label = |info: &ParamInfo| if numbered { format!("{} ({})", info.name, info.id) } else { info.id.clone() };
+    let listed = |indices: &mut dyn Iterator<Item = usize>, total: usize| {
+        let mut names: Vec<String> = indices.take(NAMED_PARAMS).map(|index| label(&params[index])).collect();
+        if total > names.len() {
+            names.push("...".to_string());
+        }
+        names.join(", ")
+    };
+    match having.as_slice() {
+        [one] => Ok(*one),
+        [] if numbered && params.len() > NAMED_PARAMS => Err(format!(
+            "no parameter '{key}' among this device's {}. get_device with `query` finds parameters by name",
+            params.len()
+        )),
+        [] => Err(format!("no parameter '{key}'. Parameters: {}", listed(&mut (0..params.len()), params.len()))),
+        several => Err(format!(
+            "{} parameters are called something like '{key}': {}. Give the whole name of one, or its id",
+            several.len(),
+            listed(&mut several.iter().copied(), several.len())
+        )),
+    }
 }
 
 /// Converts a JSON value to a parameter value in plain units: numbers pass
@@ -346,6 +382,59 @@ mod tests {
     fn notes(value: Value) -> Result<Vec<Note>, String> {
         let inputs: Vec<NoteInput> = serde_json::from_value(value).unwrap();
         parse_notes(&inputs)
+    }
+
+    fn info(id: &str, name: &str) -> ParamInfo {
+        ParamInfo {
+            id: id.into(),
+            name: name.into(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.0,
+            unit: String::new(),
+            kind: ParamKind::Float,
+        }
+    }
+
+    #[test]
+    fn a_parameter_is_found_by_id_by_name_or_by_words_only_its_name_has() {
+        let amp = [
+            info("101", "Cherubs Amp Cab L Mic Type"),
+            info("102", "Cherubs Amp Cab R Mic Type"),
+            info("103", "Input Gain"),
+            info("104", "Gain"),
+        ];
+        assert_eq!(find_param_index(&amp, "103"), Ok(2));
+        assert_eq!(find_param_index(&amp, " input gain "), Ok(2));
+        assert_eq!(find_param_index(&amp, "gain"), Ok(3), "a whole name wins over the names that contain it");
+        assert_eq!(find_param_index(&amp, "cab l type"), Ok(0));
+        let error = find_param_index(&amp, "mic type").unwrap_err();
+        assert!(error.starts_with("2 parameters are called something like 'mic type': "), "{error}");
+        assert!(error.contains("Cherubs Amp Cab L Mic Type (101), Cherubs Amp Cab R Mic Type (102)"), "{error}");
+        let error = find_param_index(&amp, "presence").unwrap_err();
+        assert!(
+            error.contains("no parameter 'presence'. Parameters: ") && error.contains("Input Gain (103)"),
+            "{error}"
+        );
+
+        // A built-in device's ids are words, and are what it is named by.
+        let synth = [info("cutoff", "Filter Cutoff"), info("resonance", "Filter Resonance")];
+        assert_eq!(find_param(&synth, "Cutoff").map(|info| info.id.as_str()), Ok("cutoff"));
+        assert_eq!(find_param_index(&synth, "filter resonance"), Ok(1));
+        assert_eq!(
+            find_param_index(&synth, "drive").unwrap_err(),
+            "no parameter 'drive'. Parameters: cutoff, resonance"
+        );
+
+        // A plugin with hundreds: where to look, not all of their names.
+        let many: Vec<ParamInfo> = (0..300).map(|n| info(&n.to_string(), &format!("Knob {n}"))).collect();
+        let error = find_param_index(&many, "presence").unwrap_err();
+        assert!(error.contains("among this device's 300") && error.contains("get_device with `query`"), "{error}");
+        let error = find_param_index(&many, "knob").unwrap_err();
+        assert!(
+            error.starts_with("300 parameters are called something like 'knob'") && error.contains("..."),
+            "{error}"
+        );
     }
 
     #[test]

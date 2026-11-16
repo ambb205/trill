@@ -136,8 +136,9 @@ pub struct AddDeviceRequest {
     /// Preset to start from: its name, its category and name ("Pads/Warm Pad"), or its id, as
     /// `describe_device` lists them.
     pub preset: Option<String>,
-    /// Parameter values to set on top of the preset, by parameter id: numbers in the parameter's units,
+    /// Parameter values to set on top of the preset, by parameter id or name: numbers in the parameter's units,
     /// true/false for switches, or the choice name for enums (e.g. {"cutoff": 800, "filter_type": "lowpass24"}).
+    /// For a plugin a string is the value as the plugin shows it ({"Input Gain": "-6 dB"}); see update_device.
     pub params: Option<BTreeMap<String, Value>>,
     /// Position in the chain, 0 = first. Omit to append. Signal flows first to last; instruments go first.
     pub index: Option<usize>,
@@ -147,8 +148,16 @@ pub struct AddDeviceRequest {
 pub struct GetDeviceRequest {
     /// Device id.
     pub device: u64,
-    /// Only parameters whose id or name contains this text. Useful for plugins with hundreds of parameters.
+    /// Only parameters whose name has these words (or whose id contains this text), e.g. "cab mic". A plugin
+    /// has hundreds of parameters: this is how to find the one you mean, with its range and its choices.
     pub query: Option<String>,
+    /// Which parameters to list when `query` is not given: "changed" (those not at the device's own defaults,
+    /// which is the default for a device with many parameters), "all", or "none".
+    pub show: Option<String>,
+    /// Skip this many of the listed parameters: the reply's `params_more` says where the next page starts.
+    pub param_offset: Option<usize>,
+    /// How many parameters to list (default 40 for a device with many, at most 200).
+    pub param_limit: Option<usize>,
     /// Words to search the presets this device can be given for, e.g. "warm pad". With any `preset_` argument
     /// the reply lists presets, and parameters only if `query` is given too.
     pub preset_query: Option<String>,
@@ -167,8 +176,10 @@ pub struct UpdateDeviceRequest {
     /// Preset to switch to: its name, its category and name ("Pads/Warm Pad"), or its id, as `get_device` and
     /// `describe_device` list them. It replaces the device's sound; `params` are applied on top of it.
     pub preset: Option<String>,
-    /// Parameter values by parameter id: numbers in the parameter's units, true/false for switches, or the
-    /// choice name for enums.
+    /// Parameter values by parameter id or name. For a built-in device: numbers in the parameter's units,
+    /// true/false for switches, or the choice name for enums. For a plugin: a number is the raw value (0 to 1
+    /// for most), and a string is the value as the plugin itself shows it, which is what get_device gives as
+    /// `text`: {"Cab L Mic Type": "Dynamic 57", "Input Gain": "-6 dB", "Doubler Active": "On"}.
     pub params: Option<BTreeMap<String, Value>>,
     /// false bypasses the device.
     pub enabled: Option<bool>,
