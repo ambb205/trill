@@ -254,7 +254,10 @@ impl TrillApp {
                 self.live.playing = transport.playing;
                 self.live.position = transport.position_beats;
                 self.live.metronome = session.metronome();
-                self.live.set_cpu_load(session.audio_load());
+                // A picture shows no load: how busy the machine happened to be
+                // while it was taken is not part of what the window looks like.
+                let load = if self.options.screenshot.is_some() { 0.0 } else { session.audio_load() };
+                self.live.set_cpu_load(load);
                 self.live.audio_faults = session.audio_faults();
                 self.live.preparing = session.preparing();
                 self.live.update_editors(&self.snapshot, &session);

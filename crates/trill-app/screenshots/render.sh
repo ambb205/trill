@@ -1,48 +1,95 @@
 #!/usr/bin/env sh
-# Regenerates every screenshot in this folder. Run from the repository root:
+# Renders pictures of the window, for looking at a change. Run from the
+# repository root, and say which pictures:
 #
-#   sh crates/trill-app/screenshots/render.sh
+#   sh crates/trill-app/screenshots/render.sh mixer      # those with "mixer" in their name
+#   sh crates/trill-app/screenshots/render.sh list       # the names there are
+#   sh crates/trill-app/screenshots/render.sh all        # every one (minutes; rarely what is wanted)
 #
-# With a word after it, only the pictures with that word in their name:
+# They are written to target/screenshots, which git ignores. Pictures are
+# for the eyes of whoever made the change: render the few that show it, look
+# at them, and leave it there. They are not kept in the repository, because
+# a single new button in the top bar changes every one of them.
 #
-#   sh crates/trill-app/screenshots/render.sh assistant
+# The exception is the four pictures the README shows, which live in
+# docs/images. Refresh those on purpose, when the README should show
+# something new:
+#
+#   sh crates/trill-app/screenshots/render.sh readme
 #
 # A screenshot run is hermetic: no audio device, no plugins, no pointer and
-# no user settings, so the pictures are the same on every machine. Look at
-# what changed before committing them: they are the record of what the
-# window looks like, and the place where a layout slip shows first.
+# no user settings, so a picture is the same on every machine. Its window
+# opens off the screen and does not take the keyboard.
 set -eu
-only=${1:-}
+here=crates/trill-app/screenshots
+out=target/screenshots
+readme="first-light assistant-answered sounds-browser keyboard-playing"
+mode=${1:-}
+only=
+case "$mode" in
+    "")
+        sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+        exit 2
+        ;;
+    list | all) ;;
+    readme) out=docs/images ;;
+    *) only=$mode ;;
+esac
 
-cargo build -p trill-app
+# Whether the picture called $1 was asked for.
+wanted() {
+    case "$mode" in
+        list) return 0 ;;
+        readme) case " $readme " in *" $1 "*) return 0 ;; *) return 1 ;; esac ;;
+        *) case "$1" in *"$only"*) return 0 ;; *) return 1 ;; esac ;;
+    esac
+}
+
+# Whether any of the pictures named was asked for and has to be made.
+making() {
+    [ "$mode" != list ] || return 1
+    for name in "$@"; do
+        if wanted "$name"; then return 0; fi
+    done
+    return 1
+}
+
+if [ "$mode" != list ]; then
+    cargo build -p trill-app
+    mkdir -p "$out"
+fi
 bin=target/debug/trill
-out=crates/trill-app/screenshots
 song=examples/first-light.trill
-rough=$out/projects/rough-mix.trill
-rack=$out/projects/drum-rack.trill
+rough=$here/projects/rough-mix.trill
+rack=$here/projects/drum-rack.trill
 
 # A sample pack and a song made from it, synthesized here so that the
 # pictures of the sound browser show nobody's own library. Written to a
-# folder git ignores; the project names its files by this path, so the
-# pictures must be made from the repository root.
-sounds=$out/sounds
-cargo run -p trill-app --example sound_fixtures -- "$sounds"
+# folder git ignores, and only when a picture needs it; the project names
+# its files by this path, so the pictures must be made from the repository
+# root.
+sounds=$here/sounds
 pack="$sounds/Night Shift"
 night=$sounds/night-shift.trill
+if making sounds-browser sounds-drum-rack sounds-sampler sounds-missing-file min-window-sounds \
+    graphite-sounds-browser graphite-sounds-drum-rack; then
+    cargo run -p trill-app --example sound_fixtures -- "$sounds"
+fi
 
 # shot NAME ARGS...: one window, rendered to NAME.png.
 shot() {
     name=$1
     shift
-    case "$name" in
-        *"$only"*) ;;
-        *) return 0 ;;
-    esac
+    wanted "$name" || return 0
+    if [ "$mode" = list ]; then
+        echo "$name"
+        return 0
+    fi
     "$bin" "$@" --screenshot "$out/$name.png"
-    echo "$name"
+    echo "$out/$name.png"
 }
 
-# The song written through MCP. first-light.png is the README's picture.
+# The song written through MCP.
 shot first-light "$song" --select Lead
 shot first-light-clip "$song" --select Lead --size 1920x1080
 shot first-light-devices "$song" --select Lead --tab devices
@@ -125,10 +172,13 @@ shot graphite-keyboard-playing "$song" --select Lead --hold adg --theme graphite
 # the offer shows nobody's real work, and nothing of the user's is read),
 # and the example song with envelopes switched off. Staged here and not at
 # the top, so that the work lost "moments ago" still was when it is shown.
-fixtures=$out/fixtures
-cargo run -p trill-app --example window_fixtures -- "$fixtures"
+fixtures=$here/fixtures
 lost=$fixtures/lost-work
 held=$fixtures/held-automation.trill
+if making recovery-offer graphite-recovery-offer min-window-recovery-offer held-automation held-automation-mixer \
+    graphite-held-automation; then
+    cargo run -p trill-app --example window_fixtures -- "$fixtures"
+fi
 
 # The offer to bring back unsaved work, as a window opens on it.
 shot recovery-offer --profile "$lost"

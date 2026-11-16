@@ -11,3 +11,6 @@
 # The held envelopes and the lost work other screenshots are made from:
 # written by `cargo run -p trill-app --example window_fixtures`.
 /crates/trill-app/screenshots/fixtures/
+# Pictures of the window are rendered to target/screenshots and not kept;
+# the README's four are in docs/images. See screenshots/render.sh.
+/crates/trill-app/screenshots/*.png

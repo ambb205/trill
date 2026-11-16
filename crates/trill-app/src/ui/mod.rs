@@ -173,16 +173,25 @@ fn native_window(creation: &eframe::CreationContext<'_>) -> Option<isize> {
     }
 }
 
+/// Where a window that must not be seen is put: far up and to the left of
+/// any screen.
+const OFF_SCREEN: egui::Pos2 = egui::pos2(-20_000.0, -20_000.0);
+
 /// Opens the window and runs until it is closed.
 pub fn run(runtime: Arc<Runtime>, options: UiOptions) -> anyhow::Result<()> {
-    let native = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Trill")
-            .with_icon(brand::icon(64))
-            .with_inner_size(options.window_size)
-            .with_min_inner_size(MIN_WINDOW_SIZE),
-        ..Default::default()
-    };
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Trill")
+        .with_icon(brand::icon(64))
+        .with_inner_size(options.window_size)
+        .with_min_inner_size(MIN_WINDOW_SIZE);
+    if options.screenshot.is_some() {
+        // A window that is only there to have its picture taken stays out
+        // of the way of whoever is at the machine: off the screen, off the
+        // taskbar, and without taking the keyboard. (Hidden would be
+        // simpler, but a hidden window is never asked to paint.)
+        viewport = viewport.with_position(OFF_SCREEN).with_active(false).with_taskbar(false);
+    }
+    let native = eframe::NativeOptions { viewport, ..Default::default() };
     // Failures inside the event loop (a screenshot that could not be saved)
     // have no way to return a value, so they are left here.
     let failure = Arc::new(Mutex::new(None));

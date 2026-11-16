@@ -13,7 +13,7 @@ Trill is an open-source digital audio workstation written in Rust. The goals:
   [Model Context Protocol](https://modelcontextprotocol.io), so an assistant can compose, arrange, mix and render a
   song, and read back loudness and spectral measurements to judge its own work.
 
-![The arrangement and piano roll, showing a song written through MCP](crates/trill-app/screenshots/first-light.png)
+![The arrangement and piano roll, showing a song written through MCP](docs/images/first-light.png)
 
 This is an early build. See [Status](#status) for what works and what does not yet.
 
@@ -99,7 +99,7 @@ and what to do about it in a terminal. Conversations are kept per project beside
 the next time the project is open. The assistant comes in by a door of its own on the MCP server (`/assistant`),
 through which files are written only into the project's folder or `Documents/Trill`.
 
-![The assistant after a turn that added a bass line, with the Undo for it](crates/trill-app/screenshots/assistant-answered.png)
+![The assistant after a turn that added a bass line, with the Undo for it](docs/images/assistant-answered.png)
 
 ## What is in the box
 
@@ -162,7 +162,7 @@ sampler or onto a drum rack pad; files dragged in from the file manager land the
 waveform, and the Clip tab shows an audio clip's file with its gain, offset, fades, warp mode, source tempo and
 transposition. The sampler shows its sample and the drum rack its sixteen pads.
 
-![The sound browser, waveforms on audio clips and an audio clip in the Clip tab](crates/trill-app/screenshots/sounds-browser.png)
+![The sound browser, waveforms on audio clips and an audio clip in the Clip tab](docs/images/sounds-browser.png)
 
 **Play it from the keyboard you type on.** `Ctrl+K`, or the keyboard button in the top bar, turns the two middle
 rows of letters into a piano on the selected track's instrument: `A S D F G H J K L ; '` are the white keys from C
@@ -179,7 +179,7 @@ the keyboard, or while `Ctrl`, `Alt`, `Shift` or the Windows key is held. And no
 ends the playing (the switch, another track selected, an octave change under a held key, the window losing the
 keyboard, a dialog, another project, exit) ends its notes.
 
-![A chord held on the computer keyboard, lit in the strip and on the piano roll](crates/trill-app/screenshots/keyboard-playing.png)
+![A chord held on the computer keyboard, lit in the strip and on the piano roll](docs/images/keyboard-playing.png)
 
 No samples at hand? `cargo run -p trill-app --example sound_fixtures -- some/folder` synthesizes a small pack and a
 song made from it (it is what the screenshots are taken from); add `some/folder/Night Shift` in the browser, or
