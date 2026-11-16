@@ -28,10 +28,16 @@ use std::time::{Duration, Instant};
 use trill_core::device::{ParamInfo, ParamKind};
 
 /// How long a plugin's request for a flush may go unanswered by a block
-/// before the main thread flushes instead. Longer than the longest block
-/// the engine processes, so that a plugin which is being processed is
-/// left to its audio thread.
-const FLUSH_GRACE: Duration = Duration::from_millis(150);
+/// before the main thread takes the plugin to be idle and flushes instead.
+///
+/// Long, on purpose. Nothing tells the main thread that a device is not
+/// being processed (switched off, or the engine at rest); it can only
+/// conclude so from blocks not coming. An audio thread that is merely
+/// late must not find its plugin taken, so the wait is far longer than
+/// any hiccup an engine recovers from. What it costs is that an edit made
+/// in the editor of a plugin that is not playing is reported a second
+/// late; the plugin itself has it at once.
+const FLUSH_GRACE: Duration = Duration::from_secs(1);
 
 /// The standard CLAP extensions a plugin may implement that this host
 /// makes no use of yet, by their identifiers.

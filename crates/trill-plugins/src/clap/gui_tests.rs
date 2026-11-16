@@ -454,8 +454,9 @@ fn an_edit_is_flushed_out_of_a_plugin_nobody_is_processing() {
     assert_eq!(value(&mut instance, scripted::AUDIO_FLUSHES), 1.0);
     assert_eq!(value(&mut instance, scripted::GAIN), 1.5);
 
-    // Once it is processed again, the audio thread has it back.
+    // Once it is processed again, the audio thread has it back, and the
+    // main thread does not flush a plugin that asked for nothing.
     assert_eq!(block(&mut instance, 0.5), vec![0.75; BLOCK]);
-    std::thread::sleep(Duration::from_millis(250));
+    std::thread::sleep(Duration::from_millis(1_300));
     assert_eq!(value(&mut instance, scripted::AUDIO_FLUSHES), 1.0, "a flush nobody asked for");
 }
