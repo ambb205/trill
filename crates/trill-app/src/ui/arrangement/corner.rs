@@ -124,17 +124,19 @@ fn controls(ui: &mut Ui, cx: &mut Cx, row: Rect) {
     ) {
         cx.state.arrangement.snap = !snap;
     }
-    if toggle(ui, cx, "Follow", "Follow playhead", follow, "Keep the playhead in view while the song plays \u{00B7} F")
-    {
+    // The keys as they are now: with the computer keyboard on, a letter it
+    // plays is a shortcut with Alt.
+    let playing = cx.keyboard.is_on();
+    let about = shortcuts::with_keys("Keep the playhead in view while the song plays", Command::ToggleFollow, playing);
+    if toggle(ui, cx, "Follow", "Follow playhead", follow, &about) {
         cx.state.arrangement.follow = !follow;
     }
 
     // The tools sit at the right end, under "+ Track".
     let tool = cx.state.arrangement.tool;
-    let tools = [
-        (Tool::Blade, Icon::Split, "Blade: click a clip to split it \u{00B7} C"),
-        (Tool::Draw, Icon::Pencil, "Pencil: draw automation in steps of the grid \u{00B7} B"),
-    ];
+    let blade = shortcuts::with_keys("Blade: click a clip to split it", Command::ToggleBlade, playing);
+    let pencil = shortcuts::with_keys("Pencil: draw automation in steps of the grid", Command::ToggleDraw, playing);
+    let tools = [(Tool::Blade, Icon::Split, blade), (Tool::Draw, Icon::Pencil, pencil)];
     let mut right = row.right();
     for (which, icon, hint) in tools {
         let rect = Rect::from_min_size(pos2(right - TOOL_BUTTON, row.top()), vec2(TOOL_BUTTON, row.height()));

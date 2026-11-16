@@ -208,7 +208,8 @@ fn header(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, number: 
     let lanes_chip = Chip::new("A", lanes_open).quiet(quiet).named(&lanes_name);
     let response = trill_noir::chip(ui, theme, chip(-1.0), id.with("automation"), &lanes_chip);
     automation::paint_owner_mark(&painter, cx, LaneOwner::Track(track.id), chip(-1.0));
-    cx.hint(&response, "Show or hide this track\u{2019}s automation lanes \u{00B7} A");
+    let about = "Show or hide this track\u{2019}s automation lanes";
+    cx.hint(&response, shortcuts::with_keys(about, Command::ToggleAutomation, cx.keyboard.is_on()));
     if response.clicked() {
         cx.state.select_track(track.id);
         automation::toggle_lanes(cx, LaneOwner::Track(track.id));

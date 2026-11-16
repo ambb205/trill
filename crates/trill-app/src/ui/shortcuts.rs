@@ -2,6 +2,10 @@
 //! (for the keys they show beside a command) and by the reference window.
 //! A shortcut cannot be documented without working, or work without being
 //! documented, because all three look here.
+//!
+//! While the computer keyboard is played as an instrument, the letters it
+//! uses are notes, and the shortcut such a letter had is the same letter
+//! with Alt held: see [`chord`], which the three ask as well.
 
 use super::state::Cx;
 use eframe::egui::{self, Align2, Event, Key, KeyboardShortcut, Modifiers, Rect, Sense, pos2, vec2};
@@ -52,6 +56,7 @@ pub enum Command {
     ToggleBlade,
     ToggleBrowser,
     ToggleAssistant,
+    ToggleKeyboard,
     ShowShortcuts,
 }
 
@@ -76,11 +81,20 @@ pub enum Section {
     Tracks,
     Transport,
     View,
+    /// The computer keyboard, played as an instrument.
+    Keyboard,
 }
 
 impl Section {
-    const ALL: [Section; 6] =
-        [Section::File, Section::Edit, Section::Arrangement, Section::Tracks, Section::Transport, Section::View];
+    const ALL: [Section; 7] = [
+        Section::File,
+        Section::Edit,
+        Section::Arrangement,
+        Section::Tracks,
+        Section::Transport,
+        Section::View,
+        Section::Keyboard,
+    ];
 
     fn title(self) -> &'static str {
         match self {
@@ -90,6 +104,7 @@ impl Section {
             Section::Tracks => "Tracks",
             Section::Transport => "Transport",
             Section::View => "View",
+            Section::Keyboard => "Computer keyboard",
         }
     }
 }
@@ -204,6 +219,14 @@ pub const BINDINGS: &[Binding] = &[
     bind(Command::ToggleBrowser, CTRL, Key::B, When::NotTyping, Section::View, "Show or hide the browser"),
     bind(Command::ToggleAssistant, CTRL_SHIFT, Key::A, When::Always, Section::View, "Show or hide the assistant"),
     bind(Command::ShowShortcuts, NONE, Key::F1, When::Always, Section::View, "This reference"),
+    bind(
+        Command::ToggleKeyboard,
+        CTRL,
+        Key::K,
+        When::NotTyping,
+        Section::Keyboard,
+        "Play notes from the computer keyboard",
+    ),
 ];
 
 /// What the mouse does, for the reference. Nothing reads these but the
@@ -284,14 +307,35 @@ fn chord_label(modifiers: Modifiers, key: Key) -> String {
     label
 }
 
+/// The modifiers `binding` answers to. While the computer keyboard is on
+/// (`playing`), a letter it uses is a note, and the shortcut that letter
+/// had is the same letter with Alt held.
+fn chord(binding: &Binding, playing: bool) -> Modifiers {
+    if playing && binding.modifiers == NONE && super::keyboard::plays(binding.key) {
+        Modifiers::ALT
+    } else {
+        binding.modifiers
+    }
+}
+
 /// The keys that run `command`, for the menu item that does the same: the
 /// first binding in the table. Empty if the command has no shortcut.
 pub fn keys(command: Command) -> String {
+    keys_while(command, false)
+}
+
+/// [`keys`], as they are while the computer keyboard is on (`playing`).
+pub fn keys_while(command: Command, playing: bool) -> String {
     BINDINGS
         .iter()
         .find(|binding| binding.command == command)
-        .map(|binding| chord_label(binding.modifiers, binding.key))
+        .map(|binding| chord_label(chord(binding, playing), binding.key))
         .unwrap_or_default()
+}
+
+/// A hint that ends with the keys for what it describes.
+pub fn with_keys(hint: &str, command: Command, playing: bool) -> String {
+    format!("{hint} \u{00B7} {}", keys_while(command, playing))
 }
 
 /// How many modifier keys a chord holds.
@@ -313,8 +357,9 @@ fn clipboard_chord(event: &Event) -> Option<Key> {
 
 /// Collects the commands for the keys pressed this frame. `typing` is true
 /// while a text field has the keyboard; `selection` while the pane being
-/// worked in has something selected.
-pub fn read(ctx: &egui::Context, typing: bool, selection: bool) -> Vec<Command> {
+/// worked in has something selected; `playing` while the computer keyboard
+/// is on, which has by then taken the keys that are its notes.
+pub fn read(ctx: &egui::Context, typing: bool, selection: bool, playing: bool) -> Vec<Command> {
     let live = |binding: &&Binding| match binding.when {
         When::Always => true,
         When::NotTyping => !typing,
@@ -322,20 +367,21 @@ pub fn read(ctx: &egui::Context, typing: bool, selection: bool) -> Vec<Command> 
     };
     // A chord also matches a press with more modifiers held, so the more
     // specific chords have to be asked first.
-    let mut bindings: Vec<&Binding> = BINDINGS.iter().filter(live).collect();
-    bindings.sort_by_key(|binding| std::cmp::Reverse(specificity(binding.modifiers)));
+    let mut bindings: Vec<(&Binding, Modifiers)> =
+        BINDINGS.iter().filter(live).map(|binding| (binding, chord(binding, playing))).collect();
+    bindings.sort_by_key(|(_, modifiers)| std::cmp::Reverse(specificity(*modifiers)));
 
     let mut commands = Vec::new();
     ctx.input_mut(|input| {
-        for binding in &bindings {
-            if input.consume_shortcut(&KeyboardShortcut::new(binding.modifiers, binding.key)) {
+        for (binding, modifiers) in &bindings {
+            if input.consume_shortcut(&KeyboardShortcut::new(*modifiers, binding.key)) {
                 commands.push(binding.command);
             }
         }
         if !typing {
             for key in input.events.iter().filter_map(clipboard_chord) {
-                let bound = bindings.iter().find(|binding| binding.key == key && binding.modifiers == CTRL);
-                commands.extend(bound.map(|binding| binding.command));
+                let bound = bindings.iter().find(|(binding, modifiers)| binding.key == key && *modifiers == CTRL);
+                commands.extend(bound.map(|(binding, _)| binding.command));
             }
         }
     });
@@ -356,17 +402,22 @@ struct Line {
 }
 
 /// The table as the reference lists it: per section, one line per command,
-/// with every chord bound to it.
-fn reference() -> Vec<(&'static str, Vec<Line>)> {
+/// with every chord bound to it as it is now: with the computer keyboard
+/// on (`playing`), the letters it plays are listed with Alt. Its own
+/// section goes on to say which key plays what.
+fn reference(playing: bool) -> Vec<(&'static str, Vec<Line>)> {
     let mut sections = Vec::new();
     for section in Section::ALL {
         let mut lines: Vec<Line> = Vec::new();
         for binding in BINDINGS.iter().filter(|binding| binding.section == section) {
-            let keys = chord_label(binding.modifiers, binding.key);
+            let keys = chord_label(chord(binding, playing), binding.key);
             match lines.iter_mut().find(|line| line.does == binding.does) {
                 Some(line) => line.keys = format!("{} / {keys}", line.keys),
                 None => lines.push(Line { does: binding.does.to_owned(), keys }),
             }
+        }
+        if section == Section::Keyboard {
+            lines.extend(super::keyboard::reference().into_iter().map(|(does, keys)| Line { does, keys }));
         }
         sections.push((section.title(), lines));
     }
@@ -384,7 +435,8 @@ pub fn window(ctx: &egui::Context, cx: &mut Cx) {
         return;
     }
     let theme = cx.theme;
-    let sections = reference();
+    let playing = cx.keyboard.is_on();
+    let sections = reference(playing);
     // Sections flow into three columns of about equal height.
     let heights: Vec<f32> = sections.iter().map(|(_, lines)| HEADING + lines.len() as f32 * ROW + 10.0).collect();
     let target = heights.iter().sum::<f32>() / 3.0;
@@ -413,8 +465,14 @@ pub fn window(ctx: &egui::Context, cx: &mut Cx) {
             ui.set_width(width);
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             let (title, _) = ui.allocate_exact_size(vec2(width, 18.0), Sense::hover());
-            text::paint(ui.painter(), title, Align2::LEFT_CENTER, theme.text.caps, "Shortcuts", theme.ink);
+            let used = text::paint(ui.painter(), title, Align2::LEFT_CENTER, theme.text.caps, "Shortcuts", theme.ink);
             text::paint(ui.painter(), title, Align2::RIGHT_CENTER, theme.text.micro, "Esc closes", theme.ink_faint);
+            if playing {
+                // Why some of the letters below are listed with Alt.
+                let note = "The computer keyboard is on: its letters play";
+                let room = title.with_min_x(title.left() + used + 14.0).with_max_x(title.right() - 90.0);
+                text::paint(ui.painter(), room, Align2::LEFT_CENTER, theme.text.micro, note, theme.ink_dim);
+            }
             ui.add_space(8.0);
             let (rule, _) = ui.allocate_exact_size(vec2(width, 1.0), Sense::hover());
             paint::hline(ui.painter(), rule.x_range(), rule.top(), theme.hairline);
@@ -503,11 +561,12 @@ mod tests {
 
     #[test]
     fn the_reference_lists_every_binding_under_its_section() {
-        let sections = reference();
+        let sections = reference(false);
         let listed: usize = sections.iter().take(Section::ALL.len()).map(|(_, lines)| lines.len()).sum();
         let distinct: std::collections::HashSet<(&str, &str)> =
             BINDINGS.iter().map(|binding| (binding.section.title(), binding.does)).collect();
-        assert_eq!(listed, distinct.len());
+        // The computer keyboard's section also lists the keys that play.
+        assert_eq!(listed, distinct.len() + crate::ui::keyboard::reference().len());
 
         let (_, edit) = sections.iter().find(|(title, _)| *title == "Edit").unwrap();
         let redo = edit.iter().find(|line| line.does == "Redo").unwrap();
@@ -525,9 +584,92 @@ mod tests {
         events.insert(0, Event::ModifiersChanged(modifiers));
         let mut found = Vec::new();
         let input = egui::RawInput { events, focused: true, ..Default::default() };
-        let mut output = ctx.run_ui(input, |ui| found = read(ui.ctx(), typing, selection));
+        let mut output = ctx.run_ui(input, |ui| found = read(ui.ctx(), typing, selection, false));
         output.textures_delta.clear();
         found
+    }
+
+    /// What `read` makes of one key press while the computer keyboard is
+    /// on. The keys it plays never get this far unless a modifier is held.
+    fn while_playing(modifiers: Modifiers, key: Key) -> Vec<Command> {
+        let ctx = egui::Context::default();
+        let mut events = press(modifiers, key);
+        events.insert(0, Event::ModifiersChanged(modifiers));
+        let mut found = Vec::new();
+        let input = egui::RawInput { events, focused: true, ..Default::default() };
+        let mut output = ctx.run_ui(input, |ui| found = read(ui.ctx(), false, false, true));
+        output.textures_delta.clear();
+        found
+    }
+
+    #[test]
+    fn while_the_keyboard_plays_its_letters_are_shortcuts_with_alt() {
+        let alt = Modifiers::ALT;
+        // Every command that sat on a playing letter is still reachable.
+        assert_eq!(while_playing(alt, Key::A), [Command::ToggleAutomation]);
+        assert_eq!(while_playing(alt, Key::C), [Command::ToggleBlade]);
+        assert_eq!(while_playing(alt, Key::F), [Command::ToggleFollow]);
+        assert_eq!(while_playing(alt, Key::K), [Command::ToggleMetronome]);
+        assert_eq!(while_playing(alt, Key::L), [Command::ToggleLoop]);
+        assert_eq!(while_playing(alt, Key::Z), [Command::ZoomToSelection]);
+        // And only there: the bare letter is a note, taken before this.
+        for key in [Key::A, Key::C, Key::F, Key::K, Key::L, Key::Z] {
+            assert!(while_playing(NONE, key).is_empty(), "{key:?}");
+        }
+        // What had modifiers of its own, and the keys that play nothing,
+        // are as they were.
+        assert_eq!(while_playing(SHIFT, Key::Z), [Command::ZoomToSong]);
+        assert_eq!(while_playing(CTRL, Key::Z), [Command::Undo]);
+        assert_eq!(while_playing(CTRL, Key::A), [Command::SelectAll]);
+        assert_eq!(while_playing(CTRL, Key::K), [Command::ToggleKeyboard]);
+        assert_eq!(while_playing(NONE, Key::M), [Command::AddMarker]);
+        assert_eq!(while_playing(NONE, Key::B), [Command::ToggleDraw]);
+        assert_eq!(while_playing(NONE, Key::Space), [Command::TogglePlay]);
+        assert_eq!(while_playing(NONE, Key::Num0), [Command::MuteClips]);
+        // Off, Alt with a letter is nothing, as it has always been.
+        assert!(commands(alt, press(alt, Key::A), false, false).is_empty());
+    }
+
+    #[test]
+    fn no_command_is_lost_or_doubled_while_the_keyboard_plays() {
+        // With the keyboard on, no two bindings answer to the same chord,
+        // and every command keeps one.
+        for (index, binding) in BINDINGS.iter().enumerate() {
+            for other in &BINDINGS[index + 1..] {
+                let same = chord(binding, true) == chord(other, true) && binding.key == other.key;
+                assert!(!same, "{} is bound twice", chord_label(chord(binding, true), binding.key));
+            }
+            assert!(!keys_while(binding.command, true).is_empty());
+            let moved = chord(binding, true) != binding.modifiers;
+            let on_a_playing_letter = binding.modifiers == NONE && crate::ui::keyboard::plays(binding.key);
+            assert_eq!(moved, on_a_playing_letter, "{:?}", binding.command);
+        }
+    }
+
+    #[test]
+    fn the_reference_and_the_menus_say_alt_while_the_keyboard_plays() {
+        assert_eq!(keys_while(Command::ToggleLoop, false), "L");
+        assert_eq!(keys_while(Command::ToggleLoop, true), "Alt+L");
+        assert_eq!(keys_while(Command::ZoomToSong, true), "Shift+Z");
+        assert_eq!(keys_while(Command::Undo, true), "Ctrl+Z");
+        assert_eq!(with_keys("Metronome", Command::ToggleMetronome, true), "Metronome \u{00B7} Alt+K");
+
+        let keys_of = |playing: bool, does: &str| {
+            let sections = reference(playing);
+            let line = sections.iter().flat_map(|(_, lines)| lines).find(|line| line.does == does);
+            line.map(|line| line.keys.clone()).unwrap_or_else(|| panic!("no line says '{does}'"))
+        };
+        assert_eq!(keys_of(false, "Metronome on or off"), "K");
+        assert_eq!(keys_of(true, "Metronome on or off"), "Alt+K");
+        assert_eq!(keys_of(true, "Zoom to the selection"), "Alt+Z");
+        assert_eq!(keys_of(true, "Play or stop"), "Space", "what plays no note is as it was");
+        // The keyboard's own section says how it is switched on and which
+        // key plays what, on or off.
+        for playing in [false, true] {
+            assert_eq!(keys_of(playing, "Play notes from the computer keyboard"), "Ctrl+K");
+            assert_eq!(keys_of(playing, "White keys, from C"), "A S D F G H J K L ; '");
+            assert_eq!(keys_of(playing, "Octave down, up"), "Z / X");
+        }
     }
 
     fn press(modifiers: Modifiers, key: Key) -> Vec<Event> {

@@ -30,6 +30,8 @@ pub enum Icon {
     Hit,
     /// A window of its own: the editor a plugin brings.
     Window,
+    /// The keyboard one types on, played as an instrument.
+    Keyboard,
 }
 
 impl Icon {
@@ -52,6 +54,7 @@ impl Icon {
             Icon::Folder => "Folder",
             Icon::Hit => "One-shot",
             Icon::Window => "Editor",
+            Icon::Keyboard => "Computer keyboard",
         }
     }
 }
@@ -162,6 +165,17 @@ pub fn paint_icon(painter: &Painter, center: Pos2, icon: Icon, color: Color32) {
             paint::frame(painter, frame, color);
             painter.rect_filled(Rect::from_min_size(frame.min, vec2(frame.width(), 3.0)), 0.0, color);
         }
+        Icon::Keyboard => {
+            // The case, two rows of keys and the space bar under them.
+            let case = Rect::from_min_size(center + vec2(-7.0, -5.0), vec2(15.0, 10.0));
+            paint::frame(painter, case, color);
+            let key = |x: f32, y: f32| Rect::from_min_size(pos2(case.left() + x, case.top() + y), vec2(1.0, 1.0));
+            for column in 0..5 {
+                painter.rect_filled(key(3.0 + 2.0 * column as f32, 2.0), 0.0, color);
+                painter.rect_filled(key(3.0 + 2.0 * column as f32, 4.0), 0.0, color);
+            }
+            paint::hline(painter, Rangef::new(case.left() + 4.0, case.right() - 4.0), case.top() + 6.0, color);
+        }
     }
 }
 
@@ -217,6 +231,7 @@ mod tests {
             Icon::Folder,
             Icon::Hit,
             Icon::Window,
+            Icon::Keyboard,
         ];
         crate::testing::with_ui(|ui, theme| {
             for icon in all {

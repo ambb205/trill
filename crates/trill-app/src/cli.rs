@@ -1,6 +1,6 @@
 //! Command-line options.
 
-use crate::ui::{AssistantOptions, AssistantScene, BrowserTab, DetailTab, UiOptions};
+use crate::ui::{AssistantOptions, AssistantScene, BrowserTab, DetailTab, KeyboardOptions, UiOptions};
 use anyhow::{Context, anyhow, bail};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -38,6 +38,8 @@ Options:
   --assistant-model <NAME>    Model the assistant asks Claude Code for (default: Claude Code's own choice)
   --assistant-scene <NAME>    Show a canned conversation in the assistant, for screenshots: ready, working,
                           answered, limit, api-key, signed-out or not-installed
+  --keyboard              Start with the computer keyboard playing notes (Ctrl+K switches it)
+  --hold <KEYS>           Hold these keys of it down, for screenshots: adg is a C major chord
   --screenshot <PATH.png> Render the window to a PNG and exit (implies --null-audio)
   --exit-after <SECONDS>  Close the window by itself after this long
   -h, --help              Show this help
@@ -81,6 +83,8 @@ pub struct Cli {
     pub assistant: bool,
     pub assistant_model: Option<String>,
     pub assistant_scene: Option<AssistantScene>,
+    /// How the computer keyboard starts, when not as it was left.
+    pub keyboard: KeyboardOptions,
     pub screenshot: Option<PathBuf>,
     pub exit_after: Option<Duration>,
 }
@@ -114,6 +118,11 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
                 cli.assistant_scene = Some(
                     scene.with_context(|| format!("unknown scene '{name}' (expected one of {})", known.join(", ")))?,
                 );
+            }
+            "--keyboard" => cli.keyboard.on = true,
+            "--hold" => {
+                let keys = value("the keys to hold")?;
+                cli.keyboard.hold = KeyboardOptions::holding(&keys).map_err(|reason| anyhow!(reason))?;
             }
             "--automation" => cli.automation = true,
             "--shortcuts" => cli.shortcuts = true,
@@ -271,6 +280,7 @@ impl Cli {
                 // could not be listened on is found out in `main`.
                 mcp_off: self.mcp_address().is_none(),
             },
+            keyboard: self.keyboard.clone(),
         }
     }
 }
@@ -479,6 +489,18 @@ mod tests {
     }
 
     #[test]
+    fn the_computer_keyboard_can_start_on_with_keys_held() {
+        let plain = run(&[]).unwrap().ui_options().keyboard;
+        assert!(!plain.on && plain.hold.is_empty(), "left to what was remembered");
+        assert!(run(&["--keyboard"]).unwrap().ui_options().keyboard.on);
+        let held = run(&["--hold", "adg"]).unwrap().ui_options().keyboard.hold;
+        assert_eq!(held.len(), 3);
+        let error = run(&["--hold", "aq"]).unwrap_err().to_string();
+        assert!(error.contains("'q'"), "{error}");
+        assert!(USAGE.contains("--keyboard") && USAGE.contains("--hold"));
+    }
+
+    #[test]
     fn a_plugins_editor_can_be_asked_for_at_startup() {
         assert_eq!(run(&[]).unwrap().ui_options().open_editor, None);
         let cli = run(&["--editor", "Surge XT", "song.trill"]).unwrap();
@@ -504,6 +526,8 @@ mod tests {
             &["--search"],
             &["--sound"],
             &["--editor"],
+            &["--hold"],
+            &["--hold", "z"],
             &["--profile"],
             &["--size", "big"],
             &["--size", "10x10"],

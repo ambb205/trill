@@ -5,6 +5,7 @@ use super::arrangement::ops;
 use super::assistant::{self, Assistant};
 use super::editors::{self, Editors};
 use super::files::{self, Confirm, Jobs};
+use super::keyboard::{self, Keyboard};
 use super::recovery::{self, Recovery};
 use super::shortcuts::{self, Command};
 use super::snapshot::{Live, Snapshot};
@@ -62,6 +63,8 @@ pub struct TrillApp {
     editors: Editors,
     jobs: Jobs,
     recovery: Recovery,
+    /// The computer keyboard, played as an instrument.
+    keyboard: Keyboard,
     /// The colors, type and metrics the window is painted with.
     theme: Theme,
     /// The devices that can be added. Starts as the built-in ones and is
@@ -187,6 +190,7 @@ impl TrillApp {
         // What an earlier program did not live to save: found when the
         // runtime started, so this is a look at a list in memory.
         let recovery = Recovery::new(runtime.recoverable());
+        let keyboard = Keyboard::new(remember_in.clone(), &options.keyboard);
         Self {
             sounds: Sounds::new(ctx, runtime),
             assistant,
@@ -197,6 +201,7 @@ impl TrillApp {
             editors: Editors::new(!unattended),
             jobs,
             recovery,
+            keyboard,
             theme,
             descriptors: BuiltinFactory.descriptors(),
             catalog,
@@ -288,6 +293,7 @@ impl TrillApp {
             recovery: &mut self.recovery,
             sounds: &mut self.sounds,
             assistant: &mut self.assistant,
+            keyboard: &mut self.keyboard,
         }
     }
 
@@ -399,7 +405,7 @@ impl TrillApp {
         // before this runs, and must not then be read as a shortcut: the
         // field that just lost the keyboard still has to see it.
         let typing = ctx.text_edit_focused() || self.was_typing;
-        let mut commands = shortcuts::read(ctx, typing, selection);
+        let mut commands = shortcuts::read(ctx, typing, selection, self.keyboard.is_on());
         if state.shortcuts_open {
             commands.retain(|command| matches!(command, Command::ShowShortcuts | Command::Escape));
         }
@@ -534,6 +540,9 @@ impl TrillApp {
         // The sound browser's keys come first: while its list is being
         // worked in, Space and the letters are its own.
         let typing = ctx.text_edit_focused() || self.was_typing;
+        // Before even those, the computer keyboard's: a note leaves for
+        // the engine before anything else in the frame is looked at.
+        keyboard::keys(&ctx, &mut self.cx(), typing);
         browser::keys(&ctx, &mut self.cx(), typing);
         let commands = self.read_commands(&ctx);
         let open_editor = self.options.open_editor.take();
@@ -584,7 +593,9 @@ impl TrillApp {
         // The detail panel may take most of the window, but never so much
         // that the arrangement above it disappears.
         let between_bars = ui.available_height();
-        let tallest = (between_bars - MIN_ARRANGEMENT_HEIGHT).clamp(detail::MIN_HEIGHT, detail::MAX_HEIGHT);
+        let keys_strip = keyboard::height(&cx);
+        let tallest = (between_bars - MIN_ARRANGEMENT_HEIGHT - keys_strip.unwrap_or(0.0))
+            .clamp(detail::MIN_HEIGHT, detail::MAX_HEIGHT);
         egui::Panel::bottom("detail")
             .resizable(true)
             .default_size(detail::DEFAULT_HEIGHT.min(tallest))
@@ -592,6 +603,15 @@ impl TrillApp {
             .show_separator_line(false)
             .frame(bare)
             .show(ui, |ui| detail::show(ui, &mut cx));
+        // While the computer keyboard is on, what it plays is shown in a
+        // strip between the song and the detail panel.
+        if let Some(height) = keys_strip {
+            egui::Panel::bottom("computer-keyboard")
+                .exact_size(height)
+                .show_separator_line(false)
+                .frame(bare)
+                .show(ui, |ui| keyboard::show(ui, &mut cx));
+        }
         egui::CentralPanel::no_frame().show(ui, |ui| arrangement::show(ui, &mut cx));
 
         dragging::end(&ctx, &mut cx);
@@ -600,6 +620,9 @@ impl TrillApp {
         shortcuts::window(&ctx, &mut cx);
         let corner = ctx.content_rect().right_bottom() - egui::vec2(12.0, status_bar::HEIGHT + 10.0);
         cx.state.toasts.show(&ctx, cx.theme, corner);
+        // What the views changed (the selection, who has the keyboard)
+        // stops the notes it must before the frame is over.
+        keyboard::settle(&ctx, &mut cx);
 
         // The status bar is laid out before the views that ask for hints,
         // so a new hint is shown by the frame after this one.
@@ -694,6 +717,16 @@ impl TrillApp {
     pub fn assistant_mut(&mut self) -> &mut Assistant {
         &mut self.assistant
     }
+
+    #[cfg(test)]
+    pub fn keyboard(&self) -> &Keyboard {
+        &self.keyboard
+    }
+
+    #[cfg(test)]
+    pub fn keyboard_mut(&mut self) -> &mut Keyboard {
+        &mut self.keyboard
+    }
 }
 
 impl eframe::App for TrillApp {
@@ -708,17 +741,24 @@ impl eframe::App for TrillApp {
     }
 
     /// What the browser shows is written down on the way out, if it
-    /// changed since it last was.
+    /// changed since it last was; and no note typed on the computer
+    /// keyboard is left without its end.
     fn on_exit(&mut self) {
         self.remember_browser(true);
+        self.keyboard.close(&self.session);
     }
 
     /// A screenshot run sees no pointer, so the picture does not depend on
     /// where the mouse happened to be: nothing in it is hovered.
+    ///
+    /// The computer keyboard hears here that the window is no longer the
+    /// one typed into: this runs while the window is hidden, too, when no
+    /// frame does.
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         if self.options.screenshot.is_some() {
             raw_input.events.retain(|event| !is_pointer_event(event));
         }
+        self.keyboard.window(raw_input, &self.session);
     }
 }
 
@@ -828,6 +868,7 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
         Command::ToggleBlade => toggle_tool(cx, Tool::Blade),
         Command::ToggleBrowser => cx.state.browser.open = !cx.state.browser.open,
         Command::ToggleAssistant => cx.assistant.toggle(),
+        Command::ToggleKeyboard => cx.keyboard.toggle(cx.session),
         Command::ShowShortcuts => cx.state.shortcuts_open = !cx.state.shortcuts_open,
     }
 }
