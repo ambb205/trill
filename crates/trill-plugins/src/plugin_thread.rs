@@ -10,6 +10,7 @@
 use crate::clap::ClapThread;
 use crate::main_thread::{CallError, MainThread, SharedMainThread, ThreadState};
 use crate::vst3::Vst3Thread;
+use std::path::Path;
 use std::time::Duration;
 
 /// The state of the plugin main thread.
@@ -40,6 +41,25 @@ static PLUGIN_THREAD: SharedMainThread<PluginThread> = SharedMainThread::new();
 /// not running. Fails only if the operating system cannot start a thread.
 pub(crate) fn plugin_thread() -> std::io::Result<MainThread<PluginThread>> {
     PLUGIN_THREAD.get("plugin-main")
+}
+
+/// Keeps the plugin library at `path`, which the caller has just loaded,
+/// mapped into the process for good.
+///
+/// Plugins start threads of their own, for their editors above all
+/// (timers, graphics, embedded web views), and do not all stop them before
+/// they report being shut down. Unloading a library takes the code away
+/// from under such a thread, and the process with it: seen as a crash a
+/// moment after the last plugin had been let go, once editors had been
+/// open. A plugin is still shut down in full when the host is done with
+/// it; only its code stays where it is.
+pub(crate) fn keep_loaded(path: &Path) {
+    // SAFETY: the library is loaded already, so loading it again runs none
+    // of its code. It only adds a reference, which is never given back.
+    match unsafe { libloading::Library::new(path) } {
+        Ok(library) => std::mem::forget(library),
+        Err(error) => log::debug!("cannot keep '{}' loaded: {error}", path.display()),
+    }
 }
 
 /// Longest a plugin may take to load, restore its state and activate.

@@ -9,6 +9,7 @@ use super::host::{AudioContext, HostMainThread, HostShared, TrillHost};
 use crate::editor::{EditorStatus, HostedEditor, Placement};
 use crate::exclusive::Exclusive;
 use crate::main_thread::ThreadState;
+use crate::plugin_thread::keep_loaded;
 use clack_extensions::audio_ports::{AudioPortInfoBuffer, PluginAudioPorts};
 use clack_extensions::gui::PluginGui;
 use clack_extensions::latency::PluginLatency;
@@ -274,6 +275,7 @@ impl ClapThread {
         // far enough to be listed.
         let entry =
             unsafe { PluginEntry::load(path) }.map_err(|error| format!("cannot load '{}': {error}", path.display()))?;
+        keep_loaded(path);
         self.entries.insert(path.to_path_buf(), entry.clone());
         Ok(entry)
     }
