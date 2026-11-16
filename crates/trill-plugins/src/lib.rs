@@ -80,5 +80,5 @@ pub mod vst3;
 pub use clap::{CLAP_SCHEME, ClapConfig, ClapFactory};
 pub use plugin_host::PluginHost;
 pub use scan::{PluginRecord, ScanFailure, ScanMode, Scanner};
-pub use vendor::VendorPlaces;
+pub use vendor::{VendorPlaces, describe_state, split_state};
 pub use vst3::{VST3_SCHEME, Vst3Config, Vst3Factory};

@@ -36,6 +36,7 @@ pub(crate) mod child;
 mod juce;
 #[cfg(test)]
 mod loading_tests;
+mod look;
 mod places;
 pub(crate) mod serum;
 pub(crate) mod superior;
@@ -44,6 +45,7 @@ mod xml;
 
 pub use child::VENDOR_PRESET_ARGUMENT;
 pub(crate) use child::run_builder;
+pub use look::{describe_state, split_state};
 pub use places::VendorPlaces;
 
 use crate::presets::Sink;

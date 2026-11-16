@@ -1,6 +1,14 @@
 //! Shows what an installed plugin tells its host about itself: its
-//! channels, its parameters with the text it shows for each value, and
-//! what it does to a stereo signal.
+//! channels, its parameters with the text it shows for each value, what
+//! it does to a stereo signal, and what its state is.
+//!
+//! The last is where reading a vendor's own presets begins. A plugin that
+//! lists no presets still has a state, and its presets are files
+//! somewhere. If the state is text, a document or a container that is
+//! known, and the files are the same kind of thing, a preset can be made
+//! into a state: `--state` says what the state is and writes it out to
+//! look at, `--files` finds the files, and `--preset` shows what the
+//! state becomes when one is loaded.
 //!
 //! ```text
 //! cargo run -p trill-plugins --example inspect -- <device> [words...] [options]
@@ -14,16 +22,24 @@
 //!                     ("Mic=Dynamic 57", "Gain=-6 dB"), and say what it came to
 //! --stereo            play noise that differs left and right through the plugin and
 //!                     say how alike its two outputs are (1.0: the same on both sides)
+//! --preset <preset>   load this preset first (an id, a name, or a category and a name)
+//! --state <folder>    write the plugin's state into this folder, each half in a file
+//!                     of its own, to look at
+//! --files             list the files that look like presets in the places this
+//!                     plugin's vendor would keep them (nothing is opened)
 //! ```
 //!
 //! The scan cache is this program's own, in the temporary folder. No
-//! window is opened.
+//! window is opened, and nothing is written but what `--state` asks for.
 
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 use trill_core::device::{CompositeFactory, DeviceDescriptor, DeviceFactory, DeviceInstance, ProcessInfo};
+use trill_core::presets::PresetLookup;
 use trill_core::{ChainRef, Project, TimeSignature};
-use trill_plugins::{ClapConfig, PluginHost, Scanner, Vst3Config};
+use trill_plugins::{ClapConfig, PluginHost, Scanner, VendorPlaces, Vst3Config, describe_state, split_state};
 
 const SAMPLE_RATE: f64 = 48_000.0;
 const BLOCK: usize = 512;
@@ -36,7 +52,9 @@ struct Options {
     limit: usize,
     set: Vec<(String, String)>,
     stereo: bool,
-    state: Option<std::path::PathBuf>,
+    preset: Option<String>,
+    state: Option<PathBuf>,
+    files: bool,
 }
 
 fn parse(arguments: &[String]) -> Result<Options, String> {
@@ -47,6 +65,8 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         match argument.as_str() {
             "--changed" => options.changed = true,
             "--stereo" => options.stereo = true,
+            "--files" => options.files = true,
+            "--preset" => options.preset = Some(value("--preset")?),
             "--state" => options.state = Some(value("--state")?.into()),
             "--limit" => options.limit = value("--limit")?.parse().map_err(|_| "--limit needs a number")?,
             "--set" => {
@@ -133,6 +153,141 @@ fn rms(samples: &[f32]) -> f64 {
     (samples.iter().map(|sample| f64::from(*sample).powi(2)).sum::<f64>() / samples.len().max(1) as f64).sqrt()
 }
 
+/// How deep a vendor's folder is looked into, and how many of its files
+/// are counted at most.
+const FILES_DEPTH: usize = 7;
+const FILES_COUNTED: usize = 300_000;
+/// Words that are in too many vendors' and plugins' names to find a
+/// folder by.
+const COMMON_WORDS: [&str; 12] = [
+    "audio",
+    "sound",
+    "sounds",
+    "music",
+    "plugin",
+    "plugins",
+    "records",
+    "studio",
+    "studios",
+    "instruments",
+    "software",
+    "digital",
+];
+
+/// Whether a file looks like one that holds presets: by what it is
+/// called, or by the folder of the vendor's it is in (`below` is its
+/// path from the vendor's folder down).
+fn preset_like(below: &Path) -> bool {
+    let has = |text: &str| ["preset", "patch", "bank"].iter().any(|word| text.contains(word));
+    let lowered =
+        |part: Option<&std::ffi::OsStr>| part.map(|part| part.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let (extension, name) = (lowered(below.extension()), lowered(below.file_name()));
+    let known = ["fxp", "fxb", "vstpreset", "aupreset", "nmsv", "h2p", "xml", "json", "ini", ""];
+    let folders = lowered(below.parent().map(Path::as_os_str));
+    has(&name) || extension.ends_with("state") || (has(&folders) && known.contains(&extension.as_str()))
+}
+
+/// Counts the files below `folder` that look like presets, by the folder
+/// of the vendor's they are in and their extension.
+fn count_files(
+    vendor: &Path,
+    folder: &Path,
+    depth: usize,
+    counted: &mut usize,
+    found: &mut BTreeMap<(PathBuf, String), (usize, String)>,
+) {
+    let Ok(entries) = std::fs::read_dir(folder) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        *counted += 1;
+        if *counted > FILES_COUNTED {
+            return;
+        }
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_dir() && depth < FILES_DEPTH => {
+                count_files(vendor, &path, depth + 1, counted, found);
+            }
+            Ok(metadata) if metadata.is_file() && preset_like(path.strip_prefix(vendor).unwrap_or(&path)) => {
+                let extension =
+                    path.extension().map(|extension| extension.to_string_lossy().to_lowercase()).unwrap_or_default();
+                let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                let entry = found.entry((folder.to_path_buf(), extension)).or_insert((0, name));
+                entry.0 += 1;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Lists what looks like the presets of a plugin, in the places a vendor
+/// keeps such things: the folders named after the vendor or the plugin in
+/// the user's documents, the machine's shared data, the programs' folders
+/// and the user's application data.
+fn list_files(descriptor: &DeviceDescriptor) {
+    let places = VendorPlaces::system();
+    let mut roots: Vec<PathBuf> =
+        places.documents.iter().chain(&places.shared_data).chain(&places.programs).cloned().collect();
+    for name in ["APPDATA", "LOCALAPPDATA", "PUBLIC", "CommonProgramFiles"] {
+        roots.extend(std::env::var_os(name).map(PathBuf::from));
+    }
+    roots.extend(std::env::var_os("PUBLIC").map(|public| PathBuf::from(public).join("Documents")));
+    let words: Vec<String> = format!("{} {}", descriptor.vendor, descriptor.name)
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::to_lowercase)
+        .filter(|word| word.len() >= 4 && !COMMON_WORDS.contains(&word.as_str()))
+        .collect();
+    let names = [descriptor.vendor.to_lowercase(), descriptor.name.to_lowercase()];
+    let mut found = BTreeMap::new();
+    let mut looked = Vec::new();
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(&root) else { continue };
+        for folder in entries.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()) {
+            let name = folder.file_name().map(|name| name.to_string_lossy().to_lowercase()).unwrap_or_default();
+            if names.contains(&name) || words.iter().any(|word| name.contains(word.as_str())) {
+                let mut counted = 0;
+                count_files(&folder, &folder, 0, &mut counted, &mut found);
+                looked.push(folder);
+            }
+        }
+    }
+    println!("files: looked in {} folders named after '{}' or '{}'", looked.len(), descriptor.vendor, descriptor.name);
+    for folder in &looked {
+        println!("  {}", folder.display());
+    }
+    if found.is_empty() {
+        println!("  nothing there looks like presets");
+    }
+    // The fullest folders first: presets come by the dozen.
+    let mut listed: Vec<_> = found.into_iter().collect();
+    listed.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+    for ((folder, extension), (count, example)) in listed.into_iter().take(24) {
+        let kind = if extension.is_empty() { "without an extension".to_string() } else { format!(".{extension}") };
+        println!("  {count:>5} {kind:<22} in {}  (such as '{example}')", folder.display());
+    }
+}
+
+/// Says what a state is, and writes it into `folder` if one is given.
+fn show_state(state: Option<Vec<u8>>, folder: Option<&Path>) -> Result<(), String> {
+    let Some(state) = state else {
+        println!("state: the plugin gives none");
+        return Ok(());
+    };
+    let halves = match split_state(&state) {
+        Some((component, controller)) => vec![("component", component), ("controller", controller)],
+        None => vec![("state", state)],
+    };
+    for (name, bytes) in &halves {
+        println!("{name} state: {} bytes: {}", bytes.len(), describe_state(bytes));
+        if let (Some(folder), false) = (folder, bytes.is_empty()) {
+            std::fs::create_dir_all(folder).map_err(|error| error.to_string())?;
+            let file = folder.join(format!("{name}.bin"));
+            std::fs::write(&file, bytes).map_err(|error| error.to_string())?;
+            println!("  written to {}", file.display());
+        }
+    }
+    Ok(())
+}
+
 fn run(options: &Options) -> Result<(), String> {
     let cache = std::env::temp_dir().join("trill-presets-example");
     let host = PluginHost::with_configs(
@@ -150,6 +305,9 @@ fn run(options: &Options) -> Result<(), String> {
     }
     let descriptor = find(&descriptors, &options.device)?;
     println!("plugin: {} by {} ({})", descriptor.name, descriptor.vendor, descriptor.uri);
+    if options.files {
+        list_files(descriptor);
+    }
 
     let mut project = Project::new("inspect example");
     let id = project
@@ -159,6 +317,25 @@ fn run(options: &Options) -> Result<(), String> {
     let mut instance = factory.create(device, SAMPLE_RATE, BLOCK).map_err(|error| error.to_string())?;
     let params = instance.params.clone();
     let controller = instance.controller.as_mut().ok_or("the plugin has no controller")?;
+    if let Some(wanted) = &options.preset {
+        let list = factory.presets_within(&descriptor.uri, Duration::from_secs(300)).unwrap_or_default();
+        let preset = match list.find(wanted) {
+            PresetLookup::Found(preset) => preset.clone(),
+            PresetLookup::Ambiguous(found) => {
+                let paths: Vec<String> = found.iter().map(|preset| preset.path()).collect();
+                return Err(format!("'{wanted}' is one of several presets: {}", paths.join(", ")));
+            }
+            PresetLookup::Missing { .. } => {
+                return Err(format!("the plugin has no preset '{wanted}' among its {}", list.len()));
+            }
+        };
+        controller.load_preset(&preset).map_err(|error| format!("'{}' was not loaded: {error}", preset.path()))?;
+        println!("preset: loaded '{}'", preset.path());
+        if let Some(note) = controller.take_preset_note() {
+            println!("  {note}");
+        }
+    }
+    show_state(controller.save_state(), options.state.as_deref())?;
     match controller.channels() {
         Some(layout) => println!("channels: {}", layout.describe()),
         None => println!("channels: not said"),
@@ -198,18 +375,6 @@ fn run(options: &Options) -> Result<(), String> {
             text(2),
             if moved(index) { "  *" } else { "" }
         );
-    }
-
-    if let Some(folder) = &options.state {
-        std::fs::create_dir_all(folder).map_err(|error| error.to_string())?;
-        match controller.save_state() {
-            Some(state) => {
-                let file = folder.join("state.bin");
-                std::fs::write(&file, &state).map_err(|error| error.to_string())?;
-                println!("state: {} bytes, written to {}", state.len(), file.display());
-            }
-            None => println!("state: the plugin gives none"),
-        }
     }
 
     for (name, text) in &options.set {

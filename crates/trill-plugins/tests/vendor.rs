@@ -133,7 +133,8 @@ fn opened(container: &[u8]) -> (serde_json::Value, Vec<u8>) {
 fn the_scanner_process_lists_a_vendors_presets_and_builds_the_state_of_one() {
     let folder = scratch("scanner");
     let _ = std::fs::remove_dir_all(&folder);
-    let presets = folder.join("documents").join("Xfer").join("Serum 2 Presets").join("Presets").join("Factory").join("Pad");
+    let presets =
+        folder.join("documents").join("Xfer").join("Serum 2 Presets").join("Presets").join("Factory").join("Pad");
     std::fs::create_dir_all(&presets).unwrap();
     let file = presets.join("PD - Made Here.SerumPreset");
     std::fs::write(&file, serum_preset("PD - Made Here")).unwrap();
@@ -148,12 +149,19 @@ fn the_scanner_process_lists_a_vendors_presets_and_builds_the_state_of_one() {
     let about = serde_json::json!({ "name": "Serum 2", "vendor": "Xfer Records", "places": { "documents": [folder.join("documents")], "shared_data": [], "programs": [] } });
     let (code, printed) = run(&["--presets", "vst3", "no-such-plugin.vst3", class, &about.to_string()]);
     let lines: Vec<serde_json::Value> = printed.lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
-    let listed: Vec<&serde_json::Value> = lines.iter().filter_map(|line| line["presets"].as_array()).flatten().collect();
+    let listed: Vec<&serde_json::Value> =
+        lines.iter().filter_map(|line| line["presets"].as_array()).flatten().collect();
     assert_eq!(listed.len(), 1, "{printed}");
-    assert_eq!((listed[0]["name"].as_str(), listed[0]["category"].as_str()), (Some("PD - Made Here"), Some("Factory/Pad")));
+    assert_eq!(
+        (listed[0]["name"].as_str(), listed[0]["category"].as_str()),
+        (Some("PD - Made Here"), Some("Factory/Pad"))
+    );
     assert_eq!((listed[0]["author"].as_str(), listed[0]["tags"][0].as_str()), (Some("Somebody"), Some("pad")));
     assert!(listed[0]["locator"].as_str().unwrap().starts_with("vendor-serum2\n"), "{printed}");
-    assert!(lines.iter().any(|line| line["watch"][0]["path"].as_str().is_some_and(|path| path.ends_with("Presets"))), "{printed}");
+    assert!(
+        lines.iter().any(|line| line["watch"][0]["path"].as_str().is_some_and(|path| path.ends_with("Presets"))),
+        "{printed}"
+    );
     assert_eq!(code, Some(1), "the plugin could not be loaded: {printed}");
     assert!(lines.last().unwrap()["failed"].is_string(), "{printed}");
     // Told of no places, it looks nowhere.
@@ -251,7 +259,8 @@ fn session(factory: &Vst3Factory) -> Session {
 /// waited for until it is ready, and returns what each came to.
 fn probe(session: &mut Session, target: &ProbeTarget, pitches: &[u8]) -> Vec<Heard> {
     let job = session.probe_job(target).unwrap_or_else(|error| panic!("{target:?}: {error}"));
-    let notes: Vec<ProbeNote> = pitches.iter().map(|pitch| ProbeNote { pitch: *pitch, velocity: 100, with: Vec::new() }).collect();
+    let notes: Vec<ProbeNote> =
+        pitches.iter().map(|pitch| ProbeNote { pitch: *pitch, velocity: 100, with: Vec::new() }).collect();
     let options = ProbeOptions { patience: Duration::from_secs(90), ..ProbeOptions::default() };
     let started = Instant::now();
     let probed = job.run(&notes, &options).unwrap_or_else(|error| panic!("{target:?}: {error}"));
@@ -262,6 +271,25 @@ fn probe(session: &mut Session, target: &ProbeTarget, pitches: &[u8]) -> Vec<Hea
         started.elapsed().as_secs_f64()
     );
     probed.heard
+}
+
+/// [`probe`], again and again until the same keys sound twice running: a
+/// sampler's copy reads its samples anew, one drum after another, and a
+/// probe that comes early hears the drums that have arrived.
+fn probe_until_steady(session: &mut Session, target: &ProbeTarget, pitches: &[u8]) -> Vec<Heard> {
+    let sounding = |heard: &[Heard]| heard.iter().filter(|note| note.sounded).count();
+    let mut heard = probe(session, target, pitches);
+    for _ in 0..8 {
+        std::thread::sleep(Duration::from_secs(2));
+        let again = probe(session, target, pitches);
+        let steady = sounding(&again) == sounding(&heard);
+        heard = again;
+        if steady {
+            break;
+        }
+        eprintln!("  ({} of {} keys so far)", sounding(&heard), pitches.len());
+    }
+    heard
 }
 
 fn said(label: &str, heard: &[Heard]) {
@@ -351,28 +379,41 @@ fn superior_drummers_kits_are_listed_and_a_loaded_one_is_heard() {
     let mut session = session(&factory);
     // Kick, snare, closed hat, a tom, the ride, and four of the cymbals.
     let keys = [36, 38, 42, 48, 51, 49, 57, 55, 52];
-    let target = |preset: Option<&str>| ProbeTarget::Device { uri: SUPERIOR.into(), preset: preset.map(str::to_string) };
-    let default = probe(&mut session, &target(None), &keys);
+    let target =
+        |preset: Option<&str>| ProbeTarget::Device { uri: SUPERIOR.into(), preset: preset.map(str::to_string) };
+    let default = probe_until_steady(&mut session, &target(None), &keys);
     said("as it comes", &default);
     // A plain kit, and one that stacks a second drum on the kick or the
-    // snare: such kits came out with their crash cymbals 25 to 30 dB low
-    // in another host, for a reason that was never found.
-    let (plain, stacked) = ("Gretsch Default", "Big Band Leedy");
-    let heard = probe(&mut session, &target(Some(plain)), &keys);
-    said(plain, &heard);
-    heard_to_differ(plain, &default, &heard);
-    let layered = probe(&mut session, &target(Some(stacked)), &keys);
-    said(stacked, &layered);
-    heard_to_differ(stacked, &default, &layered);
+    // snare, as half of the kits do: in another host such kits were
+    // thought to lose their cymbals. They do not: the cymbals of the two
+    // are as loud as each other.
     let cymbals = |heard: &[Heard]| heard[5..].iter().map(|note| note.peak_db).fold(f32::MIN, f32::max);
-    eprintln!("  loudest cymbal: {:.1} dB in the plain kit, {:.1} dB in the stacked one", cymbals(&heard), cymbals(&layered));
+    let mut loudest = Vec::new();
+    for kit in ["Black Metal", "Hard Rock"] {
+        let heard = probe_until_steady(&mut session, &target(Some(kit)), &keys);
+        said(kit, &heard);
+        heard_to_differ(kit, &default, &heard);
+        assert!(heard.iter().all(|note| note.sounded), "{kit}: every drum of the kit is there");
+        loudest.push(cymbals(&heard));
+    }
+    eprintln!("  loudest cymbal: {:.1} dB in the plain kit, {:.1} dB in the stacked one", loudest[0], loudest[1]);
+    assert!((loudest[0] - loudest[1]).abs() < 12.0, "{loudest:?}");
+    // The one kit found that does come out with quiet cymbals when they
+    // are hit alone ("California Punk", which it shares its mixer with,
+    // was the other host's example). The plugin holds the mixer exactly
+    // as the preset has it; whether its own browser makes the kit sound
+    // otherwise is not known. Said, not judged.
+    let outlier = probe_until_steady(&mut session, &target(Some("Djent Style")), &keys);
+    said("Djent Style", &outlier);
+    eprintln!("  loudest cymbal of 'Djent Style': {:.1} dB", cymbals(&outlier));
 }
 
 #[test]
 #[ignore = "needs a Neural DSP Archetype and its presets; run with `cargo test -p trill-plugins --test vendor -- --include-ignored --nocapture --test-threads 1`"]
 fn an_archetypes_presets_are_listed_and_a_loaded_one_is_heard() {
     let factory = vst3();
-    let amplifiers: Vec<_> = factory.descriptors().into_iter().filter(|descriptor| descriptor.uri.starts_with(NEURAL)).collect();
+    let amplifiers: Vec<_> =
+        factory.descriptors().into_iter().filter(|descriptor| descriptor.uri.starts_with(NEURAL)).collect();
     if amplifiers.is_empty() {
         eprintln!("skipping: no Neural DSP plugin is installed");
     }
