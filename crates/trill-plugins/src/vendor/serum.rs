@@ -265,7 +265,7 @@ mod tests {
             assert_eq!(xfer::field(&container.header, "product"), "Serum2");
             assert_eq!(xfer::field(&container.header, "productVersion"), "2.0.12");
             assert_eq!(container.header["version"], serde_json::json!(4.0));
-            assert_eq!(container.header.contains_key("fileType"), false);
+            assert!(!container.header.contains_key("fileType"));
             assert_eq!(container.header.contains_key("presetName"), half == "controller");
             // The settings are the file's, byte for byte, without what it
             // says of itself as a file and with the half they are for.

@@ -312,7 +312,7 @@ fn list_files(descriptor: &DeviceDescriptor) {
     }
     // The most numerous first: presets come by the dozen.
     let mut listed: Vec<_> = kinds.into_iter().collect();
-    listed.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+    listed.sort_by_key(|kind| std::cmp::Reverse(kind.1.0));
     for ((_, extension), (count, folders, below, example)) in listed.into_iter().take(24) {
         let kind = if extension.is_empty() { "without an extension".to_string() } else { format!(".{extension}") };
         let spread = if folders == 1 { "in".to_string() } else { format!("in {folders} folders under") };
