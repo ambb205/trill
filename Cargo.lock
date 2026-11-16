@@ -4839,11 +4839,13 @@ dependencies = [
  "tokio",
  "tokio-util",
  "trill-core",
+ "trill-dsp",
  "trill-engine",
  "trill-library",
  "trill-media",
  "trill-plugins",
  "trill-runtime",
+ "trill-theory",
 ]
 
 [[package]]
@@ -4897,6 +4899,13 @@ dependencies = [
  "trill-library",
  "trill-media",
  "trill-plugins",
+]
+
+[[package]]
+name = "trill-theory"
+version = "0.1.0"
+dependencies = [
+ "trill-core",
 ]
 
 [[package]]

@@ -78,9 +78,9 @@ Musical guidance
 - Give sections contrast: add and remove parts, automate filters and volume, change the drum pattern.
 - Every edit can be reversed with history (undo/redo).";
 
-type Reply = Result<Value, String>;
+pub(crate) type Reply = Result<Value, String>;
 
-fn finish(reply: Reply) -> CallToolResult {
+pub(crate) fn finish(reply: Reply) -> CallToolResult {
     match reply {
         Ok(value) => CallToolResult::success(vec![ContentBlock::text(value.to_string())]),
         Err(message) => CallToolResult::error(vec![ContentBlock::text(message)]),
@@ -89,7 +89,7 @@ fn finish(reply: Reply) -> CallToolResult {
 
 /// Turns an error into a message that says what to do next: a missing id
 /// comes back with the ids that do exist.
-fn explain(project: &Project, error: impl Into<SessionError>) -> String {
+pub(crate) fn explain(project: &Project, error: impl Into<SessionError>) -> String {
     let error = error.into();
     let list = |items: Vec<String>, what: &str| {
         if items.is_empty() {
@@ -120,7 +120,10 @@ fn explain(project: &Project, error: impl Into<SessionError>) -> String {
 }
 
 /// Runs an edit and explains its failure against the current project.
-fn edit<T>(session: &mut Session, change: impl FnOnce(&mut Project) -> Result<T, EditError>) -> Result<T, String> {
+pub(crate) fn edit<T>(
+    session: &mut Session,
+    change: impl FnOnce(&mut Project) -> Result<T, EditError>,
+) -> Result<T, String> {
     session.edit(change).map_err(|error| explain(session.project(), error))
 }
 
@@ -195,13 +198,14 @@ fn render_reply(report: &RenderReport) -> Value {
 pub struct TrillServer {
     runtime: Arc<Runtime>,
     /// The runtime's session, which most tools need and nothing else.
-    session: SharedSession,
+    pub(crate) session: SharedSession,
     tool_router: ToolRouter<Self>,
 }
 
 impl TrillServer {
     pub fn new(runtime: Arc<Runtime>) -> Self {
-        Self { session: runtime.session.clone(), runtime, tool_router: Self::tool_router() }
+        let session = runtime.session.clone();
+        Self { session, runtime, tool_router: Self::tool_router() + Self::music_router() }
     }
 
     /// What a `library` reply always carries: the folders, how much is in
@@ -1471,6 +1475,6 @@ impl ServerHandler for TrillServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
-            .with_instructions(INSTRUCTIONS)
+            .with_instructions(format!("{INSTRUCTIONS}\n\n{}", crate::music::INSTRUCTIONS))
     }
 }
