@@ -246,6 +246,10 @@ impl<'a> Stand<'a> {
             done += BLOCK;
         }
         self.reset();
+        // Some devices act on a reset with their next block (a VST3 plugin
+        // is told to be silent then): that block is this one, not the
+        // first of what comes after.
+        self.run(&[], BLOCK as f64 / self.info.sample_rate);
     }
 
     /// Resets every device: voices silenced, delay lines cleared.

@@ -476,9 +476,7 @@ fn report_json(
             })
             .collect();
     }
-    if !report.problems.is_empty() {
-        out["problems"] = json!(report.problems);
-    }
+    out["problems"] = json!(report.problems);
     let mut all = observations(report, project);
     all.append(&mut notes);
     out["notes"] = json!(all);

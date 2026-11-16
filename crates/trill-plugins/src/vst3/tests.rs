@@ -808,8 +808,8 @@ fn a_plugin_made_for_a_render_is_set_up_and_processed_offline() {
     let mut played = create(&factory, &device(kind::IMPULSE));
     block(&mut played, BLOCK, &[], 0.0);
     let seen = self::seen(&mut played);
-    assert_eq!(seen.setup.map(|(.., mode, _)| mode), Some(kRealtime as i32));
-    assert_eq!(seen.block_mode, Some(kRealtime as i32));
+    assert_eq!(seen.setup.map(|(.., mode, _)| mode), Some(kRealtime));
+    assert_eq!(seen.block_mode, Some(kRealtime));
 
     // Made for a render: told so when it is set up, and with every block,
     // and again when it is set up for another sample rate.
@@ -819,12 +819,12 @@ fn a_plugin_made_for_a_render_is_set_up_and_processed_offline() {
     let (left, _) = block(&mut rendered, BLOCK, &[on(3, 1.0)], 0.0);
     assert_eq!(left[3], 1.0, "it plays as it would played live");
     let seen = self::seen(&mut rendered);
-    assert_eq!(seen.setup.map(|(.., mode, _)| mode), Some(kOffline as i32));
-    assert_eq!(seen.block_mode, Some(kOffline as i32));
+    assert_eq!(seen.setup.map(|(.., mode, _)| mode), Some(kOffline));
+    assert_eq!(seen.block_mode, Some(kOffline));
     rendered.processor.prepare(44_100.0, 32);
     block(&mut rendered, 32, &[], 0.0);
     let seen = self::seen(&mut rendered);
-    assert_eq!(seen.setup, Some((44_100.0, 32, kOffline as i32, 0)));
+    assert_eq!(seen.setup, Some((44_100.0, 32, kOffline, 0)));
 }
 
 // ---- through the engine --------------------------------------------------
