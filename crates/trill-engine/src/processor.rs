@@ -17,8 +17,37 @@ const EVENT_CAPACITY: usize = MAX_EVENTS_PER_BLOCK;
 /// Leave room for the note-offs that follow a burst of note-ons.
 const NOTE_ON_LIMIT: usize = EVENT_CAPACITY - 512;
 /// Live events held for one callback. A player with ten fingers, two feet
-/// and a pitch wheel does not come near it.
+/// and a pitch wheel does not come near it; a controller that floods can.
+/// So the room is not given out evenly: see [`Processor::push_live`].
 const LIVE_CAPACITY: usize = 1024;
+/// From this many waiting on, the newest value of a wheel or a controller
+/// takes the place of the one already waiting instead of joining the line.
+const LIVE_THIN_AT: usize = 512;
+/// The last of the room is kept for what ends notes: keys coming up, the
+/// pedal, "all notes off". New notes and controllers stop short of it.
+const LIVE_RESERVE: usize = 128;
+
+/// What became of a live event handed to the processor.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Taken {
+    /// It will be played (or, for a controller in a flood, its value will).
+    Kept,
+    /// It was a new note and there was no room: it is not played, and
+    /// nothing hangs for want of it.
+    Skipped,
+    /// It could not be kept and may have been the end of a note. The
+    /// caller must let go of everything.
+    Lost,
+}
+
+/// Whether two events are the same wheel or the same controller.
+fn same_control(a: EventKind, b: EventKind) -> bool {
+    match (a, b) {
+        (EventKind::PitchBend { .. }, EventKind::PitchBend { .. }) => true,
+        (EventKind::Control { controller: one, .. }, EventKind::Control { controller: other, .. }) => one == other,
+        _ => false,
+    }
+}
 /// Fade applied at the edges of audio clips to avoid clicks.
 const CLIP_FADE_SECONDS: f64 = 0.003;
 /// Length of the cross-fade from a stand-in to the audio that replaces it.
@@ -282,22 +311,54 @@ impl Processor {
 
     /// Plays `kind` on `track`, `offset` frames into the next call to
     /// [`Processor::process`]. It was played `early` frames before that
-    /// frame. Returns `false` if it was dropped for want of room.
-    pub(crate) fn live_on(&mut self, track: TrackId, kind: EventKind, offset: u32, early: f64) -> bool {
+    /// frame.
+    pub(crate) fn live_on(&mut self, track: TrackId, kind: EventKind, offset: u32, early: f64) -> Taken {
         self.push_live(LiveEvent { target: LiveTarget::Track(track), kind, offset, early })
     }
 
     /// Like [`Processor::live_on`], on the tracks a keyboard plays.
-    pub(crate) fn live_routed(&mut self, kind: EventKind, offset: u32, early: f64) -> bool {
+    pub(crate) fn live_routed(&mut self, kind: EventKind, offset: u32, early: f64) -> Taken {
         self.push_live(LiveEvent { target: LiveTarget::Routed, kind, offset, early })
     }
 
-    fn push_live(&mut self, event: LiveEvent) -> bool {
-        let room = self.live.len() < self.live.capacity();
-        if room {
-            self.live.push(event);
+    /// Takes a live event for the next call to `process`. There is room
+    /// for [`LIVE_CAPACITY`] between two calls, and when it runs short it
+    /// is what would leave a note hanging that is kept longest:
+    ///
+    /// * a wheel or a controller is thinned from [`LIVE_THIN_AT`] on: its
+    ///   newest value replaces the one waiting, so where it ends up is
+    ///   never lost, only some of the way there;
+    /// * new notes and controllers stop [`LIVE_RESERVE`] short of the end;
+    /// * what ends notes is taken to the very last slot.
+    fn push_live(&mut self, event: LiveEvent) -> Taken {
+        let waiting = self.live.len();
+        let capacity = self.live.capacity();
+        let ends_notes =
+            matches!(event.kind, EventKind::NoteOff { .. } | EventKind::AllNotesOff) || event.kind.sustain().is_some();
+        if ends_notes {
+            if waiting == capacity {
+                return Taken::Lost;
+            }
+        } else if let EventKind::NoteOn { .. } = event.kind {
+            if waiting + LIVE_RESERVE >= capacity {
+                return Taken::Skipped;
+            }
+        } else {
+            if waiting >= LIVE_THIN_AT {
+                let same = |held: &&mut LiveEvent| held.target == event.target && same_control(held.kind, event.kind);
+                if let Some(held) = self.live.iter_mut().rev().find(same) {
+                    held.kind = event.kind;
+                    held.offset = held.offset.max(event.offset);
+                    held.early = event.early;
+                    return Taken::Kept;
+                }
+            }
+            if waiting + LIVE_RESERVE >= capacity {
+                return Taken::Lost;
+            }
         }
-        room
+        self.live.push(event);
+        Taken::Kept
     }
 
     /// Sets the tracks a keyboard plays. A track that no longer is one lets
@@ -514,7 +575,14 @@ impl Processor {
                         LiveTarget::Routed => self.live_targets.contains(track.id),
                         LiveTarget::Track(id) => id == track.id,
                     };
-                    if !plays || events.len() >= EVENT_CAPACITY {
+                    if !plays {
+                        continue;
+                    }
+                    if events.len() >= EVENT_CAPACITY {
+                        // Cannot happen: fewer live events are held than a
+                        // device takes in a block. If it ever does, the
+                        // event may have been the end of a note.
+                        self.flush = Flush::Everything;
                         continue;
                     }
                     // A key the keyboard does not hold here has nothing to

@@ -456,6 +456,8 @@ mod tests {
     use super::*;
 
     const TRACK: TrackId = TrackId(1);
+    /// A note as written: pitch, start and length on the timeline.
+    type Written = (u8, f64, f64);
 
     fn on(pitch: u8, beat: f64) -> Captured {
         on_in(pitch, beat, 0)
@@ -495,7 +497,7 @@ mod tests {
 
     /// The notes of the one clip on the track as `(pitch, start, length)`
     /// on the timeline, and the clip's span.
-    fn written(project: &Project) -> (Vec<(u8, f64, f64)>, (f64, f64)) {
+    fn written(project: &Project) -> (Vec<Written>, (f64, f64)) {
         let clips = &project.track(TRACK).unwrap().clips;
         assert_eq!(clips.len(), 1, "one clip");
         let notes = clips[0].timeline_notes().iter().map(|note| (note.pitch, note.start, note.length)).collect();

@@ -156,8 +156,71 @@ impl Session {
             self.engine.send(Message::Stop);
             self.finish_take(true);
         }
+        // Nothing may sound on into the new stream: keys that come up
+        // while there is none are not heard to. A stream that is still
+        // running takes this now; one that is gone leaves it for the first
+        // buffer of the next.
+        self.release_everything_played();
         self.absorb_editor_edits();
         self.capture_device_state();
+    }
+
+    /// Lets go of every note that sounds, and of the pedal and the wheel
+    /// where a keyboard left them.
+    fn release_everything_played(&mut self) {
+        self.engine.send(Message::ReleaseLive);
+        self.engine.send(Message::ReleaseEverything);
+    }
+
+    /// How many times live input came faster than the engine could take
+    /// it, and some of it was lost. Each time, every sounding note was let
+    /// go of, so that a key whose coming up was among what was lost cannot
+    /// hang. Zero in any ordinary playing: there is room for 4096 events
+    /// between two audio buffers, and of a flood of wheel or controller
+    /// movements only the newest values are kept.
+    pub fn live_input_lost(&self) -> u32 {
+        self.engine.live_dropped()
+    }
+
+    /// How many new notes were not sounded, because more arrived at once
+    /// than there was room for or because they reached the audio thread
+    /// more than half a second late (the stream was away). Nothing hangs
+    /// for these.
+    pub fn live_notes_skipped(&self) -> u32 {
+        self.engine.live_skipped()
+    }
+
+    /// If messages to the audio thread were lost while it was not taking
+    /// any (the queue holds 1024; the device was stalled or being changed
+    /// for longer than that lasts), tells it again everything it may have
+    /// missed, now that it is back: every note is let go of, the graph is
+    /// compiled from the project, every device gets its parameter values,
+    /// and the metronome and the tracks a keyboard plays are set. What
+    /// was asked of the transport meanwhile (play, stop, seek) is not
+    /// repeated: the user sees where the song is. Part of
+    /// [`Session::housekeeping`].
+    pub(super) fn recover_lost_messages(&mut self) {
+        if !self.engine.take_lost_messages() {
+            return;
+        }
+        log::warn!("the audio thread missed messages while it was away; telling it again");
+        self.release_everything_played();
+        self.compile_and_swap();
+        let mut values = Vec::new();
+        for device in self.project.devices() {
+            let Some(meta) = self.bank.devices.get(&device.id) else { continue };
+            for (index, info) in meta.params.iter().enumerate() {
+                if let Some(value) = device.params.get(&info.id) {
+                    values.push(Message::Param { device: device.id, index, value: *value });
+                }
+            }
+        }
+        for message in values {
+            self.engine.send(message);
+        }
+        self.engine.send(Message::Metronome(self.metronome));
+        self.playing.sent = None;
+        self.send_live_targets();
     }
 
     fn after_audio_change(&mut self, applied: Applied, position: f64) {
@@ -174,10 +237,11 @@ impl Session {
             self.playing.sent = None;
             self.send_live_targets();
         } else {
-            // Keys that came up while there was no stream were not heard
-            // to: nothing may be left sounding.
-            self.engine.send(Message::ReleaseEverything);
+            // Said before the change too, but that may have been one
+            // message too many for a queue nobody was emptying.
+            self.release_everything_played();
         }
+        self.recover_lost_messages();
     }
 
     /// Looks after the audio stream: a device that was lost is replaced by
@@ -440,10 +504,10 @@ impl Session {
 
     fn write_take(&mut self) {
         let Some(mut active) = self.playing.take.take() else { return };
-        if active.take.has_news(&self.project) {
-            if let Err(error) = self.edit(|project| active.take.write(project)) {
-                log::error!("could not write what was recorded: {error}");
-            }
+        if active.take.has_news(&self.project)
+            && let Err(error) = self.edit(|project| active.take.write(project))
+        {
+            log::error!("could not write what was recorded: {error}");
         }
         self.playing.take = Some(active);
     }

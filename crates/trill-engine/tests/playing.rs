@@ -7,9 +7,11 @@ mod rig;
 
 use common::click_times;
 use rig::*;
+use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 use trill_core::device::EventKind;
-use trill_core::{DeviceId, TrackId};
+use trill_core::{DeviceId, Note, TrackId};
 use trill_engine::{RecordState, Session, TransportStatus};
 
 fn instrument(session: &Session, track: TrackId) -> DeviceId {
@@ -426,4 +428,216 @@ fn a_take_survives_what_happens_around_it() {
     assert_eq!((notes[0].0, notes[1].0), (60, 62));
     assert!((notes[1].1 - 2.0).abs() < 1e-6 && notes[1].2 > 0.5, "{notes:?}");
     assert_eq!(rig.session.audio_info().device, None, "no device is left");
+}
+
+/// The keys left down after `events`, as an instrument would have them.
+fn keys_down(events: &[(u64, EventKind)]) -> BTreeSet<u8> {
+    let mut down = BTreeSet::new();
+    for (_, kind) in events {
+        match kind {
+            EventKind::NoteOn { pitch, .. } => {
+                down.insert(*pitch);
+            }
+            EventKind::NoteOff { pitch } => {
+                down.remove(pitch);
+            }
+            EventKind::AllNotesOff => down.clear(),
+            _ => {}
+        }
+    }
+    down
+}
+
+#[test]
+fn a_flood_of_wheel_and_controller_movements_never_costs_a_key_its_release() {
+    let mut rig = Rig::new();
+    let track = rig.probe_track("Keys");
+    rig.session.set_selected_track(Some(track));
+    rig.run(2);
+    // Ten keys are down.
+    for pitch in 40..50 {
+        rig.session.play_live(on(pitch));
+    }
+    rig.run(2);
+    rig.probes.take();
+
+    // In the time of one buffer: thousands of movements of the pitch
+    // wheel, hundreds of the mod wheel, forty more keys going down, every
+    // key coming up, and the wheels coming to rest. Far more than the
+    // engine holds for one buffer.
+    let live = rig.session.live();
+    let now = Rig::ns(rig.now());
+    let mod_wheel = |value: f32| EventKind::Control { controller: 1, value };
+    for step in 0..3_000 {
+        assert!(live.play_at(now, EventKind::PitchBend { value: (step % 100) as f32 / 100.0 }));
+    }
+    for step in 0..600 {
+        assert!(live.play_at(now, mod_wheel((step % 50) as f32 / 50.0)));
+    }
+    for pitch in 60..100 {
+        assert!(live.play_at(now, on(pitch)));
+    }
+    for pitch in (40..50).chain(60..100) {
+        assert!(live.play_at(now, off(pitch)));
+    }
+    assert!(live.play_at(now, EventKind::PitchBend { value: 0.0 }));
+    assert!(live.play_at(now, mod_wheel(0.0)));
+    rig.run(2);
+
+    let told = rig.probes.events();
+    let count = |wanted: fn(&EventKind) -> bool| told.iter().filter(|(_, kind)| wanted(kind)).count();
+    // Every key that came up was heard to, and every new note was played.
+    assert_eq!(count(|kind| matches!(kind, EventKind::NoteOff { .. })), 50, "no key lost its release");
+    assert_eq!(count(|kind| matches!(kind, EventKind::NoteOn { .. })), 40);
+    assert!(keys_down(&told).is_empty());
+    assert_eq!(count(|kind| *kind == EventKind::AllNotesOff), 0, "and nothing had to be cut off to make sure");
+    // The wheels were thinned, and ended where they were left.
+    let bends: Vec<f32> = told
+        .iter()
+        .filter_map(|(_, kind)| match kind {
+            EventKind::PitchBend { value } => Some(*value),
+            _ => None,
+        })
+        .collect();
+    assert!(bends.len() <= 512 && bends.len() >= 100, "{} bends", bends.len());
+    assert_eq!(bends.last(), Some(&0.0), "the wheel is where it was left");
+    let wheel: Vec<&EventKind> =
+        told.iter().map(|(_, kind)| kind).filter(|kind| matches!(kind, EventKind::Control { .. })).collect();
+    assert_eq!(wheel.last(), Some(&&mod_wheel(0.0)));
+    assert_eq!((rig.session.live_input_lost(), rig.session.live_notes_skipped()), (0, 0));
+
+    // A thousand keys going down in one buffer is more notes than there is
+    // room for. The later ones are not played; every one that was played
+    // is still let go of when its key comes up.
+    let now = Rig::ns(rig.now());
+    for step in 0..1_000u32 {
+        assert!(live.play_at(now, on((step % 100) as u8)));
+    }
+    for pitch in 0..100 {
+        assert!(live.play_at(now, off(pitch)));
+    }
+    rig.run(2);
+    let told = rig.probes.events();
+    let played = told.iter().filter(|(_, kind)| matches!(kind, EventKind::NoteOn { .. })).count();
+    assert_eq!(played, 896, "the room for new notes");
+    assert_eq!(rig.session.live_notes_skipped(), 104);
+    assert!(keys_down(&told).is_empty(), "nothing hangs");
+    assert_eq!(rig.session.live_input_lost(), 0);
+    assert_eq!(rig.session.audio_faults(), 0);
+}
+
+#[test]
+fn input_that_overflows_everything_lets_go_of_every_note() {
+    let mut rig = Rig::new();
+    let track = rig.probe_track("Keys");
+    rig.session.set_selected_track(Some(track));
+    rig.run(2);
+    rig.session.play_live(on(60));
+    rig.run(2);
+    rig.probes.take();
+
+    // Between two buffers, more events than the way to the audio thread
+    // holds at all: some are refused, and the key coming up is one.
+    let live = rig.session.live();
+    let now = Rig::ns(rig.now());
+    let refused = (0..5_000)
+        .filter(|step| !live.play_at(now, EventKind::Control { controller: 11, value: (step % 10) as f32 / 10.0 }))
+        .count();
+    assert_eq!(refused, 5_000 - 4_096);
+    assert!(!live.play_at(now, off(60)), "the key coming up finds no room");
+
+    // The audio thread is told something was lost, and lets go of
+    // everything rather than guess what.
+    rig.run(2);
+    let told = rig.probes.events();
+    assert!(
+        told.iter().any(|(_, kind)| *kind == EventKind::AllNotesOff),
+        "{:?}",
+        &told[told.len().saturating_sub(4)..]
+    );
+    assert!(keys_down(&told).is_empty());
+    assert_eq!(rig.session.live_input_lost(), 1);
+
+    // And carries on as before.
+    rig.session.play_live(on(62));
+    rig.session.play_live(off(62));
+    rig.run(2);
+    let kinds: Vec<EventKind> = rig.probes.events().into_iter().map(|(_, kind)| kind).collect();
+    assert_eq!(kinds, [on(62), off(62)]);
+    assert_eq!(rig.session.live_input_lost(), 1);
+}
+
+#[test]
+fn a_key_played_while_the_stream_was_away_is_not_sounded_late() {
+    let mut rig = Rig::new();
+    let track = rig.probe_track("Keys");
+    rig.session.set_selected_track(Some(track));
+    rig.run(150);
+    rig.probes.take();
+
+    // What was played a second ago reaches the audio thread only now: the
+    // stream was being changed, say.
+    let live = rig.session.live();
+    let now = rig.now();
+    assert!(live.play_at(Rig::ns(now - 48_000.0), on(60)));
+    assert!(live.play_at(Rig::ns(now - 47_000.0), pedal(true)));
+    assert!(live.play_at(Rig::ns(now - 46_000.0), off(60)));
+    // A tenth of a second is late, and still played.
+    assert!(live.play_at(Rig::ns(now - 4_800.0), on(62)));
+    rig.run(2);
+    let kinds: Vec<EventKind> = rig.probes.events().into_iter().map(|(_, kind)| kind).collect();
+    assert_eq!(kinds, [pedal(true), on(62)], "the old key is not sounded; where the pedal is still counts");
+    assert_eq!(rig.session.live_notes_skipped(), 1);
+}
+
+#[test]
+fn what_the_audio_thread_missed_while_it_was_away_it_is_told_again() {
+    let mut rig = Rig::new();
+    let track = rig.probe_track("Keys");
+    rig.session.set_selected_track(Some(track));
+    rig.run(2);
+    rig.session.play_live(on(60));
+    rig.run(2);
+    rig.probes.take();
+
+    // The audio thread goes away: nothing is rendered, however long
+    // anybody waits. More is asked of it than its queue holds.
+    rig.host.set_pump(false);
+    let started = Instant::now();
+    for step in 0..1_200 {
+        rig.session.set_metronome(step % 2 == 0);
+    }
+    // The keyboard's port goes too: the message that would let go of its
+    // key is one of those that find no room.
+    rig.session.release_live();
+    // And the project is edited meanwhile.
+    let clip = rig.session.edit(|project| project.add_midi_clip(track, "Late", 0.0, 4.0)).unwrap();
+    let note = Note { pitch: 72, start: 1.0, length: 1.0, velocity: 100 };
+    rig.session.edit(|project| project.clip_mut(clip)?.add_notes(&[note])).unwrap();
+    let waited = started.elapsed();
+    // Waited for once, briefly; not for two seconds, message after message.
+    assert!(waited < Duration::from_millis(1_500), "waited {waited:?} on an audio thread that was away");
+
+    // It comes back and takes what was queued, which was not the release.
+    rig.host.set_pump(true);
+    rig.run(2);
+    assert!(rig.probes.events().is_empty(), "the key is still down, as far as the audio thread knows");
+
+    // The session notices and tells it again.
+    rig.session.housekeeping();
+    rig.run(2);
+    let told = rig.probes.events();
+    assert!(told.iter().any(|(_, kind)| *kind == EventKind::AllNotesOff), "the key is let go of: {told:?}");
+    // The graph is the project's again: the clip added meanwhile plays.
+    let lag = probe_lag(&rig);
+    let playing = rig.now();
+    rig.session.play();
+    rig.run_until(playing + 2.5 * FRAMES_PER_BEAT);
+    let told = rig.probes.events();
+    let at = (playing + FRAMES_PER_BEAT - lag).round() as u64;
+    assert!(told.contains(&(at, on(72))), "{told:?}");
+    // Once is enough: nothing is told a second time.
+    rig.session.housekeeping();
+    rig.run(2);
+    assert!(!rig.probes.events().iter().any(|(_, kind)| *kind == EventKind::AllNotesOff));
 }

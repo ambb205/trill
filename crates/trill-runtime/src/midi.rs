@@ -16,7 +16,6 @@ use parking_lot::{Condvar, Mutex};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use trill_core::device::EventKind;
 use trill_engine::LiveSender;
@@ -119,6 +118,8 @@ struct State {
     /// Set to have them looked at now.
     poked: bool,
     stopped: bool,
+    /// Set by the watching thread as it ends, its ports closed.
+    finished: bool,
 }
 
 struct Shared {
@@ -129,7 +130,6 @@ struct Shared {
 /// The program's MIDI inputs; see the module documentation.
 pub(crate) struct MidiInputs {
     shared: Arc<Shared>,
-    done: Option<mpsc::Receiver<()>>,
 }
 
 impl MidiInputs {
@@ -146,13 +146,14 @@ impl MidiInputs {
     ) -> std::io::Result<Self> {
         let state = State { disabled: disabled.iter().cloned().collect(), ..State::default() };
         let shared = Arc::new(Shared { state: Mutex::new(state), changed: Condvar::new() });
-        let (finished, done) = mpsc::channel();
         let watching = shared.clone();
         std::thread::Builder::new().name("midi-watch".into()).spawn(move || {
+            let ending = watching.clone();
             Watcher { shared: watching, backend, live, on_lost, connections: Vec::new() }.run();
-            let _ = finished.send(());
+            ending.state.lock().finished = true;
+            ending.changed.notify_all();
         })?;
-        Ok(Self { shared, done: Some(done) })
+        Ok(Self { shared })
     }
 
     /// The inputs as they stood when the ports were last looked at.
@@ -215,16 +216,18 @@ impl MidiInputs {
 
 impl Drop for MidiInputs {
     fn drop(&mut self) {
-        {
-            let mut state = self.shared.state.lock();
-            state.stopped = true;
-            self.shared.changed.notify_all();
-        }
+        let deadline = Instant::now() + STOP_WAIT;
+        let mut state = self.shared.state.lock();
+        state.stopped = true;
+        self.shared.changed.notify_all();
         // The thread closes its ports on the way out. If a driver has it
         // stuck, the program ends without it.
-        if let Some(done) = self.done.take()
-            && done.recv_timeout(STOP_WAIT).is_err()
-        {
+        while !state.finished {
+            if self.shared.changed.wait_until(&mut state, deadline).timed_out() {
+                break;
+            }
+        }
+        if !state.finished {
             log::warn!("the MIDI ports were not closed in time; leaving them to the system");
         }
     }

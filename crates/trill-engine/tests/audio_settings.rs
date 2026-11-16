@@ -310,7 +310,7 @@ fn a_device_that_disappears_is_replaced_and_taken_up_again_when_it_is_back() {
     assert_eq!(rig.session.audio_info().warning, None);
     rig.run(2);
     assert!(rig.session.transport().playing);
-    assert_eq!(rig.session.undo_step().is_some(), true);
+    assert!(rig.session.can_undo(), "and the history is still there");
 }
 
 #[test]

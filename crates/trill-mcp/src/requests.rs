@@ -92,6 +92,9 @@ pub struct UpdateTrackRequest {
     /// Set, change or remove a send from this track to a return track. The send is taken after the track's
     /// fader.
     pub send: Option<SendInput>,
+    /// Arm the track: what is played live (a MIDI keyboard, play_notes) goes to the armed tracks, and
+    /// `transport` with action "record" records them. Not part of the project file; not an undo step.
+    pub armed: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -355,18 +358,82 @@ pub struct SetAutomationRequest {
 #[serde(rename_all = "snake_case")]
 pub enum TransportAction {
     Play,
+    /// Ends a take that is being recorded, too: the reply then lists the clips it wrote.
     Stop,
     Seek,
     Status,
     /// Stop and silence everything immediately, including reverb and delay tails.
     Panic,
+    /// Record what is played live on the armed tracks into clips, from the playhead. If the song is stopped
+    /// it starts after a count-in; if it is playing, recording begins at once. Ends with `stop`.
+    Record,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TransportRequest {
     pub action: TransportAction,
-    /// Beat to move the playhead to; required for `seek`, optional for `play` (plays from there).
+    /// Beat to move the playhead to; required for `seek`, optional for `play` and `record` (from there).
     pub position: Option<f64>,
+    /// Bars of metronome before a recording starts, 0-8 (0 = none). Kept until changed; one bar at first.
+    pub count_in_bars: Option<u32>,
+    /// Turn the metronome on or off. It clicks while the song plays and is never part of a render.
+    pub metronome: Option<bool>,
+}
+
+#[derive(Copy, Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioAction {
+    /// The stream that is running: device, sample rate, buffer, latency, load.
+    #[default]
+    Status,
+    /// The same, with the output and input devices that could be chosen.
+    Devices,
+    /// Change the device, sample rate, buffer size or exclusive mode. Only the fields given change.
+    Set,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct AudioRequest {
+    #[serde(default)]
+    pub action: AudioAction,
+    /// Name of the output device, as `devices` lists it. "default" follows the system's default device.
+    pub output: Option<String>,
+    /// Sample rate in Hz. 0 leaves it to the device.
+    pub sample_rate: Option<u32>,
+    /// Buffer size in frames: smaller is less latency and more risk of drop-outs. 0 leaves it to the device.
+    /// A device shared with other programs may ignore it; `exclusive` makes it count.
+    pub buffer_size: Option<u32>,
+    /// Take the output device for Trill alone: the shortest latency, and no other program can play through
+    /// the device meanwhile.
+    pub exclusive: Option<bool>,
+}
+
+#[derive(Copy, Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MidiInputsAction {
+    #[default]
+    List,
+    /// Listen to the input called `name`.
+    Enable,
+    /// Stop listening to the input called `name`.
+    Disable,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct MidiInputsRequest {
+    #[serde(default)]
+    pub action: MidiInputsAction,
+    /// The input's name, as `list` gives it. Needed for `enable` and `disable`.
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlayNotesRequest {
+    /// Track to play on, whether or not it is armed. Omit to play where a keyboard would: on the armed tracks.
+    pub track: Option<u64>,
+    /// Notes as [pitch, start, length, velocity] or objects, like create_clip takes. `start` is in beats from
+    /// now, at the project tempo.
+    pub notes: Vec<NoteInput>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]

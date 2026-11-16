@@ -19,7 +19,7 @@ use crate::host::{
     StreamHandle, StreamRequest, SystemHost, Timing,
 };
 use crate::live::{Captured, LiveInput, LiveSender, LiveTarget, TrackSet};
-use crate::processor::Processor;
+use crate::processor::{Processor, Taken};
 use crate::queue::Queue;
 use std::cell::UnsafeCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -31,6 +31,13 @@ use std::time::{Duration, Instant};
 use trill_core::DeviceId;
 
 const MESSAGE_CAPACITY: usize = 1024;
+/// How long a message waits for room in a queue the audio thread is
+/// emptying, and in one it shows no sign of emptying.
+const SEND_WAIT: Duration = Duration::from_secs(2);
+const SEND_WAIT_AWAY: Duration = Duration::from_millis(250);
+/// A key that reaches the audio thread this long after it went down (the
+/// stream was away) is not sounded late.
+const STALE_SECONDS: f64 = 0.5;
 const GARBAGE_CAPACITY: usize = 64;
 /// Recorded events waiting to be collected. They are collected a few times
 /// a second; a player does not come near this in that time.
@@ -233,6 +240,9 @@ struct Shared {
     recording: AtomicU8,
     /// Times live input was lost for want of room.
     live_dropped: AtomicU32,
+    /// New notes that were not sounded: there was no room, or they came
+    /// too late.
+    live_skipped: AtomicU32,
 }
 
 /// Everything the audio callback works with.
@@ -294,9 +304,17 @@ impl Realtime {
     /// add a random one of up to a buffer's length.
     fn take_live_input(&mut self, frames: usize, timing: Timing) {
         let frames_per_ns = self.processor.sample_rate() / 1e9;
+        let stale = STALE_SECONDS * self.processor.sample_rate();
         let mut lost = self.live_overflowed.swap(false, Ordering::Relaxed);
         while let Some(input) = self.live.pop() {
             let age = timing.now_ns.saturating_sub(input.time_ns) as f64 * frames_per_ns;
+            // A key that went down while there was no stream to sound it
+            // is not sounded now, long after. Its coming up, the pedal and
+            // the wheels still count: they say how things stand.
+            if age > stale && matches!(input.kind, trill_core::device::EventKind::NoteOn { .. }) {
+                self.shared.live_skipped.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
             let offset = (frames as f64 - age).round().clamp(0.0, frames.saturating_sub(1) as f64);
             // How long before the frame it is placed at the event happened.
             let early = offset + age;
@@ -304,7 +322,13 @@ impl Realtime {
                 LiveTarget::Routed => self.processor.live_routed(input.kind, offset as u32, early),
                 LiveTarget::Track(track) => self.processor.live_on(track, input.kind, offset as u32, early),
             };
-            lost |= !taken;
+            match taken {
+                Taken::Kept => {}
+                Taken::Skipped => {
+                    self.shared.live_skipped.fetch_add(1, Ordering::Relaxed);
+                }
+                Taken::Lost => lost = true,
+            }
         }
         if lost {
             // What was lost may have been a key coming up: nothing may be
@@ -570,6 +594,8 @@ pub struct Engine {
     info: StreamInfo,
     /// Graphs sent to the audio thread and not yet returned.
     swaps_in_flight: usize,
+    /// Set when a message could not be sent; see [`Engine::send`].
+    messages_lost: bool,
     host: Arc<dyn AudioHost>,
     /// What plays when no device will: nothing, at real-time pace.
     null: Arc<NullHost>,
@@ -662,6 +688,7 @@ impl Engine {
                 latency_frames: 0,
             },
             swaps_in_flight: 0,
+            messages_lost: false,
             host: setup.host,
             null: Arc::new(NullHost::new(FALLBACK_SAMPLE_RATE)),
             config: setup.config,
@@ -738,6 +765,25 @@ impl Engine {
         self.shared.live_dropped.load(Ordering::Relaxed)
     }
 
+    /// How many new notes were not sounded: more came at once than there
+    /// was room for, or they reached the audio thread long after they were
+    /// played because the stream was away. Nothing hangs for these.
+    pub fn live_skipped(&self) -> u32 {
+        self.shared.live_skipped.load(Ordering::Relaxed)
+    }
+
+    /// Whether messages to the audio thread were lost because it was not
+    /// taking any, now that it is taking them again. Asked once it is
+    /// `true`, it is `false` until more are lost: whoever asks then brings
+    /// the audio thread back in line with everything it missed.
+    pub(crate) fn take_lost_messages(&mut self) -> bool {
+        let recovered = self.messages_lost && self.messages.slots() >= MESSAGE_CAPACITY / 2;
+        if recovered {
+            self.messages_lost = false;
+        }
+        recovered
+    }
+
     /// The way in for live input.
     pub fn live(&self) -> &LiveSender {
         &self.live
@@ -787,25 +833,52 @@ impl Engine {
         self.collect_garbage();
         // Never have more graphs outstanding than the return queue holds, so
         // the audio thread can always hand the old one back.
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while self.swaps_in_flight >= GARBAGE_CAPACITY - 1 && Instant::now() < deadline {
+        let deadline = Instant::now() + SEND_WAIT;
+        while self.swaps_in_flight >= GARBAGE_CAPACITY - 1 && !self.messages_lost && Instant::now() < deadline {
             self.wait_a_moment();
             self.collect_garbage();
         }
         self.swaps_in_flight += 1;
-        self.send(Message::Swap(graph));
+        if !self.send(Message::Swap(graph)) {
+            // It never left: there is nothing to come back.
+            self.swaps_in_flight -= 1;
+        }
     }
 
-    pub(crate) fn send(&mut self, message: Message) {
+    /// Sends a message to the audio thread and says whether it went.
+    ///
+    /// The queue is long, so there is room unless the audio thread has
+    /// stopped taking messages: the device is being changed, or has
+    /// stalled. Then this waits, but not for long and not twice: two
+    /// seconds for an audio thread that is still rendering, a quarter of a
+    /// second for one that shows no sign of life, and not at all once a
+    /// message has been lost and the queue is still full. A caller is never
+    /// held up for seconds on end, time after time, by a device that has
+    /// gone away.
+    ///
+    /// A message that is lost is not forgotten: [`Engine::take_lost_messages`]
+    /// says so once the audio thread is back, and the session then tells
+    /// it again everything it needs to know.
+    pub(crate) fn send(&mut self, message: Message) -> bool {
         let mut message = message;
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let started = Instant::now();
+        let rendered = self.shared.callbacks.load(Ordering::Relaxed);
         loop {
             match self.messages.push(message) {
-                Ok(()) => return,
+                Ok(()) => return true,
                 Err(rtrb::PushError::Full(returned)) => {
-                    if Instant::now() >= deadline {
-                        log::error!("audio thread is not consuming messages; dropping one");
-                        return;
+                    let alive = self.shared.callbacks.load(Ordering::Relaxed) != rendered;
+                    let patience = match (self.messages_lost, alive) {
+                        (true, _) => Duration::ZERO,
+                        (false, true) => SEND_WAIT,
+                        (false, false) => SEND_WAIT_AWAY,
+                    };
+                    if started.elapsed() >= patience {
+                        if !self.messages_lost {
+                            log::error!("the audio thread is not taking messages; they are told again when it is back");
+                        }
+                        self.messages_lost = true;
+                        return false;
                     }
                     message = returned;
                     self.wait_a_moment();
@@ -1016,6 +1089,9 @@ impl Engine {
         drop(claim);
         self.stream = Some(stream.handle);
 
+        // Whether anything is heard: not through the stand-in, and not
+        // through a host that is itself no device.
+        let audible = real && format.device != NULL_DEVICE;
         let first = refusals.first().cloned();
         let warning = match (&first, real) {
             (None, _) => None,
@@ -1027,9 +1103,9 @@ impl Engine {
         }
         self.info = StreamInfo {
             sample_rate: format.sample_rate as f64,
-            output: if real { describe_format(&format) } else { "none (null backend)".into() },
+            output: if audible { describe_format(&format) } else { "none (null backend)".into() },
             warning,
-            device: (real && format.device != NULL_DEVICE).then(|| format.device.clone()),
+            device: audible.then(|| format.device.clone()),
             buffer_frames: format.buffer_frames,
             exclusive: format.exclusive,
             latency_frames: format.latency_frames,

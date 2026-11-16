@@ -7,8 +7,10 @@ use trill_core::device::{DeviceCategory, DeviceDescriptor, ParamInfo, ParamKind}
 use trill_core::pitch::pitch_name;
 use trill_core::project::{AutomationLane, AutomationTarget, Clip, ClipContent, Segment, WarpMode};
 use trill_core::{Device, Note, Project, Track, TrackKind};
+use trill_engine::{AudioConfig, AudioDevice, RecordState, TakeClip};
 use trill_engine::{ParamState, SampleFile, Session};
 use trill_library::{Entry, ScanStatus};
+use trill_runtime::{AudioStatus, MidiInputInfo};
 
 /// Rounds for display so replies do not carry float noise.
 pub fn round(value: f64) -> f64 {
@@ -233,11 +235,98 @@ pub fn bar_beat(beat: f64, beats_per_bar: f64) -> String {
 pub fn transport_json(session: &Session) -> Value {
     let status = session.transport();
     let beats_per_bar = session.project().time_signature.beats_per_bar();
-    json!({
+    let mut out = json!({
         "playing": status.playing,
         "position_beats": round(status.position_beats),
         "position_bar_beat": bar_beat(status.position_beats, beats_per_bar),
-    })
+    });
+    if session.metronome() {
+        out["metronome"] = json!(true);
+    }
+    if let Some(recording) = recording_json(session) {
+        out["recording"] = recording;
+    }
+    out
+}
+
+/// The take being recorded, if one is.
+pub fn recording_json(session: &Session) -> Option<Value> {
+    let status = session.record_status();
+    let state = match status.state {
+        RecordState::Idle => return None,
+        RecordState::CountIn => "count_in",
+        RecordState::Recording => "recording",
+    };
+    let mut out = json!({ "state": state, "tracks": status.tracks, "notes": status.notes });
+    if let Some(start) = status.start_beat {
+        out["from_beat"] = json!(round(start));
+    }
+    if status.pass > 0 {
+        out["loop_pass"] = json!(status.pass + 1);
+    }
+    Some(out)
+}
+
+/// The clips a take wrote into.
+pub fn take_json(clips: &[TakeClip]) -> Value {
+    clips
+        .iter()
+        .map(|clip| json!({ "track_id": clip.track, "clip_id": clip.clip, "notes": clip.notes, "new_clip": clip.created }))
+        .collect()
+}
+
+/// The audio stream: what is running, and what was asked for where that
+/// differs.
+pub fn audio_json(status: &AudioStatus) -> Value {
+    let info = &status.info;
+    let mut out = json!({
+        "output": info.output,
+        "device": info.device,
+        "sample_rate": info.sample_rate,
+        "buffer_frames": info.buffer_frames,
+        "buffer_ms": round(info.buffer_ms()),
+        "latency_ms": round(status.latency_ms),
+        "exclusive": info.exclusive,
+        "load": round(f64::from(status.load)),
+    });
+    if let Some(warning) = &info.warning {
+        out["warning"] = json!(warning);
+    }
+    let asked = &status.config;
+    if *asked != AudioConfig::default() {
+        out["asked_for"] = json!({
+            "output": asked.output,
+            "sample_rate": asked.sample_rate,
+            "buffer_size": asked.buffer_size,
+            "exclusive": asked.exclusive,
+        });
+    }
+    out
+}
+
+pub fn audio_device_json(device: &AudioDevice) -> Value {
+    let mut out = json!({ "name": device.name, "sample_rates": device.sample_rates, "channels": device.channels });
+    if device.is_default {
+        out["default"] = json!(true);
+    }
+    if device.exclusive {
+        out["exclusive"] = json!(true);
+    }
+    out
+}
+
+pub fn midi_input_json(input: &MidiInputInfo) -> Value {
+    let mut out = json!({ "name": input.name, "enabled": input.enabled, "listening": input.open });
+    if !input.present {
+        out["unplugged"] = json!(true);
+    }
+    if let Some(problem) = &input.problem {
+        out["problem"] = json!(problem);
+    }
+    if input.events > 0 {
+        out["messages"] = json!(input.events);
+    }
+    out
 }
 
 pub fn project_json(session: &Session, include_notes: bool) -> Value {
@@ -259,7 +348,17 @@ pub fn project_json(session: &Session, include_notes: bool) -> Value {
             "end": project.loop_region.end,
         },
         "transport": transport_json(session),
-        "tracks": project.tracks.iter().map(|t| track_json(t, beats_per_bar, include_notes)).collect::<Vec<_>>(),
+        "tracks": project
+            .tracks
+            .iter()
+            .map(|track| {
+                let mut out = track_json(track, beats_per_bar, include_notes);
+                if session.is_armed(track.id) {
+                    out["armed"] = json!(true);
+                }
+                out
+            })
+            .collect::<Vec<_>>(),
         "master": {
             "volume_db": project.master.volume_db,
             "devices": project.master.devices.iter().map(device_json).collect::<Vec<_>>(),

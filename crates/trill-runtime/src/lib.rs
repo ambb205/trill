@@ -450,6 +450,12 @@ impl Runtime {
     }
 }
 
+/// Front ends share the runtime between threads.
+const _: () = {
+    const fn shared<T: Send + Sync>() {}
+    shared::<Runtime>();
+};
+
 /// The audio settings as the engine takes them.
 fn audio_config(settings: &AudioSettings) -> AudioConfig {
     AudioConfig {

@@ -132,11 +132,15 @@ impl AudioHost for SystemHost {
                 .find(|named| named.name == *name)
                 .ok_or_else(|| OpenError::NotFound(name.clone()))?,
             None => {
+                // The device as the system hands it out for "the default":
+                // a stream built from this one is told when the system's
+                // choice moves on, which one built from the list is not.
                 let device = host.default_output_device().ok_or(OpenError::NoDevice)?;
                 // Under the name it is listed by, which may carry a number.
                 let id = device.id().ok();
                 let listed = outputs(&host).into_iter().find(|named| id.is_some() && named.device.id().ok() == id);
-                listed.unwrap_or_else(|| Named { name: name_of(&device), device, is_default: true })
+                let name = listed.map_or_else(|| name_of(&device), |listed| listed.name);
+                Named { name, device, is_default: true }
             }
         };
         if request.exclusive {

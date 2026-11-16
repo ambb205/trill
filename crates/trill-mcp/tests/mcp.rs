@@ -10,10 +10,12 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use trill_core::audio::AudioBuffer;
+use trill_engine::host::scripted::{ScriptedDevice, ScriptedHost};
 use trill_engine::{AudioBackend, SharedSession};
 use trill_mcp::{HttpServer, serve_http};
 use trill_media::{WavFormat, decode, write_wav};
-use trill_runtime::{Runtime, RuntimeOptions, Storage};
+use trill_runtime::midi::scripted::ScriptedMidi;
+use trill_runtime::{Parts, Runtime, RuntimeOptions, Storage};
 
 type Client = RunningService<RoleClient, ClientConfig>;
 
@@ -48,7 +50,13 @@ fn options_in(folder: &std::path::Path) -> RuntimeOptions {
 
 /// A server and a client of it, with whatever `folder` already holds.
 async fn connect_in(folder: tempfile::TempDir) -> Fixture {
-    let runtime = Arc::new(Runtime::start(options_in(folder.path())).unwrap());
+    connect_with(folder, Parts::default()).await
+}
+
+/// The same, with some of the runtime's parts replaced: audio devices and
+/// MIDI ports that exist only in the test.
+async fn connect_with(folder: tempfile::TempDir, parts: Parts) -> Fixture {
+    let runtime = Arc::new(Runtime::start_custom(options_in(folder.path()), parts).unwrap());
     let server = serve_http(runtime.clone(), "127.0.0.1:0".parse().unwrap()).unwrap();
     let transport =
         StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(server.url()));
@@ -113,6 +121,9 @@ async fn tools_are_listed_with_schemas() {
         "show_device_editor",
         "recover_project",
         "transport",
+        "audio",
+        "midi_inputs",
+        "play_notes",
         "render",
         "history",
         "save_project",
@@ -139,6 +150,12 @@ async fn tools_are_listed_with_schemas() {
     for word in ["search_sounds", "preview_sound", "builtin:drumrack", "set_sample", "create_audio_clip", "warp"] {
         assert!(instructions.contains(word), "the instructions should mention {word}");
     }
+    // And playing live: arming, recording, the devices.
+    for word in ["armed", "record", "play_notes", "midi_inputs", "count-in"] {
+        assert!(instructions.contains(word), "the instructions should mention {word}");
+    }
+    assert!(schema_of("update_track").contains("armed") && schema_of("transport").contains("count_in_bars"));
+    assert!(schema_of("audio").contains("exclusive") && schema_of("midi_inputs").contains("disable"));
     let create_clip = tools.iter().find(|tool| tool.name == "create_clip").unwrap();
     let schema = serde_json::to_string(&create_clip.input_schema).unwrap();
     assert!(schema.contains("closed_hat"), "the note schema should teach drum names: {schema}");
@@ -1239,4 +1256,210 @@ async fn the_assistant_cannot_throw_the_users_work_away() {
     let anywhere = folder.path().join("anywhere").join("song.trill").display().to_string();
     ok(&full, "save_project", json!({ "path": anywhere })).await;
     assert!(std::path::Path::new(&anywhere).is_file());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_arms_a_track_plays_it_and_records_a_take() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    ok(client, "set_project", json!({ "tempo": 240 })).await;
+    let keys = ok(client, "create_track", json!({ "name": "Keys", "instrument": "builtin:polysynth" })).await;
+    let keys = keys["track_id"].as_u64().unwrap();
+    let bus = ok(client, "create_track", json!({ "name": "Bus", "kind": "group" })).await["track_id"].as_u64().unwrap();
+
+    // Nothing is armed: recording says what to do, and so does playing
+    // where a keyboard would.
+    let error = call(client, "transport", json!({ "action": "record" })).await.unwrap_err();
+    assert!(error.contains("arm a track first") && error.contains("update_track"), "{error}");
+    let error = call(client, "play_notes", json!({ "notes": [[60, 0, 1]] })).await.unwrap_err();
+    assert!(error.contains("No track is armed") && error.contains("armed"), "{error}");
+    let error = call(client, "update_track", json!({ "track": bus, "armed": true })).await.unwrap_err();
+    assert!(error.contains("group track"), "{error}");
+    let error = call(client, "transport", json!({ "action": "record", "count_in_bars": 99 })).await.unwrap_err();
+    assert!(error.contains("at most 8"), "{error}");
+
+    // Arming is not an edit: nothing to undo, and the project is unchanged.
+    let before = ok(client, "history", json!({ "action": "undo", "steps": 0 })).await;
+    let armed = ok(client, "update_track", json!({ "track": keys, "armed": true })).await;
+    assert_eq!(armed["armed"], true);
+    let project = ok(client, "get_project", json!({})).await;
+    assert_eq!(project["tracks"][0]["armed"], true);
+    assert!(project["tracks"][1].get("armed").is_none());
+    assert_eq!(fixture.session.lock().armed().len(), 1);
+    let _ = before;
+
+    // A take with no count-in: two notes played as a keyboard would play
+    // them, a beat apart (a quarter of a second at this tempo).
+    let started = ok(client, "transport", json!({ "action": "record", "count_in_bars": 0, "position": 4 })).await;
+    assert_eq!(started["recording"]["state"], "recording");
+    assert_eq!(started["recording"]["tracks"], json!([keys]));
+    let played = ok(client, "play_notes", json!({ "notes": [[60, 0.5, 0.5, 90], ["E4", 1.5, 0.5]] })).await;
+    assert_eq!((played["played"].as_u64(), played["tracks"].clone()), (Some(2), json!([keys])));
+    assert!(played["recording"].is_string());
+    let status = ok(client, "transport", json!({ "action": "status" })).await;
+    assert_eq!(status["recording"]["state"], "recording");
+    assert_eq!(status["recording"]["from_beat"], 4.0);
+    let stopped = ok(client, "transport", json!({ "action": "stop" })).await;
+    let take = stopped["take"].as_array().unwrap();
+    assert_eq!(take.len(), 1, "{stopped}");
+    assert_eq!(
+        (take[0]["track_id"].as_u64(), take[0]["notes"].as_u64(), take[0]["new_clip"].clone()),
+        (Some(keys), Some(2), json!(true))
+    );
+
+    // The notes are where they were played: after beat 4, a beat apart,
+    // half a beat long, give or take what a busy machine does to a sleep.
+    let clip = take[0]["clip_id"].as_u64().unwrap();
+    let notes = ok(client, "get_notes", json!({ "clip": clip })).await;
+    let notes = notes["notes"].as_array().unwrap().clone();
+    assert_eq!(notes.len(), 2);
+    assert_eq!((notes[0]["name"].as_str(), notes[1]["name"].as_str()), (Some("C4"), Some("E4")));
+    assert_eq!(notes[0]["velocity"], 90);
+    let start = |note: &Value| note["start"].as_f64().unwrap();
+    let apart = start(&notes[1]) - start(&notes[0]);
+    assert!((0.6..1.6).contains(&apart), "the notes are {apart} beats apart: {notes:?}");
+    let project = ok(client, "get_project", json!({})).await;
+    let recorded = &project["tracks"][0]["clips"][0];
+    assert_eq!((recorded["start"].as_f64(), recorded["name"].as_str()), (Some(4.0), Some("Take")));
+
+    // One undo takes the take back; a recording in which nothing is
+    // played leaves nothing, and says so.
+    ok(client, "history", json!({ "action": "undo" })).await;
+    assert_eq!(ok(client, "get_project", json!({})).await["tracks"][0]["clips"], json!([]));
+    ok(client, "transport", json!({ "action": "record" })).await;
+    let stopped = ok(client, "transport", json!({ "action": "stop" })).await;
+    assert_eq!(stopped["take"], json!([]));
+    assert!(stopped["note"].as_str().unwrap().contains("Nothing was played"));
+
+    // A note played on a named track sounds there, armed or not; mistakes
+    // are refused with the reason.
+    ok(client, "update_track", json!({ "track": keys, "armed": false })).await;
+    let played =
+        ok(client, "play_notes", json!({ "track": keys, "notes": [{ "pitch": 72, "start": 0, "length": 0.25 }] }))
+            .await;
+    assert_eq!(played["tracks"], json!([keys]));
+    assert!(played.get("recording").is_none());
+    let error = call(client, "play_notes", json!({ "track": 999, "notes": [[60, 0, 1]] })).await.unwrap_err();
+    assert!(error.contains("Existing tracks"), "{error}");
+    let error = call(client, "play_notes", json!({ "track": keys, "notes": [] })).await.unwrap_err();
+    assert!(error.contains("at least one note"), "{error}");
+    let error = call(client, "play_notes", json!({ "track": keys, "notes": [[60, 0, 4000]] })).await.unwrap_err();
+    assert!(error.contains("at most 60 s"), "{error}");
+
+    // The metronome is the transport's to switch.
+    let status = ok(client, "transport", json!({ "action": "status", "metronome": true })).await;
+    assert_eq!(status["metronome"], true);
+    assert!(fixture.session.lock().metronome());
+}
+
+/// The `name` of each item of a list in a reply.
+fn listed(list: &Value) -> Vec<&str> {
+    list.as_array().unwrap().iter().map(|item| item["name"].as_str().unwrap()).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_chooses_the_audio_device_and_the_midi_inputs() {
+    let host = ScriptedHost::with_speakers();
+    host.add_device(ScriptedDevice::new("Interface"));
+    let midi = ScriptedMidi::new();
+    midi.plug("Keystation");
+    midi.plug("Loopback");
+    midi.refuse("Loopback", Some("another program is using this port"));
+    let parts = Parts { audio: Some(Arc::new(host.clone())), midi: Some(Box::new(midi.clone())), ..Parts::default() };
+    let fixture = connect_with(tempfile::tempdir().unwrap(), parts).await;
+    let client = &fixture.client;
+    let track = ok(client, "create_track", json!({ "name": "Keys" })).await["track_id"].as_u64().unwrap();
+    ok(client, "transport", json!({ "action": "seek", "position": 6 })).await;
+
+    // What is running, and what could be.
+    let status = ok(client, "audio", json!({})).await;
+    assert_eq!((status["device"].as_str(), status["sample_rate"].as_f64()), (Some("Speakers"), Some(48_000.0)));
+    assert_eq!((status["buffer_frames"].as_u64(), status["latency_ms"].as_f64()), (Some(480), Some(30.0)));
+    assert!(status.get("asked_for").is_none() && status.get("warning").is_none(), "{status}");
+    let devices = ok(client, "audio", json!({ "action": "devices" })).await;
+    assert_eq!(listed(&devices["outputs"]), ["Speakers", "Interface"]);
+    assert_eq!(devices["outputs"][0]["default"], true);
+    assert_eq!(devices["outputs"][1]["exclusive"], true);
+
+    // Only what is named changes; the project and the playhead stay.
+    let changed =
+        ok(client, "audio", json!({ "action": "set", "output": "Interface", "exclusive": true, "buffer_size": 64 }))
+            .await;
+    assert_eq!(
+        (changed["device"].as_str(), changed["buffer_frames"].as_u64(), changed["exclusive"].clone()),
+        (Some("Interface"), Some(64), json!(true))
+    );
+    assert!((changed["latency_ms"].as_f64().unwrap() - 1.33).abs() < 0.01, "{changed}");
+    assert_eq!(changed["asked_for"]["output"], "Interface");
+    let changed = ok(client, "audio", json!({ "action": "set", "buffer_size": 256 })).await;
+    assert_eq!((changed["device"].as_str(), changed["buffer_frames"].as_u64()), (Some("Interface"), Some(256)));
+    host.advance(512);
+    let project = ok(client, "get_project", json!({})).await;
+    assert_eq!(
+        (project["tracks"][0]["id"].as_u64(), project["transport"]["position_beats"].as_f64()),
+        (Some(track), Some(6.0))
+    );
+    let saved = trill_library::Settings::load(&fixture.settings_file()).settings.audio;
+    assert_eq!(
+        (saved.output_device.as_deref(), saved.buffer_size, saved.exclusive),
+        (Some("Interface"), Some(256), true)
+    );
+
+    // What cannot be had comes back as what was opened instead, and why.
+    let fallback =
+        ok(client, "audio", json!({ "action": "set", "output": "Headphones", "exclusive": false, "buffer_size": 0 }))
+            .await;
+    assert_eq!(fallback["device"], "Speakers");
+    assert!(fallback["warning"].as_str().unwrap().contains("no audio device called 'Headphones'"), "{fallback}");
+    assert!(fallback["hint"].as_str().unwrap().contains("devices"));
+    let back = ok(client, "audio", json!({ "action": "set", "output": "default" })).await;
+    assert_eq!((back["device"].as_str(), back.get("warning")), (Some("Speakers"), None));
+    assert!(back.get("asked_for").is_none(), "nothing is asked for any more: {back}");
+
+    // The MIDI inputs: on unless switched off, with what is wrong with
+    // the one that cannot be opened, and a word on what they play.
+    let inputs = ok(client, "midi_inputs", json!({})).await;
+    assert_eq!(listed(&inputs["inputs"]), ["Keystation", "Loopback"]);
+    assert_eq!(
+        (inputs["inputs"][0]["enabled"].clone(), inputs["inputs"][0]["listening"].clone()),
+        (json!(true), json!(true))
+    );
+    assert_eq!(inputs["inputs"][1]["listening"], false);
+    assert_eq!(inputs["inputs"][1]["problem"], "another program is using this port");
+    assert!(inputs["note"].as_str().unwrap().contains("No track is armed"), "{inputs}");
+    ok(client, "update_track", json!({ "track": track, "armed": true })).await;
+    midi.send("Keystation", &[0x90, 60, 100]);
+    let inputs = ok(client, "midi_inputs", json!({})).await;
+    assert_eq!((inputs["plays_tracks"].clone(), inputs["inputs"][0]["messages"].as_u64()), (json!([track]), Some(1)));
+    assert!(inputs.get("note").is_none());
+
+    let off = ok(client, "midi_inputs", json!({ "action": "disable", "name": "Keystation" })).await;
+    assert_eq!(
+        (off["inputs"][0]["enabled"].clone(), off["inputs"][0]["listening"].clone()),
+        (json!(false), json!(false))
+    );
+    assert!(!midi.send("Keystation", &[0x80, 60, 0]), "nobody listens to it now");
+    let saved = trill_library::Settings::load(&fixture.settings_file()).settings.midi;
+    assert_eq!(saved.disabled_inputs, ["Keystation"]);
+    let on = ok(client, "midi_inputs", json!({ "action": "enable", "name": "Keystation" })).await;
+    assert_eq!(on["inputs"][0]["listening"], true);
+
+    let error = call(client, "midi_inputs", json!({ "action": "disable" })).await.unwrap_err();
+    assert!(error.contains("need `name`"), "{error}");
+    let error = call(client, "midi_inputs", json!({ "action": "disable", "name": "Theremin" })).await.unwrap_err();
+    assert!(error.contains("Inputs: Keystation, Loopback"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_audio_hardware_the_device_tools_say_so() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let status = ok(client, "audio", json!({ "action": "devices" })).await;
+    assert_eq!((status["device"].clone(), status["outputs"].clone()), (Value::Null, json!([])));
+    assert!(status["note"].as_str().unwrap().contains("without sound"));
+    let inputs = ok(client, "midi_inputs", json!({})).await;
+    assert_eq!(inputs["inputs"], json!([]));
+    assert!(inputs["note"].as_str().unwrap().contains("No MIDI input"));
+    let error = call(client, "midi_inputs", json!({ "action": "enable", "name": "Keys" })).await.unwrap_err();
+    assert!(error.contains("none is plugged in"), "{error}");
 }

@@ -824,6 +824,7 @@ impl Session {
     pub fn housekeeping(&mut self) {
         self.engine.collect_garbage();
         self.tend_audio();
+        self.recover_lost_messages();
         self.tend_take();
         if !self.stand_ins.is_empty() && self.audio.finished() != self.stretches_seen {
             self.compile_and_swap();
