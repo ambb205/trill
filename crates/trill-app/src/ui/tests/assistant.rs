@@ -59,6 +59,9 @@ impl Harness {
 
     /// Types `message` into the message field and presses Enter.
     fn tell(&mut self, message: &str) {
+        // The field is where the last frames put it, if they put it at all.
+        self.idle(2);
+        assert!(self.is_on_screen("Message to the assistant"), "there is no message field: {:?}", self.labels);
         let field = self.app.assistant().field();
         self.click(field.center());
         self.type_text(message);
@@ -458,7 +461,7 @@ fn the_reply_appears_as_it_is_written_and_each_tool_call_is_a_line() {
     ]);
     harness.idle(1);
     assert!(harness.is_on_screen("Changed the volume of \u{201C}One\u{201D}"));
-    assert!(harness.is_on_screen("Wrote drums on track 999: failed"));
+    assert!(harness.is_on_screen("Writing drums on track 999: failed"));
     let states: Vec<ToolState> = harness
         .items()
         .iter()
@@ -475,7 +478,7 @@ fn the_reply_appears_as_it_is_written_and_each_tool_call_is_a_line() {
     );
 
     // What went in and what came back are a click away.
-    harness.click_label("Wrote drums on track 999: failed");
+    harness.click_label("Writing drums on track 999: failed");
     let Some(Item::Tool(failed)) = harness.items().iter().rev().find(|item| matches!(item, Item::Tool(_))) else {
         panic!("a tool line")
     };
@@ -483,7 +486,7 @@ fn the_reply_appears_as_it_is_written_and_each_tool_call_is_a_line() {
     assert_eq!(failed.tool, "write_drums");
     assert!(failed.input.contains("\"groove\": \"house\""), "{}", failed.input);
     assert_eq!(failed.output, "track 999 was not found; the tracks are 1, 2, 3 and 9");
-    harness.click_label("Wrote drums on track 999: failed");
+    harness.click_label("Writing drums on track 999: failed");
     let Some(Item::Tool(failed)) = harness.items().iter().rev().find(|item| matches!(item, Item::Tool(_))) else {
         panic!("a tool line")
     };
@@ -980,4 +983,254 @@ fn what_was_sent_is_what_the_script_saw() {
     let sent: Sent = script.state().sent[0].clone();
     assert_eq!(sent.message, "trim me");
     assert!(sent.context.is_some_and(|context| context.starts_with("project: ")));
+}
+
+// ---- against the CLI installed on this machine ------------------------------------------
+
+/// The panel driven against the real thing: the CLI installed and signed in
+/// on this machine, and a real MCP server. These spend the usage of whoever
+/// runs them (five short messages to a small model), so each does nothing
+/// unless asked:
+///
+/// ```text
+/// TRILL_TEST_CLAUDE=1 cargo test -p trill-app live_ -- --test-threads=1 --nocapture
+/// ```
+///
+/// Settings, the CLI's working folder and the kept conversations go into a
+/// temporary folder; nothing of the user's own settings is read or written.
+/// (The CLI keeps its own record of each conversation in its own data
+/// folder, as it does for any conversation.)
+mod live {
+    use super::*;
+
+    /// The longest a real turn may take before the test gives up.
+    const TURN_TIMEOUT: Duration = Duration::from_secs(180);
+
+    fn asked_for() -> bool {
+        let asked = std::env::var("TRILL_TEST_CLAUDE").as_deref() == Ok("1");
+        if !asked {
+            eprintln!("skipped: set TRILL_TEST_CLAUDE=1 to run against the real CLI");
+        }
+        asked
+    }
+
+    /// Runs frames, a few a second, until `done` or the timeout.
+    fn wait(harness: &mut Harness, what: &str, done: impl Fn(&Harness) -> bool) {
+        let deadline = Instant::now() + TURN_TIMEOUT;
+        while !done(harness) {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}; so far: {:#?}", harness.items());
+            std::thread::sleep(Duration::from_millis(30));
+            harness.idle(1);
+        }
+    }
+
+    /// Opens the window on settings kept in `home`, with the real CLI
+    /// behind the assistant, and waits until it has been found.
+    fn start(home: &std::path::Path, setup: impl FnOnce(&mut Session)) -> Harness {
+        let storage = trill_runtime::Storage::At { settings: home.join("settings.json"), library_index: None };
+        let runtime = Arc::new(Runtime::start(RuntimeOptions { storage, ..RuntimeOptions::hermetic() }).unwrap());
+        let mut harness = Harness::on(runtime.clone(), UiOptions::default(), setup);
+        harness.app.assistant_mut().use_installed_cli(runtime, home.to_owned(), "haiku");
+        if !harness.app.assistant().is_open() {
+            harness.key(CTRL_SHIFT, Key::A);
+        }
+        // A frame or two for the panel to start looking; what was on screen
+        // until now was the answer of the back end that was replaced.
+        harness.idle(2);
+        assert!(harness.is_on_screen("Looking for Claude Code\u{2026}."), "the CLI is looked for off this thread");
+        wait(&mut harness, "the CLI to be found", |harness| {
+            harness.is_on_screen("Send") || harness.is_on_screen("Check again")
+        });
+        assert!(harness.is_on_screen("Send"), "the assistant is not available: {:?}", harness.labels);
+        harness
+    }
+
+    /// Sends `message` and waits for the turn to end.
+    fn turn(harness: &mut Harness, message: &str) {
+        eprintln!("\n> {message}");
+        let from = harness.items().len();
+        harness.tell(message);
+        assert!(harness.app.assistant().is_working(), "the message was not sent");
+        wait(harness, "the turn to end", |harness| !harness.app.assistant().is_working());
+        harness.idle(2);
+        for item in &harness.items()[from..] {
+            match item {
+                Item::User { .. } => {}
+                Item::Reply { text } => eprintln!("  said: {text}"),
+                Item::Tool(line) => eprintln!("  tool: {} [{}] {:?}", line.words(), line.tool, line.state),
+                Item::Note { text, .. } => eprintln!("  note: {text}"),
+                Item::End(end) => eprintln!("  end: {:?}, changed the song: {}", end.ending, end.changed),
+            }
+        }
+    }
+
+    fn tools_called(harness: &Harness) -> Vec<String> {
+        let lines = harness.items().iter().filter_map(|item| match item {
+            Item::Tool(line) => Some(line.tool.clone()),
+            _ => None,
+        });
+        lines.collect()
+    }
+
+    #[test]
+    fn live_a_message_goes_with_the_selection_and_its_edit_is_one_undo() {
+        if !asked_for() {
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let mut zebra = None;
+        let mut harness = start(home.path(), |session| {
+            let (_, clips) = three_tracks(session);
+            session.edit(|project| Ok(project.clip_mut(clips[1])?.name = "Zebra".to_owned())).unwrap();
+            zebra = Some(clips[1]);
+        });
+        let zebra = zebra.unwrap();
+        harness.click(harness.lane(17.0, 0));
+        assert_eq!(harness.app.state().selected_clip, Some(zebra));
+        harness.idle(2);
+        let depth = harness.undo_depth();
+
+        // 1: only the context says which clip is selected.
+        turn(
+            &mut harness,
+            "Without calling any tool: what is the name of the clip I have selected? Reply with the name only.",
+        );
+        assert!(matches!(harness.ending().0, Ending::Finished { .. }), "{:?}", harness.ending());
+        assert!(
+            harness.reply().to_lowercase().contains("zebra"),
+            "the reply does not name the selected clip: {}",
+            harness.reply()
+        );
+        assert_eq!(harness.undo_depth(), depth, "a question changes nothing");
+        assert!(
+            !harness.labels.iter().any(|(label, _)| label.contains("billed")),
+            "a Claude login is not billed per message"
+        );
+
+        // 2: "that clip" is the selected one; the edit is one step, and the
+        // turn's own Undo takes it back.
+        turn(&mut harness, "Rename that clip to Giraffe.");
+        assert_eq!(harness.project().clip(zebra).unwrap().name, "Giraffe");
+        assert!(tools_called(&harness).iter().any(|tool| tool == "update_clip"), "{:?}", tools_called(&harness));
+        assert!(harness.ending().1, "the turn is marked as having changed the song");
+        assert_eq!(harness.undo_depth(), depth + 1, "everything the turn changed is one step");
+        assert!(harness.shows("Undo"));
+        harness.click_label("Undo");
+        assert_eq!(harness.project().clip(zebra).unwrap().name, "Zebra");
+        assert!(harness.app.assistant().conversation().is_some());
+    }
+
+    #[test]
+    fn live_stop_ends_a_turn_and_closes_its_group() {
+        if !asked_for() {
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let mut harness = start(home.path(), |session| {
+            three_tracks(session);
+        });
+        let depth = harness.undo_depth();
+        let message = "Create six new tracks named Stop 1 to Stop 6. Make one tool call per track, one after the \
+                       other, never two at once.";
+        eprintln!("\n> {message}");
+        harness.tell(message);
+        assert!(harness.app.assistant().is_working());
+        // Let it get as far as a tool call that has changed the song, then
+        // stop it.
+        wait(&mut harness, "the first track", |harness| {
+            let made = |item: &Item| matches!(item, Item::Tool(line) if line.state == ToolState::Done);
+            !harness.app.assistant().is_working() || harness.items().iter().any(made)
+        });
+        let stopped = harness.app.assistant().is_working();
+        if stopped {
+            harness.click_last_label("Stop");
+            assert!(harness.app.assistant().is_stopping());
+        }
+        wait(&mut harness, "the turn to stop", |harness| !harness.app.assistant().is_working());
+        harness.idle(2);
+        let tracks = harness.project().tracks.len() - 3;
+        eprintln!("  stopped: {stopped}; tracks made before the stop: {tracks}; end: {:?}", harness.ending());
+        for item in harness.items() {
+            if let Item::Tool(line) = item {
+                eprintln!("  tool: {} [{}] {:?}", line.words(), line.tool, line.state);
+            }
+        }
+        if stopped {
+            assert_eq!(harness.ending().0, Ending::Stopped);
+        }
+        assert!(tracks > 0, "it got as far as making a track");
+        assert_eq!(harness.ending().1, tracks > 0);
+        assert_eq!(harness.undo_depth(), depth + usize::from(tracks > 0), "what was done before the stop is one step");
+        // The group is closed: the next edit is its own step, and the
+        // field is there for the next message.
+        harness.session.lock().edit(|project| project.set_tempo(100.0)).unwrap();
+        assert_eq!(harness.undo_depth(), depth + usize::from(tracks > 0) + 1);
+        harness.idle(2);
+        assert!(harness.is_on_screen("Send"));
+    }
+
+    #[test]
+    fn live_a_conversation_is_taken_up_again_after_a_restart() {
+        if !asked_for() {
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let song = home.path().join("song.trill");
+        let mut harness = start(home.path(), |session| {
+            three_tracks(session);
+            session.save(&song).unwrap();
+        });
+        turn(&mut harness, "Remember this word for later: marimba. Reply with OK only.");
+        assert!(matches!(harness.ending().0, Ending::Finished { .. }), "{:?}", harness.ending());
+        let conversation = harness.app.assistant().conversation().cloned().expect("the conversation has an id");
+        drop(harness);
+
+        // Another run of the program, the same project.
+        let mut harness = start(home.path(), |session| session.load(&song).unwrap());
+        wait(&mut harness, "the kept conversation", |harness| !harness.items().is_empty());
+        assert!(harness.is_on_screen("You: Remember this word for later: marimba. Reply with OK only."));
+        turn(&mut harness, "What was the word I asked you to remember? Reply with the word only.");
+        assert!(harness.reply().to_lowercase().contains("marimba"), "it does not remember: {}", harness.reply());
+        assert_eq!(harness.app.assistant().conversation(), Some(&conversation), "it is the same conversation");
+    }
+
+    #[test]
+    fn live_the_tools_that_write_files_are_offered_and_kept_to_the_working_folders() {
+        if !asked_for() {
+            return;
+        }
+        // The project lives in one temporary folder; the assistant is asked
+        // to write into another, which is neither the project's nor Trill's.
+        let home = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let song = home.path().join("song.trill");
+        let outside = elsewhere.path().join("outside.trill");
+        let mut harness = start(home.path(), |session| {
+            three_tracks(session);
+            session.save(&song).unwrap();
+        });
+        turn(
+            &mut harness,
+            &format!(
+                "Save a copy of the project as {}. Try once. If the tool refuses, do not try anything else: tell me \
+                 what it said.",
+                outside.display()
+            ),
+        );
+        let saves: Vec<_> = harness
+            .items()
+            .iter()
+            .filter_map(|item| match item {
+                Item::Tool(line) if line.tool == "save_project" => Some(line.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(!saves.is_empty(), "save_project is offered, and was called: {:?}", tools_called(&harness));
+        for save in &saves {
+            eprintln!("  the server said: {}", save.output);
+        }
+        assert_eq!(saves[0].state, ToolState::Failed, "the server refuses a path outside the working folders");
+        assert!(!outside.exists(), "and nothing was written there");
+        assert_eq!(harness.session.lock().path(), Some(song.as_path()), "the project is still where it was");
+    }
 }

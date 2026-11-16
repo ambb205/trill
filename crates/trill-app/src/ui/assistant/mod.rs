@@ -665,6 +665,16 @@ impl Assistant {
         self.readiness = Readiness::Unknown;
     }
 
+    /// Puts the real back end in place: the CLI installed on this machine,
+    /// asked for `model`, working in `folder` through a server started for
+    /// it. Only for the tests that are asked to spend somebody's usage.
+    pub fn use_installed_cli(&mut self, runtime: Arc<Runtime>, folder: PathBuf, model: &str) {
+        self.backend = Box::new(Installed::new(runtime, folder, Some(model.to_owned()), McpServer::Failed));
+        self.script = None;
+        self.chat = None;
+        self.readiness = Readiness::Unknown;
+    }
+
     pub fn transcript(&self) -> &Transcript {
         &self.transcript
     }

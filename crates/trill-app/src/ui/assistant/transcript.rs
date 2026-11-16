@@ -57,11 +57,12 @@ pub struct ToolLine {
 }
 
 impl ToolLine {
-    /// The line as it reads now.
+    /// The line as it reads now: what it did once it has done it, and
+    /// until then, or if it never did, what it set out to do.
     pub fn words(&self) -> &str {
         match self.state {
-            ToolState::Running => &self.doing,
-            ToolState::Done | ToolState::Failed | ToolState::Stopped => &self.did,
+            ToolState::Done => &self.did,
+            ToolState::Running | ToolState::Failed | ToolState::Stopped => &self.doing,
         }
     }
 }
@@ -456,7 +457,7 @@ mod tests {
             ("Read the project", ToolState::Done, "{\"tracks\":[]}")
         );
         let failed = tool(&transcript.items[3]);
-        assert_eq!(failed.words(), "Added the track \u{201C}Drums\u{201D}");
+        assert_eq!(failed.words(), "Adding the track \u{201C}Drums\u{201D}", "a call that failed added nothing");
         assert_eq!((failed.state, failed.output.as_str()), (ToolState::Failed, "no such instrument"));
         assert!(failed.input.contains("\"name\": \"Drums\""), "{}", failed.input);
         assert_eq!(transcript.items[4], Item::Reply { text: "Done.\n\nA second paragraph.".into() });
@@ -476,7 +477,7 @@ mod tests {
         transcript.end(end(Ending::Stopped));
         assert_eq!(tool(&transcript.items[1]).state, ToolState::Done, "what had finished stays finished");
         let cut = tool(&transcript.items[2]);
-        assert_eq!((cut.state, cut.words()), (ToolState::Stopped, "Wrote drums"));
+        assert_eq!((cut.state, cut.words()), (ToolState::Stopped, "Writing drums"));
         assert_eq!(transcript.items[3], Item::End(end(Ending::Stopped)));
 
         // An end without its start still makes a line; an end for a call
