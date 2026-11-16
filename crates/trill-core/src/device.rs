@@ -108,12 +108,12 @@ pub enum EventKind {
     NoteOff {
         pitch: u8,
     },
-    /// Releases every note, whatever holds it: a sustain pedal that is down
-    /// counts as lifted, and the pitch wheel as back at rest.
+    /// Releases every note, whatever holds it: a key, or the sustain
+    /// pedal. The pedal and the wheels stay where they are.
     AllNotesOff,
     /// The pitch wheel, from -1 (fully down) to 1 (fully up); 0 at rest.
-    /// How far that bends is the instrument's business: two semitones each
-    /// way unless it says otherwise.
+    /// How far that bends is the instrument's business:
+    /// [`PITCH_BEND_SEMITONES`] each way unless it says otherwise.
     PitchBend {
         value: f32,
     },
@@ -127,6 +127,9 @@ pub enum EventKind {
     },
 }
 
+/// How far the pitch wheel bends, each way, where an instrument has no
+/// setting of its own for it.
+pub const PITCH_BEND_SEMITONES: f32 = 2.0;
 /// The controller number of the mod wheel in [`EventKind::Control`].
 pub const CONTROLLER_MOD_WHEEL: u8 = 1;
 /// The controller number of the sustain pedal in [`EventKind::Control`].
@@ -140,6 +143,50 @@ impl EventKind {
             EventKind::Control { controller: CONTROLLER_SUSTAIN, value } => Some(value >= 0.5),
             _ => None,
         }
+    }
+}
+
+/// The sustain pedal, for an instrument that has to work it out itself:
+/// while the pedal is down, keys that come up go on sounding, and all of
+/// them are let go of when it comes up.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Pedal {
+    down: bool,
+    /// The keys that came up while the pedal was down, a bit per pitch.
+    held: u128,
+}
+
+impl Pedal {
+    pub fn is_down(&self) -> bool {
+        self.down
+    }
+
+    /// The pedal moved. When it comes up, returns the keys it was holding,
+    /// lowest first: their notes end now.
+    pub fn set(&mut self, down: bool) -> impl Iterator<Item = u8> + use<> {
+        self.down = down;
+        let released = if down { 0 } else { std::mem::take(&mut self.held) };
+        (0..128u8).filter(move |pitch| released & (1 << pitch) != 0)
+    }
+
+    /// A key went down: whatever the pedal held of it is that key's again.
+    pub fn key_down(&mut self, pitch: u8) {
+        self.held &= !(1 << pitch.min(127));
+    }
+
+    /// A key came up. Returns whether its note ends now; if not, the pedal
+    /// has it.
+    pub fn key_up(&mut self, pitch: u8) -> bool {
+        if self.down {
+            self.held |= 1 << pitch.min(127);
+        }
+        !self.down
+    }
+
+    /// Every note has ended ([`EventKind::AllNotesOff`]): the pedal holds
+    /// nothing, and stays where it is.
+    pub fn clear(&mut self) {
+        self.held = 0;
     }
 }
 

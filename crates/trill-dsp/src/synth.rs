@@ -6,7 +6,9 @@ use crate::params::{ParamValues, PresetDef, boolean, choice, float, int};
 use crate::util::{Rng, db_to_gain, midi_to_hz, pan_gains};
 use crate::voice::{EnvShape, Envelope, FILTER_MODES, FilterMode, Stage, VoiceFilter, resonance_to_q};
 use std::f32::consts::TAU;
-use trill_core::device::{DeviceProcessor, Event, EventKind, ProcessInfo};
+use trill_core::device::{
+    CONTROLLER_MOD_WHEEL, DeviceProcessor, Event, EventKind, PITCH_BEND_SEMITONES, Pedal, ProcessInfo,
+};
 
 const MAX_VOICES: usize = 16;
 const MAX_UNISON: usize = 7;
@@ -15,6 +17,9 @@ const MAX_HELD: usize = 16;
 const CONTROL_BLOCK: usize = 16;
 /// Headroom so that chords do not clip at the default volume.
 const VOICE_GAIN: f32 = 0.22;
+/// The vibrato the mod wheel adds at the top of its travel, in semitones,
+/// at the LFO's rate.
+const MOD_WHEEL_VIBRATO: f32 = 0.5;
 
 const WAVES: &[&str] = &["sine", "triangle", "saw", "square"];
 
@@ -432,11 +437,21 @@ impl Voice {
         self.filt = Envelope::idle();
     }
 
-    fn render(&mut self, d: &Derived, lfo: f32, sample_rate: f32, rng: &mut Rng, out_l: &mut [f32], out_r: &mut [f32]) {
+    /// `lfo` is the LFO's value for the stretch and `bend` what the wheels
+    /// add to the pitch, in semitones.
+    fn render(
+        &mut self,
+        d: &Derived,
+        (lfo, bend): (f32, f32),
+        sample_rate: f32,
+        rng: &mut Rng,
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+    ) {
         let len = out_l.len();
         self.note = self.target + (self.note - self.target) * d.glide_keep.powi(len as i32);
 
-        let inc1 = midi_to_hz(self.note + lfo * d.lfo_pitch) / sample_rate;
+        let inc1 = midi_to_hz(self.note + lfo * d.lfo_pitch + bend) / sample_rate;
         let inc2 = inc1 * d.osc2_ratio;
         let sub_inc = inc1 * 0.5;
 
@@ -538,6 +553,11 @@ pub struct PolySynth {
     /// Held keys in press order, for mono note priority.
     held: [u8; MAX_HELD],
     held_len: usize,
+    pedal: Pedal,
+    /// The pitch wheel, in semitones.
+    bend: f32,
+    /// The mod wheel, 0..=1: vibrato on top of what the LFO is set to.
+    mod_wheel: f32,
 }
 
 impl PolySynth {
@@ -552,6 +572,9 @@ impl PolySynth {
             lfo_phase: 0.0,
             held: [0; MAX_HELD],
             held_len: 0,
+            pedal: Pedal::default(),
+            bend: 0.0,
+            mod_wheel: 0.0,
         }
     }
 
@@ -621,6 +644,7 @@ impl PolySynth {
 
     fn note_on(&mut self, pitch: u8, velocity: f32) {
         self.clock += 1;
+        self.pedal.key_down(pitch);
         let gain = self.velocity_gain(velocity);
         let unison = self.derived.unison;
 
@@ -697,7 +721,14 @@ impl PolySynth {
         }
     }
 
+    /// A key came up: its note ends, unless the pedal holds it.
     fn note_off(&mut self, pitch: u8) {
+        if self.pedal.key_up(pitch) {
+            self.release(pitch);
+        }
+    }
+
+    fn release(&mut self, pitch: u8) {
         if self.derived.mono {
             self.unhold(pitch);
             let voice = &mut self.voices[0];
@@ -727,6 +758,7 @@ impl PolySynth {
 
     fn all_notes_off(&mut self) {
         self.held_len = 0;
+        self.pedal.clear();
         for voice in &mut self.voices {
             voice.held = false;
             voice.amp.release();
@@ -739,7 +771,19 @@ impl PolySynth {
             EventKind::NoteOn { pitch, velocity } => self.note_on(pitch, velocity),
             EventKind::NoteOff { pitch } => self.note_off(pitch),
             EventKind::AllNotesOff => self.all_notes_off(),
-            EventKind::PitchBend { .. } | EventKind::Control { .. } => {}
+            EventKind::PitchBend { value } => {
+                self.bend = if value.is_finite() { value.clamp(-1.0, 1.0) * PITCH_BEND_SEMITONES } else { 0.0 };
+            }
+            EventKind::Control { controller: CONTROLLER_MOD_WHEEL, value } => {
+                self.mod_wheel = if value.is_finite() { value.clamp(0.0, 1.0) } else { 0.0 };
+            }
+            EventKind::Control { .. } => {
+                if let Some(down) = kind.sustain() {
+                    for pitch in self.pedal.set(down) {
+                        self.release(pitch);
+                    }
+                }
+            }
         }
     }
 
@@ -750,10 +794,11 @@ impl PolySynth {
             let len = (left.len() - pos).min(CONTROL_BLOCK);
             let lfo = (self.lfo_phase * TAU).sin();
             self.lfo_phase = (self.lfo_phase + self.derived.lfo_rate * len as f32 / sample_rate).fract();
+            let bend = self.bend + lfo * self.mod_wheel * MOD_WHEEL_VIBRATO;
             for voice in self.voices.iter_mut().filter(|v| v.active) {
                 voice.render(
                     &self.derived,
-                    lfo,
+                    (lfo, bend),
                     sample_rate,
                     &mut self.rng,
                     &mut left[pos..pos + len],
@@ -805,8 +850,127 @@ impl DeviceProcessor for PolySynth {
 
     fn reset(&mut self) {
         self.held_len = 0;
+        self.pedal.clear();
         for voice in &mut self.voices {
             voice.kill();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::*;
+
+    const SR: f64 = 48_000.0;
+    const ON: fn(u8) -> EventKind = |pitch| EventKind::NoteOn { pitch, velocity: 1.0 };
+    const OFF: fn(u8) -> EventKind = |pitch| EventKind::NoteOff { pitch };
+    const PEDAL: fn(bool) -> EventKind =
+        |down| EventKind::Control { controller: 64, value: if down { 1.0 } else { 0.0 } };
+
+    /// A sine that starts and stops at once, so what is sounding is plain
+    /// to measure.
+    fn sine_synth(params: &[(&str, f64)]) -> PolySynth {
+        let mut synth = PolySynth::new();
+        synth.prepare(SR, 512);
+        let plain = [("osc1_wave", 0.0), ("attack", 0.001), ("release", 0.01), ("sustain", 1.0), ("lfo_pitch", 0.0)];
+        for (id, value) in plain.iter().chain(params) {
+            let index = PARAMS.iter().position(|def| def.id == *id).unwrap_or_else(|| panic!("no parameter '{id}'"));
+            synth.set_param(index, *value);
+        }
+        synth
+    }
+
+    #[test]
+    fn the_pitch_wheel_bends_two_semitones_each_way() {
+        let mut synth = sine_synth(&[]);
+        let bend = |value: f32| EventKind::PitchBend { value };
+        let events = [(0, ON(69)), (24_000, bend(1.0)), (48_000, bend(-1.0)), (72_000, bend(0.5)), (96_000, bend(0.0))];
+        let (left, _) = run(&mut synth, SR, 256, 120_000, &events);
+        let pitch = |second: usize| zero_crossing_hz(&left[second * 24_000 + 2_400..(second + 1) * 24_000], SR);
+        let semitones = |hz: f64| 12.0 * (hz / 440.0).log2();
+        assert!(semitones(pitch(0)).abs() < 0.01, "at rest: {} Hz", pitch(0));
+        assert!((semitones(pitch(1)) - 2.0).abs() < 0.01, "fully up: {} Hz", pitch(1));
+        assert!((semitones(pitch(2)) + 2.0).abs() < 0.01, "fully down: {} Hz", pitch(2));
+        assert!((semitones(pitch(3)) - 1.0).abs() < 0.01, "half way: {} Hz", pitch(3));
+        assert!(semitones(pitch(4)).abs() < 0.01, "back at rest: {} Hz", pitch(4));
+        // A bend does not click: the wave carries on from where it was.
+        assert!(largest_step(&left[23_000..25_000]) < 0.1);
+
+        // Nonsense from a broken controller is no bend at all.
+        let mut synth = sine_synth(&[]);
+        let (left, _) = run(&mut synth, SR, 256, 24_000, &[(0, bend(f32::NAN)), (0, ON(69))]);
+        assert!(semitones(zero_crossing_hz(&left[2_400..], SR)).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_pedal_holds_notes_until_it_comes_up() {
+        // The key comes up with the pedal down and the note sounds on; the
+        // pedal comes up and it ends. A second key is still down then.
+        let mut synth = sine_synth(&[]);
+        let events = [
+            (0, ON(60)),
+            (0, ON(72)),
+            (4_800, PEDAL(true)),
+            (9_600, OFF(60)),
+            (33_600, PEDAL(false)),
+            (57_600, OFF(72)),
+        ];
+        let (left, _) = run(&mut synth, SR, 256, 72_000, &events);
+        let level = |from: usize| rms(&left[from..from + 4_800]);
+        let both = level(2_400);
+        assert!(level(24_000) > both * 0.95, "held by the pedal: {} against {both}", level(24_000));
+        let one = level(48_000);
+        assert!(one > both * 0.3 && one < both * 0.8, "the pedal let one note go: {one} against {both}");
+        assert_eq!(peak(&left[62_400..]), 0.0, "and the last ends with its key");
+
+        // The same key again while the pedal holds it is that key's again:
+        // it ends when the key comes up after the pedal.
+        let mut synth = sine_synth(&[]);
+        let events = [(0, ON(60)), (2_400, PEDAL(true)), (4_800, OFF(60)), (9_600, ON(60)), (14_400, PEDAL(false))];
+        let (left, _) = run(&mut synth, SR, 256, 30_000, &events);
+        assert!(rms(&left[24_000..]) > 0.05, "the key is down, so the note sounds on");
+
+        // Everything is let go of with the pedal down, and it stays down:
+        // the next note is held again.
+        let mut synth = sine_synth(&[]);
+        let events = [
+            (0, PEDAL(true)),
+            (0, ON(60)),
+            (2_400, OFF(60)),
+            (9_600, EventKind::AllNotesOff),
+            (19_200, ON(64)),
+            (21_600, OFF(64)),
+        ];
+        let (left, _) = run(&mut synth, SR, 256, 48_000, &events);
+        assert!(rms(&left[4_800..9_600]) > 0.05);
+        assert_eq!(peak(&left[12_000..19_200]), 0.0, "all notes off ends what the pedal held");
+        assert!(rms(&left[38_400..]) > 0.05, "the pedal is still down");
+
+        // In mono mode the pedal holds the last key in the same way.
+        let mut synth = sine_synth(&[("mono", 1.0)]);
+        let events = [(0, ON(60)), (2_400, PEDAL(true)), (4_800, OFF(60)), (24_000, PEDAL(false))];
+        let (left, _) = run(&mut synth, SR, 256, 36_000, &events);
+        assert!(rms(&left[14_400..24_000]) > 0.05);
+        assert_eq!(peak(&left[28_800..]), 0.0);
+    }
+
+    #[test]
+    fn the_mod_wheel_adds_vibrato() {
+        // How far the pitch strays from where it belongs over a second, in
+        // semitones, measured a hundredth of a second at a time.
+        let wobble = |synth: &mut PolySynth, wheel: f32| {
+            let events = [(0, EventKind::Control { controller: 1, value: wheel }), (0, ON(81))];
+            let (left, _) = run(synth, SR, 256, 52_800, &events);
+            let pitches: Vec<f64> =
+                left[4_800..].chunks(480).map(|chunk| 12.0 * (zero_crossing_hz(chunk, SR) / 880.0).log2()).collect();
+            pitches.iter().fold(0.0f64, |most, pitch| most.max(pitch.abs()))
+        };
+        let still = wobble(&mut sine_synth(&[]), 0.0);
+        assert!(still < 0.05, "no vibrato with the wheel down: {still}");
+        let full = wobble(&mut sine_synth(&[]), 1.0);
+        assert!((0.3..0.6).contains(&full), "half a semitone with the wheel up: {full}");
+        let half = wobble(&mut sine_synth(&[]), 0.5);
+        assert!(half > still && half < full, "{half} between {still} and {full}");
     }
 }

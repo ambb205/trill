@@ -14,7 +14,7 @@ use clack_host::events::spaces::CoreEventSpace;
 use clack_host::events::{Event as _, EventFlags, EventHeader, Match, Pckn, UnknownEvent};
 use clack_host::utils::{BeatTime, ClapId, SecondsTime};
 use std::collections::HashMap;
-use trill_core::device::{Event, EventKind, MAX_EVENTS_PER_BLOCK, ProcessInfo};
+use trill_core::device::{Event, EventKind, MAX_EVENTS_PER_BLOCK, Pedal, ProcessInfo};
 
 /// The form in which a plugin's note port accepts notes.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -41,6 +41,7 @@ const NOTE_CHANNEL: u16 = 0;
 const MIDI_NOTE_ON: u8 = 0x90;
 const MIDI_NOTE_OFF: u8 = 0x80;
 const MIDI_CONTROL_CHANGE: u8 = 0xB0;
+const MIDI_PITCH_BEND: u8 = 0xE0;
 const MIDI_ALL_SOUND_OFF: u8 = 120;
 /// Most note events delivered to a plugin in one block; more are dropped.
 /// The engine never passes more.
@@ -111,6 +112,22 @@ impl EventQueue {
         });
     }
 
+    /// A MIDI controller, `value` 0..=1, for a port that takes MIDI.
+    pub(crate) fn control(&mut self, time: u32, controller: u8, value: f32) {
+        let value = if value.is_finite() { (value.clamp(0.0, 1.0) * 127.0).round() as u8 } else { 0 };
+        let message = [MIDI_CONTROL_CHANGE | NOTE_CHANNEL as u8, controller & 0x7F, value];
+        self.push(Queued::Midi(MidiEvent::new(time, NOTE_PORT, message)));
+    }
+
+    /// The pitch wheel, `value` -1..=1, for a port that takes MIDI.
+    pub(crate) fn pitch_bend(&mut self, time: u32, value: f32) {
+        let value = if value.is_finite() { value.clamp(-1.0, 1.0) } else { 0.0 };
+        // Fourteen bits with 8192 at rest; the way up is a step shorter.
+        let raw = (8192.0 + if value >= 0.0 { value * 8191.0 } else { value * 8192.0 }).round() as u16;
+        let message = [MIDI_PITCH_BEND | NOTE_CHANNEL as u8, (raw & 0x7F) as u8, (raw >> 7) as u8 & 0x7F];
+        self.push(Queued::Midi(MidiEvent::new(time, NOTE_PORT, message)));
+    }
+
     /// Cuts every sounding voice of the plugin short at the start of the
     /// block, as far as it lets a host do that: the keys in `held` are
     /// released and choked, and a port that takes MIDI is told "all sound
@@ -165,6 +182,9 @@ pub(crate) struct BlockEvents {
     dirty_list: Vec<usize>,
     notes: Option<NotePort>,
     held: HeldKeys,
+    /// The sustain pedal, worked out here for a plugin whose note port
+    /// does not take MIDI and so cannot be sent it.
+    pedal: Pedal,
     silence: bool,
     /// The note events of blocks the plugin could not be given, waiting
     /// for the next one it can. Never grows beyond its capacity.
@@ -184,6 +204,7 @@ impl BlockEvents {
             dirty_list: Vec::with_capacity(count),
             notes,
             held: HeldKeys::default(),
+            pedal: Pedal::default(),
             silence: false,
             deferred: Vec::with_capacity(MAX_NOTE_EVENTS),
             queue: EventQueue::with_capacity(count + 2 * MAX_NOTE_EVENTS + MAX_SILENCE_EVENTS),
@@ -212,6 +233,7 @@ impl BlockEvents {
     /// and with it every voice has ended.
     pub(crate) fn forget_notes(&mut self) {
         self.held.take().for_each(drop);
+        self.pedal.clear();
         self.silence = false;
         self.deferred.clear();
     }
@@ -249,19 +271,44 @@ impl BlockEvents {
         for (time, kind) in late.chain(events_in_part(events, start, frames, total)) {
             match kind {
                 EventKind::NoteOn { pitch, velocity } => {
+                    self.pedal.key_down(pitch);
                     self.held.press(pitch);
                     self.queue.note_on(port.dialect, time, pitch, velocity);
                 }
                 EventKind::NoteOff { pitch } => {
-                    self.held.release(pitch);
-                    self.queue.note_off(port.dialect, time, pitch);
+                    // A plugin that is sent the pedal works it itself. For
+                    // one that is not, the key stays down until the pedal
+                    // comes up.
+                    if port.midi || self.pedal.key_up(pitch) {
+                        self.held.release(pitch);
+                        self.queue.note_off(port.dialect, time, pitch);
+                    }
                 }
                 EventKind::AllNotesOff => {
+                    self.pedal.clear();
                     for key in self.held.take() {
                         self.queue.note_off(port.dialect, time, key);
                     }
                 }
-                EventKind::PitchBend { .. } | EventKind::Control { .. } => {}
+                // The wheels and the pedal are MIDI's: a port that takes
+                // MIDI gets them as they are. One that takes only CLAP
+                // notes has no use for the wheels, and the pedal is worked
+                // out for it.
+                EventKind::PitchBend { value } => {
+                    if port.midi {
+                        self.queue.pitch_bend(time, value);
+                    }
+                }
+                EventKind::Control { controller, value } => {
+                    if port.midi {
+                        self.queue.control(time, controller, value);
+                    } else if let Some(down) = kind.sustain() {
+                        for key in self.pedal.set(down) {
+                            self.held.release(key);
+                            self.queue.note_off(port.dialect, time, key);
+                        }
+                    }
+                }
             }
         }
         self.deferred.clear();
@@ -518,6 +565,73 @@ mod tests {
         // Nothing but the new note is held now.
         assert_eq!(listing(feed.fill(&[flush], 0, 64, 64)), [(9, "off", 72, 0.0)]);
         assert_eq!(feed.fill(&[flush], 0, 64, 64).len(), 0);
+    }
+
+    /// The MIDI messages in the queue, as `(time, bytes)`.
+    fn midi(queue: &EventQueue) -> Vec<(u32, [u8; 3])> {
+        (0..queue.len())
+            .filter_map(|index| queue.get(index).unwrap().as_event::<MidiEvent>())
+            .map(|event| (event.header().time(), event.data()))
+            .collect()
+    }
+
+    #[test]
+    fn the_wheels_and_the_pedal_go_to_a_port_that_takes_midi_as_midi() {
+        let port = Some(NotePort { dialect: NoteDialect::Clap, midi: true });
+        let mut feed = BlockEvents::new(Vec::new(), port);
+        let at = |offset: u32, kind: EventKind| Event { offset, kind };
+        let events = [
+            on(0, 60),
+            at(1, EventKind::Control { controller: 64, value: 1.0 }),
+            at(2, EventKind::PitchBend { value: 1.0 }),
+            at(3, EventKind::PitchBend { value: -1.0 }),
+            at(4, EventKind::PitchBend { value: 0.0 }),
+            at(5, EventKind::Control { controller: 1, value: 0.5 }),
+            off(6, 60),
+            at(7, EventKind::PitchBend { value: f32::NAN }),
+        ];
+        let queue = feed.fill(&events, 0, 64, 64);
+        assert_eq!(
+            midi(queue),
+            [
+                (1, [0xB0, 64, 127]),
+                (2, [0xE0, 0x7F, 0x7F]),
+                (3, [0xE0, 0, 0]),
+                (4, [0xE0, 0, 64]),
+                (5, [0xB0, 1, 64]),
+                (7, [0xE0, 0, 64]),
+            ]
+        );
+        // The plugin has the pedal, so the key comes up when it comes up.
+        let notes: Vec<_> = listing(queue).into_iter().filter(|event| event.1 != "midi").collect();
+        assert_eq!(notes, [(0, "on", 60, 1.0), (6, "off", 60, 0.0)]);
+    }
+
+    #[test]
+    fn the_pedal_is_worked_out_for_a_port_that_takes_only_clap_notes() {
+        let mut feed = BlockEvents::new(Vec::new(), CLAP_PORT);
+        let pedal = |offset: u32, down: bool| Event {
+            offset,
+            kind: EventKind::Control { controller: 64, value: if down { 1.0 } else { 0.0 } },
+        };
+        let bend = Event { offset: 3, kind: EventKind::PitchBend { value: 0.5 } };
+        let queue = feed.fill(&[on(0, 60), on(0, 64), pedal(1, true), off(2, 60), bend, on(4, 67)], 0, 64, 64);
+        assert_eq!(
+            listing(queue),
+            [(0, "on", 60, 1.0), (0, "on", 64, 1.0), (4, "on", 67, 1.0)],
+            "the key that came up is held, and nothing is sent that the port does not take"
+        );
+        // The same key again is that key's again; the pedal comes up and
+        // lets go of what it alone was holding.
+        let queue = feed.fill(&[off(0, 67), on(1, 67), pedal(5, false), off(9, 64)], 0, 64, 64);
+        assert_eq!(listing(queue), [(1, "on", 67, 1.0), (5, "off", 60, 0.0), (9, "off", 64, 0.0)]);
+
+        // All notes off ends what the pedal holds, and leaves it down.
+        feed.fill(&[pedal(0, true), off(1, 67)], 0, 64, 64);
+        let flush = Event { offset: 2, kind: EventKind::AllNotesOff };
+        assert_eq!(listing(feed.fill(&[flush], 0, 64, 64)), [(2, "off", 67, 0.0)]);
+        assert_eq!(listing(feed.fill(&[on(0, 72), off(1, 72)], 0, 64, 64)), [(0, "on", 72, 1.0)], "still down");
+        assert_eq!(listing(feed.fill(&[pedal(0, false)], 0, 64, 64)), [(0, "off", 72, 0.0)]);
     }
 
     #[test]

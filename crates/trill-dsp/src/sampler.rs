@@ -41,7 +41,7 @@ use crate::voice::{EnvShape, Envelope, FadeOut, FilterMode, Stage, VoiceFilter, 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use trill_core::device::{DeviceProcessor, Event, EventKind, ProcessInfo};
+use trill_core::device::{DeviceProcessor, Event, EventKind, PITCH_BEND_SEMITONES, Pedal, ProcessInfo};
 
 /// The state format this build writes, and the newest it reads.
 pub const STATE_VERSION: u32 = 1;
@@ -277,12 +277,20 @@ impl Voice {
         self.active && !self.fade.fading()
     }
 
-    fn render(&mut self, d: &Derived, sample: &Sample, sample_rate: f32, out_left: &mut [f32], out_right: &mut [f32]) {
+    /// `bend` is the pitch wheel, as a ratio of frequencies.
+    fn render(
+        &mut self,
+        d: &Derived,
+        (sample, bend): (&Sample, f64),
+        sample_rate: f32,
+        out_left: &mut [f32],
+        out_right: &mut [f32],
+    ) {
         let Some(head) = self.head.as_mut() else {
             self.active = false;
             return;
         };
-        head.set_rate(sample, self.pitch_ratio * d.tune);
+        head.set_rate(sample, self.pitch_ratio * d.tune * bend);
         if d.filter.is_some() {
             let octaves = d.filter_env * self.filt.level + d.key_track * (self.pitch as f32 - 60.0) / 12.0;
             self.filter.set(d.cutoff * 2f32.powf(octaves), d.q, sample_rate);
@@ -313,6 +321,9 @@ pub struct Sampler {
     sample_rate: f64,
     voices: Vec<Voice>,
     clock: u64,
+    pedal: Pedal,
+    /// The pitch wheel, as a ratio of frequencies.
+    bend: f64,
 }
 
 impl Sampler {
@@ -326,6 +337,8 @@ impl Sampler {
             sample_rate: 48_000.0,
             voices: vec![Voice::new(); MAX_VOICES + SPARE_VOICES],
             clock: 0,
+            pedal: Pedal::default(),
+            bend: 1.0,
         }
     }
 
@@ -428,12 +441,33 @@ impl Sampler {
 
     fn handle(&mut self, kind: EventKind) {
         match kind {
-            EventKind::NoteOn { pitch, velocity } => self.note_on(pitch, velocity),
-            EventKind::NoteOff { pitch } => self.note_off(pitch),
+            EventKind::NoteOn { pitch, velocity } => {
+                self.pedal.key_down(pitch);
+                self.note_on(pitch, velocity);
+            }
+            EventKind::NoteOff { pitch } => {
+                // Unless the pedal holds it.
+                if self.pedal.key_up(pitch) {
+                    self.note_off(pitch);
+                }
+            }
             // One-shot notes are released too: stopping the transport
             // should not leave a long sample playing to its end.
-            EventKind::AllNotesOff => self.voices.iter_mut().filter(|voice| voice.active).for_each(Voice::release),
-            EventKind::PitchBend { .. } | EventKind::Control { .. } => {}
+            EventKind::AllNotesOff => {
+                self.pedal.clear();
+                self.voices.iter_mut().filter(|voice| voice.active).for_each(Voice::release);
+            }
+            EventKind::PitchBend { value } => {
+                let semitones = if value.is_finite() { value.clamp(-1.0, 1.0) * PITCH_BEND_SEMITONES } else { 0.0 };
+                self.bend = 2f64.powf(f64::from(semitones) / 12.0);
+            }
+            EventKind::Control { .. } => {
+                if let Some(down) = kind.sustain() {
+                    for pitch in self.pedal.set(down) {
+                        self.note_off(pitch);
+                    }
+                }
+            }
         }
     }
 
@@ -444,7 +478,13 @@ impl Sampler {
         while pos < left.len() {
             let len = (left.len() - pos).min(CONTROL_BLOCK);
             for voice in self.voices.iter_mut().filter(|voice| voice.active) {
-                voice.render(&self.derived, sample, sample_rate, &mut left[pos..pos + len], &mut right[pos..pos + len]);
+                voice.render(
+                    &self.derived,
+                    (sample, self.bend),
+                    sample_rate,
+                    &mut left[pos..pos + len],
+                    &mut right[pos..pos + len],
+                );
             }
             pos += len;
         }
@@ -510,6 +550,7 @@ impl DeviceProcessor for Sampler {
     }
 
     fn reset(&mut self) {
+        self.pedal.clear();
         for voice in &mut self.voices {
             voice.kill();
         }
@@ -736,6 +777,38 @@ mod tests {
         device.reset();
         let (left, _) = run(&mut device, SR, 256, 1_000, &[]);
         assert_eq!(peak(&left), 0.0);
+    }
+
+    #[test]
+    fn the_pitch_wheel_and_the_pedal_work_as_on_any_keyboard() {
+        // A sine recorded at C4, played at C4: long enough that the loop
+        // point, which is not at a whole number of waves, is never reached.
+        let file = sine(261.63, SR, 192_000);
+        let looped = with(PLAIN, &[("loop_mode", 1.0), ("release", 0.01)]);
+        let mut device = sampler(file.clone(), &looped);
+        let bend = |value: f32| EventKind::PitchBend { value };
+        let events = [(0, ON(60)), (24_000, bend(1.0)), (48_000, bend(-0.5))];
+        let (left, _) = run(&mut device, SR, 256, 72_000, &events);
+        let semitones = |second: usize| {
+            let heard = zero_crossing_hz(&left[second * 24_000 + 2_400..(second + 1) * 24_000 - 2_400], SR);
+            12.0 * (heard / 261.63).log2()
+        };
+        assert!(semitones(0).abs() < 0.02, "{}", semitones(0));
+        assert!((semitones(1) - 2.0).abs() < 0.02, "{}", semitones(1));
+        assert!((semitones(2) + 1.0).abs() < 0.02, "{}", semitones(2));
+
+        // The pedal holds a note past its key, and all notes off ends it.
+        let pedal = |down: bool| EventKind::Control { controller: 64, value: if down { 1.0 } else { 0.0 } };
+        let mut device = sampler(file.clone(), &looped);
+        let events = [(0, ON(60)), (2_400, pedal(true)), (4_800, OFF(60)), (24_000, pedal(false))];
+        let (left, _) = run(&mut device, SR, 256, 36_000, &events);
+        assert!(rms(&left[14_400..24_000]) > 0.3, "held by the pedal");
+        assert_eq!(peak(&left[28_800..]), 0.0, "let go when it comes up");
+        let mut device = sampler(file, &looped);
+        let events = [(0, pedal(true)), (0, ON(60)), (2_400, OFF(60)), (12_000, EventKind::AllNotesOff)];
+        let (left, _) = run(&mut device, SR, 256, 24_000, &events);
+        assert!(rms(&left[4_800..12_000]) > 0.3);
+        assert_eq!(peak(&left[16_800..]), 0.0);
     }
 
     #[test]

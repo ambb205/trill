@@ -339,6 +339,51 @@ pub(crate) fn resolve_values(specs: &[ParamSpec], values: &[(ParamID, f64)]) -> 
         .collect()
 }
 
+/// The pitch wheel, as VST3 numbers it among the MIDI controllers.
+pub(crate) const PITCH_BEND: u8 = 129;
+/// The most controllers kept: every one a plugin could name.
+const MIDI_CONTROLLERS: u8 = 120;
+
+/// The parameters through which the plugin takes what a keyboard sends
+/// beside notes: the pedal, the wheels, any other controller.
+///
+/// A VST3 plugin is not sent MIDI controllers. One that understands them
+/// names a parameter for each, and the host sets that parameter instead.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MidiParams {
+    /// Controller number and the parameter that stands for it.
+    assigned: Vec<(u8, ParamID)>,
+}
+
+impl MidiParams {
+    /// The parameter that stands for `controller`, if the plugin has one.
+    pub(crate) fn param(&self, controller: u8) -> Option<ParamID> {
+        self.assigned.iter().find(|(number, _)| *number == controller).map(|(_, id)| *id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn of(assigned: &[(u8, ParamID)]) -> Self {
+        Self { assigned: assigned.to_vec() }
+    }
+}
+
+/// Asks the plugin which parameters stand for the MIDI controllers and the
+/// pitch wheel, on the first channel of its first event bus.
+pub(crate) fn midi_params(controller: &ComPtr<IEditController>) -> MidiParams {
+    let Some(mapping) = controller.cast::<IMidiMapping>() else { return MidiParams::default() };
+    let assigned = (0..MIDI_CONTROLLERS)
+        .chain([PITCH_BEND])
+        .filter_map(|number| {
+            let mut id: ParamID = 0;
+            // SAFETY: `mapping` is an interface of the live edit
+            // controller, used on the plugin main thread; `id` is a local.
+            let result = unsafe { mapping.getMidiControllerAssignment(0, 0, CtrlNumber::from(number), &mut id) };
+            (result == kResultOk).then_some((number, id))
+        })
+        .collect();
+    MidiParams { assigned }
+}
+
 /// The parameters through which the plugin takes MIDI's "all sound off"
 /// and "all notes off".
 ///

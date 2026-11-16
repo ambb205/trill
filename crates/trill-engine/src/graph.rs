@@ -192,12 +192,12 @@ impl TrackState {
         }
     }
 
-    /// Nothing is held by hand any more: everything was released.
+    /// No key is held by hand any more: every note was released. The
+    /// pedal and the wheel are where they were; they are still the
+    /// keyboard's to put back.
     pub fn forget_live(&mut self) {
         self.live_held = 0;
         self.routed_held = 0;
-        self.live_sustain = false;
-        self.live_bent = false;
     }
 }
 
