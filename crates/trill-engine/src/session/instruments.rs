@@ -22,11 +22,20 @@ impl Session {
     /// drum kit or a plugin that calls itself a drum instrument. False for
     /// a track that is not there.
     pub fn plays_drums(&self, track: TrackId) -> bool {
-        let Ok(track) = self.project.track(track) else { return false };
-        match track.profile.role {
+        let Ok(found) = self.project.track(track) else { return false };
+        match found.profile.role {
             Some(role) => role == Role::Drums,
-            None => track.devices.iter().any(|device| self.factory.plays_drums(&device.uri)),
+            None => self.instrument_plays_drums(track),
         }
+    }
+
+    /// Whether a track plays through a drum kit or a plugin that calls
+    /// itself a drum instrument, whatever the track itself says: what
+    /// [`plays_drums`](Self::plays_drums) falls back on, and what a track
+    /// that says nothing is taken for.
+    pub fn instrument_plays_drums(&self, track: TrackId) -> bool {
+        let Ok(track) = self.project.track(track) else { return false };
+        track.devices.iter().any(|device| self.factory.plays_drums(&device.uri))
     }
 
     /// The device a track's notes play through: the first instrument in

@@ -10,7 +10,7 @@
 use super::timeline;
 use super::units::{METER_FLOOR_DB, gain_to_db};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -61,6 +61,11 @@ pub struct Snapshot {
     /// Which MIDI controllers the instrument of each track does something
     /// with, where that is known.
     controller_support: HashMap<TrackId, ControllerSupport>,
+    /// The tracks whose notes are drums.
+    drum_tracks: HashSet<TrackId>,
+    /// The tracks that play through a drum instrument, whatever they say
+    /// of their notes themselves.
+    drum_instruments: HashSet<TrackId>,
     /// What each MIDI clip plays, worked out the first time it is drawn and
     /// kept until the next revision.
     clip_notes: RefCell<HashMap<ClipId, Rc<ClipNotes>>>,
@@ -74,6 +79,18 @@ impl Snapshot {
     /// with: [`ControllerSupport::Unknown`] where that cannot be said.
     pub fn controller_support(&self, track: TrackId) -> ControllerSupport {
         self.controller_support.get(&track).cloned().unwrap_or_default()
+    }
+
+    /// Whether the notes of `track` are drums: the track says so, or says
+    /// nothing and plays through a drum instrument.
+    pub fn plays_drums(&self, track: TrackId) -> bool {
+        self.drum_tracks.contains(&track)
+    }
+
+    /// Whether `track` plays through a drum kit or a plugin that calls
+    /// itself a drum instrument, whatever the track says of its notes.
+    pub fn has_drum_instrument(&self, track: TrackId) -> bool {
+        self.drum_instruments.contains(&track)
     }
 
     /// Copies what the views need out of the session. `devices_for` are the
@@ -117,6 +134,9 @@ impl Snapshot {
         editors.sort_unstable();
         let controller_support =
             project.tracks.iter().map(|track| (track.id, session.controller_support(track.id))).collect();
+        let ids = || project.tracks.iter().map(|track| track.id);
+        let drum_tracks = ids().filter(|id| session.plays_drums(*id)).collect();
+        let drum_instruments = ids().filter(|id| session.instrument_plays_drums(*id)).collect();
         let mut saved_presets: HashMap<String, Vec<PresetInfo>> = HashMap::new();
         for device in shown.iter().flat_map(|track| track.devices.iter()).chain(project.master.devices.iter()) {
             if !saved_presets.contains_key(&device.uri) {
@@ -128,6 +148,8 @@ impl Snapshot {
         }
         Self {
             controller_support,
+            drum_tracks,
+            drum_instruments,
             saved_presets,
             revision: session.revision(),
             can_undo: session.can_undo(),

@@ -93,6 +93,83 @@ fn the_track_menu_duplicates_recolors_and_groups() {
     assert_eq!(names(&harness), ["Group 1", "Two", "One", "One copy", "Three"], "right under its group");
 }
 
+/// A point on the row of `pitch` in the piano roll's column of keys.
+fn key_row(harness: &Harness, pitch: u8) -> Pos2 {
+    pos2(harness.work_left() + piano_roll::SIDEBAR_WIDTH + 20.0, harness.note_cell(0.0, pitch).y)
+}
+
+/// What the status bar says with the pointer on the row of `pitch`.
+fn said_of(harness: &mut Harness, pitch: u8) -> String {
+    harness.move_to(key_row(harness, pitch));
+    harness.idle(2);
+    harness.hint()
+}
+
+#[test]
+fn a_track_is_switched_to_drums_in_its_menu_and_the_piano_roll_names_its_rows() {
+    let (mut harness, first, ..) = with_two_tracks(UiOptions::default());
+    harness.click(harness.lane(10.0, 0));
+    harness.idle(2);
+    assert!(said_of(&mut harness, 60).starts_with("Press a key"), "a note like any other: {}", harness.hint());
+
+    let before = harness.undo_depth();
+    harness.right_click(name_of(&harness, 0));
+    harness.idle(3);
+    assert!(!harness.is_on("Plays drums"));
+    harness.click_label("Plays drums");
+    assert_eq!(harness.project().track(first).unwrap().profile.role, Some(trill_core::Role::Drums));
+    assert_eq!(harness.undo_depth(), before + 1);
+    // Its rows are drums now: General MIDI's, as nothing else is known.
+    assert!(said_of(&mut harness, 60).starts_with("High Bongo (C4)"), "{}", harness.hint());
+
+    // The track's own map, as an assistant or a plugin's entry gives it, names the rows.
+    harness
+        .session
+        .lock()
+        .edit(|project| {
+            let mut profile = project.track(first)?.profile.clone();
+            profile.sounds.insert("wide_open_hat".into(), 60);
+            project.set_track_profile(first, profile)
+        })
+        .unwrap();
+    harness.idle(1);
+    assert!(said_of(&mut harness, 60).starts_with("Wide Open Hat (C4)"), "{}", harness.hint());
+
+    // Back to pitches: the track says nothing again, and a key that is not a note says so.
+    harness.right_click(name_of(&harness, 0));
+    harness.idle(3);
+    assert!(harness.is_on("Plays drums"));
+    harness.click_label("Plays drums");
+    assert_eq!(harness.project().track(first).unwrap().profile.role, None, "as its instrument has it anyway");
+    assert!(said_of(&mut harness, 60).starts_with("C4 plays a noise (wide_open_hat)"), "{}", harness.hint());
+}
+
+#[test]
+fn a_track_with_a_drum_kit_plays_drums_until_it_is_told_otherwise() {
+    let mut ids = None;
+    let mut harness = Harness::new(UiOptions::default(), |session| {
+        let (first, _, _) = two_tracks(session);
+        session.add_device(ChainRef::Track(first), "builtin:drumkit", None, None).unwrap();
+        ids = Some(first);
+    });
+    let first = ids.unwrap();
+    harness.click(harness.lane(10.0, 0));
+    harness.idle(2);
+    // The kit's own names, where it plays something; nothing is said in the song about it.
+    assert!(harness.project().track(first).unwrap().profile.is_empty());
+    assert!(said_of(&mut harness, 56).starts_with("Cowbell (G#3)"), "{}", harness.hint());
+
+    harness.right_click(name_of(&harness, 0));
+    harness.idle(3);
+    assert!(harness.is_on("Plays drums"), "its instrument is a drum kit");
+    harness.click_label("Plays drums");
+    assert_eq!(harness.project().track(first).unwrap().profile.role, Some(trill_core::Role::Pitched));
+    assert!(said_of(&mut harness, 56).starts_with("Press a key"), "{}", harness.hint());
+    harness.right_click(name_of(&harness, 0));
+    harness.click_label("Plays drums");
+    assert!(harness.project().track(first).unwrap().profile.is_empty(), "back to what the kit says, unsaid");
+}
+
 #[test]
 fn tracks_are_dragged_into_and_out_of_a_group_and_groups_fold() {
     let (mut harness, [one, two, three], _) = with_three_tracks(UiOptions::default());

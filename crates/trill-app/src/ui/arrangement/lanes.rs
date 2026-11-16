@@ -748,8 +748,10 @@ fn lane_menu(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: Option<TrackI
     let item = |ui: &mut Ui, label: &str, command: Command, enabled: bool| {
         MenuItem::new(label).shortcut(&shortcuts::keys(command)).enabled(enabled).show(ui, theme).clicked()
     };
-    let can_paste = matches!(cx.state.clipboard, Some(Clipboard::Clips(_))) && track.is_some();
-    if item(ui, "Paste", Command::Paste, can_paste) {
+    // A copied stretch of time goes back on the tracks it came from, whichever lane this is.
+    let holds_time = matches!(cx.state.clipboard, Some(Clipboard::Time(_)));
+    let can_paste = holds_time || matches!(cx.state.clipboard, Some(Clipboard::Clips(_))) && track.is_some();
+    if item(ui, if holds_time { "Paste over" } else { "Paste" }, Command::Paste, can_paste) {
         ops::paste(cx);
     }
     if MenuItem::new("Add MIDI clip here").enabled(track.is_some()).show(ui, theme).clicked()
@@ -777,6 +779,12 @@ fn lane_menu(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: Option<TrackI
     }
     if item(ui, "Insert time", Command::InsertTime, has_time) {
         ops::insert_time(cx);
+    }
+    if item(ui, "Copy time", Command::CopyTime, has_time) {
+        ops::copy_time(cx);
+    }
+    if item(ui, "Paste time", Command::PasteTime, holds_time) {
+        ops::paste_time(cx, trill_core::PasteMode::Insert);
     }
 }
 
