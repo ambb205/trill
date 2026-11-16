@@ -1,0 +1,158 @@
+{
+  "format_version": 1,
+  "name": "Drum Rack",
+  "tempo": 120.0,
+  "time_signature": {
+    "numerator": 4,
+    "denominator": 4
+  },
+  "loop_region": {
+    "enabled": false,
+    "start": 0.0,
+    "end": 16.0
+  },
+  "tracks": [
+    {
+      "id": 1,
+      "name": "Rack",
+      "color": 14267484,
+      "volume_db": -4.0,
+      "pan": 0.0,
+      "mute": false,
+      "solo": false,
+      "devices": [
+        {
+          "id": 2,
+          "uri": "builtin:drumrack",
+          "name": "Drum Rack",
+          "enabled": true,
+          "params": {}
+        }
+      ],
+      "clips": [
+        {
+          "id": 3,
+          "name": "Kit",
+          "start": 0.0,
+          "length": 8.0,
+          "muted": false,
+          "content": {
+            "type": "midi",
+            "notes": [
+              {
+                "pitch": 36,
+                "start": 0.0,
+                "length": 0.25,
+                "velocity": 80
+              },
+              {
+                "pitch": 41,
+                "start": 0.5,
+                "length": 0.25,
+                "velocity": 90
+              },
+              {
+                "pitch": 46,
+                "start": 1.0,
+                "length": 0.25,
+                "velocity": 100
+              },
+              {
+                "pitch": 39,
+                "start": 1.5,
+                "length": 0.25,
+                "velocity": 110
+              },
+              {
+                "pitch": 44,
+                "start": 2.0,
+                "length": 0.25,
+                "velocity": 80
+              },
+              {
+                "pitch": 37,
+                "start": 2.5,
+                "length": 0.25,
+                "velocity": 90
+              },
+              {
+                "pitch": 42,
+                "start": 3.0,
+                "length": 0.25,
+                "velocity": 100
+              },
+              {
+                "pitch": 47,
+                "start": 3.5,
+                "length": 0.25,
+                "velocity": 110
+              },
+              {
+                "pitch": 40,
+                "start": 4.0,
+                "length": 0.25,
+                "velocity": 80
+              },
+              {
+                "pitch": 45,
+                "start": 4.5,
+                "length": 0.25,
+                "velocity": 90
+              },
+              {
+                "pitch": 38,
+                "start": 5.0,
+                "length": 0.25,
+                "velocity": 100
+              },
+              {
+                "pitch": 43,
+                "start": 5.5,
+                "length": 0.25,
+                "velocity": 110
+              },
+              {
+                "pitch": 36,
+                "start": 6.0,
+                "length": 0.25,
+                "velocity": 80
+              },
+              {
+                "pitch": 41,
+                "start": 6.5,
+                "length": 0.25,
+                "velocity": 90
+              },
+              {
+                "pitch": 46,
+                "start": 7.0,
+                "length": 0.25,
+                "velocity": 100
+              },
+              {
+                "pitch": 39,
+                "start": 7.5,
+                "length": 0.25,
+                "velocity": 110
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "master": {
+    "volume_db": 0.0,
+    "devices": [
+      {
+        "id": 4,
+        "uri": "builtin:limiter",
+        "name": "Limiter",
+        "enabled": true,
+        "params": {}
+      }
+    ]
+  },
+  "automation": [],
+  "next_id": 10
+}

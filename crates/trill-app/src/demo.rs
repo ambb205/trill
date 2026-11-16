@@ -1,8 +1,12 @@
 //! A short built-in song, for trying the app out (`--demo`, or the button
 //! on an empty project). Sixteen bars in A minor over Am - F - C - G: pad and
 //! hats, then drums and bass, then an arpeggio, then a bell melody on top.
+//! The three synths share a group and send to a reverb on a return track,
+//! the pad's filter opens along an envelope, and markers name the sections.
 
-use trill_core::{Beats, ChainRef, ClipId, DeviceId, Note, TrackId};
+use trill_core::{
+    AutomationPoint, AutomationTarget, Beats, ChainRef, ClipId, DeviceId, Note, Segment, TrackId, TrackKind,
+};
 use trill_engine::{Session, SessionError};
 
 const BAR: Beats = 4.0;
@@ -72,6 +76,33 @@ fn build(session: &mut Session) -> Result<ClipId, SessionError> {
     let bell = track(session, "Bell", "builtin:polysynth", "bell", -12.0, -0.25)?;
     effect(session, bell, "builtin:delay", &[("time_beats", 1.0), ("mix", 0.25)])?;
     clip(session, bell, "Melody", 12.0 * BAR, PROGRESSION, None, melody())?;
+
+    // The synths play through a group, and each sends a little to a shared
+    // reverb.
+    let space = session.edit(|project| {
+        let synths = project.add_track_of_kind("Synths", TrackKind::Group);
+        project.move_track(synths, project.track_index(pad)?)?;
+        let space = project.add_track_of_kind("Space", TrackKind::Return);
+        for (track, send_db) in [(pad, -16.0), (arp, -11.0), (bell, -8.0)] {
+            project.set_track_group(track, Some(synths))?;
+            project.set_send(track, space, Some(send_db))?;
+        }
+        Ok(space)
+    })?;
+    effect(session, space, "builtin:reverb", &[("decay", 3.2), ("mix", 1.0)])?;
+
+    session.edit(|project| {
+        for (bar, name) in [(0, "Intro"), (4, "Drums"), (8, "Arp"), (12, "Melody")] {
+            project.add_marker(bar as f64 * BAR, name)?;
+        }
+        // The pad's filter opens through the first half, quickly at first,
+        // and eases back under the melody.
+        let filter = project.track(pad)?.devices[0].id;
+        let cutoff = AutomationTarget::DeviceParam { device: filter, param: "cutoff".into() };
+        let opening = AutomationPoint { beat: 0.0, value: 380.0, shape: Segment::Curve(-0.35) };
+        let points = vec![opening, AutomationPoint::new(8.0 * BAR, 2600.0), AutomationPoint::new(16.0 * BAR, 1400.0)];
+        project.set_automation(cutoff, points)
+    })?;
 
     Ok(featured)
 }
@@ -252,17 +283,31 @@ mod tests {
 
         let project = session.project();
         assert_eq!(project.name, "Night Drive");
-        assert_eq!(project.tracks.len(), 5);
+        let names: Vec<&str> = project.tracks.iter().map(|track| track.name.as_str()).collect();
+        assert_eq!(names, ["Drums", "Bass", "Synths", "Pad", "Arp", "Bell", "Space"]);
         assert_eq!(project.length_beats(), 16.0 * BAR);
         assert!(project.loop_region.enabled);
         assert_eq!(project.clip(featured).unwrap().name, "Arp A");
-        for track in &project.tracks {
+        for track in project.tracks.iter().filter(|track| track.kind == TrackKind::Normal) {
             assert!(track.devices.len() >= 2, "{} has an instrument and at least one effect", track.name);
             assert!(!track.clips.is_empty(), "{} has clips", track.name);
             for clip in &track.clips {
                 assert!(!clip.notes().is_empty(), "{} / {} has notes", track.name, clip.name);
             }
         }
+
+        // The synths are grouped and send to the reverb on the return.
+        let (synths, space) = (&project.tracks[2], &project.tracks[6]);
+        assert_eq!((synths.kind, space.kind), (TrackKind::Group, TrackKind::Return));
+        assert_eq!(space.devices[0].uri, "builtin:reverb");
+        for member in &project.tracks[3..6] {
+            assert_eq!(member.group, Some(synths.id), "{}", member.name);
+            assert_eq!(member.sends.len(), 1, "{}", member.name);
+            assert_eq!(member.sends[0].to, space.id);
+        }
+        assert!(project.tracks[..2].iter().all(|track| track.group.is_none() && track.sends.is_empty()));
+        assert_eq!(project.markers.len(), 4);
+        assert_eq!(project.automation.len(), 1, "the pad's filter envelope");
 
         assert!(session.undo());
         assert!(session.project().tracks.is_empty(), "one undo removes the whole demo");

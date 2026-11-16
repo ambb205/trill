@@ -1,0 +1,295 @@
+{
+  "format_version": 1,
+  "name": "Rough Mix With A Rather Long Name For A Project",
+  "tempo": 96.5,
+  "time_signature": {
+    "numerator": 6,
+    "denominator": 8
+  },
+  "loop_region": {
+    "enabled": false,
+    "start": 6.0,
+    "end": 12.0
+  },
+  "tracks": [
+    {
+      "id": 1,
+      "name": "Lead Vocal (comp 3, tuned, de-essed)",
+      "color": 11042769,
+      "volume_db": -3.5,
+      "pan": -0.3,
+      "mute": false,
+      "solo": true,
+      "devices": [
+        {
+          "id": 10,
+          "uri": "builtin:compressor",
+          "name": "Compressor",
+          "enabled": true,
+          "params": {}
+        },
+        {
+          "id": 11,
+          "uri": "builtin:eq",
+          "name": "EQ",
+          "enabled": true,
+          "params": {}
+        }
+      ],
+      "clips": [
+        {
+          "id": 2,
+          "name": "Verse 1",
+          "start": 3.0,
+          "length": 9.0,
+          "muted": false,
+          "content": {
+            "type": "audio",
+            "path": "C:/sessions/rough-mix/audio/lead_vocal_take_07.wav",
+            "offset_seconds": 1.25,
+            "gain_db": -2.0,
+            "fade_in": 1.5,
+            "fade_out": 2.5
+          }
+        },
+        {
+          "id": 3,
+          "name": "Ad Lib",
+          "start": 15.0,
+          "length": 1.5,
+          "muted": false,
+          "content": {
+            "type": "audio",
+            "path": "C:/sessions/rough-mix/audio/adlib.wav",
+            "offset_seconds": 0.0,
+            "gain_db": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "name": "Keys",
+      "color": 7514585,
+      "volume_db": -70.0,
+      "pan": 0.5,
+      "mute": true,
+      "solo": false,
+      "devices": [
+        {
+          "id": 20,
+          "uri": "clap:com.example.missing-piano",
+          "name": "Missing Piano",
+          "enabled": true,
+          "params": {}
+        },
+        {
+          "id": 21,
+          "uri": "builtin:eq",
+          "name": "EQ",
+          "enabled": false,
+          "params": {
+            "low_cut": 120.0
+          }
+        }
+      ],
+      "clips": [
+        {
+          "id": 5,
+          "name": "Riff",
+          "start": 0.0,
+          "length": 18.0,
+          "muted": false,
+          "content": {
+            "type": "midi",
+            "notes": [
+              {
+                "pitch": 48,
+                "start": 0.0,
+                "length": 0.5,
+                "velocity": 96
+              },
+              {
+                "pitch": 55,
+                "start": 0.5,
+                "length": 0.5,
+                "velocity": 96
+              },
+              {
+                "pitch": 60,
+                "start": 1.0,
+                "length": 0.5,
+                "velocity": 96
+              },
+              {
+                "pitch": 64,
+                "start": 1.5,
+                "length": 1.5,
+                "velocity": 96
+              }
+            ],
+            "loop_length": 3.0
+          }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "name": "Drums",
+      "color": 9421950,
+      "volume_db": 2.0,
+      "pan": 0.0,
+      "mute": false,
+      "solo": false,
+      "devices": [
+        {
+          "id": 30,
+          "uri": "builtin:drumkit",
+          "name": "Drum Kit",
+          "enabled": true,
+          "params": {}
+        }
+      ],
+      "clips": [
+        {
+          "id": 7,
+          "name": "Groove",
+          "start": 0.0,
+          "length": 6.0,
+          "muted": false,
+          "content": {
+            "type": "midi",
+            "notes": [
+              {
+                "pitch": 36,
+                "start": 0.0,
+                "length": 0.25,
+                "velocity": 118
+              },
+              {
+                "pitch": 42,
+                "start": 0.0,
+                "length": 0.25,
+                "velocity": 96
+              },
+              {
+                "pitch": 42,
+                "start": 0.5,
+                "length": 0.25,
+                "velocity": 70
+              },
+              {
+                "pitch": 42,
+                "start": 1.0,
+                "length": 0.25,
+                "velocity": 70
+              },
+              {
+                "pitch": 38,
+                "start": 1.5,
+                "length": 0.25,
+                "velocity": 104
+              },
+              {
+                "pitch": 42,
+                "start": 1.5,
+                "length": 0.25,
+                "velocity": 96
+              },
+              {
+                "pitch": 42,
+                "start": 2.0,
+                "length": 0.25,
+                "velocity": 70
+              },
+              {
+                "pitch": 42,
+                "start": 2.5,
+                "length": 0.25,
+                "velocity": 70
+              },
+              {
+                "pitch": 36,
+                "start": 3.0,
+                "length": 0.25,
+                "velocity": 118
+              },
+              {
+                "pitch": 42,
+                "start": 3.0,
+                "length": 0.25,
+                "velocity": 96
+              },
+              {
+                "pitch": 42,
+                "start": 3.5,
+                "length": 0.25,
+                "velocity": 70
+              },
+              {
+                "pitch": 42,
+                "start": 4.0,
+                "length": 0.25,
+                "velocity": 70
+              },
+              {
+                "pitch": 38,
+                "start": 4.5,
+                "length": 0.25,
+                "velocity": 104
+              },
+              {
+                "pitch": 42,
+                "start": 4.5,
+                "length": 0.25,
+                "velocity": 96
+              },
+              {
+                "pitch": 42,
+                "start": 5.0,
+                "length": 0.25,
+                "velocity": 70
+              },
+              {
+                "pitch": 42,
+                "start": 5.5,
+                "length": 0.25,
+                "velocity": 70
+              },
+              {
+                "pitch": 46,
+                "start": 5.5,
+                "length": 0.5,
+                "velocity": 92
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "master": {
+    "volume_db": -6.0,
+    "devices": [
+      {
+        "id": 40,
+        "uri": "builtin:limiter",
+        "name": "Limiter",
+        "enabled": true,
+        "params": {}
+      }
+    ]
+  },
+  "automation": [],
+  "markers": [
+    {
+      "beat": 3.0,
+      "name": "Verse"
+    },
+    {
+      "beat": 15.0,
+      "name": "Tag"
+    }
+  ],
+  "next_id": 50
+}

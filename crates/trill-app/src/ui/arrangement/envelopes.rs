@@ -479,6 +479,13 @@ fn interact(
                     select(cx, target, vec![point]);
                 }
             }
+            // The pencil's click is its shortest stroke: one grid cell.
+            _ if response.clicked() && pencil && !double => {
+                cx.state.focus = FocusArea::Automation;
+                let grid = geometry.step();
+                let cell = timeline::snap_floor(map.beat(pointer.x), Some(grid));
+                write_steps(cx, target, cell, cell, grid, map.value(pointer.y));
+            }
             _ => {}
         }
     }
@@ -592,15 +599,21 @@ fn step(
             let cell = timeline::snap_floor(map.beat(pointer.x), Some(grid));
             let value = map.value(pointer.y);
             cx.state.hint.set(format!("{} at {}", map.scale.format(value), timeline::format_position(cell, signature)));
-            let target = target.clone();
-            cx.edit(|project| {
-                let lane = project.automation.iter().find(|lane| lane.target == target);
-                let now = lane.map(|lane| lane.points.clone()).unwrap_or_default();
-                project.set_automation(target, drawn(&now, last, cell, grid, value))
-            });
+            write_steps(cx, target, last, cell, grid, value);
             LaneDrag::Draw { last: cell }
         }
     }
+}
+
+/// Writes a step of `value` over the grid cells from `first` to `last`
+/// into the envelope of `target`, as it is right now.
+fn write_steps(cx: &mut Cx, target: &AutomationTarget, first: Beats, last: Beats, grid: Beats, value: f64) {
+    let target = target.clone();
+    cx.edit(|project| {
+        let lane = project.automation.iter().find(|lane| lane.target == target);
+        let now = lane.map(|lane| lane.points.clone()).unwrap_or_default();
+        project.set_automation(target, drawn(&now, first, last, grid, value))
+    });
 }
 
 /// Removes the selected points: Delete, with an automation lane in focus.

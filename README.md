@@ -67,8 +67,10 @@ fades, automation of track and master volume, pan and any device parameter with 
 segments, group tracks and return tracks with sends, a metronome, sample-exact transport looping, mute/solo, undo/redo, offline rendering that is bit-identical to
 playback, and render analysis (peak, LUFS, stereo correlation, spectral balance, per-track levels).
 
-**Application**: arrangement view with clip editing, piano roll, device panels generated from each device's
-parameters, mixer strips with meters, project files, WAV export.
+**Application**: an arrangement with multi-clip editing (move and copy across tracks, trim either edge, split,
+fades, a clipboard, time selection), markers, group and return tracks, and automation lanes that are edited by
+hand or drawn in steps; a piano roll; device panels generated from each device's parameters; a mixer; MIDI import
+and export; project files; WAV export. `F1` lists the keyboard shortcuts.
 
 ## MCP tools
 

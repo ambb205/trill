@@ -5469,5 +5469,23 @@
       ]
     }
   ],
+  "markers": [
+    {
+      "beat": 0.0,
+      "name": "Intro"
+    },
+    {
+      "beat": 32.0,
+      "name": "Verse"
+    },
+    {
+      "beat": 64.0,
+      "name": "Lead"
+    },
+    {
+      "beat": 96.0,
+      "name": "Outro"
+    }
+  ],
   "next_id": 56
 }

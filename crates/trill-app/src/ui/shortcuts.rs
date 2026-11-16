@@ -139,24 +139,10 @@ pub const BINDINGS: &[Binding] = &[
     bind(Command::Escape, NONE, Key::Escape, When::NotTyping, Section::Edit, "Deselect, or put the tool away"),
     bind(Command::Nudge(-1, 0), NONE, Key::ArrowLeft, When::WithSelection, Section::Edit, "Nudge by one grid step"),
     bind(Command::Nudge(1, 0), NONE, Key::ArrowRight, When::WithSelection, Section::Edit, "Nudge by one grid step"),
-    bind(Command::Nudge(0, 1), NONE, Key::ArrowUp, When::WithSelection, Section::Edit, "Notes: up or down a semitone"),
-    bind(
-        Command::Nudge(0, -1),
-        NONE,
-        Key::ArrowDown,
-        When::WithSelection,
-        Section::Edit,
-        "Notes: up or down a semitone",
-    ),
-    bind(Command::Nudge(0, 12), SHIFT, Key::ArrowUp, When::WithSelection, Section::Edit, "Notes: up or down an octave"),
-    bind(
-        Command::Nudge(0, -12),
-        SHIFT,
-        Key::ArrowDown,
-        When::WithSelection,
-        Section::Edit,
-        "Notes: up or down an octave",
-    ),
+    bind(Command::Nudge(0, 1), NONE, Key::ArrowUp, When::WithSelection, Section::Edit, "Notes: by a semitone"),
+    bind(Command::Nudge(0, -1), NONE, Key::ArrowDown, When::WithSelection, Section::Edit, "Notes: by a semitone"),
+    bind(Command::Nudge(0, 12), SHIFT, Key::ArrowUp, When::WithSelection, Section::Edit, "Notes: by an octave"),
+    bind(Command::Nudge(0, -12), SHIFT, Key::ArrowDown, When::WithSelection, Section::Edit, "Notes: by an octave"),
     bind(Command::Quantize, CTRL, Key::U, When::NotTyping, Section::Edit, "Notes: quantize to the grid"),
     bind(Command::Split, CTRL, Key::E, When::NotTyping, Section::Arrangement, "Split clips at the edit cursor"),
     bind(
@@ -408,9 +394,13 @@ pub fn window(ctx: &egui::Context, cx: &mut Cx) {
             paint::hline(ui.painter(), rule.x_range(), rule.top(), theme.hairline);
             ui.add_space(6.0);
 
-            // A window too short for the list scrolls it.
-            let room = (ui.ctx().content_rect().height() - 120.0).max(160.0);
-            egui::ScrollArea::vertical().max_height(room).auto_shrink([false, true]).show(ui, |ui| {
+            // A window too short for the list scrolls it. The list is given
+            // its place outright: left to size itself, a scroll area inside
+            // a dialog settles for less room than the window has.
+            let room = (ui.ctx().content_rect().height() - 150.0).max(160.0);
+            let (list, _) = ui.allocate_exact_size(vec2(width, body_height.min(room)), Sense::hover());
+            let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(list));
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(&mut ui, |ui| {
                 let (body, _) = ui.allocate_exact_size(vec2(width, body_height), Sense::hover());
                 let painter = ui.painter();
                 for (column, members) in columns.iter().enumerate() {

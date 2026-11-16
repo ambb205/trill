@@ -33,6 +33,8 @@ const HEADER_METER_INSET: f32 = 4.0;
 const MEMBER_INDENT: f32 = 10.0;
 /// A header shorter than this has room for its name row only.
 const TWO_ROWS: f32 = 52.0;
+/// A send bar narrower than this leaves the unit off its value.
+const NARROW_SEND: f32 = 130.0;
 /// Height of the zone along a header's lower edge that resizes it.
 const RESIZE_ZONE: f32 = 4.0;
 /// The instrument new tracks get, so they make sound immediately.
@@ -340,7 +342,10 @@ pub(in crate::ui) fn pan_bar(ui: &Ui, cx: &mut Cx, track: &Track, rect: Rect, id
 pub(in crate::ui) fn send_bar(ui: &Ui, cx: &mut Cx, track: &Track, target: &Track, rect: Rect, id: egui::Id) {
     let level = track.sends.iter().find(|send| send.to == target.id).map(|send| send.level_db);
     let shown = level.map_or_else(|| "Off".to_owned(), units::format_db);
-    let bar = Bar::new(&target.name, &shown, level.map_or(0.0, units::db_to_fader));
+    // In a mixer strip there is no room for the return's name and a unit:
+    // sends are in decibels throughout, and the hint spells it out.
+    let in_bar = if rect.width() < NARROW_SEND { shown.trim_end_matches(" dB") } else { &shown };
+    let bar = Bar::new(&target.name, in_bar, level.map_or(0.0, units::db_to_fader));
     let output = trill_noir::bar(ui, cx.theme, rect, id, &bar);
     cx.hint(
         &output.response,

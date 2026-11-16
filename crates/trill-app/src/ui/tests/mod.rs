@@ -10,6 +10,7 @@ mod automation;
 mod clips;
 mod keys;
 mod mixer;
+mod perf;
 mod ruler;
 mod tracks;
 
@@ -917,7 +918,7 @@ fn an_empty_project_offers_ways_to_start() {
     assert!(harness.project().tracks.is_empty());
     harness.click_label("Open demo song");
     let project = harness.project();
-    assert_eq!((project.name.as_str(), project.tracks.len()), ("Night Drive", 5));
+    assert_eq!((project.name.as_str(), project.tracks.len()), ("Night Drive", 7));
     let selected = harness.app.state().selected_clip.expect("the demo selects a clip");
     assert_eq!(project.clip(selected).unwrap().name, "Arp A");
 }
@@ -1301,64 +1302,4 @@ fn piano_keys_audition_while_held() {
     harness.idle(2);
     assert_eq!(held(&harness), None, "releasing the mouse releases the note");
     assert_eq!(harness.undo_depth(), 1, "auditioning edits nothing");
-}
-
-/// Not a correctness test: prints how long a frame takes with thousands of
-/// notes on screen. Run with `cargo test -p trill-app -- --ignored frame_cost`.
-#[test]
-#[ignore = "a measurement, not an assertion"]
-fn frame_cost_with_thousands_of_notes() {
-    let mut harness = Harness::new(UiOptions::default(), |session| {
-        session
-            .edit(|project| {
-                for track in 0..8 {
-                    let id = project.add_track(format!("Track {track}"));
-                    for clip in 0..4 {
-                        let clip = project.add_midi_clip(id, "Clip", clip as f64 * 16.0, 16.0)?;
-                        let notes: Vec<Note> = (0..250)
-                            .map(|n| Note {
-                                pitch: 36 + ((n * 7 + track * 5) % 48) as u8,
-                                start: n as f64 * 0.0625,
-                                length: 0.0625,
-                                velocity: 40 + (n % 80) as u8,
-                            })
-                            .collect();
-                        project.clip_mut(clip)?.set_notes(notes)?;
-                    }
-                }
-                Ok(())
-            })
-            .unwrap();
-    });
-    // Select a clip so the piano roll is busy too.
-    harness.click(harness.lane(4.0, 0));
-    harness.idle(5);
-    let notes: usize =
-        harness.project().tracks.iter().flat_map(|track| &track.clips).map(|clip| clip.notes().len()).sum();
-
-    let frames = 120;
-    let started = Instant::now();
-    let mut tessellation = Duration::ZERO;
-    for _ in 0..frames {
-        harness.time += FRAME;
-        let input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SCREEN)),
-            time: Some(harness.time),
-            focused: true,
-            ..Default::default()
-        };
-        harness.app.tick(&harness.ctx);
-        let mut output = harness.ctx.run_ui(input, |ui| harness.app.frame(ui));
-        output.textures_delta.clear();
-        let before = Instant::now();
-        let primitives = harness.ctx.tessellate(output.shapes, output.pixels_per_point);
-        tessellation += before.elapsed();
-        assert!(!primitives.is_empty());
-    }
-    let per_frame = started.elapsed() / frames;
-    eprintln!(
-        "{notes} notes in the project: {:.2} ms per frame, of which {:.2} ms tessellation",
-        per_frame.as_secs_f64() * 1000.0,
-        (tessellation / frames).as_secs_f64() * 1000.0
-    );
 }

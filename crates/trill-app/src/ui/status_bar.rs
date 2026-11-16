@@ -11,7 +11,7 @@ const EDGE: f32 = 10.0;
 /// Space between items.
 const GAP: f32 = 16.0;
 /// What the hint says when the pointer is over nothing in particular.
-const IDLE_HINT: &str = "Double-click a lane to create a clip \u{00B7} Space plays";
+const IDLE_HINT: &str = "Double-click a lane to create a clip \u{00B7} Space plays \u{00B7} F1 lists the shortcuts";
 /// The hint never crowds the status items: it stops this far short of them.
 const HINT_CLEARANCE: f32 = 32.0;
 

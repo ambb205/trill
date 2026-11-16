@@ -223,6 +223,15 @@ fn the_pencil_draws_steps_on_the_grid() {
     assert_eq!(value(4.5), steps[0].value, "the cells beside the stroke are untouched");
     assert_eq!(value(7.5), steps[3].value);
 
+    // A click is the shortest stroke: one cell.
+    let before = envelope(&harness, &target).len();
+    harness.settle();
+    harness.click(at_volume(&harness, 12.4, -20.0));
+    let points = envelope(&harness, &target);
+    let step = |point: &AutomationPoint| point.beat == 12.0 && point.shape == Segment::Hold;
+    assert!(points.iter().any(step), "a step at the cell under the click: {points:?}");
+    assert!(points.len() > before);
+
     harness.key(Modifiers::NONE, Key::B);
     assert_eq!(harness.app.state().arrangement.tool, Tool::Pointer);
 }
