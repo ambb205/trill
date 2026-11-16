@@ -126,6 +126,8 @@ impl Compiler<'_> {
         // that have a stand-in meanwhile.
         let mut wanted = HashSet::new();
         let mut waiting = HashMap::new();
+        // The stretched copies this graph has given a stand-in for.
+        let mut held = HashSet::new();
 
         let mut tracks = Vec::with_capacity(project.tracks.len());
         for track in &project.tracks {
@@ -140,7 +142,7 @@ impl Compiler<'_> {
                     ClipContent::Audio(content) => content,
                 };
                 let report = |reason| Problem::AudioFile { clip: clip.id, path: content.path.clone(), reason };
-                let found = match self.audio.clip_audio(content, project.tempo, self.sample_rate, !live) {
+                let found = match self.audio.clip_audio(content, project.tempo, self.sample_rate, !live, &mut held) {
                     Ok(found) => found,
                     Err(reason) => {
                         problems.push(report(reason));
