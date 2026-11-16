@@ -16,6 +16,8 @@ pub const MAX_TEMPO: f64 = 999.0;
 pub const MIN_VOLUME_DB: f32 = -70.0;
 pub const MAX_VOLUME_DB: f32 = 6.0;
 pub const FORMAT_VERSION: u32 = 1;
+/// The furthest an audio clip can be transposed, in semitones either way.
+pub const MAX_TRANSPOSE: f64 = 24.0;
 /// Shortest loop a clip repeats, so a tiny loop length cannot explode into
 /// millions of notes.
 pub const MIN_LOOP_BEATS: Beats = 1.0 / 64.0;
@@ -91,11 +93,65 @@ fn is_zero(value: &Beats) -> bool {
     *value == 0.0
 }
 
+/// How an audio clip relates to the project tempo.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarpMode {
+    /// The recording plays at the speed and pitch it was made at, whatever
+    /// the project tempo.
+    #[default]
+    Off,
+    /// Follows the tempo by playing faster or slower, so the pitch moves
+    /// with it, like a record on a turntable.
+    Repitch,
+    /// Follows the tempo and keeps the pitch, protecting transients: for
+    /// drums and other rhythmic material.
+    Beats,
+    /// Follows the tempo and keeps the pitch, keeping sustained sound
+    /// smooth: for chords, pads, bass, vocals and full mixes.
+    Tonal,
+}
+
+impl WarpMode {
+    fn is_off(&self) -> bool {
+        *self == WarpMode::Off
+    }
+
+    /// Whether the mode changes speed without changing pitch, which is what
+    /// makes transposing possible.
+    pub fn keeps_pitch(self) -> bool {
+        matches!(self, WarpMode::Beats | WarpMode::Tonal)
+    }
+}
+
+/// The audio a clip plays and how it is fitted to the timeline.
+///
+/// # What a clip plays
+///
+/// A clip is a window on a recording. `offset_seconds` is where in the
+/// recording the window opens: always a time in the file as it was
+/// recorded, never affected by tempo or warping. From there on, one beat of
+/// the timeline covers [`AudioContent::seconds_per_beat`] of the recording:
+///
+/// * A clip that **follows the tempo** (its `warp` is not `Off` and its
+///   `source_tempo` is known) covers `60 / source_tempo` seconds per beat.
+///   N beats of the recording occupy N beats of the timeline at any project
+///   tempo, so a bar of a loop stays a bar.
+/// * Any other clip plays at the speed it was recorded at and covers
+///   `60 / project tempo` seconds per beat: how much of the recording fits
+///   under the clip changes with the project tempo.
+///
+/// Everything else follows from that one rule. Trimming the left edge by
+/// `b` beats moves `offset_seconds` by `b` times that many seconds, and
+/// splitting gives the second half the offset the first half would have
+/// reached, so both keep playing exactly what they played. Fades are
+/// lengths on the timeline, in beats, applied to what comes out: warping a
+/// clip does not move them.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AudioContent {
     /// Path of the audio file on disk.
     pub path: String,
-    /// Where in the file playback starts, in seconds.
+    /// Where in the file playback starts, in seconds of the recording.
     #[serde(default)]
     pub offset_seconds: f64,
     #[serde(default)]
@@ -106,12 +162,67 @@ pub struct AudioContent {
     /// Length of the fade at the end of the clip, in beats.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub fade_out: Beats,
+    /// Whether and how the clip follows the project tempo.
+    #[serde(default, skip_serializing_if = "WarpMode::is_off")]
+    pub warp: WarpMode,
+    /// The tempo the recording was made at, in beats per minute, if known.
+    /// A warped clip without one has nothing to follow the tempo with and
+    /// plays at its recorded speed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_tempo: Option<f64>,
+    /// Pitch shift in semitones, without changing the speed. Applies in the
+    /// warp modes that keep pitch ([`WarpMode::keeps_pitch`]); the others
+    /// tie pitch to speed and ignore it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub transpose: f64,
 }
 
 impl AudioContent {
-    /// The whole file at unity gain, without fades.
+    /// The whole file at unity gain, unwarped, without fades.
     pub fn new(path: impl Into<String>) -> Self {
         Self { path: path.into(), ..Self::default() }
+    }
+
+    /// The recording's tempo, if the clip follows the project tempo with it.
+    pub fn followed_tempo(&self) -> Option<f64> {
+        self.source_tempo.filter(|_| self.warp != WarpMode::Off)
+    }
+
+    /// Seconds of the recording that one beat of the timeline covers at
+    /// `project_tempo`. See the type's documentation.
+    pub fn seconds_per_beat(&self, project_tempo: f64) -> f64 {
+        60.0 / self.followed_tempo().unwrap_or(project_tempo)
+    }
+
+    /// How much longer the clip's audio lasts than the stretch of recording
+    /// it plays: 1 for a clip at its recorded speed, and
+    /// `source_tempo / project_tempo` for one that follows the tempo.
+    pub fn time_ratio(&self, project_tempo: f64) -> f64 {
+        self.followed_tempo().map_or(1.0, |source| source / project_tempo)
+    }
+
+    /// The pitch shift that is actually heard, in semitones: `transpose`
+    /// in the modes that can shift pitch on its own, zero in the others.
+    pub fn pitch_shift(&self) -> f64 {
+        if self.warp.keeps_pitch() { self.transpose } else { 0.0 }
+    }
+
+    fn validate(&self) -> Result<(), EditError> {
+        if !self.offset_seconds.is_finite() || self.offset_seconds < 0.0 {
+            return invalid("audio offset must be >= 0 seconds");
+        }
+        if let Some(tempo) = self.source_tempo
+            && (!tempo.is_finite() || !(MIN_TEMPO..=MAX_TEMPO).contains(&tempo))
+        {
+            return invalid(format!("source tempo {tempo} is outside {MIN_TEMPO}..={MAX_TEMPO} BPM"));
+        }
+        if !self.transpose.is_finite() || self.transpose.abs() > MAX_TRANSPOSE {
+            return invalid(format!(
+                "transpose {} is outside -{MAX_TRANSPOSE}..={MAX_TRANSPOSE} semitones",
+                self.transpose
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -124,7 +235,8 @@ pub enum ClipContent {
 
 impl ClipContent {
     /// Moves the point where playback starts `beats` later in the content
-    /// (earlier when negative), as trimming a clip's left edge does.
+    /// (earlier when negative), as trimming a clip's left edge does. `tempo`
+    /// is the project's.
     fn advance(&mut self, beats: Beats, tempo: f64) {
         match self {
             ClipContent::Midi(midi) => {
@@ -134,7 +246,7 @@ impl ClipContent {
                     None => target,
                 };
             }
-            ClipContent::Audio(audio) => audio.offset_seconds += beats * 60.0 / tempo,
+            ClipContent::Audio(audio) => audio.offset_seconds += beats * audio.seconds_per_beat(tempo),
         }
     }
 }
@@ -766,9 +878,7 @@ impl Project {
         length: Beats,
         audio: AudioContent,
     ) -> Result<ClipId, EditError> {
-        if !audio.offset_seconds.is_finite() || audio.offset_seconds < 0.0 {
-            return invalid("audio offset must be >= 0 seconds");
-        }
+        audio.validate()?;
         self.add_clip(track, name.into(), start, length, ClipContent::Audio(audio))
     }
 
@@ -900,7 +1010,7 @@ impl Project {
             }
             ClipContent::Audio(audio) => {
                 // An audio file has nothing before its first sample.
-                delta = delta.max(-audio.offset_seconds * tempo / 60.0);
+                delta = delta.max(-audio.offset_seconds / audio.seconds_per_beat(tempo));
                 advance = delta;
             }
         }
@@ -959,6 +1069,32 @@ impl Project {
                 Ok(())
             }
             ClipContent::Midi(_) => invalid(format!("{id} is a MIDI clip; only audio clips have fades")),
+        }
+    }
+
+    /// Sets how an audio clip follows the project tempo: its warp mode, the
+    /// tempo it was recorded at and its transposition in semitones. See
+    /// [`AudioContent`] for what each means.
+    ///
+    /// The clip keeps its place and length on the timeline and the point in
+    /// the recording where it starts. What changes is how much of the
+    /// recording its length covers, so a caller that wants the clip to keep
+    /// showing the same stretch of the recording resizes it afterwards.
+    pub fn set_clip_warp(
+        &mut self,
+        id: ClipId,
+        warp: WarpMode,
+        source_tempo: Option<f64>,
+        transpose: f64,
+    ) -> Result<(), EditError> {
+        match &mut self.clip_mut(id)?.content {
+            ClipContent::Audio(audio) => {
+                let changed = AudioContent { warp, source_tempo, transpose, ..audio.clone() };
+                changed.validate()?;
+                *audio = changed;
+                Ok(())
+            }
+            ClipContent::Midi(_) => invalid(format!("{id} is a MIDI clip; only audio clips can be warped")),
         }
     }
 
@@ -1354,6 +1490,96 @@ mod tests {
 
         let midi = project.add_midi_clip(track, "m", 0.0, 1.0).unwrap();
         assert!(project.set_clip_fades(midi, 0.1, 0.1).is_err());
+    }
+
+    #[test]
+    fn warped_clips_measure_the_recording_in_its_own_beats() {
+        let mut project = Project::new("t");
+        project.set_tempo(120.0).unwrap();
+        let track = project.add_track("A");
+        // A loop recorded at 100 BPM: one beat of it is 0.6 s of file.
+        let content = AudioContent { offset_seconds: 0.6, ..AudioContent::new("loop.wav") };
+        let clip = project.add_audio_clip(track, "loop", 4.0, 8.0, content).unwrap();
+        let audio = |project: &Project, id: ClipId| project.clip(id).unwrap().audio().unwrap().clone();
+
+        // Unwarped, a beat of the timeline covers a beat of project time.
+        assert_eq!(audio(&project, clip).seconds_per_beat(120.0), 0.5);
+        assert_eq!((audio(&project, clip).time_ratio(120.0), audio(&project, clip).followed_tempo()), (1.0, None));
+
+        project.set_clip_warp(clip, WarpMode::Beats, Some(100.0), 3.0).unwrap();
+        let warped = audio(&project, clip);
+        assert_eq!((warped.warp, warped.source_tempo, warped.transpose), (WarpMode::Beats, Some(100.0), 3.0));
+        assert_eq!(warped.offset_seconds, 0.6, "warping does not move where the clip starts in the file");
+        assert_eq!(warped.seconds_per_beat(120.0), 0.6, "a beat of the timeline is a beat of the recording");
+        assert_eq!(warped.seconds_per_beat(60.0), 0.6, "whatever the project tempo");
+        assert!((warped.time_ratio(120.0) - 100.0 / 120.0).abs() < 1e-12);
+        assert_eq!(warped.pitch_shift(), 3.0);
+        let clip_span =
+            |project: &Project, id: ClipId| (project.clip(id).unwrap().start, project.clip(id).unwrap().length);
+        assert_eq!(clip_span(&project, clip), (4.0, 8.0), "nor its place on the timeline");
+
+        // Splitting two beats in: the second half starts two recorded beats
+        // (1.2 s) further into the file, not two project beats (1.0 s).
+        let second = project.split_clip(clip, 6.0).unwrap();
+        assert!((audio(&project, second).offset_seconds - 1.8).abs() < 1e-12);
+        assert_eq!(audio(&project, second).warp, WarpMode::Beats, "both halves stay warped");
+        assert_eq!(audio(&project, clip).offset_seconds, 0.6);
+
+        // The file starts one recorded beat before the clip, so the left
+        // edge can be pulled back exactly one beat; trimming in again by
+        // half a beat moves 0.3 s into the file.
+        assert_eq!(project.trim_clip_start(clip, 0.0).unwrap(), 3.0);
+        assert!(audio(&project, clip).offset_seconds.abs() < 1e-12);
+        assert_eq!(project.trim_clip_start(clip, 3.5).unwrap(), 3.5);
+        assert!((audio(&project, clip).offset_seconds - 0.3).abs() < 1e-12);
+
+        // A tempo change leaves a warped clip's offsets alone: they are in
+        // the recording's time.
+        project.set_tempo(90.0).unwrap();
+        project.split_clip(second, 7.0).unwrap();
+        assert!((audio(&project, second).offset_seconds - 1.8).abs() < 1e-12);
+
+        // Warped without a known tempo, and repitched: the speed is the
+        // recording's own, and transposing has nothing to act on.
+        project.set_clip_warp(clip, WarpMode::Tonal, None, -2.0).unwrap();
+        assert_eq!(audio(&project, clip).seconds_per_beat(90.0), 60.0 / 90.0);
+        assert_eq!((audio(&project, clip).time_ratio(90.0), audio(&project, clip).pitch_shift()), (1.0, -2.0));
+        project.set_clip_warp(clip, WarpMode::Repitch, Some(100.0), -2.0).unwrap();
+        assert_eq!(audio(&project, clip).pitch_shift(), 0.0, "repitch ties pitch to speed");
+        project.set_clip_warp(clip, WarpMode::Off, Some(100.0), 0.0).unwrap();
+        assert_eq!(audio(&project, clip).seconds_per_beat(90.0), 60.0 / 90.0, "off ignores the source tempo");
+    }
+
+    #[test]
+    fn warp_settings_are_validated_and_absent_from_old_files() {
+        let mut project = Project::new("t");
+        let track = project.add_track("A");
+        let clip = project.add_audio_clip(track, "a", 0.0, 4.0, AudioContent::new("a.wav")).unwrap();
+        let midi = project.add_midi_clip(track, "m", 4.0, 4.0).unwrap();
+        let before = project.clone();
+
+        for (tempo, transpose) in [(Some(5.0), 0.0), (Some(f64::NAN), 0.0), (Some(5_000.0), 0.0), (None, 25.0)] {
+            assert!(project.set_clip_warp(clip, WarpMode::Beats, tempo, transpose).is_err(), "{tempo:?} {transpose}");
+        }
+        assert!(project.set_clip_warp(clip, WarpMode::Tonal, Some(120.0), f64::INFINITY).is_err());
+        assert!(project.set_clip_warp(midi, WarpMode::Beats, Some(120.0), 0.0).is_err(), "MIDI has no audio to warp");
+        assert!(project.set_clip_warp(ClipId(999), WarpMode::Beats, Some(120.0), 0.0).is_err());
+        assert_eq!(project, before, "a rejected change leaves the clip as it was");
+        let bad = AudioContent { source_tempo: Some(0.0), ..AudioContent::new("a.wav") };
+        assert!(project.add_audio_clip(track, "bad", 8.0, 1.0, bad).is_err());
+
+        // An unwarped clip is written exactly as before these settings
+        // existed, and a file from before them loads as unwarped.
+        let json = project.to_json();
+        for field in ["warp", "source_tempo", "transpose"] {
+            assert!(!json.contains(field), "'{field}' should be left out when it is the default");
+        }
+        assert_eq!(Project::from_json(&json).unwrap(), project);
+
+        project.set_clip_warp(clip, WarpMode::Tonal, Some(87.5), -12.0).unwrap();
+        let json = project.to_json();
+        assert!(json.contains("\"warp\": \"tonal\"") && json.contains("\"source_tempo\": 87.5"), "{json}");
+        assert_eq!(Project::from_json(&json).unwrap(), project);
     }
 
     #[test]
