@@ -397,9 +397,8 @@ fn play(stand: &mut Stand, note: &ProbeNote, options: &ProbeOptions, setting: &[
     if silent < quiet_frames {
         // Still ringing. What rings is waited out, as far as that goes,
         // so that the next note starts from silence: a quiet hit cannot be
-        // measured under a cymbal. (Nothing cuts a sampler's tail short: a
-        // reset is not a thing every plugin acts on, and some take one
-        // badly in the middle of playing.)
+        // measured under a cymbal. (Nothing cuts a tail short here: how
+        // long a note rings is one of the things that are measured.)
         let mut all_off = vec![Event { offset: 0, kind: EventKind::AllNotesOff }];
         all_off.extend_from_slice(setting);
         let mut silent = 0;

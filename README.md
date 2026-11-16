@@ -164,7 +164,8 @@ Trill then asks the plugin for its state again and looks for the preset's settin
 did not take (a damaged file, a version this reader does not know, a plugin that refuses) is a sentence that names
 it, and the device keeps the sound it had. The files are read in the scanner process, in bounded sizes, and nothing
 is ever written to a maker's folder. Where a preset makes the plugin read samples for a while (a drum kit, a
-guitar's other set of samples) the reply says so; a probe, a measurement and a render wait for it. It also says
+guitar's other set of samples) the reply says so; a probe, a measurement and a render wait for it, and the
+device is marked as loading meanwhile. It also says
 when an Ample preset switches the instrument's automatic legato on, as nearly all of them do: notes that ring over
 each other are then hammered on unasked, until the parameter "Auto Legato" is set to 0. A folder or a product that
 is not there is simply no presets.
@@ -236,11 +237,20 @@ that quick and true:
   another, for as much as a minute, the cymbals last), a modelled instrument goes on waking up, and an amplifier
   may pass nothing for a moment; a render that started at once lost the beginning of the song. Plugins are told
   they are being rendered offline (VST3 process mode, CLAP `render`). Before the first sample each plugin
-  instrument is rehearsed on the notes it is about to play, and each plugin effect on a burst of noise, until it
-  has answered alike three times running for a quarter of a second or more and the program has stopped growing
-  meanwhile: while samples are being read its memory rises, which is what tells a kit that is still loading
-  from one that is complete. Built-in devices are not touched, so their renders are the samples they always
-  were. `Session::readiness_job` asks the same of one device, for a front end that wants to say "still loading".
+  instrument is rehearsed on the notes it is about to play, each note by itself (a tom that rings would hide a
+  cymbal that has not arrived), and each plugin effect on a burst of noise, until every note has answered and
+  gone on answering alike for a quarter of a second or more, with the program not growing meanwhile: while
+  samples are being read its memory rises. A sampler was watched to pause for seconds between two drums with
+  nothing to show for it, so an instrument that answers some of its notes and not others is held to that for
+  five seconds before the silent ones are taken to be keys that play nothing; that is remembered of the plugin,
+  and the reply names the notes, because a key that plays nothing and a sample that is still loading sound the
+  same. Built-in devices are not touched, so their renders are the samples they always were.
+  `Session::readiness_job` asks the same of one device. The plugins that are heard live are not waited for:
+  `Session::loading` says which of them were made or given another sound lately while the program still shows
+  the signs of loading. The window writes "Loading" on their panels, and `get_project`, `get_device` and
+  `transport` tell a model, so that neither presses play into half a kit unawares.
+  `cargo run -p trill-plugins --example loading -- "vst3:<class id>" --preset "<kit>"` watches an installed
+  sampler load, key by key, beside the program's memory, reads and processor time.
 - *A render measures everything as it goes*, without keeping a stem per track: the mix (peak, true peak, LUFS,
   stereo correlation, spectral balance), every track after its fader in the same terms, the loudness of every
   section between the markers (or of bar ranges), and how many dB each built-in compressor and limiter took

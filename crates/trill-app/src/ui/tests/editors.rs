@@ -169,10 +169,14 @@ const BUTTON: &str = "Editor of Synth";
 
 #[test]
 fn a_plugin_that_was_just_made_says_that_it_is_loading_and_a_built_in_device_does_not() {
-    let (mut harness, _plugins, _synth) = with_plugins(devices_tab());
-    // The two plugins were made a moment ago and may be reading what
-    // they play; the reverb is built in, and ready when it exists.
-    assert_eq!(harness.all_labeled("Loading ").len(), 2);
+    let (mut harness, _plugins, synth) = with_plugins(devices_tab());
+    // A plugin that was made, or given another sound, a moment ago may be
+    // reading what it plays. (Told again here, so that the test does not
+    // depend on how long the window took to come up.) The reverb is built
+    // in, and ready when it exists.
+    harness.session.lock().load_watch().began(synth);
+    harness.idle(2);
+    assert_eq!(harness.all_labeled("Loading Synth").len(), 1);
     assert!(harness.all_labeled("Loading Reverb").is_empty());
     harness.move_to(harness.labeled("Loading Synth"));
     harness.idle(1);
