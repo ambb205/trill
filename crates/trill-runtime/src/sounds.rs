@@ -186,7 +186,8 @@ impl Runtime {
             )));
         }
         let remaining = facts.seconds - sound.offset_seconds;
-        if !(remaining > 0.0) {
+        // Written so that an offset that is not a number is refused too.
+        if !sound.offset_seconds.is_finite() || remaining <= 0.0 {
             return Err(SoundError::Invalid(format!(
                 "an offset of {} s is past the end of '{file_name}', which is {:.3} s long",
                 sound.offset_seconds, facts.seconds

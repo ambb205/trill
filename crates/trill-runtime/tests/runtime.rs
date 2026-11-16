@@ -89,11 +89,11 @@ fn library_folders_favorites_and_recents_survive_a_restart() {
 
     // The next run starts where this one stopped, searchable at once.
     let runtime = start(folder.path());
-    assert_eq!(runtime.library.roots(), [samples.clone()]);
+    assert_eq!(runtime.library.roots(), std::slice::from_ref(&samples));
     assert_eq!(runtime.library.search(&Query::text("kick")).len(), 1, "the saved index is loaded before any scan");
     assert!(runtime.library.is_favorite(&snare) && runtime.library.recent() == [kick.clone()]);
     assert_eq!(runtime.settings().ui.browser_width, 333.0);
-    assert_eq!(runtime.settings().library.roots, [samples.clone()]);
+    assert_eq!(runtime.settings().library.roots, std::slice::from_ref(&samples));
 
     // Another program changed its own part of the file meanwhile; saving
     // the library's part keeps that change.
@@ -147,7 +147,7 @@ fn sounds_are_described_previewed_and_placed() {
     eventually("the preview is heard", || runtime.session.lock().is_auditioning());
     runtime.stop_preview();
     eventually("the preview has stopped", || !runtime.session.lock().is_auditioning());
-    assert_eq!(runtime.library.recent(), [bass_loop.clone()]);
+    assert_eq!(runtime.library.recent(), std::slice::from_ref(&bass_loop));
     assert!(runtime.preview(&samples.join("nothing.wav"), 0.0).is_err());
 
     // Placed as it is: as long as the file, at the project's tempo.
