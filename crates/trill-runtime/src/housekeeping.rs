@@ -46,7 +46,13 @@ impl Housekeeper {
                             return;
                         }
                     }
-                    session.lock().housekeeping();
+                    {
+                        let mut session = session.lock();
+                        session.housekeeping();
+                        // What the user did in plugin windows since the
+                        // last round: the project and every view follow.
+                        session.absorb_editor_edits();
+                    }
                     tick = tick.wrapping_add(1);
                     if tick.is_multiple_of(SETTINGS_EVERY) {
                         save_if_changed(&library, &settings);

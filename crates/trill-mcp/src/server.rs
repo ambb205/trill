@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use trill_core::device::DeviceCategory;
+use trill_core::device::{DeviceCategory, EditorOptions};
 use trill_core::midi_file;
 use trill_core::project::{AutomationTarget, MAX_TEMPO, MAX_VOLUME_DB, MIN_TEMPO, WarpMode};
 use trill_core::{ChainRef, ClipId, DeviceId, EditError, Project, TrackId, TrackKind};
@@ -76,6 +76,8 @@ Musical guidance
 - Vary velocity and use transform_notes to humanize; identical velocities sound mechanical.
 - Keep bass and kick in the centre; use low_cut on the EQ for everything else; leave headroom on the master.
 - Give sections contrast: add and remove parts, automate filters and volume, change the drum pattern.
+- Rearranging: edit_time removes, repeats or opens up a stretch of time on every track at once (drop a \
+section, double a chorus, make room for a bridge).
 - Every edit can be reversed with history (undo/redo).";
 
 pub(crate) type Reply = Result<Value, String>;
@@ -548,6 +550,9 @@ impl TrillServer {
                 }
                 out["samples"] = samples_json(&files);
             }
+            if session.device_has_editor(id) {
+                out["editor"] = json!(if session.is_device_editor_open(id) { "open" } else { "closed" });
+            }
             out["param_count"] = json!(matching.len());
             if matching.len() > LIMIT {
                 out["truncated"] = json!(format!("showing the first {LIMIT}; narrow it down with `query`"));
@@ -969,6 +974,76 @@ impl TrillServer {
             }
             Ok(json!({ "marker_count": project.markers.len() }))
         });
+        finish(reply)
+    }
+
+    /// Change the length of the whole song at one point: cut a stretch of time out, repeat it, or open up
+    /// empty time. Every track moves together, with automation, markers and the loop, and clips lying across
+    /// the edges are cut there. Use it to drop a section, double a chorus or make room for a bridge, instead of
+    /// moving clips one by one.
+    #[tool(annotations(title = "Edit time"))]
+    fn edit_time(&self, Parameters(request): Parameters<EditTimeRequest>) -> CallToolResult {
+        enum Change {
+            Delete(f64),
+            Duplicate(f64),
+            Insert(f64),
+        }
+        let change = match (request.action.as_str(), request.end, request.length) {
+            ("delete", Some(end), _) => Ok(Change::Delete(end)),
+            ("duplicate", Some(end), _) => Ok(Change::Duplicate(end)),
+            ("insert", _, Some(length)) => Ok(Change::Insert(length)),
+            ("delete" | "duplicate", None, _) => {
+                Err(format!("action \"{}\" needs `end`, the beat where the stretch ends", request.action))
+            }
+            ("insert", _, None) => Err("action \"insert\" needs `length`, the number of beats to open up".to_string()),
+            (other, ..) => Err(format!("unknown action '{other}'; use \"delete\", \"duplicate\" or \"insert\"")),
+        };
+        let mut session = self.session.lock();
+        let reply = change.and_then(|change| {
+            edit(&mut session, |project| {
+                let before = project.length_beats();
+                match change {
+                    Change::Delete(end) => project.delete_time(request.start, end)?,
+                    Change::Duplicate(end) => project.duplicate_time(request.start, end)?,
+                    Change::Insert(length) => project.insert_time(request.start, length)?,
+                }
+                let markers: Vec<Value> =
+                    project.markers.iter().map(|m| json!({ "beat": round(m.beat), "name": m.name })).collect();
+                Ok(json!({
+                    "length_beats": round(project.length_beats()),
+                    "was_beats": round(before),
+                    "markers": markers,
+                }))
+            })
+        });
+        finish(reply)
+    }
+
+    /// Open a plugin's own window on the user's screen, bring it to the front, or close it. Only plugins have
+    /// one (get_device shows "editor" for those); built-in devices are edited through their parameters. What
+    /// the user changes in the window shows up in get_device.
+    #[tool(annotations(title = "Show device editor"))]
+    fn show_device_editor(&self, Parameters(request): Parameters<DeviceEditorRequest>) -> CallToolResult {
+        let mut session = self.session.lock();
+        let id = DeviceId(request.device);
+        let reply = (|| {
+            let name = match session.project().device(id) {
+                Ok(device) => device.name.clone(),
+                Err(error) => return Err(explain(session.project(), error)),
+            };
+            if !session.device_has_editor(id) {
+                return Err(format!(
+                    "{name} has no window of its own. Read and set its parameters with get_device and update_device."
+                ));
+            }
+            if request.open.unwrap_or(true) {
+                let options = EditorOptions { title: name.clone(), ..EditorOptions::default() };
+                session.open_device_editor(id, &options).map_err(|error| error.to_string())?;
+            } else {
+                session.close_device_editor(id);
+            }
+            Ok(json!({ "device": id, "editor": if session.is_device_editor_open(id) { "open" } else { "closed" } }))
+        })();
         finish(reply)
     }
 

@@ -101,6 +101,8 @@ async fn tools_are_listed_with_schemas() {
         "library",
         "preview_sound",
         "set_sample",
+        "edit_time",
+        "show_device_editor",
         "transport",
         "render",
         "history",
@@ -893,4 +895,78 @@ async fn sound_tools_say_what_is_wrong_and_change_nothing() {
         ok(client, "library", json!({ "action": "remove_folder", "path": pack.root.display().to_string() })).await;
     assert_eq!((removed["folders"].as_array().unwrap().len(), removed["sounds"].as_u64()), (0, Some(0)));
     assert!(trill_library::Settings::load(&fixture.settings_file()).settings.library.roots.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn time_is_cut_repeated_and_opened_up_across_the_song() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let track = ok(client, "create_track", json!({ "name": "Keys", "instrument": "builtin:polysynth" })).await;
+    let track = track["track_id"].as_u64().unwrap();
+    let note = |start: f64| json!({ "pitch": 60, "start": start, "length": 0.5 });
+    for (name, start) in [("A", 0.0), ("B", 16.0), ("C", 32.0)] {
+        let notes: Vec<Value> = (0..16).map(|beat| note(beat as f64)).collect();
+        ok(
+            client,
+            "create_clip",
+            json!({ "track": track, "name": name, "start": start, "length": 16, "notes": notes }),
+        )
+        .await;
+    }
+    ok(
+        client,
+        "set_markers",
+        json!({ "markers": [{ "beat": 0, "name": "A" }, { "beat": 16, "name": "B" }, { "beat": 32, "name": "C" }] }),
+    )
+    .await;
+    let spans = |project: &Value| -> Vec<(f64, f64)> {
+        let clips = project["tracks"][0]["clips"].as_array().unwrap();
+        clips.iter().map(|clip| (clip["start"].as_f64().unwrap(), clip["length"].as_f64().unwrap())).collect()
+    };
+
+    // Section B goes: C closes up behind A.
+    let cut = ok(client, "edit_time", json!({ "action": "delete", "start": 16, "end": 32 })).await;
+    assert_eq!((cut["was_beats"].as_f64(), cut["length_beats"].as_f64()), (Some(48.0), Some(32.0)));
+    assert_eq!(cut["markers"], json!([{ "beat": 0.0, "name": "A" }, { "beat": 16.0, "name": "C" }]));
+    assert_eq!(spans(&ok(client, "get_project", json!({})).await), [(0.0, 16.0), (16.0, 16.0)]);
+
+    // The second half of A plays twice, and four beats open up before C.
+    ok(client, "edit_time", json!({ "action": "duplicate", "start": 8, "end": 16 })).await;
+    let opened = ok(client, "edit_time", json!({ "action": "insert", "start": 24, "length": 4 })).await;
+    assert_eq!(opened["length_beats"].as_f64(), Some(44.0));
+    assert_eq!(
+        spans(&ok(client, "get_project", json!({})).await),
+        [(0.0, 16.0), (16.0, 8.0), (28.0, 16.0)],
+        "A, the repeat of its second half, then C after the new four beats"
+    );
+
+    // One undo step each, like every other edit.
+    ok(client, "history", json!({ "action": "undo" })).await;
+    assert_eq!(spans(&ok(client, "get_project", json!({})).await), [(0.0, 16.0), (16.0, 8.0), (24.0, 16.0)]);
+
+    // What cannot be done says what is missing, and changes nothing.
+    let before = ok(client, "get_project", json!({})).await;
+    for (arguments, expected) in [
+        (json!({ "action": "delete", "start": 8 }), "needs `end`"),
+        (json!({ "action": "insert", "start": 8 }), "needs `length`"),
+        (json!({ "action": "delete", "start": 8, "end": 8 }), "0 <= start < end"),
+        (json!({ "action": "shorten", "start": 8, "end": 12 }), "unknown action"),
+    ] {
+        let error = call(client, "edit_time", arguments.clone()).await.unwrap_err();
+        assert!(error.contains(expected), "{arguments}: {error}");
+    }
+    assert_eq!(spans(&ok(client, "get_project", json!({})).await), spans(&before));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_without_a_window_says_how_to_edit_it_instead() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let track = ok(client, "create_track", json!({ "name": "Keys", "instrument": "builtin:polysynth" })).await;
+    let device = track["instrument_device_id"].as_u64().unwrap();
+    assert!(ok(client, "get_device", json!({ "device": device })).await.get("editor").is_none());
+    let error = call(client, "show_device_editor", json!({ "device": device })).await.unwrap_err();
+    assert!(error.contains("no window of its own") && error.contains("update_device"), "{error}");
+    let error = call(client, "show_device_editor", json!({ "device": 9999 })).await.unwrap_err();
+    assert!(error.contains("not found"), "{error}");
 }

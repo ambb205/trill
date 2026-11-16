@@ -435,6 +435,28 @@ pub struct SetMarkersRequest {
     pub markers: Vec<MarkerInput>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EditTimeRequest {
+    /// "delete": remove the time from `start` to `end`; what follows moves earlier and closes the gap.
+    /// "duplicate": repeat the time from `start` to `end` right after itself; what follows moves later.
+    /// "insert": open up `length` beats of empty time at `start`; what follows moves later.
+    pub action: String,
+    /// Where the stretch begins, in beats (bar N of 4/4 starts at (N-1)*4).
+    pub start: f64,
+    /// Where the stretch ends, in beats. Needed for "delete" and "duplicate".
+    pub end: Option<f64>,
+    /// How many beats to open up. Needed for "insert".
+    pub length: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeviceEditorRequest {
+    /// Device id of a plugin.
+    pub device: u64,
+    /// true (default) opens the window or brings it to the front; false closes it.
+    pub open: Option<bool>,
+}
+
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct NewProjectRequest {
     pub name: Option<String>,

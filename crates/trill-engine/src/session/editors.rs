@@ -407,4 +407,23 @@ mod tests {
         assert!(session.redo());
         assert_eq!(stored(&session).get("cutoff"), Some(&0.8), "the history was corrected along with the present");
     }
+
+    #[test]
+    fn saving_takes_in_what_the_editors_did_first() {
+        let plugins = Plugins::default();
+        let mut session = session(&plugins);
+        let device = session.add_device(ChainRef::Master, URI, None, None).unwrap();
+        session.set_device_params(device, &[("cutoff".into(), 0.4)]).unwrap();
+        // A knob turned in the editor and the song saved at once, with no
+        // housekeeping in between.
+        plugins.0.lock().edits = vec![(device, ParamEdit { index: 0, kind: ParamEditKind::Value(0.8) })];
+        let folder = std::env::temp_dir().join(format!("trill-editor-save-{}", std::process::id()));
+        let path = folder.join("song.trill");
+        session.save(&path).unwrap();
+
+        let saved = trill_core::Project::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.device(device).unwrap().params.get("cutoff"), Some(&0.8), "the file has the knob as it is");
+        assert!(session.absorb_editor_edits().is_empty(), "nothing is left to collect");
+        std::fs::remove_dir_all(&folder).ok();
+    }
 }

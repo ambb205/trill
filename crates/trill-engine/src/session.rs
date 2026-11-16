@@ -592,6 +592,9 @@ impl Session {
     }
 
     pub fn save(&mut self, path: &Path) -> Result<(), SessionError> {
+        // A knob turned in a plugin's own window a moment ago belongs in
+        // the file, whether or not housekeeping has come round since.
+        self.absorb_editor_edits();
         self.capture_device_state();
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
