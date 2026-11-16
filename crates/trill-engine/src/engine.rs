@@ -41,15 +41,34 @@ const CALLBACK_FRAMES: usize = 8192;
 /// The rate the engine runs at before a device has had its say, and with no
 /// device at all.
 const FALLBACK_SAMPLE_RATE: u32 = 48_000;
-/// How long a device may take to open, to list or to close before the
-/// engine stops waiting for it.
-const DEVICE_TIMEOUT: Duration = Duration::from_secs(6);
-/// How long the controller waits for the audio thread to leave the seat.
-const CLAIM_TIMEOUT: Duration = Duration::from_secs(2);
-/// A stream that has not asked for audio for this long has stalled.
-const STALL_AFTER: Duration = Duration::from_secs(3);
-/// How often a device that went missing is looked for again.
-const RETRY_EVERY: Duration = Duration::from_secs(3);
+
+/// How long the engine waits for things that should not take long, before
+/// it stops waiting and does the next best thing. The defaults suit real
+/// hardware; tests shorten them.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Patience {
+    /// How long a device may take to open, to list or to close.
+    pub device: Duration,
+    /// How long the audio thread may take to finish the buffer it is in
+    /// when the stream is changed. Longer than this and a device is stuck
+    /// inside its `process`: the engine starts over without it.
+    pub audio_thread: Duration,
+    /// A stream that has not asked for audio for this long has stalled.
+    pub stall: Duration,
+    /// How often a device that went missing is looked for again.
+    pub retry: Duration,
+}
+
+impl Default for Patience {
+    fn default() -> Self {
+        Self {
+            device: Duration::from_secs(6),
+            audio_thread: Duration::from_secs(2),
+            stall: Duration::from_secs(3),
+            retry: Duration::from_secs(3),
+        }
+    }
+}
 
 /// Where the audio goes.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -73,20 +92,25 @@ pub struct AudioSetup {
     /// engine starts, rather than fail. Once it runs, an engine always
     /// carries on without sound when its devices go.
     pub silent_fallback: bool,
+    pub patience: Patience,
 }
 
 impl AudioSetup {
     /// The setup `backend` stands for, asking for `config`.
     pub fn new(backend: AudioBackend, config: AudioConfig) -> Self {
         match backend {
-            AudioBackend::Auto => Self { host: Arc::new(SystemHost::new()), config, silent_fallback: true },
-            AudioBackend::Device => Self { host: Arc::new(SystemHost::new()), config, silent_fallback: false },
-            AudioBackend::Null { sample_rate } => Self {
-                host: Arc::new(NullHost::new(sample_rate)),
-                config: AudioConfig::default(),
-                silent_fallback: true,
-            },
+            AudioBackend::Auto => Self::on(Arc::new(SystemHost::new()), config),
+            AudioBackend::Device => Self { silent_fallback: false, ..Self::on(Arc::new(SystemHost::new()), config) },
+            AudioBackend::Null { sample_rate } => {
+                Self::on(Arc::new(NullHost::new(sample_rate)), AudioConfig::default())
+            }
         }
+    }
+
+    /// A setup that plays through `host`, asking for `config`, and runs
+    /// without sound if no device can be opened.
+    pub fn on(host: Arc<dyn AudioHost>, config: AudioConfig) -> Self {
+        Self { host, config, silent_fallback: true, patience: Patience::default() }
     }
 }
 
@@ -164,9 +188,12 @@ pub(crate) enum Message {
     LiveTargets(TrackSet),
     /// Lets go of every note a keyboard is holding: its port has gone.
     ReleaseLive,
-    /// Starts a take on `tracks`, after `count_in_beats` of count-in if the
-    /// song is not already playing.
+    /// Lets go of every note that sounds, played by hand or by the song.
+    ReleaseEverything,
+    /// Starts the take numbered `take` on `tracks`, after `count_in_beats`
+    /// of count-in if the song is not already playing.
     Record {
+        take: u32,
         tracks: TrackSet,
         count_in_beats: f64,
     },
@@ -204,7 +231,7 @@ struct Shared {
     failure: AtomicU8,
     /// A [`RecordPhase`].
     recording: AtomicU8,
-    /// Live events that found the processor's buffer full.
+    /// Times live input was lost for want of room.
     live_dropped: AtomicU32,
 }
 
@@ -214,6 +241,8 @@ pub(crate) struct Realtime {
     messages: rtrb::Consumer<Message>,
     garbage: rtrb::Producer<Garbage>,
     live: Arc<Queue<LiveInput>>,
+    /// Set by whoever could not queue a live event.
+    live_overflowed: Arc<AtomicBool>,
     shared: Arc<Shared>,
     left: Vec<f32>,
     right: Vec<f32>,
@@ -244,7 +273,10 @@ impl Realtime {
                 Message::Metronome(on) => self.processor.set_metronome(on),
                 Message::LiveTargets(tracks) => self.processor.set_live_targets(tracks),
                 Message::ReleaseLive => self.processor.release_live(),
-                Message::Record { tracks, count_in_beats } => self.processor.record(tracks, count_in_beats),
+                Message::ReleaseEverything => self.processor.release_everything(),
+                Message::Record { take, tracks, count_in_beats } => {
+                    self.processor.record(take, tracks, count_in_beats);
+                }
             }
         }
         if let Some(finished) = self.processor.take_finished_audition() {
@@ -262,6 +294,7 @@ impl Realtime {
     /// add a random one of up to a buffer's length.
     fn take_live_input(&mut self, frames: usize, timing: Timing) {
         let frames_per_ns = self.processor.sample_rate() / 1e9;
+        let mut lost = self.live_overflowed.swap(false, Ordering::Relaxed);
         while let Some(input) = self.live.pop() {
             let age = timing.now_ns.saturating_sub(input.time_ns) as f64 * frames_per_ns;
             let offset = (frames as f64 - age).round().clamp(0.0, frames.saturating_sub(1) as f64);
@@ -271,9 +304,13 @@ impl Realtime {
                 LiveTarget::Routed => self.processor.live_routed(input.kind, offset as u32, early),
                 LiveTarget::Track(track) => self.processor.live_on(track, input.kind, offset as u32, early),
             };
-            if !taken {
-                self.shared.live_dropped.fetch_add(1, Ordering::Relaxed);
-            }
+            lost |= !taken;
+        }
+        if lost {
+            // What was lost may have been a key coming up: nothing may be
+            // left sounding on the strength of an event that never came.
+            self.shared.live_dropped.fetch_add(1, Ordering::Relaxed);
+            self.processor.release_everything();
         }
     }
 
@@ -498,6 +535,17 @@ pub(crate) struct Applied {
     pub reset: bool,
 }
 
+/// Whether the device that was asked for is missing, and so worth looking
+/// for.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Missing {
+    No,
+    /// It was not there when last looked for: when it is, try it.
+    Absent,
+    /// It was there and could not be opened: wait until it has gone.
+    Unseen,
+}
+
 /// What [`Engine::check`] found.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Health {
@@ -526,6 +574,7 @@ pub struct Engine {
     /// What plays when no device will: nothing, at real-time pace.
     null: Arc<NullHost>,
     config: AudioConfig,
+    patience: Patience,
     // Field order is drop order: the stream goes before the driver thread
     // that opened it.
     stream: Option<StreamHandle>,
@@ -537,7 +586,10 @@ pub struct Engine {
     last_progress: Instant,
     /// Set while a device other than the one asked for is in use because
     /// that one was missing: it is looked for again every so often.
-    missing: bool,
+    missing: Missing,
+    /// Set while the stream is being opened again because the missing
+    /// device was seen to be back.
+    retrying: bool,
     last_retry: Instant,
     /// The answer, when it comes, to whether that device is back.
     lookup: Option<mpsc::Receiver<bool>>,
@@ -566,6 +618,7 @@ impl Core {
             messages: message_rx,
             garbage: garbage_tx,
             live: live.queue(),
+            live_overflowed: live.overflowed(),
             shared: shared.clone(),
             left: vec![0.0; CALLBACK_FRAMES],
             right: vec![0.0; CALLBACK_FRAMES],
@@ -612,12 +665,14 @@ impl Engine {
             host: setup.host,
             null: Arc::new(NullHost::new(FALLBACK_SAMPLE_RATE)),
             config: setup.config,
+            patience: setup.patience,
             stream: None,
             driver: Driver::start()?,
             watched: false,
             last_callbacks: 0,
             last_progress: now,
-            missing: false,
+            missing: Missing::No,
+            retrying: false,
             last_retry: now,
             lookup: None,
         };
@@ -643,7 +698,7 @@ impl Engine {
     /// moment; if it does not answer at all the lists come back empty.
     pub fn devices(&mut self) -> AudioDevices {
         let host = self.host.clone();
-        self.driver.call(DEVICE_TIMEOUT, move || host.devices()).unwrap_or_default()
+        self.driver.call(self.patience.device, move || host.devices()).unwrap_or_default()
     }
 
     pub fn is_playing(&self) -> bool {
@@ -676,8 +731,9 @@ impl Engine {
         self.shared.latency_frames.load(Ordering::Relaxed)
     }
 
-    /// Live events that were dropped because more arrived in one buffer
-    /// than the engine holds. Never, in ordinary playing.
+    /// How many times live input arrived faster than the engine could take
+    /// it and some was lost; every sounding note was let go of each time.
+    /// Never, in ordinary playing.
     pub fn live_dropped(&self) -> u32 {
         self.shared.live_dropped.load(Ordering::Relaxed)
     }
@@ -705,6 +761,12 @@ impl Engine {
     /// to; see [`AudioHost::pump`].
     pub(crate) fn pump(&self) {
         self.host.pump();
+    }
+
+    /// The time on the clock the audio thread reads; see
+    /// [`AudioHost::now_ns`].
+    pub(crate) fn now_ns(&self) -> u64 {
+        self.host.now_ns()
     }
 
     /// Frees graphs the audio thread has retired. Cheap; call it often.
@@ -781,10 +843,24 @@ impl Engine {
                 // no stream; the next round of chores tries again.
                 log::error!("{error}");
                 self.info.warning = Some(error.to_string());
-                self.missing = true;
+                self.missing = Missing::Absent;
                 Applied { reset: false }
             }
         }
+    }
+
+    /// Puts on record, for whoever reads [`Engine::info`], that the stream
+    /// in use took over from one that failed, and why.
+    pub(crate) fn note_failure(&mut self, reason: &str) {
+        let mut text = reason.to_string();
+        if let Some(first) = text.get_mut(..1) {
+            first.make_ascii_uppercase();
+        }
+        let now = match &self.info.device {
+            Some(_) => format!("Now using {}.", self.info.output),
+            None => "Running without sound until an audio device is there.".to_string(),
+        };
+        self.info.warning = Some(format!("{text}. {now}"));
     }
 
     /// Looks at how the stream is doing. Cheap; call it a few times a
@@ -799,7 +875,7 @@ impl Engine {
             if callbacks != self.last_callbacks {
                 self.last_callbacks = callbacks;
                 self.last_progress = now;
-            } else if now.duration_since(self.last_progress) >= STALL_AFTER {
+            } else if now.duration_since(self.last_progress) >= self.patience.stall {
                 self.last_progress = now;
                 return Health::Failed(StreamFailure::Stalled);
             }
@@ -808,16 +884,21 @@ impl Engine {
             // Asking the system for its devices takes a moment, so it is
             // not waited for: the answer is picked up on a later round.
             match lookup.try_recv() {
-                Ok(back) => {
+                Ok(present) => {
                     self.lookup = None;
-                    if back && self.missing {
-                        return Health::Retry;
+                    match (self.missing, present) {
+                        (Missing::Absent, true) => {
+                            self.retrying = true;
+                            return Health::Retry;
+                        }
+                        (Missing::Unseen, false) => self.missing = Missing::Absent,
+                        _ => {}
                     }
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => self.lookup = None,
             }
-        } else if self.missing && now.duration_since(self.last_retry) >= RETRY_EVERY {
+        } else if self.missing != Missing::No && now.duration_since(self.last_retry) >= self.patience.retry {
             self.last_retry = now;
             let (host, wanted) = (self.host.clone(), self.config.output.clone());
             let (answer, lookup) = mpsc::channel();
@@ -840,7 +921,7 @@ impl Engine {
         self.generation += 1;
         self.seat.active.store(self.generation, Ordering::Release);
         if let Some(stream) = self.stream.take() {
-            self.driver.call(DEVICE_TIMEOUT, move || drop(stream));
+            self.driver.call(self.patience.device, move || drop(stream));
         }
         self.watched = false;
     }
@@ -865,7 +946,7 @@ impl Engine {
     fn open(&mut self, silent_fallback: bool) -> Result<Applied, EngineError> {
         self.close();
         let mut reset = false;
-        if self.seat.claim(CLAIM_TIMEOUT).is_none() {
+        if self.seat.claim(self.patience.audio_thread).is_none() {
             self.start_over();
             reset = true;
         }
@@ -894,7 +975,7 @@ impl Engine {
             let (host, attempt, failed) = (self.host.clone(), request.clone(), on_failure.clone());
             let result = self
                 .driver
-                .call(DEVICE_TIMEOUT, move || host.open_output(&attempt, renderer, failed))
+                .call(self.patience.device, move || host.open_output(&attempt, renderer, failed))
                 .unwrap_or_else(|| Err(OpenError::Failed("the device did not answer".into())));
             match result {
                 Ok(stream) => {
@@ -960,8 +1041,16 @@ impl Engine {
         self.last_callbacks = self.shared.callbacks.load(Ordering::Relaxed);
         self.last_progress = now;
         // Worth looking again only where a device was not there: one that
-        // is there and refuses a format will refuse it next time too.
-        self.missing = missing && first.is_some();
+        // is there and refuses a format will refuse it next time too. And
+        // if this very attempt was made because the device looked to be
+        // back, it must be seen to go before it is tried once more: a
+        // device that is listed and cannot be opened would otherwise have
+        // the stream opened again and again.
+        self.missing = match (missing && first.is_some(), std::mem::take(&mut self.retrying)) {
+            (false, _) => Missing::No,
+            (true, false) => Missing::Absent,
+            (true, true) => Missing::Unseen,
+        };
         self.last_retry = now;
         self.lookup = None;
         Ok(Applied { reset })

@@ -329,6 +329,10 @@ impl AudioHost for ScriptedHost {
     fn runs_by_itself(&self) -> bool {
         self.state.lock().watched
     }
+
+    fn now_ns(&self) -> u64 {
+        self.state.lock().now_ns
+    }
 }
 
 /// Closes its stream when dropped, if that stream is still the one running.

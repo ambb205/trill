@@ -23,13 +23,16 @@ mod stretcher;
 
 pub use analysis::AudioStats;
 pub use compile::Problem;
-pub use engine::{AudioBackend, AudioSetup, Engine, EngineError, StreamInfo};
+pub use engine::{AudioBackend, AudioSetup, Engine, EngineError, Patience, StreamInfo};
 pub use graph::{MAX_BLOCK, Meter};
 pub use host::{AudioConfig, AudioDevice, AudioDevices, AudioHost};
 pub use live::LiveSender;
 pub use processor::Processor;
 pub use render::{RenderError, RenderJob, RenderOptions, RenderReport, Rendered};
-pub use session::{ParamState, SampleFile, Session, SessionError, TransportStatus};
+pub use session::{
+    MAX_COUNT_IN_BARS, ParamState, RecordState, RecordStatus, SampleFile, Session, SessionError, TakeClip,
+    TransportStatus,
+};
 pub use sources::AudioSources;
 
 /// A session shared between front ends.

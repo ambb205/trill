@@ -4,13 +4,19 @@
 //! across a split) and taking over a new graph must never allocate or free
 //! memory.
 //!
+//! So must playing by hand and recording it: taking live input off its
+//! queue, placing it, following the armed tracks, counting in, reporting
+//! what was played and where, and letting go of it all.
+//!
 //! This test binary replaces the global allocator with one that counts the
 //! calls made by the current thread while the processor runs. The devices
 //! get the same treatment in `trill-dsp` and `trill-plugins`.
 
 mod common;
+mod rig;
 
 use common::*;
+use rig::Rig;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::time::{Duration, Instant};
@@ -177,6 +183,95 @@ fn playing_audio_clips_and_swapping_graphs_never_touches_the_allocator() {
     assert!(level > 0.3);
     assert_eq!(calls, 0, "{calls} allocator calls while handing over from a stand-in");
     assert_eq!(retired.len(), 3);
+}
+
+#[test]
+fn playing_by_hand_and_recording_never_touch_the_allocator() {
+    use trill_core::device::EventKind;
+
+    // The audio thread of this session is whoever asks the scripted device
+    // for a buffer: this thread, watched for exactly that long. What the
+    // session does in between (and it allocates freely) is not watched.
+    let mut rig = Rig::new();
+    let keys = rig.sine_track("Keys");
+    let bass = rig.sine_track("Bass");
+    let drums = rig.session.edit(|project| Ok(project.add_track("Drums"))).unwrap();
+    rig.session.add_device(trill_core::ChainRef::Track(drums), "builtin:drumkit", None, None).unwrap();
+    rig.session.edit(|project| project.set_loop(true, 0.0, 2.0)).unwrap();
+    rig.session.set_metronome(true);
+    rig.session.set_armed(keys, true).unwrap();
+    rig.session.set_armed(bass, true).unwrap();
+    // Once without watching, to fault in pages.
+    rig.session.play_live(EventKind::NoteOn { pitch: 50, velocity: 0.5 });
+    rig.run(8);
+    rig.session.stop();
+    rig.run(8);
+
+    let mut calls = 0;
+    let mut level = 0.0f32;
+    let mut watched = |rig: &mut Rig, buffers: usize| {
+        for _ in 0..buffers {
+            calls += allocator_calls(|| {
+                rig.host.advance(rig::BUFFER);
+            });
+            let meter = rig.session.master_meter().take();
+            level = level.max(meter.0);
+        }
+    };
+
+    // A bar of count-in, then four passes of a two-beat loop.
+    rig.session.record().unwrap();
+    let live = rig.session.live();
+    for step in 0..620usize {
+        let now = rig.host.now_ns();
+        let early = |frames: f64| now.saturating_sub(Rig::ns(frames));
+        let pitch = 48 + (step % 24) as u8;
+        match step % 10 {
+            // Keys go down and come up at odd moments within the buffer.
+            0 => assert!(live.play_at(early(301.5), EventKind::NoteOn { pitch, velocity: 0.8 })),
+            1 => assert!(live.play_at(early(77.0), EventKind::NoteOn { pitch: pitch + 7, velocity: 0.6 })),
+            3 => assert!(live.play_at(early(12.0), EventKind::PitchBend { value: 0.4 })),
+            4 => assert!(live.play_at(early(440.0), EventKind::Control { controller: 64, value: 1.0 })),
+            5 => assert!(live.play_at(early(1.0), EventKind::NoteOff { pitch: pitch - 5 })),
+            6 => assert!(live.play_at(early(200.0), EventKind::NoteOff { pitch: pitch + 1 })),
+            7 => assert!(live.play_at(early(0.0), EventKind::Control { controller: 1, value: 0.7 })),
+            8 => assert!(live.play_at(early(90.0), EventKind::Control { controller: 64, value: 0.0 })),
+            // And notes that name their track, as the window plays them.
+            9 => rig.session.note_on(drums, 36 + (step % 3) as u8, 110),
+            _ => {}
+        }
+        match step {
+            // Arming changes while keys are down: the release path.
+            150 => rig.session.set_armed(bass, false).unwrap(),
+            260 => rig.session.set_armed(bass, true).unwrap(),
+            // The keyboard's port goes away with keys down.
+            340 => rig.session.release_live(),
+            _ => {}
+        }
+        // The housekeeping thread writes what was played into the project,
+        // which swaps a new graph in under the audio thread.
+        if step % 20 == 19 {
+            rig.session.housekeeping();
+        }
+        watched(&mut rig, 1);
+    }
+    assert!(
+        rig.session.record_status().pass >= 3,
+        "the loop should have come round: {:?}",
+        rig.session.record_status()
+    );
+
+    // The take ends; the buffer that hears of it is watched too.
+    rig.host.set_pump(false);
+    rig.session.stop();
+    watched(&mut rig, 4);
+    assert!(level > 0.05, "something should have been sounding: {level}");
+    assert_eq!(calls, 0, "{calls} allocator calls on the audio thread while playing by hand and recording");
+    assert_eq!(rig.session.audio_faults(), 0);
+    // It was a real take: there are notes in two clips.
+    let take = rig.session.last_take();
+    assert_eq!(take.len(), 2, "{take:?}");
+    assert!(take.iter().all(|clip| clip.notes > 20), "{take:?}");
 }
 
 #[test]

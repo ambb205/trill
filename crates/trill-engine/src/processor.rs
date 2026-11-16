@@ -139,23 +139,54 @@ impl Processor {
     }
 
     pub fn play(&mut self) {
+        // Asked to play in the middle of a count-in: the count-in is over.
+        if let Some(recording) = &mut self.recording
+            && recording.count_in > 0
+        {
+            recording.count_in = 0;
+            self.report(Captured::Rolling { beat: self.position() });
+        }
         if !self.playing {
             self.playing = true;
             self.jumped(self.position(), false);
         }
     }
 
-    /// Stops the transport. Sounding notes are released and tails ring out.
-    /// A take that was being recorded ends here.
+    /// Stops the transport. Sounding notes are released, those held by
+    /// hand included (stopping a song that is not playing is how to
+    /// silence a key that hangs), and tails ring out. A take that was being
+    /// recorded ends here.
     pub fn stop(&mut self) {
-        if let Some(recording) = self.recording.take() {
-            self.report(Captured::Stopped { beat: self.position(), pass: recording.pass });
-            self.flush = Flush::Everything;
+        if let Some(heard) = self.heard() {
+            // Where the song was heard to be when it was stopped.
+            let (beat, pass) = heard.at(0, 0.0);
+            self.recording = None;
+            self.report(Captured::Stopped { beat, pass });
         }
-        if self.playing {
-            self.playing = false;
-            self.flush = Flush::Everything;
-        }
+        self.playing = false;
+        self.flush = Flush::Everything;
+    }
+
+    /// Lets go of every note that sounds, played by hand or by the song,
+    /// at the start of the next block.
+    pub(crate) fn release_everything(&mut self) {
+        self.flush = Flush::Everything;
+    }
+
+    /// What it takes to say where the song is heard to be right now, while
+    /// a take is being recorded.
+    fn heard(&self) -> Option<Heard> {
+        self.recording.map(|recording| Heard {
+            tracks: recording.tracks,
+            pass: recording.pass,
+            start_beat: self.position(),
+            beats_per_frame: self.beats_per_frame(),
+            count_in: recording.count_in as f64,
+            latency: self.output_latency,
+            continuity: self.continuity as f64,
+            before_jump: self.before_jump,
+            jump_was_wrap: self.jump_was_wrap,
+        })
     }
 
     pub fn seek(&mut self, beat: f64) {
@@ -287,10 +318,11 @@ impl Processor {
         }
     }
 
-    /// Starts a take on `tracks`. If the song is stopped it starts playing,
-    /// after `count_in_beats` of metronome; if it is playing, the take
-    /// begins where the song is.
-    pub(crate) fn record(&mut self, tracks: TrackSet, count_in_beats: f64) {
+    /// Starts the take numbered `take` on `tracks`. If the song is stopped
+    /// it starts playing, after `count_in_beats` of metronome; if it is
+    /// playing, the take begins where the song is.
+    pub(crate) fn record(&mut self, take: u32, tracks: TrackSet, count_in_beats: f64) {
+        self.report(Captured::Began { take });
         let signature = self.graph.time_signature;
         let bar = signature.numerator as f64 * 4.0 / signature.denominator as f64;
         let count_in_beats = if self.playing || !count_in_beats.is_finite() { 0.0 } else { count_in_beats.max(0.0) };
@@ -431,17 +463,7 @@ impl Processor {
         let block = block_start as u32..(block_start + frames) as u32;
         let has_live = self.live.iter().any(|event| block.contains(&event.offset));
         // Where a take's events are written: see `Heard`.
-        let heard = self.recording.map(|recording| Heard {
-            tracks: recording.tracks,
-            pass: recording.pass,
-            start_beat,
-            beats_per_frame,
-            count_in: recording.count_in as f64,
-            latency: self.output_latency,
-            continuity: self.continuity as f64,
-            before_jump: self.before_jump,
-            jump_was_wrap: self.jump_was_wrap,
-        });
+        let heard = self.heard();
 
         let mix_left = &mut self.mix_left[..frames];
         let mix_right = &mut self.mix_right[..frames];
@@ -493,6 +515,14 @@ impl Processor {
                         LiveTarget::Track(id) => id == track.id,
                     };
                     if !plays || events.len() >= EVENT_CAPACITY {
+                        continue;
+                    }
+                    // A key the keyboard does not hold here has nothing to
+                    // let go of: it went down before this track was one it
+                    // plays, or the note was ended for it already.
+                    if let (true, EventKind::NoteOff { pitch }) = (routed, event.kind)
+                        && track.state.routed_held & (1 << pitch.min(127)) == 0
+                    {
                         continue;
                     }
                     by_hand = true;

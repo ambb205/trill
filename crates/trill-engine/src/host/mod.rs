@@ -207,6 +207,14 @@ pub trait AudioHost: Send + Sync {
     fn runs_by_itself(&self) -> bool {
         true
     }
+
+    /// The time on the clock this host stamps its buffers with
+    /// ([`Timing::now_ns`]): the one live input must be stamped with to
+    /// land where it was played. Every host but a scripted one reads
+    /// [`now_ns`].
+    fn now_ns(&self) -> u64 {
+        now_ns()
+    }
 }
 
 /// No audio hardware. The engine runs at real-time pace all the same.

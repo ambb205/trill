@@ -11,6 +11,7 @@
 use crate::clock;
 use crate::queue::Queue;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use trill_core::TrackId;
 use trill_core::device::EventKind;
 
@@ -47,20 +48,37 @@ pub(crate) struct LiveInput {
 #[derive(Clone)]
 pub struct LiveSender {
     queue: Arc<Queue<LiveInput>>,
+    /// Set when an event could not be queued. What was lost may have been
+    /// a key coming up, so the audio thread then lets go of everything.
+    overflowed: Arc<AtomicBool>,
 }
 
 impl LiveSender {
     pub(crate) fn new() -> Self {
-        Self { queue: Arc::new(Queue::new(QUEUE_CAPACITY)) }
+        Self { queue: Arc::new(Queue::new(QUEUE_CAPACITY)), overflowed: Arc::new(AtomicBool::new(false)) }
     }
 
     pub(crate) fn queue(&self) -> Arc<Queue<LiveInput>> {
         self.queue.clone()
     }
 
+    pub(crate) fn overflowed(&self) -> Arc<AtomicBool> {
+        self.overflowed.clone()
+    }
+
+    fn push(&self, input: LiveInput) -> bool {
+        let queued = self.queue.push(input);
+        if !queued {
+            self.overflowed.store(true, Ordering::Relaxed);
+        }
+        queued
+    }
+
     /// Plays `kind`, now, wherever a keyboard goes: on the armed tracks,
     /// or on the selected track when none is armed. Returns `false` if the
-    /// event had to be dropped because the audio thread is not keeping up.
+    /// event had to be dropped because the audio thread is not keeping up;
+    /// every note that sounds is then let go of, since the event that was
+    /// lost may have been a key coming up.
     pub fn play(&self, kind: EventKind) -> bool {
         self.play_at(clock::now_ns(), kind)
     }
@@ -68,7 +86,7 @@ impl LiveSender {
     /// [`LiveSender::play`] for an event that happened at `time_ns` on the
     /// engine's clock ([`crate::host::now_ns`]).
     pub fn play_at(&self, time_ns: u64, kind: EventKind) -> bool {
-        self.queue.push(LiveInput { time_ns, target: LiveTarget::Routed, kind })
+        self.push(LiveInput { time_ns, target: LiveTarget::Routed, kind })
     }
 
     /// Plays `kind`, now, on `track` whether or not it is armed.
@@ -78,7 +96,7 @@ impl LiveSender {
 
     /// [`LiveSender::play_on`] for an event that happened at `time_ns`.
     pub fn play_on_at(&self, time_ns: u64, track: TrackId, kind: EventKind) -> bool {
-        self.queue.push(LiveInput { time_ns, target: LiveTarget::Track(track), kind })
+        self.push(LiveInput { time_ns, target: LiveTarget::Track(track), kind })
     }
 }
 
@@ -120,6 +138,9 @@ impl TrackSet {
 /// What the audio thread reports while a take is being recorded.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub(crate) enum Captured {
+    /// The audio thread has taken up the take numbered `take`. What comes
+    /// after is that take's; what came before was an earlier one's.
+    Began { take: u32 },
     /// Something was played on a track that is being recorded. `beat` is
     /// where the song was *heard* to be when it was played: the engine's
     /// own position, less the output latency and the time the event took
