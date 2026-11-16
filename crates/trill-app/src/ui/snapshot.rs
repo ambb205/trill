@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use trill_core::device::ControllerSupport;
+use trill_core::presets::PresetInfo;
 use trill_core::project::AutomationLane;
 use trill_core::{AutomationPoint, AutomationTarget, Beats, Clip, ClipId, DeviceId, Note, Project, Track, TrackId};
 use trill_engine::{Meter, ParamState, Problem, RecordStatus, SampleFile, Session, SilentInstrument};
@@ -54,6 +55,9 @@ pub struct Snapshot {
     /// The devices that bring a window of their own (plugins do, built-in
     /// devices do not), in ascending order.
     pub editors: Vec<DeviceId>,
+    /// The presets that were saved for the device types `params` covers,
+    /// by device URI; a type without any is not in it.
+    pub saved_presets: HashMap<String, Vec<PresetInfo>>,
     /// Which MIDI controllers the instrument of each track does something
     /// with, where that is known.
     controller_support: HashMap<TrackId, ControllerSupport>,
@@ -113,8 +117,18 @@ impl Snapshot {
         editors.sort_unstable();
         let controller_support =
             project.tracks.iter().map(|track| (track.id, session.controller_support(track.id))).collect();
+        let mut saved_presets: HashMap<String, Vec<PresetInfo>> = HashMap::new();
+        for device in shown.iter().flat_map(|track| track.devices.iter()).chain(project.master.devices.iter()) {
+            if !saved_presets.contains_key(&device.uri) {
+                let saved = session.saved_presets().list(&device.uri);
+                if !saved.is_empty() {
+                    saved_presets.insert(device.uri.clone(), saved);
+                }
+            }
+        }
         Self {
             controller_support,
+            saved_presets,
             revision: session.revision(),
             can_undo: session.can_undo(),
             can_redo: session.can_redo(),

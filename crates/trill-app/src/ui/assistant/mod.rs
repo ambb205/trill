@@ -1032,6 +1032,7 @@ impl Assistant {
             || state.piano.drag.is_some()
             || state.sound_drag.is_some()
             || state.renaming_track.is_some()
+            || state.naming_preset.is_some()
             || state.renaming_clip.is_some()
             || state.renaming_clip_inline.is_some()
             || view.renaming_marker.is_some()

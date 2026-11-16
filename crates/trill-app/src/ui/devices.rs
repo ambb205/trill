@@ -10,11 +10,12 @@
 
 use super::automation::{self, Hold};
 use super::device_layouts::{self, Display, Format, Layout, Row};
-use super::state::Cx;
+use super::state::{Cx, TextEditState};
 use super::units::{self, ParamScale};
-use super::{colors, displays, editors, sample_panels};
+use super::{colors, displays, editors, sample_panels, widgets};
 use eframe::egui::{self, Align2, Color32, FontId, Id, Rect, Role, Sense, Ui, WidgetInfo, pos2, vec2};
 use trill_core::device::{DeviceCategory, DeviceDescriptor, ParamKind};
+use trill_core::presets::PresetInfo;
 use trill_core::{AutomationTarget, ChainRef, Device, DeviceId};
 use trill_engine::ParamState;
 use trill_noir::{Bar, Chip, Icon, MenuItem, paint, text};
@@ -109,6 +110,31 @@ pub fn current_preset<'a>(device: &Device, descriptor: &'a DeviceDescriptor) -> 
                 && preset.params.iter().all(|(id, value)| device.params.get(id) == Some(value))
         })
         .map(|preset| preset.name.as_str())
+}
+
+/// The presets that were saved for a device's type, by name.
+pub fn saved_presets<'a>(cx: &Cx<'a>, device: &Device) -> &'a [PresetInfo] {
+    cx.snap.saved_presets.get(&device.uri).map(Vec::as_slice).unwrap_or_default()
+}
+
+/// The id of the saved preset a device is on, if it is on one.
+pub fn current_saved<'a>(cx: &Cx<'a>, device: &'a Device) -> Option<&'a str> {
+    let reference = device.preset.as_ref()?;
+    saved_presets(cx, device).iter().any(|preset| preset.id == reference.id).then_some(reference.id.as_str())
+}
+
+/// What a device's preset menu shows for the preset it is on: one of its
+/// type's own if its values are that preset's, the saved preset it was
+/// given, or for a plugin the preset it was last given.
+fn shown_preset<'a>(cx: &Cx<'a>, device: &'a Device, descriptor: Option<&'a DeviceDescriptor>) -> Option<&'a str> {
+    let own = descriptor.and_then(|descriptor| current_preset(device, descriptor));
+    let given = device.preset.as_ref().map(|preset| preset.name.as_str());
+    let built_in = descriptor.is_some_and(|descriptor| !descriptor.presets.is_empty());
+    own.or(match current_saved(cx, device) {
+        Some(_) => given,
+        // A built-in device's own presets are told by its values alone.
+        None => given.filter(|_| !built_in),
+    })
 }
 
 /// Adds a device where it belongs in `chain`, as one undo step.
@@ -295,30 +321,80 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
 
     let descriptor = cx.descriptors.iter().find(|descriptor| descriptor.uri == device.uri);
     let mut name_right = close.left() - 4.0;
-    if let Some(descriptor) = descriptor.filter(|descriptor| !descriptor.presets.is_empty()) {
-        let current = current_preset(device, descriptor);
-        let shown = current.unwrap_or("Preset");
+    {
+        // Every device has the menu: its type's own presets, the ones that
+        // were saved, and saving the sound it has now.
+        let own = descriptor.map(|descriptor| descriptor.presets.as_slice()).unwrap_or_default();
+        let saved = saved_presets(cx, device);
+        let current = descriptor.and_then(|descriptor| current_preset(device, descriptor));
+        let current_saved = current_saved(cx, device);
+        let shown = shown_preset(cx, device, descriptor).unwrap_or("Preset");
         let width = trill_noir::dropdown_width(ui, theme, shown).min(104.0);
         let rect = Rect::from_min_size(pos2(name_right - width, header.center().y - 8.0), vec2(width, 16.0));
         let response = trill_noir::dropdown(ui, theme, rect, id.with("preset"), "", shown, !device.enabled);
-        cx.hint(&response, "Presets of this device");
-        let mut chosen = None;
+        cx.hint(&response, "Presets of this device, and saving its sound as one");
+        let (mut chosen, mut save) = (None, false);
         egui::Popup::menu(&response).gap(1.0).show(|ui| {
             ui.set_min_width(150.0);
-            for preset in &descriptor.presets {
+            if !saved.is_empty() {
+                trill_noir::menu_heading(ui, theme, "Saved");
+            }
+            for preset in saved {
+                let item = MenuItem::new(&preset.name).checked(current_saved == Some(preset.id.as_str()));
+                if item.detail(&preset.description).show(ui, theme).clicked() {
+                    chosen = Some(preset.id.clone());
+                }
+            }
+            if !saved.is_empty() && !own.is_empty() {
+                trill_noir::menu_separator(ui, theme);
+            }
+            for preset in own {
                 let item = MenuItem::new(&preset.name).checked(current == Some(preset.name.as_str()));
                 if item.detail(&preset.description).show(ui, theme).clicked() {
                     chosen = Some(preset.name.clone());
                 }
             }
+            if !saved.is_empty() || !own.is_empty() {
+                trill_noir::menu_separator(ui, theme);
+            }
+            let about = "Keep this sound under a name, for every song";
+            save = MenuItem::new("Save preset\u{2026}").detail(about).show(ui, theme).clicked();
         });
         if let Some(preset) = chosen {
             cx.try_session(|session| session.apply_preset(device_id, &preset));
+        }
+        if save {
+            // The name of the saved preset it is on is the likely one to
+            // save over; anything else starts empty.
+            let text = current_saved.and(device.preset.as_ref()).map(|preset| preset.name.clone()).unwrap_or_default();
+            cx.state.naming_preset = Some(TextEditState { target: device_id, text, focused: false });
         }
         name_right = rect.left() - 6.0;
     }
 
     let mut name = Rect::from_min_max(pos2(dot_zone.right() + 2.0, header.top()), pos2(name_right, header.bottom()));
+    if cx.state.naming_preset.as_ref().is_some_and(|edit| edit.target == device_id) {
+        // The name of the preset is typed where the device's name is.
+        let field = name.shrink2(vec2(0.0, 3.0));
+        let hint = format!("Name this sound of {} and press Enter; Escape leaves it unsaved", device.name);
+        cx.state.hint.set(hint);
+        let naming = PresetName(device_id);
+        let mut edit = cx.state.naming_preset.take().map(|edit| TextEditState {
+            target: naming,
+            text: edit.text,
+            focused: edit.focused,
+        });
+        let committed = widgets::name_field(ui, theme, field, naming, "", &mut edit);
+        cx.state.naming_preset =
+            edit.map(|edit| TextEditState { target: device_id, text: edit.text, focused: edit.focused });
+        if let Some(preset) = committed
+            && let Some(saved) = cx.try_session(|session| session.save_preset(device_id, &preset, "", &[]))
+        {
+            let what = if saved.replaced { "Replaced" } else { "Saved" };
+            cx.state.toasts.info(format!("{what} the preset \u{201C}{}\u{201D} of {}", saved.info.name, device.name));
+        }
+        return;
+    }
     if editors::has(cx, device_id) {
         // The plugin's own window. Its button follows the name, at the
         // panel's left: a plugin with hundreds of parameters makes a panel
@@ -339,6 +415,11 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
     let color = if device.enabled { theme.ink } else { quiet };
     text::paint(&painter, name, Align2::LEFT_CENTER, theme.text.caps, &device.name, color);
 }
+
+/// What tells the field a preset is named in from the other name fields:
+/// a device's id is a plain number, as a track's is.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+struct PresetName(DeviceId);
 
 // ---- built-in layouts ------------------------------------------------------
 
