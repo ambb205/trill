@@ -4860,6 +4860,7 @@ dependencies = [
  "clack-plugin",
  "libloading",
  "log",
+ "png",
  "serde",
  "serde_json",
  "trill-core",

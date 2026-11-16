@@ -55,7 +55,7 @@ impl Window {
         match self.0 {}
     }
 
-    pub(crate) fn bring_to_front(&self, _activate: bool) {
+    pub(crate) fn available_size(&self) -> Option<Size> {
         match self.0 {}
     }
 

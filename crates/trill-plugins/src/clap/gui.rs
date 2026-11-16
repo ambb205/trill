@@ -161,8 +161,9 @@ impl Instance {
             editor.set_resizable(view.can_resize());
         }
         if let Some(size) = requests.resize {
+            log::debug!("[{}] its editor asks to be {size:?}", self.plugin_id);
             // A plugin that got what it asked for needs no telling.
-            let given = editor.resize_to(size);
+            let given = editor.resize_to(&mut view, size);
             if given != size {
                 view.set_size(given);
             }

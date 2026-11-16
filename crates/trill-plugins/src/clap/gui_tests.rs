@@ -321,6 +321,26 @@ fn the_plugin_resizes_its_own_editor_and_changes_its_mind_about_resizing() {
 }
 
 #[test]
+fn a_plugin_that_asks_for_more_room_than_the_screen_has_gets_what_fits() {
+    let factory = factory();
+    let mut instance = create(&factory, kind::EDITOR);
+    let serial = serial(&mut instance);
+    let window = open(&mut instance, &options("asks for too much"));
+    let natural = simulate::client_size(window);
+
+    // A window larger than the screen could not be reached to make it
+    // smaller, so a plugin that can do with less is given what there is.
+    // CLAP has the host say so with `set_size`.
+    scripted::act(serial, Action::Resize(30_000, 30_000));
+    assert!(eventually(WAIT, || editor_steps(serial).last() == Some(&"gui size")));
+    let given = simulate::client_size(window);
+    assert!(given.width > natural.width && given.height > natural.height, "{given:?}");
+    assert!(given.width < 30_000 && given.height < 30_000, "{given:?}");
+    assert_eq!(value(&mut instance, scripted::EDITOR_WIDTH), f64::from(given.width));
+    assert_eq!(value(&mut instance, scripted::EDITOR_HEIGHT), f64::from(given.height));
+}
+
+#[test]
 fn an_editor_follows_its_window_to_a_monitor_of_another_scale() {
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);

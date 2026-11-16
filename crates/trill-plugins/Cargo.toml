@@ -55,3 +55,5 @@ trill-engine.workspace = true
 # into the test binary, to check the host exactly and against misbehavior.
 clack-plugin = "0.2.0"
 clack-extensions = { version = "0.2.0", features = ["clack-plugin"] }
+# The `editor` example saves pictures of the editors it opens.
+png = "0.18"

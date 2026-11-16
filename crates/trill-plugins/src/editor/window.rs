@@ -25,7 +25,8 @@ use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM}
 use windows_sys::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLACK_BRUSH, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC,
-    DeleteObject, GdiFlush, GetDC, GetStockObject, MONITOR_DEFAULTTONULL, MonitorFromPoint, ReleaseDC, SelectObject,
+    DeleteObject, GdiFlush, GetDC, GetMonitorInfoW, GetStockObject, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
+    MONITORINFO, MonitorFromPoint, MonitorFromWindow, ReleaseDC, SelectObject,
 };
 use windows_sys::Win32::Storage::Xps::{PW_CLIENTONLY, PrintWindow};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -224,18 +225,19 @@ impl Window {
         client_size(self.handle())
     }
 
-    /// Puts the window on screen, giving it the keyboard focus only if
-    /// `activate` is set.
+    /// Puts the window on screen, where a new window goes: in front. It
+    /// takes the keyboard focus only with `activate`; without, whoever is
+    /// typing somewhere else goes on typing there. Shown again, a window
+    /// that is open comes to the front, or back from being minimized.
+    ///
+    /// (Opening it behind the windows in use would disturb even less, but
+    /// Windows does not have a covered window paint, and an editor that
+    /// was never painted cannot be captured.)
     pub(crate) fn show(&self, activate: bool) {
-        self.raise(activate, SWP_NOZORDER);
+        if activate { self.place(HWND_TOP, 0, true) } else { self.place(null_mut(), SWP_NOZORDER, false) }
     }
 
-    /// Brings the window to the front, restoring it if it is minimized.
-    pub(crate) fn bring_to_front(&self, activate: bool) {
-        self.raise(activate, 0);
-    }
-
-    fn raise(&self, activate: bool, flags: u32) {
+    fn place(&self, after: HWND, flags: u32, activate: bool) {
         if !SHOWN {
             return;
         }
@@ -249,11 +251,27 @@ impl Window {
             if IsIconic(window) != 0 {
                 ShowWindow(window, if activate { SW_RESTORE } else { SW_SHOWNOACTIVATE });
             }
-            SetWindowPos(window, HWND_TOP, 0, 0, 0, 0, flags);
+            SetWindowPos(window, after, 0, 0, 0, 0, flags);
             if activate {
                 SetForegroundWindow(window);
             }
         }
+    }
+
+    /// The largest area inside the window's frame that fits the part of
+    /// its monitor that is free for windows: the screen less the taskbar.
+    pub(crate) fn available_size(&self) -> Option<Size> {
+        let window = self.handle();
+        // SAFETY: the handle is this window's, and the monitor's
+        // description a local the system fills in.
+        let work = unsafe {
+            let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..std::mem::zeroed() };
+            let monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+            (GetMonitorInfoW(monitor, &mut info) != 0).then_some(info.rcWork)?
+        };
+        let (extra_width, extra_height) = frame_extent(window);
+        let fit = |length: i32, extra: i32| u32::try_from(length - extra).ok().filter(|inner| *inner > 0);
+        Some(Size::new(fit(work.right - work.left, extra_width)?, fit(work.bottom - work.top, extra_height)?))
     }
 
     /// The window's top-left corner in screen pixels; where it would be

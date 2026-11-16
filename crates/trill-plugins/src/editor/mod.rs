@@ -195,6 +195,7 @@ impl HostedEditor {
         // The order is the one both formats document: scale first, since
         // every size that follows is in pixels of that scale.
         let scale = window.scale();
+        log::debug!("[{plugin_name}] before scale {scale}: its editor says {:?}", view.size());
         view.set_scale(scale);
         let resizable = view.can_resize();
         window.set_resizable(resizable);
@@ -208,6 +209,14 @@ impl HostedEditor {
         if let Some(wanted) = resized {
             size = view.constrain(wanted);
             view.set_size(size);
+        }
+        // A view that wants more room than its monitor has, and can do
+        // with less, is offered what there is: a window whose edges are
+        // beyond the screen cannot be reached to make it smaller.
+        if resizable && let Some(fitting) = window.available_size().and_then(|room| fit_into(view, size, room)) {
+            log::debug!("[{plugin_name}] its editor wants {size:?}, more than the screen has; it gets {fitting:?}");
+            view.set_size(fitting);
+            size = fitting;
         }
         let mut editor = Self { size: window.set_client_size(size), window, status, resizable, closing: false };
 
@@ -223,9 +232,10 @@ impl HostedEditor {
         if let Some(settled) = view.size().filter(|settled| !settled.is_empty() && *settled != editor.size) {
             editor.size = editor.window.set_client_size(settled);
         }
-        if editor.size != size {
-            log::debug!("[{plugin_name}] its editor is {:?} instead of the {size:?} it asked for", editor.size);
-        }
+        log::debug!(
+            "[{plugin_name}] its editor asked for {size:?} at scale {scale} and has {:?}; resizable: {resizable}",
+            editor.size
+        );
         view.show();
         editor.window.show(options.activate);
         editor.status.set_open(true);
@@ -235,7 +245,7 @@ impl HostedEditor {
     /// Brings the window to the front, as opening an editor that is
     /// already open should.
     pub(crate) fn bring_to_front(&self, activate: bool) {
-        self.window.bring_to_front(activate);
+        self.window.show(activate);
     }
 
     /// Acts on what happened to the window since the last call.
@@ -264,10 +274,17 @@ impl HostedEditor {
     }
 
     /// Resizes the window because the view asked for `size`. Returns the
-    /// size the window now has, which the system may have limited.
-    pub(crate) fn resize_to(&mut self, size: Size) -> Size {
-        if !size.is_empty() && size != self.size {
-            self.size = self.window.set_client_size(size);
+    /// size the view is given, for the caller to tell the view if it is
+    /// not what was asked: a view that can do with less is not given more
+    /// room than its monitor has, and the system has limits of its own.
+    pub(crate) fn resize_to(&mut self, view: &mut dyn PluginView, size: Size) -> Size {
+        if size.is_empty() {
+            return self.size;
+        }
+        let room = self.window.available_size().filter(|_| self.resizable);
+        let granted = room.and_then(|room| fit_into(view, size, room)).unwrap_or(size);
+        if granted != self.size {
+            self.size = self.window.set_client_size(granted);
         }
         self.size
     }
@@ -297,11 +314,124 @@ impl HostedEditor {
     }
 }
 
+/// How often a view is offered a smaller size before the host gives up on
+/// fitting it into its monitor.
+const FITTING_ROUNDS: u32 = 6;
+
+/// The size a view makes of being given `room` instead of the larger
+/// `wanted`, if it settles on one that fits. `None` if the view fits as it
+/// is, or does not go along.
+///
+/// A view that keeps its proportions answers an offer by fixing one side
+/// and working out the other, which may again be too large. So it is
+/// offered sizes of its own shape, a little smaller each time.
+fn fit_into(view: &mut dyn PluginView, wanted: Size, room: Size) -> Option<Size> {
+    let fits = |size: Size| !size.is_empty() && size.width <= room.width && size.height <= room.height;
+    if fits(wanted) {
+        return None;
+    }
+    let mut offer = Size::new(wanted.width.min(room.width), wanted.height.min(room.height));
+    for round in 0..FITTING_ROUNDS {
+        let accepted = view.constrain(offer);
+        if fits(accepted) {
+            return (accepted != wanted).then_some(accepted);
+        }
+        if accepted.is_empty() {
+            return None;
+        }
+        // The view's answer, shrunk to where its larger side fits, and by
+        // a pixel more for every answer that came back rounded up.
+        let scale = (f64::from(room.width) / f64::from(accepted.width))
+            .min(f64::from(room.height) / f64::from(accepted.height));
+        let shrunk = |length: u32| ((f64::from(length) * scale) as u32).saturating_sub(round).max(1);
+        offer = Size::new(shrunk(accepted.width), shrunk(accepted.height));
+    }
+    None
+}
+
 impl Drop for HostedEditor {
     /// The window goes before the editor is said to be closed, so that
     /// whoever reads "closed" finds no window.
     fn drop(&mut self) {
         self.window.destroy();
         self.status.set_open(false);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A view that answers every question about sizes with `shape`.
+    struct Shaped<F: Fn(Size) -> Size> {
+        shape: F,
+        asked: u32,
+    }
+
+    impl<F: Fn(Size) -> Size> PluginView for Shaped<F> {
+        fn set_scale(&mut self, _scale: f64) {}
+
+        fn size(&mut self) -> Option<Size> {
+            None
+        }
+
+        fn can_resize(&mut self) -> bool {
+            true
+        }
+
+        fn constrain(&mut self, size: Size) -> Size {
+            self.asked += 1;
+            (self.shape)(size)
+        }
+
+        fn set_size(&mut self, _size: Size) {}
+
+        fn attach(&mut self, _parent: &Window) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn show(&mut self) {}
+
+        fn detach(&mut self) {}
+    }
+
+    fn fit(shape: impl Fn(Size) -> Size, wanted: Size, room: Size) -> (Option<Size>, u32) {
+        let mut view = Shaped { shape, asked: 0 };
+        (fit_into(&mut view, wanted, room), view.asked)
+    }
+
+    const ROOM: Size = Size { width: 1900, height: 1000 };
+
+    #[test]
+    fn a_view_that_fits_is_left_alone() {
+        assert_eq!(fit(|size| size, Size::new(800, 600), ROOM), (None, 0));
+        assert_eq!(fit(|size| size, ROOM, ROOM), (None, 0), "exactly the room there is");
+    }
+
+    #[test]
+    fn a_view_that_takes_any_size_gets_the_room_there_is() {
+        assert_eq!(fit(|size| size, Size::new(3000, 600), ROOM), (Some(Size::new(1900, 600)), 1));
+        assert_eq!(fit(|size| size, Size::new(3000, 2000), ROOM), (Some(ROOM), 1));
+    }
+
+    #[test]
+    fn a_view_that_keeps_its_shape_is_brought_down_to_one_that_fits() {
+        // 16 by 10, worked out from the width and rounded up: the first
+        // offer comes back too tall, as it does from a real plugin.
+        let widescreen = |size: Size| Size::new(size.width, (size.width * 10).div_ceil(16));
+        let (fitted, asked) = fit(widescreen, Size::new(3200, 2000), ROOM);
+        let fitted = fitted.expect("a size that fits");
+        assert!(fitted.width <= ROOM.width && fitted.height <= ROOM.height, "{fitted:?}");
+        assert_eq!(fitted, widescreen(fitted), "a size the view itself accepts");
+        assert!(fitted.height >= 990, "nearly all of the room is used: {fitted:?}");
+        assert!(asked <= FITTING_ROUNDS);
+    }
+
+    #[test]
+    fn a_view_that_will_not_be_smaller_keeps_its_size() {
+        let stubborn = |_: Size| Size::new(3000, 2000);
+        assert_eq!(fit(stubborn, Size::new(3000, 2000), ROOM), (None, FITTING_ROUNDS));
+        // Nor is nonsense followed.
+        assert_eq!(fit(|_| Size::new(0, 0), Size::new(3000, 2000), ROOM), (None, 1));
     }
 }

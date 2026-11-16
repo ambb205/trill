@@ -134,12 +134,6 @@ impl PluginView for View<'_> {
     }
 }
 
-impl Editor {
-    fn view<'a>(&'a self, name: &'a str) -> (View<'a>, &'a HostedEditor) {
-        (View { view: &self.view, scale: self.scale.as_ref(), name, attached: true }, &self.hosted)
-    }
-}
-
 impl Instance {
     fn open_editor(&mut self, id: InstanceId, options: &EditorOptions) -> Result<(), EditorError> {
         if let Some(editor) = &self.editor {
@@ -184,9 +178,9 @@ impl Instance {
         };
         let mut opening = View { view: &view, scale: scale.as_ref(), name: &self.name, attached: false };
         let hosted = HostedEditor::open(&mut opening, request).map_err(EditorError::Failed)?;
-        // A view that asked for a size while it was being attached has
-        // been given it by now.
-        frame.take_request();
+        // A view that asked for another size while it was being attached
+        // (views do, once they see the window they are in) is given it
+        // when the thread idles, which is as soon as this job is done.
         self.editor = Some(Editor { hosted, view, scale, frame });
         self.editor_closing = false;
         Ok(())
@@ -207,20 +201,21 @@ impl Instance {
     /// Resizes the editor's window because its view asked for `size`, and
     /// tells the view the size it got, as VST3 has it.
     fn resize_editor(&mut self, size: Size) -> bool {
-        let Some(editor) = self.editor.as_mut() else { return false };
-        let given = editor.hosted.resize_to(size);
-        editor.view(&self.name).0.set_size(given);
+        let Some(Editor { hosted, view, scale, .. }) = self.editor.as_mut() else { return false };
+        log::debug!("[{}] its editor asks to be {size:?}", self.name);
+        let mut view = View { view, scale: scale.as_ref(), name: &self.name, attached: true };
+        let given = hosted.resize_to(&mut view, size);
+        view.set_size(given);
         true
     }
 
     /// Acts on what the user did to the editor's window and what the view
     /// asked for since the last call.
     pub(super) fn service_editor(&mut self, nested: bool) {
-        let Some(editor) = self.editor.as_mut() else { return };
-        if let Some(size) = editor.frame.take_request() {
-            let given = editor.hosted.resize_to(size);
-            editor.view(&self.name).0.set_size(given);
+        if let Some(size) = self.editor.as_ref().and_then(|editor| editor.frame.take_request()) {
+            self.resize_editor(size);
         }
+        let Some(editor) = self.editor.as_mut() else { return };
         let Editor { hosted, view, scale, .. } = editor;
         let mut view = View { view, scale: scale.as_ref(), name: &self.name, attached: true };
         self.editor_closing |= hosted.service(&mut view) == Serviced::Close;
@@ -261,6 +256,7 @@ impl Vst3Thread {
     /// accepts.
     fn constrain_editor(&mut self, id: InstanceId, size: Size) -> Option<Size> {
         let instance = self.instances.get(&id)?;
-        Some(instance.editor.as_ref()?.view(&instance.name).0.constrain(size))
+        let Editor { view, scale, .. } = instance.editor.as_ref()?;
+        Some(View { view, scale: scale.as_ref(), name: &instance.name, attached: true }.constrain(size))
     }
 }

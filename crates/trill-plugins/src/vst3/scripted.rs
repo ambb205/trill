@@ -85,8 +85,12 @@ pub(crate) mod kind {
     pub(crate) const FIXED_EDITOR: u8 = 11;
     /// [`EDITOR`] whose view cannot be put into a window.
     pub(crate) const FAILS_ATTACH: u8 = 12;
+    /// [`EDITOR`] whose view only finds out how large it is once it is in
+    /// a window, and asks for that size from inside `attached`, while it
+    /// goes on reporting the old one until it is told the new.
+    pub(crate) const ASKS_WHEN_ATTACHED: u8 = 13;
 
-    pub(crate) const ALL: [u8; 13] = [
+    pub(crate) const ALL: [u8; 14] = [
         IMPULSE,
         MONO_GAIN,
         STEREO_GAIN,
@@ -100,12 +104,13 @@ pub(crate) mod kind {
         EDITOR,
         FIXED_EDITOR,
         FAILS_ATTACH,
+        ASKS_WHEN_ATTACHED,
     ];
 }
 
 /// Whether the plugin's edit controller makes a view.
 fn has_view(kind: u8) -> bool {
-    matches!(kind, kind::EDITOR | kind::FIXED_EDITOR | kind::FAILS_ATTACH)
+    matches!(kind, kind::EDITOR | kind::FIXED_EDITOR | kind::FAILS_ATTACH | kind::ASKS_WHEN_ATTACHED)
 }
 
 fn is_instrument(kind: u8) -> bool {
@@ -294,6 +299,8 @@ pub(crate) fn host_contexts() -> u32 {
 pub(crate) const VIEW_SIZE: (i32, i32) = (300, 200);
 /// What the view rounds the sizes it is offered down to.
 pub(crate) const VIEW_STEP: i32 = 10;
+/// The size [`kind::ASKS_WHEN_ATTACHED`] asks for when it is attached.
+pub(crate) const ATTACHED_SIZE: (i32, i32) = (450, 300);
 
 /// Something the user of a view does in it.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -521,6 +528,9 @@ impl<const SCALES: bool> IPlugViewTrait for View<SCALES> {
         view_log(self.serial, "attached");
         self.state.parent.store(parent as usize, Ordering::Relaxed);
         view_timer::start(&self.state);
+        if self.state.kind == kind::ASKS_WHEN_ATTACHED {
+            self.state.perform(Action::Resize(ATTACHED_SIZE.0, ATTACHED_SIZE.1));
+        }
         kResultOk
     }
 

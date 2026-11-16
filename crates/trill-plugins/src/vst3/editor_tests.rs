@@ -333,6 +333,42 @@ fn a_view_that_asks_for_another_size_gets_it_and_is_told() {
 }
 
 #[test]
+fn a_view_that_asks_for_its_size_while_it_is_attached_gets_it() {
+    let factory = factory();
+    let mut instance = create(&factory, kind::ASKS_WHEN_ATTACHED);
+    let serial = serial(&mut instance);
+    // Views built on some frameworks only learn their scale from the
+    // window they are put into, and ask for the size that makes them from
+    // inside `attached`, while still reporting the old one. A host that
+    // let the request go would show them cut off.
+    let window = open(&mut instance, &options("asks when attached"));
+    let asked = Size::new(scripted::ATTACHED_SIZE.0 as u32, scripted::ATTACHED_SIZE.1 as u32);
+    assert!(eventually(WAIT, || simulate::client_size(window) == asked), "{:?}", simulate::client_size(window));
+    assert!(eventually(WAIT, || view_size(serial) == asked), "the view was not told the size it got");
+    assert_eq!(view(serial).resize_results, [kResultOk]);
+}
+
+#[test]
+fn a_view_that_asks_for_more_room_than_the_screen_has_gets_what_fits() {
+    let factory = factory();
+    let mut instance = create(&factory, kind::EDITOR);
+    let serial = serial(&mut instance);
+    let window = open(&mut instance, &options("asks for too much"));
+    let natural = simulate::client_size(window);
+
+    // A window larger than the screen could not be reached to make it
+    // smaller, so a view that can do with less is given what there is,
+    // and told.
+    scripted::act(serial, Action::Resize(30_000, 30_000));
+    assert!(eventually(WAIT, || view(serial).resize_results == [kResultOk]));
+    let given = simulate::client_size(window);
+    assert!(given.width > natural.width && given.height > natural.height, "{given:?}");
+    assert!(given.width < 30_000 && given.height < 30_000, "{given:?}");
+    assert_eq!(view_size(serial), given, "the view was told the size it got instead");
+    assert_eq!(given.width % 10 + given.height % 10, 0, "a size the view itself accepts");
+}
+
+#[test]
 fn an_editor_follows_its_window_to_a_monitor_of_another_scale() {
     let factory = factory();
     let mut instance = create(&factory, kind::EDITOR);
