@@ -92,6 +92,15 @@ pub struct AssistantConfig {
     /// digits, `_` and `-` only.
     pub mcp_server_name: String,
 
+    /// Tools of Trill's that the assistant is not offered, by Trill's own
+    /// names (`"load_project"`). Empty by default.
+    ///
+    /// The assistant has no file access of its own, but some of Trill's tools
+    /// take a path and read or write wherever it points (saving, loading,
+    /// rendering, importing and exporting). An app that wants the assistant
+    /// kept to the open project withholds those here.
+    pub withheld_tools: Vec<String>,
+
     /// Instructions added to the CLI's own system prompt.
     ///
     /// The CLI records the system prompt when a conversation starts and
@@ -142,6 +151,7 @@ impl AssistantConfig {
             cli_path: None,
             mcp_url: DEFAULT_MCP_URL.to_owned(),
             mcp_server_name: DEFAULT_MCP_SERVER_NAME.to_owned(),
+            withheld_tools: Vec::new(),
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_owned(),
             model: None,
             effort: None,
@@ -155,9 +165,11 @@ impl AssistantConfig {
     /// Checks the values that end up on the CLI's command line, so that a
     /// mistake is reported here, by name, and not as a confusing CLI error.
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
-        let name = &self.mcp_server_name;
-        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-            return Err(ConfigError::ServerName(name.clone()));
+        if !is_plain_name(&self.mcp_server_name) {
+            return Err(ConfigError::ServerName(self.mcp_server_name.clone()));
+        }
+        if let Some(tool) = self.withheld_tools.iter().find(|tool| !is_plain_name(tool)) {
+            return Err(ConfigError::ToolName(tool.clone()));
         }
         if !(self.mcp_url.starts_with("http://") || self.mcp_url.starts_with("https://")) {
             return Err(ConfigError::McpUrl(self.mcp_url.clone()));
@@ -176,11 +188,20 @@ impl AssistantConfig {
     }
 }
 
+/// Whether `name` is made of letters, digits, `_` and `-` only, as the names
+/// of MCP servers and tools are.
+fn is_plain_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 /// A value in an [`AssistantConfig`] that cannot be used.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
     /// The MCP server name has characters other than letters, digits, `_`, `-`.
     ServerName(String),
+    /// A withheld tool's name has characters other than letters, digits, `_`,
+    /// `-`.
+    ToolName(String),
     /// The MCP address is not an `http://` or `https://` URL.
     McpUrl(String),
     /// The model name is empty, starts with `-` or contains spaces.
@@ -194,6 +215,9 @@ impl fmt::Display for ConfigError {
         match self {
             ConfigError::ServerName(name) => {
                 write!(f, "the MCP server name {name:?} may only contain letters, digits, _ and -")
+            }
+            ConfigError::ToolName(name) => {
+                write!(f, "the tool name {name:?} may only contain letters, digits, _ and -")
             }
             ConfigError::McpUrl(url) => write!(f, "the MCP address {url:?} is not an http:// or https:// URL"),
             ConfigError::Model(model) => write!(f, "{model:?} is not a model name"),
@@ -219,6 +243,9 @@ mod tests {
 
         let config = AssistantConfig { mcp_server_name: "tr ill".into(), ..base.clone() };
         assert_eq!(config.validate(), Err(ConfigError::ServerName("tr ill".into())));
+
+        let config = AssistantConfig { withheld_tools: vec!["render".into(), "a,b".into()], ..base.clone() };
+        assert_eq!(config.validate(), Err(ConfigError::ToolName("a,b".into())));
 
         let config = AssistantConfig { mcp_url: "127.0.0.1:7777".into(), ..base.clone() };
         assert_eq!(config.validate(), Err(ConfigError::McpUrl("127.0.0.1:7777".into())));

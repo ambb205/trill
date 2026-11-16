@@ -275,6 +275,13 @@ fn arguments(
     add("");
     add("--allowedTools");
     add(&format!("mcp__{}__*", config.mcp_server_name));
+    if !config.withheld_tools.is_empty() {
+        // Denied tools are not merely refused: the model is never told of them.
+        let withheld: Vec<String> =
+            config.withheld_tools.iter().map(|tool| format!("mcp__{}__{tool}", config.mcp_server_name)).collect();
+        add("--disallowedTools");
+        add(&withheld.join(","));
+    }
     add("--permission-mode");
     add("dontAsk");
     if cli.version >= PERMISSION_PROMPTS_SINCE {
@@ -646,7 +653,8 @@ mod tests {
         ] {
             assert!(arguments.contains(group), "missing {group} in {arguments}");
         }
-        for absent in ["--model", "--effort", "--resume", "--bare", "--safe-mode", "--dangerously"] {
+        for absent in ["--model", "--effort", "--resume", "--disallowedTools", "--bare", "--safe-mode", "--dangerously"]
+        {
             assert!(!arguments.contains(absent), "unexpected {absent} in {arguments}");
         }
     }
@@ -659,13 +667,16 @@ mod tests {
             max_turns: None,
             system_prompt: "  ".into(),
             mcp_server_name: "studio".into(),
+            withheld_tools: vec!["load_project".into(), "new_project".into()],
             ..AssistantConfig::new("data")
         };
         let session = SessionId::parse("39367d22-e40b-4a04-9358-33e91538ff0d").unwrap();
         let arguments = joined(&arguments(&config, &cli(CliVersion::new(2, 1, 325)), &files(), Some(&session)));
 
         assert!(arguments.contains("[--model=haiku][--effort=xhigh][--resume=39367d22-e40b-4a04-9358-33e91538ff0d]"));
-        assert!(arguments.contains("[--allowedTools][mcp__studio__*]"));
+        assert!(arguments.contains(
+            "[--allowedTools][mcp__studio__*][--disallowedTools][mcp__studio__load_project,mcp__studio__new_project]"
+        ));
         assert!(!arguments.contains("--max-turns"));
         assert!(!arguments.contains("--append-system-prompt-file"));
     }

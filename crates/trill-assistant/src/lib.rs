@@ -41,7 +41,7 @@
 //! claude -p --output-format stream-json --verbose --include-partial-messages
 //!        --mcp-config <file> --strict-mcp-config
 //!        --setting-sources "" --disable-slash-commands
-//!        --tools "" --allowedTools "mcp__trill__*"
+//!        --tools "" --allowedTools "mcp__trill__*" [--disallowedTools ..]
 //!        --permission-mode dontAsk --permission-prompts none
 //!        --append-system-prompt-file <file>
 //!        [--model=..] [--effort=..] [--max-turns=..] [--resume=<id>]
