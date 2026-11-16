@@ -56,11 +56,8 @@ fn preset_files(places: &VendorPlaces) -> Vec<PathBuf> {
     for programs in &places.programs {
         let libraries = programs.join("Toontrack").join("Superior").join("Superior Drummer");
         let Ok(entries) = std::fs::read_dir(&libraries) else { continue };
-        let mut found: Vec<PathBuf> = entries
-            .flatten()
-            .map(|entry| entry.path().join(PRESETS_FILE))
-            .filter(|file| file.is_file())
-            .collect();
+        let mut found: Vec<PathBuf> =
+            entries.flatten().map(|entry| entry.path().join(PRESETS_FILE)).filter(|file| file.is_file()).collect();
         found.sort();
         files.extend(found);
     }
@@ -270,7 +267,10 @@ pub(crate) fn build(file: &[u8], key: Option<&str>, current: &PluginState) -> Re
         .ok_or_else(|| format!("the file no longer has a kit called '{name}'"))?;
     let kit: Vec<&str> = lines(&text[preset.at.clone()]).map(|(_, line)| line).collect();
 
-    let version = kit.iter().find_map(|line| line.strip_prefix("version ")).and_then(|version| version.trim().parse::<u32>().ok());
+    let version = kit
+        .iter()
+        .find_map(|line| line.strip_prefix("version "))
+        .and_then(|version| version.trim().parse::<u32>().ok());
     if version.is_some_and(|version| version > KNOWN_VERSION) {
         return Err(format!(
             "the kit '{name}' is written in a newer form (version {}) than this reader knows ({KNOWN_VERSION})",
@@ -291,7 +291,8 @@ pub(crate) fn build(file: &[u8], key: Option<&str>, current: &PluginState) -> Re
     // The preset's drums, mixer and macros: from its first drum to the
     // line before the brace that closes it.
     let first = kit.iter().position(|line| line.starts_with("instbox 0"));
-    let first = first.filter(|first| *first + 1 < kit.len()).ok_or_else(|| format!("the kit '{name}' has no drums in it"))?;
+    let first =
+        first.filter(|first| *first + 1 < kit.len()).ok_or_else(|| format!("the kit '{name}' has no drums in it"))?;
     let body = &kit[first..kit.len() - 1];
     // The microphones of a stacked drum, which the preset lists before
     // its drums.
@@ -406,12 +407,20 @@ mod tests {
         let listed: Vec<String> = found.presets.iter().map(|preset| preset.path()).collect();
         assert_eq!(
             listed,
-            ["Clean Kits/Ayotte Default", "Clean Kits/Gretsch {Dry}", "Metal/Heavy Rock/Death Metal", "Roomy/Ayotte Default"]
+            [
+                "Clean Kits/Ayotte Default",
+                "Clean Kits/Gretsch {Dry}",
+                "Metal/Heavy Rock/Death Metal",
+                "Roomy/Ayotte Default"
+            ]
         );
         // Two kits of one name are two presets.
-        let locators: Vec<Locator> = found.presets.iter().map(|preset| Locator::parse(&preset.locator).unwrap()).collect();
+        let locators: Vec<Locator> =
+            found.presets.iter().map(|preset| Locator::parse(&preset.locator).unwrap()).collect();
         let key = |index: usize| match &locators[index] {
-            Locator::Vendor { format: super::super::Format::Superior3, path, key } if *path == file => key.clone().unwrap(),
+            Locator::Vendor { format: super::super::Format::Superior3, path, key } if *path == file => {
+                key.clone().unwrap()
+            }
             other => panic!("{other:?}"),
         };
         assert_eq!((key(0), key(3)), ("0:Ayotte Default".to_string(), "3:Ayotte Default".to_string()));
@@ -429,7 +438,10 @@ mod tests {
         // text are in place.
         let unwrapped = unwrap(&built.state.component).unwrap();
         let text = unwrapped.text.clone();
-        assert!(text.starts_with("PlugVersion 3.4.4\nSAMPLER {\nHQ {\nsoundlib \"SL-TEST\"\n}\ninstbox 0 \"Kick\" {\n"), "{text}");
+        assert!(
+            text.starts_with("PlugVersion 3.4.4\nSAMPLER {\nHQ {\nsoundlib \"SL-TEST\"\n}\ninstbox 0 \"Kick\" {\n"),
+            "{text}"
+        );
         assert!(text.contains("drum \"Kick7\"  \"Felt\" 1\nalias kick 36\n") && !text.contains("Kick1"), "{text}");
         assert!(text.contains("mixer {\nKick-In {\nvolume 0.5\n}\n}\nmacros {\n}\nmidilearn {\n}\n}\nSongTrack 0 {\nTempo 120 0 0\n}\n"), "{text}");
         assert!(!text.contains("latcomp") && !text.contains("xmics"), "{text}");
@@ -447,7 +459,10 @@ mod tests {
         // A stacked drum's microphones go in ahead of the drums.
         let stacked = build(&file, Some("2:Death Metal"), &current).unwrap();
         let text = unwrap(&stacked.state.component).unwrap().text;
-        assert!(text.contains("soundlib \"SL-TEST\"\n}\nxmics {\nmic {\nname \"X-Kick-In\"\n}\n}\ninstbox 0 \"Kick\" {\n"), "{text}");
+        assert!(
+            text.contains("soundlib \"SL-TEST\"\n}\nxmics {\nmic {\nname \"X-Kick-In\"\n}\n}\ninstbox 0 \"Kick\" {\n"),
+            "{text}"
+        );
         // The second of two kits of one name, and a kit found by its name
         // after the file has changed under it.
         let second = build(&file, Some("3:Ayotte Default"), &current).unwrap();
@@ -463,7 +478,10 @@ mod tests {
         let wrong = |file: &[u8], key: Option<&str>, state: &PluginState| build(file, key, state).unwrap_err();
         assert_eq!(wrong(&file, Some("0:No Such Kit"), &current), "the file no longer has a kit called 'No Such Kit'");
         assert_eq!(wrong(&file, None, &current), "it does not say which kit of the file it is");
-        assert_eq!(wrong(b"not presets", Some("0:Ayotte Default"), &current), "the file no longer has a kit called 'Ayotte Default'");
+        assert_eq!(
+            wrong(b"not presets", Some("0:Ayotte Default"), &current),
+            "the file no longer has a kit called 'Ayotte Default'"
+        );
         let newer = String::from_utf8(file.clone()).unwrap().replace("version 5", "version 9");
         assert_eq!(
             wrong(newer.as_bytes(), Some("0:Ayotte Default"), &current),
@@ -496,13 +514,19 @@ mod tests {
 
     #[test]
     fn braces_in_names_do_not_open_blocks() {
-        assert_eq!((nesting("instbox 0 \"Kick\" {"), nesting("}"), nesting("\"Gretsch {Dry}\" {"), nesting("name \"}}\"")), (1, -1, 1, 0));
+        assert_eq!(
+            (nesting("instbox 0 \"Kick\" {"), nesting("}"), nesting("\"Gretsch {Dry}\" {"), nesting("name \"}}\"")),
+            (1, -1, 1, 0)
+        );
         assert_eq!(quoted("submenu \"Clean Kits\""), Some("Clean Kits"));
         assert_eq!(quoted("no quotes"), None);
         let text = String::from_utf8(presets_file(&KITS)).unwrap();
         let found = presets(&text);
         assert_eq!(found.len(), 4);
-        assert!(text[found[1].at.clone()].starts_with("\"Gretsch {Dry}\" {\nversion 5\n") && text[found[1].at.clone()].ends_with("macros {\n}\n}"));
+        assert!(
+            text[found[1].at.clone()].starts_with("\"Gretsch {Dry}\" {\nversion 5\n")
+                && text[found[1].at.clone()].ends_with("macros {\n}\n}")
+        );
         // A file that is cut off inside a kit has the kits before it.
         assert_eq!(presets(&text[..found[2].at.start + 40]).len(), 2);
     }

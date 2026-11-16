@@ -56,7 +56,7 @@ mod presets;
 mod probe;
 mod processor;
 #[cfg(test)]
-mod scripted;
+pub(crate) mod scripted;
 pub(crate) mod state;
 mod stream;
 #[cfg(test)]

@@ -34,6 +34,8 @@ pub(crate) mod archetype;
 mod cbor;
 pub(crate) mod child;
 mod juce;
+#[cfg(test)]
+mod loading_tests;
 mod places;
 pub(crate) mod serum;
 pub(crate) mod superior;

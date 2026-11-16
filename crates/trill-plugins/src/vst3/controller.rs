@@ -29,7 +29,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// is given to show the preset in its own state, and how often it is
 /// looked at meanwhile. Plugins take a state on a moment after they are
 /// handed it; none was seen to need a second.
-const TOOK_TIMEOUT: Duration = Duration::from_secs(8);
+const TOOK_TIMEOUT: Duration = if cfg!(test) { Duration::from_millis(400) } else { Duration::from_secs(8) };
 const TOOK_POLL: Duration = Duration::from_millis(25);
 
 /// Forwards the session's requests to the plugin main thread, whichever

@@ -54,7 +54,9 @@ fn folders(plugin: &PluginRef, places: &VendorPlaces) -> Vec<PathBuf> {
 /// a name, and not with the `<` of the text its extension promises.
 fn begins_a_tree(start: &[u8]) -> bool {
     let name = start.split(|byte| *byte == 0).next().unwrap_or_default();
-    name.len() < start.len() && !name.is_empty() && name.iter().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(byte))
+    name.len() < start.len()
+        && !name.is_empty()
+        && name.iter().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(byte))
 }
 
 /// Lists the preset files in a product's folders: each by its file's
@@ -135,8 +137,10 @@ fn lay_over(ours: &mut Element, theirs: &Element, way: &str, marks: &mut Vec<Mar
 
 /// The document a plugin's state is, and the envelope it is in.
 fn state_document(state: &PluginState) -> Result<(Envelope<'_>, Element), String> {
-    let envelope = Envelope::open(&state.component).ok_or("the plugin's state is not the document this reader knows")?;
-    let document = Element::parse(envelope.text).map_err(|reason| format!("the plugin's state cannot be read: {reason}"))?;
+    let envelope =
+        Envelope::open(&state.component).ok_or("the plugin's state is not the document this reader knows")?;
+    let document =
+        Element::parse(envelope.text).map_err(|reason| format!("the plugin's state cannot be read: {reason}"))?;
     Ok((envelope, document))
 }
 
@@ -149,7 +153,8 @@ pub(crate) fn build(file: &[u8], current: &PluginState) -> Result<Built, String>
     // The preset's root is about the file; the settings are the tree in
     // it that is called what the state's document is.
     let theirs = if preset.name == ours.name { Some(&preset) } else { preset.child(&ours.name) };
-    let theirs = theirs.ok_or_else(|| format!("it is not a preset of this plugin (it has no '{}' in it)", ours.name))?;
+    let theirs =
+        theirs.ok_or_else(|| format!("it is not a preset of this plugin (it has no '{}' in it)", ours.name))?;
 
     let mut marks = Vec::new();
     let mut known = (0, 0);
@@ -232,7 +237,8 @@ mod tests {
         }
     }
 
-    const OURS: [(&str, &str); 4] = [("gateThreshold", "-80"), ("doublerActive", "false"), ("inputGain", "0"), ("gateLocked", "false")];
+    const OURS: [(&str, &str); 4] =
+        [("gateThreshold", "-80"), ("doublerActive", "false"), ("inputGain", "0"), ("gateLocked", "false")];
 
     #[test]
     fn presets_are_the_files_in_the_products_folder_under_whose_they_are() {
@@ -251,7 +257,8 @@ mod tests {
         let places = VendorPlaces { shared_data: vec![dir.path().join("data")], ..VendorPlaces::default() };
         let mut found = Found::default();
         list(&plugin("Archetype Test X"), &places, &mut found);
-        let listed: Vec<(String, &str)> = found.presets.iter().map(|preset| (preset.path(), preset.author.as_str())).collect();
+        let listed: Vec<(String, &str)> =
+            found.presets.iter().map(|preset| (preset.path(), preset.author.as_str())).collect();
         assert_eq!(
             listed,
             [
@@ -281,19 +288,31 @@ mod tests {
 
         // The preset's values, the plugin's own where the preset has none,
         // and a list replaced whole.
-        assert_eq!((document.attribute("selectedAmp"), document.attribute("pluginVersion")), (Some("0"), Some("1.1.0")));
+        assert_eq!(
+            (document.attribute("selectedAmp"), document.attribute("pluginVersion")),
+            (Some("0"), Some("1.1.0"))
+        );
         let parameters = document.child("subModels").unwrap().child("parameters").unwrap();
-        let values: Vec<(&str, &str)> = parameters.attributes.iter().map(|(name, value)| (name.as_str(), value.as_str())).collect();
+        let values: Vec<(&str, &str)> =
+            parameters.attributes.iter().map(|(name, value)| (name.as_str(), value.as_str())).collect();
         assert_eq!(
             values,
-            [("gateThreshold", "-62.5"), ("doublerActive", "true"), ("inputGain", "0.0"), ("gateLocked", "false"), ("newKnob", "a<b")]
+            [
+                ("gateThreshold", "-62.5"),
+                ("doublerActive", "true"),
+                ("inputGain", "0.0"),
+                ("gateLocked", "false"),
+                ("newKnob", "a<b")
+            ]
         );
-        let maps = &document.child("subModels").unwrap().child("midiMap").unwrap().child("listElements").unwrap().children;
+        let maps =
+            &document.child("subModels").unwrap().child("midiMap").unwrap().child("listElements").unwrap().children;
         assert_eq!(maps.iter().map(|map| map.attribute("cc").unwrap()).collect::<Vec<_>>(), ["7", "11"]);
 
         // What changed is what the state is to show: not the gain, which
         // is the same number written another way.
-        let marks: Vec<(&str, &str)> = built.marks.iter().map(|mark| (mark.name.as_str(), mark.value.as_str())).collect();
+        let marks: Vec<(&str, &str)> =
+            built.marks.iter().map(|mark| (mark.name.as_str(), mark.value.as_str())).collect();
         assert_eq!(
             marks,
             [

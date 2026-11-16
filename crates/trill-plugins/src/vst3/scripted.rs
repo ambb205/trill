@@ -92,6 +92,19 @@ pub(crate) mod kind {
     /// goes on reporting the old one until it is told the new.
     pub(crate) const ASKS_WHEN_ATTACHED: u8 = 13;
 
+    /// Plugins that keep whatever state they are handed and give it back,
+    /// under the class ids of plugins whose vendors keep presets in files
+    /// of their own ([`crate::vendor`]): what the readers of those files
+    /// are tried on. Each is a [`MONO_GAIN`] otherwise. A state that has
+    /// the word `refuse-this` in it is refused, and one with `ignore-this`
+    /// is agreed to and not kept. They are a module of their own
+    /// ([`super::keepers`]).
+    pub(crate) const KEEPS_SERUM: u8 = 20;
+    pub(crate) const KEEPS_AMPLE: u8 = 21;
+    pub(crate) const KEEPS_SUPERIOR: u8 = 22;
+    pub(crate) const KEEPS_ARCHETYPE: u8 = 23;
+    pub(crate) const KEEPERS: [u8; 4] = [KEEPS_SERUM, KEEPS_AMPLE, KEEPS_SUPERIOR, KEEPS_ARCHETYPE];
+
     pub(crate) const ALL: [u8; 14] = [
         IMPULSE,
         MONO_GAIN,
@@ -125,8 +138,44 @@ fn has_separate_controller(kind: u8) -> bool {
 }
 
 fn class_id(kind: u8, controller: bool) -> ClassId {
+    // A plugin that stands in for a vendor's has the id the vendor's has,
+    // or one that begins as all of that vendor's do.
+    let vendors = match kind {
+        kind::KEEPS_SERUM => Some("56534558667350736572756D20320000"),
+        kind::KEEPS_AMPLE => Some("ABCDEF019182FAEB4170736454657374"),
+        kind::KEEPS_SUPERIOR => Some("565354534433617375706572696F7220"),
+        kind::KEEPS_ARCHETYPE => Some("ABCDEF019182FAEB4E44535054657374"),
+        _ => None,
+    };
+    if let Some(id) = vendors {
+        return ClassId::parse(id).expect("a class id");
+    }
     let role = if controller { 0x636F_6E74 } else { 0x7072_6F63 };
     ClassId::from_tuid(&uid(0x5343_5250, 0x7465_7374, role, u32::from(kind)))
+}
+
+/// Whether the plugin keeps whatever state it is handed.
+fn is_keeper(kind: u8) -> bool {
+    kind::KEEPERS.contains(&kind)
+}
+
+/// The component state a keeper starts with: what its vendor's plugin
+/// has when it is new, made here in the vendor's format. (The synth
+/// starts with none: its presets are whole states, not laid over one.)
+fn initial_state(kind: u8) -> Vec<u8> {
+    use crate::vendor::{ample, archetype, superior};
+    match kind {
+        kind::KEEPS_AMPLE => {
+            let settings = [("M-Master Vol", "0.9"), ("Auto Legato", "1"), ("Amp", "Lead 800")];
+            let tune = std::path::Path::new("<no tuning files>");
+            ample::state(&ample::document("Default", "4.1.0", "AMHBg", tune, &settings)).component
+        }
+        kind::KEEPS_SUPERIOR => superior::state("Kick1").component,
+        kind::KEEPS_ARCHETYPE => {
+            archetype::state(&[("gateThreshold", "-80"), ("doublerActive", "false"), ("gateLocked", "false")]).component
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// The device URI of the scripted plugin of `kind`.
@@ -645,6 +694,22 @@ struct ClassEntry {
     controller: bool,
 }
 
+/// The classes of the module a factory of `version` is: the keepers are
+/// a module of their own, which is [`KEEPERS_MODULE`].
+fn classes_of(version: u8) -> Vec<ClassEntry> {
+    if version == KEEPERS_MODULE {
+        let category = "Audio Module Class";
+        return kind::KEEPERS
+            .map(|kind| ClassEntry { id: class_id(kind, false), category, kind, controller: false })
+            .into();
+    }
+    classes()
+}
+
+/// The factory "version" that stands for the module of keepers, which
+/// speaks the first version of the factory interface.
+const KEEPERS_MODULE: u8 = 9;
+
 fn classes() -> Vec<ClassEntry> {
     let mut classes = Vec::new();
     for kind in kind::ALL {
@@ -678,6 +743,16 @@ impl Class for Factory<3> {
     type Interfaces = (IPluginFactory3,);
 }
 
+impl Class for Factory<KEEPERS_MODULE> {
+    type Interfaces = (IPluginFactory,);
+}
+
+/// The module of plugins that keep whatever state they are handed: see
+/// [`kind::KEEPERS`].
+pub(crate) fn keepers() -> ComPtr<IPluginFactory> {
+    ComWrapper::new(Factory::<KEEPERS_MODULE>).to_com_ptr().expect("the class implements IPluginFactory")
+}
+
 /// The scripted module's factory, as `GetPluginFactory` would return it.
 pub(crate) fn factory() -> ComPtr<IPluginFactory> {
     ComWrapper::new(Factory::<3>).to_com_ptr().expect("the class implements IPluginFactory")
@@ -694,7 +769,12 @@ pub(crate) fn old_factory(version: u8) -> ComPtr<IPluginFactory> {
 }
 
 fn class_name(kind: u8, version: u8) -> String {
-    format!("Scripted {kind} v{version}")
+    match kind {
+        // A vendor's folder is named as its product is.
+        kind::KEEPS_ARCHETYPE => "Archetype Test X".to_string(),
+        kind if is_keeper(kind) => format!("Keeper {kind}"),
+        _ => format!("Scripted {kind} v{version}"),
+    }
 }
 
 impl<const VERSION: u8> IPluginFactoryTrait for Factory<VERSION> {
@@ -708,11 +788,11 @@ impl<const VERSION: u8> IPluginFactoryTrait for Factory<VERSION> {
     /// One more than there are: the extra index is a class the factory
     /// fails to describe.
     unsafe fn countClasses(&self) -> int32 {
-        classes().len() as int32 + 1
+        classes_of(VERSION).len() as int32 + 1
     }
 
     unsafe fn getClassInfo(&self, index: int32, info: *mut PClassInfo) -> tresult {
-        let classes = classes();
+        let classes = classes_of(VERSION);
         // SAFETY: the host passes its own `PClassInfo`.
         let (Some(class), Some(info)) = (classes.get(index as usize), unsafe { info.as_mut() }) else {
             return kInvalidArgument;
@@ -728,7 +808,7 @@ impl<const VERSION: u8> IPluginFactoryTrait for Factory<VERSION> {
         // variable.
         let (class, obj) = unsafe { (ClassId::from_tuid(&cid.cast::<TUID>().read_unaligned()), &mut *obj) };
         *obj = std::ptr::null_mut();
-        let Some(class) = classes().into_iter().find(|entry| entry.id == class) else { return kNoInterface };
+        let Some(class) = classes_of(VERSION).into_iter().find(|entry| entry.id == class) else { return kNoInterface };
         let object: Option<ComPtr<FUnknown>> = match (class.controller, has_separate_controller(class.kind)) {
             (true, _) => ComWrapper::new(Object::<CONTROLLER>::new(class.kind)).to_com_ptr(),
             (false, true) => ComWrapper::new(Object::<PROCESSOR>::new(class.kind)).to_com_ptr(),
@@ -843,6 +923,9 @@ struct Object<const ROLE: u8> {
     sample_rate: AtomicU64,
     blocks: AtomicU32,
     activations: AtomicU32,
+    /// What a keeper was last handed: its component's state and its
+    /// controller's.
+    kept: Mutex<[Vec<u8>; 2]>,
 }
 
 impl Class for Object<PROCESSOR> {
@@ -874,6 +957,7 @@ impl<const ROLE: u8> Object<ROLE> {
             sample_rate: AtomicU64::new(0),
             blocks: AtomicU32::new(0),
             activations: AtomicU32::new(0),
+            kept: Mutex::new([initial_state(kind), Vec::new()]),
         };
         if ROLE != CONTROLLER {
             INSTANCES.lock().unwrap().push((serial, kind));
@@ -969,14 +1053,14 @@ impl<const ROLE: u8> Object<ROLE> {
         }
     }
 
-    /// Reads a state: its magic, then values.
-    fn read_state(stream: *mut IBStream, magic: &[u8; 4]) -> Option<Vec<f64>> {
+    /// Everything a stream holds.
+    fn read_bytes(stream: *mut IBStream) -> Option<Vec<u8>> {
         // SAFETY: the host passes a live stream, and the buffer is a local
         // of the size given.
         let stream = unsafe { ComRef::from_raw(stream) }?;
         let mut bytes = Vec::new();
         loop {
-            let mut buffer = [0u8; 16];
+            let mut buffer = [0u8; 4096];
             let mut count = 0;
             // SAFETY: as above.
             let result = unsafe { stream.read(buffer.as_mut_ptr().cast(), buffer.len() as int32, &mut count) };
@@ -985,8 +1069,40 @@ impl<const ROLE: u8> Object<ROLE> {
             }
             bytes.extend_from_slice(&buffer[..count as usize]);
         }
+        Some(bytes)
+    }
+
+    /// Reads a state: its magic, then values.
+    fn read_state(stream: *mut IBStream, magic: &[u8; 4]) -> Option<Vec<f64>> {
+        let bytes = Self::read_bytes(stream)?;
         let values = bytes.strip_prefix(magic)?;
         Some(values.chunks_exact(8).map(|value| f64::from_le_bytes(value.try_into().unwrap())).collect())
+    }
+
+    /// A keeper is handed a state for the half `half` of it (0: its
+    /// component, 1: its controller).
+    fn keep(&self, half: usize, stream: *mut IBStream) -> tresult {
+        let Some(bytes) = Self::read_bytes(stream) else { return kInvalidArgument };
+        let has = |word: &[u8]| bytes.windows(word.len()).any(|window| window == word);
+        if has(b"refuse-this") {
+            return kResultFalse;
+        }
+        if !has(b"ignore-this") {
+            self.kept.lock().unwrap()[half] = bytes;
+        }
+        kResultOk
+    }
+
+    /// A keeper gives back what it was handed for the half `half` of it.
+    fn give(&self, half: usize, stream: *mut IBStream) -> tresult {
+        // SAFETY: the host passes a live stream, and `bytes` is readable.
+        let Some(stream) = (unsafe { ComRef::from_raw(stream) }) else { return kInvalidArgument };
+        let mut bytes = self.kept.lock().unwrap()[half].clone();
+        if bytes.is_empty() {
+            return kResultOk;
+        }
+        // SAFETY: as above.
+        unsafe { stream.write(bytes.as_mut_ptr().cast(), bytes.len() as int32, std::ptr::null_mut()) }
     }
 
     fn write_state(stream: *mut IBStream, magic: &[u8; 4], values: &[f64]) -> tresult {
@@ -1095,6 +1211,9 @@ impl<const ROLE: u8> IComponentTrait for Object<ROLE> {
 
     unsafe fn setState(&self, state: *mut IBStream) -> tresult {
         self.on_main_thread();
+        if is_keeper(self.kind) {
+            return self.keep(0, state);
+        }
         let Some(values) = Self::read_state(state, STATE_MAGIC) else { return kResultFalse };
         for (id, value) in [GAIN, SHAPE].into_iter().zip(values) {
             Self::set_value(&self.processor_values, id, value);
@@ -1107,6 +1226,9 @@ impl<const ROLE: u8> IComponentTrait for Object<ROLE> {
         self.on_main_thread();
         if self.kind == kind::BARE {
             return kNotImplemented;
+        }
+        if is_keeper(self.kind) {
+            return self.give(0, state);
         }
         let values = [GAIN, SHAPE].map(|id| Self::value(&self.processor_values, id));
         Self::write_state(state, STATE_MAGIC, &values)
@@ -1327,6 +1449,9 @@ impl<const ROLE: u8> IEditControllerTrait for Object<ROLE> {
     /// may or may not act on, as plugins do after loading a state.
     unsafe fn setComponentState(&self, state: *mut IBStream) -> tresult {
         self.on_main_thread();
+        if is_keeper(self.kind) {
+            return kResultOk;
+        }
         let Some(values) = Self::read_state(state, STATE_MAGIC) else { return kResultFalse };
         for (id, value) in [GAIN, SHAPE].into_iter().zip(values) {
             Self::set_value(&self.controller_values, id, value);
@@ -1342,6 +1467,9 @@ impl<const ROLE: u8> IEditControllerTrait for Object<ROLE> {
 
     unsafe fn setState(&self, state: *mut IBStream) -> tresult {
         self.on_main_thread();
+        if is_keeper(self.kind) {
+            return self.keep(1, state);
+        }
         let Some(values) = Self::read_state(state, CONTROLLER_MAGIC) else { return kResultFalse };
         for (id, value) in [VOICES].into_iter().zip(values) {
             Self::set_value(&self.controller_values, id, value);
@@ -1352,6 +1480,9 @@ impl<const ROLE: u8> IEditControllerTrait for Object<ROLE> {
 
     unsafe fn getState(&self, state: *mut IBStream) -> tresult {
         self.on_main_thread();
+        if is_keeper(self.kind) {
+            return self.give(1, state);
+        }
         Self::write_state(state, CONTROLLER_MAGIC, &[Self::value(&self.controller_values, VOICES)])
     }
 
@@ -1596,8 +1727,9 @@ impl<const ROLE: u8> IUnitInfoTrait for Object<ROLE> {
         kResultOk
     }
 
+    /// A keeper has no programs: its presets are its vendor's files.
     unsafe fn getProgramListCount(&self) -> int32 {
-        1
+        int32::from(!is_keeper(self.kind))
     }
 
     unsafe fn getProgramListInfo(&self, index: int32, info: *mut ProgramListInfo) -> tresult {

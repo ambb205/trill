@@ -548,7 +548,9 @@ impl Vst3Thread {
         factory: ComPtr<vst3::Steinberg::IPluginFactory>,
     ) -> (PathBuf, Vec<crate::scan::PluginRecord>) {
         let records = super::probe::records(&factory);
-        let path = PathBuf::from(format!("<scripted module {name}>"));
+        // Named as a plugin's file would be: some things about a plugin
+        // are told by its file's name.
+        let path = PathBuf::from(format!("<scripted modules>/{name}.vst3"));
         self.modules.insert(path.clone(), introduce(Module::from_factory(factory), &self.host));
         (path, records)
     }
