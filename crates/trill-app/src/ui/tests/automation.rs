@@ -91,6 +91,23 @@ fn a_lane_unfolds_under_its_track_and_a_click_adds_a_point() {
 }
 
 #[test]
+fn a_lane_is_resized_by_its_lower_edge() {
+    let (mut harness, _) = with_volume_lane(&[]);
+    let edge = |harness: &Harness, y: f32| pos2(harness.work_left() + 100.0, harness.content_y(y));
+    // The lane lies under the first track: from 60 down the track list.
+    let top = arrangement::TRACK_HEIGHT;
+    harness.drag(edge(&harness, top + LANE - 2.0), edge(&harness, top + 100.0));
+    assert_eq!(harness.app.state().arrangement.lanes[0].height, 100.0);
+    assert_eq!(harness.undo_depth(), 1, "a view setting, not an edit");
+    // It cannot be dragged shut.
+    harness.drag(edge(&harness, top + 98.0), edge(&harness, top - 40.0));
+    assert_eq!(harness.app.state().arrangement.lanes[0].height, ArrangementState::MIN_LANE_HEIGHT);
+    harness.settle();
+    harness.double_click(edge(&harness, top + ArrangementState::MIN_LANE_HEIGHT - 2.0));
+    assert_eq!(harness.app.state().arrangement.lanes[0].height, LANE, "a double-click restores the usual height");
+}
+
+#[test]
 fn a_point_drags_on_the_grid_between_its_neighbors() {
     let (mut harness, target) = with_volume_lane(&[(4.0, -12.0), (8.0, 0.0), (12.0, -12.0)]);
     let before = harness.undo_depth();
