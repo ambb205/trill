@@ -3,3 +3,5 @@
 *.wav
 !/assets/**/*.wav
 .DS_Store
+# Projects that point at sound files on this machine.
+/examples/local/
