@@ -6,7 +6,7 @@ use super::instance::InstanceId;
 use crate::editor::{EDITOR_TIMEOUT, EditorStatus};
 use crate::edits::Edit;
 use crate::main_thread::MainThread;
-use crate::plugin_thread::PluginThread;
+use crate::plugin_thread::{PluginThread, keep_for_good};
 use std::sync::Arc;
 use std::time::Duration;
 use trill_core::device::{DeviceController, EditorError, EditorImage, EditorOptions, ParamEdit, ParamEditKind};
@@ -72,9 +72,11 @@ impl DeviceController for ClapController {
             return Err(EditorError::NoEditor);
         }
         let (instance, options) = (self.instance, options.clone());
-        self.main
-            .call(EDITOR_TIMEOUT, move |thread| thread.clap.open_editor(instance, &options))
-            .unwrap_or_else(|error| Err(EditorError::Failed(error.to_string())))
+        let opened = self.main.call(EDITOR_TIMEOUT, move |thread| thread.clap.open_editor(instance, &options));
+        // A plugin that has been asked for its editor has made this thread
+        // its user-interface thread, whether or not the editor came up.
+        keep_for_good(&self.main);
+        opened.unwrap_or_else(|error| Err(EditorError::Failed(error.to_string())))
     }
 
     fn close_editor(&mut self) {

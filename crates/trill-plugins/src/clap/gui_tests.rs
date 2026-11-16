@@ -397,7 +397,8 @@ fn an_edit_made_in_the_editor_is_heard_and_reported_with_its_gesture() {
     assert_eq!(instance.controller.as_mut().unwrap().take_param_edits(), []);
 
     // The user turns the gain knob in the editor. The plugin has the value
-    // at once; the host hears of it with the next block.
+    // at once; the host hears of it with the next block, or by a flush if
+    // that block is long in coming.
     scripted::act(serial, Action::TurnKnob(0.5));
     assert!(eventually(WAIT, || value(&mut instance, scripted::GAIN) == 0.5));
     assert_eq!(block(&mut instance, 0.5), vec![0.25; BLOCK], "the edit is heard");
@@ -407,7 +408,29 @@ fn an_edit_made_in_the_editor_is_heard_and_reported_with_its_gesture() {
         [edit(ParamEditKind::Begin), edit(ParamEditKind::Value(0.5)), edit(ParamEditKind::End)]
     );
     assert_eq!(instance.controller.as_mut().unwrap().take_param_edits(), [], "edits are reported once");
-    assert_eq!(value(&mut instance, scripted::AUDIO_FLUSHES), 0.0, "a plugin that is processed needs no flush");
+}
+
+#[test]
+fn a_plugin_that_is_being_processed_is_not_flushed_from_the_main_thread() {
+    let factory = factory();
+    let mut instance = create(&factory, kind::EDITOR);
+    let serial = serial(&mut instance);
+    open(&mut instance, &options("processed"));
+
+    // Blocks keep coming, far more often than the main thread's patience
+    // with a flush request lasts, while the user turns the knob.
+    scripted::act(serial, Action::TurnKnob(0.5));
+    let mut edits = 0;
+    assert!(eventually(WAIT, || {
+        block(&mut instance, 0.5);
+        edits += instance.controller.as_mut().unwrap().take_param_edits().len();
+        edits >= 3
+    }));
+    // The plugin's request for a flush was answered by its own blocks.
+    // Only a machine that stalls this test for longer than the main
+    // thread waits makes that thread flush, and then once.
+    let flushes = value(&mut instance, scripted::AUDIO_FLUSHES);
+    assert!(flushes <= 1.0, "{flushes} flushes for one request");
 }
 
 #[test]

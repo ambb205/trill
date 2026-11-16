@@ -10,7 +10,7 @@
 use crate::clap::ClapThread;
 use crate::main_thread::{CallError, MainThread, SharedMainThread, ThreadState};
 use crate::vst3::Vst3Thread;
-use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 /// The state of the plugin main thread.
@@ -43,23 +43,27 @@ pub(crate) fn plugin_thread() -> std::io::Result<MainThread<PluginThread>> {
     PLUGIN_THREAD.get("plugin-main")
 }
 
-/// Keeps the plugin library at `path`, which the caller has just loaded,
-/// mapped into the process for good.
+/// The handle that keeps the plugin main thread running once it has been
+/// decided that it must not end; see [`keep_for_good`].
+static KEPT: OnceLock<MainThread<PluginThread>> = OnceLock::new();
+
+/// Keeps the plugin main thread running, and with it every plugin library
+/// it has loaded, for the rest of the process. Called when a plugin first
+/// shows an editor.
 ///
-/// Plugins start threads of their own, for their editors above all
-/// (timers, graphics, embedded web views), and do not all stop them before
-/// they report being shut down. Unloading a library takes the code away
-/// from under such a thread, and the process with it: seen as a crash a
-/// moment after the last plugin had been let go, once editors had been
-/// open. A plugin is still shut down in full when the host is done with
-/// it; only its code stays where it is.
-pub(crate) fn keep_loaded(path: &Path) {
-    // SAFETY: the library is loaded already, so loading it again runs none
-    // of its code. It only adds a reference, which is never given back.
-    match unsafe { libloading::Library::new(path) } {
-        Ok(library) => std::mem::forget(library),
-        Err(error) => log::debug!("cannot keep '{}' loaded: {error}", path.display()),
-    }
+/// Until then the thread ends with its last user, shuts its plugins'
+/// libraries down and unloads them, and a later user gets a fresh thread
+/// and freshly loaded libraries. A plugin that has shown an editor does
+/// not survive either half of that. It has started threads of its own
+/// (timers, graphics, an embedded web view) which it does not reliably
+/// stop before it reports being shut down, so unloading takes the code
+/// away from under them: seen as a crash a moment after the last plugin
+/// was let go, about every second time. And its framework has adopted
+/// this thread as its user-interface thread for good, so it cannot be
+/// handed a new one. A process that is done with its plugins simply
+/// exits.
+pub(crate) fn keep_for_good(main: &MainThread<PluginThread>) {
+    let _ = KEPT.set(main.clone());
 }
 
 /// Longest a plugin may take to load, restore its state and activate.

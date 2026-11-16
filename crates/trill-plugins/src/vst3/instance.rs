@@ -15,7 +15,6 @@ use super::state::{self, PluginState};
 use super::stream::MemoryStream;
 use crate::editor::{EditorStatus, Placement};
 use crate::main_thread::ThreadState;
-use crate::plugin_thread::keep_loaded;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
@@ -499,7 +498,6 @@ fn module<'a>(
         Entry::Occupied(loaded) => Ok(loaded.into_mut()),
         Entry::Vacant(place) => {
             let module = Module::load(path).map_err(|error| format!("cannot load '{}': {error}", path.display()))?;
-            keep_loaded(path);
             Ok(place.insert(introduce(module, host)))
         }
     }

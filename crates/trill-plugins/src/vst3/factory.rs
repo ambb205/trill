@@ -88,7 +88,8 @@ impl From<Vst3Config> for Settings {
 /// The factory may be used from any thread. All plugin main-thread work is
 /// carried out on the process's plugin main thread, the one CLAP plugins
 /// use too, which runs for as long as a factory or a device created by one
-/// exists.
+/// exists, and for the rest of the process once a plugin has shown its
+/// editor.
 ///
 /// Cloning is cheap and yields a handle to the same factory: keep one to
 /// scan and report with, and give another to the engine.
