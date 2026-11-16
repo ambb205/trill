@@ -7,7 +7,7 @@
 //! a drum kit that can be told to take their time after they are created,
 //! as samplers do.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 use trill_core::device::{CompositeFactory, DeviceFactory, Purpose};
 use trill_core::{ChainRef, Note, Project, TrackId};
@@ -18,6 +18,21 @@ use trill_engine::scripted::{AMP, BASS, DRUMS, Loading, MUTE_KEY, ScriptedFactor
 use trill_engine::{AudioBackend, ProbeTarget, Session};
 
 const SR: u32 = 48_000;
+
+/// A plugin is taken to be ready when, among other things, the program has
+/// stopped growing in memory (`ready.rs`), and every test in this file runs
+/// in the one program: a test that renders a long stretch makes it grow, and
+/// a wait in another test then lasts longer. The tests that say how *short*
+/// a wait was therefore run alone; the rest run beside each other.
+static QUIET: RwLock<()> = RwLock::new(());
+
+fn alone() -> RwLockWriteGuard<'static, ()> {
+    QUIET.write().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn beside_the_others() -> RwLockReadGuard<'static, ()> {
+    QUIET.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn note(pitch: u8, start: f64, length: f64) -> Note {
     Note { pitch, start, length, velocity: 100 }
@@ -65,6 +80,7 @@ fn snares() -> Project {
 
 #[test]
 fn a_note_on_the_first_sample_sounds_in_full_on_a_plugin_that_is_slow_to_be_ready() {
+    let _quiet = alone();
     // Ready at once: what the hits are worth.
     let ready = render(&snares(), &ScriptedFactory::new(), &options()).unwrap();
     let hits = [0.0, 0.2, 1.0];
@@ -90,6 +106,7 @@ fn a_note_on_the_first_sample_sounds_in_full_on_a_plugin_that_is_slow_to_be_read
 
 #[test]
 fn a_plugin_that_loads_piece_by_piece_is_waited_for_until_every_note_answers() {
+    let _quiet = beside_the_others();
     // The bass answers its low notes after 0.2 s and those from middle C
     // up only after 0.4 s. The song opens low and goes high a beat later.
     let mut project = Project::new("bass");
@@ -106,6 +123,7 @@ fn a_plugin_that_loads_piece_by_piece_is_waited_for_until_every_note_answers() {
 
 #[test]
 fn an_effect_that_passes_no_sound_for_a_moment_is_waited_for_wherever_it_sits() {
+    let _quiet = alone();
     // An amplifier that lets nothing through for 0.4 s after it is made:
     // behind a built-in synth, which has nothing to be late with itself,
     // behind a plugin, and on the master.
@@ -152,6 +170,7 @@ fn an_effect_that_passes_no_sound_for_a_moment_is_waited_for_wherever_it_sits() 
 
 #[test]
 fn a_long_wait_is_reported_and_a_plugin_that_never_answers_is_given_up_on_and_named() {
+    let _quiet = alone();
     let slow = ScriptedFactory::loading(Loading { first: Duration::from_millis(1200), ..Loading::default() });
     let out = render(&snares(), &slow, &options()).unwrap();
     let [waited] = out.measured.waited.as_slice() else { panic!("{:?}", out.measured.waited) };
@@ -184,6 +203,7 @@ fn a_long_wait_is_reported_and_a_plugin_that_never_answers_is_given_up_on_and_na
 
 #[test]
 fn built_in_devices_are_not_touched_by_the_wait_and_render_as_they_always_did() {
+    let _quiet = beside_the_others();
     // A synth beside a slow plugin. Heard alone, the synth's part is the
     // same samples as in a song that has no plugin at all.
     let synth_notes = [note(57, 0.0, 1.0), note(64, 1.0, 1.0)];
@@ -209,6 +229,7 @@ fn built_in_devices_are_not_touched_by_the_wait_and_render_as_they_always_did() 
 
 #[test]
 fn a_session_plays_its_plugins_and_a_render_of_it_renders_them() {
+    let _quiet = beside_the_others();
     let scripted = ScriptedFactory::new();
     let mut session = Session::new(factory(&scripted), AudioBackend::Null { sample_rate: SR }).unwrap();
     session.edit(|project| Ok(track_with(project, "Bass", BASS, &[note(40, 0.0, 1.0)]))).unwrap();
@@ -244,6 +265,7 @@ fn sections() -> Vec<Section> {
 
 #[test]
 fn every_track_is_measured_as_the_mix_is() {
+    let _quiet = beside_the_others();
     let (project, synth, drums) = two_parts();
     let scripted = ScriptedFactory::new();
     let out = render(&project, factory(&scripted).as_ref(), &options()).unwrap();
@@ -277,6 +299,7 @@ fn every_track_is_measured_as_the_mix_is() {
 
 #[test]
 fn each_part_of_the_song_has_its_own_loudness_in_the_mix_and_on_every_track() {
+    let _quiet = beside_the_others();
     let (project, synth, drums) = two_parts();
     let scripted = ScriptedFactory::new();
     let with_parts = RenderOptions { sections: sections(), ..options() };
@@ -304,6 +327,7 @@ fn each_part_of_the_song_has_its_own_loudness_in_the_mix_and_on_every_track() {
 
 #[test]
 fn a_compressor_and_a_limiter_say_how_much_they_took_off() {
+    let _quiet = beside_the_others();
     let mut project = Project::new("squash");
     let hits: Vec<Note> = (0..8).map(|step| note(36, f64::from(step) * 0.5, 0.25)).collect();
     let track = track_with(&mut project, "Kick", DRUMS, &hits);
@@ -353,6 +377,7 @@ fn a_compressor_and_a_limiter_say_how_much_they_took_off() {
 
 #[test]
 fn a_render_can_be_measured_without_keeping_or_writing_anything() {
+    let _quiet = beside_the_others();
     let (project, ..) = two_parts();
     let scripted = ScriptedFactory::new();
     let mut session = Session::new(factory(&scripted), AudioBackend::Null { sample_rate: SR }).unwrap();
@@ -390,6 +415,7 @@ fn a_render_can_be_measured_without_keeping_or_writing_anything() {
 
 #[test]
 fn hearing_only_some_tracks_leaves_the_songs_own_mute_and_solo_alone() {
+    let _quiet = beside_the_others();
     let (mut project, synth, drums) = two_parts();
     // The song has the snare soloed and the synth muted.
     project.track_mut(drums).unwrap().solo = true;
@@ -434,6 +460,7 @@ fn probe(session: &mut Session, target: ProbeTarget, notes: &[ProbeNote], option
 
 #[test]
 fn a_probe_finds_an_instruments_range_and_the_octave_it_really_sounds_at() {
+    let _quiet = beside_the_others();
     let scripted = ScriptedFactory::loading(Loading { first: Duration::from_millis(300), ..Loading::default() });
     let mut session = session_with(&scripted);
     let target = ProbeTarget::Device { uri: BASS.to_string(), preset: None };
@@ -464,6 +491,7 @@ fn a_probe_finds_an_instruments_range_and_the_octave_it_really_sounds_at() {
 
 #[test]
 fn a_probe_shows_what_a_held_key_changes_about_a_note() {
+    let _quiet = beside_the_others();
     let mut session = session_with(&ScriptedFactory::new());
     let target = ProbeTarget::Device { uri: BASS.to_string(), preset: None };
     let muted = ProbeNote { with: vec![MUTE_KEY], ..plain(40) };
@@ -491,6 +519,7 @@ fn a_probe_shows_what_a_held_key_changes_about_a_note() {
 
 #[test]
 fn a_probe_tells_a_kick_from_a_snare_from_a_cymbal() {
+    let _quiet = beside_the_others();
     let mut session = session_with(&ScriptedFactory::new());
     let target = ProbeTarget::Device { uri: DRUMS.to_string(), preset: None };
     let notes: Vec<ProbeNote> = (35..=50).map(plain).collect();
@@ -515,6 +544,7 @@ fn a_probe_tells_a_kick_from_a_snare_from_a_cymbal() {
 
 #[test]
 fn a_probe_plays_a_track_as_it_is_and_changes_nothing_in_the_song() {
+    let _quiet = beside_the_others();
     let scripted = ScriptedFactory::new();
     let mut session = session_with(&scripted);
     let track = session.edit(|project| Ok(track_with(project, "Bass", BASS, &[note(40, 0.0, 1.0)]))).unwrap();
@@ -602,6 +632,7 @@ fn a_probe_plays_a_track_as_it_is_and_changes_nothing_in_the_song() {
 
 #[test]
 fn a_built_in_instrument_is_probed_through_its_preset_and_with_controllers() {
+    let _quiet = beside_the_others();
     let mut session = session_with(&ScriptedFactory::new());
     let target =
         |preset: &str| ProbeTarget::Device { uri: "builtin:polysynth".to_string(), preset: Some(preset.to_string()) };
