@@ -5,6 +5,7 @@
 use serde_json::{Value, json};
 use trill_core::device::{DeviceCategory, DeviceDescriptor, ParamInfo, ParamKind};
 use trill_core::pitch::pitch_name;
+use trill_core::presets::{CATEGORY_SEPARATOR, PresetInfo, PresetList, PresetQuery, PresetStatus};
 use trill_core::project::{AutomationLane, AutomationTarget, Clip, ClipContent, Segment, WarpMode};
 use trill_core::{Device, Note, Project, Track, TrackKind};
 use trill_engine::{AudioConfig, AudioDevice, RecordState, TakeClip};
@@ -462,9 +463,111 @@ pub fn descriptor_summary_json(descriptor: &DeviceDescriptor) -> Value {
     out
 }
 
-/// Full catalog entry, with every parameter.
+/// Which of a device's presets a reply lists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PresetSearch<'a> {
+    pub query: Option<&'a str>,
+    pub category: Option<&'a str>,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+/// The longest description a preset is listed with, in characters, and
+/// the most tags.
+const PRESET_DESCRIPTION: usize = 140;
+const PRESET_TAGS: usize = 6;
+/// The most kinds of preset a reply sums up.
+const PRESET_KINDS: usize = 30;
+
+fn preset_json(preset: &PresetInfo) -> Value {
+    let mut out = json!({ "name": preset.name });
+    if !preset.category.is_empty() {
+        out["category"] = json!(preset.category);
+    }
+    if !preset.author.is_empty() {
+        out["author"] = json!(preset.author);
+    }
+    if !preset.tags.is_empty() {
+        out["tags"] = preset.tags.iter().take(PRESET_TAGS).map(|tag| json!(tag)).collect();
+    }
+    if !preset.description.is_empty() {
+        let description: String = preset.description.chars().take(PRESET_DESCRIPTION).collect();
+        out["description"] = json!(description);
+    }
+    // A built-in preset is asked for by its name; any other has an id
+    // that tells it from its namesakes.
+    if preset.id != preset.name {
+        out["id"] = json!(preset.id);
+    }
+    out
+}
+
+/// One page of a device's presets, with what it takes to get at the
+/// rest: how many there are, how many match, and where the next page
+/// starts. A list of thousands costs a reply no more than a list of ten.
+pub fn presets_json(list: &PresetList, search: &PresetSearch) -> Value {
+    let text = search.query.unwrap_or_default();
+    let query = PresetQuery { text, category: search.category, offset: search.offset, limit: search.limit };
+    let page = list.search(&query);
+    let narrowed = !text.trim().is_empty() || search.category.is_some_and(|category| !category.trim().is_empty());
+
+    let mut out = json!({ "total": list.len() });
+    if narrowed {
+        out["matching"] = json!(page.total);
+    }
+    match &list.status {
+        PresetStatus::Ready => {}
+        PresetStatus::Reading => {
+            out["status"] = json!(format!(
+                "still being read ({} found so far); ask again in a few seconds for the rest",
+                list.len()
+            ));
+        }
+        PresetStatus::Failed(reason) => {
+            out["status"] = json!(format!("could not all be read: {reason}"));
+        }
+    }
+    if page.offset > 0 {
+        out["offset"] = json!(page.offset);
+    }
+    out["items"] = page.presets.iter().map(|preset| preset_json(preset)).collect();
+    let shown = page.offset + page.presets.len();
+    if shown < page.total {
+        let narrow = if narrowed { "" } else { "; preset_query (\"warm pad\") or preset_category narrows them down" };
+        out["more"] = json!(format!("{} more: preset_offset {shown} lists the next{narrow}", page.total - shown));
+        if !narrowed {
+            out["kinds"] = preset_kinds(list);
+        }
+    }
+    if list.is_empty() && list.status == PresetStatus::Ready {
+        out["note"] = json!("This device offers no presets that can be listed.");
+    }
+    out
+}
+
+/// What kinds of preset a list has, most numerous first: the last part of
+/// each category, which is what tells a pad from a bass whatever bank
+/// either is in, with how many presets are filed under it.
+fn preset_kinds(list: &PresetList) -> Value {
+    let mut kinds: Vec<(String, usize)> = Vec::new();
+    for (category, count) in list.categories() {
+        let Some(kind) = category.rsplit(CATEGORY_SEPARATOR).next().filter(|kind| !kind.is_empty()) else { continue };
+        match kinds.iter_mut().find(|(known, _)| known.eq_ignore_ascii_case(kind)) {
+            Some((_, total)) => *total += count,
+            None => kinds.push((kind.to_string(), count)),
+        }
+    }
+    kinds.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    kinds.iter().take(PRESET_KINDS).map(|(kind, count)| json!(format!("{kind} ({count})"))).collect()
+}
+
+/// Full catalog entry, with every parameter. Its presets are listed by
+/// [`presets_json`], a page at a time.
 pub fn descriptor_json(descriptor: &DeviceDescriptor) -> Value {
     let mut out = descriptor_summary_json(descriptor);
+    if let Some(fields) = out.as_object_mut() {
+        fields.remove("presets");
+    }
     if descriptor.params.is_empty() {
         out["params_note"] = json!("Plugin parameters are known once it is added to a track; use get_device then.");
     } else {
@@ -476,6 +579,92 @@ pub fn descriptor_json(descriptor: &DeviceDescriptor) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn preset(name: &str, category: &str) -> PresetInfo {
+        PresetInfo {
+            id: trill_core::presets::short_id(&format!("{category}/{name}")),
+            name: name.into(),
+            category: category.into(),
+            ..PresetInfo::default()
+        }
+    }
+
+    /// A list the size of a big synth's: a hundred presets in each of
+    /// thirty folders of two banks.
+    fn big() -> PresetList {
+        let kinds = ["Pads", "Leads", "Basses", "Keys", "Plucks", "FX"];
+        let presets = (0..3000).map(|n| {
+            let bank = if n % 2 == 0 { "Factory" } else { "Third Party/Somebody" };
+            let kind = kinds[(n / 2) % kinds.len()];
+            preset(&format!("{} {n}", kind.trim_end_matches('s')), &format!("{bank}/{kind}"))
+        });
+        PresetList::ready(presets.collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn a_big_list_of_presets_is_a_small_reply() {
+        let list = big();
+        let first = presets_json(&list, &PresetSearch { limit: 20, ..PresetSearch::default() });
+        assert_eq!((first["total"].as_u64(), first["items"].as_array().unwrap().len()), (Some(3000), 20));
+        assert!(first.get("matching").is_none() && first.get("status").is_none());
+        assert!(first["more"].as_str().unwrap().starts_with("2980 more: preset_offset 20 lists the next;"));
+        // What there is to choose from, whatever bank it is in.
+        assert_eq!(first["kinds"][0], "Basses (500)");
+        assert_eq!(first["kinds"].as_array().unwrap().len(), 6);
+        assert!(first.to_string().len() < 3000, "{} bytes", first.to_string().len());
+
+        let item = &first["items"][0];
+        assert_eq!((item["name"].as_str(), item["category"].as_str()), (Some("Pad 0"), Some("Factory/Pads")));
+        assert_eq!(item["id"].as_str().map(str::len), Some(10));
+        assert!(item.get("author").is_none() && item.get("tags").is_none() && item.get("description").is_none());
+
+        // Searched, it says how many match and where the next page is.
+        let search = PresetSearch { query: Some("pad 1"), category: Some("factory"), offset: 0, limit: 5 };
+        let pads = presets_json(&list, &search);
+        assert_eq!((pads["total"].as_u64(), pads["items"].as_array().unwrap().len()), (Some(3000), 5));
+        let matching = pads["matching"].as_u64().unwrap();
+        assert!(matching > 5 && matching < 300, "{matching}");
+        assert_eq!(pads["more"], format!("{} more: preset_offset 5 lists the next", matching - 5));
+        assert!(pads.get("kinds").is_none());
+        let next = presets_json(&list, &PresetSearch { offset: 5, ..search });
+        assert_eq!(next["offset"], 5);
+        assert_ne!(next["items"][0], pads["items"][0]);
+        // The last page says nothing of more.
+        let last = presets_json(&list, &PresetSearch { offset: matching as usize - 2, ..search });
+        assert_eq!(last["items"].as_array().unwrap().len(), 2);
+        assert!(last.get("more").is_none());
+    }
+
+    #[test]
+    fn a_list_says_how_far_along_it_is_and_a_built_in_preset_needs_no_id() {
+        let named = PresetInfo {
+            id: "warm_pad".into(),
+            name: "warm_pad".into(),
+            description: "x".repeat(400),
+            tags: (0..20).map(|n| format!("tag{n}")).collect(),
+            author: "Ada".into(),
+            ..PresetInfo::default()
+        };
+        let all = PresetSearch { limit: 20, ..PresetSearch::default() };
+        let ready = presets_json(&PresetList::ready(vec![named.clone()]), &all);
+        let item = &ready["items"][0];
+        assert!(item.get("id").is_none() && item.get("category").is_none());
+        assert_eq!(item["description"].as_str().unwrap().len(), PRESET_DESCRIPTION);
+        assert_eq!(item["tags"].as_array().unwrap().len(), PRESET_TAGS);
+        assert_eq!(item["author"], "Ada");
+        assert!(ready.get("more").is_none() && ready.get("kinds").is_none() && ready.get("note").is_none());
+
+        let reading = presets_json(&PresetList::reading(vec![named.clone()]), &all);
+        assert!(reading["status"].as_str().unwrap().starts_with("still being read (1 found so far)"));
+        let failed =
+            PresetList { status: PresetStatus::Failed("the plugin crashed".into()), presets: vec![named].into() };
+        assert_eq!(presets_json(&failed, &all)["status"], "could not all be read: the plugin crashed");
+        assert_eq!(presets_json(&failed, &all)["items"].as_array().unwrap().len(), 1);
+
+        let none = presets_json(&PresetList::default(), &all);
+        assert_eq!((none["total"].as_u64(), none["note"].is_string()), (Some(0), true));
+        assert!(presets_json(&PresetList::reading(Vec::new()), &all).get("note").is_none());
+    }
 
     #[test]
     fn bar_beat_is_one_based() {

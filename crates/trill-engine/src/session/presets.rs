@@ -24,8 +24,9 @@ use trill_core::device::PresetLoadError;
 use trill_core::presets::{PresetInfo, PresetList, PresetLookup, PresetRef, PresetStatus};
 use trill_core::{DeviceId, EditError};
 
-/// The most presets an error names, as what there is or what is near.
-const NAMED_IN_ERRORS: usize = 12;
+/// The most presets an error names, as what there is or what is near:
+/// enough to name every preset of a built-in device.
+const NAMED_IN_ERRORS: usize = 24;
 
 impl Session {
     /// The presets of the device type `uri`, built-in device and plugin
