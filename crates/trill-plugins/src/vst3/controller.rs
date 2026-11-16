@@ -117,10 +117,17 @@ impl Vst3Controller {
         file: &Path,
         key: Option<&str>,
     ) -> Result<(), PresetLoadError> {
-        let instance = self.instance;
         let current = self.states()?;
         let built = vendor::child::build(&self.scanner, format, file, key, self.class, &current);
-        let vendor::Built { state, marks, note } = built.map_err(PresetLoadError::Failed)?;
+        self.hand_over(format, built.map_err(PresetLoadError::Failed)?, "preset")
+    }
+
+    /// Hands the plugin a state that was built for it, and waits until
+    /// the plugin's own state shows what the state was built to bring:
+    /// `what`, a preset or settings.
+    fn hand_over(&mut self, format: vendor::Format, built: vendor::Built, what: &str) -> Result<(), PresetLoadError> {
+        let instance = self.instance;
+        let vendor::Built { state, marks, note } = built;
         match self.main.call(LOAD_TIMEOUT, move |thread| thread.vst3.load_state(instance, &state)) {
             Ok(Ok(())) => {}
             Ok(Err(reason)) => return Err(PresetLoadError::Failed(reason)),
@@ -144,8 +151,8 @@ impl Vst3Controller {
             if Instant::now() >= deadline {
                 let first = missing.first().map(|mark| mark.name.as_str()).unwrap_or_default();
                 return Err(PresetLoadError::Failed(format!(
-                    "the plugin was handed the preset and did not take it: its state does not show {} of the {} \
-                     settings the preset gives it ('{first}' among them)",
+                    "the plugin was handed the {what} and did not take it: its state does not show {} of the {} \
+                     settings the {what} gives it ('{first}' among them)",
                     missing.len(),
                     marks.len()
                 )));
@@ -303,6 +310,20 @@ impl DeviceController for Vst3Controller {
 
     fn take_preset_note(&mut self) -> Option<String> {
         self.note.take()
+    }
+
+    fn settings(&mut self) -> Option<Vec<(String, String)>> {
+        let format = vendor::Format::of_class(&self.class.to_string())?;
+        vendor::settings(format, &self.states().ok()?)
+    }
+
+    fn set_settings(&mut self, values: &[(String, String)]) -> Result<(), PresetLoadError> {
+        self.note = None;
+        let format = vendor::Format::of_class(&self.class.to_string()).ok_or(PresetLoadError::Unsupported)?;
+        let current = self.states()?;
+        // The plugin's own state is read here, not a file from elsewhere.
+        let built = vendor::with_settings(format, &current, values).map_err(PresetLoadError::Failed)?;
+        self.hand_over(format, built, "settings")
     }
 }
 

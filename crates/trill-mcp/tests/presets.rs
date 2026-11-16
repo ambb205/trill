@@ -512,7 +512,11 @@ async fn a_plugin_that_lists_no_presets_says_where_they_are_and_what_to_do() {
     let client = &fixture.client;
     let described = ok(client, "describe_device", json!({ "uri": SYNTH_VST3 })).await;
     let note = described["presets"]["note"].as_str().unwrap();
-    assert!(note.starts_with("This plugin gives a host no presets to list: it keeps them in its own window"), "{note}");
+    assert!(
+        note.starts_with("This plugin gives a host no presets to list, and keeps them in no files that Trill reads"),
+        "{note}"
+    );
+    assert!(note.contains("in its own window, where only the user can reach them"), "{note}");
     assert!(note.contains("show_device_editor") && note.contains("save_preset"), "{note}");
     assert!(note.contains("get_device `query`"), "{note}");
     assert!(note.contains(&format!("The same plugin in another format: {SYNTH} lists 3000 presets")), "{note}");
@@ -776,7 +780,7 @@ async fn an_assistant_dials_in_an_amplifier_keeps_its_sound_and_searches_every_i
     let said = |call: &str, reply: &Value| eprintln!("\n> {call}\n{reply}");
 
     // The amplifier, as it comes: how many parameters, the ones its patch
-    // moved, its channels, and that it has no presets to list.
+    // moved, its channels, and how many presets its maker's files give it.
     let amp = ok(client, "add_device", json!({ "uri": TIM_HENSON })).await["device_id"].as_u64().unwrap();
     // Asked about once, so that whether it has presets is known.
     ok(client, "describe_device", json!({ "uri": TIM_HENSON, "preset_limit": 0 })).await;
@@ -786,7 +790,8 @@ async fn an_assistant_dials_in_an_amplifier_keeps_its_sound_and_searches_every_i
     assert!(count > 100 && changed > 0 && changed < count / 2, "{changed} of {count}");
     assert_eq!(got["channels"], "stereo in, stereo out");
     assert!(got["params"].as_array().unwrap().iter().all(|param| param["text"].is_string()), "{got}");
-    assert!(got["presets"]["note"].as_str().unwrap().starts_with("This plugin gives a host no presets"), "{got}");
+    let own = got["presets"]["total"].as_u64().unwrap();
+    assert!(own > 100 && got["presets"].get("note").is_none(), "{got}");
     assert!(got.to_string().len() < 4000, "a small reply for {count} parameters: {} bytes", got.to_string().len());
 
     // Found by name, with what it can be set to.
@@ -816,9 +821,11 @@ async fn an_assistant_dials_in_an_amplifier_keeps_its_sound_and_searches_every_i
     let saved = ok(client, "save_preset", json!({ "device": amp, "name": "Dry Rhythm", "tags": ["rhythm"] })).await;
     said("save_preset", &saved);
     assert!(std::path::Path::new(saved["file"].as_str().unwrap()).starts_with(folder.path()));
-    let described = ok(client, "describe_device", json!({ "uri": TIM_HENSON })).await;
+    let described = ok(client, "describe_device", json!({ "uri": TIM_HENSON, "preset_limit": 3 })).await;
     said("describe_device (its presets)", &described["presets"]);
-    assert_eq!((described["presets"]["total"].as_u64(), names(&described["presets"])), (Some(1), vec!["Dry Rhythm"]));
+    // The saved one is first, in front of the maker's own.
+    assert_eq!(described["presets"]["total"].as_u64(), Some(own + 1));
+    assert_eq!(names(&described["presets"])[0], "Dry Rhythm");
     // Another amplifier starts from it: the plugin's state came with it.
     let second = ok(client, "add_device", json!({ "uri": TIM_HENSON, "preset": "Dry Rhythm" })).await;
     let second = second["device_id"].as_u64().unwrap();
@@ -871,4 +878,145 @@ async fn an_assistant_dials_in_an_amplifier_keeps_its_sound_and_searches_every_i
         ok(client, "create_track", json!({ "name": "Pad", "instrument": first["device"], "preset": preset })).await;
     said("create_track (from the first match)", &track);
     assert_eq!(track["preset"], first["preset"]);
+}
+
+/// What an assistant does now that the plugins it reaches for have their
+/// makers' presets: counts them, gives a drum sampler a kit, a sampled
+/// guitar a tone and an amplifier a preset by name, takes the guitar out
+/// of its automatic hammer-ons, changes a setting of it that has no
+/// parameter, and probes what it has before it writes for it. Prints the
+/// calls' replies.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Superior Drummer 3, Ample Metal Hellrazer, Archetype Tim Henson X and Serum 2; run with `cargo test -p trill-mcp --test presets an_assistant_gives -- --include-ignored --nocapture`"]
+async fn an_assistant_gives_each_plugin_a_preset_of_its_makers_and_probes_it() {
+    use trill_plugins::{ClapConfig, PluginHost, Scanner, Vst3Config};
+    const SUPERIOR: &str = "vst3:565354534433617375706572696F7220";
+    const HELLRAZER: &str = "vst3:ABCDEF019182FAEB41707364416D6872";
+    const SERUM_2: &str = "vst3:56534558667350736572756D20320000";
+    // The plugin host's caches are the test's own. The vendors' folders
+    // of this machine are read, and nothing is written to them.
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("mcp-vendor");
+    let clap =
+        ClapConfig { cache_path: Some(scratch.join("clap.json")), scanner: Scanner::Auto, ..ClapConfig::default() };
+    let vst3 = Vst3Config {
+        cache_path: Some(scratch.join("vst3.json")),
+        scanner: Scanner::Auto,
+        preset_paths: vec![scratch.join("vst3 presets")],
+        ..Vst3Config::default()
+    };
+    let host = PluginHost::with_configs(clap, vst3).unwrap();
+    let installed: Vec<String> = host.vst3().descriptors().into_iter().map(|descriptor| descriptor.uri).collect();
+    if let Some(missing) =
+        [SUPERIOR, HELLRAZER, TIM_HENSON, SERUM_2].iter().find(|uri| !installed.contains(&uri.to_string()))
+    {
+        eprintln!("skipping: '{missing}' is not installed");
+        return;
+    }
+    let folder = tempfile::tempdir().unwrap();
+    let storage = Storage::At {
+        settings: folder.path().join("config").join("settings.json"),
+        library_index: Some(folder.path().join("cache").join("library-index.json")),
+    };
+    let options = RuntimeOptions { audio: AudioBackend::Null { sample_rate: 48_000 }, plugins: None, storage };
+    let parts = Parts { devices: host.factories(), ..Parts::default() };
+    let runtime = Arc::new(Runtime::start_custom(options, parts).unwrap());
+    let server = serve_http(runtime, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let transport =
+        StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(server.url()));
+    let client = &ClientConfig::default().serve(transport).await.unwrap();
+    let said = |call: &str, reply: &Value| eprintln!("\n> {call}\n{reply}");
+
+    // How many presets each has, where the makers' files were read.
+    for (uri, at_least) in [(SUPERIOR, 100), (HELLRAZER, 20), (TIM_HENSON, 100), (SERUM_2, 300)] {
+        let described = ok(client, "describe_device", json!({ "uri": uri, "preset_limit": 3 })).await;
+        said(&format!("describe_device {uri}"), &described["presets"]);
+        assert!(described["presets"]["total"].as_u64().unwrap() >= at_least, "{described}");
+        assert!(described["presets"].get("note").is_none(), "{described}");
+    }
+    // One search finds a sound among all of them.
+    let found = ok(client, "search_presets", json!({ "query": "metal", "limit": 8, "wait_seconds": 60 })).await;
+    said("search_presets \"metal\"", &found);
+    let devices: Vec<&str> =
+        found["items"].as_array().unwrap().iter().filter_map(|item| item["device"].as_str()).collect();
+    assert!(
+        devices.contains(&SUPERIOR) && devices.contains(&HELLRAZER),
+        "kits and guitar tones in one answer: {found}"
+    );
+
+    // A drum sampler started from a kit: the reply says that it reads its
+    // samples, and a probe (which waits for that) hears the kick.
+    let arguments = json!({ "name": "Drums", "instrument": SUPERIOR, "preset": "Black Metal" });
+    let drums = ok(client, "create_track", arguments.clone()).await;
+    said(&format!("create_track {arguments}"), &drums);
+    assert_eq!(drums["preset"], "Black Metal");
+    assert!(drums["note"].as_str().unwrap().contains("reads the kit's samples in the background"), "{drums}");
+    let arguments = json!({ "track": drums["track_id"], "notes": [36, 38, 49], "detail": true });
+    let mut probed = ok(client, "probe", arguments.clone()).await;
+    // The copy a probe plays reads the kit anew: asked too early, it has
+    // the drums that have arrived.
+    for _ in 0..6 {
+        if !probed.to_string().contains("\"silent\":true") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        probed = ok(client, "probe", arguments.clone()).await;
+    }
+    said(&format!("probe {arguments}"), &probed);
+    assert!(!probed.to_string().contains("\"silent\":true"), "kick, snare and a crash are all heard: {probed}");
+
+    // A sampled guitar with one of its maker's tones, then out of the
+    // automatic hammer-ons its presets come with.
+    let arguments = json!({ "name": "Rhythm", "instrument": HELLRAZER, "preset": "9 String Metal" });
+    let guitar = ok(client, "create_track", arguments.clone()).await;
+    said(&format!("create_track {arguments}"), &guitar);
+    assert_eq!(guitar["preset"], "9 String Metal");
+    let device = guitar["instrument_device_id"].as_u64().unwrap();
+    let legato = ok(client, "get_device", json!({ "device": device, "query": "auto legato" })).await;
+    said("get_device query \"auto legato\"", &legato["params"]);
+    assert_eq!(
+        (legato["params"][0]["name"].as_str(), legato["params"][0]["text"].as_str()),
+        (Some("Auto Legato"), Some("1"))
+    );
+    let arguments = json!({ "device": device, "params": { "Auto Legato": "0" } });
+    let updated = ok(client, "update_device", arguments.clone()).await;
+    said(&format!("update_device {arguments}"), &updated);
+    assert_eq!(updated["shown"]["Auto Legato"], "0");
+    // And a setting that is in its saved state alone: the preset turned
+    // the sound of the frets off.
+    let frets = ok(client, "get_device", json!({ "device": device, "query": "fret sound" })).await;
+    let shown = json!({ "settings": frets["settings"], "settings_count": frets["settings_count"], "matching": frets["matching"] });
+    said("get_device query \"fret sound\"", &shown);
+    assert_eq!(frets["settings"], json!([{ "name": "M-Fret Sound", "value": "0" }]));
+    assert!(frets["settings_count"].as_u64().unwrap() > 100 && frets["matching"] == 0, "{frets}");
+    let arguments = json!({ "device": device, "settings": { "M-Fret Sound": 1 } });
+    let updated = ok(client, "update_device", arguments.clone()).await;
+    said(&format!("update_device {arguments}"), &updated);
+    assert_eq!(updated["settings"], json!({ "M-Fret Sound": "1" }));
+    let fret = |reply: Value| reply["settings"][0]["value"].as_str().map(str::to_string);
+    assert_eq!(
+        fret(ok(client, "get_device", json!({ "device": device, "query": "fret sound" })).await).as_deref(),
+        Some("1")
+    );
+    ok(client, "history", json!({ "action": "undo" })).await;
+    let undone = fret(ok(client, "get_device", json!({ "device": device, "query": "fret sound" })).await);
+    assert_eq!(undone.as_deref(), Some("0"), "undone, the setting is the preset's again");
+    let error =
+        call(client, "update_device", json!({ "device": device, "settings": { "Fret Buzz": 1 } })).await.unwrap_err();
+    said("update_device settings {\"Fret Buzz\": 1}", &json!(error));
+    assert!(error.contains("has no setting 'Fret Buzz'; near it: ") && error.contains("M-Fret Sound"), "{error}");
+
+    // An amplifier on the guitar's track, by a preset's name; and a synth
+    // patch found by a search and probed before a track is made of it.
+    let arguments = json!({ "uri": TIM_HENSON, "track": guitar["track_id"], "preset": "80s Arch Lead" });
+    let amp = ok(client, "add_device", arguments.clone()).await;
+    said(&format!("add_device {arguments}"), &amp);
+    assert_eq!(amp["preset"], "80s Arch Lead");
+    let found = ok(client, "search_presets", json!({ "query": "808", "device": "serum", "limit": 3 })).await;
+    said("search_presets \"808\" in Serum", &found);
+    let first = &found["items"][0];
+    assert_eq!(first["device"], SERUM_2);
+    let arguments = json!({ "device": SERUM_2, "preset": first["id"], "notes": ["C1", "C2"] });
+    let probed = ok(client, "probe", arguments.clone()).await;
+    said(&format!("probe {arguments}"), &probed);
+    assert!(!probed.to_string().contains("\"silent\":true"), "{probed}");
 }

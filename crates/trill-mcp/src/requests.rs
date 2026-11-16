@@ -181,6 +181,10 @@ pub struct UpdateDeviceRequest {
     /// for most), and a string is the value as the plugin itself shows it, which is what get_device gives as
     /// `text`: {"Cab L Mic Type": "Dynamic 57", "Input Gain": "-6 dB", "Doubler Active": "On"}.
     pub params: Option<BTreeMap<String, Value>>,
+    /// Settings in a plugin's saved state that it has no parameter for, by the names get_device lists under
+    /// `settings` (its `query` finds them): {"Auto Legato": 0}. A value is written as the plugin writes it,
+    /// which get_device shows: keep to the form the value has (a switch that reads 1 is off as 0 or as -1).
+    pub settings: Option<BTreeMap<String, Value>>,
     /// false bypasses the device.
     pub enabled: Option<bool>,
 }

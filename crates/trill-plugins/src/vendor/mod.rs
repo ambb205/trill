@@ -93,7 +93,12 @@ impl Format {
     /// one that is read. A plugin is told by its id, or where a vendor
     /// builds all its plugins alike, by the vendor's name.
     pub(crate) fn of(plugin: &PluginRef) -> Option<Self> {
-        match plugin.id.as_str() {
+        Self::of_class(&plugin.id)
+    }
+
+    /// [`of`](Self::of), for a plugin known by its id alone.
+    pub(crate) fn of_class(id: &str) -> Option<Self> {
+        match id {
             serum::CLASS => Some(Format::Serum2),
             superior::CLASS => Some(Format::Superior3),
             id if ample::is_ours(id) => Some(Format::Ample),
@@ -164,6 +169,32 @@ pub(crate) fn missing<'a>(format: Format, marks: &'a [Mark], state: &PluginState
         Format::Archetype => archetype::shown(state, &mark.name),
     };
     marks.iter().filter(|mark| shown(mark).is_none_or(|value| !same_value(&value, &mark.value))).collect()
+}
+
+/// Every setting in `state`, a state of a plugin of `format`, by name,
+/// with the value it has: for the formats whose state is a list of named
+/// settings. `None` for the others, and for a state that is not what the
+/// format's reader knows.
+pub(crate) fn settings(format: Format, state: &PluginState) -> Option<Vec<(String, String)>> {
+    match format {
+        Format::Ample => ample::settings(state),
+        Format::Serum2 | Format::Superior3 | Format::Archetype => None,
+    }
+}
+
+/// `current` with `values` in place of the values of the settings they
+/// name: see [`settings`]. An error says which name is no setting.
+pub(crate) fn with_settings(
+    format: Format,
+    current: &PluginState,
+    values: &[(String, String)],
+) -> Result<Built, String> {
+    match format {
+        Format::Ample => ample::with_settings(current, values),
+        Format::Serum2 | Format::Superior3 | Format::Archetype => {
+            Err("this plugin's state has no settings that are set by name".to_string())
+        }
+    }
 }
 
 /// Whether a plugin whose state lacks `missing` of the `marks` of a preset

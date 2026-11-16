@@ -446,6 +446,24 @@ pub trait DeviceController: Send {
         None
     }
 
+    /// The settings in the device's saved state, by name, with the value
+    /// each has as the device itself writes it: for a plugin whose state
+    /// is a list of named settings, most of which it shows a host no
+    /// parameter for. `None` for a device whose state is not read that
+    /// way.
+    fn settings(&mut self) -> Option<Vec<(String, String)>> {
+        None
+    }
+
+    /// Gives settings of [`settings`](Self::settings) other values, by
+    /// name: the device is handed its state again with them in place, and
+    /// is seen to have taken it before this returns. A name that is no
+    /// setting is an error that says so, and changes nothing.
+    fn set_settings(&mut self, values: &[(String, String)]) -> Result<(), PresetLoadError> {
+        let _ = values;
+        Err(PresetLoadError::Unsupported)
+    }
+
     /// Which MIDI controllers the device does something with, if it can
     /// say. Cheap: a view may ask whenever it is drawn.
     fn controller_support(&self) -> ControllerSupport {

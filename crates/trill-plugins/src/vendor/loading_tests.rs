@@ -321,3 +321,49 @@ fn a_session_loads_a_vendors_preset_as_one_undo_step() {
     assert!(session.add_device(ChainRef::Master, &uri, Some("Refused"), None).is_err());
     assert_eq!(session.project().devices().count(), devices);
 }
+
+#[test]
+fn a_setting_no_parameter_reaches_is_set_in_the_running_plugin_as_an_undo_step() {
+    let rig = Rig::new();
+    let uri = scripted::uri(kind::KEEPS_AMPLE);
+    let factory = CompositeFactory::new(vec![Box::new(rig.factory.clone())]);
+    let mut session = Session::new(Arc::new(factory), AudioBackend::Null { sample_rate: 48_000 }).unwrap();
+    let device = session.add_device(ChainRef::Master, &uri, None, None).unwrap();
+    let legato = |session: &Session| {
+        let settings = session.device_settings(device).unwrap();
+        settings.into_iter().find(|(name, _)| name == "Auto Legato").map(|(_, value)| value)
+    };
+    // The plugin's state lists its settings; none of them is a parameter
+    // of this one, so all are settings no parameter reaches.
+    let names: Vec<String> = session.device_settings(device).unwrap().into_iter().map(|(name, _)| name).collect();
+    assert_eq!(names, ["M-Master Vol", "Auto Legato", "Amp", ample::LIBRARY]);
+    assert_eq!(legato(&session).as_deref(), Some("1"));
+
+    let step = session.undo_step();
+    session.set_device_settings(device, &[("Auto Legato".to_string(), "0".to_string())]).unwrap();
+    assert_eq!(legato(&session).as_deref(), Some("0"));
+    assert_ne!(session.undo_step(), step);
+    assert_eq!(session.take_preset_note(device), None);
+    assert!(session.undo());
+    assert_eq!(legato(&session).as_deref(), Some("1"));
+    assert!(session.redo());
+    assert_eq!(legato(&session).as_deref(), Some("0"));
+
+    // A name that is no setting, and a set of samples that is not here:
+    // a sentence, and the plugin as it was.
+    let step = session.undo_step();
+    let error =
+        session.set_device_settings(device, &[("Legato".to_string(), "1".to_string())]).unwrap_err().to_string();
+    assert!(
+        error.contains("was not given the settings: the plugin's state has no setting 'Legato'; near it: Auto Legato"),
+        "{error}"
+    );
+    let error = session.set_device_settings(device, &[(ample::LIBRARY.to_string(), "AMHNk".to_string())]).unwrap_err();
+    assert!(error.to_string().contains("the set of samples 'AMHNk' is not installed"), "{error}");
+    assert_eq!((legato(&session).as_deref(), session.undo_step()), (Some("0"), step));
+    // A plugin whose state is not a list of named settings has none.
+    let synth = session.add_device(ChainRef::Master, &scripted::uri(kind::KEEPS_SERUM), None, None).unwrap();
+    assert!(session.device_settings(synth).unwrap().is_empty());
+    let error = session.set_device_settings(synth, &[("x".to_string(), "1".to_string())]).unwrap_err().to_string();
+    assert!(error.contains("this plugin's state has no settings that are set by name"), "{error}");
+}

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use trill_core::Device;
 use trill_core::device::{
     ChannelLayout, DeviceCategory, DeviceController, DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance,
-    DeviceProcessor, Event, ParamInfo, ParamKind, ProcessInfo,
+    DeviceProcessor, Event, ParamInfo, ParamKind, PresetLoadError, ProcessInfo,
 };
 use trill_engine::AudioBackend;
 use trill_mcp::{HttpServer, serve_http};
@@ -86,11 +86,47 @@ impl DeviceProcessor for Silent {
     fn reset(&mut self) {}
 }
 
-struct Controller;
+/// The plugin's main-thread half: besides its parameters it has settings
+/// in its saved state, one of them under the name of a parameter.
+struct Controller {
+    settings: Vec<(String, String)>,
+    note: Option<String>,
+}
+
+impl Controller {
+    fn new() -> Self {
+        let settings = [("Auto Legato", "1"), ("Fret Noise", "0.5"), ("Input Gain", "12"), ("Library", "Bridge")];
+        Self { settings: settings.map(|(name, value)| (name.to_string(), value.to_string())).into(), note: None }
+    }
+}
 
 impl DeviceController for Controller {
     fn save_state(&mut self) -> Option<Vec<u8>> {
         None
+    }
+
+    fn settings(&mut self) -> Option<Vec<(String, String)>> {
+        Some(self.settings.clone())
+    }
+
+    /// Other samples take a moment to read, which is said once.
+    fn set_settings(&mut self, values: &[(String, String)]) -> Result<(), PresetLoadError> {
+        for (name, _) in values {
+            if !self.settings.iter().any(|(known, _)| known == name) {
+                return Err(PresetLoadError::Failed(format!("the plugin's state has no setting '{name}'")));
+            }
+        }
+        for (name, value) in values {
+            self.settings.iter_mut().find(|(known, _)| known == name).unwrap().1 = value.clone();
+            if name == "Library" {
+                self.note = Some("It plays another set of samples now, and reads them in the background.".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    fn take_preset_note(&mut self) -> Option<String> {
+        self.note.take()
     }
 
     fn channels(&self) -> Option<ChannelLayout> {
@@ -141,7 +177,8 @@ impl DeviceFactory for Amps {
         if device.uri != AMP {
             return Err(DeviceError::Unknown(device.uri.clone()));
         }
-        Ok(DeviceInstance { processor: Box::new(Silent), params: infos(), controller: Some(Box::new(Controller)) })
+        let controller = Some(Box::new(Controller::new()) as Box<dyn DeviceController>);
+        Ok(DeviceInstance { processor: Box::new(Silent), params: infos(), controller })
     }
 }
 
@@ -404,4 +441,60 @@ async fn a_plugin_that_hands_over_no_state_is_saved_by_the_values_that_were_set(
     let got = ok(client, "get_device", json!({ "device": other["device_id"], "query": "amp type" })).await;
     assert_eq!((got["preset"].as_str(), texts(&got)), (Some("Lead Tone"), vec!["Amp Type: Lead".to_string()]));
     assert_eq!(got["presets"]["total"], 1, "the saved one is the only preset it has: {got}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settings_that_no_parameter_reaches_are_found_and_set_by_name() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let device = amp(client).await;
+
+    // Unasked: how many there are beside the parameters. The one that has
+    // a parameter's name is that parameter's business.
+    let got = ok(client, "get_device", json!({ "device": device })).await;
+    assert_eq!(got["settings_count"], 3, "{got}");
+    assert!(got.get("settings").is_none(), "{got}");
+    assert!(got["settings_note"].as_str().unwrap().contains("settings that it has no parameter for"), "{got}");
+
+    // Found by words in their names, with the values the plugin writes.
+    let found = ok(client, "get_device", json!({ "device": device, "query": "legato" })).await;
+    assert_eq!(found["settings"], json!([{ "name": "Auto Legato", "value": "1" }]));
+    assert_eq!(found["matching"], 0, "no parameter is called that: {found}");
+    assert!(found["settings_note"].as_str().unwrap().contains("read from the plugin's saved state"), "{found}");
+    let gain = ok(client, "get_device", json!({ "device": device, "query": "input gain" })).await;
+    assert!(gain.get("settings").is_some_and(|settings| settings.as_array().unwrap().is_empty()), "{gain}");
+    assert_eq!(gain["matching"], 1);
+
+    // Set, with a number or with the text of a value; what the plugin
+    // then goes on doing is said.
+    let settings = json!({ "Auto Legato": 0, "Library": "Neck" });
+    let updated = ok(client, "update_device", json!({ "device": device, "settings": settings })).await;
+    assert_eq!(updated["settings"], json!({ "Auto Legato": "0", "Library": "Neck" }));
+    assert_eq!(updated["note"], "It plays another set of samples now, and reads them in the background.");
+    let found = ok(client, "get_device", json!({ "device": device, "query": "a" })).await;
+    assert_eq!(
+        found["settings"],
+        json!([{ "name": "Auto Legato", "value": "0" }, { "name": "Library", "value": "Neck" }])
+    );
+    let again = ok(client, "update_device", json!({ "device": device, "settings": { "Fret Noise": "0.25" } })).await;
+    assert!(again.get("note").is_none(), "nothing more to say: {again}");
+
+    // What is no setting, and what is no value: a sentence, and nothing
+    // is changed.
+    let set = |settings: Value| call(client, "update_device", json!({ "device": device, "settings": settings }));
+    let error = set(json!({ "Fret Noise": 1, "Nope": 1 })).await.unwrap_err();
+    assert!(error.contains("was not given the settings: the plugin's state has no setting 'Nope'"), "{error}");
+    assert!(error.contains("The device is as it was"), "{error}");
+    let error = set(json!({ "Auto Legato": true })).await.unwrap_err();
+    assert!(error.contains("the setting 'Auto Legato' needs a number or a string"), "{error}");
+    let found = ok(client, "get_device", json!({ "device": device, "query": "fret" })).await;
+    assert_eq!(found["settings"], json!([{ "name": "Fret Noise", "value": "0.25" }]));
+
+    // A device whose state is not a list of named settings has none.
+    let reverb = ok(client, "add_device", json!({ "uri": REVERB })).await["device_id"].clone();
+    let got = ok(client, "get_device", json!({ "device": reverb, "query": "decay" })).await;
+    assert!(got.get("settings_count").is_none() && got.get("settings").is_none(), "{got}");
+    let error =
+        call(client, "update_device", json!({ "device": reverb, "settings": { "Decay": 1 } })).await.unwrap_err();
+    assert!(error.contains("its saved state has no settings that are set by name"), "{error}");
 }
