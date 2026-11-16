@@ -268,12 +268,20 @@ fn search_json(searched: &[Searched], query: &str, offset: usize, limit: usize) 
     }
     // Said once, where the search begins: which plugins have nothing to
     // search, and what to do about one of them.
-    let silent: Vec<String> = searched
+    // A plugin installed in two formats is one plugin: it is not without
+    // presets if either format lists them, and is named once.
+    let has_presets = |name: &str| {
+        searched.iter().any(|entry| !entry.list.is_empty() && entry.descriptor.name.eq_ignore_ascii_case(name))
+    };
+    let mut silent: Vec<String> = searched
         .iter()
         .filter(|entry| is_plugin(&entry.descriptor.uri))
         .filter(|entry| entry.list.is_empty() && entry.list.status == PresetStatus::Ready)
+        .filter(|entry| !has_presets(&entry.descriptor.name))
         .map(|entry| entry.descriptor.name.clone())
         .collect();
+    let mut named_already = std::collections::HashSet::new();
+    silent.retain(|name| named_already.insert(name.to_lowercase()));
     if offset == 0 && !silent.is_empty() {
         out["without_presets"] = json!(named(&silent));
         out["without_presets_note"] = json!(
@@ -493,7 +501,9 @@ mod tests {
             device("clap:a", "Read", PresetList::ready(vec![preset("Warm", "")])),
             device("clap:b", "Reading", PresetList::reading(vec![preset("Warm So Far", "")])),
             device("vst3:C", "Windowed", PresetList::default()),
+            device("vst3:A", "Read", PresetList::default()),
             device("vst3:D", "Broken", failed),
+            device("clap:c", "Windowed", PresetList::default()),
             device("builtin:sampler", "Sampler", PresetList::default()),
         ];
         let reply = search_json(&searched, "warm", 0, 10);
@@ -501,8 +511,9 @@ mod tests {
         assert_eq!(reply["still_reading"], json!(["Reading (clap:b)"]));
         assert!(reply["status"].as_str().unwrap().starts_with("One device's presets are still being read"));
         assert_eq!(reply["could_not_read"], json!(["Broken: the plugin crashed"]));
-        // A plugin without presets is named; a built-in device without
-        // any has none to keep anywhere.
+        // A plugin without presets is named, once for both its formats,
+        // unless its other format has some; a built-in device without any
+        // has none to keep anywhere.
         assert_eq!(reply["without_presets"], json!(["Windowed"]));
         assert!(reply["without_presets_note"].as_str().unwrap().contains("save_preset"));
         assert!(search_json(&searched, "warm", 1, 10).get("without_presets").is_none(), "said once");

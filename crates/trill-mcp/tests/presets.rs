@@ -730,3 +730,143 @@ async fn an_assistant_puts_a_warm_pad_on_surge_xt() {
         assert!(described["presets"]["note"].as_str().unwrap().contains(SURGE), "{described}");
     }
 }
+
+const TIM_HENSON: &str = "vst3:ABCDEF019182FAEB4E4453504E544858";
+
+/// What an assistant does with an amplifier that lists no presets, on the
+/// real Archetype Tim Henson: reads the few parameters that matter out of
+/// its hundred and seventy, sets a microphone and a gain in the plugin's
+/// own words, keeps the sound under a name and gives it to another
+/// device; then looks for a pad across every instrument that is
+/// installed. Prints the calls' replies.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Archetype Tim Henson X (VST3) installed; run with `cargo test -p trill-mcp --test presets an_assistant_dials -- --include-ignored --nocapture`"]
+async fn an_assistant_dials_in_an_amplifier_keeps_its_sound_and_searches_every_instrument() {
+    use trill_plugins::{ClapConfig, PluginHost, Scanner, Vst3Config};
+    // The plugin host's caches are the test's own, and no preset file of
+    // the user's is read; what is saved goes to a temporary folder.
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("mcp-sounds");
+    let clap =
+        ClapConfig { cache_path: Some(scratch.join("clap.json")), scanner: Scanner::Auto, ..ClapConfig::default() };
+    let vst3 = Vst3Config {
+        cache_path: Some(scratch.join("vst3.json")),
+        scanner: Scanner::Auto,
+        preset_paths: vec![scratch.join("vst3 presets")],
+        ..Vst3Config::default()
+    };
+    let host = PluginHost::with_configs(clap, vst3).unwrap();
+    if !host.vst3().descriptors().iter().any(|descriptor| descriptor.uri == TIM_HENSON) {
+        eprintln!("skipping: Archetype Tim Henson X is not installed as a VST3 plugin");
+        return;
+    }
+    let folder = tempfile::tempdir().unwrap();
+    let storage = Storage::At {
+        settings: folder.path().join("config").join("settings.json"),
+        library_index: Some(folder.path().join("cache").join("library-index.json")),
+    };
+    let options = RuntimeOptions { audio: AudioBackend::Null { sample_rate: 48_000 }, plugins: None, storage };
+    let parts = Parts { devices: host.factories(), ..Parts::default() };
+    let runtime = Arc::new(Runtime::start_custom(options, parts).unwrap());
+    let server = serve_http(runtime, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let transport =
+        StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(server.url()));
+    let client = &ClientConfig::default().serve(transport).await.unwrap();
+    let said = |call: &str, reply: &Value| eprintln!("\n> {call}\n{reply}");
+
+    // The amplifier, as it comes: how many parameters, the ones its patch
+    // moved, its channels, and that it has no presets to list.
+    let amp = ok(client, "add_device", json!({ "uri": TIM_HENSON })).await["device_id"].as_u64().unwrap();
+    // Asked about once, so that whether it has presets is known.
+    ok(client, "describe_device", json!({ "uri": TIM_HENSON, "preset_limit": 0 })).await;
+    let got = ok(client, "get_device", json!({ "device": amp, "param_limit": 6 })).await;
+    said("get_device (the amplifier, unasked)", &got);
+    let (count, changed) = (got["param_count"].as_u64().unwrap(), got["changed"].as_u64().unwrap());
+    assert!(count > 100 && changed > 0 && changed < count / 2, "{changed} of {count}");
+    assert_eq!(got["channels"], "stereo in, stereo out");
+    assert!(got["params"].as_array().unwrap().iter().all(|param| param["text"].is_string()), "{got}");
+    assert!(got["presets"]["note"].as_str().unwrap().starts_with("This plugin gives a host no presets"), "{got}");
+    assert!(got.to_string().len() < 4000, "a small reply for {count} parameters: {} bytes", got.to_string().len());
+
+    // Found by name, with what it can be set to.
+    let mics = ok(client, "get_device", json!({ "device": amp, "query": "cherubs cab l mic type" })).await;
+    said("get_device query \"cherubs cab l mic type\"", &mics["params"]);
+    let choices = mics["params"][0]["choices"].as_array().unwrap();
+    assert!(choices.contains(&json!("Dynamic 57")) && choices.len() >= 3, "{mics}");
+    let gain = ok(client, "get_device", json!({ "device": amp, "query": "input gain" })).await;
+    said("get_device query \"input gain\"", &gain["params"]);
+    assert_eq!(
+        (gain["params"][0]["from"].as_str(), gain["params"][0]["to"].as_str()),
+        (Some("-24.0 dB"), Some("+24.0 dB"))
+    );
+
+    // Set in its own words; the reply says what each value came to.
+    let params = json!({ "Cherubs Amp Cab L Mic Type": "dynamic 57", "Input Gain": "-6 dB", "Doubler Active": "On" });
+    let updated = ok(client, "update_device", json!({ "device": amp, "params": params })).await;
+    said(&format!("update_device {params}"), &updated);
+    assert_eq!(updated["shown"]["Input Gain"], "-6.0 dB");
+    assert_eq!(updated["shown"]["Cherubs Amp Cab L Mic Type"], "Dynamic 57");
+    assert_eq!(updated["shown"]["Doubler Active"], "On");
+    let error = call(client, "update_device", json!({ "device": amp, "params": { "Input Gain": "99 dB" } })).await;
+    said("update_device Input Gain = 99 dB", &json!(error.clone().unwrap_err()));
+    assert!(error.unwrap_err().contains("values like '-24.0 dB'"));
+
+    // Kept under a name, it is the amplifier's preset from then on.
+    let saved = ok(client, "save_preset", json!({ "device": amp, "name": "Dry Rhythm", "tags": ["rhythm"] })).await;
+    said("save_preset", &saved);
+    assert!(std::path::Path::new(saved["file"].as_str().unwrap()).starts_with(folder.path()));
+    let described = ok(client, "describe_device", json!({ "uri": TIM_HENSON })).await;
+    said("describe_device (its presets)", &described["presets"]);
+    assert_eq!((described["presets"]["total"].as_u64(), names(&described["presets"])), (Some(1), vec!["Dry Rhythm"]));
+    // Another amplifier starts from it: the plugin's state came with it.
+    let second = ok(client, "add_device", json!({ "uri": TIM_HENSON, "preset": "Dry Rhythm" })).await;
+    let second = second["device_id"].as_u64().unwrap();
+    // A plugin takes a state on a moment after it is created.
+    let mut shown = Value::Null;
+    for _ in 0..50 {
+        shown = ok(client, "get_device", json!({ "device": second, "query": "input gain" })).await;
+        if shown["params"][0]["text"] == "-6.0 dB" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    said("get_device (a second amplifier, from the saved preset)", &shown["params"]);
+    assert_eq!(shown["params"][0]["text"], "-6.0 dB");
+    let mic = ok(client, "get_device", json!({ "device": second, "query": "cherubs cab l mic type" })).await;
+    assert_eq!(mic["params"][0]["text"], "Dynamic 57");
+
+    // A sound, across everything that is installed. The first search on a
+    // machine reads every instrument's presets, which takes a while.
+    let search = json!({ "query": "warm pad", "limit": 8, "wait_seconds": 60 });
+    let mut found = ok(client, "search_presets", search.clone()).await;
+    for _ in 0..6 {
+        if found.get("still_reading").is_none() {
+            break;
+        }
+        said("search_presets (still reading)", &json!({ "status": found["status"], "of": found["still_reading"] }));
+        found = ok(client, "search_presets", search.clone()).await;
+    }
+    said(&format!("search_presets {search}"), &found);
+    assert!(found.get("still_reading").is_none(), "everything was read in the end: {found}");
+    let without: Vec<&str> = found["without_presets"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    eprintln!("\ninstruments that give a host no presets: {without:?}");
+    let listed = ok(client, "list_devices", json!({ "category": "instrument" })).await;
+    for device in listed["devices"].as_array().unwrap() {
+        if let Some(count) = device.get("preset_count") {
+            eprintln!(
+                "{:>6} presets: {} ({})",
+                count,
+                device["name"].as_str().unwrap(),
+                device["uri"].as_str().unwrap()
+            );
+        }
+    }
+    // The built-in synth has a warm pad, whatever else is installed, and
+    // what was found is ready for create_track.
+    assert!(found["matching"].as_u64().unwrap() >= 1, "{found}");
+    let first = &found["items"][0];
+    let preset = first.get("id").unwrap_or(&first["preset"]);
+    let track =
+        ok(client, "create_track", json!({ "name": "Pad", "instrument": first["device"], "preset": preset })).await;
+    said("create_track (from the first match)", &track);
+    assert_eq!(track["preset"], first["preset"]);
+}

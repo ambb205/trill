@@ -384,3 +384,24 @@ async fn a_device_says_what_channels_it_takes_and_gives() {
     let marks: Vec<Option<&str>> = chain.iter().map(|device| device["channels"].as_str()).collect();
     assert_eq!(marks, [None, None, Some("mono in, stereo out")], "{project}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_that_hands_over_no_state_is_saved_by_the_values_that_were_set() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let device = amp(client).await;
+    // The stand-in keeps no state a host could ask for: untouched, there
+    // is nothing of it to keep.
+    let error = call(client, "save_preset", json!({ "device": device, "name": "Nothing" })).await.unwrap_err();
+    assert!(error.contains("gives a host no state to keep") && error.contains("no sound to save"), "{error}");
+
+    // What was set from here is kept, and comes back on another device.
+    let params = json!({ "Amp Type": "Lead", "Input Gain": "+6 dB" });
+    ok(client, "update_device", json!({ "device": device, "params": params })).await;
+    let saved = ok(client, "save_preset", json!({ "device": device, "name": "Lead Tone" })).await;
+    assert_eq!(saved["saved"], "Saved/Lead Tone");
+    let other = ok(client, "add_device", json!({ "uri": AMP, "preset": "Lead Tone" })).await;
+    let got = ok(client, "get_device", json!({ "device": other["device_id"], "query": "amp type" })).await;
+    assert_eq!((got["preset"].as_str(), texts(&got)), (Some("Lead Tone"), vec!["Amp Type: Lead".to_string()]));
+    assert_eq!(got["presets"]["total"], 1, "the saved one is the only preset it has: {got}");
+}

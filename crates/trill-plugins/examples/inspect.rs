@@ -164,7 +164,8 @@ fn run(options: &Options) -> Result<(), String> {
 
     let values = controller.param_values().unwrap_or_else(|| params.iter().map(|param| param.default).collect());
     let defaults = controller.param_defaults().unwrap_or_else(|| params.iter().map(|param| param.default).collect());
-    let moved = |index: usize| (values[index] - defaults[index]).abs() > 1e-6;
+    // A knob at its default is reported as 0.499999 by some plugins.
+    let moved = |index: usize| (values[index] - defaults[index]).abs() > 1e-4 * (params[index].max - params[index].min);
     let changed = (0..params.len()).filter(|index| moved(*index)).count();
     println!("{} parameters, {changed} not at the plugin's own default", params.len());
 

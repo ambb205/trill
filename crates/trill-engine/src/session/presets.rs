@@ -163,6 +163,14 @@ impl Session {
             // the sound the device had before.
             self.device_params(id)?.into_iter().map(|state| (state.info.id, state.value)).collect()
         };
+        // A plugin that hands a host no state, with nothing set on it
+        // from here: a preset of that would be a name and no sound.
+        if plugin && device.state.is_none() && params.is_empty() {
+            return Err(SessionError::Device(format!(
+                "{id} ({device_name}) gives a host no state to keep, and none of its parameters was set from here, \
+                 so there is no sound to save"
+            )));
+        }
         let type_name = self.factory.descriptors().into_iter().find(|d| d.uri == uri).map(|d| d.name);
         let preset = SavedPreset {
             uri,

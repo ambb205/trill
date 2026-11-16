@@ -67,8 +67,9 @@ const MAX_PARAMS: usize = 200;
 /// At most this many parameters found by a search come with their ranges,
 /// choices and defaults.
 const DETAILED_PARAMS: usize = 12;
-/// How far a value may be from a default and still be at it.
-const AT_DEFAULT: f64 = 1e-6;
+/// How far a value may be from a default and still be at it, as a part of
+/// the parameter's range: plugins report a knob at its default as 0.499999.
+const AT_DEFAULT: f64 = 1e-4;
 /// A stepped parameter with at most this many steps is shown by what each
 /// step is called.
 const NAMED_STEPS: f64 = 64.0;
@@ -2271,8 +2272,11 @@ fn params_into(
     let project = session.project();
     let plugin = project.device(id).is_ok_and(|device| is_plugin(&device.uri));
     let defaults = session.device_param_defaults(id).map_err(|error| explain(project, error))?;
-    let moved =
-        |index: &usize| defaults.get(*index).is_some_and(|default| (states[*index].value - default).abs() > AT_DEFAULT);
+    let moved = |index: &usize| {
+        let state = &states[*index];
+        let room = (state.info.max - state.info.min).abs() * AT_DEFAULT;
+        defaults.get(*index).is_some_and(|default| (state.value - default).abs() > room)
+    };
     let many = states.len() > MANY_PARAMS;
     let every = || (0..states.len()).collect::<Vec<usize>>();
 
