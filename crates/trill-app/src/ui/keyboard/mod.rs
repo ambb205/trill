@@ -70,8 +70,9 @@ impl Options {
     /// The keys named by `letters`, as `--hold` takes them: `"adg"`.
     pub fn holding(letters: &str) -> Result<Vec<Key>, String> {
         let key = |letter: char| {
-            layout::key_labeled(&letter.to_string())
-                .ok_or_else(|| format!("'{letter}' is not a key that plays a note (the keys are A W S E D F T G Y H U J K O L P ; ')"))
+            layout::key_labeled(&letter.to_string()).ok_or_else(|| {
+                format!("'{letter}' is not a key that plays a note (the keys are A W S E D F T G Y H U J K O L P ; ')")
+            })
         };
         letters.chars().filter(|letter| !letter.is_whitespace()).map(key).collect()
     }
@@ -443,9 +444,22 @@ impl Keyboard {
         }
     }
 
+    /// Every note that was started and not stopped, in the order started.
     #[cfg(test)]
     pub fn sounding(&self) -> Vec<(TrackId, u8)> {
         self.sounding.iter().map(|note| (note.track, note.pitch)).collect()
+    }
+
+    /// The keys that hold a note down.
+    #[cfg(test)]
+    pub fn keys_down(&self) -> Vec<Key> {
+        self.sounding.iter().filter_map(|note| note.key).collect()
+    }
+
+    /// How many notes only the sustain holds.
+    #[cfg(test)]
+    pub fn pedalled(&self) -> usize {
+        self.sounding.iter().filter(|note| note.key.is_none()).count()
     }
 }
 

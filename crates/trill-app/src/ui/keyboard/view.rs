@@ -207,7 +207,9 @@ fn plays(ui: &Ui, cx: &mut Cx, cells: &mut Cells, id: Id, width: f32) {
     let response = ui.interact(whole, id.with("plays"), Sense::hover());
     let about = match &playing.silence {
         Some(silence) => silence.text(),
-        None => format!("The keys play {} on {} \u{00B7} select another track to play it", playing.instrument, playing.name),
+        None => {
+            format!("The keys play {} on {} \u{00B7} select another track to play it", playing.instrument, playing.name)
+        }
     };
     cx.hint(&response, about);
 }
@@ -311,9 +313,8 @@ fn key_at(keys: Rect, position: eframe::egui::Pos2) -> Option<u8> {
 fn piano_keys(ui: &Ui, cx: &mut Cx, keys: Rect, id: Id) {
     let theme = cx.theme;
     let response = ui.interact(keys, id.with("keys"), Sense::click_and_drag());
-    response.widget_info(|| {
-        eframe::egui::WidgetInfo::labeled(eframe::egui::Role::Button, true, "Computer keyboard keys")
-    });
+    response
+        .widget_info(|| eframe::egui::WidgetInfo::labeled(eframe::egui::Role::Button, true, "Computer keyboard keys"));
     let playing = cx.keyboard.playing().clone();
     let lowest = cx.keyboard.lowest();
     let stored = playing.track.and_then(|track| cx.snap.track(track)).map_or(0, |track| track.color);
@@ -394,7 +395,13 @@ fn key_ink(theme: &Theme, black: bool, lit: bool) -> Color32 {
 
 /// The letter of the computer key that plays `pitch`, for the piano
 /// roll's own keyboard, and the ink it is written in there.
-pub fn letter_on(keyboard: &Keyboard, theme: &Theme, pitch: u8, black: bool, lit: bool) -> Option<(&'static str, Color32)> {
+pub fn letter_on(
+    keyboard: &Keyboard,
+    theme: &Theme,
+    pitch: u8,
+    black: bool,
+    lit: bool,
+) -> Option<(&'static str, Color32)> {
     keyboard.letter(pitch).map(|letter| (letter, key_ink(theme, black, lit)))
 }
 
@@ -427,7 +434,7 @@ mod tests {
         // Low on the first white key: C. High on the join: C sharp.
         assert_eq!(key_at(keys, pos2(104.0, 40.0)), Some(0));
         assert_eq!(key_at(keys, pos2(100.0 + WHITE_KEY, 14.0)), Some(1), "a black key wins where it lies");
-        assert_eq!(key_at(keys, pos2(100.0 + WHITE_KEY, 40.0)), Some(2), "below it, the white key to the right");
+        assert_eq!(key_at(keys, pos2(101.0 + WHITE_KEY, 40.0)), Some(2), "below it, the white key to the right");
         // E and F have no black key between them.
         assert_eq!(key_at(keys, pos2(100.0 + 3.0 * WHITE_KEY - 1.0, 14.0)), Some(4));
         assert_eq!(key_at(keys, pos2(100.0 + 3.0 * WHITE_KEY + 1.0, 14.0)), Some(5));

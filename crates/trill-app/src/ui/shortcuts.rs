@@ -626,8 +626,10 @@ mod tests {
         assert_eq!(while_playing(NONE, Key::B), [Command::ToggleDraw]);
         assert_eq!(while_playing(NONE, Key::Space), [Command::TogglePlay]);
         assert_eq!(while_playing(NONE, Key::Num0), [Command::MuteClips]);
-        // Off, Alt with a letter is nothing, as it has always been.
-        assert!(commands(alt, press(alt, Key::A), false, false).is_empty());
+        // Alt with a letter is no new chord to learn: a chord has always
+        // matched a press with more modifiers held, so it works off as on.
+        assert_eq!(commands(alt, press(alt, Key::A), false, false), [Command::ToggleAutomation]);
+        assert_eq!(commands(alt, press(alt, Key::L), false, false), [Command::ToggleLoop]);
     }
 
     #[test]

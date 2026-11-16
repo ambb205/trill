@@ -135,11 +135,7 @@ fn default_loop_length(clip: &Clip, beats_per_bar: Beats) -> Beats {
 /// takes. A range taller than the view is shown from its lowest pitch up.
 fn revealed_top(top: f32, rows: f32, low: u8, high: u8) -> f32 {
     let (low, above) = (low as f32, high as f32 + 1.0);
-    if top - rows > low || above - low > rows {
-        low + rows
-    } else {
-        top.max(above)
-    }
+    if top - rows > low || above - low > rows { low + rows } else { top.max(above) }
 }
 
 /// Name of a General MIDI drum the built-in kit plays, for labeling rows.

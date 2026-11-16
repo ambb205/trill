@@ -507,10 +507,8 @@ fn status_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, least: f32) -> f32 {
     let with_meter = value.left() - meter_width - 8.0 - label_width - GAP - BUTTON_WIDTH >= least;
     let mut label_right = value.left() - 8.0;
     if with_meter {
-        let meter = Rect::from_min_size(
-            pos2(value.left() - meter_width, bar.center().y - 4.0),
-            vec2(CPU_METER_WIDTH, 8.0),
-        );
+        let meter =
+            Rect::from_min_size(pos2(value.left() - meter_width, bar.center().y - 4.0), vec2(CPU_METER_WIDTH, 8.0));
         trill_noir::mini_meter(&painter, theme, meter, load, color);
         label_right = meter.left() - 8.0;
     }
