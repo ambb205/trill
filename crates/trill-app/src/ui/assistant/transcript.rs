@@ -439,6 +439,33 @@ impl Transcript {
         }
     }
 
+    /// Whether `event` is the answer of a call that put another project in
+    /// place of the open one: one was loaded, begun, or brought back. Ask
+    /// before the event is applied, while the call's arguments are at hand.
+    pub fn opens_another_project(&self, event: &Event) -> bool {
+        let Event::ToolCallFinished { id, tool, result: Ok(_) } = event else { return false };
+        match tool.as_str() {
+            "load_project" | "new_project" => true,
+            "recover_project" => self.items.iter().rev().any(|item| {
+                matches!(item, Item::Tool(line) if line.id == *id
+                    && line.arguments.get("action").and_then(serde_json::Value::as_str) == Some("open"))
+            }),
+            _ => false,
+        }
+    }
+
+    /// Forgets where every line leads: the project they led into has been
+    /// replaced by another, in which the same ids name other things.
+    pub fn forget_places(&mut self) {
+        for item in &mut self.items {
+            match item {
+                Item::Tool(line) => line.place = None,
+                Item::End(end) => end.places.clear(),
+                _ => {}
+            }
+        }
+    }
+
     /// For a conversation read back another day: keeps only the places
     /// that still name the same things in `project`.
     pub fn keep_places_in(&mut self, project: &Project) {
@@ -773,6 +800,18 @@ mod tests {
         read.keep_places_in(&project);
         assert_eq!(tool(&read.items[2]).place, None);
         assert_eq!(read.turn_places(end).collect::<Vec<_>>(), [&track]);
+        // Another project in place of this one: nothing leads anywhere.
+        let loaded = finished_call("f", "load_project", Ok("{}"));
+        assert!(transcript.opens_another_project(&loaded) && !transcript.opens_another_project(&text("load_project")));
+        assert!(!transcript.opens_another_project(&finished_call("f", "load_project", Err("refused"))));
+        assert!(!transcript.opens_another_project(&finished_call("f", "save_project", Ok("{}"))));
+        transcript.apply(&started("g", "recover_project", json!({ "action": "list" })), &project);
+        assert!(!transcript.opens_another_project(&finished_call("g", "recover_project", Ok("{}"))));
+        transcript.apply(&started("h", "recover_project", json!({ "action": "open", "index": 0 })), &project);
+        assert!(transcript.opens_another_project(&finished_call("h", "recover_project", Ok("{}"))));
+        transcript.forget_places();
+        assert_eq!(transcript.turn_places(end).count() + transcript.turn_places(transcript.items.len()).count(), 0);
+
         // A conversation kept before lines led anywhere reads as before.
         let old = r#"[{"kind":"user","text":"hi"},{"kind":"tool","tool":"create_clip","doing":"a","did":"b",
             "state":"done","input":"{}","output":"{}"},{"kind":"end","how":"stopped","changed":true}]"#;

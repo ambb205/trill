@@ -142,6 +142,12 @@ struct Turn {
     /// The song as it was when the message was sent, to tell what the turn
     /// changed should its calls not say.
     before: Project,
+    /// The file of the project the message was sent about.
+    file: Option<PathBuf>,
+    /// One of the turn's own calls has just put another project in place
+    /// of the open one; the next tick takes the window and the
+    /// conversation over to it.
+    opened_another: bool,
 }
 
 /// Who the conversation is billed to, when that is not the user's Claude
@@ -398,6 +404,9 @@ impl Assistant {
         }
 
         self.pump(&snapshot.project);
+        if self.turn.as_mut().is_some_and(|turn| std::mem::take(&mut turn.opened_another)) {
+            self.go_along(state, snapshot);
+        }
         // The turn has ended and changed the song: go and show what, unless
         // that would take the user away from something.
         if let Some(route) = self.arrival.take()
@@ -482,9 +491,9 @@ impl Assistant {
         }
         let Some(chat) = &mut self.chat else { return false };
 
-        let (group, before) = {
+        let (group, before, file) = {
             let mut session = self.session.lock();
-            (session.begin_group(), session.project().clone())
+            (session.begin_group(), session.project().clone(), session.path().map(PathBuf::from))
         };
         if let Err(error) = chat.send(message, Some(&context.text)) {
             // Only a mistake in this file gets here; the group must not
@@ -504,7 +513,8 @@ impl Assistant {
         // before no longer says they are busy elsewhere.
         self.worked_at = None;
         self.arrival = None;
-        self.turn = Some(Turn { group: Some(group), started: Instant::now(), stopping: false, before });
+        let started = Instant::now();
+        self.turn = Some(Turn { group: Some(group), started, stopping: false, before, file, opened_another: false });
         true
     }
 
@@ -648,9 +658,46 @@ impl Assistant {
                 Event::Finished(summary) => self.finish(transcript::finished(&summary)),
                 Event::Cancelled => self.finish(Ending::Stopped),
                 Event::Failed(reason) => self.fail(&reason),
-                other => self.transcript.apply(&other, project),
+                other => {
+                    let opened = self.transcript.opens_another_project(&other);
+                    self.transcript.apply(&other, project);
+                    if let (true, Some(turn)) = (opened, &mut self.turn) {
+                        turn.opened_another = true;
+                    }
+                }
             }
         }
+    }
+
+    /// The assistant itself has opened another project (or started a new
+    /// one) in the middle of its turn. The turn carries on, and the
+    /// conversation goes along: it is about that project from now on, and
+    /// is found with it another day, no longer with the one that was left.
+    /// The window starts over for the new project, as it does when the user
+    /// opens one; and what the conversation's lines led to is forgotten,
+    /// for it was in the project that is gone.
+    fn go_along(&mut self, state: &mut UiState, snapshot: &Snapshot) {
+        state.reset_for_new_project();
+        state.reconcile(&snapshot.project);
+        self.transcript.forget_places();
+        let (now, file) = {
+            let session = self.session.lock();
+            (session.project().clone(), session.path().map(PathBuf::from))
+        };
+        let left = self.turn.as_mut().and_then(|turn| {
+            // What the turn changes from here on is told against this.
+            turn.before = now;
+            std::mem::replace(&mut turn.file, file.clone())
+        });
+        if let Some(session) = &self.conversation {
+            if let Some(left) = left.filter(|left| Some(left) != file.as_ref()) {
+                self.store.release(&left, session);
+            }
+            if let Some(file) = &file {
+                self.store.remember(file, session);
+            }
+        }
+        self.project = Some((state.project_generation, file));
     }
 
     /// The conversation goes by `session` from now on.

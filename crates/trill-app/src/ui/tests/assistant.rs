@@ -1615,6 +1615,89 @@ fn a_project_saved_for_the_first_time_keeps_its_conversation_and_a_new_one_start
 }
 
 #[test]
+fn a_conversation_goes_along_to_a_project_the_assistant_itself_opens() {
+    let home = tempfile::tempdir().unwrap();
+    let storage = trill_runtime::Storage::At { settings: home.path().join("settings.json"), library_index: None };
+    let runtime = Arc::new(Runtime::start(RuntimeOptions { storage, ..RuntimeOptions::hermetic() }).unwrap());
+    let (night, day) = (home.path().join("night.trill"), home.path().join("day.trill"));
+    let mut ids = None;
+    let mut harness = Harness::on(runtime, UiOptions::default(), |session| {
+        // Two songs with the same ids in them, as any two songs have.
+        ids = Some(three_tracks(session));
+        session.save(&day).unwrap();
+        session.save(&night).unwrap();
+    });
+    let (tracks, clips) = ids.unwrap();
+    let script = Script::ready();
+    harness.open_assistant(&script);
+    let kept = |harness: &mut Harness| {
+        harness.app.assistant_mut().store_mut().flush();
+        std::fs::read_to_string(home.path().join("assistant.json")).unwrap()
+    };
+
+    // The first clip is selected when the message goes.
+    harness.click(harness.lane(9.0, 0));
+    harness.tell("thin out the first clip, then open my other song and add a part to it");
+    script.say([started(), call("1", "update_clip", json!({ "clip": clips[0].0, "muted": true }))]);
+    harness.idle(2);
+    script.say([
+        answer("1", "update_clip", Ok("{}")),
+        call("2", "load_project", json!({ "path": day.display().to_string() })),
+    ]);
+    harness.idle(2);
+    let update = |harness: &Harness| {
+        let found = harness.items().iter().find_map(|item| match item {
+            Item::Tool(line) if line.tool == "update_clip" => Some(line.place.clone()),
+            _ => None,
+        });
+        found.expect("the call is in the conversation")
+    };
+    assert!(update(&harness).is_some(), "the line of the first call leads to its clip");
+    assert!(kept(&mut harness).contains("night.trill"));
+    let generation = harness.app.state().project_generation;
+    assert_eq!(harness.selected_clips(), [clips[0]]);
+
+    // The tool opens the other song, as the server does it: in the
+    // session, with no word to the window.
+    harness.session.lock().load(&day).unwrap();
+    script
+        .say([answer("2", "load_project", Ok("{ \"name\": \"Untitled\" }")), create_clip("3", tracks[1], "Part", 4.0)]);
+    harness.idle(3);
+    assert!(harness.app.assistant().is_working(), "the turn carries on");
+    assert_eq!(script.state().cancels, 0, "nothing was stopped: the assistant opened it itself");
+    assert_eq!(harness.items().len(), 4, "and the conversation is all there");
+    assert_eq!(harness.app.state().project_generation, generation + 1, "the window started over for the new song");
+    assert!(harness.selected_clips().is_empty(), "with nothing of the old one selected");
+    assert_eq!(update(&harness), None, "the line no longer leads: the same id is another song's clip now");
+    let record = kept(&mut harness);
+    assert!(
+        record.contains("day.trill") && !record.contains("night.trill"),
+        "the conversation is the new song's: {record}"
+    );
+
+    // What the turn makes from here on is shown in the song it is made in.
+    let part = harness.tool_adds_clip(&script, "3", tracks[1], "Part", 4.0);
+    script.say([text("Opened it and added a part."), finished()]);
+    harness.idle(30);
+    assert_eq!(harness.selected_clips(), [part]);
+    assert_eq!(harness.app.assistant().conversation(), Some(&conversation_id('a')));
+    assert_eq!(script.state().opened, [None], "one conversation throughout");
+
+    // The song that was left has no conversation; the one gone to has it.
+    harness.session.lock().load(&night).unwrap();
+    harness.app.state_mut().reset_for_new_project();
+    harness.idle(3);
+    assert!(harness.items().is_empty());
+    assert_eq!(harness.app.assistant().conversation(), None);
+    harness.session.lock().load(&day).unwrap();
+    harness.app.state_mut().reset_for_new_project();
+    harness.idle(2);
+    wait_for_the_conversation(&mut harness);
+    assert_eq!(harness.app.assistant().conversation(), Some(&conversation_id('a')));
+    assert!(harness.is_on_screen("Opened it and added a part."));
+}
+
+#[test]
 fn what_was_sent_is_what_the_script_saw() {
     // The seam itself: a message and its context arrive as given.
     let (mut harness, script, ..) = assisted();

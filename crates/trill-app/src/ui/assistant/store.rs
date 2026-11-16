@@ -213,6 +213,17 @@ impl Store {
         self.save();
     }
 
+    /// Lets go of `session` as the conversation about `project`, keeping
+    /// what was kept of it: the conversation has gone on to another
+    /// project. Nothing happens if the project's conversation is another.
+    pub fn release(&mut self, project: &Path, session: &SessionId) {
+        let key = key(project);
+        if self.remembered.conversations.get(&key).is_some_and(|kept| kept.session == session.as_str()) {
+            self.remembered.conversations.remove(&key);
+            self.save();
+        }
+    }
+
     /// Forgets the conversation about `project`, and what was kept of it.
     pub fn forget(&mut self, project: &Path) {
         if let Some(kept) = self.remembered.conversations.remove(&key(project)) {
@@ -401,11 +412,22 @@ mod tests {
         assert!(transcripts.join(format!("{}.json", id('b'))).exists());
         assert_eq!(std::fs::read_dir(&transcripts).unwrap().count(), 1, "and no temporary file is left behind");
 
-        store.forget(project);
+        // A conversation that goes on to another project is let go of
+        // here and keeps its record.
+        let other = Path::new("songs/b.trill");
+        store.release(project, &id('a'));
+        assert_eq!(store.conversation(project), Some(id('b')), "only the conversation named is let go of");
+        store.release(project, &id('b'));
+        store.remember(other, &id('b'));
         store.flush();
-        assert_eq!(store.conversation(project), None);
+        assert_eq!((store.conversation(project), store.conversation(other)), (None, Some(id('b'))));
+        assert!(transcripts.join(format!("{}.json", id('b'))).exists(), "what was kept of it stays");
+
+        store.forget(other);
+        store.flush();
+        assert_eq!(store.conversation(other), None);
         assert_eq!(std::fs::read_dir(&transcripts).unwrap().count(), 0);
-        assert_eq!(open(home.path()).conversation(project), None);
+        assert_eq!(open(home.path()).conversation(other), None);
     }
 
     #[test]
