@@ -924,7 +924,10 @@ impl TrillServer {
     fn set_automation(&self, Parameters(request): Parameters<SetAutomationRequest>) -> CallToolResult {
         let mut session = self.session.lock();
         let reply = (|| {
-            let points = parse_points(&request.points)?;
+            if request.points.is_none() && request.enabled.is_none() {
+                return Err("give `points` (the envelope), `enabled` (to switch it off or on), or both".to_string());
+            }
+            let points = request.points.as_deref().map(parse_points).transpose()?;
             let need = |value: Option<u64>, what: &str| value.ok_or_else(|| format!("this target needs `{what}`"));
             let (target, min, max) = match request.target.kind {
                 TargetKind::TrackVolume => (
@@ -945,15 +948,32 @@ impl TrillServer {
                     (AutomationTarget::DeviceParam { device, param: info.id.clone() }, info.min, info.max)
                 }
             };
-            if let Some(point) = points.iter().find(|point| point.value < min || point.value > max) {
+            if let Some(point) = points.iter().flatten().find(|point| point.value < min || point.value > max) {
                 return Err(format!(
                     "value {} at beat {} is outside the allowed range {min}..={max}",
                     point.value, point.beat
                 ));
             }
-            let count = points.len();
-            edit(&mut session, |project| project.set_automation(target, points))?;
-            Ok(json!({ "point_count": count, "cleared": count == 0 }))
+            edit(&mut session, |project| {
+                let written = points.is_some();
+                if let Some(points) = points {
+                    project.set_automation(target.clone(), points)?;
+                }
+                let lane = project.automation.iter().find(|lane| lane.target == target);
+                let Some(count) = lane.map(|lane| lane.points.len()) else {
+                    // No envelope: one was just cleared, or there never was one to switch.
+                    return match written {
+                        true => Ok(json!({ "point_count": 0, "cleared": true })),
+                        false => Err(EditError::Invalid(
+                            "there is no automation for that target to switch; write `points` first".into(),
+                        )),
+                    };
+                };
+                // Writing an envelope means wanting to hear it.
+                let enabled = request.enabled.unwrap_or(written || lane.is_some_and(|lane| lane.enabled));
+                project.set_automation_enabled(&target, enabled)?;
+                Ok(json!({ "point_count": count, "cleared": false, "enabled": enabled }))
+            })
         })();
         finish(reply)
     }

@@ -343,8 +343,12 @@ pub struct SetAutomationRequest {
     pub target: TargetInput,
     /// The complete envelope; it replaces any existing one. Values move in a straight line between points
     /// unless a point says otherwise, and are held before the first and after the last. An empty list removes
-    /// the automation.
-    pub points: Vec<PointInput>,
+    /// the automation. Omit to keep the envelope as it is (when only switching `enabled`).
+    pub points: Option<Vec<PointInput>>,
+    /// false switches the automation off without deleting it: the target then stays at the value it is set to
+    /// (update_device, update_track). true switches it back on. Writing `points` switches it on unless this
+    /// says otherwise.
+    pub enabled: Option<bool>,
 }
 
 #[derive(Copy, Clone, Debug, Deserialize, JsonSchema)]

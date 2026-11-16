@@ -272,6 +272,43 @@ fn automation_drives_volume_and_device_parameters() {
 }
 
 #[test]
+fn automation_that_is_switched_off_drives_nothing() {
+    let mut project = Project::new("t");
+    let track = sine_track(&mut project, "A");
+    clip_with(&mut project, track, 0.0, 8.0, &[note(93, 0.0, 8.0)]);
+    let filter = project.add_device(ChainRef::Track(track), "builtin:filter", "Filter", None).unwrap();
+    let plain = render(&project, &BuiltinFactory, &options()).unwrap();
+
+    let volume = AutomationTarget::TrackVolume { track };
+    let cutoff = AutomationTarget::DeviceParam { device: filter, param: "cutoff".into() };
+    let master = AutomationTarget::MasterVolume;
+    project
+        .set_automation(volume.clone(), vec![AutomationPoint::new(0.0, -60.0), AutomationPoint::new(8.0, 0.0)])
+        .unwrap();
+    project
+        .set_automation(cutoff.clone(), vec![AutomationPoint::new(0.0, 20_000.0), AutomationPoint::new(6.0, 60.0)])
+        .unwrap();
+    project.set_automation(master.clone(), vec![AutomationPoint::new(0.0, -30.0)]).unwrap();
+    let automated = render(&project, &BuiltinFactory, &options()).unwrap();
+    assert_ne!(automated.left, plain.left);
+
+    // Off, every kind of lane leaves its target where it is set by hand:
+    // the song is, to the sample, the one without automation.
+    for target in [&volume, &cutoff, &master] {
+        project.set_automation_enabled(target, false).unwrap();
+    }
+    let off = render(&project, &BuiltinFactory, &options()).unwrap();
+    assert!(off.left == plain.left && off.right == plain.right, "a lane that is off still moves something");
+
+    // And on again, the one with it.
+    for target in [&volume, &cutoff, &master] {
+        project.set_automation_enabled(target, true).unwrap();
+    }
+    let on = render(&project, &BuiltinFactory, &options()).unwrap();
+    assert!(on.left == automated.left && on.right == automated.right);
+}
+
+#[test]
 fn audio_clips_play_in_time_and_in_tune() {
     let dir = std::env::temp_dir().join(format!("trill-test-{}", std::process::id()));
     let path = dir.join("tone.wav");

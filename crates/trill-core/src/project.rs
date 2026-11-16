@@ -570,6 +570,19 @@ pub struct AutomationLane {
     pub target: AutomationTarget,
     /// Sorted by beat; never empty.
     pub points: Vec<AutomationPoint>,
+    /// Off, the lane keeps its points and drives nothing: its target stays
+    /// where it is set by hand. This is what lets someone take hold of an
+    /// automated control without throwing the envelope away.
+    #[serde(default = "on", skip_serializing_if = "is_on")]
+    pub enabled: bool,
+}
+
+fn on() -> bool {
+    true
+}
+
+fn is_on(enabled: &bool) -> bool {
+    *enabled
 }
 
 impl AutomationLane {
@@ -819,7 +832,7 @@ impl Project {
                     }
                     _ => return None,
                 };
-                Some(AutomationLane { target, points: lane.points.clone() })
+                Some(AutomationLane { target, points: lane.points.clone(), enabled: lane.enabled })
             })
             .collect();
         self.automation.extend(lanes);
@@ -1275,11 +1288,25 @@ impl Project {
             return invalid("automation points need finite values and beats >= 0");
         }
         points.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+        // A lane that is switched off stays off when its points are edited.
+        let enabled = self.automation.iter().find(|lane| lane.target == target).is_none_or(|lane| lane.enabled);
         self.automation.retain(|lane| lane.target != target);
         if !points.is_empty() {
-            self.automation.push(AutomationLane { target, points });
+            self.automation.push(AutomationLane { target, points, enabled });
         }
         Ok(())
+    }
+
+    /// Switches a lane off or on again. Off, it keeps its points but drives
+    /// nothing, and its target stays where it is set by hand.
+    pub fn set_automation_enabled(&mut self, target: &AutomationTarget, enabled: bool) -> Result<(), EditError> {
+        match self.automation.iter_mut().find(|lane| lane.target == *target) {
+            Some(lane) => {
+                lane.enabled = enabled;
+                Ok(())
+            }
+            None => invalid("there is no automation for that target to switch"),
+        }
     }
 
     /// Drops lanes whose track or device no longer exists.
@@ -1341,6 +1368,35 @@ mod tests {
 
     fn note(pitch: u8, start: Beats) -> Note {
         Note { pitch, start, length: 1.0, velocity: 100 }
+    }
+
+    #[test]
+    fn a_lane_can_be_switched_off_and_keeps_its_points() {
+        let mut project = Project::new("t");
+        let track = project.add_track("Keys");
+        let volume = AutomationTarget::TrackVolume { track };
+        let pan = AutomationTarget::TrackPan { track };
+        let points = vec![AutomationPoint::new(0.0, -12.0), AutomationPoint::new(8.0, 0.0)];
+        project.set_automation(volume.clone(), points.clone()).unwrap();
+        assert!(project.automation[0].enabled, "a new lane plays");
+        assert!(!project.to_json().contains("enabled\": true"), "which is not worth a line in the file");
+
+        project.set_automation_enabled(&volume, false).unwrap();
+        assert_eq!((project.automation[0].enabled, &project.automation[0].points), (false, &points));
+        // Editing its points does not switch it back on behind anyone's back.
+        project.set_automation(volume.clone(), points[..1].to_vec()).unwrap();
+        assert!(!project.automation[0].enabled);
+        // It is saved and loaded as it is, and copied with its track.
+        let loaded = Project::from_json(&project.to_json()).unwrap();
+        assert_eq!(loaded.automation, project.automation);
+        let copy = project.duplicate_track(track).unwrap();
+        let copied =
+            project.automation.iter().find(|lane| lane.target == AutomationTarget::TrackVolume { track: copy });
+        assert!(copied.is_some_and(|lane| !lane.enabled));
+
+        project.set_automation_enabled(&volume, true).unwrap();
+        assert!(project.automation.iter().find(|lane| lane.target == volume).unwrap().enabled);
+        assert!(project.set_automation_enabled(&pan, false).is_err(), "nothing to switch where there is no lane");
     }
 
     /// A song that is opened and saved must come back as it was, to the last

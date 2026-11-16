@@ -244,7 +244,7 @@ impl Compiler<'_> {
         let slots: Vec<DeviceSlot> = devices.iter().map(|device| self.slot(device, problems)).collect();
 
         let mut automation = Vec::new();
-        for lane in &project.automation {
+        for lane in project.automation.iter().filter(|lane| lane.enabled) {
             let AutomationTarget::DeviceParam { device, param } = &lane.target else { continue };
             let Some(slot) = devices.iter().position(|d| d.id == *device) else { continue };
             let Some(meta) = self.bank.devices.get(device) else { continue };
@@ -416,7 +416,8 @@ fn lane_points(
     project: &Project,
     matches: impl Fn(&AutomationTarget) -> bool,
 ) -> Option<Vec<trill_core::AutomationPoint>> {
-    project.automation.iter().find(|lane| matches(&lane.target)).map(|lane| lane.points.clone())
+    // A lane that is switched off is no lane to the engine.
+    project.automation.iter().find(|lane| lane.enabled && matches(&lane.target)).map(|lane| lane.points.clone())
 }
 
 /// A clip's notes as the engine plays them: absolute positions, with the

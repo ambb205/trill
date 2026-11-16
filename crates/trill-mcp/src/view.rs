@@ -206,6 +206,9 @@ pub fn target_json(target: &AutomationTarget) -> Value {
 
 pub fn lane_json(lane: &AutomationLane, include_points: bool) -> Value {
     let mut out = json!({ "target": target_json(&lane.target), "point_count": lane.points.len() });
+    if !lane.enabled {
+        out["enabled"] = json!(false);
+    }
     if include_points {
         out["points"] = lane
             .points

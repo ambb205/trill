@@ -1081,3 +1081,37 @@ async fn projects_lost_to_a_crash_are_listed_brought_back_and_discarded() {
     let error = call(client, "recover_project", json!({ "action": "open", "index": 0 })).await.unwrap_err();
     assert!(error.contains("nothing to recover"), "{error}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn automation_is_switched_off_and_on_without_losing_it() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let track = ok(client, "create_track", json!({ "name": "Keys", "instrument": "builtin:polysynth" })).await;
+    let target = json!({ "type": "track_volume", "track": track["track_id"] });
+    let lane = |automation: &Value| automation["automation"][0].clone();
+
+    let written = ok(client, "set_automation", json!({ "target": target, "points": [[0, -12], [8, 0]] })).await;
+    assert_eq!((written["point_count"].as_u64(), written["enabled"].as_bool()), (Some(2), Some(true)));
+    assert!(lane(&ok(client, "get_automation", json!({})).await).get("enabled").is_none(), "on is not worth saying");
+
+    let off = ok(client, "set_automation", json!({ "target": target, "enabled": false })).await;
+    assert_eq!((off["point_count"].as_u64(), off["enabled"].as_bool()), (Some(2), Some(false)));
+    let shown = lane(&ok(client, "get_automation", json!({})).await);
+    assert_eq!((shown["enabled"].as_bool(), shown["points"].as_array().map(Vec::len)), (Some(false), Some(2)));
+    assert_eq!(ok(client, "get_project", json!({})).await["automation"][0]["enabled"], false);
+
+    // Writing an envelope means wanting to hear it, unless told otherwise.
+    let rewritten = ok(client, "set_automation", json!({ "target": target, "points": [[0, -6]] })).await;
+    assert_eq!(rewritten["enabled"], true);
+    let quiet = ok(client, "set_automation", json!({ "target": target, "points": [[0, -6]], "enabled": false })).await;
+    assert_eq!(quiet["enabled"], false);
+    assert_eq!(ok(client, "set_automation", json!({ "target": target, "enabled": true })).await["enabled"], true);
+
+    // Nothing to do, and nothing to switch, say so.
+    let error = call(client, "set_automation", json!({ "target": target })).await.unwrap_err();
+    assert!(error.contains("`points`") && error.contains("`enabled`"), "{error}");
+    let pan = json!({ "type": "track_pan", "track": track["track_id"] });
+    let error = call(client, "set_automation", json!({ "target": pan, "enabled": false })).await.unwrap_err();
+    assert!(error.contains("no automation for that target"), "{error}");
+    assert_eq!(ok(client, "set_automation", json!({ "target": target, "points": [] })).await["cleared"], true);
+}
