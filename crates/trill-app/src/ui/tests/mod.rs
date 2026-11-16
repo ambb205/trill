@@ -372,11 +372,11 @@ impl Harness {
         self.header(row, left + (right - left) * fraction, arrangement::HEADER_CONTROLS_TOP + BAR / 2.0)
     }
 
-    /// Center of the mute (0) or solo (1) chip of track row `row`.
+    /// Center of the mute (0), solo (1) or arm (2) chip of track row `row`.
     fn header_chip(&self, row: usize, index: f32) -> Pos2 {
         let right = arrangement::HEADER_WIDTH - arrangement::HEADER_RIGHT;
         let chip = arrangement::HEADER_CHIP;
-        let left = right - (2.0 - index) * chip.x - (1.0 - index) * GAP;
+        let left = right - (3.0 - index) * chip.x - (2.0 - index) * GAP;
         self.header(row, left + chip.x / 2.0, arrangement::HEADER_NAME_TOP + chip.y / 2.0)
     }
 

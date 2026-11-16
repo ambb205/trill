@@ -167,6 +167,20 @@ shot keyboard-shortcuts --demo --shortcuts --keyboard
 shot min-window-keyboard "$song" --select Bass --hold zadg --size 1060x640
 shot graphite-keyboard-playing "$song" --select Lead --hold adg --theme graphite
 
+# Recording: a track armed and a take being counted in, in the arrangement
+# and in the mixer, and the same in the smallest window, where the transport
+# gives up its clock. Then the Audio and MIDI panel on made-up hardware: a
+# studio's worth of devices with one MIDI port held by another program, the
+# chosen interface unplugged (the speakers play, and the panel says why),
+# and a machine with nothing plugged in at all.
+shot recording-count-in "$song" --select Lead --arm Lead --record
+shot recording-mixer "$song" --select Lead --arm Lead --arm Bass --tab mixer --record
+shot min-window-recording "$song" --select Bass --arm Bass --record --size 1060x640
+shot audio-settings "$song" --select Lead --settings --audio-scene studio
+shot audio-settings-fallback "$song" --select Lead --settings --audio-scene fallback
+shot audio-settings-none --settings --audio-scene none
+shot graphite-audio-settings "$song" --select Lead --settings --audio-scene studio --theme graphite
+
 # Staged for the last pictures, in a folder git ignores: two projects that
 # their program did not live to save, in a profile folder of their own (so
 # the offer shows nobody's real work, and nothing of the user's is read),

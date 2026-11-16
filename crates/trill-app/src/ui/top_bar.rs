@@ -5,7 +5,7 @@
 use super::arrangement::ops;
 use super::shortcuts::{self, Command};
 use super::state::{Clipboard, Cx, DetailTab};
-use super::{arrangement, brand, files, recovery, timeline};
+use super::{arrangement, audio_settings, brand, files, recording, recovery, timeline};
 use eframe::egui::{self, Align2, Id, Rect, Sense, Ui, pos2, vec2};
 use trill_core::TimeSignature;
 use trill_core::project::{MAX_TEMPO, MIN_TEMPO};
@@ -30,8 +30,21 @@ const POSITION_WIDTH: f32 = 140.0;
 /// Room for three digits before the point and the unit after.
 const TEMPO_WIDTH: f32 = 106.0;
 const SIGNATURE_WIDTH: f32 = 52.0;
-const TRANSPORT_WIDTH: f32 =
-    4.0 * BUTTON_WIDTH + 3.0 * 4.0 + 10.0 + POSITION_WIDTH + 6.0 + TEMPO_WIDTH + 6.0 + SIGNATURE_WIDTH;
+/// The box beside the record button: the count-in while nothing is being
+/// recorded, and what the take is doing while one is.
+const COUNT_WIDTH: f32 = 66.0;
+/// The song position without its clock, as the narrowest windows show it.
+const POSITION_COMPACT: f32 = 76.0;
+const TRANSPORT_WIDTH: f32 = 5.0 * BUTTON_WIDTH
+    + COUNT_WIDTH
+    + 3.0 * 4.0
+    + 10.0
+    + POSITION_WIDTH
+    + 6.0
+    + TEMPO_WIDTH
+    + 6.0
+    + SIGNATURE_WIDTH;
+const TRANSPORT_COMPACT: f32 = TRANSPORT_WIDTH - (POSITION_WIDTH - POSITION_COMPACT);
 const CPU_METER_WIDTH: f32 = 54.0;
 
 pub fn show(ui: &mut Ui, cx: &mut Cx) {
@@ -42,19 +55,22 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     paint::hline_above(&painter, bar.x_range(), bar.bottom(), theme.hairline);
 
     // In a window too narrow for everything, things give way in a fixed
-    // order: a long project name first, down to a few letters, and only
-    // then the meter beside the load. So the right is laid out first, told
-    // where the transport would end with the name at its shortest, and
-    // what is left over says how much of the name there is room for.
+    // order: a long project name first, down to a few letters, then the
+    // meter beside the load, and last the clock beside the song position.
+    // So the right is laid out first, told where the transport would end
+    // with the name at its shortest, and what is left over says how much
+    // of the name there is room for.
     let shortest = project_group_shortest(&painter, cx, bar);
     let right_start = status_group(ui, cx, bar, shortest + GAP + TRANSPORT_WIDTH + GAP);
-    let left_end = project_group(ui, cx, bar, right_start - GAP - TRANSPORT_WIDTH - GAP);
+    let compact = right_start < shortest + GAP + TRANSPORT_WIDTH + GAP;
+    let width = if compact { TRANSPORT_COMPACT } else { TRANSPORT_WIDTH };
+    let left_end = project_group(ui, cx, bar, right_start - GAP - width - GAP);
 
     // At its usual place when there is room; otherwise squeezed between
     // its neighbors, keeping clear of the menus first.
-    let latest = right_start - GAP - TRANSPORT_WIDTH;
+    let latest = right_start - GAP - width;
     let left = TRANSPORT_LEFT.min(latest).max(left_end + GAP);
-    transport_group(ui, cx, bar, bar.left() + left);
+    transport_group(ui, cx, bar, bar.left() + left, compact);
 }
 
 /// A box of the bar's height at `left`, vertically centered.
@@ -166,6 +182,10 @@ fn file_menu(ui: &mut Ui, cx: &mut Cx) {
     if item(ui, "Export WAV\u{2026}", Command::ExportWav, idle) {
         files::export_wav(ui.ctx(), cx);
     }
+    trill_noir::menu_separator(ui, theme);
+    if item(ui, "Audio and MIDI\u{2026}", Command::AudioSettings, true) {
+        audio_settings::open(cx);
+    }
 }
 
 fn edit_menu(ui: &mut Ui, cx: &mut Cx) {
@@ -268,7 +288,7 @@ fn view_menu(ui: &mut Ui, cx: &mut Cx) {
     }
     let switch = keys(Command::ToggleKeyboard);
     if MenuItem::new("Computer keyboard").shortcut(&switch).checked(playing).show(ui, theme).clicked() {
-        cx.keyboard.toggle(cx.session);
+        cx.keyboard.toggle();
     }
     trill_noir::menu_separator(ui, theme);
     for (tab, label) in [(DetailTab::Clip, "Clip"), (DetailTab::Devices, "Devices"), (DetailTab::Mixer, "Mixer")] {
@@ -311,8 +331,9 @@ fn capitalized(name: &str) -> String {
     letters.next().map_or_else(String::new, |first| first.to_uppercase().chain(letters).collect())
 }
 
-/// Play, stop, loop and metronome, then position, tempo and time signature.
-fn transport_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, left: f32) {
+/// Play, stop and record with its count-in, loop and metronome, then
+/// position, tempo and time signature. `compact` leaves the clock out.
+fn transport_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, left: f32, compact: bool) {
     let theme = cx.theme;
     let id = ui.scope_id().with("transport");
     let mut x = left;
@@ -335,6 +356,30 @@ fn transport_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, left: f32) {
     if response.clicked() {
         stop_or_rewind(cx);
     }
+
+    // Record, and beside it the count-in, which while a take runs says
+    // what the take is doing. The two share an edge: they are one control.
+    let take = cx.live.take.clone();
+    let color = if take.is_some() { theme.signal } else { theme.ink_dim };
+    let rect = boxed(bar, x, BUTTON_WIDTH);
+    let lit = take.is_some();
+    let response = trill_noir::icon_button(ui, theme, rect, id.with("record"), Icon::Record, lit, color);
+    let keys = shortcuts::keys(Command::Record);
+    let about = match &take {
+        Some(take) => recording::describe(cx, take),
+        None if cx.live.armed.is_empty() => {
+            format!("Record on the selected track, which is armed for it \u{00B7} {keys}")
+        }
+        None => format!("Record what is played on the armed tracks \u{00B7} {keys}"),
+    };
+    cx.hint(&response, about);
+    if response.clicked() {
+        recording::toggle(cx);
+    }
+    let rect = boxed(bar, rect.right() - 1.0, COUNT_WIDTH + 1.0);
+    count_in(ui, cx, rect, id.with("count-in"));
+    x = rect.right() + 4.0;
+
     let looping = cx.snap.project.loop_region.enabled;
     let color = if looping { theme.ink } else { theme.ink_dim };
     let response = trill_noir::icon_button(ui, theme, button(&mut x), id.with("loop"), Icon::Loop, looping, color);
@@ -356,14 +401,16 @@ fn transport_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, left: f32) {
 
     let signature = cx.snap.project.time_signature;
     let painter = ui.painter().clone();
-    let position = boxed(bar, x, POSITION_WIDTH);
+    let position = boxed(bar, x, if compact { POSITION_COMPACT } else { POSITION_WIDTH });
     paint::frame(&painter, position, theme.hairline);
     let inner = position.shrink2(vec2(8.0, 0.0));
     let bars = timeline::format_position(cx.live.position, signature).replace('.', ". ");
     text::paint(&painter, inner, Align2::LEFT_CENTER, theme.text.readout, &bars, theme.ink);
-    let clock = timeline::format_clock(cx.live.position, cx.snap.project.tempo);
-    let clock_style = TextStyle { size: 12.0, ..theme.text.value };
-    text::paint(&painter, inner, Align2::RIGHT_CENTER, clock_style, &clock, theme.ink_dim);
+    if !compact {
+        let clock = timeline::format_clock(cx.live.position, cx.snap.project.tempo);
+        let clock_style = TextStyle { size: 12.0, ..theme.text.value };
+        text::paint(&painter, inner, Align2::RIGHT_CENTER, clock_style, &clock, theme.ink_dim);
+    }
     let response = ui.interact(position, id.with("position"), Sense::hover());
     cx.hint(&response, "Song position in bars, beats and sixteenths, and in minutes and seconds");
     x = position.right() + 6.0;
@@ -392,6 +439,52 @@ fn transport_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, left: f32) {
     x += TEMPO_WIDTH + 6.0;
 
     time_signature(ui, cx, boxed(bar, x, SIGNATURE_WIDTH), id.with("signature"));
+}
+
+/// The box beside the record button. While nothing is recorded it is the
+/// count-in, with a menu to choose it; while a take runs it says what the
+/// take is doing: counting in, recording, or which pass of the loop.
+fn count_in(ui: &mut Ui, cx: &mut Cx, rect: Rect, id: Id) {
+    let theme = cx.theme;
+    let painter = ui.painter_at(rect);
+    if let Some(take) = cx.live.take.clone() {
+        let state = recording::state_label(&take, cx.snap.project.loop_region.enabled);
+        let response = ui.interact(rect, id, Sense::hover());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("Take: {state}")));
+        painter.rect_filled(rect, 0.0, theme.selected);
+        paint::frame(&painter, rect, theme.hairline);
+        text::paint(&painter, rect.shrink(1.0), Align2::CENTER_CENTER, theme.text.micro, &state, theme.signal);
+        cx.hint(&response, recording::describe(cx, &take));
+        return;
+    }
+
+    let bars = cx.live.count_in;
+    let response = ui.interact(rect, id, Sense::click());
+    let name = format!("Count-in: {}", recording::count_in_name(bars));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &name));
+    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
+    if open {
+        painter.rect_filled(rect, 0.0, theme.selected);
+    } else if response.hovered() {
+        painter.rect_filled(rect, 0.0, theme.hover);
+    }
+    paint::frame(&painter, rect, theme.hairline);
+    let color = if open || response.hovered() { theme.ink } else { theme.ink_dim };
+    let value = if bars == 1 { "1 bar".to_owned() } else { format!("{bars} bars") };
+    let content = Rect::from_min_max(pos2(rect.left() + 7.0, rect.top()), pos2(rect.right() - 13.0, rect.bottom()));
+    text::paint(&painter, content, Align2::LEFT_CENTER, theme.text.micro, &value, color);
+    trill_noir::paint_icon(&painter, pos2(rect.right() - 8.0, rect.center().y), Icon::CaretDown, color);
+    cx.hint(&response, "Count-in: the bars the metronome clicks before a take that starts from a stopped song");
+    egui::Popup::menu(&response).gap(1.0).show(|ui| {
+        ui.set_min_width(130.0);
+        trill_noir::menu_heading(ui, theme, "Count-in");
+        for choice in recording::COUNT_INS {
+            let label = recording::count_in_name(choice);
+            if MenuItem::new(&label).checked(choice == bars).show(ui, theme).clicked() {
+                recording::set_count_in(cx, choice);
+            }
+        }
+    });
 }
 
 /// The signatures the time signature's menu offers.
@@ -466,15 +559,19 @@ fn time_signature(ui: &mut Ui, cx: &mut Cx, rect: Rect, id: Id) {
     });
 }
 
-/// Stops playback; pressing stop again returns to the start of the song.
+/// Stops playback, and with it a take that is being recorded or counted
+/// in; pressing stop again returns to the start of the song.
 pub fn stop_or_rewind(cx: &mut Cx) {
-    let playing = cx.live.playing;
-    cx.with_session(|session| if playing { session.stop() } else { session.seek(0.0) });
+    let rolling = cx.live.playing || cx.live.take.is_some();
+    cx.with_session(|session| if rolling { session.stop() } else { session.seek(0.0) });
 }
 
+/// Plays, or stops. A take ends where the song is stopped, and one that
+/// is still being counted in is called off: the song has not started, and
+/// Space must not then start it.
 pub fn toggle_play(cx: &mut Cx) {
-    let playing = cx.live.playing;
-    cx.with_session(|session| if playing { session.stop() } else { session.play() });
+    let rolling = cx.live.playing || cx.live.take.is_some();
+    cx.with_session(|session| if rolling { session.stop() } else { session.play() });
 }
 
 pub fn toggle_loop(cx: &mut Cx) {

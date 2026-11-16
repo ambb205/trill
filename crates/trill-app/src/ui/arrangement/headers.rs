@@ -9,7 +9,7 @@ use crate::ui::automation::{self, Hold};
 use crate::ui::shortcuts::{self, Command};
 use crate::ui::sounds::DropTarget;
 use crate::ui::state::{ArrangeDrag, ArrangementState, Cx, FocusArea, LaneOwner, TextEditState, TrackDrop};
-use crate::ui::{colors, units, widgets};
+use crate::ui::{colors, recording, units, widgets};
 use eframe::egui::{self, Align2, CursorIcon, PointerButton, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use trill_core::{AutomationTarget, ChainRef, Track, TrackId, TrackKind};
 use trill_noir::{Bar, Chip, Icon, MenuItem, TRACK_HUES, fade, paint, text};
@@ -154,7 +154,9 @@ fn header(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, number: 
     background.context_menu(|ui| track_menu(ui, cx, track));
 
     // Name row: number (or a group's fold caret), name, badge, automation,
-    // mute and solo. A short header centers it.
+    // mute, solo and arm. A short header centers it. The arm control is
+    // last, beside the meter, and its place is kept on the tracks that
+    // have none, so that mute and solo stand in one column.
     let name_top = if two_rows { rect.top() + HEADER_NAME_TOP } else { rect.center().y - HEADER_CHIP.y / 2.0 };
     let name_row = Rect::from_min_size(pos2(parts.left, name_top.round()), vec2(0.0, HEADER_CHIP.y));
     let chip = |index: f32| {
@@ -176,7 +178,7 @@ fn header(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, number: 
         let number_style = trill_noir::TextStyle { size: 11.0, ..theme.text.value };
         text::paint(&painter, index_rect, Align2::LEFT_CENTER, number_style, &number.to_string(), quiet);
     }
-    let mut name_rect = Rect::from_min_max(index_rect.right_top(), pos2(chip(-1.0).left() - 6.0, name_row.bottom()));
+    let mut name_rect = Rect::from_min_max(index_rect.right_top(), pos2(chip(-2.0).left() - 6.0, name_row.bottom()));
     let badge = match track.kind {
         TrackKind::Normal => None,
         TrackKind::Group => Some("Group"),
@@ -206,8 +208,8 @@ fn header(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, number: 
     let lanes_open = cx.state.arrangement.lanes.iter().any(|lane| lane.owner == LaneOwner::Track(track.id));
     let lanes_name = format!("Automation of {}", track.name);
     let lanes_chip = Chip::new("A", lanes_open).quiet(quiet).named(&lanes_name);
-    let response = trill_noir::chip(ui, theme, chip(-1.0), id.with("automation"), &lanes_chip);
-    automation::paint_owner_mark(&painter, cx, LaneOwner::Track(track.id), chip(-1.0));
+    let response = trill_noir::chip(ui, theme, chip(-2.0), id.with("automation"), &lanes_chip);
+    automation::paint_owner_mark(&painter, cx, LaneOwner::Track(track.id), chip(-2.0));
     let about = "Show or hide this track\u{2019}s automation lanes";
     cx.hint(&response, shortcuts::with_keys(about, Command::ToggleAutomation, cx.keyboard.is_on()));
     if response.clicked() {
@@ -217,7 +219,7 @@ fn header(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, number: 
 
     let (mute_name, solo_name) = (format!("Mute {}", track.name), format!("Solo {}", track.name));
     let mute = Chip::new("M", track.mute).accent(theme.warn).quiet(quiet).named(&mute_name);
-    let response = trill_noir::chip(ui, theme, chip(0.0), id.with("mute"), &mute);
+    let response = trill_noir::chip(ui, theme, chip(-1.0), id.with("mute"), &mute);
     cx.hint(&response, "Mute this track");
     if response.clicked() {
         let (track_id, mute) = (track.id, !track.mute);
@@ -227,7 +229,7 @@ fn header(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, number: 
         });
     }
     let solo = Chip::new("S", track.solo).accent(theme.info).quiet(quiet).named(&solo_name);
-    let response = trill_noir::chip(ui, theme, chip(1.0), id.with("solo"), &solo);
+    let response = trill_noir::chip(ui, theme, chip(0.0), id.with("solo"), &solo);
     cx.hint(&response, "Solo: hear only the soloed tracks");
     if response.clicked() {
         let (track_id, solo) = (track.id, !track.solo);
@@ -235,6 +237,10 @@ fn header(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, number: 
             project.track_mut(track_id)?.solo = solo;
             Ok(())
         });
+    }
+    if recording::armable(cx, track) {
+        let name = format!("Arm {}", track.name);
+        recording::arm_chip(ui, cx, track, chip(1.0), id.with("arm"), quiet, &name);
     }
 
     if two_rows {

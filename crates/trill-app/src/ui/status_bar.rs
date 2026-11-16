@@ -1,7 +1,14 @@
 //! The bar along the bottom: the state of the engine on the left, and on
 //! the right a one-line hint for whatever is under the pointer.
+//!
+//! The first items are the audio stream as it is now: the device, its
+//! sample rate, how much it asks for at a time and how late it is heard.
+//! They follow the stream when it changes, and a click on them opens the
+//! Audio and MIDI panel.
 
-use super::state::Cx;
+use super::audio_settings;
+use super::shortcuts::{self, Command};
+use super::state::{AudioSummary, Cx};
 use eframe::egui::{self, Align2, Color32, Painter, Rect, Sense, Ui, pos2};
 use trill_core::device::{BUILTIN_SCHEME, split_uri};
 use trill_noir::{TextStyle, paint, text};
@@ -24,14 +31,24 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
 
     let mut row = Row { painter: &painter, cx, x: bar.left() + EDGE, bar };
 
-    let (engine, state) = match (&row.cx.audio.warning, row.cx.live.audio_faults) {
-        (Some(_), _) => (theme.warn, "No audio"),
-        (None, faults) if faults > 0 => (theme.signal, "Engine"),
-        (None, _) => (theme.ok, "Engine"),
+    let audio = row.cx.audio;
+    let (engine, state) = match (audio.silent(), row.cx.live.audio_faults, &audio.info.warning) {
+        (true, ..) => (theme.warn, "No audio"),
+        (false, faults, _) if faults > 0 => (theme.signal, "Engine"),
+        // Sound, but not through what was asked for.
+        (false, _, Some(_)) => (theme.warn, "Engine"),
+        (false, _, None) => (theme.ok, "Engine"),
     };
     row.status(engine, state);
-    row.readout("Out", output_name(&row.cx.audio.output));
-    row.readout("Rate", &format_rate(row.cx.audio.sample_rate));
+    row.readout("Out", output_name(audio));
+    row.readout("Rate", &format_rate(audio.info.sample_rate));
+    if audio.info.device.is_some() {
+        // What a device does: how much it asks for at a time, and how
+        // long after that is rendered it is heard.
+        row.readout("Buffer", &audio.info.buffer_frames.to_string());
+        row.readout("Latency", &format!("{:.1} ms", audio.latency_ms));
+    }
+    let audio_items = Rect::from_min_max(pos2(bar.left(), bar.top()), pos2(row.x - GAP + 6.0, bar.bottom()));
     let plugins = plugin_count(row.cx);
     match (row.cx.catalog_ready, plugins) {
         (false, _) => row.status(theme.ink_faint, "Scanning plugins\u{2026}"),
@@ -49,6 +66,22 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     }
     let problems = problems(row.cx);
     let items_end = row.problems(ui, &problems);
+
+    // The audio items are a button: they open the panel that changes them.
+    let response = ui.interact(audio_items, ui.scope_id().with("audio"), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Audio and MIDI settings"));
+    if response.hovered() {
+        painter.rect_filled(audio_items, 0.0, theme.hover);
+    }
+    let keys = shortcuts::keys(Command::AudioSettings);
+    let about = match &cx.audio.info.warning {
+        Some(warning) => format!("{warning} \u{00B7} click for the audio settings"),
+        None => format!("Audio and MIDI settings: the device, its sample rate and buffer, MIDI inputs \u{00B7} {keys}"),
+    };
+    cx.hint(&response, about);
+    if response.clicked() {
+        audio_settings::open(cx);
+    }
 
     let hint = if cx.state.hint.text().is_empty() { IDLE_HINT } else { cx.state.hint.text() };
     let room = Rect::from_min_max(pos2(items_end + HINT_CLEARANCE, bar.top()), pos2(bar.right() - EDGE, bar.bottom()));
@@ -114,7 +147,7 @@ impl Row<'_, '_> {
 /// Everything the problems item should tell the user about.
 fn problems(cx: &Cx) -> Vec<String> {
     let mut problems = Vec::new();
-    if let Some(warning) = &cx.audio.warning {
+    if let Some(warning) = &cx.audio.info.warning {
         problems.push(warning.clone());
     }
     problems.extend(cx.snap.problems.iter().cloned());
@@ -133,16 +166,22 @@ fn plugin_count(cx: &Cx) -> usize {
     cx.descriptors.iter().filter(|descriptor| is_plugin(&descriptor.uri)).count()
 }
 
-/// The output's name without the sample rate the engine appends to it,
-/// which has its own readout.
-fn output_name(output: &str) -> &str {
+/// The name of the device in use, or how the engine describes going
+/// without one.
+fn output_name(audio: &AudioSummary) -> &str {
+    audio.info.device.as_deref().unwrap_or_else(|| without_rate(&audio.info.output))
+}
+
+/// A description of the output without the sample rate the engine appends
+/// to it, which has its own readout.
+fn without_rate(output: &str) -> &str {
     let Some((name, rate)) = output.rsplit_once(" (") else { return output };
     let is_rate = rate.strip_suffix(" Hz)").is_some_and(|digits| digits.bytes().all(|byte| byte.is_ascii_digit()));
     if is_rate { name } else { output }
 }
 
 /// `"48 kHz"`, `"44.1 kHz"`.
-fn format_rate(sample_rate: f64) -> String {
+pub(super) fn format_rate(sample_rate: f64) -> String {
     let khz = sample_rate / 1000.0;
     if (khz - khz.round()).abs() < 0.005 { format!("{khz:.0} kHz") } else { format!("{khz:.1} kHz") }
 }
@@ -153,10 +192,10 @@ mod tests {
 
     #[test]
     fn the_output_name_loses_its_rate_suffix_only() {
-        assert_eq!(output_name("Speakers (Schiit Unison Modius E) (48000 Hz)"), "Speakers (Schiit Unison Modius E)");
-        assert_eq!(output_name("Speakers (Schiit Unison Modius E)"), "Speakers (Schiit Unison Modius E)");
-        assert_eq!(output_name("none (null backend)"), "none (null backend)");
-        assert_eq!(output_name("Line Out"), "Line Out");
+        assert_eq!(without_rate("Speakers (Schiit Unison Modius E) (48000 Hz)"), "Speakers (Schiit Unison Modius E)");
+        assert_eq!(without_rate("Speakers (Schiit Unison Modius E)"), "Speakers (Schiit Unison Modius E)");
+        assert_eq!(without_rate("none (null backend)"), "none (null backend)");
+        assert_eq!(without_rate("Line Out"), "Line Out");
     }
 
     #[test]

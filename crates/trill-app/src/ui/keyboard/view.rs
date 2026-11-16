@@ -49,7 +49,7 @@ pub fn switch(ui: &Ui, cx: &mut Cx, rect: Rect) -> Response {
     let keys = shortcuts::keys(Command::ToggleKeyboard);
     cx.hint(&response, format!("Play the selected track from the computer keyboard \u{00B7} {keys}"));
     if response.clicked() {
-        cx.keyboard.toggle(cx.session);
+        cx.keyboard.toggle();
     }
     response
 }
@@ -203,8 +203,10 @@ fn plays(ui: &Ui, cx: &mut Cx, cells: &mut Cells, id: Id, width: f32) {
             text::paint(cells.painter, room, Align2::LEFT_CENTER, style, &matter, theme.warn);
         }
         None => {
-            let stored = playing.track.and_then(|track| cx.snap.track(track)).map_or(0, |track| track.color);
-            let color = colors::track_color(theme, stored);
+            let stored = playing.tracks.first().and_then(|track| cx.snap.track(*track)).map_or(0, |track| track.color);
+            // Armed tracks are marked as their arm control is: these are
+            // played whatever is selected.
+            let color = if playing.armed { theme.signal } else { colors::track_color(theme, stored) };
             let left = paint::dot(cells.painter, value.left_center(), theme.metric.dot, color) + 6.0;
             let room = value.with_min_x(left);
             let used = text::paint(cells.painter, room, Align2::LEFT_CENTER, style, &playing.name, theme.ink);
@@ -218,6 +220,9 @@ fn plays(ui: &Ui, cx: &mut Cx, cells: &mut Cells, id: Id, width: f32) {
             Some(advice) => format!("{} \u{00B7} {advice}", silence.text()),
             None => silence.text(),
         },
+        None if playing.armed => {
+            format!("The keys play the armed tracks ({}), as a MIDI keyboard does \u{00B7} disarm to play the selected one", playing.name)
+        }
         None => {
             format!("The keys play {} on {} \u{00B7} select another track to play it", playing.instrument, playing.name)
         }
@@ -249,7 +254,7 @@ fn octave(ui: &Ui, cx: &mut Cx, cells: &mut Cells, id: Id) {
     let keys = [(cap_of(Role::Octave(-1)), "Octave down"), (cap_of(Role::Octave(1)), "Octave up")];
     let clicked = stepper(ui, cx, value, id.with("octave"), &shown, keys);
     if let Some(index) = clicked {
-        cx.keyboard.shift_octave(if index == 0 { -1 } else { 1 }, cx.session);
+        cx.keyboard.shift_octave(if index == 0 { -1 } else { 1 });
     }
     let response = ui.interact(whole, id.with("octave-cell"), Sense::hover());
     let range = range_name(cx.keyboard);
@@ -328,10 +333,12 @@ fn piano_keys(ui: &Ui, cx: &mut Cx, keys: Rect, id: Id) {
         .widget_info(|| eframe::egui::WidgetInfo::labeled(eframe::egui::Role::Button, true, "Computer keyboard keys"));
     let playing = cx.keyboard.playing().clone();
     let lowest = cx.keyboard.lowest();
-    let stored = playing.track.and_then(|track| cx.snap.track(track)).map_or(0, |track| track.color);
+    // The mouse plays the first of the tracks the keys play.
+    let first = playing.tracks.first().copied();
+    let stored = first.and_then(|track| cx.snap.track(track)).map_or(0, |track| track.color);
     let hue = colors::track_color(theme, stored);
     let hovered = response.hover_pos().and_then(|position| key_at(keys, position));
-    let auditioned = cx.state.audition.filter(|audition| Some(audition.track) == playing.track);
+    let auditioned = cx.state.audition.filter(|audition| Some(audition.track) == first);
 
     let painter = ui.painter_at(keys);
     let look = |semitone: u8| {
@@ -339,7 +346,7 @@ fn piano_keys(ui: &Ui, cx: &mut Cx, keys: Rect, id: Id) {
         let playable = pitch <= 127;
         let pitch = pitch.min(127) as u8;
         let lit = playable
-            && (playing.track.is_some_and(|track| cx.keyboard.is_sounding(track, pitch))
+            && (playing.tracks.iter().any(|track| cx.keyboard.is_sounding(*track, pitch))
                 || auditioned.is_some_and(|audition| audition.pitch == pitch));
         (playable, lit)
     };
@@ -384,7 +391,7 @@ fn piano_keys(ui: &Ui, cx: &mut Cx, keys: Rect, id: Id) {
     if response.is_pointer_button_down_on()
         && let Some(pointer) = ui.input(|input| input.pointer.interact_pos())
         && let Some(semitone) = key_at(keys, pointer)
-        && let Some(track) = playing.track
+        && let Some(track) = first
         && lowest as u16 + semitone as u16 <= 127
     {
         let pitch = lowest + semitone;

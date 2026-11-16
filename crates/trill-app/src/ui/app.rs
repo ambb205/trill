@@ -3,6 +3,7 @@
 
 use super::arrangement::ops;
 use super::assistant::{self, Assistant};
+use super::audio_settings::{self, Settings};
 use super::editors::{self, Editors};
 use super::files::{self, Confirm, Jobs};
 use super::keyboard::{self, Keyboard};
@@ -11,7 +12,9 @@ use super::shortcuts::{self, Command};
 use super::snapshot::{Live, Snapshot};
 use super::sounds::{Dropped, Report, Sounds};
 use super::state::{AudioSummary, BrowserState, BrowserTab, Cx, FocusArea, LaneOwner, Tool, UiState, lane_owner};
-use super::{UiOptions, arrangement, automation, browser, detail, dragging, piano_roll, status_bar, top_bar};
+use super::{
+    UiOptions, arrangement, automation, browser, detail, dragging, piano_roll, recording, status_bar, top_bar,
+};
 use eframe::egui;
 use parking_lot::Mutex;
 use std::num::NonZeroUsize;
@@ -27,7 +30,6 @@ use trill_runtime::Runtime;
 
 /// How often an idle window checks the session for edits made elsewhere.
 const IDLE_POLL: Duration = Duration::from_millis(100);
-const HOUSEKEEPING_INTERVAL: Duration = Duration::from_secs(1);
 /// Height the arrangement keeps however tall the detail panel is made:
 /// the ruler, two tracks and the master.
 const MIN_ARRANGEMENT_HEIGHT: f32 = 200.0;
@@ -65,6 +67,8 @@ pub struct TrillApp {
     recovery: Recovery,
     /// The computer keyboard, played as an instrument.
     keyboard: Keyboard,
+    /// The Audio and MIDI panel.
+    settings: Settings,
     /// The colors, type and metrics the window is painted with.
     theme: Theme,
     /// The devices that can be added. Starts as the built-in ones and is
@@ -83,7 +87,12 @@ pub struct TrillApp {
     started: Instant,
     frames: u32,
     last_meter_update: Instant,
-    last_housekeeping: Instant,
+    /// The selection the session was last told of; `None` before the first
+    /// time. Saves asking for the session when nothing moved.
+    told_selection: Option<Option<TrackId>>,
+    /// The project a take was last seen running in: one that ends because
+    /// its project was replaced leaves nothing to select.
+    take_generation: u64,
     /// The window title last sent, to avoid resending it every frame.
     title: String,
     /// Whether a text field had the keyboard when the last frame ended.
@@ -138,7 +147,7 @@ impl TrillApp {
         }
         state.browser.sounds.pending_select = options.select_sound.clone();
         state.shortcuts_open = options.show_shortcuts;
-        let (snapshot, factory, audio) = {
+        let (snapshot, factory, audio, live_input) = {
             let mut guard = session.lock();
             let first = Snapshot::capture(&guard, &[]);
             state.reconcile(&first.project);
@@ -160,15 +169,17 @@ impl TrillApp {
             if options.autoplay {
                 guard.play();
             }
-            let info = guard.audio_info();
-            let audio = AudioSummary {
-                output: info.output.clone(),
-                sample_rate: info.sample_rate,
-                warning: info.warning.clone(),
-            };
+            // A keyboard plays the selected track from the first frame on.
+            guard.set_selected_track(state.selected_track);
+            if options.record
+                && let Err(error) = guard.record()
+            {
+                log::warn!("--record: {error}");
+            }
+            let audio = AudioSummary::of(&guard);
             // Captured again now that the selection is known, so it covers
             // the devices of the tracks on show.
-            (Snapshot::capture(&guard, &params_tracks(&state)), guard.factory(), audio)
+            (Snapshot::capture(&guard, &params_tracks(&state)), guard.factory(), audio, guard.live())
         };
         let (catalog_tx, catalog) = mpsc::channel();
         let repaint = ctx.clone();
@@ -190,7 +201,7 @@ impl TrillApp {
         // What an earlier program did not live to save: found when the
         // runtime started, so this is a look at a list in memory.
         let recovery = Recovery::new(runtime.recoverable());
-        let keyboard = Keyboard::new(remember_in.clone(), &options.keyboard);
+        let keyboard = Keyboard::new(remember_in.clone(), &options.keyboard, live_input);
         Self {
             sounds: Sounds::new(ctx, runtime),
             assistant,
@@ -202,6 +213,7 @@ impl TrillApp {
             jobs,
             recovery,
             keyboard,
+            settings: Settings::default(),
             theme,
             descriptors: BuiltinFactory.descriptors(),
             catalog,
@@ -213,7 +225,8 @@ impl TrillApp {
             started: now,
             frames: 0,
             last_meter_update: now,
-            last_housekeeping: now,
+            told_selection: None,
+            take_generation: 0,
             title: String::new(),
             was_typing: false,
             saved_browser_width,
@@ -261,10 +274,36 @@ impl TrillApp {
                 self.live.audio_faults = session.audio_faults();
                 self.live.preparing = session.preparing();
                 self.live.update_editors(&self.snapshot, &session);
-                if now.duration_since(self.last_housekeeping) >= HOUSEKEEPING_INTERVAL {
-                    session.housekeeping();
-                    self.last_housekeeping = now;
+                // The session's chores (a take written into the project, a
+                // lost audio device replaced) are the runtime's
+                // housekeeping thread's to do: looking for another device
+                // can take seconds, and this thread paints.
+
+                // The audio stream, when it has changed: the device, what
+                // it runs at, and why that is not what was asked for.
+                if session.audio_revision() != self.audio.revision {
+                    self.audio = AudioSummary::of(&session);
                 }
+                self.audio.hear_latency(session.output_latency_ms());
+
+                // Where keyboards play: the session is kept told of the
+                // selection, also when it moved without the window (the
+                // selected track was deleted from elsewhere, say, and the
+                // session forgot it with the track).
+                if session.selected_track() != self.state.selected_track {
+                    session.set_selected_track(self.state.selected_track);
+                }
+                self.told_selection = Some(self.state.selected_track);
+
+                // Arming and recording, and what a take that just ended
+                // left behind, wherever it was ended from.
+                let was_recording = self.live.take.is_some();
+                self.live.update_recording(&session);
+                if was_recording && self.live.take.is_none() && self.take_generation == self.state.project_generation
+                {
+                    recording::take_ended(&mut self.state, &self.snapshot, session.last_take());
+                }
+                self.take_generation = self.state.project_generation;
             }
             None => ctx.request_repaint_after(Duration::from_millis(8)),
         }
@@ -297,7 +336,21 @@ impl TrillApp {
             sounds: &mut self.sounds,
             assistant: &mut self.assistant,
             keyboard: &mut self.keyboard,
+            settings: &mut self.settings,
         }
+    }
+
+    /// Tells the session which track is selected, if that moved since it
+    /// was last told: a MIDI keyboard plays the selected track while none
+    /// is armed, and must not be a frame behind a click.
+    fn tell_selection(&mut self) {
+        // Not while a stream is being opened: the session is busy with
+        // that, and the next look at it (`sync`) catches up.
+        if self.told_selection == Some(self.state.selected_track) || self.settings.is_applying() {
+            return;
+        }
+        self.session.lock().set_selected_track(self.state.selected_track);
+        self.told_selection = Some(self.state.selected_track);
     }
 
     /// Takes in what the sound workers finished: says what went wrong,
@@ -416,6 +469,18 @@ impl TrillApp {
         if state.shortcuts_open {
             commands.retain(|command| matches!(command, Command::ShowShortcuts | Command::Escape));
         }
+        if self.settings.is_open() {
+            // The panel has the keyboard, but for the key that closes it
+            // and for playing the song to hear what a setting does. While
+            // a stream is being opened the session is busy: nothing that
+            // needs it is run.
+            let applying = self.settings.is_applying();
+            commands.retain(|command| match command {
+                Command::AudioSettings | Command::Escape => true,
+                Command::TogglePlay => !applying,
+                _ => false,
+            });
+        }
         commands
     }
 
@@ -503,7 +568,7 @@ impl TrillApp {
                     elapsed.as_secs_f32(),
                     if self.live.playing { "playing" } else { "stopped" },
                     self.live.position,
-                    self.audio.output,
+                    self.audio.info.output,
                     self.live.audio_faults,
                 );
                 self.capture = Capture::Done;
@@ -518,6 +583,7 @@ impl TrillApp {
     pub fn tick(&mut self, ctx: &egui::Context) {
         let replaced = self.jobs.poll(&mut self.state) | self.recovery.poll(&mut self.state);
         self.editors.poll(&mut self.state.toasts);
+        self.settings.poll();
         self.take_reports();
         self.sync(ctx);
         if replaced {
@@ -553,9 +619,13 @@ impl TrillApp {
         browser::keys(&ctx, &mut self.cx(), typing);
         let commands = self.read_commands(&ctx);
         let open_editor = self.options.open_editor.take();
+        let open_settings = std::mem::take(&mut self.options.show_settings);
         let mut cx = self.cx();
         for command in commands {
             run_command(&ctx, &mut cx, command);
+        }
+        if open_settings {
+            audio_settings::open(&mut cx);
         }
         if let Some(name) = open_editor {
             editors::open_named(&mut cx, &name);
@@ -624,6 +694,7 @@ impl TrillApp {
         dragging::end(&ctx, &mut cx);
         files::confirm_modal(&ctx, &mut cx);
         recovery::modal(&ctx, &mut cx);
+        audio_settings::modal(&ctx, &mut cx);
         shortcuts::window(&ctx, &mut cx);
         // Clear of the assistant's panel: its Send and Stop are in that corner.
         let aside = if cx.assistant.is_open() { cx.assistant.width() } else { 0.0 };
@@ -649,13 +720,15 @@ impl TrillApp {
         }
 
         self.close_gesture(&ctx);
+        self.tell_selection();
         self.save_browser_width(&ctx);
         self.remember_browser(false);
         self.was_typing = ctx.text_edit_focused();
         // Moving things need every frame; everything else waits for input
         // or the idle poll scheduled in `logic`.
         let previewing = self.sounds.preview.is_playing() && self.state.browser.tab == BrowserTab::Sounds;
-        if self.live.playing || self.live.meters_moving() || self.state.audition.is_some() || previewing {
+        let moving = self.live.playing || self.live.take.is_some() || self.live.meters_moving();
+        if moving || self.state.audition.is_some() || previewing {
             ctx.request_repaint();
         }
         self.automate(&ctx);
@@ -736,6 +809,16 @@ impl TrillApp {
     pub fn keyboard_mut(&mut self) -> &mut Keyboard {
         &mut self.keyboard
     }
+
+    #[cfg(test)]
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    #[cfg(test)]
+    pub fn audio(&self) -> &AudioSummary {
+        &self.audio
+    }
 }
 
 impl eframe::App for TrillApp {
@@ -754,7 +837,7 @@ impl eframe::App for TrillApp {
     /// keyboard is left without its end.
     fn on_exit(&mut self) {
         self.remember_browser(true);
-        self.keyboard.close(&self.session);
+        self.keyboard.close();
     }
 
     /// A screenshot run sees no pointer, so the picture does not depend on
@@ -767,7 +850,7 @@ impl eframe::App for TrillApp {
         if self.options.screenshot.is_some() {
             raw_input.events.retain(|event| !is_pointer_event(event));
         }
-        self.keyboard.window(raw_input, &self.session);
+        self.keyboard.window(raw_input);
     }
 }
 
@@ -838,6 +921,8 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
         Command::Escape => {
             if cx.state.shortcuts_open {
                 cx.state.shortcuts_open = false;
+            } else if cx.settings.is_open() {
+                audio_settings::toggle(cx);
             } else if dragging::cancel(cx) {
                 // The sound in the air was put down.
             } else if cx.sounds.preview.is_playing() || cx.sounds.preview.loading.is_some() {
@@ -877,7 +962,9 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
         Command::ToggleBlade => toggle_tool(cx, Tool::Blade),
         Command::ToggleBrowser => cx.state.browser.open = !cx.state.browser.open,
         Command::ToggleAssistant => cx.assistant.toggle(),
-        Command::ToggleKeyboard => cx.keyboard.toggle(cx.session),
+        Command::ToggleKeyboard => cx.keyboard.toggle(),
+        Command::Record => recording::toggle(cx),
+        Command::AudioSettings => audio_settings::toggle(cx),
         Command::ShowShortcuts => cx.state.shortcuts_open = !cx.state.shortcuts_open,
     }
 }

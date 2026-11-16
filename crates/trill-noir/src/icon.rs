@@ -34,6 +34,9 @@ pub enum Icon {
     Keyboard,
     /// Leads somewhere: an arrow up and to the right.
     GoTo,
+    /// Recording, and a track that will be recorded: the round dot every
+    /// recorder has used for it. The one round thing in the kit.
+    Record,
 }
 
 impl Icon {
@@ -58,6 +61,7 @@ impl Icon {
             Icon::Window => "Editor",
             Icon::Keyboard => "Computer keyboard",
             Icon::GoTo => "Go to",
+            Icon::Record => "Record",
         }
     }
 }
@@ -187,6 +191,9 @@ pub fn paint_icon(painter: &Painter, center: Pos2, icon: Icon, color: Color32) {
             paint::hline(painter, Rangef::new(corner.x - 5.0, corner.x + 1.0), corner.y, color);
             paint::vline(painter, corner.x, Rangef::new(corner.y, corner.y + 6.0), color);
         }
+        Icon::Record => {
+            painter.circle_filled(center + vec2(0.5, 0.5), 4.5, color);
+        }
     }
 }
 
@@ -244,6 +251,7 @@ mod tests {
             Icon::Window,
             Icon::Keyboard,
             Icon::GoTo,
+            Icon::Record,
         ];
         crate::testing::with_ui(|ui, theme| {
             for icon in all {

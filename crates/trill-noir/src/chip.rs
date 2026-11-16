@@ -1,6 +1,7 @@
 //! The Chip: a small toggle drawn as a hairline box with micro caps text,
 //! and rows of chips for choosing one of a few things.
 
+use crate::icon::{Icon, paint_icon};
 use crate::theme::{Theme, fade};
 use crate::{paint, text};
 use egui::{Align2, Color32, Id, Pos2, Rect, Response, Role, Sense, Ui, WidgetInfo, pos2, vec2};
@@ -16,12 +17,13 @@ pub struct Chip<'a> {
     quiet: Option<Color32>,
     dimmed: bool,
     name: Option<&'a str>,
+    glyph: Option<Icon>,
 }
 
 impl<'a> Chip<'a> {
     /// A toggle that reads `label`. On: the selected wash and primary ink.
     pub fn new(label: &'a str, on: bool) -> Self {
-        Self { label, on, dot: None, accent: None, action: false, quiet: None, dimmed: false, name: None }
+        Self { label, on, dot: None, accent: None, action: false, quiet: None, dimmed: false, name: None, glyph: None }
     }
 
     /// A momentary chip: it never latches, so it reads as a button rather
@@ -60,6 +62,13 @@ impl<'a> Chip<'a> {
     /// single letter, a note value) would not say what the chip is.
     pub fn named(mut self, name: &'a str) -> Self {
         self.name = Some(name);
+        self
+    }
+
+    /// Shows `icon` in place of the label, for the few toggles a sign says
+    /// better than a letter. The label is then the chip's name.
+    pub fn glyph(mut self, icon: Icon) -> Self {
+        self.glyph = Some(icon);
         self
     }
 
@@ -110,7 +119,9 @@ pub fn chip(ui: &Ui, theme: &Theme, rect: Rect, id: Id, chip: &Chip) -> Response
     };
     let color = if chip.dimmed { fade(color, theme.disabled) } else { color };
     let mut content = rect.shrink2(vec2(theme.metric.chip_pad + 1.0, 0.0));
-    if let Some(dot) = chip.dot {
+    if let Some(icon) = chip.glyph {
+        paint_icon(&painter, rect.center(), icon, color);
+    } else if let Some(dot) = chip.dot {
         let dot = if chip.dimmed { fade(dot, theme.disabled) } else { dot };
         content.min.x = paint::dot(&painter, content.left_center(), theme.metric.dot, dot) + 5.0;
         text::paint(&painter, content, Align2::LEFT_CENTER, theme.text.micro, chip.label, color);
