@@ -903,3 +903,126 @@ fn the_keyboards_strip_says_when_what_it_plays_makes_no_sound() {
     stage.run(&mut harness, 2 * BUFFER);
     assert_eq!(stage.heard.take().last().map(|(_, kind)| *kind), Some(on(64)));
 }
+
+// ---- the real thing ----------------------------------------------------------------
+
+/// SWAM Alto Sax 3, as a VST3 plugin: silent until it is given expression.
+const SWAM_SAX: &str = "vst3:565354575361337377616D20616C746F";
+
+/// The window's own code on the installed instrument the feature was asked
+/// for, without a window: the plugin is hosted with no editor, the audio
+/// device is the scripted one, and the keys are events handed to a frame.
+/// Nothing of the user's is read beside the plugin itself.
+///
+/// ```sh
+/// cargo test -p trill-app a_modelled_saxophone -- --include-ignored --nocapture
+/// ```
+#[test]
+#[ignore = "needs SWAM Alto Sax 3 (VST3) installed; run with `cargo test -p trill-app a_modelled_saxophone -- --include-ignored --nocapture`"]
+fn a_modelled_saxophone_sounds_when_it_is_simply_typed_on() {
+    use trill_plugins::{ClapConfig, PluginHost, Scanner, Vst3Config};
+    let scratch = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp/app-controllers");
+    let clap =
+        ClapConfig { cache_path: Some(scratch.join("clap.json")), scanner: Scanner::Auto, ..ClapConfig::default() };
+    let vst3 = Vst3Config {
+        cache_path: Some(scratch.join("vst3.json")),
+        scanner: Scanner::Auto,
+        preset_paths: vec![scratch.join("vst3 presets")],
+        ..Vst3Config::default()
+    };
+    let plugins = PluginHost::with_configs(clap, vst3).unwrap();
+    if !plugins.vst3().descriptors().iter().any(|descriptor| descriptor.uri == SWAM_SAX) {
+        eprintln!("skipping: {SWAM_SAX} is not installed on this machine");
+        return;
+    }
+    let host = ScriptedHost::with_speakers();
+    let parts = Parts {
+        devices: plugins.factories(),
+        audio: Some(Arc::new(host.clone())),
+        midi: Some(Box::new(ScriptedMidi::new())),
+    };
+    let runtime = Runtime::start_custom(RuntimeOptions::hermetic(), parts).unwrap();
+    let mut sax = None;
+    let mut harness = Harness::on(Arc::new(runtime), UiOptions::default(), |session| {
+        let track = session.edit(|project| Ok(project.add_track("Sax"))).unwrap();
+        session.add_device(ChainRef::Track(track), SWAM_SAX, None, None).unwrap();
+        sax = Some(track);
+    });
+    let sax = sax.unwrap();
+    let clock = host.clone();
+    harness.app.keyboard_mut().set_clock(Arc::new(move || clock.now_ns()));
+    let run = |harness: &mut Harness, seconds: f64| {
+        for _ in 0..(seconds * 100.0) as usize {
+            host.advance(BUFFER);
+        }
+        harness.session.lock().housekeeping();
+        harness.idle(2);
+    };
+    // The loudest the output has been since it was last asked, in dB.
+    host.keep_output();
+    let peak = |_: &Harness| {
+        let (left, right) = host.take_output();
+        let loudest = left.iter().chain(&right).fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+        20.0 * f64::from(loudest).max(1e-6).log10()
+    };
+    let notices = |harness: &Harness| -> Vec<String> {
+        harness.labels.iter().map(|(text, _)| text.clone()).filter(|text| text.contains("is given notes")).collect()
+    };
+    // The plugin goes on waking up for a moment after it is loaded, and
+    // is silent whatever it is given until it has: a few seconds of the
+    // machine's own time, which a window gets by being looked at.
+    for _ in 0..30 {
+        std::thread::sleep(Duration::from_millis(100));
+        run(&mut harness, 0.05);
+    }
+    peak(&harness);
+
+    // A note as a MIDI keyboard without an expression pedal sends it: the
+    // saxophone stays silent, and the window says so on the track.
+    harness.session.lock().note_on(sax, 64, 100);
+    run(&mut harness, 1.5);
+    let unblown = peak(&harness);
+    let said = notices(&harness);
+    harness.session.lock().note_off(sax, 64);
+    run(&mut harness, 0.3);
+    peak(&harness);
+
+    // The computer keyboard is switched on and the same note typed.
+    harness.key(Modifiers::COMMAND, Key::K);
+    assert!(harness.app.keyboard().is_on());
+    harness.step(Modifiers::NONE, vec![key(Key::D, true)]);
+    run(&mut harness, 1.5);
+    let typed = peak(&harness);
+    let said_while_typing = notices(&harness);
+    // Under the held note, expression down to 60 with the B key.
+    for _ in 0..7 {
+        harness.key(Modifiers::NONE, Key::B);
+    }
+    assert_eq!(harness.app.keyboard().expression(), 60);
+    run(&mut harness, 1.0);
+    peak(&harness);
+    run(&mut harness, 1.0);
+    let softer = peak(&harness);
+    // And down to nothing.
+    for _ in 0..6 {
+        harness.key(Modifiers::NONE, Key::B);
+    }
+    assert_eq!(harness.app.keyboard().expression(), 0);
+    // The instrument's own room rings on for a while after the breath.
+    run(&mut harness, 2.5);
+    peak(&harness);
+    run(&mut harness, 1.0);
+    let none = peak(&harness);
+    harness.step(Modifiers::NONE, vec![key(Key::D, false)]);
+    run(&mut harness, 0.2);
+
+    eprintln!("a note without expression: {unblown:.1} dB, and the window says {said:?}");
+    eprintln!("the same note typed on the computer keyboard: {typed:.1} dB, and the window says {said_while_typing:?}");
+    eprintln!("with expression at 60: {softer:.1} dB; at 0: {none:.1} dB");
+    assert!(unblown < -80.0, "silent without expression: {unblown:.1} dB");
+    assert!(said.iter().any(|text| text.starts_with("Sax: ")), "the track is marked: {said:?}");
+    assert!(typed > -40.0, "typed, it sounds: {typed:.1} dB");
+    assert!(said_while_typing.is_empty(), "and nothing is said about a silence there is not: {said_while_typing:?}");
+    assert!(softer < typed - 3.0, "less expression is less sound: {softer:.1} dB after {typed:.1} dB");
+    assert!(none < typed - 30.0, "and none is next to nothing: {none:.1} dB");
+}
