@@ -462,6 +462,8 @@ struct Registration {
     home: *const (),
     /// The type of state the home holds.
     state: TypeId,
+    // Only the Windows layer has event loops of others to notice.
+    #[cfg_attr(not(windows), allow(dead_code))]
     service_nested: unsafe fn(*const ()),
 }
 
@@ -494,7 +496,9 @@ impl Drop for Registered<'_> {
 }
 
 /// Serves the calling thread's queue from inside an event loop that is not
-/// the thread's own. For the OS layer, which is what notices being there.
+/// the thread's own. For the OS layer, which is what notices being there;
+/// so far only the Windows one has such loops to notice.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn service_nested() {
     if let Some(registration) = HOME.get() {
         // SAFETY: a registration exists only while the home it points to
