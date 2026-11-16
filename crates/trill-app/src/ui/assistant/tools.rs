@@ -339,7 +339,17 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
             Some("delete") => about("Deleting", "Deleted", "a stretch of time"),
             Some("duplicate") => about("Repeating", "Repeated", "a stretch of time"),
             Some("insert") => about("Opening up", "Opened up", "empty time"),
+            Some("copy") => about("Copying", "Copied", "a stretch of time"),
             _ => about("Editing", "Edited", "the timeline"),
+        },
+        "get_instrument_profile" => match (call.track("track"), call.text("uri")) {
+            (Some(track), _) => about("Reading", "Read", &format!("what is known about the instrument of {track}")),
+            (None, Some(uri)) => about("Reading", "Read", &format!("what is known about {}", device_kind(uri))),
+            (None, None) => about("Reading", "Read", "which instruments are known"),
+        },
+        "set_instrument_profile" => match call.track("track") {
+            Some(track) => about("Noting", "Noted", &format!("what the instrument of {track} does")),
+            None => about("Noting", "Noted", "what an instrument does"),
         },
 
         "transport" => match call.text("action") {
@@ -547,6 +557,10 @@ mod tests {
             "Searched the sounds for \u{201C}deep kick\u{201D}"
         );
         assert_eq!(
+            did("edit_time", json!({ "action": "copy", "start": 0, "end": 16, "to": 32 }), p),
+            "Copied a stretch of time"
+        );
+        assert_eq!(
             did("edit_time", json!({ "action": "duplicate", "start": 0, "end": 16 }), p),
             "Repeated a stretch of time"
         );
@@ -638,6 +652,8 @@ mod tests {
             "get_automation",
             "set_markers",
             "edit_time",
+            "get_instrument_profile",
+            "set_instrument_profile",
             "transport",
         ] {
             let wording = describe(tool, &input, &project);

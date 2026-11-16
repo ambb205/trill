@@ -93,7 +93,9 @@ on the samples.
 - **An MCP tool:** an argument struct in `requests.rs` (its doc comments are the schema descriptions the model
   reads, so write them for the model), the tool in `server.rs` or `music.rs`, a compact reply through `view.rs`,
   a test in `tests/mcp.rs` (and its name in `tools_are_listed_with_schemas`). If it changes how a song should be
-  written, say so in the `INSTRUCTIONS` texts, which every client reads.
+  written, say so in the `INSTRUCTIONS` texts, which every client reads. Give it words in the assistant's panel
+  too (`trill-app/src/ui/assistant/tools.rs`, and what it changed in `places.rs`): without them the panel shows
+  the tool's bare name.
 - **A built-in device:** a module in `trill-dsp` registered in `lib.rs`, and a layout in
   `trill-app/src/ui/device_layouts.rs`.
 - **Something the window remembers:** `Settings` (`trill-library/src/settings.rs`) has fixed fields; state that
