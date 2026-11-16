@@ -164,7 +164,7 @@ pub fn of_call(tool: &str, input: &Value, answer: &str) -> Option<Place> {
         "update_track" => given("track").map(Place::track),
 
         "add_device" => answered("device_id").map(Place::device),
-        "update_device" | "set_sample" | "show_device_editor" => given("device").map(Place::device),
+        "update_device" | "set_sample" | "show_device_editor" | "save_preset" => given("device").map(Place::device),
 
         "create_clip" | "create_audio_clip" => Place::clips(answered("clip_id")),
         "update_clip" | "add_notes" | "set_notes" | "remove_notes" | "transform_notes" => Place::clips(given("clip")),

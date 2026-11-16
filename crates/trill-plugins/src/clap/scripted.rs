@@ -211,6 +211,8 @@ const fn seen(id: u32, name: &'static str) -> Param {
 
 pub(crate) const GAIN: u32 = 1;
 pub(crate) const STEPS: u32 = 2;
+/// What the plugin shows for each value of [`STEPS`].
+pub(crate) const STEP_NAMES: [&str; 5] = ["Off", "Room", "Hall", "Plate", "Spring"];
 pub(crate) const CUTOFF_1: u32 = 3;
 pub(crate) const CUTOFF_2: u32 = 4;
 pub(crate) const REVERSED: u32 = 5;
@@ -555,12 +557,24 @@ impl<const KIND: u8> PluginMainThreadParams for MainThread<'_, KIND> {
         self.shared.slot(id.get()).map(|slot| f64::from_bits(slot.load(Ordering::Relaxed)))
     }
 
-    fn value_to_text(&self, _id: ClapId, value: f64, writer: &mut ParamDisplayWriter) -> std::fmt::Result {
-        write!(writer, "{value}")
+    fn value_to_text(&self, id: ClapId, value: f64, writer: &mut ParamDisplayWriter) -> std::fmt::Result {
+        match id.get() {
+            GAIN => write!(writer, "{value:.2} x"),
+            STEPS => write!(writer, "{}", STEP_NAMES[(value.round().max(0.0) as usize).min(STEP_NAMES.len() - 1)]),
+            CUTOFF_1 | CUTOFF_2 => write!(writer, "{value:.0} Hz"),
+            _ => write!(writer, "{value}"),
+        }
     }
 
-    fn text_to_value(&self, _id: ClapId, _text: &CStr) -> Option<f64> {
-        None
+    /// As plugins do it: the gain is read from its text; the second cutoff
+    /// is answered with the bottom of its range whatever is asked; and the
+    /// rest are not converted at all.
+    fn text_to_value(&self, id: ClapId, text: &CStr) -> Option<f64> {
+        match id.get() {
+            GAIN => text.to_str().ok()?.trim().trim_end_matches('x').trim().parse().ok(),
+            CUTOFF_2 => Some(20.0),
+            _ => None,
+        }
     }
 
     fn flush(&self, input: &InputEvents, output: &mut OutputEvents) {

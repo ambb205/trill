@@ -191,6 +191,12 @@ fn program_gain(value: f64) -> f64 {
     PROGRAMS[(value.clamp(0.0, 1.0) * steps).round() as usize].1
 }
 
+/// The frequency a normalized cutoff stands for: 20 Hz to 20 kHz, evenly
+/// by pitch.
+fn cutoff_hz(value: f64) -> f64 {
+    20.0 * 1000f64.powf(value.clamp(0.0, 1.0))
+}
+
 /// The value the "editor" gives [`MANUAL`] when [`SWITCH`] is turned on.
 pub(crate) const MANUAL_EDIT: f64 = 0.625;
 pub(crate) const SHAPES: [&str; 4] = ["Sine", "Saw", "Square", "Noise"];
@@ -1378,15 +1384,41 @@ impl<const ROLE: u8> IEditControllerTrait for Object<ROLE> {
         // SAFETY: the host passes its own `String128`.
         let Some(string) = (unsafe { string.as_mut() }) else { return kInvalidArgument };
         match id {
+            // The unit ("x") is in the parameter's description, not here.
+            GAIN => text::to_utf16(&format!("{:.2}", value * 2.0), string),
+            SWITCH => text::to_utf16(if value >= 0.5 { "On" } else { "Off" }, string),
             SHAPE => text::to_utf16(SHAPES[((value * 4.0) as usize).min(3)], string),
+            VOICES => text::to_utf16(&((value * 127.0).round() as u32 + 1).to_string(), string),
             UNNAMED => return kResultFalse,
+            // These put their unit into the text as well.
+            CUTOFF_1 | CUTOFF_2 => text::to_utf16(&format!("{:.0} Hz", cutoff_hz(value)), string),
+            ECHO => text::to_utf16(&format!("{:.0} %", value * 100.0), string),
             _ => text::to_utf16(&value.to_string(), string),
         }
         kResultOk
     }
 
-    unsafe fn getParamValueByString(&self, _id: ParamID, _string: *mut TChar, _value: *mut ParamValue) -> tresult {
-        kNotImplemented
+    /// As plugins do it: the gain is read from a bare number (not from one
+    /// with its unit); the echo is answered with zero whatever is asked;
+    /// and the rest are not converted at all.
+    unsafe fn getParamValueByString(&self, id: ParamID, string: *mut TChar, value: *mut ParamValue) -> tresult {
+        // SAFETY: the host passes its own value to fill in.
+        let Some(value) = (unsafe { value.as_mut() }) else { return kInvalidArgument };
+        if string.is_null() {
+            return kInvalidArgument;
+        }
+        // SAFETY: the host passes a NUL-terminated string.
+        let asked: Vec<u16> = (0..256).map(|at| unsafe { *string.add(at) }).take_while(|unit| *unit != 0).collect();
+        let asked = String::from_utf16_lossy(&asked);
+        match id {
+            GAIN => match asked.trim().parse::<f64>() {
+                Ok(gain) => *value = (gain / 2.0).clamp(0.0, 1.0),
+                Err(_) => return kResultFalse,
+            },
+            ECHO => *value = 0.0,
+            _ => return kNotImplemented,
+        }
+        kResultOk
     }
 
     unsafe fn normalizedParamToPlain(&self, _id: ParamID, value: ParamValue) -> ParamValue {

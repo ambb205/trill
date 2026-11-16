@@ -228,6 +228,15 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
         "delete_device" => {
             about("Removing", "Removed", &call.device("device").unwrap_or_else(|| "a device".to_owned()))
         }
+        "search_presets" => {
+            let sound = call.text("query").map(quoted).unwrap_or_else(|| "a sound".to_owned());
+            about("Looking for", "Looked for", &format!("{sound} among the presets"))
+        }
+        "save_preset" => {
+            let device = call.device("device").unwrap_or_else(|| "a device".to_owned());
+            let name = call.text("name").map(quoted).unwrap_or_default();
+            about("Saving", "Saved", format!("the sound of {device} as the preset {name}").trim_end())
+        }
         "show_device_editor" => {
             let device = call.device("device").unwrap_or_else(|| "a device".to_owned());
             match call.input.get("open").and_then(Value::as_bool) {
@@ -600,6 +609,8 @@ mod tests {
             "get_device",
             "update_device",
             "delete_device",
+            "search_presets",
+            "save_preset",
             "show_device_editor",
             "create_clip",
             "create_audio_clip",

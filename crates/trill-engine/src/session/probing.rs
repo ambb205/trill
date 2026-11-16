@@ -17,7 +17,8 @@ pub enum ProbeTarget {
     Track { track: TrackId, effects: bool },
     /// An instrument by its URI, which need not be in the song, started
     /// from `preset` if one is named (by name, by category and name, or
-    /// by id), else as it comes.
+    /// by id), else as it comes. The preset may be one of the type's own
+    /// or one that was saved.
     Device { uri: String, preset: Option<String> },
 }
 
@@ -75,11 +76,14 @@ impl Session {
                 if let Some(wanted) = preset {
                     let info = self.find_preset(uri, wanted)?;
                     device.preset = Some(info.reference());
-                    match preset_values(descriptor, &info) {
+                    match (self.saved_preset(uri, &info)?, preset_values(descriptor, &info)) {
+                        // A preset that was saved is the device as it was
+                        // then: its values and its state.
+                        (Some(saved), _) => (device.params, device.state) = (saved.params, saved.state),
                         // A preset that is a set of values is the device.
-                        Some(values) => device.params = values.into_iter().collect(),
+                        (None, Some(values)) => device.params = values.into_iter().collect(),
                         // Any other only the plugin can load, once it exists.
-                        None => to_load = Some(info),
+                        (None, None) => to_load = Some(info),
                     }
                 }
                 (vec![device], to_load)

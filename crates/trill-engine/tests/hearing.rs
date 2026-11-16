@@ -576,6 +576,19 @@ fn a_probe_plays_a_track_as_it_is_and_changes_nothing_in_the_song() {
     assert_eq!((session.project(), session.revision()), (&before, revision), "the song is as it was");
     assert_eq!(undo_steps(&mut session), steps, "and nothing was done to undo");
 
+    // The sound of the track saved as a preset is what a probe of the
+    // bare instrument started from that preset plays: half as loud.
+    session.saved_presets().open(tempfile::tempdir().unwrap().keep());
+    session.save_preset(device, "Quiet take", "", &[]).unwrap();
+    let saved = ProbeTarget::Device { uri: BASS.to_string(), preset: Some("Quiet take".to_string()) };
+    let from_saved = probe(&mut session, saved, &[plain(40)], &probe_options());
+    assert!(
+        (from_saved[0].peak_db - alone[0].peak_db).abs() < 0.1,
+        "{} against {}",
+        from_saved[0].peak_db,
+        alone[0].peak_db
+    );
+
     // What cannot be probed says why.
     let empty = session.edit(|project| Ok(project.add_track("Empty"))).unwrap();
     let error = session.probe_job(&ProbeTarget::Track { track: empty, effects: false }).err().unwrap().to_string();

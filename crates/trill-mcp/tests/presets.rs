@@ -418,6 +418,206 @@ async fn the_instructions_say_to_look_for_presets_first() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_devices_sound_is_saved_and_given_to_another_like_any_preset() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let synths = &fixture.synths;
+    let track =
+        ok(client, "create_track", json!({ "name": "Keys", "instrument": SYNTH, "preset": "glass keys" })).await;
+    let device = track["instrument_device_id"].as_u64().unwrap();
+    ok(client, "update_device", json!({ "device": device, "params": { "tone": 0.9 } })).await;
+
+    // Kept under a name, in the storage this run was given: a temporary
+    // folder here, and never the user's own.
+    let arguments = json!({ "device": device, "name": "Chorus Keys", "description": "bright", "tags": ["keys"] });
+    let saved = ok(client, "save_preset", arguments).await;
+    assert_eq!((saved["saved"].as_str(), saved["device"].as_str()), (Some("Saved/Chorus Keys"), Some(SYNTH)));
+    assert!(saved.get("replaced").is_none(), "{saved}");
+    let file = std::path::PathBuf::from(saved["file"].as_str().unwrap());
+    assert!(file.starts_with(fixture._folder.path().join("config").join("saved-presets")), "{}", file.display());
+    assert!(file.exists() && file.extension().unwrap() == "trillpreset");
+    assert!(saved["use"].as_str().unwrap().contains("`preset: \"Chorus Keys\"`"), "{saved}");
+    let got = ok(client, "get_device", json!({ "device": device })).await;
+    assert_eq!((got["preset"].as_str(), got["presets"]["total"].as_u64()), (Some("Chorus Keys"), Some(3001)));
+
+    // It is one of the device type's presets: listed in front of its own,
+    // found by a search, and counted.
+    let described = ok(client, "describe_device", json!({ "uri": SYNTH, "preset_limit": 2 })).await;
+    assert_eq!(described["presets"]["total"], 3001);
+    assert_eq!(described["presets"]["items"][0]["name"], "Chorus Keys");
+    assert_eq!(described["presets"]["items"][0]["category"], "Saved");
+    let searched = ok(client, "describe_device", json!({ "uri": SYNTH, "preset_category": "saved" })).await;
+    assert_eq!(names(&searched["presets"]), ["Chorus Keys"]);
+    let listed = ok(client, "list_devices", json!({ "query": "big synth" })).await;
+    let entry = |uri: &str| {
+        let devices = listed["devices"].as_array().unwrap();
+        devices.iter().find(|device| device["uri"] == uri).unwrap_or_else(|| panic!("{uri} is not in {listed}")).clone()
+    };
+    assert_eq!(entry(SYNTH)["preset_count"], 3001);
+    assert_eq!(entry(SYNTH)["saved_presets"], json!(["Chorus Keys"]));
+    assert_eq!(entry(SYNTH_VST3)["preset_count"], 0);
+    assert!(entry(SYNTH_VST3).get("saved_presets").is_none(), "saved for one format, not for the other");
+
+    // Given to a new track by name, and to a device that has another
+    // sound: the patch and the value that was set on top of it.
+    let other =
+        ok(client, "create_track", json!({ "name": "More Keys", "instrument": SYNTH, "preset": "Chorus Keys" })).await;
+    let second = other["instrument_device_id"].as_u64().unwrap();
+    assert_eq!(other["preset"], "Chorus Keys");
+    assert_eq!(synths.patch(second), "Factory/Keys/Glass Keys");
+    let tone = ok(client, "get_device", json!({ "device": second, "query": "tone" })).await;
+    assert_eq!(tone["params"][0]["value"], 0.9);
+    let third = ok(client, "add_device", json!({ "uri": SYNTH, "preset": "Factory/Pads/Warm Pad" })).await;
+    let third = third["device_id"].as_u64().unwrap();
+    let updated = ok(client, "update_device", json!({ "device": third, "preset": "saved/chorus keys" })).await;
+    assert_eq!(updated["preset"], "Saved/Chorus Keys");
+    assert_eq!(synths.patch(third), "Factory/Keys/Glass Keys");
+    ok(client, "history", json!({ "action": "undo" })).await;
+    assert_eq!(synths.patch(third), "Factory/Pads/Warm Pad");
+
+    // Saved again under the name, it replaces what was there.
+    let again = ok(client, "save_preset", json!({ "device": third, "name": "chorus keys" })).await;
+    assert_eq!((again["replaced"].as_bool(), again["saved"].as_str()), (Some(true), Some("Saved/chorus keys")));
+    assert_eq!(
+        ok(client, "describe_device", json!({ "uri": SYNTH, "preset_limit": 0 })).await["presets"]["total"],
+        3001
+    );
+
+    // A built-in device's sound is kept the same way.
+    let pad = ok(client, "add_device", json!({ "uri": POLYSYNTH, "preset": "warm_pad" })).await["device_id"].clone();
+    ok(client, "update_device", json!({ "device": pad, "params": { "cutoff": 432 } })).await;
+    let dark = ok(client, "save_preset", json!({ "device": pad, "name": "Dark Pad" })).await;
+    assert_eq!(dark["saved"], "Saved/Dark Pad");
+    ok(client, "update_device", json!({ "device": pad, "preset": "sub_bass" })).await;
+    let back = ok(client, "update_device", json!({ "device": pad, "preset": "Dark Pad" })).await;
+    assert_eq!(back["preset"], "Saved/Dark Pad");
+    let cutoff = ok(client, "get_device", json!({ "device": pad, "query": "cutoff" })).await;
+    assert_eq!(cutoff["params"][0]["value"], 432.0);
+    assert!(names(&cutoff["presets"]).contains(&"Dark Pad"), "{cutoff}");
+    let listed = ok(client, "list_devices", json!({ "query": POLYSYNTH })).await;
+    assert_eq!(listed["devices"][0]["saved_presets"], json!(["Dark Pad"]));
+    assert!(listed["devices"][0].get("preset_count").is_none(), "its own presets are listed by name: {listed}");
+
+    // What cannot be saved says why.
+    let error = call(client, "save_preset", json!({ "device": pad, "name": "Pads/Dark" })).await.unwrap_err();
+    assert!(error.contains("cannot have '/'"), "{error}");
+    let error = call(client, "save_preset", json!({ "device": 999, "name": "x" })).await.unwrap_err();
+    assert!(error.contains("Existing devices"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_that_lists_no_presets_says_where_they_are_and_what_to_do() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let described = ok(client, "describe_device", json!({ "uri": SYNTH_VST3 })).await;
+    let note = described["presets"]["note"].as_str().unwrap();
+    assert!(note.starts_with("This plugin gives a host no presets to list: it keeps them in its own window"), "{note}");
+    assert!(note.contains("show_device_editor") && note.contains("save_preset"), "{note}");
+    assert!(note.contains("get_device `query`"), "{note}");
+    assert!(note.contains(&format!("The same plugin in another format: {SYNTH} lists 3000 presets")), "{note}");
+
+    let device = ok(client, "add_device", json!({ "uri": SYNTH_VST3 })).await["device_id"].as_u64().unwrap();
+    let got = ok(client, "get_device", json!({ "device": device })).await;
+    assert!(got["presets"]["note"].as_str().unwrap().starts_with("This plugin gives a host no presets"), "{got}");
+    let asked = ok(client, "get_device", json!({ "device": device, "preset_query": "pad" })).await;
+    assert!(asked["presets"]["note"].as_str().unwrap().contains("save_preset"), "{asked}");
+
+    // Once a sound of it was saved, that is its preset.
+    ok(client, "save_preset", json!({ "device": device, "name": "My Sound" })).await;
+    let got = ok(client, "get_device", json!({ "device": device })).await;
+    assert_eq!((got["preset"].as_str(), got["presets"]["total"].as_u64()), (Some("My Sound"), Some(1)));
+    assert!(got["presets"].get("note").is_none(), "{got}");
+    // A built-in device without presets has no window to keep any in.
+    let limiter = ok(client, "describe_device", json!({ "uri": "builtin:limiter" })).await;
+    assert!(!limiter["presets"]["note"].as_str().unwrap_or_default().contains("window"), "{limiter}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sound_is_found_across_every_instrument_there_is() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let devices = |reply: &Value| -> Vec<String> {
+        let items = reply["items"].as_array().unwrap();
+        items
+            .iter()
+            .map(|item| format!("{}: {}", item["device"].as_str().unwrap(), item["preset"].as_str().unwrap()))
+            .collect()
+    };
+
+    // The plugin's and the built-in synth's, in one answer, each with
+    // what create_track takes.
+    let found = ok(client, "search_presets", json!({ "query": "warm pad" })).await;
+    let listed = devices(&found);
+    assert_eq!(listed[..2], [format!("{SYNTH}: Warm Pad"), format!("{SYNTH}: Warm Pad")], "{found}");
+    assert!(listed.contains(&format!("{POLYSYNTH}: warm_pad")), "{found}");
+    assert!(found["searched"].as_str().unwrap().starts_with("30"), "thousands were looked through: {found}");
+    // The synth lists none in its other format, and is not said to be
+    // without presets for that: it has three thousand.
+    assert!(found.get("without_presets").is_none(), "{found}");
+    assert!(found.get("still_reading").is_none(), "{found}");
+    let first = &found["items"][0];
+    let made =
+        ok(client, "create_track", json!({ "name": "Pad", "instrument": first["device"], "preset": first["id"] }))
+            .await;
+    assert_eq!(made["preset"], "Warm Pad");
+    assert_eq!(fixture.synths.patch(made["instrument_device_id"].as_u64().unwrap()), "Factory/Pads/Warm Pad");
+
+    // A saved sound is found with the rest.
+    ok(client, "save_preset", json!({ "device": made["instrument_device_id"], "name": "Warm Pad Deluxe" })).await;
+    let found = ok(client, "search_presets", json!({ "query": "warm pad deluxe" })).await;
+    assert_eq!(devices(&found), [format!("{SYNTH}: Warm Pad Deluxe")]);
+    assert_eq!(found["items"][0]["category"], "Saved");
+
+    // Narrowed to one device, paged, and among the effects (of which this
+    // run has only built-in ones).
+    let narrowed = ok(client, "search_presets", json!({ "query": "pad", "device": "big", "limit": 3 })).await;
+    assert_eq!(narrowed["items"].as_array().unwrap().len(), 3);
+    assert!(devices(&narrowed).iter().all(|found| found.starts_with(SYNTH)), "{narrowed}");
+    assert!(narrowed["more"].as_str().unwrap().ends_with("offset 3 lists the next"), "{narrowed}");
+    let next = ok(client, "search_presets", json!({ "query": "pad", "device": "big", "limit": 3, "offset": 3 })).await;
+    assert_ne!(next["items"], narrowed["items"]);
+    let effects = ok(client, "search_presets", json!({ "query": "warm pad", "category": "effect" })).await;
+    assert!(devices(&effects).iter().all(|found| !found.starts_with(SYNTH)), "{effects}");
+    let any = ok(client, "search_presets", json!({ "query": "glass keys", "category": "any" })).await;
+    assert_eq!(devices(&any), [format!("{SYNTH}: Glass Keys")]);
+
+    // While a plugin's presets are being read, the answer says so and has
+    // what is known so far.
+    fixture.synths.0.lock().unwrap().list = PresetList::reading(presets());
+    let partial = ok(client, "search_presets", json!({ "query": "glass keys", "wait_seconds": 0 })).await;
+    assert_eq!(partial["still_reading"], json!([format!("Big Synth ({SYNTH})")]));
+    assert!(partial["status"].as_str().unwrap().contains("search again in a few seconds"), "{partial}");
+    assert_eq!(devices(&partial), [format!("{SYNTH}: Glass Keys")]);
+
+    let error = call(client, "search_presets", json!({ "query": " " })).await.unwrap_err();
+    assert!(error.contains("give `query`"), "{error}");
+    let error = call(client, "search_presets", json!({ "query": "pad", "category": "drums" })).await.unwrap_err();
+    assert!(error.contains("\"instrument\", \"effect\" or \"any\""), "{error}");
+    let error = call(client, "search_presets", json!({ "query": "pad", "device": "nonesuch" })).await.unwrap_err();
+    assert!(error.contains("no installed device is called anything like 'nonesuch'"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_instructions_say_to_search_everything_before_settling_for_a_built_in_synth() {
+    let fixture = connect().await;
+    let instructions = fixture.client.peer_info().and_then(|info| info.instructions.clone()).unwrap_or_default();
+    for said in [
+        "search_presets finds a sound by words",
+        "before settling for a built-in synth",
+        "save_preset keeps that sound under a name",
+        "as the plugin displays it (`text`)",
+    ] {
+        assert!(instructions.contains(said), "the instructions do not say: {said}");
+    }
+    let tools = fixture.client.list_all_tools().await.unwrap();
+    let schema_of =
+        |name: &str| serde_json::to_string(&tools.iter().find(|tool| tool.name == name).unwrap().input_schema).unwrap();
+    assert!(schema_of("search_presets").contains("808 sub") && schema_of("search_presets").contains("wait_seconds"));
+    assert!(schema_of("save_preset").contains("Glass Lead"));
+    assert!(schema_of("get_device").contains("param_offset") && schema_of("update_device").contains("Dynamic 57"));
+}
+
 // ---- against an installed plugin -------------------------------------------
 
 const SURGE: &str = "clap:org.surge-synth-team.surge-xt";
@@ -531,4 +731,144 @@ async fn an_assistant_puts_a_warm_pad_on_surge_xt() {
         said("describe_device (Surge XT as a VST3)", &described["presets"]);
         assert!(described["presets"]["note"].as_str().unwrap().contains(SURGE), "{described}");
     }
+}
+
+const TIM_HENSON: &str = "vst3:ABCDEF019182FAEB4E4453504E544858";
+
+/// What an assistant does with an amplifier that lists no presets, on the
+/// real Archetype Tim Henson: reads the few parameters that matter out of
+/// its hundred and seventy, sets a microphone and a gain in the plugin's
+/// own words, keeps the sound under a name and gives it to another
+/// device; then looks for a pad across every instrument that is
+/// installed. Prints the calls' replies.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Archetype Tim Henson X (VST3) installed; run with `cargo test -p trill-mcp --test presets an_assistant_dials -- --include-ignored --nocapture`"]
+async fn an_assistant_dials_in_an_amplifier_keeps_its_sound_and_searches_every_instrument() {
+    use trill_plugins::{ClapConfig, PluginHost, Scanner, Vst3Config};
+    // The plugin host's caches are the test's own, and no preset file of
+    // the user's is read; what is saved goes to a temporary folder.
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("mcp-sounds");
+    let clap =
+        ClapConfig { cache_path: Some(scratch.join("clap.json")), scanner: Scanner::Auto, ..ClapConfig::default() };
+    let vst3 = Vst3Config {
+        cache_path: Some(scratch.join("vst3.json")),
+        scanner: Scanner::Auto,
+        preset_paths: vec![scratch.join("vst3 presets")],
+        ..Vst3Config::default()
+    };
+    let host = PluginHost::with_configs(clap, vst3).unwrap();
+    if !host.vst3().descriptors().iter().any(|descriptor| descriptor.uri == TIM_HENSON) {
+        eprintln!("skipping: Archetype Tim Henson X is not installed as a VST3 plugin");
+        return;
+    }
+    let folder = tempfile::tempdir().unwrap();
+    let storage = Storage::At {
+        settings: folder.path().join("config").join("settings.json"),
+        library_index: Some(folder.path().join("cache").join("library-index.json")),
+    };
+    let options = RuntimeOptions { audio: AudioBackend::Null { sample_rate: 48_000 }, plugins: None, storage };
+    let parts = Parts { devices: host.factories(), ..Parts::default() };
+    let runtime = Arc::new(Runtime::start_custom(options, parts).unwrap());
+    let server = serve_http(runtime, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let transport =
+        StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(server.url()));
+    let client = &ClientConfig::default().serve(transport).await.unwrap();
+    let said = |call: &str, reply: &Value| eprintln!("\n> {call}\n{reply}");
+
+    // The amplifier, as it comes: how many parameters, the ones its patch
+    // moved, its channels, and that it has no presets to list.
+    let amp = ok(client, "add_device", json!({ "uri": TIM_HENSON })).await["device_id"].as_u64().unwrap();
+    // Asked about once, so that whether it has presets is known.
+    ok(client, "describe_device", json!({ "uri": TIM_HENSON, "preset_limit": 0 })).await;
+    let got = ok(client, "get_device", json!({ "device": amp, "param_limit": 6 })).await;
+    said("get_device (the amplifier, unasked)", &got);
+    let (count, changed) = (got["param_count"].as_u64().unwrap(), got["changed"].as_u64().unwrap());
+    assert!(count > 100 && changed > 0 && changed < count / 2, "{changed} of {count}");
+    assert_eq!(got["channels"], "stereo in, stereo out");
+    assert!(got["params"].as_array().unwrap().iter().all(|param| param["text"].is_string()), "{got}");
+    assert!(got["presets"]["note"].as_str().unwrap().starts_with("This plugin gives a host no presets"), "{got}");
+    assert!(got.to_string().len() < 4000, "a small reply for {count} parameters: {} bytes", got.to_string().len());
+
+    // Found by name, with what it can be set to.
+    let mics = ok(client, "get_device", json!({ "device": amp, "query": "cherubs cab l mic type" })).await;
+    said("get_device query \"cherubs cab l mic type\"", &mics["params"]);
+    let choices = mics["params"][0]["choices"].as_array().unwrap();
+    assert!(choices.contains(&json!("Dynamic 57")) && choices.len() >= 3, "{mics}");
+    let gain = ok(client, "get_device", json!({ "device": amp, "query": "input gain" })).await;
+    said("get_device query \"input gain\"", &gain["params"]);
+    assert_eq!(
+        (gain["params"][0]["from"].as_str(), gain["params"][0]["to"].as_str()),
+        (Some("-24.0 dB"), Some("+24.0 dB"))
+    );
+
+    // Set in its own words; the reply says what each value came to.
+    let params = json!({ "Cherubs Amp Cab L Mic Type": "dynamic 57", "Input Gain": "-6 dB", "Doubler Active": "On" });
+    let updated = ok(client, "update_device", json!({ "device": amp, "params": params })).await;
+    said(&format!("update_device {params}"), &updated);
+    assert_eq!(updated["shown"]["Input Gain"], "-6.0 dB");
+    assert_eq!(updated["shown"]["Cherubs Amp Cab L Mic Type"], "Dynamic 57");
+    assert_eq!(updated["shown"]["Doubler Active"], "On");
+    let error = call(client, "update_device", json!({ "device": amp, "params": { "Input Gain": "99 dB" } })).await;
+    said("update_device Input Gain = 99 dB", &json!(error.clone().unwrap_err()));
+    assert!(error.unwrap_err().contains("values like '-24.0 dB'"));
+
+    // Kept under a name, it is the amplifier's preset from then on.
+    let saved = ok(client, "save_preset", json!({ "device": amp, "name": "Dry Rhythm", "tags": ["rhythm"] })).await;
+    said("save_preset", &saved);
+    assert!(std::path::Path::new(saved["file"].as_str().unwrap()).starts_with(folder.path()));
+    let described = ok(client, "describe_device", json!({ "uri": TIM_HENSON })).await;
+    said("describe_device (its presets)", &described["presets"]);
+    assert_eq!((described["presets"]["total"].as_u64(), names(&described["presets"])), (Some(1), vec!["Dry Rhythm"]));
+    // Another amplifier starts from it: the plugin's state came with it.
+    let second = ok(client, "add_device", json!({ "uri": TIM_HENSON, "preset": "Dry Rhythm" })).await;
+    let second = second["device_id"].as_u64().unwrap();
+    // A plugin takes a state on a moment after it is created.
+    let mut shown = Value::Null;
+    for _ in 0..50 {
+        shown = ok(client, "get_device", json!({ "device": second, "query": "input gain" })).await;
+        if shown["params"][0]["text"] == "-6.0 dB" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    said("get_device (a second amplifier, from the saved preset)", &shown["params"]);
+    assert_eq!(shown["params"][0]["text"], "-6.0 dB");
+    let mic = ok(client, "get_device", json!({ "device": second, "query": "cherubs cab l mic type" })).await;
+    assert_eq!(mic["params"][0]["text"], "Dynamic 57");
+
+    // A sound, across everything that is installed. The first search on a
+    // machine reads every instrument's presets, which takes a while.
+    let search = json!({ "query": "warm pad", "limit": 8, "wait_seconds": 60 });
+    let mut found = ok(client, "search_presets", search.clone()).await;
+    for _ in 0..6 {
+        if found.get("still_reading").is_none() {
+            break;
+        }
+        said("search_presets (still reading)", &json!({ "status": found["status"], "of": found["still_reading"] }));
+        found = ok(client, "search_presets", search.clone()).await;
+    }
+    said(&format!("search_presets {search}"), &found);
+    assert!(found.get("still_reading").is_none(), "everything was read in the end: {found}");
+    let without: Vec<&str> = found["without_presets"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    eprintln!("\ninstruments that give a host no presets: {without:?}");
+    let listed = ok(client, "list_devices", json!({ "category": "instrument" })).await;
+    for device in listed["devices"].as_array().unwrap() {
+        if let Some(count) = device.get("preset_count") {
+            eprintln!(
+                "{:>6} presets: {} ({})",
+                count,
+                device["name"].as_str().unwrap(),
+                device["uri"].as_str().unwrap()
+            );
+        }
+    }
+    // The built-in synth has a warm pad, whatever else is installed, and
+    // what was found is ready for create_track.
+    assert!(found["matching"].as_u64().unwrap() >= 1, "{found}");
+    let first = &found["items"][0];
+    let preset = first.get("id").unwrap_or(&first["preset"]);
+    let track =
+        ok(client, "create_track", json!({ "name": "Pad", "instrument": first["device"], "preset": preset })).await;
+    said("create_track (from the first match)", &track);
+    assert_eq!(track["preset"], first["preset"]);
 }

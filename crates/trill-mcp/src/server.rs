@@ -5,14 +5,15 @@
 
 use crate::guard::Guard;
 use crate::input::{
-    ControllerPointInput, controller_scale, find_param, parse_controller, parse_controller_points, parse_notes,
-    parse_param_value, parse_pitch_value, parse_points,
+    ControllerPointInput, controller_scale, find_param, find_param_index, parse_controller, parse_controller_points,
+    parse_notes, parse_param_value, parse_pitch_value, parse_points,
 };
 use crate::requests::*;
 use crate::view::{
-    PresetSearch, audio_device_json, audio_json, clip_json, controller_json, descriptor_json, descriptor_summary_json,
-    device_json, lane_json, midi_input_json, param_state_json, presets_json, project_json, round, samples_json,
-    scan_json, sound_json, take_json, track_json, transport_json, warp_name,
+    ParamDetail, ParamSpan, PresetSearch, audio_device_json, audio_json, clip_json, controller_json, descriptor_json,
+    descriptor_summary_json, device_json, lane_json, midi_input_json, param_state_json, plugin_param_json,
+    presets_json, project_json, round, samples_json, scan_json, sound_json, take_json, track_json, transport_json,
+    warp_name,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -55,6 +56,22 @@ const UNASKED_PRESETS: usize = 24;
 /// How long a tool waits for a plugin's presets to be read before it
 /// answers with what there is.
 const PRESET_WAIT: Duration = Duration::from_secs(20);
+/// A device with more parameters than this is shown by those that were
+/// moved from their defaults, unless more is asked for.
+const MANY_PARAMS: usize = 64;
+/// Parameters listed of a device with many when the caller does not say
+/// how many, and the most it can ask for.
+const DEFAULT_PARAMS: usize = 40;
+const MAX_PARAMS: usize = 200;
+/// At most this many parameters found by a search come with their ranges,
+/// choices and defaults.
+const DETAILED_PARAMS: usize = 12;
+/// How far a value may be from a default and still be at it, as a part of
+/// the parameter's range: plugins report a knob at its default as 0.499999.
+const AT_DEFAULT: f64 = 1e-4;
+/// A stepped parameter with at most this many steps is shown by what each
+/// step is called.
+const NAMED_STEPS: f64 = 64.0;
 
 const INSTRUCTIONS: &str = "\
 This server controls Trill, a digital audio workstation. You compose, arrange and mix a song by calling tools; the \
@@ -203,7 +220,7 @@ impl TrillServer {
     /// write wherever it is told.
     pub fn new(runtime: Arc<Runtime>) -> Self {
         let session = runtime.session.clone();
-        let tool_router = Self::tool_router() + Self::music_router() + Self::hearing_router();
+        let tool_router = Self::tool_router() + Self::music_router() + Self::sound_router() + Self::hearing_router();
         Self { session, runtime, tool_router, guard: None }
     }
 
@@ -523,6 +540,8 @@ impl TrillServer {
     /// The catalog of instruments and effects that can be added. Built-in devices have `builtin:` URIs and are
     /// listed with their presets; installed plugins appear with `clap:` and `vst3:` URIs (a plugin installed in
     /// both formats is listed once per format; either works), and `describe_device` lists and searches theirs.
+    /// `preset_count` says how many presets a plugin has, where they have been read; search_presets reads and
+    /// searches them all at once.
     #[tool(annotations(title = "List devices", read_only_hint = true))]
     fn list_devices(&self, Parameters(request): Parameters<ListDevicesRequest>) -> CallToolResult {
         // Read outside the session lock: the first plugin scan can take
@@ -545,7 +564,11 @@ impl TrillServer {
                         [&d.name, &d.vendor, &d.uri].iter().any(|field| field.to_ascii_lowercase().contains(q))
                     })
                 })
-                .map(descriptor_summary_json)
+                .map(|descriptor| {
+                    let mut out = descriptor_summary_json(descriptor);
+                    crate::sounds::known_presets_into(&mut out, factory.as_ref(), descriptor);
+                    out
+                })
                 .collect();
             Ok(json!({ "devices": devices }))
         })();
@@ -590,11 +613,15 @@ impl TrillServer {
                     })
                 })
                 .collect();
-            if !others.is_empty() {
-                out["presets"]["note"] = json!(format!(
-                    "This device offers no presets that can be listed. The same plugin in another format: {}.",
-                    others.join("; ")
-                ));
+            if is_plugin(&descriptor.uri) {
+                out["presets"]["note"] = json!(match others.is_empty() {
+                    true => crate::sounds::NO_PRESETS.to_string(),
+                    false => format!(
+                        "{} The same plugin in another format: {}.",
+                        crate::sounds::NO_PRESETS,
+                        others.join("; ")
+                    ),
+                });
             }
         }
         finish(Ok(out))
@@ -628,13 +655,17 @@ impl TrillServer {
         finish(reply)
     }
 
-    /// A device's current parameter values, with ranges and units, the preset it was last given, and how many
-    /// presets it can be given. `preset_query` and the other `preset_` arguments search and page those presets,
-    /// as in describe_device. For the sample players (builtin:sampler, builtin:drumrack) also the audio files
-    /// they play, per slot, with what is wrong with any that is missing.
+    /// A device as it is now: its parameters with their values, the channels it takes and gives, the preset it
+    /// was last given, and how many presets it can be given. A plugin's parameter is a number from 0 to 1 whose
+    /// meaning only the plugin knows, so each comes with `text`, the value as the plugin shows it ("-6.0 dB",
+    /// "Dynamic 57", "On"); update_device sets a parameter by that text as well as by number. A device with
+    /// many parameters is shown by those not at its own defaults: `query` finds parameters by name (with their
+    /// ranges and choices), `show: "all"` lists every one, a page at a time. `preset_query` and the other
+    /// `preset_` arguments search and page the presets, as in describe_device. For the sample players
+    /// (builtin:sampler, builtin:drumrack) also the audio files they play, per slot, with what is wrong with
+    /// any that is missing.
     #[tool(annotations(title = "Get device", read_only_hint = true))]
     async fn get_device(&self, Parameters(request): Parameters<GetDeviceRequest>) -> CallToolResult {
-        const LIMIT: usize = 200;
         let id = DeviceId(request.device);
         // Asked for presets, the reply waits for them to have been read:
         // before the session is taken, not while it is held.
@@ -652,17 +683,6 @@ impl TrillServer {
             let project = session.project();
             let model = project.device(id).map_err(|error| explain(project, error))?;
             let states = session.device_params(id).map_err(|error| explain(project, error))?;
-            let query = request.query.as_deref().map(str::to_ascii_lowercase);
-            let matching: Vec<Value> = states
-                .iter()
-                .filter(|state| {
-                    query.as_deref().is_none_or(|q| {
-                        state.info.id.to_ascii_lowercase().contains(q)
-                            || state.info.name.to_ascii_lowercase().contains(q)
-                    })
-                })
-                .map(param_state_json)
-                .collect();
             let mut out = device_json(model);
             out["enabled"] = json!(model.enabled);
             out["chain"] = match project.device_chain(id).map_err(|e| e.to_string())? {
@@ -678,6 +698,15 @@ impl TrillServer {
             }
             if session.device_has_editor(id) {
                 out["editor"] = json!(if session.is_device_editor_open(id) { "open" } else { "closed" });
+            }
+            if let Ok(channels) = session.device_channels(id) {
+                out["channels"] = json!(channels.describe());
+                if channels.folds_input() {
+                    out["channels_note"] = json!(
+                        "Left and right are mixed into this device's one input channel: whatever differed between \
+                         the sides before it (a doubled guitar, a stereo effect) is the same on both from here on."
+                    );
+                }
             }
             if let Some(preset) = &model.preset {
                 out["preset"] = json!(preset.name);
@@ -706,16 +735,15 @@ impl TrillServer {
                     out["presets"] = presets;
                 }
             }
+            if is_plugin(&model.uri) && out["presets"]["total"] == 0 && out["presets"].get("status").is_none() {
+                out["presets"]["note"] = json!(crate::sounds::NO_PRESETS);
+            }
             // A reply about presets carries the parameters only if they
             // were asked about too.
-            if searched.is_some() && request.query.is_none() {
+            if searched.is_some() && request.query.is_none() && request.show.is_none() {
                 return Ok(out);
             }
-            out["param_count"] = json!(matching.len());
-            if matching.len() > LIMIT {
-                out["truncated"] = json!(format!("showing the first {LIMIT}; narrow it down with `query`"));
-            }
-            out["params"] = matching.into_iter().take(LIMIT).collect();
+            params_into(&mut out, &session, id, &states, &request)?;
             Ok(out)
         })();
         finish(reply)
@@ -758,9 +786,13 @@ impl TrillServer {
             })();
             session.end_gesture();
             result?;
+            let shown = shown_values(&session, id, &resolved);
             let changed: BTreeMap<String, f64> = resolved.into_iter().collect();
             let model = session.project().device(id).map_err(|e| e.to_string())?;
             let mut out = json!({ "device_id": id, "name": model.name, "enabled": model.enabled, "set": changed });
+            if let Some(shown) = shown {
+                out["shown"] = shown;
+            }
             if let Some(preset) = loaded {
                 out["preset"] = json!(preset);
             }
@@ -2077,7 +2109,7 @@ pub(crate) fn add_controller_warnings(
     }
 }
 
-fn is_plugin(uri: &str) -> bool {
+pub(crate) fn is_plugin(uri: &str) -> bool {
     split_uri(uri).is_some_and(|(scheme, _)| scheme != BUILTIN_SCHEME)
 }
 
@@ -2092,20 +2124,214 @@ fn preset_hint(error: String, uri: &str) -> String {
     }
 }
 
+/// The parameters of a `get_device` reply: which of the device's, a page
+/// of them, and how to get at the rest.
+fn params_into(
+    out: &mut Value,
+    session: &Session,
+    id: DeviceId,
+    states: &[trill_engine::ParamState],
+    request: &GetDeviceRequest,
+) -> Result<(), String> {
+    let project = session.project();
+    let plugin = project.device(id).is_ok_and(|device| is_plugin(&device.uri));
+    let defaults = session.device_param_defaults(id).map_err(|error| explain(project, error))?;
+    let moved = |index: &usize| {
+        let state = &states[*index];
+        let room = (state.info.max - state.info.min).abs() * AT_DEFAULT;
+        defaults.get(*index).is_some_and(|default| (state.value - default).abs() > room)
+    };
+    let many = states.len() > MANY_PARAMS;
+    let every = || (0..states.len()).collect::<Vec<usize>>();
+
+    #[derive(PartialEq)]
+    enum Listed {
+        Found,
+        Changed,
+        All,
+    }
+    let query = request.query.as_deref().map(str::trim).filter(|query| !query.is_empty());
+    let (listed, chosen) = match (query, request.show.as_deref().map(str::to_ascii_lowercase).as_deref()) {
+        (Some(query), _) => {
+            let (whole, words) = (query.to_lowercase(), query.split_whitespace().map(str::to_lowercase));
+            let words: Vec<String> = words.collect();
+            let found = every().into_iter().filter(|index| {
+                let info = &states[*index].info;
+                let name = info.name.to_lowercase();
+                info.id.to_lowercase().contains(&whole) || words.iter().all(|word| name.contains(word.as_str()))
+            });
+            (Listed::Found, found.collect())
+        }
+        (None, Some("all")) => (Listed::All, every()),
+        (None, Some("none")) => (Listed::All, Vec::new()),
+        (None, Some("changed")) => (Listed::Changed, every().into_iter().filter(moved).collect()),
+        (None, Some(other)) => return Err(format!("show '{other}' should be \"changed\", \"all\" or \"none\"")),
+        (None, None) if many => (Listed::Changed, every().into_iter().filter(moved).collect()),
+        (None, None) => (Listed::All, every()),
+    };
+    let limit = request.param_limit.unwrap_or(if many { DEFAULT_PARAMS } else { MAX_PARAMS }).min(MAX_PARAMS);
+    let offset = request.param_offset.unwrap_or(0).min(chosen.len());
+    let page: Vec<usize> = chosen.iter().copied().skip(offset).take(limit).collect();
+
+    let params: Vec<Value> = if plugin {
+        // What the plugin shows for each value; and for the few a search
+        // found, for its own default and for the values there are: every
+        // step, or the ends of the range.
+        let detailed = listed == Listed::Found && page.len() <= DETAILED_PARAMS;
+        let mut asked: Vec<(usize, f64)> = Vec::new();
+        let mut starts: Vec<usize> = Vec::new();
+        for &index in &page {
+            let info = &states[index].info;
+            starts.push(asked.len());
+            asked.push((index, states[index].value));
+            if detailed {
+                asked.push((index, defaults[index]));
+                let span = steps_of(info).unwrap_or_else(|| vec![info.min, info.max]);
+                asked.extend(span.into_iter().map(|value| (index, value)));
+            }
+        }
+        starts.push(asked.len());
+        let texts = session.device_param_texts(id, &asked).map_err(|error| explain(project, error))?;
+        let rows = page.iter().enumerate().map(|(row, &index)| {
+            let shown = &texts[starts[row]..starts[row + 1]];
+            let detail = detailed.then(|| ParamDetail {
+                default: shown[1].clone(),
+                span: match steps_of(&states[index].info) {
+                    Some(_) => ParamSpan::Choices(shown[2..].to_vec()),
+                    None => ParamSpan::Range(shown[2].clone(), shown[3].clone()),
+                },
+            });
+            plugin_param_json(&states[index], &shown[0], detail.as_ref())
+        });
+        rows.collect()
+    } else {
+        page.iter().map(|&index| param_state_json(&states[index])).collect()
+    };
+
+    out["param_count"] = json!(states.len());
+    match listed {
+        Listed::Found => out["matching"] = json!(chosen.len()),
+        Listed::Changed => out["changed"] = json!(chosen.len()),
+        Listed::All => {}
+    }
+    if offset > 0 {
+        out["param_offset"] = json!(offset);
+    }
+    let shown = offset + page.len();
+    if shown < chosen.len() {
+        out["params_more"] = json!(format!("{} more: param_offset {shown} lists the next", chosen.len() - shown));
+    }
+    let mut notes: Vec<String> = Vec::new();
+    if listed == Listed::Changed {
+        notes.push(format!(
+            "Of this device's {} parameters, these {} are not at its own defaults. `query` finds a parameter by \
+             name (\"mic\", \"gain\"), with its range and choices; `show: \"all\"` lists every one.",
+            states.len(),
+            chosen.len()
+        ));
+    }
+    if plugin && !page.is_empty() {
+        notes.push(
+            "`value` is the raw number (0 to 1 unless `max` says otherwise); `text` is what the plugin shows for \
+             it. update_device sets a parameter by either: a number, or the text as a string."
+                .to_string(),
+        );
+    }
+    if !notes.is_empty() {
+        out["params_note"] = json!(notes.join(" "));
+    }
+    out["params"] = json!(params);
+    Ok(())
+}
+
+/// Every value of a parameter that moves in a few steps (a switch, a
+/// choice, a count), from the lowest; `None` for one that does not.
+fn steps_of(info: &trill_core::device::ParamInfo) -> Option<Vec<f64>> {
+    let steps = info.max - info.min;
+    let stepped = !matches!(info.kind, trill_core::device::ParamKind::Float) && (1.0..=NAMED_STEPS).contains(&steps);
+    stepped.then(|| (0..=steps as usize).map(|step| info.min + step as f64).collect())
+}
+
+/// What a plugin's parameters came to after they were set, in the plugin's
+/// own words by parameter name: the check that "-6 dB" landed on -6 dB.
+/// `None` for a device that has no words of its own.
+fn shown_values(session: &Session, device: DeviceId, set: &[(String, f64)]) -> Option<Value> {
+    let plugin = session.project().device(device).is_ok_and(|model| is_plugin(&model.uri));
+    if !plugin || set.is_empty() {
+        return None;
+    }
+    let states = session.device_params(device).ok()?;
+    let found: Vec<(usize, f64)> = set
+        .iter()
+        .filter_map(|(id, value)| Some((states.iter().position(|state| state.info.id == *id)?, *value)))
+        .collect();
+    let texts = session.device_param_texts(device, &found).ok()?;
+    let shown: serde_json::Map<String, Value> =
+        found.iter().zip(texts).map(|((index, _), text)| (states[*index].info.name.clone(), json!(text))).collect();
+    Some(Value::Object(shown))
+}
+
 fn resolve_params(
     session: &Session,
     device: DeviceId,
     params: &BTreeMap<String, Value>,
 ) -> Result<Vec<(String, f64)>, String> {
-    let states = session.device_params(device).map_err(|error| explain(session.project(), error))?;
+    let project = session.project();
+    let states = session.device_params(device).map_err(|error| explain(project, error))?;
     let infos: Vec<_> = states.into_iter().map(|state| state.info).collect();
+    let plugin = project.device(device).is_ok_and(|model| is_plugin(&model.uri));
     params
         .iter()
         .map(|(key, value)| {
-            let info = find_param(&infos, key)?;
-            Ok((info.id.clone(), parse_param_value(info, value)?))
+            let index = find_param_index(&infos, key)?;
+            let info = &infos[index];
+            let parsed = match value {
+                // A plugin's parameter set by a string is set in the
+                // plugin's own words: "Dynamic 57", "-6 dB".
+                Value::String(text) if plugin => match session.device_param_value(device, index, text) {
+                    Ok(Some(value)) => value,
+                    _ => parse_param_value(info, value).map_err(|_| not_shown(session, device, index, info, text))?,
+                },
+                _ => parse_param_value(info, value)?,
+            };
+            Ok((info.id.clone(), parsed))
         })
         .collect()
+}
+
+/// Says that a plugin shows no value of a parameter as `text`, and what it
+/// does show: every step of a parameter with a few, or a few values
+/// across its range.
+fn not_shown(
+    session: &Session,
+    device: DeviceId,
+    index: usize,
+    info: &trill_core::device::ParamInfo,
+    text: &str,
+) -> String {
+    const NAMED: usize = 16;
+    let steps = steps_of(info);
+    let stepped = steps.is_some();
+    let at =
+        steps.unwrap_or_else(|| (0..5).map(|part| info.min + (info.max - info.min) * f64::from(part) / 4.0).collect());
+    let asked: Vec<(usize, f64)> = at.iter().map(|value| (index, *value)).collect();
+    let mut shown: Vec<String> = Vec::new();
+    for example in session.device_param_texts(device, &asked).unwrap_or_default() {
+        if !example.is_empty() && !shown.contains(&example) {
+            shown.push(example);
+        }
+    }
+    let more = if shown.len() > NAMED { ", ..." } else { "" };
+    let examples: Vec<String> = shown.iter().take(NAMED).map(|example| format!("'{example}'")).collect();
+    let (between, among) = if stepped { ("one of", "") } else { ("values like", " across its range") };
+    format!(
+        "'{}' has no value that the plugin shows as '{text}'. It shows {between} {}{more}{among}. Give one of those as \
+         a string, or a number from {} to {}",
+        info.name,
+        examples.join(", "),
+        info.min,
+        info.max
+    )
 }
 
 fn set_params(session: &mut Session, device: DeviceId, params: &BTreeMap<String, Value>) -> Result<(), String> {
@@ -2170,7 +2396,8 @@ impl ServerHandler for TrillServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "{INSTRUCTIONS}\n\n{}\n\n{}",
+                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}",
+                crate::sounds::INSTRUCTIONS,
                 crate::music::INSTRUCTIONS,
                 crate::hearing::INSTRUCTIONS
             ))

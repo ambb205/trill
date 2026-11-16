@@ -35,7 +35,8 @@ asked for:
 
 ```sh
 cargo test -p trill-plugins -- --include-ignored    # against the CLAP and VST3 plugins installed here (minutes)
-cargo test -p trill-mcp --test presets -- --include-ignored --nocapture    # an assistant's pass over Surge XT's presets
+cargo test -p trill-mcp --test presets -- --include-ignored --nocapture    # an assistant's pass over Surge XT's presets, and over an amplifier that lists none
+cargo test -p trill-plugins --test sounds -- --include-ignored --nocapture --test-threads 1    # what installed plugins say of their parameters, channels and presets
 cargo test -p trill-mcp --test controllers -- --include-ignored --nocapture    # a SWAM saxophone and Surge XT played from the controller curves of clips
 cargo test -p trill-mcp --test hearing -- --include-ignored --nocapture    # renders and probes of Superior Drummer 3, a SWAM saxophone and an Ample bass
 cargo test -p trill-app a_modelled_saxophone -- --include-ignored --nocapture    # the same saxophone typed on the computer keyboard, through the window's own code (no window opens)
@@ -142,8 +143,26 @@ standard preset folders and the programs of its program lists. A big synth has t
 background, in the scanner process, and remembered until the plugin or its preset folders change. Loading one is
 done by the running plugin, as its own preset browser would, while the song plays; it is one undo step, and what
 it comes to is saved with the project. (What a plugin keeps in a format and a browser of its own, without telling
-the host, cannot be listed: Surge XT lists its three thousand patches as a CLAP plugin and none as a VST3.)
+the host, cannot be listed: Surge XT lists its three thousand patches as a CLAP plugin and none as a VST3. A
+program list that is only numbered slots, "Prog 1" to "Prog 128", is not listed either: there is no sound to
+choose by a number.)
 `cargo run -p trill-plugins --example presets -- "clap:Surge XT" warm pad` shows what an installed plugin offers.
+
+**Saved presets**: any device's sound can be kept under a name: a plugin's state with everything that was set in
+its own window, a built-in device's every parameter. That is how a plugin that keeps its presets in its own window
+(most guitar, bass and drum instruments, and amplifiers) gets presets a host can list: choose a sound in the
+plugin's window once, then "Save preset…" in the preset menu of its panel, or `save_preset` over MCP. A saved
+preset is listed with the device type's own, under "Saved", in every song, and is given to a device like any
+other. They are small files in `saved-presets` beside the settings file, one folder per device type.
+
+**Reading a plugin**: a plugin's parameters are numbers from 0 to 1 whose meaning only the plugin knows, so each
+is shown with the text the plugin itself displays for it ("-6.0 dB", "Dynamic 57", "On"), and can be set by that
+text: where the plugin converts text to a value its answer is checked against what it then shows, and where it
+does not, the value is found among what it shows. Every device says what channels it takes and gives; a device
+with one input channel is handed left and right mixed, and is marked in the chain. (A plugin that takes a stereo
+pair may still be mono inside: a guitar amplifier is, and widens the sound with a doubler of its own.)
+`cargo run -p trill-plugins --example inspect -- "vst3:<plugin name>" mic` shows an installed plugin's channels
+and the parameters with that word in their name, as the plugin shows them.
 
 **Songwriting**: chords by symbol or Roman numeral, voicings, rhythms, arpeggios, bass lines, drum grooves with
 fills, melodies by scale degree, swing and humanizing, and reading a song's key and chords back from its notes
@@ -287,6 +306,7 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Project | `get_project`, `set_project`, `new_project`, `save_project`, `load_project`, `recover_project`, `import_midi`, `export_midi`, `history` |
 | Tracks | `create_track`, `update_track`, `delete_track` |
 | Devices | `list_devices`, `describe_device`, `add_device`, `get_device`, `update_device`, `delete_device`, `show_device_editor` |
+| Presets | `search_presets` (one search across the presets of every installed instrument and the saved ones), `save_preset` (keeps a device's sound under a name) |
 | Clips | `create_clip`, `create_audio_clip`, `update_clip`, `split_clip`, `duplicate_clip`, `delete_clip` |
 | Sounds | `search_sounds`, `library`, `preview_sound`, `set_sample` |
 | Notes | `get_notes`, `add_notes`, `set_notes`, `remove_notes`, `transform_notes` |
@@ -304,7 +324,18 @@ that exist, a bad note with its index and the reason.
 
 Presets are part of the device tools, for plugins as for built-in devices: `describe_device` and `get_device` list
 them a page at a time and search them (`preset_query: "warm pad"`, `preset_category: "Pads"`), and `create_track`,
-`add_device` and `update_device` take one by its name, its category and name, or its id.
+`add_device` and `update_device` take one by its name, its category and name, or its id. `search_presets` looks
+for a sound ("warm pad", "808 sub") across every installed instrument at once and answers with the device and the
+preset to give `create_track`; the presets are read in the background the first time and remembered, and the reply
+says which are still being read. `list_devices` says how many presets a plugin has, where that is known. A plugin
+that lists none says so in a sentence: its presets are in its own window, and `save_preset` keeps what is chosen
+there.
+
+`get_device` is small whatever the device: for a plugin with hundreds of parameters it gives the count and the
+ones that are not at the plugin's own defaults, `query` finds others by name with their ranges and choices, and
+`show: "all"` pages through every one. Each of a plugin's parameters comes with `text`, the value as the plugin
+displays it, and `update_device` takes that text as well as a number: `{"Cab L Mic Type": "Dynamic 57", "Input
+Gain": "-6 dB"}`. It also says which channels the device takes and gives.
 
 The HTTP server listens on localhost only and has no password: any program on the machine may use it. Pages in a
 web browser may not; requests that carry a browser's `Origin` are refused.
@@ -374,7 +405,8 @@ Working: everything listed above, with tests.
 Not yet: running plugins out of process (only scanning and the reading of presets are isolated today, so a plugin
 that crashes while playing or while it loads a preset still takes the app with it; the safety copy is what saves
 the work), a preset browser for plugins in the window (the session lists, searches and loads them, and so does
-MCP; the device panel shows built-in presets only), plugin editors on Linux and macOS,
+MCP; the device panel shows built-in and saved presets only), asking a CLAP plugin for a stereo layout when its
+default is mono (a VST3 plugin is asked), plugin editors on Linux and macOS,
 session (clip-launching) view, audio recording (MIDI is recorded; audio is not), polyphonic aftertouch and MPE
 (per-note expression; clips hold one curve per controller for the whole channel), ASIO, warp markers, plugin
 delay compensation, multi-core rendering. Only Windows has been run so far.

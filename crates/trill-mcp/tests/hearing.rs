@@ -669,3 +669,37 @@ async fn a_sampled_bass_is_learned_in_two_calls() {
     }
     assert!(switches["keyswitches"].as_array().unwrap().len() >= 2, "{switches}");
 }
+
+/// Archetype Tim Henson X, an amplifier, as a VST3 plugin: an effect that
+/// passes no sound for a moment after it is created.
+const AMPLIFIER: &str = "vst3:ABCDEF019182FAEB4E4453504E544858";
+
+/// With the installed Archetype Tim Henson behind a built-in synth, which
+/// has nothing to be late with itself: a note on the first sample of a
+/// render comes through the amplifier as the same note two seconds later
+/// does.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Archetype Tim Henson X (VST3) installed; run with `cargo test -p trill-mcp --test hearing -- --include-ignored --nocapture`"]
+async fn a_note_on_the_first_sample_comes_through_an_amplifier_that_takes_a_moment() {
+    let Some((fixture, folder)) = connect_with_plugins(AMPLIFIER).await else { return };
+    let client = &fixture.client;
+    ok(client, "set_project", json!({ "tempo": 120 })).await;
+    let lead = track(client, "Lead", "builtin:polysynth").await;
+    ok(client, "add_device", json!({ "track": lead, "uri": AMPLIFIER })).await;
+    clip(client, lead, 0.0, 8.0, json!([["E3", 0, 1], ["E3", 4, 1]])).await;
+    let wav = folder.path().join("amp.wav");
+    let begun = Instant::now();
+    let report = ok(client, "render", json!({ "path": wav.display().to_string(), "max_tail_seconds": 1 })).await;
+    let audio = trill_media::decode(&wav).unwrap();
+    let notes = levels(&audio.left, 48_000.0, &[0.0, 2.0], 0.4);
+    let opening = levels(&audio.left, 48_000.0, &[0.0, 2.0], 0.05);
+    eprintln!(
+        "rendered in {:.1?}: the note at 0 s and at 2 s peak at {notes:.1?} dB, their first 50 ms at {opening:.1?} dB; \
+         notes {}",
+        begun.elapsed(),
+        report["notes"]
+    );
+    assert!(notes[0] > -60.0, "the first note comes through: {notes:?}");
+    assert!((notes[0] - notes[1]).abs() < 3.0, "as loud as the same note later: {notes:?}");
+    assert!((opening[0] - opening[1]).abs() < 6.0, "from its beginning: {opening:?}");
+}

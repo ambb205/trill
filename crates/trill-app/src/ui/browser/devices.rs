@@ -182,13 +182,35 @@ fn preset_list(ui: &mut Ui, cx: &mut Cx) {
     let Some(descriptor) = cx.descriptors.iter().find(|descriptor| descriptor.uri == device.uri) else { return };
     let query = cx.state.browser.search.clone();
     let presets: Vec<_> = descriptor.presets.iter().filter(|preset| matches(&preset.name, &query)).collect();
+    let device_id = device.id;
+    // The ones that were saved come first: they are the user's own.
+    let saved: Vec<_> =
+        devices::saved_presets(cx, device).iter().filter(|preset| matches(&preset.name, &query)).collect();
+    if !saved.is_empty() {
+        section(ui, cx, &format!("Saved presets \u{00B7} {}", descriptor.name));
+        let current = devices::current_saved(cx, device);
+        for preset in saved {
+            let response = row(ui, cx, &preset.name, "", current == Some(preset.id.as_str()));
+            cx.hint(
+                &response,
+                if preset.description.is_empty() {
+                    format!("{}, as it was saved", preset.name)
+                } else {
+                    preset.description.clone()
+                },
+            );
+            if response.clicked() {
+                let id = preset.id.clone();
+                cx.try_session(|session| session.apply_preset(device_id, &id));
+            }
+        }
+    }
     if presets.is_empty() {
         return;
     }
 
     section(ui, cx, &format!("Presets \u{00B7} {}", descriptor.name));
     let current = devices::current_preset(device, descriptor);
-    let device_id = device.id;
     for preset in presets {
         let response = row(ui, cx, &preset.name, "", current == Some(preset.name.as_str()));
         cx.hint(

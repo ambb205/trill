@@ -101,6 +101,8 @@ async fn tools_are_listed_with_schemas() {
         "get_device",
         "update_device",
         "delete_device",
+        "search_presets",
+        "save_preset",
         "create_clip",
         "create_audio_clip",
         "update_clip",
