@@ -153,7 +153,9 @@ pub fn articulate(profile: &InstrumentProfile, notes: &[(Note, Option<String>)],
             moved = Some((original, late));
         }
         for (key, lead, velocity, name) in presses {
-            out.notes.push(Note { pitch: key, start: note.start - lead, length: SWITCH_HOLD, velocity });
+            // Never before the clip begins, by rounding either: a note a hair before beat 0 is refused.
+            let start = (note.start - lead).max(0.0 - room);
+            out.notes.push(Note { pitch: key, start, length: SWITCH_HOLD, velocity });
             *out.presses.entry(name.to_string()).or_default() += 1;
         }
         previous = Some(out.notes.len());
