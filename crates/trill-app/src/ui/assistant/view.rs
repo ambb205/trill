@@ -224,11 +224,19 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     }
 }
 
-/// The name of the panel, how it stands, and its two buttons.
+/// The name of the panel, how it stands, and at the right a way to start
+/// over and a way to put the panel away.
 fn header(ui: &mut Ui, cx: &mut Cx, bar: Rect) {
     let theme = cx.theme;
     let painter = ui.painter().clone();
     paint::hline_above(&painter, bar.x_range(), bar.bottom(), theme.hairline);
+    let close_rect = Rect::from_min_size(pos2(bar.right() - HEADER, bar.top()), vec2(HEADER, HEADER - 1.0));
+    let fresh_chip = Chip::action("New").named("New conversation");
+    let fresh_width = fresh_chip.width(ui, theme);
+    let fresh_rect = Rect::from_min_size(
+        pos2(close_rect.left() - 2.0 - fresh_width, bar.center().y - theme.metric.chip / 2.0),
+        vec2(fresh_width, theme.metric.chip),
+    );
     let row = bar.with_min_x(bar.left() + EDGE);
     let mut x = row.left() + text::paint(&painter, row, Align2::LEFT_CENTER, theme.text.caps, "Assistant", theme.ink);
 
@@ -241,7 +249,7 @@ fn header(ui: &mut Ui, cx: &mut Cx, bar: Rect) {
         (Readiness::Ready(_), false, _) => (theme.ok, "Ready"),
     };
     x = paint::dot(&painter, pos2(x + 10.0, bar.center().y), theme.metric.dot, color) + 5.0;
-    let status = Rect::from_min_max(pos2(x, bar.top()), pos2(bar.right() - 2.0 * HEADER, bar.bottom()));
+    let status = Rect::from_min_max(pos2(x, bar.top()), pos2(fresh_rect.left() - 8.0, bar.bottom()));
     let used = text::paint(&painter, status, Align2::LEFT_CENTER, theme.text.micro, word, theme.ink_faint);
     let about = match &assistant.readiness {
         Readiness::Ready(ready) => {
@@ -257,17 +265,14 @@ fn header(ui: &mut Ui, cx: &mut Cx, bar: Rect) {
     let response = ui.interact(sensed, ui.scope_id().with("assistant-status"), Sense::hover());
     cx.hint(&response, about);
 
-    let button = |index: f32| {
-        Rect::from_min_size(pos2(bar.right() - (index + 1.0) * HEADER, bar.top()), vec2(HEADER, HEADER - 1.0))
-    };
     let id = ui.scope_id().with("assistant-header");
     let close =
-        trill_noir::bare_icon_button(ui, theme, button(0.0), id.with("close"), Icon::Close, "Close the assistant");
+        trill_noir::bare_icon_button(ui, theme, close_rect, id.with("close"), Icon::Close, "Close the assistant");
     cx.hint(&close, format!("Put the assistant away \u{00B7} {}", shortcuts::keys(Command::ToggleAssistant)));
     if close.clicked() {
         cx.assistant.toggle();
     }
-    let fresh = trill_noir::bare_icon_button(ui, theme, button(1.0), id.with("new"), Icon::Plus, "New conversation");
+    let fresh = trill_noir::chip(ui, theme, fresh_rect, id.with("new"), &fresh_chip);
     cx.hint(&fresh, "New conversation: the assistant starts over and remembers nothing of this one");
     if fresh.clicked() {
         if cx.assistant.is_working() {

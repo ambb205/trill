@@ -427,6 +427,28 @@ mod tests {
     }
 
     #[test]
+    fn the_assistant_can_be_opened_and_told_what_to_use() {
+        let plain = run(&[]).unwrap();
+        let options = plain.ui_options().assistant;
+        assert!(!options.open && options.scene.is_none() && options.model.is_none());
+        assert!(!options.mcp_off, "the MCP server it works through is on unless turned off");
+        assert!(run(&["--no-mcp"]).unwrap().ui_options().assistant.mcp_off);
+
+        let cli = run(&["--assistant", "--assistant-model", "haiku", "--assistant-scene", "working"]).unwrap();
+        let options = cli.ui_options().assistant;
+        assert!(options.open);
+        assert_eq!(options.model.as_deref(), Some("haiku"));
+        assert_eq!(options.scene, Some(AssistantScene::Working));
+        for (name, scene) in AssistantScene::ALL {
+            assert_eq!(run(&["--assistant-scene", name]).unwrap().assistant_scene, Some(scene));
+            assert!(USAGE.contains(name), "the help does not list the scene '{name}'");
+        }
+        let error = run(&["--assistant-scene", "live"]).unwrap_err().to_string();
+        assert!(error.contains("live") && error.contains("signed-out"), "{error}");
+        assert!(run(&["--assistant-model"]).is_err() && run(&["--assistant-scene"]).is_err());
+    }
+
+    #[test]
     fn help_is_recognized() {
         assert_eq!(parse(["--help".to_owned()]).unwrap(), Parsed::Help);
         assert_eq!(parse(["--demo".to_owned(), "-h".to_owned()]).unwrap(), Parsed::Help);
