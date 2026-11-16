@@ -25,6 +25,17 @@
 //! caller has patience. Then the notes are let go of, what rings is left to die
 //! away, the plugins are reset, and the render starts from the top.
 //!
+//! **Effects wait too.** An amplifier or a reverb that is a plugin may
+//! pass no sound for a moment after it is made. Behind a plugin
+//! instrument it is rehearsed with it: the notes are heard at the end of
+//! the track's plugins, not at the instrument. Anywhere else (after a
+//! built-in instrument, on an audio track, a group, a return or the
+//! master) there are no notes to give it, so it is given a short burst of
+//! noise instead and is ready when that comes out the same way for a
+//! quarter of a second. An effect that lets nothing through (a gate that
+//! stays shut, a delay that is all echo) is given up on after a few
+//! seconds and remembered, like an instrument that never answers.
+//!
 //! Only plugins are rehearsed, and only they are run: the built-in devices
 //! are ready the moment they exist and are not touched, so a song of
 //! built-in devices renders to the same samples it always did.
@@ -35,12 +46,15 @@
 //! what it was (the plugins, their state, the notes), and the next render
 //! of the same thing waits only a moment for it.
 //!
-//! What this cannot see: a plugin that stops changing for longer than a
-//! quarter of a second and is still not done (a library that loads for
-//! many seconds with pauses in it, or one whose later notes are not among
-//! the dozen that are rehearsed), and an effect plugin behind a built-in
-//! instrument, which is given nothing to answer. Neither is worse off
-//! than before there was any waiting.
+//! A plugin that was slow to give its first answer is asked to hold its
+//! answers for longer (half as long as it took, up to two seconds): on a
+//! busy machine a sampler's loading stalls, and a stall is not the end.
+//!
+//! What this cannot see: a plugin that stops changing for longer than
+//! that and is still not done, one whose later notes are not among the
+//! dozen that are rehearsed, and an effect that passes sound before it is
+//! ready to pass it rightly. None of them is worse off than before there
+//! was any waiting.
 
 use crate::graph::Graph;
 use parking_lot::Mutex;
@@ -65,16 +79,26 @@ const ABOVE_NOISE: f32 = 4.0;
 /// Two answers this close in level, in dB, are the same answer.
 const SAME_ANSWER_DB: f32 = 3.0;
 /// How long the answers must have stayed the same for the plugin to be
-/// taken as ready.
+/// taken as ready: at least this, at most [`SETTLED_AT_MOST`], and half
+/// as long as its first answer took to come.
 const SETTLED_FOR: Duration = Duration::from_millis(250);
+const SETTLED_AT_MOST: Duration = Duration::from_secs(2);
+/// The longest an effect that passes nothing is waited for.
+const EFFECT_PATIENCE: Duration = Duration::from_secs(3);
+/// The level of the noise an effect is tried with: -12 dB, which opens a
+/// gate that is set for music.
+const SIGNAL_LEVEL: f32 = 0.25;
+/// How many stretches of [`NOTE_SECONDS`] the noise lasts.
+const SIGNAL_STRETCHES: usize = 3;
 /// How many more times an answer that keeps changing is asked for before
 /// it is taken as it is: an instrument that never plays a note the same
 /// way twice is ready all the same.
 const CHANGING_ANSWERS: u32 = 10;
 /// How long a rehearsal waits between tries.
 const BETWEEN_TRIES: Duration = Duration::from_millis(100);
-/// The longest a rehearsed plugin is left to ring out before it is reset.
-const RING_OUT_SECONDS: f64 = 3.0;
+/// The longest a rehearsed plugin is left to ring out before it is reset:
+/// long enough for a hall to forget a short burst of noise.
+const RING_OUT_SECONDS: f64 = 10.0;
 /// How long output must stay down to count as rung out.
 const QUIET_SECONDS: f64 = 0.1;
 /// How long a track that is known not to answer is waited for.
@@ -85,12 +109,17 @@ const REMEMBERED: usize = 256;
 /// What did not answer the last time it was asked, by [`signature`].
 static KNOWN_NOT_TO_ANSWER: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 
-/// How waiting for one track's plugin went.
+/// How waiting for the plugins of one chain went.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Waited {
-    pub track: TrackId,
-    /// The plugin that was waited for: the track's instrument.
+    /// The track they are on; `None` for the master.
+    pub track: Option<TrackId>,
+    /// The plugin that was waited for: the track's instrument, or the
+    /// first of the effects that were tried with it.
     pub device: DeviceId,
+    /// Whether it was effects that were waited for, tried with noise, and
+    /// not an instrument with its notes.
+    pub effect: bool,
     /// How long it took to answer, or how long it was waited for in vain.
     pub seconds: f64,
     /// Whether it answered. If not, the render went ahead without it.
@@ -110,7 +139,10 @@ pub(crate) struct OpeningNote {
 /// What a plugin is given to see whether it answers.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Opening {
+    /// The notes an instrument is played.
     pub notes: Vec<OpeningNote>,
+    /// For effects, which take no notes: a burst of noise to pass.
+    pub signal: bool,
 }
 
 /// Devices in a row, driven by hand outside any graph: events in at the
@@ -148,13 +180,24 @@ impl<'a> Stand<'a> {
     /// Runs the devices for `frames` frames, with `events` in the first
     /// block, and hands every block of what comes out to `hear`. Stops
     /// early, at the end of a block, once `hear` returns false.
-    pub fn run_into(&mut self, events: &[Event], frames: usize, mut hear: impl FnMut(&[f32], &[f32]) -> bool) {
+    pub fn run_into(&mut self, events: &[Event], frames: usize, hear: impl FnMut(&[f32], &[f32]) -> bool) {
+        self.run_through(events, frames, |left, right| (left.fill(0.0), right.fill(0.0)).0, hear);
+    }
+
+    /// [`Self::run_into`] with something going in: `feed` fills every
+    /// block before the devices are given it.
+    fn run_through(
+        &mut self,
+        events: &[Event],
+        frames: usize,
+        mut feed: impl FnMut(&mut [f32], &mut [f32]),
+        mut hear: impl FnMut(&[f32], &[f32]) -> bool,
+    ) {
         let mut done = 0;
         while done < frames {
             let count = (frames - done).min(BLOCK);
             let (left, right) = (&mut self.left[..count], &mut self.right[..count]);
-            left.fill(0.0);
-            right.fill(0.0);
+            feed(left, right);
             let events = if done == 0 { events } else { &[] };
             for device in &mut self.devices {
                 device.process(&self.info, events, left, right);
@@ -214,9 +257,40 @@ impl<'a> Stand<'a> {
         Answer { peak, energy }
     }
 
+    /// Puts noise through the devices for `seconds` and returns what came
+    /// out. The noise is the same every time it is begun from `seed`.
+    fn pass(&mut self, seed: &mut u32, seconds: f64) -> Answer {
+        let frames = self.frames(seconds);
+        let (mut peak, mut energy) = (0.0f32, 0.0f64);
+        let feed = |left: &mut [f32], right: &mut [f32]| {
+            for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+                *seed ^= *seed << 13;
+                *seed ^= *seed >> 17;
+                *seed ^= *seed << 5;
+                let sample = ((*seed >> 8) as f32 / 8_388_608.0 - 1.0) * SIGNAL_LEVEL;
+                (*l, *r) = (sample, sample);
+            }
+        };
+        self.run_through(&[], frames, feed, |left, right| {
+            for sample in left.iter().chain(right) {
+                peak = peak.max(sample.abs());
+                energy += f64::from(*sample) * f64::from(*sample);
+            }
+            true
+        });
+        Answer { peak, energy }
+    }
+
     /// Plays `opening` a note at a time and returns what came out while
-    /// each was down, and after the last.
+    /// each was down, and after the last. For effects: what came out
+    /// while the noise went in, stretch by stretch, and after it.
     fn rehearse(&mut self, opening: &Opening) -> Vec<Answer> {
+        if opening.signal {
+            let mut seed = 0x2545_F491u32;
+            let mut answers: Vec<Answer> = (0..SIGNAL_STRETCHES).map(|_| self.pass(&mut seed, NOTE_SECONDS)).collect();
+            answers.push(self.hear(&[], AFTER_SECONDS));
+            return answers;
+        }
         let mut answers = Vec::with_capacity(opening.notes.len() + 1);
         let mut events: Vec<Event> = Vec::new();
         for note in &opening.notes {
@@ -283,13 +357,15 @@ pub(crate) struct Wait<'a> {
     same_since: Option<Instant>,
     /// How many answers so far were not like the one before.
     changing: u32,
+    /// How long after the wait began the first answer came.
+    first_answer: Option<Duration>,
     /// When it was found ready, or given up on.
     outcome: Option<(Duration, bool)>,
 }
 
 impl<'a> Wait<'a> {
     pub fn new(stand: Stand<'a>, opening: Opening, signature: u64) -> Self {
-        Self { stand, opening, signature, last: None, same_since: None, changing: 0, outcome: None }
+        Self { stand, opening, signature, last: None, same_since: None, changing: 0, first_answer: None, outcome: None }
     }
 
     /// One try. Returns whether the wait is over.
@@ -301,6 +377,7 @@ impl<'a> Wait<'a> {
             (self.last, self.same_since) = (None, None);
             return false;
         }
+        let first = *self.first_answer.get_or_insert(begun.elapsed());
         // Note for note: both silent, or both sounding with about the same
         // energy.
         let alike = |now: Answer, before: Answer| match (now.peak > floor, before.peak > floor) {
@@ -318,7 +395,9 @@ impl<'a> Wait<'a> {
             _ => None,
         };
         self.last = Some((answers, now));
-        let settled = self.same_since.is_some_and(|since| now.duration_since(since) >= SETTLED_FOR);
+        // One that was slow to answer at all is given longer to finish.
+        let hold = (first / 2).clamp(SETTLED_FOR, SETTLED_AT_MOST);
+        let settled = self.same_since.is_some_and(|since| now.duration_since(since) >= hold);
         if settled || self.changing >= CHANGING_ANSWERS {
             self.outcome = Some((begun.elapsed(), true));
         }
@@ -344,6 +423,7 @@ pub(crate) fn wait_for(waits: &mut [Wait], patience: Duration) {
         let waited = begun.elapsed();
         let mut pending = false;
         for wait in waits.iter_mut().filter(|wait| wait.outcome.is_none()) {
+            let patience = if wait.opening.signal { patience.min(EFFECT_PATIENCE) } else { patience };
             let limit = if known.contains(&wait.signature) { patience.min(KNOWN_SILENT) } else { patience };
             if wait.attempt(begun) {
                 continue;
@@ -385,6 +465,7 @@ pub(crate) fn signature<'a>(devices: impl Iterator<Item = &'a Device>, opening: 
             value.to_bits().hash(&mut hasher);
         }
     }
+    opening.signal.hash(&mut hasher);
     for note in &opening.notes {
         (note.pitch, note.velocity.to_bits()).hash(&mut hasher);
         for kind in &note.controllers {
@@ -425,9 +506,11 @@ impl Plugins {
     }
 }
 
-/// Sees to it that every plugin instrument of `graph` that has notes to
-/// play between the beats `from` and `to` is ready to play them, waiting
-/// up to `patience` for those that are not. See the module documentation.
+/// Sees to it that the plugins of `graph` are ready before it is played:
+/// every plugin instrument that has notes to play between the beats
+/// `from` and `to`, with the plugins after it, and every other plugin, as
+/// an effect. Waits up to `patience` for those that are not. See the
+/// module documentation.
 pub(crate) fn wake(
     graph: &mut Graph,
     project: &Project,
@@ -442,21 +525,16 @@ pub(crate) fn wake(
     for node in &mut graph.tracks {
         let Ok(track) = project.track(node.id) else { continue };
         // What plays the track's notes: its first device that is not an
-        // effect. Only if that is a plugin is there anything to wait for.
+        // effect. Only if that is a plugin is there an instrument to wait
+        // for, and then only if it has notes to play.
         let sounding = track.devices.iter().filter(|device| device.enabled);
-        let Some(instrument) = sounding.clone().find(|device| trill_dsp::is_instrument(&device.uri) != Some(false))
-        else {
-            continue;
-        };
-        if !plugins.is_instrument(&instrument.uri) {
-            continue;
-        }
-        // The instrument and the plugins after it: what a note goes
-        // through before it is heard, the built-in devices left out.
-        let from_instrument = sounding.skip_while(|device| device.id != instrument.id);
-        let rehearsed: Vec<&Device> = from_instrument.filter(|device| Plugins::is_plugin(&device.uri)).collect();
+        let instrument = sounding
+            .clone()
+            .find(|device| trill_dsp::is_instrument(&device.uri) != Some(false))
+            .filter(|instrument| plugins.is_instrument(&instrument.uri));
         let mut notes: Vec<OpeningNote> = Vec::new();
-        for note in node.notes.iter().filter(|note| note.start >= from - 1e-9 && note.start < to) {
+        let opening_notes = node.notes.iter().filter(|note| note.start >= from - 1e-9 && note.start < to);
+        for note in opening_notes.filter(|_| instrument.is_some()) {
             if notes.len() == OPENING_NOTES {
                 break;
             }
@@ -480,21 +558,56 @@ pub(crate) fn wake(
             let velocity = f32::from(note.velocity.clamp(1, 127)) / 127.0;
             notes.push(OpeningNote { pitch: note.pitch, velocity, controllers });
         }
-        if notes.is_empty() {
-            // Nothing to play, so nothing to be late with.
-            continue;
+        // The instrument and the plugins after it are what a note goes
+        // through before it is heard, the built-in devices left out. With
+        // no notes to play, there is nothing to rehearse them with.
+        let rehearsed: Vec<&Device> = match instrument.filter(|_| !notes.is_empty()) {
+            Some(instrument) => sounding
+                .clone()
+                .skip_while(|device| device.id != instrument.id)
+                .filter(|device| Plugins::is_plugin(&device.uri))
+                .collect(),
+            None => Vec::new(),
+        };
+        // Every other plugin of the track is tried as an effect.
+        let effects: Vec<&Device> = sounding
+            .filter(|device| Plugins::is_plugin(&device.uri) && !rehearsed.iter().any(|other| other.id == device.id))
+            .collect();
+        let (mut with_notes, mut with_noise) = (Vec::new(), Vec::new());
+        for slot in node.chain.devices.iter_mut() {
+            let id = slot.id;
+            let Some(processor) = slot.processor.as_mut() else { continue };
+            if rehearsed.iter().any(|device| device.id == id) {
+                with_notes.push(processor);
+            } else if effects.iter().any(|device| device.id == id) {
+                with_noise.push(processor);
+            }
         }
-        let opening = Opening { notes };
-        let signature = signature(rehearsed.iter().copied(), &opening);
-        let ids: Vec<DeviceId> = rehearsed.iter().map(|device| device.id).collect();
-        let slots = node.chain.devices.iter_mut().filter(|slot| ids.contains(&slot.id));
-        let processors: Vec<_> = slots.filter_map(|slot| slot.processor.as_mut()).collect();
-        if processors.len() != ids.len() {
-            // One of them could not be created: a problem of its own.
-            continue;
+        // (A plugin that could not be created is a problem of its own,
+        // and what is left of its chain is not rehearsed without it.)
+        if let (Some(instrument), true) = (instrument, !rehearsed.is_empty() && with_notes.len() == rehearsed.len()) {
+            let opening = Opening { notes, signal: false };
+            let signature = signature(rehearsed.iter().copied(), &opening);
+            waits.push(Wait::new(Stand::new(with_notes, sample_rate, tempo), opening, signature));
+            who.push((Some(node.id), instrument.id, false));
         }
+        if let (Some(first), true) = (effects.first(), with_noise.len() == effects.len()) {
+            let opening = Opening { notes: Vec::new(), signal: true };
+            let signature = signature(effects.iter().copied(), &opening);
+            waits.push(Wait::new(Stand::new(with_noise, sample_rate, tempo), opening, signature));
+            who.push((Some(node.id), first.id, true));
+        }
+    }
+    // The master has no notes: its plugins are effects.
+    let effects: Vec<&Device> =
+        project.master.devices.iter().filter(|device| device.enabled && Plugins::is_plugin(&device.uri)).collect();
+    let slots = graph.master.chain.devices.iter_mut().filter(|slot| effects.iter().any(|device| device.id == slot.id));
+    let processors: Vec<_> = slots.filter_map(|slot| slot.processor.as_mut()).collect();
+    if let (Some(first), true) = (effects.first(), processors.len() == effects.len()) {
+        let opening = Opening { notes: Vec::new(), signal: true };
+        let signature = signature(effects.iter().copied(), &opening);
         waits.push(Wait::new(Stand::new(processors, sample_rate, tempo), opening, signature));
-        who.push((node.id, instrument.id));
+        who.push((None, first.id, true));
     }
     if waits.is_empty() {
         return Vec::new();
@@ -503,9 +616,9 @@ pub(crate) fn wake(
     waits
         .iter()
         .zip(who)
-        .map(|(wait, (track, device))| {
+        .map(|(wait, (track, device, effect))| {
             let (waited, answered) = wait.outcome();
-            Waited { track, device, seconds: waited.as_secs_f64(), answered }
+            Waited { track, device, effect, seconds: waited.as_secs_f64(), answered }
         })
         .collect()
 }

@@ -331,7 +331,7 @@ fn silent_track_notes(
                  controllers {{\"expression\": 100}} tells, and shape_dynamics writes the curve."
             ));
         }
-        if waited.iter().any(|waited| waited.track == track.id && !waited.answered) {
+        if waited.iter().any(|waited| waited.track == Some(track.id) && !waited.answered) {
             note.push_str(" (The render waited for it to answer before it started, and it never did.)");
         }
         notes.push(note);
@@ -1342,7 +1342,7 @@ mod tests {
 
         // One the render waited for in vain says so.
         let waited = [WaitedFor {
-            track: guitar,
+            track: Some(guitar),
             track_name: "Guitar".into(),
             device: trill_core::DeviceId(3),
             device_name: "Amp".into(),

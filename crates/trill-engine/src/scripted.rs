@@ -19,10 +19,12 @@
 //!   tick) and a crash on 49 (a long bright wash). Every other note is
 //!   silent.
 //!
+//! * [`AMP`] is an effect: it passes what it is given at half its level.
+//!
 //! A factory made with [`ScriptedFactory::loading`] hands out instruments
 //! that are deaf for a while after they are created, on the machine's own
 //! clock, as a sampler is while it reads its samples: notes given to them
-//! meanwhile never sound.
+//! meanwhile never sound. Its amplifier passes nothing for as long.
 
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -37,6 +39,7 @@ use trill_core::presets::{PresetInfo, PresetList};
 
 pub const BASS: &str = "scripted:bass";
 pub const DRUMS: &str = "scripted:drums";
+pub const AMP: &str = "scripted:amp";
 
 /// The key that palm-mutes the bass while it is held: C0.
 pub const MUTE_KEY: u8 = 12;
@@ -95,18 +98,20 @@ impl ScriptedFactory {
 
 impl DeviceFactory for ScriptedFactory {
     fn descriptors(&self) -> Vec<DeviceDescriptor> {
-        let descriptor = |uri: &str, name: &str, description: &str| DeviceDescriptor {
+        let descriptor = |uri: &str, name: &str, category: DeviceCategory, description: &str| DeviceDescriptor {
             uri: uri.to_string(),
             name: name.to_string(),
             vendor: "Trill tests".to_string(),
-            category: DeviceCategory::Instrument,
+            category,
             description: description.to_string(),
             params: Vec::new(),
             presets: Vec::new(),
         };
+        let (instrument, effect) = (DeviceCategory::Instrument, DeviceCategory::Effect);
         vec![
-            descriptor(BASS, "Scripted Bass", "A bass that sounds an octave below what is written"),
-            descriptor(DRUMS, "Scripted Drums", "A kick, a snare, a hat and a crash"),
+            descriptor(BASS, "Scripted Bass", instrument, "A bass that sounds an octave below what is written"),
+            descriptor(DRUMS, "Scripted Drums", instrument, "A kick, a snare, a hat and a crash"),
+            descriptor(AMP, "Scripted Amp", effect, "Passes what it is given at half its level"),
         ]
     }
 
@@ -124,10 +129,15 @@ impl DeviceFactory for ScriptedFactory {
         let kind = match device.uri.as_str() {
             BASS => Kind::Bass,
             DRUMS => Kind::Drums,
+            AMP => Kind::Amp,
             _ => return Err(DeviceError::Unknown(device.uri.clone())),
         };
         self.made.lock().push((device.uri.clone(), purpose));
         let born = Instant::now();
+        if kind == Kind::Amp {
+            let ready = (!self.loading.never).then(|| born + self.loading.first);
+            return Ok(DeviceInstance { processor: Box::new(Amp { ready }), params: Vec::new(), controller: None });
+        }
         let patch = Arc::new(Patch::default());
         // The sound a saved state stands for: the preset it was saved with.
         if let Some(saved) = device.state.as_deref().and_then(|state| std::str::from_utf8(state).ok()) {
@@ -156,7 +166,7 @@ impl DeviceFactory for ScriptedFactory {
                 Self::preset("up", "Octave up", "Sounds as written"),
                 Self::preset("soft", "Soft", "Half as loud"),
             ])),
-            DRUMS => Some(PresetList::ready(Vec::<PresetInfo>::new())),
+            DRUMS | AMP => Some(PresetList::ready(Vec::<PresetInfo>::new())),
             _ => None,
         }
     }
@@ -215,6 +225,26 @@ impl DeviceController for Controller {
 enum Kind {
     Bass,
     Drums,
+    Amp,
+}
+
+/// The amplifier: half of what goes in comes out, once it is ready.
+struct Amp {
+    /// When it begins to pass sound; `None` for one that never does.
+    ready: Option<Instant>,
+}
+
+impl DeviceProcessor for Amp {
+    fn prepare(&mut self, _sample_rate: f64, _max_block: usize) {}
+
+    fn set_param(&mut self, _index: usize, _value: f64) {}
+
+    fn process(&mut self, _info: &ProcessInfo, _events: &[Event], left: &mut [f32], right: &mut [f32]) {
+        let gain = if self.ready.is_some_and(|ready| Instant::now() >= ready) { 0.5 } else { 0.0 };
+        left.iter_mut().chain(right.iter_mut()).for_each(|sample| *sample *= gain);
+    }
+
+    fn reset(&mut self) {}
 }
 
 /// What a voice makes.
@@ -297,6 +327,7 @@ impl Instrument {
                     voice.overtone = 0.6;
                 }
             }
+            Kind::Amp => return,
             Kind::Drums => {
                 let (sound, hz, rings) = match pitch {
                     36 => (Sound::Tone, 55.0, 0.04),

@@ -31,6 +31,9 @@ const STEP_SECONDS: f64 = 0.005;
 /// How long the output must stay down after a note before the next is
 /// played.
 const QUIET_SECONDS: f64 = 0.05;
+/// How long at most a note that is still ringing when the listening
+/// stops is waited out before the next one is played.
+const RING_OUT_SECONDS: f64 = 4.0;
 /// How long a key that is held with a note (a keyswitch) is down before
 /// the note.
 const WITH_SECONDS: f64 = 0.03;
@@ -318,11 +321,19 @@ fn play(stand: &mut Stand, note: &ProbeNote, options: &ProbeOptions, setting: &[
         silent < quiet_frames
     });
     if silent < quiet_frames {
-        // Still ringing: cut it off, so that the next note starts clean.
-        stand.run(&[Event { offset: 0, kind: EventKind::AllNotesOff }], 0.01);
-        stand.reset();
-        // A reset lets go of what was held throughout, too.
-        stand.run(setting, 0.03);
+        // Still ringing. What rings is waited out, as far as that goes,
+        // so that the next note starts from silence: a quiet hit cannot be
+        // measured under a cymbal. (Nothing cuts a sampler's tail short: a
+        // reset is not a thing every plugin acts on, and some take one
+        // badly in the middle of playing.)
+        let mut all_off = vec![Event { offset: 0, kind: EventKind::AllNotesOff }];
+        all_off.extend_from_slice(setting);
+        let mut silent = 0;
+        stand.run_into(&all_off, stand.frames(RING_OUT_SECONDS), |l, r| {
+            let loud = l.iter().chain(r).any(|sample| sample.abs() > quiet);
+            silent = if loud { 0 } else { silent + l.len() };
+            silent < quiet_frames
+        });
     }
 
     let held = stand.frames(options.hold_seconds.max(0.01));

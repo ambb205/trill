@@ -14,7 +14,7 @@ use trill_core::{ChainRef, Note, Project, TrackId};
 use trill_dsp::BuiltinFactory;
 use trill_engine::probe::{Heard, ProbeNote, ProbeOptions};
 use trill_engine::render::{RenderOptions, Section, render};
-use trill_engine::scripted::{BASS, DRUMS, Loading, MUTE_KEY, ScriptedFactory};
+use trill_engine::scripted::{AMP, BASS, DRUMS, Loading, MUTE_KEY, ScriptedFactory};
 use trill_engine::{AudioBackend, ProbeTarget, Session};
 
 const SR: u32 = 48_000;
@@ -102,6 +102,52 @@ fn a_plugin_that_loads_piece_by_piece_is_waited_for_until_every_note_answers() {
     assert!(peak(&ready.left[high.clone()]) > 0.1);
     assert_eq!(peak(&pieces.left[high]), peak(&ready.left[seconds(0.5..0.6)]), "the high note is there too");
     assert!(pieces.left == ready.left);
+}
+
+#[test]
+fn an_effect_that_passes_no_sound_for_a_moment_is_waited_for_wherever_it_sits() {
+    // An amplifier that lets nothing through for 0.4 s after it is made:
+    // behind a built-in synth, which has nothing to be late with itself,
+    // behind a plugin, and on the master.
+    let slow = || ScriptedFactory::loading(Loading { first: Duration::from_millis(400), ..Loading::default() });
+    let behind = |instrument: &str| {
+        let mut project = Project::new("amp");
+        let track = track_with(&mut project, "Lead", instrument, &[note(45, 0.0, 1.0), note(45, 2.0, 1.0)]);
+        project.add_device(ChainRef::Track(track), AMP, "Amp", None).unwrap();
+        project
+    };
+    let first_and_later =
+        |out: &trill_engine::Rendered| (peak(&out.left[seconds(0.0..0.2)]), peak(&out.left[seconds(1.0..1.2)]));
+    for instrument in ["builtin:polysynth", BASS] {
+        let project = behind(instrument);
+        let ready = render(&project, factory(&ScriptedFactory::new()).as_ref(), &options()).unwrap();
+        let (first, later) = first_and_later(&ready);
+        assert!(first > 0.01 && (first - later).abs() < 0.02, "{instrument}: {first} then {later}");
+        let scripted = slow();
+        let waited = render(&project, factory(&scripted).as_ref(), &options()).unwrap();
+        assert_eq!(first_and_later(&waited), (first, later), "{instrument}: the first note comes through the amp");
+        assert!(waited.left == ready.left, "{instrument}: and the render is the same render");
+        assert!(scripted.made().iter().any(|(uri, purpose)| uri == AMP && *purpose == Purpose::Rendering));
+    }
+
+    // On the master, behind everything.
+    let mut project = Project::new("master");
+    track_with(&mut project, "Lead", "builtin:polysynth", &[note(45, 0.0, 1.0)]);
+    project.add_device(ChainRef::Master, AMP, "Amp", None).unwrap();
+    let ready = render(&project, factory(&ScriptedFactory::new()).as_ref(), &options()).unwrap();
+    let waited = render(&project, factory(&slow()).as_ref(), &options()).unwrap();
+    assert!(peak(&ready.left[seconds(0.0..0.2)]) > 0.01 && waited.left == ready.left);
+
+    // One that never passes anything (a gate that stays shut) is given a
+    // few seconds, not the whole of the caller's patience, and is not
+    // spoken of: the track is silent, which is said elsewhere.
+    let shut = ScriptedFactory::loading(Loading { never: true, ..Loading::default() });
+    let patient = RenderOptions { patience: Duration::from_secs(30), ..options() };
+    let begun = Instant::now();
+    let out = render(&behind("builtin:polysynth"), factory(&shut).as_ref(), &patient).unwrap();
+    assert!(begun.elapsed() < Duration::from_secs(8), "{:?}", begun.elapsed());
+    assert!(out.measured.waited.is_empty(), "{:?}", out.measured.waited);
+    assert_eq!(peak(&out.left), 0.0);
 }
 
 #[test]

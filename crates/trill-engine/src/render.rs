@@ -154,7 +154,9 @@ pub struct DynamicsLevel {
 /// A plugin that was waited for before the render started.
 #[derive(Clone, Debug, Serialize)]
 pub struct WaitedFor {
-    pub track: TrackId,
+    /// The track it is on; `None` for the master.
+    pub track: Option<TrackId>,
+    /// That track's name, or "master".
     pub track_name: String,
     pub device: DeviceId,
     pub device_name: String,
@@ -397,12 +399,16 @@ fn render_from(
     }
     taken_off(&mut graph.master.chain, None, project, &mut dynamics);
 
-    let name_of = |track: TrackId| project.track(track).map(|track| track.name.clone()).unwrap_or_default();
+    let name_of = |track: Option<TrackId>| match track {
+        Some(track) => project.track(track).map(|track| track.name.clone()).unwrap_or_default(),
+        None => "master".to_string(),
+    };
     let waited = waited
         .into_iter()
-        // A plugin that was ready at once is not news.
-        .filter(|waited| !waited.answered || waited.seconds >= WORTH_SAYING_SECONDS)
-        .map(|Waited { track, device, seconds, answered }| WaitedFor {
+        // A plugin that was ready at once is not news, and neither is an
+        // effect that lets no noise through: a gate does that for a living.
+        .filter(|waited| if waited.answered { waited.seconds >= WORTH_SAYING_SECONDS } else { !waited.effect })
+        .map(|Waited { track, device, seconds, answered, .. }| WaitedFor {
             track,
             track_name: name_of(track),
             device,
