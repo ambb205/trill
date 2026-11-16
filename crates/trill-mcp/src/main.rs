@@ -25,6 +25,8 @@ OPTIONS:
     --no-plugins         Offer only the built-in devices
     --scratch            Keep nothing between runs: no settings, no sound library,
                          no safety copies of unsaved work
+    --profile <FOLDER>   Keep settings, the library index, saved presets and safety
+                         copies in this folder instead of the user's own
     --project <FILE>     Open a project file at startup
     -h, --help           Show this help";
 
@@ -65,6 +67,13 @@ fn parse_args() -> anyhow::Result<Option<Options>> {
             "--no-audio" => options.audio = AudioBackend::Null { sample_rate: 48_000 },
             "--no-plugins" => options.plugins = false,
             "--scratch" => options.storage = Storage::Nowhere,
+            "--profile" => {
+                let folder = PathBuf::from(args.next().context("--profile needs a folder")?);
+                options.storage = Storage::At {
+                    settings: folder.join("settings.json"),
+                    library_index: Some(folder.join("library-index.json")),
+                };
+            }
             "--project" => {
                 options.project = Some(args.next().context("--project needs a file")?.into());
             }
