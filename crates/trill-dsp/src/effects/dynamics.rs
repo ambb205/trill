@@ -1,14 +1,14 @@
-//! Compressor and look-ahead limiter.
+//! Look-ahead limiter, and the count of what a dynamics device takes off.
 
 use crate::define_params;
 use crate::params::{ParamValues, float};
-use crate::util::{DelayLine, crossfade_gains, db_to_gain, gain_to_db, smooth_coef};
+use crate::util::{DelayLine, db_to_gain, gain_to_db, smooth_coef};
 use trill_core::device::{DeviceProcessor, Event, GainReduction, ProcessInfo};
 
 /// Keeps count of what a dynamics device takes off, a few additions a
 /// sample, for [`DeviceProcessor::gain_reduction`].
 #[derive(Default)]
-struct ReductionMeter {
+pub(super) struct ReductionMeter {
     /// The most taken off, in dB.
     most: f32,
     /// The dB taken off, summed over the frames it was half a dB or more.
@@ -23,7 +23,7 @@ impl ReductionMeter {
 
     /// One frame on which `taken_off` dB (0 or more) was taken off.
     #[inline]
-    fn record(&mut self, taken_off: f32) {
+    pub(super) fn record(&mut self, taken_off: f32) {
         self.frames += 1;
         if taken_off >= Self::WORTH_THE_NAME {
             self.active += 1;
@@ -33,7 +33,7 @@ impl ReductionMeter {
     }
 
     /// What was counted since the last call, which starts the count anew.
-    fn take(&mut self) -> GainReduction {
+    pub(super) fn take(&mut self) -> GainReduction {
         let counted = std::mem::take(self);
         if counted.active == 0 {
             return GainReduction::default();
@@ -45,136 +45,6 @@ impl ReductionMeter {
         }
     }
 }
-
-// ---- Compressor ------------------------------------------------------------
-
-mod compressor {
-    use super::*;
-
-    define_params!(P, PARAMS, [
-        Threshold => float("threshold", "Threshold", -60.0, 0.0, -18.0, "dB"),
-        Ratio => float("ratio", "Ratio", 1.0, 20.0, 4.0, ":1"),
-        Attack => float("attack", "Attack", 0.1, 200.0, 10.0, "ms"),
-        Release => float("release", "Release", 5.0, 2000.0, 120.0, "ms"),
-        Knee => float("knee", "Knee", 0.0, 24.0, 6.0, "dB"),
-        Makeup => float("makeup", "Makeup Gain", -12.0, 24.0, 0.0, "dB"),
-        Mix => float("mix", "Mix (below 1 = parallel compression)", 0.0, 1.0, 1.0, ""),
-    ]);
-
-    pub const DESCRIPTION: &str = "Stereo-linked compressor. Lower `threshold` and raise `ratio` for more \
-control; slow `attack` keeps transients punchy; add `makeup` to restore level.";
-
-    pub struct Compressor {
-        params: ParamValues,
-        sample_rate: f32,
-        /// Current gain reduction in dB (<= 0).
-        reduction: f32,
-        taken_off: ReductionMeter,
-        threshold: f32,
-        slope: f32,
-        knee: f32,
-        attack: f32,
-        release: f32,
-        makeup: f32,
-        dry: f32,
-        wet: f32,
-    }
-
-    impl Compressor {
-        pub fn new() -> Self {
-            Self {
-                params: ParamValues::new(PARAMS),
-                sample_rate: 48_000.0,
-                reduction: 0.0,
-                taken_off: ReductionMeter::default(),
-                threshold: 0.0,
-                slope: 0.0,
-                knee: 0.0,
-                attack: 1.0,
-                release: 1.0,
-                makeup: 1.0,
-                dry: 0.0,
-                wet: 1.0,
-            }
-        }
-
-        fn refresh(&mut self) {
-            let p = &self.params;
-            let sr = self.sample_rate;
-            self.threshold = p.get(P::Threshold as usize);
-            self.slope = 1.0 / p.get(P::Ratio as usize) - 1.0;
-            self.knee = p.get(P::Knee as usize);
-            self.attack = smooth_coef(p.get(P::Attack as usize) * 0.001, sr);
-            self.release = smooth_coef(p.get(P::Release as usize) * 0.001, sr);
-            self.makeup = db_to_gain(p.get(P::Makeup as usize));
-            (self.dry, self.wet) = crossfade_gains(p.get(P::Mix as usize));
-            if p.get(P::Mix as usize) >= 1.0 {
-                (self.dry, self.wet) = (0.0, 1.0);
-            }
-            self.params.changed = false;
-        }
-
-        /// Static curve: gain change in dB for an input level in dB.
-        #[inline]
-        fn curve(&self, level_db: f32) -> f32 {
-            let over = level_db - self.threshold;
-            if 2.0 * over < -self.knee {
-                0.0
-            // A hard knee has no curve to be on; without this test a level
-            // exactly at the threshold would divide zero by zero.
-            } else if self.knee > 0.0 && 2.0 * over.abs() <= self.knee {
-                let x = over + self.knee * 0.5;
-                self.slope * x * x / (2.0 * self.knee)
-            } else {
-                self.slope * over
-            }
-        }
-    }
-
-    impl Default for Compressor {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    impl DeviceProcessor for Compressor {
-        fn prepare(&mut self, sample_rate: f64, _max_block: usize) {
-            self.sample_rate = sample_rate as f32;
-            self.params.changed = true;
-            self.reset();
-        }
-
-        fn set_param(&mut self, index: usize, value: f64) {
-            self.params.set(index, value);
-        }
-
-        fn process(&mut self, _info: &ProcessInfo, _events: &[Event], left: &mut [f32], right: &mut [f32]) {
-            if self.params.changed {
-                self.refresh();
-            }
-            for i in 0..left.len() {
-                let (l, r) = (left[i], right[i]);
-                let target = self.curve(gain_to_db(l.abs().max(r.abs())));
-                let coef = if target < self.reduction { self.attack } else { self.release };
-                self.reduction += (target - self.reduction) * coef;
-                self.taken_off.record(-self.reduction);
-                let gain = db_to_gain(self.reduction) * self.makeup;
-                left[i] = l * self.dry + l * gain * self.wet;
-                right[i] = r * self.dry + r * gain * self.wet;
-            }
-        }
-
-        fn reset(&mut self) {
-            self.reduction = 0.0;
-        }
-
-        fn gain_reduction(&mut self) -> Option<GainReduction> {
-            Some(self.taken_off.take())
-        }
-    }
-}
-
-pub use compressor::{Compressor, DESCRIPTION as COMPRESSOR_DESCRIPTION, PARAMS as COMPRESSOR_PARAMS};
 
 // ---- Limiter ---------------------------------------------------------------
 

@@ -88,6 +88,34 @@ impl Session {
             self.factory.descriptors().iter().any(|d| d.uri == device.uri && d.category == DeviceCategory::Instrument);
         Ok(if instrument { ChannelLayout { inputs: 0, outputs: 2 } } else { ChannelLayout::STEREO })
     }
+
+    /// Whether a device can listen to a track other than its own: whether
+    /// it does anything with a [sidechain](Session::set_sidechain). Of the
+    /// built-in devices the compressor does.
+    pub fn device_takes_key(&self, id: DeviceId) -> bool {
+        self.bank.devices.get(&id).is_some_and(|meta| meta.takes_key)
+    }
+
+    /// Has a device listen to `track` in place of its own input, or to its
+    /// own input again with `None`: a compressor then turns its own track
+    /// down by how loud the other is (a bass ducked to the kick). The
+    /// track is heard as it leaves its devices, ahead of its fader and its
+    /// mute, so one that is muted still serves as a key. One undo step.
+    ///
+    /// Refused, with what to do instead, for a device that listens to
+    /// nothing but its input, and for a track that would have to be played
+    /// both before and after the device's own
+    /// ([`Project::set_sidechain`](trill_core::Project::set_sidechain)).
+    pub fn set_sidechain(&mut self, id: DeviceId, track: Option<trill_core::TrackId>) -> Result<(), SessionError> {
+        let device = self.project.device(id)?;
+        if track.is_some() && !self.device_takes_key(id) {
+            return Err(SessionError::Device(format!(
+                "{id} ({}) listens to nothing but what comes into it. Of the built-in devices the compressor takes a                  sidechain: put one on the track that is to be turned down",
+                device.name
+            )));
+        }
+        self.edit(|project| project.set_sidechain(id, track))
+    }
 }
 
 #[cfg(test)]

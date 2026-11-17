@@ -5,11 +5,11 @@
 //! exactly what you heard.
 
 use crate::engine::RecordPhase;
-use crate::graph::{AudioData, Chain, Graph, MAX_BLOCK, RegionAudio, TrackNode, TrackState};
+use crate::graph::{AudioData, Bus, Chain, Graph, MAX_BLOCK, RegionAudio, TrackNode, TrackState};
 use crate::live::{Captured, LiveTarget, TrackSet};
 use crate::monitor::{Beats, Monitor};
 use trill_core::controllers::{CONTROLLER_KINDS, ControllerKind};
-use trill_core::device::{Event, EventKind, MAX_EVENTS_PER_BLOCK, ProcessInfo};
+use trill_core::device::{Event, EventKind, KeyInput, MAX_EVENTS_PER_BLOCK, ProcessInfo};
 use trill_core::project::{MIN_VOLUME_DB, automation_value};
 use trill_core::{DeviceId, TrackId};
 use trill_dsp::util::{db_to_gain, pan_gains};
@@ -580,7 +580,7 @@ impl Processor {
         mix_left.fill(0.0);
         mix_right.fill(0.0);
 
-        let Graph { tracks, buses, .. } = &mut *self.graph;
+        let Graph { tracks, buses, keys, master, .. } = &mut *self.graph;
         for bus in buses.iter_mut() {
             bus.left[..frames].fill(0.0);
             bus.right[..frames].fill(0.0);
@@ -705,8 +705,14 @@ impl Processor {
                 merge_by_offset(events, before_notes, sorted);
             }
 
-            run_chain(&mut track.chain, &info, events, left, right);
+            run_chain(&mut track.chain, &info, events, left, right, keys);
             listen_for_an_answer(track, left, right);
+            // What the devices that listen to this track hear of it: as it
+            // leaves its own devices, whatever its fader and its mute say.
+            if let Some(key) = track.key_out.and_then(|key| keys.get_mut(key)) {
+                key.left[..frames].copy_from_slice(left);
+                key.right[..frames].copy_from_slice(right);
+            }
 
             let volume = match &track.volume_automation {
                 Some(points) => automation_value(points, start_beat) as f32,
@@ -716,13 +722,22 @@ impl Processor {
                 Some(points) => automation_value(points, start_beat) as f32,
                 None => track.pan,
             };
-            let (target_left, target_right) = if track.audible && volume > MIN_VOLUME_DB {
+            let (open_left, open_right) = if volume > MIN_VOLUME_DB {
                 let gain = db_to_gain(volume);
                 let (pan_left, pan_right) = pan_gains(pan);
                 (gain * pan_left, gain * pan_right)
             } else {
                 (0.0, 0.0)
             };
+            let (target_left, target_right) = if track.audible { (open_left, open_right) } else { (0.0, 0.0) };
+            // Not heard, but its group is listened to: it plays into the
+            // group at its fader, and what follows hears nothing of it.
+            if track.feeds_key
+                && let Some(bus) = track.output_bus.and_then(|bus| buses.get_mut(bus))
+            {
+                add_scaled(left, &mut bus.left[..frames], open_left);
+                add_scaled(right, &mut bus.right[..frames], open_right);
+            }
             let state = &mut track.state;
             if !state.primed {
                 state.gain_left = target_left;
@@ -758,8 +773,7 @@ impl Processor {
             }
         }
 
-        let master = &mut self.graph.master;
-        run_chain(&mut master.chain, &info, &[], mix_left, mix_right);
+        run_chain(&mut master.chain, &info, &[], mix_left, mix_right, keys);
 
         let volume = match &master.volume_automation {
             Some(points) => automation_value(points, start_beat) as f32,
@@ -1116,7 +1130,17 @@ fn mix_ramped(source: &[f32], destination: &mut [f32], from: f32, to: f32) -> f3
     peak
 }
 
-fn run_chain(chain: &mut Chain, info: &ProcessInfo, events: &[Event], left: &mut [f32], right: &mut [f32]) {
+/// Runs the devices of a chain over one block, in order. A device that
+/// listens to another track is handed what that track put out in this
+/// block, which `keys` holds: the track was played before this one.
+fn run_chain(
+    chain: &mut Chain,
+    info: &ProcessInfo,
+    events: &[Event],
+    left: &mut [f32],
+    right: &mut [f32],
+    keys: &[Bus],
+) {
     let Chain { devices, automation } = chain;
     for lane in automation.iter_mut() {
         let value = automation_value(&lane.points, info.position_beats);
@@ -1131,7 +1155,13 @@ fn run_chain(chain: &mut Chain, info: &ProcessInfo, events: &[Event], left: &mut
         if slot.enabled
             && let Some(processor) = slot.processor.as_mut()
         {
-            processor.process(info, events, left, right);
+            match slot.key.and_then(|key| keys.get(key)) {
+                Some(key) => {
+                    let key = KeyInput { left: &key.left[..left.len()], right: &key.right[..left.len()] };
+                    processor.process_keyed(info, events, left, right, key);
+                }
+                None => processor.process(info, events, left, right),
+            }
         }
     }
 }
@@ -1376,6 +1406,7 @@ mod tests {
             volume_db: 0.0,
             pan: 0.0,
             audible: true,
+            feeds_key: false,
             volume_automation: None,
             pan_automation: None,
             meter: Arc::new(Meter::default()),
@@ -1383,6 +1414,7 @@ mod tests {
             input_bus: None,
             output_bus: None,
             sends: Vec::new(),
+            key_out: None,
             tap: None,
         }
     }

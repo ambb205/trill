@@ -81,6 +81,11 @@ impl SavedPreset {
             return Err("it does not say which device it is a preset of".to_string());
         }
         Self::checked_name(&preset.name)?;
+        // A preset of a built-in device holds every value the device had
+        // when it was saved: one from before a device was changed is made
+        // to sound as it did.
+        let mut preset = preset;
+        crate::formats::keep_complete_format_1(&preset.uri, &mut preset.params);
         Ok(preset)
     }
 

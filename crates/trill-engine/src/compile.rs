@@ -60,6 +60,9 @@ pub struct DeviceMeta {
     /// What the factory found wrong with the device when it was created,
     /// short of failing: samples it plays without.
     pub warnings: Vec<DeviceWarning>,
+    /// Whether the device can listen to a key: a track other than its own
+    /// ([`trill_core::Device::sidechain`]).
+    pub takes_key: bool,
 }
 
 /// The devices that exist in the running graph.
@@ -213,7 +216,7 @@ impl Compiler<'_> {
             join_continuations(&mut audio);
 
             let meter = self.meters.tracks.entry(track.id).or_default().clone();
-            let chain = self.chain(&track.devices, project, &mut problems);
+            let chain = self.chain(&track.devices, project, &routing.keys, &mut problems);
             tracks.push(TrackNode {
                 id: track.id,
                 notes,
@@ -224,6 +227,7 @@ impl Compiler<'_> {
                 volume_db: track.volume_db,
                 pan: track.pan,
                 audible: routing.audible(project, track),
+                feeds_key: routing.feeds_key(project, track),
                 volume_automation: lane_points(
                     project,
                     |target| matches!(target, AutomationTarget::TrackVolume { track: id } if *id == track.id),
@@ -241,14 +245,16 @@ impl Compiler<'_> {
                     .iter()
                     .filter_map(|send| Some((routing.bus(send.to)?, db_to_gain(send.level_db))))
                     .collect(),
+                key_out: routing.key(track.id),
                 tap: None,
             });
         }
-        // Every node must run before the bus it feeds is read.
-        tracks.sort_by_key(|node| routing.stage(node.id));
+        // Every node must run before the bus it feeds is read, and before
+        // the devices that listen to it.
+        tracks.sort_by_key(|node| routing.place(node.id));
 
         let master = MasterNode {
-            chain: self.chain(&project.master.devices, project, &mut problems),
+            chain: self.chain(&project.master.devices, project, &routing.keys, &mut problems),
             volume_db: project.master.volume_db,
             volume_automation: lane_points(project, |target| matches!(target, AutomationTarget::MasterVolume)),
             meter: self.meters.master.clone(),
@@ -272,6 +278,7 @@ impl Compiler<'_> {
         let graph = Graph {
             tracks,
             buses: (0..routing.bus_count()).map(|_| Bus::new()).collect(),
+            keys: routing.keys.iter().map(|_| Bus::new()).collect(),
             master,
             tempo: project.tempo,
             time_signature: project.time_signature,
@@ -280,8 +287,10 @@ impl Compiler<'_> {
         (Box::new(graph), problems)
     }
 
-    fn chain(&mut self, devices: &[Device], project: &Project, problems: &mut Vec<Problem>) -> Chain {
-        let slots: Vec<DeviceSlot> = devices.iter().map(|device| self.slot(device, problems)).collect();
+    /// The devices of a chain, and what moves their parameters. `keys` are
+    /// the tracks that devices listen to, in the order of the graph's keys.
+    fn chain(&mut self, devices: &[Device], project: &Project, keys: &[TrackId], problems: &mut Vec<Problem>) -> Chain {
+        let slots: Vec<DeviceSlot> = devices.iter().map(|device| self.slot(device, keys, problems)).collect();
 
         let mut automation = Vec::new();
         for lane in project.automation.iter().filter(|lane| lane.enabled) {
@@ -295,7 +304,7 @@ impl Compiler<'_> {
         Chain { devices: slots, automation }
     }
 
-    fn slot(&mut self, device: &Device, problems: &mut Vec<Problem>) -> DeviceSlot {
+    fn slot(&mut self, device: &Device, keys: &[TrackId], problems: &mut Vec<Problem>) -> DeviceSlot {
         let running = self.bank.devices.get(&device.id).is_some_and(|meta| {
             meta.uri == device.uri
                 && meta.applied_state == device.state
@@ -322,6 +331,7 @@ impl Compiler<'_> {
                             settling: device.state.as_ref().map(|_| Instant::now() + SETTLING),
                             error: None,
                             warnings: self.factory.warnings(device),
+                            takes_key: instance.processor.takes_key(),
                         },
                     );
                     Some(instance.processor)
@@ -337,6 +347,7 @@ impl Compiler<'_> {
                             settling: None,
                             error: Some(error.to_string()),
                             warnings: Vec::new(),
+                            takes_key: false,
                         },
                     );
                     None
@@ -354,7 +365,11 @@ impl Compiler<'_> {
                 reason: warning.message.clone(),
             }));
         }
-        DeviceSlot { id: device.id, processor, enabled: device.enabled }
+        // A key only for a device that can listen to one, from a track
+        // that is played before it.
+        let listens = self.bank.devices.get(&device.id).is_some_and(|meta| meta.takes_key);
+        let key = device.sidechain.filter(|_| listens).and_then(|track| keys.iter().position(|key| *key == track));
+        DeviceSlot { id: device.id, processor, enabled: device.enabled, key }
     }
 }
 
@@ -400,11 +415,15 @@ fn join_continuations(regions: &mut [AudioRegion]) {
     }
 }
 
-/// Which tracks own a bus, and in what order tracks must be processed.
+/// Which tracks own a bus, which are listened to, and in what order tracks
+/// must be processed.
 struct Routing {
     /// Group and return tracks, in bus order.
     buses: Vec<TrackId>,
-    stages: HashMap<TrackId, u8>,
+    /// The tracks that devices listen to, in key order.
+    keys: Vec<TrackId>,
+    /// The tracks in the order they are played.
+    order: Vec<TrackId>,
     any_solo: bool,
 }
 
@@ -412,19 +431,41 @@ impl Routing {
     fn of(project: &Project) -> Self {
         let buses =
             project.tracks.iter().filter(|track| track.kind != TrackKind::Normal).map(|track| track.id).collect();
-        let stages = project
-            .tracks
-            .iter()
-            .map(|track| {
-                let stage = match track.kind {
-                    TrackKind::Normal => 0,
-                    TrackKind::Group => 1,
-                    TrackKind::Return => 2,
-                };
-                (track.id, stage)
-            })
-            .collect();
-        Self { buses, stages, any_solo: project.tracks.iter().any(|track| track.solo) }
+        // The edits refuse a loop, but a file may hold anything: tracks
+        // that wait for each other are played in the order of their kinds,
+        // and nothing is listened to.
+        let (order, sound) = match project.playing_order() {
+            Some(order) => (order, true),
+            None => {
+                let mut without = project.clone();
+                for track in &mut without.tracks {
+                    track.devices.iter_mut().for_each(|device| device.sidechain = None);
+                }
+                (
+                    without.playing_order().unwrap_or_else(|| project.tracks.iter().map(|track| track.id).collect()),
+                    false,
+                )
+            }
+        };
+        let mut keys: Vec<TrackId> = Vec::new();
+        if sound {
+            for track in project.devices().filter_map(|device| device.sidechain) {
+                if project.track(track).is_ok() && !keys.contains(&track) {
+                    keys.push(track);
+                }
+            }
+        }
+        Self { buses, keys, order, any_solo: project.tracks.iter().any(|track| track.solo) }
+    }
+
+    /// The place of a track that is listened to among the graph's keys.
+    fn key(&self, track: TrackId) -> Option<usize> {
+        self.keys.iter().position(|id| *id == track)
+    }
+
+    /// Where a track comes in the order they are played in.
+    fn place(&self, track: TrackId) -> usize {
+        self.order.iter().position(|id| *id == track).unwrap_or(usize::MAX)
     }
 
     fn bus(&self, track: TrackId) -> Option<usize> {
@@ -433,10 +474,6 @@ impl Routing {
 
     fn bus_count(&self) -> usize {
         self.buses.len()
-    }
-
-    fn stage(&self, track: TrackId) -> u8 {
-        self.stages.get(&track).copied().unwrap_or(0)
     }
 
     /// Mute and solo, resolved. Soloing a track keeps its group open, and
@@ -454,6 +491,17 @@ impl Routing {
             TrackKind::Group => project.tracks.iter().any(|member| member.group == Some(track.id) && member.solo),
             TrackKind::Normal => track.group.is_some_and(|group| project.track(group).is_ok_and(|group| group.solo)),
         }
+    }
+}
+
+impl Routing {
+    /// Whether a track that is not heard still plays into its group: see
+    /// [`TrackNode::feeds_key`].
+    fn feeds_key(&self, project: &Project, track: &Track) -> bool {
+        let listened = |group: &Track| self.key(group.id).is_some() && !self.audible(project, group);
+        !track.mute
+            && !self.audible(project, track)
+            && track.group.is_some_and(|group| project.track(group).is_ok_and(listened))
     }
 }
 
