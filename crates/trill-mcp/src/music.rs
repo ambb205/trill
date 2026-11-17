@@ -836,7 +836,9 @@ fn write(
             .and_then(|id| session.project().clip(id).ok())
             .and_then(|clip| clip.midi().map(|midi| midi.notes.clone()))
             .unwrap_or_default();
-        let ours = !held.is_empty() && is_our_writing(&profile, &held);
+        // A clip without a keyswitch in it has none that was placed by hand.
+        let ours = !held.is_empty()
+            && (!held.iter().any(|note| profile.is_keyswitch(note.pitch)) || is_our_writing(&profile, &held));
         let articulated = if ours {
             let inside = |note: &Note| note.start >= offset - EPSILON && note.start < offset + written - EPSILON;
             let mut all = read_back(&profile, &held);
@@ -857,7 +859,7 @@ fn write(
             whole_clip = Some(articulated.notes.clone());
             articulated
         } else {
-            if !held.is_empty() && held.iter().any(|note| profile.is_keyswitch(note.pitch)) {
+            if !held.is_empty() {
                 part.warnings.push(
                     "This clip holds keyswitches that were placed by hand, another way than these tools place them. \
                      They were left as they are, and these notes were given switches of their own: check how the \

@@ -188,12 +188,16 @@ pub(crate) struct Played {
     pub remarks: Vec<String>,
 }
 
-/// Works out what a clip on `track` holds once `notes` are in it, where
-/// some of them say how they are played (`how`, in step with them): the
-/// instrument's keyswitches are written for the whole clip, `held` being
-/// what it holds now, so that these notes leave the others played as they
-/// were. `None` where no note says how it is played: the notes then go in
-/// as they are, as they always did.
+/// Works out what a clip on `track` holds once `notes` are in it, on an
+/// instrument that has articulations: the instrument's keyswitches are
+/// written for the whole clip, `held` being what it holds now, so that
+/// each note is played as it says (`how`, in step with the notes; a note
+/// that says nothing is played the instrument's ordinary way) and leaves
+/// the others played as they were.
+///
+/// `None` where the notes go in as they are, as they always did: on a
+/// track whose instrument has no articulations, and where the notes
+/// themselves hold keyswitches that someone placed as notes.
 pub(crate) fn played(
     session: &Session,
     track: TrackId,
@@ -202,21 +206,34 @@ pub(crate) fn played(
     how: &[Option<String>],
 ) -> Result<Option<Played>, String> {
     use trill_theory::articulation::{Asked, articulate_asked, is_our_writing, read_back, unknown};
-    let Some(first) = how.iter().flatten().next() else { return Ok(None) };
     let profile = session.profile_of(track);
-    if session.plays_drums(track) {
-        return Err(format!(
-            "'{first}': track {} is a drum track, whose notes are drums by name; `how` is for an instrument with \
-             articulations (a sampled guitar or bass)",
-            track.0
-        ));
-    }
-    if profile.articulations.is_empty() {
-        return Err(unknown(&profile, first).to_string());
+    let drums = session.plays_drums(track);
+    let by_hand = notes.iter().find(|note| !drums && profile.is_keyswitch(note.pitch));
+    match (how.iter().flatten().next(), by_hand) {
+        (Some(first), _) if drums => {
+            return Err(format!(
+                "'{first}': track {} is a drum track, whose notes are drums by name; `how` is for an instrument                  with articulations (a sampled guitar or bass)",
+                track.0
+            ));
+        }
+        (Some(first), _) if profile.articulations.is_empty() => return Err(unknown(&profile, first).to_string()),
+        (Some(_), Some(switch)) => {
+            return Err(format!(
+                "{} is this instrument's '{}' keyswitch, placed as a note beside notes that say how they are                  played: leave it out and give `how` to the notes it was meant for",
+                pitch_name(switch.pitch),
+                profile.keyswitch_name(switch.pitch).unwrap_or_default()
+            ));
+        }
+        // Nothing to press for, or presses placed by hand: the notes are their own.
+        (None, _) if drums || profile.articulations.is_empty() || by_hand.is_some() || notes.is_empty() => {
+            return Ok(None);
+        }
+        _ => {}
     }
     let asked: Vec<Asked> = notes.iter().zip(how).map(|(note, how)| Asked::new(*note, how.clone())).collect();
     let mut remarks = Vec::new();
-    let ours = held.is_empty() || is_our_writing(&profile, held);
+    // A clip without a keyswitch in it has none that was placed by hand.
+    let ours = !held.iter().any(|note| profile.is_keyswitch(note.pitch)) || is_our_writing(&profile, held);
     let (articulated, keyswitches) = if ours {
         let mut all = read_back(&profile, held);
         let kept = articulate_asked(&profile, &all, 0.0).map_err(|error| error.to_string())?.presses;

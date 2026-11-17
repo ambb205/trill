@@ -1587,14 +1587,11 @@ impl TrillServer {
         let id = ClipId(request.clip);
         let reply = (|| {
             let (notes, how) = crate::instruments::TrackKeys::of_clip(&session, id).played(&request.notes)?;
-            let played = match how.iter().any(Option::is_some) {
-                true => {
-                    let project = session.project();
-                    let track = project.clip_track(id).map_err(|error| explain(project, error))?;
-                    let held = project.clip(id).ok().and_then(|clip| clip.midi()).map(|midi| midi.notes.clone());
-                    crate::instruments::played(&session, track, &held.unwrap_or_default(), &notes, &how)?
-                }
-                false => None,
+            let played = {
+                let project = session.project();
+                let track = project.clip_track(id).map_err(|error| explain(project, error))?;
+                let held = project.clip(id).ok().and_then(|clip| clip.midi()).map(|midi| midi.notes.clone());
+                crate::instruments::played(&session, track, &held.unwrap_or_default(), &notes, &how)?
             };
             let total = edit(&mut session, |project| {
                 let clip = project.clip_mut(id)?;
@@ -1620,13 +1617,10 @@ impl TrillServer {
         let id = ClipId(request.clip);
         let reply = (|| {
             let (notes, how) = crate::instruments::TrackKeys::of_clip(&session, id).played(&request.notes)?;
-            let played = match how.iter().any(Option::is_some) {
-                true => {
-                    let project = session.project();
-                    let track = project.clip_track(id).map_err(|error| explain(project, error))?;
-                    crate::instruments::played(&session, track, &[], &notes, &how)?
-                }
-                false => None,
+            let played = {
+                let project = session.project();
+                let track = project.clip_track(id).map_err(|error| explain(project, error))?;
+                crate::instruments::played(&session, track, &[], &notes, &how)?
             };
             let count = notes.len();
             let written = played.as_ref().map_or(notes, |played| played.all.clone());
