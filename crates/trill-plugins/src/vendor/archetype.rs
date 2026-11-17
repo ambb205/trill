@@ -21,7 +21,7 @@ use super::{Built, Mark, VendorPlaces, read_start, same_value};
 use crate::presets::store::PluginRef;
 use crate::presets::{Locator, NAME_LIMIT, Sink, Watch, tidy, walk};
 use crate::vst3::state::PluginState;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use trill_core::presets::{CATEGORY_SEPARATOR, PresetInfo};
 
 /// What the class ids of Neural DSP's plugins begin with: JUCE's own
@@ -67,10 +67,7 @@ pub(crate) fn list(plugin: &PluginRef, places: &VendorPlaces, sink: &mut dyn Sin
         sink.watch(Watch { path: folder.clone(), extensions: extensions.clone() });
         let mut batch = Vec::new();
         for file in walk::files(&folder, &extensions) {
-            if !read_start(&file, 64).is_ok_and(|start| begins_a_tree(&start)) {
-                continue;
-            }
-            let stem = file.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
+            let Ok(mut preset) = file_preset(&file) else { continue };
             let category = walk::category_below(&folder, &file);
             // Whose preset it is: the artist's, or the bank's maker.
             let mut parts = category.split(CATEGORY_SEPARATOR);
@@ -79,16 +76,29 @@ pub(crate) fn list(plugin: &PluginRef, places: &VendorPlaces, sink: &mut dyn Sin
                 (Some("User") | None, _) => "",
                 (Some(bank), _) => bank,
             };
-            batch.push(PresetInfo {
-                name: tidy(&stem, NAME_LIMIT),
-                author: author.to_string(),
-                locator: Locator::Vendor { format: super::Format::Archetype, path: file, key: None }.to_text(),
-                category,
-                ..PresetInfo::default()
-            });
+            preset.author = author.to_string();
+            preset.category = category;
+            batch.push(preset);
         }
         sink.presets(batch);
     }
+}
+
+/// The preset in the file at `file`, wherever that lies: by its file's
+/// name. An error says why the file is not a preset of an Archetype, as
+/// the end of a sentence about it. Which Archetype it is a preset of
+/// shows when it is loaded.
+pub(crate) fn file_preset(file: &Path) -> Result<PresetInfo, String> {
+    let start = read_start(file, 64).map_err(|error| format!("it cannot be read ({error})"))?;
+    if !begins_a_tree(&start) {
+        return Err("it is not a preset of one of Neural DSP's Archetypes (it does not begin as theirs do)".to_string());
+    }
+    let stem = file.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
+    Ok(PresetInfo {
+        name: tidy(&stem, NAME_LIMIT),
+        locator: Locator::Vendor { format: super::Format::Archetype, path: file.to_path_buf(), key: None }.to_text(),
+        ..PresetInfo::default()
+    })
 }
 
 /// Lays `theirs` over `ours`: every setting of theirs is set in ours, and

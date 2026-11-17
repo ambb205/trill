@@ -141,6 +141,12 @@ impl Catalog {
         self.plugins.len()
     }
 
+    /// Every installed plugin, as [`plugin_ref`](Self::plugin_ref) has
+    /// one.
+    pub(crate) fn plugin_refs<'a>(&'a self, scheme: &'a str) -> impl Iterator<Item = PluginRef> + 'a {
+        self.plugins.keys().filter_map(move |id| self.plugin_ref(scheme, id))
+    }
+
     /// The installed plugin with this id, as the plugin whose presets are
     /// wanted.
     pub(crate) fn plugin_ref(&self, scheme: &str, id: &str) -> Option<PluginRef> {

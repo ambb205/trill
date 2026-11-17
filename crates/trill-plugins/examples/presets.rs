@@ -12,8 +12,9 @@
 //! --limit <n>         how many to print (default 15)
 //! --fresh             read the presets again, whatever the cache holds
 //! --load <preset>     create the plugin, play a note, load this preset (an id, a name,
-//!                     or a category and a name), play the note again, and say how the
-//!                     sound and the saved state changed
+//!                     or a category and a name; or the whole path of a preset file that
+//!                     lies anywhere), play the note again, and say how the sound and
+//!                     the saved state changed
 //! ```
 //!
 //! The caches are this program's own, in the temporary folder. No window
@@ -24,7 +25,7 @@ use std::time::{Duration, Instant};
 use trill_core::device::{
     CompositeFactory, DeviceDescriptor, DeviceFactory, DeviceInstance, Event, EventKind, ProcessInfo,
 };
-use trill_core::presets::{PresetList, PresetLookup, PresetQuery, PresetStatus};
+use trill_core::presets::{PresetFile, PresetList, PresetLookup, PresetQuery, PresetStatus};
 use trill_core::{ChainRef, Project, TimeSignature};
 use trill_plugins::{ClapConfig, PluginHost, Scanner, Vst3Config};
 
@@ -174,13 +175,24 @@ fn load(
     list: &PresetList,
     wanted: &str,
 ) -> Result<(), String> {
-    let preset = match list.find(wanted) {
-        PresetLookup::Found(preset) => preset,
-        PresetLookup::Ambiguous(found) => {
+    // A preset that is asked for by the path of its file is the device
+    // type's to make of the file; any other is one of the listed ones.
+    let from_file = match PresetFile::asked(wanted) {
+        Some(asked) => {
+            let read = factory.preset_file(&descriptor.uri, &asked.path, asked.within.as_deref());
+            let read = read.ok_or("the device is not one of this host's")?;
+            Some(read.map_err(|reason| format!("'{}' is no preset of it: {reason}", asked.path.display()))?)
+        }
+        None => None,
+    };
+    let preset = match (&from_file, list.find(wanted)) {
+        (Some(preset), _) => preset,
+        (None, PresetLookup::Found(preset)) => preset,
+        (None, PresetLookup::Ambiguous(found)) => {
             let paths: Vec<String> = found.iter().map(|preset| format!("{} ({})", preset.path(), preset.id)).collect();
             return Err(format!("several presets are '{wanted}': {}", paths.join(", ")));
         }
-        PresetLookup::Missing { similar } => {
+        (None, PresetLookup::Missing { similar }) => {
             let paths: Vec<String> = similar.iter().map(|preset| preset.path()).collect();
             return Err(format!("no preset is '{wanted}'; nearest: {}", paths.join(", ")));
         }

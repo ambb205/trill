@@ -33,7 +33,7 @@ use std::time::Duration;
 use trill_core::device::{BUILTIN_SCHEME, DeviceCategory, DeviceFactory, EditorOptions, EventKind, split_uri};
 use trill_core::journal::{Author, CallId, Outcome};
 use trill_core::midi_file;
-use trill_core::presets::PresetList;
+use trill_core::presets::{PresetFile, PresetList};
 use trill_core::project::AutomationPoint;
 use trill_core::project::{AutomationTarget, MAX_TEMPO, MAX_VOLUME_DB, MIN_TEMPO, WarpMode};
 use trill_core::{ChainRef, ClipId, ControllerKind, DeviceId, EditError, Project, TrackId, TrackKind};
@@ -235,7 +235,7 @@ impl Noise {
 
 #[derive(Clone)]
 pub struct TrillServer {
-    runtime: Arc<Runtime>,
+    pub(crate) runtime: Arc<Runtime>,
     /// The runtime's session, which most tools need and nothing else.
     pub(crate) session: SharedSession,
     tool_router: ToolRouter<Self>,
@@ -339,13 +339,27 @@ impl TrillServer {
         read.await.ok().flatten().unwrap_or_default()
     }
 
-    /// Sees to it that the presets of `uri` have been read, as far as
-    /// that can be done in [`PRESET_WAIT`], before a tool that was given
-    /// a preset looks for it.
-    async fn ready_presets(&self, uri: Option<&str>, preset: &Option<String>) {
-        if let (Some(uri), Some(_)) = (uri, preset) {
+    /// What has to be done before a tool that was given a preset goes to
+    /// the session with it, off the async threads and without the
+    /// session. For a preset by name: the presets of `uri` are read, as
+    /// far as that can be done in [`PRESET_WAIT`]. For a preset by the
+    /// path of its file: a guarded client is refused a file it may not be
+    /// pointed at, and the file is asked what it holds, so that the
+    /// session, asking again, has the answer at once.
+    pub(crate) async fn ready_presets(&self, uri: Option<&str>, preset: &Option<String>) -> Result<(), String> {
+        let (Some(uri), Some(preset)) = (uri, preset) else { return Ok(()) };
+        let Some(asked) = PresetFile::asked(preset) else {
             self.presets_of(uri).await;
+            return Ok(());
+        };
+        if let Some(guard) = &self.guard {
+            guard.may_read_preset(&asked.path)?;
         }
+        let (factory, uri) = (self.session.lock().factory(), uri.to_string());
+        let read = move || factory.preset_file(&uri, &asked.path, asked.within.as_deref());
+        // What it says is the session's to act on.
+        let _ = tokio::task::spawn_blocking(read).await;
+        Ok(())
     }
 
     /// Waits for the running scan, up to what the caller asked for, off
@@ -490,7 +504,9 @@ impl TrillServer {
     /// track (feed it with update_track `send`, and put a shared reverb or delay on it).
     #[tool(annotations(title = "Create track"))]
     async fn create_track(&self, Parameters(request): Parameters<CreateTrackRequest>) -> CallToolResult {
-        self.ready_presets(request.instrument.as_deref(), &request.preset).await;
+        if let Err(refusal) = self.ready_presets(request.instrument.as_deref(), &request.preset).await {
+            return finish(Err(format!("{refusal} No track was created.")));
+        }
         let mut session = self.session.lock();
         let reply = (|| {
             if request.preset.is_some() && request.instrument.is_none() {
@@ -685,11 +701,14 @@ impl TrillServer {
     }
 
     /// Add an instrument or effect to a track's chain, or to the master chain when `track` is omitted. `preset`
-    /// starts it from one of its presets, a plugin's included (describe_device lists and searches them);
-    /// `params` go on top of the preset. `sidechain` has a compressor listen to another track.
+    /// starts it from one of its presets, a plugin's included (describe_device lists and searches them), or
+    /// from a preset file by its path; `params` go on top of the preset. `sidechain` has a compressor listen to
+    /// another track.
     #[tool(annotations(title = "Add device"))]
     async fn add_device(&self, Parameters(request): Parameters<AddDeviceRequest>) -> CallToolResult {
-        self.ready_presets(Some(&request.uri), &request.preset).await;
+        if let Err(refusal) = self.ready_presets(Some(&request.uri), &request.preset).await {
+            return finish(Err(format!("{refusal} The device was not added.")));
+        }
         let mut session = self.session.lock();
         let reply = (|| {
             let chain = request.track.map_or(ChainRef::Master, |track| ChainRef::Track(TrackId(track)));
@@ -829,13 +848,15 @@ impl TrillServer {
 
     /// Change a device: switch preset, set parameters or settings, bypass it, or have it listen to another
     /// track (`sidechain`). A preset replaces the device's sound, a plugin's as its own preset browser would
-    /// (get_device and describe_device list and search them); `params` in the same call go on top of it, and the
-    /// whole call is one undo step.
+    /// (get_device and describe_device list and search them; a preset file is given by its path); `params` in
+    /// the same call go on top of it, and the whole call is one undo step.
     #[tool(annotations(title = "Update device"))]
     async fn update_device(&self, Parameters(request): Parameters<UpdateDeviceRequest>) -> CallToolResult {
         let id = DeviceId(request.device);
         let uri = self.session.lock().project().device(id).map(|device| device.uri.clone()).ok();
-        self.ready_presets(uri.as_deref(), &request.preset).await;
+        if let Err(refusal) = self.ready_presets(uri.as_deref(), &request.preset).await {
+            return finish(Err(format!("{refusal} The device is as it was.")));
+        }
         let mut session = self.session.lock();
         let reply = (|| {
             // Validate before touching anything, so a bad value changes nothing.
