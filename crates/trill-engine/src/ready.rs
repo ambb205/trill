@@ -1123,7 +1123,8 @@ pub(crate) fn wake(
     sample_rate: f64,
     patience: Duration,
 ) -> Vec<Waited> {
-    let tempo = graph.tempo;
+    // The instruments are tried at the tempo the render starts in.
+    let tempo = graph.tempo_map.tempo_at(from);
     let mut waits = Vec::new();
     let mut who = Vec::new();
     for node in &mut graph.tracks {

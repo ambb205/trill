@@ -240,6 +240,18 @@ impl TempoMap {
         self.seconds_between(from, to) * sample_rate
     }
 
+    /// Frames of audio that `length` beats from `from` on last; negative
+    /// for a length that goes back.
+    pub fn frames_over(&self, from: Beats, length: Beats, sample_rate: f64) -> f64 {
+        let to = from + length;
+        let piece = self.piece_at(from.min(to).max(0.0));
+        if !piece.is_ramp() && from.max(to) <= piece.end {
+            // Within one steady tempo: as it always was, to the bit.
+            return length / (piece.from / (60.0 * sample_rate));
+        }
+        self.seconds_between(from, to) * sample_rate
+    }
+
     /// The beat reached `frames` frames of audio after `from`: later for a
     /// positive count, earlier for a negative one, and never before the
     /// start of the song's own time (beats run on below zero at the first
@@ -602,6 +614,7 @@ mod tests {
             for (from, to) in [(0.0, 4.0), (1.5, 1.500_001), (8.0, 2.0), (0.0, 1234.567)] {
                 let old = (to - from) / beats_per_frame;
                 assert_eq!(map.frames_between(from, to, SR).to_bits(), old.to_bits());
+                assert_eq!(map.frames_over(from, 0.37, SR).to_bits(), (0.37 / beats_per_frame).to_bits());
             }
             for beat in [0.0, 1.0, 7.75, 345.678] {
                 assert_eq!(map.frames_at(beat, SR).to_bits(), (beat * (60.0 * SR / tempo)).to_bits());

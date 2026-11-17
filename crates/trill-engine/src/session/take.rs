@@ -51,7 +51,7 @@ use crate::live::Captured;
 use trill_core::controllers::{self, GESTURE_GAP_SECONDS, THIN_TOLERANCE};
 use trill_core::device::EventKind;
 use trill_core::project::{AutomationPoint, ClipContent, Note};
-use trill_core::{ClipId, ControllerKind, EditError, Project, TrackId, TrackKind};
+use trill_core::{ClipId, ControllerKind, EditError, MeterMap, Project, TrackId, TrackKind};
 
 /// How long before the take a note may begin and still be kept, in beats.
 const EARLY_BEATS: f64 = 0.25;
@@ -143,6 +143,8 @@ pub(crate) struct Take {
     loop_region: Option<(f64, f64)>,
     /// One bar, in beats.
     bar: f64,
+    /// The song's bars, where they are not all `bar` long.
+    bars: Option<MeterMap>,
     /// The latest pass of the loop heard of.
     pass: u32,
     /// The furthest the song was heard to get.
@@ -184,6 +186,7 @@ impl Take {
             start: None,
             loop_region,
             bar: if bar.is_finite() && bar > 0.0 { bar } else { 4.0 },
+            bars: None,
             pass: 0,
             furthest: 0.0,
             stopped: None,
@@ -319,6 +322,7 @@ impl Take {
         let Some(start) = self.start else { return Ok(()) };
         let span_start = self.span_start(start);
         for index in 0..self.tracks.len() {
+            let first_bar = self.bar_from(span_start);
             let track = &mut self.tracks[index];
             // A clip that was deleted meanwhile is not come back to.
             if track.clip.is_some_and(|clip| project.clip(clip).is_err()) {
@@ -343,7 +347,7 @@ impl Take {
                     let under = clip_under(project, track.track, span_start, start);
                     let clip = match under {
                         Some(clip) => clip,
-                        None => project.add_midi_clip(track.track, "Take", span_start, self.bar)?,
+                        None => project.add_midi_clip(track.track, "Take", span_start, first_bar)?,
                     };
                     track.clip = Some(clip);
                     track.created = under.is_none();
@@ -415,10 +419,25 @@ impl Take {
         Ok(())
     }
 
+    /// The take, in a song whose bars are `bars`: its clips are cut to
+    /// them where the time signature changes.
+    pub fn in_bars(mut self, bars: MeterMap) -> Self {
+        self.bars = Some(bars).filter(|bars| !bars.is_constant());
+        self
+    }
+
+    /// The length of the bar that begins at `bar_line`.
+    fn bar_from(&self, bar_line: f64) -> f64 {
+        self.bars.as_ref().map_or(self.bar, |bars| bars.bar_at(bar_line).length)
+    }
+
     /// Where a new clip for this take starts: the bar line at or before
     /// the take's start, or the start of the loop if that is earlier.
     fn span_start(&self, start: f64) -> f64 {
-        let bar_line = ((start + EPSILON) / self.bar).floor() * self.bar;
+        let bar_line = match &self.bars {
+            Some(bars) => bars.bar_at(start + EPSILON).start,
+            None => ((start + EPSILON) / self.bar).floor() * self.bar,
+        };
         match self.looping(start) {
             Some((loop_start, _)) => bar_line.min(loop_start).max(0.0),
             None => bar_line.max(0.0),
@@ -434,8 +453,11 @@ impl Take {
     /// furthest the take has got, or the loop's end once it has come round.
     fn wanted_end(&self, track: &TrackTake, start: f64) -> f64 {
         let reached = self.furthest.max(track.last_end).max(start);
-        let bar_line = ((reached - EPSILON) / self.bar).ceil().max(1.0) * self.bar;
-        let floor = self.span_start(start) + self.bar;
+        let bar_line = match &self.bars {
+            Some(bars) => bars.bar_line_at_or_after(reached - EPSILON),
+            None => ((reached - EPSILON) / self.bar).ceil().max(1.0) * self.bar,
+        };
+        let floor = self.span_start(start) + self.bar_from(self.span_start(start));
         match self.looping(start) {
             Some((_, loop_end)) if self.pass > 0 => loop_end.max(floor),
             Some((_, loop_end)) => bar_line.min(loop_end).max(floor.min(loop_end)),
