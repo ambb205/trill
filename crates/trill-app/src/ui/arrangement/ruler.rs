@@ -580,9 +580,12 @@ fn paint(ui: &Ui, cx: &Cx, geometry: &Geometry) {
             theme.ink_faint,
         );
     });
-    for (change, rect, said_at) in &changing {
+    for (index, (change, rect, said_at)) in changing.iter().enumerate() {
         let x = geometry.x(change.beat).round();
         paint::vline(&painter, x, time_top..=ruler.bottom(), theme.signal);
+        // Zoomed far out, one change's words give way where the next begin.
+        let room = changing.get(index + 1).map_or(ruler.right(), |(_, next, _)| next.left() - 4.0);
+        let painter = painter.with_clip_rect(Rect::from_min_max(pos2(x, time_top), pos2(room.max(x), ruler.bottom())));
         let number = Rect::from_min_max(pos2(x + 4.0, time_top + 1.0), ruler.max);
         let place = timeline::format_bar_beat(change.beat, bars);
         text::paint(&painter, number, Align2::LEFT_CENTER, style, &place, theme.ink_faint);

@@ -351,7 +351,11 @@ pub(crate) fn process_context(info: &ProcessInfo, frame_offset: usize, continuou
         #[allow(clippy::unnecessary_cast)]
         state: state as u32,
         sampleRate: sample_rate,
-        // The engine's tempo is constant over the whole song.
+        // Worked out from the tempo of this block alone, which is the song's
+        // time in a song of one tempo. Where the tempo changes inside a
+        // song the engine tells each block its own tempo, and this is then
+        // not the time the song took to get here: `ProcessInfo` does not
+        // carry that yet (nor where the bar began, below).
         projectTimeSamples: (beats * 60.0 / tempo * sample_rate).round() as i64,
         systemTime: 0,
         continousTimeSamples: continuous_samples,
