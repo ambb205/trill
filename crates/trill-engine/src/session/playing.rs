@@ -422,6 +422,9 @@ impl Session {
         self.playing.takes = self.playing.takes.wrapping_add(1);
         let id = self.playing.takes;
         let group = self.begin_group();
+        // In the journal, what is played is one step however often it is
+        // written down while it is played.
+        self.begin_run("Recorded a take");
         self.playing.take =
             Some(ActiveTake { take: Take::new(id, &tracks, loop_region, bar, self.project.tempo), group });
         self.playing.last_take.clear();
@@ -543,6 +546,7 @@ impl Session {
         self.write_take();
         if let Some(active) = self.playing.take.take() {
             self.playing.last_take = active.take.clips();
+            self.end_run();
             self.end_group(active.group);
         }
     }
@@ -551,6 +555,7 @@ impl Session {
     /// being replaced.
     pub(super) fn abandon_take(&mut self) {
         if let Some(active) = self.playing.take.take() {
+            self.end_run();
             self.end_group(active.group);
         }
     }

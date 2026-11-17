@@ -23,7 +23,10 @@
 //!   them changes, and keeps a safety copy of a project with unsaved
 //!   changes;
 //! * those safety copies, and the ones a program that crashed left behind
-//!   ([`Runtime::recoverable`]).
+//!   ([`Runtime::recoverable`]);
+//! * the journals of how each song was made, in a folder beside the
+//!   settings, and the user's word on whether one is kept
+//!   ([`Runtime::set_journal_keeping`]).
 //!
 //! On top of those sit the operations that need more than one of them and
 //! that every front end must do the same way: [`Runtime::sound_facts`],
@@ -145,6 +148,10 @@ pub const SAVED_PRESETS_FOLDER: &str = "saved-presets";
 /// The folder, beside the settings file, that keeps what was learned about
 /// instruments.
 pub const INSTRUMENTS_FOLDER: &str = "instruments";
+/// The folder, beside the settings file, that keeps the journals of how
+/// songs were made. Never a project's own folder: a journal holds the
+/// conversation with the assistant.
+pub const JOURNALS_FOLDER: &str = "journals";
 /// How long listing the audio devices may take.
 const DEVICE_LIST_TIMEOUT: Duration = Duration::from_secs(6);
 /// How long a rescan of the MIDI ports is waited for.
@@ -236,7 +243,7 @@ impl Runtime {
                 .map_err(RuntimeError::Thread)?;
         }
         let factory = Arc::new(CompositeFactory::new(factories));
-        let session = Session::with_audio(factory, media.clone(), audio)?;
+        let mut session = Session::with_audio(factory, media.clone(), audio)?;
         if let Some(warning) = &session.audio_info().warning {
             log::warn!("{warning}");
         }
@@ -247,7 +254,13 @@ impl Runtime {
             // So is what was learned about instruments: which keys of a
             // plugin are drums or keyswitches, its range, its octave.
             session.instruments().open(folder.join(INSTRUMENTS_FOLDER));
+            // And the journals of how songs were made, a couple of hundred
+            // of the latest at most.
+            let journals = folder.join(JOURNALS_FOLDER);
+            trill_engine::journal::prune(&journals);
+            session.keep_journals_in(journals);
         }
+        session.set_journal_keeping(settings.current().journal.keep);
         let live = session.live();
         let session: SharedSession = Arc::new(Mutex::new(session));
 
@@ -408,6 +421,19 @@ impl Runtime {
     /// nothing changed. For a front end about to do something risky.
     pub fn refresh_safety_copy(&self) {
         recovery::refresh(&self.session, &self.copies);
+    }
+
+    /// Whether a journal is kept of how each song is made.
+    pub fn keeps_journal(&self) -> bool {
+        self.session.lock().keeps_journal()
+    }
+
+    /// Keeps a journal from now on, or stops keeping one, and remembers
+    /// the choice. Stopping leaves the journals that were written where
+    /// they are; [`Session::delete_journal`] deletes the open song's.
+    pub fn set_journal_keeping(&self, keep: bool) -> Result<(), SaveError> {
+        self.session.lock().set_journal_keeping(keep);
+        self.update_settings(|settings| settings.journal.keep = keep)
     }
 
     /// Ends this runtime the way a crash would: nothing is tidied away,
