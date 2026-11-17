@@ -462,6 +462,19 @@ impl Runtime {
         Ok(())
     }
 
+    /// [`Runtime::do_jobs_apart`] as a program does it that has called
+    /// [`jobs::run_as_job_if_requested`] first thing: by itself, started
+    /// a second time, unless its environment says otherwise
+    /// ([`Jobs::usual`]). A program that cannot find its own file goes on
+    /// doing its jobs here, and says so in its log.
+    pub fn do_jobs_as_usual(&self) {
+        match Jobs::usual(Program::CurrentExecutable).map(|jobs| self.do_jobs_apart(jobs)) {
+            Some(Err(reason)) => log::warn!("renders and probes are done in this process: {reason}"),
+            Some(Ok(())) => {}
+            None => log::info!("renders and probes are done in this process, as the environment says"),
+        }
+    }
+
     /// Has every job done in this process from now on.
     pub fn do_jobs_here(&self) {
         self.session.lock().do_jobs_apart(None);

@@ -162,7 +162,6 @@ fn run(job: Job, factory: Arc<dyn DeviceFactory>) -> Box<dyn std::any::Any> {
         }
         Job::Probe { devices, preset, tempo, notes, options } => {
             let job = ProbeJob { devices, factory, preset, tempo, apart: None };
-            super::stage(Stage::Waiting);
             match job.run_here(&notes, &options) {
                 Ok((probed, probing)) => {
                     say(&Said::Probed(probed));
@@ -176,7 +175,6 @@ fn run(job: Job, factory: Arc<dyn DeviceFactory>) -> Box<dyn std::any::Any> {
         }
         Job::Ready { devices, tempo, pitches, patience } => {
             let job = ProbeJob { devices, factory, preset: None, tempo, apart: None };
-            super::stage(Stage::Waiting);
             match job.wait_here(&pitches, patience) {
                 Ok((readiness, probing)) => {
                     say(&Said::Ready(readiness));

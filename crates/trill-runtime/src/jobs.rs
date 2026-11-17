@@ -67,7 +67,29 @@ pub struct Jobs {
     pub room: Option<fn() -> Option<trill_engine::apart::Room>>,
 }
 
+/// The variable that says where a program does its jobs, for finding out
+/// what a process of its own costs or does: `here` (in the program's own
+/// process, as before there was another), `fresh` (a process that has
+/// just started for every job, probes too), `kept` (renders too are done
+/// by the process that is kept). Anything else, and nothing, is the
+/// usual: see [`Jobs::usual`].
+pub const JOBS_ENV: &str = "TRILL_JOBS";
+
 impl Jobs {
+    /// How a program does its jobs unless its environment says otherwise
+    /// ([`JOBS_ENV`]): a render and a measurement each in a process that
+    /// has just started, probes in one that is kept between them. `None`
+    /// where the environment says to do them here.
+    pub fn usual(program: Program) -> Option<Self> {
+        let asked = std::env::var(JOBS_ENV).unwrap_or_default();
+        match asked.trim() {
+            "here" => None,
+            "fresh" => Some(Self::by(program)),
+            "kept" => Some(Self { keep_for_probes: true, keep_for_renders: true, ..Self::by(program) }),
+            _ => Some(Self { keep_for_probes: true, ..Self::by(program) }),
+        }
+    }
+
     /// Jobs done by `program`, each in a process that has just started.
     pub fn by(program: Program) -> Self {
         Self {

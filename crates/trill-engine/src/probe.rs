@@ -204,6 +204,7 @@ impl ProbeJob {
         options: &ProbeOptions,
     ) -> Result<(Probed, Probing), ProbeError> {
         let mut probing = self.open(notes, options)?;
+        crate::apart::stage(crate::apart::Stage::Playing);
         let heard = probing.play(notes);
         let probed = Probed {
             heard,
@@ -280,6 +281,9 @@ impl ProbeJob {
         for (index, device) in devices.iter_mut().enumerate() {
             let failed = |reason: String| ProbeError::Device(format!("{} ({}): {reason}", device.name, device.uri));
             let make = |device: &Device| {
+                // A probe in a process of its own says which device it is
+                // making, as a render does.
+                crate::apart::stage(crate::apart::Stage::Making(device.id));
                 let made = self.factory.create_for(device, sample_rate, MAX_BLOCK, Purpose::Rendering);
                 made.map_err(|error| failed(error.to_string()))
             };
@@ -326,6 +330,7 @@ impl ProbeJob {
 
         let plugins = devices.iter().any(|device| Plugins::is_plugin(&device.uri));
         let mut stand = probing.stand();
+        crate::apart::stage(crate::apart::Stage::Waiting);
         if plugins {
             let signature = signature(devices.iter(), &opening);
             let mut waits = [Wait::new(stand, opening, signature, device_signature(devices.iter()))];

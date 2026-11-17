@@ -28,9 +28,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use trill_engine::SharedSession;
-use trill_engine::scripted::{BASS, DRUMS, Loading, ScriptedFactory};
+use trill_engine::scripted::{BASS, DRUMS, Dies, Loading, ScriptedFactory};
 use trill_mcp::{HttpServer, serve_http};
-use trill_runtime::{Parts, Runtime, RuntimeOptions};
+use trill_runtime::{Jobs, Parts, Program, Runtime, RuntimeOptions};
 
 type Client = RunningService<RoleClient, ClientConfig>;
 
@@ -51,6 +51,22 @@ async fn serve(runtime: Arc<Runtime>) -> Fixture {
 
 /// A server that offers the scripted instruments beside the built-in
 /// devices. Nothing of the user's is read or written.
+/// The program that does jobs for the servers of these tests: the
+/// server's own, as it is built for them.
+fn job_program() -> Program {
+    Program::Executable(std::path::PathBuf::from(env!("CARGO_BIN_EXE_trill-mcp")))
+}
+
+/// A server whose scripted instruments are as `loading` says, and whose
+/// renders, measurements and probes of them are done in a process of
+/// their own.
+async fn connect_apart(loading: Loading) -> Fixture {
+    let parts = Parts { devices: vec![Box::new(ScriptedFactory::loading(loading))], ..Parts::default() };
+    let runtime = Runtime::start_custom(RuntimeOptions::hermetic(), parts).unwrap();
+    runtime.do_jobs_apart(Jobs { scripted: Some(loading), keep_for_probes: true, ..Jobs::by(job_program()) }).unwrap();
+    serve(Arc::new(runtime)).await
+}
+
 async fn connect(scripted: ScriptedFactory) -> Fixture {
     let parts = Parts { devices: vec![Box::new(scripted)], ..Parts::default() };
     serve(Arc::new(Runtime::start_custom(RuntimeOptions::hermetic(), parts).unwrap())).await
@@ -408,6 +424,56 @@ async fn a_device_that_is_not_run_beside_others_keeps_a_measure_on_one_processor
     // Asked for one, there is nothing to explain.
     let asked = ok(client, "measure", json!({ "threads": 1 })).await;
     assert!(!strings(&asked["notes"]).iter().any(|note| note.contains("one processor")), "{asked}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_that_takes_its_process_down_costs_the_call_an_error_that_says_so_and_the_song_is_as_it_was() {
+    // The bass takes its process down in the middle of the song: every
+    // tool that would have made one for it says so, and none of them is
+    // the server.
+    let dying = Loading { dies: Some(Dies::Played(40)), ..Loading::default() };
+    let fixture = connect_apart(dying).await;
+    let client = &fixture.client;
+    let (bass, _, _) = two_part_song(client).await;
+    let folder = tempfile::tempdir().unwrap();
+    let before = ok(client, "get_project", json!({})).await;
+
+    let refused = call(client, "measure", json!({})).await.unwrap_err();
+    assert!(refused.contains("the measurement was taken down while it was being played"), "{refused}");
+    assert!(refused.contains("the song that is open is untouched") && refused.contains("Try again"), "{refused}");
+    let wav = folder.path().join("mix.wav");
+    let arguments = json!({ "path": wav.display().to_string(), "stems": ["all"] });
+    let refused = call(client, "render", arguments.clone()).await.unwrap_err();
+    assert!(refused.contains("the render was taken down while it was being played"), "{refused}");
+    assert!(refused.contains("what it had begun to write was removed"), "{refused}");
+    assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0, "nothing was written");
+    // The song is what it was, and the server goes on serving it.
+    assert_eq!(ok(client, "get_project", json!({})).await, before);
+    // A probe plays the instrument's notes while the song stands still,
+    // which this bass lives through: in a process of its own as well.
+    let probed = ok(client, "probe", json!({ "track": bass, "notes": [40, 43] })).await;
+    assert_eq!(probed["sounding"], "E2 (40), G2 (43)", "{probed}");
+
+    // With the track muted, the rest is measured and rendered.
+    ok(client, "update_track", json!({ "track": bass, "mute": true })).await;
+    let report = ok(client, "measure", json!({})).await;
+    assert!(report["peak_db"].as_f64().unwrap() > -60.0, "{report}");
+    let report = ok(client, "render", arguments).await;
+    assert!(wav.exists() && !report["stems"].as_array().unwrap().is_empty(), "{report}");
+
+    // One that goes as it is made is named, with its track.
+    let fixture = connect_apart(Loading { dies: Some(Dies::Made), ..Loading::default() }).await;
+    let client = &fixture.client;
+    let (bass, _, _) = two_part_song(client).await;
+    let refused = call(client, "measure", json!({})).await.unwrap_err();
+    assert!(refused.contains("a plugin took the measurement down while its devices were being made: "), "{refused}");
+    assert!(
+        refused.contains(" on 'Bass' (") && refused.contains("mute that track or take the device out"),
+        "{refused}"
+    );
+    let refused = call(client, "probe", json!({ "track": bass, "notes": [40] })).await.unwrap_err();
+    assert!(refused.contains("a plugin took the probe down while its devices were being made"), "{refused}");
+    assert!(ok(client, "get_project", json!({})).await["tracks"].as_array().is_some());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -817,6 +883,9 @@ async fn connect_with_plugins(uri: &str) -> Option<(Fixture, tempfile::TempDir)>
     let options = RuntimeOptions { audio, plugins: None, storage };
     let parts = Parts { devices: host.factories(), ..Parts::default() };
     let runtime = Arc::new(Runtime::start_custom(options, parts).unwrap());
+    // As the programs do it: what makes and lets go of plugins is done in
+    // a process of its own, which here is the server's own program.
+    runtime.do_jobs_apart(Jobs { plugins: Some(host), keep_for_probes: true, ..Jobs::by(job_program()) }).unwrap();
     Some((serve(runtime).await, folder))
 }
 
