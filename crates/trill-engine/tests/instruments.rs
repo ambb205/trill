@@ -218,34 +218,48 @@ fn a_sine_at_a_volume_setting_is_as_loud_as_operators_at_the_same() {
 }
 
 #[test]
-fn a_pitch_envelope_drops_every_note_onto_its_pitch_in_a_straight_line() {
-    // An 808's knock: an octave up, down to the note in 30 ms. On A4, so
-    // that there are cycles enough to count.
-    let knock: Vec<(&str, f64)> = SUB.iter().copied().chain([("pitch_env", 12.0), ("pitch_decay", 0.03)]).collect();
-    let played = Played::synth(&knock, &[note(69, 0.0, 1.0, 110), note(69, 2.0, 1.0, 110)], 4.0);
-    let out = played.render();
-    let cycles = |from: f64, to: f64, at: usize| {
-        let range = at + (from * SR) as usize..at + (to * SR) as usize;
-        out.left[range].windows(2).filter(|pair| pair[0] <= 0.0 && pair[1] > 0.0).count()
+fn a_pitch_envelope_drops_every_note_onto_its_pitch_as_an_envelope_decays() {
+    // How far over its own pitch a note on A4 is, a hundredth of a second
+    // around a moment.
+    let over = |out: &Rendered, start: usize, seconds: f64| {
+        let from = start + ((seconds - 0.005) * SR) as usize;
+        12.0 * (zero_crossing_hz(&out.left[from..from + (0.01 * SR) as usize], SR) / 440.0).log2()
     };
+    // An octave over three tenths of a second: half of the way is gone
+    // after a tenth of the time, nine tenths after a third, and then the
+    // note is on its pitch. Every note falls anew.
+    let slow: Vec<(&str, f64)> = SUB.iter().copied().chain([("pitch_env", 12.0), ("pitch_decay", 0.3)]).collect();
+    let played = Played::synth(&slow, &[note(69, 0.0, 1.5, 110), note(69, 2.0, 1.5, 110)], 4.0);
+    let out = played.render();
     for start in [0, beats(2.0..2.0).start] {
-        // In a straight line in pitch from 880 Hz to 440 Hz the note goes
-        // through 19 cycles in its first 30 ms; held at 440 Hz it would be
-        // 13, and falling the way an exponential does, far fewer than 19.
-        let fallen = cycles(0.0, 0.03, start);
-        assert!((18..=20).contains(&fallen), "{fallen} cycles in the first 30 ms");
-        // Half way down, at 15 ms, it is six semitones up: 622 Hz.
-        let half_way = zero_crossing_hz(&out.left[start + (0.012 * SR) as usize..start + (0.018 * SR) as usize], SR);
-        assert!((half_way / 622.25 - 1.0).abs() < 0.05, "{half_way} Hz half way");
-        // And then it is on its pitch, and stays.
-        let landed = zero_crossing_hz(&out.left[start + (0.035 * SR) as usize..start + (0.4 * SR) as usize], SR);
-        assert!((landed - 440.0).abs() < 0.5, "{landed} Hz after the fall");
+        for (seconds, wanted) in [(0.01, 9.5), (0.03, 6.0), (0.1, 1.2), (0.2, 0.12), (0.5, 0.0)] {
+            let heard = over(&out, start, seconds);
+            assert!((heard - wanted).abs() < 0.2, "{seconds} s into the note: {heard} semitones over, wanted {wanted}");
+        }
     }
-    // A fall the other way, and none at all where the amount is nothing.
-    let rising: Vec<(&str, f64)> = SUB.iter().copied().chain([("pitch_env", -12.0), ("pitch_decay", 0.1)]).collect();
+
+    // An 808's knock, as the bench's song sets it on Live's Operator: an
+    // octave up, a pitch envelope of 30 ms. What Operator's pitch was read
+    // to be from the bench's recording of it alone, beside the law here.
+    let live = [(2.0, 6.5), (4.0, 3.3), (6.0, 2.1), (10.0, 1.2), (15.0, 0.1), (20.0, 0.0)];
+    println!("ms into the note   Live's Operator   Trill's law   (semitones over the note)");
+    for (ms, live) in live {
+        let law = 12.0 * (-(1000f64.ln()) * ms / 30.0).exp();
+        println!("      {ms:>4}             {live:>+5.1}         {law:>+5.1}");
+        assert!((law - live).abs() < 1.6, "{ms} ms: {law} against Live's {live}");
+    }
+    let knock: Vec<(&str, f64)> = SUB.iter().copied().chain([("pitch_env", 12.0), ("pitch_decay", 0.03)]).collect();
+    let out = Played::synth(&knock, &[note(69, 0.0, 1.0, 110)], 2.0).render();
+    // It starts well over the note, and has landed after 20 ms.
+    let first = zero_crossing_hz(&out.left[..(0.004 * SR) as usize], SR);
+    assert!(first > 440.0 * 1.4, "{first} Hz over the first 4 ms");
+    let landed = zero_crossing_hz(&out.left[(0.02 * SR) as usize..(0.4 * SR) as usize], SR);
+    assert!((landed - 440.0).abs() < 0.5, "{landed} Hz after the fall");
+
+    // A rise from below, and no envelope at all where the amount is nothing.
+    let rising: Vec<(&str, f64)> = SUB.iter().copied().chain([("pitch_env", -12.0), ("pitch_decay", 0.3)]).collect();
     let out = Played::synth(&rising, &[note(69, 0.0, 1.0, 110)], 2.0).render();
-    let early = zero_crossing_hz(&out.left[(0.02 * SR) as usize..(0.04 * SR) as usize], SR);
-    assert!(early > 250.0 && early < 320.0, "{early} Hz on the way up from an octave under");
+    assert!((over(&out, 0, 0.03) + 6.0).abs() < 0.2, "{} semitones", over(&out, 0, 0.03));
     let out = Played::synth(&SUB, &[note(69, 0.0, 1.0, 110)], 2.0).render();
     assert!((zero_crossing_hz(&out.left[48..(0.03 * SR) as usize], SR) - 440.0).abs() < 2.0);
 }
@@ -341,6 +355,20 @@ fn noise_plays_alone_and_as_wide_as_it_is_set() {
     // And with neither there is nothing.
     let silent = Played::synth(&[("osc_level", 0.0)], &[note(60, 0.0, 2.0, 100)], 3.0).render();
     assert_eq!(peak(&silent.left), 0.0);
+
+    // How loud: white noise at a level of 1 is 13 dB under an oscillator
+    // of the same peak (noise that reaches as high as a sine is 1.8 dB
+    // under it on average, and the synth's open filter takes most of a
+    // dB off the very top); in a song saved before it is as high as the
+    // oscillator, as it was.
+    let plain = [("osc_level", 0.0), ("noise_level", 1.0), ("velocity_sens", 0.0), ("sustain", 1.0), ("volume", -21.0)];
+    let played = Played::synth(&plain, &[note(60, 0.0, 2.0, 100)], 3.0);
+    let level = |out: &Rendered| db(f64::from(rms(&out.left[beats(0.5..2.0)])));
+    let sine = db(0.22 * std::f64::consts::FRAC_1_SQRT_2);
+    assert!((level(&played.render()) - (sine - 13.0 - 2.6)).abs() < 0.3, "{}", level(&played.render()));
+    // Its volume then, 21 dB further down that scale.
+    let old = played.render_this(&played.as_saved_in_format_2());
+    assert!((level(&old) - (sine - 21.0 - 2.6)).abs() < 0.3, "{}", level(&old));
 }
 
 #[test]

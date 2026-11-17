@@ -1952,8 +1952,8 @@ mod tests {
         };
         // The synth's volume is the same sound under another number,
         // wherever the file has it; nothing else of it has moved.
-        assert_eq!(params(synth), BTreeMap::from([("volume".to_string(), -13.0)]));
-        assert_eq!(params(plain), BTreeMap::from([("volume".to_string(), -21.0)]));
+        let synth_at = |volume: f64| BTreeMap::from([("legacy".to_string(), 1.0), ("volume".to_string(), volume)]);
+        assert_eq!((params(synth), params(plain)), (synth_at(-13.0), synth_at(-21.0)));
         assert_eq!(values(&volume(synth)), [-69.0, -13.0]);
         assert_eq!(values(&cutoff), [200.0, 8000.0]);
         // The sampler keeps its law and the defaults of the day; its own

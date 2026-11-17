@@ -171,6 +171,7 @@ pub static LAYOUTS: &[Layout] = &[
                         p("sub_level", "Sub"),
                         p("noise_level", "Noise"),
                         p("noise_width", "Noise Width"),
+                        Row::Toggles(&[("legacy", "Legacy")]),
                     ],
                 )],
             },

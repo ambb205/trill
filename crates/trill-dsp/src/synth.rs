@@ -25,9 +25,18 @@ const CONTROL_BLOCK: usize = 16;
 /// one of the synth it was measured against (Ableton Live's Operator, on
 /// the bench's second song: within 0.2 dB at velocities 112 and 127).
 const VOICE_GAIN: f32 = 2.468_44;
+/// The level of the noise at a noise level of 1, against the peak of an
+/// oscillator: 13 dB under it, which is where white noise through the
+/// band-pass was measured to be in the same synth (within 0.1 dB over
+/// seven sections of the song). Before format 3 it was the oscillator's
+/// own peak.
+const NOISE_GAIN: f32 = 0.223_87;
 /// Frames between two readings of a voice's pitch envelope, counted from
 /// the start of its note: a third of a millisecond at 48 kHz.
 const PITCH_STEP: u32 = 16;
+/// The natural logarithm of a thousand: an envelope that has fallen by
+/// 60 dB has this many time constants behind it.
+const SIXTY_DB: f32 = 6.907_755;
 /// The vibrato the mod wheel adds at the top of its travel, in semitones,
 /// at the LFO's rate.
 const MOD_WHEEL_VIBRATO: f32 = 0.5;
@@ -43,7 +52,7 @@ define_params!(P, PARAMS, [
     FmAmount => float("fm_amount", "FM Amount (osc 2 modulates osc 1)", 0.0, 1.0, 0.0, ""),
     FmEnv => float("fm_env", "FM Follows Filter Envelope", 0.0, 1.0, 0.0, ""),
     SubLevel => float("sub_level", "Sub Oscillator Level", 0.0, 1.0, 0.0, ""),
-    NoiseLevel => float("noise_level", "Noise Level", 0.0, 1.0, 0.0, ""),
+    NoiseLevel => float("noise_level", "Noise Level (white noise; at 1 it peaks 13 dB under an oscillator)", 0.0, 1.0, 0.0, ""),
     Unison => int("unison", "Unison Voices", 1, MAX_UNISON as i32, 1, ""),
     UnisonDetune => float("unison_detune", "Unison Detune", 0.0, 100.0, 20.0, "cents"),
     UnisonSpread => float("unison_spread", "Unison Stereo Spread", 0.0, 1.0, 0.7, ""),
@@ -77,14 +86,14 @@ define_params!(P, PARAMS, [
     ),
     PitchEnv => float(
         "pitch_env",
-        "Pitch Envelope (where every note starts, from its own pitch; it gets there in a straight line over the \
-         pitch envelope time. 12 over 0.03 s is the knock of an 808)",
+        "Pitch Envelope (where every note starts, from its own pitch; it falls there as the amp envelope decays, \
+         fast at first: half of the way in a tenth of the pitch envelope time. 12 over 0.03 s is the knock of an 808)",
         -48.0,
         48.0,
         0.0,
         "st"
     ),
-    PitchDecay => float("pitch_decay", "Pitch Envelope Time", 0.001, 5.0, 0.05, "s"),
+    PitchDecay => float("pitch_decay", "Pitch Envelope Time (to a thousandth of the way from the note)", 0.001, 5.0, 0.05, "s"),
     BendRange => float(
         "bend_range",
         "Pitch Wheel Range (how far the wheel bends, each way; the track's instrument profile takes it from here)",
@@ -108,6 +117,11 @@ define_params!(P, PARAMS, [
         1.0,
         0.0,
         ""
+    ),
+    Legacy => boolean(
+        "legacy",
+        "Legacy (the noise of songs saved before format 3: 13 dB louder, as high as an oscillator)",
+        false
     ),
 ]);
 
@@ -521,8 +535,10 @@ impl Voice {
         if d.pitch_env == 0.0 || age >= d.pitch_frames {
             return (0.0, usize::MAX);
         }
+        // As the other envelopes decay: by 60 dB over the time, and then
+        // it is there.
         let read = self.pitch_age - self.pitch_age % PITCH_STEP;
-        let left = (1.0 - read as f32 / d.pitch_frames).max(0.0);
+        let left = (-SIXTY_DB * read as f32 / d.pitch_frames).exp();
         (d.pitch_env * left, (PITCH_STEP - self.pitch_age % PITCH_STEP) as usize)
     }
 
@@ -707,7 +723,7 @@ impl PolySynth {
         d.fm = p.get(P::FmAmount as usize) * 1.5;
         d.fm_env = p.get(P::FmEnv as usize);
         d.sub = p.get(P::SubLevel as usize);
-        d.noise = p.get(P::NoiseLevel as usize);
+        d.noise = p.get(P::NoiseLevel as usize) * if p.on(P::Legacy as usize) { 1.0 } else { NOISE_GAIN };
         let width = p.get(P::NoiseWidth as usize) * std::f32::consts::FRAC_PI_2;
         (d.noise_same, d.noise_own) = (width.cos(), width.sin());
         d.pitch_env = p.get(P::PitchEnv as usize);
