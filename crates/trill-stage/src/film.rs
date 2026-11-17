@@ -102,6 +102,8 @@ pub struct Filmer {
     stage: Stage,
     renderer: Renderer,
     pixels: Vec<u8>,
+    /// The program the frames are handed to.
+    encoder: PathBuf,
 }
 
 impl Filmer {
@@ -111,7 +113,18 @@ impl Filmer {
     }
 
     pub fn on(gpu: Gpu) -> Self {
-        Self { stage: Stage::new(Theme::noir()), renderer: Renderer::new(gpu, Quality::FILM), pixels: Vec::new() }
+        Self {
+            stage: Stage::new(Theme::noir()),
+            renderer: Renderer::new(gpu, Quality::FILM),
+            pixels: Vec::new(),
+            encoder: PathBuf::from("ffmpeg"),
+        }
+    }
+
+    /// Hands the frames to `program` instead of the `ffmpeg` on the path.
+    pub fn with_encoder(mut self, program: impl Into<PathBuf>) -> Self {
+        self.encoder = program.into();
+        self
     }
 
     /// What the graphics card calls itself.
@@ -186,7 +199,7 @@ impl Filmer {
             std::fs::create_dir_all(folder)
                 .map_err(|error| format!("{} could not be made: {error}", folder.display()))?;
         }
-        let mut sink = Sink::open(path, shoot, audio, from, to - from)?;
+        let mut sink = Sink::open(&self.encoder, path, shoot, audio, from, to - from)?;
         for frame in 0..total {
             if progress.is_stopped() {
                 sink.abandon();
@@ -208,9 +221,16 @@ enum Sink {
 }
 
 impl Sink {
-    fn open(path: &Path, shoot: &Shoot, audio: Option<&Path>, from: f64, length: f64) -> Result<Self, String> {
+    fn open(
+        encoder: &Path,
+        path: &Path,
+        shoot: &Shoot,
+        audio: Option<&Path>,
+        from: f64,
+        length: f64,
+    ) -> Result<Self, String> {
         let Format { width, height } = shoot.format;
-        let mut command = Command::new("ffmpeg");
+        let mut command = Command::new(encoder);
         command.args(["-y", "-hide_banner", "-loglevel", "error"]);
         command.args(["-f", "rawvideo", "-pixel_format", "rgba"]);
         command.args(["-video_size", &format!("{width}x{height}"), "-framerate", &shoot.rate.to_string()]);
@@ -223,7 +243,7 @@ impl Sink {
         // The colors as screens take them to be, in a file every player
         // opens.
         command.args(["-vf", "scale=out_color_matrix=bt709:out_range=tv"]);
-        command.args(["-c:v", "libx264", "-preset", "medium", "-crf", "14", "-pix_fmt", "yuv420p"]);
+        command.args(["-c:v", "libx264", "-preset", "medium", "-crf", "17", "-pix_fmt", "yuv420p"]);
         command.args(["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]);
         command.args(["-movflags", "+faststart", "-shortest"]);
         command.arg(path);

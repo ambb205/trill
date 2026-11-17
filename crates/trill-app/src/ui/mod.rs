@@ -33,7 +33,8 @@
 //! parameters, [`sample_panels`] draws what the sampler and the drum rack
 //! play, and [`displays`] draws the devices' small curves from the math in
 //! [`response`]. [`editors`] opens the windows plugins bring with them,
-//! and [`recovery`] offers back the work a crash left unsaved.
+//! and [`recovery`] offers back the work a crash left unsaved. [`stage`]
+//! shows the song filmed as it plays, in place of all of these.
 //! [`files`] runs dialogs, imports and exports off the UI
 //! thread, and [`sounds`] does the same for everything that reads audio
 //! files (waveforms, previews, searches, drops) on the workers of
@@ -69,6 +70,7 @@ mod sample_panels;
 mod shortcuts;
 mod snapshot;
 mod sounds;
+mod stage;
 mod state;
 mod status_bar;
 mod timeline;
@@ -149,6 +151,8 @@ pub struct UiOptions {
     pub show_settings: bool,
     /// Start a take on the armed tracks as soon as the window opens.
     pub record: bool,
+    /// Open on the stage.
+    pub stage: bool,
 }
 
 impl Default for UiOptions {
@@ -175,6 +179,7 @@ impl Default for UiOptions {
             keyboard: KeyboardOptions::default(),
             show_settings: false,
             record: false,
+            stage: false,
         }
     }
 }
@@ -221,6 +226,8 @@ pub fn run(runtime: Arc<Runtime>, options: UiOptions) -> anyhow::Result<()> {
             // Plugin editors belong to this window: they stay above it and
             // go where it goes.
             app.set_native_window(native_window(creation));
+            // The stage draws on the window's own graphics device.
+            app.set_graphics(creation.wgpu_render_state.clone());
             Ok(Box::new(app))
         }),
     )

@@ -60,6 +60,10 @@ pub struct Look {
     pub blur: f32,
     /// What the whole picture is multiplied by.
     pub exposure: f32,
+    /// Where in linear light the highlights start to roll off towards
+    /// white, 0..=1. Under it a tone passes as it was painted; at 1
+    /// nothing rolls off, and what the light pushed over white clips.
+    pub shoulder: f32,
     /// Light let in across the top of the frame (a crash), and its color.
     pub flare: f32,
     pub flare_color: [f32; 3],
@@ -85,6 +89,7 @@ impl Look {
             spread: 0.0,
             blur: 0.0,
             exposure: 1.0,
+            shoulder: 1.0,
             flare: 0.0,
             flare_color: [0.0; 3],
             punch: 0.0,

@@ -4613,6 +4613,7 @@ dependencies = [
  "trill-noir",
  "trill-plugins",
  "trill-runtime",
+ "trill-stage",
  "winresource",
 ]
 

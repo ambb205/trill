@@ -244,6 +244,14 @@ impl Renderer {
         self.finish();
     }
 
+    /// Lets go of every texture: what a renderer that will not draw for a
+    /// while should do. The passes are kept, and the next picture makes
+    /// the textures again.
+    pub fn release(&mut self) {
+        self.targets = None;
+        self.reading = None;
+    }
+
     /// The finished picture, as a texture on the device: what the window
     /// shows. `None` before the first picture.
     pub fn finished(&self) -> Option<&wgpu::TextureView> {
@@ -647,7 +655,7 @@ impl Globals {
         let spread = look.spread.clamp(0.0, 0.95);
         Self {
             scene: [width, height, 1.0 / width, 1.0 / height],
-            out: [out_width, out_height, 1.0 / out_width, 1.0 / out_height],
+            out: [out_width, out_height, look.shoulder.clamp(0.0, 1.0), 0.0],
             // Every level of the bloom adds to the one above it: taken
             // together they are this much brighter than one.
             light: [look.light, look.glow * (1.0 - spread), look.flare, look.exposure],

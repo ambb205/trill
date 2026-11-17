@@ -29,7 +29,7 @@ const SNARE_TEAR: f32 = 1.6;
 const CRASH_FLARE: f32 = 0.022;
 /// How much brighter the frame of a cut is, and how fast that falls away,
 /// in beats.
-const CUT_FLASH: f32 = 0.35;
+const CUT_FLASH: f32 = 0.24;
 const CUT_FALL: f64 = 0.35;
 
 /// A song as the stage films it: read once, directed once.
@@ -78,6 +78,7 @@ impl Look {
             spread: 0.8,
             blur: BLUR,
             exposure: 0.86 + 0.16 * heard.level + CUT_FLASH * cut,
+            shoulder: 0.72,
             flare: CRASH_FLARE * crash,
             flare_color: [0.92, 0.9, 1.0],
             punch: KICK_PUNCH * kick,

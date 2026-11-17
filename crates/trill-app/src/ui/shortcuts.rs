@@ -61,6 +61,8 @@ pub enum Command {
     ToggleBrowser,
     ToggleAssistant,
     ToggleKeyboard,
+    /// Shows the stage in place of the window's panes, or the panes again.
+    ToggleStage,
     /// Starts a take, or ends the one being recorded.
     Record,
     AudioSettings,
@@ -250,6 +252,7 @@ pub const BINDINGS: &[Binding] = &[
     bind(Command::ZoomToSong, SHIFT, Key::Z, When::NotTyping, Section::View, "Zoom to the whole song"),
     bind(Command::ToggleBrowser, CTRL, Key::B, When::NotTyping, Section::View, "Show or hide the browser"),
     bind(Command::ToggleAssistant, CTRL_SHIFT, Key::A, When::Always, Section::View, "Show or hide the assistant"),
+    bind(Command::ToggleStage, NONE, Key::F11, When::Always, Section::View, "The stage: the song filmed as it plays"),
     bind(Command::ShowShortcuts, NONE, Key::F1, When::Always, Section::View, "This reference"),
     bind(
         Command::ToggleKeyboard,

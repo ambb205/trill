@@ -12,7 +12,8 @@
 struct Globals {
     // Size of the scene in pixels, and one over it.
     scene: vec4<f32>,
-    // Size of the output in pixels, and one over it.
+    // Size of the output in pixels; then where the highlights start to
+    // roll off, in linear light.
     out: vec4<f32>,
     // x: how strong the light layer is. y: how much bloom is added.
     // z: the flare. w: exposure.
@@ -185,9 +186,10 @@ fn finish(in: Covered) -> @location(0) vec4<f32> {
     color *= 1.0 - g.finish.x * smoothstep(0.55, 1.45, from_middle);
     // The interface's own tones pass as they are; what the light pushed
     // over them rolls off towards white instead of clipping.
-    let knee = vec3<f32>(0.72);
+    let knee = vec3<f32>(g.out.z);
+    let room = max(vec3<f32>(1.0) - knee, vec3<f32>(0.0001));
     let over = max(color - knee, vec3<f32>(0.0));
-    color = min(color, knee) + (vec3<f32>(1.0) - knee) * (vec3<f32>(1.0) - exp(-over / (vec3<f32>(1.0) - knee)));
+    color = min(color, knee) + room * (vec3<f32>(1.0) - exp(-over / room));
     var shown = gamma_from_linear(color);
     // Grain: two throws of the dice make it soft-edged, and it is finer
     // in the lights than in the darks.
