@@ -31,14 +31,15 @@ const ZERO_CROSSINGS: usize = 16;
 /// two rows are blended.
 const PHASES: usize = 256;
 const KAISER_BETA: f64 = 7.0;
-/// How many widths there are: quarter octaves from 1 to 4.
-const WIDTHS: usize = 9;
+/// How many widths there are: quarter octaves from 1 to a little past 4,
+/// which is what a recording played two octaves up needs.
+const WIDTHS: usize = 10;
 /// How much wider than the speed the weights are made, so that the end of
 /// their roll-off and not the middle of it lies on the frequency that
-/// folds.
-const ALIAS_MARGIN: f64 = 1.1;
+/// folds: the roll-off of these weights ends 14 % above its middle.
+const ALIAS_MARGIN: f64 = 1.14;
 /// The most weights on either side of the middle.
-pub const MAX_HALF: usize = 64;
+pub const MAX_HALF: usize = 80;
 
 /// The weights for one width.
 pub struct Kernel {
@@ -261,13 +262,14 @@ pub(crate) mod tests {
     #[test]
     fn an_octave_up_what_folds_is_seventy_decibels_under_what_is_played() {
         // A recording as bright as a recording can be: equal tones every
-        // 500 Hz up to 23.5 kHz. An octave up, the ones above 12 kHz
+        // 487 Hz up to 23.9 kHz. An octave up, the ones above 12 kHz
         // would land above 24 kHz. What is left between the tones that
-        // belong (now 1 kHz apart) is what folded.
+        // belong (now 974 Hz apart) is what folded. (Not 500 Hz: what
+        // folds would land on the tones that belong, and hide.)
         let frames = 1 << 17;
-        let tones: Vec<f64> = (1..=47).map(|k| k as f64 * 500.0).collect();
+        let tones: Vec<f64> = (1..=49).map(|k| k as f64 * 487.0).collect();
         let recording: Vec<f32> = (0..frames)
-            .map(|i| tones.iter().map(|hz| (TAU * hz * i as f64 / SR + hz).sin()).sum::<f64>() as f32 / 47.0)
+            .map(|i| tones.iter().map(|hz| (TAU * hz * i as f64 / SR + hz).sin()).sum::<f64>() as f32 / 49.0)
             .collect();
         let audio = audio(recording, None);
         let played = play(&audio, 2.0, 1 << 15);
@@ -276,10 +278,10 @@ pub(crate) mod tests {
         let (mut wanted, mut folded) = (f64::MIN, f64::MIN);
         for (index, level) in spectrum.iter().enumerate() {
             let hz = index as f64 * bin;
-            let nearest = (hz / 1_000.0).round() * 1_000.0;
-            if (hz - nearest).abs() < 6.0 * bin && (1_000.0..=20_000.0).contains(&nearest) {
+            let nearest = (hz / 974.0).round() * 974.0;
+            if (hz - nearest).abs() < 6.0 * bin && (974.0..=18_000.0).contains(&nearest) {
                 wanted = wanted.max(f64::from(*level));
-            } else if (hz - nearest).abs() > 200.0 && hz > 200.0 {
+            } else if (hz - nearest).abs() > 80.0 && hz > 200.0 {
                 folded = folded.max(f64::from(*level));
             }
         }
@@ -316,7 +318,8 @@ pub(crate) mod tests {
     fn the_weights_widen_with_the_speed_and_never_past_what_is_guarded() {
         let half = |rate: f64| kernel_for(rate).half();
         assert_eq!((half(0.25), half(1.0)), (16, 16));
-        assert_eq!(half(1.059_463), 20, "a semitone up");
+        assert_eq!(half(1.03), 20, "half a semitone up");
+        assert_eq!(half(1.059_463), 24, "a semitone up");
         assert_eq!(half(2.0), 40, "an octave up");
         assert_eq!((half(4.0), half(100.0)), (MAX_HALF, MAX_HALF));
         assert!(GUARD >= MAX_HALF, "the guard has to cover the widest reach");

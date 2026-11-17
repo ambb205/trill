@@ -17,6 +17,7 @@
 //! names, read once however many devices and renders play it, with what
 //! there is to say about it.
 
+mod kit;
 pub mod loaded;
 pub mod model;
 pub mod player;

@@ -388,9 +388,9 @@ impl Loaded {
         profile
     }
 
-    /// What is on each key, for an instrument whose keys are drums: the
-    /// name the instrument gives the key, or failing that the name of the
-    /// recording it plays.
+    /// What is on each key, for an instrument whose keys are drums, said
+    /// as a kit says it ([`super::kit`]): from the name the instrument
+    /// gives the key, or failing that the name of the recording it plays.
     pub fn key_sounds(&self) -> Option<Vec<KeySound>> {
         if !self.summary.drums {
             return None;
@@ -401,14 +401,14 @@ impl Loaded {
             else {
                 continue;
             };
-            let place = match self.instrument.key_labels.get(&key) {
+            let words = match self.instrument.key_labels.get(&key) {
                 Some(label) => label.clone(),
                 None => match region.recording {
                     Some(index) => recording_words(&self.instrument.recordings[index as usize]),
                     None => continue,
                 },
             };
-            sounds.push(KeySound { key, place, instrument: String::new(), stroke: String::new() });
+            sounds.push(super::kit::sound(key, &words));
         }
         Some(sounds)
     }
@@ -689,8 +689,10 @@ pub(crate) mod tests {
         let instruments = Instruments::default();
         let kit = instruments.load(&State::new("/i/Kit.sfz"), &pool, &texts).unwrap().unwrap();
         assert_eq!(kit.profile().role, Some(Role::Drums));
-        let sounds: Vec<(u8, String)> = kit.key_sounds().unwrap().into_iter().map(|sound| (sound.key, sound.place)).collect();
-        assert_eq!(sounds, [(36, "Kick 01".to_string()), (38, "Snare Center".to_string()), (42, "HH closed".to_string())]);
+        let sounds: Vec<(u8, String, String)> =
+            kit.key_sounds().unwrap().into_iter().map(|sound| (sound.key, sound.place, sound.stroke)).collect();
+        let said = |key: u8, place: &str, stroke: &str| (key, place.to_string(), stroke.to_string());
+        assert_eq!(sounds, [said(36, "Kick", "Hit"), said(38, "Snare", "Center"), said(42, "Hats", "Closed Tip")]);
         assert!(kit.about().contains("drums on keys C2..F#2 (36..42)"), "{}", kit.about());
         assert_eq!(kit.missing.len(), 3);
         assert!(kit.warnings()[0].message.contains("3 of its 3 recordings are missing, the first '/i/Kick_01.wav'"));
