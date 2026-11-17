@@ -166,7 +166,7 @@ fn half_move(from: &Take, into: &Take) -> Option<Beats> {
 }
 
 /// Slow out of one framing and slow into the other.
-fn ease(through: f32) -> f32 {
+pub(crate) fn ease(through: f32) -> f32 {
     let t = through.clamp(0.0, 1.0);
     t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 }
@@ -262,7 +262,7 @@ impl Framing {
 
 /// The drums `part` plays between `from` and `to`, lowest first, each
 /// fully open. Empty for a pitched part.
-fn drums_played(part: &Part, from: Beats, to: Beats) -> Vec<(u8, f32)> {
+pub(crate) fn drums_played(part: &Part, from: Beats, to: Beats) -> Vec<(u8, f32)> {
     if !part.drums {
         return Vec::new();
     }
@@ -286,7 +286,7 @@ fn blend_drums(from: &[(u8, f32)], to: &[(u8, f32)], through: f32) -> Vec<(u8, f
 /// The pitches a roll of `part` shows for the notes it plays between
 /// `from` and `to`: all of them with room to spare, and never so few rows
 /// that a line of three notes fills the frame.
-fn roll_range(part: &Part, from: Beats, to: Beats) -> (f32, f32) {
+pub(crate) fn roll_range(part: &Part, from: Beats, to: Beats) -> (f32, f32) {
     let notes = part.starting_between(from, to);
     let (low, high) = match notes.is_empty() {
         true => (part.low, part.high),

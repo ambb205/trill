@@ -384,6 +384,18 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
                 None => about("Rendering", "Rendered", what),
             }
         }
+        "film" | "film_plan" => {
+            let what = match (call.text("of"), call.text("section")) {
+                (Some("making_of"), _) => "how the song was made".to_owned(),
+                (_, Some(section)) => format!("{} of the song", quoted(section)),
+                _ => "the song".to_owned(),
+            };
+            match (tool, call.text("path")) {
+                ("film_plan", _) => about("Planning", "Planned", &format!("a film of {what}")),
+                (_, Some(path)) => about("Filming", "Filmed", &format!("{what} to {}", quoted(file_name(path)))),
+                (_, None) => about("Filming", "Filmed", &what),
+            }
+        }
         "measure" => match call.has("tracks") {
             true => about("Measuring", "Measured", "some of the tracks"),
             false => about("Measuring", "Measured", "the song"),
@@ -453,7 +465,13 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
             Some("add_folder") => about("Adding", "Added", "a folder to the sound library"),
             Some("remove_folder") => about("Taking", "Took", "a folder out of the sound library"),
             Some("rescan") => about("Scanning", "Scanned", "the sound library"),
+            Some("move_folder") => about("Telling", "Told", "the sound library where a folder went"),
             _ => about("Checking", "Checked", "the sound library"),
+        },
+        "missing_files" => about("Looking for", "Looked for", "the song's missing files"),
+        "relink_files" => match crate::files::one_file(input) {
+            Some(file) => about("Relinking", "Relinked", &quoted(file)),
+            None => about("Relinking", "Relinked", "the song's missing files"),
         },
         "preview_sound" => match call.text("path") {
             Some(path) => about("Playing", "Played", &quoted(file_name(path))),
@@ -505,6 +523,10 @@ pub fn of_call(tool: &str, input: &Value, answer: &str) -> Option<Place> {
         "update_device" | "set_sample" | "show_device_editor" | "save_preset" => given("device").map(Place::device),
 
         "create_clip" | "create_audio_clip" => Place::clips(answered("clip_id")),
+        "relink_files" => {
+            let clips = answer.get("clips").and_then(Value::as_array);
+            Place::clips(clips.into_iter().flatten().filter_map(Value::as_u64))
+        }
         "update_clip" | "add_notes" | "set_notes" | "remove_notes" | "transform_notes" => Place::clips(given("clip")),
         "write_chords" | "write_drums" | "write_arpeggio" | "write_bass" | "write_melody" => {
             Place::clips(answered("clip_id"))
@@ -576,6 +598,27 @@ fn number(value: &Value) -> Option<String> {
 pub fn heard(tool: &str, answer: &str) -> Option<String> {
     let answer: Value = serde_json::from_str(answer).ok()?;
     match tool {
+        "film" => {
+            // How long it is and how it sounds: what a film is known by.
+            let seconds = answer.get("seconds").and_then(Value::as_f64)?;
+            let mut said = vec![format!("{}:{:02}", seconds as u64 / 60, seconds as u64 % 60)];
+            if let Some(size) = answer.get("size").and_then(Value::as_str) {
+                said.push(size.to_owned());
+            }
+            if let Some(loudness) = answer.get("loudness_lufs").and_then(number) {
+                said.push(format!("{loudness} LUFS"));
+            }
+            Some(said.join(", "))
+        }
+        "film_plan" => {
+            let takes = answer.get("takes").and_then(Value::as_array).map(Vec::len);
+            let shots = answer.get("shots").and_then(Value::as_u64);
+            match (takes, shots) {
+                (Some(takes), _) => Some(format!("{takes} takes")),
+                (None, Some(shots)) => Some(format!("{shots} shots")),
+                (None, None) => None,
+            }
+        }
         "measure" | "render" => {
             let mut said = Vec::new();
             if let Some(loudness) = answer.get("loudness_lufs").and_then(number) {
@@ -768,6 +811,34 @@ mod tests {
             did("edit_time", json!({ "action": "duplicate", "start": 0, "end": 16 }), p),
             "Repeated a stretch of time"
         );
+    }
+
+    #[test]
+    fn files_that_are_missing_are_looked_for_and_relinked_in_words() {
+        let (project, ..) = song();
+        let p = &project;
+        let wording = describe("missing_files", &json!({}), p);
+        assert_eq!(wording.doing, "Looking for the song's missing files");
+        assert_eq!(wording.did, "Looked for the song's missing files");
+        assert_eq!(did("relink_files", json!({}), p), "Relinked the song's missing files");
+        assert_eq!(
+            did("relink_files", json!({ "found": "likely", "look_in": ["D:/x"] }), p),
+            "Relinked the song's missing files"
+        );
+        // One file by hand goes by its name, not by where it is.
+        let one = json!({ "files": [{ "clip": 7, "to": "D:\\Samples\\Kicks\\Kick 01.wav" }] });
+        assert_eq!(did("relink_files", one, p), "Relinked \u{201C}Kick 01.wav\u{201D}");
+        let two = json!({ "files": [{ "clip": 7, "to": "a.wav" }, { "clip": 8, "to": "b.wav" }] });
+        assert_eq!(did("relink_files", two, p), "Relinked the song's missing files");
+        assert_eq!(
+            did("library", json!({ "action": "move_folder", "path": "D:/a", "to": "D:/b" }), p),
+            "Told the sound library where a folder went"
+        );
+        // Where it landed: the clips, as the answer names them.
+        let answer = json!({ "relinked": { "files": 1, "places": 2 }, "clips": [7, 9] }).to_string();
+        assert_eq!(of_call("relink_files", &json!({}), &answer), Place::clips([7, 9]));
+        assert_eq!(of_call("relink_files", &json!({}), "{}"), None);
+        assert_eq!(of_call("missing_files", &json!({}), "{}"), None);
     }
 
     #[test]

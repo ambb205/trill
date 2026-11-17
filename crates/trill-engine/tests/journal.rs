@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use trill_core::journal::{Author, Entry, Journal, Outcome, PlanItem, PlanState, Reversal, States, What};
+use trill_core::journal::{Author, Entry, Journal, Outcome, PlanItem, PlanState, Reversal, States, What, Who};
 use trill_core::{ChainRef, ClipId, DeviceId, Note, Project, TrackId};
 use trill_dsp::BuiltinFactory;
 use trill_engine::journal::{acting, file_for};
@@ -627,4 +627,75 @@ fn what_recording_a_step_costs_an_edit_on_a_large_project() {
 fn large_base(session: &Session) -> Project {
     let journal = journal(session);
     journal.song_after(1, States::With(journal.blobs())).unwrap()
+}
+
+/// The loudest sample of the second half second of `song`, rendered.
+fn peak_of(song: &Project) -> (f32, Vec<f32>) {
+    use trill_engine::render::{RenderOptions, render};
+    let options = RenderOptions { sample_rate: 48_000, max_tail_seconds: 0.0, ..RenderOptions::default() };
+    let out = render(song, &BuiltinFactory, &options).unwrap();
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    let peak = out.left[24_000..48_000].iter().fold(0.0f32, |most, sample| most.max(sample.abs()));
+    (peak, out.left)
+}
+
+#[test]
+fn a_journal_kept_before_a_format_change_replays_the_song_as_it_sounded() {
+    use trill_core::project::FORMAT_VERSION;
+    // A session as a build of format 2 kept it: a sine held on the poly
+    // synth where its volume was then, a saturator put after it, and the
+    // synth turned down 6 dB. The numbers are that build's.
+    let mut song = Project::new("Song");
+    song.master.devices.clear();
+    song.set_tempo(120.0).unwrap();
+    let track = song.add_track("Lead");
+    let synth = song.add_device(ChainRef::Track(track), "builtin:polysynth", "Poly Synth", None).unwrap();
+    for (param, value) in [("osc1_wave", 0.0), ("sustain", 1.0), ("velocity_sens", 0.0)] {
+        song.device_mut(synth).unwrap().params.insert(param.to_string(), value);
+    }
+    let clip = song.add_midi_clip(track, "Held", 0.0, 4.0).unwrap();
+    song.clip_mut(clip).unwrap().add_notes(&[Note { pitch: 57, start: 0.0, length: 4.0, velocity: 100 }]).unwrap();
+    let mut kept = Journal::begin(&song, 0);
+    let mut step = |song: &mut Project, at: u64, edit: &dyn Fn(&mut Project)| {
+        let before = song.clone();
+        edit(song);
+        kept.record(at, Who::Person, &before, song, None);
+    };
+    step(&mut song, 1_000, &|song| {
+        let drive = song.add_device(ChainRef::Track(track), "builtin:saturator", "Saturator", None).unwrap();
+        song.device_mut(drive).unwrap().params.insert("drive".to_string(), 12.0);
+    });
+    step(&mut song, 2_000, &|song| {
+        song.device_mut(synth).unwrap().params.insert("volume".to_string(), -6.0);
+    });
+    let written = |text: String, spaced: bool| {
+        let colon = if spaced { ": " } else { ":" };
+        let ours = format!("\"format_version\"{colon}{FORMAT_VERSION}");
+        assert!(text.contains(&ours));
+        text.replace(&ours, &format!("\"format_version\"{colon}2"))
+    };
+    let journal = Journal::from_text(&written(kept.to_text(true), false)).unwrap();
+
+    // What that build played at each moment: one voice at 0.22 of full
+    // scale at a volume of 0 dB; a saturator that bent it and then took
+    // half its drive off again; and the same from 6 dB lower.
+    let drive = 10f32.powf(12.0 / 20.0);
+    let driven = |level: f32| (level * drive).tanh() / drive.sqrt();
+    let then = [0.22, driven(0.22), driven(0.22 * 10f32.powf(-6.0 / 20.0))];
+    for (moment, wanted) in then.into_iter().enumerate() {
+        let replayed = journal.song_after(moment, States::With(journal.blobs())).unwrap();
+        let (peak, samples) = peak_of(&replayed);
+        assert!((peak / wanted - 1.0).abs() < 0.005, "after {moment} steps: {peak}, and it played {wanted}");
+        // And sample for sample what the song's file of that moment plays
+        // when it is opened.
+        let then = kept.song_after(moment, States::With(kept.blobs())).unwrap();
+        let opened = Project::from_json(&written(then.to_json(), true)).unwrap();
+        assert_eq!(replayed, opened);
+        assert!(samples == peak_of(&opened).1, "after {moment} steps the journal and the file differ");
+    }
+    // Read as this build's own, the same numbers are another song: the
+    // synth 21 dB up the scale, and nothing taken off the saturator.
+    let ours = Journal::from_text(&kept.to_text(true)).unwrap();
+    let (peak, _) = peak_of(&ours.head().unwrap());
+    assert!(peak > then[2] * 2.0, "{peak}");
 }

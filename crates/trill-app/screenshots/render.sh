@@ -11,7 +11,7 @@
 # at them, and leave it there. They are not kept in the repository, because
 # a single new button in the top bar changes every one of them.
 #
-# The exception is the four pictures the README shows, which live in
+# The exception is the five pictures the README shows, which live in
 # docs/images. Refresh those on purpose, when the README should show
 # something new:
 #
@@ -23,7 +23,7 @@
 set -eu
 here=crates/trill-app/screenshots
 out=target/screenshots
-readme="first-light assistant-answered sounds-browser keyboard-playing"
+readme="first-light assistant-answered sounds-browser keyboard-playing stage"
 mode=${1:-}
 only=
 case "$mode" in
@@ -71,8 +71,10 @@ rack=$here/projects/drum-rack.trill
 sounds=$here/sounds
 pack="$sounds/Night Shift"
 night=$sounds/night-shift.trill
+moved=$sounds/night-shift-moved.trill
 if making sounds-browser sounds-drum-rack sounds-sampler sounds-missing-file min-window-sounds \
-    graphite-sounds-browser graphite-sounds-drum-rack; then
+    graphite-sounds-browser graphite-sounds-drum-rack missing-files missing-files-status \
+    missing-library-folder min-window-missing-files graphite-missing-files; then
     cargo run -p trill-app --example sound_fixtures -- "$sounds"
 fi
 
@@ -88,6 +90,19 @@ shot() {
     "$bin" "$@" --screenshot "$out/$name.png"
     echo "$out/$name.png"
 }
+
+# The stage is not a picture of the window: it is the song filmed, drawn by
+# trill-stage's own passes at one moment of the song (the verse, where two
+# parts drive it) and lit by the song's own sound, rendered there. The same
+# picture on every machine with a graphics card, which the window needs too.
+if wanted stage; then
+    if [ "$mode" = list ]; then
+        echo stage
+    else
+        cargo run -p trill-stage --example film -- "$song" --own-sound --size 1280x720 --still 24.2 "$out/stage.png"
+        echo "$out/stage.png"
+    fi
+fi
 
 # The song written through MCP.
 shot first-light "$song" --select Lead
@@ -132,6 +147,17 @@ shot sounds-missing-file "$night" --browse sounds --select "Lost Take"
 shot min-window-sounds "$night" --browse sounds --library "$pack" --sound "Bass Loop 120bpm Am" --select "Bass Loop"     --size 1060x640
 shot graphite-sounds-browser "$night" --browse sounds --library "$pack" --sound "Drum Loop Steady 120bpm"     --select "Pad Loop" --theme graphite
 shot graphite-sounds-drum-rack "$night" --browse sounds --library "$pack" --search kick --select Beat --tab devices     --theme graphite
+
+# Missing files: the same song after its pack was moved. The line in the
+# status bar and the clips marked, with the library pointed at where the
+# pack is now; the list it opens, with what was found for each file and one
+# that was not; the list when it is the library's own folder that is gone
+# (marked in the browser's folders); the smallest window; the other theme.
+shot missing-files-status "$moved" --browse sounds --library "$pack" --select "Drum Loop Busy"
+shot missing-files "$moved" --browse sounds --library "$pack" --missing-files
+shot missing-library-folder "$moved" --browse sounds --library "$sounds/Sample Packs/Night Shift" --missing-files
+shot min-window-missing-files "$moved" --browse sounds --library "$pack" --missing-files --size 1060x640
+shot graphite-missing-files "$moved" --browse sounds --library "$pack" --missing-files --theme graphite
 
 # The assistant's panel: ready, in the middle of a turn, after a turn that
 # changed the song (the window has gone to the clip it wrote), after an
@@ -207,6 +233,7 @@ shot graphite-controllers-expression --demo --select Melody --lane expression --
 shot recording-count-in "$song" --select Lead --arm Lead --record
 shot recording-mixer "$song" --select Lead --arm Lead --arm Bass --tab mixer --record
 shot min-window-recording "$song" --select Bass --arm Bass --record --size 1060x640
+shot film-export "$song" --select Lead --film
 shot audio-settings "$song" --select Lead --settings --audio-scene studio
 shot audio-settings-fallback "$song" --select Lead --settings --audio-scene fallback
 shot audio-settings-none --settings --audio-scene none

@@ -206,6 +206,14 @@ impl Analyzer {
         gated_loudness(&self.hops[self.steps(from, to)], self.hop)
     }
 
+    /// How loud every whole tenth of a second so far was, in dB, weighted
+    /// as loudness is: the level as it went, ten numbers a second. What
+    /// lights a picture of the song is read from this.
+    pub fn levels(&self) -> Vec<f32> {
+        let frames = (2 * self.hop) as f64;
+        self.hops.iter().map(|power| to_db(power / frames)).collect()
+    }
+
     /// The highest sample in the frames `from..to`, in dB, to the tenth
     /// of a second.
     pub fn peak_between(&self, from: usize, to: usize) -> f32 {

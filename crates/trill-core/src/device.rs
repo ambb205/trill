@@ -247,6 +247,11 @@ pub enum EventKind {
 /// How far the pitch wheel bends, each way, where an instrument has no
 /// setting of its own for it.
 pub const PITCH_BEND_SEMITONES: f32 = 2.0;
+/// The parameter by which a built-in instrument says how far its pitch
+/// wheel bends, in semitones each way. A track whose profile says nothing
+/// of its own takes the range from it, so that what is written for the
+/// wheel is written for the wheel there is.
+pub const BEND_RANGE_PARAM: &str = "bend_range";
 /// The controller number of the mod wheel in [`EventKind::Control`].
 pub const CONTROLLER_MOD_WHEEL: u8 = 1;
 /// The controller number of the sustain pedal in [`EventKind::Control`].

@@ -29,6 +29,7 @@ Options:
   --no-browser            Start with the browser hidden (Ctrl+B shows it)
   --browse <devices|sounds>   What the browser lists first (default: as it was left)
   --library <FOLDER>      Add a folder of sounds to the library; may be given several times
+  --missing-files         Open with the list of the song's missing files up
   --search <TEXT>         Search the sound library for this at startup
   --sound <NAME>          Select the sound with this name in the browser
   --editor <DEVICE NAME>  Open this plugin's own window at startup
@@ -55,6 +56,7 @@ Options:
   --arm <TRACK NAME>      Arm this track at startup; may be given several times
   --record                Start recording on the armed tracks when the window opens (F9 does it)
   --stage                 Open on the stage: the song filmed as it plays (F11 shows it)
+  --film                  Start with the film panel open: File, Export a film (Ctrl+Shift+F shows it)
   --settings              Start with the Audio and MIDI panel open (Ctrl+, shows it)
   --audio-scene <NAME>    Show made-up audio and MIDI devices in that panel, for screenshots:
                           studio, fallback or none
@@ -89,6 +91,8 @@ pub struct Cli {
     pub browse: Option<BrowserTab>,
     /// Folders to add to the sound library.
     pub library: Vec<PathBuf>,
+    /// Open with the list of missing files up.
+    pub missing_files: bool,
     /// What to search the sound library for.
     pub search: Option<String>,
     /// Name of a sound to select in the browser.
@@ -121,6 +125,8 @@ pub struct Cli {
     pub record: bool,
     /// Open on the stage.
     pub stage: bool,
+    /// Open the film panel.
+    pub film: bool,
     /// Open the Audio and MIDI panel.
     pub settings: bool,
     /// Made-up audio and MIDI devices to show in it.
@@ -181,6 +187,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
             "--arm" => cli.arm.push(value("a track name")?),
             "--record" => cli.record = true,
             "--stage" => cli.stage = true,
+            "--film" => cli.film = true,
             "--settings" => cli.settings = true,
             "--audio-scene" => {
                 let name = value("the name of a scene")?;
@@ -209,6 +216,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
             "--shortcuts" => cli.shortcuts = true,
             "--also-select" => cli.also_select.push(value("a clip name")?),
             "--library" => cli.library.push(PathBuf::from(value("a folder")?)),
+            "--missing-files" => cli.missing_files = true,
             "--search" => cli.search = Some(value("what to search for")?),
             "--sound" => cli.sound = Some(value("the name of a sound")?),
             "--editor" => cli.editor = Some(value("the name of a device")?),
@@ -365,6 +373,8 @@ impl Cli {
             },
             keyboard: self.keyboard.clone(),
             show_settings: self.settings,
+            show_film: self.film,
+            show_missing: self.missing_files,
             record: self.record,
             stage: self.stage,
             making_of: (self.making_of || self.making_of_at.is_some()).then(|| match self.making_of_at {

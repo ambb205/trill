@@ -585,6 +585,7 @@ fn report_json(
     only: Option<&[TrackId]>,
     detail: bool,
     mut notes: Vec<String>,
+    missing: &trill_runtime::Missing,
 ) -> Value {
     let db = |value: f32| round(f64::from(value));
     let mut out = serde_json::to_value(&report.stats).unwrap_or_else(|_| json!({}));
@@ -672,8 +673,14 @@ fn report_json(
             })
             .collect();
     }
-    out["problems"] = json!(report.problems);
-    let mut all = observations(report, project);
+    // Files that are not on disk are said once and first: the lines for
+    // each clip and pad that names one give way to that.
+    out["problems"] = json!(crate::files::without_missing(report.problems.clone(), missing));
+    let mut all: Vec<String> = crate::files::heard_without(missing).into_iter().collect();
+    if let Some(brief) = crate::files::brief(missing) {
+        out["missing_files"] = brief;
+    }
+    all.append(&mut observations(report, project));
     all.extend(alone_note(&report.alone));
     all.append(&mut notes);
     out["notes"] = json!(all);
@@ -1408,7 +1415,7 @@ impl TrillServer {
     async fn hear(&self, request: MeasureRequest, file: Option<(Option<String>, Vec<StemChoice>)>) -> CallToolResult {
         // Snapshot under the lock, render outside it: a long bounce must not
         // freeze the GUI or other tools.
-        let (job, path, options, start, end) = {
+        let (job, path, options, start, end, missing) = {
             let mut session = self.session.lock();
             let path = match &file {
                 None => None,
@@ -1476,7 +1483,14 @@ impl TrillServer {
                 stems,
                 ..defaults
             };
-            (session.render_job(), path, options, start, end)
+            // The files of the song that are not on disk, on the tracks
+            // that are heard: said with what was measured.
+            let missing = trill_runtime::files_missing_in(&session);
+            let missing = match &options.only_tracks {
+                Some(only) => missing.on_tracks(only, session.project()),
+                None => missing,
+            };
+            (session.render_job(), path, options, start, end, missing)
         };
         let detail = request.detail;
         let outcome = tokio::task::spawn_blocking(move || {
@@ -1503,7 +1517,8 @@ impl TrillServer {
                 None => job.project.clone(),
             };
             let silent = silent_track_notes(&project, &heard, &report.waited, options.start_beat, options.end_beat);
-            Ok::<_, RenderError>(report_json(&report, &job.project, options.only_tracks.as_deref(), detail, silent))
+            let only = options.only_tracks.as_deref();
+            Ok::<_, RenderError>(report_json(&report, &job.project, only, detail, silent, &missing))
         })
         .await;
         finish(match outcome {

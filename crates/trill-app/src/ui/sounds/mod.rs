@@ -16,12 +16,17 @@
 //!   as clips, in a sampler, on the pads of a drum rack. One drop is one
 //!   undo step.
 //!
-//! The edits themselves are the runtime's ([`Runtime::add_sound`]) and the
-//! session's (`set_sampler_file`, `set_pad_file`): the same ones the MCP
-//! server uses.
+//! * [`Sounds::watch_missing`] keeps up with the files the song names that
+//!   are not on disk, and what was found for them (`missing.rs`).
+//!
+//! The edits themselves are the runtime's ([`Runtime::add_sound`],
+//! [`Runtime::relink`]) and the session's (`set_sampler_file`,
+//! `set_pad_file`): the same ones the MCP server uses.
 
+mod missing;
 mod waves;
 
+pub use missing::{MissingFiles, Relinked, relinked_words};
 pub use waves::{WaveData, WaveState};
 
 use super::work::{Priority, Work};
@@ -30,6 +35,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+use trill_core::files::{FilePlace, FolderMove, Relink};
 use trill_core::project::WarpMode;
 use trill_core::{Beats, ClipId, DeviceId, TrackId};
 use trill_dsp::drumrack;
@@ -101,8 +107,24 @@ pub enum Done {
     RelinkPicked(Option<(ClipId, PathBuf)>),
     /// A folder was added to the library, or why it was not.
     FolderAdded(Result<PathBuf, String>),
-    /// A clip was pointed at another file: the file's name, or why not.
-    Relinked(Result<String, String>),
+    /// A clip was pointed at another file: the file's name, and where
+    /// that says its folder went if its file was missing; or why not.
+    Relinked(Result<(String, Option<trill_core::FolderMove>), String>),
+    /// What a look for the song's missing files found.
+    Looked {
+        ticket: u64,
+        missing: Box<trill_runtime::Missing>,
+    },
+    /// Missing files were relinked, or why not.
+    FilesRelinked(Result<Relinked, String>),
+    /// Dialogs about what is missing were answered: where one file is,
+    /// a folder to look in, where a folder of the library went.
+    FileLocated(Option<(String, PathBuf)>),
+    LookIn(Option<PathBuf>),
+    LibraryLocated(Option<(PathBuf, PathBuf)>),
+    /// The library was told where a folder of its own went: from where to
+    /// where, or why not.
+    LibraryMoved(Result<(PathBuf, PathBuf), String>),
     /// Something the user need not hear about unless it failed.
     Quiet(Result<(), String>),
 }
@@ -198,6 +220,12 @@ pub struct PendingDrop {
 pub enum Report {
     Info(String),
     Error(String),
+    /// Something that went well and is worth a line.
+    Success(String),
+    /// Something to read that nobody asked about: it stays a while.
+    Notice(String),
+    /// A folder of the library is somewhere else now.
+    LibraryMoved(PathBuf, PathBuf),
     Dropped(Dropped),
     FolderAdded(PathBuf),
     /// A file chosen in a dialog, to be dropped on `target`.
@@ -213,6 +241,8 @@ pub struct Sounds {
     pub preview: Preview,
     pub search: Search,
     pub pending: Vec<PendingDrop>,
+    /// The files the song names that are not on disk, and what was found.
+    pub missing: MissingFiles,
     next_drop: u64,
     /// A native dialog is up; a second one must not open over it.
     dialog_open: bool,
@@ -227,6 +257,7 @@ impl Sounds {
             preview: Preview::default(),
             search: Search::default(),
             pending: Vec::new(),
+            missing: MissingFiles::default(),
             next_drop: 0,
             dialog_open: false,
         }
@@ -260,6 +291,7 @@ impl Sounds {
             || self.search.in_flight.is_some()
             || !self.pending.is_empty()
             || self.preview.loading.is_some()
+            || self.missing.looking
             || self.runtime.library.scan_status().is_scanning()
     }
 
@@ -339,8 +371,58 @@ impl Sounds {
                         self.relink(clip, path);
                     }
                 }
-                Done::Relinked(Ok(name)) => reports.push(Report::Info(format!("The clip now plays {name}"))),
+                Done::Relinked(Ok((name, moved))) => {
+                    // Where its folder went is where the other missing
+                    // files are looked for.
+                    if let Some(moved) = moved {
+                        self.missing.point_at(moved);
+                    }
+                    self.missing.look_again();
+                    reports.push(Report::Info(format!("The clip now plays {name}")));
+                }
                 Done::Relinked(Err(reason)) => reports.push(Report::Error(reason)),
+                Done::Looked { ticket, missing } => reports.extend(self.looked(ticket, *missing).map(Report::Notice)),
+                Done::FilesRelinked(result) => {
+                    self.missing.busy = false;
+                    self.missing.look_again();
+                    match result {
+                        Ok(relinked) => {
+                            reports.push(Report::Success(relinked_words(&relinked)));
+                            let moved = relinked.library.into_iter();
+                            reports.extend(moved.map(|(from, to)| Report::LibraryMoved(from, to)));
+                        }
+                        Err(reason) => reports.push(Report::Error(reason)),
+                    }
+                }
+                Done::FileLocated(answer) => {
+                    self.dialog_open = false;
+                    if let Some((old, new)) = answer {
+                        self.relink_file(old, new);
+                    }
+                }
+                Done::LookIn(answer) => {
+                    self.dialog_open = false;
+                    if let Some(folder) = answer {
+                        self.look_in(folder);
+                    }
+                }
+                Done::LibraryLocated(answer) => {
+                    self.dialog_open = false;
+                    if let Some((from, to)) = answer {
+                        self.move_library_folder(from, to);
+                    }
+                }
+                Done::LibraryMoved(result) => {
+                    self.missing.busy = false;
+                    self.missing.look_again();
+                    match result {
+                        Ok((from, to)) => {
+                            reports.push(Report::Success(format!("The library now has {}", to.display())));
+                            reports.push(Report::LibraryMoved(from, to));
+                        }
+                        Err(reason) => reports.push(Report::Error(reason)),
+                    }
+                }
             }
         }
         for path in self.waves.take_requests() {
@@ -548,21 +630,24 @@ fn add_folder(runtime: &Runtime, folder: &Path) -> Result<PathBuf, String> {
     Ok(folder.to_path_buf())
 }
 
-/// Points `clip` at the file at `path`, if that file can be read.
-fn relink(runtime: &Runtime, clip: ClipId, path: &Path) -> Result<String, String> {
+/// Points `clip` at the file at `path`, if that file can be read. A clip
+/// whose file is missing takes every other place that names that file
+/// along: they are missing the same file, and it is one undo step. Says
+/// the new file's name, and for a missing one where the two paths say its
+/// folder went.
+fn relink(runtime: &Runtime, clip: ClipId, path: &Path) -> Result<(String, Option<FolderMove>), String> {
     runtime.sound_facts(path).map_err(|error| error.to_string())?;
-    let rate = runtime.session.lock().audio_info().sample_rate;
-    runtime.media.audio_at_rate(path, rate).map_err(|error| error.to_string())?;
     let stored = stored_path(path);
-    let edit = runtime.session.lock().edit(|project| {
-        match &mut project.clip_mut(clip)?.content {
-            trill_core::project::ClipContent::Audio(audio) => audio.path = stored,
-            trill_core::project::ClipContent::Midi(_) => {}
-        }
-        Ok(())
-    });
-    edit.map_err(|error| error.to_string())?;
-    Ok(file_name(path))
+    let uses = runtime.session.lock().files();
+    let here = FilePlace::Clip(clip);
+    let old = uses.iter().find(|used| used.place == here).map(|used| used.path.clone());
+    let old = old.ok_or_else(|| format!("{clip} plays no audio file"))?;
+    let missing = !Path::new(&old).is_file();
+    let places = uses.into_iter().filter(|used| if missing { used.path == old } else { used.place == here });
+    let relinks: Vec<Relink> = places.map(|used| Relink { place: used.place, path: stored.clone() }).collect();
+    runtime.relink(&relinks).map_err(|error| error.to_string())?;
+    let moved = missing.then(|| FolderMove::between(&old, &stored)).flatten().map(|(moved, _)| moved);
+    Ok((file_name(path), moved))
 }
 
 /// The name of the file at `path`, extension included.

@@ -598,3 +598,79 @@ fn listings_follow_natural_order_everywhere() {
     let modified: Option<SystemTime> = index.entries()[0].modified;
     assert!(modified.is_some_and(|time| time <= SystemTime::now() + Duration::from_secs(60)));
 }
+
+#[test]
+fn a_folder_of_the_library_that_moved_is_said_to_be_missing_and_takes_what_is_kept_along() {
+    let folder = tempfile::tempdir().unwrap();
+    let (old, new) = (folder.path().join("Packs"), folder.path().join("Samples").join("Packs"));
+    let other = folder.path().join("Other");
+    pack(&old);
+    write(&other.join("Clap.wav"), &wav(0.2, 8_000, 1));
+    let index_path = folder.path().join("index.json");
+    let library = open(&[&old, &other], Some(index_path.clone()));
+    let first = scan(&library);
+    assert!(first.missing.is_empty() && library.missing_roots().is_empty());
+    let kick = old.join("Drums/Kicks/Kick 1.wav");
+    let pad = old.join("Loops/Warm Pad 90 F#m.wav");
+    library.set_favorite(&kick, true);
+    library.set_favorite(&other.join("Clap.wav"), true);
+    library.mark_used(&pad);
+    library.mark_used(&other.join("Clap.wav"));
+    library.mark_used(&kick);
+
+    // The folder goes elsewhere while nobody is looking.
+    std::fs::create_dir_all(new.parent().unwrap()).unwrap();
+    std::fs::rename(&old, &new).unwrap();
+    let summary = scan(&library);
+    let missing = library.missing_roots();
+    assert_eq!(missing.len(), 1, "{missing:?}");
+    assert_eq!((missing[0].path.as_path(), missing[0].files), (old.as_path(), first.files - 1));
+    assert!(!missing[0].reason.is_empty());
+    assert_eq!(summary.missing, missing);
+    assert_eq!(summary.files, first.files, "what was known of it is still listed");
+
+    // Saying where it went cannot be got wrong quietly.
+    let error = library.move_root(&folder.path().join("Never A Root"), &new).unwrap_err();
+    assert!(error.contains("is not a folder of the library") && error.contains("Other"), "{error}");
+    let error = library.move_root(&old, &folder.path().join("Nowhere")).unwrap_err();
+    assert!(error.contains("cannot read") && error.contains("the library is as it was"), "{error}");
+    assert_eq!(library.roots(), [old.clone(), other.clone()]);
+    assert_eq!(library.missing_roots().len(), 1);
+
+    // Said: the library covers the new place, in the old one's position.
+    let moved = library.move_root(&old, &new).unwrap();
+    assert_eq!((moved.files, moved.favorites, moved.recent), (first.files - 1, 1, 2));
+    assert_eq!(library.roots(), [new.clone(), other.clone()]);
+    assert!(library.wait_until_idle(WAIT));
+    let after = library.scan_status().last.expect("moving a folder scans it");
+    assert_eq!((after.files, after.headers_read), (first.files, 0), "no file is opened again: {after:?}");
+    assert!(library.missing_roots().is_empty() && after.missing.is_empty());
+
+    // Favorites and recently used files are the same files, where they are.
+    let new_kick = new.join("Drums/Kicks/Kick 1.wav");
+    assert_eq!(library.favorites(), [new_kick.clone(), other.join("Clap.wav")]);
+    assert!(library.is_favorite(&new_kick) && !library.is_favorite(&kick));
+    assert_eq!(library.recent(), [new_kick.clone(), other.join("Clap.wav"), new.join("Loops/Warm Pad 90 F#m.wav")]);
+    let index = library.index();
+    assert!(index.find(&new_kick).is_some() && index.find(&kick).is_none());
+    let entry = index.entry(index.find(&new_kick).unwrap()).unwrap();
+    assert_eq!(entry.audio.map(|audio| audio.sample_rate), Some(8_000));
+    let favorites = library.search(&Query { favorites_only: true, ..Query::default() });
+    assert_eq!(favorites.len(), 2);
+
+    // And all of it survives a restart, through the settings.
+    let settings = library.settings();
+    drop(library);
+    let library = Library::open(&settings, Some(index_path));
+    assert_eq!(library.index().len(), first.files, "the saved index is the moved one");
+    assert_eq!(scan(&library).headers_read, 0);
+    assert!(library.is_favorite(&new_kick));
+
+    // A folder said to be where another folder of the library already is
+    // simply joins it.
+    let moved = library.move_root(&other, &new).unwrap();
+    assert_eq!(moved.favorites, 1);
+    assert_eq!(library.roots(), std::slice::from_ref(&new));
+    assert!(library.wait_until_idle(WAIT));
+    assert_eq!(library.index().roots().len(), 1);
+}

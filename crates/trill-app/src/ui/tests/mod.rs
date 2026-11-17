@@ -12,9 +12,11 @@ mod automation;
 mod clips;
 mod controllers;
 mod editors;
+mod film;
 mod keyboard;
 mod keys;
 mod making_of;
+mod missing;
 mod mixer;
 mod perf;
 mod recording;
@@ -331,6 +333,17 @@ impl Harness {
         while !condition(&self.session.lock()) {
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Runs frames until the window is as `condition` says: for what a
+    /// helper thread has to finish first.
+    fn wait_until(&mut self, what: &str, condition: impl Fn(&Self) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !condition(self) {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(5));
+            self.idle(1);
         }
     }
 
@@ -1127,8 +1140,8 @@ fn the_browser_adds_and_swaps_devices_and_applies_presets() {
     // Selecting another device lists its presets instead (the delay has
     // none).
     let delay = harness.project().tracks[0].devices[1].id;
-    // The synth's panel is 832 wide; the delay's follows after the gap.
-    let delay_name = harness.first_panel() + vec2(832.0 + devices::PANEL_GAP + 60.0, devices::PANEL_HEADER / 2.0);
+    // The synth's panel is 994 wide; the delay's follows after the gap.
+    let delay_name = harness.first_panel() + vec2(994.0 + devices::PANEL_GAP + 60.0, devices::PANEL_HEADER / 2.0);
     harness.click(delay_name);
     assert_eq!(harness.app.state().selected_device, Some(delay));
     harness.idle(2);

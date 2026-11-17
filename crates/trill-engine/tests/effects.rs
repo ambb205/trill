@@ -5,8 +5,8 @@
 //! The targets are the textbook's where there is one (a Butterworth filter
 //! of the stated order, the cookbook's shelf, a second-order low-pass) and
 //! otherwise what Ableton Live's devices were measured to do on the bench's
-//! first song (`trill-ab`, report of 16 November 2026): those numbers are
-//! printed beside Trill's. Run with `--nocapture` to see the tables.
+//! songs (`trill-ab`, reports of 16 and 17 November 2026): those numbers
+//! are printed beside Trill's. Run with `--nocapture` to see the tables.
 
 mod common;
 
@@ -1064,4 +1064,169 @@ fn a_pad_is_ducked_under_a_kick_as_the_bench_measured_lives_to_do() {
     // The hat, which is as loud as the kick, is not heard by it: between
     // the kicks nothing is taken off again.
     assert!(taken(1.5 + 0.27) < taken(1.5 + 0.2), "the hat at 250 ms does not duck the pad");
+}
+
+// ---- pitch shifter ---------------------------------------------------------
+
+/// A device's parameter drawn over the song: points of (beat, value).
+fn draw(song: &mut Song, device: DeviceId, param: &str, points: &[(f64, f64)]) {
+    use trill_core::project::{AutomationPoint, AutomationTarget};
+    let target = AutomationTarget::DeviceParam { device, param: param.to_string() };
+    let points = points.iter().map(|(beat, value)| AutomationPoint::new(*beat, *value)).collect();
+    song.project.set_automation(target, points).unwrap();
+}
+
+/// The dive the bench's second song draws for Live's Shifter at a stop on
+/// beat 4: the mix opened over the twentieth of a beat before it, and the
+/// pitch drawn from 0 to two octaves down over the beat after it.
+fn dive(song: &mut Song, shifter: DeviceId) {
+    draw(song, shifter, "mix", &[(0.0, 0.0), (3.95, 0.0), (4.0, 1.0)]);
+    draw(song, shifter, "pitch", &[(0.0, 0.0), (4.05, 0.0), (5.0, -24.0)]);
+}
+
+#[test]
+fn a_chord_melts_two_octaves_down_in_a_beat_where_the_pitch_shifter_is_drawn_to() {
+    // One note first, whose pitch can be followed on the way down.
+    let note = tones(&[880.0], 0.4, 4.0);
+    let mut song = Song::new();
+    let (_, devices) = song.track("Saws", &note, &note, &[("builtin:shifter", &[("mix", 0.0)])]);
+    dive(&mut song, devices[0]);
+    let out = song.render(0.0);
+    // Until the stop the shifter is not in the sound at all: the track
+    // as it plays without one, to the bit.
+    let without = mono_through(&note, &[], 0.0);
+    assert!(
+        out.left[..frames(0.0..1.9).end] == without.left[..frames(0.0..1.9).end],
+        "the shifter is heard before the stop"
+    );
+    // Then it falls along the line: semitones under 880 Hz, read over a
+    // fiftieth of a second around each moment.
+    println!("beats after the stop   drawn      heard   (semitones)");
+    for after in [0.2, 0.35, 0.5, 0.65, 0.8, 0.95] {
+        let drawn = -24.0 * (after - 0.05) / 0.95;
+        let middle = (4.0 + after) * 0.5;
+        let heard = 12.0 * (zero_crossing_hz(&out.left[frames(middle - 0.01..middle + 0.01)], SR) / 880.0).log2();
+        println!("        {after:>4.2}          {drawn:>+6.1}    {heard:>+6.1}");
+        assert!((heard - drawn).abs() < 2.0, "{after} beats after the stop: {heard} semitones, drawn {drawn}");
+    }
+    let landed = 12.0 * (zero_crossing_hz(&out.left[frames(2.7..3.9)], SR) / 880.0).log2();
+    assert!((landed + 24.0).abs() < 0.05, "and stays two octaves down: {landed}");
+    // As loud all the way as the note was, and with no click in it.
+    for middle in [2.1, 2.2, 2.3, 2.4, 2.6, 3.0, 3.5] {
+        let level = rms_db(&out.left[frames(middle - 0.04..middle + 0.04)]) - db(0.4 * std::f64::consts::FRAC_1_SQRT_2);
+        assert!(level.abs() < 1.5, "{middle} s: {level} dB against the note");
+    }
+    assert!(largest_step(&out.left[frames(1.9..4.0)]) < 0.4 * 0.2, "{}", largest_step(&out.left[frames(1.9..4.0)]));
+
+    // Then a chord, as the song has: every note of it two octaves down at
+    // the end, as loud as it was, and nothing left where it was.
+    let chord = tones(&[440.0, 556.0, 660.0, 880.0], 0.15, 4.0);
+    let mut song = Song::new();
+    let (_, devices) = song.track("Saws", &chord, &chord, &[("builtin:shifter", &[("mix", 0.0)])]);
+    dive(&mut song, devices[0]);
+    let out = song.render(0.0);
+    let after = &out.left[frames(3.0..4.0)];
+    // What there is within 12 Hz of a pitch. A chord has no one period the
+    // shifter could read it by, so each note comes out with a grain to it:
+    // a little of it to either side of where it belongs.
+    let around = |hz: f64| (-12..=12).map(|off| amplitude(after, hz + f64::from(off)).powi(2)).sum::<f64>().sqrt();
+    for hz in [440.0, 556.0, 660.0, 880.0] {
+        let level = db(around(hz / 4.0) / 0.15);
+        assert!(level.abs() < 1.5, "{} Hz: {level} dB against the note it was", hz / 4.0);
+    }
+    assert!(around(556.0) < 0.15 * 0.03 && around(660.0) < 0.15 * 0.03 && around(880.0) < 0.15 * 0.03);
+    for middle in [2.1, 2.2, 2.3, 2.4, 2.6, 3.0, 3.5] {
+        let level = rms_db(&out.left[frames(middle - 0.04..middle + 0.04)]) - rms_db(&chord[frames(0.5..1.5)]);
+        assert!(level.abs() < 2.5, "{middle} s into the chord: {level} dB against it");
+    }
+}
+
+// ---- saturator -------------------------------------------------------------
+
+#[test]
+fn a_saturator_does_not_turn_down_what_it_drives_and_its_sine_curve_adds_the_overtones() {
+    // A sub bass as the bench's second song has it out of Live's Operator
+    // (a sine that peaks at -3.5 dBFS), into the song's saturator: 9 dB of
+    // drive, the output at -8 dB.
+    let sub = tones(&[55.0], 0.667, 2.0);
+    let driven = |set: &[(&str, f64)]| {
+        let params: Vec<(&str, f64)> = [("drive", 9.0), ("output", -8.0)].iter().chain(set).copied().collect();
+        mono_through(&sub, &[("builtin:saturator", &params)], 0.0)
+    };
+    let (soft, sine, old) = (driven(&[("shape", 0.0)]), driven(&[("shape", 3.0)]), driven(&[("legacy", 1.0)]));
+    // A second from the middle, clear of where the clip fades in and out.
+    let second = frames(0.5..1.5);
+    // Driven over its ceiling, the sine curve holds the wave at the output's
+    // level: it peaks at -8 dBFS, whatever the drive.
+    assert!((db(f64::from(peak(&sine.left))) + 8.0).abs() < 0.01, "{}", db(f64::from(peak(&sine.left))));
+    assert!((db(f64::from(peak(&soft.left))) + 8.0 - db(1.88f64.tanh())).abs() < 0.05);
+    // A song saved before had half the drive taken off again. The bench
+    // found that 6.3 dB under Live's Saturator on this sub, in loudness,
+    // which the overtones add to; in level the sine curve is 5.8 dB over it.
+    let over = rms_db(&sine.left[second.clone()]) - rms_db(&old.left[second.clone()]);
+    println!("the sine curve over the old soft one, on the song's sub: {over:+.2} dB (the bench: Live's 6.3 dB over)");
+    assert!((over - 5.8).abs() < 0.2, "{over}");
+    assert!(
+        (rms_db(&soft.left[second.clone()]) - rms_db(&old.left[second.clone()]) - 4.5).abs() < 0.01,
+        "half of 9 dB"
+    );
+
+    // The overtones a sine bass is heard by on small speakers. With the
+    // two as loud as each other at 55 Hz, the sine curve has 4 to 11 dB
+    // more of the three that carry most of them (165, 275 and 385 Hz), and
+    // far more further up: what the bench found missing against Live's
+    // "Soft Sine" (4 to 8 dB between 120 Hz and 2 kHz). Run on Live's own
+    // recording of this sub, the sine curve came within 0.6 dB of Live's
+    // track in every band from 20 Hz to 10 kHz, the level at 55 Hz taken
+    // out; the soft one was 4 to 8 dB short from 120 Hz to 2 kHz.
+    let part = |out: &Rendered, harmonic: f64| db(amplitude(&out.left[second.clone()], 55.0 * harmonic));
+    println!("overtone      the sine curve   the soft curve   (dB under each one's own 55 Hz)");
+    for harmonic in [3.0, 5.0, 7.0, 9.0, 11.0, 15.0, 21.0, 29.0, 35.0] {
+        let (with_sine, with_soft) =
+            (part(&sine, harmonic) - part(&sine, 1.0), part(&soft, harmonic) - part(&soft, 1.0));
+        println!("  {:>5.0} Hz       {with_sine:>6.1}          {with_soft:>6.1}", 55.0 * harmonic);
+        if harmonic <= 7.0 {
+            let more = with_sine - with_soft;
+            assert!((4.0..=11.5).contains(&more), "{} Hz: {more} dB more", 55.0 * harmonic);
+        }
+    }
+    // And no even ones: the curve is the same both ways.
+    assert!(part(&sine, 2.0) - part(&sine, 1.0) < -60.0 && part(&sine, 4.0) - part(&sine, 1.0) < -60.0);
+}
+
+// ---- utility ---------------------------------------------------------------
+
+#[test]
+fn a_fade_drawn_down_to_the_lowest_gain_ends_in_silence() {
+    // A stop, as a song draws one: the gain held, then drawn down to the
+    // bottom of its range over a fifth of a beat, and left there.
+    let tone = tones(&[220.0], 0.5, 4.0);
+    let mut song = Song::new();
+    let (_, devices) = song.track("Band", &tone, &tone, &[("builtin:utility", &[])]);
+    draw(&mut song, devices[0], "gain", &[(0.0, 0.0), (3.8, 0.0), (4.0, -70.0)]);
+    let out = song.render(0.0);
+    assert!((rms_db(&out.left[frames(1.0..1.8)]) - rms_db(&tone[frames(1.0..1.8)])).abs() < 0.01);
+    // The fade is the line, one stretch of 256 frames behind it: the engine
+    // reads an envelope for a device every 256 frames, and the gain goes
+    // from one reading to the next in a straight line. Half way down, at
+    // -35 dB on the line, it is where the line was 256 frames before
+    // (3.7 dB up), and not where a hundredth of a second of smoothing on
+    // top of that would have it (11 dB up).
+    let half_way = (1.95 * SR) as usize;
+    let around = half_way - 96..half_way + 96;
+    let gain = rms_db(&out.left[around.clone()]) - rms_db(&tone[around]);
+    assert!((gain + 35.0 - 3.7).abs() < 0.6, "{gain} dB half way down");
+    // Two stretches after the line gets to the bottom there is nothing:
+    // not the tone 70 dB down, which is what the lowest gain was before,
+    // and not the tail of a filter.
+    let bottom = (2.0 * SR) as usize;
+    assert!(peak(&out.left[bottom - 256..bottom]) > 0.0, "still fading as the line ends");
+    assert_eq!(peak(&out.left[bottom + 512..]), 0.0);
+    // The same file as a build before format 4 wrote it: 70 dB down, as it was.
+    let file = song.project.to_json();
+    let now = format!("\"format_version\": {}", trill_core::project::FORMAT_VERSION);
+    let old = Project::from_json(&file.replace(&now, "\"format_version\": 2")).unwrap();
+    let out = render(&old, &BuiltinFactory, &RenderOptions { sample_rate: SR as u32, ..Default::default() }).unwrap();
+    let left = rms_db(&out.left[frames(2.5..3.5)]) - rms_db(&tone[frames(2.5..3.5)]);
+    assert!((left + 70.0).abs() < 0.05, "{left} dB");
 }

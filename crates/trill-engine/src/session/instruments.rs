@@ -5,7 +5,7 @@
 use super::Session;
 use crate::instruments::InstrumentKnowledge;
 use std::sync::Arc;
-use trill_core::device::{DeviceCategory, DeviceDescriptor};
+use trill_core::device::{BEND_RANGE_PARAM, DeviceCategory, DeviceDescriptor, PITCH_BEND_SEMITONES};
 use trill_core::{ChainRef, Device, InstrumentProfile, Project, Role, TrackId, TrackKind};
 
 impl Session {
@@ -45,6 +45,39 @@ impl Session {
         let track = self.project.track(track).ok()?;
         let descriptors = self.factory.descriptors();
         track.devices.iter().find(|device| is_instrument(&descriptors, &device.uri))
+    }
+
+    /// How far the pitch wheel of a track's instrument bends, in semitones
+    /// each way, where the instrument is a built-in one that has a setting
+    /// for it ([`BEND_RANGE_PARAM`]): what the song has it set to. `None`
+    /// for a plugin, whose own setting a host cannot read, and for a wheel
+    /// that is set to bend nothing.
+    pub fn instrument_bend_range(&self, track: TrackId) -> Option<f64> {
+        let device = self.instrument_of(track)?;
+        let descriptors = self.factory.descriptors();
+        let descriptor = descriptors.iter().find(|descriptor| descriptor.uri == device.uri)?;
+        let param = descriptor.params.iter().find(|param| param.id == BEND_RANGE_PARAM)?;
+        let range = device.params.get(BEND_RANGE_PARAM).copied().unwrap_or(param.default);
+        (range > 0.0).then_some(range)
+    }
+
+    /// What is known about the instrument a track plays through, for
+    /// whoever writes for it: what the track says ([`Track::profile`]),
+    /// and where it says nothing of the pitch wheel, how far the
+    /// instrument's own setting has it bend
+    /// ([`instrument_bend_range`](Self::instrument_bend_range)). The
+    /// default for a track that is not there.
+    ///
+    /// [`Track::profile`]: trill_core::Track::profile
+    pub fn profile_of(&self, track: TrackId) -> InstrumentProfile {
+        let Ok(found) = self.project.track(track) else { return InstrumentProfile::default() };
+        let mut profile = found.profile.clone();
+        if profile.bend_range.is_none() {
+            // Two semitones is what a profile that says nothing means.
+            profile.bend_range =
+                self.instrument_bend_range(track).filter(|range| *range != f64::from(PITCH_BEND_SEMITONES));
+        }
+        profile
     }
 
     /// A project that is being opened, with what is known about their
