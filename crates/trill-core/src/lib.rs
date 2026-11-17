@@ -8,6 +8,7 @@
 pub mod audio;
 pub mod controllers;
 pub mod device;
+pub mod files;
 pub mod formats;
 pub mod ids;
 pub mod instrument;
@@ -20,6 +21,7 @@ pub mod time;
 mod time_ops;
 
 pub use controllers::{ControllerCurve, ControllerKind, ControllerLane};
+pub use files::{DeviceFiles, FilePlace, FileTable, FileUse, FolderMove, KnownFile, Relink};
 pub use ids::{ClipId, DeviceId, TrackId};
 pub use instrument::{Articulation, InstrumentProfile, KnownInstrument, Lasts, Role};
 pub use project::{
