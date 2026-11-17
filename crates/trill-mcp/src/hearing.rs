@@ -498,7 +498,7 @@ fn observations(report: &RenderReport, project: &Project) -> Vec<String> {
             ));
         }
     }
-    notes.extend(report.waited.iter().filter(|waited| waited.answered).map(waited_note));
+    notes.extend(report.waited.iter().filter(|waited| waited.answered).map(|waited| waited_note(waited, project)));
     notes
 }
 
@@ -518,21 +518,27 @@ fn alone_note(alone: &[trill_engine::render::Alone]) -> Option<String> {
 }
 
 /// What to say of a plugin that was waited for and answered: how long it
-/// took, and which of its notes stayed silent, if any did.
-fn waited_note(waited: &WaitedFor) -> String {
+/// took, and which of its notes stayed silent, if any did. A key the
+/// track itself knows for a keyswitch is not one of them: it is meant to
+/// sound nothing, and whoever asked for a way of playing by its name
+/// never chose the key.
+fn waited_note(waited: &WaitedFor, project: &Project) -> String {
     let mut note = format!(
         "Waited {:.1} s for {} on '{}' to be ready before the render started.",
         waited.seconds, waited.device_name, waited.track_name
     );
-    if !waited.silent.is_empty() {
+    let profile = waited.track.and_then(|track| project.track(track).ok()).map(|track| &track.profile);
+    let known = |pitch: u8| profile.is_some_and(|profile| profile.keyswitch_name(pitch).is_some());
+    let silent: Vec<u8> = waited.silent.iter().copied().filter(|pitch| !known(*pitch)).collect();
+    if !silent.is_empty() {
         // The one case a wait cannot settle: a key that plays nothing and
         // a sample that has not been loaded sound the same.
         note.push_str(&format!(
             " {} of the notes it plays made no sound the whole time: {}. Either it does not play them (a \
              keyswitch, a note outside its range) or it was still loading them when this was made, and then \
              they are missing here. `probe` with track {} and those notes says which.",
-            waited.silent.len(),
-            runs(&waited.silent),
+            silent.len(),
+            runs(&silent),
             waited.track.map_or(0, |track| track.0)
         ));
     }
@@ -564,7 +570,7 @@ fn not_answered(session: &Session, waited: &[WaitedFor], start: f64, end: Option
     // What else the wait found, which it finds once.
     for other in others {
         said.push_str("\nBesides: ");
-        said.push_str(&waited_note(other));
+        said.push_str(&waited_note(other, project));
     }
     let loading = session.loading();
     let reading = missing.iter().any(|waited| loading.contains(&waited.device));
@@ -1538,6 +1544,35 @@ mod tests {
     use trill_core::project::AutomationPoint;
     use trill_core::{ChainRef, Note};
     use trill_engine::analysis::Spectrum;
+
+    #[test]
+    fn a_key_the_track_knows_for_a_keyswitch_is_not_said_to_be_a_note_that_made_no_sound() {
+        use trill_core::{Articulation, InstrumentProfile};
+        let mut project = Project::default();
+        let (guitar, plain) = (project.add_track("Guitar"), project.add_track("Plain"));
+        let profile =
+            InstrumentProfile { articulations: vec![Articulation::key("open", 24)], ..InstrumentProfile::default() };
+        project.set_track_profile(guitar, profile).unwrap();
+        let waited = |track: TrackId, name: &str, silent: &[u8]| WaitedFor {
+            track: Some(track),
+            track_name: name.to_string(),
+            device: trill_core::DeviceId(7),
+            device_name: "A guitar".to_string(),
+            seconds: 6.5,
+            answered: true,
+            silent: silent.to_vec(),
+        };
+        // The key that chooses how the notes are played made no sound, as it is meant to.
+        let said = waited_note(&waited(guitar, "Guitar", &[24]), &project);
+        assert_eq!(said, "Waited 6.5 s for A guitar on 'Guitar' to be ready before the render started.");
+        // A key the track knows nothing of is still said, and only that one.
+        let said = waited_note(&waited(guitar, "Guitar", &[24, 30]), &project);
+        assert!(said.contains("1 of the notes it plays made no sound the whole time: F#1 (30)."), "{said}");
+        assert!(said.contains(&format!("`probe` with track {} and those notes", guitar.0)), "{said}");
+        // And on a track that says nothing of its keys, both are.
+        let said = waited_note(&waited(plain, "Plain", &[24, 30]), &project);
+        assert!(said.contains("2 of the notes it plays made no sound the whole time: C1 (24), F#1 (30)."), "{said}");
+    }
 
     fn level(track: TrackId, peak_db: f32) -> TrackLevel {
         TrackLevel {
