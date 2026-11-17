@@ -82,26 +82,38 @@ pub(crate) fn preset_files(plugin: &PluginRef, folders: &[PathBuf], sink: &mut d
         let origin = if index == 0 { "user" } else { "factory" };
         let mut found = Vec::new();
         for file in walk::files(&folder, &extensions) {
-            let Some(glance) = std::fs::File::open(&file).ok().and_then(|mut file| state::glance(&mut file)) else {
+            let Ok((whose, mut preset)) = file_preset(&file) else {
                 log::debug!("'{}' is not a VST3 preset file; skipping it", file.display());
                 continue;
             };
-            if glance.class != class {
+            if whose != class {
                 continue;
             }
-            let mut tags = sound_tags(attributes(&glance.info).iter().map(|(id, value)| (id.as_str(), value.as_str())));
-            tags.push(origin.to_string());
-            let name = file.file_stem().map(|stem| tidy(&stem.to_string_lossy(), NAME_LIMIT)).unwrap_or_default();
-            found.push(PresetInfo {
-                name,
-                category: walk::category_below(&folder, &file),
-                tags,
-                locator: Locator::Vst3File { path: file }.to_text(),
-                ..PresetInfo::default()
-            });
+            preset.tags.push(origin.to_string());
+            preset.category = walk::category_below(&folder, &file);
+            found.push(preset);
         }
         sink.presets(found);
     }
+}
+
+/// Whether `file` is named as a VST3 preset file is.
+pub(crate) fn is_preset_file(file: &Path) -> bool {
+    crate::presets::file::has_extension(file, PRESET_EXTENSION)
+}
+
+/// The preset in the `.vstpreset` file at `file`, wherever that lies,
+/// with the class of the plugin it is a preset of: by the file's name,
+/// with the tags its meta information gives it. Only the file's first
+/// bytes and that information are read. An error says why the file is no
+/// VST3 preset, as the end of a sentence about it.
+pub(crate) fn file_preset(file: &Path) -> Result<(ClassId, PresetInfo), String> {
+    let mut opened = std::fs::File::open(file).map_err(|error| format!("it cannot be read ({error})"))?;
+    let glance = state::glance(&mut opened).ok_or("it is not a VST3 preset file (it does not begin as one does)")?;
+    let tags = sound_tags(attributes(&glance.info).iter().map(|(id, value)| (id.as_str(), value.as_str())));
+    let name = file.file_stem().map(|stem| tidy(&stem.to_string_lossy(), NAME_LIMIT)).unwrap_or_default();
+    let locator = Locator::Vst3File { path: file.to_path_buf() }.to_text();
+    Ok((glance.class, PresetInfo { name, tags, locator, ..PresetInfo::default() }))
 }
 
 /// The words of the attributes that say what kind of sound a preset is,

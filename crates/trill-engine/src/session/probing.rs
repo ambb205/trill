@@ -136,9 +136,10 @@ impl Session {
                 };
                 let mut to_load = None;
                 if let Some(wanted) = preset {
-                    let info = self.find_preset(uri, wanted)?;
+                    // By its name or id, or by the path of its file.
+                    let (info, saved) = self.wanted_preset(uri, wanted)?;
                     device.preset = Some(info.reference());
-                    match (self.saved_preset(uri, &info)?, preset_values(descriptor, &info)) {
+                    match (saved, preset_values(descriptor, &info)) {
                         // A preset that was saved is the device as it was
                         // then: its values and its state.
                         (Some(saved), _) => (device.params, device.state) = (saved.params, saved.state),

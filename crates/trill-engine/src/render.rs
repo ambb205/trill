@@ -14,6 +14,15 @@
 //! taken as the audio goes by; no track's audio is kept, and the mix's is
 //! kept only when it is asked for ([`RenderJob::measure`] keeps none).
 //!
+//! **A render does not go on without an instrument.** If a plugin that has
+//! notes to play never answered them for as long as it was waited for,
+//! what would come out is not the song, and nothing says so but a line
+//! that is easily missed. The render stops there, before the first
+//! sample, with [`RenderError::NotAnswered`] naming the track: nothing is
+//! rendered and no file is written. The one exception is a silence the
+//! track itself explains: what it knows of its instrument says that the
+//! notes it plays here are keyswitches, or lie outside its range.
+//!
 //! **Only what is heard is made.** A track that is muted, or left out by a
 //! solo or by [`RenderOptions::only_tracks`], is not compiled into the
 //! graph at all: its devices are not created, its plugins not waited for.
@@ -204,6 +213,29 @@ pub enum RenderError {
     EmptyRange { start: f64, end: f64 },
     #[error(transparent)]
     File(#[from] MediaError),
+    /// Instruments that have notes to play never answered them, and
+    /// nothing was rendered: see the module documentation. The ones that
+    /// did not answer come first; after them, what else the wait found
+    /// that is worth saying (an instrument that answered some of its
+    /// notes and not others), which is found once and would be lost.
+    #[error("{}", not_answered(.0))]
+    NotAnswered(Vec<WaitedFor>),
+}
+
+fn not_answered(waited: &[WaitedFor]) -> String {
+    let waited: Vec<&WaitedFor> = waited.iter().filter(|waited| !waited.answered).collect();
+    let named: Vec<String> = waited
+        .iter()
+        .map(|waited| format!("{} on '{}' ({:.0} s)", waited.device_name, waited.track_name, waited.seconds))
+        .collect();
+    format!(
+        "nothing was rendered: {} never answered the notes {} to play for as long as {} waited for, so what came out \
+         would not be the song. If it was still loading, try again in a moment; if its notes are ones it does not \
+         play, move them; or mute the track to go on without it",
+        named.join(" and "),
+        if waited.len() == 1 { "it is" } else { "they are" },
+        if waited.len() == 1 { "it was" } else { "they were" },
+    )
 }
 
 pub struct Rendered {
@@ -430,12 +462,18 @@ fn render_from(
     // plugins are waited for, so that a folder that cannot be written to
     // is found out at once.
     let stems = options.stems.as_ref();
+    // The folder for them, if this render is what makes it: a render that
+    // comes to nothing leaves no empty folder behind.
+    let made_folder = stems.map(|stems| &stems.folder).filter(|folder| !folder.exists());
     let listener = |file: Option<WavWriter>| {
         let analyzer = Analyzer::new(options.sample_rate);
         let analyzer = if file.is_some() { analyzer.with_true_peak() } else { analyzer };
         Box::new(Tap { analyzer, file })
     };
-    for node in &mut graph.tracks {
+    // A track that is made only for what it feeds (a soloed return, a
+    // device that listens to it) is not heard itself: it has no row and
+    // no file.
+    for node in graph.tracks.iter_mut().filter(|node| node.heard) {
         let track = project.track(node.id).ok();
         let file = match (track, stems) {
             (Some(track), Some(stems)) => match stems.kind_of(track) {
@@ -457,7 +495,44 @@ fn render_from(
     if let Some(stems) = stems.filter(|stems| stems.premaster) {
         graph.master.tap = Some(listener(Some(stems.begin(StemKind::Premaster, None, sample_rate)?)));
     }
-    let waited = ready::wake(&mut graph, project, &plugins, (start, end), sample_rate, options.patience);
+    let waited = ready::wake(&mut graph, project, (&plugins, factory), (start, end), sample_rate, options.patience);
+    let name_of = |track: Option<TrackId>| match track {
+        Some(track) => project.track(track).map(|track| track.name.clone()).unwrap_or_default(),
+        None => "master".to_string(),
+    };
+    let named = |Waited { track, device, seconds, answered, silent, .. }: Waited| WaitedFor {
+        track,
+        track_name: name_of(track),
+        device,
+        device_name: project.device(device).map(|device| device.name.clone()).unwrap_or_default(),
+        seconds,
+        answered,
+        silent,
+    };
+    // An instrument that never answered, and whose track does not say why:
+    // the render does not go on without it.
+    let explained = |waited: &Waited| {
+        waited
+            .track
+            .and_then(|track| project.track(track).ok())
+            .is_some_and(|track| silent_by_design(track, start, end))
+    };
+    let mut missing: Vec<WaitedFor> = waited
+        .iter()
+        .filter(|waited| !waited.answered && !waited.effect && !explained(waited))
+        .cloned()
+        .map(named)
+        .collect();
+    if !missing.is_empty() {
+        let partly = waited.iter().filter(|waited| waited.answered && !waited.silent.is_empty());
+        missing.extend(partly.cloned().map(named));
+        // With the graph go the files that were begun.
+        drop(graph);
+        if let Some(folder) = made_folder {
+            let _ = std::fs::remove_dir(folder);
+        }
+        return Err(RenderError::NotAnswered(missing));
+    }
 
     let mut processor = Processor::new(sample_rate);
     drop(processor.swap_graph(graph));
@@ -582,10 +657,6 @@ fn render_from(
     }
     taken_off(&mut graph.master.chain, None, project, &mut dynamics);
 
-    let name_of = |track: Option<TrackId>| match track {
-        Some(track) => project.track(track).map(|track| track.name.clone()).unwrap_or_default(),
-        None => "master".to_string(),
-    };
     let waited = waited
         .into_iter()
         // A plugin that was ready at once is not news, and neither is an
@@ -596,15 +667,7 @@ fn render_from(
             true => waited.seconds >= WORTH_SAYING_SECONDS || !waited.silent.is_empty(),
             false => !waited.effect,
         })
-        .map(|Waited { track, device, seconds, answered, silent, .. }| WaitedFor {
-            track,
-            track_name: name_of(track),
-            device,
-            device_name: project.device(device).map(|device| device.name.clone()).unwrap_or_default(),
-            seconds,
-            answered,
-            silent,
-        })
+        .map(named)
         .collect();
 
     let measured = Measured { stats: mix.stats(), tracks, sections, dynamics, waited, stems };
@@ -614,6 +677,23 @@ fn render_from(
 /// A wait shorter than this is not reported: the plugin was as good as
 /// ready.
 const WORTH_SAYING_SECONDS: f64 = 1.0;
+
+/// Whether what a track knows of its instrument says that none of the
+/// notes it plays from `from` to `to` makes a sound: every one of them is
+/// a keyswitch, or lies outside the instrument's range.
+fn silent_by_design(track: &Track, from: f64, to: f64) -> bool {
+    let profile = &track.profile;
+    let unmuted = track.clips.iter().filter(|clip| !clip.muted);
+    let mut notes = unmuted
+        .flat_map(|clip| clip.timeline_notes())
+        .filter(|note| note.start >= from - 1e-9 && note.start < to)
+        .peekable();
+    let silent = |pitch: u8| {
+        let outside = profile.range.is_some() && !profile.in_range(pitch) && profile.sound_name(pitch).is_none();
+        profile.is_keyswitch(pitch) || outside
+    };
+    !profile.is_empty() && notes.peek().is_some() && notes.all(|note| silent(note.pitch))
+}
 
 /// How many of a track's devices, from the first, make what goes into its
 /// effects: up to and with its instrument. None for a track that plays

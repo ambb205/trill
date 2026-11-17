@@ -56,6 +56,15 @@
 //! a sampler that plays its samples from the disk reads whenever it is
 //! played a note.)
 //!
+//! **A plugin that is held up is waited for.** The plugins of a host take
+//! their turns on one thread, and a sampler begins to load only when it
+//! gets one. While that thread is behind (a song of many plugins is being
+//! let go of, say, each taking its time) a plugin that has just been made
+//! does nothing at all, and none of it is its doing. The caller's patience
+//! does not run out meanwhile ([`DeviceFactory::busy`]). And the memory a
+//! song gives back as it goes does not hide what a kit takes as it comes:
+//! the mark that growth is measured against comes down with it.
+//!
 //! **Effects wait too.** An amplifier or a reverb that is a plugin may
 //! pass no sound for a moment after it is made. Behind a plugin
 //! instrument it is rehearsed with it: the notes are heard at the end of
@@ -160,6 +169,9 @@ const LOADING_BYTES_A_SECOND: f64 = 4.0 * 1024.0 * 1024.0;
 /// Memory given back in one piece of this size or more is something
 /// unloaded: a kit that is being replaced.
 const UNLOADED_BYTES: u64 = 64 * 1024 * 1024;
+/// The same for a wait, which is over in seconds and shares the program
+/// with whatever else it is doing: a song's worth of plugins let go of.
+const UNLOADED_UNDER_A_WAIT: u64 = 256 * 1024 * 1024;
 /// How long plugins that show signs of loading are waited for at most.
 const LOADING_LIMIT: Duration = Duration::from_secs(120);
 /// The longest a rehearsed plugin is left to ring out before it is reset:
@@ -269,10 +281,10 @@ struct Signs {
     looked: Option<Instant>,
     /// The most memory it has held so far: in use, and asked for.
     most: (u64, u64),
-    /// Whether memory that is given back in bulk lowers that mark: for a
-    /// watch that goes on for as long as the program runs, in which one
-    /// kit is unloaded and a smaller one loaded.
-    follows: bool,
+    /// How much memory has to be given back for that mark to come down
+    /// with it, so that what is loaded after something was unloaded shows;
+    /// `None` for a mark that only rises.
+    follows: Option<u64>,
 }
 
 impl Signs {
@@ -281,13 +293,14 @@ impl Signs {
         Self {
             most: now.map(|vitals| (vitals.in_use, vitals.asked)).unwrap_or_default(),
             looked: now.map(|_| Instant::now()),
-            follows: false,
+            follows: None,
         }
     }
 
-    /// [`Self::new`], for watching over a long time.
-    fn following() -> Self {
-        Self { follows: true, ..Self::new() }
+    /// [`Self::new`], with a mark that comes down when `bytes` or more
+    /// are given back.
+    fn following(bytes: u64) -> Self {
+        Self { follows: Some(bytes), ..Self::new() }
     }
 
     /// Whether the program grew since this was last asked at the rate of
@@ -301,7 +314,8 @@ impl Signs {
             return false;
         }
         let grown = now.in_use.saturating_sub(self.most.0).max(now.asked.saturating_sub(self.most.1));
-        let mark = |most: u64, now: u64| if self.follows && now + UNLOADED_BYTES < most { now } else { most.max(now) };
+        let given_back = |most: u64, now: u64| self.follows.is_some_and(|bytes| now + bytes < most);
+        let mark = |most: u64, now: u64| if given_back(most, now) { now } else { most.max(now) };
         self.most = (mark(self.most.0, now.in_use), mark(self.most.1, now.asked));
         self.looked = Some(at);
         grown as f64 / seconds >= LOADING_BYTES_A_SECOND
@@ -370,7 +384,7 @@ impl LoadWatch {
         let now = Instant::now();
         let mut state = self.state.lock();
         let watching = state.get_or_insert_with(|| Watching {
-            signs: Signs::following(),
+            signs: Signs::following(UNLOADED_BYTES),
             looked: now,
             stirred: None,
             fresh: Vec::new(),
@@ -378,7 +392,7 @@ impl LoadWatch {
         if watching.fresh.is_empty() {
             // What the program did while nothing was watched is not this
             // plugin's.
-            (watching.signs, watching.looked, watching.stirred) = (Signs::following(), now, None);
+            (watching.signs, watching.looked, watching.stirred) = (Signs::following(UNLOADED_BYTES), now, None);
         }
         watching.fresh.retain(|(other, _)| *other != device);
         watching.fresh.push((device, now));
@@ -423,7 +437,7 @@ impl LoadWatch {
             let mut state = self.state.lock();
             match state.as_mut().filter(|watching| !watching.fresh.is_empty()) {
                 Some(watching) if watching.looked.elapsed() >= LOOKED_LATELY => {
-                    (watching.signs, watching.looked) = (Signs::following(), Instant::now());
+                    (watching.signs, watching.looked) = (Signs::following(UNLOADED_BYTES), Instant::now());
                     true
                 }
                 _ => false,
@@ -945,15 +959,17 @@ fn tell(begun: Instant, first: &Vitals, loading: bool, waits: &[Wait]) {
 
 /// Tries every wait in turn until each is over, then settles them all.
 /// A wait is given up on when nothing has stirred for `patience` (no
-/// answer that differs from the last, and the program not loading), or
-/// after [`LOADING_LIMIT`] whatever stirs. Waits that are known not to be
-/// answered get [`KNOWN_SILENT`] at most; how each went is remembered.
-pub(crate) fn wait_for(waits: &mut [Wait], patience: Duration) {
+/// answer that differs from the last, the program not loading, and
+/// nothing holding the plugins up: `held_up` says whether their host is
+/// behind with other work), or after [`LOADING_LIMIT`] whatever stirs.
+/// Waits that are known not to be answered get [`KNOWN_SILENT`] at most;
+/// how each went is remembered.
+pub(crate) fn wait_for(waits: &mut [Wait], patience: Duration, held_up: &dyn Fn() -> bool) {
     let begun = Instant::now();
     let silent: Vec<u64> = KNOWN_NOT_TO_ANSWER.lock().clone();
     let ready: Vec<(u64, Vec<Answer>)> = KNOWN_READY.lock().clone();
     let keys: Vec<(u64, Keys)> = KNOWN_KEYS.lock().clone();
-    let mut signs = Signs::new();
+    let mut signs = Signs::following(UNLOADED_UNDER_A_WAIT);
     let first = Vitals::now().unwrap_or_default();
     for wait in waits.iter_mut() {
         wait.stand.hear_noise();
@@ -961,6 +977,8 @@ pub(crate) fn wait_for(waits: &mut [Wait], patience: Duration) {
     }
     loop {
         let loading = signs.seen();
+        // A plugin that cannot have its turn is not one that does nothing.
+        let waiting_its_turn = held_up();
         tell(begun, &first, loading, waits);
         let mut pending = false;
         for wait in waits.iter_mut().filter(|wait| wait.outcome.is_none()) {
@@ -972,6 +990,9 @@ pub(crate) fn wait_for(waits: &mut [Wait], patience: Duration) {
             };
             if wait.attempt(begun, loading, known, patience / 2) {
                 continue;
+            }
+            if waiting_its_turn {
+                wait.stirred = Instant::now();
             }
             // Given up on: nothing has happened for as long as the caller
             // has patience, or it has gone on for too long altogether. A
@@ -1097,7 +1118,7 @@ impl Plugins {
 pub(crate) fn wake(
     graph: &mut Graph,
     project: &Project,
-    plugins: &Plugins,
+    (plugins, factory): (&Plugins, &dyn DeviceFactory),
     (from, to): (f64, f64),
     sample_rate: f64,
     patience: Duration,
@@ -1198,7 +1219,7 @@ pub(crate) fn wake(
     if waits.is_empty() {
         return Vec::new();
     }
-    wait_for(&mut waits, patience);
+    wait_for(&mut waits, patience, &|| factory.busy());
     waits
         .iter()
         .zip(who)

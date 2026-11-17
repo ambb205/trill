@@ -735,26 +735,19 @@ impl Processor {
                 Some(points) => automation_value(points, start_beat) as f32,
                 None => track.pan,
             };
-            let (open_left, open_right) = if volume > MIN_VOLUME_DB {
+            let (target_left, target_right) = if track.passes && volume > MIN_VOLUME_DB {
                 let gain = db_to_gain(volume);
                 let (pan_left, pan_right) = pan_gains(pan);
                 (gain * pan_left, gain * pan_right)
             } else {
                 (0.0, 0.0)
             };
-            let (target_left, target_right) = if track.audible { (open_left, open_right) } else { (0.0, 0.0) };
-            // Not heard, but its group is listened to: it plays into the
-            // group at its fader, and what follows hears nothing of it.
-            if track.feeds_key
-                && let Some(bus) = track.output_bus.and_then(|bus| buses.get_mut(bus))
-            {
-                add_scaled(left, &mut bus.left[..frames], open_left);
-                add_scaled(right, &mut bus.right[..frames], open_right);
-            }
+            let out_target = if track.to_output { 1.0 } else { 0.0 };
             let state = &mut track.state;
             if !state.primed {
                 state.gain_left = target_left;
                 state.gain_right = target_right;
+                state.out = out_target;
                 state.primed = true;
             }
             // Fade in place, so the output and every send carry the same
@@ -768,20 +761,31 @@ impl Processor {
                 tap.push(left, right);
             }
 
-            match track.output_bus.and_then(|bus| buses.get_mut(bus)) {
-                Some(bus) => {
-                    add_scaled(left, &mut bus.left[..frames], 1.0);
-                    add_scaled(right, &mut bus.right[..frames], 1.0);
-                }
-                None => {
-                    add_scaled(left, mix_left, 1.0);
-                    add_scaled(right, mix_right, 1.0);
+            // What goes on to the output, and what goes to each return,
+            // are opened and closed by mute and solo apart from each other:
+            // a track that feeds a soloed return is not heard itself.
+            let out_from = std::mem::replace(&mut state.out, out_target);
+            if out_from > 0.0 || out_target > 0.0 {
+                match track.output_bus.and_then(|bus| buses.get_mut(bus)) {
+                    Some(bus) => {
+                        add_ramped(left, &mut bus.left[..frames], out_from, out_target);
+                        add_ramped(right, &mut bus.right[..frames], out_from, out_target);
+                    }
+                    None => {
+                        add_ramped(left, mix_left, out_from, out_target);
+                        add_ramped(right, mix_right, out_from, out_target);
+                    }
                 }
             }
-            for &(bus, gain) in &track.sends {
-                if let Some(bus) = buses.get_mut(bus) {
-                    add_scaled(left, &mut bus.left[..frames], gain);
-                    add_scaled(right, &mut bus.right[..frames], gain);
+            for send in &mut track.sends {
+                let from = if send.last.is_nan() { send.gain } else { send.last };
+                send.last = send.gain;
+                if from == 0.0 && send.gain == 0.0 {
+                    continue;
+                }
+                if let Some(bus) = buses.get_mut(send.bus) {
+                    add_ramped(left, &mut bus.left[..frames], from, send.gain);
+                    add_ramped(right, &mut bus.right[..frames], from, send.gain);
                 }
             }
         }
@@ -1130,6 +1134,21 @@ fn add_scaled(source: &[f32], destination: &mut [f32], gain: f32) {
     }
 }
 
+/// Adds `source` into `destination` at a gain that goes from `from` to
+/// `to` over the block.
+#[inline]
+fn add_ramped(source: &[f32], destination: &mut [f32], from: f32, to: f32) {
+    if from == to {
+        return add_scaled(source, destination, to);
+    }
+    let step = (to - from) / source.len().max(1) as f32;
+    let mut gain = from;
+    for (out, sample) in destination.iter_mut().zip(source) {
+        gain += step;
+        *out += sample * gain;
+    }
+}
+
 /// Adds `source` into `destination` while ramping the gain from `from` to
 /// `to`, and returns the peak of what was added.
 #[inline]
@@ -1440,8 +1459,9 @@ mod tests {
             chain: Chain::default(),
             volume_db: 0.0,
             pan: 0.0,
-            audible: true,
-            feeds_key: false,
+            heard: true,
+            passes: true,
+            to_output: true,
             volume_automation: None,
             pan_automation: None,
             meter: Arc::new(Meter::default()),

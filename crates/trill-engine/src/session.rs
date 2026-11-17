@@ -588,14 +588,17 @@ impl Session {
         // A track's first instrument brings what is known about its keys.
         let profile = self.profile_for_new_instrument(chain, &descriptor, &descriptors);
         // Found before anything is added, so that a preset there is none
-        // of adds nothing.
-        let preset = preset.map(|wanted| self.find_preset(uri, wanted)).transpose()?;
+        // of, or a file that is no preset of this device, adds nothing.
+        let wanted = preset.map(|wanted| self.wanted_preset(uri, wanted)).transpose()?;
+        let (preset, saved) = match wanted {
+            Some((info, saved)) => (Some(info), saved),
+            None => (None, None),
+        };
         // A preset that is a set of parameter values goes into the model
         // with the device, and so does one that was saved, state and all:
         // the device is created as the preset has it. Any other is the
         // device's own to load, once there is a device.
         let values = preset.as_ref().and_then(|info| preset_values(&descriptor, info));
-        let saved = preset.as_ref().map(|info| self.saved_preset(uri, info)).transpose()?.flatten();
 
         let id = self.edit(|project| {
             let id = project.add_device(chain, uri, descriptor.name.clone(), index)?;

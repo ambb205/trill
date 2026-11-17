@@ -7,41 +7,18 @@
 //! shown.
 
 use eframe::egui::Color32;
-use trill_noir::{TRACK_HUES, Theme};
-
-/// The colors `trill_core::Project::add_track` hands out, in order.
-///
-/// They say "the nth track", not "this hue": two of the ten are greens of
-/// one hue and two are purples. Mapped by hue they would collapse onto
-/// seven palette entries, so they are mapped by position instead and ten
-/// tracks stay ten colors.
-const POSITIONAL: [u32; TRACK_HUES] =
-    [0xF2994A, 0x56CCF2, 0xBB6BD9, 0x6FCF97, 0xEB5757, 0xF2C94C, 0x2D9CDB, 0x9B51E0, 0x27AE60, 0xE27AB0];
-
-fn unpack(rgb: u32) -> Color32 {
-    Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
-}
+use trill_noir::Theme;
+#[cfg(test)]
+use trill_noir::{POSITIONAL, TRACK_HUES};
 
 fn pack(color: Color32) -> u32 {
     (color.r() as u32) << 16 | (color.g() as u32) << 8 | color.b() as u32
 }
 
-/// The hue to draw a track in, given the color stored on it.
+/// The hue to draw a track in, given the color stored on it: the kit's
+/// rule ([`Theme::stored_hue`]), which the stage follows too.
 pub fn track_color(theme: &Theme, stored: u32) -> Color32 {
-    // Compared against Noir's hues whatever the theme, since those are what
-    // `new_track_color` stores: a track made in one theme keeps its place
-    // in the palette of another.
-    let noir = Theme::noir();
-    let stored_hue = unpack(stored);
-    let index = POSITIONAL
-        .iter()
-        .position(|legacy| *legacy == stored)
-        .or_else(|| noir.tracks.iter().position(|hue| *hue == stored_hue))
-        .or_else(|| {
-            let nearest = noir.nearest_track_hue(stored_hue);
-            noir.tracks.iter().position(|hue| *hue == nearest)
-        });
-    index.map_or(stored_hue, |index| theme.track_hue(index))
+    theme.stored_hue(stored)
 }
 
 /// The color to store on the `index`th track of a project when the window

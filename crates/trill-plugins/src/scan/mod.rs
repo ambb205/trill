@@ -187,6 +187,10 @@ fn run_scanner() -> u8 {
         suppress_crash_dialogs();
         return crate::vendor::run_builder(arguments.skip(1));
     }
+    if arguments.peek().is_some_and(|first| first == crate::vendor::VENDOR_FILE_ARGUMENT) {
+        suppress_crash_dialogs();
+        return crate::vendor::run_lister(arguments.skip(1));
+    }
     let (Some(path), None) = (arguments.next(), arguments.next()) else {
         eprintln!("usage: {SCANNER_NAME} <plugin file>");
         return 2;

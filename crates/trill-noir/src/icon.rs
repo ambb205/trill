@@ -37,6 +37,8 @@ pub enum Icon {
     /// Recording, and a track that will be recorded: the round dot every
     /// recorder has used for it. The one round thing in the kit.
     Record,
+    /// The stage: a frame with the playhead standing in it.
+    Stage,
     /// Holds what is playing where it is.
     Pause,
     /// To the step before: a bar and an arrowhead pointing at it.
@@ -68,6 +70,7 @@ impl Icon {
             Icon::Keyboard => "Computer keyboard",
             Icon::GoTo => "Go to",
             Icon::Record => "Record",
+            Icon::Stage => "Stage",
             Icon::Pause => "Pause",
             Icon::StepBack => "Step back",
             Icon::StepForward => "Step forward",
@@ -217,6 +220,12 @@ pub fn paint_icon(painter: &Painter, center: Pos2, icon: Icon, color: Color32) {
         Icon::Record => {
             painter.circle_filled(center + vec2(0.5, 0.5), 4.5, color);
         }
+        Icon::Stage => {
+            // A picture's frame, and the playhead a third of the way in.
+            let frame = Rect::from_min_size(center + vec2(-7.0, -4.0), vec2(15.0, 9.0));
+            paint::frame(painter, frame, color);
+            paint::vline(painter, frame.left() + 5.0, Rangef::new(frame.top() - 2.0, frame.bottom() + 2.0), color);
+        }
     }
 }
 
@@ -275,6 +284,7 @@ mod tests {
             Icon::Keyboard,
             Icon::GoTo,
             Icon::Record,
+            Icon::Stage,
             Icon::Pause,
             Icon::StepBack,
             Icon::StepForward,

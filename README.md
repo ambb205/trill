@@ -35,9 +35,9 @@ asked for:
 
 ```sh
 cargo test -p trill-plugins -- --include-ignored    # against the CLAP and VST3 plugins installed here (minutes)
-cargo test -p trill-mcp --test presets -- --include-ignored --nocapture    # an assistant's pass over Surge XT's presets, an amplifier's, and a kit, a guitar tone and a patch of their makers'
+cargo test -p trill-mcp --test presets -- --include-ignored --nocapture    # an assistant's pass over Surge XT's presets, an amplifier's, a kit, a guitar tone and a patch of their makers', and a bought preset found among the samples
 cargo test -p trill-plugins --test sounds -- --include-ignored --nocapture --test-threads 1    # what installed plugins say of their parameters, channels and presets
-cargo test -p trill-plugins --test vendor -- --include-ignored --nocapture --test-threads 1    # the makers' own presets of Serum 2, the Ample guitars, Superior Drummer 3 and the Archetypes: listed, loaded, and heard to differ
+cargo test -p trill-plugins --test vendor -- --include-ignored --nocapture --test-threads 1    # the makers' own presets of Serum 2, the Ample guitars, Superior Drummer 3 and the Archetypes: listed, loaded by name and by a file's path, and heard to differ
 cargo test -p trill-mcp --test controllers -- --include-ignored --nocapture    # a SWAM saxophone and Surge XT played from the controller curves of clips
 cargo test -p trill-mcp --test hearing -- --include-ignored --nocapture    # renders and probes of Superior Drummer 3, a SWAM saxophone and an Ample bass
 cargo test -p trill-mcp --test instruments -- --include-ignored --nocapture    # what Trill ships about the Ample guitars and bass and Superior Drummer 3, checked on the plugins themselves
@@ -236,6 +236,18 @@ when an Ample preset switches the instrument's automatic legato on, as nearly al
 each other are then hammered on unasked, until the parameter "Auto Legato" is set to 0. A folder or a product that
 is not there is simply no presets.
 
+**A preset from a file, anywhere**: presets that were bought or sent lie with the samples, not where a plugin's
+presets are listed from. Any place that takes a preset by name also takes the whole path of a preset file: a
+`.vstpreset` for any VST3 plugin (which is also the form a plugin's state has in another host's project), a file
+of the maker's own format where Trill reads it (`.SerumPreset`, an Ample instrument's preset, an Archetype's; for
+a file of many, such as Superior Drummer's kits, `path#name`), a file a CLAP plugin loads itself, or a
+`.trillpreset` that was saved on another machine. It goes through the same door as a preset by name: one undo
+step, the plugin checked to have taken it where that can be seen, and a sentence when the file is another
+plugin's, damaged or gone. In the window it is "Load preset file…" in a device's preset menu. Preset files in the
+sample library's folders are found by `search_presets` by their names, each with the device it is for and its
+path. The assistant in the window may be pointed at a preset file on any disk of this machine, and at none on a
+network share: opening one would sign the user in to whatever machine the path names.
+
 **Saved presets**: any device's sound can be kept under a name: a plugin's state with everything that was set in
 its own window, a built-in device's every parameter. That is how a plugin whose presets are neither told to the
 host nor in files that Trill reads gets presets a host can list: choose a sound in the plugin's window once, then
@@ -317,6 +329,14 @@ that quick and true:
   `transport` tell a model, so that neither presses play into half a kit unawares.
   `cargo run -p trill-plugins --example loading -- "vst3:<class id>" --preset "<kit>"` watches an installed
   sampler load, key by key, beside the program's memory, reads and processor time.
+- *A render does not go on without an instrument.* If a plugin never answers any of the notes it is to play
+  for as long as it is waited for, the render is refused before its first sample: nothing is measured, no file
+  is written, and the refusal names the track, says what its notes say of why (their range, or that they are
+  keyswitches) and what to do. A mix without one of its instruments is not the song, and a line in a reply
+  that otherwise looks like a success is easily missed. A track that is muted is left out on purpose, and a
+  silence the track itself explains (its notes are keyswitches of its instrument, or outside its range) is
+  no refusal. While the plugins' own thread is behind with other work (a song's plugins being let go of, each
+  taking its time), a plugin that has not had its turn to load is waited for and not given up on.
 - *A render measures everything as it goes*, without keeping a stem per track: the mix (peak, true peak, LUFS,
   stereo correlation, spectral balance), every track after its fader in the same terms, the loudness of every
   section between the markers (or of bar ranges), and how many dB each built-in compressor and limiter took
@@ -325,7 +345,15 @@ that quick and true:
 - *A render makes only what is heard.* A track that is muted, or left out by a solo or by `tracks`, is not put
   into the render at all: its devices are not created and its plugins are not waited for. Hearing one track of
   a song with many plugins costs what that track costs. (What plays live keeps every track running, so that a
-  track is there the moment it is unmuted.)
+  track is there the moment it is unmuted.) What feeds a track that is heard is made with it: the members of a
+  group, and the tracks whose sends reach a soloed return.
+- *A return can be heard alone.* Soloing a return, in the window or by naming it in `tracks`, gives the return
+  as the whole song feeds it: every track's send still reaches it, a group's too, while the tracks themselves
+  and the other returns are not heard. (Soloing a track or a group keeps the returns open, so that it is heard
+  with its reverb.) Each of these opens and closes over one block of audio, so a solo changed while the song
+  plays makes no click.
+- *A render runs at the rate it is asked for.* `measure` and `render` take `sample_rate`; left out, they run at
+  the engine's rate, which is 48 kHz when there is no audio device. The reply says which it was.
 - *One render writes every stem.* Asked to, a render writes parts of the song to files of their own as it
   goes (`render` with `stems`; "Export WAV and stems" in the window): every track as it leaves its fader and
   pan, what goes into each track's effects (its instrument alone), every group, every return fed by every
@@ -472,7 +500,9 @@ them a page at a time and search them (`preset_query: "warm pad"`, `preset_categ
 for a sound ("warm pad", "808 sub") across every installed instrument at once and answers with the device and the
 preset to give `create_track`; the presets are read in the background the first time and remembered, and the reply
 says which are still being read. `list_devices` says how many presets a plugin has, where that is known. The
-presets a maker keeps in files of its own format (see "The makers' own presets") are among them. After a preset
+presets a maker keeps in files of its own format (see "The makers' own presets") are among them, and `preset`
+also takes the whole path of a preset file that lies anywhere (`search_presets` finds those of the sample library:
+an item with `file`). After a preset
 that sets the plugin reading samples, the reply has a `note` that says so. A plugin that lists none says so in a
 sentence: its presets are in its own window, and `save_preset` keeps what is chosen there.
 

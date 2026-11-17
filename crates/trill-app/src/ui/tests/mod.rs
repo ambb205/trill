@@ -21,6 +21,7 @@ mod recording;
 mod recovery;
 mod ruler;
 mod sounds;
+mod stage;
 mod tracks;
 
 use super::app::TrillApp;

@@ -1,0 +1,33 @@
+[package]
+name = "trill-stage"
+description = "The stage: Trill's own interface, composed by a director, lit by the song and filmed"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+trill-core.workspace = true
+trill-noir.workspace = true
+
+log.workspace = true
+parking_lot.workspace = true
+
+# The same egui the window runs on: the stage is painted with the kit, into
+# a context of its own. `bytemuck` lets its vertices go to the graphics card
+# as they are.
+egui = { version = "0.37", features = ["bytemuck"] }
+# For the `wgpu` it re-exports, with the features the window's renderer is
+# built with: one build of wgpu for the workspace, and the stage's passes can
+# run on the window's own device.
+egui-wgpu = "0.37"
+bytemuck = "1"
+# Waits for the graphics card where there is no event loop to wait in.
+pollster = "1"
+# Writes stills, and a film's frames where there is no ffmpeg.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+# The examples read a finished mix to light the picture with.
+hound.workspace = true
+tempfile = "3"

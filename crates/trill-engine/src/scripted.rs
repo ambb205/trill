@@ -80,6 +80,11 @@ pub struct Loading {
     /// How long an instrument goes on with the sound it had after it is
     /// given a preset. Its saved state names the preset at once.
     pub changes_after: Duration,
+    /// How long after an instrument is made its host is behind with other
+    /// work ([`DeviceFactory::busy`]), as while a song of plugins is let
+    /// go of. The instrument does not have its turn before: everything
+    /// else it takes its time over begins after this.
+    pub held_up: Duration,
 }
 
 /// Makes the scripted instruments, and writes down what each was made for.
@@ -87,6 +92,8 @@ pub struct Loading {
 pub struct ScriptedFactory {
     loading: Loading,
     made: Arc<Mutex<Vec<(String, Purpose)>>>,
+    /// Until when the host is behind with other work.
+    behind_until: Arc<Mutex<Option<Instant>>>,
 }
 
 impl ScriptedFactory {
@@ -153,7 +160,12 @@ impl DeviceFactory for ScriptedFactory {
             _ => return Err(DeviceError::Unknown(device.uri.clone())),
         };
         self.made.lock().push((device.uri.clone(), purpose));
-        let born = Instant::now();
+        // What holds the host up holds the instrument up: it is as if it
+        // were made when that is over.
+        let born = Instant::now() + self.loading.held_up;
+        if !self.loading.held_up.is_zero() {
+            *self.behind_until.lock() = Some(born);
+        }
         if kind == Kind::Amp {
             let ready = (!self.loading.never).then(|| born + self.loading.first);
             return Ok(DeviceInstance { processor: Box::new(Amp { ready }), params: Vec::new(), controller: None });
@@ -193,6 +205,10 @@ impl DeviceFactory for ScriptedFactory {
             params: Vec::new(),
             controller: Some(Box::new(Controller { patch, changes_after: self.loading.changes_after })),
         })
+    }
+
+    fn busy(&self) -> bool {
+        self.behind_until.lock().is_some_and(|until| Instant::now() < until)
     }
 
     fn presets(&self, uri: &str) -> Option<PresetList> {
