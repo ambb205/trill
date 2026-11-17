@@ -20,7 +20,9 @@
 //!   key's pitch, how even their levels are from key to key, how much
 //!   noise they carry.
 //! * `play` renders a phrase that suits the kind of instrument to a WAV
-//!   file, for listening.
+//!   file, for listening. Several files joined by `|` are played together,
+//!   each the notes of the phrase that lie in its range: the sections of
+//!   a string orchestra.
 //!
 //! Nothing is written but the file `play` names, and nothing of the user's
 //! is read: point it at folders of your own.
@@ -268,10 +270,13 @@ fn model() -> trill_core::Device {
 }
 
 /// The pitch of `samples` near `expected` Hz, by how well the sound
-/// matches itself a period later: within 80 cents either side.
+/// matches itself some whole periods later: within 50 cents either side.
+/// (Several periods, so that a high note, whose period is a dozen frames,
+/// is told as finely as a low one.)
 fn pitch_near(samples: &[f32], sample_rate: f64, expected: f64) -> Option<f64> {
-    let period = sample_rate / expected;
-    let (low, high) = ((period / 1.047).floor() as usize, (period * 1.047).ceil() as usize + 1);
+    let periods = (240.0 * expected / sample_rate).ceil().max(1.0);
+    let period = periods * sample_rate / expected;
+    let (low, high) = ((period / 1.029).floor() as usize, (period * 1.029).ceil() as usize + 1);
     let window = samples.len().checked_sub(high + 2)?;
     if window < high * 3 || low < 2 {
         return None;
@@ -285,7 +290,12 @@ fn pitch_near(samples: &[f32], sample_rate: f64, expected: f64) -> Option<f64> {
     let (before, at, after) = (scores[best - 1], scores[best], scores[best + 1]);
     let bend = before - 2.0 * at + after;
     let shift = if bend > 0.0 { 0.5 * (before - after) / bend } else { 0.0 };
-    Some(sample_rate / ((low - 1 + best) as f64 + shift))
+    // At either end of what was tried there is no dip to speak of.
+    (best > 1 && best < scores.len() - 2).then(|| periods * sample_rate / ((low - 1 + best) as f64 + shift))
+}
+
+fn peak_db(samples: &[f32]) -> f64 {
+    20.0 * f64::from(samples.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs())).max(1e-9)).log10()
 }
 
 fn rms_db(samples: &[f32]) -> f64 {
@@ -316,10 +326,11 @@ fn measure(file: &str) -> Result<(), String> {
         let (left, _) = audio.channels();
         let samples = &left[sampled::pool::GUARD..sampled::pool::GUARD + audio.frames()];
         // The quietest twentieth of a second in it: what it carries when nothing sounds.
-        let window = 2_400.min(samples.len());
+        // (Of recordings a second long or more: a short one is never quiet.)
+        let window = 2_400;
         let quietest = samples.chunks(window).filter(|chunk| chunk.len() == window).map(rms_db).fold(f64::MAX, f64::min);
-        if quietest < f64::MAX {
-            noise.push(quietest);
+        if quietest < f64::MAX && samples.len() >= 48_000 {
+            noise.push(quietest - peak_db(samples));
         }
         measured += 1;
     }
@@ -336,18 +347,22 @@ fn measure(file: &str) -> Result<(), String> {
             continue;
         }
         let expected = 440.0 * 2f64.powf((f64::from(*root) - 69.0) / 12.0) / 2f64.powf(f64::from(region.tune) / 1_200.0);
-        if let Some(heard) = pitch_near(&samples[from..to], rate, expected) {
+        // Between C2 and C7: outside that a piano is tuned wide on purpose.
+        if (36..=96).contains(root)
+            && let Some(heard) = pitch_near(&samples[from..to], rate, expected)
+        {
             cents.push((*root, 1_200.0 * (heard / expected).log2()));
         }
-        levels.push((*root, rms_db(&samples[from..to]) + f64::from(region.volume)));
+        // How hard it speaks: its peak, as the instrument levels it.
+        levels.push((*root, peak_db(&samples[..to]) + f64::from(region.volume)));
     }
     println!("{}: {measured} recordings read, {} keys recorded at their loudest", loaded.summary.name, loudest.len());
     noise.sort_by(f64::total_cmp);
     if !noise.is_empty() {
         println!(
-            "  noise: the quietest twentieth of a second of a recording is {:.0} dBFS at the middle, {:.0} at the worst",
-            noise[noise.len() / 2],
-            noise[noise.len() - 1]
+            "  noise: the quietest twentieth of a second of a recording lies {:.0} dB under its peak at the middle, {:.0} dB for the noisiest tenth",
+            -noise[noise.len() / 2],
+            -noise[noise.len() * 9 / 10]
         );
     }
     if !cents.is_empty() {
@@ -355,8 +370,10 @@ fn measure(file: &str) -> Result<(), String> {
         let spread = (cents.iter().map(|(_, off)| (off - mean).powi(2)).sum::<f64>() / cents.len() as f64).sqrt();
         let worst = cents.iter().max_by(|a, b| a.1.abs().total_cmp(&b.1.abs())).copied().unwrap_or((0, 0.0));
         println!(
-            "  tuning: the recordings are {mean:+.1} cents from their keys on average, {spread:.1} cents apart from one another (one deviation), the worst {:+.1} on key {}",
-            worst.1, worst.0
+            "  tuning (C2 to C7, {} keys): {mean:+.1} cents from equal temperament on average, {spread:.1} cents of spread (one deviation), the worst {:+.1} on key {}",
+            cents.len(),
+            worst.1,
+            worst.0
         );
     } else {
         println!("  tuning: not measured (no recordings that follow the keys, or none long enough)");
@@ -366,7 +383,7 @@ fn measure(file: &str) -> Result<(), String> {
         let worst = steps.iter().fold(0.0f64, |worst, step| worst.max(step.abs()));
         let spread = (steps.iter().map(|step| step * step).sum::<f64>() / steps.len() as f64).sqrt();
         println!(
-            "  evenness: from one recorded key to the next the level steps by {spread:.1} dB (root mean square), {worst:.1} dB at the most"
+            "  evenness: from one recorded key to the next the peak steps by {spread:.1} dB (root mean square), {worst:.1} dB at the most"
         );
     }
     Ok(())
@@ -508,42 +525,54 @@ fn play(file: &str, kind: &str, out: &Path) -> Result<(), String> {
     let limiter = session.project().master.devices[0].id;
     session.edit(|project| project.remove_device(limiter)).map_err(|error| error.to_string())?;
     session.edit(|project| project.set_tempo(96.0)).map_err(|error| error.to_string())?;
-    let track = session.edit(|project| Ok(project.add_track("Phrase"))).map_err(|error| error.to_string())?;
-    let device = session.add_device(ChainRef::Track(track), sampled::URI, Some(file), None).map_err(|error| error.to_string())?;
-    let said = session.sampled(device).ok_or("the instrument did not load")?;
-    println!("{}", said.about);
+    let files: Vec<&str> = file.split('|').collect();
+    let mut written = 0;
+    for file in &files {
+        let track = session.edit(|project| Ok(project.add_track("Phrase"))).map_err(|error| error.to_string())?;
+        let device =
+            session.add_device(ChainRef::Track(track), sampled::URI, Some(file), None).map_err(|error| error.to_string())?;
+        let said = session.sampled(device).ok_or("the instrument did not load")?;
+        println!("{}", said.about);
+        let (notes, curves, beats) = phrase(kind, &session, track)?;
+        // A bass that is written an octave up, a kit: what the instrument's
+        // range says. One instrument takes every note, moved by octaves to
+        // where it can play it; of several, each takes the notes it has.
+        let range = session.profile_of(track).range;
+        let notes: Vec<Note> = notes
+            .into_iter()
+            .filter_map(|mut note| {
+                if let (Some((low, high)), false) = (range, kind == "drums") {
+                    if files.len() > 1 {
+                        return (low..=high).contains(&note.pitch).then_some(note);
+                    }
+                    while note.pitch < low && note.pitch + 12 <= high {
+                        note.pitch += 12;
+                    }
+                    while note.pitch > high && note.pitch >= low + 12 {
+                        note.pitch -= 12;
+                    }
+                }
+                Some(note)
+            })
+            .collect();
+        written += notes.len();
+        session
+            .edit(|project| {
+                let clip = project.add_midi_clip(track, "Phrase", 0.0, beats)?;
+                project.clip_mut(clip)?.add_notes(&notes)?;
+                for (kind, points) in &curves {
+                    let (low, high) = kind.range();
+                    let points =
+                        points.iter().map(|(beat, value)| AutomationPoint::new(*beat, low + (high - low) * value / 127.0)).collect();
+                    project.clip_mut(clip)?.set_controller(*kind, points)?;
+                }
+                Ok(())
+            })
+            .map_err(|error| error.to_string())?;
+    }
     for problem in session.problems() {
         println!("problem: {problem:?}");
     }
-    let (notes, curves, beats) = phrase(kind, &session, track)?;
-    // A bass that is written an octave up, a kit: what the instrument's range says.
-    let range = session.profile_of(track).range;
-    let notes: Vec<Note> = notes
-        .into_iter()
-        .map(|mut note| {
-            if let (Some((low, high)), false) = (range, kind == "drums") {
-                while note.pitch < low && note.pitch + 12 <= high {
-                    note.pitch += 12;
-                }
-                while note.pitch > high && note.pitch >= low + 12 {
-                    note.pitch -= 12;
-                }
-            }
-            note
-        })
-        .collect();
-    session
-        .edit(|project| {
-            let clip = project.add_midi_clip(track, "Phrase", 0.0, beats)?;
-            project.clip_mut(clip)?.add_notes(&notes)?;
-            for (kind, points) in &curves {
-                let (low, high) = kind.range();
-                let points = points.iter().map(|(beat, value)| AutomationPoint::new(*beat, low + (high - low) * value / 127.0)).collect();
-                project.clip_mut(clip)?.set_controller(*kind, points)?;
-            }
-            Ok(())
-        })
-        .map_err(|error| error.to_string())?;
     let begun = Instant::now();
     let options = RenderOptions { sample_rate: SR as u32, max_tail_seconds: 6.0, ..RenderOptions::default() };
     let rendered = session.render_job().render(&options).map_err(|error| error.to_string())?;
@@ -562,7 +591,7 @@ fn play(file: &str, kind: &str, out: &Path) -> Result<(), String> {
     trill_media::write_wav(out, &buffer, WavFormat::Int24).map_err(|error| error.to_string())?;
     println!(
         "{} notes, {:.1} s of sound rendered in {:.2} s; its peak was {:.1} dB at the device's own volume; written to {}",
-        notes.len(),
+        written,
         buffer.left.len() as f64 / SR,
         took.as_secs_f64(),
         20.0 * f64::from(peak.max(1e-9)).log10(),
