@@ -96,3 +96,15 @@ pub fn zero_crossing_hz(samples: &[f32], sample_rate: f64) -> f64 {
         _ => 0.0,
     }
 }
+
+/// How much of the tone at `hz` is in `samples`: the amplitude of the sine
+/// of that frequency that accounts for it, whatever its phase.
+pub fn amplitude(samples: &[f32], hz: f64, sample_rate: f64) -> f32 {
+    let (mut re, mut im) = (0.0f64, 0.0f64);
+    for (n, sample) in samples.iter().enumerate() {
+        let phase = std::f64::consts::TAU * hz * n as f64 / sample_rate;
+        re += f64::from(*sample) * phase.cos();
+        im += f64::from(*sample) * phase.sin();
+    }
+    (2.0 * (re * re + im * im).sqrt() / samples.len().max(1) as f64) as f32
+}

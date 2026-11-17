@@ -29,6 +29,7 @@ Options:
   --no-browser            Start with the browser hidden (Ctrl+B shows it)
   --browse <devices|sounds>   What the browser lists first (default: as it was left)
   --library <FOLDER>      Add a folder of sounds to the library; may be given several times
+  --missing-files         Open with the list of the song's missing files up
   --search <TEXT>         Search the sound library for this at startup
   --sound <NAME>          Select the sound with this name in the browser
   --editor <DEVICE NAME>  Open this plugin's own window at startup
@@ -89,6 +90,8 @@ pub struct Cli {
     pub browse: Option<BrowserTab>,
     /// Folders to add to the sound library.
     pub library: Vec<PathBuf>,
+    /// Open with the list of missing files up.
+    pub missing_files: bool,
     /// What to search the sound library for.
     pub search: Option<String>,
     /// Name of a sound to select in the browser.
@@ -209,6 +212,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
             "--shortcuts" => cli.shortcuts = true,
             "--also-select" => cli.also_select.push(value("a clip name")?),
             "--library" => cli.library.push(PathBuf::from(value("a folder")?)),
+            "--missing-files" => cli.missing_files = true,
             "--search" => cli.search = Some(value("what to search for")?),
             "--sound" => cli.sound = Some(value("the name of a sound")?),
             "--editor" => cli.editor = Some(value("the name of a device")?),
@@ -365,6 +369,7 @@ impl Cli {
             },
             keyboard: self.keyboard.clone(),
             show_settings: self.settings,
+            show_missing: self.missing_files,
             record: self.record,
             stage: self.stage,
             making_of: (self.making_of || self.making_of_at.is_some()).then(|| match self.making_of_at {

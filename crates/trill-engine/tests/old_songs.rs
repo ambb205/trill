@@ -7,7 +7,9 @@
 //! file). It is opened as any file is and rendered, and the render is held
 //! to numbers that the last build with the old effects (commit 724556d)
 //! wrote down from the same file: the level of each side, and sixteen
-//! samples of each from the first to the tail.
+//! samples of each from the first to the tail. Further down are the files
+//! of format 2 and of format 3, each with the numbers of the last build
+//! that wrote that format.
 //!
 //! The numbers are never to be written down again from a newer build: that
 //! would make the test agree with whatever the effects have become.
@@ -15,11 +17,17 @@
 mod common;
 
 use common::*;
-use trill_core::Project;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use trill_core::audio::AudioBuffer;
-use trill_dsp::BuiltinFactory;
+use trill_core::controllers::ControllerKind;
+use trill_core::device::DeviceFactory;
+use trill_core::project::{AudioContent, AutomationPoint, AutomationTarget, FORMAT_VERSION};
+use trill_core::travel::Travel;
+use trill_core::{ChainRef, DeviceId, Note, Project, TrackId};
+use trill_dsp::{BuiltinFactory, Builtins, drumrack, sampler};
 use trill_engine::render::{RenderOptions, render};
-use trill_media::WavFormat;
+use trill_media::{MediaCache, WavFormat};
 
 /// The frames a render is sampled at.
 const POINTS: usize = 16;
@@ -117,9 +125,14 @@ fn old_file(source: &str, uri: &str, params: &str) -> String {
 /// Opens the file and renders it: the two seconds of the clip and what
 /// rings on after it.
 fn print_of(file: &str) -> Print {
+    print_with(file, &BuiltinFactory)
+}
+
+/// The same, with a factory that can read the files of sample players.
+fn print_with(file: &str, factory: &dyn DeviceFactory) -> Print {
     let project = Project::from_json(file).unwrap();
     let options = RenderOptions { sample_rate: SR as u32, max_tail_seconds: 2.0, ..RenderOptions::default() };
-    let out = render(&project, &BuiltinFactory, &options).unwrap();
+    let out = render(&project, factory, &options).unwrap();
     assert!(out.problems.is_empty(), "{:?}", out.problems);
     let mut print = [0.0f32; 2 + 2 * POINTS];
     print[0] = rms(&out.left);
@@ -403,19 +416,491 @@ const OLD: &[(&str, &str, Print)] = &[
 #[test]
 fn a_song_of_format_1_renders_to_the_samples_it_rendered_to_before() {
     let folder = folder();
-    let path = file(&folder, "source.wav");
-    trill_media::write_wav(&path, &source(), WavFormat::Float32).unwrap();
-    let path = path.display().to_string().replace('\\', "/");
+    let (path, _) = files(&folder);
     for (uri, params, expected) in OLD {
         let print = print_of(&old_file(&path, uri, params));
-        // A level off by a hundredth of a dB, or a sample that has moved,
-        // is far outside this; what a compiler may do to the last bit of a
-        // coefficient is far inside it.
-        for (index, (got, expected)) in print.iter().zip(expected).enumerate() {
-            assert!(
-                (got - expected).abs() <= 1e-5 + 1e-4 * expected.abs(),
-                "{uri} with {params}: number {index} is {got:e}, and was {expected:e}"
-            );
+        assert_as_it_was(&print, expected, &format!("{uri} with {params}"));
+    }
+}
+
+// ---- Format 2 --------------------------------------------------------------
+//
+// The same for a file of format 2, the last before the sample players'
+// velocity law, the synth's level, the saturator's level and the lowest
+// value of a level changed. Commit e0bd78a wrote these numbers down: the
+// effects on the source above, and each instrument playing `played`.
+
+/// What is on the one track of a file of format 2.
+#[derive(Copy, Clone, Debug)]
+enum Plays {
+    /// The source, through the device.
+    Effect,
+    /// The device, playing [`played`] with the pitch wheel of [`wheel`].
+    Synth,
+    /// The same, the device a sampler with [`hit`] as its file.
+    Sampler,
+    /// The same, a drum rack with [`hit`] on three of its pads.
+    Rack,
+}
+
+/// The notes an instrument plays: three of the rack's pads and keys across
+/// the keyboard, hard and soft, apart and together.
+fn played() -> Vec<Note> {
+    [
+        (36, 0.0, 0.5, 127),
+        (60, 0.25, 0.4, 100),
+        (42, 0.5, 0.25, 75),
+        (64, 1.0, 0.45, 75),
+        (67, 1.0, 0.45, 60),
+        (48, 1.5, 0.5, 46),
+        (42, 1.75, 0.2, 110),
+        (72, 2.0, 0.25, 110),
+        (36, 2.5, 0.3, 20),
+        (55, 2.5, 1.0, 20),
+        (42, 3.0, 0.2, 100),
+        (60, 3.0, 0.75, 90),
+        (48, 3.5, 0.4, 64),
+    ]
+    .into_iter()
+    .map(|(pitch, start, length, velocity)| Note { pitch, start, length, velocity })
+    .collect()
+}
+
+/// Where the pitch wheel is while they play: down, up and back to rest.
+fn wheel() -> Vec<AutomationPoint> {
+    [(1.0, 0.0), (1.4, -0.5), (2.0, 1.0), (2.2, 0.0)]
+        .into_iter()
+        .map(|(beat, value)| AutomationPoint::new(beat, value))
+        .collect()
+}
+
+/// A drum hit of a third of a second for the sample players: a thump under
+/// a burst of noise, not the same on both sides.
+fn hit() -> AudioBuffer {
+    let rate = 44_100.0;
+    let frames = (0.33 * rate) as usize;
+    let (mut left, mut right) = (vec![0.0f32; frames], vec![0.0f32; frames]);
+    let mut seed = 0x1F12_3BB5u32;
+    let mut noise = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        (seed >> 8) as f64 / 8_388_608.0 - 1.0
+    };
+    for n in 0..frames {
+        let t = n as f64 / rate;
+        let thump = 0.7 * (-t / 0.09).exp() * (std::f64::consts::TAU * 150.0 * t).sin();
+        let (a, b) = (noise(), noise());
+        let fall = (-t / 0.03).exp();
+        left[n] = (thump + 0.25 * a * fall) as f32;
+        right[n] = (thump + 0.25 * (0.5 * a + 0.5 * b) * fall) as f32;
+    }
+    AudioBuffer { sample_rate: rate, left, right }
+}
+
+/// A project file of format 2 with one track: `plays`, the device `uri`
+/// with `params` as the file has them, `source` and `hit` being the paths
+/// of the two files.
+fn later_file(plays: Plays, uri: &str, params: &[(&str, f64)], source: &str, hit: &str) -> String {
+    let mut project = Project::new("old");
+    project.master.devices.clear();
+    project.set_tempo(120.0).unwrap();
+    let track = project.add_track("Track");
+    let device = project.add_device(ChainRef::Track(track), uri, "Device", None).unwrap();
+    let params: BTreeMap<String, f64> = params.iter().map(|(id, value)| (id.to_string(), *value)).collect();
+    project.device_mut(device).unwrap().params = params;
+    project.device_mut(device).unwrap().state = match plays {
+        Plays::Sampler => Some(sampler::State::new(hit).to_bytes()),
+        Plays::Rack => {
+            let mut state = drumrack::State::default();
+            for pad in [36, 42, 48] {
+                state.set_pad(pad, hit).unwrap();
+            }
+            Some(state.to_bytes())
+        }
+        Plays::Effect | Plays::Synth => None,
+    };
+    match plays {
+        Plays::Effect => {
+            project.add_audio_clip(track, "clip", 0.0, 4.0, AudioContent::new(source)).unwrap();
+        }
+        Plays::Synth | Plays::Sampler | Plays::Rack => {
+            let clip = project.add_midi_clip(track, "clip", 0.0, 4.0).unwrap();
+            let clip = project.clip_mut(clip).unwrap();
+            clip.add_notes(&played()).unwrap();
+            clip.set_controller(ControllerKind::PitchBend, wheel()).unwrap();
         }
     }
+    // The file as the build of the day wrote it: this one's, but for the
+    // number that says which format it is.
+    let file = project.to_json();
+    let now = format!("\"format_version\": {FORMAT_VERSION}");
+    assert!(file.contains(&now), "{file}");
+    file.replace(&now, "\"format_version\": 2")
+}
+
+/// A case of format 2: what is on the track, the device, what the file set
+/// on it, and what it rendered to.
+type Later = (Plays, &'static str, &'static [(&'static str, f64)], Print);
+
+#[rustfmt::skip]
+const LATER: &[Later] = &[
+    (
+        Plays::Synth,
+        "builtin:polysynth",
+        &[],
+        [
+            8.083367e-2, 8.083367e-2, -5.99122e-2, -5.99122e-2, 1.2960912e-1, 1.2960912e-1,
+            2.1975977e-2, 2.1975977e-2, -1.2794988e-1, -1.2794988e-1, 6.697058e-2, 6.697058e-2,
+            -1.4385544e-1, -1.4385544e-1, -1.8616882e-3, -1.8616882e-3, -3.0625854e-2, -3.0625854e-2,
+            7.9085104e-2, 7.9085104e-2, 5.6153733e-2, 5.6153733e-2, -6.602579e-2, -6.602579e-2,
+            1.457565e-3, 1.457565e-3, -4.1970907e-5, -4.1970907e-5, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0,
+        ],
+    ),
+    (
+        Plays::Synth,
+        "builtin:polysynth",
+        &[("osc1_wave", 0.0), ("attack", 0.001), ("decay", 20.0), ("sustain", 1.0), ("release", 0.12), ("velocity_sens", 0.6), ("volume", -10.0)],
+        [
+            3.805487e-2, 3.805487e-2, 5.4078966e-2, 5.4078966e-2, -1.0065698e-1, -1.0065698e-1,
+            2.850383e-4, 2.850383e-4, 6.9638185e-2, 6.9638185e-2, -3.082618e-2, -3.082618e-2,
+            8.423329e-2, 8.423329e-2, -1.9598451e-4, -1.9598451e-4, 3.141987e-2, 3.141987e-2,
+            3.450108e-3, 3.450108e-3, -3.3882793e-2, -3.3882793e-2, 1.329844e-2, 1.329844e-2,
+            -1.25112e-5, -1.25112e-5, 0e0, 0e0, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0,
+        ],
+    ),
+    (
+        Plays::Synth,
+        "builtin:polysynth",
+        &[("noise_level", 1.0), ("osc_mix", 1.0), ("osc2_wave", 0.0), ("osc2_semitones", -24.0), ("filter_type", 3.0), ("cutoff", 8000.0), ("resonance", 0.15), ("attack", 0.002), ("release", 0.2), ("velocity_sens", 0.0), ("volume", -20.0)],
+        [
+            6.439263e-3, 6.439263e-3, 4.521841e-3, 4.521841e-3, 9.3962075e-3, 9.3962075e-3,
+            1.4412231e-3, 1.4412231e-3, 5.9771026e-3, 5.9771026e-3, -3.2898467e-3, -3.2898467e-3,
+            7.5462097e-3, 7.5462097e-3, -1.6855148e-3, -1.6855148e-3, 1.2947279e-2, 1.2947279e-2,
+            2.0840413e-4, 2.0840413e-4, 1.0019033e-2, 1.0019033e-2, 4.6904446e-3, 4.6904446e-3,
+            2.0700883e-5, 2.0700883e-5, 0e0, 0e0, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0,
+        ],
+    ),
+    (
+        Plays::Synth,
+        "builtin:polysynth",
+        &[("osc2_wave", 3.0), ("osc_mix", 0.4), ("osc2_detune", 6.0), ("sub_level", 0.5), ("noise_level", 0.2), ("unison", 3.0), ("fm_amount", 0.3), ("filter_type", 1.0), ("cutoff", 520.0), ("resonance", 0.25), ("filter_env", 2.5), ("mono", 1.0), ("glide", 0.03), ("velocity_sens", 0.4), ("volume", -48.0)],
+        [
+            3.0499094e-4, 3.0823651e-4, -6.178745e-4, -4.9732404e-4, 3.0950384e-4, 2.3782109e-4,
+            -1.9883462e-4, 2.315149e-5, 7.360397e-5, -6.807641e-5, -1.6782671e-4, -2.4161545e-4,
+            2.2940878e-4, 1.19908735e-4, 2.0028556e-4, 3.6270096e-4, -1.2637548e-4, -2.2828029e-4,
+            -8.018735e-4, -7.034482e-4, -4.939016e-5, 1.2229921e-4, -1.4096271e-4, -1.1888988e-4,
+            -4.4296035e-6, -1.961392e-6, 0e0, 0e0, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0,
+        ],
+    ),
+    (
+        Plays::Sampler,
+        "builtin:sampler",
+        &[],
+        [
+            1.1526465e-1, 1.1367371e-1, -3.5735133e-1, -3.7449113e-1, -1.828607e-1, -1.9405667e-1,
+            -6.879738e-3, -6.76289e-3, -2.6170248e-2, -2.7028352e-2, -2.0898534e-2, -2.2840545e-2,
+            -1.8232125e-1, -1.7883717e-1, -2.8078293e-4, -2.807948e-4, 1.4796767e-1, 1.3198353e-1,
+            4.124061e-1, 3.409136e-1, 2.411041e-2, 2.4148028e-2, -2.1352509e-2, -2.1452673e-2,
+            0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0,
+        ],
+    ),
+    (
+        Plays::Sampler,
+        "builtin:sampler",
+        &[("one_shot", 1.0), ("release", 0.02), ("velocity_sens", 0.8), ("volume", -12.0)],
+        [
+            6.044964e-2, 5.981674e-2, -1.7909993e-1, -1.8769018e-1, -9.190254e-2, -9.749288e-2,
+            -1.0319605e-1, -1.0255108e-1, -5.599024e-2, -5.6715034e-2, -8.55358e-3, -9.184881e-3,
+            -9.957921e-2, -9.774664e-2, 5.031776e-2, 4.9591165e-2, 5.9702665e-2, 5.539654e-2,
+            2.0427711e-1, 1.7177139e-1, 4.1903548e-2, 4.121915e-2, -1.3800663e-3, -1.3684699e-3,
+            0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0,
+        ],
+    ),
+    (
+        Plays::Sampler,
+        "builtin:sampler",
+        &[("velocity_sens", 1.0), ("volume", -48.0), ("transpose", 5.0)],
+        [
+            6.7055033e-4, 6.622287e-4, 3.5825017e-4, 4.2820096e-4, 1.1438535e-4, 9.7655044e-5,
+            2.2050683e-5, 2.2180098e-5, -3.0447464e-4, -3.0254354e-4, 4.5905113e-6, 6.711892e-5,
+            1.0565036e-3, 1.2212646e-3, 0e0, 0e0, 4.7098772e-5, 4.23847e-5,
+            8.6193706e-4, 1.1322729e-3, -6.339215e-5, -6.339033e-5, -1.608566e-4, -1.6087164e-4,
+            0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0,
+        ],
+    ),
+    (
+        Plays::Rack,
+        "builtin:drumrack",
+        &[],
+        [
+            1.1586747e-1, 1.14572875e-1, 3.7532258e-1, 3.5259074e-1, 6.9339894e-2, 6.921044e-2,
+            -4.6114374e-2, -4.5608625e-2, 0e0, 0e0, 1.0411567e-1, 8.449789e-2,
+            1.7864557e-2, 9.624408e-3, -2.0777488e-2, -2.0798424e-2, -6.702592e-4, -9.2804886e-4,
+            3.273506e-1, 3.055559e-1, 4.7927245e-2, 4.800202e-2, -2.9988738e-2, -2.9848939e-2,
+            0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0,
+        ],
+    ),
+    (
+        Plays::Rack,
+        "builtin:drumrack",
+        &[("velocity_sens", 0.5), ("volume", -6.0), ("pad42_level", 0.7), ("pad48_tune", -5.0)],
+        [
+            6.609665e-2, 6.536169e-2, 1.8810686e-1, 1.7671396e-1, 3.475227e-2, 3.4687385e-2,
+            -2.5913702e-2, -2.56295e-2, 0e0, 0e0, 1.5032767e-1, 1.3487041e-1,
+            1.9865701e-2, 1.674034e-2, -7.5700083e-3, -7.5774593e-3, -2.8556166e-3, -3.9539207e-3,
+            1.3321745e-1, 1.23920396e-1, 2.0439686e-2, 2.0471575e-2, 3.9861254e-2, 3.917985e-2,
+            2.1700198e-3, 2.1783048e-3, 0e0, 0e0, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0,
+        ],
+    ),
+    (
+        Plays::Effect,
+        "builtin:saturator",
+        &[],
+        [
+            2.1635906e-1, 1.7473346e-1, -2.0008089e-1, 1.6797978e-1, 2.3642804e-2, -9.664135e-3,
+            -3.2872085e-2, 3.867318e-2, 3.716535e-1, 2.62163e-1, -4.929621e-1, -2.1445984e-1,
+            1.8551177e-1, -2.1579817e-1, -2.4582297e-3, 2.8959366e-3, 1.3940863e-1, 1.3940863e-1,
+            0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0,
+        ],
+    ),
+    (
+        Plays::Effect,
+        "builtin:saturator",
+        &[("drive", 9.0), ("output", -8.0)],
+        [
+            9.326295e-2, 7.75462e-2, -9.219856e-2, 7.801157e-2, 1.1182484e-2, -4.5723147e-3,
+            -1.5542348e-2, 1.828016e-2, 1.6056924e-1, 1.185459e-1, -1.9876029e-1, -9.843713e-2,
+            8.580217e-2, -9.901387e-2, -1.1631098e-3, 1.3702085e-3, 6.5119244e-2, 6.5119244e-2,
+            0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0,
+        ],
+    ),
+    (
+        Plays::Effect,
+        "builtin:saturator",
+        &[("drive", 24.0), ("shape", 1.0), ("mix", 0.5)],
+        [
+            2.4805133e-1, 2.1795754e-1, -2.805786e-1, 2.6334035e-1, 5.8975052e-2, -2.4098929e-2,
+            -8.202523e-2, 9.652732e-2, 3.8429284e-1, 3.1540093e-1, -4.8244306e-1, -2.8845188e-1,
+            2.727008e-1, -2.8919e-1, -6.129598e-3, 7.2210324e-3, 2.4832784e-1, 2.4832784e-1,
+            0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0,
+        ],
+    ),
+    (
+        Plays::Effect,
+        "builtin:utility",
+        &[("gain", -70.0)],
+        [
+            1.5525827e-2, 1.0945996e-2, -1.8246645e-2, 1.51917115e-2, 5.29505e-6, -2.1637125e-6,
+            -7.364601e-6, 8.666665e-6, 9.24302e-5, 6.1620136e-5, -1.3632528e-4, -4.9567883e-5,
+            4.2523632e-5, -4.9897986e-5, -5.503434e-7, 6.483373e-7, 3.162347e-5, 3.162347e-5,
+            0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0,
+        ],
+    ),
+    (
+        Plays::Effect,
+        "builtin:limiter",
+        &[("gain", 7.0)],
+        [
+            3.6841285e-1, 2.8413364e-1, 4.06743e-1, 5.6409754e-2, 1.0213294e-2, 4.2390242e-2,
+            1.2786524e-1, -1.3158101e-1, 1.8668354e-2, 2.488344e-2, -7.093116e-1, 6.41975e-1,
+            6.338586e-1, -4.53362e-2, 1.4472194e-1, 1.4440762e-1, -4.051579e-1, -4.051579e-1,
+            0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0,
+        ],
+    ),
+    (
+        Plays::Effect,
+        "builtin:limiter",
+        &[("gain", 12.0), ("ceiling", -1.0), ("release", 300.0)],
+        [
+            3.982748e-1, 3.1016126e-1, 3.8202715e-1, 5.2982006e-2, 1.2615167e-2, 5.23592e-2,
+            1.876456e-1, -1.9309862e-1, 2.2410227e-2, 2.9871061e-2, -6.5751106e-1, 5.95092e-1,
+            7.7260023e-1, -5.5259574e-2, 1.5695553e-1, 1.5661463e-1, -4.742187e-1, -4.742187e-1,
+            0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+            0e0, 0e0, 0e0, 0e0,
+        ],
+    ),
+];
+
+/// The two files the cases play, written into `folder`: the source and the
+/// hit, as the paths a project file holds.
+fn files(folder: &tempfile::TempDir) -> (String, String) {
+    let written = |name: &str, audio: AudioBuffer| {
+        let path = file(folder, name);
+        trill_media::write_wav(&path, &audio, WavFormat::Float32).unwrap();
+        path.display().to_string().replace('\\', "/")
+    };
+    (written("source.wav", source()), written("hit.wav", hit()))
+}
+
+/// Holds a render to what it was: a level off by a hundredth of a dB, or a
+/// sample that has moved, is far outside this; what a compiler may do to
+/// the last bit of a coefficient is far inside it.
+fn assert_as_it_was(print: &Print, expected: &Print, what: &str) {
+    for (index, (got, expected)) in print.iter().zip(expected).enumerate() {
+        assert!(
+            (got - expected).abs() <= 1e-5 + 1e-4 * expected.abs(),
+            "{what}: number {index} is {got:e}, and was {expected:e}"
+        );
+    }
+}
+
+#[test]
+fn a_song_of_format_2_renders_to_the_samples_it_rendered_to_before() {
+    let folder = folder();
+    let (source, hit) = files(&folder);
+    let factory = Builtins::with_loader(Arc::new(MediaCache::default()));
+    for (plays, uri, params, expected) in LATER {
+        let print = print_with(&later_file(*plays, uri, params, &source, &hit), &factory);
+        assert!(expected[0] > 0.0, "{uri} with {params:?} was not silent");
+        assert_as_it_was(&print, expected, &format!("{uri} with {params:?}"));
+    }
+}
+
+// ---- Format 3 --------------------------------------------------------------
+//
+// And for a file of format 3, the first whose envelopes say how their lines
+// travel and the last with the devices as they were before format 4. The
+// build that wrote that format (commit f2a63be) wrote these numbers down.
+// Here the two things an older file is read by meet: the devices keep the
+// sound they had, and an envelope on a parameter whose scale has moved
+// since keeps the curve it played.
+
+/// A track with `devices` on it, each set to what its file sets.
+fn track(project: &mut Project, name: &str, devices: &[(&str, &[(&str, f64)])]) -> (TrackId, Vec<DeviceId>) {
+    let track = project.add_track(name);
+    let ids = devices
+        .iter()
+        .map(|(uri, params)| {
+            let id = project.add_device(ChainRef::Track(track), *uri, *uri, None).unwrap();
+            let params: BTreeMap<String, f64> = params.iter().map(|(id, value)| (id.to_string(), *value)).collect();
+            project.device_mut(id).unwrap().params = params;
+            id
+        })
+        .collect();
+    (track, ids)
+}
+
+fn empty() -> Project {
+    let mut project = Project::new("old");
+    project.master.devices.clear();
+    project.set_tempo(120.0).unwrap();
+    project
+}
+
+/// A sampler beside a poly synth through a saturator, each playing
+/// [`played`].
+fn band(hit: &str) -> Project {
+    let mut project = empty();
+    let (hits, devices) = track(&mut project, "Hits", &[("builtin:sampler", &[])]);
+    project.device_mut(devices[0]).unwrap().state = Some(sampler::State::new(hit).to_bytes());
+    let synth: &[(&str, f64)] = &[("osc1_wave", 0.0), ("noise_level", 0.3), ("volume", -3.0)];
+    let (bass, _) =
+        track(&mut project, "Bass", &[("builtin:polysynth", synth), ("builtin:saturator", &[("drive", 12.0)])]);
+    for part in [hits, bass] {
+        let clip = project.add_midi_clip(part, "clip", 0.0, 4.0).unwrap();
+        let clip = project.clip_mut(clip).unwrap();
+        clip.add_notes(&played()).unwrap();
+        clip.set_controller(ControllerKind::PitchBend, wheel()).unwrap();
+    }
+    project
+}
+
+/// A held note on a poly synth whose volume an envelope moves along the
+/// travel `volume`, through a utility whose gain one fades along `gain`:
+/// down to the bottom of the volume's range of the day and up over the
+/// top of today's, and out to where a gain was 70 dB down.
+fn faded(volume: Travel, gain: Travel) -> Project {
+    let mut project = empty();
+    let synth: &[(&str, f64)] = &[("osc1_wave", 0.0), ("sustain", 1.0), ("release", 0.05), ("velocity_sens", 0.0)];
+    let (lead, devices) = track(&mut project, "Lead", &[("builtin:polysynth", synth), ("builtin:utility", &[])]);
+    let clip = project.add_midi_clip(lead, "clip", 0.0, 4.0).unwrap();
+    project.clip_mut(clip).unwrap().add_notes(&[Note { pitch: 57, start: 0.0, length: 4.0, velocity: 100 }]).unwrap();
+    let points =
+        |points: &[(f64, f64)]| points.iter().map(|(beat, value)| AutomationPoint::new(*beat, *value)).collect();
+    let target = |device: DeviceId, param: &str| AutomationTarget::DeviceParam { device, param: param.to_string() };
+    let line = points(&[(0.0, 0.0), (1.5, -30.0), (2.5, -48.0), (3.0, 6.0), (4.0, -12.0)]);
+    project.write_automation(target(devices[0], "volume"), line, volume).unwrap();
+    let line = points(&[(0.0, 0.0), (3.5, 0.0), (4.0, -70.0)]);
+    project.write_automation(target(devices[1], "gain"), line, gain).unwrap();
+    project
+}
+
+/// `project` as a build of format 3 saved it.
+fn of_format_3(project: &Project) -> String {
+    let file = project.to_json();
+    let now = format!("\"format_version\": {FORMAT_VERSION}");
+    assert!(file.contains(&now), "{file}");
+    file.replace(&now, "\"format_version\": 3")
+}
+
+/// What the three songs of format 3 rendered to: the band, the fade along
+/// the faders of the day, and the same fade straight in decibels.
+#[rustfmt::skip]
+const THIRD: [Print; 3] = [
+    [
+        1.6985302e-1, 1.6874328e-1, -1.1886214e-1, -1.3600193e-1, -4.793711e-1, -4.905671e-1,
+        -2.6985344e-2, -2.6868496e-2, 2.1439037e-1, 2.1353227e-1, -1.710221e-1, -1.7296411e-1,
+        1.3515893e-1, 1.3864301e-1, 2.4152678e-2, 2.4152664e-2, 2.8187498e-1, 2.6589084e-1,
+        3.2488525e-1, 2.5339276e-1, -1.4277056e-1, -1.4273293e-1, -3.633645e-2, -3.6436614e-2,
+        -7.6887677e-3, -7.6887677e-3, 8.434271e-5, 8.434271e-5, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0,
+    ],
+    [
+        9.604933e-2, 9.604933e-2, -8.7527804e-2, -8.7527804e-2, -9.750474e-2, -9.750474e-2,
+        2.4662694e-2, 2.4662694e-2, 1.85178e-2, 1.85178e-2, -3.5000711e-3, -3.5000711e-3,
+        -3.6042812e-3, -3.6042812e-3, 1.3156374e-3, 1.3156374e-3, 2.5477238e-2, 2.5477238e-2,
+        -2.534566e-1, -2.534566e-1, -1.5738381e-1, -1.5738381e-1, 4.9167653e-3, 4.9167653e-3,
+        0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0,
+    ],
+    [
+        8.626552e-2, 8.626552e-2, -8.555548e-2, -8.555548e-2, -7.558947e-2, -7.558947e-2,
+        1.684298e-2, 1.684298e-2, 1.3125865e-2, 1.3125865e-2, -3.37307e-3, -3.37307e-3,
+        -2.493017e-3, -2.493017e-3, 7.8553386e-4, 7.8553386e-4, 5.5886456e-3, 5.5886456e-3,
+        -2.5007606e-1, -2.5007606e-1, -1.4293873e-1, -1.4293873e-1, 8.286766e-4, 8.286766e-4,
+        0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0,
+    ],
+];
+
+#[test]
+fn a_song_of_format_3_renders_to_the_samples_it_rendered_to_before() {
+    let folder = folder();
+    let (_, hit) = files(&folder);
+    let factory = Builtins::with_loader(Arc::new(MediaCache::default()));
+    // How that build had an envelope on these two parameters travel: along
+    // a fader down to the lowest value each had then.
+    let (volume, gain) = (Travel::Fader { floor: -48.0 }, Travel::Fader { floor: -70.0 });
+    let songs = [
+        ("a sampler beside a synth through a saturator", band(&hit)),
+        ("an envelope on a synth's volume, along its fader", faded(volume, gain)),
+        ("the same envelope, straight in decibels", faded(Travel::Linear, Travel::Linear)),
+    ];
+    for ((what, song), expected) in songs.iter().zip(&THIRD) {
+        assert_as_it_was(&print_with(&of_format_3(song), &factory), expected, what);
+    }
+    // The two fades are not the same curve, so each holds its own line:
+    // a moved envelope that bent would be off by decibels, not by a bit.
+    assert!((THIRD[1][0] / THIRD[2][0] - 1.0).abs() > 0.1);
 }

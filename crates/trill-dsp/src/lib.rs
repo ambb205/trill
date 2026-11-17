@@ -29,22 +29,24 @@ mod testing;
 pub use level::{controller_support, is_instrument};
 pub use loading::{SampleRef, StateError};
 
-use effects::{compressor, delay, dynamics, eq, modulation, reverb, utility};
+use effects::{compressor, delay, dynamics, eq, modulation, reverb, shifter, utility};
 use loading::{SampleController, SampleSource, SampleStore};
 use params::{ParamDef, PresetDef};
 use std::sync::Arc;
-use trill_core::Device;
 use trill_core::audio::AudioLoader;
 use trill_core::device::{
     BUILTIN_SCHEME, DeviceCategory, DeviceController, DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance,
     DeviceProcessor, DeviceWarning, split_uri,
 };
+use trill_core::{Device, DeviceFiles};
 
 /// Makes a sample player from its stored state, loading its files. Fails
 /// only if there is no way to load files at all.
 type CreateSampled = fn(Option<&[u8]>, &SampleSource) -> Result<Box<dyn DeviceProcessor>, String>;
 /// Lists the files a stored state refers to.
 type ListSamples = fn(Option<&[u8]>) -> Result<Vec<SampleRef>, StateError>;
+/// The stored state with the files in the given slots replaced.
+type RelinkSamples = fn(Option<&[u8]>, &[(String, String)]) -> Result<Vec<u8>, StateError>;
 
 /// How a built-in device is made.
 #[derive(Copy, Clone)]
@@ -52,7 +54,7 @@ enum Create {
     /// From its parameters alone.
     Plain(fn() -> Box<dyn DeviceProcessor>),
     /// From its state document, which names the audio files it plays.
-    Sampled { create: CreateSampled, references: ListSamples },
+    Sampled { create: CreateSampled, references: ListSamples, relink: RelinkSamples },
 }
 
 struct Builtin {
@@ -102,7 +104,11 @@ static BUILTINS: &[Builtin] = &[
         description: sampler::DESCRIPTION,
         params: sampler::PARAMS,
         presets: sampler::PRESETS,
-        create: Create::Sampled { create: sampler::create, references: sampler::sample_refs },
+        create: Create::Sampled {
+            create: sampler::create,
+            references: sampler::sample_refs,
+            relink: sampler::relinked,
+        },
     },
     Builtin {
         key: "drumrack",
@@ -111,7 +117,11 @@ static BUILTINS: &[Builtin] = &[
         description: drumrack::DESCRIPTION,
         params: drumrack::PARAMS,
         presets: &[],
-        create: Create::Sampled { create: drumrack::create, references: drumrack::sample_refs },
+        create: Create::Sampled {
+            create: drumrack::create,
+            references: drumrack::sample_refs,
+            relink: drumrack::relinked,
+        },
     },
     effect("reverb", "Reverb", reverb::DESCRIPTION, reverb::PARAMS, || Box::new(reverb::Reverb::new())),
     effect("delay", "Delay", delay::DESCRIPTION, delay::PARAMS, || Box::new(delay::Delay::new())),
@@ -132,6 +142,7 @@ static BUILTINS: &[Builtin] = &[
         Box::new(modulation::Tremolo::new())
     }),
     effect("pump", "Pump", modulation::PUMP_DESCRIPTION, modulation::PUMP_PARAMS, || Box::new(modulation::Pump::new())),
+    effect("shifter", "Pitch Shifter", shifter::DESCRIPTION, shifter::PARAMS, || Box::new(shifter::Shifter::new())),
     effect("saturator", "Saturator", utility::SATURATOR_DESCRIPTION, utility::SATURATOR_PARAMS, || {
         Box::new(utility::Saturator::new())
     }),
@@ -286,6 +297,27 @@ pub fn sample_refs(device: &Device) -> Vec<SampleRef> {
     match find(&device.uri).map(|builtin| builtin.create) {
         Some(Create::Sampled { references, .. }) => references(device.state.as_deref()).unwrap_or_default(),
         _ => Vec::new(),
+    }
+}
+
+/// What the states of the built-in sample players say of files: which a
+/// device plays, and its state with other files in their place. This is
+/// what [`Project::files`](trill_core::Project::files) and
+/// [`Project::relink`](trill_core::Project::relink) ask of the devices of a
+/// song; a plugin keeps its files to itself.
+pub struct SampleFiles;
+
+impl DeviceFiles for SampleFiles {
+    fn files(&self, device: &Device) -> Vec<(String, String)> {
+        sample_refs(device).into_iter().map(|SampleRef { slot, path }| (slot, path)).collect()
+    }
+
+    fn relinked(&self, device: &Device, slots: &[(String, String)]) -> Result<Vec<u8>, String> {
+        match find(&device.uri).map(|builtin| builtin.create) {
+            Some(Create::Sampled { relink, .. }) => relink(device.state.as_deref(), slots)
+                .map_err(|error| format!("{} ({}): {error}", device.id, device.name)),
+            _ => Err(format!("{} ({}) plays no files", device.id, device.name)),
+        }
     }
 }
 
@@ -461,14 +493,14 @@ mod tests {
         }
     }
 
-    /// The devices that sound different from format 2 on are named in
+    /// The devices that sound different from one format on are named in
     /// `trill-core`, which knows nothing of them: each has to be a device,
-    /// and what a format-1 file is taken to have said has to be something
+    /// and what an older file is taken to have said has to be something
     /// it can be told.
     #[test]
-    fn what_a_song_of_format_1_is_given_are_parameters_of_these_devices() {
-        use trill_core::formats::{FORMAT_1, LEGACY};
-        for (uri, values) in FORMAT_1 {
+    fn what_a_song_of_an_older_format_is_given_are_parameters_of_these_devices() {
+        use trill_core::formats::{FORMAT_1, FORMAT_3, LEGACY, MOVED_3};
+        for (uri, values) in FORMAT_1.iter().chain(FORMAT_3) {
             let builtin = find(uri).unwrap_or_else(|| panic!("{uri} is not a built-in device"));
             assert!(
                 values.iter().any(|(id, value)| *id == LEGACY && *value == 1.0),
@@ -481,11 +513,22 @@ mod tests {
             let legacy = builtin.params.iter().find(|def| def.id == LEGACY).unwrap();
             assert!(matches!(legacy.kind, params::Kind::Bool) && legacy.default == 0.0, "{uri}: off in a new device");
         }
-        // And no device has such a switch without being in the list: it
-        // would be on in no song.
+        // And no device has such a switch without being in a list: it
+        // would be on in no song. Nor is one in both: its switch could say
+        // only one of the two things.
         for builtin in BUILTINS {
-            let listed = FORMAT_1.iter().any(|(uri, _)| *uri == format!("{BUILTIN_SCHEME}:{}", builtin.key));
-            assert_eq!(builtin.params.iter().any(|def| def.id == LEGACY), listed, "{}", builtin.key);
+            let uri = format!("{BUILTIN_SCHEME}:{}", builtin.key);
+            let listed = FORMAT_1.iter().chain(FORMAT_3).filter(|(device, _)| *device == uri).count();
+            assert_eq!(usize::from(builtin.params.iter().any(|def| def.id == LEGACY)), listed, "{}", builtin.key);
+        }
+        // A parameter that moved is one of its device's, as is the one that
+        // came with the move; what it was and what that is now are both
+        // values it takes, and what it was unsaid is now its default.
+        for moved in MOVED_3 {
+            let builtin = find(moved.uri).unwrap_or_else(|| panic!("{} is not a built-in device", moved.uri));
+            let def = |id: &str| builtin.params.iter().find(|def| def.id == id).unwrap_or_else(|| panic!("no {id}"));
+            assert_eq!(def(moved.param).default, moved.unsaid + moved.by, "{}", moved.param);
+            assert!(def(moved.param).min <= moved.unsaid + moved.by && def(moved.since).min < def(moved.since).max);
         }
     }
 
@@ -804,6 +847,75 @@ mod tests {
         assert!(sample_refs(&model("reverb", &[])).is_empty());
         assert_eq!(sample_refs(&model("sampler", &[])), [SampleRef { slot: "sample".into(), path: "tone.wav".into() }]);
         assert_eq!(sample_refs(&model("drumrack", &[])).len(), drumrack::PAD_COUNT);
+    }
+
+    #[test]
+    fn a_sample_player_is_pointed_at_other_files_and_keeps_everything_else() {
+        let mut project = Project::new("Song");
+        let track = project.add_track("Kit");
+        let chain = ChainRef::Track(track);
+        let rack = project.add_device(chain, "builtin:drumrack", "Drum Rack", None).unwrap();
+        // A pad with something this build does not know, which is kept.
+        let document = br#"{ "version": 1, "choke": [42, 46],
+            "pads": [{ "note": 36, "path": "A/kick.wav", "tune": 3 }, { "note": 38, "path": "A/snare.wav" }] }"#;
+        project.device_mut(rack).unwrap().state = Some(document.to_vec());
+        project.device_mut(rack).unwrap().params.insert("volume".into(), -3.0);
+        let sampler = project.add_device(chain, "builtin:sampler", "Sampler", None).unwrap();
+        project.device_mut(sampler).unwrap().state = Some(sampler::State::new("A/keys.wav").to_bytes());
+        let synth = project.add_device(chain, "builtin:polysynth", "Poly Synth", None).unwrap();
+
+        let paths = |project: &Project| -> Vec<String> {
+            project.files(&SampleFiles).into_iter().map(|file| format!("{}: {}", file.place, file.path)).collect()
+        };
+        assert_eq!(
+            paths(&project),
+            [
+                format!("pad 36 of {rack}: A/kick.wav"),
+                format!("pad 38 of {rack}: A/snare.wav"),
+                format!("sample of {sampler}: A/keys.wav")
+            ]
+        );
+
+        let to = |device, slot: &str, path: &str| trill_core::Relink {
+            place: trill_core::FilePlace::Sample { device, slot: slot.into() },
+            path: path.into(),
+        };
+        let relinks = [to(rack, "pad 38", "B/snare.wav"), to(sampler, "sample", "B/keys.wav")];
+        assert_eq!(project.relink(&relinks, &SampleFiles), Ok(2));
+        assert_eq!(
+            paths(&project),
+            [
+                format!("pad 36 of {rack}: A/kick.wav"),
+                format!("pad 38 of {rack}: B/snare.wav"),
+                format!("sample of {sampler}: B/keys.wav")
+            ]
+        );
+        let device = project.device(rack).unwrap();
+        let state: serde_json::Value = serde_json::from_slice(device.state.as_deref().unwrap()).unwrap();
+        assert_eq!(state["choke"], serde_json::json!([42, 46]), "what this build does not know is kept");
+        assert_eq!(state["pads"][0]["tune"], 3);
+        assert_eq!(device.params.get("volume"), Some(&-3.0));
+
+        // What cannot be done says why, and names what the device does have.
+        let before = project.clone();
+        for (relink, expected) in [
+            (to(rack, "pad 40", "B/x.wav"), "has no file in 'pad 40'; its files are in: pad 36, pad 38"),
+            (to(sampler, "pad 36", "B/x.wav"), "has no file in 'pad 36'; its files are in: sample"),
+            (to(synth, "sample", "B/x.wav"), "plays no files"),
+        ] {
+            let error = project.relink(&[relink], &SampleFiles).unwrap_err().to_string();
+            assert!(error.contains(expected), "'{error}' should say '{expected}'");
+            assert_eq!(project, before);
+        }
+        // An empty sampler has no file to be found elsewhere.
+        let empty = project.add_device(chain, "builtin:sampler", "Empty", None).unwrap();
+        let error = project.relink(&[to(empty, "sample", "B/x.wav")], &SampleFiles).unwrap_err().to_string();
+        assert!(error.contains("plays no files"), "{error}");
+        // A state this build cannot read is left alone, and said to be.
+        project.device_mut(rack).unwrap().state = Some(br#"{ "version": 99, "pads": [] }"#.to_vec());
+        assert!(SampleFiles.files(project.device(rack).unwrap()).is_empty());
+        let error = SampleFiles.relinked(project.device(rack).unwrap(), &[("pad 36".into(), "B/k.wav".into())]);
+        assert!(error.unwrap_err().contains("newer version"));
     }
 
     #[test]

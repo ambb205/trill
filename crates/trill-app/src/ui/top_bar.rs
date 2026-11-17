@@ -6,7 +6,7 @@ use super::arrangement::ops;
 use super::files::Confirm;
 use super::shortcuts::{self, Command};
 use super::state::{Clipboard, Cx, DetailTab, StoryAsk};
-use super::{arrangement, audio_settings, brand, files, recording, recovery, timeline};
+use super::{arrangement, audio_settings, brand, files, missing, recording, recovery, timeline};
 use eframe::egui::{self, Align2, Id, Rect, Sense, Ui, pos2, vec2};
 use trill_core::TimeSignature;
 use trill_core::project::{MAX_TEMPO, MIN_TEMPO};
@@ -166,6 +166,13 @@ fn file_menu(ui: &mut Ui, cx: &mut Cx) {
     let count = if lost > 0 { lost.to_string() } else { String::new() };
     if MenuItem::new("Recover unsaved work\u{2026}").shortcut(&count).enabled(lost > 0).show(ui, theme).clicked() {
         recovery::open(cx);
+    }
+    // The files the song names that are not on disk, counted the same
+    // way. The list opens with nothing missing too: it then says so.
+    let gone = cx.sounds.missing.found.files.len();
+    let count = if gone > 0 { gone.to_string() } else { String::new() };
+    if MenuItem::new("Missing files\u{2026}").shortcut(&count).show(ui, theme).clicked() {
+        missing::open(cx);
     }
     trill_noir::menu_separator(ui, theme);
     if item(ui, "Save", Command::Save, true) {

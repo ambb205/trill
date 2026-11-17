@@ -109,11 +109,11 @@ expression, as a saxophone is without air. After writing such a line, call shape
 the phrases from the notes and writes an expression curve that rises into the high points, swells through long \
 notes and breathes between phrases. set_controllers writes or adjusts a curve point by point (a pedal, a pitch \
 bend, vibrato on the mod wheel). measure names any track that had notes and made no sound.
-4. Shape the sound: add_device for effects (reverb, delay, eq, compressor, filter, chorus, tremolo...), \
-update_device for parameters, set_automation for movement such as filter sweeps, fades and a send opened for one \
-note (a delay throw), update_track for the mix. describe_device says what each parameter does and in what unit. \
-Two points are enough for a fade or a sweep: the line between them follows the control's travel (a fader for a \
-level, pitch for a frequency), so it does not need to be laid out in small steps.
+4. Shape the sound: add_device for effects (reverb, delay, eq, compressor, filter, chorus, tremolo, saturator, \
+pitch shifter...), update_device for parameters, set_automation for movement such as filter sweeps, fades and a \
+send opened for one note (a delay throw), update_track for the mix. describe_device says what each parameter does \
+and in what unit. Two points are enough for a fade or a sweep: the line between them follows the control's travel \
+(a fader for a level, pitch for a frequency), so it does not need to be laid out in small steps.
 5. measure reports loudness, true peak, spectral balance, every track's level and loudness, each section's \
 loudness and what the compressors and limiters took off, without writing a file. You cannot hear, so read those \
 numbers and adjust, as often as it takes.
@@ -152,6 +152,20 @@ the peaks, ratio 2, knee 18, attack 10-30 ms, auto_release on: about 2 dB off). 
 `sidechain`: it then turns its own track down whenever the kick sounds. The kick's track may be muted.
 - Reverb and delay belong on return tracks with `mix` 1, fed by sends of -10 to -20 dB: both filter what goes into \
 them (low_cut, high_cut), and the reverb returns more the longer its decay.
+- A level's lowest value is silence: a track's fader, a send, a Utility's `gain` and an instrument's `volume` \
+all end in nothing at -70 dB. Draw a fade or a stop down to -70, not to some other low number.
+- Samples follow velocity in dB. On builtin:sampler and builtin:drumrack `volume` is the level of a note at \
+velocity 75, and `velocity_sens` moves harder and softer notes from it, 0.4 dB a step at 1 (velocity 100 is \
++10 dB, 127 is +21 dB, 45 is -12 dB; 0.5 is half of that): a hard hit is louder than the volume, so leave it \
+room, and write rolls, accents and ghost notes with velocity.
+- A sub bass on builtin:polysynth: a sine with `pitch_env` 12 and `pitch_decay` 0.03 for the knock of an 808, \
+into builtin:saturator on `sine` so that it is heard on small speakers. Noise for a riser or a splash: `osc_level` \
+0, `noise_level` 1, `noise_width` 1, through the synth's band-pass with `cutoff` and `volume` automated. The \
+saturator does not turn down what it drives: more drive is louder, up to the curve's ceiling; trim with `output`.
+- builtin:shifter changes the pitch of any sound, recorded and sampled parts too. Its `pitch` and `mix` can be \
+automated: `mix` opened at a stop and `pitch` drawn from 0 to -24 over a beat makes a held chord melt away.
+- A built-in synth's or sampler's `bend_range` is how far its pitch wheel bends; bends written for the track \
+follow it, so set it before writing a wide bend or a dive as a pitch_bend curve.
 - Give sections contrast: add and remove parts, automate filters and volume, change the drum pattern.
 - Rearranging: edit_time removes, repeats or opens up a stretch of time on every track at once (drop a \
 section, double a chorus, make room for a bridge).
@@ -355,6 +369,7 @@ impl TrillServer {
             + Self::hearing_router()
             + Self::instrument_router()
             + Self::story_router()
+            + Self::files_router()
     }
 
     /// The names of the tools the server offers.
@@ -414,6 +429,25 @@ impl TrillServer {
         out["favorites"] = json!(library.favorites().len());
         if let Some(problem) = library.index_problem() {
             out["index_problem"] = json!(problem);
+        }
+        // A folder that is not where the library has it: what was known
+        // of its files is still listed, and that must not pass for all
+        // being well.
+        let missing = library.missing_roots();
+        if !missing.is_empty() {
+            out["missing_folders"] = missing
+                .iter()
+                .map(|folder| {
+                    json!({
+                        "folder": folder.path.display().to_string(),
+                        "files_known": folder.files,
+                        "why": folder.reason,
+                    })
+                })
+                .collect();
+            out["hint"] = json!(
+                "A folder of the library is not where it was (moved, renamed, or on a drive that is not there).                  Its files are still listed and cannot be played. missing_files says where it seems to be;                  `move_folder` with `path` and `to` says where it went, and keeps the favorites with their files."
+            );
         }
         if library.roots().is_empty() {
             out["hint"] = json!(
@@ -2034,6 +2068,31 @@ impl TrillServer {
                 )),
                 Err(error) => Err(error),
             },
+            LibraryAction::MoveFolder => {
+                let from = folder_argument(request.path.as_deref(), "move_folder");
+                let to = match request.to.as_deref().map(str::trim).filter(|to| !to.is_empty()) {
+                    Some(to) => Ok(std::path::absolute(to).unwrap_or_else(|_| PathBuf::from(to))),
+                    None => Err("move_folder needs `to`: where the folder is now".to_owned()),
+                };
+                match (from, to) {
+                    (Ok(from), Ok(to)) => match library.move_root(&from, &to) {
+                        Ok(moved) => {
+                            self.wait_for_scan(request.wait_seconds).await;
+                            let mut out = self.library_status();
+                            out["moved"] = json!({
+                                "from": from.display().to_string(),
+                                "to": to.display().to_string(),
+                                "files_known": moved.files,
+                                "favorites": moved.favorites,
+                                "recent": moved.recent,
+                            });
+                            Ok(out)
+                        }
+                        Err(error) => Err(error),
+                    },
+                    (Err(error), _) | (_, Err(error)) => Err(error),
+                }
+            }
             LibraryAction::Rescan => {
                 library.rescan();
                 self.wait_for_scan(request.wait_seconds).await;
@@ -3108,8 +3167,9 @@ impl ServerHandler for TrillServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
                 crate::sounds::INSTRUCTIONS,
+                crate::files::INSTRUCTIONS,
                 crate::music::INSTRUCTIONS,
                 crate::instruments::INSTRUCTIONS,
                 crate::hearing::INSTRUCTIONS,

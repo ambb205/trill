@@ -708,7 +708,8 @@ fn write(
         }
         bars => bars.map(|bars| bars as usize),
     };
-    let profile = session.project().track(destination.track).map(|track| track.profile.clone()).unwrap_or_default();
+    // With how far its instrument's wheel bends, where the track says nothing of it.
+    let profile = session.profile_of(destination.track);
     let mut part = build(&Setting { signature, tempo, bars, profile: profile.clone() })?;
     // The bars it is written into are the song's from there on. Where
     // they are not all the first one's, each is laid in its own meter.
