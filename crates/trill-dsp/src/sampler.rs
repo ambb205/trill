@@ -166,7 +166,7 @@ define_params!(P, PARAMS, [
     ),
     Legacy => boolean(
         "legacy",
-        "Legacy (the velocity law of songs saved before format 3: sensitivity only ever turns a hit down from the \
+        "Legacy (the velocity law of songs saved before format 4: sensitivity only ever turns a hit down from the \
          volume, by the square of its velocity)",
         false
     ),
@@ -244,7 +244,7 @@ struct Derived {
     filter_env: f32,
     key_track: f32,
     velocity_sens: f32,
-    /// The velocity law of songs saved before format 3.
+    /// The velocity law of songs saved before format 4.
     legacy: bool,
     gain_left: f32,
     gain_right: f32,

@@ -1206,10 +1206,23 @@ fn a_fade_drawn_down_to_the_lowest_gain_ends_in_silence() {
     draw(&mut song, devices[0], "gain", &[(0.0, 0.0), (3.8, 0.0), (4.0, -70.0)]);
     let out = song.render(0.0);
     assert!((rms_db(&out.left[frames(1.0..1.8)]) - rms_db(&tone[frames(1.0..1.8)])).abs() < 0.01);
-    // A tenth of a second after the line gets there, there is nothing: not
-    // the tone 70 dB down, which is what the lowest gain was before.
-    assert_eq!(peak(&out.left[frames(2.1..4.0)]), 0.0);
-    // The same file as a build before format 3 wrote it: 70 dB down, as it was.
+    // The fade is the line, one stretch of 256 frames behind it: the engine
+    // reads an envelope for a device every 256 frames, and the gain goes
+    // from one reading to the next in a straight line. Half way down, at
+    // -35 dB on the line, it is where the line was 256 frames before
+    // (3.7 dB up), and not where a hundredth of a second of smoothing on
+    // top of that would have it (11 dB up).
+    let half_way = (1.95 * SR) as usize;
+    let around = half_way - 96..half_way + 96;
+    let gain = rms_db(&out.left[around.clone()]) - rms_db(&tone[around]);
+    assert!((gain + 35.0 - 3.7).abs() < 0.6, "{gain} dB half way down");
+    // Two stretches after the line gets to the bottom there is nothing:
+    // not the tone 70 dB down, which is what the lowest gain was before,
+    // and not the tail of a filter.
+    let bottom = (2.0 * SR) as usize;
+    assert!(peak(&out.left[bottom - 256..bottom]) > 0.0, "still fading as the line ends");
+    assert_eq!(peak(&out.left[bottom + 512..]), 0.0);
+    // The same file as a build before format 4 wrote it: 70 dB down, as it was.
     let file = song.project.to_json();
     let now = format!("\"format_version\": {}", trill_core::project::FORMAT_VERSION);
     let old = Project::from_json(&file.replace(&now, "\"format_version\": 2")).unwrap();

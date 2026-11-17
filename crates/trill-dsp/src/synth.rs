@@ -18,7 +18,7 @@ const MAX_HELD: usize = 16;
 /// Samples between control-rate updates (pitch, filter cutoff, LFO).
 const CONTROL_BLOCK: usize = 16;
 /// The level of one voice at a volume of 0 dB and full velocity: 21 dB
-/// over what it was before format 3 (0.22, with a default volume of 0 dB:
+/// over what it was before format 4 (0.22, with a default volume of 0 dB:
 /// the same sound, 21 dB down the scale). At the default volume a voice
 /// peaks 13 dB under full scale, which is the room a chord needs; and at
 /// the same volume setting, envelope and velocity a sine is as loud as the
@@ -28,7 +28,7 @@ const VOICE_GAIN: f32 = 2.468_44;
 /// The level of the noise at a noise level of 1, against the peak of an
 /// oscillator: 13 dB under it, which is where white noise through the
 /// band-pass was measured to be in the same synth (within 0.1 dB over
-/// seven sections of the song). Before format 3 it was the oscillator's
+/// seven sections of the song). Before format 4 it was the oscillator's
 /// own peak.
 const NOISE_GAIN: f32 = 0.223_87;
 /// Frames between two readings of a voice's pitch envelope, counted from
@@ -134,7 +134,7 @@ define_params!(P, PARAMS, [
     ),
     Legacy => boolean(
         "legacy",
-        "Legacy (the noise of songs saved before format 3: 13 dB louder, as high as an oscillator)",
+        "Legacy (the noise of songs saved before format 4: 13 dB louder, as high as an oscillator)",
         false
     ),
 ]);

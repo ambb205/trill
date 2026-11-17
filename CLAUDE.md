@@ -111,8 +111,10 @@ on the samples.
   only the parameters that were set, so a new parameter defaults to what the device did before, or the device
   gets a line in `trill-core/src/formats.rs` (what a file of the older format is taken to have said, written into
   it as it is read; a parameter whose scale moved is moved there too, with the envelopes that drive it) and the
-  file format's number goes up. `trill-engine/tests/old_songs.rs` holds every device to the samples a file of
-  format 1 and of format 2 rendered to: add a file of the format you are leaving, recorded before you change the
+  file format's number goes up. A journal is read by the same rule (`journal/change.rs`, `Change::keep_format`),
+  so add nothing there, but everything goes through `formats::keep_project`, `keep_device` and `keep_lane`.
+  `trill-engine/tests/old_songs.rs` holds every device to the samples a file of each older format rendered to:
+  add a file of the format you are leaving, recorded on the last build that wrote it and before you change the
   device, and never record one again from a newer build. `tests/effects.rs` and `tests/instruments.rs` hold what
   the devices do now to numbers.
 - **Routing:** a device may listen to another track (`Device::sidechain`, `Project::set_sidechain`). The tracks

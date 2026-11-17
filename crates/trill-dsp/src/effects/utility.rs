@@ -2,7 +2,7 @@
 
 use crate::define_params;
 use crate::params::{ParamValues, boolean, choice, float};
-use crate::util::{SILENT_DB, Smooth, crossfade_gains, db_to_gain, level_gain, pan_gains};
+use crate::util::{Ramp, SILENT_DB, Smooth, crossfade_gains, db_to_gain, level_gain, pan_gains};
 use trill_core::device::{DeviceProcessor, Event, ProcessInfo};
 
 // ---- Utility ---------------------------------------------------------------
@@ -11,24 +11,44 @@ mod gain {
     use super::*;
 
     define_params!(P, PARAMS, [
-        Gain => float("gain", "Gain (silent at -70, as the bottom of a fader is)", SILENT_DB as f64, 24.0, 0.0, "dB"),
+        Gain => float(
+            "gain",
+            "Gain (silent at -70, as the bottom of a fader is; moved, it gets there in a straight line over 256 frames)",
+            SILENT_DB as f64,
+            24.0,
+            0.0,
+            "dB"
+        ),
         Pan => float("pan", "Pan", -1.0, 1.0, 0.0, ""),
         Width => float("width", "Stereo Width (0 = mono, 1 = unchanged, 2 = extra wide)", 0.0, 2.0, 1.0, ""),
         Mono => boolean("mono", "Mono", false),
         Legacy => boolean(
             "legacy",
-            "Legacy (the gain of songs saved before format 3: its lowest value is 70 dB down and not silence)",
+            "Legacy (the gain of songs saved before format 4: its lowest value is 70 dB down and not silence, and it \
+             comes to where it is set through a hundredth of a second of smoothing)",
             false
         ),
     ]);
 
-    pub const DESCRIPTION: &str = "Gain, pan and stereo width. Automate `gain` for fades: its lowest value, \
--70 dB, is silence, so a fade written down to it ends in nothing.";
+    pub const DESCRIPTION: &str = "Gain, pan and stereo width. Automate `gain` for fades and stops: its lowest \
+value, -70 dB, is silence, so a fade written down to it ends in nothing, a few milliseconds after the line does.";
+
+    /// How long a gain takes to get where it is set, in frames: the stretch
+    /// the engine holds an automated parameter for (5 ms at 48 kHz). A fade
+    /// that an envelope draws so comes out as straight lines from one
+    /// reading to the next, one such stretch behind the drawing; a gain
+    /// moved by hand, or to and from silence, takes as long and does not
+    /// click.
+    const GLIDE_FRAMES: u32 = 256;
 
     pub struct Utility {
         params: ParamValues,
-        left: Smooth,
-        right: Smooth,
+        left: Ramp,
+        right: Ramp,
+        /// The same for a song saved before format 4, which heard the gain
+        /// follow through a filter with a hundredth of a second to it.
+        old_left: Smooth,
+        old_right: Smooth,
         /// False until the first block has been played: that one starts
         /// where the gain is set, instead of coming to it from somewhere.
         started: bool,
@@ -36,7 +56,14 @@ mod gain {
 
     impl Utility {
         pub fn new() -> Self {
-            Self { params: ParamValues::new(PARAMS), left: Smooth::new(1.0), right: Smooth::new(1.0), started: false }
+            Self {
+                params: ParamValues::new(PARAMS),
+                left: Ramp::new(1.0),
+                right: Ramp::new(1.0),
+                old_left: Smooth::new(1.0),
+                old_right: Smooth::new(1.0),
+                started: false,
+            }
         }
 
         /// The gain of each side, as the parameters have it.
@@ -56,8 +83,8 @@ mod gain {
 
     impl DeviceProcessor for Utility {
         fn prepare(&mut self, sample_rate: f64, _max_block: usize) {
-            self.left.set_time(0.01, sample_rate as f32);
-            self.right.set_time(0.01, sample_rate as f32);
+            self.old_left.set_time(0.01, sample_rate as f32);
+            self.old_right.set_time(0.01, sample_rate as f32);
             self.started = false;
             self.reset();
         }
@@ -68,30 +95,32 @@ mod gain {
 
         fn process(&mut self, _info: &ProcessInfo, _events: &[Event], left: &mut [f32], right: &mut [f32]) {
             let (gain_l, gain_r) = self.gains();
-            // A device is told its parameters after it is prepared. A song
-            // saved before format 3 heard the gain come from unity to where
-            // it was set over the first hundredth of a second, and still
-            // does; since then the first block starts where the gain is.
+            let width = if self.params.on(P::Mono as usize) { 0.0 } else { self.params.get(P::Width as usize) };
+            if self.params.on(P::Legacy as usize) {
+                // A device is told its parameters after it is prepared, so
+                // such a song heard the gain come from unity to where it
+                // was set over its first hundredth of a second, and does.
+                for i in 0..left.len() {
+                    let mid = (left[i] + right[i]) * 0.5;
+                    let side = (left[i] - right[i]) * 0.5 * width;
+                    left[i] = (mid + side) * self.old_left.next(gain_l);
+                    right[i] = (mid - side) * self.old_right.next(gain_r);
+                }
+                return;
+            }
+            // The first block starts where the gain is.
             if !self.started {
                 self.started = true;
-                if !self.params.on(P::Legacy as usize) {
-                    self.left.snap(gain_l);
-                    self.right.snap(gain_r);
-                }
+                self.left.snap(gain_l);
+                self.right.snap(gain_r);
             }
-            let width = if self.params.on(P::Mono as usize) { 0.0 } else { self.params.get(P::Width as usize) };
+            self.left.aim(gain_l, GLIDE_FRAMES);
+            self.right.aim(gain_r, GLIDE_FRAMES);
             for i in 0..left.len() {
                 let mid = (left[i] + right[i]) * 0.5;
                 let side = (left[i] - right[i]) * 0.5 * width;
-                left[i] = (mid + side) * self.left.next(gain_l);
-                right[i] = (mid - side) * self.right.next(gain_r);
-            }
-            // A gain on its way to nothing gets there: 120 dB down it is
-            // let go of, and what follows is silence itself.
-            for (smooth, gain) in [(&mut self.left, gain_l), (&mut self.right, gain_r)] {
-                if gain == 0.0 && smooth.next(0.0).abs() < 1e-6 {
-                    smooth.snap(0.0);
-                }
+                left[i] = (mid + side) * self.left.next();
+                right[i] = (mid - side) * self.right.next();
             }
         }
 
@@ -99,6 +128,8 @@ mod gain {
             let (gain_l, gain_r) = self.gains();
             self.left.snap(gain_l);
             self.right.snap(gain_r);
+            self.old_left.snap(gain_l);
+            self.old_right.snap(gain_r);
         }
     }
 
@@ -117,13 +148,19 @@ mod gain {
             device
         }
 
-        /// What half a second of a steady signal comes out as.
-        fn through(device: &mut Utility) -> Vec<f32> {
-            let (mut left, mut right) = (vec![0.5f32; 24_000], vec![0.5f32; 24_000]);
-            for (left, right) in left.chunks_mut(256).zip(right.chunks_mut(256)) {
+        /// What `frames` frames of a steady signal come out as, handed
+        /// over in blocks of `block`.
+        fn played(device: &mut Utility, frames: usize, block: usize) -> Vec<f32> {
+            let (mut left, mut right) = (vec![0.5f32; frames], vec![0.5f32; frames]);
+            for (left, right) in left.chunks_mut(block).zip(right.chunks_mut(block)) {
                 device.process(&info(48_000.0), &[], left, right);
             }
             left
+        }
+
+        /// Half a second of it.
+        fn through(device: &mut Utility) -> Vec<f32> {
+            played(device, 24_000, 256)
         }
 
         #[test]
@@ -140,15 +177,46 @@ mod gain {
                 "nothing of the signal at full level first: {}",
                 out[0]
             );
+        }
 
-            // A gain that is moved while it plays takes its hundredth of a
-            // second, down to silence as anywhere else.
+        #[test]
+        fn a_gain_that_is_moved_gets_there_in_a_straight_line_over_256_frames_whatever_the_blocks() {
+            // Down to silence while it plays: half way after 128 frames,
+            // there after 256, and then nothing at all.
             let mut device = utility(&[]);
             through(&mut device);
             device.set_param(P::Gain as usize, -70.0);
             let out = through(&mut device);
-            assert!(out[0] > 0.45 && out[240] < 0.35 && out[240] > 0.1, "{} then {}", out[0], out[240]);
-            assert!(out[4_800] < 1e-4, "and is gone: {}", out[4_800]);
+            assert!((out[0] - 0.5 * 255.0 / 256.0).abs() < 1e-6 && (out[127] - 0.25).abs() < 1e-6, "{}", out[127]);
+            assert_eq!(peak(&out[255..]), 0.0, "silence itself from the 256th frame on");
+            assert!(largest_step(&out) < 0.5 / 250.0, "in even steps: {}", largest_step(&out));
+            // And up again from it, to exactly where it is set.
+            device.set_param(P::Gain as usize, -6.0);
+            let out = through(&mut device);
+            assert!(out[0] > 0.0 && (out[255] - 0.5 * db_to_gain(-6.0)).abs() < 1e-7 && out[255] == out[20_000]);
+
+            // An envelope moves the gain every 256 frames: the fade is then
+            // straight from one reading to the next, the same samples
+            // whatever the blocks the frames come in.
+            let readings = [0.0, -3.0, -8.0, -15.0, -26.0, -45.0, -70.0, -70.0];
+            let fade = |block: usize| {
+                let mut device = utility(&[]);
+                let mut out = played(&mut device, 256, block);
+                for db in readings {
+                    device.set_param(P::Gain as usize, db);
+                    out.extend(played(&mut device, 256, block));
+                }
+                out
+            };
+            let whole = fade(256);
+            for (reading, db) in readings.iter().enumerate() {
+                let reached = whole[256 * (reading + 2) - 1] / 0.5;
+                assert!((reached - level_gain(*db as f32)).abs() < 1e-6, "reading {reading}: {reached}");
+            }
+            assert_eq!(peak(&whole[256 * 8 - 1..]), 0.0);
+            for block in [1, 32, 64, 100, 128] {
+                assert!(fade(block) == whole, "in blocks of {block} it is another fade");
+            }
         }
 
         #[test]
@@ -191,7 +259,7 @@ mod saturator {
         Mix => float("mix", "Mix", 0.0, 1.0, 1.0, ""),
         Legacy => boolean(
             "legacy",
-            "Legacy (the level of songs saved before format 3: turned down by half the drive, in dB)",
+            "Legacy (the level of songs saved before format 4: turned down by half the drive, in dB)",
             false
         ),
     ]);
@@ -250,7 +318,7 @@ the curve holds it, so trim with `output`.";
             let kind = self.params.index(P::Shape as usize);
             let mut trim = db_to_gain(self.params.get(P::Output as usize));
             if self.params.on(P::Legacy as usize) {
-                // Before format 3: half the drive taken off again.
+                // Before format 4: half the drive taken off again.
                 trim /= drive.sqrt();
             }
             let mix = self.params.get(P::Mix as usize);

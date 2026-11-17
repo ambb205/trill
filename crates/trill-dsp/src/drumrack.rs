@@ -235,7 +235,7 @@ macro_rules! rack_params {
             )*
             boolean(
                 "legacy",
-                "Legacy (the velocity law of songs saved before format 3: sensitivity only ever turns a hit down \
+                "Legacy (the velocity law of songs saved before format 4: sensitivity only ever turns a hit down \
                  from the volume)",
                 false,
             ),
@@ -355,7 +355,7 @@ pub struct DrumRack {
     pads: [PadSettings; PAD_COUNT],
     volume: f32,
     velocity_sens: f32,
-    /// The velocity law of songs saved before format 3.
+    /// The velocity law of songs saved before format 4.
     legacy: bool,
     sample_rate: f64,
     voices: [Voice; VOICES],

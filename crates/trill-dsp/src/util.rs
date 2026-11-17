@@ -122,6 +122,50 @@ impl Smooth {
     }
 }
 
+/// A gain that goes to where it is set in a straight line, over a number
+/// of frames that does not depend on how the frames are handed over: the
+/// same moves at the same frames make the same samples whatever the size of
+/// the blocks, in playback and in a render. It arrives exactly.
+#[derive(Copy, Clone)]
+pub struct Ramp {
+    value: f32,
+    target: f32,
+    step: f32,
+    left: u32,
+}
+
+impl Ramp {
+    pub const fn new(value: f32) -> Self {
+        Self { value, target: value, step: 0.0, left: 0 }
+    }
+
+    /// Puts the gain at `value`, now.
+    pub fn snap(&mut self, value: f32) {
+        *self = Self::new(value);
+    }
+
+    /// Sets off for `target`, to be there in `frames` frames. Asked again
+    /// for where it is already going, it goes on as it was.
+    #[inline]
+    pub fn aim(&mut self, target: f32, frames: u32) {
+        if target != self.target {
+            self.target = target;
+            self.left = frames.max(1);
+            self.step = (target - self.value) / self.left as f32;
+        }
+    }
+
+    /// The gain for the next frame.
+    #[inline]
+    pub fn next(&mut self) -> f32 {
+        if self.left > 0 {
+            self.left -= 1;
+            self.value = if self.left == 0 { self.target } else { self.value + self.step };
+        }
+        self.value
+    }
+}
+
 /// Outputs of one state-variable filter step.
 #[derive(Copy, Clone)]
 pub struct SvfOut {

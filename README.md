@@ -178,7 +178,7 @@ fader, a send and a Utility's gain, is silence at its lowest value (-70 dB), so 
 | `builtin:pump` | Ducking locked to the grid, for when there is no kick to listen to. |
 | `builtin:shifter` | Pitch shifter: any sound up or down by as much as two octaves, its length kept. Pitch and mix can be automated: a chord drawn two octaves down over a beat melts away. |
 | `builtin:saturator` | Waveshaping distortion on four curves: soft, hard, tube, and a quarter of a sine that is flat above its ceiling (the overtones that make a sine bass heard on small speakers). It does not turn down what it drives. |
-| `builtin:utility` | Gain down to silence, pan and width. |
+| `builtin:utility` | Gain down to silence, pan and width. A gain that an envelope draws is followed in straight lines, 256 frames behind the drawing: a stop is a stop. |
 
 A compressor's sidechain is the track as it leaves its devices, ahead of its fader and its mute, so a muted track
 serves as a key. It is set in the compressor's panel ("Listen to") and with `sidechain` on `add_device` and
@@ -196,9 +196,12 @@ to what Operator's were read to be.
 A song saved before a device was changed keeps the sound it had. The project file says which format it is, and
 opening an older one writes into each device what that format meant: the reverb and the delay of format 1 have
 their `legacy` switched on, and so have the sample players (the velocity law they had), the saturator (its level
-turned down as the drive rises), the utility (a lowest gain that is 70 dB down and not silence) and the synth
-(its noise) of formats 1 and 2, whose synth volumes are also written 21 dB down the scale, where they mean what
-they did. `trill-engine/tests/old_songs.rs` holds every one of these to the samples it rendered to then.
+turned down as the drive rises), the utility (a lowest gain that is 70 dB down and not silence, smoothed over a
+hundredth of a second) and the synth (its noise) of formats 1 to 3. The synth volumes of those formats are also
+written 21 dB down the scale, where they mean what they did, and so is an envelope on one: its points, and the
+level its line's travel is measured from where it follows a fader, so that it plays the curve it played. A journal
+kept before such a change is read by the same rule, so the making-of plays the song as it sounded.
+`trill-engine/tests/old_songs.rs` holds a file of each format to the samples the build that wrote it rendered.
 
 **Plugins**: installed CLAP and VST3 plugins appear beside the built-in devices as `clap:<plugin id>` and
 `vst3:<class id>`. Their state is saved in the project, and their parameters are automatable and reachable over
