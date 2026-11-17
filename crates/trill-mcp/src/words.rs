@@ -289,7 +289,7 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
                 (None, None) => "a clip".to_owned(),
             };
             let track = call.track("track").map(|track| format!(" to {track}")).unwrap_or_default();
-            about("Adding", "Added", &format!("{name}{track}"))
+            about("Adding", "Added", &format!("{name}{track}{}", played_as(call.input.get("notes"))))
         }
         "update_clip" => {
             let clip = call.clip("clip").unwrap_or_else(|| "a clip".to_owned());
@@ -320,10 +320,11 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
             let count = call.input.get("notes").and_then(Value::as_array).map_or(0, Vec::len);
             let notes = if count == 1 { "1 note".to_owned() } else { format!("{count} notes") };
             let clip = call.clip("clip").unwrap_or_else(|| "a clip".to_owned());
+            let how = played_as(call.input.get("notes"));
             if tool == "add_notes" {
-                about("Adding", "Added", &format!("{notes} to {clip}"))
+                about("Adding", "Added", &format!("{notes} to {clip}{how}"))
             } else {
-                about("Rewriting", "Rewrote", &format!("{clip} with {notes}"))
+                about("Rewriting", "Rewrote", &format!("{clip} with {notes}{how}"))
             }
         }
         "remove_notes" => {
@@ -671,6 +672,23 @@ pub fn heard(tool: &str, answer: &str) -> Option<String> {
             }
             (!said.is_empty()).then(|| said.join(", "))
         }
+        "get_instrument_profile" => {
+            // A drum track: how many drums it can be written by, and whose word that is.
+            let drums = answer.get("drum_map").and_then(Value::as_object).map(|map| map.len())?;
+            let lacking: Vec<&str> = answer
+                .get("kit")
+                .and_then(|kit| kit.get("has_no"))
+                .and_then(Value::as_array)
+                .map(|names| names.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            Some(match (answer.get("kit").is_some(), lacking.is_empty()) {
+                (true, true) => format!("{drums} drums by name, read from the kit that is loaded"),
+                (true, false) => {
+                    format!("{drums} drums by name, read from the kit that is loaded; it has no {}", lacking.join(", "))
+                }
+                (false, _) => format!("{drums} drums by name"),
+            })
+        }
         "probe" => {
             let played = answer.get("played").and_then(Value::as_u64)?;
             let notes = if played == 1 { "1 note played".to_owned() } else { format!("{played} notes played") };
@@ -681,6 +699,29 @@ pub fn heard(tool: &str, answer: &str) -> Option<String> {
             })
         }
         _ => None,
+    }
+}
+
+/// The ways of playing that the notes of a call ask for by name, as the
+/// end of a sentence about them: `, played as palm_mute and hammer`. Empty
+/// where no note says how it is played.
+fn played_as(notes: Option<&Value>) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    for note in notes.and_then(Value::as_array).into_iter().flatten() {
+        let how = match note {
+            Value::Object(fields) => fields.get("how").or_else(|| fields.get("articulation")).and_then(Value::as_str),
+            // The fifth item, or the fourth where that is no velocity.
+            Value::Array(items) => items.get(4).or_else(|| items.get(3)).and_then(Value::as_str),
+            _ => None,
+        };
+        if let Some(how) = how.filter(|how| !names.contains(how)) {
+            names.push(how);
+        }
+    }
+    match names.as_slice() {
+        [] => String::new(),
+        [one] => format!(", played as {one}"),
+        [first @ .., last] => format!(", played as {} and {last}", first.join(", ")),
     }
 }
 
@@ -908,6 +949,29 @@ mod tests {
         // Arguments of the wrong shape never break a line.
         assert_eq!(did("create_track", json!("nonsense"), &project), "Added the track");
         assert_eq!(did("add_notes", json!({ "clip": "seven", "notes": 3 }), &project), "Added 0 notes to a clip");
+        // Notes that say how they are played say so in the journal too.
+        let riff = json!([["E2", 0, 0.5, 100, "palm_mute"], ["E2", 1, 0.5, "palm_mute"], { "pitch": 40, "start": 2, "length": 1, "how": "hammer" }, [40, 3, 1, 90]]);
+        assert!(
+            did("add_notes", json!({ "clip": "seven", "notes": riff }), &project)
+                .ends_with("Added 4 notes to a clip, played as palm_mute and hammer")
+        );
+        assert_eq!(played_as(Some(&json!([[40, 0, 1, 100, "muted"]]))), ", played as muted");
+        assert_eq!(
+            played_as(Some(&json!([[40, 0, 1, 100], ["kick", 0, 1]]))),
+            "",
+            "a drum's name is its pitch, not how it is played"
+        );
+        // What a drum track's instrument was found to know.
+        let kit = json!({ "drum_map": { "kick": 36, "china": 52 }, "kit": { "has_no": ["clap", "splash"] } });
+        assert_eq!(
+            heard("get_instrument_profile", &kit.to_string()).as_deref(),
+            Some("2 drums by name, read from the kit that is loaded; it has no clap, splash")
+        );
+        assert_eq!(
+            heard("get_instrument_profile", &json!({ "drum_map": { "kick": 36 } }).to_string()).as_deref(),
+            Some("1 drums by name")
+        );
+        assert_eq!(heard("get_instrument_profile", &json!({ "plays": "pitched" }).to_string()), None);
     }
 
     #[test]
