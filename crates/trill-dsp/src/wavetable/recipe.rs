@@ -645,7 +645,7 @@ impl FileSpec {
         if mono.iter().all(|sample| sample.abs() < 1e-9) {
             return Err("is silent".to_string());
         }
-        let whole_cycles = mono.len() >= FILE_CYCLE && mono.len() % FILE_CYCLE == 0;
+        let whole_cycles = mono.len() >= FILE_CYCLE && mono.len().is_multiple_of(FILE_CYCLE);
         let as_cycles = self
             .cycle
             .or((self.root.is_none() && whole_cycles && mono.len() / FILE_CYCLE <= MAX_FRAMES).then_some(FILE_CYCLE));

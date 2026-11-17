@@ -6,6 +6,10 @@
 //! in a line, frame by frame ([`Glide`]). So nothing a note does depends
 //! on where a buffer or an event divides the frames, and nothing steps.
 
+// The loops here run over a few frames of several buffers at once, by
+// their number.
+#![allow(clippy::needless_range_loop, clippy::manual_memcpy)]
+
 use super::Shared;
 use super::params::{MAX_UNISON, SLOTS};
 use super::table::{Reader, Table};
@@ -65,7 +69,9 @@ pub mod dest {
     pub const PAN: usize = 24;
     pub const LFO_RATE: usize = 25;
     pub const LFO_DEPTH: usize = 28;
-    pub const COUNT: usize = 31;
+    /// Of envelopes 2 and 3.
+    pub const ENV_DEPTH: usize = 31;
+    pub const COUNT: usize = 33;
 }
 
 /// A value on its way to where it was last told to be, a frame at a time.
@@ -557,6 +563,8 @@ pub struct Voice {
     /// tick late.
     lfo_rate: [f32; 3],
     lfo_depth: [f32; 3],
+    /// The same for how much envelopes 2 and 3 send.
+    env_depth: [f32; 2],
     osc: [OscVoice; 2],
     fm: Glide,
     sub_phase: f32,
@@ -595,6 +603,7 @@ impl Voice {
             lfo_step: [0; 3],
             lfo_rate: [0.0; 3],
             lfo_depth: [0.0; 3],
+            env_depth: [0.0; 2],
             osc: [OscVoice::default(); 2],
             fm: Glide::default(),
             sub_phase: 0.0,
@@ -678,6 +687,7 @@ impl Voice {
             }
             self.lfo_rate = [0.0; 3];
             self.lfo_depth = [0.0; 3];
+            self.env_depth = [0.0; 2];
         } else if from.is_none() && !shared.d.glides {
             self.note = self.target;
         }
@@ -719,8 +729,9 @@ impl Voice {
 
         let mut sources = [0.0f32; source::COUNT];
         sources[..source::COUNT].copy_from_slice(&shared.sources);
-        for which in 0..3 {
-            sources[source::ENV + which] = self.env[which].level;
+        sources[source::ENV] = self.env[0].level;
+        for which in 1..3 {
+            sources[source::ENV + which] = self.env[which].level * (1.0 + self.env_depth[which - 1]).clamp(0.0, 2.0);
         }
         sources[source::VELOCITY] = self.velocity;
         sources[source::KEY] = ((self.note - 60.0) / 48.0).clamp(-1.0, 1.0);
@@ -751,6 +762,7 @@ impl Voice {
             self.lfo_rate[which] = moved[dest::LFO_RATE + which];
             self.lfo_depth[which] = moved[dest::LFO_DEPTH + which];
         }
+        self.env_depth = [moved[dest::ENV_DEPTH], moved[dest::ENV_DEPTH + 1]];
 
         // The pitch slides to where it is going, by a share of the way
         // that is the same however the frames are counted.

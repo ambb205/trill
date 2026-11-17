@@ -555,9 +555,8 @@ impl Wavetable {
         for which in 0..2 {
             let setting = &self.shared.d.osc[which];
             for (side, target) in [&setting.left, &setting.right].into_iter().enumerate() {
-                for copy in 0..MAX_UNISON {
-                    let now = &mut self.shared.copies[which][side][copy];
-                    *now += (target[copy] - *now) * 0.25;
+                for (now, target) in self.shared.copies[which][side].iter_mut().zip(target) {
+                    *now += (target - *now) * 0.25;
                 }
             }
         }
@@ -987,8 +986,12 @@ pub(crate) fn relinked(state: Option<&[u8]>, slots: &[(String, String)]) -> Resu
 /// with the last device that plays it.
 #[derive(Default)]
 pub(crate) struct TableStore {
-    made: Mutex<HashMap<String, (Option<Weak<AudioBuffer>>, Weak<Table>)>>,
+    made: Mutex<HashMap<String, Made>>,
 }
+
+/// The audio a table was made from, if it was made from any, and the
+/// table.
+type Made = (Option<Weak<AudioBuffer>>, Weak<Table>);
 
 impl TableStore {
     fn get(&self, key: &str, audio: Option<&Arc<AudioBuffer>>) -> Option<Arc<Table>> {

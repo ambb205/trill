@@ -529,8 +529,8 @@ mod tests {
     #[test]
     fn preset_values_reference_real_parameters() {
         for builtin in BUILTINS {
-            for preset in builtin.presets {
-                for (id, value) in preset.params {
+            for preset in &builtin.presets() {
+                for (id, value) in &preset.params {
                     let def = builtin
                         .params
                         .iter()

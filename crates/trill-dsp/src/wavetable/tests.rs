@@ -512,7 +512,8 @@ fn nothing_clicks_when_a_parameter_is_moved_or_a_table_changed() {
         left.extend(play_from(&mut synth, 256, 24_000, &[], 1.0).0);
         left
     };
-    let cases: Vec<(&str, Vec<(&'static str, f64)>, Vec<(&'static str, f64)>)> = vec![
+    type Settings = Vec<(&'static str, f64)>;
+    let cases: Vec<(&str, Settings, Settings)> = vec![
         ("the oscillator's level", vec![], vec![("osc1_level", 0.1)]),
         ("the volume", vec![], vec![("volume", -40.0)]),
         ("the pan", vec![], vec![("osc1_pan", 1.0)]),
@@ -723,6 +724,19 @@ fn the_matrix_moves_what_a_slot_says_by_what_it_says() {
     let swoop = with(&slot("env2", "pitch", 0.25), &[("env2_attack", 0.1), ("env2_decay", 0.1), ("env2_sustain", 0.0)]);
     assert!(semitones(&swoop, &[], 4_300..4_800) > 10.0);
     assert!(semitones(&swoop, &[], late.clone()).abs() < 0.05);
+    // How much an envelope sends can itself be moved: by a macro, say.
+    let scaled = |macro_at: f64| {
+        let more = [
+            choice("mod2_source", "macro1"),
+            choice("mod2_dest", "env2_depth"),
+            ("mod2_amount", 1.0),
+            ("macro1", macro_at),
+        ];
+        semitones(&with(&with(&slot("env2", "pitch", 0.25), &[("env2_sustain", 1.0)]), &more), &[], late.clone())
+    };
+    assert!(
+        (scaled(0.0) - 12.0).abs() < 0.05 && (scaled(0.5) - 18.0).abs() < 0.05 && (scaled(1.0) - 24.0).abs() < 0.05
+    );
     // Two slots on one destination add up.
     let two = with(
         &slot("mod_wheel", "fine_pitch", 0.5),
@@ -1008,4 +1022,135 @@ fn eight_notes_of_eight_voices_leave_most_of_a_core() {
     let filters = [choice("filter1_type", "lowpass24"), ("filter1_cutoff", 2_000.0)];
     let share = share_of_a_core(8, 8.0, 2, &filters);
     assert!(share < 0.6, "{:.0} % of a core", share * 100.0);
+}
+
+/// The patch `name` on a synth, with its macros where `macros` puts them.
+fn patch(name: &str) -> Wavetable {
+    let patch = patches::named(name).unwrap_or_else(|| panic!("no patch '{name}'"));
+    let mut synth = Wavetable::new([None, None]);
+    synth.prepare(SR, 512);
+    for (id, value) in patch.values() {
+        let index = PARAMS.iter().position(|def| def.id == id).unwrap();
+        synth.set_param(index, value);
+    }
+    synth
+}
+
+/// What a patch is played to be measured, held for some seconds: a note
+/// where it is written if it plays one note at a time (a bass low, a lead
+/// high), and a chord if it plays several.
+fn phrase(category: &str, one_at_a_time: bool) -> (Vec<u8>, f64) {
+    match (one_at_a_time, category) {
+        (true, "Bass") => (vec![40], 1.5),
+        (true, _) => (vec![72], 1.5),
+        (false, "Pad") => (vec![48, 55, 60, 64], 5.0),
+        (false, _) => (vec![48, 55, 60, 64], 1.5),
+    }
+}
+
+/// How loud `left` and `right` are over their loudest 400 ms, in dBFS,
+/// the two sides averaged; and their peak.
+fn loudest(left: &[f32], right: &[f32]) -> (f32, f32) {
+    let power: Vec<f32> = left.iter().zip(right).map(|(l, r)| 0.5 * (l * l + r * r)).collect();
+    let window = (0.4 * SR) as usize;
+    let loudest = (0..power.len() - window)
+        .step_by(2_400)
+        .map(|start| power[start..start + window].iter().sum::<f32>() / window as f32)
+        .fold(0.0f32, f32::max);
+    (10.0 * loudest.max(1e-12).log10(), db(peak(left).max(peak(right))))
+}
+
+/// How loud a patch is playing its phrase at a velocity of 100.
+fn loudness(patch: &patches::Patch) -> (f32, f32) {
+    let one_at_a_time = patch.params.iter().any(|(id, value)| *id == "mode" && *value != patches::Value::C("poly"));
+    let (notes, seconds) = phrase(patch.category, one_at_a_time);
+    let hit = |pitch: u8| EventKind::NoteOn { pitch, velocity: 100.0 / 127.0 };
+    let events: Vec<(usize, EventKind)> = notes.iter().map(|note| (0, hit(*note))).collect();
+    let (left, right) = play(&mut self::patch(patch.name), 256, (seconds * SR) as usize, &events);
+    loudest(&left, &right)
+}
+
+/// What every patch is matched to, in dBFS over its loudest 400 ms: where
+/// the poly synth's presets lie by the same measure (most of them between
+/// -17 and -14). And the room a patch leaves over its phrase: one that
+/// would have less at that level (a pluck, whose start is far over its
+/// ring) is turned down until it has it.
+const PATCH_LEVEL: f32 = -16.5;
+const PATCH_ROOM: f32 = -4.0;
+const PATCH_TOLERANCE: f32 = 1.0;
+
+#[test]
+fn the_patches_are_as_loud_as_one_another_and_leave_room() {
+    println!("patch            category   loudest 400 ms    peak        volume to match");
+    let mut wrong = Vec::new();
+    for patch in patches::PATCHES.iter().skip(1) {
+        let (level, peak) = loudness(patch);
+        // To the level, or as near it as leaves the room.
+        let wanted = (PATCH_LEVEL - level).min(PATCH_ROOM - peak);
+        let volume = patch.values().iter().find(|(id, _)| id == "volume").map_or(-21.0, |(_, value)| *value);
+        println!(
+            "{:<16} {:<8}   {level:>7.1} dBFS   {peak:>6.1} dBFS   {:>6.1}",
+            patch.name,
+            patch.category,
+            volume + f64::from(wanted)
+        );
+        if wanted.abs() > PATCH_TOLERANCE {
+            wrong.push(format!(
+                "{} is at {level:.1} dBFS, peak {peak:.1}: its volume wants {wanted:+.1} dB",
+                patch.name
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+#[test]
+fn every_patch_sounds_ends_and_answers_its_macros() {
+    for patch in patches::PATCHES {
+        let mut synth = self::patch(patch.name);
+        let (left, right) = play(&mut synth, 256, 48_000, &[(0, ON(57)), (3, ON(64))]);
+        assert!(left.iter().chain(&right).all(|sample| sample.is_finite()), "{}", patch.name);
+        assert!(rms(&left[..24_000]) > 0.003, "{} is silent", patch.name);
+        assert!(peak(&left) < 1.5, "{} is too loud: {}", patch.name, peak(&left));
+        // Let go of, it ends within its release, and the longest is a pad's.
+        let (tail, _) = play_from(&mut synth, 256, 30 * 48_000, &[(0, OFF(57)), (0, OFF(64))], 2.0);
+        assert_eq!(peak(&tail[tail.len() - 4_800..]), 0.0, "{} never ends", patch.name);
+        // Every macro it names changes the sound.
+        let plain = play(&mut self::patch(patch.name), 256, 24_000, &[(0, ON(57))]).0;
+        for (which, name) in patch.macros.iter().enumerate().filter(|(_, name)| !name.is_empty()) {
+            let mut moved = self::patch(patch.name);
+            set(&mut moved, &[(["macro1", "macro2", "macro3", "macro4"][which], 1.0)]);
+            let heard = play(&mut moved, 256, 24_000, &[(0, ON(57))]).0;
+            let apart = plain.iter().zip(&heard).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+            assert!(apart > 0.002, "{}: {name} changes nothing ({apart})", patch.name);
+        }
+    }
+}
+
+/// Not a test: how loud the poly synth's presets are by the same measure,
+/// which is where the level the patches are matched to comes from.
+#[test]
+#[ignore = "a measurement: cargo test -p trill-dsp --lib the_poly_synths_presets -- --ignored --nocapture"]
+fn how_loud_the_poly_synths_presets_are_by_the_same_measure() {
+    use crate::synth::{PARAMS as SYNTH_PARAMS, PRESETS, PolySynth};
+    for preset in PRESETS.iter().skip(1) {
+        let category = match preset.name {
+            "bass" | "sub_bass" | "acid_bass" => "Bass",
+            "lead" => "Lead",
+            "warm_pad" | "strings" => "Pad",
+            _ => "Keys",
+        };
+        let mut synth = PolySynth::new();
+        synth.prepare(SR, 512);
+        for (id, value) in preset.params {
+            synth.set_param(SYNTH_PARAMS.iter().position(|def| def.id == *id).unwrap(), *value);
+        }
+        let one_at_a_time = preset.params.iter().any(|(id, value)| *id == "mono" && *value == 1.0);
+        let (notes, seconds) = phrase(category, one_at_a_time);
+        let hit = |pitch: u8| EventKind::NoteOn { pitch, velocity: 100.0 / 127.0 };
+        let events: Vec<(usize, EventKind)> = notes.iter().map(|note| (0, hit(*note))).collect();
+        let (left, right) = crate::testing::run(&mut synth, SR, 256, (seconds * SR) as usize, &events);
+        let (level, peak) = loudest(&left, &right);
+        println!("{:<12} {category:<5} {level:>7.1} dBFS   peak {peak:>6.1} dBFS", preset.name);
+    }
 }

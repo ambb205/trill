@@ -88,6 +88,13 @@ fn model(uri: &str) -> Device {
         "builtin:drumrack" => {
             Some(drumrack::State::with_pads(drumrack::PAD_NOTES.map(|note| (note, "tone.wav"))).unwrap().to_bytes())
         }
+        // A table of its own for each oscillator: one from a recipe, one
+        // read from the file as a recording of a note.
+        "builtin:wavetable" => Some(
+            br#"{ "version": 1, "osc1": { "frames": [ {"shape":"pulse","width":0.5}, {"shape":"fm","ratio":3,"index":4} ] },
+                  "osc2": { "file": "tone.wav", "root": 55, "frames": 8 } }"#
+                .to_vec(),
+        ),
         _ => None,
     };
     device.clone()
