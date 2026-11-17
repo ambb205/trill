@@ -26,7 +26,8 @@ sh crates/trill-app/screenshots/render.sh <word>    # pictures of the window, in
   (installed plugins, audio devices, MIDI ports, a signed-in Claude Code) are `#[ignore]`d with the command that
   runs them; `README.md`, "Building and testing", lists them. Run the plugin ones after touching `trill-plugins`.
 - A few tests hold a wall-clock budget and can fail on a machine that is busy with other builds
-  (`trill-library` `scale::a_hundred_thousand_files…`, `trill-engine` `session_transport_runs_in_real_time`, `trill-mcp`
+  (`trill-library` `scale::a_hundred_thousand_files…`, `trill-engine` `session_transport_runs_in_real_time` and
+  `the_session_says_how_many_clips_it_is_still_preparing`, `trill-mcp`
   `an_agent_arms_a_track_plays_it_and_records_a_take`, the real-plugin tests). If one is the only failure, run it alone before concluding anything.
 - Development builds are optimized (`[profile.dev]` in `Cargo.toml`) because unoptimized audio code cannot keep
   up; what only runs while building is not, and debug info is line tables only.
