@@ -119,14 +119,17 @@ fn a_sound_a_device_brings_makes_its_effects_behind_it_in_one_undo_step() {
     assert!(session.redo());
     assert_eq!(chain(&session, pads), ["Wavetable", "Chorus", "Reverb"]);
 
-    // A bass is dry and says so; the list of sounds has the eleven that
-    // bring something, each with what.
+    // A bass is dry and says so; the list of sounds has every sound of
+    // the synth's bank, each with what it brings.
     let bass = track(&mut session, "Bass");
     let added = session.add_given(ChainRef::Track(bass), WAVETABLE, Some("Solid Bass"), None).unwrap();
     assert_eq!(chain(&session, bass), ["Wavetable"]);
     assert!(added.given.unwrap().sound);
     let sounds = listed_sounds(&session.descriptors(), session.saved_presets());
-    assert_eq!(sounds.len(), 11);
+    let bank = session.descriptors().iter().find(|device| device.uri == WAVETABLE).unwrap().presets.len();
+    assert_eq!(sounds.len(), bank - 1, "all but the plain sound a synth starts from");
+    assert!(sounds.iter().any(|sound| sound.preset.name == "Solid Bass" && sound.after.is_empty()));
+    assert!(sounds.iter().all(|sound| sound.preset.name != "init"));
     let pad = sounds.iter().find(|sound| sound.preset.name == "Glass Pad").unwrap();
     assert_eq!(
         (pad.device.as_str(), pad.after.as_slice(), pad.saved),

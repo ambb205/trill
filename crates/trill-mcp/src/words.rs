@@ -279,6 +279,15 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
             let name = call.text("name").map(quoted).unwrap_or_default();
             about("Saving", "Saved", format!("the sound of {device} as the preset {name}").trim_end())
         }
+        "edit_preset" | "delete_preset" => {
+            let preset = call.text("preset").map(|name| format!("the saved preset {}", quoted(name)));
+            let preset = preset.unwrap_or_else(|| "a saved preset".to_owned());
+            match (tool, call.text("name")) {
+                ("delete_preset", _) => about("Deleting", "Deleted", &preset),
+                (_, Some(name)) => about("Renaming", "Renamed", &format!("{preset} to {}", quoted(name))),
+                (_, None) => about("Changing", "Changed", &format!("what {preset} says of itself")),
+            }
+        }
         "save_sound" => {
             let track = call.track("track").unwrap_or_else(|| "a track".to_owned());
             let name = call.text("name").map(quoted).unwrap_or_default();

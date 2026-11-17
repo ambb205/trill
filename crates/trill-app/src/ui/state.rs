@@ -532,6 +532,9 @@ pub struct BrowserState {
     pub tab: BrowserTab,
     /// What is typed in the devices' search field; narrows the lists.
     pub search: String,
+    /// The kinds of sound whose rows the Devices tab shows: a kind is
+    /// one row until it is opened.
+    pub open_kinds: Vec<String>,
     pub sounds: SoundBrowser,
 }
 
@@ -547,6 +550,7 @@ impl BrowserState {
             rect: egui::Rect::NOTHING,
             tab: BrowserTab::default(),
             search: String::new(),
+            open_kinds: Vec::new(),
             sounds: SoundBrowser::default(),
         }
     }
@@ -715,10 +719,13 @@ pub struct UiState {
     pub renaming_track: Option<TextEditState<TrackId>>,
     /// The name being typed for a preset of this device's sound.
     pub naming_preset: Option<TextEditState<DeviceId>>,
-    /// Whether the name being typed there is for the sound of the device's
-    /// track, the device and every effect after it, and not for a preset
-    /// of the device alone.
-    pub naming_sound: bool,
+    /// A sound that is being saved, or a saved preset or sound that is
+    /// being renamed and described: its name, description and tags as
+    /// they are typed.
+    pub preset_form: Option<super::sound_presets::Form>,
+    /// A saved preset or sound the user asked to delete, until they have
+    /// said whether they mean it: its device type and its name.
+    pub deleting_preset: Option<(String, String)>,
     pub renaming_clip: Option<TextEditState<ClipId>>,
     /// A clip being renamed on its own name strip in the arrangement.
     pub renaming_clip_inline: Option<TextEditState<InlineClip>>,
@@ -805,7 +812,8 @@ impl UiState {
             },
             renaming_track: None,
             naming_preset: None,
-            naming_sound: false,
+            preset_form: None,
+            deleting_preset: None,
             renaming_clip: None,
             renaming_clip_inline: None,
             audition: None,
