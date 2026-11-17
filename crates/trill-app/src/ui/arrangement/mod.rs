@@ -49,7 +49,7 @@ use super::state::{ArrangeDrag, ArrangementState, Cx};
 use super::timeline::{self, GridChoice, GridLevel, TimeView};
 use eframe::egui::{self, Rect, Sense, Shape, Stroke, Ui, pos2, vec2};
 use rows::{Row, Rows};
-use trill_core::{Beats, Clip, TimeSignature};
+use trill_core::{Beats, Clip, MeterMap, TimeSignature};
 use trill_noir::paint;
 
 pub(super) const HEADER_WIDTH: f32 = 232.0;
@@ -79,6 +79,10 @@ pub(super) struct Geometry {
     master: Rect,
     time: TimeView,
     scroll_y: f32,
+    /// The song's bars, through every change of time signature, and the
+    /// signature it begins in: the grid's steps are chosen for that one,
+    /// and each other gets what they come to in it.
+    meter: MeterMap,
     signature: TimeSignature,
     beats_per_bar: Beats,
     /// Spacing of the finest grid lines drawn, in beats.
@@ -89,7 +93,8 @@ pub(super) struct Geometry {
 }
 
 impl Geometry {
-    fn new(area: Rect, view: &ArrangementState, rows: Rows, signature: TimeSignature) -> Self {
+    fn new(area: Rect, view: &ArrangementState, rows: Rows, meter: MeterMap) -> Self {
+        let signature = meter.signature_at(0.0);
         let split_x = area.left() + HEADER_WIDTH;
         let split_y = area.top() + RULER_HEIGHT;
         let master_top = (area.bottom() - MASTER_HEIGHT).max(split_y);
@@ -105,6 +110,7 @@ impl Geometry {
             master: Rect::from_min_max(pos2(area.left(), master_top), area.max),
             time: view.time,
             scroll_y: view.scroll_y,
+            meter,
             signature,
             beats_per_bar: signature.beats_per_bar(),
             grid: 1.0,
@@ -181,7 +187,7 @@ impl Geometry {
     /// off.
     fn snap(&self, beat: Beats, free: bool) -> Beats {
         match self.snap {
-            Some(step) if !free => timeline::snap_to_bar_grid(beat, self.beats_per_bar, step),
+            Some(step) if !free => timeline::snap_in(beat, &self.meter, step),
             _ => beat.max(0.0),
         }
     }
@@ -224,6 +230,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     let area = ui.max_rect();
     ui.painter().rect_filled(area, 0.0, cx.theme.bg);
 
+    let meter = cx.snap.project.meter_map();
     let signature = cx.snap.project.time_signature;
     let track_count = cx.snap.project.tracks.len();
     let now = ui.input(|input| input.time);
@@ -242,7 +249,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
         ui.ctx().request_repaint();
     }
     let rows = Rows::build(&cx.snap.project.tracks, view);
-    let mut geometry = Geometry::new(area, view, rows, signature);
+    let mut geometry = Geometry::new(area, view, rows, meter);
     if track_count == 0 {
         // Nothing to arrange yet: say how to begin, above the master.
         let welcome = Rect::from_min_max(area.min, pos2(area.right(), geometry.master.top()));
@@ -463,7 +470,7 @@ mod tests {
 
     fn geometry_of(project: &Project, view: &ArrangementState) -> Geometry {
         let area = Rect::from_min_size(pos2(0.0, 100.0), vec2(1000.0, 400.0));
-        Geometry::new(area, view, Rows::build(&project.tracks, view), project.time_signature)
+        Geometry::new(area, view, Rows::build(&project.tracks, view), project.meter_map())
     }
 
     fn geometry(track_count: usize) -> Geometry {
@@ -507,7 +514,7 @@ mod tests {
 
         // In a window too short for both, the tracks keep a row.
         let short = Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, RULER_HEIGHT + MASTER_HEIGHT + 90.0));
-        let cramped = Geometry::new(short, &view, Rows::build(&project.tracks, &view), project.time_signature);
+        let cramped = Geometry::new(short, &view, Rows::build(&project.tracks, &view), project.meter_map());
         assert_eq!(cramped.lanes.height(), TRACK_HEIGHT);
         assert_eq!(cramped.master_lanes.height(), 30.0);
     }

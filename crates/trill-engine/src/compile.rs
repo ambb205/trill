@@ -6,6 +6,7 @@ use crate::graph::{
     AudioRegion, Bus, Chain, DeviceSlot, Envelope, Graph, MAX_BLOCK, MasterNode, Meter, NoteEvent, ParamAutomation,
     RegionAudio, SendNode, TrackNode, TrackState,
 };
+use crate::processor::CLIP_FADE_SECONDS;
 use crate::ready::{LoadWatch, Plugins};
 use crate::sources::AudioSources;
 use parking_lot::Mutex;
@@ -13,8 +14,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use trill_core::device::{DeviceController, DeviceFactory, DeviceWarning, ParamInfo, Purpose};
-use trill_core::project::{AutomationTarget, Clip, ClipContent};
-use trill_core::{ClipId, Device, DeviceId, Project, Track, TrackId, TrackKind};
+use trill_core::project::{AudioContent, AutomationTarget, Clip, ClipContent};
+use trill_core::{ClipId, Device, DeviceId, Project, TempoMap, Track, TrackId, TrackKind};
 use trill_dsp::util::db_to_gain;
 
 /// How far apart, in beats, the end of one clip and the start of the next
@@ -88,13 +89,13 @@ pub struct Meters {
 /// real audio can fade over from what was playing.
 #[derive(Default)]
 pub struct StandIns {
-    playing: HashMap<ClipId, RegionAudio>,
+    playing: HashMap<(ClipId, u32), RegionAudio>,
 }
 
 impl StandIns {
     /// How many clips are playing a stand-in.
     pub fn len(&self) -> usize {
-        self.playing.len()
+        self.playing.keys().map(|(clip, _)| clip).collect::<HashSet<_>>().len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -156,7 +157,7 @@ impl Compiler<'_> {
     pub fn compile(&mut self, project: &Project, looping: bool) -> (Box<Graph>, Vec<Problem>) {
         let mut problems = Vec::new();
         let routing = Routing::of(project);
-        let frames_per_beat = 60.0 * self.sample_rate / project.tempo;
+        let tempo_map = project.tempo_map();
         let live = self.stand_ins.is_some();
         // The stretched audio this graph plays or waits for, and the clips
         // that have a stand-in meanwhile.
@@ -187,39 +188,63 @@ impl Compiler<'_> {
                     ClipContent::Audio(content) => content,
                 };
                 let report = |reason| Problem::AudioFile { clip: clip.id, path: content.path.clone(), reason };
-                let found = match self.audio.clip_audio(content, project.tempo, self.sample_rate, !live, &mut held) {
-                    Ok(found) => found,
-                    Err(reason) => {
-                        problems.push(report(reason));
-                        continue;
-                    }
-                };
-                problems.extend(found.problem.map(report));
-                wanted.extend(found.key);
-                let region_audio = RegionAudio {
-                    origin: content.offset_seconds * found.frames_per_second
-                        - clip.start * frames_per_beat * found.step,
-                    step: found.step,
-                    data: found.data,
-                };
-                let replaces = if found.stand_in {
-                    waiting.insert(clip.id, region_audio.clone());
-                    None
-                } else {
-                    self.stand_ins.as_ref().and_then(|stand_ins| stand_ins.playing.get(&clip.id).cloned())
-                };
-                audio.push(AudioRegion {
-                    start: clip.start,
-                    end: clip.end(),
-                    fade_in: content.fade_in,
-                    fade_out: content.fade_out,
-                    joins_previous: false,
-                    joins_next: false,
-                    gain: db_to_gain(content.gain_db),
-                    audio: region_audio,
-                    replaces,
-                    blended: 0,
-                });
+                // A clip that follows the tempo is a piece for each tempo
+                // it lies under; any other is one piece, at the speed it
+                // was recorded at.
+                let pieces = pieces(content, clip, &tempo_map);
+                let last = pieces.len() - 1;
+                let mut said = false;
+                for (index, piece) in pieces.iter().enumerate() {
+                    let found = self.audio.clip_audio(content, piece.tempo, self.sample_rate, !live, &mut held);
+                    let found = match found {
+                        Ok(found) => found,
+                        Err(reason) => {
+                            problems.push(report(reason));
+                            break;
+                        }
+                    };
+                    // One sentence for a clip, however many pieces it is.
+                    problems.extend(found.problem.filter(|_| !std::mem::replace(&mut said, true)).map(report));
+                    wanted.extend(found.key);
+                    // Where in the recording the piece begins, and from
+                    // there where beat 0 of the song would fall in it.
+                    let within =
+                        content.offset_seconds + content.seconds_over(&tempo_map, clip.start, piece.start - clip.start);
+                    let region_audio = RegionAudio {
+                        origin: within * found.frames_per_second
+                            - tempo_map.frames_at(piece.start, self.sample_rate) * found.step,
+                        step: found.step,
+                        data: found.data,
+                    };
+                    let place = (clip.id, index as u32);
+                    let replaces = if found.stand_in {
+                        waiting.insert(place, region_audio.clone());
+                        None
+                    } else {
+                        self.stand_ins.as_ref().and_then(|stand_ins| stand_ins.playing.get(&place).cloned())
+                    };
+                    // At a seam each piece is played half a click guard
+                    // into the other's time, at the tempo that has there.
+                    let (seam_before, seam_after) = (index > 0, index < last);
+                    let before = if seam_before { seam_beats(pieces[index - 1].tempo) } else { 0.0 };
+                    let after = if seam_after { seam_beats(pieces[index + 1].tempo) } else { 0.0 };
+                    audio.push(AudioRegion {
+                        start: piece.start - before,
+                        end: piece.end + after,
+                        clip_start: clip.start,
+                        clip_end: clip.end(),
+                        seam_before,
+                        seam_after,
+                        fade_in: content.fade_in,
+                        fade_out: content.fade_out,
+                        joins_previous: false,
+                        joins_next: false,
+                        gain: db_to_gain(content.gain_db),
+                        audio: region_audio,
+                        replaces,
+                        blended: 0,
+                    });
+                }
             }
             notes.sort_by(|a, b| a.start.total_cmp(&b.start));
             join_continuations(&mut audio);
@@ -290,8 +315,8 @@ impl Compiler<'_> {
             buses: (0..routing.bus_count()).map(|_| Bus::new()).collect(),
             keys: routing.keys.iter().map(|_| Bus::new()).collect(),
             master,
-            tempo: project.tempo,
-            time_signature: project.time_signature,
+            tempo_map,
+            meter_map: project.meter_map(),
             loop_region: (looping && region.enabled).then_some((region.start, region.end)),
         };
         (Box::new(graph), problems)
@@ -383,6 +408,74 @@ impl Compiler<'_> {
     }
 }
 
+/// A stretch of a clip of audio under one tempo.
+struct Piece {
+    start: f64,
+    end: f64,
+    /// The tempo the stretch is played at: the song's there, or for a
+    /// stretch of a tempo that glides, the one tempo that takes as long.
+    tempo: f64,
+}
+
+/// How far a clip that follows a gliding tempo may be from its beat. It
+/// is played at one speed for a stretch of the glide, on time at both ends
+/// of the stretch and off by the most half way through it; a stretch is as
+/// long as keeps that under this many seconds, between
+/// [`GLIDE_PIECE_BEATS`] bounds. Each stretch is a copy of the file
+/// stretched for its tempo, so a steep glide under a long file costs time
+/// and memory.
+const GLIDE_DRIFT_SECONDS: f64 = 0.0015;
+/// The shortest and the longest stretch of a glide played at one speed.
+const GLIDE_PIECE_BEATS: (f64, f64) = (0.125, 1.0);
+
+/// How many beats from `beat` on, where the tempo glides, a clip that
+/// follows it is played at one speed.
+fn glide_piece_beats(map: &TempoMap, beat: f64) -> f64 {
+    let (shortest, longest) = GLIDE_PIECE_BEATS;
+    let tempo = map.tempo_at(beat);
+    // How much of itself the tempo gains or loses in a beat. Half way
+    // through a stretch of `l` beats the clip is `rate * l * l / 8` beats
+    // from where the glide has the song.
+    let rate = ((map.tempo_at(beat + 1e-3) - tempo) / (1e-3 * tempo)).abs();
+    if rate <= 0.0 {
+        return longest;
+    }
+    (GLIDE_DRIFT_SECONDS * 8.0 * tempo / (60.0 * rate)).sqrt().clamp(shortest, longest)
+}
+
+/// How far on either side of a seam between two pieces of a clip both are
+/// played, in beats at `tempo`: half the click guard, so that the fade
+/// across the seam is as long as the guard is.
+fn seam_beats(tempo: f64) -> f64 {
+    0.5 * CLIP_FADE_SECONDS * tempo / 60.0
+}
+
+/// The pieces a clip of audio is played in: one, unless it follows the
+/// tempo and the tempo changes under it.
+fn pieces(content: &AudioContent, clip: &Clip, map: &TempoMap) -> Vec<Piece> {
+    let (start, end) = (clip.start, clip.end());
+    let follows = content.followed_tempo().is_some();
+    let steady = map.next_change(start).is_none_or(|change| change >= end) && !map.is_ramping_at(start);
+    if !follows || steady {
+        // Read at the tempo where it starts, which for a clip that does
+        // not follow the tempo decides nothing.
+        return vec![Piece { start, end, tempo: map.tempo_at(start) }];
+    }
+    let mut pieces = Vec::new();
+    let mut from = start;
+    while from < end {
+        let change = map.next_change(from).unwrap_or(f64::INFINITY);
+        let gliding = map.is_ramping_at(from);
+        let to = if gliding { change.min(from + glide_piece_beats(map, from)) } else { change }.min(end);
+        // A sliver at the end of the clip goes with the piece before it.
+        let to = if end - to < 1e-6 { end } else { to };
+        let tempo = if gliding { (to - from) * 60.0 / map.seconds_between(from, to) } else { map.tempo_at(from) };
+        pieces.push(Piece { start: from, end: to, tempo });
+        from = to;
+    }
+    pieces
+}
+
 /// Finds the clips that carry straight on from another (the halves of a
 /// split, typically) and joins them, so that together they play exactly
 /// what one clip over the same span would: the same frames, with no fade
@@ -420,6 +513,7 @@ fn join_continuations(regions: &mut [AudioRegion]) {
             // last bit: the two were computed separately and may differ by
             // a rounding error, which is enough to move a frame.
             region.start = end;
+            region.clip_start = end;
             region.audio.origin = origin;
         }
     }

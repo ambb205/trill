@@ -14,7 +14,7 @@ use crate::ui::state::{DetailTab, UiState};
 use crate::ui::timeline;
 use std::fmt::Write;
 use trill_core::pitch::pitch_name;
-use trill_core::{Beats, ChainRef, Clip, Note, Project, TimeSignature, Track, TrackKind};
+use trill_core::{Beats, ChainRef, Clip, MeterMap, Note, Project, Track, TrackKind};
 
 /// Notes are listed one by one up to this many; beyond it they are summed
 /// up, and the assistant reads the rest with a tool if it wants them.
@@ -40,12 +40,12 @@ fn beats(value: Beats) -> String {
 }
 
 /// `beat 16 (5.1.1)`.
-fn at(beat: Beats, signature: TimeSignature) -> String {
+fn at(beat: Beats, signature: &MeterMap) -> String {
     format!("beat {} ({})", beats(beat), timeline::format_position(beat, signature))
 }
 
 /// `beats 16 to 32 (5.1.1 to 9.1.1)`.
-fn span(start: Beats, end: Beats, signature: TimeSignature) -> String {
+fn span(start: Beats, end: Beats, signature: &MeterMap) -> String {
     format!(
         "beats {} to {} ({} to {})",
         beats(start),
@@ -56,7 +56,7 @@ fn span(start: Beats, end: Beats, signature: TimeSignature) -> String {
 }
 
 /// The span as the window's ruler would label it: `5 to 9`, `5.3 to 6`.
-fn short_span(start: Beats, end: Beats, signature: TimeSignature) -> String {
+fn short_span(start: Beats, end: Beats, signature: &MeterMap) -> String {
     format!("{}\u{2013}{}", timeline::format_bar_beat(start, signature), timeline::format_bar_beat(end, signature))
 }
 
@@ -68,7 +68,7 @@ fn track_kind(track: &Track) -> &'static str {
     }
 }
 
-fn clip_line(track: &Track, clip: &Clip, signature: TimeSignature) -> String {
+fn clip_line(track: &Track, clip: &Clip, signature: &MeterMap) -> String {
     let holds = match (clip.midi(), clip.audio()) {
         (Some(_), _) => match clip.notes().len() {
             1 => "MIDI, 1 note".to_owned(),
@@ -133,6 +133,8 @@ fn notes_line(notes: &[Note], clip: &Clip) -> String {
 /// Puts what the window shows into words.
 pub fn describe(project: &Project, state: &UiState, live: &Live) -> Context {
     let signature = project.time_signature;
+    // Bars are counted through every change of time signature.
+    let bars = &project.meter_map();
     let mut text = String::new();
     let mut summary = Vec::new();
     let mut line = |line: String| {
@@ -148,10 +150,17 @@ pub fn describe(project: &Project, state: &UiState, live: &Live) -> Context {
         signature.denominator,
         beats(signature.beats_per_bar())
     ));
+    let changes = project.tempo_changes.len() + project.meter_changes.len();
+    if changes > 0 {
+        line(format!(
+            "the tempo or the time signature changes {changes} time(s) along the song: those above are what it begins \
+             with, and get_tempo_map has every change with its bar and beat"
+        ));
+    }
     line("positions: in beats from the start of the song, then (bar.beat.sixteenth) as the window shows them".into());
-    line(format!("playhead: {}, {}", at(live.position, signature), if live.playing { "playing" } else { "stopped" }));
+    line(format!("playhead: {}, {}", at(live.position, bars), if live.playing { "playing" } else { "stopped" }));
     let region = project.loop_region;
-    line(format!("loop: {}, {}", if region.enabled { "on" } else { "off" }, span(region.start, region.end, signature)));
+    line(format!("loop: {}, {}", if region.enabled { "on" } else { "off" }, span(region.start, region.end, bars)));
     line(format!(
         "detail panel: {}",
         match state.detail_tab {
@@ -187,11 +196,11 @@ pub fn describe(project: &Project, state: &UiState, live: &Live) -> Context {
         .collect();
     match clips.as_slice() {
         [] => line("selected clips: none".to_owned()),
-        [(track, clip)] => line(format!("selected clip: {}", clip_line(track, clip, signature))),
+        [(track, clip)] => line(format!("selected clip: {}", clip_line(track, clip, bars))),
         many => {
             line(format!("selected clips: {}", many.len()));
             for (track, clip) in many.iter().take(CLIPS_LISTED) {
-                line(format!("- {}", clip_line(track, clip, signature)));
+                line(format!("- {}", clip_line(track, clip, bars)));
             }
             if many.len() > CLIPS_LISTED {
                 line(format!("- and {} more", many.len() - CLIPS_LISTED));
@@ -228,11 +237,11 @@ pub fn describe(project: &Project, state: &UiState, live: &Live) -> Context {
                 .map(|track| format!("\"{}\"", track.name))
                 .collect();
             let on = if names.is_empty() { "every track".to_owned() } else { names.join(", ") };
-            line(format!("time selection: {} on {on}", span(selection.start, selection.end, signature)));
+            line(format!("time selection: {} on {on}", span(selection.start, selection.end, bars)));
         }
         None => line("time selection: none".to_owned()),
     }
-    line(format!("edit cursor: {}", at(view.cursor, signature)));
+    line(format!("edit cursor: {}", at(view.cursor, bars)));
 
     // The few words shown above the message field.
     match (clips.as_slice(), track) {
@@ -252,12 +261,12 @@ pub fn describe(project: &Project, state: &UiState, live: &Live) -> Context {
         summary.push(device.name.clone());
     }
     if let Some(selection) = &view.time_selection {
-        summary.push(format!("bars {}", short_span(selection.start, selection.end, signature)));
+        summary.push(format!("bars {}", short_span(selection.start, selection.end, bars)));
     }
     summary.push(if region.enabled {
-        format!("loop {}", short_span(region.start, region.end, signature))
+        format!("loop {}", short_span(region.start, region.end, bars))
     } else {
-        format!("playhead {}", timeline::format_bar_beat(live.position, signature))
+        format!("playhead {}", timeline::format_bar_beat(live.position, bars))
     });
 
     Context { text, summary }

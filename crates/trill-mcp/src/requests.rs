@@ -26,9 +26,10 @@ pub struct LoopInput {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct SetProjectRequest {
     pub name: Option<String>,
-    /// Beats per minute, 20-999.
+    /// Beats per minute, 20-999: the tempo the song begins at. set_tempo changes it from a later bar on.
     pub tempo: Option<f64>,
-    /// For example "4/4", "3/4", "6/8" or "7/8".
+    /// For example "4/4", "3/4", "6/8" or "7/8": the time signature the song begins in. set_time_signature
+    /// changes it from a later bar on.
     pub time_signature: Option<String>,
     /// Region that live playback repeats. Rendering ignores it.
     #[serde(rename = "loop")]
@@ -591,8 +592,51 @@ pub struct ImportMidiRequest {
     /// Instrument for the new melodic tracks (default "builtin:polysynth"). Drum parts always get
     /// "builtin:drumkit".
     pub instrument: Option<String>,
-    /// Also adopt the file's tempo and time signature. Defaults to true when the project has no tracks yet.
+    /// Also adopt the file's tempo and time signature, with every change of them in the file, from `at` on.
+    /// Defaults to true when the project has no tracks yet.
     pub use_tempo: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct SetTempoRequest {
+    /// Beats per minute, 20-999. Needed unless `remove` is true.
+    pub bpm: Option<f64>,
+    /// The bar the tempo is set at, counted from 1 as get_tempo_map counts them (default 1: the tempo the
+    /// song begins at).
+    pub bar: Option<u32>,
+    /// The beat in that bar, counted from 1 in quarter notes (default 1, the bar line; 3 is two beats in,
+    /// 2.5 a beat and a half in).
+    pub beat: Option<f64>,
+    /// false (default): the tempo jumps to `bpm` here and stays there. true: it glides here, evenly from
+    /// beat to beat, from the change before this one (or from the start of the song) and arrives at `bpm`
+    /// here: an accelerando or a ritardando. For a glide that sets out later than the change before it, first
+    /// set the tempo it sets out from at the bar it sets out at.
+    pub ramp: Option<bool>,
+    /// true removes what the tempo does here (the glide that arrives and the tempo that takes over, whichever
+    /// there is); the tempo before goes on.
+    pub remove: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct SetTimeSignatureRequest {
+    /// For example "4/4", "3/4", "6/8", "7/8" or "5/4": 1 to 32 over 1, 2, 4, 8 or 16. Needed unless
+    /// `remove` is true.
+    pub time_signature: Option<String>,
+    /// The bar it takes over at, counted from 1 as get_tempo_map counts them (default 1: the time signature
+    /// the song begins in).
+    pub bar: Option<u32>,
+    /// For this many bars only: after them, the time signature that was in force here before takes over
+    /// again. Omit to leave it in force until the next change.
+    pub bars: Option<u32>,
+    /// true removes the change at this bar; the time signature before it goes on.
+    pub remove: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct GetTempoMapRequest {
+    /// Bars to look up, counted from 1: for each, the beat it starts at, how many beats long it is, the
+    /// second it starts at, its time signature and the tempo there.
+    pub bars: Option<Vec<u32>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -622,7 +666,8 @@ pub struct EditTimeRequest {
     /// "insert": open up `length` beats of empty time at `start`; what follows moves later.
     /// "copy": copy the time from `start` to `end` to the beat `to`, on every track or on `tracks`.
     pub action: String,
-    /// Where the stretch begins, in beats (bar N of 4/4 starts at (N-1)*4).
+    /// Where the stretch begins, in beats (bar N of 4/4 starts at (N-1)*4; where the time signature changes,
+    /// get_tempo_map gives the beat a bar starts at).
     pub start: f64,
     /// Where the stretch ends, in beats. Needed for "delete", "duplicate" and "copy".
     pub end: Option<f64>,
@@ -831,4 +876,110 @@ pub struct JournalRequest {
     /// Default false: only how the song was made. Ask the user before turning this on.
     #[serde(default)]
     pub conversation: bool,
+}
+
+// ---- films ---------------------------------------------------------------------------
+
+/// What a film is of.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FilmOf {
+    /// The song as it plays: its lanes, clips and piano rolls on the stage, filmed by a director, with the
+    /// song's own sound.
+    #[default]
+    Song,
+    /// How the song was made: the session's journal played again, step by step, with the finished song under it.
+    MakingOf,
+}
+
+/// How a stretch of a film is framed.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FilmShot {
+    /// The whole song in the frame, the playhead crossing it.
+    Song,
+    /// The lanes of every part that plays, eight bars across.
+    Wide,
+    /// The lanes above and the piano rolls of two or three parts below, four bars across.
+    Ensemble,
+    /// One part's piano roll, large, with the lanes as a strip above it.
+    Close,
+}
+
+/// How a stretch of a film is entered.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FilmEntry {
+    /// At once, on the beat, with a flash.
+    Cut,
+    /// The camera travels there over a bar.
+    Move,
+}
+
+/// What is asked of the director for one stretch of the song. Whatever is left out stays the director's choice.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+pub struct FilmDirection {
+    /// The stretch, as a section by its marker's name ("CHORUS 2"). Give this, or `from_bar`.
+    pub section: Option<String>,
+    /// The stretch, in bars counted from 1: from the start of this bar…
+    pub from_bar: Option<f64>,
+    /// …to the end of this one (default: the same bar as `from_bar`, or the end of `section`).
+    pub to_bar: Option<f64>,
+    /// How to frame it. Omit and name `parts` to let them decide: one part is held close, two or three are an
+    /// ensemble.
+    pub shot: Option<FilmShot>,
+    /// Ids of the tracks to show as piano rolls, top to bottom: for "close" the one to hold close, for
+    /// "ensemble" up to three. Omit to let the director pick who drives the stretch.
+    pub parts: Option<Vec<u64>>,
+    /// How to come to it. Omit for a cut where the frame changes and a move where it does not.
+    pub enter: Option<FilmEntry>,
+}
+
+/// How much work goes into each frame.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FilmQuality {
+    /// Each frame exposed from eight moments (the blur of motion) and drawn at twice its size. About half real
+    /// time at 1920x1080 on a good graphics card.
+    #[default]
+    Fine,
+    /// One moment a frame at its own size, as the window shows the stage: about twice as fast.
+    Plain,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct FilmPlanRequest {
+    /// What the film would be of (default "song").
+    #[serde(default)]
+    pub of: FilmOf,
+    /// Film only this section, by its marker's name. Omit for the whole song (or give `start`/`end`).
+    pub section: Option<String>,
+    /// Film from this beat (default 0).
+    pub start: Option<f64>,
+    /// Film up to this beat (default: the end of the song).
+    pub end: Option<f64>,
+    /// What you ask of the director, stretch by stretch, in order: where two speak of the same bars the later
+    /// one has them. Omit for the director's own plan.
+    pub direct: Option<Vec<FilmDirection>>,
+    /// With "making_of": how many seconds of the story a second of film is (default 1, or as much more as it
+    /// takes for the film to be no longer than the song under it).
+    pub speed: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct FilmRequest {
+    /// Where to write the film, as an .mp4. Defaults to a `films` folder beside the project file (for a song
+    /// that has not been saved: the system temp folder, or the folder the assistant works in).
+    pub path: Option<String>,
+    /// "1080p" (1920x1080, the default), "2160p" (3840x2160), "upright" (1080x1920, for phones), or any
+    /// "WIDTHxHEIGHT" with even sides from 320 to 3840.
+    pub size: Option<String>,
+    /// Frames a second, 24 to 60 (default 60).
+    pub rate: Option<u32>,
+    #[serde(default)]
+    pub quality: FilmQuality,
+    /// With "making_of": false for a silent film. Default true: the finished song plays under it.
+    pub music: Option<bool>,
+    #[serde(flatten)]
+    pub what: FilmPlanRequest,
 }

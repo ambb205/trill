@@ -83,6 +83,11 @@ pub struct MakingOf {
     factory: Arc<dyn DeviceFactory>,
     /// Where the replay starts, and whether it plays from there.
     start: Start,
+    /// Whether this is the making of the song that is open, which can be
+    /// filmed: a film ends on the finished song and plays it.
+    own: bool,
+    /// Its film was asked for, from the bar.
+    film_asked: bool,
 }
 
 /// Where a replay starts.
@@ -201,7 +206,7 @@ impl MakingOf {
                 waker.request_repaint();
             }
         });
-        Self { stage: Stage::Reading(journal), title, factory, start }
+        Self { stage: Stage::Reading(journal), title, factory, start, own: true, film_asked: false }
     }
 
     /// Opens the making-of that was written out to `file`, to watch what
@@ -217,7 +222,7 @@ impl MakingOf {
                 waker.request_repaint();
             }
         });
-        Self { stage: Stage::Reading(journal), title, factory, start: Start::default() }
+        Self { stage: Stage::Reading(journal), title, factory, start: Start::default(), own: false, film_asked: false }
     }
 
     /// The part of a frame that needs no window: takes in the replay when
@@ -259,6 +264,11 @@ impl MakingOf {
             Stage::Nothing(reason) => Some(reason),
             _ => None,
         }
+    }
+
+    /// Whether the film of this was asked for since this was last asked.
+    pub fn take_film_ask(&mut self) -> bool {
+        std::mem::take(&mut self.film_asked)
     }
 
     /// Does what a key asked for. Returns whether the making-of is to be
@@ -517,6 +527,20 @@ pub fn bar(ui: &mut Ui, theme: &Theme, making_of: &mut MakingOf) -> bool {
         hint = Some("Back to the song as it is \u{00B7} Esc".to_owned());
     }
     let left = response.clicked();
+    // Its film, beside the way out: of the song that is open, whose
+    // finished state the film ends on and plays under the story.
+    let mut right = leave_rect.left();
+    if making_of.own {
+        let film = Chip::action("Film\u{2026}");
+        let width = film.width(ui, theme);
+        let rect = Rect::from_min_size(pos2(right - 6.0 - width, leave_rect.top()), vec2(width, theme.metric.chip));
+        let response = trill_noir::chip(ui, theme, rect, id.with("film"), &film);
+        if response.hovered() {
+            hint = Some("Export a film of this: the story staged, the finished song playing under it".to_owned());
+        }
+        making_of.film_asked |= response.clicked();
+        right = rect.left();
+    }
 
     let mut x = bar.left() + EDGE;
     x += brand::paint_centered(&painter, x, bar.center().y, 1.0).width() + 9.0;
@@ -531,7 +555,7 @@ pub fn bar(ui: &mut Ui, theme: &Theme, making_of: &mut MakingOf) -> bool {
     let Some(watching) = making_of.watching_mut() else {
         return left;
     };
-    let mut x = (bar.left() + TRANSPORT_LEFT).min(leave_rect.left() - 420.0).max(x + GAP);
+    let mut x = (bar.left() + TRANSPORT_LEFT).min(right - 420.0).max(x + GAP);
     let button = |x: &mut f32| {
         let rect = boxed(bar, *x, BUTTON);
         *x += BUTTON + 4.0;
@@ -596,7 +620,7 @@ pub fn bar(ui: &mut Ui, theme: &Theme, making_of: &mut MakingOf) -> bool {
     // Which step of how many.
     let (reached, steps) = watching.steps();
     let count = format!("Step {reached} of {steps}");
-    let room = row(x).with_max_x(leave_rect.left() - GAP);
+    let room = row(x).with_max_x(right - GAP);
     if room.width() > 60.0 {
         text::paint(&painter, room, Align2::LEFT_CENTER, theme.text.caps, &count, theme.ink_dim);
     }

@@ -8,6 +8,14 @@ license.workspace = true
 
 [dependencies]
 trill-core.workspace = true
+# The built-in sampler says which file it plays.
+trill-dsp.workspace = true
+# A film renders the song's own sound: the mix, and the level of every
+# track as it went.
+trill-engine.workspace = true
+# Reads the recordings a song plays, for their outlines, and writes a film's
+# sound.
+trill-media.workspace = true
 trill-noir.workspace = true
 
 log.workspace = true

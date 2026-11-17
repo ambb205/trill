@@ -29,7 +29,7 @@ Development builds are optimized (see `[profile.dev]`), because unoptimized audi
 
 ### Building and testing
 
-`cargo test --workspace` runs about 2,110 tests in a few minutes. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 2,180 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -49,6 +49,9 @@ TRILL_TEST_CLAUDE=1 cargo test -p trill-app live_ -- --test-threads=1    # ...th
 cargo test -p trill-engine --test machine -- --include-ignored --nocapture     # opens this machine's audio outputs (silence only) and prints their latency
 cargo test -p trill-runtime --test machine -- --include-ignored --nocapture    # lists and opens this machine's MIDI inputs
 cargo test -p trill-engine --test journal what_recording_a_step_costs -- --ignored --nocapture    # what keeping the journal costs an edit on a large project (a measurement; run it alone)
+cargo test -p trill-stage --test drawn -- --ignored    # what the graphics card makes of the stage, and a film as a file (a graphics card; two of them ffmpeg)
+cargo test -p trill-mcp --test mcp a_film_is_made -- --ignored --nocapture    # a film of a song and of its making over MCP, kept in the assistant's working folder (a graphics card)
+cargo test -p trill-app a_film_is_made_from_the_window -- --ignored --nocapture    # a film from the window's panel, watched as it is made, and one stopped (a graphics card)
 ```
 
 Run the first two after touching plugin hosting or audio decoding, and the last two after touching the audio
@@ -146,6 +149,55 @@ play, hold, step through (`Left`, `Right`) and scrub, at half speed up to eight 
   entries or 32 MB of story the oldest entries are let go, and the story begins with the song as it was after
   them. Journals are kept for the two hundred songs most recently saved.
 - *View, Keep a journal* switches it off; *Delete this song's journal* deletes one.
+
+### The stage, and a film of the song
+
+![The stage on the verse of the demo song: its lanes above, the piano rolls of the two parts that drive the section below, lit by what plays](docs/images/stage.png)
+
+**The stage** (`F11`, the button beside the metronome, or the View menu) is the song filmed as it plays: Trill's
+own lanes, clips and piano rolls on the whole screen, lit by what sounds, with a director choosing the shots.
+Nothing on it is made up for the camera. It is the song's interface, staged.
+
+- **A director that reads the song.** Wide on the fullest sections, close on the piano roll of a part that
+  carries the tune, the lanes over the rolls of whoever drives a section otherwise; a cut where the song jumps
+  and a move where it does not. The shots are a function of the song alone, so the same song is the same film.
+- **Two things light it, and they are kept apart.** What is *written* lands exactly: a note lights on its beat
+  and a kick is a flash, to the frame. What is *heard* sets the mood: how loud the mix is, and each part by its
+  own level.
+- **Recordings and automation are on it too.** An audio clip, or the sample a track plays, is its waveform, lit
+  where the playhead has just been; an automated parameter is its line.
+- It is drawn by passes of its own on the graphics card (light that spreads, depth of focus, and in a film the
+  blur of motion), and the window's own drawing is untouched: with the stage shut, none of it runs.
+- `Space` plays and stops. `Esc` or `F11` leaves, and the window is as it was, its size included.
+
+**File, Export a film** (`Ctrl+Shift+F`) makes an `.mp4` of it. The panel asks what the song does not say:
+
+- *what of*: the song, or how it was made (below);
+- *size and rate*: 1920×1080, 3840×2160, or 1080×1920 upright for a phone, at 60, 30 or 24 frames a second;
+- *which stretch*: all of it, the time selected in the arrangement, or a section by its marker.
+
+The film renders **the song's own sound** in the same job, as *Export WAV* would: plugins are waited for, and
+each part is lit by its own level in that render. Frame 600 of a film at sixty a second is the stage at ten
+seconds however long it took to draw, so nothing depends on how busy the machine is. *Fine* exposes every frame
+from eight moments and draws it at twice its size; *Plain* is one moment, as the window shows it, and about
+twice as fast. The film is made away from the window, which goes on being worked in: the panel and the status
+bar say how far it is, and *Stop the film* ends it and keeps nothing. Frames are handed to
+[ffmpeg](https://ffmpeg.org), a program found on the `PATH` when a film is made and not a part of Trill;
+without it the film is numbered pictures in a folder with its sound beside them, and the panel says so before
+any work is done. A film needs a graphics card.
+
+**A film of how the song was made** (*How it was made* in that panel, or *Film…* in the making-of's bar) stages
+the journal. The camera goes where each step landed: close on a part while it is being written, wide between.
+Notes arrive lit. What you asked and what the assistant answered are cards over the song, as in a silent film;
+its plan ticks off; and the film ends on the finished song. The story's time is the film's, told as much faster
+as it takes to be no longer than the song, because **the finished song plays under it**, timed so that the film
+ends as the song does. (What was being made could not be heard while it was made: half of it was not there yet.
+The song it became is the one sound that is true of all of it.) The film is made from the journal and has your
+conversation in it, so it goes where you say and nowhere else.
+
+An assistant films too, and directs: see `film_plan` and `film` under [MCP tools](#mcp-tools). Without the
+window, a song that plays through the built-in devices is filmed by
+`cargo run -p trill-stage --example film -- SONG.trill --film OUT.mp4`.
 
 ## What is in the box
 
@@ -357,8 +409,8 @@ lane's menu in the window).
 *A song saved before this plays as it did.* An envelope keeps what its lines are straight along, and a project
 file written before envelopes did (format version 1 or 2) says nothing: its envelopes are straight in their units, as
 they were played then, and stay so when their points are edited. They become a fader's or a knob's only when
-they are written anew over MCP, or by the lane's menu. A file saved now is format version 3, which an earlier
-build refuses to open instead of playing its fades as other curves.
+they are written anew over MCP, or by the lane's menu. A file saved since is format version 3 or later, which an
+earlier build refuses to open instead of playing its fades as other curves.
 
 *A send can be automated* like a volume: its envelope is the send, at the bottom of which nothing is sent, with or
 without a level set by hand. A send opened for single notes (a delay throw) needs no return of its own.
@@ -370,6 +422,41 @@ same song is the same samples at any buffer size and in a render. What no envelo
 by hand, a mute, the song jumping to where an envelope is at another level) is let go of evenly over ten
 milliseconds. (The built-in filter still reads its cutoff every sixteen frames of the block it is handed: with a
 swept cutoff it is the same samples only at buffer sizes that are a multiple of sixteen.)
+
+**A tempo and a time signature that change inside the song.** A song begins at a tempo and in a time signature,
+and may change either along the way. A change of tempo is a jump at a beat, or a glide that arrives there from
+the change before it (an accelerando, a ritardando); one beat can hold both, a glide that arrives and a tempo
+that takes over (a ritardando, and then the old tempo again). A change of time signature begins a bar where it is
+set. Nothing in the song moves when either is set: positions are beats, and beats stay where they are. What
+changes is how long a beat lasts and which bar it is in, and two maps made from the project answer those two
+questions for everyone (`Project::tempo_map`, `Project::meter_map`, in `trill-core/src/tempo.rs`), in closed form
+through jumps and glides alike.
+
+Everything that is counted in beats follows: notes, controller curves, envelopes, markers and the loop; the
+metronome, which counts the time signature it is in, and the count-in, which is a bar of the meter the take
+starts in at the tempo it has there; a take's clips, which are cut to the song's bars; a render, which is as long
+as the tempo makes it, and its sections by bar. Audio that keeps its own speed is laid along the song's time and
+ignores the tempo; audio that follows the tempo (warp) follows every change of it, as one stretched piece for
+each tempo it lies under, faded across the seams over three milliseconds. A plugin is told the tempo and the time
+signature as they pass, block by block, and a block ends where either changes. A MIDI file is read and written
+with every tempo and time signature in it (a glide goes out as eight jumps to the beat that keep its time), and
+time that is cut out of the song, repeated or opened up takes its changes with it.
+
+*How exact.* The audio thread moves through the song evenly within a stretch of one tempo; a stretch ends at the
+first frame at or past a jump, and a glide is taken in steps of 256 frames, each on the beat at both ends. A note
+sounds within a frame of where the map has its beat, whatever the buffer size, and a render is what was played
+(`trill-engine/tests/tempo.rs`). A song of one tempo is one stretch, and every number in it is what it was: such
+a song renders to the samples it rendered to before.
+
+*An older file is one tempo and one meter.* A file saved now is format version 5. One saved before says nothing
+of changes and has none; nothing is written into it.
+
+In the window the foot of the ruler says where the tempo or the time signature changes, beside the bar's number
+("7/8 · 140 BPM", an arrow before a tempo the song glides to). A double-click types another value, a drag moves
+the change along the song, and the right-click menu sets one where it was clicked, removes one, or makes a tempo
+a glide. The grid, snapping, the bar numbers and the position are counted through the changes, the piano roll
+counts a clip's bars as the song has them under it, and the tempo and the time signature in the top bar are
+those the song has where it is.
 
 **Hearing without ears.** Whoever cannot listen (a script, an assistant) measures instead, and three things make
 that quick and true:
@@ -550,6 +637,7 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Area | Tools |
 |---|---|
 | Project | `get_project`, `set_project`, `new_project`, `save_project`, `load_project`, `recover_project`, `import_midi`, `export_midi`, `history` |
+| Tempo and meter along the song | `set_tempo` (the tempo from a bar on: a jump, or with `ramp` a glide that arrives there), `set_time_signature` (the time signature from a bar on, for so many bars if asked), `get_tempo_map` (both, with the bar, the beat and the second of every change, the bars a change cuts short, and the beat any bar starts at) |
 | How it was made | `get_journal` (the steps of the session, who made each and where it landed, a page at a time; found by their words), `get_song_at` (the song as it was after any step), `journal` (keep one or not, write it out to hand on, delete it) |
 | Tracks | `create_track`, `update_track`, `delete_track` |
 | Devices | `list_devices`, `describe_device`, `add_device`, `get_device`, `update_device`, `delete_device`, `show_device_editor` |
@@ -564,6 +652,7 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Automation | `set_automation`, `get_automation`, `set_markers` |
 | Arrangement | `edit_time` (remove, repeat or open up a stretch of time on every track at once; copy one to another place, on every track or some, over what is there or making room) |
 | Playback | `transport` (play, stop, seek, record) |
+| Film | `film_plan` (what a film would be, take by take, before any of it is made; costs nothing), `film` (makes it: the song or a stretch of it with its own sound, or how it was made, as an .mp4) |
 | Hearing | `probe` (what an instrument does: range, octave, keyswitches, drum map), `measure` (the mix, every track, every section, gain reduction; writes nothing), `render` (the same, and a WAV file; with `stems`, every track, group and return in files of their own from the same pass) |
 | Playing live | `play_notes`, `midi_inputs`, `audio` (device, sample rate, buffer size, latency) |
 
@@ -600,6 +689,15 @@ Every call is entered in the session's journal as it is made, under what it did 
 client gave: `get_journal` lists them, `search: "chorus"` finds the step where the chorus was written, `after`
 lists what changed since, and `get_song_at` shows the song as it was there. Undoing takes nothing out: a step
 that was undone is followed by one that takes it back.
+
+`film` takes minutes, so `film_plan` comes first: it lists the takes the director would shoot, each with its
+bars, its shot (`wide`, `close`, `ensemble`, `song`), the parts shown as piano rolls and whether it is cut or
+moved to. `direct` changes them, a stretch at a time: `{"section": "Chorus 2", "shot": "close", "parts": [7]}`
+holds the lead close for that chorus, `{"from_bar": 17, "to_bar": 24, "shot": "wide", "enter": "cut"}` cuts wide
+at bar 17. What is left out stays the director's, and the plan read again shows what was got. `size` is
+`"1080p"`, `"2160p"` or `"upright"`; `section` or `start`/`end` film a stretch; `of: "making_of"` films the
+journal instead. The assistant in the window writes films only into its working folders, as it writes
+everything else.
 
 The HTTP server listens on localhost only and has no password: any program on the machine may use it. Pages in a
 web browser may not; requests that carry a browser's `Origin` are refused.
@@ -647,6 +745,8 @@ crates/
   trill-mcp       MCP server (library) and the headless `trill-mcp` binary.
   trill-assistant Back end of the in-app assistant: runs the user's own Claude Code, kept to Trill's tools, a plan and the web.
   trill-noir      The GUI kit: theme, widgets and painting.
+  trill-stage     The stage: the song's own interface filmed. The director, the camera, what lights when, the
+                  passes on the graphics card, and a film as a file (frames to ffmpeg, with the song's own sound).
   trill-app       The desktop application (`trill`).
 ```
 
@@ -674,8 +774,10 @@ the work), a preset browser for plugins in the window (the session lists, search
 MCP; the device panel shows built-in and saved presets only), asking a CLAP plugin for a stereo layout when its
 default is mono (a VST3 plugin is asked), a hosted plugin's sidechain input (the built-in compressor has one),
 plugin editors on Linux and macOS,
-a film of a making-of (the replay gives the song as it was at any moment and where the action is; nothing
-renders it to video yet), hearing a making-of (it is silent: the song as it was is shown, not played),
+hearing a making-of in the window (it is silent there: the song as it was is shown, not played; a film of one
+has the finished song under it), filming a making-of that was handed over as a file (a film is of the song that
+is open, whose finished state it ends on), choosing the shots of a film in the window (the director's are used;
+over MCP they can be directed),
 finding a song's journal again after its file was moved or renamed (it is kept by where the file is),
 "collect all and save" (copying every file a song plays into a folder beside it; the song already says where
 its files are from its own folder and plays the ones beside it, so what is missing is the copying, a rule for
@@ -685,6 +787,16 @@ theirs to Trill),
 session (clip-launching) view, audio recording (MIDI is recorded; audio is not), polyphonic aftertouch and MPE
 (per-note expression; clips hold one curve per controller for the whole channel), ASIO, warp markers, plugin
 delay compensation, multi-core rendering. Only Windows has been run so far.
+
+Where the tempo or the time signature changes inside a song, not yet: a plugin's position in seconds and the
+start of its bar (it is told the tempo, the time signature and the beat of each block; the seconds and the bar
+line it is given are still worked out from those alone, so after a change they are not the song's, and through a
+glide the seconds do not run evenly); the stage and its films, which read one tempo and one meter; a melody
+written across a change of time signature in one call (`write_melody` says to write each side on its own); a
+warped clip under a glide without one stretched copy of its file for every step of the glide, and without the
+three-millisecond fade where two copies meet, which a held tone can show; the length a sound dropped into a
+later section is given, which goes by the tempo the song begins at; and the Clip tab's own picture of a
+recording that keeps its speed, which is drawn at the tempo where the clip starts.
 
 ## Licence
 

@@ -6,7 +6,9 @@
 //! where the project does not say), so two films of one song are the same
 //! film.
 
-use trill_core::{Beats, ClipId, Note, Project, Role, TimeSignature, Track, TrackId, TrackKind};
+use crate::voice::Voiced;
+use trill_core::project::automation_value;
+use trill_core::{AutomationTarget, Beats, ClipId, Note, Project, Role, TimeSignature, Track, TrackId, TrackKind};
 
 /// The built-in devices whose notes are drums.
 const DRUM_DEVICES: [&str; 2] = ["builtin:drumkit", "builtin:drumrack"];
@@ -42,6 +44,28 @@ pub struct ClipSpan {
     pub end: Beats,
 }
 
+/// Something of a part that the song moves by itself (its volume, a
+/// filter's cutoff), as a line over the song.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Envelope {
+    /// Where the line is at each beat it was read at, from 0 (the lowest
+    /// the envelope goes) to 1 (the highest), in order.
+    pub line: Vec<(Beats, f32)>,
+}
+
+impl Envelope {
+    /// Where the line is at `beat`: held before its first point and after
+    /// its last.
+    pub fn at(&self, beat: Beats) -> f32 {
+        let after = self.line.partition_point(|(at, _)| *at <= beat);
+        match (after.checked_sub(1).and_then(|before| self.line.get(before)), self.line.get(after)) {
+            (Some((from, low)), Some((to, high))) => low + (high - low) * ((beat - from) / (to - from)) as f32,
+            (Some((_, value)), None) | (None, Some((_, value))) => *value,
+            (None, None) => 0.5,
+        }
+    }
+}
+
 /// A row of a drum part: one key of the kit and what it is called.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DrumRow {
@@ -71,9 +95,14 @@ pub struct Part {
     pub high: u8,
     /// The keys a drum part uses, lowest first. Empty for a pitched part.
     pub rows: Vec<DrumRow>,
-    /// Where the part is there: stretches of notes with no silence of two
-    /// bars or more inside them.
+    /// Where the part is there: stretches of notes (and of audio clips)
+    /// with no silence of two bars or more inside them.
     pub spans: Vec<(Beats, Beats)>,
+    /// The recordings it plays, where their outlines were read
+    /// ([`Score::with_voices`]): shown as waveforms in place of note lines.
+    pub voiced: Vec<Voiced>,
+    /// What of it the song automates, in the order of the song's lanes.
+    pub envelopes: Vec<Envelope>,
 }
 
 impl Part {
@@ -143,6 +172,17 @@ impl Score {
     /// not say what its notes are plays through a drum instrument: a
     /// session knows that of plugins too.
     pub fn of(project: &Project, drum_instrument: impl Fn(&Track) -> bool) -> Self {
+        Self::reading(project, drum_instrument, false)
+    }
+
+    /// Reads `project` with a part for every track, the ones that hold
+    /// nothing yet too: a song that is being made is shown with the
+    /// tracks it has, before anything is written on them.
+    pub fn of_every_track(project: &Project, drum_instrument: impl Fn(&Track) -> bool) -> Self {
+        Self::reading(project, drum_instrument, true)
+    }
+
+    fn reading(project: &Project, drum_instrument: impl Fn(&Track) -> bool, every_track: bool) -> Self {
         let bar = project.time_signature.beats_per_bar();
         let length = (project.length_beats() / bar).ceil().max(1.0) * bar;
         let mut hits = Hits::default();
@@ -152,10 +192,11 @@ impl Score {
                 Some(role) => role == Role::Drums,
                 None => drum_instrument(track),
             };
-            if let Some(part) = read_part(track, drums, AWAY_AFTER_BARS * bar) {
+            if let Some(mut part) = read_part(track, drums, AWAY_AFTER_BARS * bar, every_track) {
                 if drums && !track.mute {
                     read_hits(track, &part, &mut hits);
                 }
+                part.envelopes = envelopes_of(project, track);
                 parts.push(part);
             }
         }
@@ -175,6 +216,17 @@ impl Score {
             parts,
             hits,
         }
+    }
+
+    /// The score with the recordings its parts play, as
+    /// [`voiced`](crate::voice::voiced) found them.
+    pub fn with_voices(mut self, voices: Vec<(TrackId, Vec<Voiced>)>) -> Self {
+        for (track, voiced) in voices {
+            if let Some(part) = self.parts.iter_mut().find(|part| part.track == track) {
+                part.voiced = voiced;
+            }
+        }
+        self
     }
 
     /// Seconds from the start of the song to `beat`.
@@ -212,8 +264,8 @@ impl Score {
 }
 
 /// What a track plays, or `None` for one with no clips.
-fn read_part(track: &Track, drums: bool, away: Beats) -> Option<Part> {
-    if track.clips.is_empty() {
+fn read_part(track: &Track, drums: bool, away: Beats, empty_too: bool) -> Option<Part> {
+    if track.clips.is_empty() && !empty_too {
         return None;
     }
     let mut notes: Vec<Note> = Vec::new();
@@ -235,11 +287,18 @@ fn read_part(track: &Track, drums: bool, away: Beats) -> Option<Part> {
         keys.dedup();
         rows = keys.into_iter().map(|pitch| DrumRow { pitch, name: track.profile.drum_name(pitch) }).collect();
     }
+    // Where it is there: its notes, and the audio clips it plays.
+    let mut sounding: Vec<(Beats, Beats)> = notes.iter().map(|note| (note.start, note.end())).collect();
+    if !track.mute {
+        let audio = track.clips.iter().filter(|clip| !clip.muted && clip.audio().is_some());
+        sounding.extend(audio.map(|clip| (clip.start, clip.end())));
+        sounding.sort_by(|a, b| a.0.total_cmp(&b.0));
+    }
     let mut spans: Vec<(Beats, Beats)> = Vec::new();
-    for note in &notes {
+    for (start, end) in sounding {
         match spans.last_mut() {
-            Some((_, end)) if note.start - *end < away => *end = end.max(note.end()),
-            _ => spans.push((note.start, note.end())),
+            Some((_, until)) if start - *until < away => *until = until.max(end),
+            _ => spans.push((start, end)),
         }
     }
     let mut clips: Vec<ClipSpan> = track
@@ -260,7 +319,44 @@ fn read_part(track: &Track, drums: bool, away: Beats) -> Option<Part> {
         high,
         rows,
         spans,
+        voiced: Vec::new(),
+        envelopes: Vec::new(),
     })
+}
+
+/// An envelope is read at most this many times, however long it is.
+const ENVELOPE_READINGS: usize = 1600;
+
+/// What the song automates of `track`: its volume, its pan, what it sends
+/// to a return and the parameters of its devices, each as a line from its
+/// lowest to its highest. Envelopes that are switched off, and ones that never move,
+/// are left out.
+fn envelopes_of(project: &Project, track: &Track) -> Vec<Envelope> {
+    let own = |target: &AutomationTarget| match target {
+        AutomationTarget::TrackVolume { track: id }
+        | AutomationTarget::TrackPan { track: id }
+        | AutomationTarget::Send { track: id, .. } => *id == track.id,
+        AutomationTarget::DeviceParam { device, .. } => track.devices.iter().any(|own| own.id == *device),
+        AutomationTarget::MasterVolume => false,
+    };
+    let lanes = project.automation.iter().filter(|lane| lane.enabled && lane.points.len() >= 2 && own(&lane.target));
+    lanes
+        .filter_map(|lane| {
+            let (first, last) = (lane.points.first()?.beat, lane.points.last()?.beat);
+            // Read every sixteenth, or less often where that would be too many.
+            let step = ((last - first) / ENVELOPE_READINGS as f64).max(0.25);
+            let count = ((last - first) / step).ceil() as usize;
+            let read: Vec<(Beats, f64)> = (0..=count)
+                .map(|index| (first + index as f64 * step).min(last))
+                .map(|beat| (beat, automation_value(&lane.points, beat)))
+                .collect();
+            let low = read.iter().map(|(_, value)| *value).fold(f64::INFINITY, f64::min);
+            let high = read.iter().map(|(_, value)| *value).fold(f64::NEG_INFINITY, f64::max);
+            (high > low).then(|| Envelope {
+                line: read.iter().map(|(beat, value)| (*beat, ((value - low) / (high - low)) as f32)).collect(),
+            })
+        })
+        .collect()
 }
 
 /// Whether a key of a pitched track plays a note: not a keyswitch, and not
@@ -480,6 +576,59 @@ mod tests {
         assert_eq!(cuts, [0.0, 16.0, 32.0]);
         assert_eq!(score.sections.last().unwrap().end, 64.0);
         assert!(score.sections.iter().all(|section| section.name.is_empty()));
+    }
+
+    #[test]
+    fn what_the_song_automates_of_a_part_is_a_line_from_its_lowest_to_its_highest() {
+        use trill_core::{AutomationPoint, AutomationTarget};
+        let mut project = Project::new("song");
+        let track = track_with(&mut project, "Pad", 0.0, 16.0, &[note(60, 0.0, 16.0)]);
+        let other = track_with(&mut project, "Bass", 0.0, 16.0, &[note(36, 0.0, 16.0)]);
+        let volume = AutomationTarget::TrackVolume { track };
+        let swell =
+            vec![AutomationPoint::new(4.0, -24.0), AutomationPoint::new(8.0, 0.0), AutomationPoint::new(12.0, -12.0)];
+        project.set_automation(volume.clone(), swell).unwrap();
+        // One that never moves, and the master's, are no part's line.
+        let flat = vec![AutomationPoint::new(0.0, 0.2), AutomationPoint::new(8.0, 0.2)];
+        project.set_automation(AutomationTarget::TrackPan { track: other }, flat).unwrap();
+        let master = vec![AutomationPoint::new(0.0, -6.0), AutomationPoint::new(8.0, 0.0)];
+        project.set_automation(AutomationTarget::MasterVolume, master).unwrap();
+
+        let score = Score::read(&project);
+        let [envelope] = score.part(track).unwrap().envelopes.as_slice() else { panic!("one envelope") };
+        assert!(score.part(other).unwrap().envelopes.is_empty());
+        assert_eq!((envelope.at(4.0), envelope.at(8.0), envelope.at(12.0)), (0.0, 1.0, 0.5));
+        assert!((envelope.at(6.0) - 0.5).abs() < 1e-6, "halfway up the swell");
+        assert_eq!((envelope.at(0.0), envelope.at(99.0)), (0.0, 0.5), "held before it and after it");
+        // Switched off, it is not shown.
+        project.set_automation_enabled(&volume, false).unwrap();
+        assert!(Score::read(&project).part(track).unwrap().envelopes.is_empty());
+        // What a part sends to a return is its own line too, and not the return's.
+        let echo = project.add_track_of_kind("Echo", trill_core::TrackKind::Return);
+        let throw = vec![AutomationPoint::new(8.0, -60.0), AutomationPoint::new(12.0, -6.0)];
+        project.set_automation(AutomationTarget::Send { track: other, to: echo }, throw).unwrap();
+        let score = Score::read(&project);
+        let [sent] = score.part(other).unwrap().envelopes.as_slice() else { panic!("the send's envelope") };
+        assert_eq!((sent.at(8.0), sent.at(12.0)), (0.0, 1.0));
+        assert!(score.part(track).unwrap().envelopes.is_empty());
+    }
+
+    #[test]
+    fn a_track_of_audio_clips_is_a_part_that_is_there_while_they_play() {
+        use trill_core::project::AudioContent;
+        let mut project = Project::new("song");
+        let track = project.add_track("Voice");
+        project.add_audio_clip(track, "Take", 16.0, 8.0, AudioContent::new("take.wav")).unwrap();
+        let score = Score::read(&project);
+        let part = score.part(track).unwrap();
+        assert!(part.notes.is_empty() && part.voiced.is_empty());
+        assert_eq!(part.spans, [(16.0, 24.0)]);
+        assert!(part.present(20.0) && !part.present(8.0));
+        // Its picture is the outline of what it plays, once that is read.
+        let wave = std::sync::Arc::new(crate::voice::Wave::of(&[0.0, 0.5], &[0.0, 0.5], 2.0));
+        let voices = crate::voice::voiced(&project, |_| Some(wave.clone()));
+        let score = score.with_voices(voices);
+        assert_eq!(score.part(track).unwrap().voiced.len(), 1);
     }
 
     #[test]

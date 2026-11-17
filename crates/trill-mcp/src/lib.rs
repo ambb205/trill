@@ -17,6 +17,7 @@
 //! gave, or as the assistant's for the second door.
 
 mod files;
+mod film;
 mod guard;
 mod hearing;
 mod input;

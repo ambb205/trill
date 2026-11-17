@@ -277,6 +277,73 @@ fn playing_envelopes_never_touches_the_allocator() {
 }
 
 #[test]
+fn a_tempo_and_a_meter_that_change_never_touch_the_allocator() {
+    use trill_core::project::{AutomationPoint, AutomationTarget, WarpMode};
+    use trill_core::{ChainRef, Note};
+
+    // A song that jumps, glides and changes meter, with a recording at its
+    // own speed, one that follows the tempo (a piece for every tempo it
+    // lies under), notes, and an envelope: everything that is counted in
+    // beats, through everything the tempo does.
+    let folder = folder();
+    let tone = write_wav(&file(&folder, "tone.wav"), SR, &sine(440.0, SR, 4.0, 0.5));
+    let (mut project, track) = audio_project(120.0);
+    project.set_tempo_at(2.0, 96.5, false).unwrap();
+    project.set_tempo_at(4.0, 96.5, false).unwrap();
+    project.set_tempo_at(6.0, 150.0, true).unwrap();
+    project.set_tempo_at(6.0, 133.0, false).unwrap();
+    project.set_time_signature_at(4.0, 7, 8).unwrap();
+    project.set_time_signature_at(7.5, 3, 4).unwrap();
+    add_clip(&mut project, track, &tone, 0.0, 8.0);
+    let follows = project.add_track("Loop");
+    let warped = add_clip(&mut project, follows, &tone, 0.0, 8.0);
+    project.set_clip_warp(warped, WarpMode::Repitch, Some(100.0), 0.0).unwrap();
+    let keys = project.add_track("Keys");
+    project.add_device(ChainRef::Track(keys), "builtin:polysynth", "Synth", None).unwrap();
+    let clip = project.add_midi_clip(keys, "notes", 0.0, 8.0).unwrap();
+    let notes: Vec<Note> =
+        (0..32).map(|step| Note { pitch: 60, start: step as f64 * 0.25, length: 0.2, velocity: 100 }).collect();
+    project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
+    let point = AutomationPoint::new;
+    project.set_automation(AutomationTarget::TrackVolume { track }, vec![point(0.0, -12.0), point(8.0, 0.0)]).unwrap();
+    // Round a loop that has every change in it.
+    project.set_loop(true, 1.0, 7.75).unwrap();
+
+    let mut controller = Controller {
+        bank: DeviceBank::default(),
+        meters: Meters::default(),
+        stand_ins: StandIns::default(),
+        audio: AudioSources::default(),
+    };
+    let mut processor = Processor::new(SR);
+    let (mut left, mut right) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+    let mut retired = Vec::with_capacity(8);
+    retired.push(processor.swap_graph(controller.compile_prepared(&project)));
+    processor.set_metronome(true);
+    processor.play();
+    // Once without watching, to fault in pages.
+    play(&mut processor, &mut left, &mut right, 4_096);
+
+    // An edit that arrives while it plays: the tempo is another from the
+    // bar the song is in.
+    project.set_tempo_at(2.0, 110.0, false).unwrap();
+    let mut next = Some(controller.compile_prepared(&project));
+    let mut level = 0.0;
+    let calls = allocator_calls(|| {
+        level = play(&mut processor, &mut left, &mut right, 8 * SR as usize);
+        retired.push(processor.swap_graph(next.take().expect("a graph to swap in")));
+        play(&mut processor, &mut left, &mut right, 6 * SR as usize);
+        processor.seek(5.0);
+        play(&mut processor, &mut left, &mut right, 3 * SR as usize);
+        processor.stop();
+        play(&mut processor, &mut left, &mut right, 2_048);
+    });
+    assert!(level > 0.05, "the song should be sounding: {level}");
+    assert_eq!(calls, 0, "{calls} allocator calls while the tempo and the meter changed");
+    assert_eq!(retired.len(), 2);
+}
+
+#[test]
 fn a_device_that_listens_to_another_track_never_touches_the_allocator() {
     use trill_core::{ChainRef, TrackKind};
 
