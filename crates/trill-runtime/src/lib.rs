@@ -49,16 +49,16 @@
 //! ```
 
 mod housekeeping;
-mod listening;
 pub mod jobs;
+mod listening;
 pub mod midi;
 mod missing;
 mod recovery;
 mod settings;
 mod sounds;
 
-pub use listening::{LONGEST_SECONDS, ListenError};
 pub use jobs::{Jobs, Program};
+pub use listening::{LONGEST_SECONDS, ListenError};
 pub use midi::MidiInputInfo;
 pub use missing::{Candidate, Confidence, FoundFolder, Look, Missing, MissingFile, MissingFolder, files_missing_in};
 pub use recovery::SafetyCopy;
