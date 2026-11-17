@@ -228,6 +228,10 @@ impl Heard {
     }
 }
 
+/// What a thread that heard one part of a recording is taken down with,
+/// when that part stopped on an error of Trill's own.
+const STOPPED: &str = "a thread that heard part of a recording stopped on an error of Trill's own";
+
 /// Listens to a recording: see the crate's own words for what is found.
 pub fn hear(recording: &Recording, options: &Options) -> Heard {
     let seconds = recording.seconds();
@@ -258,26 +262,18 @@ pub fn hear(recording: &Recording, options: &Options) -> Heard {
 
     let silent = recording.mix.is_silent();
     let bass_stem = recording.stem("bass").map(Sound::mono);
-    let harmony = (!silent).then(|| harmony::analyse(&pitched, bass_stem.as_deref(), &grid.beats));
 
-    // What follows from the stems and the grid: parts, loops, single hits.
+    // What follows from the stems and the grid: harmony, parts, loops,
+    // single hits and notes. None of them waits for another, so each is
+    // heard on a thread of its own; what is heard is the same in any order.
     let bar_times = grid.bar_times(seconds);
     let per_bar = grid.beats_per_bar.max(1);
     let stem_signals: Vec<(String, Vec<f32>)> =
         recording.stems.iter().map(|stem| (stem.name.clone(), stem.sound.mono())).collect();
-    let whole = structure::bar_features(&mix, &bar_times, per_bar);
-    let stem_features: Vec<(String, structure::BarFeatures)> = stem_signals
-        .iter()
-        .map(|(name, signal)| (name.clone(), structure::bar_features(signal, &bar_times, per_bar)))
-        .collect();
-    let named: Vec<(String, &structure::BarFeatures)> =
-        stem_features.iter().map(|(name, features)| (name.clone(), features)).collect();
-    let parts = structure::parts(&whole, &named, &bar_times);
-
     // Besides the single stems, loops are looked for in everything
     // together, in everything but the vocals, and in everything but the
     // vocals and the drums: where leaving those out leaves something else.
-    let blend = |without: &[&str]| -> Option<(Vec<String>, structure::BarFeatures)> {
+    let blend = |without: &[&str]| -> Option<(Vec<String>, Vec<f32>)> {
         let members: Vec<&(String, Vec<f32>)> =
             stem_signals.iter().filter(|(name, _)| !without.contains(&name.as_str())).collect();
         if members.len() < 2 || members.len() == stem_signals.len() {
@@ -289,14 +285,55 @@ pub fn hear(recording: &Recording, options: &Options) -> Heard {
                 *slot += sample;
             }
         }
-        Some((
-            members.iter().map(|(name, _)| name.clone()).collect(),
-            structure::bar_features(&sum, &bar_times, per_bar),
-        ))
+        Some((members.iter().map(|(name, _)| name.clone()).collect(), sum))
     };
-    let instrumental = blend(&["vocals"]);
-    let melodic = blend(&["vocals", "drums"]);
-    let mut sources: Vec<loops::Source<'_>> = stem_features
+    let blends =
+        [("instrumental", "Instrumental", blend(&["vocals"])), ("melodic", "No drums", blend(&["vocals", "drums"]))];
+    // One sound stands in for each stem it was not taken apart into, with
+    // the bass looked for where a bass is: under everything else.
+    let drums = recording.stem("drums").map(Sound::mono).or_else(|| stems.is_empty().then(|| mix.clone()));
+    let bass = bass_stem.clone().or_else(|| stems.is_empty().then(|| hits::band(&mix, None, Some(260.0))));
+    let voice = recording.stem("vocals").map(Sound::mono).or_else(|| stems.is_empty().then(|| mix.clone()));
+
+    let features_of = |signal: &[f32]| structure::bar_features(signal, &bar_times, per_bar);
+    let (harmony, whole, stem_features, blend_features, drum_part, bass_part, melody) = std::thread::scope(|scope| {
+        let harmony = scope.spawn(|| (!silent).then(|| harmony::analyse(&pitched, bass_stem.as_deref(), &grid.beats)));
+        let whole = scope.spawn(|| features_of(&mix));
+        let stem_features: Vec<_> =
+            stem_signals.iter().map(|(_, signal)| scope.spawn(|| features_of(signal))).collect();
+        let blend_features: Vec<_> = blends
+            .iter()
+            .map(|(_, _, blend)| scope.spawn(|| blend.as_ref().map(|(_, signal)| features_of(signal))))
+            .collect();
+        let drum_part = scope.spawn(|| {
+            drums
+                .as_deref()
+                .filter(|_| !silent)
+                .map(|drums| (hits::pick_drums(&hits::drum_hits(drums)), hits::groove(drums)))
+        });
+        let bass_part = scope.spawn(|| bass.as_deref().filter(|_| !silent).map(|bass| pitch::track(bass, 30.0, 400.0)));
+        let melody = scope.spawn(|| {
+            voice
+                .as_deref()
+                .filter(|_| !silent)
+                .map(|voice| pitch::notes(&pitch::track(voice, 70.0, 1100.0), 0.07))
+                .unwrap_or_default()
+        });
+        (
+            harmony.join().expect(STOPPED),
+            whole.join().expect(STOPPED),
+            stem_features.into_iter().map(|handle| handle.join().expect(STOPPED)).collect::<Vec<_>>(),
+            blend_features.into_iter().map(|handle| handle.join().expect(STOPPED)).collect::<Vec<_>>(),
+            drum_part.join().expect(STOPPED),
+            bass_part.join().expect(STOPPED),
+            melody.join().expect(STOPPED),
+        )
+    });
+
+    let named: Vec<(String, &structure::BarFeatures)> =
+        stem_signals.iter().zip(&stem_features).map(|((name, _), features)| (name.clone(), features)).collect();
+    let parts = structure::parts(&whole, &named, &bar_times);
+    let mut sources: Vec<loops::Source<'_>> = named
         .iter()
         .map(|(name, features)| loops::Source {
             name: name.clone(),
@@ -313,49 +350,26 @@ pub fn hear(recording: &Recording, options: &Options) -> Heard {
         single: false,
         features: &whole,
     });
-    if let Some((members, features)) = &instrumental {
-        sources.push(loops::Source {
-            name: "instrumental".to_owned(),
-            label: "Instrumental".to_owned(),
-            stems: members.clone(),
-            single: false,
-            features,
-        });
-    }
-    if let Some((members, features)) = &melodic {
-        sources.push(loops::Source {
-            name: "melodic".to_owned(),
-            label: "No drums".to_owned(),
-            stems: members.clone(),
-            single: false,
-            features,
-        });
+    for ((name, label, blend), features) in blends.iter().zip(&blend_features) {
+        if let (Some((members, _)), Some(features)) = (blend, features) {
+            sources.push(loops::Source {
+                name: (*name).to_owned(),
+                label: (*label).to_owned(),
+                stems: members.clone(),
+                single: false,
+                features,
+            });
+        }
     }
     let found_loops = loops::find(&sources, &whole, &stems, &bar_times, per_bar, &parts);
 
-    // One sound stands in for each stem it was not taken apart into, with
-    // the bass looked for where a bass is: under everything else.
     let flats = harmony.as_ref().is_some_and(|harmony| harmony.key.key.uses_flats());
-    let drums = recording.stem("drums").map(Sound::mono).or_else(|| stems.is_empty().then(|| mix.clone()));
-    let bass = bass_stem.or_else(|| stems.is_empty().then(|| hits::band(&mix, None, Some(260.0))));
-    let voice = recording.stem("vocals").map(Sound::mono).or_else(|| stems.is_empty().then(|| mix.clone()));
-    let mut one_shots = Vec::new();
-    let mut groove = Vec::new();
-    if let Some(drums) = drums.as_deref().filter(|_| !silent) {
-        one_shots.extend(hits::pick_drums(&hits::drum_hits(drums)));
-        groove = hits::groove(drums);
-    }
+    let (mut one_shots, groove) = drum_part.unwrap_or_default();
     let mut bass_line = Vec::new();
-    if let Some(bass) = bass.as_deref().filter(|_| !silent) {
-        let followed = pitch::track(bass, 30.0, 400.0);
-        one_shots.extend(hits::bass_notes(bass, flats, Some(&followed), 12));
-        bass_line = pitch::notes(&followed, 0.09);
+    if let (Some(bass), Some(followed)) = (bass.as_deref(), &bass_part) {
+        one_shots.extend(hits::bass_notes(bass, flats, Some(followed), 12));
+        bass_line = pitch::notes(followed, 0.09);
     }
-    let melody = voice
-        .as_deref()
-        .filter(|_| !silent)
-        .map(|voice| pitch::notes(&pitch::track(voice, 70.0, 1100.0), 0.07))
-        .unwrap_or_default();
 
     Heard {
         seconds: (seconds * 1e4).round() / 1e4,
