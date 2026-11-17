@@ -1223,15 +1223,21 @@ const SERUM: &str = "vst3:56534558667350736572756D20320000";
 /// With the plugins the owner's songs are made of: a song of two
 /// amplifiers behind built-in synths, two sampled basses set to take their
 /// recordings in turn, two synthesizers, a drum kit and a reverb on a
-/// return is rendered on one processor, on one again, and on all of them,
+/// return is rendered on one processor, on one again, and on several,
 /// each time with every part written to a file of its own. Every part
 /// that is the same samples the two times one processor made it (its
-/// plugins do the same thing twice) is those samples again when all of
-/// them did. The test says which parts those are and how long each render
-/// took, and fails if fewer than six of them are.
+/// plugins do the same thing twice) is those samples again on several.
+/// The test says which parts those are and how long each render took, and
+/// fails if fewer than six of them are.
+///
+/// The drum kit is in the song and is not held to this: Superior Drummer
+/// 3 chooses its hits for itself, two renders of it on one processor are
+/// the same samples some of the time and not most of it, and so two that
+/// agree say nothing about a third. What it and the sums it is part of
+/// come to is said, and not asserted.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs Archetype Tim Henson X, Ample Metal R, Serum 2 and Superior Drummer 3 (VST3) installed; run with `cargo test -p trill-mcp --test hearing a_song_of_installed_plugins -- --include-ignored --nocapture`"]
-async fn a_song_of_installed_plugins_is_the_same_samples_on_one_processor_and_on_all_of_them() {
+async fn a_song_of_installed_plugins_is_the_same_samples_on_one_processor_and_on_several() {
     let Some((fixture, folder)) = connect_with_plugins(AMPLIFIER).await else { return };
     if [AMPLE_BASS, SERUM, SD3].into_iter().any(|uri| installed(uri).is_none()) {
         return;
@@ -1269,7 +1275,7 @@ async fn a_song_of_installed_plugins_is_the_same_samples_on_one_processor_and_on
     clip(client, drums, 0.0, 16.0, line([36, 42, 38, 42])).await;
 
     let mut renders: Vec<(Value, f64)> = Vec::new();
-    for (name, threads) in [("one", json!(1)), ("one again", json!(1)), ("all", Value::Null)] {
+    for (name, threads) in [("one", json!(1)), ("one again", json!(1)), ("several", Value::Null)] {
         let wav = folder.path().join(format!("{name}.wav"));
         let mut arguments = json!({ "path": wav.display().to_string(), "stems": ["all"], "max_tail_seconds": 2 });
         if !threads.is_null() {
@@ -1297,12 +1303,19 @@ async fn a_song_of_installed_plugins_is_the_same_samples_on_one_processor_and_on
         files
     };
     let (one, again, all) = (files(&renders[0].0), files(&renders[1].0), files(&renders[2].0));
-    let (mut held, mut not_judged) = (Vec::new(), Vec::new());
+    let (mut held, mut not_judged, mut drums) = (Vec::new(), Vec::new(), Vec::new());
     for ((part, one), ((_, again), (_, all))) in one.iter().zip(again.iter().zip(&all)) {
         let read = |path: &String| trill_media::decode(Path::new(path)).unwrap().left;
         let (one, again, all) = (read(one), read(again), read(all));
-        if one == again {
-            assert!(all == one, "{part}: other samples on all processors ({:.0} dB left)", null_db(&one, &all));
+        let with_drums = part.contains("Drums") || part.starts_with("premaster") || part == "the mix";
+        if with_drums {
+            drums.push(format!(
+                "{part}: {:.0} dB left the second time on one processor, {:.0} dB on several",
+                null_db(&one, &again),
+                null_db(&one, &all)
+            ));
+        } else if one == again {
+            assert!(all == one, "{part}: other samples on several processors ({:.0} dB left)", null_db(&one, &all));
             held.push(part.clone());
         } else {
             not_judged.push(format!(
@@ -1312,8 +1325,11 @@ async fn a_song_of_installed_plugins_is_the_same_samples_on_one_processor_and_on
             ));
         }
     }
-    eprintln!("the same samples on one processor and on all: {held:?}");
+    eprintln!("the same samples on one processor and on several: {held:?}");
     eprintln!("not the same samples twice even on one processor, so not judged: {not_judged:?}");
-    eprintln!("one processor {:.1} s and {:.1} s, all of them {:.1} s", renders[0].1, renders[1].1, renders[2].1);
+    eprintln!(
+        "the drum kit, which chooses its hits for itself, and the sums it is in (far down is the same): {drums:?}"
+    );
+    eprintln!("one processor {:.1} s and {:.1} s, several {:.1} s", renders[0].1, renders[1].1, renders[2].1);
     assert!(held.len() >= 6, "too few parts repeat themselves for this to say anything: {held:?}");
 }
