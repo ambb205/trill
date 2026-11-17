@@ -60,6 +60,7 @@
 //! # }
 //! ```
 
+mod beside;
 pub mod clap;
 mod editor;
 mod edits;

@@ -353,6 +353,57 @@ async fn a_compressor_is_given_another_track_to_listen_to() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn measure_and_render_use_the_machine_and_what_they_give_is_what_one_processor_gives() {
+    let fixture = connect(ScriptedFactory::new()).await;
+    let client = &fixture.client;
+    two_part_song(client).await;
+    let all = ok(client, "measure", json!({})).await;
+    let one = ok(client, "measure", json!({ "threads": 1 })).await;
+    assert_eq!(one["threads"], 1, "{one}");
+    if std::thread::available_parallelism().map_or(1, usize::from) > 1 {
+        assert_eq!(all["threads"], 2, "the bass and the drums at once: {all}");
+    }
+    for said in ["loudness_lufs", "peak_db", "true_peak_db", "duration_seconds", "tracks", "gain_reduction", "notes"] {
+        assert_eq!(all[said], one[said], "{said}");
+    }
+
+    // And the same files, the mix and every part of it.
+    let folder = tempfile::tempdir().unwrap();
+    let path = |name: &str| folder.path().join(name).display().to_string();
+    let all = ok(client, "render", json!({ "path": path("all.wav"), "stems": ["all"] })).await;
+    let one = ok(client, "render", json!({ "path": path("one.wav"), "stems": ["all"], "threads": 1 })).await;
+    assert!(std::fs::read(path("all.wav")).unwrap() == std::fs::read(path("one.wav")).unwrap());
+    let stems = |report: &Value| -> Vec<String> {
+        report["stems"].as_array().unwrap().iter().map(|stem| stem["file"].as_str().unwrap().to_string()).collect()
+    };
+    assert!(stems(&all).len() >= 4, "{all}");
+    for (made, single) in stems(&all).iter().zip(stems(&one)) {
+        assert!(std::fs::read(made).unwrap() == std::fs::read(&single).unwrap(), "{made} is not {single}");
+    }
+
+    // No processors is not a number of them.
+    let refused = call(client, "measure", json!({ "threads": 0 })).await.unwrap_err();
+    assert!(refused.contains("leave it out"), "{refused}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_that_is_not_run_beside_others_keeps_a_measure_on_one_processor_and_the_reply_says_so() {
+    let alone = trill_engine::scripted::Loading { alone: true, ..Default::default() };
+    let fixture = connect(ScriptedFactory::loading(alone)).await;
+    let client = &fixture.client;
+    two_part_song(client).await;
+    let report = ok(client, "measure", json!({})).await;
+    assert_eq!(report["threads"], 1, "{report}");
+    let said: Vec<String> =
+        strings(&report["notes"]).into_iter().filter(|note| note.contains("one processor")).collect();
+    assert_eq!(said.len(), 1, "{report}");
+    assert!(said[0].contains("on 'Bass'") && said[0].contains("more like it"), "{}", said[0]);
+    // Asked for one, there is nothing to explain.
+    let asked = ok(client, "measure", json!({ "threads": 1 })).await;
+    assert!(!strings(&asked["notes"]).iter().any(|note| note.contains("one processor")), "{asked}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn measuring_checks_a_mix_without_writing_a_file() {
     let fixture = connect(ScriptedFactory::new()).await;
     let client = &fixture.client;
@@ -688,7 +739,7 @@ async fn the_tools_and_the_instructions_say_how_to_hear() {
     }
     let (measure, schema) = described("measure");
     assert!(measure.contains("WITHOUT writing a file"), "{measure}");
-    for word in ["tracks", "sections", "bars", "detail"] {
+    for word in ["tracks", "sections", "bars", "detail", "threads"] {
         assert!(schema.contains(word), "{word}: {schema}");
     }
     // The tool that writes a file says which one to use for checking.
@@ -704,6 +755,7 @@ async fn the_tools_and_the_instructions_say_how_to_hear() {
         "gain reduction",
         "never to check your work",
         "mark it `loading`",
+        "every processor the machine has",
     ];
     for word in words {
         assert!(instructions.contains(word), "the instructions should say '{word}'");
@@ -1163,4 +1215,105 @@ async fn the_same_song_rendered_again_is_the_same_samples_where_takes_go_round_a
          started repeats these.",
         not_held.join("; ")
     );
+}
+
+/// Serum 2, a synthesizer, as a VST3 plugin.
+const SERUM: &str = "vst3:56534558667350736572756D20320000";
+
+/// With the plugins the owner's songs are made of: a song of two
+/// amplifiers behind built-in synths, two sampled basses set to take their
+/// recordings in turn, two synthesizers, a drum kit and a reverb on a
+/// return is rendered on one processor, on one again, and on all of them,
+/// each time with every part written to a file of its own. Every part
+/// that is the same samples the two times one processor made it (its
+/// plugins do the same thing twice) is those samples again when all of
+/// them did. The test says which parts those are and how long each render
+/// took, and fails if fewer than six of them are.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Archetype Tim Henson X, Ample Metal R, Serum 2 and Superior Drummer 3 (VST3) installed; run with `cargo test -p trill-mcp --test hearing a_song_of_installed_plugins -- --include-ignored --nocapture`"]
+async fn a_song_of_installed_plugins_is_the_same_samples_on_one_processor_and_on_all_of_them() {
+    let Some((fixture, folder)) = connect_with_plugins(AMPLIFIER).await else { return };
+    if [AMPLE_BASS, SERUM, SD3].into_iter().any(|uri| installed(uri).is_none()) {
+        return;
+    }
+    let client = &fixture.client;
+    ok(client, "set_project", json!({ "tempo": 132 })).await;
+    let room =
+        ok(client, "create_track", json!({ "name": "Room", "kind": "return" })).await["track_id"].as_u64().unwrap();
+    ok(client, "add_device", json!({ "track": room, "uri": "builtin:reverb" })).await;
+    let line = |pitches: [u8; 4]| -> Value {
+        (0..32).map(|step| json!([pitches[step % 4], step as f64 * 0.5, 0.4, 100])).collect()
+    };
+    // Two amplifiers, each behind a built-in synth.
+    for (name, pitches) in [("Amp low", [40, 47, 52, 47]), ("Amp high", [64, 59, 67, 71])] {
+        let part = track(client, name, "builtin:polysynth").await;
+        ok(client, "add_device", json!({ "track": part, "uri": AMPLIFIER })).await;
+        clip(client, part, 0.0, 16.0, line(pitches)).await;
+        ok(client, "update_track", json!({ "track": part, "send": { "to": room, "level_db": -12 } })).await;
+    }
+    // Two basses of one maker, which are run in turn, with their takes in
+    // turn too.
+    for (name, pitches) in [("Bass", [45, 45, 52, 50]), ("Bass above", [57, 64, 62, 57])] {
+        let made = ok(client, "create_track", json!({ "name": name, "instrument": AMPLE_BASS })).await;
+        let (part, device) = (made["track_id"].as_u64().unwrap(), made["instrument_device_id"].as_u64().unwrap());
+        let in_turn = json!({ "Cycle Mode Switch": 1, "M-Fret Sound": 0 });
+        ok(client, "update_device", json!({ "device": device, "settings": in_turn })).await;
+        clip(client, part, 0.0, 16.0, line(pitches)).await;
+    }
+    for (name, pitches) in [("Synth", [60, 67, 72, 67]), ("Synth above", [76, 79, 84, 79])] {
+        let part = track(client, name, SERUM).await;
+        clip(client, part, 0.0, 16.0, line(pitches)).await;
+        ok(client, "update_track", json!({ "track": part, "send": { "to": room, "level_db": -9 } })).await;
+    }
+    let drums = track(client, "Drums", SD3).await;
+    clip(client, drums, 0.0, 16.0, line([36, 42, 38, 42])).await;
+
+    let mut renders: Vec<(Value, f64)> = Vec::new();
+    for (name, threads) in [("one", json!(1)), ("one again", json!(1)), ("all", Value::Null)] {
+        let wav = folder.path().join(format!("{name}.wav"));
+        let mut arguments = json!({ "path": wav.display().to_string(), "stems": ["all"], "max_tail_seconds": 2 });
+        if !threads.is_null() {
+            arguments["threads"] = threads;
+        }
+        let begun = Instant::now();
+        let report = ok(client, "render", arguments).await;
+        let took = begun.elapsed().as_secs_f64();
+        eprintln!(
+            "{name}: {} thread(s), {took:.1} s for {} s of audio; {}",
+            report["threads"],
+            report["duration_seconds"],
+            strings(&report["notes"]).into_iter().filter(|note| note.contains("processor")).collect::<String>()
+        );
+        renders.push((report, took));
+    }
+    assert_eq!(renders[0].0["threads"], 1);
+    assert!(renders[2].0["threads"].as_u64().unwrap() > 1, "{}", renders[2].0);
+    let files = |report: &Value| -> Vec<(String, String)> {
+        let name =
+            |stem: &Value| format!("{} {}", stem["what"].as_str().unwrap_or(""), stem["name"].as_str().unwrap_or(""));
+        let stems = report["stems"].as_array().unwrap().iter();
+        let mut files: Vec<_> = stems.map(|stem| (name(stem), stem["file"].as_str().unwrap().to_string())).collect();
+        files.push(("the mix".to_string(), report["path"].as_str().unwrap().to_string()));
+        files
+    };
+    let (one, again, all) = (files(&renders[0].0), files(&renders[1].0), files(&renders[2].0));
+    let (mut held, mut not_judged) = (Vec::new(), Vec::new());
+    for ((part, one), ((_, again), (_, all))) in one.iter().zip(again.iter().zip(&all)) {
+        let read = |path: &String| trill_media::decode(Path::new(path)).unwrap().left;
+        let (one, again, all) = (read(one), read(again), read(all));
+        if one == again {
+            assert!(all == one, "{part}: other samples on all processors ({:.0} dB left)", null_db(&one, &all));
+            held.push(part.clone());
+        } else {
+            not_judged.push(format!(
+                "{part} ({:.0} dB left the second time on one processor, {:.0} dB on all)",
+                null_db(&one, &again),
+                null_db(&one, &all)
+            ));
+        }
+    }
+    eprintln!("the same samples on one processor and on all: {held:?}");
+    eprintln!("not the same samples twice even on one processor, so not judged: {not_judged:?}");
+    eprintln!("one processor {:.1} s and {:.1} s, all of them {:.1} s", renders[0].1, renders[1].1, renders[2].1);
+    assert!(held.len() >= 6, "too few parts repeat themselves for this to say anything: {held:?}");
 }

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use trill_core::Device;
-use trill_core::device::{DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance, Purpose, split_uri};
+use trill_core::device::{Beside, DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance, Purpose, split_uri};
 use trill_core::presets::{PresetInfo, PresetList};
 
 /// The VST3 sub-category that marks a plugin as an instrument.
@@ -274,6 +274,18 @@ impl DeviceFactory for Vst3Factory {
     /// format waits for its turn on it.
     fn busy(&self) -> bool {
         self.shared.main.behind()
+    }
+
+    /// In turn with the other instances of its module, unless more is
+    /// known of the plugin: see [`crate::beside`].
+    fn beside(&self, uri: &str) -> Beside {
+        let Some((VST3_SCHEME, class)) = split_uri(uri) else { return Beside::Anything };
+        let catalog = self.shared.installed.catalog();
+        let class = ClassId::parse(class).map(|class| class.to_string());
+        match class.and_then(|class| catalog.find(&class).ok()) {
+            Some(installed) => crate::beside::of(uri, &installed.path),
+            None => Beside::Anything,
+        }
     }
 
     fn create_for(

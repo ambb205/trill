@@ -681,6 +681,8 @@ mod tests {
             dynamics: Vec::new(),
             waited: Vec::new(),
             stems: Vec::new(),
+            threads: 1,
+            alone: Vec::new(),
             problems,
         }
     }

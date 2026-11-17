@@ -326,7 +326,7 @@ by hand, a mute, the song jumping to where an envelope is at another level) is l
 milliseconds. (The built-in filter still reads its cutoff every sixteen frames of the block it is handed: with a
 swept cutoff it is the same samples only at buffer sizes that are a multiple of sixteen.)
 
-**Hearing without ears.** Whoever cannot listen (a script, an assistant) measures instead, and three things make
+**Hearing without ears.** Whoever cannot listen (a script, an assistant) measures instead, and a few things make
 that quick and true:
 
 - *A render waits for its plugins.* A sampler goes on loading after it is created (a drum kit one drum after
@@ -334,14 +334,19 @@ that quick and true:
   may pass nothing for a moment; a render that started at once lost the beginning of the song. Plugins are told
   they are being rendered offline (VST3 process mode, CLAP `render`). Before the first sample each plugin
   instrument is rehearsed on the notes it is about to play, each note by itself (a tom that rings would hide a
-  cymbal that has not arrived), and each plugin effect on a burst of noise, until every note has answered and
+  cymbal that has not arrived), and each plugin effect on bursts of noise, until every note has answered and
   nothing more has arrived for a quarter of a second or more, with the program not growing meanwhile: while
   samples are being read its memory rises. Every rehearsed note is sounded exactly three times and then left
   alone, however long the wait lasts: an instrument that plays its recordings of a note in turn then begins
   every render at the same one, and the same song renders to the same samples again. (That cannot hold an
   instrument that draws its recordings at random from a stream all its instances share, which only a program
   that has just started begins at the same place. Ample Sound's do as they come, and go in turn when they are
-  set to: their profiles say how.) A sampler was watched to pause for seconds between two drums with
+  set to: their profiles say how.) What a plugin has been run by the time a render begins is counted the
+  same way, because what some give depends on it to the block (an amplifier was measured whose sound is
+  another after one block more of silence, whatever a reset does): an effect is tried until it has passed
+  three bursts and no more, the effects after an instrument are run only on the notes the instrument itself
+  sounds, and once nothing is left to ask nothing is run. A sampler was watched to pause for seconds between
+  two drums with
   nothing to show for it, so an instrument that answers some of its notes and not others is held to that for
   five seconds before the silent ones are taken to be keys that play nothing; that is remembered of the plugin,
   and the reply names the notes, because a key that plays nothing and a sample that is still loading sound the
@@ -365,6 +370,19 @@ that quick and true:
   section between the markers (or of bar ranges), and how many dB each built-in compressor and limiter took
   off, at the most and typically. It can be made without writing a file, and with only some tracks heard,
   the song's mute and solo left alone.
+- *A render uses the machine.* While a song plays one thread makes every block, a track at a time. A render
+  hands the tracks that do not feed one another to as many threads as the machine has processors, and then
+  adds them up, by one thread, in the order one thread would have: the mix, every stem and every number
+  measured are the same samples and the same figures as on one, sooner (`threads` holds it to fewer; the
+  reply says how many it was). A track waits for what feeds it: a group for its members, a return for the
+  tracks that send to it, a track for the one its compressor listens to. Plugins take more care. The
+  instances of one plugin share its module, and some modules keep things for all their instances: run at
+  once, the instruments of Ample Sound give other samples than run one after the other. So the instances
+  of one plugin are run in turn and in the order of the song, beside everything else, unless the plugin
+  was measured to give the same samples either way (`trill-plugins/src/beside.rs` lists those, and
+  `cargo run -p trill-plugins --example beside` measures an installed plugin, or all of them, each in a
+  process of its own). A plugin that is listed as one not to run beside anything leaves the render on one
+  thread, and the reply says which it was.
 - *A render makes only what is heard.* A track that is muted, or left out by a solo or by `tracks`, is not put
   into the render at all: its devices are not created and its plugins are not waited for. Hearing one track of
   a song with many plugins costs what that track costs. (What plays live keeps every track running, so that a

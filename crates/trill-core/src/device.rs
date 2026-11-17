@@ -667,6 +667,35 @@ pub struct DeviceWarning {
 
 /// Creates devices from their model description. Implemented by the built-in
 /// device registry and by each plugin host; the app composes them.
+/// What a device may be run beside, where a render uses more than one
+/// thread at once. (While a song plays, one thread runs every device.)
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Beside {
+    /// Anything: it shares nothing with any other device that what comes
+    /// out of it depends on, and does not mind which thread runs it.
+    #[default]
+    Anything,
+    /// Anything but the devices that name the same thing: the module of a
+    /// plugin, say, which may keep something for all its instances (some
+    /// keep where they are in a round of recordings). Devices that name
+    /// the same thing are run one at a time and in the order of the song,
+    /// as one thread would run them.
+    InTurn(String),
+    /// Nothing: a render of a song that has it is made on one thread.
+    Nothing,
+}
+
+impl Beside {
+    /// Whichever of the two leaves less to be run at once.
+    pub fn or(self, other: Beside) -> Beside {
+        match (self, other) {
+            (Beside::Nothing, _) | (_, Beside::Nothing) => Beside::Nothing,
+            (Beside::Anything, other) => other,
+            (this, _) => this,
+        }
+    }
+}
+
 pub trait DeviceFactory: Send + Sync {
     /// Everything this factory can create.
     fn descriptors(&self) -> Vec<DeviceDescriptor>;
@@ -698,6 +727,15 @@ pub trait DeviceFactory: Send + Sync {
     /// factory that hands the work to another must hand this on too.
     fn busy(&self) -> bool {
         false
+    }
+
+    /// What a device of this factory may be run beside when a render uses
+    /// more than one thread: see [`Beside`]. Anything, for a device that
+    /// is not this factory's. A factory that hands the work to another
+    /// must hand this on too.
+    fn beside(&self, uri: &str) -> Beside {
+        let _ = uri;
+        Beside::Anything
     }
 
     /// What is wrong with `device` as this factory would create it, short
@@ -813,6 +851,10 @@ impl<T: DeviceFactory + ?Sized> DeviceFactory for std::sync::Arc<T> {
         (**self).busy()
     }
 
+    fn beside(&self, uri: &str) -> Beside {
+        (**self).beside(uri)
+    }
+
     fn warnings(&self, device: &Device) -> Vec<DeviceWarning> {
         (**self).warnings(device)
     }
@@ -869,6 +911,10 @@ impl DeviceFactory for CompositeFactory {
 
     fn busy(&self) -> bool {
         self.factories.iter().any(|factory| factory.busy())
+    }
+
+    fn beside(&self, uri: &str) -> Beside {
+        self.factories.iter().map(|factory| factory.beside(uri)).fold(Beside::Anything, Beside::or)
     }
 
     fn create(&self, device: &Device, sample_rate: f64, max_block: usize) -> Result<DeviceInstance, DeviceError> {

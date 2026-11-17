@@ -9,6 +9,7 @@
 pub mod analysis;
 mod clock;
 pub mod compile;
+mod crew;
 pub mod engine;
 mod glide;
 pub mod graph;
@@ -26,6 +27,7 @@ pub mod saved;
 pub mod scripted;
 pub mod session;
 pub mod sources;
+mod spread;
 mod stretcher;
 
 pub use analysis::AudioStats;

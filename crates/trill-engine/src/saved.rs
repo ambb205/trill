@@ -445,6 +445,10 @@ impl DeviceFactory for WithSaved {
         self.inner.busy()
     }
 
+    fn beside(&self, uri: &str) -> trill_core::device::Beside {
+        self.inner.beside(uri)
+    }
+
     fn warnings(&self, device: &Device) -> Vec<DeviceWarning> {
         self.inner.warnings(device)
     }

@@ -329,6 +329,52 @@ fn an_instrument_whose_takes_go_round_begins_every_render_at_the_same_take_howev
 }
 
 #[test]
+fn an_effect_is_run_the_same_amount_before_every_render_however_long_its_instrument_took_to_load() {
+    let _alone = ONE_AT_A_TIME.lock();
+    // An amplifier whose level goes up and down from the moment it is
+    // made, with every frame it is run: what it makes of the song says how
+    // much it was run before, and a reset does not put that back. One
+    // stands behind a bass, which is rehearsed on its notes, and one
+    // behind a built-in synth, where it is tried with noise.
+    let mut project = song(BASS, &[(40, 0.0), (43, 0.5), (45, 1.0), (62, 1.5), (40, 2.0), (43, 2.5)]);
+    let bass = project.tracks[0].id;
+    project.add_device(ChainRef::Track(bass), AMP, "Amp", None).unwrap();
+    let lead = project.add_track("Lead");
+    project.add_device(ChainRef::Track(lead), "builtin:polysynth", "Synth", None).unwrap();
+    project.add_device(ChainRef::Track(lead), AMP, "Amp", None).unwrap();
+    let clip = project.add_midi_clip(lead, "clip", 0.0, 8.0).unwrap();
+    let notes = [Note { pitch: 60, start: 0.0, length: 3.0, velocity: 100 }];
+    project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
+    let options = RenderOptions { sample_rate: SR, max_tail_seconds: 0.5, ..RenderOptions::default() };
+    let render = |loading: Loading| {
+        let job = RenderJob {
+            project: project.clone(),
+            factory: factory(&ScriptedFactory::loading(loading)),
+            audio: trill_engine::sources::AudioSources::default(),
+        };
+        let begun = Instant::now();
+        (job.render(&options).unwrap(), begun.elapsed())
+    };
+    let free = Loading { free: true, ..Loading::default() };
+    let (steady, _) = render(Loading::default());
+
+    // Nothing is known of them the first time, and they are held to
+    // their answers for longer than the next, when they are known.
+    let (new, first) = render(free);
+    assert!(new.left != steady.left, "the amplifiers are heard to move");
+    let (known, again) = render(free);
+    assert!(known.left == new.left, "the same samples ({again:?} after {first:?})");
+
+    // A bass that arrives piece by piece over more than a second is asked
+    // for the notes it does not have yet try after try, and all that
+    // while the amplifier behind it is given nothing.
+    let slow = Loading { upper: Duration::from_millis(700), late: Some((45, Duration::from_millis(1100))), ..free };
+    let (loaded, took) = render(slow);
+    assert!(took >= Duration::from_millis(1100), "{took:?}");
+    assert!(loaded.left == new.left, "the same samples after a wait of {took:?}");
+}
+
+#[test]
 fn a_render_does_not_go_on_without_an_instrument_that_never_answered_and_writes_nothing() {
     let _alone = ONE_AT_A_TIME.lock();
     // A bass that plays, and drums that never answer: one of two.

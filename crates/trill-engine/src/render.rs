@@ -35,6 +35,14 @@
 //! and written a block at a time, so one render stands for as many as the
 //! song has tracks and none of them is held in memory. A track's stem is
 //! what a render of a project holding that track alone gives.
+//!
+//! **A render uses the machine.** The tracks of a block that do not feed
+//! one another are made on several threads at once ([`crate::spread`]),
+//! and added up in the order one thread would have added them: the
+//! samples are the same, in less time. Plugins that are not known to keep
+//! nothing between their instances are run in turn all the same, and one
+//! that is not to be run beside anything leaves the render on one thread,
+//! which the report says ([`Measured::alone`]).
 
 use crate::analysis::{Analyzer, AudioStats, Spectrum};
 use crate::compile::{Compiler, DeviceBank, Meters, Problem};
@@ -42,10 +50,11 @@ use crate::graph::{Chain, Graph, MAX_BLOCK, Tap, TrackNode};
 use crate::processor::Processor;
 use crate::ready::{self, Waited};
 use crate::sources::AudioSources;
+use crate::spread;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use trill_core::audio::AudioBuffer;
 use trill_core::device::{DeviceFactory, Purpose};
 use trill_core::{DeviceId, Project, Track, TrackId, TrackKind};
@@ -77,6 +86,17 @@ pub struct RenderOptions {
     /// Parts of the song to write to files of their own as the render
     /// goes. `None` writes none.
     pub stems: Option<Stems>,
+    /// How many threads make the render at the most: as many as the
+    /// machine has processors where this is `None`, and never more than
+    /// the song has tracks that can be made at once. With 1 it is made as
+    /// a song is played, a track after the other. The samples are the
+    /// same whatever this is, wherever the devices themselves do the same
+    /// thing twice.
+    pub threads: Option<usize>,
+    /// Takes every device to tolerate being run beside any other, whatever
+    /// is known of it ([`trill_core::device::Beside`]). For finding out
+    /// what a plugin does when it is, and for nothing else.
+    pub trusting: bool,
 }
 
 /// Which parts of the song a render writes to files of their own, beside
@@ -195,6 +215,8 @@ impl Default for RenderOptions {
             sections: Vec::new(),
             patience: Duration::from_secs(10),
             stems: None,
+            threads: None,
+            trusting: false,
         }
     }
 }
@@ -265,6 +287,23 @@ pub struct Measured {
     /// The files that were written beside the mix, in the order of the
     /// song's tracks.
     pub stems: Vec<Stem>,
+    /// How many threads made the render.
+    pub threads: usize,
+    /// The devices that kept it on one thread though it was given more:
+    /// they are not to be run beside anything.
+    pub alone: Vec<Alone>,
+}
+
+/// A device that is not to be run beside anything, which leaves a render
+/// on one thread.
+#[derive(Clone, Debug, Serialize)]
+pub struct Alone {
+    /// The track it is on; `None` for the master.
+    pub track: Option<TrackId>,
+    /// That track's name, or "master".
+    pub track_name: String,
+    pub device: DeviceId,
+    pub device_name: String,
 }
 
 /// One track as it leaves its fader: what it adds to the mix or to its
@@ -346,12 +385,17 @@ pub struct RenderReport {
     /// See [`Measured::stems`].
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stems: Vec<Stem>,
+    /// See [`Measured::threads`].
+    pub threads: usize,
+    /// See [`Measured::alone`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub alone: Vec<Alone>,
     pub problems: Vec<String>,
 }
 
 impl RenderReport {
     fn new(path: Option<&Path>, sample_rate: u32, measured: Measured, problems: &[Problem]) -> Self {
-        let Measured { stats, tracks, sections, dynamics, waited, stems } = measured;
+        let Measured { stats, tracks, sections, dynamics, waited, stems, threads, alone } = measured;
         Self {
             path: path.map(|path| path.display().to_string()),
             sample_rate,
@@ -361,6 +405,8 @@ impl RenderReport {
             dynamics,
             waited,
             stems,
+            threads,
+            alone,
             problems: problems.iter().map(ToString::to_string).collect(),
         }
     }
@@ -442,6 +488,7 @@ fn render_from(
     let sample_rate = options.sample_rate as f64;
     let only = options.only_tracks.as_deref().map(|tracks| hearing_only(project, tracks));
     let project = only.as_ref().unwrap_or(project);
+    let begun = Instant::now();
 
     let mut bank = DeviceBank::default();
     let mut meters = Meters::default();
@@ -495,7 +542,9 @@ fn render_from(
     if let Some(stems) = stems.filter(|stems| stems.premaster) {
         graph.master.tap = Some(listener(Some(stems.begin(StemKind::Premaster, None, sample_rate)?)));
     }
+    let made = begun.elapsed();
     let waited = ready::wake(&mut graph, project, (&plugins, factory), (start, end), sample_rate, options.patience);
+    let woke = begun.elapsed();
     let name_of = |track: Option<TrackId>| match track {
         Some(track) => project.track(track).map(|track| track.name.clone()).unwrap_or_default(),
         None => "master".to_string(),
@@ -534,8 +583,26 @@ fn render_from(
         return Err(RenderError::NotAnswered(missing));
     }
 
+    // How many threads make it: as many as it was given and can use,
+    // unless a device of it is not to be run beside anything.
+    let alone: Vec<Alone> = spread::company(&mut graph, project, factory, options.trusting)
+        .into_iter()
+        .map(|device| {
+            let track = project.tracks.iter().find(|track| track.devices.iter().any(|on| on.id == device));
+            Alone {
+                track: track.map(|track| track.id),
+                track_name: name_of(track.map(|track| track.id)),
+                device,
+                device_name: project.device(device).map(|device| device.name.clone()).unwrap_or_default(),
+            }
+        })
+        .collect();
+    let given = options.threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from));
     let mut processor = Processor::new(sample_rate);
     drop(processor.swap_graph(graph));
+    let threads = if alone.is_empty() { processor.spread_over(given.max(1)) } else { 1 };
+    // Only where it made a difference is it worth saying.
+    let alone = if given > 1 { alone } else { Vec::new() };
     processor.seek(start);
     processor.play();
 
@@ -670,7 +737,20 @@ fn render_from(
         .map(named)
         .collect();
 
-    let measured = Measured { stats: mix.stats(), tracks, sections, dynamics, waited, stems };
+    let played = begun.elapsed();
+    // The devices go, each plugin in its turn on the plugins' own thread.
+    drop(graph);
+    log::info!(
+        "a render of {:.1} s of audio on {threads} thread(s): its devices were made in {:.1} s, waited for {:.1} s, \
+         played in {:.1} s and let go of in {:.1} s",
+        total_frames as f64 / sample_rate,
+        made.as_secs_f64(),
+        (woke - made).as_secs_f64(),
+        (played - woke).as_secs_f64(),
+        (begun.elapsed() - played).as_secs_f64()
+    );
+
+    let measured = Measured { stats: mix.stats(), tracks, sections, dynamics, waited, stems, threads, alone };
     Ok(Rendered { sample_rate: options.sample_rate, left, right, track_peaks, problems, measured })
 }
 

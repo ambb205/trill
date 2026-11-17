@@ -3,12 +3,23 @@
 //! Nothing in here allocates, locks or blocks once constructed. The same
 //! processor drives realtime playback and offline rendering, so a bounce is
 //! exactly what you heard.
+//!
+//! A block is made a track at a time, in the order the graph has them:
+//! each track begins from what was fed to it ([`begin`]), is told where
+//! its controllers are ([`say_controllers`]), plays its notes and audio
+//! through its devices ([`play`]), is brought to where its fader has it
+//! ([`fade`]) and is added to where it goes ([`mix`]). While a song plays
+//! one thread does all of that, track after track. A render may hand the
+//! tracks that do not feed one another to several threads at once
+//! ([`crate::spread`]): the same steps, on the same numbers, added up in
+//! the same order, so that the samples are the same.
 
 use crate::engine::RecordPhase;
 use crate::glide::{DECLICK_SECONDS, STEP, Span, gated};
 use crate::graph::{AudioData, Bus, Chain, DeviceSlot, Graph, MAX_BLOCK, RegionAudio, TrackNode, TrackState};
 use crate::live::{Captured, LiveTarget, TrackSet};
 use crate::monitor::{Beats, Monitor};
+use crate::spread::Spread;
 use trill_core::controllers::{CONTROLLER_KINDS, ControllerKind};
 use trill_core::device::{Event, EventKind, KeyInput, MAX_EVENTS_PER_BLOCK, ProcessInfo};
 use trill_core::project::MIN_VOLUME_DB;
@@ -127,24 +138,19 @@ pub struct Processor {
     live: Vec<LiveEvent>,
     /// The tracks a keyboard plays.
     live_targets: TrackSet,
-    events: Vec<Event>,
-    /// Room to put a block's events in order.
-    sorted: Vec<Event>,
+    /// Room for the block of the track that is being made.
+    room: Room,
+    /// The threads a render makes its blocks on, if it was given any: see
+    /// [`Processor::spread_over`]. Never while a song plays.
+    spread: Option<Box<Spread>>,
     /// Set when the song starts or jumps: the next block says where every
     /// controller is at its first frame.
     chase: bool,
     /// Set when the song starts playing or jumps while it plays: the
     /// controllers it has curves for are its own again, whoever moved them.
     take_back: bool,
-    track_left: Vec<f32>,
-    track_right: Vec<f32>,
     mix_left: Vec<f32>,
     mix_right: Vec<f32>,
-    /// Room for a block of gains that move: a fader's two sides, or a send.
-    gain_left: Vec<f32>,
-    gain_right: Vec<f32>,
-    /// Room for how far a gate is open over a block, while it moves.
-    shares: Vec<f32>,
     /// How many frames an abrupt change of a gain is spread over.
     declick: u32,
     /// The audition voice and the metronome, heard but never rendered.
@@ -173,17 +179,12 @@ impl Processor {
             flush: Flush::Nothing,
             live: Vec::with_capacity(LIVE_CAPACITY),
             live_targets: TrackSet::default(),
-            events: Vec::with_capacity(EVENT_CAPACITY),
-            sorted: Vec::with_capacity(EVENT_CAPACITY),
+            room: Room::new(),
+            spread: None,
             chase: true,
             take_back: false,
-            track_left: vec![0.0; MAX_BLOCK],
-            track_right: vec![0.0; MAX_BLOCK],
             mix_left: vec![0.0; MAX_BLOCK],
             mix_right: vec![0.0; MAX_BLOCK],
-            gain_left: vec![0.0; MAX_BLOCK],
-            gain_right: vec![0.0; MAX_BLOCK],
-            shares: vec![0.0; MAX_BLOCK],
             declick: (DECLICK_SECONDS * sample_rate).round().max(1.0) as u32,
             monitor: Monitor::new(sample_rate),
             output_latency: 0.0,
@@ -469,6 +470,12 @@ impl Processor {
     /// Installs `new`, carrying running state across, and returns the old
     /// graph so the caller can free it off the audio thread.
     pub fn swap_graph(&mut self, mut new: Box<Graph>) -> Box<Graph> {
+        // Threads were given for the graph that goes. (A processor that
+        // plays never has any: nothing is let go of here on the audio
+        // thread.)
+        if self.spread.is_some() {
+            self.spread = None;
+        }
         let position = self.position();
         new.adopt(&mut self.graph);
         let tempo_changed = new.tempo != self.graph.tempo;
@@ -478,6 +485,17 @@ impl Processor {
             self.frames = 0;
         }
         old
+    }
+
+    /// Has the blocks of the graph it now holds made on up to `threads`
+    /// threads at once, this one among them, and returns how many it will
+    /// be: as many as there are tracks that can be made at once, at the
+    /// most, and one where every track waits for another. For a render
+    /// only: threads are started and waited on, which a processor that
+    /// plays must never do. The samples are the ones one thread makes.
+    pub fn spread_over(&mut self, threads: usize) -> usize {
+        self.spread = Spread::new(&self.graph, threads).map(Box::new);
+        self.spread.as_ref().map_or(1, |spread| spread.threads())
     }
 
     /// Renders `left.len()` frames. The slices must have equal length.
@@ -613,79 +631,10 @@ impl Processor {
             bus.right[..frames].fill(0.0);
         }
 
-        for track in tracks.iter_mut() {
-            let left = &mut self.track_left[..frames];
-            let right = &mut self.track_right[..frames];
-            // A group or return starts from what was fed to its bus; every
-            // track that feeds it has already run.
-            match track.input_bus.and_then(|bus| buses.get(bus)) {
-                Some(bus) => {
-                    left.copy_from_slice(&bus.left[..frames]);
-                    right.copy_from_slice(&bus.right[..frames]);
-                }
-                None => {
-                    left.fill(0.0);
-                    right.fill(0.0);
-                }
-            }
-
-            let events = &mut self.events;
-            let sorted = &mut self.sorted;
-            events.clear();
-            release_notes(track, flush, events);
-            let recorded = heard.as_ref().filter(|heard| heard.tracks.contains(track.id));
-            let mut by_hand = false;
-            if std::mem::take(&mut track.state.release_routed) {
-                by_hand = true;
-                let id = track.id;
-                release_routed(track, events, |kind| {
-                    if let (Some(heard), Some(capture)) = (recorded, &mut self.capture) {
-                        let (beat, pass) = heard.at(0, 0.0);
-                        let _ = capture.push(Captured::Event { track: id, kind, beat, pass });
-                    }
-                });
-            }
-            if has_live {
-                for event in self.live.iter().filter(|event| block.contains(&event.offset)) {
-                    let routed = event.target == LiveTarget::Routed;
-                    let plays = match event.target {
-                        LiveTarget::Routed => self.live_targets.contains(track.id),
-                        LiveTarget::Track(id) => id == track.id,
-                    };
-                    if !plays {
-                        continue;
-                    }
-                    if events.len() >= EVENT_CAPACITY {
-                        // Cannot happen: fewer live events are held than a
-                        // device takes in a block. If it ever does, the
-                        // event may have been the end of a note.
-                        self.flush = Flush::Everything;
-                        continue;
-                    }
-                    // A key the keyboard does not hold here has nothing to
-                    // let go of: it went down before this track was one it
-                    // plays, or the note was ended for it already.
-                    if let (true, EventKind::NoteOff { pitch }) = (routed, event.kind)
-                        && track.state.routed_held & (1 << pitch.min(127)) == 0
-                    {
-                        continue;
-                    }
-                    by_hand = true;
-                    let offset = event.offset - block.start;
-                    track.state.played(event.kind, routed);
-                    events.push(Event { offset, kind: event.kind });
-                    let keeps = matches!(event.kind, EventKind::NoteOn { .. } | EventKind::NoteOff { .. })
-                        || ControllerKind::of_event(event.kind).is_some();
-                    if let (true, Some(heard), Some(capture)) = (keeps, recorded, &mut self.capture) {
-                        let (beat, pass) = heard.at(offset, event.early);
-                        let _ = capture.push(Captured::Event { track: track.id, kind: event.kind, beat, pass });
-                    }
-                }
-            }
-            // The song's controllers, after whatever the hand did in this
-            // block (which makes a controller the hand's) and before the
-            // song's notes, so that a note begins at the level meant for it.
-            let controls = ControlBlock {
+        let common = Common {
+            info: &info,
+            flush,
+            controls: ControlBlock {
                 playing,
                 chase,
                 take_back,
@@ -695,145 +644,99 @@ impl Processor {
                 elapsed: self.frames,
                 beats_per_frame,
                 frames,
-            };
-            let before_controls = events.len();
-            collect_controllers(track, &controls, events);
-            let moved = events.len() > before_controls;
-            if let (true, Some(heard), Some(capture)) = (standing_due, recorded, &mut self.capture) {
-                // Where the hand has left the controllers is how the take
-                // begins: an instrument that was given its expression
-                // before the take needs it to play the take back.
-                for (index, value) in track.state.live.iter().enumerate().filter(|(_, value)| !value.is_nan()) {
-                    let Some(kind) = ControllerKind::from_index(index) else { continue };
-                    if kind.rest().is_none_or(|rest| rest as f32 != *value) {
-                        let report = Captured::Standing { track: track.id, kind, value: *value, pass: heard.pass };
-                        let _ = capture.push(report);
+            },
+            span,
+            param_beat,
+            declick,
+            sample_rate: self.sample_rate,
+        };
+        // A render that was given threads makes the tracks that do not
+        // feed one another at once. Nothing is played by hand into a
+        // render; if anything were, the block would be made here.
+        let spread = self.spread.as_mut().filter(|_| !has_live && !standing_due);
+        if let Some(spread) = spread {
+            spread.block(tracks, buses, keys, &common, mix_left, mix_right);
+        } else {
+            let room = &mut self.room;
+            for track in tracks.iter_mut() {
+                // A group or return starts from what was fed to its bus;
+                // every track that feeds it has already run.
+                begin(track, &common, buses, room);
+                let events = &mut room.events;
+                let recorded = heard.as_ref().filter(|heard| heard.tracks.contains(track.id));
+                let mut by_hand = false;
+                if std::mem::take(&mut track.state.release_routed) {
+                    by_hand = true;
+                    let id = track.id;
+                    release_routed(track, events, |kind| {
+                        if let (Some(heard), Some(capture)) = (recorded, &mut self.capture) {
+                            let (beat, pass) = heard.at(0, 0.0);
+                            let _ = capture.push(Captured::Event { track: id, kind, beat, pass });
+                        }
+                    });
+                }
+                if has_live {
+                    for event in self.live.iter().filter(|event| block.contains(&event.offset)) {
+                        let routed = event.target == LiveTarget::Routed;
+                        let plays = match event.target {
+                            LiveTarget::Routed => self.live_targets.contains(track.id),
+                            LiveTarget::Track(id) => id == track.id,
+                        };
+                        if !plays {
+                            continue;
+                        }
+                        if events.len() >= EVENT_CAPACITY {
+                            // Cannot happen: fewer live events are held than a
+                            // device takes in a block. If it ever does, the
+                            // event may have been the end of a note.
+                            self.flush = Flush::Everything;
+                            continue;
+                        }
+                        // A key the keyboard does not hold here has nothing to
+                        // let go of: it went down before this track was one it
+                        // plays, or the note was ended for it already.
+                        if let (true, EventKind::NoteOff { pitch }) = (routed, event.kind)
+                            && track.state.routed_held & (1 << pitch.min(127)) == 0
+                        {
+                            continue;
+                        }
+                        by_hand = true;
+                        let offset = event.offset - block.start;
+                        track.state.played(event.kind, routed);
+                        events.push(Event { offset, kind: event.kind });
+                        let keeps = matches!(event.kind, EventKind::NoteOn { .. } | EventKind::NoteOff { .. })
+                            || ControllerKind::of_event(event.kind).is_some();
+                        if let (true, Some(heard), Some(capture)) = (keeps, recorded, &mut self.capture) {
+                            let (beat, pass) = heard.at(offset, event.early);
+                            let _ = capture.push(Captured::Event { track: track.id, kind: event.kind, beat, pass });
+                        }
                     }
                 }
-            }
-            let before_notes = events.len();
-            if playing {
-                collect_notes(track, start_beat, end_beat, beats_per_frame, frames, events);
-                let block = Block {
-                    start_beat,
-                    beats_per_frame,
-                    anchor_frames: self.anchor_beat / beats_per_frame,
-                    elapsed: self.frames,
-                    sample_rate: self.sample_rate,
-                };
-                render_audio(track, &block, left, right);
-            }
-            if by_hand || moved {
-                // What is played by hand comes at any offset, and the
-                // song's controllers and notes were added after it: devices
-                // want one list in order. Ties keep the order they were
-                // added in.
-                sort_by_offset(&mut events[..before_notes]);
-                merge_by_offset(events, before_notes, sorted);
-            }
-
-            match &mut track.source {
-                None => run_chain(&mut track.chain, &info, param_beat, events, left, right, keys),
-                // A render that keeps what goes into the track's effects:
-                // the chain is run in two parts, and heard between them.
-                Some((sources, tap)) => {
-                    move_params(&mut track.chain, param_beat);
-                    let devices = &mut track.chain.devices;
-                    let sources = (*sources).min(devices.len());
-                    let (source, effects) = devices.split_at_mut(sources);
-                    run_devices(source, &info, events, left, right, keys);
-                    tap.push(left, right);
-                    run_devices(effects, &info, events, left, right, keys);
-                }
-            }
-            listen_for_an_answer(track, left, right);
-            // What the devices that listen to this track hear of it: as it
-            // leaves its own devices, whatever its fader and its mute say.
-            if let Some(key) = track.key_out.and_then(|key| keys.get_mut(key)) {
-                key.left[..frames].copy_from_slice(left);
-                key.right[..frames].copy_from_slice(right);
-            }
-
-            // Where the fader and the pan have the two sides at a position
-            // of the song: where their envelopes have them, or where they
-            // were set by hand.
-            let (volume, pan) = (&track.volume_automation, &track.pan_automation);
-            let (volume_db, pan_set) = (track.volume_db, track.pan);
-            let sides = |beat: f64| {
-                let level = volume.as_ref().map_or(volume_db, |envelope| envelope.value_at(beat) as f32);
-                if level <= MIN_VOLUME_DB {
-                    return [0.0, 0.0];
-                }
-                let gain = db_to_gain(level);
-                let (pan_left, pan_right) =
-                    pan_gains(pan.as_ref().map_or(pan_set, |envelope| envelope.value_at(beat) as f32));
-                [gain * pan_left, gain * pan_right]
-            };
-            let moving = volume.is_some() || pan.is_some();
-            let shares = &mut self.shares[..frames];
-            let mut gains = [&mut self.gain_left[..frames], &mut self.gain_right[..frames]];
-            let state = &mut track.state;
-            let flat = state.fader.fill(&span, moving, declick, frames, &mut gains, sides);
-            // A track that passes no sound, on to its output or into a
-            // send, is shut: mute and solo work a gate on what the fader
-            // leaves, so that neither makes a step when the other moves.
-            let flat = gated(flat, state.passes.fill(track.passes, declick, shares), shares, &mut gains);
-            // Fade in place, so the output and every send carry the same
-            // post-fader signal.
-            let (peak_left, peak_right) = match flat {
-                Some([gain_left, gain_right]) => (scale(left, gain_left), scale(right, gain_right)),
-                None => (scale_by(left, gains[0]), scale_by(right, gains[1])),
-            };
-            track.meter.record(peak_left, peak_right);
-            if let Some(tap) = &mut track.tap {
-                tap.push(left, right);
-            }
-
-            // What goes on to the output, and what goes to each return,
-            // are opened and closed by mute and solo apart from each other:
-            // a track that feeds a soloed return is not heard itself.
-            let (out_left, out_right) = match track.output_bus.and_then(|bus| buses.get_mut(bus)) {
-                Some(bus) => (&mut bus.left[..frames], &mut bus.right[..frames]),
-                None => (&mut *mix_left, &mut *mix_right),
-            };
-            match state.out.fill(track.to_output, declick, shares) {
-                Some(0.0) => {}
-                Some(share) => {
-                    add_scaled(left, out_left, share);
-                    add_scaled(right, out_right, share);
-                }
-                None => {
-                    add_scaled_by(left, out_left, shares);
-                    add_scaled_by(right, out_right, shares);
-                }
-            }
-            for send in &mut track.sends {
-                // What the send carries: its level at a position of the
-                // song, where its envelope has it or where it was set by
-                // hand, times how far mute and solo leave it open.
-                let (automation, set) = (&send.automation, send.gain);
-                let level = |beat: f64| match automation {
-                    Some(envelope) => {
-                        let level = envelope.value_at(beat) as f32;
-                        [if level > MIN_VOLUME_DB { db_to_gain(level) } else { 0.0 }]
-                    }
-                    None => [set],
-                };
-                let mut gains = [&mut self.gain_left[..frames]];
-                let flat = send.glide.fill(&span, automation.is_some(), declick, frames, &mut gains, level);
-                let flat = gated(flat, send.gate.fill(send.open, declick, shares), shares, &mut gains);
-                let Some(bus) = buses.get_mut(send.bus) else { continue };
-                match flat {
-                    Some([0.0]) => {}
-                    Some([gain]) => {
-                        add_scaled(left, &mut bus.left[..frames], gain);
-                        add_scaled(right, &mut bus.right[..frames], gain);
-                    }
-                    None => {
-                        add_scaled_by(left, &mut bus.left[..frames], gains[0]);
-                        add_scaled_by(right, &mut bus.right[..frames], gains[0]);
+                // The song's controllers, after whatever the hand did in this
+                // block (which makes a controller the hand's) and before the
+                // song's notes, so that a note begins at the level meant for it.
+                let moved = say_controllers(track, &common, room);
+                if let (true, Some(heard), Some(capture)) = (standing_due, recorded, &mut self.capture) {
+                    // Where the hand has left the controllers is how the take
+                    // begins: an instrument that was given its expression
+                    // before the take needs it to play the take back.
+                    for (index, value) in track.state.live.iter().enumerate().filter(|(_, value)| !value.is_nan()) {
+                        let Some(kind) = ControllerKind::from_index(index) else { continue };
+                        if kind.rest().is_none_or(|rest| rest as f32 != *value) {
+                            let report = Captured::Standing { track: track.id, kind, value: *value, pass: heard.pass };
+                            let _ = capture.push(report);
+                        }
                     }
                 }
+                play(track, &common, room, by_hand || moved, keys);
+                // What the devices that listen to this track hear of it: as it
+                // leaves its own devices, whatever its fader and its mute say.
+                if let Some(key) = track.key_out.and_then(|key| keys.get_mut(key)) {
+                    key.left[..frames].copy_from_slice(&room.left[..frames]);
+                    key.right[..frames].copy_from_slice(&room.right[..frames]);
+                }
+                fade(track, &common, room);
+                mix(track, &common, room, buses, mix_left, mix_right);
             }
         }
 
@@ -847,7 +750,7 @@ impl Processor {
             let level = volume.as_ref().map_or(volume_db, |envelope| envelope.value_at(beat) as f32);
             [if level > MIN_VOLUME_DB { db_to_gain(level) } else { 0.0 }]
         };
-        let mut gains = [&mut self.gain_left[..frames]];
+        let mut gains = [&mut self.room.gain_left[..frames]];
         let (peak_left, peak_right) =
             match master.fader.fill(&span, volume.is_some(), declick, frames, &mut gains, level) {
                 Some([gain]) => (scale(mix_left, gain), scale(mix_right, gain)),
@@ -877,6 +780,237 @@ impl Processor {
                 );
             }
             None => self.monitor.mix(out_left, out_right, playing.then(|| beats_from(start_beat)), false),
+        }
+    }
+}
+
+/// What a block is to every track of it alike.
+pub(crate) struct Common<'a> {
+    info: &'a ProcessInfo,
+    /// What every track lets go of as the block begins.
+    flush: Flush,
+    controls: ControlBlock,
+    span: Span,
+    /// Where the song is for the parameters its envelopes move.
+    param_beat: f64,
+    /// How many frames an abrupt change of a gain is spread over.
+    declick: u32,
+    sample_rate: f64,
+}
+
+impl Common<'_> {
+    /// How many frames the block has.
+    pub fn frames(&self) -> usize {
+        self.controls.frames
+    }
+}
+
+/// Room for one track's block: its sound, the events it is given, and the
+/// gains that move over it. One is enough where a block's tracks are made
+/// one after the other; where several are made at once, each has its own.
+pub(crate) struct Room {
+    pub left: Vec<f32>,
+    pub right: Vec<f32>,
+    events: Vec<Event>,
+    /// Room to put a block's events in order.
+    sorted: Vec<Event>,
+    /// Room for a block of gains that move: a fader's two sides, or a send.
+    gain_left: Vec<f32>,
+    gain_right: Vec<f32>,
+    /// Room for how far a gate is open over a block, while it moves.
+    shares: Vec<f32>,
+}
+
+impl Room {
+    pub fn new() -> Self {
+        Self {
+            left: vec![0.0; MAX_BLOCK],
+            right: vec![0.0; MAX_BLOCK],
+            events: Vec::with_capacity(EVENT_CAPACITY),
+            sorted: Vec::with_capacity(EVENT_CAPACITY),
+            gain_left: vec![0.0; MAX_BLOCK],
+            gain_right: vec![0.0; MAX_BLOCK],
+            shares: vec![0.0; MAX_BLOCK],
+        }
+    }
+}
+
+/// A track's block begins: with what was fed to its bus, if it is a group
+/// or a return (every track that feeds it has been added to it), and with
+/// the notes that the block lets go of.
+pub(crate) fn begin(track: &mut TrackNode, common: &Common, buses: &[Bus], room: &mut Room) {
+    let frames = common.controls.frames;
+    let (left, right) = (&mut room.left[..frames], &mut room.right[..frames]);
+    match track.input_bus.and_then(|bus| buses.get(bus)) {
+        Some(bus) => {
+            left.copy_from_slice(&bus.left[..frames]);
+            right.copy_from_slice(&bus.right[..frames]);
+        }
+        None => {
+            left.fill(0.0);
+            right.fill(0.0);
+        }
+    }
+    room.events.clear();
+    release_notes(track, common.flush, &mut room.events);
+}
+
+/// Adds the song's controllers to what a track is told in the block, and
+/// returns whether there were any.
+pub(crate) fn say_controllers(track: &mut TrackNode, common: &Common, room: &mut Room) -> bool {
+    let before = room.events.len();
+    collect_controllers(track, &common.controls, &mut room.events);
+    room.events.len() > before
+}
+
+/// A track's notes and audio, through its devices: what it sounds like
+/// ahead of its fader, left in `room`. `unordered` says that what the
+/// track has been told so far (by hand, or by the song's controllers) is
+/// not in order of time. A device that listens to another track is handed
+/// what `keys` holds of it.
+pub(crate) fn play(track: &mut TrackNode, common: &Common, room: &mut Room, unordered: bool, keys: &[Bus]) {
+    let ControlBlock { playing, start_beat, end_beat, anchor_beat, elapsed, beats_per_frame, frames, .. } =
+        common.controls;
+    let Room { left, right, events, sorted, .. } = room;
+    let (left, right) = (&mut left[..frames], &mut right[..frames]);
+    let before_notes = events.len();
+    if playing {
+        collect_notes(track, start_beat, end_beat, beats_per_frame, frames, events);
+        let block = Block {
+            start_beat,
+            beats_per_frame,
+            anchor_frames: anchor_beat / beats_per_frame,
+            elapsed,
+            sample_rate: common.sample_rate,
+        };
+        render_audio(track, &block, left, right);
+    }
+    if unordered {
+        // What is played by hand comes at any offset, and the
+        // song's controllers and notes were added after it: devices
+        // want one list in order. Ties keep the order they were
+        // added in.
+        sort_by_offset(&mut events[..before_notes]);
+        merge_by_offset(events, before_notes, sorted);
+    }
+
+    match &mut track.source {
+        None => run_chain(&mut track.chain, common.info, common.param_beat, events, left, right, keys),
+        // A render that keeps what goes into the track's effects:
+        // the chain is run in two parts, and heard between them.
+        Some((sources, tap)) => {
+            move_params(&mut track.chain, common.param_beat);
+            let devices = &mut track.chain.devices;
+            let sources = (*sources).min(devices.len());
+            let (source, effects) = devices.split_at_mut(sources);
+            run_devices(source, common.info, events, left, right, keys);
+            tap.push(left, right);
+            run_devices(effects, common.info, events, left, right, keys);
+        }
+    }
+    listen_for_an_answer(track, left, right);
+}
+
+/// Brings what a track has played to where its fader, its pan, and mute
+/// and solo have it, in place, so that its output and every send carry the
+/// same signal; and lets its meter and whatever listens to it hear that.
+pub(crate) fn fade(track: &mut TrackNode, common: &Common, room: &mut Room) {
+    let frames = common.controls.frames;
+    let (span, declick) = (&common.span, common.declick);
+    let Room { left, right, gain_left, gain_right, shares, .. } = room;
+    let (left, right) = (&mut left[..frames], &mut right[..frames]);
+    // Where the fader and the pan have the two sides at a position
+    // of the song: where their envelopes have them, or where they
+    // were set by hand.
+    let (volume, pan) = (&track.volume_automation, &track.pan_automation);
+    let (volume_db, pan_set) = (track.volume_db, track.pan);
+    let sides = |beat: f64| {
+        let level = volume.as_ref().map_or(volume_db, |envelope| envelope.value_at(beat) as f32);
+        if level <= MIN_VOLUME_DB {
+            return [0.0, 0.0];
+        }
+        let gain = db_to_gain(level);
+        let (pan_left, pan_right) = pan_gains(pan.as_ref().map_or(pan_set, |envelope| envelope.value_at(beat) as f32));
+        [gain * pan_left, gain * pan_right]
+    };
+    let moving = volume.is_some() || pan.is_some();
+    let shares = &mut shares[..frames];
+    let mut gains = [&mut gain_left[..frames], &mut gain_right[..frames]];
+    let state = &mut track.state;
+    let flat = state.fader.fill(span, moving, declick, frames, &mut gains, sides);
+    // A track that passes no sound, on to its output or into a
+    // send, is shut: mute and solo work a gate on what the fader
+    // leaves, so that neither makes a step when the other moves.
+    let flat = gated(flat, state.passes.fill(track.passes, declick, shares), shares, &mut gains);
+    let (peak_left, peak_right) = match flat {
+        Some([gain_left, gain_right]) => (scale(left, gain_left), scale(right, gain_right)),
+        None => (scale_by(left, gains[0]), scale_by(right, gains[1])),
+    };
+    track.meter.record(peak_left, peak_right);
+    if let Some(tap) = &mut track.tap {
+        tap.push(left, right);
+    }
+}
+
+/// Adds what a track has come to, in `room`, to where it goes: its output
+/// (its group's bus, or the mix) and the bus of every return it sends to.
+/// What goes on to the output, and what goes to each return, are opened
+/// and closed by mute and solo apart from each other: a track that feeds
+/// a soloed return is not heard itself.
+pub(crate) fn mix(
+    track: &mut TrackNode,
+    common: &Common,
+    room: &mut Room,
+    buses: &mut [Bus],
+    mix_left: &mut [f32],
+    mix_right: &mut [f32],
+) {
+    let frames = common.controls.frames;
+    let (span, declick) = (&common.span, common.declick);
+    let Room { left, right, gain_left, shares, .. } = room;
+    let (left, right) = (&left[..frames], &right[..frames]);
+    let shares = &mut shares[..frames];
+    let (out_left, out_right) = match track.output_bus.and_then(|bus| buses.get_mut(bus)) {
+        Some(bus) => (&mut bus.left[..frames], &mut bus.right[..frames]),
+        None => (&mut *mix_left, &mut *mix_right),
+    };
+    match track.state.out.fill(track.to_output, declick, shares) {
+        Some(0.0) => {}
+        Some(share) => {
+            add_scaled(left, out_left, share);
+            add_scaled(right, out_right, share);
+        }
+        None => {
+            add_scaled_by(left, out_left, shares);
+            add_scaled_by(right, out_right, shares);
+        }
+    }
+    for send in &mut track.sends {
+        // What the send carries: its level at a position of the
+        // song, where its envelope has it or where it was set by
+        // hand, times how far mute and solo leave it open.
+        let (automation, set) = (&send.automation, send.gain);
+        let level = |beat: f64| match automation {
+            Some(envelope) => {
+                let level = envelope.value_at(beat) as f32;
+                [if level > MIN_VOLUME_DB { db_to_gain(level) } else { 0.0 }]
+            }
+            None => [set],
+        };
+        let mut gains = [&mut gain_left[..frames]];
+        let flat = send.glide.fill(span, automation.is_some(), declick, frames, &mut gains, level);
+        let flat = gated(flat, send.gate.fill(send.open, declick, shares), shares, &mut gains);
+        let Some(bus) = buses.get_mut(send.bus) else { continue };
+        match flat {
+            Some([0.0]) => {}
+            Some([gain]) => {
+                add_scaled(left, &mut bus.left[..frames], gain);
+                add_scaled(right, &mut bus.right[..frames], gain);
+            }
+            None => {
+                add_scaled_by(left, &mut bus.left[..frames], gains[0]);
+                add_scaled_by(right, &mut bus.right[..frames], gains[0]);
+            }
         }
     }
 }
@@ -994,6 +1128,7 @@ fn merge_by_offset(events: &mut [Event], middle: usize, room: &mut Vec<Event>) {
 }
 
 /// Where a block lies for the controllers the song moves.
+#[derive(Copy, Clone)]
 struct ControlBlock {
     playing: bool,
     /// The song has just started or jumped: every controller is said at
@@ -1436,15 +1571,17 @@ fn render_audio(track: &mut TrackNode, block: &Block, left: &mut [f32], right: &
 
 /// Flushes denormal floats to zero while alive. Decaying filters and reverb
 /// tails otherwise drift into subnormals, which are orders of magnitude
-/// slower to compute and show up as CPU spikes in silence.
-struct DenormalGuard {
+/// slower to compute and show up as CPU spikes in silence. The setting is
+/// a thread's own: every thread that makes sound has to have it, or the
+/// same devices give other samples on it.
+pub(crate) struct DenormalGuard {
     #[cfg(target_arch = "x86_64")]
     saved: u32,
 }
 
 impl DenormalGuard {
     #[cfg(target_arch = "x86_64")]
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let mut saved = 0u32;
         // SAFETY: stmxcsr/ldmxcsr only read and write the SSE control
         // register through a valid pointer; the previous value is restored on
@@ -1459,7 +1596,7 @@ impl DenormalGuard {
     }
 
     #[cfg(not(target_arch = "x86_64"))]
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {}
     }
 }

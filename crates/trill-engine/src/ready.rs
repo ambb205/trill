@@ -38,6 +38,21 @@
 //! place. Nor a note that sounded and then stopped for good while it was
 //! rehearsed: the wait does not hang on it.
 //!
+//! **And every plugin is run the same amount.** What some plugins give
+//! depends on how much they were run before, to the block: an amplifier
+//! was measured (Archetype Tim Henson X) whose sound is another after one
+//! block more of silence, and the same again after the same number,
+//! however long that took by the clock. A reset does not put that back
+//! either. So the wait counts what it runs. The effects after an
+//! instrument are run only on the notes the instrument itself sounds,
+//! from where it begins to: while a sampler is still loading and its
+//! notes come to nothing, try after try, what stands behind it is given
+//! nothing at all. An effect that is tried with noise is tried until it
+//! has passed three bursts, and then left alone like a note. Once
+//! nothing is left to ask, nothing is run. What a plugin has been given
+//! when a render begins is then a matter of what it was asked and how it
+//! answered, and not of how long it took to load.
+//!
 //! **Each note is heard alone.** A drum that has not been loaded sounds
 //! exactly like a key that plays nothing, and under the ringing of the
 //! drum before it, it sounds like nothing at all: a tom that is there
@@ -86,9 +101,10 @@
 //! instrument it is rehearsed with it: the notes are heard at the end of
 //! the track's plugins, not at the instrument. Anywhere else (after a
 //! built-in instrument, on an audio track, a group, a return or the
-//! master) there are no notes to give it, so it is given a short burst of
-//! noise instead and is ready when that comes out the same way for a
-//! quarter of a second. An effect that lets nothing through (a gate that
+//! master) there are no notes to give it, so it is given short bursts of
+//! noise instead and is ready when three of them have come out and
+//! nothing has been loading for a quarter of a second since it first
+//! passed one. An effect that lets nothing through (a gate that
 //! stays shut, a delay that is all echo) is given up on after a few
 //! seconds and remembered, like an instrument that never answers.
 //!
@@ -177,10 +193,9 @@ const SIGNAL_LEVEL: f32 = 0.25;
 const SIGNAL_STRETCHES: usize = 3;
 /// How long a rehearsal waits between tries.
 const BETWEEN_TRIES: Duration = Duration::from_millis(100);
-/// How many tries in a row an effect must answer alike.
-const ALIKE_RUNNING: u32 = 3;
-/// How many times each rehearsed note is to sound, and then is not played
-/// again: see the module documentation.
+/// How many times each rehearsed note is to sound, and an effect to pass a
+/// burst of noise, before it is not asked again: see the module
+/// documentation.
 const SOUNDINGS: usize = 3;
 /// A note that has sounded and then stays silent for this many tries is
 /// one that may not come back: the wait does not hang on it.
@@ -528,6 +543,15 @@ impl Opening {
 /// front, and what comes out of the last one listened to.
 pub(crate) struct Stand<'a> {
     devices: Vec<&'a mut Box<dyn DeviceProcessor>>,
+    /// How many of them, from the first, make the sound that the rest are
+    /// given: an instrument that is rehearsed, with the effects after it.
+    /// Those are run only from where the instrument sounds
+    /// ([`Stand::engaged`]). None where every device is always run.
+    sources: usize,
+    /// Whether the instrument has sounded in the note that is being
+    /// played, so that what comes after it is run; and whether it ever has.
+    engaged: bool,
+    ever_engaged: bool,
     info: ProcessInfo,
     left: Vec<f32>,
     right: Vec<f32>,
@@ -545,7 +569,25 @@ impl<'a> Stand<'a> {
             position_beats: 0.0,
             loop_range: None,
         };
-        Self { devices, info, left: vec![0.0; BLOCK], right: vec![0.0; BLOCK], noise: 0.0 }
+        Self {
+            devices,
+            sources: 0,
+            engaged: false,
+            ever_engaged: false,
+            info,
+            left: vec![0.0; BLOCK],
+            right: vec![0.0; BLOCK],
+            noise: 0.0,
+        }
+    }
+
+    /// From here on the first device is an instrument that is rehearsed,
+    /// and the devices after it are run only on the notes it sounds, from
+    /// where it begins to: what they have been given by the end depends
+    /// on what the instrument played, not on how often it was asked in
+    /// vain. Until the stand is [settled](Self::settle).
+    fn behind_an_instrument(&mut self) {
+        self.sources = 1.min(self.devices.len());
     }
 
     pub fn sample_rate(&self) -> f64 {
@@ -590,8 +632,18 @@ impl<'a> Stand<'a> {
             let (left, right) = (&mut self.left[..count], &mut self.right[..count]);
             feed(left, right);
             let events = if done == 0 { events } else { &[] };
-            for device in &mut self.devices {
+            let (sources, effects) = self.devices.split_at_mut(self.sources);
+            for device in sources.iter_mut() {
                 device.process(&self.info, events, left, right);
+            }
+            if !sources.is_empty() && !self.engaged {
+                self.engaged = left.iter().chain(right.iter()).any(|sample| sample.abs() > ANSWER);
+                self.ever_engaged |= self.engaged;
+            }
+            if sources.is_empty() || self.engaged {
+                for device in effects.iter_mut() {
+                    device.process(&self.info, events, left, right);
+                }
             }
             done += count;
             if !hear(left, right) {
@@ -612,9 +664,12 @@ impl<'a> Stand<'a> {
         peak
     }
 
-    /// Listens to the devices with nothing going in, to know their noise.
+    /// Listens to the devices with nothing going in, to know their noise:
+    /// all of them, for the same short stretch every time.
     pub fn hear_noise(&mut self) {
+        let sources = std::mem::take(&mut self.sources);
         self.noise = self.run(&[], 0.05);
+        self.sources = sources;
     }
 
     /// The noise that was heard, for a stand of the same devices to be
@@ -707,6 +762,9 @@ impl<'a> Stand<'a> {
                 answers.push(None);
                 continue;
             }
+            // What comes after the instrument waits for it to sound, note
+            // by note.
+            self.engaged = false;
             // A key held with the note goes down a moment ahead of it and
             // comes up with it.
             for key in with.drain(..) {
@@ -753,6 +811,8 @@ impl<'a> Stand<'a> {
     /// rings to die away (not for ever), and resets them: they are as
     /// they were made, but awake.
     pub fn settle(&mut self) {
+        // What the instrument never reached has nothing to let go of.
+        self.engaged = self.ever_engaged;
         let quiet = self.heard_above() / 2.0;
         let needed = self.frames(QUIET_SECONDS);
         let limit = self.frames(RING_OUT_SECONDS);
@@ -773,6 +833,8 @@ impl<'a> Stand<'a> {
             // after.
             self.run(&[], block);
         }
+        // From here on every device is run, whatever the first one does.
+        self.sources = 0;
     }
 
     /// Resets every device: voices silenced, delay lines cleared.
@@ -835,15 +897,10 @@ pub(crate) struct Wait<'a> {
     missed: Vec<u32>,
     /// How many tries there have been.
     tries: u32,
-    /// For effects: the answers of the last try, if it was answered at
-    /// all; how many tries in a row were answered alike with nothing
-    /// loading, and since when; and whether it answers as it did when it
-    /// was last found ready.
-    last: Option<Vec<Answer>>,
-    alike: u32,
-    alike_since: Option<Instant>,
-    known: bool,
-    /// Since when nothing has been loading and no note has sounded that
+    /// For effects: what came out of each burst of noise that was passed
+    /// at all, [`SOUNDINGS`] of them at the most.
+    bursts: Vec<Vec<Answer>>,
+    /// Since when nothing has been loading and nothing has sounded that
     /// had not before.
     steady_since: Option<Instant>,
     /// Whether the program showed signs of loading while this went on.
@@ -863,7 +920,10 @@ pub(crate) struct Wait<'a> {
 }
 
 impl<'a> Wait<'a> {
-    pub fn new(stand: Stand<'a>, opening: Opening, signature: u64, devices: u64) -> Self {
+    pub fn new(mut stand: Stand<'a>, opening: Opening, signature: u64, devices: u64) -> Self {
+        if !opening.signal {
+            stand.behind_an_instrument();
+        }
         Self {
             stand,
             opening,
@@ -872,10 +932,7 @@ impl<'a> Wait<'a> {
             sounded: Vec::new(),
             missed: Vec::new(),
             tries: 0,
-            last: None,
-            alike: 0,
-            alike_since: None,
-            known: false,
+            bursts: Vec::new(),
             steady_since: None,
             saw_loading: false,
             first_answer: None,
@@ -996,47 +1053,42 @@ impl<'a> Wait<'a> {
         self.outcome.is_some()
     }
 
-    /// A try of effects: a burst of noise is put through them.
+    /// A try of effects: a burst of noise is put through them, unless they
+    /// have passed as many as they are to.
     fn attempt_noise(&mut self, begun: Instant, loading: bool, known: Known) -> bool {
         let floor = self.stand.heard_above();
         let now = Instant::now();
-        let answers = self.stand.rehearse_noise();
-        self.tries += 1;
-        if answers.iter().all(|answer| answer.peak <= floor) {
-            (self.last, self.alike, self.alike_since, self.steady_since) = (None, 0, None, None);
+        let mut arrived = false;
+        if self.bursts.len() < SOUNDINGS {
+            let answers = self.stand.rehearse_noise();
+            self.tries += 1;
+            if answers.iter().any(|answer| answer.peak > floor) {
+                arrived = self.bursts.is_empty();
+                self.bursts.push(answers);
+                self.stirred = now;
+            }
+        }
+        if self.bursts.is_empty() {
+            self.steady_since = None;
             return false;
         }
         let first = *self.first_answer.get_or_insert(begun.elapsed());
-        // What answers as it did when it was last found ready has one
-        // like answer behind it already, and need not be held for long.
-        let as_before = known.answers.is_some_and(|before| alike(&answers, before, floor));
-        if self.last.is_none() && as_before && !loading {
-            (self.alike, self.alike_since, self.known) = (1, Some(now), true);
-        }
-        let same = self.last.as_ref().is_some_and(|last| alike(&answers, last, floor));
-        if self.last.is_some() && !same {
-            self.stirred = now;
-        }
-        if loading || self.steady_since.is_none() {
+        if loading || arrived || self.steady_since.is_none() {
             self.steady_since = Some(now);
         }
-        if same && !loading {
-            self.alike += 1;
-            self.alike_since.get_or_insert(now);
-        } else if self.last.is_some() || !self.known {
-            (self.alike, self.alike_since) = (u32::from(!loading), (!loading).then_some(now));
-            self.known &= !loading && as_before;
-        }
-        self.last = Some(answers);
-        // One that was slow to answer at all is given longer to finish.
-        let hold = if self.known { BETWEEN_TRIES } else { (first / 2).clamp(SETTLED_FOR, SETTLED_AT_MOST) };
-        let held = self.alike_since.is_some_and(|since| now.duration_since(since) >= hold);
-        let enough = if self.known { ALIKE_RUNNING - 1 } else { ALIKE_RUNNING };
         let steady = self.steady_since.map_or(Duration::ZERO, |since| now.duration_since(since));
-        // An effect that never passes a burst the same way twice is ready
-        // all the same, once it has passed them for a while with nothing
-        // loading.
-        if !loading && ((self.alike >= enough && held) || steady >= hold.max(UNSETTLED_FOR)) {
+        // As with notes: a moment for what passes its bursts as it did
+        // when it was last found ready, longer for what was slow to pass
+        // one at all, or never passes one the same way twice.
+        let as_before = known.answers.is_some_and(|before| self.bursts.iter().all(|burst| alike(burst, before, floor)));
+        let slow = (first / 2).clamp(SETTLED_FOR, SETTLED_AT_MOST);
+        let level = self.bursts.windows(2).all(|pair| alike(&pair[0], &pair[1], floor));
+        let hold = match (as_before && !self.saw_loading, level) {
+            (true, _) => BETWEEN_TRIES,
+            (false, true) => slow,
+            (false, false) => slow.max(UNSETTLED_FOR),
+        };
+        if self.bursts.len() >= SOUNDINGS && !loading && steady >= hold {
             (self.outcome, self.found) = (Some((begun.elapsed(), true)), true);
         }
         self.outcome.is_some()
@@ -1044,7 +1096,7 @@ impl<'a> Wait<'a> {
 
     /// Whether anything has come out at all.
     fn answered(&self) -> bool {
-        self.last.is_some() || self.sounded.iter().any(|heard| !heard.is_empty())
+        !self.bursts.is_empty() || self.sounded.iter().any(|heard| !heard.is_empty())
     }
 
     /// What to remember of how it answered, to know it by when it is
@@ -1052,7 +1104,7 @@ impl<'a> Wait<'a> {
     /// last sound of each note, or nothing for a note that made none.
     fn remembered(&mut self) -> Vec<Answer> {
         match self.opening.signal {
-            true => self.last.take().unwrap_or_default(),
+            true => self.bursts.pop().unwrap_or_default(),
             false => self.sounded.iter().map(|heard| heard.last().copied().unwrap_or_default()).collect(),
         }
     }
@@ -1088,8 +1140,9 @@ fn tell(begun: Instant, first: &Vitals, loading: bool, waits: &[Wait]) {
             };
             match wait.opening.signal {
                 true => {
-                    let said: Vec<String> = wait.last.as_deref().unwrap_or_default().iter().map(level).collect();
-                    format!("alike {} [{}]", wait.alike, said.join(" "))
+                    let last = wait.bursts.last().map(Vec::as_slice).unwrap_or_default();
+                    let said: Vec<String> = last.iter().map(level).collect();
+                    format!("{} bursts [{}]", wait.bursts.len(), said.join(" "))
                 }
                 // How often each note has sounded, and how loud the last time.
                 false => {
