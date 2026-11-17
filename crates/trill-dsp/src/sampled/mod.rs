@@ -79,15 +79,14 @@ impl Source {
     }
 }
 
+/// The two halves of a device: what plays it and what speaks for it.
+pub(crate) type Made = (Box<dyn DeviceProcessor>, Box<dyn DeviceController>);
+
 /// Makes a device from its stored state. Fails only when the state names
 /// an instrument and there is no way to read files at all; an instrument
 /// that cannot be read makes a silent device, and
 /// [`Source::warnings`] says why.
-pub(crate) fn make(
-    state: Option<&[u8]>,
-    source: Option<&Source>,
-    purpose: Purpose,
-) -> Result<(Box<dyn DeviceProcessor>, Box<dyn DeviceController>), String> {
+pub(crate) fn make(state: Option<&[u8]>, source: Option<&Source>, purpose: Purpose) -> Result<Made, String> {
     let loaded = match source {
         Some(source) => source.load(state).unwrap_or(None),
         None => {
@@ -141,8 +140,12 @@ impl DeviceController for Controller {
     }
 
     fn controller_support(&self) -> ControllerSupport {
-        let mut kinds =
-            vec![ControllerKind::VOLUME, ControllerKind::EXPRESSION, ControllerKind::SUSTAIN, ControllerKind::PitchBend];
+        let mut kinds = vec![
+            ControllerKind::VOLUME,
+            ControllerKind::EXPRESSION,
+            ControllerKind::SUSTAIN,
+            ControllerKind::PitchBend,
+        ];
         if let Some(loaded) = &self.loaded {
             for number in loaded.instrument.controllers() {
                 if let Some(kind) = ControllerKind::numbered(number).filter(|kind| !kinds.contains(kind)) {

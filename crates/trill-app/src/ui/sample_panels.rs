@@ -78,7 +78,7 @@ fn sample<'a>(cx: &'a Cx, device: DeviceId, slot: &str) -> Option<&'a SampleFile
 
 /// A caps heading over a rule, as the laid-out panels have them. Returns
 /// where the content under it starts.
-fn heading(ui: &Ui, cx: &Cx, rect: Rect, title: &str) -> f32 {
+pub(super) fn heading(ui: &Ui, cx: &Cx, rect: Rect, title: &str) -> f32 {
     let theme = cx.theme;
     let label = rect.with_max_y(rect.bottom() - 2.0);
     text::paint(ui.painter(), label, Align2::LEFT_CENTER, theme.text.micro, title, theme.ink_faint);

@@ -161,15 +161,8 @@ pub const BUILT_IN_CURVES: usize = 7;
 
 /// The curves an instrument starts with ([`BUILT_IN_CURVES`]).
 pub fn built_in_curves() -> Vec<[f32; 128]> {
-    let shapes: [fn(f32) -> f32; BUILT_IN_CURVES] = [
-        |x| x,
-        |x| 2.0 * x - 1.0,
-        |x| 1.0 - x,
-        |x| 1.0 - 2.0 * x,
-        |x| x * x,
-        |x| x.sqrt(),
-        |x| (1.0 - x).sqrt(),
-    ];
+    let shapes: [fn(f32) -> f32; BUILT_IN_CURVES] =
+        [|x| x, |x| 2.0 * x - 1.0, |x| 1.0 - x, |x| 1.0 - 2.0 * x, |x| x * x, |x| x.sqrt(), |x| (1.0 - x).sqrt()];
     shapes.iter().map(|shape| std::array::from_fn(|step| shape(step as f32 / 127.0))).collect()
 }
 
@@ -839,7 +832,9 @@ mod tests {
         assert_eq!((at(0, 0.25), at(0, 2.0), at(0, -1.0)), (0.25, 1.0, 0.0));
         assert!((at(1, 0.5)).abs() < 1e-6 && at(1, 0.0) == -1.0 && at(1, 1.0) == 1.0, "from -1 to 1");
         assert!((at(2, 0.25) - 0.75).abs() < 1e-6 && (at(3, 0.25) - 0.5).abs() < 1e-6);
-        assert!((at(4, 0.5) - 0.25).abs() < 1e-3 && (at(5, 0.25) - 0.5).abs() < 2e-3 && (at(6, 0.75) - 0.5).abs() < 2e-3);
+        assert!(
+            (at(4, 0.5) - 0.25).abs() < 1e-3 && (at(5, 0.25) - 0.5).abs() < 2e-3 && (at(6, 0.75) - 0.5).abs() < 2e-3
+        );
         assert_eq!(at(99, 0.3), 0.3, "a curve there is none of is the straight line");
         // An instrument's own: a step.
         let mut step = [1.0f32; 128];

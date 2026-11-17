@@ -200,7 +200,8 @@ mod tests {
         let left = ramp(50_000);
         let right: Vec<f32> = left.iter().map(|sample| -sample * 0.5).collect();
         let stereo = dir.path().join("stereo.wav");
-        write_wav(&stereo, &AudioBuffer { sample_rate: 44_100.0, left: left.clone(), right }, WavFormat::Int24).unwrap();
+        write_wav(&stereo, &AudioBuffer { sample_rate: 44_100.0, left: left.clone(), right }, WavFormat::Int24)
+            .unwrap();
         let whole = decode(&stereo).unwrap();
 
         let mut file = open(&stereo).unwrap();
@@ -217,7 +218,12 @@ mod tests {
 
         // A file of one channel hands out one.
         let mono = dir.path().join("mono.wav");
-        let spec = hound::WavSpec { channels: 1, sample_rate: 48_000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 48_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
         let mut writer = hound::WavWriter::create(&mono, spec).unwrap();
         for sample in &left[..1_000] {
             writer.write_sample((sample * 32_767.0) as i16).unwrap();

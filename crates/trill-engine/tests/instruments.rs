@@ -487,14 +487,21 @@ fn a_sampled_instrument_plays_every_key_within_a_hundredth_of_a_cent_of_its_pitc
     // two notes of three at another pitch as well.
     let folder = folder();
     let roots: Vec<u8> = (48..=84).step_by(3).collect();
-    let recordings: Vec<(String, f64, Vec<f32>)> =
-        roots.iter().map(|root| (format!("samples/{root}.wav"), 44_100.0, sine(key_hz(*root), 44_100.0, 1.5, 0.5))).collect();
+    let recordings: Vec<(String, f64, Vec<f32>)> = roots
+        .iter()
+        .map(|root| (format!("samples/{root}.wav"), 44_100.0, sine(key_hz(*root), 44_100.0, 1.5, 0.5)))
+        .collect();
     let mut sfz = "<global> amp_veltrack=0 ampeg_release=0.05\n".to_string();
     for root in &roots {
-        sfz += &format!("<region> sample=samples/{root}.wav lokey={} hikey={} pitch_keycenter={root}\n", root - 1, root + 1);
+        sfz += &format!(
+            "<region> sample=samples/{root}.wav lokey={} hikey={} pitch_keycenter={root}\n",
+            root - 1,
+            root + 1
+        );
     }
     let keys: Vec<u8> = (47..=85).collect();
-    let notes: Vec<Note> = keys.iter().enumerate().map(|(index, key)| note(*key, index as f64 * 2.0, 1.5, 100)).collect();
+    let notes: Vec<Note> =
+        keys.iter().enumerate().map(|(index, key)| note(*key, index as f64 * 2.0, 1.5, 100)).collect();
     let out = sampled(&folder, &sfz, &recordings, &[], &notes, keys.len() as f64 * 2.0).render();
 
     let mut worst = (0.0f64, 0u8);
@@ -506,7 +513,10 @@ fn a_sampled_instrument_plays_every_key_within_a_hundredth_of_a_cent_of_its_pitc
             worst = (off, *key);
         }
         assert!(off.abs() < 0.01, "key {key} is {off:+.4} cents from its pitch ({heard:.3} Hz)");
-        assert!((rms(&out.left[window]) - 0.5 / 2f32.sqrt()).abs() < 0.003, "key {key} is not as loud as its recording");
+        assert!(
+            (rms(&out.left[window]) - 0.5 / 2f32.sqrt()).abs() < 0.003,
+            "key {key} is not as loud as its recording"
+        );
     }
     println!("{} keys from 13 recordings: the worst is {:+.5} cents off (key {})", keys.len(), worst.0, worst.1);
 }
@@ -564,7 +574,10 @@ fn a_bright_recording_played_above_its_pitch_folds_seventy_decibels_under_what_b
         let heard = folded_under(&played.left[2_048..], 487.0, rate, 20_000.0);
         let anywhere = folded_under(&played.left[2_048..], 487.0, rate, 24_000.0);
         println!("  {semitones:>12}   {heard:>9.1} dB   {anywhere:.1} dB");
-        assert!(heard > 70.0, "{semitones} semitones up, what folds under 20 kHz is only {heard:.1} dB under what belongs");
+        assert!(
+            heard > 70.0,
+            "{semitones} semitones up, what folds under 20 kHz is only {heard:.1} dB under what belongs"
+        );
         assert!(anywhere > 70.0, "{semitones} semitones up, what folds is only {anywhere:.1} dB under what belongs");
     }
 }
@@ -598,14 +611,16 @@ fn a_sampled_instrument_makes_no_click_at_a_loop_a_release_a_taken_voice_or_a_la
     // Let go of in the middle of a wave, by an instrument that says nothing of its release.
     let folder = self::folder();
     let long = [("long.wav".to_string(), SR, sine(100.0, SR, 4.0, 0.5))];
-    let played = sampled(&folder, "<region> sample=long.wav amp_veltrack=0", &long, &[], &[note(60, 0.0, 1.013, 100)], 4.0);
+    let played =
+        sampled(&folder, "<region> sample=long.wav amp_veltrack=0", &long, &[], &[note(60, 0.0, 1.013, 100)], 4.0);
     let out = played.render();
     let step = largest_step(&out.left);
     assert!(step < natural(100.0, 0.5) * 3.0, "let go of mid-wave: a step of {step}");
     assert_eq!(peak(&out.left[beats(1.2..4.0)]), 0.0, "and gone within forty milliseconds");
 
     // Two voices allowed and a note every 50 ms, each held: every note takes one.
-    let notes: Vec<Note> = (0..30).map(|index| note(55 + (index % 7) as u8, f64::from(index) * 0.1 + 0.013, 2.0, 100)).collect();
+    let notes: Vec<Note> =
+        (0..30).map(|index| note(55 + (index % 7) as u8, f64::from(index) * 0.1 + 0.013, 2.0, 100)).collect();
     let sfz = "<region> sample=long.wav amp_veltrack=0 volume=-12 ampeg_release=0.3";
     let out = sampled(&folder, sfz, &long, &[("voices", 2.0)], &notes, 5.0).render();
     // Up to three overlap while one goes, each at a quarter of the recording and up to a fifth above it.
@@ -646,7 +661,8 @@ fn a_sampled_instrument_makes_no_click_at_a_loop_a_release_a_taken_voice_or_a_la
 /// code, at a buffer size a render does not use.
 fn played_in_buffers(project: &Project, factory: &Builtins, frames: usize, block: usize) -> Vec<f32> {
     use trill_engine::compile::{Compiler, DeviceBank, Meters};
-    let (mut bank, mut meters, audio) = (DeviceBank::default(), Meters::default(), trill_engine::AudioSources::default());
+    let (mut bank, mut meters, audio) =
+        (DeviceBank::default(), Meters::default(), trill_engine::AudioSources::default());
     let (graph, problems) = Compiler {
         factory,
         bank: &mut bank,
@@ -696,7 +712,10 @@ fn a_song_of_sampled_instruments_is_the_same_samples_at_any_buffer_size_and_on_a
          pitchlfo_freq=5.5 pitchlfo_depth_oncc1=25 cutoff=3000 cutoff_cc1=2400 lokey=40 hikey=80\n\
          <region> sample=s/p.wav pitch_keycenter=55 xfout_locc1=30 xfout_hicc1=110\n\
          <region> sample=s/f.wav pitch_keycenter=55 xfin_locc1=30 xfin_hicc1=110",
-        &[("s/p.wav", 48_000.0, sine(196.0, 48_000.0, 1.0, 0.2)), ("s/f.wav", 48_000.0, sine(196.3, 48_000.0, 1.0, 0.4))],
+        &[
+            ("s/p.wav", 48_000.0, sine(196.0, 48_000.0, 1.0, 0.2)),
+            ("s/f.wav", 48_000.0, sine(196.3, 48_000.0, 1.0, 0.4)),
+        ],
     );
     let piano = write_instrument(
         dir,
@@ -706,7 +725,10 @@ fn a_song_of_sampled_instruments_is_the_same_samples_at_any_buffer_size_and_on_a
          <group> lovel=91 hivel=127 volume=3\n<region> sample=p/c3.wav lokey=36 hikey=54 pitch_keycenter=48 tune=3\n\
          <region> sample=p/c5.wav lokey=55 hikey=96 pitch_keycenter=72 tune=-2\n\
          <group> trigger=release rt_decay=4 volume=-14 <region> sample=k/c.wav lokey=36 hikey=96 pitch_keytrack=0",
-        &[("p/c3.wav", 44_100.0, sine(130.8, 44_100.0, 3.0, 0.3)), ("p/c5.wav", 44_100.0, sine(523.3, 44_100.0, 3.0, 0.3))],
+        &[
+            ("p/c3.wav", 44_100.0, sine(130.8, 44_100.0, 3.0, 0.3)),
+            ("p/c5.wav", 44_100.0, sine(523.3, 44_100.0, 3.0, 0.3)),
+        ],
     );
 
     let mut project = Project::new("three");
@@ -730,16 +752,42 @@ fn a_song_of_sampled_instruments_is_the_same_samples_at_any_buffer_size_and_on_a
         })
         .collect();
     part("Kit", &kit, &beat, &[]);
-    let chords: Vec<Note> =
-        (0..4).flat_map(|bar| [55u8, 59, 62, 67].map(|key| note(key + bar as u8, f64::from(bar) * 4.0, 3.7, 100))).collect();
+    let chords: Vec<Note> = (0..4)
+        .flat_map(|bar| [55u8, 59, 62, 67].map(|key| note(key + bar as u8, f64::from(bar) * 4.0, 3.7, 100)))
+        .collect();
     let wheel = vec![(0.0, 0.0), (3.0, 1.0), (5.0, 0.2), (9.0, 0.9), (16.0, 0.0)];
-    part("Strings", &strings, &chords, &[(ControllerKind::MOD_WHEEL, wheel), (ControllerKind::PitchBend, vec![(0.0, 0.0), (8.0, 0.0), (10.0, 0.6), (12.0, 0.0)])]);
-    let tune: Vec<Note> = (0..40).map(|step| note(40 + (step * 7 % 50) as u8, f64::from(step) * 0.4, 0.35, 50 + (step * 13 % 78) as u8)).collect();
-    let pedal = vec![(0.0, 0.0), (1.0, 1.0), (3.9, 1.0), (4.0, 0.0), (4.2, 1.0), (7.9, 1.0), (8.0, 0.0), (12.0, 1.0), (15.5, 0.0)];
+    part(
+        "Strings",
+        &strings,
+        &chords,
+        &[
+            (ControllerKind::MOD_WHEEL, wheel),
+            (ControllerKind::PitchBend, vec![(0.0, 0.0), (8.0, 0.0), (10.0, 0.6), (12.0, 0.0)]),
+        ],
+    );
+    let tune: Vec<Note> = (0..40)
+        .map(|step| note(40 + (step * 7 % 50) as u8, f64::from(step) * 0.4, 0.35, 50 + (step * 13 % 78) as u8))
+        .collect();
+    let pedal = vec![
+        (0.0, 0.0),
+        (1.0, 1.0),
+        (3.9, 1.0),
+        (4.0, 0.0),
+        (4.2, 1.0),
+        (7.9, 1.0),
+        (8.0, 0.0),
+        (12.0, 1.0),
+        (15.5, 0.0),
+    ];
     part("Piano", &piano, &tune, &[(ControllerKind::SUSTAIN, pedal)]);
 
     let factory = Builtins::with_loader(Arc::new(MediaCache::default()));
-    let options = |threads: Option<usize>| RenderOptions { sample_rate: SR as u32, max_tail_seconds: 1.0, threads, ..RenderOptions::default() };
+    let options = |threads: Option<usize>| RenderOptions {
+        sample_rate: SR as u32,
+        max_tail_seconds: 1.0,
+        threads,
+        ..RenderOptions::default()
+    };
     let one = render(&project, &factory, &options(Some(1))).unwrap();
     assert!(one.problems.is_empty(), "{:?}", one.problems);
     assert!(rms(&one.left) > 0.05 && one.left.len() > 8 * SR as usize, "the song sounds");

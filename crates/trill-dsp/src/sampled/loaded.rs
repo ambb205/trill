@@ -305,7 +305,9 @@ impl Loaded {
             let (count, all) = (self.missing.len(), self.recordings.len());
             let first = &self.paths[*first as usize];
             let message = match count {
-                1 => format!("{}: its recording '{first}' is missing; the notes it plays are silent", self.summary.name),
+                1 => {
+                    format!("{}: its recording '{first}' is missing; the notes it plays are silent", self.summary.name)
+                }
                 _ => format!(
                     "{}: {count} of its {all} recordings are missing, the first '{first}'; the notes they play are \
                      silent",
@@ -494,7 +496,11 @@ impl Loaded {
             let named: Vec<String> = summary
                 .controllers
                 .iter()
-                .map(|(number, label)| if label.is_empty() { format!("{number}") } else { format!("{number} ({label})") })
+                .map(
+                    |(number, label)| {
+                        if label.is_empty() { format!("{number}") } else { format!("{number} ({label})") }
+                    },
+                )
                 .collect();
             text.push_str(&format!(" It listens to controllers {}.", named.join(", ")));
         }
@@ -653,7 +659,8 @@ pub(crate) mod tests {
     #[test]
     fn what_an_instrument_asks_for_and_does_not_get_is_said_in_a_sentence() {
         let (pool, texts) = sources(&piano_files(), &[("D:/Inst/Grand/Grand.sfz", PIANO)]);
-        let loaded = Instruments::default().load(&State::new("D:/Inst/Grand/Grand.sfz"), &pool, &texts).unwrap().unwrap();
+        let loaded =
+            Instruments::default().load(&State::new("D:/Inst/Grand/Grand.sfz"), &pool, &texts).unwrap().unwrap();
         let sentence = loaded.unsupported().unwrap();
         assert_eq!(
             sentence,
@@ -662,9 +669,17 @@ pub(crate) mod tests {
              eq1_gain). Everything else plays."
         );
         let about = loaded.about();
-        assert!(about.starts_with("Grand: 5 recordings (0.9 MB) in 5 regions, range A#2..A3 (46..57), 2 layers of loudness."), "{about}");
+        assert!(
+            about.starts_with(
+                "Grand: 5 recordings (0.9 MB) in 5 regions, range A#2..A3 (46..57), 2 layers of loudness."
+            ),
+            "{about}"
+        );
         assert!(about.contains("It listens to controllers 64 (Pedal)."), "{about}");
-        assert!(about.contains("The sustain pedal holds its notes; it has sounds of its own for a key coming up"), "{about}");
+        assert!(
+            about.contains("The sustain pedal holds its notes; it has sounds of its own for a key coming up"),
+            "{about}"
+        );
         assert!(about.ends_with("Everything else plays."), "{about}");
         let profile = loaded.profile();
         assert_eq!((profile.range, profile.role, profile.bend_range), (Some((46, 57)), None, None));
@@ -700,6 +715,12 @@ pub(crate) mod tests {
         assert_eq!(ways, [("open", Some(24), true), ("palm_mute", Some(25), false), ("switch_26", Some(26), false)]);
         assert_eq!((profile.range, profile.bend_range), (Some((40, 80)), Some(12.0)));
         assert!(profile.clone().validated().is_ok(), "a track can keep it");
-        assert!(guitar.about().contains("Ways of playing, chosen by a key: open (default) on C1, palm_mute on C#1, switch_26 on D1."), "{}", guitar.about());
+        assert!(
+            guitar
+                .about()
+                .contains("Ways of playing, chosen by a key: open (default) on C1, palm_mute on C#1, switch_26 on D1."),
+            "{}",
+            guitar.about()
+        );
     }
 }

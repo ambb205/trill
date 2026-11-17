@@ -30,8 +30,29 @@ type Read = (String, &'static str, &'static str);
 /// Words that name a microphone, not a drum.
 fn is_microphone(word: &str) -> bool {
     const NAMED: &[&str] = &[
-        "oh", "ohl", "ohr", "overhead", "overheads", "room", "rooml", "roomr", "amb", "ambl", "ambr", "ambience",
-        "close", "far", "mid", "lofi", "mono", "stereo", "trigger", "top", "bottom", "front", "direct",
+        "oh",
+        "ohl",
+        "ohr",
+        "overhead",
+        "overheads",
+        "room",
+        "rooml",
+        "roomr",
+        "amb",
+        "ambl",
+        "ambr",
+        "ambience",
+        "close",
+        "far",
+        "mid",
+        "lofi",
+        "mono",
+        "stereo",
+        "trigger",
+        "top",
+        "bottom",
+        "front",
+        "direct",
     ];
     NAMED.contains(&word) || (word.len() > 3 && word.ends_with("mic"))
 }
@@ -96,7 +117,13 @@ fn drum(name: &str) -> Option<Read> {
     if has("tom") {
         // By its number where it has one; else by where it stands.
         let floor = has("floor") || has("ftom") || has("ltom") || has("low");
-        let by_word = if has("htom") || has("hi") { 1 } else if has("mtom") || has("mid") { 2 } else { 3 };
+        let by_word = if has("htom") || has("hi") {
+            1
+        } else if has("mtom") || has("mid") {
+            2
+        } else {
+            3
+        };
         let number = number_of("tom").unwrap_or(if floor { 1 } else { by_word });
         let place = if floor { format!("Floortom {number}") } else { format!("Racktom {number}") };
         return Some((place, "", "Center"));
@@ -186,8 +213,10 @@ pub(crate) fn sounds(keys: &[(u8, Option<&str>, Vec<&str>)]) -> Vec<KeySound> {
                 Some((place, instrument, stroke)) => {
                     let place = if place == "Cymbal" {
                         // Without what says how it is struck: a choke is the same cymbal.
-                        let which: Vec<String> =
-                            words_of(&told).into_iter().filter(|word| !["choke", "mute", "hit"].contains(&word.as_str())).collect();
+                        let which: Vec<String> = words_of(&told)
+                            .into_iter()
+                            .filter(|word| !["choke", "mute", "hit"].contains(&word.as_str()))
+                            .collect();
                         let which = which.join(" ");
                         let at = cymbals.iter().position(|known| *known == which).unwrap_or_else(|| {
                             cymbals.push(which);
@@ -258,11 +287,26 @@ mod tests {
         // the files say which microphone before they say which drum.
         let kit = [
             (36u8, None, vec!["Samples/kickmic/kick/kickmic_kick_vl1.flac", "Samples/oh/kick/oh_kick_vl1.flac"]),
-            (38, None, vec!["Samples/kickmic/snare/kickmic_snare_center_vl1.flac", "Samples/snaremic/snare/snaremic_snare_center_vl1.flac"]),
+            (
+                38,
+                None,
+                vec![
+                    "Samples/kickmic/snare/kickmic_snare_center_vl1.flac",
+                    "Samples/snaremic/snare/snaremic_snare_center_vl1.flac",
+                ],
+            ),
             (42, None, vec!["Samples/kickmic/hh/kickmic_hh_closed_vl1.flac", "Samples/oh/hh/oh_hh_closed_vl1.flac"]),
             (46, None, vec!["Samples/oh/hh/oh_hh_34_vl1_rr1.flac", "Samples/snaremic/hh/snaremic_hh_34_vl1_rr1.flac"]),
             (48, None, vec!["Samples/oh/htom/oh_htom_center_vl1.flac"]),
-            (49, None, vec!["Samples/China/1-China-AmbL.flac", "Samples/China/1-China-KdrumL.flac", "Samples/China/2-China-Snare.flac"]),
+            (
+                49,
+                None,
+                vec![
+                    "Samples/China/1-China-AmbL.flac",
+                    "Samples/China/1-China-KdrumL.flac",
+                    "Samples/China/2-China-Snare.flac",
+                ],
+            ),
             (57, None, vec!["Samples/CrashL/1-CrashL-OHL.flac"]),
             (55, None, vec!["Samples/CrashR/1-CrashR-OHL.flac"]),
             (52, None, vec!["Samples/CrashR/1-CrashR-choke-OHL.flac"]),
@@ -270,7 +314,12 @@ mod tests {
         ];
         let said: Vec<(u8, String, String, String)> =
             sounds(&kit).into_iter().map(|sound| (sound.key, sound.place, sound.instrument, sound.stroke)).collect();
-        let at = |key: u8| said.iter().find(|(known, ..)| *known == key).map(|(_, place, what, stroke)| (place.as_str(), what.as_str(), stroke.as_str())).unwrap();
+        let at = |key: u8| {
+            said.iter()
+                .find(|(known, ..)| *known == key)
+                .map(|(_, place, what, stroke)| (place.as_str(), what.as_str(), stroke.as_str()))
+                .unwrap()
+        };
         assert_eq!(at(36), ("Kick", "", "Hit"));
         assert_eq!(at(38), ("Snare", "", "Center"));
         assert_eq!((at(42), at(46)), (("Hats", "", "Closed Tip"), ("Hats", "", "Open Edge 2")));

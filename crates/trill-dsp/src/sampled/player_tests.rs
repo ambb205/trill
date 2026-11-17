@@ -139,7 +139,8 @@ fn the_keys_and_how_hard_they_are_struck_decide_which_recording_sounds() {
         "{FLAT}<group> lokey=36 hikey=59\n<region> sample=low_soft.wav lovel=1 hivel=64\n<region> sample=low_loud.wav lovel=65 hivel=127\n\
          <group> lokey=60 hikey=84 pitch_keytrack=0\n<region> sample=high.wav"
     );
-    let files = [("low_soft.wav", level(9_000, 0.1)), ("low_loud.wav", level(9_000, 0.2)), ("high.wav", level(9_000, 0.4))];
+    let files =
+        [("low_soft.wav", level(9_000, 0.1)), ("low_loud.wav", level(9_000, 0.2)), ("high.wav", level(9_000, 0.4))];
     let heard = |key: u8, velocity: u8| {
         let mut player = rendered(&sfz, &files);
         play(&mut player, 256, 4_000, &[(0, on(key, velocity))])[2_000]
@@ -170,7 +171,12 @@ const TAKES: &str = "<global> amp_veltrack=0 pitch_keytrack=0 loop_mode=one_shot
     <region> sample=t3.wav lorand=0.5 hirand=0.75\n<region> sample=t4.wav lorand=0.75 hirand=1";
 
 fn take_files() -> Vec<(&'static str, Vec<f32>)> {
-    vec![("t1.wav", level(400, 0.1)), ("t2.wav", level(400, 0.2)), ("t3.wav", level(400, 0.3)), ("t4.wav", level(400, 0.4))]
+    vec![
+        ("t1.wav", level(400, 0.1)),
+        ("t2.wav", level(400, 0.2)),
+        ("t3.wav", level(400, 0.3)),
+        ("t4.wav", level(400, 0.4)),
+    ]
 }
 
 #[test]
@@ -233,11 +239,17 @@ fn a_held_note_goes_round_its_loop_without_a_click_and_on_to_the_end_when_the_in
     let tone = sine(SR / period, SR, 12_000);
     let natural = (std::f64::consts::TAU / period) as f32;
     for key in [57u8, 60, 64, 72] {
-        let sfz = format!("{FLAT}<region> sample=tone.wav loop_mode=loop_continuous loop_start=3000 loop_end=6599 ampeg_release=0.05");
+        let sfz = format!(
+            "{FLAT}<region> sample=tone.wav loop_mode=loop_continuous loop_start=3000 loop_end=6599 ampeg_release=0.05"
+        );
         let mut player = rendered(&sfz, &[("tone.wav", tone.clone())]);
         let heard = play(&mut player, 256, 96_000, &[(0, on(key, 100)), (80_000, off(key))]);
         let rate = 2f32.powf((f32::from(key) - 60.0) / 12.0);
-        assert!(largest_step(&heard[100..]) < natural * rate * 1.05, "key {key}: a step of {}", largest_step(&heard[100..]));
+        assert!(
+            largest_step(&heard[100..]) < natural * rate * 1.05,
+            "key {key}: a step of {}",
+            largest_step(&heard[100..])
+        );
         assert!(rms(&heard[70_000..80_000]) > 0.69, "key {key}: the loop should sustain");
         let wanted = SR / period * f64::from(rate);
         assert!(cents(zero_crossing_hz(&heard[20_000..80_000], SR), wanted).abs() < 0.05, "key {key}");
@@ -246,7 +258,9 @@ fn a_held_note_goes_round_its_loop_without_a_click_and_on_to_the_end_when_the_in
 
     // A loop only while the note is held: let go of, it plays on to the end of the recording.
     let staircase: Vec<f32> = (0..12_000).map(|frame| 0.1 + (frame / 3_000) as f32 * 0.1).collect();
-    let sfz = format!("{FLAT}<region> sample=steps.wav loop_mode=loop_sustain loop_start=3000 loop_end=5999 ampeg_release=30");
+    let sfz = format!(
+        "{FLAT}<region> sample=steps.wav loop_mode=loop_sustain loop_start=3000 loop_end=5999 ampeg_release=30"
+    );
     let mut player = rendered(&sfz, &[("steps.wav", staircase.clone())]);
     let heard = play(&mut player, 256, 40_000, &[(0, on(60, 100)), (20_000, off(60))]);
     assert!((heard[1_000] - 0.1).abs() < 1e-3 && (heard[4_000] - 0.2).abs() < 1e-3);
@@ -258,7 +272,9 @@ fn a_held_note_goes_round_its_loop_without_a_click_and_on_to_the_end_when_the_in
     // A loop whose ends do not meet is faded across, where the instrument asks for that.
     let rough: Vec<f32> = sine(SR / 117.3, SR, 12_000);
     let joined = |crossfade: &str| {
-        let sfz = format!("{FLAT}<region> sample=rough.wav loop_mode=loop_continuous loop_start=3000 loop_end=6599 {crossfade}");
+        let sfz = format!(
+            "{FLAT}<region> sample=rough.wav loop_mode=loop_continuous loop_start=3000 loop_end=6599 {crossfade}"
+        );
         let mut player = rendered(&sfz, &[("rough.wav", rough.clone())]);
         largest_step(&play(&mut player, 256, 48_000, &[(0, on(60, 100))])[100..])
     };
@@ -313,7 +329,10 @@ fn the_pedal_holds_notes_and_a_key_coming_up_has_sounds_of_its_own() {
     let mut player = rendered(sfz, &files);
     let events = [(0, on(60, 100)), (2_400, pedal(true)), (4_800, off(60)), (24_000, pedal(false))];
     let heard = play(&mut player, 256, 36_000, &events);
-    assert!((heard[4_900] - 0.5).abs() < 1e-6 && (heard[23_000] - 0.5).abs() < 1e-6, "held by the pedal, with no thump");
+    assert!(
+        (heard[4_900] - 0.5).abs() < 1e-6 && (heard[23_000] - 0.5).abs() < 1e-6,
+        "held by the pedal, with no thump"
+    );
     // Half a second held by then: three decibels quieter.
     let wanted = 0.25 * 10f32.powf(-3.0 / 20.0);
     assert!((heard[25_500] - wanted).abs() < wanted * 0.01, "the thump when it comes up: {}", heard[25_500]);
@@ -363,7 +382,12 @@ fn layers_fade_into_one_another_by_how_hard_a_key_is_struck_and_by_a_controller(
     events.extend((0..200).map(|step| (9_600 + step * 240, control(1, step as f32 / 199.0))));
     events.push((70_000, control(1, 0.0)));
     let heard = play(&mut player, 256, 80_000, &events);
-    assert!((heard[9_000] - 0.2).abs() < 1e-6 && (heard[60_000] - 0.6).abs() < 1e-4, "{} {}", heard[9_000], heard[60_000]);
+    assert!(
+        (heard[9_000] - 0.2).abs() < 1e-6 && (heard[60_000] - 0.6).abs() < 1e-4,
+        "{} {}",
+        heard[9_000],
+        heard[60_000]
+    );
     let half_way = 9_600 + 100 * 240;
     // A little past the middle of the wheel's travel, which is a little past the middle of the crossing.
     assert!((heard[half_way + 400] - 0.42).abs() < 0.01, "{}", heard[half_way + 400]);
@@ -411,7 +435,8 @@ fn a_group_silences_another_and_a_key_has_only_so_many_voices() {
     // An open hat that the closed one cuts off, and a snare that rings over itself only twice.
     let sfz = "<global> amp_veltrack=0 loop_mode=one_shot\n<region> key=46 sample=open.wav group=1 off_by=2\n\
                <region> key=42 sample=closed.wav group=2\n<region> key=38 sample=snare.wav note_polyphony=2";
-    let files = [("open.wav", level(48_000, 0.5)), ("closed.wav", level(2_400, 0.1)), ("snare.wav", level(48_000, 0.2))];
+    let files =
+        [("open.wav", level(48_000, 0.5)), ("closed.wav", level(2_400, 0.1)), ("snare.wav", level(48_000, 0.2))];
     let mut player = rendered(sfz, &files);
     let heard = play(&mut player, 256, 30_000, &[(0, on(46, 100)), (9_600, on(42, 100))]);
     assert!((heard[9_000] - 0.5).abs() < 1e-6);
@@ -434,7 +459,8 @@ fn notes_over_the_limit_are_taken_without_a_click() {
     let mut player = rendered(&sfz, &[("tone.wav", tone)]);
     set(&mut player, "voices", 2.0);
     // A new note every 50 ms, each held: every note takes a voice.
-    let events: Vec<(usize, EventKind)> = (0..30).map(|note| (note * 2_400 + 77, on(55 + (note % 7) as u8, 100))).collect();
+    let events: Vec<(usize, EventKind)> =
+        (0..30).map(|note| (note * 2_400 + 77, on(55 + (note % 7) as u8, 100))).collect();
     let heard = play(&mut player, 256, 80_000, &events);
     // Up to three voices overlap while one goes, each at a quarter and up to a fifth above its recording.
     let limit = natural * 1.5 * 0.25 * 3.0 * 2.0;
@@ -446,7 +472,8 @@ fn notes_over_the_limit_are_taken_without_a_click() {
 
 #[test]
 fn a_filter_a_vibrato_and_controllers_do_what_the_instrument_says() {
-    let noise: Vec<f32> = (0..48_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 8) as f32 / 8_388_608.0 - 1.0).collect();
+    let noise: Vec<f32> =
+        (0..48_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 8) as f32 / 8_388_608.0 - 1.0).collect();
     let files = [("noise.wav", noise), ("tone.wav", sine(440.0, SR, 96_000))];
     let loud = |sfz: &str, events: &[(usize, EventKind)]| {
         let mut player = rendered(&format!("{FLAT}{sfz}"), &files);
@@ -478,8 +505,10 @@ fn a_filter_a_vibrato_and_controllers_do_what_the_instrument_says() {
         let mut player = rendered(&format!("{FLAT}{vibrato}"), &files);
         let heard = play(&mut player, 256, 48_000, &[(0, control(1, wheel)), (0, on(69, 100))]);
         // The pitch over each fortieth of a second.
-        let pitches: Vec<f64> = heard[4_800..].chunks(1_200).map(|chunk| cents(zero_crossing_hz(chunk, SR), 440.0)).collect();
-        let (low, high) = pitches.iter().fold((f64::MAX, f64::MIN), |(low, high), cents| (low.min(*cents), high.max(*cents)));
+        let pitches: Vec<f64> =
+            heard[4_800..].chunks(1_200).map(|chunk| cents(zero_crossing_hz(chunk, SR), 440.0)).collect();
+        let (low, high) =
+            pitches.iter().fold((f64::MAX, f64::MIN), |(low, high), cents| (low.min(*cents), high.max(*cents)));
         high - low
     };
     assert!(swing(0.0) < 3.0, "{}", swing(0.0));
@@ -492,7 +521,11 @@ fn a_filter_a_vibrato_and_controllers_do_what_the_instrument_says() {
         let heard = play(&mut player, 256, 24_000, &[(0, EventKind::PitchBend { value: wheel }), (0, on(60, 100))]);
         cents(zero_crossing_hz(&heard[2_400..], SR), 440.0)
     };
-    assert!((bent("<region> sample=tone.wav", 0.0, 1.0) - 200.0).abs() < 0.1, "{}", bent("<region> sample=tone.wav", 0.0, 1.0));
+    assert!(
+        (bent("<region> sample=tone.wav", 0.0, 1.0) - 200.0).abs() < 0.1,
+        "{}",
+        bent("<region> sample=tone.wav", 0.0, 1.0)
+    );
     assert!((bent("<region> sample=tone.wav bend_up=1200 bend_down=-700", 0.0, -1.0) + 700.0).abs() < 0.1);
     assert!((bent("<region> sample=tone.wav bend_up=1200", 5.0, 0.5) - 250.0).abs() < 0.1, "the device's own range");
 }
@@ -613,7 +646,9 @@ fn a_device_with_nothing_loaded_is_silent_and_one_whose_instrument_is_gone_says_
     assert_eq!(warnings.len(), 1);
     assert_eq!(warnings[0].message, "cannot read '/i/Gone.sfz': there is no such file");
     assert!(source.warnings(None).is_empty());
-    assert!(source.warnings(Some(b"{ not json")).iter().any(|warning| warning.message.contains("not a valid document")));
+    assert!(
+        source.warnings(Some(b"{ not json")).iter().any(|warning| warning.message.contains("not a valid document"))
+    );
 
     // Without any way to read files, naming an instrument is an error that says what to do.
     let error = make(Some(&gone), None, Purpose::Playing).err().unwrap();
@@ -633,7 +668,11 @@ fn the_device_says_what_it_has_loaded() {
     assert_eq!((said.name.as_str(), said.file.as_str(), said.recordings, said.regions.len()), ("Made Up", FILE, 2, 2));
     assert_eq!(said.profile.articulation_names(), ["arco", "pizz"]);
     assert_eq!(said.profile.range, Some((40, 80)));
-    assert!(said.about.contains("Ways of playing, chosen by a key: arco (default) on C1, pizz on C#1."), "{}", said.about);
+    assert!(
+        said.about.contains("Ways of playing, chosen by a key: arco (default) on C1, pizz on C#1."),
+        "{}",
+        said.about
+    );
     assert!(Arc::ptr_eq(&said, &controller.sampled().unwrap()), "said once, kept");
     assert_eq!(controller.missing_files(), [("recording missing.wav".to_string(), "/i/missing.wav".to_string())]);
     wait_for("the starts being read", || controller.reading().is_some_and(|reading| !reading.is_loading()));
@@ -668,7 +707,10 @@ fn a_controller_is_read_along_the_curve_the_instrument_names_for_it() {
     // The level knob at its top, the pan knob at its right, the velocity deciding everything.
     let events = [(0, control(7, 1.0)), (0, control(10, 1.0)), (0, control(99, 1.0)), (0, on(60, 64))];
     let (left, right) = heard(&events);
-    assert!(left.abs() < 1e-6 && (right - by_velocity(64.0, 1.0) * std::f32::consts::SQRT_2).abs() < 2e-3, "{left} {right}");
+    assert!(
+        left.abs() < 1e-6 && (right - by_velocity(64.0, 1.0) * std::f32::consts::SQRT_2).abs() < 2e-3,
+        "{left} {right}"
+    );
     // The instrument's own curve: nothing at the very bottom, all of the twelve decibels from the first step up.
     let quiet = heard(&[(0, control(80, 1.0 / 127.0)), (0, on(60, 127))]).0;
     let full = heard(&[(0, on(60, 127))]).0;
@@ -683,7 +725,9 @@ fn a_group_has_only_so_many_voices_and_the_pedal_is_the_controller_the_instrumen
     let files = [("low.wav", level(96_000, 0.2)), ("high.wav", level(96_000, 0.4))];
     let mut player = rendered(sfz, &files);
     let heard = play(&mut player, 256, 20_000, &[(0, on(50, 100)), (4_800, on(62, 100)), (9_600, on(45, 100))]);
-    assert!((heard[4_000] - 0.2).abs() < 1e-6 && (heard[9_000] - 0.4).abs() < 1e-6 && (heard[14_000] - 0.2).abs() < 1e-6);
+    assert!(
+        (heard[4_000] - 0.2).abs() < 1e-6 && (heard[9_000] - 0.4).abs() < 1e-6 && (heard[14_000] - 0.2).abs() < 1e-6
+    );
     assert!(largest_step(&heard[4_800..5_200]) < 0.05, "it gives way quickly, not at once");
 
     // An instrument whose pedal is another controller than the usual one; and levels above the region that add up.
@@ -709,5 +753,8 @@ fn a_region_that_no_key_plays_is_left_out_and_said() {
     assert_eq!(loaded.instrument.regions.len(), 1);
     assert_eq!(loaded.summary.range, Some((40, 80)));
     let sentence = loaded.unsupported().unwrap();
-    assert!(sentence.contains("sounds that moving a controller sets off (the noise of a pedal) (on_hicc64, on_locc64)"), "{sentence}");
+    assert!(
+        sentence.contains("sounds that moving a controller sets off (the noise of a pedal) (on_hicc64, on_locc64)"),
+        "{sentence}"
+    );
 }

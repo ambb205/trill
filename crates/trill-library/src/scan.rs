@@ -758,7 +758,10 @@ mod tests {
             <group> sw_last=25 sw_label=Loud\n<region> sample=c3 loud.wav lokey=36 hikey=59 pitch_keycenter=48\n\
             <region> sample=gone.wav lokey=60 hikey=84";
         write("Programs/Small Grand.sfz", piano.as_bytes().to_vec());
-        write("Programs/Tiny Kit.sfz", br"<global> loop_mode=one_shot <region> key=36 sample=..\Samples\Kit\Kick.wav".to_vec());
+        write(
+            "Programs/Tiny Kit.sfz",
+            br"<global> loop_mode=one_shot <region> key=36 sample=..\Samples\Kit\Kick.wav".to_vec(),
+        );
         write("Programs/Broken.sfz", b"not an instrument at all".to_vec());
 
         let roots = [root.clone()];
@@ -766,7 +769,8 @@ mod tests {
         let scan = Scan { roots: &roots, previous: &previous, cancel: &cancel, progress: &progress };
         let (index, _) = scan.run(&mut |_| {});
         let index = index.unwrap();
-        let entry = |name: &str| index.entries().iter().find(|entry| entry.name == name).unwrap_or_else(|| panic!("{name}"));
+        let entry =
+            |name: &str| index.entries().iter().find(|entry| entry.name == name).unwrap_or_else(|| panic!("{name}"));
 
         // The instrument says what it is.
         let grand = entry("Small Grand");

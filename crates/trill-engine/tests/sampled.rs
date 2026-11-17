@@ -112,7 +112,9 @@ fn an_instrument_is_given_to_a_device_by_the_path_of_its_file_and_says_what_it_i
     assert!(said.about.contains("range C2..C7 (36..96), 2 layers of loudness"), "{}", said.about);
     assert!(said.about.contains("The sustain pedal holds its notes; it has sounds of its own for a key coming up"));
     let unsupported = said.unsupported.as_deref().unwrap();
-    assert!(unsupported.contains("equalisers of its own (eq1_gain)") && unsupported.ends_with("Everything else plays."));
+    assert!(
+        unsupported.contains("equalisers of its own (eq1_gain)") && unsupported.ends_with("Everything else plays.")
+    );
     // The track's notes are the instrument's: its range, read from the file and kept nowhere in the song.
     assert_eq!(session.profile_of(track).range, Some((36, 96)));
     assert!(session.project().track(track).unwrap().profile.is_empty());
@@ -128,7 +130,10 @@ fn an_instrument_is_given_to_a_device_by_the_path_of_its_file_and_says_what_it_i
     let out = render(&mut session);
     // (The second from where the first has died away: it is the softer by far.)
     let (first, second) = (&out[4_800..43_200], &out[72_000..91_200]);
-    assert!((zero_crossing_hz(first, SR) - key_hz(60)).abs() < 0.05 && (zero_crossing_hz(second, SR) - key_hz(48)).abs() < 0.05);
+    assert!(
+        (zero_crossing_hz(first, SR) - key_hz(60)).abs() < 0.05
+            && (zero_crossing_hz(second, SR) - key_hz(48)).abs() < 0.05
+    );
     let by_velocity = |velocity: f32| (velocity / 127.0).powi(2);
     assert!((rms(first) - 0.5 / 2f32.sqrt() * by_velocity(100.0)).abs() < 0.003, "{}", rms(first));
     assert!((rms(second) - 0.2 / 2f32.sqrt() * by_velocity(40.0)).abs() < 0.001, "{}", rms(second));
@@ -138,7 +143,10 @@ fn an_instrument_is_given_to_a_device_by_the_path_of_its_file_and_says_what_it_i
         folder.path(),
         "Tiny Kit",
         "<global> loop_mode=one_shot\n<region> key=36 sample=kit/Kick.wav\n<region> key=38 sample=kit/Snare.wav",
-        &[("kit/Kick.wav", 44_100.0, sine(60.0, 44_100.0, 0.2, 0.5)), ("kit/Snare.wav", 44_100.0, sine(200.0, 44_100.0, 0.2, 0.5))],
+        &[
+            ("kit/Kick.wav", 44_100.0, sine(60.0, 44_100.0, 0.2, 0.5)),
+            ("kit/Snare.wav", 44_100.0, sine(200.0, 44_100.0, 0.2, 0.5)),
+        ],
     );
     assert_eq!(session.load_preset(device, &kit).unwrap().name, "Tiny Kit");
     assert_eq!(session.sampled(device).unwrap().name, "Tiny Kit");
@@ -149,7 +157,10 @@ fn an_instrument_is_given_to_a_device_by_the_path_of_its_file_and_says_what_it_i
     // What is no instrument says why, and changes nothing.
     let missing = folder.path().join("Gone.sfz").display().to_string();
     let error = session.load_preset(device, &missing).unwrap_err().to_string();
-    assert!(error.contains("cannot be given to 'builtin:sampled' as a preset") && error.contains("there is no such file"), "{error}");
+    assert!(
+        error.contains("cannot be given to 'builtin:sampled' as a preset") && error.contains("there is no such file"),
+        "{error}"
+    );
     let recording = folder.path().join("samples").join("thump.wav").display().to_string();
     let error = session.load_preset(device, &recording).unwrap_err().to_string();
     assert!(error.contains("it reads SFZ files"), "{error}");
@@ -190,7 +201,10 @@ fn a_kit_gives_its_track_the_kits_drums_and_an_instrument_with_switches_its_ways
     let profile = session.profile_of(track);
     let key = |name: &str| profile.drum(name).map(|drum| drum.pitch);
     assert_eq!((key("kick"), key("snare"), key("rimshot")), (Some(36), Some(40), Some(41)));
-    assert_eq!((key("closed_hat"), key("open_hat"), key("crash"), key("cowbell")), (Some(42), Some(46), Some(49), Some(70)));
+    assert_eq!(
+        (key("closed_hat"), key("open_hat"), key("crash"), key("cowbell")),
+        (Some(42), Some(46), Some(49), Some(70))
+    );
     assert_eq!(key("high_tom"), Some(47));
     // And a drum the kit has not got is said to be lacking, not played on whatever is on General MIDI's key.
     assert_eq!(profile.find_drum("ride"), Drum::Lacking("ride".to_string()));
@@ -249,7 +263,8 @@ fn a_recording_that_is_missing_is_the_songs_to_find_and_an_instrument_that_moved
     assert_eq!(problems, [format!("Small Grand: its recording '{gone}' is missing; the notes it plays are silent")]);
     assert_eq!(peak(&render(&mut session)[..48_000]), 0.0);
     // The song names the instrument's file, and the recording that is not where that file says.
-    let named: Vec<(String, String)> = session.files().into_iter().map(|file| (file.place.to_string(), file.path)).collect();
+    let named: Vec<(String, String)> =
+        session.files().into_iter().map(|file| (file.place.to_string(), file.path)).collect();
     assert_eq!(
         named,
         [
@@ -260,13 +275,17 @@ fn a_recording_that_is_missing_is_the_songs_to_find_and_an_instrument_that_moved
 
     // Given the file where it is now, the recording plays, in one step.
     let place = FilePlace::Sample { device, slot: "recording samples/c5_f.wav".into() };
-    let error = session.relink(&[Relink { place: place.clone(), path: gone.clone() + ".nope" }]).unwrap_err().to_string();
+    let error =
+        session.relink(&[Relink { place: place.clone(), path: gone.clone() + ".nope" }]).unwrap_err().to_string();
     assert!(error.contains("nothing was relinked"), "{error}");
     assert_eq!(session.relink(&[Relink { place: place.clone(), path: elsewhere.display().to_string() }]).unwrap(), 1);
     assert!(session.problems().is_empty(), "{:?}", session.problems());
     assert!(rms(&render(&mut session)[4_800..43_200]) > 0.25);
     let state = State::from_device_state(session.project().device(device).unwrap().state.as_deref()).unwrap();
-    assert_eq!(state.recordings.get("samples/c5_f.wav").map(String::as_str), Some(elsewhere.display().to_string().as_str()));
+    assert_eq!(
+        state.recordings.get("samples/c5_f.wav").map(String::as_str),
+        Some(elsewhere.display().to_string().as_str())
+    );
     assert!(session.files().iter().any(|file| file.place == place && file.path == elsewhere.display().to_string()));
     assert!(session.undo());
     assert_eq!(session.problems().len(), 1, "taken back, it is missing again");

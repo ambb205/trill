@@ -300,6 +300,15 @@ fn sound_drop(ui: &Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, rect: Re
     let beat = cx.state.arrangement.cursor;
     let Some(drag) = &mut cx.state.sound_drag else { return };
     match instrument {
+        // An instrument takes the place of whatever the track plays
+        // through, a sampler or a rack included.
+        _ if drag.is_instrument() && track.kind == TrackKind::Normal => {
+            drag.offer(DropTarget::TrackInstrument { track: track.id });
+        }
+        _ if drag.is_instrument() => {
+            drag.refusal = Some("An instrument goes on a track that holds clips, not on a group or a return");
+            return;
+        }
         Some(device) if device.uri == crate::ui::sample_panels::SAMPLER => {
             drag.offer(DropTarget::Sampler { device: device.id });
         }

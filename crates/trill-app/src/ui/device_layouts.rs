@@ -301,6 +301,21 @@ pub static LAYOUTS: &[Layout] = &[
             },
         ],
     },
+    // The instrument it plays is shown ahead of these, by
+    // `instrument_panel`: it is not a parameter.
+    Layout {
+        uri: "builtin:sampled",
+        columns: &[Column {
+            width: NARROW,
+            sections: &[
+                section("Pitch", &[p("transpose", "Transpose"), p("tune", "Fine"), p("bend_range", "Wheel")]),
+                section(
+                    "Output",
+                    &[p("dynamics", "Dynamics"), p("voices", "Voices"), p("volume", "Volume"), p("pan", "Pan")],
+                ),
+            ],
+        }],
+    },
     Layout {
         uri: "builtin:sampler",
         columns: &[

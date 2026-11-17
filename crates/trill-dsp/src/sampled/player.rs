@@ -1068,7 +1068,7 @@ impl Player {
         self.clock += 1;
         let velocity = self.struck[usize::from(key)];
         let held = self.frame.saturating_sub(self.since[usize::from(key)]) as f32 / self.sample_rate as f32;
-        let seed = place.rotate_left(8) ^ u64::from(key) ^ 0x5EED_0FF5_EEDu64;
+        let seed = place.rotate_left(8) ^ u64::from(key) ^ 0x05EE_D0FF_5EED_u64;
         let number = chance(seed, 0);
         for at in 0..loaded.up[usize::from(key)].len() {
             let index = loaded.up[usize::from(key)][at] as usize;
@@ -1229,7 +1229,7 @@ impl DeviceProcessor for Player {
                 self.handle(&loaded, events[next_event].kind, place);
                 next_event += 1;
             }
-            let at_point = self.frame % TICK as u64 == 0;
+            let at_point = self.frame.is_multiple_of(TICK as u64);
             let to_point = TICK - (self.frame % TICK as u64) as usize;
             let next = events.get(next_event).map_or(len, |event| (event.offset as usize).min(len));
             let end = next.min(pos + to_point);

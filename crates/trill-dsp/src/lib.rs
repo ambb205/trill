@@ -267,8 +267,10 @@ impl Builtins {
     /// instrument is.
     fn instrument_preset(&self, file: &std::path::Path) -> Result<(trill_core::presets::PresetInfo, Vec<u8>), String> {
         let Some(instruments) = &self.instruments else {
-            return Err("this device factory was created without an audio loader (use trill_dsp::Builtins::with_loader)"
-                .to_string());
+            return Err(
+                "this device factory was created without an audio loader (use trill_dsp::Builtins::with_loader)"
+                    .to_string(),
+            );
         };
         let path = file.to_string_lossy().into_owned();
         let state = sampled::State::new(path.clone()).to_bytes();

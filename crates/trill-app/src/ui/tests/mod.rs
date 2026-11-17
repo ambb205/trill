@@ -13,6 +13,7 @@ mod clips;
 mod controllers;
 mod editors;
 mod film;
+mod instruments;
 mod keyboard;
 mod keys;
 mod making_of;

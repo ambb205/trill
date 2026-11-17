@@ -118,7 +118,10 @@ fn survey(folder: &Path) -> Result<(), String> {
     // What is asked for and not done: by name, in how many files, how often, and what is missed.
     let mut asked: BTreeMap<String, (usize, usize, &'static str)> = BTreeMap::new();
     let mut whole = 0;
-    println!("{:<52} {:>7} {:>6} {:>9} {:>6} {:>5} {:>5}  {}", "instrument", "regions", "files", "range", "layers", "takes", "ways", "not done");
+    println!(
+        "{:<52} {:>7} {:>6} {:>9} {:>6} {:>5} {:>5}  {}",
+        "instrument", "regions", "files", "range", "layers", "takes", "ways", "not done"
+    );
     for file in &files {
         match trill_dsp::sfz::read(file, &text) {
             Ok(instrument) => {
@@ -154,7 +157,11 @@ fn survey(folder: &Path) -> Result<(), String> {
         }
     }
     println!();
-    println!("{read} of {} files read in {:.2} s; {whole} ask for nothing that is not done", files.len(), begun.elapsed().as_secs_f64());
+    println!(
+        "{read} of {} files read in {:.2} s; {whole} ask for nothing that is not done",
+        files.len(),
+        begun.elapsed().as_secs_f64()
+    );
     for failure in &failed {
         println!("  not read: {failure}");
     }
@@ -189,14 +196,26 @@ fn about(file: &str) -> Result<(), String> {
     let loaded = loaded(&factory, file)?;
     println!("{}", loaded.about());
     println!();
-    println!("on disk: {:.1} MB in {} recordings, {} missing", megabytes(loaded.bytes), loaded.recordings.len(), loaded.missing.len());
+    println!(
+        "on disk: {:.1} MB in {} recordings, {} missing",
+        megabytes(loaded.bytes),
+        loaded.recordings.len(),
+        loaded.missing.len()
+    );
     for warning in loaded.warnings() {
         println!("warning: {}", warning.message);
     }
     let profile = loaded.profile();
-    println!("profile: range {:?}, role {:?}, bend {:?}, articulations {:?}", profile.range, profile.role, profile.bend_range, profile.articulation_names());
+    println!(
+        "profile: range {:?}, role {:?}, bend {:?}, articulations {:?}",
+        profile.range,
+        profile.role,
+        profile.bend_range,
+        profile.articulation_names()
+    );
     if let Some(sounds) = loaded.key_sounds() {
-        let named: Vec<String> = sounds.iter().map(|sound| format!("{}: {} {}", sound.key, sound.place, sound.stroke)).collect();
+        let named: Vec<String> =
+            sounds.iter().map(|sound| format!("{}: {} {}", sound.key, sound.place, sound.stroke)).collect();
         println!("keys: {}", named.join("; "));
     }
     Ok(())
@@ -209,8 +228,16 @@ fn load(file: &str) -> Result<(), String> {
     let loaded = loaded(&factory, file)?;
     let read_file = begun.elapsed();
     println!("{}", loaded.summary.name);
-    println!("  on disk                  {:>9.1} MB in {} recordings", megabytes(loaded.bytes), loaded.recordings.len());
-    println!("  its file read            {:>9.1} ms ({} regions; every recording looked for)", read_file.as_secs_f64() * 1e3, loaded.summary.regions);
+    println!(
+        "  on disk                  {:>9.1} MB in {} recordings",
+        megabytes(loaded.bytes),
+        loaded.recordings.len()
+    );
+    println!(
+        "  its file read            {:>9.1} ms ({} regions; every recording looked for)",
+        read_file.as_secs_f64() * 1e3,
+        loaded.summary.regions
+    );
 
     // As a device that plays live has it: the start of every recording.
     let device = trill_core::Device { state: Some(State::new(file).to_bytes()), ..model() };
@@ -232,8 +259,16 @@ fn load(file: &str) -> Result<(), String> {
     }
     println!("  the device made          {:>9.1} ms", made.as_secs_f64() * 1e3);
     println!("  every note can begin     {:>9.2} s  (the start of every recording read)", starts.as_secs_f64());
-    println!("  held then                {:>9.1} MB ({} recordings are short enough to be whole)", megabytes(held), whole);
-    println!("  its recordings are       {:>9.1} minutes of sound; the longest {:.1} s", frames as f64 / 48_000.0 / 60.0, longest as f64 / 48_000.0);
+    println!(
+        "  held then                {:>9.1} MB ({} recordings are short enough to be whole)",
+        megabytes(held),
+        whole
+    );
+    println!(
+        "  its recordings are       {:>9.1} minutes of sound; the longest {:.1} s",
+        frames as f64 / 48_000.0 / 60.0,
+        longest as f64 / 48_000.0
+    );
 
     // How long the rest of one recording takes to read: what a note's start has to last for.
     let pool = &factory.instruments().ok_or("no instruments")?.pool;
@@ -258,7 +293,11 @@ fn load(file: &str) -> Result<(), String> {
         );
     }
     println!("  every recording whole    {:>9.2} s on one thread", all.as_secs_f64());
-    println!("  held then                {:>9.1} MB (the pool counts {:.1} MB of whole recordings)", megabytes(everything), megabytes(pool.held().whole_bytes as u64));
+    println!(
+        "  held then                {:>9.1} MB (the pool counts {:.1} MB of whole recordings)",
+        megabytes(everything),
+        megabytes(pool.held().whole_bytes as u64)
+    );
     drop(instance);
     Ok(())
 }
@@ -319,7 +358,8 @@ fn measure(file: &str) -> Result<(), String> {
             loudest.insert(region.root, index);
         }
     }
-    let (mut cents, mut levels, mut noise): (Vec<(u8, f64)>, Vec<(u8, f64)>, Vec<f64>) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut cents, mut levels, mut noise): (Vec<(u8, f64)>, Vec<(u8, f64)>, Vec<f64>) =
+        (Vec::new(), Vec::new(), Vec::new());
     let mut measured = 0;
     for recording in &loaded.recordings {
         let Some(audio) = pool.whole_now(recording) else { continue };
@@ -328,7 +368,8 @@ fn measure(file: &str) -> Result<(), String> {
         // The quietest twentieth of a second in it: what it carries when nothing sounds.
         // (Of recordings a second long or more: a short one is never quiet.)
         let window = 2_400;
-        let quietest = samples.chunks(window).filter(|chunk| chunk.len() == window).map(rms_db).fold(f64::MAX, f64::min);
+        let quietest =
+            samples.chunks(window).filter(|chunk| chunk.len() == window).map(rms_db).fold(f64::MAX, f64::min);
         if quietest < f64::MAX && samples.len() >= 48_000 {
             noise.push(quietest - peak_db(samples));
         }
@@ -346,7 +387,8 @@ fn measure(file: &str) -> Result<(), String> {
         if to - from < (0.2 * rate) as usize {
             continue;
         }
-        let expected = 440.0 * 2f64.powf((f64::from(*root) - 69.0) / 12.0) / 2f64.powf(f64::from(region.tune) / 1_200.0);
+        let expected =
+            440.0 * 2f64.powf((f64::from(*root) - 69.0) / 12.0) / 2f64.powf(f64::from(region.tune) / 1_200.0);
         // Between C2 and C7: outside that a piano is tuned wide on purpose.
         if (36..=96).contains(root)
             && let Some(heard) = pitch_near(&samples[from..to], rate, expected)
@@ -396,7 +438,11 @@ fn note(pitch: u8, start: f64, length: f64, velocity: u8) -> Note {
 /// Notes of a phrase that suits `kind`, at 96 BPM, with the controller
 /// curves it wants, and its length in beats.
 #[allow(clippy::type_complexity)]
-fn phrase(kind: &str, session: &Session, track: trill_core::TrackId) -> Result<(Vec<Note>, Vec<(ControllerKind, Vec<(f64, f64)>)>, f64), String> {
+fn phrase(
+    kind: &str,
+    session: &Session,
+    track: trill_core::TrackId,
+) -> Result<(Vec<Note>, Vec<(ControllerKind, Vec<(f64, f64)>)>, f64), String> {
     let chords: [[u8; 4]; 4] = [[57, 60, 64, 67], [53, 57, 60, 64], [48, 55, 60, 64], [55, 59, 62, 65]];
     let mut notes = Vec::new();
     let mut curves = Vec::new();
@@ -413,12 +459,20 @@ fn phrase(kind: &str, session: &Session, track: trill_core::TrackId) -> Result<(
                 }
             }
             for step in 0..16u8 {
-                notes.push(note(60 + [0u8, 2, 4, 5, 7, 9, 11, 12, 14, 16, 17, 19, 21, 23, 24, 26][step as usize], 16.0 + f64::from(step) * 0.25, 0.22, 70 + step * 3));
+                notes.push(note(
+                    60 + [0u8, 2, 4, 5, 7, 9, 11, 12, 14, 16, 17, 19, 21, 23, 24, 26][step as usize],
+                    16.0 + f64::from(step) * 0.25,
+                    0.22,
+                    70 + step * 3,
+                ));
             }
             for key in [36u8, 48, 60, 64, 67, 72, 84] {
                 notes.push(note(key, 20.0, 6.0, 118));
             }
-            let pedal: Vec<(f64, f64)> = (0..4).flat_map(|bar| [(bar as f64 * 4.0 + 0.1, 127.0), (bar as f64 * 4.0 + 3.8, 0.0)]).chain([(20.0, 127.0), (27.0, 0.0)]).collect();
+            let pedal: Vec<(f64, f64)> = (0..4)
+                .flat_map(|bar| [(bar as f64 * 4.0 + 0.1, 127.0), (bar as f64 * 4.0 + 3.8, 0.0)])
+                .chain([(20.0, 127.0), (27.0, 0.0)])
+                .collect();
             curves.push((ControllerKind::SUSTAIN, pedal));
             Ok((notes, curves, 28.0))
         }
@@ -454,9 +508,16 @@ fn phrase(kind: &str, session: &Session, track: trill_core::TrackId) -> Result<(
                 notes.push(note(*key, 16.0 + step as f64, 0.95, 96));
                 notes.push(note(key - 12, 16.0 + step as f64, 0.95, 96));
             }
-            let swell: Vec<(f64, f64)> = (0..6).flat_map(|bar| [(bar as f64 * 4.0, 30.0), (bar as f64 * 4.0 + 2.2, 120.0), (bar as f64 * 4.0 + 3.9, 45.0)]).collect();
+            let swell: Vec<(f64, f64)> = (0..6)
+                .flat_map(|bar| {
+                    [(bar as f64 * 4.0, 30.0), (bar as f64 * 4.0 + 2.2, 120.0), (bar as f64 * 4.0 + 3.9, 45.0)]
+                })
+                .collect();
             curves.push((ControllerKind::MOD_WHEEL, swell.clone()));
-            curves.push((ControllerKind::EXPRESSION, swell.into_iter().map(|(beat, value)| (beat, 60.0 + value * 0.5)).collect()));
+            curves.push((
+                ControllerKind::EXPRESSION,
+                swell.into_iter().map(|(beat, value)| (beat, 60.0 + value * 0.5)).collect(),
+            ));
             Ok((notes, curves, 26.0))
         }
         "bass" => {
@@ -465,7 +526,12 @@ fn phrase(kind: &str, session: &Session, track: trill_core::TrackId) -> Result<(
             for (bar, root) in roots.iter().enumerate() {
                 for (step, up) in [0u8, 4, 7, 9, 12, 9, 7, 5].iter().enumerate() {
                     let short = step % 4 == 3;
-                    notes.push(note(root + up - 12, bar as f64 * 8.0 + step as f64, if short { 0.4 } else { 0.92 }, 78 + (step as u8 % 4) * 9));
+                    notes.push(note(
+                        root + up - 12,
+                        bar as f64 * 8.0 + step as f64,
+                        if short { 0.4 } else { 0.92 },
+                        78 + (step as u8 % 4) * 9,
+                    ));
                 }
             }
             notes.push(note(33, 32.0, 4.0, 110));
@@ -480,7 +546,8 @@ fn phrase(kind: &str, session: &Session, track: trill_core::TrackId) -> Result<(
             let hat = key(&["closed_hat", "ride", "hat"]);
             let open = key(&["open_hat"]);
             let crash = key(&["crash", "china", "splash"]);
-            let toms: Vec<u8> = ["high_tom", "mid_tom", "low_tom", "floor_tom"].iter().filter_map(|name| key(&[name])).collect();
+            let toms: Vec<u8> =
+                ["high_tom", "mid_tom", "low_tom", "floor_tom"].iter().filter_map(|name| key(&[name])).collect();
             for bar in 0..4 {
                 let at = bar as f64 * 4.0;
                 for beat in [0.0, 1.5, 2.0] {
@@ -521,7 +588,8 @@ fn phrase(kind: &str, session: &Session, track: trill_core::TrackId) -> Result<(
 fn play(file: &str, kind: &str, out: &Path) -> Result<(), String> {
     let media = Arc::new(MediaCache::default());
     let factory = Arc::new(Builtins::with_loader(media.clone()));
-    let mut session = Session::with_media(factory, media, AudioBackend::Null { sample_rate: SR as u32 }).map_err(|error| error.to_string())?;
+    let mut session = Session::with_media(factory, media, AudioBackend::Null { sample_rate: SR as u32 })
+        .map_err(|error| error.to_string())?;
     let limiter = session.project().master.devices[0].id;
     session.edit(|project| project.remove_device(limiter)).map_err(|error| error.to_string())?;
     session.edit(|project| project.set_tempo(96.0)).map_err(|error| error.to_string())?;
@@ -529,8 +597,9 @@ fn play(file: &str, kind: &str, out: &Path) -> Result<(), String> {
     let mut written = 0;
     for file in &files {
         let track = session.edit(|project| Ok(project.add_track("Phrase"))).map_err(|error| error.to_string())?;
-        let device =
-            session.add_device(ChainRef::Track(track), sampled::URI, Some(file), None).map_err(|error| error.to_string())?;
+        let device = session
+            .add_device(ChainRef::Track(track), sampled::URI, Some(file), None)
+            .map_err(|error| error.to_string())?;
         let said = session.sampled(device).ok_or("the instrument did not load")?;
         println!("{}", said.about);
         let (notes, curves, beats) = phrase(kind, &session, track)?;
@@ -562,8 +631,10 @@ fn play(file: &str, kind: &str, out: &Path) -> Result<(), String> {
                 project.clip_mut(clip)?.add_notes(&notes)?;
                 for (kind, points) in &curves {
                     let (low, high) = kind.range();
-                    let points =
-                        points.iter().map(|(beat, value)| AutomationPoint::new(*beat, low + (high - low) * value / 127.0)).collect();
+                    let points = points
+                        .iter()
+                        .map(|(beat, value)| AutomationPoint::new(*beat, low + (high - low) * value / 127.0))
+                        .collect();
                     project.clip_mut(clip)?.set_controller(*kind, points)?;
                 }
                 Ok(())

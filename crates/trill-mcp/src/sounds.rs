@@ -511,7 +511,8 @@ pub(crate) fn instrument_into(out: &mut Value, session: &Session, device: Device
         .collect();
     if !problems.is_empty() {
         instrument["problems"] = json!(problems);
-        instrument["problems_hint"] = json!("missing_files lists what is missing; relink_files gives it another place.");
+        instrument["problems_hint"] =
+            json!("missing_files lists what is missing; relink_files gives it another place.");
     }
     out["instrument"] = instrument;
 }

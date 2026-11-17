@@ -170,8 +170,12 @@ struct Reader {
     /// The instrument's own curves, by their numbers in the file, and the
     /// one that is being read: its number and its points.
     curves: BTreeMap<u16, [f32; 128]>,
-    curve: Option<(Option<u16>, Vec<(u8, f32)>)>,
+    curve: Option<CurveRead>,
 }
+
+/// A curve while its header is being read: its number, if it has said
+/// one, and the points it has given so far.
+type CurveRead = (Option<u16>, Vec<(u8, f32)>);
 
 impl Reader {
     /// Keeps the curve that was being read: a straight line from each of
@@ -327,7 +331,10 @@ impl Reader {
         // What a controller moves is read along the curve that was named
         // for it, wherever in the file that was.
         for control in &mut region.controls {
-            let named = curves.iter().rev().find(|(moved, controller, _)| (*moved, *controller) == (Some(control.moved), control.controller));
+            let named = curves
+                .iter()
+                .rev()
+                .find(|(moved, controller, _)| (*moved, *controller) == (Some(control.moved), control.controller));
             control.curve = named.map_or(0, |(_, _, curve)| *curve);
         }
 
@@ -735,7 +742,10 @@ fn envelope_pair(envelope: &mut Envelope, rest: &str, amount: f32) -> bool {
     let (stem, number) = split_number(rest);
     // The curve a controller is read along for a stage it lengthens.
     if let (Some(stage), Some(controller)) = (stem.strip_suffix("_curvecc").and_then(stage_of), number) {
-        let found = envelope.by_controller.iter_mut().find(|(which, number, _, _)| *which == stage && u32::from(*number) == controller);
+        let found = envelope
+            .by_controller
+            .iter_mut()
+            .find(|(which, number, _, _)| *which == stage && u32::from(*number) == controller);
         return match found {
             Some(entry) => {
                 entry.3 = amount.max(0.0) as u16;

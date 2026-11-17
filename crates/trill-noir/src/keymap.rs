@@ -140,11 +140,14 @@ pub fn key_map(painter: &Painter, theme: &Theme, rect: Rect, map: &KeyMap) {
     let octave = map.key_span(strip, low.saturating_add(12).min(127)).0 - strip.left();
     let every = (NAME_WIDTH / octave.max(1.0)).ceil().max(1.0) as u8;
     for (index, key) in (low..=high).filter(|key| key % 12 == 0).enumerate() {
-        if index as u8 % every != 0 {
+        if !(index as u8).is_multiple_of(every) {
             continue;
         }
         let left = map.key_span(strip, key).0;
-        let room = Rect::from_min_size(pos2(left + 1.0, strip.bottom()), vec2(NAME_WIDTH.max(octave * f32::from(every)), NAMES));
+        let room = Rect::from_min_size(
+            pos2(left + 1.0, strip.bottom()),
+            vec2(NAME_WIDTH.max(octave * f32::from(every)), NAMES),
+        );
         // Middle C is C4.
         let name = format!("C{}", i32::from(key / 12) - 1);
         text::paint(&painter, room, Align2::LEFT_CENTER, theme.text.micro, &name, theme.ink_faint);
@@ -189,7 +192,12 @@ mod tests {
                 KeyBox { keys: (60, 59), levels: (90, 20), back: false },
                 KeyBox { keys: (36, 36), levels: (64, 127), back: false },
             ];
-            key_map(ui.painter(), theme, rect, &KeyMap { boxes: &boxes, range: (36, 84), marks: &[24, 25], accent: theme.signal });
+            key_map(
+                ui.painter(),
+                theme,
+                rect,
+                &KeyMap { boxes: &boxes, range: (36, 84), marks: &[24, 25], accent: theme.signal },
+            );
             key_map(ui.painter(), theme, rect, &map(&[], (60, 60)));
             // No room at all is no reason to fall over.
             key_map(ui.painter(), theme, Rect::from_min_size(pos2(0.0, 0.0), vec2(3.0, 2.0)), &map(&boxes, (0, 127)));
