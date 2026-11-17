@@ -35,6 +35,8 @@ const ROW: f32 = 46.0;
 const MAX_ROWS: usize = 7;
 /// Room for a row's two buttons.
 const BUTTONS: f32 = 170.0;
+/// And for those of a folder of the library, which are wider.
+const LIBRARY_BUTTONS: f32 = 200.0;
 
 fn count(number: usize, one: &str, many: &str) -> String {
     if number == 1 { format!("1 {one}") } else { format!("{number} {many}") }
@@ -106,20 +108,45 @@ fn uses(file: &MissingFile) -> String {
     format!("{} \u{00B7} {}", said.join(", "), file.tracks.join(", "))
 }
 
-/// What was found for a file, as the list says it: the words, and which
-/// status color goes with them.
-fn found_words(file: &MissingFile) -> (String, Option<Confidence>) {
+/// What was found for a file, as the list says it: the words, the folder
+/// it is in, and how sure that is.
+fn found_words(file: &MissingFile) -> (&'static str, &str, Option<Confidence>) {
     match file.found() {
-        None => ("Not found".to_owned(), None),
+        None => ("Not found", "", None),
         Some(candidate) => {
-            let folder = folder_of(&candidate.path);
             let words = match candidate.confidence {
-                Confidence::Sure => format!("In {folder}"),
-                Confidence::Likely => format!("Likely in {folder}"),
-                Confidence::Unsure => format!("Unsure: {folder}"),
+                Confidence::Sure => "In",
+                Confidence::Likely => "Likely in",
+                Confidence::Unsure => "Unsure:",
             };
-            (words, Some(candidate.confidence))
+            (words, folder_of(&candidate.path), Some(candidate.confidence))
         }
+    }
+}
+
+/// Words and a path as one line, for whoever cannot see paint.
+fn spoken(words: &str, path: &str) -> String {
+    if path.is_empty() { words.to_owned() } else { format!("{words} {path}") }
+}
+
+/// The second line of a row: a dot in the color of how sure the find is,
+/// the words, and the path, which keeps both its ends when it is long.
+fn found_line(
+    painter: &egui::Painter,
+    theme: &trill_noir::Theme,
+    line: Rect,
+    sure: Option<Confidence>,
+    words: &str,
+    path: &str,
+) {
+    let after = paint::dot(painter, pos2(line.left(), line.center().y), theme.metric.dot, dot_color(theme, sure));
+    let style = TextStyle { size: 11.5, ..theme.text.body };
+    let color = if sure.is_none() { theme.warn } else { theme.ink_dim };
+    let room = line.with_min_x(after + 6.0);
+    let used = text::paint(painter, room, Align2::LEFT_CENTER, style, words, color);
+    if !path.is_empty() {
+        let rest = room.with_min_x(room.left() + used + 4.0);
+        text::paint_name(painter, rest, Align2::LEFT_CENTER, style, path, color);
     }
 }
 
@@ -273,12 +300,16 @@ fn list(ctx: &egui::Context, cx: &mut Cx) -> Option<Asked> {
                     .max_height(shown * ROW)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        for (index, file) in missing.files.iter().enumerate() {
+                        // What needs someone first: the files nothing was
+                        // found for, then the ones that are not sure.
+                        let mut rows: Vec<&MissingFile> = missing.files.iter().collect();
+                        rows.sort_by_key(|file| file.found().map(|candidate| candidate.confidence));
+                        for (index, file) in rows.into_iter().enumerate() {
                             let (row, response) = ui.allocate_exact_size(vec2(WIDTH, ROW), Sense::hover());
                             let name = file_name(Path::new(&file.path));
-                            let (found, sure) = found_words(file);
+                            let (says, folder, sure) = found_words(file);
                             let used = uses(file);
-                            let spoken = format!("{name} \u{00B7} {used} \u{00B7} {found}");
+                            let spoken = format!("{name} \u{00B7} {used} \u{00B7} {}", spoken(says, folder));
                             response.widget_info(|| WidgetInfo::labeled(Role::Label, true, &spoken));
                             if index > 0 {
                                 paint::hline(ui.painter(), row.x_range(), row.top(), theme.hairline);
@@ -333,22 +364,7 @@ fn list(ctx: &egui::Context, cx: &mut Cx) -> Option<Asked> {
                                 &name,
                                 theme.ink,
                             );
-                            let after = paint::dot(
-                                ui.painter(),
-                                pos2(lower.left(), lower.center().y),
-                                theme.metric.dot,
-                                dot_color(theme, sure),
-                            );
-                            let style = TextStyle { size: 11.5, ..theme.text.body };
-                            let color = if sure.is_none() { theme.warn } else { theme.ink_dim };
-                            text::paint_name(
-                                ui.painter(),
-                                lower.with_min_x(after + 6.0),
-                                Align2::LEFT_CENTER,
-                                style,
-                                &found,
-                                color,
-                            );
+                            found_line(ui.painter(), theme, lower, sure, says, folder);
                         }
                     });
             }
@@ -421,13 +437,14 @@ fn library_row(
     let mut asked = None;
     let (row, response) = ui.allocate_exact_size(vec2(WIDTH, ROW), Sense::hover());
     let was = folder.path.display().to_string();
-    let (found, sure) = match &folder.found {
-        Some(found) if found.sure() => (format!("Now at {}", found.path.display()), Some(Confidence::Sure)),
-        Some(found) => (format!("A folder of that name is at {}", found.path.display()), Some(Confidence::Likely)),
-        None => ("Not found".to_owned(), None),
+    let now = folder.found.as_ref().map(|found| found.path.display().to_string()).unwrap_or_default();
+    let (says, sure) = match &folder.found {
+        Some(found) if found.sure() => ("Now at", Some(Confidence::Sure)),
+        Some(_) => ("A folder of that name is at", Some(Confidence::Likely)),
+        None => ("Not found", None),
     };
     let known = count(folder.files, "file known", "files known");
-    let spoken = format!("Library folder {was} \u{00B7} {found}");
+    let spoken = format!("Library folder {was} \u{00B7} {}", spoken(says, &now));
     response.widget_info(|| WidgetInfo::labeled(Role::Label, true, &spoken));
     if response.hovered() {
         *hint = Some(match &folder.found {
@@ -438,14 +455,14 @@ fn library_row(
             None => "Locate says where it is now; its favorites stay with their files".to_owned(),
         });
     }
-    let buttons = Rect::from_min_max(pos2(row.right() - BUTTONS, row.top()), row.max);
+    let buttons = Rect::from_min_max(pos2(row.right() - LIBRARY_BUTTONS, row.top()), row.max);
     let layout = Layout::right_to_left(Align::Center);
     let mut cell = ui.new_child(UiBuilder::new().id_salt(("library-folder", index)).max_rect(buttons).layout(layout));
     cell.spacing_mut().item_spacing = vec2(theme.metric.gap, 0.0);
     if busy {
         cell.disable();
     }
-    if trill_noir::button(&mut cell, theme, "Locate folder\u{2026}", Variant::Default).clicked() {
+    if trill_noir::button(&mut cell, theme, "Locate\u{2026}", Variant::Default).clicked() {
         asked = Some(Asked::LocateLibrary(folder.path.clone()));
     }
     if let Some(found) = &folder.found
@@ -458,11 +475,7 @@ fn library_row(
     let width = text::paint(ui.painter(), upper, Align2::RIGHT_CENTER, theme.text.value, &known, theme.ink_dim);
     let room = upper.with_max_x(upper.right() - width - 12.0);
     text::paint_name(ui.painter(), room, Align2::LEFT_CENTER, theme.text.body, &was, theme.ink);
-    let after =
-        paint::dot(ui.painter(), pos2(lower.left(), lower.center().y), theme.metric.dot, dot_color(theme, sure));
-    let style = TextStyle { size: 11.5, ..theme.text.body };
-    let color = if sure.is_none() { theme.warn } else { theme.ink_dim };
-    text::paint_name(ui.painter(), lower.with_min_x(after + 6.0), Align2::LEFT_CENTER, style, &found, color);
+    found_line(ui.painter(), theme, lower, sure, says, &now);
     asked
 }
 
@@ -539,10 +552,15 @@ mod tests {
         assert_eq!(uses(&both), "2 clips, pad 36 \u{00B7} FX, Kit");
         assert_eq!(uses(&file("Kick 01.wav", 0, &[36, 38], None)), "2 samples \u{00B7} Kit");
         assert_eq!(uses(&file("Riser.wav", 1, &[], None)), "1 clip \u{00B7} FX");
-        assert_eq!(found_words(&both), ("In D:/new/packs".to_owned(), Some(Confidence::Sure)));
-        assert_eq!(found_words(&file("a.wav", 1, &[], Some(Confidence::Likely))).0, "Likely in D:/new/packs");
-        assert_eq!(found_words(&file("a.wav", 1, &[], Some(Confidence::Unsure))).0, "Unsure: D:/new/packs");
-        assert_eq!(found_words(&file("a.wav", 1, &[], None)), ("Not found".to_owned(), None));
+        let said = |file: &MissingFile| {
+            let (words, folder, _) = found_words(file);
+            spoken(words, folder)
+        };
+        assert_eq!(found_words(&both), ("In", "D:/new/packs", Some(Confidence::Sure)));
+        assert_eq!(said(&file("a.wav", 1, &[], Some(Confidence::Likely))), "Likely in D:/new/packs");
+        assert_eq!(said(&file("a.wav", 1, &[], Some(Confidence::Unsure))), "Unsure: D:/new/packs");
+        assert_eq!(found_words(&file("a.wav", 1, &[], None)), ("Not found", "", None));
+        assert_eq!(said(&file("a.wav", 1, &[], None)), "Not found");
 
         let missing = Missing { files: vec![both, file("Riser.wav", 1, &[], None)], ..Missing::default() };
         assert_eq!(

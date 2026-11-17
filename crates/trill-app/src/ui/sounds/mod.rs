@@ -291,6 +291,7 @@ impl Sounds {
             || self.search.in_flight.is_some()
             || !self.pending.is_empty()
             || self.preview.loading.is_some()
+            || self.missing.looking
             || self.runtime.library.scan_status().is_scanning()
     }
 

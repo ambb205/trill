@@ -42,6 +42,9 @@ use trill_library::{Index, MovedRoot};
 const NEARBY_FOLDERS: usize = 3_000;
 /// How deep below a folder near the missing one the look goes.
 const NEARBY_DEPTH: usize = 4;
+/// How many levels of a missing file's folders are looked for by name:
+/// the topmost that is gone, and the ones under it.
+const GONE_DEPTH: usize = 3;
 /// How many folders are listed in all inside the folders a caller names:
 /// they asked, so it is thorough, and it still ends.
 const NAMED_FOLDERS: usize = 60_000;
@@ -174,6 +177,9 @@ pub struct Missing {
     pub moves: Vec<(FolderMove, usize)>,
     /// The library's own folders that are missing.
     pub folders: Vec<MissingFolder>,
+    /// The names of the song's tracks, in the song's order: what
+    /// [`Missing::tracks`] goes by.
+    pub order: Vec<String>,
 }
 
 impl Missing {
@@ -237,12 +243,19 @@ impl Missing {
             }
             files.push(MissingFile { uses, tracks, ..file.clone() });
         }
-        Missing { files, moves: self.moves.clone(), folders: Vec::new() }
+        Missing { files, moves: self.moves.clone(), folders: Vec::new(), order: self.order.clone() }
     }
 
     /// The tracks that have such a place, in the song's order.
     pub fn tracks(&self) -> Vec<String> {
+        let has = |name: &String| self.files.iter().any(|file| file.tracks.contains(name));
         let mut tracks: Vec<String> = Vec::new();
+        for name in self.order.iter().filter(|name| has(name)) {
+            if !tracks.contains(name) {
+                tracks.push(name.clone());
+            }
+        }
+        // And whatever the order does not know of (the master), as met.
         for name in self.files.iter().flat_map(|file| &file.tracks) {
             if !tracks.contains(name) {
                 tracks.push(name.clone());
@@ -468,21 +481,23 @@ fn check_folder(index: &Index, root: &Path, there: &Path) -> FoundFolder {
     FoundFolder { path: there.to_path_buf(), checked, there: found }
 }
 
-/// The topmost folder of `path` that is not there: the one that was moved
-/// or renamed, as far as the disk says. `None` when the file's own folder
-/// exists, and when nothing above it does.
-fn folder_that_went(path: &str) -> Option<PathBuf> {
-    let mut gone = None;
+/// The folders of `path` that are not there, the topmost first: the one
+/// that was moved or renamed, as far as the disk says, and the ones that
+/// went with it. Empty when the file's own folder exists, and when nothing
+/// above it does.
+fn folders_that_went(path: &str) -> Vec<PathBuf> {
+    let mut gone = Vec::new();
     for above in Path::new(path).ancestors().skip(1) {
         if above.as_os_str().is_empty() {
-            return None;
+            return Vec::new();
         }
         if above.is_dir() {
+            gone.reverse();
             return gone;
         }
-        gone = Some(above.to_path_buf());
+        gone.push(above.to_path_buf());
     }
-    None
+    Vec::new()
 }
 
 fn seconds(length: f64) -> String {
@@ -508,9 +523,16 @@ fn difference(was: &KnownFile, is: &KnownFile) -> String {
 /// The files the song open in `session` names that are not there:
 /// [`Runtime::files_missing`], for a caller that holds the session.
 pub fn files_missing_in(session: &Session) -> Missing {
-    let tracks: BTreeMap<TrackId, String> =
-        session.project().tracks.iter().map(|track| (track.id, track.name.clone())).collect();
-    Missing { files: missing_of(session.files(), &tracks, session.known_files()), ..Missing::default() }
+    let tracks = session.project().tracks.iter().map(|track| (track.id, track.name.clone())).collect();
+    whole(session.files(), tracks, session.known_files())
+}
+
+/// What is missing among `uses`, in a song whose tracks are `tracks`, in
+/// that order: nothing looked for yet.
+fn whole(uses: Vec<FileUse>, tracks: Vec<(TrackId, String)>, table: &FileTable) -> Missing {
+    let order = tracks.iter().map(|(_, name)| name.clone()).collect();
+    let names: BTreeMap<TrackId, String> = tracks.into_iter().collect();
+    Missing { files: missing_of(uses, &names, table), order, ..Missing::default() }
 }
 
 impl Runtime {
@@ -520,11 +542,12 @@ impl Runtime {
     pub fn files_missing(&self) -> Missing {
         let (uses, tracks, table) = {
             let session = self.session.lock();
-            let tracks: BTreeMap<TrackId, String> =
+            let tracks: Vec<(TrackId, String)> =
                 session.project().tracks.iter().map(|track| (track.id, track.name.clone())).collect();
             (session.files(), tracks, session.known_files().clone())
         };
-        Missing { files: missing_of(uses, &tracks, &table), ..Missing::default() }
+        // The disk is asked with the session free.
+        whole(uses, tracks, &table)
     }
 
     /// What the open song is missing, and what could be found: see the
@@ -535,11 +558,11 @@ impl Runtime {
     pub fn missing_files(&self, look: &Look) -> Missing {
         let (uses, tracks, table, song) = {
             let session = self.session.lock();
-            let tracks: BTreeMap<TrackId, String> =
+            let tracks: Vec<(TrackId, String)> =
                 session.project().tracks.iter().map(|track| (track.id, track.name.clone())).collect();
             (session.files(), tracks, session.known_files().clone(), session.path().map(Path::to_path_buf))
         };
-        let mut missing = Missing { files: missing_of(uses, &tracks, &table), ..Missing::default() };
+        let mut missing = whole(uses, tracks, &table);
         let index = self.library.index();
         let mut disk = Disk::default();
         let mut nearby = NEARBY_FOLDERS;
@@ -622,10 +645,22 @@ impl Runtime {
                 }
             }
         }
-        let gone: BTreeSet<PathBuf> = missing.files.iter().filter_map(|file| folder_that_went(&file.path)).collect();
-        for folder in gone {
-            for there in folders_like(&folder, &mut nearby) {
-                propose(FolderMove::new(text(&folder), text(&there)), &mut moves);
+        // The topmost folder that is gone is the one that was moved, if
+        // it kept its name. If it was renamed, or moved into a folder
+        // that was, a folder further down still has its name: those are
+        // looked for next, level by level, until something turns up.
+        let gone: Vec<Vec<PathBuf>> = missing.files.iter().map(|file| folders_that_went(&file.path)).collect();
+        for depth in 0..GONE_DEPTH {
+            let level: BTreeSet<&PathBuf> = gone.iter().filter_map(|chain| chain.get(depth)).collect();
+            let mut found_any = false;
+            for folder in level {
+                for there in folders_like(folder, &mut nearby) {
+                    found_any = true;
+                    propose(FolderMove::new(text(folder), text(&there)), &mut moves);
+                }
+            }
+            if found_any {
+                break;
             }
         }
         // A folder that was renamed as well as moved shows as its folders

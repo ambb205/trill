@@ -293,7 +293,7 @@ fn a_library_folder_that_is_gone_is_marked_and_goes_along_with_the_songs_files()
     harness.settle_work();
     assert!(harness.is_on_screen(&format!("Library folder {} \u{00B7} Now at {}", old.display(), new.display())));
     assert!(harness.is_on("Point the sound library there too"));
-    assert!(harness.is_on_screen("Move") && harness.is_on_screen("Locate folder\u{2026}"));
+    assert!(harness.is_on_screen("Move") && harness.is_on_screen("Locate\u{2026}"));
 
     // Relinking the song takes the library along, with what it keeps.
     harness.click_label("Relink all 1");
