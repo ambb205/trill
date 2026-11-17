@@ -674,6 +674,197 @@ async fn the_instructions_say_to_search_everything_before_shaping_a_sound_by_han
     assert!(schema_of("get_device").contains("param_offset") && schema_of("update_device").contains("Dynamic 57"));
 }
 
+// ---- sounds: an instrument and the effects after it ---------------------------
+
+const WAVETABLE: &str = "builtin:wavetable";
+
+/// The devices of a track, by name, as get_project lists them.
+async fn chain_of(client: &Client, track: u64) -> Vec<String> {
+    let project = ok(client, "get_project", json!({})).await;
+    let tracks = project["tracks"].as_array().unwrap();
+    let found = tracks.iter().find(|found| found["id"] == track).unwrap_or_else(|| panic!("no track {track}"));
+    found["devices"].as_array().unwrap().iter().map(|device| device["name"].as_str().unwrap().to_string()).collect()
+}
+
+/// The names of the devices a reply's `sound` says were made.
+fn made(reply: &Value) -> Vec<&str> {
+    let made = reply["sound"]["made"].as_array().unwrap_or_else(|| panic!("no sound in {reply}"));
+    made.iter().map(|device| device["name"].as_str().unwrap()).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tracks_sound_is_saved_and_given_to_a_new_track_as_a_preset_is() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let synths = &fixture.synths;
+    // A plugin on one of its presets, a reverb that was changed, and a
+    // compressor that listens to the drums.
+    let drums = ok(client, "create_track", json!({ "name": "Drums" })).await["track_id"].as_u64().unwrap();
+    let keys = ok(client, "create_track", json!({ "name": "Keys", "instrument": SYNTH, "preset": "glass keys" })).await;
+    let track = keys["track_id"].as_u64().unwrap();
+    assert!(keys.get("sound").is_none(), "a preset of one device is no sound: {keys}");
+    let reverb = json!({ "track": track, "uri": "builtin:reverb", "params": { "decay": 3.5 } });
+    ok(client, "add_device", reverb).await;
+    ok(client, "add_device", json!({ "track": track, "uri": "builtin:compressor", "sidechain": drums })).await;
+    ok(client, "update_track", json!({ "track": track, "volume_db": -9.0 })).await;
+
+    let arguments = json!({ "track": track, "name": "Glass Hall", "description": "keys in a hall", "tags": ["keys"] });
+    let saved = ok(client, "save_sound", arguments).await;
+    assert_eq!((saved["saved"].as_str(), saved["instrument"].as_str()), (Some("Saved/Glass Hall"), Some(SYNTH)));
+    assert_eq!(saved["devices"], json!(["Big Synth", "Reverb", "Compressor"]));
+    // What belongs to this song is left out, and said.
+    let left_out = saved["left_out"].as_array().unwrap();
+    assert_eq!(left_out.len(), 1, "{saved}");
+    assert!(left_out[0].as_str().unwrap().starts_with("Compressor listens to Drums in this song"), "{saved}");
+    let file = std::path::PathBuf::from(saved["file"].as_str().unwrap());
+    assert!(file.starts_with(fixture.folder.path().join("config").join("saved-presets")), "{}", file.display());
+    assert!(saved["use"].as_str().unwrap().contains("`preset: \"Glass Hall\"`"), "{saved}");
+    assert!(saved["use"].as_str().unwrap().contains(SYNTH), "{saved}");
+
+    // It is one of the instrument's presets, and says what it brings
+    // wherever presets are listed.
+    let found = ok(client, "search_presets", json!({ "query": "glass hall" })).await;
+    let item = &found["items"][0];
+    assert_eq!((item["device"].as_str(), item["preset"].as_str()), (Some(SYNTH), Some("Glass Hall")));
+    assert_eq!(item["with"], json!(["Reverb", "Compressor"]));
+    assert!(found["sounds"].as_str().unwrap().contains("makes those effects behind the instrument"), "{found}");
+    let listed = ok(client, "describe_device", json!({ "uri": SYNTH, "preset_category": "saved" })).await;
+    assert_eq!(listed["presets"]["items"][0]["with"], json!(["Reverb", "Compressor"]));
+    // A preset of one device brings nothing, and a search that finds no
+    // sound says nothing of sounds.
+    let plain = ok(client, "search_presets", json!({ "query": "glass keys" })).await;
+    assert!(plain["items"][0]["preset"] == "Glass Keys" && plain["items"][0].get("with").is_none(), "{plain}");
+    let none = ok(client, "search_presets", json!({ "query": "warm pad", "device": "big" })).await;
+    assert!(none.get("sounds").is_none(), "{none}");
+
+    // A new track is given it by its name: the instrument and its effects,
+    // and nothing of the mix.
+    let arguments = json!({ "name": "More Keys", "instrument": item["device"], "preset": item["id"] });
+    let other = ok(client, "create_track", arguments).await;
+    let second = other["track_id"].as_u64().unwrap();
+    assert_eq!(other["preset"], "Glass Hall");
+    assert_eq!(made(&other), ["Reverb", "Compressor"]);
+    assert!(other["sound"]["note"].as_str().unwrap().contains("devices of their own"), "{other}");
+    assert_eq!(chain_of(client, second).await, ["Big Synth", "Reverb", "Compressor"]);
+    assert_eq!(synths.patch(other["instrument_device_id"].as_u64().unwrap()), "Factory/Keys/Glass Keys");
+    let hall = other["sound"]["made"][0]["device_id"].as_u64().unwrap();
+    let got = ok(client, "get_device", json!({ "device": hall, "query": "decay" })).await;
+    assert_eq!(got["params"][0]["value"], 3.5);
+    assert_eq!((got["from_sound"].as_str(), got.get("preset")), (Some("Glass Hall"), None), "{got}");
+    let listener = other["sound"]["made"][1]["device_id"].as_u64().unwrap();
+    assert!(ok(client, "get_device", json!({ "device": listener })).await.get("sidechain").is_none());
+    let project = ok(client, "get_project", json!({})).await;
+    let fader =
+        |id: u64| project["tracks"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap()["volume_db"].clone();
+    assert_eq!((fader(track), fader(second)), (json!(-9.0), json!(0.0)));
+
+    // One step takes the instrument and its effects back.
+    ok(client, "history", json!({ "action": "undo" })).await;
+    assert!(chain_of(client, second).await.is_empty());
+    ok(client, "history", json!({ "action": "redo" })).await;
+    assert_eq!(chain_of(client, second).await.len(), 3);
+
+    // A track with nothing on it has no sound to save.
+    let error = call(client, "save_sound", json!({ "track": drums, "name": "Nothing" })).await.unwrap_err();
+    assert!(error.contains("has no devices, so there is no sound to save"), "{error}");
+    let error = call(client, "save_sound", json!({ "track": 999, "name": "x" })).await.unwrap_err();
+    assert!(error.contains("Existing tracks"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sound_given_to_an_instrument_replaces_what_the_last_one_brought_and_says_so() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    // The wavetable synth has no effects inside: a pad of its comes with
+    // a chorus and a hall, as devices.
+    let found = ok(client, "search_presets", json!({ "query": "glass pad", "device": "wavetable" })).await;
+    assert_eq!(found["items"][0]["with"], json!(["Chorus", "Reverb"]));
+    let pads =
+        ok(client, "create_track", json!({ "name": "Pads", "instrument": WAVETABLE, "preset": "Glass Pad" })).await;
+    let (track, synth) = (pads["track_id"].as_u64().unwrap(), pads["instrument_device_id"].as_u64().unwrap());
+    assert_eq!(made(&pads), ["Chorus", "Reverb"]);
+    assert!(pads["sound"].get("removed").is_none(), "{pads}");
+    ok(client, "add_device", json!({ "track": track, "uri": "builtin:eq" })).await;
+
+    // A pluck in its place: the pad's effects go, the pluck's come, and
+    // the equalizer that was added by hand stays behind them.
+    let pluck = ok(client, "update_device", json!({ "device": synth, "preset": "Trance Pluck" })).await;
+    assert_eq!(pluck["preset"], "Pluck/Trance Pluck");
+    assert_eq!(made(&pluck), ["Delay", "Reverb"]);
+    assert_eq!(pluck["sound"]["removed"], json!(["Chorus", "Reverb"]));
+    let note = pluck["sound"]["note"].as_str().unwrap();
+    assert!(note.contains("The effects the sound before it had brought were removed"), "{note}");
+    assert!(note.contains("One undo takes all of it back"), "{note}");
+    assert_eq!(chain_of(client, track).await, ["Wavetable", "Delay", "Reverb", "EQ"]);
+    ok(client, "history", json!({ "action": "undo" })).await;
+    assert_eq!(chain_of(client, track).await, ["Wavetable", "Chorus", "Reverb", "EQ"]);
+    ok(client, "history", json!({ "action": "redo" })).await;
+
+    // A bass is dry: what the pluck brought goes and nothing comes.
+    let bass = ok(client, "update_device", json!({ "device": synth, "preset": "Solid Bass" })).await;
+    assert_eq!((made(&bass).len(), &bass["sound"]["removed"]), (0, &json!(["Delay", "Reverb"])));
+    assert_eq!(chain_of(client, track).await, ["Wavetable", "EQ"]);
+    // And given again it has nothing to say.
+    let again = ok(client, "update_device", json!({ "device": synth, "preset": "Solid Bass" })).await;
+    assert!(again.get("sound").is_none(), "{again}");
+
+    // Added to a track that has devices, a sound is put where it is asked
+    // to be, its effects behind it.
+    let lead = json!({ "track": track, "uri": WAVETABLE, "preset": "Sync Lead", "index": 0 });
+    let added = ok(client, "add_device", lead).await;
+    assert_eq!(made(&added), ["Delay", "Reverb"]);
+    assert_eq!(chain_of(client, track).await, ["Wavetable", "Delay", "Reverb", "Wavetable", "EQ"]);
+
+    // The device type says which of its presets are sounds.
+    let described = ok(client, "describe_device", json!({ "uri": WAVETABLE, "preset_query": "choir" })).await;
+    assert_eq!(described["presets"]["items"][0]["with"], json!(["Chorus", "Reverb"]));
+    let listed = ok(client, "list_devices", json!({ "query": WAVETABLE })).await;
+    let presets = listed["devices"][0]["presets"].as_array().unwrap();
+    let with = |name: &str| presets.iter().find(|preset| preset["name"] == name).unwrap().get("with").cloned();
+    assert_eq!((with("Choir"), with("Deep Sub")), (Some(json!(["Chorus", "Reverb"])), None));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sound_that_names_a_plugin_this_machine_has_not_got_is_made_without_it_and_says_which() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    // A sound from another machine, as its file: a synth through an
+    // amplifier that is not installed here, and a reverb.
+    let text = r#"{ "uri": "builtin:polysynth", "name": "Their Tone", "params": { "cutoff": 900.0 }, "format": 7,
+        "after": [ { "uri": "vst3:NOT-HERE", "device": "Big Amp" },
+                   { "uri": "builtin:reverb", "device": "Reverb", "params": { "decay": 1.2 } } ] }"#;
+    let file = fixture.file("sent/Their Tone.trillpreset", text);
+    let part = ok(client, "create_track", json!({ "name": "Part", "instrument": POLYSYNTH, "preset": file })).await;
+    assert_eq!(part["preset"], "Their Tone");
+    assert_eq!(made(&part), ["Reverb"]);
+    assert_eq!(part["sound"]["without"], json!(["Big Amp (vst3:NOT-HERE) is not installed on this machine"]));
+    assert!(part["sound"]["note"].as_str().unwrap().contains("made without what `without` names"), "{part}");
+    assert_eq!(chain_of(client, part["track_id"].as_u64().unwrap()).await, ["Poly Synth", "Reverb"]);
+    // The song is whole: nothing of the amplifier is left in it.
+    let project = ok(client, "get_project", json!({})).await;
+    assert!(project.get("problems").is_none(), "{project}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_instructions_say_when_a_sound_is_worth_saving_and_what_giving_one_replaces() {
+    let fixture = connect().await;
+    let instructions = fixture.client.peer_info().and_then(|info| info.instructions.clone()).unwrap_or_default();
+    for said in [
+        "save_sound keeps a track's instrument and every effect after it as one thing",
+        "Save one when a chain is worth having again",
+        "lists it with what it brings (`with`)",
+        "replaces the instrument's own sound and the effects the sound before it had brought",
+        "A sound holds no fader, pan, send, automation or sidechain",
+        "builtin:wavetable has no effects inside; its presets are sounds",
+    ] {
+        assert!(instructions.contains(said), "the instructions do not say: {said}");
+    }
+    let tools = fixture.client.list_all_tools().await.unwrap();
+    let tool = tools.iter().find(|tool| tool.name == "save_sound").expect("there is a save_sound tool");
+    let schema = serde_json::to_string(&tool.input_schema).unwrap();
+    assert!(schema.contains("Djent Rhythm") && schema.contains("every effect after it"), "{schema}");
+}
+
 // ---- against an installed plugin -------------------------------------------
 
 const SURGE: &str = "clap:org.surge-synth-team.surge-xt";

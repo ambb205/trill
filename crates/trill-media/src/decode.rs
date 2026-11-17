@@ -179,7 +179,7 @@ pub fn decode(path: &Path) -> Result<AudioBuffer, MediaError> {
 }
 
 /// Opens `path` and finds the reader for its container.
-fn open(path: &Path) -> Result<Box<dyn FormatReader>, MediaError> {
+pub(crate) fn open(path: &Path) -> Result<Box<dyn FormatReader>, MediaError> {
     let io_error = |error: std::io::Error| MediaError::from_io(path, &error);
     let mut file = File::open(path).map_err(io_error)?;
 
@@ -231,14 +231,14 @@ fn open(path: &Path) -> Result<Box<dyn FormatReader>, MediaError> {
 }
 
 /// The track of a file that gets decoded.
-struct AudioTrack {
-    id: u32,
+pub(crate) struct AudioTrack {
+    pub(crate) id: u32,
     /// Length in frames, when the container states it.
-    frames: Option<u64>,
-    params: AudioCodecParameters,
+    pub(crate) frames: Option<u64>,
+    pub(crate) params: AudioCodecParameters,
 }
 
-fn audio_track(path: &Path, format: &dyn FormatReader) -> Result<AudioTrack, MediaError> {
+pub(crate) fn audio_track(path: &Path, format: &dyn FormatReader) -> Result<AudioTrack, MediaError> {
     let track =
         format.default_track(TrackType::Audio).ok_or_else(|| MediaError::unsupported(path, "it has no audio track"))?;
     let params = track
@@ -251,7 +251,7 @@ fn audio_track(path: &Path, format: &dyn FormatReader) -> Result<AudioTrack, Med
 
 /// Turns a symphonia error into ours, in words that do not need a codec
 /// engineer to read.
-fn describe(path: &Path, error: &Error) -> MediaError {
+pub(crate) fn describe(path: &Path, error: &Error) -> MediaError {
     match error {
         Error::IoError(io) if io.kind() == std::io::ErrorKind::UnexpectedEof => {
             MediaError::corrupt(path, "the file ends before its audio does")
@@ -288,12 +288,12 @@ fn is_ableton_protected(head: &[u8]) -> bool {
 /// Decoders are large and fed arbitrary bytes. A bug in one must cost the
 /// user that file, not the session, so a panic is reported like any other
 /// damaged file.
-fn guarded<T>(path: &Path, work: impl FnOnce() -> Result<T, MediaError>) -> Result<T, MediaError> {
+pub(crate) fn guarded<T>(path: &Path, work: impl FnOnce() -> Result<T, MediaError>) -> Result<T, MediaError> {
     catch_unwind(AssertUnwindSafe(work))
         .unwrap_or_else(|_| Err(MediaError::corrupt(path, "the decoder could not make sense of it")))
 }
 
-fn silence_non_finite(samples: &mut [f32]) {
+pub(crate) fn silence_non_finite(samples: &mut [f32]) {
     for sample in samples {
         if !sample.is_finite() {
             *sample = 0.0;

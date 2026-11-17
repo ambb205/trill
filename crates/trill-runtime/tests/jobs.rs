@@ -558,3 +558,61 @@ fn a_recording_that_follows_the_tempo_is_read_and_stretched_by_the_process_that_
     assert!(here.problems.is_empty() && there.problems.is_empty(), "{:?} {:?}", here.problems, there.problems);
     assert_eq!(jobs_done(&runtime), (2, 2));
 }
+
+/// A song with a sampled instrument beside a plugin: the process that
+/// renders it reads the instrument's file and its recordings itself, and
+/// what it makes is what the program makes, the takes it draws at random
+/// and the ones it takes in turn included.
+#[test]
+fn a_sampled_instrument_is_read_by_the_process_that_renders_it_to_the_same_samples() {
+    let folder = tempfile::tempdir().unwrap();
+    let rate = f64::from(SR);
+    // Four recordings that differ: two taken in turn, two drawn by lot.
+    for (name, hertz) in [("turn 1", 220.0), ("turn 2", 233.1), ("lot 1", 329.6), ("lot 2", 349.2)] {
+        let samples: Vec<f32> = (0..(0.5 * rate) as usize)
+            .map(|frame| {
+                let time = frame as f64 / rate;
+                ((std::f64::consts::TAU * hertz * time).sin() * (1.0 - time / 0.5) * 0.5) as f32
+            })
+            .collect();
+        let buffer = trill_core::audio::AudioBuffer { sample_rate: rate, left: samples.clone(), right: samples };
+        let file = folder.path().join("Samples").join(format!("{name}.wav"));
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        trill_media::write_wav(&file, &buffer, trill_media::WavFormat::Float32).unwrap();
+    }
+    let instrument = folder.path().join("Two Ways.sfz");
+    let sfz = "<control> default_path=Samples/\n<global> pitch_keytrack=0 ampeg_release=0.1\n\
+               <group> lokey=40 hikey=47 seq_length=2\n\
+               <region> sample=turn 1.wav seq_position=1\n<region> sample=turn 2.wav seq_position=2\n\
+               <group> lokey=48 hikey=60\n\
+               <region> sample=lot 1.wav hirand=0.5\n<region> sample=lot 2.wav lorand=0.5\n";
+    std::fs::write(&instrument, sfz).unwrap();
+
+    let runtime = apart(Loading::default());
+    let keys = runtime
+        .session
+        .lock()
+        .edit(|project| {
+            part(project, "Bass", BASS, &[40, 43, 45, 47]);
+            let keys = part(project, "Keys", trill_dsp::sampled::URI, &[40, 52, 43, 55, 45, 57, 47, 59]);
+            let device = project.track(keys)?.devices[0].id;
+            let state = trill_dsp::sampled::State::new(instrument.display().to_string());
+            project.device_mut(device)?.state = Some(state.to_bytes());
+            Ok(keys)
+        })
+        .unwrap();
+    runtime.do_jobs_here();
+    let here = rendered(&runtime, &plain()).unwrap();
+    runtime.do_jobs_apart(Jobs { scripted: Some(Loading::default()), ..Jobs::by(program()) }).unwrap();
+    let there = rendered(&runtime, &plain()).unwrap();
+    let again = rendered(&runtime, &plain()).unwrap();
+    assert!(here.problems.is_empty() && there.problems.is_empty(), "{:?} {:?}", here.problems, there.problems);
+    assert!(there.left == here.left && there.right == here.right, "the process played the instrument otherwise");
+    assert!(again.left == here.left, "and the same again");
+    assert_eq!(jobs_done(&runtime), (2, 2));
+    // The instrument is in what was compared: without it the song is another.
+    runtime.do_jobs_here();
+    runtime.session.lock().edit(|project| project.remove_track(keys).map(drop)).unwrap();
+    let without = rendered(&runtime, &plain()).unwrap();
+    assert!(without.left != here.left, "the sampled instrument is heard in the song");
+}

@@ -185,6 +185,72 @@ pub struct KeySound {
     pub stroke: String,
 }
 
+/// One recording of a sampled instrument, as a picture of the instrument
+/// shows it: the keys and the velocities it covers.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct SampledRegion {
+    /// The lowest and the highest key that play it.
+    pub keys: (u8, u8),
+    /// The softest and the hardest velocity that play it.
+    pub velocities: (u8, u8),
+    /// The key that plays it at the pitch it was recorded at.
+    pub root: u8,
+    /// The keyswitch that chooses it, if one does.
+    pub switch: Option<u8>,
+    /// It sounds when a key comes up, not when one goes down.
+    pub release: bool,
+}
+
+/// What a device that plays an instrument made of recordings has loaded,
+/// as the device itself says it: for a window to draw, a list to show and
+/// whoever writes for the instrument to read. It is the instrument's file
+/// that says all of this; nothing of it is kept in a song.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SampledInstrument {
+    pub name: String,
+    /// The instrument's file.
+    pub file: String,
+    /// What it is, in a few sentences for whoever writes for it: its
+    /// size, range, layers and takes, its ways of playing, the controllers
+    /// it listens to, and what its file asks for that is not done.
+    pub about: String,
+    /// The last of those on its own: what the file asks for that the
+    /// device does not do, by name, and what a listener misses. `None` for
+    /// an instrument that is played as its maker meant.
+    pub unsupported: Option<String>,
+    /// What its recordings take on the disk.
+    pub bytes: u64,
+    pub recordings: usize,
+    /// The most layers of loudness a key has, and the most recordings of
+    /// one note at one loudness, taken in turn or at random.
+    pub layers: usize,
+    pub takes: usize,
+    pub regions: Vec<SampledRegion>,
+    /// What a track that plays through it is told of its notes: the range,
+    /// whether the keys are drums, the ways of playing chosen by a key.
+    pub profile: InstrumentProfile,
+}
+
+/// How far a device is with reading what it plays from the disk.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Reading {
+    /// How many of its recordings can be played, and how many it has.
+    pub ready: usize,
+    pub of: usize,
+    /// Notes that did not sound because their recording had not been read
+    /// yet, and notes that were cut short because the rest of it had not
+    /// been read in time, since the program started.
+    pub unready_notes: usize,
+    pub short_notes: usize,
+}
+
+impl Reading {
+    /// Whether anything is still to be read before every note can sound.
+    pub fn is_loading(&self) -> bool {
+        self.ready < self.of
+    }
+}
+
 /// What a drum name comes to on a track.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Drum {

@@ -16,6 +16,14 @@
 //! it would be had the pack been moved since: it names every file in
 //! `<DIR>/Sample Packs/Night Shift`, where there is nothing. That is what
 //! the pictures of the missing-files list are made from.
+//!
+//! The pack also holds two sampled instruments, each an SFZ file with its
+//! recordings in a folder of its own (`Night Shift/Instruments`): keys
+//! with three layers of loudness, a second way of playing and a sound for
+//! a key coming up, and a small drum kit with two takes of every hit. A
+//! third project, `<DIR>/night-keys.trill`, is the song with a track
+//! playing through each: what the pictures of the Sampled Instrument are
+//! made from.
 
 use std::f64::consts::TAU;
 use std::path::{Path, PathBuf};
@@ -153,6 +161,104 @@ fn pad(seconds: f64, chord: &[f64]) -> Vec<f32> {
             .sum();
         voices / chord.len() as f64 * swell * 0.45
     })
+}
+
+/// A struck bar of glass at `frequency`: `bright` is how hard it was hit,
+/// 0..=2, and adds partials.
+fn glass(frequency: f64, seconds: f64, bright: u8) -> Vec<f32> {
+    let partials: &[(f64, f64)] = match bright {
+        0 => &[(1.0, 1.0), (2.0, 0.2)],
+        1 => &[(1.0, 1.0), (2.0, 0.4), (2.76, 0.25), (4.0, 0.12)],
+        _ => &[(1.0, 1.0), (2.0, 0.55), (2.76, 0.45), (4.0, 0.3), (5.4, 0.22), (7.1, 0.12)],
+    };
+    let level = [0.3, 0.5, 0.75][usize::from(bright.min(2))];
+    render(seconds, |time| {
+        let sum: f64 = partials
+            .iter()
+            .map(|(ratio, gain)| gain * (time * frequency * ratio * TAU).sin() * decay(time, seconds / ratio))
+            .sum();
+        sum * level * (time / 0.002).min(1.0)
+    })
+}
+
+/// The hertz of a key: 69 is the A at 440.
+fn hertz(key: u8) -> f64 {
+    440.0 * 2f64.powf((f64::from(key) - 69.0) / 12.0)
+}
+
+/// `"C2"`, `"F#4"`: a key as recordings are named.
+fn key_name(key: u8) -> String {
+    const NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    format!("{}{}", NAMES[usize::from(key % 12)], i32::from(key / 12) - 1)
+}
+
+/// Writes the keys: a recording every half octave from C2 to F#5 at three
+/// strengths, a muted way of playing chosen by a key, and a sound for a
+/// key coming up. Returns the instrument's file as a project names it.
+fn glass_keys(pack: &Pack) -> anyhow::Result<String> {
+    let folder = "Instruments/Glass Keys";
+    let mut text = String::from(
+        "// Glass Keys: synthesized for the pictures of Trill.\n<control> default_path=Samples/\n\
+         <global> ampeg_release=0.4 sw_lokey=24 sw_hikey=25 sw_default=24\n\n<master> sw_last=24 sw_label=Open\n",
+    );
+    let roots: Vec<u8> = (0..8).map(|step| 36 + 6 * step).collect();
+    let layers = [("soft", 1, 60), ("medium", 61, 100), ("hard", 101, 127)];
+    for (bright, (layer, low, high)) in layers.iter().enumerate() {
+        text.push_str(&format!("<group> lovel={low} hivel={high}\n"));
+        for root in &roots {
+            let name = format!("open {layer} {}.wav", key_name(*root));
+            pack.write(&format!("{folder}/Samples/{name}"), glass(hertz(*root), 0.9, bright as u8))?;
+            let (first, last) = ((*root).saturating_sub(2).max(36), if *root == 78 { 84 } else { root + 3 });
+            text.push_str(&format!("<region> sample={name} lokey={first} hikey={last} pitch_keycenter={root}\n"));
+        }
+    }
+    text.push_str("\n<master> sw_last=25 sw_label=Muted\n<group> ampeg_release=0.08\n");
+    for root in [42u8, 54, 66, 78] {
+        let name = format!("muted {}.wav", key_name(root));
+        pack.write(&format!("{folder}/Samples/{name}"), glass(hertz(root), 0.18, 1))?;
+        let (first, last) = (root - 6, if root == 78 { 84 } else { root + 5 });
+        text.push_str(&format!("<region> sample={name} lokey={first} hikey={last} pitch_keycenter={root}\n"));
+    }
+    pack.write(&format!("{folder}/Samples/release.wav"), metal(0.07, 53, 0.25))?;
+    text.push_str("\n<master> trigger=release\n<region> sample=release.wav lokey=36 hikey=84 pitch_keycenter=60\n");
+    std::fs::write(pack.root.join(folder).join("Glass Keys.sfz"), text)?;
+    Ok(format!("{}/{folder}/Glass Keys.sfz", pack.named))
+}
+
+/// Writes the kit: six drums, each soft and hard, each twice so that a
+/// repeated hit is not the same recording. Returns the instrument's file
+/// as a project names it.
+fn tape_kit(pack: &Pack) -> anyhow::Result<String> {
+    let folder = "Instruments/Tape Kit";
+    let mut text = String::from(
+        "// Tape Kit: synthesized for the pictures of Trill.\n<control> default_path=Samples/\n\
+         <global> loop_mode=one_shot\n",
+    );
+    let drums: [(u8, &str); 6] =
+        [(36, "Kick"), (38, "Snare"), (42, "Hihat Closed"), (45, "Tom"), (46, "Hihat Open"), (49, "Crash")];
+    for (key, drum) in drums {
+        text.push_str(&format!("\n<group> key={key} seq_length=2\n"));
+        for (hard, (layer, low, high)) in [("soft", 1, 90), ("hard", 91, 127)].into_iter().enumerate() {
+            for take in 1..=2u32 {
+                let seed = u32::from(key) * 8 + hard as u32 * 2 + take;
+                let level = if hard == 1 { 1.0 } else { 0.55 };
+                let hit: Vec<f32> = match key {
+                    36 => kick(44.0 + f64::from(take), 0.34),
+                    38 => snare(185.0 + 6.0 * f64::from(take), 0.22, seed),
+                    42 => metal(0.05, seed, 0.6),
+                    45 => tom(118.0 + 3.0 * f64::from(take)),
+                    46 => metal(0.36, seed, 0.5),
+                    _ => metal(1.4, seed, 0.5),
+                };
+                let name = format!("{drum} {layer} {take}.wav");
+                let hit = hit.into_iter().map(|sample| sample * level).collect();
+                pack.write(&format!("{folder}/Samples/{name}"), hit)?;
+                text.push_str(&format!("<region> sample={name} lovel={low} hivel={high} seq_position={take}\n"));
+            }
+        }
+    }
+    std::fs::write(pack.root.join(folder).join("Tape Kit.sfz"), text)?;
+    Ok(format!("{}/{folder}/Tape Kit.sfz", pack.named))
 }
 
 struct Pack {
@@ -363,6 +469,41 @@ fn main() -> anyhow::Result<()> {
     let file = Path::new(&folder).join("night-shift.trill");
     std::fs::write(&file, project.to_json())?;
     println!("wrote the pack to {} and the project to {}", pack.root.display(), file.display());
+
+    // The song with a track for each of the pack's sampled instruments.
+    let mut with_keys = project.clone();
+    let plays = |project: &mut Project, name: &str, file: String| -> anyhow::Result<trill_core::TrackId> {
+        let track = project.add_track(name);
+        let device = project.add_device(ChainRef::Track(track), trill_dsp::sampled::URI, "Sampled Instrument", None)?;
+        project.device_mut(device)?.state = Some(trill_dsp::sampled::State::new(file).to_bytes());
+        Ok(track)
+    };
+    let glass_track = plays(&mut with_keys, "Glass", glass_keys(&pack)?)?;
+    let glass_line = with_keys.add_midi_clip(glass_track, "Glass line", 0.0, 16.0)?;
+    let line: Vec<Note> = [(0.0, 57, 70), (1.0, 64, 96), (2.0, 60, 84), (3.0, 67, 110), (4.0, 55, 66), (5.0, 62, 92)]
+        .into_iter()
+        .map(|(start, pitch, velocity)| Note { pitch, start, length: 0.9, velocity })
+        .collect();
+    with_keys.clip_mut(glass_line)?.set_notes(line)?;
+    with_keys.clip_mut(glass_line)?.set_loop_length(Some(8.0))?;
+    let tape_track = plays(&mut with_keys, "Tape", tape_kit(&pack)?)?;
+    let tape_beat = with_keys.add_midi_clip(tape_track, "Tape beat", 0.0, 16.0)?;
+    let beat: Vec<Note> = (0..16u8)
+        .flat_map(|step| {
+            let start = f64::from(step) * 0.5;
+            let hat = Note { pitch: 42, start, length: 0.25, velocity: if step % 2 == 0 { 96 } else { 62 } };
+            let drum = match step % 8 {
+                0 | 5 => Some(Note { pitch: 36, start, length: 0.25, velocity: 112 }),
+                2 | 6 => Some(Note { pitch: 38, start, length: 0.25, velocity: 104 }),
+                _ => None,
+            };
+            [Some(hat), drum].into_iter().flatten()
+        })
+        .collect();
+    with_keys.clip_mut(tape_beat)?.set_notes(beat)?;
+    let keys_file = Path::new(&folder).join("night-keys.trill");
+    std::fs::write(&keys_file, with_keys.to_json())?;
+    println!("and the song with its sampled instruments to {}", keys_file.display());
 
     // The same song as if the pack had been moved since it was saved:
     // every file it names is in a folder where there is nothing.

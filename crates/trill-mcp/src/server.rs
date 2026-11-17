@@ -12,8 +12,8 @@ use crate::requests::*;
 use crate::view::{
     ParamDetail, ParamSpan, PresetSearch, audio_device_json, audio_json, clip_json, controller_json, descriptor_json,
     descriptor_summary_json, device_json, lane_json, midi_input_json, param_state_json, plugin_param_json,
-    presets_json, project_json, round, samples_json, scan_json, sound_json, take_json, target_json, tempo_map_json,
-    track_json, transport_json, warp_name,
+    presets_json_with, project_json, round, samples_json, scan_json, sound_json, take_json, target_json,
+    tempo_map_json, track_json, transport_json, warp_name,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -339,6 +339,59 @@ pub(crate) fn edit<T>(
     session.edit(change).map_err(|error| explain(session.project(), error))
 }
 
+/// Puts the parts of a MIDI file into the song from `at` beats on, each on
+/// a new track with an instrument (`melodic`, or the drum kit for a drum
+/// part) and one clip: one undo step. With `use_tempo` the song takes the
+/// file's tempo and time signature, and every change of them, from there.
+pub(crate) fn import_parts(
+    session: &mut Session,
+    file: &midi_file::MidiFile,
+    at: f64,
+    use_tempo: bool,
+    melodic: &str,
+) -> Result<Vec<Value>, String> {
+    // One undo step for the whole import.
+    session.begin_gesture();
+    let result: Result<Vec<Value>, String> = (|| {
+        let parts = edit(session, |project| {
+            if use_tempo {
+                // Every tempo and time signature of the file, from where it is put.
+                let mut timed = file.clone();
+                timed.tempo = timed.tempo.map(|tempo| tempo.clamp(MIN_TEMPO, MAX_TEMPO));
+                for change in &mut timed.tempo_changes {
+                    change.tempo = change.tempo.clamp(MIN_TEMPO, MAX_TEMPO);
+                }
+                project.take_midi_time(&timed, at)?;
+            }
+            project.import_midi(file, at)
+        })?;
+        let mut out = Vec::new();
+        for part in parts {
+            let uri = if part.drums { "builtin:drumkit" } else { melodic };
+            let device =
+                session.add_device(ChainRef::Track(part.track), uri, None, None).map_err(|error| error.to_string())?;
+            let project = session.project();
+            let clip = project.clip(part.clip).map_err(|e| e.to_string())?;
+            let mut entry = json!({
+                "track_id": part.track,
+                "name": project.track(part.track).map_err(|e| e.to_string())?.name,
+                "instrument_device_id": device,
+                "clip_id": part.clip,
+                "note_count": clip.notes().len(),
+                "length": round(clip.length),
+                "drums": part.drums,
+            });
+            if !clip.controllers().is_empty() {
+                entry["controllers"] = clip.controllers().iter().map(|curve| curve.controller.key()).collect();
+            }
+            out.push(entry);
+        }
+        Ok(out)
+    })();
+    session.end_gesture();
+    result
+}
+
 fn parse_time_signature(text: &str) -> Result<(u8, u8), String> {
     let invalid = || format!("time signature '{text}' should look like \"4/4\" or \"6/8\"");
     let (numerator, denominator) = text.split_once('/').ok_or_else(invalid)?;
@@ -386,6 +439,7 @@ impl TrillServer {
             + Self::story_router()
             + Self::film_router()
             + Self::files_router()
+            + Self::listening_router()
             + Self::wavetable_router()
     }
 
@@ -587,9 +641,12 @@ fn sound_query(request: &SearchSoundsRequest, folder: Option<PathBuf>) -> Result
         Some("midi") => Some(EntryKind::Midi),
         Some("project") => Some(EntryKind::Project),
         Some("preset") => Some(EntryKind::Preset),
+        Some("instrument" | "instruments") => Some(EntryKind::Instrument),
         Some("any" | "all") => None,
         Some(other) => {
-            return Err(format!("kind '{other}' should be \"audio\", \"midi\", \"project\", \"preset\" or \"any\""));
+            return Err(format!(
+                "kind '{other}' should be \"audio\", \"midi\", \"project\", \"preset\", \"instrument\" or \"any\""
+            ));
         }
     };
     let key = match request.key.as_deref() {
@@ -612,6 +669,7 @@ fn sound_query(request: &SearchSoundsRequest, folder: Option<PathBuf>) -> Result
         folder,
         favorites_only: request.favorites_only,
         include_unreadable: false,
+        include_recordings: request.include_recordings,
         limit: Some(request.limit.unwrap_or(DEFAULT_SOUNDS).clamp(1, MAX_SOUNDS)),
     })
 }
@@ -899,13 +957,16 @@ impl TrillServer {
             })?;
             let mut out = json!({ "track_id": track });
             if let Some(uri) = &request.instrument {
-                match session.add_device(ChainRef::Track(track), uri, request.preset.as_deref(), None) {
-                    Ok(device) => {
+                match session.add_given(ChainRef::Track(track), uri, request.preset.as_deref(), None) {
+                    Ok(added) => {
+                        let device = added.device;
                         out["instrument_device_id"] = json!(device);
                         if let Some(preset) = session.device_preset(device) {
                             out["preset"] = json!(preset.name);
                         }
+                        crate::sounds::given_into(&mut out, &session, added.given.as_ref());
                         crate::sounds::preset_note_into(&mut out, &mut session, device);
+                        crate::sounds::instrument_into(&mut out, &session, device);
                     }
                     Err(error) => {
                         session.undo();
@@ -1047,8 +1108,10 @@ impl TrillServer {
             limit: request.preset_limit.unwrap_or(DEFAULT_PRESETS).min(MAX_PRESETS),
         };
         let list = self.presets_of(&request.uri).await;
+        let saved = self.session.lock().saved_presets().clone();
         let mut out = descriptor_json(descriptor);
-        out["presets"] = presets_json(&list, &search);
+        let after = |preset: &trill_core::presets::PresetInfo| trill_engine::sound_after(descriptor, &saved, preset);
+        out["presets"] = presets_json_with(&list, &search, &after);
         // A plugin that lists no presets in one format may list them in
         // another: which of its formats a plugin was built to tell a host
         // of its presets in is its maker's choice.
@@ -1092,9 +1155,10 @@ impl TrillServer {
         let reply = (|| {
             let chain = request.track.map_or(ChainRef::Master, |track| ChainRef::Track(TrackId(track)));
             let before = session.undo_step();
-            let device = session
-                .add_device(chain, &request.uri, request.preset.as_deref(), request.index)
+            let added = session
+                .add_given(chain, &request.uri, request.preset.as_deref(), request.index)
                 .map_err(|error| preset_hint(explain(session.project(), error), &request.uri))?;
+            let device = added.device;
             let rest: Result<(), String> = (|| {
                 if let Some(params) = &request.params {
                     set_params(&mut session, device, params)?;
@@ -1116,7 +1180,9 @@ impl TrillServer {
                 out["preset"] = json!(preset.name);
             }
             sidechain_into(&mut out, session.project(), model);
+            crate::sounds::given_into(&mut out, &session, added.given.as_ref());
             crate::sounds::preset_note_into(&mut out, &mut session, device);
+            crate::sounds::instrument_into(&mut out, &session, device);
             Ok(out)
         })();
         finish(reply)
@@ -1130,7 +1196,8 @@ impl TrillServer {
     /// ranges and choices), `show: "all"` lists every one, a page at a time. `preset_query` and the other
     /// `preset_` arguments search and page the presets, as in describe_device. For the sample players
     /// (builtin:sampler, builtin:drumrack) also the audio files they play, per slot, with what is wrong with
-    /// any that is missing.
+    /// any that is missing. For a sampled instrument (builtin:sampled) also `instrument`: what it has loaded
+    /// and what that is, enough to write for it.
     #[tool(annotations(title = "Get device", read_only_hint = true))]
     async fn get_device(&self, Parameters(request): Parameters<GetDeviceRequest>) -> CallToolResult {
         let id = DeviceId(request.device);
@@ -1171,6 +1238,15 @@ impl TrillServer {
                 }
                 out["samples"] = samples_json(&files);
             }
+            if model.uri == trill_dsp::sampled::URI {
+                crate::sounds::instrument_into(&mut out, &session, id);
+                if out.get("instrument").is_none() {
+                    out["instrument_hint"] = json!(
+                        "No instrument loaded, so the device is silent. update_device `preset` takes the whole path \
+                         of an instrument's .sfz file; search_presets finds the ones in the sample library."
+                    );
+                }
+            }
             crate::wavetable::device_into(&mut out, &session, model);
             if session.device_has_editor(id) {
                 out["editor"] = json!(if session.is_device_editor_open(id) { "open" } else { "closed" });
@@ -1184,9 +1260,14 @@ impl TrillServer {
                     );
                 }
             }
-            if let Some(preset) = &model.preset {
-                out["preset"] = json!(preset.name);
+            match &model.preset {
+                // An effect a sound brought says so, not that it is on a
+                // preset of its own type.
+                Some(preset) if preset.bringer().is_some() => out["from_sound"] = json!(preset.name),
+                Some(preset) => out["preset"] = json!(preset.name),
+                None => {}
             }
+            let after = |preset: &trill_core::presets::PresetInfo| session.sound_after(&model.uri, preset);
             match &searched {
                 Some(list) => {
                     let search = PresetSearch {
@@ -1195,14 +1276,15 @@ impl TrillServer {
                         offset: request.preset_offset.unwrap_or(0),
                         limit: request.preset_limit.unwrap_or(DEFAULT_PRESETS).min(MAX_PRESETS),
                     };
-                    out["presets"] = presets_json(list, &search);
+                    out["presets"] = presets_json_with(list, &search, &after);
                 }
                 // Not asked for: how many there are, and the presets
                 // themselves only where they are few.
                 None => {
                     let list = session.presets(&model.uri);
                     let limit = if list.len() <= UNASKED_PRESETS { UNASKED_PRESETS } else { 0 };
-                    let mut presets = presets_json(&list, &PresetSearch { limit, ..PresetSearch::default() });
+                    let shown = PresetSearch { limit, ..PresetSearch::default() };
+                    let mut presets = presets_json_with(&list, &shown, &after);
                     if let (0, Some(fields)) = (limit, presets.as_object_mut()) {
                         fields.remove("items");
                         fields.remove("kinds");
@@ -1255,10 +1337,10 @@ impl TrillServer {
             let mut loaded = None;
             let result: Result<(), String> = (|| {
                 if let Some(preset) = &request.preset {
-                    let preset = session.load_preset(id, preset).map_err(|error| {
+                    let given = session.give_preset(id, preset).map_err(|error| {
                         preset_hint(explain(session.project(), error), uri.as_deref().unwrap_or_default())
                     })?;
-                    loaded = Some(preset.path());
+                    loaded = Some(given);
                 }
                 if !resolved.is_empty() {
                     session.set_device_params(id, &resolved).map_err(|error| explain(session.project(), error))?;
@@ -1287,8 +1369,10 @@ impl TrillServer {
             if let Some(shown) = shown {
                 out["shown"] = shown;
             }
-            if let Some(preset) = loaded {
-                out["preset"] = json!(preset);
+            let given = loaded.is_some();
+            if let Some(sound) = &loaded {
+                out["preset"] = json!(sound.preset.path());
+                crate::sounds::given_into(&mut out, &session, Some(sound));
             }
             if !settings.is_empty() {
                 out["settings"] = json!(settings.into_iter().collect::<BTreeMap<String, String>>());
@@ -1300,6 +1384,9 @@ impl TrillServer {
                 }
             }
             crate::sounds::preset_note_into(&mut out, &mut session, id);
+            if given {
+                crate::sounds::instrument_into(&mut out, &session, id);
+            }
             Ok(out)
         })();
         finish(reply)
@@ -2584,47 +2671,7 @@ impl TrillServer {
                 return Err(format!("unknown device '{melodic}'; list_devices shows what is available"));
             }
 
-            // One undo step for the whole import.
-            session.begin_gesture();
-            let result: Result<Vec<Value>, String> = (|| {
-                let parts = edit(&mut session, |project| {
-                    if use_tempo {
-                        // Every tempo and time signature of the file, from where it is put.
-                        let mut timed = file.clone();
-                        timed.tempo = timed.tempo.map(|tempo| tempo.clamp(MIN_TEMPO, MAX_TEMPO));
-                        for change in &mut timed.tempo_changes {
-                            change.tempo = change.tempo.clamp(MIN_TEMPO, MAX_TEMPO);
-                        }
-                        project.take_midi_time(&timed, request.at.unwrap_or(0.0))?;
-                    }
-                    project.import_midi(&file, request.at.unwrap_or(0.0))
-                })?;
-                let mut out = Vec::new();
-                for part in parts {
-                    let uri = if part.drums { "builtin:drumkit" } else { melodic };
-                    let device = session
-                        .add_device(ChainRef::Track(part.track), uri, None, None)
-                        .map_err(|error| error.to_string())?;
-                    let project = session.project();
-                    let clip = project.clip(part.clip).map_err(|e| e.to_string())?;
-                    let mut entry = json!({
-                        "track_id": part.track,
-                        "name": project.track(part.track).map_err(|e| e.to_string())?.name,
-                        "instrument_device_id": device,
-                        "clip_id": part.clip,
-                        "note_count": clip.notes().len(),
-                        "length": round(clip.length),
-                        "drums": part.drums,
-                    });
-                    if !clip.controllers().is_empty() {
-                        entry["controllers"] = clip.controllers().iter().map(|curve| curve.controller.key()).collect();
-                    }
-                    out.push(entry);
-                }
-                Ok(out)
-            })();
-            session.end_gesture();
-            let parts = result?;
+            let parts = import_parts(&mut session, &file, request.at.unwrap_or(0.0), use_tempo, melodic)?;
             let mut out = json!({ "tracks": parts, "file_tempo": file.tempo, "tempo": session.project().tempo });
             let changes = file.tempo_changes.len() + file.meter_changes.len();
             if changes > 0 {
@@ -3263,8 +3310,9 @@ impl ServerHandler for TrillServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
                 crate::sounds::INSTRUCTIONS,
+                crate::listening::INSTRUCTIONS,
                 crate::wavetable::INSTRUCTIONS,
                 crate::files::INSTRUCTIONS,
                 crate::music::INSTRUCTIONS,

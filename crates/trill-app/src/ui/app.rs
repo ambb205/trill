@@ -19,8 +19,8 @@ use super::state::{
     AudioSummary, BrowserState, BrowserTab, Cx, FocusArea, LaneOwner, StoryAsk, Tool, UiState, lane_owner,
 };
 use super::{
-    UiOptions, arrangement, automation, browser, controller_lane, detail, dragging, piano_roll, recording, status_bar,
-    top_bar,
+    UiOptions, arrangement, automation, browser, controller_lane, detail, dragging, piano_roll, recording,
+    sound_presets, status_bar, top_bar,
 };
 use eframe::egui;
 use parking_lot::Mutex;
@@ -328,6 +328,9 @@ impl TrillApp {
                 // picture: how long ago a device was made is not part of
                 // what the window looks like.)
                 self.live.loading = if self.options.screenshot.is_some() { Vec::new() } else { session.loading() };
+                // How far the sampled instruments on show are with reading
+                // their recordings. (Not in a picture, for the same reason.)
+                self.live.update_reading(&self.snapshot, &session, self.options.screenshot.is_none());
                 // The session's chores (a take written into the project, a
                 // lost audio device replaced) are the runtime's
                 // housekeeping thread's to do: looking for another device
@@ -449,6 +452,14 @@ impl TrillApp {
                     self.state.focus = FocusArea::Arrangement;
                 }
                 Report::Dropped(Dropped::Sample { device, .. }) => self.state.selected_device = Some(device),
+                Report::Dropped(Dropped::Instrument { device, track, .. }) => {
+                    // The track it is on now, with the device that plays
+                    // it: the Devices tab then shows what was dropped.
+                    if let Some(track) = track {
+                        self.state.select_track(track);
+                    }
+                    self.state.selected_device = Some(device);
+                }
                 Report::Dropped(Dropped::Pads { device, notes }) => {
                     self.state.selected_device = Some(device);
                     if let Some(note) = notes.last() {
@@ -898,6 +909,7 @@ impl TrillApp {
         self.stage.closed(self.graphics.as_ref());
         let mut cx = self.cx();
         dragging::begin(&ctx, &mut cx);
+        sound_presets::begin(&ctx, &mut cx);
 
         // Panels are claimed from the outside in: the bars, the browser
         // down the left, the detail panel under what is left, and the
@@ -959,6 +971,7 @@ impl TrillApp {
         egui::CentralPanel::no_frame().show(ui, |ui| arrangement::show(ui, &mut cx));
 
         dragging::end(&ctx, &mut cx);
+        sound_presets::end(&ctx, &mut cx);
         files::confirm_modal(&ctx, &mut cx);
         recovery::modal(&ctx, &mut cx);
         missing::modal(&ctx, &mut cx);
@@ -1315,7 +1328,7 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
                 audio_settings::toggle(cx);
             } else if cx.filming.is_open() {
                 filming::close(cx);
-            } else if dragging::cancel(cx) {
+            } else if dragging::cancel(cx) || sound_presets::cancel(cx) {
                 // The sound in the air was put down.
             } else if cx.sounds.preview.is_playing() || cx.sounds.preview.loading.is_some() {
                 // A sound being auditioned is the first thing Escape ends.

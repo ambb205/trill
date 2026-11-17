@@ -41,6 +41,10 @@ pub struct Query {
     pub favorites_only: bool,
     /// Also list audio files that cannot be decoded.
     pub include_unreadable: bool,
+    /// Also list the recordings of sampled instruments: the hundreds of
+    /// files that are the notes of one, which are otherwise left out so
+    /// that a search for a sound finds sounds.
+    pub include_recordings: bool,
     /// The most results wanted; `None` for all of them. A list on screen
     /// shows a few hundred rows, and asking for no more keeps searches that
     /// match everything as quick as those that match little.
@@ -178,6 +182,7 @@ pub(crate) fn search(index: &Index, query: &Query, favorites: &[EntryId]) -> (Ve
     let seconds = query.seconds.as_ref().map(|range| *range.start() as f32..=*range.end() as f32);
     let passes = |facts: &Facts| {
         (query.include_unreadable || !facts.unreadable)
+            && (query.include_recordings || !facts.part)
             && kind.is_none_or(|kind| facts.kind == kind)
             && facts.tags & wanted_tags == wanted_tags
             && key.is_none_or(|key| facts.key == key)

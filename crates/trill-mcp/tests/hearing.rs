@@ -1851,3 +1851,115 @@ async fn a_stretch_of_a_song_rendered_alone_is_the_stretch_as_the_whole_song_has
     }
     eprintln!("SAID, and not asserted: the stretch alone leaves of the song's: {}.", said.join("; "));
 }
+
+/// One track of the song rendered alone to a file, and read back: its
+/// left channel.
+async fn part_rendered(client: &Client, folder: &Path, name: &str, track: u64) -> Vec<f32> {
+    let wav = folder.join(format!("{name}.wav"));
+    let begun = Instant::now();
+    let arguments =
+        json!({ "path": wav.display().to_string(), "tracks": [track], "start": 0, "end": 8, "max_tail_seconds": 2 });
+    let report = ok(client, "render", arguments).await;
+    let audio = trill_media::decode(&wav).unwrap();
+    eprintln!("  {name} in {:.1?}: {:.2} LUFS", begun.elapsed(), report["loudness_lufs"].as_f64().unwrap_or(f64::NAN));
+    std::fs::remove_file(&wav).unwrap();
+    audio.left
+}
+
+/// A guitar tone is two plugins: the guitar and its amplifier. With the
+/// installed Ample Metal Hellrazer through the installed Archetype Tim
+/// Henson X, each on what was set in it (the guitar's takes in turn, the
+/// amplifier on one of its maker's presets): the track's sound is saved
+/// as one thing, a new song is begun, a track of it is given the sound by
+/// its name, and the same riff is rendered in both. What the second song
+/// plays is what the first did, as nearly as two renders of the first are
+/// the same, which is said; and it is nothing like the guitar without the
+/// amplifier. Nothing of either maker's is kept anywhere but in the
+/// test's own temporary folder.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Ample Metal Hellrazer and Archetype Tim Henson X (VST3) installed; run with `cargo test -p trill-mcp --test hearing a_guitar_through_its_amplifier -- --include-ignored --nocapture`"]
+async fn a_guitar_through_its_amplifier_is_saved_as_a_sound_and_is_the_same_in_another_song() {
+    const GUITAR: &str = "vst3:ABCDEF019182FAEB41707364416D6872";
+    let Some((fixture, folder)) = connect_with_plugins(AMPLIFIER).await else { return };
+    if installed(GUITAR).is_none() {
+        return;
+    }
+    let client = &fixture.client;
+    // Two pitches: a line on one hides what a sampled guitar does with
+    // its takes.
+    let riff: Vec<Value> =
+        (0..16).map(|index| json!([if index % 2 == 0 { 45 } else { 52 }, f64::from(index) * 0.5, 0.45, 104])).collect();
+
+    // The first song.
+    ok(client, "set_project", json!({ "tempo": 156, "name": "First" })).await;
+    let made = ok(client, "create_track", json!({ "name": "Guitar", "instrument": GUITAR })).await;
+    let (track, guitar) = (made["track_id"].as_u64().unwrap(), made["instrument_device_id"].as_u64().unwrap());
+    // Its takes in turn and no noise drawn at random, so that a render of
+    // it can be the same twice (the profile Trill ships of it says so).
+    let in_turn = json!({ "Cycle Mode Switch": 1, "M-Fret Sound": 0 });
+    ok(client, "update_device", json!({ "device": guitar, "settings": in_turn })).await;
+    // The amplifier, on one of its maker's presets where this machine
+    // has it, and as it comes where it has not.
+    let on_preset = json!({ "track": track, "uri": AMPLIFIER, "preset": "80s Arch Lead" });
+    let amp = match call(client, "add_device", on_preset).await {
+        Ok(amp) => amp,
+        Err(why) => {
+            eprintln!("the amplifier as it comes: {why}");
+            ok(client, "add_device", json!({ "track": track, "uri": AMPLIFIER })).await
+        }
+    };
+    eprintln!("the amplifier: {amp}");
+    clip(client, track, 0.0, 8.0, json!(riff)).await;
+    let there = part_rendered(client, folder.path(), "the first song", track).await;
+    let again = part_rendered(client, folder.path(), "the first song again", track).await;
+    let allowed = null_db(&there, &again);
+
+    // Kept as one thing, in the test's own folder.
+    let arguments =
+        json!({ "track": track, "name": "Hellrazer Henson", "description": "a riff tone", "tags": ["guitar"] });
+    let saved = ok(client, "save_sound", arguments).await;
+    eprintln!("saved: {saved}");
+    assert_eq!((saved["saved"].as_str(), saved["instrument"].as_str()), (Some("Saved/Hellrazer Henson"), Some(GUITAR)));
+    let devices = strings(&saved["devices"]);
+    assert_eq!(devices.len(), 2, "{saved}");
+    assert_eq!(Some(devices[1].as_str()), amp["name"].as_str(), "{saved}");
+    let file = std::path::PathBuf::from(saved["file"].as_str().unwrap());
+    assert!(file.starts_with(folder.path()), "kept in the test's own folder: {}", file.display());
+    let found = ok(client, "search_presets", json!({ "query": "hellrazer henson" })).await;
+    assert_eq!(found["items"][0]["with"], json!([devices[1]]), "{found}");
+
+    // Another song: a track is given the sound by its name.
+    ok(client, "new_project", json!({})).await;
+    ok(client, "set_project", json!({ "tempo": 156, "name": "Second" })).await;
+    let arguments = json!({ "name": "Guitar again", "instrument": GUITAR, "preset": "Hellrazer Henson" });
+    let given = ok(client, "create_track", arguments).await;
+    eprintln!("given: {given}");
+    let second = given["track_id"].as_u64().unwrap();
+    assert_eq!(given["preset"], "Hellrazer Henson");
+    assert_eq!(given["sound"]["made"][0]["name"].as_str(), Some(devices[1].as_str()), "{given}");
+    assert!(given["sound"].get("without").is_none(), "{given}");
+    clip(client, second, 0.0, 8.0, json!(riff)).await;
+    let here = part_rendered(client, folder.path(), "the second song", second).await;
+    let same = null_db(&there, &here);
+
+    // Without the amplifier it is another sound altogether.
+    let amp_here = given["sound"]["made"][0]["device_id"].as_u64().unwrap();
+    ok(client, "update_device", json!({ "device": amp_here, "enabled": false })).await;
+    let bare = part_rendered(client, folder.path(), "the second song without its amplifier", second).await;
+    let without = null_db(&here, &bare);
+
+    eprintln!(
+        "taken from the first song's render: the first song again leaves {allowed:.1} dB, the second song {same:.1} dB; \
+         the second song without its amplifier, taken from the second song, leaves {without:.1} dB"
+    );
+    assert!(peak_of(&there) > 0.01 && peak_of(&here) > 0.01, "both sound");
+    assert!(without > -20.0, "the amplifier is heard: {without:.1} dB");
+    // The same within what the plugins allow: as near as the first song is
+    // to itself, and in any case 60 dB under the sound.
+    assert!(same < -60.0 && same <= allowed + 6.0, "the second song {same:.1} dB, the first again {allowed:.1} dB");
+}
+
+/// The highest sample of `audio`.
+fn peak_of(audio: &[f32]) -> f32 {
+    audio.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()))
+}

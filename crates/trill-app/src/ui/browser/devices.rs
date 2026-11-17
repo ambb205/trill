@@ -3,10 +3,22 @@
 //!
 //! Double-clicking a device adds it to the chain the Devices tab shows.
 //! Clicking a preset applies it to the selected device.
+//!
+//! After the built-in devices come the sounds that are more than one
+//! device: an instrument and the effects after it, saved from a track or
+//! brought by a built-in instrument. Double-clicking one makes it the sound of the
+//! track that is shown; dragging it to a track does the same there, and
+//! below the tracks makes a track of its own.
+//!
+//! The library's sampled instruments are listed with the instruments: one
+//! row for each, whatever number of recordings it is made of. One is
+//! dragged onto a track, or double-clicked, as a device is.
 
 use super::{EDGE, ROW, SEARCH_BLOCK, SEARCH_HEIGHT};
+use crate::ui::sound_presets::{self, Listed, Target};
+use crate::ui::sounds::{DropTarget, InstrumentRow};
 use crate::ui::state::Cx;
-use crate::ui::{arrangement, devices, widgets};
+use crate::ui::{arrangement, devices, dragging, widgets};
 use eframe::egui::{self, Align2, Rect, Role, Sense, Ui, WidgetInfo, pos2, vec2};
 use trill_core::ChainRef;
 use trill_core::device::{BUILTIN_SCHEME, DeviceCategory, DeviceDescriptor, split_uri};
@@ -102,8 +114,13 @@ fn section(ui: &mut Ui, cx: &Cx, title: &str) {
 
 /// One row of a list. `selected` marks the current choice.
 fn row(ui: &mut Ui, cx: &Cx, name: &str, badge: &str, selected: bool) -> egui::Response {
+    row_sensing(ui, cx, name, badge, selected, Sense::click())
+}
+
+/// A row that can be dragged out of the list as well.
+fn row_sensing(ui: &mut Ui, cx: &Cx, name: &str, badge: &str, selected: bool, sense: Sense) -> egui::Response {
     let theme = cx.theme;
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), sense);
     response.widget_info(|| WidgetInfo::selected(Role::Button, true, selected, name));
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
@@ -125,6 +142,82 @@ fn row(ui: &mut Ui, cx: &Cx, name: &str, badge: &str, selected: bool) -> egui::R
     response
 }
 
+/// The longest name of an instrument a sound's row says in full.
+const SOUND_DEVICE: usize = 12;
+
+/// What a sound's row says beside its name: its instrument, and how many
+/// effects come with it.
+fn sound_badge(sound: &Listed) -> String {
+    let device = match sound.device.chars().count() > SOUND_DEVICE {
+        true => format!("{}\u{2026}", sound.device.chars().take(SOUND_DEVICE - 1).collect::<String>().trim_end()),
+        false => sound.device.clone(),
+    };
+    match sound.after.len() {
+        0 => device.to_uppercase(),
+        count => format!("{} +{count}", device.to_uppercase()),
+    }
+}
+
+/// One sound: its name, and what it is made of. It can be carried off.
+fn sound_row(ui: &mut Ui, cx: &Cx, sound: &Listed) -> egui::Response {
+    let theme = cx.theme;
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click_and_drag());
+    let label = format!("Sound {}", sound.name);
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let lit = response.hovered() || response.dragged();
+        if lit {
+            painter.rect_filled(rect, 0.0, theme.hover);
+        }
+        let mut content = rect.shrink2(vec2(EDGE, 0.0));
+        let quiet = if lit { theme.ink_dim } else { theme.ink_faint };
+        let badge = sound_badge(sound);
+        let width = text::paint(painter, content, Align2::RIGHT_CENTER, theme.text.micro, &badge, quiet);
+        content.max.x -= width + 6.0;
+        let color = if lit { theme.ink } else { theme.ink_dim };
+        text::paint_name(painter, content, Align2::LEFT_CENTER, theme.text.body, &sound.name, color);
+    }
+    response
+}
+
+/// The sounds that are an instrument and the effects after it.
+fn sound_list(ui: &mut Ui, cx: &mut Cx) {
+    let query = cx.state.browser.search.clone();
+    let sounds: Vec<Listed> = sound_presets::listed(cx)
+        .into_iter()
+        .filter(|sound| matches(&sound.name, &query) || matches(&sound.device, &query))
+        .collect();
+    if sounds.is_empty() {
+        return;
+    }
+    let target = match cx.state.shown_chain() {
+        ChainRef::Track(track) => Target::Track(track),
+        ChainRef::Master => Target::NewTrack,
+    };
+    let onto = match target {
+        Target::Track(track) => {
+            let name = cx.snap.track(track).map_or_else(|| "the track".to_owned(), |track| track.name.clone());
+            format!("double-click to make it the sound of {name}")
+        }
+        Target::NewTrack => "double-click for a new track with it".to_owned(),
+    };
+    section(ui, cx, "Sounds");
+    for sound in &sounds {
+        let response = sound_row(ui, cx, sound);
+        cx.hint(&response, format!("{} \u{00B7} {onto}, or drag it to a track", sound.made_of()));
+        if response.drag_started() {
+            sound_presets::start(cx, sound);
+        }
+        if widgets::activated(ui, &response) {
+            sound_presets::give(cx, &sound.uri, &sound.id, &sound.name, target);
+        }
+        if !sound.description.is_empty() && cx.state.preset_drag.is_none() {
+            response.on_hover_text(&sound.description);
+        }
+    }
+}
+
 /// Instruments, effects and plugins.
 fn device_lists(ui: &mut Ui, cx: &mut Cx) {
     let chain = cx.state.shown_chain();
@@ -141,6 +234,11 @@ fn device_lists(ui: &mut Ui, cx: &mut Cx) {
     let query = cx.state.browser.search.clone();
 
     for (which, title) in Shelf::ALL {
+        // The sounds follow what is built in, ahead of the plugins: those
+        // may be a long list.
+        if which == Shelf::Plugins {
+            sound_list(ui, cx);
+        }
         let found = shelf(descriptors, which, &query);
         if found.is_empty() {
             continue;
@@ -169,6 +267,53 @@ fn device_lists(ui: &mut Ui, cx: &mut Cx) {
                 response.on_hover_text(&descriptor.description);
             }
         }
+        if which == Shelf::Instruments {
+            sampled_instruments(ui, cx, chain, &target, &query);
+        }
+    }
+}
+
+/// The library's sampled instruments, under the instruments: each a row
+/// that is dragged to a track or double-clicked.
+fn sampled_instruments(ui: &mut Ui, cx: &mut Cx, chain: ChainRef, target: &str, query: &str) {
+    let all = cx.sounds.instruments();
+    let found: Vec<&InstrumentRow> = all.iter().filter(|row| matches(&row.name, query)).collect();
+    if found.is_empty() {
+        return;
+    }
+    section(ui, cx, "Sampled instruments");
+    // The one the selected device plays, if it plays one.
+    let playing = cx.state.selected_device.and_then(|device| cx.snap.instruments.get(&device));
+    // (Spelled as the library spells its files: a song may name the
+    // instrument from where the program was started.)
+    let playing = playing.and_then(|shown| shown.said.as_ref()).map(|said| std::path::PathBuf::from(&said.file));
+    let playing = playing.map(|file| std::path::absolute(&file).unwrap_or(file));
+    for instrument in found {
+        let selected = playing.as_deref() == Some(instrument.path.as_path());
+        let response = row_sensing(ui, cx, &instrument.name, &instrument.size, selected, Sense::click_and_drag());
+        let action = match chain {
+            ChainRef::Master => format!("Double-click for a new track that plays {}", instrument.name),
+            ChainRef::Track(_) => format!("Double-click to make {} the instrument of {target}", instrument.name),
+        };
+        cx.hint(&response, format!("{} \u{00B7} {action} \u{00B7} or drag it to a track", instrument.about));
+        if response.drag_started() {
+            dragging::start(cx, vec![instrument.path.clone()], None, None, trill_library::Tags::EMPTY);
+        }
+        if widgets::activated(ui, &response) {
+            let place = match chain {
+                ChainRef::Track(track) => DropTarget::TrackInstrument { track },
+                ChainRef::Master => {
+                    DropTarget::NewInstrument { color: dragging::new_track_colors(cx, 1).first().copied() }
+                }
+            };
+            cx.sounds.drop_files(vec![instrument.path.clone()], place, instrument.name.clone(), 0.0);
+        }
+        response.on_hover_ui(|ui| {
+            ui.set_max_width(420.0);
+            ui.label(egui::RichText::new(&instrument.name).color(cx.theme.ink));
+            ui.label(egui::RichText::new(&instrument.about).color(cx.theme.ink_dim));
+            ui.label(egui::RichText::new(instrument.path.display().to_string()).color(cx.theme.ink_faint));
+        });
     }
 }
 
@@ -210,7 +355,7 @@ fn preset_list(ui: &mut Ui, cx: &mut Cx) {
     }
 
     section(ui, cx, &format!("Presets \u{00B7} {}", descriptor.name));
-    let current = devices::current_preset(device, descriptor);
+    let current = devices::current_own(cx, device, descriptor);
     for preset in presets {
         let response = row(ui, cx, &preset.name, "", current == Some(preset.name.as_str()));
         cx.hint(

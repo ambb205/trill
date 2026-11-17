@@ -121,6 +121,51 @@ pub fn write_wav(path: &Path, sample_rate: f64, samples: &[f32]) -> String {
     path.display().to_string()
 }
 
+/// Writes a sampled instrument into `folder`: `sfz` as `<name>.sfz`, and
+/// each of `recordings` (where it is from the folder, its sample rate,
+/// its samples) as a mono WAV file. Returns the path of the instrument's
+/// file, which is what a device is given as its preset.
+pub fn write_instrument(folder: &Path, name: &str, sfz: &str, recordings: &[(&str, f64, Vec<f32>)]) -> String {
+    for (file, sample_rate, samples) in recordings {
+        let path = folder.join(file);
+        std::fs::create_dir_all(path.parent().expect("a file in a folder")).unwrap();
+        write_wav(&path, *sample_rate, samples);
+    }
+    let path = folder.join(format!("{name}.sfz"));
+    std::fs::write(&path, sfz).unwrap();
+    path.display().to_string()
+}
+
+/// Says in the WAV file at `path` that it loops from frame `start` to
+/// frame `end`, as an instrument's recordings do: in a `smpl` chunk after
+/// the audio.
+pub fn write_loop(path: &Path, start: u32, end: u32) {
+    let mut bytes = std::fs::read(path).unwrap();
+    let mut chunk: Vec<u8> = Vec::new();
+    for field in [0u32, 0, 20_833, 60, 0, 0, 0, 1, 0, 0, 0, start, end, 0, 0] {
+        chunk.extend(field.to_le_bytes());
+    }
+    bytes.extend(b"smpl");
+    bytes.extend((chunk.len() as u32).to_le_bytes());
+    bytes.extend(&chunk);
+    let size = (bytes.len() - 8) as u32;
+    bytes[4..8].copy_from_slice(&size.to_le_bytes());
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// The level of each frequency in the first `size` frames of `samples`, in
+/// dB where a sine of full scale is 0: one figure a bin, from 0 Hz to half
+/// the sample rate. `size` is a power of two.
+pub fn spectrum_db(samples: &[f32], size: usize) -> Vec<f32> {
+    let mut fft = trill_dsp::fft::RealFft::new(size);
+    let window = trill_dsp::fft::hann(size);
+    let windowed: Vec<f32> = samples[..size].iter().zip(&window).map(|(sample, weight)| sample * weight).collect();
+    let (mut re, mut im) = (vec![0.0f32; fft.bins()], vec![0.0f32; fft.bins()]);
+    fft.forward(&windowed, &mut re, &mut im);
+    let scale = 2.0 / window.iter().sum::<f32>();
+    re.iter().zip(&im).map(|(re, im)| 20.0 * ((re * re + im * im).sqrt() * scale).max(1e-12).log10()).collect()
+}
+
 /// Converts `source` to `target` with ffmpeg; `false` if ffmpeg is missing
 /// or cannot make that format, in which case the caller skips its check.
 pub fn ffmpeg(source: &Path, target: &Path, options: &[&str]) -> bool {

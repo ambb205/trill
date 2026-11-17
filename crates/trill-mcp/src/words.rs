@@ -279,6 +279,11 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
             let name = call.text("name").map(quoted).unwrap_or_default();
             about("Saving", "Saved", format!("the sound of {device} as the preset {name}").trim_end())
         }
+        "save_sound" => {
+            let track = call.track("track").unwrap_or_else(|| "a track".to_owned());
+            let name = call.text("name").map(quoted).unwrap_or_default();
+            about("Saving", "Saved", format!("the sound of {track} as {name}").trim_end_matches(" as ").trim_end())
+        }
         "show_device_editor" => {
             let device = call.device("device").unwrap_or_else(|| "a device".to_owned());
             match call.input.get("open").and_then(Value::as_bool) {
@@ -513,6 +518,26 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
             _ => about("Checking", "Checked", "the sound library"),
         },
         "missing_files" => about("Looking for", "Looked for", "the song's missing files"),
+        "listen" | "transcribe" => {
+            // The sound by its file's name, or the clip that plays it by its own.
+            let sound = match (call.text("path"), call.clip("clip")) {
+                (Some(path), _) => quoted(file_name(path)),
+                (None, Some(clip)) => clip,
+                (None, None) => "a sound".to_owned(),
+            };
+            if tool == "listen" {
+                about("Listening to", "Listened to", &sound)
+            } else {
+                let part = match call.text("part") {
+                    Some("bass") => "the bass line",
+                    Some("melody") => "the melody",
+                    Some("groove") => "the drum groove",
+                    Some("chords") => "the chords",
+                    _ => "a part",
+                };
+                about("Writing", "Wrote", &format!("{part} of {sound} as MIDI"))
+            }
+        }
         "relink_files" => match crate::files::one_file(input) {
             Some(file) => about("Relinking", "Relinked", &quoted(file)),
             None => about("Relinking", "Relinked", "the song's missing files"),
@@ -583,7 +608,7 @@ pub fn of_call(tool: &str, input: &Value, answer: &str) -> Option<Place> {
     let answered = |key: &str| answer.get(key).and_then(Value::as_u64);
     match tool {
         "create_track" => answered("track_id").map(Place::track),
-        "update_track" | "set_instrument_profile" => given("track").map(Place::track),
+        "update_track" | "set_instrument_profile" | "save_sound" => given("track").map(Place::track),
 
         "add_device" => answered("device_id").map(Place::device),
         "update_device" | "set_sample" | "set_wavetable" | "show_device_editor" | "save_preset" => {
@@ -607,7 +632,7 @@ pub fn of_call(tool: &str, input: &Value, answer: &str) -> Option<Place> {
             let copies = answer.get("copies").and_then(Value::as_array);
             Place::clips(copies.into_iter().flatten().filter_map(|copy| copy.get("clip_id")?.as_u64()))
         }
-        "import_midi" => {
+        "import_midi" | "transcribe" => {
             let parts = answer.get("tracks").and_then(Value::as_array);
             Place::clips(parts.into_iter().flatten().filter_map(|part| part.get("clip_id")?.as_u64()))
         }
@@ -722,6 +747,26 @@ pub fn heard(tool: &str, answer: &str) -> Option<String> {
                 }
                 (false, _) => format!("{drums} drums by name"),
             })
+        }
+        "listen" => {
+            // What a musician would say first: the tempo, the key, the form.
+            let mut said = Vec::new();
+            if let Some(bpm) = answer.get("tempo").and_then(|tempo| tempo.get("bpm")).and_then(number) {
+                said.push(format!("{bpm} bpm"));
+            }
+            if let Some(key) = answer.get("key").and_then(|key| key.get("name")).and_then(Value::as_str) {
+                said.push(key.to_owned());
+            }
+            match answer.get("found").and_then(|found| found.get("parts")).and_then(Value::as_u64) {
+                Some(1) => said.push("1 part".to_owned()),
+                Some(parts) if parts > 1 => said.push(format!("{parts} parts")),
+                _ => {}
+            }
+            (!said.is_empty()).then(|| said.join(", "))
+        }
+        "transcribe" => {
+            let notes = answer.get("notes").and_then(Value::as_u64)?;
+            Some(if notes == 1 { "1 note".to_owned() } else { format!("{notes} notes") })
         }
         "probe" => {
             let played = answer.get("played").and_then(Value::as_u64)?;
@@ -859,6 +904,12 @@ mod tests {
             did("update_device", json!({ "device": device, "enabled": false }), p),
             "Bypassed \u{201C}Poly Synth\u{201D}"
         );
+        // A track's sound, kept as one thing.
+        assert_eq!(
+            did("save_sound", json!({ "track": track, "name": "Dub Bass" }), p),
+            "Saved the sound of \u{201C}Bass\u{201D} as \u{201C}Dub Bass\u{201D}"
+        );
+        assert_eq!(did("save_sound", json!({ "track": track }), p), "Saved the sound of \u{201C}Bass\u{201D}");
         assert_eq!(
             did("create_clip", json!({ "track": track, "start": 0, "length": 8, "name": "Chorus" }), p),
             "Added the clip \u{201C}Chorus\u{201D} to \u{201C}Bass\u{201D}"
@@ -930,6 +981,15 @@ mod tests {
         assert_eq!(did("probe", json!({ "device": "builtin:polysynth" }), p), "Tried out polysynth");
         assert_eq!(did("import_midi", json!({ "path": "D:/midi/riff.mid" }), p), "Imported \u{201C}riff.mid\u{201D}");
         assert_eq!(did("export_midi", json!({ "path": "out.mid" }), p), "Exported the song as \u{201C}out.mid\u{201D}");
+        assert_eq!(
+            did("listen", json!({ "path": "D:/refs/Swansong.flac" }), p),
+            "Listened to \u{201C}Swansong.flac\u{201D}"
+        );
+        assert_eq!(did("listen", json!({}), p), "Listened to a sound");
+        assert_eq!(
+            did("transcribe", json!({ "path": "D:/loops/break.wav", "part": "groove" }), p),
+            "Wrote the drum groove of \u{201C}break.wav\u{201D} as MIDI"
+        );
         assert_eq!(
             did("recover_project", json!({ "action": "open", "index": 0 }), p),
             "Brought back a project that was not saved"
@@ -1071,6 +1131,7 @@ mod tests {
         // What was changed is named in the arguments.
         assert_eq!(of("update_track", json!({ "track": 4, "volume_db": -6 }), json!({})), Some(Place::track(4)));
         assert_eq!(of("update_device", json!({ "device": 5, "params": {} }), json!({})), Some(Place::device(5)));
+        assert_eq!(of("save_sound", json!({ "track": 4, "name": "Tone" }), json!({})), Some(Place::track(4)));
         assert_eq!(of("set_sample", json!({ "device": 5, "path": "k.wav" }), json!({})), Some(Place::device(5)));
         assert_eq!(of("set_wavetable", json!({ "device": 5, "table": "Acid" }), json!({})), Some(Place::device(5)));
         assert_eq!(of("describe_wavetable", json!({ "device": 5 }), json!({})), None);
@@ -1172,6 +1233,10 @@ mod tests {
         assert_eq!(heard("probe", &silent.to_string()).as_deref(), Some("1 note played, none sounding"));
         // A call that does not listen, and answers that say nothing.
         assert_eq!(heard("create_track", "{\"track_id\":3}"), None);
+        let listened = json!({ "tempo": { "bpm": 101.02 }, "key": { "name": "Dm" }, "found": { "parts": 11 } });
+        assert_eq!(heard("listen", &listened.to_string()).as_deref(), Some("101.0 bpm, Dm, 11 parts"));
+        assert_eq!(heard("listen", &json!({ "tempo": null, "found": { "parts": 0 } }).to_string()), None);
+        assert_eq!(heard("transcribe", &json!({ "notes": 64 }).to_string()).as_deref(), Some("64 notes"));
         assert_eq!(heard("measure", "it went wrong"), None);
         assert_eq!(heard("measure", "{}"), None);
     }

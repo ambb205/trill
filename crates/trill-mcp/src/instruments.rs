@@ -659,9 +659,10 @@ pub(crate) fn describe_track(session: &Session, track: TrackId, out: &mut Value)
 pub(crate) fn profile_warnings(session: &Session, clip: ClipId) -> Vec<String> {
     let project = session.project();
     let (Ok(clip), Ok(track)) = (project.clip(clip), project.clip_track(clip)) else { return Vec::new() };
-    let Ok(found) = project.track(track) else { return Vec::new() };
+    // What the notes mean is the session's to say: the track's own words, and under them what an
+    // instrument that a file describes says of itself.
     let notes = clip.notes();
-    note_warnings(&found.profile, session.plays_drums(track), notes, notes.len())
+    note_warnings(&session.profile_of(track), session.plays_drums(track), notes, notes.len())
 }
 
 /// The warnings for `notes`, which were just written to a track with
@@ -798,7 +799,20 @@ fn track_reply(session: &Session, id: TrackId, profile: &InstrumentProfile) -> V
              this track follow (set that parameter to change it)"
         ));
     }
-    if !drums && !profile.articulations.is_empty() {
+    // A sampled instrument says what its keys do in its own file: its range, whether they are drums, the
+    // ways of playing a key chooses. The track follows that wherever it says nothing itself.
+    let sampled = session.sampled_of(id);
+    if let Some(said) = &sampled {
+        out["instrument_says"] = json!({
+            "name": said.name,
+            "profile": profile_json(&said.profile),
+            "note": "Read from the instrument's file, now: none of it is kept in the song, and it changes with the \
+                     instrument that is loaded. What the track says itself (`profile`) is laid over it.",
+        });
+    }
+    let asked_by_name = !profile.articulations.is_empty()
+        || sampled.as_ref().is_some_and(|said| !said.profile.articulations.is_empty());
+    if !drums && asked_by_name {
         out["ask_by_name"] = json!(
             "`articulation` on write_chords, write_bass, write_arpeggio and write_melody; a mark on one note of a \
              melody (\"E3:0.5!palm_mute\"); `how` on a note of create_clip, add_notes and set_notes ([\"E2\", 0, \
@@ -815,7 +829,11 @@ fn track_reply(session: &Session, id: TrackId, profile: &InstrumentProfile) -> V
             let lacking: Vec<&str> =
                 USUAL_DRUMS.iter().copied().filter(|name| matches!(whole.find_drum(name), Drum::Lacking(_))).collect();
             out["kit"] = json!({
-                "read_from": "the plugin's own state, now: it is the kit that is loaded, and changes with it",
+                "read_from": if sampled.is_some() {
+                    "the instrument's file, now: it is the kit that is loaded, and changes with it"
+                } else {
+                    "the plugin's own state, now: it is the kit that is loaded, and changes with it"
+                },
                 "what": whole.notes,
                 "has_no": lacking,
                 "note": "These names are the whole kit: a drum that is not in `drum_map` is not played by any key, \

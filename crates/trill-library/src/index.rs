@@ -91,6 +91,8 @@ pub(crate) struct Facts {
     /// [`crate::Key::code`]; [`Facts::NO_KEY`] when unknown.
     pub key: u8,
     pub unreadable: bool,
+    /// A recording of an instrument, which a search for sounds leaves out.
+    pub part: bool,
 }
 
 impl Facts {
@@ -104,6 +106,7 @@ impl Facts {
             kind: entry.kind.code(),
             key: entry.key.map_or(Self::NO_KEY, |key| key.code()),
             unreadable: entry.unreadable,
+            part: entry.of_instrument,
         }
     }
 }
@@ -513,6 +516,8 @@ pub(crate) mod tests {
             tempo: None,
             key: None,
             tags: Tags::EMPTY,
+            instrument: None,
+            of_instrument: false,
         }
     }
 

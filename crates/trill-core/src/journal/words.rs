@@ -115,7 +115,12 @@ fn device_change(was: &Device, now: &Device, state: StateChange, after: &Project
     } else if was.preset != now.preset
         && let Some(preset) = &now.preset
     {
-        format!("Set {device} to the preset {}", quoted(&preset.name))
+        match preset.bringer() {
+            // An effect that was saved as part of its track's sound: it
+            // is on no preset of its own.
+            Some(_) => format!("Made {device} part of the sound {}", quoted(&preset.name)),
+            None => format!("Set {device} to the preset {}", quoted(&preset.name)),
+        }
     } else if was.params != now.params {
         format!("Adjusted {device}")
     } else if was.name != now.name {
@@ -510,6 +515,17 @@ mod tests {
         assert_eq!(
             words(p, |p| p.device_mut(synth).unwrap().state = Some(vec![1, 2, 3])),
             "Changed the sound of \u{201C}Poly Synth\u{201D}"
+        );
+        // A preset the device was given; and a track's sound that was
+        // saved, which its effects are part of without being on it.
+        let tone = crate::presets::PresetRef { id: "tone".into(), name: "Tone".into() };
+        assert_eq!(
+            words(p, |p| p.device_mut(synth).unwrap().preset = Some(tone.clone())),
+            "Set \u{201C}Poly Synth\u{201D} to the preset \u{201C}Tone\u{201D}"
+        );
+        assert_eq!(
+            words(p, |p| p.device_mut(limiter).unwrap().preset = Some(crate::presets::PresetRef::brought_by(&tone))),
+            "Made \u{201C}Limiter\u{201D} part of the sound \u{201C}Tone\u{201D}"
         );
 
         // Envelopes, the song's settings, markers.
