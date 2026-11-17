@@ -13,12 +13,12 @@ use trill_core::project::AudioContent;
 use trill_core::{InstrumentProfile, Note, Project, Role, TrackId};
 use trill_noir::Theme;
 use trill_stage::director::{Entry, Kind, Plan, Shot, Take};
-use trill_stage::film::{Filmer, Progress, Shoot};
+use trill_stage::film::{Filmer, Playing, Progress, Shoot, Subject};
 use trill_stage::gpu::{Gpu, Quality, Renderer};
 use trill_stage::making::Making;
 use trill_stage::scene::Layout;
 use trill_stage::voice::{Wave, voiced};
-use trill_stage::{Format, Heard, Look, Score, Song, Sound, Stage};
+use trill_stage::{Format, Heard, Look, Picture, Score, Song, Sound, Stage};
 
 /// Sixteen bars: a kick on every beat, a line of eighths, two sections.
 fn score() -> (Score, TrackId) {
@@ -306,6 +306,84 @@ fn the_making_of_a_song_is_the_same_frame_for_the_same_moment_however_it_is_come
     assert!(bare != frames[0].as_slice(), "what was asked has a place in the frame");
 }
 
+/// Two bars of 4/4 at 120, two of 7/8 at 140 and two of 4/4 at 120: a
+/// held chord, and a kick on every bar line and at beat 22.
+fn changing() -> Song {
+    let mut project = Project::new("Changing");
+    let drums = project.add_track("Drums");
+    let clip = project.add_midi_clip(drums, "beat", 0.0, 23.0).unwrap();
+    let kicks: Vec<Note> = [0.0, 4.0, 8.0, 11.5, 15.0, 19.0, 22.0]
+        .iter()
+        .map(|beat| Note { pitch: 36, start: *beat, length: 0.25, velocity: 127 })
+        .collect();
+    project.clip_mut(clip).unwrap().add_notes(&kicks).unwrap();
+    project.set_track_profile(drums, InstrumentProfile { role: Some(Role::Drums), ..Default::default() }).unwrap();
+    let pad = project.add_track("Pad");
+    let clip = project.add_midi_clip(pad, "held", 0.0, 23.0).unwrap();
+    project.clip_mut(clip).unwrap().add_notes(&[Note { pitch: 60, start: 0.0, length: 23.0, velocity: 90 }]).unwrap();
+    project.set_time_signature_at(8.0, 7, 8).unwrap();
+    project.set_tempo_at(8.0, 140.0, false).unwrap();
+    project.set_time_signature_at(15.0, 4, 4).unwrap();
+    project.set_tempo_at(15.0, 120.0, false).unwrap();
+    Song::of(&project)
+}
+
+#[test]
+#[ignore = "needs a graphics card: cargo test -p trill-stage --test drawn -- --ignored"]
+fn a_kick_is_lit_on_the_frame_the_tempo_map_says_it_sounds_on_after_the_song_has_changed_tempo() {
+    let song = changing();
+    let sound = Sound::default();
+    // One moment a frame, so that a frame is of its instant alone.
+    let shoot = Shoot::plain(Format::new(640, 360));
+    let mut filmer = Filmer::new().unwrap();
+    let mut light = |seconds: f64| -> f64 {
+        let pixels = filmer.frame(&song, &sound, seconds, &shoot).unwrap();
+        pixels.chunks_exact(4).map(|pixel| f64::from(pixel[0]) + f64::from(pixel[1]) + f64::from(pixel[2])).sum::<f64>()
+            / (pixels.len() / 4) as f64
+    };
+    let frame = 1.0 / 60.0;
+    // The kicks at beats 19 and 22 sound at 9 and 10.5 seconds, after two
+    // changes of tempo: the frame of each is brighter than the one before
+    // it, and the frames after fall back.
+    let mut steps = Vec::new();
+    for sounds in [9.0, 10.5] {
+        let (before, on, after) = (light(sounds - frame), light(sounds), light(sounds + 12.0 * frame));
+        assert!(on > before * 1.01, "the frame at {sounds} s is lit by its kick: {before:.3} then {on:.3}");
+        assert!(after < on, "and it falls away: {on:.3} then {after:.3}");
+        steps.push(on - before);
+    }
+    // At one tempo throughout they would have sounded at 9.5 and 11
+    // seconds. Nothing is struck there.
+    for wrong in [9.5, 11.0 - frame] {
+        let step = light(wrong) - light(wrong - frame);
+        assert!(step < steps[0] * 0.1, "nothing lights the frame at {wrong:.2} s: {step:.4} against {:.4}", steps[0]);
+    }
+}
+
+#[test]
+#[ignore = "needs a graphics card: cargo test -p trill-stage --test drawn -- --ignored"]
+fn a_change_of_tempo_and_meter_is_in_the_picture_from_the_frame_it_arrives_on() {
+    let song = changing();
+    let (mut stage, mut renderer) = on_a_card();
+    // The top right says where the song is: with a time signature for a
+    // song that changes it, which changes as the song does.
+    let corner = |drawn: &Drawn| -> Vec<[u8; 3]> {
+        (1500..1900).flat_map(|x| (8..40).map(move |y| (x, y))).map(|(x, y)| drawn.at(x, y)).collect()
+    };
+    let just_before = draw(&mut stage, &mut renderer, &song, 7.99, Look::plain());
+    let on = draw(&mut stage, &mut renderer, &song, 8.0, Look::plain());
+    let differing = corner(&just_before).iter().zip(corner(&on)).filter(|(a, b)| *a != b).count();
+    assert!(differing > 60, "the readout says 7/8 and 140 from the beat they arrive on: {differing} pixels changed");
+    // A song that changes neither is drawn as it always was: the same
+    // corner twice, a beat apart inside a bar, differs only in its count.
+    let steady = in_one_take(Kind::Wide);
+    let (a, b) = (
+        draw(&mut stage, &mut renderer, &steady, 8.0, Look::plain()),
+        draw(&mut stage, &mut renderer, &steady, 8.0, Look::plain()),
+    );
+    assert!(corner(&a) == corner(&b));
+}
+
 /// Half a second of sound at 8 kHz, as a file.
 fn write_tone(path: &Path) {
     let spec = hound::WavSpec {
@@ -387,4 +465,32 @@ fn a_film_that_is_stopped_leaves_nothing_behind() {
     let stopped = filmer.film(&song, &Sound::default(), 0.0, 1.0, &small(), None, &film, &progress).unwrap_err();
     assert!(stopped.contains("stopped at frame 0 of 30"), "{stopped}");
     assert!(!film.exists(), "nothing of it was kept");
+
+    // Stopped part of the way, with frames already handed over: nothing is
+    // kept, and nothing turns up a moment later either. (Where `ffmpeg` is
+    // a launcher for the real one, killing it left the real one to finish
+    // the file after it had been removed. The window's test of a stopped
+    // film, which has sound and full-size frames, is the one that showed it.)
+    struct Stopping<'a> {
+        playing: Playing<'a>,
+        progress: &'a Progress,
+        after: u32,
+    }
+    impl Subject for Stopping<'_> {
+        fn picture(&mut self, stage: &mut Stage, seconds: f64, shoot: &Shoot, seed: u32) -> Picture {
+            self.after = self.after.saturating_sub(1);
+            if self.after == 0 {
+                self.progress.stop();
+            }
+            self.playing.picture(stage, seconds, shoot, seed)
+        }
+    }
+    let (progress, sound) = (Progress::default(), Sound::default());
+    let mut subject = Stopping { playing: Playing { song: &song, sound: &sound }, progress: &progress, after: 40 };
+    let stopped = filmer.film_of(&mut subject, 0.0, 4.0, &small(), None, &film, &progress).unwrap_err();
+    assert!(stopped.contains("stopped at frame") && !stopped.contains("frame 0 of"), "{stopped}");
+    assert!(!film.exists(), "nothing of it was kept");
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert!(!film.exists(), "and nothing of it turned up afterwards");
+    assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0);
 }

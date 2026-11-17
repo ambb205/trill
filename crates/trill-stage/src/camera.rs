@@ -106,7 +106,7 @@ impl Camera {
             .rev()
             .find(|take| take.entry == Entry::Cut && take.start > 0.0)
             .map(|take| beat - take.start);
-        let bar = score.bar();
+        let bar = score.bar_length(beat);
         let lanes = score
             .parts
             .iter()

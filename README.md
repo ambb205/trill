@@ -167,6 +167,11 @@ Nothing on it is made up for the camera. It is the song's interface, staged.
   own level.
 - **Recordings and automation are on it too.** An audio clip, or the sample a track plays, is its waveform, lit
   where the playhead has just been; an automated parameter is its line.
+- **A tempo or a time signature that changes is part of the picture.** The stage follows the song through every
+  change of either, so a note still lights on the frame it sounds on and a film is as long as its sound. The
+  ruler says what arrives beside the bar it arrives at ("7/8 · 140 BPM", an arrow before a tempo the song
+  glides to), the place at the top right reads in the bars and the tempo the song has there and lights as they
+  change, and the arrival is titled as a section is.
 - It is drawn by passes of its own on the graphics card (light that spreads, depth of focus, and in a film the
   blur of motion), and the window's own drawing is untouched: with the stage shut, none of it runs.
 - `Space` plays and stops. `Esc` or `F11` leaves, and the window is as it was, its size included.
@@ -824,7 +829,7 @@ delay compensation, multi-core rendering. Only Windows has been run so far.
 Where the tempo or the time signature changes inside a song, not yet: a plugin's position in seconds and the
 start of its bar (it is told the tempo, the time signature and the beat of each block; the seconds and the bar
 line it is given are still worked out from those alone, so after a change they are not the song's, and through a
-glide the seconds do not run evenly); the stage and its films, which read one tempo and one meter; a melody
+glide the seconds do not run evenly); a melody
 written across a change of time signature in one call (`write_melody` says to write each side on its own); a
 warped clip under a glide without one stretched copy of its file for every step of the glide, and without the
 three-millisecond fade where two copies meet, which a held tone can show; the length a sound dropped into a

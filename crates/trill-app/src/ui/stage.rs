@@ -286,13 +286,17 @@ impl StageView {
             self.stirred = Some(started);
         }
         let elapsed = ctx.input(|input| input.stable_dt).min(0.1);
-        let tempo = snapshot.project.tempo;
-        // What is heard now left the engine a little earlier than where
-        // the engine is: the picture is of what is heard.
-        let behind = if live.playing { latency_ms / 1000.0 * tempo / 60.0 } else { 0.0 };
-        let beat = self.clock.beat(live.position - behind, live.playing, tempo, started).max(0.0);
+        // The song's time first: its tempo may change along the way, and
+        // the clock runs at the tempo the song has where it is.
+        let (heard_at, tempo) = {
+            let time = &self.song(snapshot).score.time;
+            // What is heard now left the engine a little earlier than where
+            // the engine is: the picture is of what is heard.
+            let heard_at = if live.playing { time.before(live.position, latency_ms / 1000.0) } else { live.position };
+            (heard_at, time.tempo_at(heard_at.max(0.0)))
+        };
+        let beat = self.clock.beat(heard_at, live.playing, tempo, started).max(0.0);
         let heard = self.heard(snapshot, live, elapsed);
-        self.song(snapshot);
         let Some((_, song)) = &self.song else { return };
         self.frames = self.frames.wrapping_add(1);
 
