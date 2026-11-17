@@ -416,6 +416,6 @@ mod tests {
         for word in ["describe_wavetable", "set_wavetable", "macro1", "builtin:polysynth", "nobody has tuned"] {
             assert!(INSTRUCTIONS.contains(word), "{word}");
         }
-        assert!(patches::PATCHES.len() > 12);
+        assert!(patches::all().count() > 12);
     }
 }

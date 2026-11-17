@@ -134,7 +134,9 @@ pub fn sound_after(descriptor: &DeviceDescriptor, saved: &SavedPresets, info: &P
 
 /// The sounds there are to choose from without reading anything: the ones
 /// that were saved, of every device type that is installed, and the ones
-/// the built-in devices bring with effects behind them.
+/// the built-in devices bring, dry or with effects behind them (a preset
+/// that is filed nowhere, such as a synth's plain starting point, is no
+/// sound to choose).
 pub fn listed_sounds(descriptors: &[DeviceDescriptor], saved: &SavedPresets) -> Vec<ListedSound> {
     let named = |uri: &str| descriptors.iter().find(|descriptor| descriptor.uri == uri);
     let mut sounds: Vec<ListedSound> = saved
@@ -149,7 +151,7 @@ pub fn listed_sounds(descriptors: &[DeviceDescriptor], saved: &SavedPresets) -> 
         .collect();
     for descriptor in descriptors {
         for preset in &descriptor.presets {
-            let Some(after) = preset.after.as_deref().filter(|after| !after.is_empty()) else { continue };
+            let Some(after) = preset.after.as_deref().filter(|_| !preset.category.is_empty()) else { continue };
             sounds.push(ListedSound {
                 uri: descriptor.uri.clone(),
                 device: descriptor.name.clone(),

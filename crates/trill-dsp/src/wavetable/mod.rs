@@ -223,6 +223,43 @@ pub(crate) struct Derived {
     pub glides: bool,
     pub bend_range: f32,
     pub velocity_sens: f32,
+    /// What takes the difference between the sides away under a
+    /// frequency: two high-pass stages for it, if any is set.
+    mono: Option<[SideStage; 2]>,
+}
+
+/// One stage of the high-pass that the difference between the two sides
+/// goes through: what its two integrators are fed by, and its damping.
+#[derive(Copy, Clone, Default, PartialEq)]
+struct SideStage {
+    a1: f32,
+    a2: f32,
+    a3: f32,
+    k: f32,
+}
+
+impl SideStage {
+    /// The two stages of a high-pass at `hz` that falls 24 dB an octave
+    /// below it and is flat above.
+    fn pair(hz: f32, sample_rate: f32) -> [SideStage; 2] {
+        let g = (std::f32::consts::PI * (hz / sample_rate).min(0.45)).tan();
+        [0.541_196_1f32, 1.306_563].map(|q| {
+            let k = 1.0 / q;
+            let a1 = 1.0 / (1.0 + g * (g + k));
+            SideStage { a1, a2: g * a1, a3: g * g * a1, k }
+        })
+    }
+
+    /// What the stage lets through of `x`, with what it keeps in `state`.
+    #[inline]
+    fn run(&self, state: &mut [f32; 2], x: f32) -> f32 {
+        let v3 = x - state[1];
+        let v1 = self.a1 * state[0] + self.a2 * v3;
+        let v2 = state[1] + self.a2 * state[0] + self.a3 * v3;
+        state[0] = 2.0 * v1 - state[0];
+        state[1] = 2.0 * v2 - state[1];
+        x - self.k * v1 - v2
+    }
 }
 
 impl Derived {
@@ -318,6 +355,8 @@ pub struct Wavetable {
     started: bool,
     /// Settings that wait for the gate to shut before they are taken on.
     pending: Option<Derived>,
+    /// What the high-pass on the difference between the sides keeps.
+    side: [[f32; 2]; 2],
 }
 
 impl Wavetable {
@@ -353,6 +392,7 @@ impl Wavetable {
             level: ChannelLevel::new(),
             started: false,
             pending: None,
+            side: [[0.0; 2]; 2],
         }
     }
 
@@ -464,6 +504,8 @@ impl Wavetable {
         d.bend_range = p.get(P::BendRange as usize);
         d.velocity_sens = p.get(P::VelocitySens as usize);
         targets[smoothed::VOLUME] = level_gain(p.get(P::Volume as usize));
+        let below = p.get(P::MonoBelow as usize);
+        d.mono = (below >= 1.0).then(|| SideStage::pair(below, sr));
 
         // The first block starts where everything is set; after that a
         // value that is moved takes its 256 frames to get there, and what
@@ -620,8 +662,36 @@ impl Wavetable {
         let mut levels = [1.0f32; TICK];
         self.level.fill(&mut levels[..frames], self.shared.sample_rate);
         let shared = &self.shared;
-        for voice in self.voices.iter_mut().filter(|voice| voice.active) {
-            voice.render(shared, &levels[..frames], left, right);
+        match shared.d.mono {
+            None => {
+                for voice in self.voices.iter_mut().filter(|voice| voice.active) {
+                    voice.render(shared, &levels[..frames], left, right);
+                }
+            }
+            // The notes by themselves first: only what they bring is
+            // drawn to the middle, not what was on the track before them.
+            Some(stages) => {
+                let (mut own_left, mut own_right) = ([0.0f32; TICK], [0.0f32; TICK]);
+                for voice in self.voices.iter_mut().filter(|voice| voice.active) {
+                    voice.render(shared, &levels[..frames], &mut own_left[..frames], &mut own_right[..frames]);
+                }
+                for frame in 0..frames {
+                    let middle = 0.5 * (own_left[frame] + own_right[frame]);
+                    let mut apart = 0.5 * (own_left[frame] - own_right[frame]);
+                    for (stage, state) in stages.iter().zip(&mut self.side) {
+                        apart = stage.run(state, apart);
+                    }
+                    left[frame] += middle + apart;
+                    right[frame] += middle - apart;
+                }
+                // What rings on in the stages when nothing comes dies
+                // away to nothing, not to numbers too small to add.
+                for state in self.side.iter_mut().flatten() {
+                    if state.abs() < 1e-20 {
+                        *state = 0.0;
+                    }
+                }
+            }
         }
         self.until_tick -= frames;
         self.clock += frames as u64;
@@ -850,6 +920,7 @@ impl DeviceProcessor for Wavetable {
         self.shared.gate = 1.0;
         self.pending = None;
         self.started = false;
+        self.side = [[0.0; 2]; 2];
         self.params.changed = true;
     }
 }

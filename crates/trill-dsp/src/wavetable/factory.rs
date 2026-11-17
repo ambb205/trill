@@ -74,6 +74,26 @@ fn vowel(formants: [f64; 3]) -> Frame {
     harmonics(&levels)
 }
 
+/// The harmonic of a chord table's cycle that the chord's root is: a
+/// third and a fifth over the twentieth harmonic fall on harmonics too
+/// (the twenty-fourth or twenty-fifth, and the thirtieth), which is what
+/// lets one cycle hold a chord.
+pub const CHORD_ROOT: usize = 20;
+
+/// A chord as one cycle: a sawtooth on each of `notes`, which are
+/// harmonics of the cycle, with as many of its own harmonics as the cycle
+/// has room for. `dark` rolls each sawtooth off faster.
+fn chord(notes: &[usize], dark: f64) -> Frame {
+    let room = super::table::MAX_HARMONICS;
+    let mut levels = vec![0.0; room];
+    for note in notes {
+        for partial in (1..).take_while(|partial| note * partial <= room) {
+            levels[note * partial - 1] += 1.0 / f64::from(partial as u32).powf(1.0 + dark);
+        }
+    }
+    harmonics(&levels)
+}
+
 /// Every table that ships, in the order a song knows them by.
 pub static TABLES: &[Factory] = &[
     Factory {
@@ -329,6 +349,50 @@ pub static TABLES: &[Factory] = &[
             )
         },
     },
+    Factory {
+        name: "Chords",
+        about: "A whole chord in one cycle, so that one key plays it: a bare fifth at 0, a minor triad at a third \
+                of the way, a major triad at two thirds and a minor seventh at 1 (in between, two of them at once). \
+                The chord's root is the cycle's twentieth harmonic: tune the oscillator four octaves and 3.86 \
+                semitones down (`osc1_octave` -4, `osc1_semitones` -4, `osc1_fine` 14) and the root is the key. For \
+                the chord stabs of house, rave and dub techno.",
+        recipe: || {
+            let root = CHORD_ROOT;
+            sized(
+                4,
+                vec![
+                    chord(&[root, root * 3 / 2], 0.0),
+                    chord(&[root, root * 6 / 5, root * 3 / 2], 0.0),
+                    chord(&[root, root * 5 / 4, root * 3 / 2], 0.0),
+                    chord(&[root, root * 6 / 5, root * 3 / 2, root * 9 / 5], 0.0),
+                ],
+            )
+        },
+    },
+    Factory {
+        name: "Mallets",
+        about: "Struck bars and tines: a marimba's bar at 0 (the note with a soft partial two octaves up), a \
+                vibraphone's at half way (that partial stronger, and one over three octaves up), a thumb piano's \
+                tine at 1 (thin, with a partial two and a half octaves up). For mallets, bells and soft plucks; let \
+                velocity move the position a little.",
+        recipe: || {
+            let bar = |partials: &[(usize, f64)]| {
+                let mut levels = vec![0.0; 16];
+                for (harmonic, level) in partials {
+                    levels[harmonic - 1] = *level;
+                }
+                harmonics(&levels)
+            };
+            sized(
+                9,
+                vec![
+                    bar(&[(1, 1.0), (4, 0.3), (10, 0.06)]),
+                    bar(&[(1, 1.0), (2, 0.04), (4, 0.5), (10, 0.2)]),
+                    bar(&[(1, 1.0), (2, 0.1), (6, 0.32), (16, 0.07)]),
+                ],
+            )
+        },
+    },
 ];
 
 /// The names an oscillator's table is chosen by: [`CUSTOM`], then every
@@ -357,6 +421,8 @@ pub static NAMES: &[&str] = &[
     "Octaves",
     "Tine",
     "Strings",
+    "Chords",
+    "Mallets",
 ];
 
 /// The tables that ship, made.
@@ -409,6 +475,7 @@ mod tests {
         assert_eq!(&NAMES[1..], names);
         // The order is the file format: these never move.
         assert_eq!((NAMES[1], NAMES[7], NAMES[22]), ("Basic Shapes", "Acid", "Strings"));
+        assert_eq!((NAMES[23], NAMES[24]), ("Chords", "Mallets"));
         assert_eq!(named("basic shapes").map(|(index, _)| index), Some(1));
         assert_eq!(named(" Acid ").map(|(index, table)| (index, table.name)), Some((7, "Acid")));
         assert!(named("custom").is_none() && named("nope").is_none());
@@ -463,6 +530,16 @@ mod tests {
         assert!(basic[0].highest == 1 && basic[3].odd > 0.999 && (basic[2].odd - 0.75).abs() < 0.01);
         assert!(table("Saw to Square").info()[8].odd > 0.999);
         assert_eq!(table("Harmonics").info()[5].highest, 6);
+        // A chord's notes are harmonics of its cycle: nothing under its
+        // root, and its fifth on the thirtieth.
+        let recipe = named("Chords").unwrap().1.recipe();
+        for frame in &recipe.frames {
+            let levels = frame.harmonics.as_deref().unwrap();
+            assert!(levels[..CHORD_ROOT - 1].iter().all(|level| *level == 0.0));
+            assert!(levels[CHORD_ROOT - 1] == 1.0 && levels[CHORD_ROOT * 3 / 2 - 1] >= 1.0);
+        }
+        let minor = recipe.frames[1].harmonics.as_deref().unwrap();
+        assert!(minor[23] == 1.0 && minor[24] == 0.0, "a minor third: six fifths of the root");
         assert!(table("Pulse Width").info()[15].rms_db < table("Pulse Width").info()[0].rms_db - 6.0);
     }
 }

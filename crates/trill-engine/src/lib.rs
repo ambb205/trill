@@ -8,6 +8,7 @@
 
 pub mod analysis;
 pub mod apart;
+pub mod character;
 mod clock;
 pub mod compile;
 mod crew;
