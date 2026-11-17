@@ -59,6 +59,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
         let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         row.status(theme.info, &format!("Rendering {name}\u{2026}"));
     }
+    if let Some((path, how_far)) = row.cx.filming.making() {
+        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        row.status(theme.info, &format!("Filming {name} \u{00B7} {how_far}"));
+    }
     let problems = problems(row.cx);
     let items_end = row.problems(ui, &problems);
 

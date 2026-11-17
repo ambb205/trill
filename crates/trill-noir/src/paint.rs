@@ -65,6 +65,18 @@ pub fn frame(painter: &Painter, rect: Rect, color: Color32) {
     vline_left_of(painter, rect.right(), sides, color);
 }
 
+/// How far something has got: `rect` in the color of a well, and its
+/// left `fraction` filled. Nothing to take hold of: a thing that is waited
+/// for, not one that is set.
+pub fn progress(painter: &Painter, rect: Rect, fraction: f32, well: Color32, fill: Color32) {
+    painter.rect_filled(rect, 0.0, well);
+    let fraction = if fraction.is_finite() { fraction.clamp(0.0, 1.0) } else { 0.0 };
+    let right = snap(painter, rect.left() + rect.width() * fraction);
+    if right > rect.left() {
+        painter.rect_filled(rect.with_max_x(right), 0.0, fill);
+    }
+}
+
 /// Side of a [`corner_mark`], in points.
 const CORNER_MARK: f32 = 5.0;
 

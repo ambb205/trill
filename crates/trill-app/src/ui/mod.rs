@@ -61,6 +61,7 @@ mod displays;
 mod dragging;
 mod editors;
 mod files;
+mod filming;
 mod keyboard;
 mod making_of;
 mod mixer;
@@ -153,6 +154,8 @@ pub struct UiOptions {
     pub keyboard: KeyboardOptions,
     /// Open with the Audio and MIDI panel up.
     pub show_settings: bool,
+    /// Open with the film panel up.
+    pub show_film: bool,
     /// Start a take on the armed tracks as soon as the window opens.
     pub record: bool,
     /// Open on the stage.
@@ -186,6 +189,7 @@ impl Default for UiOptions {
             assistant: AssistantOptions::default(),
             keyboard: KeyboardOptions::default(),
             show_settings: false,
+            show_film: false,
             record: false,
             stage: false,
             making_of: None,

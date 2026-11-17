@@ -55,6 +55,7 @@ Options:
   --arm <TRACK NAME>      Arm this track at startup; may be given several times
   --record                Start recording on the armed tracks when the window opens (F9 does it)
   --stage                 Open on the stage: the song filmed as it plays (F11 shows it)
+  --film                  Start with the film panel open: File, Export a film (Ctrl+Shift+F shows it)
   --settings              Start with the Audio and MIDI panel open (Ctrl+, shows it)
   --audio-scene <NAME>    Show made-up audio and MIDI devices in that panel, for screenshots:
                           studio, fallback or none
@@ -121,6 +122,8 @@ pub struct Cli {
     pub record: bool,
     /// Open on the stage.
     pub stage: bool,
+    /// Open the film panel.
+    pub film: bool,
     /// Open the Audio and MIDI panel.
     pub settings: bool,
     /// Made-up audio and MIDI devices to show in it.
@@ -181,6 +184,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
             "--arm" => cli.arm.push(value("a track name")?),
             "--record" => cli.record = true,
             "--stage" => cli.stage = true,
+            "--film" => cli.film = true,
             "--settings" => cli.settings = true,
             "--audio-scene" => {
                 let name = value("the name of a scene")?;
@@ -365,6 +369,7 @@ impl Cli {
             },
             keyboard: self.keyboard.clone(),
             show_settings: self.settings,
+            show_film: self.film,
             record: self.record,
             stage: self.stage,
             making_of: (self.making_of || self.making_of_at.is_some()).then(|| match self.making_of_at {

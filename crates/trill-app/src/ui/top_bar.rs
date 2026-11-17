@@ -6,7 +6,7 @@ use super::arrangement::ops;
 use super::files::Confirm;
 use super::shortcuts::{self, Command};
 use super::state::{Clipboard, Cx, DetailTab, StoryAsk};
-use super::{arrangement, audio_settings, brand, files, recording, recovery, timeline};
+use super::{arrangement, audio_settings, brand, files, filming, recording, recovery, timeline};
 use eframe::egui::{self, Align2, Id, Rect, Sense, Ui, pos2, vec2};
 use trill_core::TimeSignature;
 use trill_core::project::{MAX_TEMPO, MIN_TEMPO};
@@ -188,6 +188,12 @@ fn file_menu(ui: &mut Ui, cx: &mut Cx) {
     // The song, and every track, group and return beside it, in one pass.
     if MenuItem::new("Export WAV and stems\u{2026}").enabled(idle).show(ui, theme).clicked() {
         files::export_stems(ui.ctx(), cx);
+    }
+    // The stage as a file: the song filmed with its own sound, or how it
+    // was made. While one is being made, this is where it is watched.
+    let film = if cx.filming.making().is_some() { "Film in progress\u{2026}" } else { "Export a film\u{2026}" };
+    if item(ui, film, Command::ExportFilm, true) {
+        filming::open(ui.ctx(), cx);
     }
     // How the song was made, as a file to hand on: by name, and without
     // the conversation unless that is what is asked for.

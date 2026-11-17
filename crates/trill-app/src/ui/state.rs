@@ -5,6 +5,7 @@ use super::assistant::Assistant;
 use super::audio_settings::Settings;
 use super::editors::Editors;
 use super::files::Jobs;
+use super::filming::Filming;
 use super::keyboard::Keyboard;
 use super::recovery::Recovery;
 use super::snapshot::{Live, Snapshot};
@@ -1019,6 +1020,8 @@ pub struct Cx<'a> {
     pub keyboard: &'a mut Keyboard,
     /// The Audio and MIDI panel.
     pub settings: &'a mut Settings,
+    /// The film panel, and the film being made if one is.
+    pub filming: &'a mut Filming,
 }
 
 impl Cx<'_> {

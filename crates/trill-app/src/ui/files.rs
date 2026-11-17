@@ -524,7 +524,7 @@ pub fn keep_journal(cx: &mut Cx, keep: bool) {
 
 /// `path` with `extension` appended unless it already ends in it. Save
 /// dialogs do not reliably add the extension themselves.
-fn with_extension(path: &Path, extension: &str) -> PathBuf {
+pub(super) fn with_extension(path: &Path, extension: &str) -> PathBuf {
     let has_it = path.extension().is_some_and(|existing| existing.eq_ignore_ascii_case(extension));
     if has_it {
         return path.to_path_buf();
@@ -537,7 +537,7 @@ fn with_extension(path: &Path, extension: &str) -> PathBuf {
 
 /// A file name suggested for a project called `name`: characters that file
 /// systems reject are replaced.
-fn file_stem_for(name: &str) -> String {
+pub(super) fn file_stem_for(name: &str) -> String {
     let cleaned: String =
         name.trim().chars().map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '-' } else { c }).collect();
     if cleaned.is_empty() { "Untitled".to_owned() } else { cleaned }

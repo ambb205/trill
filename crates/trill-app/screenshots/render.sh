@@ -207,6 +207,7 @@ shot graphite-controllers-expression --demo --select Melody --lane expression --
 shot recording-count-in "$song" --select Lead --arm Lead --record
 shot recording-mixer "$song" --select Lead --arm Lead --arm Bass --tab mixer --record
 shot min-window-recording "$song" --select Bass --arm Bass --record --size 1060x640
+shot film-export "$song" --select Lead --film
 shot audio-settings "$song" --select Lead --settings --audio-scene studio
 shot audio-settings-fallback "$song" --select Lead --settings --audio-scene fallback
 shot audio-settings-none --settings --audio-scene none

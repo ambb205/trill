@@ -52,6 +52,26 @@ fn the_stage_takes_the_window_and_leaving_it_puts_the_window_back_as_it_was() {
 }
 
 #[test]
+fn the_stage_takes_the_whole_screen_and_gives_it_back_on_leaving() {
+    let (mut harness, ..) = with_two_tracks(UiOptions::default());
+    assert_eq!(harness.app.asked_whole_screen(), None, "a window that opens keeps its size");
+    harness.key(Modifiers::NONE, Key::F11);
+    harness.idle(2);
+    assert_eq!(harness.app.asked_whole_screen(), Some(true), "F11 is the key people expect that of");
+    harness.key(Modifiers::NONE, Key::F11);
+    harness.idle(2);
+    assert_eq!(harness.app.asked_whole_screen(), Some(false), "and the window is its own size again");
+
+    // A run that nobody watches (a picture of the stage) is of the window
+    // as it was asked for.
+    let picture = UiOptions { stage: true, exit_after: Some(Duration::from_secs(600)), ..Default::default() };
+    let (mut harness, ..) = with_two_tracks(picture);
+    harness.idle(2);
+    assert!(harness.app.state().stage_open);
+    assert_eq!(harness.app.asked_whole_screen(), None);
+}
+
+#[test]
 fn the_stage_opens_from_its_button_and_from_the_view_menu() {
     let (mut harness, ..) = with_two_tracks(UiOptions::default());
     harness.click_label("Stage");

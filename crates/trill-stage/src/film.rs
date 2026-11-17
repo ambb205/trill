@@ -330,6 +330,28 @@ impl Filmer {
     }
 }
 
+/// Keeps a program started from a window from opening a console of its
+/// own over it.
+fn quiet(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
+/// Whether there is an `ffmpeg` on the path to make one file of the
+/// frames. Starts it to find out, so not for the window's thread.
+pub fn encoder_found() -> bool {
+    let mut command = Command::new("ffmpeg");
+    command.arg("-version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    quiet(&mut command);
+    command.status().is_ok_and(|status| status.success())
+}
+
 /// Where the frames go: into `ffmpeg`, or into a folder.
 enum Sink {
     Encoder { child: Child, path: PathBuf },
@@ -364,6 +386,7 @@ impl Sink {
         command.args(["-movflags", "+faststart"]);
         command.arg(path);
         command.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
+        quiet(&mut command);
         match command.spawn() {
             Ok(child) => Ok(Self::Encoder { child, path: path.to_path_buf() }),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
