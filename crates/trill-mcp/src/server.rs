@@ -98,7 +98,8 @@ are relative to the clip start. They loop, trim, split and move with the clip.
 
 A good workflow
 1. get_project to see what exists; set_project for tempo and time signature.
-2. create_track per part with an instrument and preset (list_devices shows instruments, effects and presets).
+2. create_track per part with an instrument and preset (list_devices shows instruments, effects and presets; \
+search_presets finds a sound by words across all of them).
    A plugin (clap:, vst3:) may have thousands of presets: before programming one by hand, search them with \
 describe_device `preset_query` (\"warm pad\") and give `preset` the name or id to create_track, add_device or \
 update_device.
@@ -385,6 +386,7 @@ impl TrillServer {
             + Self::story_router()
             + Self::film_router()
             + Self::files_router()
+            + Self::wavetable_router()
     }
 
     /// The names of the tools the server offers.
@@ -1169,6 +1171,7 @@ impl TrillServer {
                 }
                 out["samples"] = samples_json(&files);
             }
+            crate::wavetable::device_into(&mut out, &session, model);
             if session.device_has_editor(id) {
                 out["editor"] = json!(if session.is_device_editor_open(id) { "open" } else { "closed" });
             }
@@ -3260,8 +3263,9 @@ impl ServerHandler for TrillServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
                 crate::sounds::INSTRUCTIONS,
+                crate::wavetable::INSTRUCTIONS,
                 crate::files::INSTRUCTIONS,
                 crate::music::INSTRUCTIONS,
                 crate::instruments::INSTRUCTIONS,

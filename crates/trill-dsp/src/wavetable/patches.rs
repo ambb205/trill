@@ -83,7 +83,7 @@ pub static PATCHES: &[Patch] = &[
         name: "Solid Bass",
         category: "Bass",
         description: "A firm, round analog bass with a short filter pluck on every note: saw and square over a \
-                      sine sub that goes past the filter. For bass lines of any style; write it between E1 and G2. \
+                      sine at the note itself that goes past the filter. For bass lines of any style; write it between E1 and G2. \
                       Macros: Cutoff opens it, Drive roughens it, Sub adds weight, Resonance makes the pluck ring",
         tags: &["bass", "analog", "mono", "punchy", "warm"],
         macros: ["Cutoff", "Drive", "Sub", "Resonance"],
@@ -94,6 +94,7 @@ pub static PATCHES: &[Patch] = &[
             ("osc2_level", N(0.5)),
             ("osc2_fine", N(6.0)),
             ("osc2_phase_random", N(0.0)),
+            ("sub_octave", N(0.0)),
             ("sub_level", N(0.6)),
             ("sub_direct", N(1.0)),
             ("filter1_type", C("lowpass24")),
@@ -130,7 +131,7 @@ pub static PATCHES: &[Patch] = &[
             ("mode", C("mono")),
             ("glide", N(0.02)),
             ("velocity_sens", N(0.4)),
-            ("volume", N(-20.0)),
+            ("volume", N(-22.2)),
         ],
     },
     Patch {
@@ -151,6 +152,7 @@ pub static PATCHES: &[Patch] = &[
             ("osc2_detune", N(30.0)),
             ("osc2_fine", N(-11.0)),
             ("osc2_spread", N(0.8)),
+            ("sub_octave", N(0.0)),
             ("sub_level", N(0.45)),
             ("sub_direct", N(1.0)),
             ("filter1_type", C("lowpass24")),
@@ -253,6 +255,7 @@ pub static PATCHES: &[Patch] = &[
             ("osc1_unison", N(2.0)),
             ("osc1_detune", N(10.0)),
             ("osc1_spread", N(0.3)),
+            ("sub_octave", N(0.0)),
             ("sub_level", N(0.55)),
             ("sub_direct", N(1.0)),
             ("filter1_type", C("lowpass24")),

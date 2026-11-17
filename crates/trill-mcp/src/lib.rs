@@ -29,6 +29,7 @@ mod server;
 mod sounds;
 mod story;
 mod view;
+mod wavetable;
 pub mod words;
 
 pub use server::TrillServer;
