@@ -23,7 +23,7 @@ pub const MAX_BEND_SEMITONES: f64 = 96.0;
 /// The most octaves an instrument may sound from the key that is played.
 pub const MAX_OCTAVES: i8 = 4;
 /// How many characters of free text a profile keeps.
-pub const MAX_NOTES_TEXT: usize = 2000;
+pub const MAX_NOTES_TEXT: usize = 2400;
 
 /// Whether a track's notes are pitches or drums.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
