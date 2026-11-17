@@ -153,10 +153,15 @@ play, hold, step through (`Left`, `Right`) and scrub, at half speed up to eight 
 
 | Device | |
 |---|---|
-| `builtin:polysynth` | 16-voice subtractive/FM synth: two oscillators, unison, sub, noise, multimode filter, two envelopes, LFO, mono/glide. 15 presets from pads and basses to FM keys and bells. |
+| `builtin:polysynth` | 16-voice subtractive/FM synth: two oscillators that can be turned off, unison, sub, noise (as wide as it is set), multimode filter, two envelopes, a pitch envelope (an 808's knock), LFO, mono/glide, a pitch wheel whose range can be set. 15 presets from pads and basses to FM keys and bells. |
 | `builtin:drumkit` | Synthesized drum machine on the General MIDI map, with 808, 909, tight, trap and lo-fi kits. Each drum is shaped after measurements of recorded ones: where its energy sits and how long it rings. |
-| `builtin:sampler` | Plays one audio file across the keyboard: loops with crossfade, reverse, one-shot, amp and filter envelopes. |
+| `builtin:sampler` | Plays one audio file across the keyboard: loops with crossfade, reverse, one-shot, amp and filter envelopes, a pitch wheel whose range can be set. |
 | `builtin:drumrack` | Sixteen pads on the General MIDI drum notes, each playing its own audio file, with level, pan, tune, decay and choke groups. |
+
+The two sample players follow velocity by one law, in decibels: the volume is the level of a note at velocity 75,
+and the sensitivity moves harder and softer notes from it by 0.4 dB a step at full (half of that at 0.5), so a
+hard hit is louder than the volume says and a roll swells as it is written. The level of every instrument, like a
+fader, a send and a Utility's gain, is silence at its lowest value (-70 dB), so a fade drawn there ends in nothing.
 
 **Effects**
 
@@ -171,7 +176,9 @@ play, hold, step through (`Left`, `Right`) and scrub, at half speed up to eight 
 | `builtin:chorus` | Stereo chorus with a width. |
 | `builtin:tremolo` | Tremolo and auto-pan: sine, triangle or square, free or in time with the song, the two sides together or taking turns. |
 | `builtin:pump` | Ducking locked to the grid, for when there is no kick to listen to. |
-| `builtin:saturator`, `builtin:utility` | Waveshaping distortion; gain, pan and width. |
+| `builtin:shifter` | Pitch shifter: any sound up or down by as much as two octaves, its length kept. Pitch and mix can be automated: a chord drawn two octaves down over a beat melts away. |
+| `builtin:saturator` | Waveshaping distortion on four curves: soft, hard, tube, and a quarter of a sine that is flat above its ceiling (the overtones that make a sine bass heard on small speakers). It does not turn down what it drives. |
+| `builtin:utility` | Gain down to silence, pan and width. |
 
 A compressor's sidechain is the track as it leaves its devices, ahead of its fader and its mute, so a muted track
 serves as a key. It is set in the compressor's panel ("Listen to") and with `sidechain` on `add_device` and
@@ -180,10 +187,18 @@ plugin's sidechain input is not connected yet.
 
 What these devices do is held to numbers by renders (`trill-engine/tests/effects.rs`): the cuts to a Butterworth
 filter of their order, the compressor to what it takes off a signal of known crest, the delay to its first
-repeats, and the reverb, the makeup and the steep filter to what Ableton Live's were measured to do on one song.
-A song saved before the reverb and the delay were rebuilt (file format 1) keeps the sound it had: opening it
-switches their `legacy` on, and `trill-engine/tests/old_songs.rs` holds every effect to the samples it rendered
-to then.
+repeats, the pitch shifter to the line its pitch is drawn along, and the reverb, the makeup, the steep filter
+and the saturator's sine curve to what Ableton Live's were measured to do on two songs. The instruments are held
+the same way (`tests/instruments.rs`): the sampler's levels to what Live's Simpler plays at five velocities, a
+sine on the synth to the level of Live's Operator at the same volume setting, its pitch envelope and its noise
+to what Operator's were read to be.
+
+A song saved before a device was changed keeps the sound it had. The project file says which format it is, and
+opening an older one writes into each device what that format meant: the reverb and the delay of format 1 have
+their `legacy` switched on, and so have the sample players (the velocity law they had), the saturator (its level
+turned down as the drive rises), the utility (a lowest gain that is 70 dB down and not silence) and the synth
+(its noise) of formats 1 and 2, whose synth volumes are also written 21 dB down the scale, where they mean what
+they did. `trill-engine/tests/old_songs.rs` holds every one of these to the samples it rendered to then.
 
 **Plugins**: installed CLAP and VST3 plugins appear beside the built-in devices as `clap:<plugin id>` and
 `vst3:<class id>`. Their state is saved in the project, and their parameters are automatable and reachable over

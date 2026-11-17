@@ -80,7 +80,7 @@ define_params!(P, PARAMS, [
         "Volume (silent at -70; at 0 one voice at full velocity is 8 dB over full scale, so chords need the room \
          the default leaves)",
         SILENT_DB as f64,
-        0.0,
+        6.0,
         -21.0,
         "dB"
     ),

@@ -126,6 +126,11 @@ pub fn format_param(info: &ParamInfo, value: f64) -> String {
         "Hz" => format!("{} Hz", adaptive(value)),
         "s" if value < 1.0 => format!("{} ms", adaptive(value * 1000.0)),
         "s" => format!("{value:.2} s"),
+        // A level that reaches down to where a fader is silent is silent
+        // there, and says so.
+        "dB" if info.min <= f64::from(MIN_VOLUME_DB) && info.max > 0.0 && value <= info.min + 0.05 => {
+            "\u{2212}\u{221E} dB".to_owned()
+        }
         "dB" => format_signed(value, "dB"),
         // Bipolar ranges read better with an explicit sign.
         unit if info.min < 0.0 && !unit.is_empty() => format_signed(value, unit),
@@ -257,7 +262,11 @@ mod tests {
         assert_eq!(format_param(&time, 0.005), "5.00 ms");
         assert_eq!(format_param(&time, 0.25), "250 ms");
         assert_eq!(format_param(&time, 1.5), "1.50 s");
-        let volume = param(-48.0, 12.0, "dB", ParamKind::Float);
+        let volume = param(-70.0, 12.0, "dB", ParamKind::Float);
+        assert_eq!(format_param(&volume, -70.0), "\u{2212}\u{221E} dB", "silence at the bottom, as on a fader");
+        assert_eq!(format_param(&volume, -69.5), "\u{2212}69.5 dB");
+        let threshold = param(-70.0, 0.0, "dB", ParamKind::Float);
+        assert_eq!(format_param(&threshold, -70.0), "\u{2212}70.0 dB", "a threshold is no level");
         assert_eq!(format_param(&volume, -6.0), "\u{2212}6.0 dB");
         assert_eq!(format_param(&volume, 3.0), "+3.0 dB");
         assert_eq!(format_param(&volume, -0.01), "0.0 dB");

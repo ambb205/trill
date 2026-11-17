@@ -113,8 +113,11 @@ pub const WIDE: f32 = 156.0;
 const EQ_WIDTH: f32 = 204.0;
 /// A filter column whose type chips include "Off".
 const FILTER_WITH_OFF: f32 = 178.0;
-/// The saturator's column: room for its four curves in a row.
-const FOUR_CURVES: f32 = 170.0;
+/// The saturator's column: room for its four curves in a row, and for its
+/// name over them.
+const FOUR_CURVES: f32 = 186.0;
+/// The pitch shifter's column: room for its name.
+const SHIFTER_WIDTH: f32 = 224.0;
 
 const fn p(id: &'static str, label: &'static str) -> Row {
     Row::Param { id, label, format: Format::Auto }
@@ -602,12 +605,15 @@ pub static LAYOUTS: &[Layout] = &[
     Layout {
         uri: "builtin:shifter",
         columns: &[Column {
-            width: WIDE,
+            width: SHIFTER_WIDTH,
             sections: &[
                 section(
                     "Pitch",
                     &[
-                        Row::Picks { id: "pitch", picks: &[("-24", -24.0), ("-12", -12.0), ("0", 0.0), ("+12", 12.0)] },
+                        Row::Picks {
+                            id: "pitch",
+                            picks: &[("-24", -24.0), ("-12", -12.0), ("0", 0.0), ("+12", 12.0), ("+24", 24.0)],
+                        },
                         p("pitch", "Pitch"),
                         p("fine", "Fine"),
                         p("window", "Window"),

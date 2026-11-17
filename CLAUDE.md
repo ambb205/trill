@@ -103,8 +103,11 @@ on the samples.
 - **A change to how a built-in device sounds:** a song saved before must sound as it did. A project file holds
   only the parameters that were set, so a new parameter defaults to what the device did before, or the device
   gets a line in `trill-core/src/formats.rs` (what a file of the older format is taken to have said, written into
-  it as it is read) and the file format's number goes up. `trill-engine/tests/old_songs.rs` holds every effect to
-  the samples a format-1 file rendered to; `tests/effects.rs` holds what they do now to numbers.
+  it as it is read; a parameter whose scale moved is moved there too, with the envelopes that drive it) and the
+  file format's number goes up. `trill-engine/tests/old_songs.rs` holds every device to the samples a file of
+  format 1 and of format 2 rendered to: add a file of the format you are leaving, recorded before you change the
+  device, and never record one again from a newer build. `tests/effects.rs` and `tests/instruments.rs` hold what
+  the devices do now to numbers.
 - **Routing:** a device may listen to another track (`Device::sidechain`, `Project::set_sidechain`). The tracks
   are played in `Project::playing_order`, each after the tracks that feed it (`Project::feeds`: a group's
   members, a return's senders, a device's key), and the edits refuse a loop. Whatever decides which tracks a
