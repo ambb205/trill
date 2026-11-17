@@ -111,7 +111,9 @@ on the samples.
   (`ready.rs`), as a probe does: until every note asked for sounds, heard one at a time. To find out what an
   instrument does, use a probe (`Session::probe_job`, the `probe` tool); to check a mix, `RenderJob::measure`
   (the `measure` tool), which writes nothing. A plugin that plays live is not waited for; `Session::loading`
-  says whether it may still be reading its samples.
+  says whether it may still be reading its samples. A render compiles only the tracks that are heard
+  (`Routing::needed` in `compile.rs`), and writes every stem in the one pass when asked
+  (`RenderOptions::stems`): never render a song once per track.
 - **Hermetic by default.** Tests, screenshots and scripts never read or write the user's settings
   (`%APPDATA%\trill`), sample library or safety copies: `RuntimeOptions::hermetic()` or `Storage::At` on a
   temporary folder in tests, `trill-mcp --scratch`, or `--profile <folder>` on either program, by hand.

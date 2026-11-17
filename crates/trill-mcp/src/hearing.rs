@@ -30,7 +30,7 @@ use trill_core::InstrumentProfile;
 use trill_core::pitch::{drum_name, pitch_name};
 use trill_core::{ControllerKind, Project, TrackId};
 use trill_engine::probe::{Heard, ProbeNote, ProbeOptions};
-use trill_engine::render::{RenderError, Section, TrackLevel, WaitedFor};
+use trill_engine::render::{RenderError, Section, Stems, TrackLevel, WaitedFor};
 use trill_engine::{ProbeTarget, RenderOptions, RenderReport, Session};
 
 /// Appended to the server's instructions.
@@ -52,7 +52,10 @@ balance, the level and loudness of every track, the loudness of every section be
 dB each compressor and limiter took off. It writes no file. Use it after every change you want to check; set a \
 compressor's threshold from its gain reduction, not by guessing.
 - render does what measure does and writes a WAV file. Call it for the finished result, or when the user asks \
-for a file; never to check your work.
+for a file; never to check your work. With `stems` the same pass also writes every track, group and return to a \
+file of its own: ask once for all of them, never render the song once per track.
+Both hear only some of the song with `tracks`, and then make and wait for only those tracks and what feeds them: \
+hearing one track of a long song costs what that track costs.
 A plugin that plays samples (a drum kit, a sampled guitar) reads them after it is made or given another kit or \
 preset, for seconds or as much as a minute, and until a drum has arrived its key is silent. probe, measure and \
 render wait for that on a copy of their own, so what they report is the whole instrument; if notes stayed \
@@ -94,6 +97,8 @@ pub struct MeasureRequest {
     /// Beat to stop at (default: end of the last clip).
     pub end: Option<f64>,
     /// Hear only these tracks (their ids), as if they were soloed. Mute and solo in the song are not changed.
+    /// Only these tracks, and the groups and returns their sound goes through, are made and waited for: one
+    /// track of a song with many plugins costs what that track costs.
     pub tracks: Option<Vec<u64>>,
     /// Stretches of the song to measure one by one. Omit to get one per marker (each from its marker to the
     /// next); give [] for none.
@@ -110,8 +115,44 @@ pub struct MeasureRequest {
 pub struct RenderRequest {
     /// Output WAV path. Defaults to a `renders` folder beside the project file, or the system temp folder.
     pub path: Option<String>,
+    /// Also write parts of the song to WAV files of their own, in this same pass: one render in place of one
+    /// per track. Any of "tracks" (every track that has clips, after its effects, fader and pan, without what
+    /// its sends give the returns), "instruments" (what goes into each track's effects: its instrument
+    /// alone), "groups", "returns" (each return, fed by every track's send), "premaster" (the mix as it reaches
+    /// the master's devices), or "all". The files go into a folder beside `path` named after it
+    /// ("mix stems" for "mix.wav"); they are 32-bit float, as long as the mix, and the reply lists each with
+    /// its track, what it is and its level. Leave out when the mix is all that is wanted.
+    pub stems: Option<Vec<StemChoice>>,
     #[serde(flatten)]
     pub what: MeasureRequest,
+}
+
+/// A kind of stem to write beside a render.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum StemChoice {
+    Tracks,
+    Instruments,
+    Groups,
+    Returns,
+    Premaster,
+    All,
+}
+
+/// The stems of `choices`, into the folder that goes with the mix at
+/// `mix`: beside it, named after it. `None` when none were asked for.
+fn stems_for(choices: &[StemChoice], mix: &Path) -> Option<Stems> {
+    let has = |choice: StemChoice| choices.contains(&choice) || choices.contains(&StemChoice::All);
+    let name = mix.file_stem().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| "render".into());
+    let stems = Stems {
+        folder: mix.with_file_name(format!("{name} stems")),
+        tracks: has(StemChoice::Tracks),
+        instruments: has(StemChoice::Instruments),
+        groups: has(StemChoice::Groups),
+        returns: has(StemChoice::Returns),
+        premaster: has(StemChoice::Premaster),
+    };
+    (!choices.is_empty()).then_some(stems)
 }
 
 /// A pitch, or a run of pitches, to probe.
@@ -503,6 +544,30 @@ fn report_json(
                     "typical_db": db(dynamics.typical_db),
                     "active": round(f64::from(dynamics.active)),
                 })
+            })
+            .collect();
+    }
+    if !report.stems.is_empty() {
+        out["stems"] = report
+            .stems
+            .iter()
+            .map(|stem| {
+                let mut entry = json!({ "file": stem.path, "what": stem.what });
+                if let Some(track) = stem.track {
+                    entry["track"] = json!(track.0);
+                    entry["name"] = json!(stem.name);
+                }
+                entry["peak_db"] = json!(db(stem.stats.peak_db));
+                entry["loudness_lufs"] = json!(db(stem.stats.loudness_lufs));
+                if let Some(true_peak) = stem.stats.true_peak_db {
+                    entry["true_peak_db"] = json!(db(true_peak));
+                }
+                if detail {
+                    entry["rms_db"] = json!(db(stem.stats.rms_db));
+                    entry["stereo_correlation"] = json!(db(stem.stats.stereo_correlation));
+                    entry["spectrum"] = serde_json::to_value(&stem.stats.spectrum).unwrap_or_default();
+                }
+                entry
             })
             .collect();
     }
@@ -1220,27 +1285,34 @@ impl TrillServer {
     }
 
     /// Render the song to a WAV file, and measure it as `measure` does. For the finished result, or when the
-    /// user wants a file: to check your work use `measure`, which writes nothing.
+    /// user wants a file: to check your work use `measure`, which writes nothing. With `stems`, the same pass
+    /// writes every track, group and return to a file of its own as well.
     #[tool(annotations(title = "Render to WAV"))]
     async fn render(&self, Parameters(request): Parameters<RenderRequest>) -> CallToolResult {
-        self.hear(request.what, Some(request.path)).await
+        self.hear(request.what, Some((request.path, request.stems.unwrap_or_default()))).await
     }
 }
 
 impl TrillServer {
     /// Renders and measures the song. With `file`, writes it too: where
-    /// asked, or where renders go when no place is named.
-    async fn hear(&self, request: MeasureRequest, file: Option<Option<String>>) -> CallToolResult {
+    /// asked, or where renders go when no place is named, with the stems
+    /// that were asked for beside it.
+    async fn hear(&self, request: MeasureRequest, file: Option<(Option<String>, Vec<StemChoice>)>) -> CallToolResult {
         // Snapshot under the lock, render outside it: a long bounce must not
         // freeze the GUI or other tools.
         let (job, path, options) = {
             let mut session = self.session.lock();
             let path = match &file {
                 None => None,
-                Some(requested) => match self.write_path(&session, requested.as_deref(), "a render", &["wav"]) {
+                Some((requested, _)) => match self.write_path(&session, requested.as_deref(), "a render", &["wav"]) {
                     Ok(path) => Some(path.unwrap_or_else(|| default_render_path(&session))),
                     Err(refusal) => return finish(Err(refusal)),
                 },
+            };
+            // The stems go beside the mix, which is somewhere the mix may be.
+            let stems = match (&file, &path) {
+                (Some((_, choices)), Some(path)) => stems_for(choices, path),
+                _ => None,
             };
             let project = session.project();
             let defaults = RenderOptions::default();
@@ -1273,6 +1345,7 @@ impl TrillServer {
                 max_tail_seconds: request.max_tail_seconds.unwrap_or(defaults.max_tail_seconds),
                 only_tracks,
                 sections,
+                stems,
                 ..defaults
             };
             (session.render_job(), path, options)

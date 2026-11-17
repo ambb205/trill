@@ -295,9 +295,31 @@ pub(crate) struct TrackNode {
     pub output_bus: Option<usize>,
     /// Copies of the faded signal for return tracks: bus and linear gain.
     pub sends: Vec<(usize, f32)>,
-    /// Measures the track as it leaves its fader. Only a graph that is
+    /// Listens to the track as it leaves its fader. Only a graph that is
     /// rendered has one; a graph that is played measures nothing.
-    pub tap: Option<Box<crate::analysis::Analyzer>>,
+    pub tap: Option<Box<Tap>>,
+    /// Listens to what goes into the track's effects: what its audio and
+    /// the first so many devices of its chain (up to its instrument) have
+    /// made, before anything else is done to it. Only in a render that
+    /// was asked for it.
+    pub source: Option<(usize, Box<Tap>)>,
+}
+
+/// What a render listens with at one point of the graph: it measures what
+/// goes by, and writes it to a file if that was asked for (a stem). The
+/// file is written a block at a time, so that nothing of it is held.
+pub(crate) struct Tap {
+    pub analyzer: crate::analysis::Analyzer,
+    pub file: Option<trill_media::WavWriter>,
+}
+
+impl Tap {
+    pub fn push(&mut self, left: &[f32], right: &[f32]) {
+        self.analyzer.push(left, right);
+        if let Some(file) = &mut self.file {
+            file.write(left, right);
+        }
+    }
 }
 
 /// Where a group or return track collects its input during a block.
@@ -319,6 +341,9 @@ pub(crate) struct MasterNode {
     pub meter: Arc<Meter>,
     pub gain: f32,
     pub primed: bool,
+    /// Listens to the mix as it reaches the master's devices. Only in a
+    /// render that was asked for it.
+    pub tap: Option<Box<Tap>>,
 }
 
 pub struct Graph {
@@ -345,6 +370,7 @@ impl Graph {
                 meter: Arc::new(Meter::default()),
                 gain: 1.0,
                 primed: false,
+                tap: None,
             },
             tempo: 120.0,
             time_signature: TimeSignature::default(),

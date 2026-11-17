@@ -355,6 +355,88 @@ async fn measuring_checks_a_mix_without_writing_a_file() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn one_render_writes_the_mix_and_every_part_of_the_song_to_files_of_their_own() {
+    // The scripted instruments take a second and a half to load.
+    let slow = Loading { first: Duration::from_millis(1500), ..Loading::default() };
+    let fixture = connect(ScriptedFactory::loading(slow)).await;
+    let client = &fixture.client;
+    let bass = track(client, "Bass", BASS).await;
+    clip(client, bass, 0.0, 8.0, json!([["E2", 0, 2], ["G2", 2, 2], ["A2", 4, 4]])).await;
+    let keys = track(client, "Keys", "builtin:polysynth").await;
+    clip(client, keys, 0.0, 8.0, json!([["C4", 0, 4], ["E4", 4, 4]])).await;
+    let made = ok(client, "create_track", json!({ "name": "Room", "kind": "return" })).await;
+    let room = made["track_id"].as_u64().unwrap();
+    ok(client, "add_device", json!({ "track": room, "uri": "builtin:reverb" })).await;
+    ok(client, "update_track", json!({ "track": keys, "send": { "to": room, "level_db": -6 } })).await;
+    let folder = tempfile::tempdir().unwrap();
+    let mix = folder.path().join("song.wav");
+
+    // The mix alone, as ever: one file.
+    let plain = ok(client, "render", json!({ "path": mix.display().to_string(), "max_tail_seconds": 2 })).await;
+    assert!(plain.get("stems").is_none(), "{plain}");
+    assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 1);
+    let before = standing(&fixture);
+
+    // Asked for all of them: one pass, and the reply says what is where.
+    let arguments = json!({ "path": mix.display().to_string(), "max_tail_seconds": 2, "stems": ["all"] });
+    let report = ok(client, "render", arguments).await;
+    assert_eq!(standing(&fixture), before, "the song is as it was");
+    let stems = report["stems"].as_array().unwrap_or_else(|| panic!("{report}"));
+    let listed: Vec<(String, u64)> = stems
+        .iter()
+        .map(|stem| (stem["what"].as_str().unwrap().to_string(), stem["track"].as_u64().unwrap_or_default()))
+        .collect();
+    let expected = [
+        ("track", bass),
+        ("instrument", bass),
+        ("track", keys),
+        ("instrument", keys),
+        ("return", room),
+        ("premaster", 0),
+    ];
+    assert_eq!(listed, expected.map(|(what, track)| (what.to_string(), track)), "{report}");
+    let mix_frames = trill_media::decode(&mix).unwrap().left.len();
+    for stem in stems {
+        let file = Path::new(stem["file"].as_str().unwrap());
+        assert_eq!(file.parent().unwrap(), folder.path().join("song stems"), "beside the mix: {stem}");
+        let audio = trill_media::decode(file).unwrap();
+        assert_eq!(audio.left.len(), mix_frames, "as long as the mix: {stem}");
+        let peak = audio.left.iter().chain(&audio.right).fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+        let said = stem["peak_db"].as_f64().unwrap();
+        assert!((f64::from(20.0 * peak.log10()) - said).abs() < 0.1, "{stem}");
+        assert!(stem["loudness_lufs"].as_f64().unwrap() > -60.0 && stem.get("true_peak_db").is_some(), "{stem}");
+        assert!(stem.get("spectrum").is_none(), "detail is not sent unasked: {stem}");
+    }
+    // A track's file is what the track's own row says of it.
+    let row = report["tracks"].as_array().unwrap().iter().find(|row| row["track"] == keys).unwrap();
+    assert_eq!(stems[2]["peak_db"], row["peak_db"], "{report}");
+    assert_eq!(stems[2]["name"], "Keys");
+
+    // Only some kinds, and with `detail` each in full.
+    let arguments =
+        json!({ "path": mix.display().to_string(), "max_tail_seconds": 2, "stems": ["returns"], "detail": true });
+    let report = ok(client, "render", arguments).await;
+    let stems = report["stems"].as_array().unwrap();
+    assert_eq!(stems.len(), 1, "{report}");
+    assert!(stems[0]["spectrum"].is_object() && stems[0]["what"] == "return", "{report}");
+    // `measure` writes nothing, and takes no stems.
+    let error = call(client, "measure", json!({ "stems": ["all"] })).await;
+    assert!(error.is_err() || error.unwrap().get("stems").is_none());
+
+    // Hearing one track makes that track only: the synth alone waits for
+    // no plugin, however many the song has.
+    let begun = Instant::now();
+    let only = ok(client, "measure", json!({ "tracks": [keys] })).await;
+    let notes = strings(&only["notes"]);
+    assert!(notes.iter().all(|note| !note.contains("Waited")), "{notes:?} after {:?}", begun.elapsed());
+    let rows: Vec<u64> = only["tracks"].as_array().unwrap().iter().map(|row| row["track"].as_u64().unwrap()).collect();
+    assert_eq!(rows, [keys]);
+    // The bass alone waits for the bass.
+    let only = ok(client, "measure", json!({ "tracks": [bass] })).await;
+    assert!(only["tracks"][0]["peak_db"].as_f64().unwrap() > -40.0, "{only}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_silent_track_is_told_what_its_notes_say_and_sent_to_the_probe() {
     let fixture = connect(ScriptedFactory::new()).await;
     let client = &fixture.client;

@@ -256,6 +256,17 @@ that quick and true:
   section between the markers (or of bar ranges), and how many dB each built-in compressor and limiter took
   off, at the most and typically. It can be made without writing a file, and with only some tracks heard,
   the song's mute and solo left alone.
+- *A render makes only what is heard.* A track that is muted, or left out by a solo or by `tracks`, is not put
+  into the render at all: its devices are not created and its plugins are not waited for. Hearing one track of
+  a song with many plugins costs what that track costs. (What plays live keeps every track running, so that a
+  track is there the moment it is unmuted.)
+- *One render writes every stem.* Asked to, a render writes parts of the song to files of their own as it
+  goes (`render` with `stems`; "Export WAV and stems" in the window): every track as it leaves its fader and
+  pan, what goes into each track's effects (its instrument alone), every group, every return fed by every
+  send, and the mix as it reaches the master's devices. Each is taken where it goes by, written a block at a
+  time as 32-bit float (a part may go over full scale before the master brings it down), cut to the length of
+  the mix and measured as the mix is; none of them is held in memory. A track's file is what a project holding
+  that track alone renders to, sample for sample, so one render stands for as many as the song has tracks.
 - *A probe plays one instrument a list of notes* and measures each: whether it sounds, how loud, the pitch that
   is heard, how soon it starts, how long it rings, how bright it is. One call gives an instrument's range and
   the octave it really sounds at, a drum plugin's map (which notes are a low thump, a noisy mid hit, a long
@@ -291,7 +302,7 @@ fades, a clipboard, time selection, deleting, repeating or inserting a stretch o
 and copying one, with its automation, to paste over what is there or with room made for it), markers, group and
 return tracks, and automation lanes that are edited by hand or drawn in steps; a piano roll, which lists a drum
 track's rows by the names its kit has for them; device panels generated from each device's parameters; a mixer; MIDI import and export; project files; WAV
-export. `F1` lists the keyboard shortcuts.
+export, with every track, group and return as files of their own if wanted. `F1` lists the keyboard shortcuts.
 
 The lane under the piano roll's notes shows velocity or a MIDI controller of the clip, chosen from the chips
 above it: expression, the mod wheel, the pitch wheel, the sustain pedal, whatever else the clip holds, and any
@@ -381,7 +392,7 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Automation | `set_automation`, `get_automation`, `set_markers` |
 | Arrangement | `edit_time` (remove, repeat or open up a stretch of time on every track at once; copy one to another place, on every track or some, over what is there or making room) |
 | Playback | `transport` (play, stop, seek, record) |
-| Hearing | `probe` (what an instrument does: range, octave, keyswitches, drum map), `measure` (the mix, every track, every section, gain reduction; writes nothing), `render` (the same, and a WAV file) |
+| Hearing | `probe` (what an instrument does: range, octave, keyswitches, drum map), `measure` (the mix, every track, every section, gain reduction; writes nothing), `render` (the same, and a WAV file; with `stems`, every track, group and return in files of their own from the same pass) |
 | Playing live | `play_notes`, `midi_inputs`, `audio` (device, sample rate, buffer size, latency) |
 
 Time is in beats. Pitches are MIDI numbers, note names (`"F#3"`) or drum names (`"kick"`). Notes can be written
