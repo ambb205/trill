@@ -11,6 +11,7 @@ use crate::instrument::InstrumentProfile;
 use crate::midi_file::{MidiFile, MidiTrack};
 use crate::presets::PresetRef;
 use crate::time::{Beats, TimeSignature};
+use crate::travel::Travel;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -18,13 +19,24 @@ pub const MIN_TEMPO: f64 = 20.0;
 pub const MAX_TEMPO: f64 = 999.0;
 pub const MIN_VOLUME_DB: f32 = -70.0;
 pub const MAX_VOLUME_DB: f32 = 6.0;
-/// The format of the project file this build writes.
+/// The format of the project file this build writes, and the newest it
+/// reads.
 ///
 /// * 1: the first.
 /// * 2: the reverb returns some 10 dB less and filters what goes into it,
-///   and the ping-pong delay feeds back once a pair of repeats. A device of
-///   a format-1 file keeps the sound it had: see [`crate::formats`].
-pub const FORMAT_VERSION: u32 = 2;
+///   and the ping-pong delay feeds back once a pair of repeats.
+/// * 3: an automation lane says how its lines travel between points
+///   ([`AutomationLane::travel`]), and a send can be automated. A file of
+///   an earlier format says neither; its lanes are straight in their
+///   units, as they were played when it was saved.
+/// * 4: the sampler and the drum rack follow velocity by a law in decibels
+///   that plays a hard hit louder than the volume, the saturator no longer
+///   turns its level down as its drive rises, the lowest value of a level
+///   is silence, and the poly synth's volume is 21 dB up.
+///
+/// A device of an older file keeps the sound it had, and an envelope the
+/// curve it played: see [`crate::formats`].
+pub const FORMAT_VERSION: u32 = 4;
 /// The furthest an audio clip can be transposed, in semitones either way.
 pub const MAX_TRANSPOSE: f64 = 24.0;
 /// Shortest loop a clip repeats, so a tiny loop length cannot explode into
@@ -646,6 +658,27 @@ pub enum AutomationTarget {
     DeviceParam { device: DeviceId, param: String },
     /// In dB.
     MasterVolume,
+    /// How much of `track` goes to the return track `to`, in dB after the
+    /// track's fader, as [`Send::level_db`] is. At [`MIN_VOLUME_DB`] or
+    /// under, nothing is sent. The envelope is the send: the track need not
+    /// have one set by hand.
+    Send { track: TrackId, to: TrackId },
+}
+
+impl AutomationTarget {
+    /// How the control travels, where the model knows it by itself: the
+    /// mixer's faders and sends, and the pan. `None` for a device's
+    /// parameter: what it is known only to its device
+    /// ([`Travel::of_param`]).
+    pub fn travel(&self) -> Option<Travel> {
+        match self {
+            AutomationTarget::TrackVolume { .. } | AutomationTarget::MasterVolume | AutomationTarget::Send { .. } => {
+                Some(Travel::FADER)
+            }
+            AutomationTarget::TrackPan { .. } => Some(Travel::Linear),
+            AutomationTarget::DeviceParam { .. } => None,
+        }
+    }
 }
 
 /// How an envelope travels from one point to the next.
@@ -702,6 +735,15 @@ pub struct AutomationLane {
     pub target: AutomationTarget,
     /// Sorted by beat; never empty.
     pub points: Vec<AutomationPoint>,
+    /// What a line between two points is straight along: the travel of the
+    /// control it moves (see [`travel`](crate::travel)), which a lane takes
+    /// when it is written. It is kept with the lane, so that a file plays
+    /// the same whatever comes to be known about its devices, and
+    /// [`Travel::Linear`], straight in the units, is not written at all:
+    /// that is how every lane travelled before this was kept, and how a
+    /// file from then still plays.
+    #[serde(default, skip_serializing_if = "Travel::is_linear")]
+    pub travel: Travel,
     /// Off, the lane keeps its points and drives nothing: its target stays
     /// where it is set by hand. This is what lets someone take hold of an
     /// automated control without throwing the envelope away.
@@ -719,12 +761,22 @@ fn is_on(enabled: &bool) -> bool {
 
 impl AutomationLane {
     pub fn value_at(&self, beat: Beats) -> f64 {
-        automation_value(&self.points, beat)
+        envelope_value(&self.points, self.travel, beat)
     }
 }
 
-/// Evaluates a breakpoint envelope. `points` must be sorted and non-empty.
+/// Evaluates a breakpoint envelope whose lines are straight in its units:
+/// a controller's curve, or a lane of [`Travel::Linear`]. `points` must be
+/// sorted and non-empty.
 pub fn automation_value(points: &[AutomationPoint], beat: Beats) -> f64 {
+    envelope_value(points, Travel::Linear, beat)
+}
+
+/// Evaluates a breakpoint envelope whose lines are straight along `travel`.
+/// `points` must be sorted and non-empty. However many there are, this is
+/// one search among them: it neither allocates nor waits, so the audio
+/// thread may.
+pub fn envelope_value(points: &[AutomationPoint], travel: Travel, beat: Beats) -> f64 {
     let next = points.partition_point(|p| p.beat <= beat);
     if next == 0 {
         return points[0].value;
@@ -737,7 +789,7 @@ pub fn automation_value(points: &[AutomationPoint], beat: Beats) -> f64 {
     if span <= 0.0 {
         return b.value;
     }
-    a.value + (b.value - a.value) * a.shape.shape((beat - a.beat) / span)
+    travel.between(a.value, b.value, a.shape.shape((beat - a.beat) / span))
 }
 
 /// A track and clip created by [`Project::import_midi`].
@@ -907,15 +959,22 @@ impl Project {
         Ok(())
     }
 
-    /// Sets how much of a track is sent to a return track, in dB after the
-    /// fader; `None` removes the send.
-    pub fn set_send(&mut self, id: TrackId, to: TrackId, level_db: Option<f32>) -> Result<(), EditError> {
+    /// Whether `id` may send to `to`: any track but a return, to a return.
+    fn can_send(&self, id: TrackId, to: TrackId) -> Result<(), EditError> {
         if self.track(id)?.kind == TrackKind::Return {
             return invalid(format!("{id} is a return track; returns cannot send to returns"));
         }
         if self.track(to)?.kind != TrackKind::Return {
             return invalid(format!("{to} is not a return track"));
         }
+        Ok(())
+    }
+
+    /// Sets how much of a track is sent to a return track, in dB after the
+    /// fader; `None` removes the send. (An envelope may move it over time:
+    /// [`AutomationTarget::Send`].)
+    pub fn set_send(&mut self, id: TrackId, to: TrackId, level_db: Option<f32>) -> Result<(), EditError> {
+        self.can_send(id, to)?;
         let level_db = level_db.map(validate_volume).transpose()?;
         let before = self.track(id)?.sends.clone();
         let sends = &mut self.track_mut(id)?.sends;
@@ -979,9 +1038,14 @@ impl Project {
                         let (_, new) = devices.iter().find(|(old, _)| old == device)?;
                         AutomationTarget::DeviceParam { device: *new, param: param.clone() }
                     }
+                    // What the track sends, the copy sends too. What is
+                    // sent to it (a return's copy) stays with the original.
+                    AutomationTarget::Send { track, to } if *track == id => {
+                        AutomationTarget::Send { track: copy.id, to: *to }
+                    }
                     _ => return None,
                 };
-                Some(AutomationLane { target, points: lane.points.clone(), enabled: lane.enabled })
+                Some(AutomationLane { target, ..lane.clone() })
             })
             .collect();
         self.automation.extend(lanes);
@@ -1490,18 +1554,24 @@ impl Project {
     }
 
     /// The tracks that must have been played before `track` can be: the
-    /// members of a group, the tracks that send to a return, and the
+    /// members of a group, the tracks that send to a return (by a send set
+    /// by hand or by one that is its envelope, switched on or not), and the
     /// tracks its devices listen to. In the order of the track list,
     /// without repeats.
     pub fn feeds(&self, track: TrackId) -> Vec<TrackId> {
         let Ok(node) = self.track(track) else { return Vec::new() };
         let keys: Vec<TrackId> = node.devices.iter().filter_map(|device| device.sidechain).collect();
+        let sends_by_envelope = |from: TrackId| {
+            let moved = AutomationTarget::Send { track: from, to: track };
+            self.automation.iter().any(|lane| lane.target == moved)
+        };
         self.tracks
             .iter()
             .filter(|other| {
                 other.id != track
                     && (other.group == Some(track)
                         || other.sends.iter().any(|send| send.to == track)
+                        || sends_by_envelope(other.id)
                         || keys.contains(&other.id))
             })
             .map(|other| other.id)
@@ -1549,6 +1619,13 @@ impl Project {
     // ---- automation ----------------------------------------------------
 
     /// Replaces the envelope for `target`. An empty list removes the lane.
+    ///
+    /// A lane that exists keeps the travel its lines follow, so that editing
+    /// some of its points leaves the rest of it as it sounded. A new lane
+    /// takes its control's ([`AutomationTarget::travel`]); for a device's
+    /// parameter only its device knows that, and whoever knows the device
+    /// says so with [`Project::write_automation`]. Left unsaid, such a lane
+    /// is straight in the parameter's units.
     pub fn set_automation(
         &mut self,
         target: AutomationTarget,
@@ -1562,18 +1639,60 @@ impl Project {
                 self.device(*device)?;
             }
             AutomationTarget::MasterVolume => {}
+            AutomationTarget::Send { track, to } => self.can_send(*track, *to)?,
         }
         if points.iter().any(|p| !p.beat.is_finite() || !p.value.is_finite() || p.beat < 0.0) {
             return invalid("automation points need finite values and beats >= 0");
         }
         points.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+        let existing = self.automation.iter().find(|lane| lane.target == target);
         // A lane that is switched off stays off when its points are edited.
-        let enabled = self.automation.iter().find(|lane| lane.target == target).is_none_or(|lane| lane.enabled);
+        let enabled = existing.is_none_or(|lane| lane.enabled);
+        let travel = existing.map_or_else(|| target.travel().unwrap_or_default(), |lane| lane.travel);
+        let new = existing.is_none();
         self.automation.retain(|lane| lane.target != target);
         if !points.is_empty() {
-            self.automation.push(AutomationLane { target, points, enabled });
+            self.automation.push(AutomationLane { target: target.clone(), points, travel, enabled });
+            // A send that an envelope opens is a send: its return has to be
+            // played after the track, like any other it is sent to.
+            if let (true, AutomationTarget::Send { track, to }) = (new, &target)
+                && let Err(error) = self.no_loop(format!("sending {track} to {to}"))
+            {
+                self.automation.retain(|lane| lane.target != target);
+                return Err(error);
+            }
         }
         Ok(())
+    }
+
+    /// [`Project::set_automation`], saying what the lines are straight
+    /// along: for a lane that is new, or one whose lines are to travel
+    /// another way from now on.
+    pub fn write_automation(
+        &mut self,
+        target: AutomationTarget,
+        points: Vec<AutomationPoint>,
+        travel: Travel,
+    ) -> Result<(), EditError> {
+        validate_travel(travel)?;
+        self.set_automation(target.clone(), points)?;
+        if let Some(lane) = self.automation.iter_mut().find(|lane| lane.target == target) {
+            lane.travel = travel;
+        }
+        Ok(())
+    }
+
+    /// Changes what the lines of an envelope are straight along, its points
+    /// staying where they are: the same points are then another curve.
+    pub fn set_automation_travel(&mut self, target: &AutomationTarget, travel: Travel) -> Result<(), EditError> {
+        validate_travel(travel)?;
+        match self.automation.iter_mut().find(|lane| lane.target == *target) {
+            Some(lane) => {
+                lane.travel = travel;
+                Ok(())
+            }
+            None => invalid("there is no automation for that target to change the travel of"),
+        }
     }
 
     /// Switches a lane off or on again. Off, it keeps its points but drives
@@ -1597,6 +1716,7 @@ impl Project {
             }
             AutomationTarget::DeviceParam { device, .. } => self.device(*device).is_ok(),
             AutomationTarget::MasterVolume => true,
+            AutomationTarget::Send { track, to } => self.track(*track).is_ok() && self.track(*to).is_ok(),
         });
         self.automation = lanes;
     }
@@ -1608,9 +1728,8 @@ impl Project {
     }
 
     pub fn from_json(json: &str) -> Result<Self, EditError> {
-        let project: Project =
+        let mut project: Project =
             serde_json::from_str(json).map_err(|e| EditError::Invalid(format!("invalid project file: {e}")))?;
-        let mut project = project;
         if project.format_version > FORMAT_VERSION {
             return invalid(format!(
                 "project was saved by a newer version (format {}, this build reads up to {FORMAT_VERSION})",
@@ -1618,14 +1737,10 @@ impl Project {
             ));
         }
         // A file of an older format says less than it means: what it leaves
-        // unsaid is written into it here, once, so that it sounds as it did.
-        if project.format_version < 2 {
-            let devices = project.tracks.iter_mut().flat_map(|track| track.devices.iter_mut());
-            for device in devices.chain(project.master.devices.iter_mut()) {
-                crate::formats::keep_format_1(&device.uri, &mut device.params);
-            }
-        }
-        project.format_version = FORMAT_VERSION;
+        // unsaid is written into it here, once, so that it sounds as it did,
+        // and a value whose scale has moved since is moved, in the device
+        // and in the envelopes that drive it.
+        crate::formats::keep_project(&mut project);
         Ok(project)
     }
 }
@@ -1664,6 +1779,13 @@ fn validate_span(start: Beats, length: Beats) -> Result<(), EditError> {
         return invalid(format!("length {length} must be > 0 beats"));
     }
     Ok(())
+}
+
+fn validate_travel(travel: Travel) -> Result<(), EditError> {
+    match travel {
+        Travel::Fader { floor } if !floor.is_finite() => invalid("a fader's floor must be a number of dB"),
+        _ => Ok(()),
+    }
 }
 
 fn validate_volume(volume_db: f32) -> Result<f32, EditError> {
@@ -1708,6 +1830,210 @@ mod tests {
         project.set_automation_enabled(&volume, true).unwrap();
         assert!(project.automation.iter().find(|lane| lane.target == volume).unwrap().enabled);
         assert!(project.set_automation_enabled(&pan, false).is_err(), "nothing to switch where there is no lane");
+    }
+
+    fn lane<'a>(project: &'a Project, target: &AutomationTarget) -> &'a AutomationLane {
+        project.automation.iter().find(|lane| lane.target == *target).expect("the target has an envelope")
+    }
+
+    #[test]
+    fn a_send_is_automated_like_a_fader_and_goes_with_its_tracks() {
+        let mut project = Project::new("t");
+        let lead = project.add_track("Lead");
+        let bus = project.add_track_of_kind("Bus", TrackKind::Group);
+        let echo = project.add_track_of_kind("Echo", TrackKind::Return);
+        let hall = project.add_track_of_kind("Hall", TrackKind::Return);
+        let throw = AutomationTarget::Send { track: lead, to: echo };
+        // A throw: shut, open for a note, shut again. The track has no send
+        // set by hand; the envelope is the send.
+        let points = vec![
+            AutomationPoint::new(0.0, -70.0),
+            AutomationPoint::new(7.0, -70.0),
+            AutomationPoint::new(8.0, -6.0),
+            AutomationPoint::new(12.0, -70.0),
+        ];
+        project.set_automation(throw.clone(), points.clone()).unwrap();
+        assert!(project.track(lead).unwrap().sends.is_empty());
+        assert_eq!((lane(&project, &throw).travel, &lane(&project, &throw).points), (Travel::FADER, &points));
+        // Half way up it is where a fader would be half way between the two.
+        let half = lane(&project, &throw).value_at(7.5);
+        assert!((half - (-70.0 + (64.0f64 * 64.0 / 2.0).sqrt())).abs() < 1e-9, "{half}");
+        assert_eq!(lane(&project, &throw).value_at(20.0), -70.0);
+        // A group sends as a track does.
+        project.set_automation(AutomationTarget::Send { track: bus, to: hall }, points.clone()).unwrap();
+
+        // Only what can be sent, to where it can go, and both must exist.
+        for (track, to) in [(echo, hall), (lead, bus), (lead, lead), (TrackId(99), echo), (lead, TrackId(99))] {
+            let refused = project.set_automation(AutomationTarget::Send { track, to }, points.clone());
+            assert!(refused.is_err(), "{track} to {to}");
+        }
+        assert_eq!(project.automation.len(), 2);
+
+        // Saved and loaded as it is.
+        let loaded = Project::from_json(&project.to_json()).unwrap();
+        assert_eq!(loaded, project);
+        assert!(project.to_json().contains("\"type\": \"send\""));
+
+        // The copy of a track sends what the track sends.
+        let copy = project.duplicate_track(lead).unwrap();
+        assert_eq!(lane(&project, &AutomationTarget::Send { track: copy, to: echo }).points, points);
+        // A send set by hand lives beside the envelope and is not it.
+        project.set_send(lead, echo, Some(-12.0)).unwrap();
+        project.set_send(lead, echo, None).unwrap();
+        assert_eq!(lane(&project, &throw).points, points, "removing the send by hand leaves the envelope");
+
+        // A send that is an envelope is a send to whoever orders the tracks:
+        // the lead cannot listen to the return it feeds, nor be made to feed
+        // a return it listens to.
+        let squeeze = project.add_device(ChainRef::Track(lead), "builtin:compressor", "Duck", None).unwrap();
+        let loop_of = |error: EditError| error.to_string().contains("would make a loop");
+        assert!(project.set_sidechain(squeeze, Some(echo)).is_err_and(loop_of), "it sends there by its envelope");
+        assert!(project.feeds(echo).contains(&lead) && project.feeds(hall).contains(&bus));
+        project.set_sidechain(squeeze, Some(hall)).unwrap();
+        let before = project.clone();
+        let to_hall = AutomationTarget::Send { track: lead, to: hall };
+        assert!(project.set_automation(to_hall, points.clone()).is_err_and(loop_of));
+        assert_eq!(project, before, "and what is refused changes nothing");
+        project.remove_device(squeeze).unwrap();
+
+        // An envelope goes with the return it feeds, and with its track.
+        project.remove_track(echo).unwrap();
+        assert!(
+            project
+                .automation
+                .iter()
+                .all(|lane| !matches!(lane.target, AutomationTarget::Send { to, .. } if to == echo))
+        );
+        assert_eq!(project.automation.len(), 1, "the group's send to the hall is all that is left");
+        project.remove_track(bus).unwrap();
+        assert!(project.automation.is_empty());
+    }
+
+    #[test]
+    fn a_new_envelope_follows_its_control_and_an_edited_one_keeps_its_travel() {
+        let mut project = Project::new("t");
+        let track = project.add_track("Keys");
+        let filter = project.add_device(ChainRef::Track(track), "builtin:filter", "Filter", None).unwrap();
+        let volume = AutomationTarget::TrackVolume { track };
+        let pan = AutomationTarget::TrackPan { track };
+        let cutoff = AutomationTarget::DeviceParam { device: filter, param: "cutoff".into() };
+        let fade = vec![AutomationPoint::new(0.0, 0.0), AutomationPoint::new(8.0, -60.0)];
+        let sweep = vec![AutomationPoint::new(0.0, 300.0), AutomationPoint::new(8.0, 9000.0)];
+
+        // The mixer's controls are the model's own: a fader, and the pan.
+        project.set_automation(volume.clone(), fade.clone()).unwrap();
+        project.set_automation(AutomationTarget::MasterVolume, fade.clone()).unwrap();
+        project
+            .set_automation(pan.clone(), vec![AutomationPoint::new(0.0, -1.0), AutomationPoint::new(8.0, 1.0)])
+            .unwrap();
+        assert_eq!(lane(&project, &volume).travel, Travel::FADER);
+        assert_eq!(lane(&project, &AutomationTarget::MasterVolume).travel, Travel::FADER);
+        assert!((lane(&project, &volume).value_at(4.0) + 20.0).abs() < 1e-9, "a fade is still heard half way");
+        assert_eq!((lane(&project, &pan).travel, lane(&project, &pan).value_at(4.0)), (Travel::Linear, 0.0));
+
+        // A device's parameter is what its device says: whoever knows says so.
+        project.set_automation(cutoff.clone(), sweep.clone()).unwrap();
+        assert_eq!((lane(&project, &cutoff).travel, lane(&project, &cutoff).value_at(4.0)), (Travel::Linear, 4650.0));
+        project.write_automation(cutoff.clone(), sweep.clone(), Travel::Log).unwrap();
+        let middle = lane(&project, &cutoff).value_at(4.0);
+        assert!((middle - (300.0f64 * 9000.0).sqrt()).abs() < 1e-9, "the middle pitch, not the middle frequency");
+
+        // Editing the points of a lane leaves how it travels alone...
+        let mut longer = sweep.clone();
+        longer.push(AutomationPoint::new(16.0, 300.0));
+        project.set_automation(cutoff.clone(), longer).unwrap();
+        assert_eq!(lane(&project, &cutoff).travel, Travel::Log);
+        // ...until that is changed, the points staying where they are.
+        project.set_automation_travel(&volume, Travel::Linear).unwrap();
+        assert_eq!((lane(&project, &volume).value_at(4.0), &lane(&project, &volume).points), (-30.0, &fade));
+        project.set_automation_travel(&volume, Travel::FADER).unwrap();
+        assert!(project.set_automation_travel(&volume, Travel::Fader { floor: f64::NAN }).is_err());
+        assert!(
+            project.write_automation(volume.clone(), fade.clone(), Travel::Fader { floor: f64::INFINITY }).is_err()
+        );
+        let unwritten = AutomationTarget::DeviceParam { device: filter, param: "resonance".into() };
+        assert!(project.set_automation_travel(&unwritten, Travel::Log).is_err(), "no lane, nothing to change");
+
+        // A cleared lane is gone, and the next one for the target starts afresh.
+        project.set_automation(cutoff.clone(), Vec::new()).unwrap();
+        project.set_automation(cutoff.clone(), sweep).unwrap();
+        assert_eq!(lane(&project, &cutoff).travel, Travel::Linear);
+
+        // The travel is saved with the lane, copied with its track, and one
+        // that is straight in its units is not worth a line in the file.
+        let json = project.to_json();
+        assert_eq!(json.matches("\"travel\"").count(), 2, "the two faders: {json}");
+        assert_eq!(Project::from_json(&json).unwrap(), project);
+        let copy = project.duplicate_track(track).unwrap();
+        assert_eq!(lane(&project, &AutomationTarget::TrackVolume { track: copy }).travel, Travel::FADER);
+    }
+
+    #[test]
+    fn a_file_saved_before_lines_followed_their_controls_plays_as_it_did() {
+        for format in [1, 2] {
+            an_older_file_plays_as_it_did(format);
+        }
+    }
+
+    fn an_older_file_plays_as_it_did(format: u32) {
+        // A project as a build before format 3 wrote it: a fade and a
+        // sweep, neither lane saying how its lines travel, because there
+        // was one way only.
+        let old = r#"{
+            "format_version": 1,
+            "name": "before",
+            "tempo": 120.0,
+            "time_signature": { "numerator": 4, "denominator": 4 },
+            "loop_region": { "enabled": false, "start": 0.0, "end": 16.0 },
+            "tracks": [{
+                "id": 1, "name": "Keys", "color": 15899978,
+                "volume_db": 0.0, "pan": 0.0, "mute": false, "solo": false,
+                "devices": [{ "id": 2, "uri": "builtin:filter", "name": "Filter", "enabled": true, "params": {} }],
+                "clips": []
+            }],
+            "master": { "volume_db": 0.0, "devices": [] },
+            "automation": [
+                { "target": { "type": "track_volume", "track": 1 },
+                  "points": [{ "beat": 0.0, "value": 0.0 }, { "beat": 8.0, "value": -60.0, "shape": { "curve": 0.5 } },
+                             { "beat": 16.0, "value": 0.0 }] },
+                { "target": { "type": "device_param", "device": 2, "param": "cutoff" },
+                  "points": [{ "beat": 0.0, "value": 300.0 }, { "beat": 8.0, "value": 9000.0 }] }
+            ],
+            "next_id": 3
+        }"#;
+        let old = &old.replace("\"format_version\": 1", &format!("\"format_version\": {format}"));
+        let mut project = Project::from_json(old).expect("a file of an older format opens");
+        let volume = AutomationTarget::TrackVolume { track: TrackId(1) };
+        let cutoff = AutomationTarget::DeviceParam { device: DeviceId(2), param: "cutoff".into() };
+        // Straight in decibels and in hertz, exactly as it was played then.
+        assert_eq!(lane(&project, &volume).travel, Travel::Linear);
+        assert_eq!(lane(&project, &volume).value_at(4.0), -30.0);
+        assert_eq!(lane(&project, &volume).value_at(2.0), -15.0);
+        assert_eq!(lane(&project, &cutoff).value_at(4.0), 4650.0);
+        let bent = lane(&project, &volume).value_at(12.0);
+        assert_eq!(bent, automation_value(&lane(&project, &volume).points, 12.0), "a bend bends what it bent");
+
+        // Saved by this version it is this version's file, and says nothing
+        // new about lanes that are as they were.
+        let saved = project.to_json();
+        assert!(saved.contains(&format!("\"format_version\": {FORMAT_VERSION}")), "{saved}");
+        assert!(!saved.contains("travel"));
+        assert_eq!(Project::from_json(&saved).unwrap(), project);
+
+        // Moving a point of such a lane does not change the rest of it.
+        let mut points = lane(&project, &volume).points.clone();
+        points[2].value = -6.0;
+        project.set_automation(volume.clone(), points).unwrap();
+        assert_eq!((lane(&project, &volume).travel, lane(&project, &volume).value_at(4.0)), (Travel::Linear, -30.0));
+        // A lane written now on the same project is a fader's.
+        project.set_automation(AutomationTarget::MasterVolume, vec![AutomationPoint::new(0.0, 0.0)]).unwrap();
+        assert_eq!(lane(&project, &AutomationTarget::MasterVolume).travel, Travel::FADER);
+
+        // And a file from a later version than this build is refused in words.
+        let later = old
+            .replace(&format!("\"format_version\": {format}"), &format!("\"format_version\": {}", FORMAT_VERSION + 1));
+        let refusal = Project::from_json(&later).unwrap_err().to_string();
+        assert!(refusal.contains("newer version") && refusal.contains(&format!("up to {FORMAT_VERSION}")), "{refusal}");
     }
 
     /// A song that is opened and saved must come back as it was, to the last
@@ -1883,7 +2209,8 @@ mod tests {
         let eq = project.add_device(ChainRef::Master, "builtin:eq", "EQ", None).unwrap();
         project.device_mut(reverb).unwrap().params.insert("decay".into(), 0.7);
         // As a build before format 2 wrote it.
-        let old = project.to_json().replace("\"format_version\": 2", "\"format_version\": 1");
+        let this_format = format!("\"format_version\": {FORMAT_VERSION}");
+        let old = project.to_json().replace(&this_format, "\"format_version\": 1");
         assert_ne!(old, project.to_json());
 
         let read = Project::from_json(&old).unwrap();
@@ -1899,8 +2226,88 @@ mod tests {
         // A file of this format is taken at its word: a new reverb stays new.
         assert!(Project::from_json(&project.to_json()).unwrap().device(delay).unwrap().params.is_empty());
         // And one from a later build is refused in words.
-        let later = project.to_json().replace("\"format_version\": 2", "\"format_version\": 99");
+        let later = project.to_json().replace(&this_format, "\"format_version\": 99");
         assert!(Project::from_json(&later).unwrap_err().to_string().contains("newer version"));
+    }
+
+    #[test]
+    fn a_file_from_before_its_devices_changed_is_read_as_what_it_meant() {
+        // A file of format 2 has envelopes that are straight in their
+        // units, one of format 3 envelopes that follow their controls: the
+        // faders of the day, silent at the bottom of the ranges of the day.
+        let then = |floor: f64| Travel::Fader { floor };
+        an_older_file_keeps_its_devices(2, [Travel::Linear; 4]);
+        an_older_file_keeps_its_devices(3, [then(-48.0), then(-48.0), then(-70.0), Travel::FADER]);
+    }
+
+    /// `travels`: of the envelopes on the synth's volume, the sampler's
+    /// volume, the utility's gain and the track's fader, as the file has
+    /// them.
+    fn an_older_file_keeps_its_devices(format: u32, travels: [Travel; 4]) {
+        let mut project = Project::new("old");
+        let track = project.add_track("A");
+        let synth = project.add_device(ChainRef::Track(track), "builtin:polysynth", "Synth", None).unwrap();
+        let plain = project.add_device(ChainRef::Track(track), "builtin:polysynth", "Synth 2", None).unwrap();
+        let sampler = project.add_device(ChainRef::Track(track), "builtin:sampler", "Sampler", None).unwrap();
+        let fade = project.add_device(ChainRef::Master, "builtin:utility", "Fade", None).unwrap();
+        let reverb = project.add_device(ChainRef::Master, "builtin:reverb", "Reverb", None).unwrap();
+        project.device_mut(synth).unwrap().params.insert("volume".into(), 8.0);
+        let volume = |device: DeviceId| AutomationTarget::DeviceParam { device, param: "volume".into() };
+        let cutoff = AutomationTarget::DeviceParam { device: synth, param: "cutoff".into() };
+        let gain = AutomationTarget::DeviceParam { device: fade, param: "gain".into() };
+        let fader = AutomationTarget::TrackVolume { track };
+        let points = |from: f64, to: f64| vec![AutomationPoint::new(0.0, from), AutomationPoint::new(4.0, to)];
+        project.write_automation(volume(synth), points(-48.0, 8.0), travels[0]).unwrap();
+        project.write_automation(volume(sampler), points(-48.0, 8.0), travels[1]).unwrap();
+        project.write_automation(cutoff.clone(), points(200.0, 8000.0), Travel::Linear).unwrap();
+        project.write_automation(gain.clone(), points(0.0, -70.0), travels[2]).unwrap();
+        project.write_automation(fader.clone(), points(0.0, -70.0), travels[3]).unwrap();
+        // As a build of that format wrote it.
+        let this_format = format!("\"format_version\": {FORMAT_VERSION}");
+        let old = project.to_json().replace(&this_format, &format!("\"format_version\": {format}"));
+        assert_ne!(old, project.to_json());
+
+        let read = Project::from_json(&old).unwrap();
+        assert_eq!(read.format_version, FORMAT_VERSION);
+        let params = |id: DeviceId| read.device(id).unwrap().params.clone();
+        let line = |target: &AutomationTarget| -> (Vec<f64>, Travel) {
+            let lane = lane(&read, target);
+            (lane.points.iter().map(|point| point.value).collect(), lane.travel)
+        };
+        // The synth's volume is the same sound under another number,
+        // wherever the file has it; nothing else of it has moved.
+        let synth_at = |volume: f64| BTreeMap::from([("legacy".to_string(), 1.0), ("volume".to_string(), volume)]);
+        assert_eq!((params(synth), params(plain)), (synth_at(-13.0), synth_at(-21.0)));
+        assert_eq!(line(&cutoff), (vec![200.0, 8000.0], Travel::Linear));
+        // Its envelope is the same line, 21 dB down that scale: the points,
+        // and with them the level a fader's travel is measured from. Half
+        // way it is where it was, less the 21 dB.
+        let moved = match travels[0] {
+            Travel::Fader { floor } => Travel::Fader { floor: floor - 21.0 },
+            other => other,
+        };
+        assert_eq!(line(&volume(synth)), (vec![-69.0, -13.0], moved));
+        let was = travels[0].between(-48.0, 8.0, 0.5);
+        assert!((lane(&read, &volume(synth)).value_at(2.0) - (was - 21.0)).abs() < 1e-9);
+        // The sampler keeps its law and the defaults of the day; its own
+        // volume means what it did, and its envelope is as it was.
+        assert_eq!(params(sampler).get("legacy"), Some(&1.0));
+        assert_eq!((params(sampler).get("velocity_sens"), params(sampler).get("volume")), (Some(&0.6), Some(&-6.0)));
+        assert_eq!(line(&volume(sampler)), (vec![-48.0, 8.0], travels[1]));
+        // A fade that went down to 70 dB under goes there still, the way
+        // it went.
+        assert_eq!(params(fade), BTreeMap::from([("legacy".to_string(), 1.0)]));
+        assert_eq!(line(&gain), (vec![0.0, -70.0], travels[2]));
+        assert_eq!(line(&fader), (vec![0.0, -70.0], travels[3]));
+        // What changed in format 2 is as the file has it.
+        assert!(params(reverb).is_empty());
+        // Saved again it is a file of this format, and reads back the same.
+        assert_eq!(Project::from_json(&read.to_json()).unwrap(), read);
+        // And a file of format 1 is given all of it at once.
+        let oldest = old.replace(&format!("\"format_version\": {format}"), "\"format_version\": 1");
+        let oldest = Project::from_json(&oldest).unwrap();
+        assert_eq!(oldest.device(synth).unwrap().params.get("volume"), Some(&-13.0));
+        assert_eq!(oldest.device(reverb).unwrap().params.get("legacy"), Some(&1.0));
     }
 
     #[test]

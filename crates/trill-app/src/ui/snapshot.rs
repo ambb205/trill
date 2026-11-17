@@ -284,7 +284,7 @@ impl Snapshot {
     /// case the target stays where it is set by hand.
     pub fn automated(&self, target: &AutomationTarget, beat: Beats) -> Option<f64> {
         let lane = self.lane(target).filter(|lane| lane.enabled)?;
-        Some(trill_core::project::automation_value(&lane.points, beat))
+        Some(lane.value_at(beat))
     }
 
     /// Whether `device` brings a window of its own to open.
@@ -622,7 +622,10 @@ mod tests {
             .unwrap();
         let snapshot = Snapshot::capture(&session, &[]);
         assert_eq!(snapshot.envelope(&volume).unwrap().len(), 2);
-        assert_eq!(snapshot.automated(&volume, 2.0), Some(-6.0));
+        // What is heard half way: half way along the fader between the two,
+        // which is what the engine plays, not the middle of the decibels.
+        let half_way = snapshot.automated(&volume, 2.0).unwrap();
+        assert!((half_way + 5.72).abs() < 0.01, "{half_way}");
         assert_eq!(snapshot.automated(&AutomationTarget::TrackPan { track }, 2.0), None);
 
         // Switched off, the envelope is still there and says nothing.

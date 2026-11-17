@@ -3,12 +3,13 @@
 //! and hands it over; the audio thread swaps it in and carries the running
 //! state (device instances, sounding notes, fader positions) across.
 
+use crate::glide::{Gate, Glide};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use trill_core::controllers::{CONTROLLER_KINDS, ControllerKind, ControllerLane};
 use trill_core::device::{DeviceProcessor, EventKind};
-use trill_core::project::AutomationPoint;
-use trill_core::{DeviceId, TimeSignature, TrackId};
+use trill_core::project::{AutomationLane, AutomationPoint, envelope_value};
+use trill_core::{DeviceId, TimeSignature, TrackId, Travel};
 
 /// Largest block the engine hands to a device.
 pub const MAX_BLOCK: usize = 512;
@@ -79,13 +80,56 @@ pub(crate) struct DeviceSlot {
     pub key: Option<usize>,
 }
 
+/// An envelope as the audio thread plays it: its points, and what the
+/// lines between them are straight along.
+pub(crate) struct Envelope {
+    /// Sorted by beat; never empty.
+    pub points: Vec<AutomationPoint>,
+    pub travel: Travel,
+}
+
+impl Envelope {
+    pub fn of(lane: &AutomationLane) -> Self {
+        Self { points: lane.points.clone(), travel: lane.travel }
+    }
+
+    /// What the envelope is worth at `beat`. One search among its points,
+    /// however many there are: nothing is allocated and nothing waited for.
+    pub fn value_at(&self, beat: f64) -> f64 {
+        envelope_value(&self.points, self.travel, beat)
+    }
+}
+
 pub(crate) struct ParamAutomation {
     /// Index into the chain's device slots.
     pub slot: usize,
     pub param: usize,
-    pub points: Vec<AutomationPoint>,
+    pub envelope: Envelope,
     /// Last value sent, so unchanged values are not resent every block.
     pub last: f64,
+}
+
+/// A copy of a track's faded signal that goes to a return track. What it
+/// carries is its level, where its envelope has it or where it was set by
+/// hand, times how far mute and solo leave it open.
+pub(crate) struct SendNode {
+    /// The return's bus, and the return itself: by it what the send has
+    /// come to is found again in the graph that takes over.
+    pub bus: usize,
+    pub to: TrackId,
+    /// The level set by hand, as a gain; nothing where the send is its
+    /// envelope alone.
+    pub gain: f32,
+    /// The envelope that moves it, in dB, which then is what counts.
+    pub automation: Option<Envelope>,
+    /// Whether the send carries anything: shut, because the return is not
+    /// heard, or the track is not and the return does not take every
+    /// track's send.
+    pub open: bool,
+    /// Where the level has got to: see [`Glide`].
+    pub glide: Glide<1>,
+    /// How far open it is: see [`Gate`].
+    pub gate: Gate,
 }
 
 #[derive(Default)]
@@ -150,11 +194,13 @@ pub(crate) struct TrackState {
     /// End beat of the sounding note per pitch, or negative when silent.
     pub active_until: [f64; 128],
     pub active_count: usize,
-    pub gain_left: f32,
-    pub gain_right: f32,
-    /// False until the first block, so the fader starts at its target
-    /// instead of ramping up from silence.
-    pub primed: bool,
+    /// Where the fader and the pan have the two sides: see [`Glide`].
+    pub fader: Glide<2>,
+    /// How much of the track's sound passes at all, and how much of that
+    /// goes on to its output: what mute and solo open and shut, each a
+    /// [`Gate`].
+    pub passes: Gate,
+    pub out: Gate,
     /// The keys held by hand on this track, a bit per pitch: through a
     /// keyboard or [`Session::note_on`](crate::Session::note_on).
     pub live_held: u128,
@@ -192,9 +238,9 @@ impl Default for TrackState {
         Self {
             active_until: [-1.0; 128],
             active_count: 0,
-            gain_left: 0.0,
-            gain_right: 0.0,
-            primed: false,
+            fader: Glide::default(),
+            passes: Gate::default(),
+            out: Gate::default(),
             live_held: 0,
             routed_held: 0,
             live: [f32::NAN; CONTROLLER_KINDS],
@@ -285,15 +331,20 @@ pub(crate) struct TrackNode {
     pub chain: Chain,
     pub volume_db: f32,
     pub pan: f32,
-    /// Mute and solo, already resolved.
-    pub audible: bool,
-    /// The track is not heard, because others are soloed, but the group it
-    /// plays through is listened to by a device and is not heard either:
-    /// the track goes on playing into its group, so that the device hears
-    /// what it would in the whole mix, and into nothing else.
-    pub feeds_key: bool,
-    pub volume_automation: Option<Vec<AutomationPoint>>,
-    pub pan_automation: Option<Vec<AutomationPoint>>,
+    /// Mute and solo, already resolved: whether the track's own sound is
+    /// wanted in the mix. A render listens to the tracks that are.
+    pub heard: bool,
+    /// Whether the track passes sound at all: on to its output, or into a
+    /// send. One that does not is faded to nothing.
+    pub passes: bool,
+    /// Whether what it passes goes on to its output, the master or its
+    /// group. A track that only feeds a soloed return through a send
+    /// passes sound and does not. A track that is not heard but plays
+    /// through a group whose sound is wanted all the same (it sends to a
+    /// soloed return, or a device listens to it) does.
+    pub to_output: bool,
+    pub volume_automation: Option<Envelope>,
+    pub pan_automation: Option<Envelope>,
     pub meter: Arc<Meter>,
     pub state: TrackState,
     /// The bus this node reads as its input: set for groups and returns,
@@ -301,8 +352,8 @@ pub(crate) struct TrackNode {
     pub input_bus: Option<usize>,
     /// The group bus the faded signal goes to; the master when `None`.
     pub output_bus: Option<usize>,
-    /// Copies of the faded signal for return tracks: bus and linear gain.
-    pub sends: Vec<(usize, f32)>,
+    /// Copies of the faded signal for return tracks.
+    pub sends: Vec<SendNode>,
     /// Where the track leaves a copy of itself as it comes out of its
     /// devices, ahead of its fader, for the devices that listen to it: a
     /// place in [`Graph::keys`].
@@ -349,10 +400,10 @@ impl Bus {
 pub(crate) struct MasterNode {
     pub chain: Chain,
     pub volume_db: f32,
-    pub volume_automation: Option<Vec<AutomationPoint>>,
+    pub volume_automation: Option<Envelope>,
     pub meter: Arc<Meter>,
-    pub gain: f32,
-    pub primed: bool,
+    /// Where the fader has the mix: see [`Glide`].
+    pub fader: Glide<1>,
     /// Listens to the mix as it reaches the master's devices. Only in a
     /// render that was asked for it.
     pub tap: Option<Box<Tap>>,
@@ -372,6 +423,10 @@ pub struct Graph {
     pub(crate) time_signature: TimeSignature,
     /// `(start, end)` in beats when looping is on.
     pub(crate) loop_region: Option<(f64, f64)>,
+    /// Whether an envelope moves a parameter of any device. While such a
+    /// graph plays, blocks end on a grid of the song's own, so that a
+    /// parameter is moved at the same frames whatever the buffer size.
+    pub(crate) moves_params: bool,
 }
 
 impl Graph {
@@ -385,13 +440,13 @@ impl Graph {
                 volume_db: 0.0,
                 volume_automation: None,
                 meter: Arc::new(Meter::default()),
-                gain: 1.0,
-                primed: false,
+                fader: Glide::default(),
                 tap: None,
             },
             tempo: 120.0,
             time_signature: TimeSignature::default(),
             loop_region: None,
+            moves_params: false,
         }
     }
 
@@ -420,12 +475,20 @@ impl Graph {
             if let Some(previous) = old.tracks.iter_mut().find(|t| t.id == track.id) {
                 std::mem::swap(&mut track.state, &mut previous.state);
                 track.state.lanes_changed = true;
+                // A send goes on from where it was, level and gate, so that
+                // one which a solo opens or shuts does so without a step.
+                // One the track did not have before comes up from nothing.
+                for send in &mut track.sends {
+                    match previous.sends.iter().find(|before| before.to == send.to) {
+                        Some(before) => (send.glide, send.gate) = (before.glide, before.gate),
+                        None => send.gate = Gate::shut(),
+                    }
+                }
             }
             if track.fresh_devices {
                 track.state.resend = true;
             }
         }
-        self.master.gain = old.master.gain;
-        self.master.primed = old.master.primed;
+        self.master.fader = old.master.fader;
     }
 }

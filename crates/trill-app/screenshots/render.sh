@@ -71,8 +71,10 @@ rack=$here/projects/drum-rack.trill
 sounds=$here/sounds
 pack="$sounds/Night Shift"
 night=$sounds/night-shift.trill
+moved=$sounds/night-shift-moved.trill
 if making sounds-browser sounds-drum-rack sounds-sampler sounds-missing-file min-window-sounds \
-    graphite-sounds-browser graphite-sounds-drum-rack; then
+    graphite-sounds-browser graphite-sounds-drum-rack missing-files missing-files-status \
+    missing-library-folder min-window-missing-files graphite-missing-files; then
     cargo run -p trill-app --example sound_fixtures -- "$sounds"
 fi
 
@@ -132,6 +134,17 @@ shot sounds-missing-file "$night" --browse sounds --select "Lost Take"
 shot min-window-sounds "$night" --browse sounds --library "$pack" --sound "Bass Loop 120bpm Am" --select "Bass Loop"     --size 1060x640
 shot graphite-sounds-browser "$night" --browse sounds --library "$pack" --sound "Drum Loop Steady 120bpm"     --select "Pad Loop" --theme graphite
 shot graphite-sounds-drum-rack "$night" --browse sounds --library "$pack" --search kick --select Beat --tab devices     --theme graphite
+
+# Missing files: the same song after its pack was moved. The line in the
+# status bar and the clips marked, with the library pointed at where the
+# pack is now; the list it opens, with what was found for each file and one
+# that was not; the list when it is the library's own folder that is gone
+# (marked in the browser's folders); the smallest window; the other theme.
+shot missing-files-status "$moved" --browse sounds --library "$pack" --select "Drum Loop Busy"
+shot missing-files "$moved" --browse sounds --library "$pack" --missing-files
+shot missing-library-folder "$moved" --browse sounds --library "$sounds/Sample Packs/Night Shift" --missing-files
+shot min-window-missing-files "$moved" --browse sounds --library "$pack" --missing-files --size 1060x640
+shot graphite-missing-files "$moved" --browse sounds --library "$pack" --missing-files --theme graphite
 
 # The assistant's panel: ready, in the middle of a turn, after a turn that
 # changed the song (the window has gone to the clip it wrote), after an
@@ -220,8 +233,9 @@ shot graphite-audio-settings "$song" --select Lead --settings --audio-scene stud
 fixtures=$here/fixtures
 lost=$fixtures/lost-work
 held=$fixtures/held-automation.trill
+thrown=$fixtures/thrown-sends.trill
 if making recovery-offer graphite-recovery-offer min-window-recovery-offer held-automation held-automation-mixer \
-    graphite-held-automation; then
+    graphite-held-automation thrown-sends graphite-thrown-sends; then
     cargo run -p trill-app --example window_fixtures -- "$fixtures"
 fi
 
@@ -235,3 +249,11 @@ shot min-window-recovery-offer --profile "$lost" --size 1060x640
 shot held-automation "$held" --select "Pad chords" --tab devices --automation
 shot held-automation-mixer "$held" --select "Pad chords" --tab mixer --automation
 shot graphite-held-automation "$held" --select "Pad chords" --tab devices --automation --theme graphite
+
+# Sends that move: a send thrown open for single notes and one that was
+# taken hold of, in a track's lanes and on the send bars of the headers and
+# of the mixer; a fade that follows the fader, which is a straight line in
+# its lane, beside the song's own filter sweeps, which were saved straight
+# in hertz and are drawn as the curves they are.
+shot thrown-sends "$thrown" --select "Keys arp" --tab mixer --automation
+shot graphite-thrown-sends "$thrown" --select "Keys arp" --tab mixer --automation --theme graphite

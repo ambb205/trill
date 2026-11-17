@@ -53,7 +53,9 @@ pub enum TrackKindInput {
 pub struct SendInput {
     /// Id of the return track.
     pub to: u64,
-    /// Send level in dB (0 = as loud as the track itself, at most 6). null removes the send.
+    /// Send level in dB (0 = as loud as the track itself, at most 6). null removes the send. To open a send
+    /// for one note or one bar (a delay throw), leave it out here and automate it: set_automation with a
+    /// target of type "send".
     pub level_db: Option<f32>,
 }
 
@@ -405,31 +407,68 @@ pub enum TargetKind {
     TrackPan,
     DeviceParam,
     MasterVolume,
+    /// How much of a track goes to a return track, in dB.
+    Send,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TargetInput {
+    /// "track_volume" and "master_volume" (dB), "track_pan" (-1 to 1), "send" (dB: how much of `track` goes to
+    /// the return track `to`) or "device_param" (the parameter's own units).
     #[serde(rename = "type")]
     pub kind: TargetKind,
-    /// Track id, for track_volume and track_pan.
+    /// Track id, for track_volume, track_pan and send (the track that sends).
     pub track: Option<u64>,
     /// Device id, for device_param.
     pub device: Option<u64>,
     /// Parameter id, for device_param.
     pub param: Option<String>,
+    /// Id of the return track, for send.
+    pub to: Option<u64>,
+}
+
+/// What a line between two points of an envelope is straight along.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TravelInput {
+    /// Along the control's own travel: the default.
+    Control,
+    /// Straight in the value's units: so many dB or Hz a beat.
+    Linear,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetAutomationRequest {
     pub target: TargetInput,
-    /// The complete envelope; it replaces any existing one. Values move in a straight line between points
-    /// unless a point says otherwise, and are held before the first and after the last. An empty list removes
-    /// the automation. Omit to keep the envelope as it is (when only switching `enabled`).
+    /// The complete envelope; it replaces any existing one. Values go from each point to the next in a line
+    /// that is straight along the control's travel (see `travel`) unless a point's `shape` says otherwise, and
+    /// are held before the first and after the last. For a send, -70 dB or lower is shut: nothing is sent. An
+    /// empty list removes the automation. Omit to keep the envelope as it is (when only switching `enabled`).
     pub points: Option<Vec<PointInput>>,
     /// false switches the automation off without deleting it: the target then stays at the value it is set to
     /// (update_device, update_track). true switches it back on. Writing `points` switches it on unless this
     /// says otherwise.
     pub enabled: Option<bool>,
+    /// What the lines are straight along. Omit it (or "control") for the control's own travel, which is what a
+    /// fade or a sweep means: a volume or a send moves as a fader does, a frequency or a time by ratio, an
+    /// amount evenly. "linear" makes them straight in the value's units instead (a fade then loses the same
+    /// number of dB every beat and is all but silent half way down). The reply says which the envelope has.
+    pub travel: Option<TravelInput>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct GetAutomationRequest {
+    /// Only this envelope. Omit for every envelope in the project.
+    pub target: Option<TargetInput>,
+    /// Only the points from this beat on.
+    pub start: Option<f64>,
+    /// Only the points before this beat.
+    pub end: Option<f64>,
+    /// Skip this many of the envelope's points (with `target`): how to read on when a reply said `next_offset`.
+    pub offset: Option<usize>,
+    /// The most points to list in one reply, over all envelopes (default 1000, at most 5000). Every envelope
+    /// is listed with its point_count whether or not its points fit.
+    pub limit: Option<usize>,
 }
 
 #[derive(Copy, Clone, Debug, Deserialize, JsonSchema)]
@@ -660,6 +699,10 @@ pub enum LibraryAction {
     AddFolder,
     /// Take `path` out of the library. Nothing on disk is touched.
     RemoveFolder,
+    /// Say that the library's folder `path` is at `to` now: it was moved or renamed outside Trill. Favorites and
+    /// recently used files that were in it stay with their files, and nothing is read again. Nothing on disk is
+    /// touched.
+    MoveFolder,
     /// Look again for new, changed and deleted files in every folder.
     Rescan,
     /// Folders on this machine that probably hold samples (Splice, DAW packs, a Samples folder), to offer the user.
@@ -669,8 +712,10 @@ pub enum LibraryAction {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LibraryRequest {
     pub action: LibraryAction,
-    /// The folder, for `add_folder` and `remove_folder`.
+    /// The folder, for `add_folder`, `remove_folder` and `move_folder` (the folder as the library has it).
     pub path: Option<String>,
+    /// For `move_folder`: where the folder is now.
+    pub to: Option<String>,
     /// For `add_folder` and `rescan`: how long to wait for the scan before replying, in seconds (default 15, at
     /// most 120). A scan that takes longer carries on in the background; `status` shows its progress.
     pub wait_seconds: Option<f64>,

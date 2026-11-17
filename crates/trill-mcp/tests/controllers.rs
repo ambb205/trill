@@ -551,18 +551,20 @@ async fn a_saxophone_that_waits_for_expression_plays_a_clips_curve() {
         }
     };
 
-    // Notes alone: nothing, and the reply says what the answer is.
-    let (silent, report) = render("silent.wav", json!({})).await;
-    said("render, notes only", &json!({ "peak_db": report["peak_db"], "notes": report["notes"] }));
-    assert!(report["peak_db"].as_f64().unwrap() < -100.0, "{report}");
-    let advice =
-        report["notes"].as_array().unwrap().iter().map(|note| note.as_str().unwrap()).collect::<Vec<_>>().join(" ");
+    // Notes alone: the saxophone never answers them, so nothing is
+    // rendered and no file is written, and the refusal says what the
+    // answer is.
+    let silent = folder.path().join("silent.wav");
+    let arguments = json!({ "path": silent.display().to_string(), "max_tail_seconds": 1.0 });
+    let advice = call(client, "render", arguments).await.unwrap_err();
+    said("render, notes only", &json!(advice));
+    assert!(advice.starts_with("Nothing was rendered: 1 of the song's instruments never answered"), "{advice}");
+    assert!(!silent.exists(), "no file of silence");
     // It does not lead with breath (most silent plugins are silent for
     // other reasons) but it gets there: the probe that tells, and the
     // tool that writes the curve.
     assert!(advice.contains("probe with track") && advice.contains("\"expression\": 100"), "{advice}");
     assert!(advice.contains("shape_dynamics"), "{advice}");
-    assert!(level(&silent, 1.0..7.0) < -100.0);
 
     // A crescendo over the whole clip: sound, louder where the curve is
     // higher.

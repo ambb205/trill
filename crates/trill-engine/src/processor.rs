@@ -5,12 +5,13 @@
 //! exactly what you heard.
 
 use crate::engine::RecordPhase;
+use crate::glide::{DECLICK_SECONDS, STEP, Span, gated};
 use crate::graph::{AudioData, Bus, Chain, DeviceSlot, Graph, MAX_BLOCK, RegionAudio, TrackNode, TrackState};
 use crate::live::{Captured, LiveTarget, TrackSet};
 use crate::monitor::{Beats, Monitor};
 use trill_core::controllers::{CONTROLLER_KINDS, ControllerKind};
 use trill_core::device::{Event, EventKind, KeyInput, MAX_EVENTS_PER_BLOCK, ProcessInfo};
-use trill_core::project::{MIN_VOLUME_DB, automation_value};
+use trill_core::project::MIN_VOLUME_DB;
 use trill_core::{DeviceId, TrackId};
 use trill_dsp::util::{db_to_gain, pan_gains};
 
@@ -22,7 +23,13 @@ const NOTE_ON_LIMIT: usize = EVENT_CAPACITY - 512;
 /// of a millisecond at 48 kHz). The frames are counted from where the song
 /// last started or jumped, not from the start of a buffer, so the same
 /// song makes the same events whatever the buffer size.
-const CONTROL_STEP: u64 = 32;
+const CONTROL_STEP: u64 = STEP;
+/// How often, in frames, a device's parameter is moved to where its
+/// envelope has it. A device takes a parameter for a whole block, so while
+/// a song with such an envelope plays, blocks end on this grid, which is
+/// counted like [`CONTROL_STEP`]: the parameter moves at the same frames
+/// whatever the buffer size, and in a render.
+const PARAM_STEP: u64 = 256;
 /// The most events a track's controllers add to one block. One that finds
 /// no room is told a step later.
 const CONTROL_LIMIT: usize = 768;
@@ -133,6 +140,13 @@ pub struct Processor {
     track_right: Vec<f32>,
     mix_left: Vec<f32>,
     mix_right: Vec<f32>,
+    /// Room for a block of gains that move: a fader's two sides, or a send.
+    gain_left: Vec<f32>,
+    gain_right: Vec<f32>,
+    /// Room for how far a gate is open over a block, while it moves.
+    shares: Vec<f32>,
+    /// How many frames an abrupt change of a gain is spread over.
+    declick: u32,
     /// The audition voice and the metronome, heard but never rendered.
     monitor: Monitor,
     /// Frames between rendering a frame and hearing it.
@@ -167,6 +181,10 @@ impl Processor {
             track_right: vec![0.0; MAX_BLOCK],
             mix_left: vec![0.0; MAX_BLOCK],
             mix_right: vec![0.0; MAX_BLOCK],
+            gain_left: vec![0.0; MAX_BLOCK],
+            gain_right: vec![0.0; MAX_BLOCK],
+            shares: vec![0.0; MAX_BLOCK],
+            declick: (DECLICK_SECONDS * sample_rate).round().max(1.0) as u32,
             monitor: Monitor::new(sample_rate),
             output_latency: 0.0,
             recording: None,
@@ -478,6 +496,11 @@ impl Processor {
                 frames = counting as usize;
             }
 
+            // End the block where the next parameter is due to move.
+            if self.playing && self.graph.moves_params {
+                frames = frames.min((PARAM_STEP - self.frames % PARAM_STEP) as usize);
+            }
+
             // End the block exactly at the loop end so the wrap is sample
             // accurate.
             let mut wrap = None;
@@ -574,6 +597,10 @@ impl Processor {
         let has_live = self.live.iter().any(|event| block.contains(&event.offset));
         // Where a take's events are written: see `Heard`.
         let heard = self.heard();
+        let span = Span { playing, start_beat, anchor_beat: self.anchor_beat, elapsed: self.frames, beats_per_frame };
+        // Where the song is for the parameters its envelopes move.
+        let param_beat = span.beat_on_grid(PARAM_STEP);
+        let declick = self.declick;
 
         let mix_left = &mut self.mix_left[..frames];
         let mix_right = &mut self.mix_right[..frames];
@@ -706,11 +733,11 @@ impl Processor {
             }
 
             match &mut track.source {
-                None => run_chain(&mut track.chain, &info, events, left, right, keys),
+                None => run_chain(&mut track.chain, &info, param_beat, events, left, right, keys),
                 // A render that keeps what goes into the track's effects:
                 // the chain is run in two parts, and heard between them.
                 Some((sources, tap)) => {
-                    move_params(&mut track.chain, &info);
+                    move_params(&mut track.chain, param_beat);
                     let devices = &mut track.chain.devices;
                     let sources = (*sources).min(devices.len());
                     let (source, effects) = devices.split_at_mut(sources);
@@ -727,61 +754,85 @@ impl Processor {
                 key.right[..frames].copy_from_slice(right);
             }
 
-            let volume = match &track.volume_automation {
-                Some(points) => automation_value(points, start_beat) as f32,
-                None => track.volume_db,
+            // Where the fader and the pan have the two sides at a position
+            // of the song: where their envelopes have them, or where they
+            // were set by hand.
+            let (volume, pan) = (&track.volume_automation, &track.pan_automation);
+            let (volume_db, pan_set) = (track.volume_db, track.pan);
+            let sides = |beat: f64| {
+                let level = volume.as_ref().map_or(volume_db, |envelope| envelope.value_at(beat) as f32);
+                if level <= MIN_VOLUME_DB {
+                    return [0.0, 0.0];
+                }
+                let gain = db_to_gain(level);
+                let (pan_left, pan_right) =
+                    pan_gains(pan.as_ref().map_or(pan_set, |envelope| envelope.value_at(beat) as f32));
+                [gain * pan_left, gain * pan_right]
             };
-            let pan = match &track.pan_automation {
-                Some(points) => automation_value(points, start_beat) as f32,
-                None => track.pan,
-            };
-            let (open_left, open_right) = if volume > MIN_VOLUME_DB {
-                let gain = db_to_gain(volume);
-                let (pan_left, pan_right) = pan_gains(pan);
-                (gain * pan_left, gain * pan_right)
-            } else {
-                (0.0, 0.0)
-            };
-            let (target_left, target_right) = if track.audible { (open_left, open_right) } else { (0.0, 0.0) };
-            // Not heard, but its group is listened to: it plays into the
-            // group at its fader, and what follows hears nothing of it.
-            if track.feeds_key
-                && let Some(bus) = track.output_bus.and_then(|bus| buses.get_mut(bus))
-            {
-                add_scaled(left, &mut bus.left[..frames], open_left);
-                add_scaled(right, &mut bus.right[..frames], open_right);
-            }
+            let moving = volume.is_some() || pan.is_some();
+            let shares = &mut self.shares[..frames];
+            let mut gains = [&mut self.gain_left[..frames], &mut self.gain_right[..frames]];
             let state = &mut track.state;
-            if !state.primed {
-                state.gain_left = target_left;
-                state.gain_right = target_right;
-                state.primed = true;
-            }
+            let flat = state.fader.fill(&span, moving, declick, frames, &mut gains, sides);
+            // A track that passes no sound, on to its output or into a
+            // send, is shut: mute and solo work a gate on what the fader
+            // leaves, so that neither makes a step when the other moves.
+            let flat = gated(flat, state.passes.fill(track.passes, declick, shares), shares, &mut gains);
             // Fade in place, so the output and every send carry the same
             // post-fader signal.
-            let peak_left = fade_ramped(left, state.gain_left, target_left);
-            let peak_right = fade_ramped(right, state.gain_right, target_right);
-            state.gain_left = target_left;
-            state.gain_right = target_right;
+            let (peak_left, peak_right) = match flat {
+                Some([gain_left, gain_right]) => (scale(left, gain_left), scale(right, gain_right)),
+                None => (scale_by(left, gains[0]), scale_by(right, gains[1])),
+            };
             track.meter.record(peak_left, peak_right);
             if let Some(tap) = &mut track.tap {
                 tap.push(left, right);
             }
 
-            match track.output_bus.and_then(|bus| buses.get_mut(bus)) {
-                Some(bus) => {
-                    add_scaled(left, &mut bus.left[..frames], 1.0);
-                    add_scaled(right, &mut bus.right[..frames], 1.0);
+            // What goes on to the output, and what goes to each return,
+            // are opened and closed by mute and solo apart from each other:
+            // a track that feeds a soloed return is not heard itself.
+            let (out_left, out_right) = match track.output_bus.and_then(|bus| buses.get_mut(bus)) {
+                Some(bus) => (&mut bus.left[..frames], &mut bus.right[..frames]),
+                None => (&mut *mix_left, &mut *mix_right),
+            };
+            match state.out.fill(track.to_output, declick, shares) {
+                Some(0.0) => {}
+                Some(share) => {
+                    add_scaled(left, out_left, share);
+                    add_scaled(right, out_right, share);
                 }
                 None => {
-                    add_scaled(left, mix_left, 1.0);
-                    add_scaled(right, mix_right, 1.0);
+                    add_scaled_by(left, out_left, shares);
+                    add_scaled_by(right, out_right, shares);
                 }
             }
-            for &(bus, gain) in &track.sends {
-                if let Some(bus) = buses.get_mut(bus) {
-                    add_scaled(left, &mut bus.left[..frames], gain);
-                    add_scaled(right, &mut bus.right[..frames], gain);
+            for send in &mut track.sends {
+                // What the send carries: its level at a position of the
+                // song, where its envelope has it or where it was set by
+                // hand, times how far mute and solo leave it open.
+                let (automation, set) = (&send.automation, send.gain);
+                let level = |beat: f64| match automation {
+                    Some(envelope) => {
+                        let level = envelope.value_at(beat) as f32;
+                        [if level > MIN_VOLUME_DB { db_to_gain(level) } else { 0.0 }]
+                    }
+                    None => [set],
+                };
+                let mut gains = [&mut self.gain_left[..frames]];
+                let flat = send.glide.fill(&span, automation.is_some(), declick, frames, &mut gains, level);
+                let flat = gated(flat, send.gate.fill(send.open, declick, shares), shares, &mut gains);
+                let Some(bus) = buses.get_mut(send.bus) else { continue };
+                match flat {
+                    Some([0.0]) => {}
+                    Some([gain]) => {
+                        add_scaled(left, &mut bus.left[..frames], gain);
+                        add_scaled(right, &mut bus.right[..frames], gain);
+                    }
+                    None => {
+                        add_scaled_by(left, &mut bus.left[..frames], gains[0]);
+                        add_scaled_by(right, &mut bus.right[..frames], gains[0]);
+                    }
                 }
             }
         }
@@ -789,22 +840,21 @@ impl Processor {
         if let Some(tap) = &mut master.tap {
             tap.push(mix_left, mix_right);
         }
-        run_chain(&mut master.chain, &info, &[], mix_left, mix_right, keys);
+        run_chain(&mut master.chain, &info, param_beat, &[], mix_left, mix_right, keys);
 
-        let volume = match &master.volume_automation {
-            Some(points) => automation_value(points, start_beat) as f32,
-            None => master.volume_db,
+        let (volume, volume_db) = (&master.volume_automation, master.volume_db);
+        let level = |beat: f64| {
+            let level = volume.as_ref().map_or(volume_db, |envelope| envelope.value_at(beat) as f32);
+            [if level > MIN_VOLUME_DB { db_to_gain(level) } else { 0.0 }]
         };
-        let target = if volume > MIN_VOLUME_DB { db_to_gain(volume) } else { 0.0 };
-        if !master.primed {
-            master.gain = target;
-            master.primed = true;
-        }
-        out_left.fill(0.0);
-        out_right.fill(0.0);
-        let peak_left = mix_ramped(mix_left, out_left, master.gain, target);
-        let peak_right = mix_ramped(mix_right, out_right, master.gain, target);
-        master.gain = target;
+        let mut gains = [&mut self.gain_left[..frames]];
+        let (peak_left, peak_right) =
+            match master.fader.fill(&span, volume.is_some(), declick, frames, &mut gains, level) {
+                Some([gain]) => (scale(mix_left, gain), scale(mix_right, gain)),
+                None => (scale_by(mix_left, gains[0]), scale_by(mix_right, gains[0])),
+            };
+        out_left.copy_from_slice(mix_left);
+        out_right.copy_from_slice(mix_right);
         master.meter.record(peak_left, peak_right);
 
         let signature = self.graph.time_signature;
@@ -1107,15 +1157,22 @@ fn sort_by_offset(events: &mut [Event]) {
     }
 }
 
-/// Applies a gain ramping from `from` to `to` in place and returns the
-/// resulting peak.
+/// Applies one gain in place and returns the resulting peak.
 #[inline]
-fn fade_ramped(samples: &mut [f32], from: f32, to: f32) -> f32 {
-    let step = (to - from) / samples.len().max(1) as f32;
-    let mut gain = from;
+fn scale(samples: &mut [f32], gain: f32) -> f32 {
     let mut peak = 0.0f32;
     for sample in samples.iter_mut() {
-        gain += step;
+        *sample *= gain;
+        peak = peak.max(sample.abs());
+    }
+    peak
+}
+
+/// Applies a gain for every frame in place and returns the resulting peak.
+#[inline]
+fn scale_by(samples: &mut [f32], gains: &[f32]) -> f32 {
+    let mut peak = 0.0f32;
+    for (sample, gain) in samples.iter_mut().zip(gains) {
         *sample *= gain;
         peak = peak.max(sample.abs());
     }
@@ -1130,42 +1187,35 @@ fn add_scaled(source: &[f32], destination: &mut [f32], gain: f32) {
     }
 }
 
-/// Adds `source` into `destination` while ramping the gain from `from` to
-/// `to`, and returns the peak of what was added.
+/// Adds `source` into `destination`, each frame at its own gain.
 #[inline]
-fn mix_ramped(source: &[f32], destination: &mut [f32], from: f32, to: f32) -> f32 {
-    let step = (to - from) / source.len().max(1) as f32;
-    let mut gain = from;
-    let mut peak = 0.0f32;
-    for (out, sample) in destination.iter_mut().zip(source) {
-        gain += step;
-        let value = sample * gain;
-        *out += value;
-        peak = peak.max(value.abs());
+fn add_scaled_by(source: &[f32], destination: &mut [f32], gains: &[f32]) {
+    for ((out, sample), gain) in destination.iter_mut().zip(source).zip(gains) {
+        *out += sample * gain;
     }
-    peak
 }
 
 /// Runs the devices of a chain over one block, in order, with their
-/// parameters where their automation has them.
+/// parameters where their envelopes have them at `param_beat`.
 fn run_chain(
     chain: &mut Chain,
     info: &ProcessInfo,
+    param_beat: f64,
     events: &[Event],
     left: &mut [f32],
     right: &mut [f32],
     keys: &[Bus],
 ) {
-    move_params(chain, info);
+    move_params(chain, param_beat);
     run_devices(&mut chain.devices, info, events, left, right, keys);
 }
 
 /// Sets the parameters of a chain's devices to where their automation has
-/// them now.
-fn move_params(chain: &mut Chain, info: &ProcessInfo) {
+/// them at `beat`.
+fn move_params(chain: &mut Chain, beat: f64) {
     let Chain { devices, automation } = chain;
     for lane in automation.iter_mut() {
-        let value = automation_value(&lane.points, info.position_beats);
+        let value = lane.envelope.value_at(beat);
         if value != lane.last {
             lane.last = value;
             if let Some(processor) = devices.get_mut(lane.slot).and_then(|slot| slot.processor.as_mut()) {
@@ -1440,8 +1490,9 @@ mod tests {
             chain: Chain::default(),
             volume_db: 0.0,
             pan: 0.0,
-            audible: true,
-            feeds_key: false,
+            heard: true,
+            passes: true,
+            to_output: true,
             volume_automation: None,
             pan_automation: None,
             meter: Arc::new(Meter::default()),

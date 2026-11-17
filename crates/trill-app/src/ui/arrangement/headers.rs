@@ -355,27 +355,32 @@ pub(in crate::ui) fn pan_bar(ui: &Ui, cx: &mut Cx, track: &Track, rect: Rect, id
     }
 }
 
-/// How much of `track` goes to the return track `target`. Dragged to the
-/// bottom, or double-clicked, the send is removed.
-pub(in crate::ui) fn send_bar(ui: &Ui, cx: &mut Cx, track: &Track, target: &Track, rect: Rect, id: egui::Id) {
-    let level = track.sends.iter().find(|send| send.to == target.id).map(|send| send.level_db);
+/// How much of `track` goes to the return track `to`. Dragged to the
+/// bottom, or double-clicked, the send is removed. While an envelope
+/// drives the send the bar shows what the envelope says; dragging it takes
+/// hold of the send (see [`automation::respond`]).
+pub(in crate::ui) fn send_bar(ui: &Ui, cx: &mut Cx, track: &Track, to: &Track, rect: Rect, id: egui::Id) {
+    let target = AutomationTarget::Send { track: track.id, to: to.id };
+    let hold = Hold::of(cx, &target);
+    let set = track.sends.iter().find(|send| send.to == to.id).map(|send| send.level_db);
+    // What is sent now: where the envelope has the send, at the bottom of
+    // which nothing is, or what was set by hand.
+    let level = match hold.driven() {
+        Some(value) => Some(value as f32).filter(|value| *value > trill_core::project::MIN_VOLUME_DB),
+        None => set,
+    };
     let shown = level.map_or_else(|| "Off".to_owned(), units::format_db);
     // In a mixer strip there is no room for the return's name and a unit:
     // sends are in decibels throughout, and the hint spells it out.
     let in_bar = if rect.width() < NARROW_SEND { shown.trim_end_matches(" dB") } else { &shown };
-    let bar = Bar::new(&target.name, in_bar, level.map_or(0.0, units::db_to_fader));
-    let output = trill_noir::bar(ui, cx.theme, rect, id, &bar);
-    cx.hint(
-        &output.response,
-        format!("Send to {} \u{00B7} {shown} \u{00B7} drag to set, double-click to switch off", target.name),
-    );
-    if output.pressed {
-        cx.begin_gesture();
-    }
-    if let Some(position) = output.frac {
+    let bar = Bar::new(&to.name, in_bar, level.map_or(0.0, units::db_to_fader));
+    let output = trill_noir::bar(ui, cx.theme, rect, id, &bar.automation(hold.mark()));
+    let what = format!("{} \u{00B7} {shown}", automation::send_name(&to.name));
+    let gestures = "drag to set, double-click to switch off, right-click to automate";
+    if let Some(position) = automation::respond(cx, &target, hold, &output, &what, gestures) {
         let next = (!output.reset && position > 0.005).then(|| units::fader_to_db(position));
-        if next != level {
-            let (from, to) = (track.id, target.id);
+        if next != set {
+            let (from, to) = (track.id, to.id);
             cx.edit(|project| project.set_send(from, to, next));
         }
     }

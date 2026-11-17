@@ -4,7 +4,7 @@
 use super::*;
 use crate::ui::state::{ArrangementState, FocusArea, LaneOwner, Tool};
 use crate::ui::units;
-use trill_core::{AutomationPoint, AutomationTarget, Segment};
+use trill_core::{AutomationPoint, AutomationTarget, Segment, TrackKind, Travel};
 
 /// Space a lane keeps clear above and below its values.
 const PAD: f32 = 6.0;
@@ -77,7 +77,13 @@ fn a_lane_unfolds_under_its_track_and_a_click_adds_a_point() {
     let points = envelope(&harness, &target);
     assert_eq!(points.len(), 3);
     let (before, middle, after) = (points[0].value, points[1].value, points[2].value);
-    assert_eq!(middle, (before + after) / 2.0, "exactly on the line, half way along it");
+    // The line is straight in the lane, where heights are the fader's: half
+    // way along it is half way up between its ends, which is louder than
+    // the middle of the decibels.
+    let height = |db: f64| units::db_to_fader(db as f32);
+    assert!((height(middle) - (height(before) + height(after)) / 2.0).abs() < 1e-5, "{before} {middle} {after}");
+    assert!(middle > (before + after) / 2.0 + 0.2, "{middle}");
+    assert_eq!(harness.project().automation[0].travel, Travel::FADER, "an envelope drawn here follows the fader");
 
     // The rows below moved down by the lane: track two's clip is there.
     harness.click(harness.lanes_at(10.0, arrangement::TRACK_HEIGHT + LANE + 36.0));
@@ -269,7 +275,7 @@ fn an_automated_control_shows_it_and_follows_its_envelope() {
     harness.session.lock().seek(8.0);
     harness.wait_for("the seek", |session| session.transport().position_beats == 8.0);
     harness.idle(2);
-    assert!((shown(&harness) - units::db_to_fader(-32.0) as f64).abs() < 0.01, "{}", shown(&harness));
+    assert!((shown(&harness) - 0.5).abs() < 0.01, "half way up, half way through the fade: {}", shown(&harness));
 
     // Looking at it changes nothing, and the hint says what a drag would do.
     let before = harness.undo_depth();
@@ -591,6 +597,20 @@ fn the_lane_chooser_lists_everything_the_track_can_automate() {
     harness.click(in_lane(&harness, arrangement::TRACK_HEIGHT, 4.0, 0.5));
     let points = envelope(&harness, &cutoff);
     assert!((300.0..3000.0).contains(&points[0].value), "the middle of a logarithmic range: {}", points[0].value);
+    // And its lines go as the knob does, by pitch: a sweep drawn with two
+    // points passes the middle pitch half way, not the middle frequency.
+    let lane = harness.project().automation[0].clone();
+    assert_eq!(lane.travel, Travel::Log);
+    harness.click(in_lane(&harness, arrangement::TRACK_HEIGHT, 12.0, 0.9));
+    let sweep = harness.project().automation[0].clone();
+    let (low, high) = (sweep.points[0].value, sweep.points[1].value);
+    assert!(
+        (sweep.value_at(8.0) - (low * high).sqrt()).abs() < 1e-6,
+        "{} between {low} and {high}",
+        sweep.value_at(8.0)
+    );
+    harness.session.lock().edit(|project| project.set_automation(cutoff.clone(), lane.points)).unwrap();
+    harness.idle(1);
 
     // "+" shows another lane, the cross hides one.
     harness.click_label("Add lane");
@@ -599,6 +619,174 @@ fn the_lane_chooser_lists_everything_the_track_can_automate() {
     harness.click_label("Hide lane");
     assert_eq!(harness.app.state().arrangement.lanes.len(), 1);
     assert_eq!(envelope(&harness, &cutoff).len(), 1, "hiding a lane keeps its envelope");
+}
+
+/// A song with a return, and what the first track sends to it.
+fn with_a_return(options: UiOptions) -> (Harness, TrackId, TrackId, AutomationTarget) {
+    let mut ids = None;
+    let harness = Harness::new(options, |session| {
+        let (first, ..) = two_tracks(session);
+        let echo = session.edit(|project| Ok(project.add_track_of_kind("Echo", TrackKind::Return))).unwrap();
+        ids = Some((first, echo));
+    });
+    let (first, echo) = ids.unwrap();
+    (harness, first, echo, AutomationTarget::Send { track: first, to: echo })
+}
+
+#[test]
+fn a_send_has_a_lane_and_a_throw_is_drawn_in_it() {
+    let (mut harness, first, _, throw) = with_a_return(UiOptions::default());
+    harness.click_label("Automation of One");
+    harness.idle(2);
+    // The chooser offers the send beside the volume and the pan.
+    harness.click_label("Volume");
+    harness.idle(2);
+    assert!(harness.is_on_screen("Send to Echo"));
+    harness.click_label("Send to Echo");
+    harness.idle(1);
+    assert_eq!(harness.app.state().arrangement.lanes[0].target, throw);
+    assert!(harness.project().automation.is_empty(), "showing a lane writes nothing");
+
+    // Shut, open, shut: three clicks, on a scale whose floor is "nothing".
+    let top = arrangement::TRACK_HEIGHT;
+    harness.click(in_lane(&harness, top, 4.0, 0.0));
+    harness.click(in_lane(&harness, top, 6.0, units::db_to_fader(-6.0)));
+    harness.click(in_lane(&harness, top, 8.0, 0.0));
+    let lane = harness.project().automation[0].clone();
+    assert_eq!((&lane.target, lane.travel), (&throw, Travel::FADER), "it travels as a fader does");
+    let values: Vec<f64> = lane.points.iter().map(|point| point.value).collect();
+    assert_eq!((values[0], values[2]), (-70.0, -70.0));
+    assert!((values[1] + 6.0).abs() < 0.6, "{values:?}");
+    assert!(harness.project().track(first).unwrap().sends.is_empty(), "the envelope is the send");
+    // The hint reads the bottom of the lane as silence, and the lane's own
+    // header names what it moves.
+    harness.move_to(in_lane(&harness, top, 12.0, 0.0));
+    harness.idle(1);
+    assert!(harness.hint().starts_with("\u{2212}\u{221E} dB"), "{}", harness.hint());
+    // The track's chip opens the send's lane again by itself: it is the
+    // envelope the track has.
+    harness.click_label("Automation of One");
+    assert!(harness.app.state().arrangement.lanes.is_empty());
+    harness.click_label("Automation of One");
+    harness.idle(1);
+    assert_eq!(harness.app.state().arrangement.lanes[0].target, throw);
+}
+
+#[test]
+fn an_automated_send_is_marked_follows_its_envelope_and_is_taken_hold_of() {
+    let (mut harness, first, echo, throw) =
+        with_a_return(UiOptions { detail_tab: DetailTab::Mixer, ..Default::default() });
+    set_envelope(&mut harness, &throw, &[(0.0, -70.0), (16.0, 6.0)]);
+    harness.idle(2);
+    let off_mark = "Automation of Echo is off";
+    let sent = |harness: &Harness| harness.project().track(first).unwrap().sends.clone();
+    // In the mixer's strip and in the track's header alike.
+    let bars = |harness: &Harness| harness.all_labeled("Echo");
+    assert!(bars(&harness).len() >= 2, "a send bar for each track that can send");
+    assert!(harness.shown("Echo") < 0.01, "shut at the start, as the envelope has it: {}", harness.shown("Echo"));
+    harness.session.lock().seek(8.0);
+    harness.wait_for("the seek", |session| session.transport().position_beats == 8.0);
+    harness.idle(2);
+    assert!((harness.shown("Echo") - 0.5).abs() < 0.01, "half way open half way through: {}", harness.shown("Echo"));
+    assert!(sent(&harness).is_empty() && !harness.is_on_screen(off_mark));
+
+    // Looking at it says what a drag would do.
+    let bar = bars(&harness)[0];
+    harness.move_to(bar.center());
+    harness.idle(1);
+    assert!(
+        harness.hint().starts_with("Send to Echo") && harness.hint().contains("drag to take hold"),
+        "{}",
+        harness.hint()
+    );
+
+    // Dragged, the send is the user's: the envelope is switched off and
+    // kept, and the send stays where it is put, as one undo step.
+    let before = harness.undo_depth();
+    harness.drag(bar.left_center() + vec2(bar.width() * 0.5, 0.0), bar.left_center() + vec2(bar.width() * 0.85, 0.0));
+    let now = sent(&harness);
+    assert_eq!((now.len(), now[0].to), (1, echo));
+    assert!(now[0].level_db.abs() < 1.5, "85% of the way along is unity: {}", now[0].level_db);
+    assert!(!lane_on(&harness, &throw));
+    assert_eq!(envelope(&harness, &throw).len(), 2, "the envelope itself is untouched");
+    assert_eq!(harness.undo_depth(), before + 1);
+    assert!(harness.app.state().arrangement.lanes.is_empty(), "nothing is unfolded behind the user's back");
+
+    // The mark in the bar's corner hands it back, in one click.
+    harness.settle();
+    assert!(harness.is_on_screen(off_mark));
+    harness.click_label(off_mark);
+    assert!(lane_on(&harness, &throw));
+    harness.idle(1);
+    assert!((harness.shown("Echo") - 0.5).abs() < 0.01, "the envelope sets it again");
+    assert!(!harness.is_on_screen(off_mark));
+    assert_eq!(sent(&harness).len(), 1, "what was set by hand is kept for the next time");
+
+    // Its menu shows the lane, and clears the envelope.
+    harness.right_click(bars(&harness)[0].center());
+    harness.click_label("Show automation");
+    harness.idle(2);
+    assert_eq!(harness.app.state().arrangement.lanes[0].target, throw);
+    harness.right_click(bars(&harness)[0].center());
+    harness.click_label("Clear automation");
+    assert!(envelope(&harness, &throw).is_empty());
+
+    // Undo walks back through all of it.
+    harness.key(Modifiers::COMMAND, Key::Z);
+    harness.key(Modifiers::COMMAND, Key::Z);
+    harness.key(Modifiers::COMMAND, Key::Z);
+    assert!(lane_on(&harness, &throw) && sent(&harness).is_empty());
+    assert_eq!(harness.undo_depth(), before);
+}
+
+#[test]
+fn an_envelope_from_an_older_file_is_shown_as_it_plays_and_can_be_made_to_follow_its_fader() {
+    // A fade as a version 1 file holds it: straight in decibels.
+    let (mut harness, target) = with_volume_lane(&[]);
+    let fade = vec![AutomationPoint::new(0.0, 0.0), AutomationPoint::new(16.0, -60.0)];
+    harness
+        .session
+        .lock()
+        .edit(|project| project.write_automation(target.clone(), fade.clone(), Travel::Linear))
+        .unwrap();
+    harness.idle(2);
+    let lane = |harness: &Harness| harness.project().automation[0].clone();
+    assert_eq!(lane(&harness).value_at(8.0), -30.0);
+
+    // The lane draws it where it is: half way along, the line is at
+    // -30 dB, far under the straight line between its two points, and
+    // that is where it is grabbed.
+    let on_curve = at_volume(&harness, 8.0, -30.0);
+    harness.move_to(on_curve);
+    harness.idle(1);
+    assert!(harness.hint().contains("drag moves the line"), "{}", harness.hint());
+    harness.move_to(at_volume(&harness, 8.0, -20.0));
+    harness.idle(1);
+    assert!(harness.hint().contains("click adds a point"), "nothing is drawn there: {}", harness.hint());
+    // Moving one of its points leaves the rest of it as it sounded.
+    harness.drag(at_volume(&harness, 16.0, -60.0), at_volume(&harness, 16.0, -40.0));
+    assert_eq!(lane(&harness).travel, Travel::Linear);
+    assert!((lane(&harness).value_at(8.0) + 20.0).abs() < 0.6, "half of -40 dB: {}", lane(&harness).value_at(8.0));
+    harness.key(Modifiers::COMMAND, Key::Z);
+    harness.idle(1);
+
+    // Its menu says which way its lines go, and changes it, as one undo step.
+    let before = harness.undo_depth();
+    harness.right_click(on_curve);
+    assert!(harness.is_on("Lines straight in dB") && !harness.is_on("Lines follow the fader"));
+    harness.click_label("Lines follow the fader");
+    harness.idle(1);
+    assert_eq!((lane(&harness).travel, lane(&harness).points), (Travel::FADER, fade));
+    assert!((lane(&harness).value_at(8.0) + 20.0).abs() < 1e-9, "the same two points are now a fader's fade");
+    assert_eq!(harness.undo_depth(), before + 1);
+    // Now the line is where the straight line is.
+    harness.move_to(at_volume(&harness, 8.0, -20.0));
+    harness.idle(1);
+    assert!(harness.hint().contains("drag moves the line"), "{}", harness.hint());
+    harness.right_click(at_volume(&harness, 8.0, -20.0));
+    assert!(harness.is_on("Lines follow the fader"));
+    harness.click_label("Lines straight in dB");
+    assert_eq!(lane(&harness).travel, Travel::Linear);
 }
 
 #[test]

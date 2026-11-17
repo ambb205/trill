@@ -12,8 +12,8 @@ use crate::requests::*;
 use crate::view::{
     ParamDetail, ParamSpan, PresetSearch, audio_device_json, audio_json, clip_json, controller_json, descriptor_json,
     descriptor_summary_json, device_json, lane_json, midi_input_json, param_state_json, plugin_param_json,
-    presets_json, project_json, round, samples_json, scan_json, sound_json, take_json, track_json, transport_json,
-    warp_name,
+    presets_json, project_json, round, samples_json, scan_json, sound_json, take_json, target_json, track_json,
+    transport_json, warp_name,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -36,7 +36,7 @@ use trill_core::midi_file;
 use trill_core::presets::{PresetFile, PresetList};
 use trill_core::project::AutomationPoint;
 use trill_core::project::{AutomationTarget, MAX_TEMPO, MAX_VOLUME_DB, MIN_TEMPO, WarpMode};
-use trill_core::{ChainRef, ClipId, ControllerKind, DeviceId, EditError, Project, TrackId, TrackKind};
+use trill_core::{ChainRef, ClipId, ControllerKind, DeviceId, EditError, Project, TrackId, TrackKind, Travel};
 use trill_engine::{Session, SessionError, SharedSession};
 use trill_library::{EntryKind, Key, Query, Tag, Tags, suggested_locations};
 use trill_runtime::{Runtime, SoundClip, SoundError};
@@ -108,9 +108,11 @@ expression, as a saxophone is without air. After writing such a line, call shape
 the phrases from the notes and writes an expression curve that rises into the high points, swells through long \
 notes and breathes between phrases. set_controllers writes or adjusts a curve point by point (a pedal, a pitch \
 bend, vibrato on the mod wheel). measure names any track that had notes and made no sound.
-4. Shape the sound: add_device for effects (reverb, delay, eq, compressor, filter, chorus, tremolo...), \
-update_device for parameters, set_automation for movement such as filter sweeps and fades, update_track for the \
-mix. describe_device says what each parameter does and in what unit.
+4. Shape the sound: add_device for effects (reverb, delay, eq, compressor, filter, chorus, tremolo, saturator, \
+pitch shifter...), update_device for parameters, set_automation for movement such as filter sweeps, fades and a \
+send opened for one note (a delay throw), update_track for the mix. describe_device says what each parameter does \
+and in what unit. Two points are enough for a fade or a sweep: the line between them follows the control's travel \
+(a fader for a level, pitch for a frequency), so it does not need to be laid out in small steps.
 5. measure reports loudness, true peak, spectral balance, every track's level and loudness, each section's \
 loudness and what the compressors and limiters took off, without writing a file. You cannot hear, so read those \
 numbers and adjust, as often as it takes.
@@ -149,6 +151,20 @@ the peaks, ratio 2, knee 18, attack 10-30 ms, auto_release on: about 2 dB off). 
 `sidechain`: it then turns its own track down whenever the kick sounds. The kick's track may be muted.
 - Reverb and delay belong on return tracks with `mix` 1, fed by sends of -10 to -20 dB: both filter what goes into \
 them (low_cut, high_cut), and the reverb returns more the longer its decay.
+- A level's lowest value is silence: a track's fader, a send, a Utility's `gain` and an instrument's `volume` \
+all end in nothing at -70 dB. Draw a fade or a stop down to -70, not to some other low number.
+- Samples follow velocity in dB. On builtin:sampler and builtin:drumrack `volume` is the level of a note at \
+velocity 75, and `velocity_sens` moves harder and softer notes from it, 0.4 dB a step at 1 (velocity 100 is \
++10 dB, 127 is +21 dB, 45 is -12 dB; 0.5 is half of that): a hard hit is louder than the volume, so leave it \
+room, and write rolls, accents and ghost notes with velocity.
+- A sub bass on builtin:polysynth: a sine with `pitch_env` 12 and `pitch_decay` 0.03 for the knock of an 808, \
+into builtin:saturator on `sine` so that it is heard on small speakers. Noise for a riser or a splash: `osc_level` \
+0, `noise_level` 1, `noise_width` 1, through the synth's band-pass with `cutoff` and `volume` automated. The \
+saturator does not turn down what it drives: more drive is louder, up to the curve's ceiling; trim with `output`.
+- builtin:shifter changes the pitch of any sound, recorded and sampled parts too. Its `pitch` and `mix` can be \
+automated: `mix` opened at a stop and `pitch` drawn from 0 to -24 over a beat makes a held chord melt away.
+- A built-in synth's or sampler's `bend_range` is how far its pitch wheel bends; bends written for the track \
+follow it, so set it before writing a wide bend or a dive as a pitch_bend curve.
 - Give sections contrast: add and remove parts, automate filters and volume, change the drum pattern.
 - Rearranging: edit_time removes, repeats or opens up a stretch of time on every track at once (drop a \
 section, double a chorus, make room for a bridge).
@@ -156,7 +172,74 @@ section, double a chorus, make room for a bridge).
 with automation and controller curves, in one call. Do not duplicate a chorus clip by clip.
 - Every edit can be reversed with history (undo/redo).";
 
+/// The points of envelopes one get_automation reply lists when it is not
+/// told how many, and the most it can be asked for.
+const DEFAULT_POINTS: usize = 1000;
+const MAX_POINTS: usize = 5000;
+
 pub(crate) type Reply = Result<Value, String>;
+
+/// What a tool's `target` names: the target, the lowest and the highest
+/// value a point of its envelope may have, and how its control travels.
+/// An error says what the target needs, or which ids there are.
+fn resolve_target(session: &Session, input: &TargetInput) -> Result<(AutomationTarget, f64, f64, Travel), String> {
+    let project = session.project();
+    let need = |value: Option<u64>, what: &str| value.ok_or_else(|| format!("this target needs `{what}`"));
+    let volume = |target: AutomationTarget| (target, f64::MIN, MAX_VOLUME_DB as f64, Travel::FADER);
+    let found = |track: TrackId| project.track(track).map_err(|error| explain(project, error));
+    Ok(match input.kind {
+        TargetKind::TrackVolume => {
+            let track = TrackId(need(input.track, "track")?);
+            found(track)?;
+            volume(AutomationTarget::TrackVolume { track })
+        }
+        TargetKind::TrackPan => {
+            let track = TrackId(need(input.track, "track")?);
+            found(track)?;
+            (AutomationTarget::TrackPan { track }, -1.0, 1.0, Travel::Linear)
+        }
+        TargetKind::MasterVolume => volume(AutomationTarget::MasterVolume),
+        TargetKind::Send => {
+            let (track, to) = (TrackId(need(input.track, "track")?), TrackId(need(input.to, "to")?));
+            let (from, into) = (found(track)?, found(to)?);
+            let returns: Vec<String> = project
+                .tracks
+                .iter()
+                .filter(|track| track.kind == TrackKind::Return)
+                .map(|track| format!("{} ({})", track.id.0, track.name))
+                .collect();
+            if into.kind != TrackKind::Return {
+                return Err(match returns.is_empty() {
+                    true => format!(
+                        "{to} ({}) is not a return track, and the project has none yet: create_track with kind \
+                         \"return\" makes one",
+                        into.name
+                    ),
+                    false => {
+                        format!("{to} ({}) is not a return track. Return tracks: {}", into.name, returns.join(", "))
+                    }
+                });
+            }
+            if from.kind == TrackKind::Return {
+                return Err(format!("{track} ({}) is a return track; returns cannot send to returns", from.name));
+            }
+            volume(AutomationTarget::Send { track, to })
+        }
+        TargetKind::DeviceParam => {
+            let device = DeviceId(need(input.device, "device")?);
+            let key = input.param.as_deref().ok_or("this target needs `param`")?;
+            let states = session.device_params(device).map_err(|error| explain(project, error))?;
+            let infos: Vec<_> = states.into_iter().map(|state| state.info).collect();
+            let info = find_param(&infos, key)?;
+            (
+                AutomationTarget::DeviceParam { device, param: info.id.clone() },
+                info.min,
+                info.max,
+                Travel::of_param(info),
+            )
+        }
+    })
+}
 
 pub(crate) fn finish(reply: Reply) -> CallToolResult {
     match reply {
@@ -259,6 +342,7 @@ impl TrillServer {
             + Self::hearing_router()
             + Self::instrument_router()
             + Self::story_router()
+            + Self::files_router()
     }
 
     /// The names of the tools the server offers.
@@ -318,6 +402,25 @@ impl TrillServer {
         out["favorites"] = json!(library.favorites().len());
         if let Some(problem) = library.index_problem() {
             out["index_problem"] = json!(problem);
+        }
+        // A folder that is not where the library has it: what was known
+        // of its files is still listed, and that must not pass for all
+        // being well.
+        let missing = library.missing_roots();
+        if !missing.is_empty() {
+            out["missing_folders"] = missing
+                .iter()
+                .map(|folder| {
+                    json!({
+                        "folder": folder.path.display().to_string(),
+                        "files_known": folder.files,
+                        "why": folder.reason,
+                    })
+                })
+                .collect();
+            out["hint"] = json!(
+                "A folder of the library is not where it was (moved, renamed, or on a drive that is not there).                  Its files are still listed and cannot be played. missing_files says where it seems to be;                  `move_folder` with `path` and `to` says where it went, and keeps the favorites with their files."
+            );
         }
         if library.roots().is_empty() {
             out["hint"] = json!(
@@ -587,6 +690,15 @@ impl TrillServer {
                 fields.remove("clips");
             }
             Ok(out)
+        });
+        // A send that an envelope moves is said to be, so that the level
+        // just set is not taken for what is heard.
+        let reply = reply.map(|mut out| {
+            let project = session.project();
+            if let Some(sends) = project.track(id).ok().and_then(|track| crate::view::sends_json(project, track)) {
+                out["sends"] = sends;
+            }
+            out
         });
         // Arming is the session's, not the project's: no undo step.
         let reply = reply.and_then(|mut out| {
@@ -1313,72 +1425,136 @@ impl TrillServer {
         finish(reply)
     }
 
-    /// Automate a track's volume or pan, the master volume, or any device parameter, with a breakpoint
-    /// envelope over time. Use it for fades, filter sweeps, build-ups and drops.
+    /// Automate a track's volume or pan, a send to a return track, the master volume, or any device parameter,
+    /// with a breakpoint envelope over time. Use it for fades, filter sweeps, build-ups, drops and delay throws
+    /// (a send opened for one note: target type "send", shut at -70 dB, open at the level wanted).
+    ///
+    /// A line between two points is straight along the control's travel, as if a hand moved the control at an
+    /// even speed. It is not straight in the value's units:
+    /// - a volume, a send, a gain or an instrument's volume travels like a fader ("fader"): from 0 dB to -60 dB
+    ///   it is at -9 dB after a quarter of the time, -20 dB half way and -34 dB after three quarters, so a fade
+    ///   is heard all the way down and a fade-in is not sudden;
+    /// - a frequency or a time travels by ratio ("log"): a sweep from 300 Hz to 9 kHz is at 1.6 kHz half way,
+    ///   every octave taking the same time;
+    /// - everything else evenly ("linear"): pan, mix and other amounts, an EQ's gain, a threshold, and every
+    ///   parameter of a plugin (whose values are the positions of its own knobs).
+    ///
+    /// So two points are a fade or a sweep; there is no need to lay a line out in short pieces. `shape` on a
+    /// point bends its line further, and `travel` "linear" asks for lines straight in the units. An envelope
+    /// that was in a project file saved before lines followed their controls is "linear", and stays so until
+    /// its points are written again. The reply says which travel the envelope has.
     #[tool(annotations(title = "Set automation"))]
     fn set_automation(&self, Parameters(request): Parameters<SetAutomationRequest>) -> CallToolResult {
         let mut session = self.session.lock();
         let reply = (|| {
-            if request.points.is_none() && request.enabled.is_none() {
-                return Err("give `points` (the envelope), `enabled` (to switch it off or on), or both".to_string());
+            if request.points.is_none() && request.enabled.is_none() && request.travel.is_none() {
+                return Err("give `points` (the envelope), `enabled` (to switch it off or on), `travel` (how its \
+                            lines go), or several of them"
+                    .to_string());
             }
             let points = request.points.as_deref().map(parse_points).transpose()?;
-            let need = |value: Option<u64>, what: &str| value.ok_or_else(|| format!("this target needs `{what}`"));
-            let (target, min, max) = match request.target.kind {
-                TargetKind::TrackVolume => (
-                    AutomationTarget::TrackVolume { track: TrackId(need(request.target.track, "track")?) },
-                    f64::MIN,
-                    MAX_VOLUME_DB as f64,
-                ),
-                TargetKind::TrackPan => {
-                    (AutomationTarget::TrackPan { track: TrackId(need(request.target.track, "track")?) }, -1.0, 1.0)
-                }
-                TargetKind::MasterVolume => (AutomationTarget::MasterVolume, f64::MIN, MAX_VOLUME_DB as f64),
-                TargetKind::DeviceParam => {
-                    let device = DeviceId(need(request.target.device, "device")?);
-                    let key = request.target.param.as_deref().ok_or("this target needs `param`")?;
-                    let states = session.device_params(device).map_err(|error| explain(session.project(), error))?;
-                    let infos: Vec<_> = states.into_iter().map(|state| state.info).collect();
-                    let info = find_param(&infos, key)?;
-                    (AutomationTarget::DeviceParam { device, param: info.id.clone() }, info.min, info.max)
-                }
-            };
+            let (target, min, max, control) = resolve_target(&session, &request.target)?;
             if let Some(point) = points.iter().flatten().find(|point| point.value < min || point.value > max) {
+                let lowest = if min == f64::MIN { "at most".to_string() } else { format!("{min} to") };
                 return Err(format!(
-                    "value {} at beat {} is outside the allowed range {min}..={max}",
+                    "value {} at beat {} is outside the allowed range: {lowest} {max}",
                     point.value, point.beat
                 ));
             }
+            let travel = request.travel.map(|travel| match travel {
+                TravelInput::Control => control,
+                TravelInput::Linear => Travel::Linear,
+            });
             edit(&mut session, |project| {
                 let written = points.is_some();
                 if let Some(points) = points {
-                    project.set_automation(target.clone(), points)?;
+                    // An envelope that is written is written as it is
+                    // described: along its control, whatever the one
+                    // before it did.
+                    project.write_automation(target.clone(), points, travel.unwrap_or(control))?;
                 }
                 let lane = project.automation.iter().find(|lane| lane.target == target);
-                let Some(count) = lane.map(|lane| lane.points.len()) else {
+                let Some((count, was_on)) = lane.map(|lane| (lane.points.len(), lane.enabled)) else {
                     // No envelope: one was just cleared, or there never was one to switch.
                     return match written {
                         true => Ok(json!({ "point_count": 0, "cleared": true })),
                         false => Err(EditError::Invalid(
-                            "there is no automation for that target to switch; write `points` first".into(),
+                            "there is no automation for that target to change; write `points` first".into(),
                         )),
                     };
                 };
+                if let (false, Some(travel)) = (written, travel) {
+                    project.set_automation_travel(&target, travel)?;
+                }
                 // Writing an envelope means wanting to hear it.
-                let enabled = request.enabled.unwrap_or(written || lane.is_some_and(|lane| lane.enabled));
+                let enabled = request.enabled.unwrap_or(written || was_on);
                 project.set_automation_enabled(&target, enabled)?;
-                Ok(json!({ "point_count": count, "cleared": false, "enabled": enabled }))
+                let travel = project.automation.iter().find(|lane| lane.target == target).map(|lane| lane.travel);
+                Ok(json!({
+                    "point_count": count,
+                    "cleared": false,
+                    "enabled": enabled,
+                    "travel": travel.unwrap_or_default().name(),
+                }))
             })
         })();
         finish(reply)
     }
 
-    /// Every automation envelope in the project, with its points as [beat, value] pairs.
+    /// The automation envelopes of the project: what each moves, how many points it has, what its lines are
+    /// straight along ("fader", "log" or "linear", see set_automation), and its points as [beat, value, shape?].
+    /// A song can hold tens of thousands of points, so one reply lists at most `limit` of them (1000 unless
+    /// told otherwise): the envelopes that did not fit are listed without points, and one that fits in part
+    /// says `next_offset`. Ask for one `target`, a stretch of beats (`start`, `end`), or the next part
+    /// (`offset`) to read the rest.
     #[tool(annotations(title = "Get automation", read_only_hint = true))]
-    fn get_automation(&self) -> CallToolResult {
+    fn get_automation(&self, Parameters(request): Parameters<GetAutomationRequest>) -> CallToolResult {
         let session = self.session.lock();
-        let lanes: Vec<Value> = session.project().automation.iter().map(|lane| lane_json(lane, true)).collect();
-        finish(Ok(json!({ "automation": lanes })))
+        let reply = (|| {
+            let only = match &request.target {
+                Some(target) => Some(resolve_target(&session, target)?.0),
+                None => None,
+            };
+            if request.offset.is_some() && only.is_none() {
+                return Err("`offset` reads on in one envelope: give its `target` too".to_string());
+            }
+            let (start, end) = (request.start.unwrap_or(f64::NEG_INFINITY), request.end.unwrap_or(f64::INFINITY));
+            let mut room = request.limit.unwrap_or(DEFAULT_POINTS).clamp(1, MAX_POINTS);
+            let (mut listed, mut total) = (0, 0);
+            let mut lanes: Vec<Value> = Vec::new();
+            for lane in
+                session.project().automation.iter().filter(|lane| only.as_ref().is_none_or(|t| lane.target == *t))
+            {
+                let from = lane.points.partition_point(|point| point.beat < start);
+                let to = lane.points.partition_point(|point| point.beat < end).max(from);
+                let within = &lane.points[from..to];
+                let skipped = request.offset.unwrap_or(0).min(within.len());
+                let shown = &within[skipped..(skipped + room).min(within.len())];
+                total += within.len() - skipped;
+                listed += shown.len();
+                room -= shown.len();
+                let mut out = lane_json(lane, (!shown.is_empty() || within.is_empty()).then_some(shown));
+                if skipped + shown.len() < within.len() {
+                    out["next_offset"] = json!(skipped + shown.len());
+                }
+                lanes.push(out);
+            }
+            if let (Some(target), true) = (&only, lanes.is_empty()) {
+                return Ok(json!({ "automation": [], "note": format!("nothing automates {}", target_json(target)) }));
+            }
+            let mut out = json!({ "automation": lanes });
+            if listed < total {
+                out["points_listed"] = json!(listed);
+                out["points_in_all"] = json!(total);
+                out["note"] = json!(
+                    "Not every point fits in one reply. To read on, call get_automation with one envelope's \
+                     `target` and `offset` set to its next_offset (0 for one listed without points), or with \
+                     `start` and `end` for a stretch of beats."
+                );
+            }
+            Ok(out)
+        })();
+        finish(reply)
     }
 
     /// Name the sections of the song (Intro, Verse, Drop...) with markers on the timeline. They are shown to
@@ -1670,6 +1846,31 @@ impl TrillServer {
                 )),
                 Err(error) => Err(error),
             },
+            LibraryAction::MoveFolder => {
+                let from = folder_argument(request.path.as_deref(), "move_folder");
+                let to = match request.to.as_deref().map(str::trim).filter(|to| !to.is_empty()) {
+                    Some(to) => Ok(std::path::absolute(to).unwrap_or_else(|_| PathBuf::from(to))),
+                    None => Err("move_folder needs `to`: where the folder is now".to_owned()),
+                };
+                match (from, to) {
+                    (Ok(from), Ok(to)) => match library.move_root(&from, &to) {
+                        Ok(moved) => {
+                            self.wait_for_scan(request.wait_seconds).await;
+                            let mut out = self.library_status();
+                            out["moved"] = json!({
+                                "from": from.display().to_string(),
+                                "to": to.display().to_string(),
+                                "files_known": moved.files,
+                                "favorites": moved.favorites,
+                                "recent": moved.recent,
+                            });
+                            Ok(out)
+                        }
+                        Err(error) => Err(error),
+                    },
+                    (Err(error), _) | (_, Err(error)) => Err(error),
+                }
+            }
             LibraryAction::Rescan => {
                 library.rescan();
                 self.wait_for_scan(request.wait_seconds).await;
@@ -2726,8 +2927,9 @@ impl ServerHandler for TrillServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
                 crate::sounds::INSTRUCTIONS,
+                crate::files::INSTRUCTIONS,
                 crate::music::INSTRUCTIONS,
                 crate::instruments::INSTRUCTIONS,
                 crate::hearing::INSTRUCTIONS,

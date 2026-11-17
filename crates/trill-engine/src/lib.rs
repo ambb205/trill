@@ -10,6 +10,7 @@ pub mod analysis;
 mod clock;
 pub mod compile;
 pub mod engine;
+mod glide;
 pub mod graph;
 pub mod host;
 pub mod instruments;
@@ -39,7 +40,7 @@ pub use render::{RenderError, RenderJob, RenderOptions, RenderReport, Rendered};
 pub use saved::{Saved, SavedPresets};
 pub use session::{
     MAX_COUNT_IN_BARS, ParamState, ProbeTarget, RecordState, RecordStatus, SampleFile, Session, SessionError,
-    SilentInstrument, TakeClip, TransportStatus,
+    SilentInstrument, TakeClip, TransportStatus, file_facts,
 };
 pub use sources::AudioSources;
 

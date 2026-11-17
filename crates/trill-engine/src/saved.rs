@@ -441,6 +441,10 @@ impl DeviceFactory for WithSaved {
         self.inner.create_for(device, sample_rate, max_block, purpose)
     }
 
+    fn busy(&self) -> bool {
+        self.inner.busy()
+    }
+
     fn warnings(&self, device: &Device) -> Vec<DeviceWarning> {
         self.inner.warnings(device)
     }

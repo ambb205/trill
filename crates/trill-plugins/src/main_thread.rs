@@ -155,7 +155,48 @@ impl Drop for SignalOnDrop {
     }
 }
 
+/// How long the thread must have had work without a break to count as
+/// behind: longer than anything a plugin is asked for in passing.
+const BEHIND_AFTER: Duration = Duration::from_millis(250);
+
+/// The work the thread has been given and has not finished: how many jobs,
+/// and since when there has been at least one.
+#[derive(Default)]
+struct Backlog(Mutex<(usize, Option<Instant>)>);
+
+impl Backlog {
+    fn began(&self) {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.0 += 1;
+        state.1.get_or_insert_with(Instant::now);
+    }
+
+    fn ended(&self) {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.0 = state.0.saturating_sub(1);
+        if state.0 == 0 {
+            state.1 = None;
+        }
+    }
+
+    fn behind(&self) -> bool {
+        let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.1.is_some_and(|since| since.elapsed() >= BEHIND_AFTER)
+    }
+}
+
+/// Takes a job off the backlog when it is done, or was never run.
+struct Finished(Arc<Backlog>);
+
+impl Drop for Finished {
+    fn drop(&mut self) {
+        self.0.ended();
+    }
+}
+
 struct Inner<S> {
+    /// What the thread has yet to do.
+    backlog: Arc<Backlog>,
     sender: Sender<Message<S>>,
     /// Ends the thread's wait for OS events when a message was sent.
     waker: os_events::Waker,
@@ -220,12 +261,28 @@ impl<S: ThreadState> MainThread<S> {
         let waker = started
             .recv()
             .map_err(|_| std::io::Error::other("the plugin main thread ended while it was starting"))??;
-        let inner = Inner { sender, waker, thread_id: thread.thread().id(), thread: Some(thread), exit };
+        let backlog = Arc::new(Backlog::default());
+        let inner = Inner { backlog, sender, waker, thread_id: thread.thread().id(), thread: Some(thread), exit };
         Ok(Self { inner: Arc::new(inner) })
+    }
+
+    /// Whether the thread is behind: it has had work to do for a while
+    /// without a break. A plugin that takes long to be made or let go of
+    /// keeps every other plugin waiting for its turn, and one of them may
+    /// be waiting to begin loading its samples.
+    pub(crate) fn behind(&self) -> bool {
+        self.inner.backlog.behind()
     }
 
     /// Queues `job` without waiting for it.
     fn send(&self, at_rest: bool, job: impl FnOnce(&mut S) + Send + 'static) -> Result<(), CallError> {
+        self.inner.backlog.began();
+        let finished = Finished(self.inner.backlog.clone());
+        let job = move |state: &mut S| {
+            // Let go of when the job has run, and if it never does.
+            let _finished = finished;
+            job(state);
+        };
         self.inner.sender.send(Message::Run { job: Box::new(job), at_rest }).map_err(|_| CallError::Failed)?;
         self.inner.waker.wake();
         Ok(())
@@ -573,6 +630,45 @@ mod tests {
     }
 
     const WAIT: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn the_thread_is_behind_while_it_has_had_work_for_a_while_and_not_for_work_done_in_passing() {
+        let main = MainThread::<Counter>::spawn("test-main").unwrap();
+        assert!(!main.behind());
+        // Short jobs, one after the other with a rest between: never behind.
+        for _ in 0..5 {
+            main.call(WAIT, |state| state.jobs += 1).unwrap();
+            assert!(!main.behind());
+            thread::sleep(Duration::from_millis(20));
+        }
+        // One that takes its time (a plugin being let go of), and two more
+        // behind it: behind until the last of them is done.
+        let slow = {
+            let main = main.clone();
+            thread::spawn(move || main.call(WAIT, |_| thread::sleep(Duration::from_millis(700))).unwrap())
+        };
+        thread::sleep(Duration::from_millis(100));
+        assert!(!main.behind(), "not yet: anything takes a moment");
+        let queued: Vec<_> = (0..2)
+            .map(|_| {
+                let main = main.clone();
+                thread::spawn(move || main.call(WAIT, |_| thread::sleep(Duration::from_millis(150))).unwrap())
+            })
+            .collect();
+        thread::sleep(Duration::from_millis(300));
+        assert!(main.behind(), "work for 400 ms without a break");
+        slow.join().unwrap();
+        assert!(main.behind(), "the two behind it are still to do");
+        queued.into_iter().for_each(|job| job.join().unwrap());
+        assert!(!main.behind(), "and no longer when there is nothing left");
+        // A job that is given up on still counts until it has run.
+        let given_up = main.call(Duration::from_millis(20), |_| thread::sleep(Duration::from_millis(500)));
+        assert!(given_up.is_err());
+        thread::sleep(Duration::from_millis(330));
+        assert!(main.behind());
+        main.call(WAIT, |_| ()).unwrap();
+        assert!(!main.behind());
+    }
 
     #[test]
     fn jobs_run_in_order_on_one_thread_and_state_drops_there() {

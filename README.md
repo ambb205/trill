@@ -29,7 +29,7 @@ Development builds are optimized (see `[profile.dev]`), because unoptimized audi
 
 ### Building and testing
 
-`cargo test --workspace` runs about 1,930 tests in a few minutes. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 2,110 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -154,10 +154,15 @@ play, hold, step through (`Left`, `Right`) and scrub, at half speed up to eight 
 
 | Device | |
 |---|---|
-| `builtin:polysynth` | 16-voice subtractive/FM synth: two oscillators, unison, sub, noise, multimode filter, two envelopes, LFO, mono/glide. 15 presets from pads and basses to FM keys and bells. |
+| `builtin:polysynth` | 16-voice subtractive/FM synth: two oscillators that can be turned off, unison, sub, noise (as wide as it is set), multimode filter, two envelopes, a pitch envelope (an 808's knock), LFO, mono/glide, a pitch wheel whose range can be set. 15 presets from pads and basses to FM keys and bells. |
 | `builtin:drumkit` | Synthesized drum machine on the General MIDI map, with 808, 909, tight, trap and lo-fi kits. Each drum is shaped after measurements of recorded ones: where its energy sits and how long it rings. |
-| `builtin:sampler` | Plays one audio file across the keyboard: loops with crossfade, reverse, one-shot, amp and filter envelopes. |
+| `builtin:sampler` | Plays one audio file across the keyboard: loops with crossfade, reverse, one-shot, amp and filter envelopes, a pitch wheel whose range can be set. |
 | `builtin:drumrack` | Sixteen pads on the General MIDI drum notes, each playing its own audio file, with level, pan, tune, decay and choke groups. |
+
+The two sample players follow velocity by one law, in decibels: the volume is the level of a note at velocity 75,
+and the sensitivity moves harder and softer notes from it by 0.4 dB a step at full (half of that at 0.5), so a
+hard hit is louder than the volume says and a roll swells as it is written. The level of every instrument, like a
+fader, a send and a Utility's gain, is silence at its lowest value (-70 dB), so a fade drawn there ends in nothing.
 
 **Effects**
 
@@ -172,7 +177,9 @@ play, hold, step through (`Left`, `Right`) and scrub, at half speed up to eight 
 | `builtin:chorus` | Stereo chorus with a width. |
 | `builtin:tremolo` | Tremolo and auto-pan: sine, triangle or square, free or in time with the song, the two sides together or taking turns. |
 | `builtin:pump` | Ducking locked to the grid, for when there is no kick to listen to. |
-| `builtin:saturator`, `builtin:utility` | Waveshaping distortion; gain, pan and width. |
+| `builtin:shifter` | Pitch shifter: any sound up or down by as much as two octaves, its length kept. Pitch and mix can be automated: a chord drawn two octaves down over a beat melts away. |
+| `builtin:saturator` | Waveshaping distortion on four curves: soft, hard, tube, and a quarter of a sine that is flat above its ceiling (the overtones that make a sine bass heard on small speakers). It does not turn down what it drives. |
+| `builtin:utility` | Gain down to silence, pan and width. A gain that an envelope draws is followed in straight lines, 256 frames behind the drawing: a stop is a stop. |
 
 A compressor's sidechain is the track as it leaves its devices, ahead of its fader and its mute, so a muted track
 serves as a key. It is set in the compressor's panel ("Listen to") and with `sidechain` on `add_device` and
@@ -181,10 +188,21 @@ plugin's sidechain input is not connected yet.
 
 What these devices do is held to numbers by renders (`trill-engine/tests/effects.rs`): the cuts to a Butterworth
 filter of their order, the compressor to what it takes off a signal of known crest, the delay to its first
-repeats, and the reverb, the makeup and the steep filter to what Ableton Live's were measured to do on one song.
-A song saved before the reverb and the delay were rebuilt (file format 1) keeps the sound it had: opening it
-switches their `legacy` on, and `trill-engine/tests/old_songs.rs` holds every effect to the samples it rendered
-to then.
+repeats, the pitch shifter to the line its pitch is drawn along, and the reverb, the makeup, the steep filter
+and the saturator's sine curve to what Ableton Live's were measured to do on two songs. The instruments are held
+the same way (`tests/instruments.rs`): the sampler's levels to what Live's Simpler plays at five velocities, a
+sine on the synth to the level of Live's Operator at the same volume setting, its pitch envelope and its noise
+to what Operator's were read to be.
+
+A song saved before a device was changed keeps the sound it had. The project file says which format it is, and
+opening an older one writes into each device what that format meant: the reverb and the delay of format 1 have
+their `legacy` switched on, and so have the sample players (the velocity law they had), the saturator (its level
+turned down as the drive rises), the utility (a lowest gain that is 70 dB down and not silence, smoothed over a
+hundredth of a second) and the synth (its noise) of formats 1 to 3. The synth volumes of those formats are also
+written 21 dB down the scale, where they mean what they did, and so is an envelope on one: its points, and the
+level its line's travel is measured from where it follows a fader, so that it plays the curve it played. A journal
+kept before such a change is read by the same rule, so the making-of plays the song as it sounded.
+`trill-engine/tests/old_songs.rs` holds a file of each format to the samples the build that wrote it rendered.
 
 **Plugins**: installed CLAP and VST3 plugins appear beside the built-in devices as `clap:<plugin id>` and
 `vst3:<class id>`. Their state is saved in the project, and their parameters are automatable and reachable over
@@ -289,10 +307,70 @@ tags, tempo, key and length (all read from file and folder names). Audio clips p
 Vorbis at any sample rate, and can be warped to follow the project tempo: `beats` keeps drum hits sharp, `tonal`
 keeps sustained sound smooth, `repitch` plays faster or slower like a record; warped clips can be transposed.
 
+**Files that moved**: a song names its audio files by their paths, and a folder of samples that is moved or
+renamed leaves it with clips and pads that play nothing. Trill says so in one place (a line in the status bar and
+the list it opens, `missing_files` in `get_project`, and first in the notes of a `measure` or a `render`, which
+is then the song without those files and not a quieter mix), and looks for the files itself:
+
+- *Where the folder went, then by name.* If one file that was at `A\x\y.wav` turns up at `B\x\y.wav`, everything
+  else that was under `A` is looked for under `B`. Where a folder went is read from any file found by its name in
+  the sound library, from a folder of the same name near where the missing one was, from a folder of the library
+  that is itself missing and turns up with its files in it, and from what you point at.
+- *A file of the same name can be another file.* Each thing found says how sure it is, and why: `sure` only where
+  it is where the file's folder went or has the size and length the song wrote down, `likely` for the only file of
+  that name with nothing against it, `unsure` when there are several, when it is not what the song knew, or when
+  it is shorter than a clip plays. Only what is sure is taken by the one action; the rest is offered, and taken a
+  file at a time.
+- *Relinking is one edit*, one undo step however many clips and pads it touches (`Project::relink`,
+  `relink_files`): each clip goes on playing the stretch of its file it played, each pad keeps its settings.
+- *The library's own folders.* One that is gone is marked in the browser and listed (`library` status,
+  `missing_folders`) in place of being silently stale; saying where it went (`move_folder`) keeps the favorites
+  and the recently used files with their files and reads nothing again, and it goes along with the song's files
+  when the same move explains both.
+- *A song that travels.* A project file also says where each of its files is from the song's own folder, and
+  what the file was (size, length, sample rate), in a `files` table beside the song. When a song is opened, **the
+  file beside the song wins**: one that is found where the table leads from the folder the song is in now, and
+  that is the file the song knew, is the one it plays; otherwise the path stands as it is. So a folder holding a
+  song and its samples can be moved or sent whole. The table is an addition to the file, not a new format: a
+  build that does not know it reads the song as before, and a file without one means what it always meant.
+
 **Engine**: sample-accurate MIDI and audio clips, clip looping, non-destructive trimming and splitting, audio
-fades, automation of track and master volume, pan and any device parameter with straight, held or curved
-segments, MIDI controllers in clips (see below), group tracks and return tracks with sends, a metronome, sample-exact transport looping, mute/solo, undo/redo, offline rendering that is bit-identical to
+fades, automation of track and master volume, pan, sends and any device parameter with straight, held or curved
+segments (see below), MIDI controllers in clips (see below), group tracks and return tracks with sends, a metronome, sample-exact transport looping, mute/solo, undo/redo, offline rendering that is bit-identical to
 playback, and render analysis (see below).
+
+**A line of automation follows its control.** Between two points of an envelope the value moves as if a hand
+moved the control at an even speed, which is not the same as so many decibels or hertz a beat:
+
+| What is moved | How a line travels | Half way from → to |
+|---|---|---|
+| A volume, a send, a gain or an instrument's volume (a level that reaches silence) | as a fader does: even in the square of the decibels above its floor | 0 dB → −60 dB: **−20 dB**; +6 dB → −60 dB: −15.8 dB; −40 dB → −6 dB: −20 dB |
+| A frequency or a time (a range of a hundred times its lowest value or more) | by ratio: every octave takes the same time | 300 Hz → 9 kHz: **1,643 Hz** |
+| Pan, mix and other amounts, an EQ's gain, a threshold, a plugin's parameters | evenly in the value | −12 → +12: 0 |
+
+So two points are a fade or a sweep. Straight in decibels, a fade from 0 dB to −60 dB is at −30 dB half way and as
+good as over; straight in hertz, a sweep from 300 Hz to 9 kHz is at 4,650 Hz and spends its time in the top
+octaves. The law is one piece of code (`trill-core/src/travel.rs`): the window's faders and knobs are laid out by
+it, so such a line is a straight line in its lane, and the engine plays it. `shape` on a point bends a line
+further, and an envelope can be told to go straight in its units instead (`travel` in `set_automation`; the
+lane's menu in the window).
+
+*A song saved before this plays as it did.* An envelope keeps what its lines are straight along, and a project
+file written before envelopes did (format version 1 or 2) says nothing: its envelopes are straight in their units, as
+they were played then, and stay so when their points are edited. They become a fader's or a knob's only when
+they are written anew over MCP, or by the lane's menu. A file saved now is format version 3, which an earlier
+build refuses to open instead of playing its fades as other curves.
+
+*A send can be automated* like a volume: its envelope is the send, at the bottom of which nothing is sent, with or
+without a level set by hand. A send opened for single notes (a delay throw) needs no return of its own.
+
+*Envelopes are played to the frame.* A fader, a pan, a send and the master's volume are read from their envelopes
+every 32 frames of the song and move in a straight line between two readings; a device's parameter is moved
+every 256. Both are counted from where the song last started or jumped, not from the start of a buffer, so the
+same song is the same samples at any buffer size and in a render. What no envelope accounts for (a fader moved
+by hand, a mute, the song jumping to where an envelope is at another level) is let go of evenly over ten
+milliseconds. (The built-in filter still reads its cutoff every sixteen frames of the block it is handed: with a
+swept cutoff it is the same samples only at buffer sizes that are a multiple of sixteen.)
 
 **Hearing without ears.** Whoever cannot listen (a script, an assistant) measures instead, and three things make
 that quick and true:
@@ -315,6 +393,14 @@ that quick and true:
   `transport` tell a model, so that neither presses play into half a kit unawares.
   `cargo run -p trill-plugins --example loading -- "vst3:<class id>" --preset "<kit>"` watches an installed
   sampler load, key by key, beside the program's memory, reads and processor time.
+- *A render does not go on without an instrument.* If a plugin never answers any of the notes it is to play
+  for as long as it is waited for, the render is refused before its first sample: nothing is measured, no file
+  is written, and the refusal names the track, says what its notes say of why (their range, or that they are
+  keyswitches) and what to do. A mix without one of its instruments is not the song, and a line in a reply
+  that otherwise looks like a success is easily missed. A track that is muted is left out on purpose, and a
+  silence the track itself explains (its notes are keyswitches of its instrument, or outside its range) is
+  no refusal. While the plugins' own thread is behind with other work (a song's plugins being let go of, each
+  taking its time), a plugin that has not had its turn to load is waited for and not given up on.
 - *A render measures everything as it goes*, without keeping a stem per track: the mix (peak, true peak, LUFS,
   stereo correlation, spectral balance), every track after its fader in the same terms, the loudness of every
   section between the markers (or of bar ranges), and how many dB each built-in compressor and limiter took
@@ -323,7 +409,16 @@ that quick and true:
 - *A render makes only what is heard.* A track that is muted, or left out by a solo or by `tracks`, is not put
   into the render at all: its devices are not created and its plugins are not waited for. Hearing one track of
   a song with many plugins costs what that track costs. (What plays live keeps every track running, so that a
-  track is there the moment it is unmuted.)
+  track is there the moment it is unmuted.) What feeds a track that is heard is made with it: the members of a
+  group, and the tracks whose sends reach a soloed return.
+- *A return can be heard alone.* Soloing a return, in the window or by naming it in `tracks`, gives the return
+  as the whole song feeds it: every track's send still reaches it, a group's too, while the tracks themselves
+  and the other returns are not heard. (Soloing a track or a group keeps the returns open, so that it is heard
+  with its reverb.) Each of these opens and closes over ten milliseconds, whatever the buffer size, so a solo
+  changed while the song plays makes no click; a send that an envelope is moving goes on moving meanwhile, and
+  what is heard is the two multiplied.
+- *A render runs at the rate it is asked for.* `measure` and `render` take `sample_rate`; left out, they run at
+  the engine's rate, which is 48 kHz when there is no audio device. The reply says which it was.
 - *One render writes every stem.* Asked to, a render writes parts of the song to files of their own as it
   goes (`render` with `stems`; "Export WAV and stems" in the window): every track as it leaves its fader and
   pan, what goes into each track's effects (its instrument alone), every group, every return fed by every
@@ -380,7 +475,11 @@ the lane on a controller).
 
 An automated control is not locked: drag it and it is yours. Its envelope is switched off, not lost, the mark in
 the control's corner turns into an outline, and a click on that mark (or on the switch of its lane) hands the
-control back to the envelope. And when the program did not live to save a project, the window that opens next
+control back to the envelope. That holds for a volume, a pan, a device's parameter and a send alike: a send's bar
+in a track's header and in the mixer shows where its envelope has it, and a track's lanes offer its send to each
+return beside its volume and pan. A lane of thousands of points (a compressor worked out elsewhere and drawn in)
+is painted by its width: where points crowd, the line alone is drawn, and their squares come back as the view is
+zoomed in. And when the program did not live to save a project, the window that opens next
 offers it back: recover it, discard it, or decide later (`File`, `Recover unsaved work`).
 
 The browser's **Sounds** tab is the sample library: add folders, search as you type, filter by one-shot or loop,
@@ -391,6 +490,14 @@ waveform, and the Clip tab shows an audio clip's file with its gain, offset, fad
 transposition. The sampler shows its sample and the drum rack its sixteen pads.
 
 ![The sound browser, waveforms on audio clips and an audio clip in the Clip tab](docs/images/sounds-browser.png)
+
+**When a song opens with files missing**, the clips and pads that lost their file are marked, the status bar
+says how many files are missing and how many were found, and a click on that line (or `File`, `Missing files`)
+opens the list: each file with where it is used and what was found for it. `Relink` takes everything that was
+found for sure, as one undo step; `Use` takes a file that is only likely, one at a time; `Locate` points at a
+file by hand and `Look in a folder` at a folder to search, and what either says about where a folder went finds
+the rest. A folder of the sound library that is gone is listed there too (and marked in the browser), and is
+pointed at its new place along with the song's files.
 
 **Arm a track and record.** A track with an instrument has an arm button in its header and on its mixer strip,
 lit while it is armed. The armed tracks are what every keyboard plays and what a take records; arming one disarms
@@ -449,7 +556,8 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Devices | `list_devices`, `describe_device`, `add_device`, `get_device`, `update_device`, `delete_device`, `show_device_editor` |
 | Presets | `search_presets` (one search across the presets of every installed instrument and the saved ones), `save_preset` (keeps a device's sound under a name) |
 | Clips | `create_clip`, `create_audio_clip`, `update_clip`, `split_clip`, `duplicate_clip`, `delete_clip` |
-| Sounds | `search_sounds`, `library`, `preview_sound`, `set_sample` |
+| Sounds | `search_sounds`, `library` (its folders, and `move_folder` for one that went elsewhere), `preview_sound`, `set_sample` |
+| Missing files | `missing_files` (what the song names that is not on disk, where it is used, and what was found with how sure it is), `relink_files` (what is sure, or more on request, or a folder or files named by hand: one undo step) |
 | Notes | `get_notes`, `add_notes`, `set_notes`, `remove_notes`, `transform_notes` |
 | Controllers | `get_controllers`, `set_controllers`, `shape_dynamics` (gives a line its dynamics from its notes, as an expression curve) |
 | Music | `write_chords`, `write_drums`, `write_arpeggio`, `write_bass`, `write_melody`, `analyze_music`, `music_reference` |
@@ -461,7 +569,11 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Playing live | `play_notes`, `midi_inputs`, `audio` (device, sample rate, buffer size, latency) |
 
 Time is in beats. Pitches are MIDI numbers, note names (`"F#3"`) or drum names (`"kick"`). Notes can be written
-compactly as `[pitch, start, length, velocity]`. Errors say what to do next: an unknown id comes back with the ids
+compactly as `[pitch, start, length, velocity]`. `set_automation` takes a track's volume or pan, the master's
+volume, a device's parameter or a send (`{"type": "send", "track": 3, "to": 9}`), says in its description how a
+line travels for each, and answers with what the envelope's lines are straight along. `get_automation` lists a
+thousand points a reply and reads on by target, by a stretch of beats or by offset: a song may hold tens of
+thousands. Errors say what to do next: an unknown id comes back with the ids
 that exist, a bad note with its index and the reason.
 
 Presets are part of the device tools, for plugins as for built-in devices: `describe_device` and `get_device` list
@@ -568,6 +680,11 @@ plugin editors on Linux and macOS,
 a film of a making-of (the replay gives the song as it was at any moment and where the action is; nothing
 renders it to video yet), hearing a making-of (it is silent: the song as it was is shown, not played),
 finding a song's journal again after its file was moved or renamed (it is kept by where the file is),
+"collect all and save" (copying every file a song plays into a folder beside it; the song already says where
+its files are from its own folder and plays the ones beside it, so what is missing is the copying, a rule for
+two files of one name, and an edit that points the song at the copies),
+finding files a plugin keeps in its own state (only audio clips and the built-in sampler and drum rack name
+theirs to Trill),
 session (clip-launching) view, audio recording (MIDI is recorded; audio is not), polyphonic aftertouch and MPE
 (per-note expression; clips hold one curve per controller for the whole channel), ASIO, warp markers, plugin
 delay compensation, multi-core rendering. Only Windows has been run so far.

@@ -73,6 +73,20 @@ pub struct ScanSummary {
     /// [`ScanSummary::problems_omitted`].
     pub problems: Vec<String>,
     pub problems_omitted: usize,
+    /// The library's own folders that could not be read at all: moved,
+    /// renamed, or on a drive that is not there.
+    pub missing: Vec<MissingRoot>,
+}
+
+/// A folder of the library that is not where the library has it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MissingRoot {
+    pub path: PathBuf,
+    /// Why it could not be read, as the system says it.
+    pub reason: String,
+    /// How many files were known in it, and are kept: what the library
+    /// still lists of it, and what a folder it went to can be told by.
+    pub files: usize,
 }
 
 /// Counters a running scan keeps up to date for anyone watching.
@@ -106,6 +120,7 @@ impl Progress {
 struct Problems {
     notes: Vec<String>,
     omitted: usize,
+    missing: Vec<MissingRoot>,
 }
 
 impl Problems {
@@ -178,6 +193,7 @@ impl Scan<'_> {
             cancelled,
             problems: problems.notes,
             problems_omitted: problems.omitted,
+            missing: problems.missing,
         };
         (index, summary)
     }
@@ -257,6 +273,8 @@ impl Scan<'_> {
                 Ok(()) => roots.push(Root::Listed(without_empty_folders(folders))),
                 Err(error) => {
                     let known = self.previous.find_folder(root).filter(|id| self.previous.roots().contains(id));
+                    let files = known.and_then(|id| self.previous.folder(id)).map_or(0, |kept| kept.all_files().len());
+                    problems.missing.push(MissingRoot { path: root.clone(), reason: error.to_string(), files });
                     problems.note(|| match known {
                         Some(_) => {
                             format!("cannot read '{}' ({error}); keeping what was known about it", root.display())

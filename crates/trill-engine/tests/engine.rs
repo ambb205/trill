@@ -143,6 +143,68 @@ fn swapping_graphs_mid_playback_changes_nothing() {
     assert!(steady_l == swapped_l && steady_r == swapped_r, "graph swaps altered the audio");
 }
 
+/// Soloing a return while the song plays leaves the return, fed as it was,
+/// and takes the tracks themselves away over one block: no step is heard,
+/// and none when the solo is let go of.
+#[test]
+fn soloing_a_return_while_the_song_plays_cuts_the_tracks_without_a_step() {
+    let mut project = Project::new("t");
+    let track = sine_track(&mut project, "A");
+    // (A pitch whose wave is not at a crossing when the solo changes.)
+    clip_with(&mut project, track, 0.0, 8.0, &[note(58, 0.0, 8.0)]);
+    let verb = project.add_track_of_kind("Return", trill_core::TrackKind::Return);
+    project.set_send(track, verb, Some(-6.0206)).unwrap();
+    let mut soloed = project.clone();
+    soloed.track_mut(verb).unwrap().solo = true;
+
+    let (mut bank, mut meters, audio) = (DeviceBank::default(), Meters::default(), AudioSources::default());
+    let mut compile = |project: &Project| {
+        Compiler {
+            factory: &BuiltinFactory,
+            bank: &mut bank,
+            meters: &mut meters,
+            audio: &audio,
+            stand_ins: None,
+            sample_rate: SR as f64,
+            purpose: trill_core::device::Purpose::Playing,
+        }
+        .compile(project, true)
+        .0
+    };
+    let mut processor = Processor::new(SR as f64);
+    drop(processor.swap_graph(compile(&project)));
+    processor.play();
+    // A second as it is, a second with the return soloed, a second as it
+    // was.
+    let (mut left, mut right) = (vec![0.0f32; 3 * SR as usize], vec![0.0f32; 3 * SR as usize]);
+    let block = 480;
+    for (index, (l, r)) in left.chunks_mut(block).zip(right.chunks_mut(block)).enumerate() {
+        if index == 100 {
+            drop(processor.swap_graph(compile(&soloed)));
+        }
+        if index == 200 {
+            drop(processor.swap_graph(compile(&project)));
+        }
+        processor.process(l, r);
+    }
+    // The track and its return together, the return alone (the send is at
+    // half), and together again.
+    let (both, alone, again) =
+        (rms(&left[seconds(0.5..0.9)]), rms(&left[seconds(1.5..1.9)]), rms(&left[seconds(2.5..2.9)]));
+    assert!(both > 0.05 && (alone / both - 1.0 / 3.0).abs() < 0.01, "{alone} of {both}");
+    assert!((again / both - 1.0).abs() < 0.01, "{again} of {both}");
+    // From one sample to the next the sound never moves by more than it
+    // does anyway: the change is a fade over the block, not a cut.
+    let steps = |range: std::ops::Range<usize>| {
+        left[range].windows(2).fold(0.0f32, |most, pair| most.max((pair[1] - pair[0]).abs()))
+    };
+    let usual = steps(seconds(0.5..0.9));
+    for change in [1.0, 2.0] {
+        let around = steps(seconds(change - 0.02..change + 0.03));
+        assert!(around < usual * 1.05, "a step of {around} at {change} s, where {usual} is usual");
+    }
+}
+
 /// Notes that land exactly on a block boundary are the classic place to
 /// drop or double a note. Whatever the buffer size, the audio must match.
 #[test]
@@ -766,7 +828,7 @@ fn live_parameter_changes_are_heard() {
     let loud = level(&meter);
     assert!(loud > 0.05, "expected signal, got {loud}");
 
-    session.set_device_params(synth, &[("volume".into(), -40.0)]).unwrap();
+    session.set_device_params(synth, &[("volume".into(), -61.0)]).unwrap();
     let quiet = level(&meter);
     assert!(quiet < loud * 0.05, "volume change not heard: {loud} -> {quiet}");
 

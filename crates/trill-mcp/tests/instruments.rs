@@ -604,6 +604,37 @@ async fn ornaments_are_a_pitch_bend_curve_on_an_instrument_without_articulations
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_bend_is_written_for_the_wheel_a_built_in_instrument_is_set_to() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let lead = track(client, "Lead", LEAD).await;
+    let shown_track = shown(client, lead).await;
+    let synth = shown_track["devices"][0]["id"].as_u64().unwrap();
+    // Where nothing is set, the synth's wheel bends two semitones, and the track says where that comes from.
+    let profile = ok(client, "get_instrument_profile", json!({ "track": lead })).await;
+    assert!(profile["pitch_wheel"].as_str().unwrap().starts_with("bends 2 semitone(s) each way"), "{profile}");
+    assert!(profile["profile"].get("bend_range").is_none(), "the track itself says nothing: {profile}");
+
+    // Set to an octave on the device, the same bends are a smaller part of the wheel: nothing was told to
+    // the track.
+    ok(client, "update_device", json!({ "device": synth, "params": { "bend_range": 12 } })).await;
+    let profile = ok(client, "get_instrument_profile", json!({ "track": lead })).await;
+    assert!(profile["pitch_wheel"].as_str().unwrap().starts_with("bends 12 semitone(s) each way"), "{profile}");
+    let line =
+        ok(client, "write_melody", json!({ "track": lead, "key": "A minor", "phrase": "1:2!bend=2 3:2", "gate": 1 }))
+            .await;
+    assert!(line["pitch_bend"].as_str().unwrap().contains("bends 12 semitone(s) each way"), "{line}");
+    let bend = wheel(client, &line["clip_id"]).await;
+    let highest = bend.iter().map(|point| point.1).fold(0.0, f64::max);
+    assert!((highest - 2.0 / 12.0).abs() < 0.01, "a whole tone is a sixth of this wheel: {highest}");
+
+    // What the track is told goes before what its instrument is set to.
+    ok(client, "set_instrument_profile", json!({ "track": lead, "bend_range": 4, "remember": false })).await;
+    let profile = ok(client, "get_instrument_profile", json!({ "track": lead })).await;
+    assert!(profile.get("pitch_wheel").is_none() && profile["profile"]["bend_range"] == 4.0, "{profile}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn ornaments_are_keyswitches_on_an_instrument_that_has_them() {
     let fixture = connect().await;
     let client = &fixture.client;

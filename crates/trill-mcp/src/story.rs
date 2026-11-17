@@ -254,7 +254,7 @@ fn song_json(project: &Project, include_notes: bool) -> Value {
             "volume_db": project.master.volume_db,
             "devices": project.master.devices.iter().map(device_json).collect::<Vec<_>>(),
         },
-        "automation": project.automation.iter().map(|lane| lane_json(lane, false)).collect::<Vec<_>>(),
+        "automation": project.automation.iter().map(|lane| lane_json(lane, None)).collect::<Vec<_>>(),
     });
     if project.loop_region.enabled {
         out["loop"] = json!({ "start": project.loop_region.start, "end": project.loop_region.end });

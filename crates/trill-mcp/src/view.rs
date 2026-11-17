@@ -8,7 +8,7 @@ use trill_core::ControllerCurve;
 use trill_core::device::{DeviceCategory, DeviceDescriptor, ParamInfo, ParamKind};
 use trill_core::pitch::pitch_name;
 use trill_core::presets::{CATEGORY_SEPARATOR, PresetInfo, PresetList, PresetQuery, PresetStatus};
-use trill_core::project::{AutomationLane, AutomationTarget, Clip, ClipContent, Segment, WarpMode};
+use trill_core::project::{AutomationLane, AutomationPoint, AutomationTarget, Clip, ClipContent, Segment, WarpMode};
 use trill_core::{Device, Note, Project, Track, TrackKind};
 use trill_engine::{AudioConfig, AudioDevice, RecordState, TakeClip};
 use trill_engine::{ParamState, SampleFile, Session};
@@ -287,17 +287,24 @@ pub fn target_json(target: &AutomationTarget) -> Value {
             json!({ "type": "device_param", "device": device, "param": param })
         }
         AutomationTarget::MasterVolume => json!({ "type": "master_volume" }),
+        AutomationTarget::Send { track, to } => json!({ "type": "send", "track": track, "to": to }),
     }
 }
 
-pub fn lane_json(lane: &AutomationLane, include_points: bool) -> Value {
-    let mut out = json!({ "target": target_json(&lane.target), "point_count": lane.points.len() });
+/// An envelope: what it moves, how many points it has and what its lines
+/// are straight along (`fader`, `log` or `linear`). `points` are the ones
+/// to list, as `[beat, value, shape?]`; `None` lists none.
+pub fn lane_json(lane: &AutomationLane, points: Option<&[AutomationPoint]>) -> Value {
+    let mut out = json!({
+        "target": target_json(&lane.target),
+        "point_count": lane.points.len(),
+        "travel": lane.travel.name(),
+    });
     if !lane.enabled {
         out["enabled"] = json!(false);
     }
-    if include_points {
-        out["points"] = lane
-            .points
+    if let Some(points) = points {
+        out["points"] = points
             .iter()
             .map(|p| match p.shape {
                 Segment::Linear => json!([round(p.beat), round(p.value)]),
@@ -307,6 +314,36 @@ pub fn lane_json(lane: &AutomationLane, include_points: bool) -> Value {
             .collect();
     }
     out
+}
+
+/// What `track` sends to the returns: the sends set by hand, each marked
+/// if an envelope moves it, and the sends that are an envelope alone.
+/// `None` for a track that sends nothing.
+pub fn sends_json(project: &Project, track: &Track) -> Option<Value> {
+    let moved = |to| {
+        let target = AutomationTarget::Send { track: track.id, to };
+        project.automation.iter().find(|lane| lane.target == target).map(|lane| lane.enabled)
+    };
+    let mark = |mut send: Value, to| {
+        match moved(to) {
+            Some(true) => send["automated"] = json!(true),
+            // Its envelope is switched off: the level set by hand counts.
+            Some(false) => send["automation_off"] = json!(true),
+            None => {}
+        }
+        send
+    };
+    let by_hand = track.sends.iter().map(|send| mark(json!({ "to": send.to, "level_db": send.level_db }), send.to));
+    let by_envelope = project.automation.iter().filter_map(|lane| match lane.target {
+        AutomationTarget::Send { track: from, to }
+            if from == track.id && !track.sends.iter().any(|send| send.to == to) =>
+        {
+            Some(mark(json!({ "to": to }), to))
+        }
+        _ => None,
+    });
+    let sends: Vec<Value> = by_hand.chain(by_envelope).collect();
+    (!sends.is_empty()).then(|| json!(sends))
 }
 
 /// Song position as `bar.beat`, both 1-based, e.g. beat 5.5 in 4/4 → "2.2.5".
@@ -445,6 +482,9 @@ pub fn project_json(session: &Session, include_notes: bool) -> Value {
             .iter()
             .map(|track| {
                 let mut out = track_json(track, beats_per_bar, include_notes);
+                if let Some(sends) = sends_json(project, track) {
+                    out["sends"] = sends;
+                }
                 if session.is_armed(track.id) {
                     out["armed"] = json!(true);
                 }
@@ -457,7 +497,7 @@ pub fn project_json(session: &Session, include_notes: bool) -> Value {
             "volume_db": project.master.volume_db,
             "devices": chain_json(session, &project.master.devices),
         },
-        "automation": project.automation.iter().map(|lane| lane_json(lane, false)).collect::<Vec<_>>(),
+        "automation": project.automation.iter().map(|lane| lane_json(lane, None)).collect::<Vec<_>>(),
         "audio_output": info.output,
         "file": session.path().map(|p| p.display().to_string()),
         "unsaved_changes": session.is_modified(),
@@ -472,9 +512,16 @@ pub fn project_json(session: &Session, include_notes: bool) -> Value {
     if let Some(note) = loading_note(session) {
         out["loading"] = json!(note);
     }
+    // Files that are not on disk are said once, with what to do about
+    // them, in place of a line for every clip and pad that names one.
+    let missing = trill_runtime::files_missing_in(session);
     let problems: Vec<String> = session.problems().iter().map(ToString::to_string).collect();
+    let problems = crate::files::without_missing(problems, &missing);
     if !problems.is_empty() {
         out["problems"] = json!(problems);
+    }
+    if let Some(brief) = crate::files::brief(&missing) {
+        out["missing_files"] = brief;
     }
     // Warped clips play in time but repitched until their audio is ready.
     if session.preparing() > 0 {

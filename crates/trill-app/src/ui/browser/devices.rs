@@ -259,7 +259,7 @@ mod tests {
         let names = |which| shelf(&catalog, which, "").iter().map(|d| d.name.clone()).collect::<Vec<_>>();
         assert_eq!(names(Shelf::Instruments)[..2], ["Poly Synth", "Drum Kit"], "the catalog's order");
         let effects = names(Shelf::Effects);
-        assert_eq!(effects.len(), 11);
+        assert_eq!(effects.len(), 12);
         assert_eq!(&effects[..3], ["Auto Filter", "Chorus", "Compressor"]);
         assert_eq!(names(Shelf::Plugins), ["Surge XT", "wave Forge"], "plugins of both kinds, whatever their case");
     }
@@ -272,7 +272,7 @@ mod tests {
         assert_eq!(names(Shelf::Effects, " REV "), ["Reverb"]);
         assert_eq!(
             names(Shelf::Effects, "e"),
-            ["Auto Filter", "Compressor", "Delay", "EQ", "Limiter", "Reverb", "Tremolo"]
+            ["Auto Filter", "Compressor", "Delay", "EQ", "Limiter", "Pitch Shifter", "Reverb", "Tremolo"]
         );
         assert_eq!(names(Shelf::Plugins, "eff"), ["Surge XT Effects"]);
         assert!(names(Shelf::Instruments, "zzz").is_empty());

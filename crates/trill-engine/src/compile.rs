@@ -3,8 +3,8 @@
 //! plugins and audio files.
 
 use crate::graph::{
-    AudioRegion, Bus, Chain, DeviceSlot, Graph, MAX_BLOCK, MasterNode, Meter, NoteEvent, ParamAutomation, RegionAudio,
-    TrackNode, TrackState,
+    AudioRegion, Bus, Chain, DeviceSlot, Envelope, Graph, MAX_BLOCK, MasterNode, Meter, NoteEvent, ParamAutomation,
+    RegionAudio, SendNode, TrackNode, TrackState,
 };
 use crate::ready::{LoadWatch, Plugins};
 use crate::sources::AudioSources;
@@ -235,13 +235,14 @@ impl Compiler<'_> {
                 chain,
                 volume_db: track.volume_db,
                 pan: track.pan,
-                audible: routing.audible(project, track),
-                feeds_key: routing.feeds_key(project, track),
-                volume_automation: lane_points(
+                heard: routing.heard(project, track),
+                passes: routing.passes(project, track),
+                to_output: routing.to_output(project, track),
+                volume_automation: envelope(
                     project,
                     |target| matches!(target, AutomationTarget::TrackVolume { track: id } if *id == track.id),
                 ),
-                pan_automation: lane_points(
+                pan_automation: envelope(
                     project,
                     |target| matches!(target, AutomationTarget::TrackPan { track: id } if *id == track.id),
                 ),
@@ -249,11 +250,7 @@ impl Compiler<'_> {
                 state: TrackState::default(),
                 input_bus: routing.bus(track.id),
                 output_bus: track.group.and_then(|group| routing.bus(group)),
-                sends: track
-                    .sends
-                    .iter()
-                    .filter_map(|send| Some((routing.bus(send.to)?, db_to_gain(send.level_db))))
-                    .collect(),
+                sends: sends(project, track, &routing),
                 key_out: routing.key(track.id),
                 tap: None,
                 source: None,
@@ -266,10 +263,9 @@ impl Compiler<'_> {
         let master = MasterNode {
             chain: self.chain(&project.master.devices, project, &routing.keys, &mut problems),
             volume_db: project.master.volume_db,
-            volume_automation: lane_points(project, |target| matches!(target, AutomationTarget::MasterVolume)),
+            volume_automation: envelope(project, |target| matches!(target, AutomationTarget::MasterVolume)),
             meter: self.meters.master.clone(),
-            gain: 1.0,
-            primed: false,
+            fader: Default::default(),
             tap: None,
         };
 
@@ -286,7 +282,10 @@ impl Compiler<'_> {
         }
 
         let region = project.loop_region;
+        let moves_params =
+            !master.chain.automation.is_empty() || tracks.iter().any(|track| !track.chain.automation.is_empty());
         let graph = Graph {
+            moves_params,
             tracks,
             buses: (0..routing.bus_count()).map(|_| Bus::new()).collect(),
             keys: routing.keys.iter().map(|_| Bus::new()).collect(),
@@ -309,7 +308,7 @@ impl Compiler<'_> {
             let Some(slot) = devices.iter().position(|d| d.id == *device) else { continue };
             let Some(meta) = self.bank.devices.get(device) else { continue };
             if let Some(index) = meta.params.iter().position(|info| info.id == *param) {
-                automation.push(ParamAutomation { slot, param: index, points: lane.points.clone(), last: f64::NAN });
+                automation.push(ParamAutomation { slot, param: index, envelope: Envelope::of(lane), last: f64::NAN });
             }
         }
         Chain { devices: slots, automation }
@@ -436,6 +435,8 @@ struct Routing {
     /// The tracks in the order they are played.
     order: Vec<TrackId>,
     any_solo: bool,
+    /// Whether a track that is not a return is soloed.
+    solo_beside_returns: bool,
 }
 
 impl Routing {
@@ -466,7 +467,14 @@ impl Routing {
                 }
             }
         }
-        Self { buses, keys, order, any_solo: project.tracks.iter().any(|track| track.solo) }
+        let soloed = |track: &&Track| track.solo;
+        Self {
+            buses,
+            keys,
+            order,
+            any_solo: project.tracks.iter().any(|track| track.solo),
+            solo_beside_returns: project.tracks.iter().filter(soloed).any(|track| track.kind != TrackKind::Return),
+        }
     }
 
     /// The place of a track that is listened to among the graph's keys.
@@ -487,10 +495,12 @@ impl Routing {
         self.buses.len()
     }
 
-    /// Mute and solo, resolved. Soloing a track keeps its group open, and
-    /// soloing a group keeps its members; returns stay open so a soloed
-    /// track is heard with its reverb.
-    fn audible(&self, project: &Project, track: &Track) -> bool {
+    /// Mute and solo, resolved: whether a track's own sound is wanted at
+    /// the master. Soloing a track keeps its group open, and soloing a
+    /// group keeps its members. Returns stay open while a track or a group
+    /// is soloed, so that it is heard with its reverb; a soloed return is
+    /// heard without the others.
+    fn heard(&self, project: &Project, track: &Track) -> bool {
         if track.mute {
             return false;
         }
@@ -498,99 +508,171 @@ impl Routing {
             return true;
         }
         match track.kind {
-            TrackKind::Return => true,
+            TrackKind::Return => self.solo_beside_returns,
             TrackKind::Group => project.tracks.iter().any(|member| member.group == Some(track.id) && member.solo),
             TrackKind::Normal => track.group.is_some_and(|group| project.track(group).is_ok_and(|group| group.solo)),
         }
     }
 
-    /// The tracks a render has to make and play: the ones that are heard
-    /// for their own sake, the groups and returns their sound goes on
-    /// through, and the tracks their devices listen to. With nothing
-    /// soloed that is every track that is not muted. With a solo it is the
-    /// soloed tracks, the members of a soloed group, and of the groups and
-    /// returns that are open only so that those are heard through them,
-    /// the ones something needed feeds. A track that is listened to is
-    /// made whether or not it is heard: muted, or left out by a solo.
+    /// Whether `id` is a return that is soloed: it is then heard as every
+    /// track feeds it, whether or not that track is heard itself. That is
+    /// what soloing a return is for: its sound alone, of the whole song.
+    fn takes_every_send(&self, project: &Project, id: TrackId) -> bool {
+        project.track(id).is_ok_and(|track| track.kind == TrackKind::Return && track.solo && !track.mute)
+    }
+
+    /// Whether a track's send to `to` carries anything. A return that is
+    /// soloed takes every track's send, and so does one that is not heard
+    /// and that a device listens to: the device then hears what it would
+    /// in the whole mix, whatever is muted or soloed around it. Any other
+    /// return takes the sends of the tracks that are heard, if it is heard
+    /// itself.
+    fn send_open(&self, project: &Project, track: &Track, to: TrackId) -> bool {
+        let Ok(target) = project.track(to) else { return false };
+        let heard_there = self.heard(project, target);
+        let takes_all = self.takes_every_send(project, to) || (!heard_there && self.key(to).is_some());
+        !track.mute && (takes_all || (heard_there && self.heard(project, track)))
+    }
+
+    /// Whether a track's sound goes on to its output, the master or its
+    /// group: it is heard, or it plays through a group that is not heard
+    /// and whose sound is wanted all the same, because the group sends to
+    /// a soloed return or a device listens to it.
+    fn to_output(&self, project: &Project, track: &Track) -> bool {
+        if track.mute {
+            return false;
+        }
+        let wanted_unheard = |group: &Track| {
+            let sends = || sent_to(project, group).into_iter().any(|to| self.send_open(project, group, to));
+            !self.heard(project, group) && (self.key(group.id).is_some() || sends())
+        };
+        self.heard(project, track)
+            || track.group.and_then(|group| project.track(group).ok()).is_some_and(wanted_unheard)
+    }
+
+    /// Whether a track passes sound at all: on to its output, or into a
+    /// send.
+    fn passes(&self, project: &Project, track: &Track) -> bool {
+        self.to_output(project, track)
+            || sent_to(project, track).into_iter().any(|to| self.send_open(project, track, to))
+    }
+
+    /// The tracks a render has to make and play: the ones that are heard,
+    /// and whatever feeds them. With nothing soloed that is every track
+    /// that is not muted. With a solo it is the soloed tracks and the
+    /// members of a soloed group; from those on, the groups and returns
+    /// their sound is heard through; and from all of them back, every
+    /// track that [feeds](Self::feeds) one that is made: the members of a
+    /// group, the tracks whose sends reach a soloed return, and the tracks
+    /// that devices listen to, which are made whether or not they are
+    /// heard. A return that is open only so that what is soloed is heard
+    /// with its reverb is not made when nothing that is made sends to it.
     fn needed(&self, project: &Project) -> HashSet<TrackId> {
-        let audible: HashSet<TrackId> =
-            project.tracks.iter().filter(|track| self.audible(project, track)).map(|track| track.id).collect();
-        let own = |track: &Track| !self.any_solo || track.solo || track.kind == TrackKind::Normal;
-        let mut needed: HashSet<TrackId> = project
-            .tracks
-            .iter()
-            .filter(|track| audible.contains(&track.id) && own(track))
-            .map(|track| track.id)
-            .collect();
-        let feeds = feeds(project);
+        let own = |track: &&Track| {
+            self.heard(project, track) && (!self.any_solo || track.solo || track.kind == TrackKind::Normal)
+        };
+        let mut needed: HashSet<TrackId> = project.tracks.iter().filter(own).map(|track| track.id).collect();
+        // The master is always made, and with it what its devices listen to.
+        needed.extend(listened_to(&project.master.devices).filter(|key| self.key(*key).is_some()));
+        let feeds = self.feeds(project);
+        let heard = |id: TrackId| project.track(id).is_ok_and(|track| self.heard(project, track));
         loop {
-            let fed = feeds.iter().filter(|(from, to)| needed.contains(from) && audible.contains(to));
-            let more: Vec<TrackId> = fed.map(|(_, to)| *to).filter(|to| !needed.contains(to)).collect();
-            if more.is_empty() {
+            let before = needed.len();
+            for (from, to, how) in &feeds {
+                // On, into what is heard; and back, from whatever is made.
+                if *how == Feed::Sound && needed.contains(from) && heard(*to) {
+                    needed.insert(*to);
+                }
+                if needed.contains(to) {
+                    needed.insert(*from);
+                }
+            }
+            if needed.len() == before {
                 break;
             }
-            needed.extend(more);
-        }
-
-        // What a track that is made listens to is made too, though nobody
-        // hears it: a compressor ducks to its key whether or not the key is
-        // in the mix. That is the track itself (it is heard ahead of its
-        // fader and its mute), whatever sounds into it if it is a group or
-        // a return, and what the devices of all of those listen to in turn.
-        // The master is always made.
-        let keys_of = |devices: &[Device]| devices.iter().filter_map(|device| device.sidechain).collect::<Vec<_>>();
-        let sounds_into = |from: &Track, to: &Track| match to.kind {
-            TrackKind::Group => {
-                from.group == Some(to.id) && (audible.contains(&from.id) || self.feeds_key(project, from))
-            }
-            TrackKind::Return => audible.contains(&from.id) && from.sends.iter().any(|send| send.to == to.id),
-            TrackKind::Normal => false,
-        };
-        let made = project.tracks.iter().filter(|track| needed.contains(&track.id));
-        let mut listened: Vec<TrackId> = made.flat_map(|track| keys_of(&track.devices)).collect();
-        listened.extend(keys_of(&project.master.devices));
-        while let Some(key) = listened.pop() {
-            let Ok(track) = project.track(key) else { continue };
-            if !needed.insert(key) {
-                continue;
-            }
-            listened.extend(keys_of(&track.devices));
-            listened.extend(project.tracks.iter().filter(|from| sounds_into(from, track)).map(|from| from.id));
         }
         needed
     }
-}
 
-/// Whose sound goes into whom: a member into its group, a track into each
-/// return it sends to. (A device that listens to another track is fed by
-/// it too, the other way round: [`Routing::needed`] follows those from the
-/// tracks that are made to the ones they listen to.)
-fn feeds(project: &Project) -> Vec<(TrackId, TrackId)> {
-    let mut feeds = Vec::new();
-    for track in &project.tracks {
-        feeds.extend(track.group.map(|group| (track.id, group)));
-        feeds.extend(track.sends.iter().map(|send| (track.id, send.to)));
-    }
-    feeds
-}
-
-impl Routing {
-    /// Whether a track that is not heard still plays into its group: see
-    /// [`TrackNode::feeds_key`].
-    fn feeds_key(&self, project: &Project, track: &Track) -> bool {
-        let listened = |group: &Track| self.key(group.id).is_some() && !self.audible(project, group);
-        !track.mute
-            && !self.audible(project, track)
-            && track.group.is_some_and(|group| project.track(group).is_ok_and(listened))
+    /// Who feeds whom, as mute and solo leave it: a member plays into its
+    /// group, a track into each return its sends reach (a send set by
+    /// hand, or one that is its envelope: [`sent_to`]), and a track is
+    /// listened to by the devices of another. Whatever else comes to feed
+    /// a track is one more line here, and [`Routing::needed`] makes it.
+    fn feeds(&self, project: &Project) -> Vec<(TrackId, TrackId, Feed)> {
+        let mut feeds = Vec::new();
+        for track in &project.tracks {
+            let through = track.group.filter(|_| self.to_output(project, track));
+            feeds.extend(through.map(|group| (track.id, group, Feed::Sound)));
+            let open = sent_to(project, track).into_iter().filter(|to| self.send_open(project, track, *to));
+            feeds.extend(open.map(|to| (track.id, to, Feed::Sound)));
+            let keys = listened_to(&track.devices).filter(|key| self.key(*key).is_some());
+            feeds.extend(keys.map(|key| (key, track.id, Feed::Key)));
+        }
+        feeds
     }
 }
 
-fn lane_points(
-    project: &Project,
-    matches: impl Fn(&AutomationTarget) -> bool,
-) -> Option<Vec<trill_core::AutomationPoint>> {
+/// How one track feeds another.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Feed {
+    /// Its sound goes into it: a member into its group, a send into its
+    /// return.
+    Sound,
+    /// A device of the other listens to it. It is made for that, and
+    /// being made does not make the listener heard.
+    Key,
+}
+
+/// The tracks that `devices` listen to.
+fn listened_to(devices: &[Device]) -> impl Iterator<Item = TrackId> + '_ {
+    devices.iter().filter_map(|device| device.sidechain)
+}
+
+/// The envelope that moves what `matches` picks out, if it has one.
+fn envelope(project: &Project, matches: impl Fn(&AutomationTarget) -> bool) -> Option<Envelope> {
     // A lane that is switched off is no lane to the engine.
-    project.automation.iter().find(|lane| lane.enabled && matches(&lane.target)).map(|lane| lane.points.clone())
+    project.automation.iter().find(|lane| lane.enabled && matches(&lane.target)).map(Envelope::of)
+}
+
+/// The returns `track` sends to: by a send set by hand, and by one that is
+/// its envelope alone (switched on: off, it sends nothing). Whoever asks
+/// what a track's sends reach asks this.
+fn sent_to(project: &Project, track: &Track) -> Vec<TrackId> {
+    let mut to: Vec<TrackId> = track.sends.iter().map(|send| send.to).collect();
+    for lane in project.automation.iter().filter(|lane| lane.enabled) {
+        if let AutomationTarget::Send { track: from, to: at } = lane.target
+            && from == track.id
+            && !to.contains(&at)
+        {
+            to.push(at);
+        }
+    }
+    to
+}
+
+/// What `track` sends to the returns: each send with the level it was set
+/// to by hand (nothing, for one that is its envelope alone), the envelope
+/// that moves it if it has one, and whether mute and solo leave it open.
+fn sends(project: &Project, track: &Track, routing: &Routing) -> Vec<SendNode> {
+    sent_to(project, track)
+        .into_iter()
+        .filter_map(|to| {
+            let set = track.sends.iter().find(|send| send.to == to);
+            let moved = |target: &AutomationTarget| {
+                matches!(target, AutomationTarget::Send { track: from, to: at } if *from == track.id && *at == to)
+            };
+            Some(SendNode {
+                bus: routing.bus(to)?,
+                to,
+                gain: set.map_or(0.0, |send| db_to_gain(send.level_db)),
+                automation: envelope(project, moved),
+                open: routing.send_open(project, track, to),
+                glide: Default::default(),
+                gate: Default::default(),
+            })
+        })
+        .collect()
 }
 
 /// A clip's notes as the engine plays them: absolute positions, with the

@@ -247,6 +247,11 @@ pub enum EventKind {
 /// How far the pitch wheel bends, each way, where an instrument has no
 /// setting of its own for it.
 pub const PITCH_BEND_SEMITONES: f32 = 2.0;
+/// The parameter by which a built-in instrument says how far its pitch
+/// wheel bends, in semitones each way. A track whose profile says nothing
+/// of its own takes the range from it, so that what is written for the
+/// wheel is written for the wheel there is.
+pub const BEND_RANGE_PARAM: &str = "bend_range";
 /// The controller number of the mod wheel in [`EventKind::Control`].
 pub const CONTROLLER_MOD_WHEEL: u8 = 1;
 /// The controller number of the sustain pedal in [`EventKind::Control`].
@@ -690,6 +695,16 @@ pub trait DeviceFactory: Send + Sync {
         self.create(device, sample_rate, max_block)
     }
 
+    /// Whether the factory is behind with work that its devices may be
+    /// waiting on. The plugins of a host share one thread, on which each
+    /// is made, let go of and given its turn; one that takes long to go
+    /// holds up another that is waiting to load. Whoever waits for a
+    /// device to be ready takes this as a reason to go on waiting. A
+    /// factory that hands the work to another must hand this on too.
+    fn busy(&self) -> bool {
+        false
+    }
+
     /// What is wrong with `device` as this factory would create it, short
     /// of failing to create it. Empty when all is well, and for devices of
     /// other factories. Called off the audio thread, and often: it should
@@ -799,6 +814,10 @@ impl<T: DeviceFactory + ?Sized> DeviceFactory for std::sync::Arc<T> {
         (**self).create_for(device, sample_rate, max_block, purpose)
     }
 
+    fn busy(&self) -> bool {
+        (**self).busy()
+    }
+
     fn warnings(&self, device: &Device) -> Vec<DeviceWarning> {
         (**self).warnings(device)
     }
@@ -851,6 +870,10 @@ impl CompositeFactory {
 impl DeviceFactory for CompositeFactory {
     fn descriptors(&self) -> Vec<DeviceDescriptor> {
         self.factories.iter().flat_map(|f| f.descriptors()).collect()
+    }
+
+    fn busy(&self) -> bool {
+        self.factories.iter().any(|factory| factory.busy())
     }
 
     fn create(&self, device: &Device, sample_rate: f64, max_block: usize) -> Result<DeviceInstance, DeviceError> {

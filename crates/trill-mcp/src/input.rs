@@ -119,10 +119,11 @@ impl JsonSchema for PointInput {
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
         json_schema!({
             "description": "A breakpoint: {beat, value, shape?} or [beat, value, shape?]. `beat` is a song position \
-                in beats; `value` is in the target's own units (dB for volume, -1..1 for pan, the parameter's units \
-                otherwise). `shape` says how the value travels from this point to the next: omit it for a straight \
-                line, \"hold\" to stay put and jump at the next point, or a number from -1 to 1 to bend the line \
-                (positive starts slowly and finishes fast, like a build-up; negative the reverse).",
+                in beats; `value` is in the target's own units (dB for a volume or a send, -1..1 for pan, the \
+                parameter's units otherwise). `shape` says how the value travels from this point to the next: omit \
+                it for a line straight along the control's travel, \"hold\" to stay put and jump at the next point, \
+                or a number from -1 to 1 to bend the line (positive starts slowly and finishes fast, like a \
+                build-up; negative the reverse).",
             "anyOf": [
                 {
                     "type": "object",
