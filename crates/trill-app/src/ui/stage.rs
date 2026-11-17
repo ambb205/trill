@@ -90,6 +90,13 @@ struct Costs {
     longest: Duration,
     /// When the frame before this one began, if the song played then.
     last: Option<Instant>,
+    /// The ten seconds being counted: how long they have run and the
+    /// frames in them so far. Then the most and the fewest frames a second
+    /// any ten seconds had: a run that loads samplers while it plays has
+    /// both a rough start and a steady rest, and one figure hides which.
+    stretch: (Duration, u32),
+    steadiest: f64,
+    roughest: Option<f64>,
 }
 
 impl Costs {
@@ -107,6 +114,13 @@ impl Costs {
             self.card += card;
             self.longest = self.longest.max(waited);
             self.late += u32::from(waited > Duration::from_millis(25));
+            self.stretch = (self.stretch.0 + waited, self.stretch.1 + 1);
+            if self.stretch.0 >= Duration::from_secs(10) {
+                let rate = self.stretch.1 as f64 / self.stretch.0.as_secs_f64();
+                self.steadiest = self.steadiest.max(rate);
+                self.roughest = Some(self.roughest.map_or(rate, |roughest| roughest.min(rate)));
+                self.stretch = (Duration::ZERO, 0);
+            }
         }
         self.last = Some(started);
     }
@@ -313,10 +327,16 @@ impl StageView {
             return None;
         }
         let each = |total: Duration| total.as_secs_f64() * 1000.0 / costs.frames as f64;
+        let stretches = match costs.roughest {
+            Some(roughest) => {
+                format!(" ({:.1} in its steadiest ten seconds, {roughest:.1} in its roughest)", costs.steadiest)
+            }
+            None => String::new(),
+        };
         Some(format!(
-            "stage: {} frames while the song played, {:.1} a second, {} of them late (the longest wait {:.1} ms); \
-             its part of a frame {:.2} ms on average ({:.2} ms of it handing the picture to the graphics card), \
-             {:.2} ms at worst; {}",
+            "stage: {} frames while the song played, {:.1} a second{stretches}, {} of them late (the longest wait \
+             {:.1} ms); its part of a frame {:.2} ms on average ({:.2} ms of it handing the picture to the graphics \
+             card), {:.2} ms at worst; {}",
             costs.frames,
             costs.frames as f64 / costs.played.as_secs_f64(),
             costs.late,
