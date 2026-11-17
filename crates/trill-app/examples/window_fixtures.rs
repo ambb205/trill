@@ -84,6 +84,24 @@ fn thrown_sends() -> anyhow::Result<Project> {
     Ok(project)
 }
 
+/// The song with a tempo and a time signature that change on the way:
+/// four bars of 7/8 at 132 from bar 5, a ritardando through bar 12 that
+/// arrives at 84 where bar 13 begins, and the first tempo again from there.
+fn changing_time() -> anyhow::Result<Project> {
+    let text =
+        std::fs::read_to_string(SONG).with_context(|| format!("cannot read {SONG} (run from the repository root)"))?;
+    let mut project = Project::from_json(&text)?;
+    let first = project.tempo;
+    project.set_time_signature_at(16.0, 7, 8)?;
+    project.set_time_signature_at(30.0, 4, 4)?;
+    project.set_tempo_at(16.0, 132.0, false)?;
+    project.set_tempo_at(30.0, first, false)?;
+    project.set_tempo_at(42.0, first, false)?;
+    project.set_tempo_at(46.0, 84.0, true)?;
+    project.set_tempo_at(46.0, first, false)?;
+    Ok(project)
+}
+
 /// A program that keeps what it keeps under `profile`, makes a project
 /// with `work`, and stops without saving it or saying goodbye.
 fn lose(profile: &Path, work: impl FnOnce(&mut Session) -> anyhow::Result<()>) -> anyhow::Result<()> {
@@ -126,6 +144,7 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(folder)?;
     std::fs::write(folder.join("held-automation.trill"), held_automation()?.to_json())?;
     std::fs::write(folder.join("thrown-sends.trill"), thrown_sends()?.to_json())?;
+    std::fs::write(folder.join("changing-time.trill"), changing_time()?.to_json())?;
 
     // Start over: only the files a safety copy is made of are removed.
     let profile = folder.join("lost-work");

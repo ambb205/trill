@@ -17,7 +17,7 @@ use std::path::Path;
 use std::time::Instant;
 use trill_core::pitch::pitch_name;
 use trill_core::project::{ClipContent, MidiContent};
-use trill_core::{Beats, Clip, ClipId, DeviceId, Note, TimeSignature, Track};
+use trill_core::{Beats, Clip, ClipId, DeviceId, MeterMap, Note, TimeSignature, Track};
 use trill_engine::SampleFile;
 use trill_noir::{Bar, Chip, Icon, NumberField, Theme, fade, paint, text};
 
@@ -237,7 +237,10 @@ struct Geometry {
     velocity: Rect,
     time: TimeView,
     pitch: PitchView,
+    /// The time signature the clip begins in, and its bars as the song
+    /// has them under it, counted from where its content begins.
     signature: TimeSignature,
+    meter: timeline::FewBars,
     /// The snap grid, `None` when snapping is off.
     snap: Option<Beats>,
 }
@@ -268,8 +271,14 @@ impl Geometry {
             time,
             pitch,
             signature,
+            meter: timeline::FewBars::constant(signature),
             snap: snap.step(),
         }
+    }
+
+    /// The same, for a clip whose bars are `meter`.
+    fn in_bars(self, meter: &MeterMap) -> Self {
+        Self { signature: meter.signature_at(0.0), meter: timeline::FewBars::of(meter), ..self }
     }
 
     fn x(&self, beat: Beats) -> f32 {
@@ -417,7 +426,9 @@ impl Stack {
 /// Clip name, start, length and loop; the grid; the selected notes.
 fn sidebar(ui: &mut Ui, cx: &mut Cx, clip: &Clip, rect: Rect) {
     let theme = cx.theme;
-    let signature = cx.snap.project.time_signature;
+    // Where the clip is in the song, and the time signature it starts in.
+    let bars = cx.snap.project.meter_map();
+    let signature = bars.signature_at(clip.start);
     let beats_per_bar = signature.beats_per_bar();
     let clip_id = clip.id;
     let (bar, chip, gap) = (theme.metric.bar, theme.metric.chip, theme.metric.gap);
@@ -450,7 +461,7 @@ fn sidebar(ui: &mut Ui, cx: &mut Cx, clip: &Clip, rect: Rect) {
     paint::frame(ui.painter(), start_row, theme.hairline);
     let inner = start_row.shrink2(vec2(theme.metric.pad + 2.0, 0.0));
     text::paint(ui.painter(), inner, Align2::LEFT_CENTER, theme.text.label, "Start", theme.ink_faint);
-    let start = timeline::format_position(clip.start, signature).replace('.', ". ");
+    let start = timeline::format_position(clip.start, &bars).replace('.', ". ");
     text::paint(ui.painter(), inner, Align2::RIGHT_CENTER, theme.text.value, &start, theme.ink);
     let response = ui.interact(start_row, id.with("start"), Sense::hover());
     cx.hint(&response, "Where the clip starts: bar, beat, sixteenth \u{00B7} drag the clip to move it");
@@ -749,11 +760,13 @@ pub fn nudge_selected_notes(cx: &mut Cx, steps: i32, semitones: i32) {
 }
 
 fn roll(ui: &mut Ui, cx: &mut Cx, track: &Track, clip: &Clip, midi: &MidiContent, area: Rect) {
-    let signature = cx.snap.project.time_signature;
+    // The clip's bars are the song's from where its content begins.
+    let meter = cx.snap.project.meter_map().counted_from((clip.start - midi.start_offset).max(0.0));
+    let signature = meter.signature_at(0.0);
     let is_drums = cx.snap.plays_drums(track.id);
     let keys_width = if is_drums { DRUM_KEYS_WIDTH } else { KEYS_WIDTH };
     let view = &mut cx.state.piano;
-    let inner = Geometry::new(area, keys_width, view.time, view.pitch, signature, view.snap);
+    let inner = Geometry::new(area, keys_width, view.time, view.pitch, signature, view.snap).in_bars(&meter);
 
     // Frame a newly selected clip once: all of it across, its notes
     // centered vertically. After that the user's zoom is left alone.
@@ -887,7 +900,7 @@ fn paint_grid(ui: &Ui, cx: &Cx, geometry: &Geometry, color: Color32, clip: &Clip
     }
 
     let (first_beat, last_beat) = geometry.time.visible(grid.width());
-    timeline::for_each_grid_line(first_beat, last_beat, geometry.signature, geometry.line_step(), |beat, level| {
+    timeline::for_each_grid_line(first_beat, last_beat, geometry.meter, geometry.line_step(), |beat, level| {
         let color = match level {
             GridLevel::Bar => theme.hairline,
             GridLevel::Beat => theme.grid,
@@ -989,7 +1002,7 @@ fn paint_ruler(ui: &Ui, cx: &Cx, geometry: &Geometry, clip: &Clip, midi: &MidiCo
     let (first_beat, last_beat) = geometry.time.visible(ruler.width());
     let label_step = timeline::grid_step(geometry.time.pixels_per_beat, signature, 52.0);
     let style = trill_noir::TextStyle { tracking: 0.4, ..theme.text.micro };
-    timeline::for_each_grid_line(first_beat, last_beat, signature, label_step, |beat, level| {
+    timeline::for_each_grid_line(first_beat, last_beat, geometry.meter, label_step, |beat, level| {
         let x = geometry.x(beat).round();
         if level == GridLevel::Bar {
             paint::vline(&painter, x, ruler.y_range(), theme.grid);
@@ -1000,7 +1013,7 @@ fn paint_ruler(ui: &Ui, cx: &Cx, geometry: &Geometry, clip: &Clip, midi: &MidiCo
             room,
             Align2::LEFT_CENTER,
             style,
-            &timeline::format_bar_beat(beat, signature),
+            &timeline::format_bar_beat(beat, geometry.meter),
             theme.ink_faint,
         );
     });

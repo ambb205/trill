@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use trill_core::controllers::{CONTROLLER_KINDS, ControllerKind, ControllerLane};
 use trill_core::device::{DeviceProcessor, EventKind};
 use trill_core::project::{AutomationLane, AutomationPoint, envelope_value};
-use trill_core::{DeviceId, TimeSignature, TrackId, Travel};
+use trill_core::{DeviceId, MeterMap, TempoMap, TimeSignature, TrackId, Travel};
 
 /// Largest block the engine hands to a device.
 pub const MAX_BLOCK: usize = 512;
@@ -36,9 +36,10 @@ pub type AudioData = trill_core::audio::AudioBuffer;
 pub(crate) struct RegionAudio {
     pub data: Arc<AudioData>,
     /// The position in `data`, in frames, that beat 0 of the timeline
-    /// corresponds to: output frame `n`, counted from beat 0, plays
-    /// position `origin + n * step`. Usually negative or far past the
-    /// start; only the part under the clip is ever read.
+    /// corresponds to: output frame `n`, counted from beat 0 as the song's
+    /// tempo makes it ([`TempoMap::frames_at`]), plays position
+    /// `origin + n * step`. Usually negative or far past the start; only
+    /// the part under the clip is ever read.
     pub origin: f64,
     /// Frames of `data` per output frame. Exactly 1 for everything but
     /// stand-ins and tempos beyond what the stretcher covers, and then
@@ -46,11 +47,23 @@ pub(crate) struct RegionAudio {
     pub step: f64,
 }
 
+/// A stretch of a clip of audio that plays at one speed: the whole clip,
+/// unless it follows a tempo that changes under it. Then it is one piece
+/// for each tempo, and where two meet each is played a moment past the
+/// seam and they are faded across it.
 pub(crate) struct AudioRegion {
     pub start: f64,
     pub end: f64,
-    /// Fade lengths in beats. The processor never fades an edge faster than
-    /// its own click guard, unless the edge joins a neighbour.
+    /// The clip's own start and end, which its fades are counted from:
+    /// `start` and `end`, for a clip that is one piece.
+    pub clip_start: f64,
+    pub clip_end: f64,
+    /// Whether the piece begins, or ends, at a seam with another piece of
+    /// its clip.
+    pub seam_before: bool,
+    pub seam_after: bool,
+    /// The clip's fade lengths in beats. The processor never fades an edge
+    /// faster than its own click guard, unless the edge joins a neighbour.
     pub fade_in: f64,
     pub fade_out: f64,
     /// The clip carries straight on from the clip before it, or into the
@@ -419,8 +432,11 @@ pub struct Graph {
     /// one for each such track.
     pub(crate) keys: Vec<Bus>,
     pub(crate) master: MasterNode,
-    pub(crate) tempo: f64,
-    pub(crate) time_signature: TimeSignature,
+    /// How the song's beats become time, and how they become bars: what
+    /// the audio thread counts frames and clicks the metronome by. Made
+    /// with the graph and freed with it; reading them allocates nothing.
+    pub(crate) tempo_map: TempoMap,
+    pub(crate) meter_map: MeterMap,
     /// `(start, end)` in beats when looping is on.
     pub(crate) loop_region: Option<(f64, f64)>,
     /// Whether an envelope moves a parameter of any device. While such a
@@ -443,8 +459,8 @@ impl Graph {
                 fader: Glide::default(),
                 tap: None,
             },
-            tempo: 120.0,
-            time_signature: TimeSignature::default(),
+            tempo_map: TempoMap::constant(120.0),
+            meter_map: MeterMap::constant(TimeSignature::default()),
             loop_region: None,
             moves_params: false,
         }

@@ -2,13 +2,20 @@
 //! what follows closes up, repeating it, opening up empty time, and copying
 //! it to another place. Each carries everything that lives on the timeline
 //! with it: clips on every track (with the controller curves inside them),
-//! automation, markers and the loop.
+//! automation, markers, the loop, and the changes of tempo and of time
+//! signature. Time that is cut out takes its changes with it, time that is
+//! repeated has them twice, and time that is opened up has the tempo and
+//! the signature the song arrived there with. Copying a stretch to another
+//! place ([`Project::paste_time`]) is the one that leaves them alone: what
+//! is put down is played at the tempo, and counted in the bars, of where
+//! it lands.
 //!
 //! An edit that fails may leave the project half changed; run it where a
 //! failure is rolled back, as the session's edits are.
 
 use crate::controllers::{splice_along, value_before_along};
 use crate::project::{AutomationPoint, AutomationTarget, ChainRef, Clip, EditError, Project, Segment, envelope_value};
+use crate::tempo::{Stretch, rearranged_meter, rearranged_tempo};
 use crate::time::Beats;
 use crate::travel::Travel;
 use crate::{ClipId, TrackId};
@@ -38,6 +45,11 @@ pub enum PasteMode {
     Insert,
     /// It takes the place of what its tracks hold there.
     Replace,
+}
+
+/// `length` beats of the old timeline from `from` on, kept at `at`.
+fn kept(at: Beats, from: Beats, length: Beats) -> Stretch {
+    Stretch { at, from, length, hold: false }
 }
 
 /// `start..end` as a stretch of time, or why it is none.
@@ -95,6 +107,7 @@ impl Project {
         if loop_end > loop_start {
             self.set_loop(region.enabled, loop_start, loop_end)?;
         }
+        self.lay_time(&[kept(0.0, 0.0, start), kept(start, end, f64::INFINITY)]);
         Ok(())
     }
 
@@ -110,10 +123,14 @@ impl Project {
             if source.start >= end || source.end() <= start {
                 continue;
             }
-            let copy = self.paste_clip(track, &source, source.start + length)?;
             if source.start < start {
-                // Only the part inside the stretch is repeated.
-                self.trim_clip_start(copy, start + length)?;
+                // Only the part inside the stretch is repeated: cut where
+                // it lies, at the tempo it has there.
+                let copy = self.paste_clip(track, &source, source.start)?;
+                self.trim_clip_start(copy, start)?;
+                self.move_clip(copy, None, start + length)?;
+            } else {
+                self.paste_clip(track, &source, source.start + length)?;
             }
         }
 
@@ -122,7 +139,9 @@ impl Project {
                 self.set_automation(target, repeated_envelope(&points, travel, start, end))?;
             }
         }
-        self.shift_marks(end, length)
+        self.shift_marks(end, length)?;
+        self.lay_time(&[kept(0.0, 0.0, end), kept(end, start, length), kept(end + length, end, f64::INFINITY)]);
+        Ok(())
     }
 
     /// Opens up `length` beats of empty time at `at`: everything from there
@@ -140,7 +159,10 @@ impl Project {
                 self.set_automation(target, held_envelope(&points, travel, at, length))?;
             }
         }
-        self.shift_marks(at, length)
+        self.shift_marks(at, length)?;
+        let held = Stretch { at, from: at, length, hold: true };
+        self.lay_time(&[kept(0.0, 0.0, at), held, kept(at + length, at, f64::INFINITY)]);
+        Ok(())
     }
 
     /// What the time from `start` to `end` holds on `tracks` (every track
@@ -263,6 +285,19 @@ impl Project {
             self.remove_clip(inside)?;
         }
         Ok(())
+    }
+
+    /// Lays the song's tempo and time signature along a timeline put
+    /// together from `stretches` of the one it had. The last thing an edit
+    /// of time does: until then the clips are cut at the tempo they have
+    /// where they lie.
+    fn lay_time(&mut self, stretches: &[Stretch]) {
+        if self.tempo_changes.is_empty() && self.meter_changes.is_empty() {
+            return;
+        }
+        (self.tempo, self.tempo_changes) = rearranged_tempo(self.tempo, &self.tempo_changes, stretches);
+        (self.time_signature, self.meter_changes) =
+            rearranged_meter(self.time_signature, &self.meter_changes, stretches);
     }
 
     /// Every envelope as it stands: what it moves, its points, and what
@@ -459,6 +494,76 @@ mod tests {
         let markers: Vec<(Beats, &str)> = project.markers.iter().map(|m| (m.beat, m.name.as_str())).collect();
         assert_eq!(markers, [(2.0, "a"), (10.0, "c")], "the marker inside the cut goes with it");
         assert_eq!((project.loop_region.start, project.loop_region.end), (6.0, 12.0));
+    }
+
+    #[test]
+    fn time_takes_its_tempo_and_its_meter_along_and_audio_keeps_what_it_played() {
+        use crate::project::{AudioContent, ClipContent};
+        use crate::tempo::{MeterChange, TempoChange};
+        use crate::time::TimeSignature;
+
+        // 120 in 4/4; from beat 8, 60 in 3/4; from beat 14 on, 120 in 4/4.
+        let (mut song, _, _) = project();
+        song.set_tempo_at(8.0, 60.0, false).unwrap();
+        song.set_tempo_at(14.0, 120.0, false).unwrap();
+        song.set_time_signature_at(8.0, 3, 4).unwrap();
+        song.set_time_signature_at(14.0, 4, 4).unwrap();
+        // A recording across all of it, played at the speed it was made.
+        let audio = song.add_track("Audio");
+        let take = song.add_audio_clip(audio, "take", 4.0, 14.0, AudioContent::new("take.wav")).unwrap();
+        let jump = |beat: Beats, tempo: f64| TempoChange { beat, tempo, ramp: false };
+        let meter = |beat: Beats, n: u8, d: u8| MeterChange { beat, signature: TimeSignature::new(n, d).unwrap() };
+        // Where each clip of the recording starts, and where in the file.
+        let takes = |song: &Project| -> Vec<(Beats, f64)> {
+            let clips = song.track(audio).unwrap().clips.iter();
+            clips
+                .map(|clip| match &clip.content {
+                    ClipContent::Audio(audio) => (clip.start, (audio.offset_seconds * 1e9).round() / 1e9),
+                    ClipContent::Midi(_) => unreachable!(),
+                })
+                .collect()
+        };
+
+        // The slow bars cut out: the song is at 120 in 4/4 throughout, with
+        // nothing left to say so, and the recording goes on after the cut
+        // from where it would have been: two seconds and six more in.
+        let mut cut = song.clone();
+        cut.delete_time(8.0, 14.0).unwrap();
+        assert!(cut.tempo_changes.is_empty() && cut.meter_changes.is_empty(), "{:?}", cut.meter_changes);
+        assert_eq!(takes(&cut), [(4.0, 0.0), (8.0, 8.0)]);
+
+        // Their second bar heard twice: the changes after it are a bar
+        // later, and the repeat plays the second bar's three seconds again.
+        let mut twice = song.clone();
+        twice.duplicate_time(11.0, 14.0).unwrap();
+        assert_eq!(twice.tempo_changes, [jump(8.0, 60.0), jump(17.0, 120.0)]);
+        assert_eq!(twice.meter_changes, [meter(8.0, 3, 4), meter(17.0, 4, 4)]);
+        assert_eq!(takes(&twice), [(4.0, 0.0), (14.0, 5.0), (17.0, 8.0)]);
+        assert_eq!(take, twice.track(audio).unwrap().clips[0].id);
+
+        // Two bars opened up where the slow bars begin: they have the
+        // tempo and the meter the song arrived with, and the slow bars
+        // come after them.
+        let mut opened = song.clone();
+        opened.insert_time(8.0, 8.0).unwrap();
+        assert_eq!(opened.tempo_changes, [jump(16.0, 60.0), jump(22.0, 120.0)]);
+        assert_eq!(opened.meter_changes, [meter(16.0, 3, 4), meter(22.0, 4, 4)]);
+        assert_eq!(takes(&opened), [(4.0, 0.0), (16.0, 2.0)]);
+
+        // The first eight beats cut off: the song begins slow, in three.
+        let mut later = song.clone();
+        later.delete_time(0.0, 8.0).unwrap();
+        assert_eq!((later.tempo, later.time_signature), (60.0, TimeSignature::new(3, 4).unwrap()));
+        assert_eq!(
+            (&later.tempo_changes[..], &later.meter_changes[..]),
+            (&[jump(6.0, 120.0)][..], &[meter(6.0, 4, 4)][..])
+        );
+
+        // Copied to another place, a stretch leaves the tempo and the
+        // meter of where it lands.
+        let mut copied = song.clone();
+        copied.copy_time(8.0, 14.0, 20.0, None, PasteMode::Replace).unwrap();
+        assert_eq!((&copied.tempo_changes, &copied.meter_changes), (&song.tempo_changes, &song.meter_changes));
     }
 
     #[test]

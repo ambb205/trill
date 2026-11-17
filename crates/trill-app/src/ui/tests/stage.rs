@@ -52,6 +52,26 @@ fn the_stage_takes_the_window_and_leaving_it_puts_the_window_back_as_it_was() {
 }
 
 #[test]
+fn the_stage_takes_the_whole_screen_and_gives_it_back_on_leaving() {
+    let (mut harness, ..) = with_two_tracks(UiOptions::default());
+    assert_eq!(harness.app.asked_whole_screen(), None, "a window that opens keeps its size");
+    harness.key(Modifiers::NONE, Key::F11);
+    harness.idle(2);
+    assert_eq!(harness.app.asked_whole_screen(), Some(true), "F11 is the key people expect that of");
+    harness.key(Modifiers::NONE, Key::F11);
+    harness.idle(2);
+    assert_eq!(harness.app.asked_whole_screen(), Some(false), "and the window is its own size again");
+
+    // A run that nobody watches (a picture of the stage) is of the window
+    // as it was asked for.
+    let picture = UiOptions { stage: true, exit_after: Some(Duration::from_secs(600)), ..Default::default() };
+    let (mut harness, ..) = with_two_tracks(picture);
+    harness.idle(2);
+    assert!(harness.app.state().stage_open);
+    assert_eq!(harness.app.asked_whole_screen(), None);
+}
+
+#[test]
 fn the_stage_opens_from_its_button_and_from_the_view_menu() {
     let (mut harness, ..) = with_two_tracks(UiOptions::default());
     harness.click_label("Stage");
@@ -126,4 +146,43 @@ fn the_stage_is_of_the_song_as_it_is_now() {
     harness.session.lock().edit(|project| project.rename_marker(1, "Refrain")).unwrap();
     harness.idle(2);
     assert_eq!(on_stage(&harness).as_deref(), Some("Stage: Refrain Untitled"));
+}
+
+#[test]
+fn a_recording_the_song_plays_joins_the_stage_once_it_is_read_and_one_that_is_gone_is_left_out() {
+    let folder = tempfile::tempdir().unwrap();
+    let take = folder.path().join("take.wav");
+    let channel: Vec<f32> = (0..24_000).map(|frame| (frame as f32 * 0.05).sin() * 0.5).collect();
+    let buffer = trill_core::audio::AudioBuffer { sample_rate: 48_000.0, left: channel.clone(), right: channel };
+    trill_media::write_wav(&take, &buffer, trill_media::WavFormat::Int16).unwrap();
+    let path = take.display().to_string();
+    let mut harness = Harness::new(UiOptions { stage: true, ..Default::default() }, |session| {
+        let edit = |project: &mut Project| {
+            let voice = project.add_track("Voice");
+            project.add_audio_clip(voice, "Take", 0.0, 8.0, trill_core::project::AudioContent::new(path.as_str()))?;
+            project.add_audio_clip(
+                voice,
+                "Lost",
+                8.0,
+                8.0,
+                trill_core::project::AudioContent::new("no-such-take.wav"),
+            )?;
+            Ok(())
+        };
+        session.edit(edit).unwrap();
+    });
+    // The stage is up at once, by its clips alone: the file is read behind it.
+    assert!(on_stage(&harness).is_some());
+    harness.wait_until("the recording to be read", |harness| !harness.app.stage().is_reading());
+    assert_eq!(
+        harness.app.stage().recordings(),
+        1,
+        "the take that is there; the lost one is a clip without a waveform"
+    );
+
+    // A song with nothing recorded in it reads nothing.
+    let (mut notes, ..) = with_two_tracks(UiOptions { stage: true, ..Default::default() });
+    notes.idle(2);
+    assert!(!notes.app.stage().is_reading());
+    assert_eq!(notes.app.stage().recordings(), 0);
 }

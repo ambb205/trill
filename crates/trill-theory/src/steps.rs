@@ -130,6 +130,40 @@ impl StepPattern {
         !self.bars.iter().flatten().any(|cell| matches!(cell, Cell::Hit { .. }))
     }
 
+    /// The pattern, written for bars of `own` beats, as it is played in
+    /// bars of `bar` beats with its steps as long as they were. A pattern
+    /// that begins with its bar is cut off where a shorter bar ends and
+    /// begun again where a longer one goes on; one that ends with its bar
+    /// (`from_end`: a fill, which leads into the next downbeat) loses its
+    /// beginning in a shorter bar and waits out the start of a longer one.
+    ///
+    /// `None` if a bar of `bar` beats is not a whole number of its steps
+    /// (triplets in 7/8): then there is no such pattern.
+    pub fn refit(&self, own: f64, bar: f64, from_end: bool) -> Option<Self> {
+        let mut bars = Vec::with_capacity(self.bars.len());
+        for cells in &self.bars {
+            let count = cells.len();
+            let fitted = bar * count as f64 / own;
+            let steps = fitted.round() as usize;
+            if count == 0 || steps == 0 || (fitted - steps as f64).abs() > 1e-6 {
+                return None;
+            }
+            let cell = |step: usize| match from_end {
+                // Counted back from the end of the bar.
+                true if steps - step <= count => cells[count - (steps - step)],
+                true => Cell::Rest,
+                false => cells[step % count],
+            };
+            let mut fitted: Vec<Cell> = (0..steps).map(cell).collect();
+            // A hold that lost the hit it held is nothing.
+            if let Some(first) = fitted.iter().position(|cell| *cell != Cell::Hold) {
+                fitted[..first].fill(Cell::Rest);
+            }
+            bars.push(fitted);
+        }
+        Some(Self { bars })
+    }
+
     /// The hits of one pass through the pattern, in order, with rolls
     /// written out as separate hits. Only the first hit of an accented roll
     /// keeps the accent, so the roll does not bury the pulse of the grid.
@@ -237,6 +271,32 @@ mod tests {
         assert!((shuffle[1] - 2.0 / 3.0).abs() < 1e-9, "twelve steps are triplet eighths: {shuffle:?}");
         assert_eq!(starts("x..x..", 3.0), [0.0, 1.5], "six steps in a 6/8 bar are eighths");
         assert_eq!(starts("x.x.x..", 3.5), [0.0, 1.0, 2.0], "seven in 7/8");
+    }
+
+    #[test]
+    fn a_pattern_keeps_its_steps_in_a_bar_of_another_length() {
+        let rock = pattern("X... x... X.x. x...");
+        // In 7/8 it is cut off after fourteen sixteenths, in 3/4 after
+        // twelve; in 5/4 it begins again for the fifth beat.
+        assert_eq!(rock.refit(4.0, 3.5, false).unwrap().to_string(), "X...x...X.x.x.");
+        assert_eq!(rock.refit(4.0, 3.0, false).unwrap().to_string(), "X...x...X.x.");
+        assert_eq!(rock.refit(4.0, 5.0, false).unwrap().to_string(), "X...x...X.x.x...X...");
+        assert_eq!(rock.refit(4.0, 4.0, false).unwrap(), rock);
+        assert_eq!(starts("X...x...X.x.x.", 3.5), [0.0, 1.0, 2.0, 2.5, 3.0], "and a sixteenth is still one");
+        // Bar by bar, each from its own start.
+        let two = pattern("x... .... | .... x.x.").refit(4.0, 3.0, false).unwrap();
+        assert_eq!(two.to_string(), "x.....|....x.");
+
+        // A fill ends with its bar: a shorter bar loses its beginning,
+        // and a longer one waits for it.
+        let fill = pattern("........xxxxxxxX");
+        assert_eq!(fill.refit(4.0, 3.5, true).unwrap().to_string(), "......xxxxxxxX");
+        assert_eq!(fill.refit(4.0, 5.0, true).unwrap().to_string(), "............xxxxxxxX");
+        // A hold whose hit was cut away holds nothing.
+        assert_eq!(pattern("x_x_x___").refit(2.0, 1.75, true).unwrap().to_string(), ".x_x___");
+        // Triplets are no whole number of steps of a bar of 7/8.
+        assert!(pattern("x.xx.xx.xx.x").refit(4.0, 3.5, false).is_none());
+        assert!(pattern("x.xx.xx.xx.x").refit(4.0, 3.0, false).is_some());
     }
 
     #[test]

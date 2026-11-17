@@ -88,7 +88,7 @@ fn paint_rows(ui: &Ui, cx: &Cx, geometry: &Geometry, hovered: Option<ClipId>) {
     let lanes = geometry.lanes;
     let (first_beat, last_beat) = geometry.time.visible(lanes.width());
 
-    timeline::for_each_grid_line(first_beat, last_beat, geometry.signature, geometry.grid, |beat, level| {
+    timeline::for_each_grid_line(first_beat, last_beat, &geometry.meter, geometry.grid, |beat, level| {
         let color = if geometry.is_strong_line(beat, level) { theme.grid } else { theme.grid_fine };
         paint::vline(&painter, geometry.x(beat).round(), lanes.y_range(), color);
     });

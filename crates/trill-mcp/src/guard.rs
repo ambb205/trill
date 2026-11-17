@@ -12,7 +12,10 @@
 //!
 //! * **writes only into the user's working folders**: the folder of the
 //!   open project, and one folder of the program's own (`Documents/Trill`
-//!   by default), and only the kind of file the tool makes;
+//!   by default), and only the kind of file the tool makes. A film is the
+//!   largest thing it can make, and one it gives no name goes into `films`
+//!   in the first of those folders rather than wherever temporary files go
+//!   (`TrillServer::write_path_or`);
 //! * **cannot replace a project that has unsaved changes**: it saves
 //!   first, or asks;
 //! * **cannot delete** a project that was lost in a crash.

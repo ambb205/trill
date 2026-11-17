@@ -12,7 +12,7 @@ use crate::monitor::{Beats, Monitor};
 use trill_core::controllers::{CONTROLLER_KINDS, ControllerKind};
 use trill_core::device::{Event, EventKind, KeyInput, MAX_EVENTS_PER_BLOCK, ProcessInfo};
 use trill_core::project::MIN_VOLUME_DB;
-use trill_core::{DeviceId, TrackId};
+use trill_core::{DeviceId, MeterMap, TempoMap, TrackId};
 use trill_dsp::util::{db_to_gain, pan_gains};
 
 const EVENT_CAPACITY: usize = MAX_EVENTS_PER_BLOCK;
@@ -69,7 +69,7 @@ fn same_control(a: EventKind, b: EventKind) -> bool {
     }
 }
 /// Fade applied at the edges of audio clips to avoid clicks.
-const CLIP_FADE_SECONDS: f64 = 0.003;
+pub(crate) const CLIP_FADE_SECONDS: f64 = 0.003;
 /// Length of the cross-fade from a stand-in to the audio that replaces it.
 const HAND_OVER_SECONDS: f64 = 0.01;
 
@@ -117,10 +117,29 @@ pub struct Processor {
     graph: Box<Graph>,
     sample_rate: f64,
     playing: bool,
-    /// Song position is `anchor_beat` plus `frames` at the current tempo.
-    /// Anchoring keeps positions exact however long playback runs.
+    /// Where the song was last put (started, sought, come round its loop),
+    /// and the frames played since. The song's position is that many
+    /// frames on from there along its tempo ([`TempoMap::beat_after`]),
+    /// which keeps it exact however long playback runs and however the
+    /// tempo changes on the way.
+    origin_beat: f64,
+    since_origin: u64,
+    /// The origin in frames from beat 0, which has a fraction: audio is
+    /// read by it and by the whole frames played since.
+    origin_frames: f64,
+    /// The stretch of the song that is playing, through which it moves
+    /// evenly: `anchor_beat` plus `frames` at `beats_per_frame`. With one
+    /// tempo that is the whole song from the origin on. Where the tempo
+    /// jumps, a stretch ends at the first frame at or past the jump, and
+    /// the next begins where the tempo has the song at that frame; while
+    /// the tempo glides, a stretch is [`PARAM_STEP`] frames of it.
     anchor_beat: f64,
     frames: u64,
+    beats_per_frame: f64,
+    /// The tempo of the stretch, as a device is told it.
+    tempo: f64,
+    /// How many frames long the stretch is.
+    stretch_frames: u64,
     /// What to release at the start of the next block.
     flush: Flush,
     /// What was played by hand since the last callback.
@@ -168,8 +187,14 @@ impl Processor {
             graph: Box::new(Graph::empty()),
             sample_rate,
             playing: false,
+            origin_beat: 0.0,
+            since_origin: 0,
+            origin_frames: 0.0,
             anchor_beat: 0.0,
             frames: 0,
+            beats_per_frame: 120.0 / (60.0 * sample_rate),
+            tempo: 120.0,
+            stretch_frames: u64::MAX,
             flush: Flush::Nothing,
             live: Vec::with_capacity(LIVE_CAPACITY),
             live_targets: TrackSet::default(),
@@ -204,12 +229,60 @@ impl Processor {
     }
 
     fn beats_per_frame(&self) -> f64 {
-        self.graph.tempo / (60.0 * self.sample_rate)
+        self.beats_per_frame
     }
 
     /// Current song position in beats.
     pub fn position(&self) -> f64 {
-        self.anchor_beat + self.frames as f64 * self.beats_per_frame()
+        self.anchor_beat + self.frames as f64 * self.beats_per_frame
+    }
+
+    /// Puts the song at `beat`: frames are counted from here.
+    fn put(&mut self, beat: f64) {
+        self.origin_beat = beat;
+        self.since_origin = 0;
+        let map = &self.graph.tempo_map;
+        self.origin_frames = match map.is_constant() {
+            // As it was always worked out for a song of one tempo.
+            true => beat / (map.tempo_at(0.0) / (60.0 * self.sample_rate)),
+            false => map.frames_at(beat, self.sample_rate),
+        };
+        self.begin_stretch();
+    }
+
+    /// The song's position `ahead` frames on from where it is, along its
+    /// tempo from the origin.
+    fn position_after(&self, ahead: u64) -> f64 {
+        self.graph.tempo_map.beat_after(self.origin_beat, (self.since_origin + ahead) as f64, self.sample_rate)
+    }
+
+    /// Begins the stretch of even movement that the frame now due is the
+    /// first of: see the fields.
+    fn begin_stretch(&mut self) {
+        let map = &self.graph.tempo_map;
+        let rate = self.sample_rate;
+        let beat = self.position_after(0);
+        self.anchor_beat = beat;
+        self.frames = 0;
+        if map.is_ramping_at(beat) {
+            // A step of the glide, or what is left of it: taken evenly, so
+            // that the song is where its tempo has it at both ends.
+            let end = map.next_change(beat).unwrap_or(f64::INFINITY);
+            let left = (map.frames_between(beat, end, rate) - 1e-6).ceil().max(1.0);
+            let step = if left < PARAM_STEP as f64 { left as u64 } else { PARAM_STEP };
+            self.beats_per_frame = (self.position_after(step) - beat) / step as f64;
+            self.tempo = self.beats_per_frame * 60.0 * rate;
+            self.stretch_frames = step;
+        } else {
+            self.tempo = map.tempo_at(beat);
+            self.beats_per_frame = self.tempo / (60.0 * rate);
+            self.stretch_frames = match map.next_change(beat) {
+                // To the first frame at or past the change. The small bias
+                // absorbs float rounding, as it does for a loop.
+                Some(change) => ((change - beat) / self.beats_per_frame - 1e-6).ceil().max(1.0) as u64,
+                None => u64::MAX,
+            };
+        }
     }
 
     pub fn play(&mut self) {
@@ -275,8 +348,7 @@ impl Processor {
 
     pub fn seek(&mut self, beat: f64) {
         let before = self.position();
-        self.anchor_beat = beat.max(0.0);
-        self.frames = 0;
+        self.put(beat.max(0.0));
         self.flush = self.flush.max(Flush::Song);
         self.chase = true;
         // A song that stands still takes nothing back: what the hand set
@@ -446,7 +518,9 @@ impl Processor {
     /// playing, the take begins where the song is.
     pub(crate) fn record(&mut self, take: u32, tracks: TrackSet, count_in_beats: f64) {
         self.report(Captured::Began { take });
-        let signature = self.graph.time_signature;
+        // The take is counted in at the tempo, and in the meter, that the
+        // song has where it starts.
+        let signature = self.graph.meter_map.signature_at(self.position());
         let bar = signature.numerator as f64 * 4.0 / signature.denominator as f64;
         let count_in_beats = if self.playing || !count_in_beats.is_finite() { 0.0 } else { count_in_beats.max(0.0) };
         let count_in = (count_in_beats / self.beats_per_frame()).round() as u64;
@@ -471,11 +545,12 @@ impl Processor {
     pub fn swap_graph(&mut self, mut new: Box<Graph>) -> Box<Graph> {
         let position = self.position();
         new.adopt(&mut self.graph);
-        let tempo_changed = new.tempo != self.graph.tempo;
+        let tempo_changed = new.tempo_map != self.graph.tempo_map;
         let old = std::mem::replace(&mut self.graph, new);
         if tempo_changed {
-            self.anchor_beat = position;
-            self.frames = 0;
+            // The song stays at the beat it is at, and goes on from there
+            // at the tempo it now has.
+            self.put(position);
         }
         old
     }
@@ -499,6 +574,20 @@ impl Processor {
             // End the block where the next parameter is due to move.
             if self.playing && self.graph.moves_params {
                 frames = frames.min((PARAM_STEP - self.frames % PARAM_STEP) as usize);
+            }
+
+            // End the block where the stretch does: at the first frame at
+            // or past a change of tempo. And at the first frame at or past
+            // a change of time signature, so that a block is in one meter.
+            if self.playing {
+                frames = (frames as u64).min(self.stretch_frames - self.frames) as usize;
+                let position = self.position();
+                if let Some(change) = self.graph.meter_map.next_change(position) {
+                    let until = ((change - position) / self.beats_per_frame - 1e-6).ceil().max(1.0);
+                    if until < frames as f64 {
+                        frames = until as usize;
+                    }
+                }
             }
 
             // End the block exactly at the loop end so the wrap is sample
@@ -525,15 +614,18 @@ impl Processor {
 
             if self.playing {
                 self.frames += frames as u64;
+                self.since_origin += frames as u64;
                 self.continuity += frames as u64;
+                if self.frames >= self.stretch_frames && wrap.is_none() {
+                    self.begin_stretch();
+                }
                 if let Some((start, _)) = wrap {
                     // Restart exactly on the loop start. The block above ran
                     // to the first frame at or past the loop end, so a loop
                     // is at most one frame longer than its length in beats,
                     // and a note sitting on the loop start is never missed.
                     let reached = self.position();
-                    self.anchor_beat = start;
-                    self.frames = 0;
+                    self.put(start);
                     self.flush = self.flush.max(Flush::Song);
                     self.chase = true;
                     self.take_back = true;
@@ -577,13 +669,28 @@ impl Processor {
         let beats_per_frame = self.beats_per_frame();
         // Computed the same way as the next block's start, so consecutive
         // blocks tile the timeline exactly and a note on a block boundary is
-        // played once: never dropped, never doubled.
-        let next_start = self.anchor_beat + (self.frames + frames as u64) as f64 * beats_per_frame;
+        // played once: never dropped, never doubled. A block that ends its
+        // stretch ends where the next one begins: where the tempo has the
+        // song at that frame.
+        let ends_stretch = self.playing && self.frames + frames as u64 >= self.stretch_frames;
+        let next_start = match ends_stretch {
+            true => self.position_after(frames as u64),
+            false => self.anchor_beat + (self.frames + frames as u64) as f64 * beats_per_frame,
+        };
         let end_beat = limit.map_or(next_start, |limit| next_start.min(limit));
+        // A note sounds at the frame nearest to it, and is played by the
+        // block that frame is in: the blocks hand notes over half a frame
+        // before their edges, so that where a note lands does not depend
+        // on where a buffer happens to end. Where the song is put down, a
+        // stretch begins or the loop ends, the edge is the beat itself.
+        let half = 0.5 * beats_per_frame;
+        let notes_from = if self.frames > 0 { start_beat - half } else { start_beat };
+        let notes_until = if ends_stretch || limit.is_some() { end_beat } else { end_beat - half };
+        let signature = self.graph.meter_map.signature_at(start_beat);
         let info = ProcessInfo {
             sample_rate: self.sample_rate,
-            tempo: self.graph.tempo,
-            time_signature: self.graph.time_signature,
+            tempo: self.tempo,
+            time_signature: signature,
             playing: self.playing,
             position_beats: start_beat,
             loop_range: self.graph.loop_region,
@@ -607,7 +714,8 @@ impl Processor {
         mix_left.fill(0.0);
         mix_right.fill(0.0);
 
-        let Graph { tracks, buses, keys, master, .. } = &mut *self.graph;
+        let Graph { tracks, buses, keys, master, tempo_map, meter_map, .. } = &mut *self.graph;
+        let (tempo_map, meter_map): (&TempoMap, &MeterMap) = (tempo_map, meter_map);
         for bus in buses.iter_mut() {
             bus.left[..frames].fill(0.0);
             bus.right[..frames].fill(0.0);
@@ -713,13 +821,14 @@ impl Processor {
             }
             let before_notes = events.len();
             if playing {
-                collect_notes(track, start_beat, end_beat, beats_per_frame, frames, events);
+                collect_notes(track, start_beat, (notes_from, notes_until), beats_per_frame, frames, events);
                 let block = Block {
                     start_beat,
                     beats_per_frame,
-                    anchor_frames: self.anchor_beat / beats_per_frame,
-                    elapsed: self.frames,
+                    anchor_frames: self.origin_frames,
+                    elapsed: self.since_origin,
                     sample_rate: self.sample_rate,
+                    tempo: tempo_map,
                 };
                 render_audio(track, &block, left, right);
             }
@@ -857,26 +966,29 @@ impl Processor {
         out_right.copy_from_slice(mix_right);
         master.meter.record(peak_left, peak_right);
 
-        let signature = self.graph.time_signature;
-        let beats_from = |start: f64| Beats {
+        // The metronome counts the time signature the block is in, in
+        // bars that begin where that signature took over.
+        let since = meter_map.since(start_beat);
+        let beats_from = |start: f64, until: f64| Beats {
             start,
             per_frame: beats_per_frame,
             count: 4.0 / signature.denominator as f64,
             counts_per_bar: signature.numerator as u32,
+            until,
         };
         match self.recording.filter(|recording| recording.count_in > 0) {
             // A count-in clicks whether or not the metronome is on, on the
-            // song's own grid running up to where the take starts.
+            // song's own grid running up to where the take starts, in the
+            // meter the take starts in.
             Some(recording) => {
                 let before = recording.count_in as f64 * beats_per_frame;
-                self.monitor.mix(
-                    out_left,
-                    out_right,
-                    Some(beats_from(start_beat - before + recording.click_shift)),
-                    true,
-                );
+                let start = start_beat - since - before + recording.click_shift;
+                self.monitor.mix(out_left, out_right, Some(beats_from(start, f64::INFINITY)), true);
             }
-            None => self.monitor.mix(out_left, out_right, playing.then(|| beats_from(start_beat)), false),
+            None => {
+                let until = meter_map.next_change(start_beat).map_or(f64::INFINITY, |change| change - since);
+                self.monitor.mix(out_left, out_right, playing.then(|| beats_from(start_beat - since, until)), false)
+            }
         }
     }
 }
@@ -1251,12 +1363,12 @@ fn run_devices(
     }
 }
 
-/// Appends the note events of `track` that fall in `[start_beat, end_beat)`,
-/// ordered by sample offset.
+/// Appends the note events of `track` that fall in `[from, until)`, ordered
+/// by sample offset, in a block that starts at `start_beat`.
 fn collect_notes(
     track: &mut TrackNode,
     start_beat: f64,
-    end_beat: f64,
+    (from, until): (f64, f64),
     beats_per_frame: f64,
     frames: usize,
     events: &mut Vec<Event>,
@@ -1273,7 +1385,7 @@ fn collect_notes(
         }
         for pitch in 0..128usize {
             let end = state.active_until[pitch];
-            if end >= 0.0 && end < end_beat {
+            if end >= 0.0 && end < until {
                 events.push(Event { offset: offset_of(end), kind: EventKind::NoteOff { pitch: pitch as u8 } });
                 state.active_until[pitch] = -1.0;
                 state.active_count -= 1;
@@ -1284,10 +1396,10 @@ fn collect_notes(
 
     // Notes that start in this block. A pitch that is still sounding is
     // released first, so repeated notes retrigger cleanly.
-    let first = track.notes.partition_point(|note| note.start < start_beat);
+    let first = track.notes.partition_point(|note| note.start < from);
     let mut started = false;
     for note in &track.notes[first..] {
-        if note.start >= end_beat || events.len() >= NOTE_ON_LIMIT {
+        if note.start >= until || events.len() >= NOTE_ON_LIMIT {
             break;
         }
         let offset = offset_of(note.start);
@@ -1323,17 +1435,21 @@ fn collect_notes(
 }
 
 /// Where a block lies on the timeline.
-struct Block {
+struct Block<'a> {
     start_beat: f64,
     beats_per_frame: f64,
-    /// The transport's anchor in output frames from beat 0, and the frames
-    /// played since. Their sum is the block's first frame. They are kept
-    /// apart because the anchor has a fraction and the count does not: a
-    /// position rounded from the anchor alone rounds the same way in every
-    /// block, where one rounded from the sum could flip between blocks.
+    /// Where the song was last put, in output frames from beat 0, and the
+    /// frames played since. Their sum is the block's first frame. They are
+    /// kept apart because the first has a fraction and the count does not:
+    /// a position rounded from the first alone rounds the same way in
+    /// every block, where one rounded from the sum could flip between
+    /// blocks.
     anchor_frames: f64,
     elapsed: u64,
     sample_rate: f64,
+    /// How the song's beats become frames: a clip's length and its fades
+    /// are counted in frames, through whatever the tempo does under it.
+    tempo: &'a TempoMap,
 }
 
 /// Reads a region's audio for the frames of one block.
@@ -1398,12 +1514,22 @@ fn render_audio(track: &mut TrackNode, block: &Block, left: &mut [f32], right: &
         }
         // Output frames between the clip start and this block (negative if
         // the clip starts inside the block).
-        let elapsed = (block.start_beat - region.start) / block.beats_per_frame;
-        let length = (region.end - region.start) / block.beats_per_frame;
+        let rate = block.sample_rate;
+        let elapsed = block.tempo.frames_between(region.clip_start, block.start_beat, rate);
+        let length = block.tempo.frames_between(region.clip_start, region.clip_end, rate);
         // The clip's own fades, never shorter than the click guard except
         // where the clip joins a neighbour and there is no edge to guard.
-        let fade_in = (region.fade_in / block.beats_per_frame).max(if region.joins_previous { 0.0 } else { guard });
-        let fade_out = (region.fade_out / block.beats_per_frame).max(if region.joins_next { 0.0 } else { guard });
+        let fade_in = block.tempo.frames_over(region.clip_start, region.fade_in, rate);
+        let fade_in = fade_in.max(if region.joins_previous { 0.0 } else { guard });
+        let fade_out = block.tempo.frames_over(region.clip_end - region.fade_out, region.fade_out, rate);
+        let fade_out = fade_out.max(if region.joins_next { 0.0 } else { guard });
+        // A piece of a clip is faded over the click guard where it meets
+        // another piece: counted, like the clip's fades, in frames from
+        // the piece's own edges.
+        let seams = (region.seam_before || region.seam_after).then(|| {
+            let since = block.tempo.frames_between(region.start, block.start_beat, rate);
+            (since, block.tempo.frames_between(region.start, region.end, rate))
+        });
         // Both edges are worked out the same way from a timeline position,
         // so that where one clip ends on the beat another starts on, the
         // frame at the seam belongs to exactly one of them.
@@ -1427,7 +1553,13 @@ fn render_audio(track: &mut TrackNode, block: &Block, left: &mut [f32], right: &
             }
             let rise = if fade_in > 0.0 { t / fade_in } else { 1.0 };
             let fall = if fade_out > 0.0 { (length - t) / fade_out } else { 1.0 };
-            let gain = region.gain * rise.min(fall).clamp(0.0, 1.0) as f32;
+            let mut gain = region.gain * rise.min(fall).clamp(0.0, 1.0) as f32;
+            if let Some((since, piece)) = seams {
+                let t = since + i as f64;
+                let rise = if region.seam_before { t / guard } else { 1.0 };
+                let fall = if region.seam_after { (piece - t) / guard } else { 1.0 };
+                gain *= rise.min(fall).clamp(0.0, 1.0) as f32;
+            }
             left[i] += sample_left * gain;
             right[i] += sample_right * gain;
         }
@@ -1514,7 +1646,7 @@ mod tests {
         for block in 0..blocks {
             events.clear();
             let start = block as f64;
-            collect_notes(track, start, start + 1.0, 0.01, 100, &mut events);
+            collect_notes(track, start, (start, start + 1.0), 0.01, 100, &mut events);
             for event in &events {
                 let frame = block * 100 + event.offset as usize;
                 match event.kind {

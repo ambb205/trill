@@ -4700,6 +4700,7 @@ dependencies = [
  "trill-media",
  "trill-plugins",
  "trill-runtime",
+ "trill-stage",
  "trill-theory",
 ]
 
@@ -4775,6 +4776,9 @@ dependencies = [
  "pollster",
  "tempfile",
  "trill-core",
+ "trill-dsp",
+ "trill-engine",
+ "trill-media",
  "trill-noir",
 ]
 

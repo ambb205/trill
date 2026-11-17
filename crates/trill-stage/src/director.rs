@@ -203,10 +203,144 @@ impl Plan {
         Self { takes }
     }
 
+    /// Directs `score`, and then does what `directions` ask of it, in
+    /// their order: where two speak of the same stretch the later one has
+    /// it. With none this is [`Plan::direct`].
+    pub fn directed(score: &Score, directions: &[Direction]) -> Self {
+        let mut plan = Self::direct(score);
+        let bar = score.bar();
+        for direction in directions {
+            let (from, to) = (direction.from.clamp(0.0, score.length), direction.to.clamp(0.0, score.length));
+            if to <= from || plan.takes.is_empty() {
+                continue;
+            }
+            plan.split_at(from);
+            plan.split_at(to);
+            let rolls: Vec<TrackId> =
+                direction.rolls.iter().copied().filter(|track| score.part(*track).is_some()).collect();
+            // Parts that are named are shown: one close, more as an ensemble.
+            let kind = direction.kind.or(match rolls.len() {
+                0 => None,
+                1 => Some(Kind::Close),
+                _ => Some(Kind::Ensemble),
+            });
+            if let Some(kind) = kind {
+                // The stretch becomes one take, so that it creeps in once.
+                let first = plan.takes.partition_point(|take| take.start < from);
+                let last = plan.takes.partition_point(|take| take.start < to);
+                let section = score.section_at(from);
+                let shot = shot_of(score, kind, &rolls, from, to, bar);
+                let take = Take { start: from, end: to, section, shot, entry: Entry::Cut };
+                plan.takes.splice(first..last, [take]);
+                // How it is come to and left, unless that is said: by a
+                // cut where the frame changes its kind or its parts.
+                for index in [first, first + 1] {
+                    if index == 0 || index >= plan.takes.len() {
+                        continue;
+                    }
+                    let before = plan.takes[index - 1].shot.clone();
+                    let take = &mut plan.takes[index];
+                    let same = before.kind == take.shot.kind && before.rolls == take.shot.rolls;
+                    take.entry = if same { Entry::Move(MOVE_BEATS.min(take.end - take.start)) } else { Entry::Cut };
+                }
+            }
+            if let Some(entry) = direction.entry
+                && let Some(take) = plan.takes.iter_mut().find(|take| take.start == from)
+                && from > 0.0
+            {
+                take.entry = match entry {
+                    Entry::Cut => Entry::Cut,
+                    Entry::Move(beats) => Entry::Move(beats.clamp(0.5, take.end - take.start)),
+                };
+            }
+        }
+        plan
+    }
+
+    /// Cuts the take that `beat` falls inside in two there. The second
+    /// half goes on as the first did: the camera does not notice.
+    fn split_at(&mut self, beat: Beats) {
+        let Some(index) = self.takes.iter().position(|take| take.start < beat && beat < take.end) else { return };
+        let mut second = self.takes[index].clone();
+        // Each half creeps over its own length, from where the whole had got to.
+        let whole = &mut self.takes[index];
+        let through = (beat - whole.start) / (whole.end - whole.start);
+        let at = whole.shot.window.0 + (whole.shot.window.1 - whole.shot.window.0) * through;
+        (whole.end, whole.shot.window.1) = (beat, at);
+        (second.start, second.shot.window.0, second.entry) = (beat, at, Entry::Move(0.0));
+        self.takes.insert(index + 1, second);
+    }
+
     /// The take that `beat` falls in: the first before the song and the
     /// last after it.
     pub fn take_at(&self, beat: Beats) -> usize {
         self.takes.partition_point(|take| take.end <= beat).min(self.takes.len().saturating_sub(1))
+    }
+}
+
+/// What whoever films a song asks of a stretch of it, over the director's
+/// own plan: how to frame it, which parts to show, how to come to it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Direction {
+    /// The stretch, in beats.
+    pub from: Beats,
+    pub to: Beats,
+    /// How to frame it. `None` leaves that to the parts that are named
+    /// (one is held close, several are an ensemble) or, with none named,
+    /// to the director.
+    pub kind: Option<Kind>,
+    /// The parts to show as piano rolls, top to bottom. Empty leaves the
+    /// choice to the director.
+    pub rolls: Vec<TrackId>,
+    /// How the stretch is entered. `None` cuts where the frame changes
+    /// its kind or its parts and moves where it does not.
+    pub entry: Option<Entry>,
+}
+
+/// The shot of `kind` for the stretch `from..to`, of `rolls` where they
+/// are given and of the parts that drive the stretch where they are not.
+fn shot_of(score: &Score, kind: Kind, rolls: &[TrackId], from: Beats, to: Beats, bar: Beats) -> Shot {
+    let creeping = |beats: Beats| (beats, beats * CREEP);
+    let playing: Vec<Activity> = score.parts.iter().map(|part| activity(part, from, to)).collect();
+    let wide = Shot { kind: Kind::Wide, rolls: Vec::new(), window: creeping(WIDE_BARS * bar), roll_share: 0.0 };
+    match kind {
+        Kind::Overview => Shot { kind, rolls: Vec::new(), window: (score.length, score.length), roll_share: 0.0 },
+        Kind::Wide => wide,
+        Kind::Ensemble => {
+            let rolls: Vec<TrackId> = match rolls.is_empty() {
+                true => drivers(score, &playing, &vec![0.0; score.parts.len()]),
+                false => rolls.iter().copied().take(3).collect(),
+            };
+            match rolls.is_empty() {
+                true => wide,
+                false => Shot { kind, rolls, window: creeping(ENSEMBLE_BARS * bar), roll_share: ENSEMBLE_SHARE },
+            }
+        }
+        Kind::Close => {
+            // The part that is named or, with none named, the one the
+            // director would go in on: the tune of the stretch, else the
+            // busiest that is not the drums, else the drums.
+            let busiest = |drums: bool| {
+                let parts = (0..score.parts.len()).filter(|index| score.parts[*index].drums == drums);
+                let playing = &playing;
+                parts
+                    .filter(|index| playing[*index].notes > 0)
+                    .max_by(|a, b| playing[*a].rate.total_cmp(&playing[*b].rate).then(b.cmp(a)))
+            };
+            let plays_in =
+                |part: &Part, section: &Section| !part.starting_between(section.start, section.end).is_empty();
+            let sections_of = |part: &Part| score.sections.iter().filter(|section| plays_in(part, section)).count();
+            let played: Vec<usize> = score.parts.iter().map(sections_of).collect();
+            let tunes = tune_scores(score, &playing, &played);
+            let tune = (0..tunes.len())
+                .filter(|index| tunes[*index] > 0.0)
+                .max_by(|a, b| tunes[*a].total_cmp(&tunes[*b]).then(b.cmp(a)));
+            let named = rolls.first().and_then(|track| score.part_index(*track));
+            let chosen = named.or(tune).or_else(|| busiest(false)).or_else(|| busiest(true));
+            let Some(index) = chosen else { return wide };
+            let window = close_window(playing[index].rate, bar);
+            Shot { kind, rolls: vec![score.parts[index].track], window: creeping(window), roll_share: CLOSE_SHARE }
+        }
     }
 }
 
@@ -564,6 +698,73 @@ mod tests {
         assert_eq!(chorus[1].entry, Entry::Move(4.0));
         // The others are filmed once.
         assert_eq!(plan.takes.iter().filter(|take| take.section == 1).count(), 1);
+    }
+
+    #[test]
+    fn a_direction_has_its_stretch_and_the_rest_stays_the_directors() {
+        let (song, drums, rhythm, lead) = song();
+        let score = Score::read(&song.project);
+        let own = Plan::direct(&score);
+        assert_eq!(Plan::directed(&score, &[]), own, "with nothing said the plan is the director's");
+
+        // Hold the rhythm part close for bars 5 to 8, in the first verse.
+        let close = Direction { from: 16.0, to: 32.0, kind: None, rolls: vec![rhythm], entry: None };
+        let plan = Plan::directed(&score, std::slice::from_ref(&close));
+        let held = take_from(&plan, 16.0);
+        assert_eq!((held.end, held.shot.kind, held.shot.rolls.as_slice()), (32.0, Kind::Close, [rhythm].as_slice()));
+        assert_eq!(held.entry, Entry::Cut, "in on a part: a cut");
+        assert_eq!(take_from(&plan, 32.0).entry, Entry::Cut, "and out of it again");
+        // Before it the verse is as it was, only shorter; what comes after is untouched.
+        assert_eq!((plan.takes[1].start, plan.takes[1].end, plan.takes[1].shot.kind), (8.0, 16.0, Kind::Ensemble));
+        assert!(plan.takes[1].shot.window.1 > own.takes[1].shot.window.1, "it had not crept all the way in");
+        assert_eq!(take_from(&plan, 64.0), take_from(&own, 64.0));
+        assert_eq!(plan.takes.last(), own.takes.last());
+        for pair in plan.takes.windows(2) {
+            assert_eq!(pair[0].end, pair[1].start, "still without gaps");
+        }
+
+        // A kind alone: the chorus filmed as an ensemble of who drives it.
+        let ensemble = Direction { from: 64.0, to: 128.0, kind: Some(Kind::Ensemble), rolls: Vec::new(), entry: None };
+        let plan = Plan::directed(&score, &[ensemble]);
+        let chorus = take_from(&plan, 64.0);
+        assert_eq!((chorus.end, chorus.shot.kind), (128.0, Kind::Ensemble));
+        assert!(chorus.shot.rolls.contains(&drums) && chorus.shot.rolls.len() == 2, "{:?}", chorus.shot.rolls);
+        assert_eq!(plan.takes.iter().filter(|take| take.section == 2).count(), 1, "one take where there were two");
+
+        // Close with no part named goes in on the tune of the stretch, as
+        // the director would; a part the song does not have is not shown.
+        let somewhere =
+            Direction { from: 128.0, to: 160.0, kind: Some(Kind::Close), rolls: vec![TrackId(999)], entry: None };
+        assert_eq!(take_from(&Plan::directed(&score, &[somewhere]), 128.0).shot.rolls, [lead]);
+
+        // The later of two directions has the stretch they share.
+        let wide = Direction { from: 24.0, to: 40.0, kind: Some(Kind::Wide), rolls: Vec::new(), entry: None };
+        let plan = Plan::directed(&score, &[close, wide]);
+        let kinds: Vec<(Beats, Kind)> = plan.takes.iter().map(|take| (take.start, take.shot.kind)).collect();
+        assert_eq!(
+            &kinds[1..5],
+            [(8.0, Kind::Ensemble), (16.0, Kind::Close), (24.0, Kind::Wide), (40.0, Kind::Ensemble)]
+        );
+    }
+
+    #[test]
+    fn a_cut_or_a_move_can_be_asked_for_at_any_bar() {
+        let (song, ..) = song();
+        let score = Score::read(&song.project);
+        // A cut in the middle of the solo, and a slow move into the chorus
+        // where the director cuts.
+        let cut = Direction { from: 144.0, to: 160.0, kind: None, rolls: Vec::new(), entry: Some(Entry::Cut) };
+        let slow = Direction { from: 64.0, to: 96.0, kind: None, rolls: Vec::new(), entry: Some(Entry::Move(8.0)) };
+        let plan = Plan::directed(&score, &[cut, slow]);
+        let (first, second) = (take_from(&plan, 128.0), take_from(&plan, 144.0));
+        assert_eq!((first.end, second.end, second.entry), (144.0, 160.0, Entry::Cut));
+        assert_eq!((first.shot.kind, &first.shot.rolls), (second.shot.kind, &second.shot.rolls), "the same shot");
+        assert_eq!(first.shot.window.1, second.shot.window.0, "taken up where the first half had got to");
+        assert_eq!(take_from(&plan, 64.0).entry, Entry::Move(8.0));
+        // A stretch outside the song, or with no length, asks for nothing.
+        let nothing = Direction { from: 900.0, to: 950.0, kind: Some(Kind::Wide), rolls: Vec::new(), entry: None };
+        let backwards = Direction { from: 40.0, to: 20.0, kind: Some(Kind::Wide), rolls: Vec::new(), entry: None };
+        assert_eq!(Plan::directed(&score, &[nothing, backwards]), Plan::direct(&score));
     }
 
     #[test]

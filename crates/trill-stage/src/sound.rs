@@ -69,7 +69,10 @@ impl Heard {
 pub struct Sound {
     level: Vec<f32>,
     punch: Vec<f32>,
-    tracks: Vec<(TrackId, Vec<f32>)>,
+    /// Each track that was measured: how many values a second, and them.
+    tracks: Vec<(TrackId, f64, Vec<f32>)>,
+    /// Where in the song the recording begins, in seconds.
+    starts: f64,
 }
 
 impl Sound {
@@ -81,11 +84,18 @@ impl Sound {
         let fast = decibels(&windowed(&power, sample_rate, FAST_WINDOW));
         let top = loud_passages(&body);
         if top < SILENCE_DB {
-            return Self { level: vec![0.0; body.len()], punch: vec![0.0; body.len()], tracks: Vec::new() };
+            return Self { level: vec![0.0; body.len()], punch: vec![0.0; body.len()], ..Self::default() };
         }
         let level = body.iter().map(|db| ((db - top + BODY_RANGE) / BODY_RANGE).clamp(0.0, 1.0)).collect();
         let open: Vec<f32> = fast.iter().map(|db| smoothstep(FAST_RANGE.0, FAST_RANGE.1, db - top)).collect();
-        Self { level, punch: eased(&open, FAST_RISE, FAST_FALL), tracks: Vec::new() }
+        Self { level, punch: eased(&open, FAST_RISE, FAST_FALL), ..Self::default() }
+    }
+
+    /// The same recording, as one that begins `seconds` into the song: a
+    /// render of a stretch that does not start at the first bar.
+    pub fn starting_at(mut self, seconds: f64) -> Self {
+        self.starts = seconds;
+        self
     }
 
     /// Adds what one track sounds like on its own, measured against its
@@ -98,8 +108,22 @@ impl Sound {
             true => vec![0.0; body.len()],
             false => body.iter().map(|db| ((db - top + BODY_RANGE) / BODY_RANGE).clamp(0.0, 1.0)).collect(),
         };
-        self.tracks.retain(|(id, _)| *id != track);
-        self.tracks.push((track, level));
+        self.tracks.retain(|(id, ..)| *id != track);
+        self.tracks.push((track, RATE, level));
+    }
+
+    /// Adds a track from its level as it went, in decibels, `per_second`
+    /// values a second: what a render measures of every track as it makes
+    /// the mix, with no audio of the track kept. Measured against the
+    /// track's own loud passages, as [`Sound::add_track`] does.
+    pub fn add_track_levels(&mut self, track: TrackId, decibels: &[f32], per_second: f64) {
+        let top = loud_passages(decibels);
+        let level = match top < SILENCE_DB {
+            true => vec![0.0; decibels.len()],
+            false => decibels.iter().map(|db| ((db - top + BODY_RANGE) / BODY_RANGE).clamp(0.0, 1.0)).collect(),
+        };
+        self.tracks.retain(|(id, ..)| *id != track);
+        self.tracks.push((track, per_second.max(1e-6), level));
     }
 
     /// How long the recording is, in seconds.
@@ -107,20 +131,21 @@ impl Sound {
         self.level.len() as f64 / RATE
     }
 
-    /// The sound `seconds` into the recording. Before it and after it
-    /// there is silence.
+    /// The sound `seconds` into the song. Before the recording and after
+    /// it there is silence.
     pub fn heard(&self, seconds: f64) -> Heard {
+        let seconds = seconds - self.starts;
         Heard {
-            level: at(&self.level, seconds),
-            punch: at(&self.punch, seconds),
-            tracks: self.tracks.iter().map(|(track, level)| (*track, at(level, seconds))).collect(),
+            level: at(&self.level, seconds, RATE),
+            punch: at(&self.punch, seconds, RATE),
+            tracks: self.tracks.iter().map(|(track, rate, level)| (*track, at(level, seconds, *rate))).collect(),
         }
     }
 }
 
 /// The value `seconds` in, between the two measurements it falls between.
-fn at(values: &[f32], seconds: f64) -> f32 {
-    let place = seconds * RATE;
+fn at(values: &[f32], seconds: f64, rate: f64) -> f32 {
+    let place = seconds * rate;
     if place < 0.0 || values.is_empty() {
         return 0.0;
     }
@@ -257,6 +282,27 @@ mod tests {
         assert!(heard.track(TrackId(7)).unwrap() > 0.95, "{heard:?}");
         assert_eq!(heard.track(TrackId(8)), None, "a track that was not measured says nothing");
         assert_eq!(sound.heard(5.5).track(TrackId(7)), Some(0.0));
+    }
+
+    #[test]
+    fn a_track_is_lit_from_the_levels_a_render_measured_of_it() {
+        let mix = recording(0.5);
+        // Ten values a second, as a render gives them: two seconds at
+        // -40 dB, two at -14, two of silence.
+        let levels: Vec<f32> = (0..60).map(|step| [-40.0, -14.0, -120.0][step / 20]).collect();
+        let mut sound = Sound::measure(&mix, &mix, RATE_HZ);
+        sound.add_track_levels(TrackId(3), &levels, 10.0);
+        assert_eq!(sound.heard(3.0).track(TrackId(3)), Some(1.0), "its loud passage is what it is measured against");
+        let quiet = sound.heard(1.0).track(TrackId(3)).unwrap();
+        assert!((quiet - 2.0 / 28.0).abs() < 0.01, "26 dB under it, of 28: {quiet}");
+        assert_eq!(sound.heard(5.0).track(TrackId(3)), Some(0.0));
+
+        // A render of a stretch that begins ten seconds into the song is
+        // heard there, and not before.
+        let later = sound.starting_at(10.0);
+        assert_eq!(later.heard(13.0).track(TrackId(3)), Some(1.0));
+        assert!((later.heard(13.0).level - 1.0).abs() < 0.02);
+        assert_eq!(later.heard(3.0), Heard { level: 0.0, punch: 0.0, tracks: vec![(TrackId(3), 0.0)] });
     }
 
     #[test]
