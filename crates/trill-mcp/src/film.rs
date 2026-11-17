@@ -36,7 +36,8 @@ sound, as an .mp4. A director chooses the shots from what the song is (wide on i
 the piano roll of a part that carries the tune, the lanes with the rolls of who drives a section otherwise; a \
 cut where the song jumps, a move where it does not).
 - film_plan says what would be filmed, take by take, and costs nothing. Read it before film, which takes \
-minutes: about twice the length of the song at 1920x1080.
+minutes: about twice the length of the song at 1920x1080 and eight times at 3840x2160, its sound rendered first \
+(plugins are waited for). Where a call may only take so long, film at 1920x1080, or a section at a time.
 - film makes the file. `size` is \"1080p\", \"2160p\" or \"upright\"; `section` or `start`/`end` film a stretch.
 - To direct, give `direct`: a list of stretches (a `section` by name, or `from_bar`/`to_bar`) each with a `shot` \
 (\"wide\", \"close\", \"ensemble\", \"song\"), the `parts` to show as piano rolls, or how to `enter` it (\"cut\", \
