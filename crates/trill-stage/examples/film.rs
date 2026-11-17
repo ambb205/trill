@@ -16,7 +16,9 @@
 
 use std::path::{Path, PathBuf};
 use trill_core::Project;
-use trill_stage::film::{Filmer, Progress, Shoot};
+use trill_core::journal::Journal;
+use trill_stage::film::{Audio, Filmer, Progress, Shoot};
+use trill_stage::making::Making;
 use trill_stage::{Format, Song, Sound};
 
 struct Asked {
@@ -27,6 +29,11 @@ struct Asked {
     plain: bool,
     stills: Vec<(f64, PathBuf)>,
     clips: Vec<(f64, f64, PathBuf)>,
+    /// A journal to film the making-of from, and how fast.
+    making: Option<PathBuf>,
+    speed: Option<f64>,
+    /// Where to write the whole of the making-of.
+    whole: Option<PathBuf>,
 }
 
 fn parse() -> Result<Asked, String> {
@@ -39,6 +46,9 @@ fn parse() -> Result<Asked, String> {
         plain: false,
         stills: Vec::new(),
         clips: Vec::new(),
+        making: None,
+        speed: None,
+        whole: None,
     };
     let number = |text: Option<String>, what: &str| -> Result<f64, String> {
         let text = text.ok_or_else(|| format!("{what} is missing"))?;
@@ -55,6 +65,9 @@ fn parse() -> Result<Asked, String> {
             }
             "--rate" => asked.rate = number(args.next(), "--rate")? as u32,
             "--plain" => asked.plain = true,
+            "--making" => asked.making = Some(args.next().ok_or("--making needs a journal")?.into()),
+            "--speed" => asked.speed = Some(number(args.next(), "--speed")?),
+            "--whole" => asked.whole = Some(args.next().ok_or("--whole needs a file to write")?.into()),
             "--still" => {
                 let seconds = number(args.next(), "the time of --still")?;
                 asked.stills.push((seconds, args.next().ok_or("--still needs a file to write")?.into()));
@@ -128,6 +141,9 @@ fn run() -> Result<(), String> {
         shoot.exposures,
         shoot.oversample
     );
+    if let Some(journal) = &asked.making {
+        return film_making(&asked, journal, &project, sound, &mut filmer, &shoot);
+    }
     for (seconds, path) in &asked.stills {
         filmer.still(&song, &sound, *seconds, &shoot, path)?;
         eprintln!("{} at {seconds} s", path.display());
@@ -145,6 +161,60 @@ fn run() -> Result<(), String> {
         if let Some(note) = filmed.note {
             eprintln!("{note}");
         }
+    }
+    Ok(())
+}
+
+/// Films the making of `project` as `journal` tells it: stills and
+/// clips at times of the film, or the whole of it. The recording given as
+/// `--audio` plays under it, timed to end as the film does.
+fn film_making(
+    asked: &Asked,
+    journal: &Path,
+    project: &Project,
+    sound: Sound,
+    filmer: &mut Filmer,
+    shoot: &Shoot,
+) -> Result<(), String> {
+    let text = std::fs::read_to_string(journal)
+        .map_err(|error| format!("{} could not be read: {error}", journal.display()))?;
+    let journal =
+        Journal::from_text(&text).map_err(|error| format!("{} is not a journal: {error:?}", journal.display()))?;
+    let music = sound.duration();
+    let mut making = Making::of(journal, project, &[], asked.speed.unwrap_or(1.0))?;
+    if asked.speed.is_none() && music > 12.0 && making.length() > music {
+        let speed = Making::speed_to_last(making.story_length(), music);
+        making = Making::of(Journal::from_text(&text).map_err(|error| format!("{error:?}"))?, project, &[], speed)?;
+    }
+    let length = making.length();
+    let from = (music - length).max(0.0);
+    eprintln!(
+        "the making of: {} steps in {} shots, a story of {:.1} s, a film of {length:.1} s",
+        making.steps(),
+        making.shots().len(),
+        making.story_length()
+    );
+    let mut making = making.with_sound(sound, from);
+    for (seconds, path) in &asked.stills {
+        filmer.still_of(&mut making, *seconds, shoot, path)?;
+        eprintln!("{} at {seconds} s", path.display());
+    }
+    let whole = asked.whole.iter().map(|path| (0.0, length, path.clone()));
+    for (start, end, path) in asked.clips.iter().cloned().chain(whole) {
+        let audio = asked.audio.as_ref().map(|audio| Audio {
+            path: audio.clone(),
+            from: from + start,
+            delay: 0.0,
+            fade_in: if from + start > 0.0 { 1.5 } else { 0.0 },
+        });
+        let filmed = filmer.film_of(&mut making, start, end, shoot, audio.as_ref(), &path, &Progress::default())?;
+        eprintln!(
+            "{}: {} frames in {:.1} s ({:.1} a second)",
+            filmed.path.display(),
+            filmed.frames,
+            filmed.took,
+            filmed.frames as f64 / filmed.took
+        );
     }
     Ok(())
 }

@@ -333,6 +333,16 @@ fn each_part_of_the_song_has_its_own_loudness_in_the_mix_and_on_every_track() {
     let snare = &of(drums).section_loudness;
     assert!(snare[0] > -40.0 && snare[1] < -100.0, "{snare:?}");
 
+    // The level of each track as the render went, ten numbers a second:
+    // the synth steps down where it plays softer, and the snare, eight
+    // hits in the first two seconds, is silent after them.
+    let levels = |track: TrackId| &out.track_levels.iter().find(|(id, _)| *id == track).unwrap().1;
+    let (low, snare) = (levels(synth), levels(drums));
+    assert!(low.len() >= 40 && snare.len() == low.len(), "four seconds and what rang on: {}", low.len());
+    let mean = |levels: &[f32]| levels.iter().sum::<f32>() / levels.len() as f32;
+    assert!(mean(&low[2..18]) > mean(&low[22..38]) + 3.0, "{:?}", &low[..40]);
+    assert!(mean(&snare[0..18]) > -50.0 && snare[25..38].iter().all(|level| *level < -100.0), "{:?}", &snare[..40]);
+
     // A part that is given but lies outside what was rendered is silent,
     // not an error; without parts there is nothing to list.
     let beyond = vec![Section { name: "Later".to_string(), start_beat: 40.0, end_beat: 44.0 }];

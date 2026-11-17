@@ -277,7 +277,13 @@ impl StageView {
                 &ctx,
                 &self.theme,
                 rect,
-                &Moment { score: &song.score, plan: &song.plan, camera: &camera, heard: &heard },
+                &Moment {
+                    score: &song.score,
+                    camera: &camera,
+                    heard: &heard,
+                    shot: song.shot_word(&camera),
+                    story: None,
+                },
             ),
         }
         self.hint(ui, rect, started);

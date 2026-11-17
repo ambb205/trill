@@ -4775,6 +4775,9 @@ dependencies = [
  "pollster",
  "tempfile",
  "trill-core",
+ "trill-dsp",
+ "trill-engine",
+ "trill-media",
  "trill-noir",
 ]
 
