@@ -43,7 +43,7 @@ pub fn paint(
     let plot = Plot::new(painter, theme, rect);
     let decades = [position_of(100.0), position_of(1000.0), position_of(10_000.0)];
     match display {
-        Display::Filter { kind, shapes, cutoff, resonance } => {
+        Display::Filter { kind, shapes, cutoff, resonance, slope } => {
             let shape = match shapes.get(value(kind).round().max(0.0) as usize) {
                 Some(Shape::LowPass) | None => Some(FilterShape::LowPass),
                 Some(Shape::LowPass24) => Some(FilterShape::LowPass24),
@@ -53,11 +53,15 @@ pub fn paint(
                 Some(Shape::Off) => None,
             };
             let (cutoff, resonance) = (value(cutoff), value(resonance));
+            let steep = slope.is_some_and(|slope| value(slope) >= 0.5);
             plot.verticals(&decades);
             plot.horizontals(&[0.5]);
             plot.curve(accent, 0.0, |x| match shape {
                 Some(shape) => {
-                    let gain = response::filter_gain(shape, cutoff, resonance, frequency_at(x));
+                    let gain = match steep {
+                        true => response::steep_filter_gain(shape, cutoff, resonance, frequency_at(x)),
+                        false => response::filter_gain(shape, cutoff, resonance, frequency_at(x)),
+                    };
                     height_of(response::to_db(gain), FILTER_SPAN_DB)
                 }
                 // Switched off, everything passes unchanged.
@@ -74,11 +78,13 @@ pub fn paint(
         Display::Eq => {
             let bands = EqBands {
                 low_cut: value("low_cut"),
-                low_shelf: (value("low_freq"), value("low_gain")),
+                low_cut_stages: response::cut_stages(value("low_cut_slope")),
+                low_shelf: (value("low_freq"), value("low_gain"), value("low_q")),
                 mid1: (value("mid1_freq"), value("mid1_gain"), value("mid1_q")),
                 mid2: (value("mid2_freq"), value("mid2_gain"), value("mid2_q")),
-                high_shelf: (value("high_freq"), value("high_gain")),
+                high_shelf: (value("high_freq"), value("high_gain"), value("high_q")),
                 high_cut: value("high_cut"),
+                high_cut_stages: response::cut_stages(value("high_cut_slope")),
             };
             plot.verticals(&decades);
             plot.horizontals(&[0.25, 0.5, 0.75]);
@@ -109,6 +115,17 @@ pub fn paint(
                 let input = (x as f64 * 2.0 - 1.0) * drive;
                 (0.5 + 0.44 * response::saturate(shape, input) / ceiling) as f32
             });
+        }
+        Display::Tremolo => {
+            let (depth, spread) = (value("depth"), value("spread") / 360.0);
+            let shape = value("shape").round().max(0.0) as usize;
+            let level = |phase: f64| (0.06 + 0.84 * response::tremolo_level(shape, depth, phase)) as f32;
+            plot.verticals(&[0.5]);
+            // The right side behind the left, where the two are apart.
+            if spread > 0.0 {
+                plot.curve(theme.ink_faint, 0.0, |x| level(x as f64 * 2.0 + spread));
+            }
+            plot.curve(accent, 0.0, |x| level(x as f64 * 2.0));
         }
         Display::Pump => {
             let (depth, curve) = (value("depth"), value("curve"));

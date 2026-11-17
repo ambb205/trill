@@ -339,6 +339,29 @@ pub trait DeviceProcessor: Send {
         0
     }
 
+    /// Whether the device can listen to a key input: a second signal that
+    /// it does not pass on, such as the kick a compressor ducks a bass to.
+    /// The same for the whole life of the device.
+    fn takes_key(&self) -> bool {
+        false
+    }
+
+    /// [`process`](Self::process), with a key input to listen to: `key` is
+    /// as long as `left` and `right`. Only a device that
+    /// [takes a key](Self::takes_key) is asked this way; without a key it
+    /// is asked through `process` and listens to its own input.
+    fn process_keyed(
+        &mut self,
+        info: &ProcessInfo,
+        events: &[Event],
+        left: &mut [f32],
+        right: &mut [f32],
+        key: KeyInput<'_>,
+    ) {
+        let _ = key;
+        self.process(info, events, left, right);
+    }
+
     /// How far the device has turned the signal down since this was last
     /// asked, for a device whose business that is (a compressor, a
     /// limiter); `None` for any other. Asked off the audio thread, of a
@@ -347,6 +370,14 @@ pub trait DeviceProcessor: Send {
     fn gain_reduction(&mut self) -> Option<GainReduction> {
         None
     }
+}
+
+/// A signal a device listens to and does not pass on: the key input of a
+/// compressor, taken from another track. As long as the block it comes with.
+#[derive(Copy, Clone, Debug)]
+pub struct KeyInput<'a> {
+    pub left: &'a [f32],
+    pub right: &'a [f32],
 }
 
 /// How far a compressor or a limiter turned the signal down over a stretch

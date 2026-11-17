@@ -247,8 +247,7 @@ impl Session {
         })?;
         if let Some(reason) = self.bank.devices.get(&id).and_then(|meta| meta.error.clone()) {
             if self.revision != revision {
-                self.undo();
-                self.redo.pop();
+                self.back_out();
             }
             return Err(SessionError::Device(format!(
                 "{id} ({name}) could not be started from the saved preset '{}': {reason}. The device is as it was",

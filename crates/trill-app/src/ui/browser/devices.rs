@@ -259,7 +259,7 @@ mod tests {
         let names = |which| shelf(&catalog, which, "").iter().map(|d| d.name.clone()).collect::<Vec<_>>();
         assert_eq!(names(Shelf::Instruments)[..2], ["Poly Synth", "Drum Kit"], "the catalog's order");
         let effects = names(Shelf::Effects);
-        assert_eq!(effects.len(), 10);
+        assert_eq!(effects.len(), 11);
         assert_eq!(&effects[..3], ["Auto Filter", "Chorus", "Compressor"]);
         assert_eq!(names(Shelf::Plugins), ["Surge XT", "wave Forge"], "plugins of both kinds, whatever their case");
     }
@@ -270,7 +270,10 @@ mod tests {
         catalog.push(plugin("clap:a", "Surge XT Effects", DeviceCategory::Effect));
         let names = |which, query| shelf(&catalog, which, query).iter().map(|d| d.name.clone()).collect::<Vec<_>>();
         assert_eq!(names(Shelf::Effects, " REV "), ["Reverb"]);
-        assert_eq!(names(Shelf::Effects, "e"), ["Auto Filter", "Compressor", "Delay", "EQ", "Limiter", "Reverb"]);
+        assert_eq!(
+            names(Shelf::Effects, "e"),
+            ["Auto Filter", "Compressor", "Delay", "EQ", "Limiter", "Reverb", "Tremolo"]
+        );
         assert_eq!(names(Shelf::Plugins, "eff"), ["Surge XT Effects"]);
         assert!(names(Shelf::Instruments, "zzz").is_empty());
         assert!(matches("Poly Synth", "") && matches("Poly Synth", "SYN") && !matches("Poly Synth", "drum"));

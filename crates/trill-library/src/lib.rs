@@ -57,6 +57,7 @@ pub use natural::natural_cmp;
 pub use scan::{ScanPhase, ScanSummary};
 pub use search::Query;
 pub use settings::{
-    AudioSettings, LibrarySettings, Loaded, MidiSettings, SaveError, Settings, UiSettings, cache_dir, config_dir,
+    AudioSettings, JournalSettings, LibrarySettings, Loaded, MidiSettings, SaveError, Settings, UiSettings, cache_dir,
+    config_dir,
 };
 pub use tags::{Tag, TagRule, Tags, VOCABULARY};

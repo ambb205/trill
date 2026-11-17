@@ -1,8 +1,10 @@
-//! Delay: tempo-synced stereo / ping-pong echo with filtered feedback.
+//! Delay: tempo-synced stereo / ping-pong echo, filtered on its way into
+//! the delay line: what comes in, and every time it comes round.
 
 use crate::define_params;
 use crate::params::{ParamValues, boolean, float};
 use crate::util::{DelayLine, OnePole, Smooth, mix_gains};
+use std::f32::consts::FRAC_1_SQRT_2;
 use trill_core::device::{DeviceProcessor, Event, ProcessInfo};
 
 define_params!(P, PARAMS, [
@@ -10,14 +12,23 @@ define_params!(P, PARAMS, [
     TimeBeats => float("time_beats", "Synced Time (0.5 = 1/8 note, 0.75 = dotted 1/8, 1 = 1/4)", 0.0625, 4.0, 0.75, "beats"),
     TimeMs => float("time_ms", "Free Time (when sync is off)", 1.0, 2000.0, 350.0, "ms"),
     Feedback => float("feedback", "Feedback", 0.0, 0.95, 0.4, ""),
-    PingPong => boolean("ping_pong", "Ping Pong", true),
-    LowCut => float("low_cut", "Feedback Low Cut", 20.0, 2000.0, 200.0, "Hz"),
-    HighCut => float("high_cut", "Feedback High Cut", 500.0, 20000.0, 6000.0, "Hz"),
+    PingPong => boolean("ping_pong", "Ping Pong (repeats alternate left, right)", true),
+    LowCut => float("low_cut", "Low Cut (on what comes in and on every repeat)", 20.0, 2000.0, 200.0, "Hz"),
+    HighCut => float("high_cut", "High Cut (on what comes in and on every repeat)", 500.0, 20000.0, 6000.0, "Hz"),
     Mix => float("mix", "Mix (0.5 = equal dry and wet, 1 = wet only)", 0.0, 1.0, 0.3, ""),
+    Legacy => boolean(
+        "legacy",
+        "Legacy (the echo of songs saved before format 2: ping pong loses the feedback on every bounce, and the cuts \
+         work on the feedback only)",
+        false
+    ),
 ]);
 
-pub const DESCRIPTION: &str = "Echo that follows the song tempo. `time_beats` is the delay in quarter notes; \
-`ping_pong` bounces repeats between left and right; the cut filters darken and thin each repeat.";
+pub const DESCRIPTION: &str = "Echo that follows the song tempo. `time_beats` is the delay in quarter notes. With \
+`ping_pong` the repeats alternate left and right, `time_beats` apart, starting on the left: the left and the right \
+repeat of a pair are equally loud, and each pair is `feedback` times the pair before (0.3 = 10.5 dB down a pair). \
+Without it the left and the right side echo separately. `low_cut` and `high_cut` (6 dB an octave) filter what comes \
+in and each time round again, so every repeat is thinner and darker than the last. On a return track set `mix` to 1.";
 
 const MAX_SECONDS: f32 = 4.0;
 
@@ -31,6 +42,7 @@ pub struct Delay {
     primed: bool,
     feedback: f32,
     ping_pong: bool,
+    legacy: bool,
     dry: f32,
     wet: f32,
 }
@@ -47,6 +59,7 @@ impl Delay {
             primed: false,
             feedback: 0.0,
             ping_pong: true,
+            legacy: false,
             dry: 1.0,
             wet: 0.0,
         }
@@ -57,6 +70,7 @@ impl Delay {
         let sr = self.sample_rate;
         self.feedback = p.get(P::Feedback as usize);
         self.ping_pong = p.on(P::PingPong as usize);
+        self.legacy = p.on(P::Legacy as usize);
         for filter in &mut self.low_cut {
             filter.set_cutoff(p.get(P::LowCut as usize), sr);
         }
@@ -110,15 +124,31 @@ impl DeviceProcessor for Delay {
             let delay = self.time.next(target);
             let tap_l = self.lines[0].read(delay);
             let tap_r = self.lines[1].read(delay);
-            let back_l = self.low_cut[0].high(self.high_cut[0].low(tap_l)) * self.feedback;
-            let back_r = self.low_cut[1].high(self.high_cut[1].low(tap_r)) * self.feedback;
-
-            if self.ping_pong {
-                self.lines[0].write((dry_l + dry_r) * 0.5 + back_r);
-                self.lines[1].write(back_l);
+            if self.legacy {
+                // Format 1: only what is fed back is filtered, and a
+                // ping-pong feeds back on its way to either side.
+                let back_l = self.low_cut[0].high(self.high_cut[0].low(tap_l)) * self.feedback;
+                let back_r = self.low_cut[1].high(self.high_cut[1].low(tap_r)) * self.feedback;
+                if self.ping_pong {
+                    self.lines[0].write((dry_l + dry_r) * 0.5 + back_r);
+                    self.lines[1].write(back_l);
+                } else {
+                    self.lines[0].write(dry_l + back_l);
+                    self.lines[1].write(dry_r + back_r);
+                }
+            } else if self.ping_pong {
+                // Both sides at equal power into the left line; the left
+                // line into the right one as it is, so a pair is one
+                // level; and the right line back into the left, once a
+                // pair.
+                let fed = (dry_l + dry_r) * FRAC_1_SQRT_2 + tap_r * self.feedback;
+                self.lines[0].write(self.low_cut[0].high(self.high_cut[0].low(fed)));
+                self.lines[1].write(tap_l);
             } else {
-                self.lines[0].write(dry_l + back_l);
-                self.lines[1].write(dry_r + back_r);
+                let fed_l = dry_l + tap_l * self.feedback;
+                let fed_r = dry_r + tap_r * self.feedback;
+                self.lines[0].write(self.low_cut[0].high(self.high_cut[0].low(fed_l)));
+                self.lines[1].write(self.low_cut[1].high(self.high_cut[1].low(fed_r)));
             }
 
             left[i] = dry_l * self.dry + tap_l * self.wet;

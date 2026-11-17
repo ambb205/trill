@@ -1,12 +1,12 @@
 //! Project files, imports and exports: New, Open, Save, Save As, Import
-//! and Export MIDI, Export WAV; and giving a device a preset from a file.
+//! and Export MIDI, Export WAV.
 //!
 //! Native dialogs block until the user answers, and loading, saving and
 //! rendering touch the disk, so all of that runs on helper threads. A thread
 //! reports back through a channel that [`Jobs::poll`] drains each frame; the
 //! UI thread never waits on any of it.
 
-use super::state::{Cx, UiState};
+use super::state::{Cx, StoryAsk, UiState};
 use super::toast::ToastKind;
 use super::{colors, widgets};
 use eframe::egui;
@@ -37,6 +37,11 @@ enum Event {
     /// The name of the MIDI file read and how many tracks it became.
     MidiImported(Result<(String, usize), String>),
     MidiExported(Result<PathBuf, String>),
+    /// The story of the song was written out, with or without the
+    /// conversation.
+    StoryExported(Result<(PathBuf, bool), String>),
+    /// A story written out to a file was chosen, to watch.
+    StoryPicked(PathBuf),
     /// A device was given the preset in a file.
     PresetLoaded(Result<PresetLoaded, String>),
 }
@@ -57,6 +62,9 @@ pub enum Confirm {
     New,
     Open,
     Quit,
+    /// Not about unsaved changes: the journal of the song is to be
+    /// deleted, which cannot be taken back.
+    DeleteJournal,
 }
 
 /// Background file work and its state.
@@ -159,6 +167,24 @@ impl Jobs {
                         // The session's own sentence: which file, and why not.
                         Err(error) => state.toasts.error(error),
                     }
+                }
+                Event::StoryExported(result) => {
+                    self.dialog_open = false;
+                    match result {
+                        Ok((path, true)) => state.toasts.success(format!(
+                            "Wrote {}: how the song was made, with the conversation",
+                            file_name(&path)
+                        )),
+                        Ok((path, false)) => state.toasts.success(format!(
+                            "Wrote {}: how the song was made, without the conversation",
+                            file_name(&path)
+                        )),
+                        Err(error) => state.toasts.error(format!("Could not write the making-of: {error}")),
+                    }
+                }
+                Event::StoryPicked(path) => {
+                    self.dialog_open = false;
+                    state.story = Some(StoryAsk::WatchFile(path));
                 }
             }
         }
@@ -447,10 +473,31 @@ fn project_dialog(title: &str, current: Option<&Path>) -> rfd::AsyncFileDialog {
 /// carries out the answer.
 pub fn confirm_modal(ctx: &egui::Context, cx: &mut Cx) {
     let Some(confirm) = cx.jobs.confirm else { return };
+    if confirm == Confirm::DeleteJournal {
+        let body = format!(
+            "How \"{}\" was made, step by step, with what was said to the assistant on the way, will be gone for \
+             good. The song itself is not touched.",
+            cx.snap.project.name
+        );
+        let title = "Delete this song\u{2019}s journal?";
+        let Some(proceed) = widgets::question(ctx, cx.theme, "confirm-journal", title, &body, "Delete", "Cancel")
+        else {
+            return;
+        };
+        cx.jobs.confirm = None;
+        if proceed {
+            match cx.with_session(|session| session.delete_journal()) {
+                Ok(()) => cx.state.toasts.info("The journal is deleted. The story begins again from here."),
+                Err(error) => cx.state.toasts.error(format!("Could not delete the journal: {error}")),
+            }
+        }
+        return;
+    }
     let (verb, proceed) = match confirm {
         Confirm::New => ("starting a new project", "Discard and start new"),
         Confirm::Open => ("opening another project", "Discard and open"),
         Confirm::Quit => ("quitting", "Discard and quit"),
+        Confirm::DeleteJournal => return,
     };
 
     let body = format!("\"{}\" has changes that are not saved. They will be lost by {verb}.", cx.snap.project.name);
@@ -468,7 +515,72 @@ pub fn confirm_modal(ctx: &egui::Context, cx: &mut Cx) {
             cx.jobs.quit_confirmed = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        Confirm::DeleteJournal => {}
     }
+}
+
+/// Asks where to put the story of the song and writes it there: the song
+/// as it was when its journal began and every step since, to hand on and
+/// watch elsewhere. Without `conversation`, nothing that was said between
+/// the user and the assistant is in it.
+pub fn export_story(ctx: &egui::Context, cx: &mut Cx, conversation: bool) {
+    if std::mem::replace(&mut cx.jobs.dialog_open, true) {
+        return;
+    }
+    let session = cx.session.clone();
+    let ending = trill_engine::journal::EXPORT_ENDING;
+    let title = if conversation { "Export the making-of, with the conversation" } else { "Export the making-of" };
+    let mut dialog = rfd::AsyncFileDialog::new()
+        .set_title(title)
+        .add_filter("Trill making-of", &[ending])
+        .set_file_name(format!("{}.{ending}", file_stem_for(&cx.snap.project.name)));
+    if let Some(folder) = cx.snap.path.as_deref().and_then(Path::parent) {
+        dialog = dialog.set_directory(folder);
+    }
+    cx.jobs.spawn(ctx, move |report| {
+        report(match pollster::block_on(dialog.save_file()) {
+            Some(file) => {
+                let path = with_extension(file.path(), ending);
+                let written = session.lock().export_journal(&path, conversation);
+                Event::StoryExported(written.map(|()| (path, conversation)).map_err(|error| error.to_string()))
+            }
+            None => Event::DialogCancelled,
+        });
+    });
+}
+
+/// Asks for a making-of that was written out to a file, to watch.
+pub fn watch_story(ctx: &egui::Context, cx: &mut Cx) {
+    if std::mem::replace(&mut cx.jobs.dialog_open, true) {
+        return;
+    }
+    let ending = trill_engine::journal::EXPORT_ENDING;
+    let mut dialog =
+        rfd::AsyncFileDialog::new().set_title("Watch a making-of").add_filter("Trill making-of", &[ending]);
+    if let Some(folder) = cx.snap.path.as_deref().and_then(Path::parent) {
+        dialog = dialog.set_directory(folder);
+    }
+    cx.jobs.spawn(ctx, move |report| {
+        report(match pollster::block_on(dialog.pick_file()) {
+            Some(file) => Event::StoryPicked(file.path().to_path_buf()),
+            None => Event::DialogCancelled,
+        });
+    });
+}
+
+/// Keeps a journal of how songs are made from now on, or stops, and
+/// remembers the choice for the next run.
+pub fn keep_journal(cx: &mut Cx, keep: bool) {
+    cx.with_session(|session| session.set_journal_keeping(keep));
+    cx.sounds.quietly(move |runtime| {
+        runtime.update_settings(|settings| settings.journal.keep = keep).map_err(|error| error.to_string())
+    });
+    let said = if keep {
+        "A journal is kept from here on"
+    } else {
+        "No journal is kept from here on. What was written stays until it is deleted."
+    };
+    cx.state.toasts.info(said);
 }
 
 /// `path` with `extension` appended unless it already ends in it. Save
@@ -726,6 +838,44 @@ mod tests {
     }
 
     #[test]
+    fn a_device_is_given_the_preset_in_a_file_as_one_undo_step() {
+        let scratch = Scratch::new("preset-file");
+        let session = shared_session();
+        // A sound someone saved, as the file it was saved in.
+        let (synth, file) = {
+            let mut session = session.lock();
+            session.saved_presets().open(scratch.0.join("saved"));
+            let synth = session.add_device(ChainRef::Master, MELODIC_INSTRUMENT, Some("warm_pad"), None).unwrap();
+            session.set_device_params(synth, &[("cutoff".into(), 432.0)]).unwrap();
+            let file = session.save_preset(synth, "Dark Pad", "", &[]).unwrap().file.unwrap();
+            session.load_preset(synth, "sub_bass").unwrap();
+            (synth, file)
+        };
+        let cutoff = |session: &SharedSession| {
+            let params = session.lock().device_params(synth).unwrap();
+            params.iter().find(|param| param.info.id == "cutoff").unwrap().value
+        };
+        assert_ne!(cutoff(&session), 432.0);
+        let step = session.lock().undo_step();
+
+        let loaded = give_preset_file(&session, synth, &file).unwrap();
+        assert_eq!((loaded.preset.as_str(), loaded.device.as_str(), loaded.note), ("Dark Pad", "Poly Synth", None));
+        assert_eq!(cutoff(&session), 432.0);
+        assert!(session.lock().undo());
+        assert_eq!(session.lock().undo_step(), step);
+        assert_ne!(cutoff(&session), 432.0);
+
+        // A file that is no preset of the device: the sentence, and the
+        // device as it was.
+        let wav = scratch.0.join("Kick.wav");
+        std::fs::write(&wav, b"RIFF").unwrap();
+        let error = give_preset_file(&session, synth, &wav).unwrap_err();
+        assert!(error.contains("Kick.wav") && error.contains("takes no preset files"), "{error}");
+        assert_eq!(session.lock().undo_step(), step);
+        assert!(give_preset_file(&session, DeviceId(9_999), &file).is_err());
+    }
+
+    #[test]
     fn a_midi_file_survives_a_round_trip_through_disk() {
         let scratch = Scratch::new("midi");
         let session = shared_session();
@@ -801,43 +951,5 @@ mod tests {
                 "'x.wav' cannot be given",
             ]
         );
-    }
-
-    #[test]
-    fn a_device_is_given_the_preset_in_a_file_as_one_undo_step() {
-        let scratch = Scratch::new("preset-file");
-        let session = shared_session();
-        // A sound someone saved, as the file it was saved in.
-        let (synth, file) = {
-            let mut session = session.lock();
-            session.saved_presets().open(scratch.0.join("saved"));
-            let synth = session.add_device(ChainRef::Master, MELODIC_INSTRUMENT, Some("warm_pad"), None).unwrap();
-            session.set_device_params(synth, &[("cutoff".into(), 432.0)]).unwrap();
-            let file = session.save_preset(synth, "Dark Pad", "", &[]).unwrap().file.unwrap();
-            session.load_preset(synth, "sub_bass").unwrap();
-            (synth, file)
-        };
-        let cutoff = |session: &SharedSession| {
-            let params = session.lock().device_params(synth).unwrap();
-            params.iter().find(|param| param.info.id == "cutoff").unwrap().value
-        };
-        assert_ne!(cutoff(&session), 432.0);
-        let step = session.lock().undo_step();
-
-        let loaded = give_preset_file(&session, synth, &file).unwrap();
-        assert_eq!((loaded.preset.as_str(), loaded.device.as_str(), loaded.note), ("Dark Pad", "Poly Synth", None));
-        assert_eq!(cutoff(&session), 432.0);
-        assert!(session.lock().undo());
-        assert_eq!(session.lock().undo_step(), step);
-        assert_ne!(cutoff(&session), 432.0);
-
-        // A file that is no preset of the device: the sentence, and the
-        // device as it was.
-        let wav = scratch.0.join("Kick.wav");
-        std::fs::write(&wav, b"RIFF").unwrap();
-        let error = give_preset_file(&session, synth, &wav).unwrap_err();
-        assert!(error.contains("Kick.wav") && error.contains("takes no preset files"), "{error}");
-        assert_eq!(session.lock().undo_step(), step);
-        assert!(give_preset_file(&session, DeviceId(9_999), &file).is_err());
     }
 }

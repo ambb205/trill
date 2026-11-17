@@ -16,15 +16,22 @@ use crate::view::{
     warp_name,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{CallToolRequestParams, CallToolResponse};
 use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
-use rmcp::{ServerHandler, tool, tool_handler, tool_router};
+use rmcp::service::RequestContext;
+use rmcp::{ErrorData, RoleServer, ServerHandler, tool, tool_handler, tool_router};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 use trill_core::device::{BUILTIN_SCHEME, DeviceCategory, DeviceFactory, EditorOptions, EventKind, split_uri};
+use trill_core::journal::{Author, CallId, Outcome};
 use trill_core::midi_file;
 use trill_core::presets::{PresetFile, PresetList};
 use trill_core::project::AutomationPoint;
@@ -101,8 +108,9 @@ expression, as a saxophone is without air. After writing such a line, call shape
 the phrases from the notes and writes an expression curve that rises into the high points, swells through long \
 notes and breathes between phrases. set_controllers writes or adjusts a curve point by point (a pedal, a pitch \
 bend, vibrato on the mod wheel). measure names any track that had notes and made no sound.
-4. Shape the sound: add_device for effects (reverb, delay, eq, compressor, pump...), update_device for \
-parameters, set_automation for movement such as filter sweeps and fades, update_track for the mix.
+4. Shape the sound: add_device for effects (reverb, delay, eq, compressor, filter, chorus, tremolo...), \
+update_device for parameters, set_automation for movement such as filter sweeps and fades, update_track for the \
+mix. describe_device says what each parameter does and in what unit.
 5. measure reports loudness, true peak, spectral balance, every track's level and loudness, each section's \
 loudness and what the compressors and limiters took off, without writing a file. You cannot hear, so read those \
 numbers and adjust, as often as it takes.
@@ -131,7 +139,16 @@ Playing and recording live
 
 Musical guidance
 - Vary velocity and use transform_notes to humanize; identical velocities sound mechanical.
-- Keep bass and kick in the centre; use low_cut on the EQ for everything else; leave headroom on the master.
+- Keep bass and kick in the centre; use low_cut on the EQ for everything else (slope \"24 dB\" or \"48 dB\" \
+clears what is under the corner without thinning what is over it); leave headroom on the master.
+- Compressor: on a single track the \"peak\" detector (the default) with attack 1-10 ms; on a group or the master \
+set detector \"bus\", which is the one that works with a slow attack on a full mix (threshold about 10 dB under \
+the peaks, ratio 2, knee 18, attack 10-30 ms, auto_release on: about 2 dB off). auto_makeup adds a known amount of gain, \
+0.72 x -threshold x (1 - 1/ratio) dB. measure says what each compressor took off.
+- To make room for the kick, put a compressor on the bass (or the pads) and give it the kick's track as \
+`sidechain`: it then turns its own track down whenever the kick sounds. The kick's track may be muted.
+- Reverb and delay belong on return tracks with `mix` 1, fed by sends of -10 to -20 dB: both filter what goes into \
+them (low_cut, high_cut), and the reverb returns more the longer its decay.
 - Give sections contrast: add and remove parts, automate filters and volume, change the drum pattern.
 - Rearranging: edit_time removes, repeats or opens up a stretch of time on every track at once (drop a \
 section, double a chorus, make room for a bridge).
@@ -150,6 +167,15 @@ pub(crate) fn finish(reply: Reply) -> CallToolResult {
 
 /// Turns an error into a message that says what to do next: a missing id
 /// comes back with the ids that do exist.
+/// Says which track `device` listens to in place of its own input, by id
+/// and by name, if it listens to one.
+fn sidechain_into(out: &mut Value, project: &Project, device: &trill_core::Device) {
+    if let Some(track) = device.sidechain {
+        let name = project.track(track).map(|track| track.name.clone()).unwrap_or_default();
+        out["sidechain"] = json!({ "track": track, "name": name });
+    }
+}
+
 pub(crate) fn explain(project: &Project, error: impl Into<SessionError>) -> String {
     let error = error.into();
     let list = |items: Vec<String>, what: &str| {
@@ -222,12 +248,32 @@ impl TrillServer {
     /// write wherever it is told.
     pub fn new(runtime: Arc<Runtime>) -> Self {
         let session = runtime.session.clone();
-        let tool_router = Self::tool_router()
+        Self { session, runtime, tool_router: Self::every_tool(), guard: None }
+    }
+
+    /// Every tool the server offers.
+    fn every_tool() -> ToolRouter<Self> {
+        Self::tool_router()
             + Self::music_router()
             + Self::sound_router()
             + Self::hearing_router()
-            + Self::instrument_router();
-        Self { session, runtime, tool_router, guard: None }
+            + Self::instrument_router()
+            + Self::story_router()
+    }
+
+    /// The names of the tools the server offers.
+    pub fn tool_names() -> Vec<String> {
+        Self::every_tool().list_all().into_iter().map(|tool| tool.name.into_owned()).collect()
+    }
+
+    /// Whether this is the door of the assistant in the window, which is
+    /// held to limits a client the user set up is not.
+    pub(crate) fn is_guarded(&self) -> bool {
+        self.guard.is_some()
+    }
+
+    pub(crate) fn runtime(&self) -> &Runtime {
+        &self.runtime
     }
 
     /// A server for a client that works beside the user in the window. It
@@ -656,7 +702,8 @@ impl TrillServer {
 
     /// Add an instrument or effect to a track's chain, or to the master chain when `track` is omitted. `preset`
     /// starts it from one of its presets, a plugin's included (describe_device lists and searches them), or
-    /// from a preset file by its path; `params` go on top of the preset.
+    /// from a preset file by its path; `params` go on top of the preset. `sidechain` has a compressor listen to
+    /// another track.
     #[tool(annotations(title = "Add device"))]
     async fn add_device(&self, Parameters(request): Parameters<AddDeviceRequest>) -> CallToolResult {
         if let Err(refusal) = self.ready_presets(Some(&request.uri), &request.preset).await {
@@ -665,13 +712,23 @@ impl TrillServer {
         let mut session = self.session.lock();
         let reply = (|| {
             let chain = request.track.map_or(ChainRef::Master, |track| ChainRef::Track(TrackId(track)));
+            let before = session.undo_step();
             let device = session
                 .add_device(chain, &request.uri, request.preset.as_deref(), request.index)
                 .map_err(|error| preset_hint(explain(session.project(), error), &request.uri))?;
-            if let Some(params) = &request.params
-                && let Err(error) = set_params(&mut session, device, params)
-            {
-                session.undo();
+            let rest: Result<(), String> = (|| {
+                if let Some(params) = &request.params {
+                    set_params(&mut session, device, params)?;
+                }
+                if let Some(track) = request.sidechain {
+                    let listening = session.set_sidechain(device, Some(TrackId(track)));
+                    listening.map_err(|error| explain(session.project(), error))?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = rest {
+                // Back to before the device was added, whatever of it was done.
+                while session.undo_step() != before && session.undo() {}
                 return Err(format!("{error}. The device was not added."));
             }
             let model = session.project().device(device).map_err(|e| e.to_string())?;
@@ -679,6 +736,7 @@ impl TrillServer {
             if let Some(preset) = &model.preset {
                 out["preset"] = json!(preset.name);
             }
+            sidechain_into(&mut out, session.project(), model);
             crate::sounds::preset_note_into(&mut out, &mut session, device);
             Ok(out)
         })();
@@ -715,6 +773,11 @@ impl TrillServer {
             let states = session.device_params(id).map_err(|error| explain(project, error))?;
             let mut out = device_json(model);
             out["enabled"] = json!(model.enabled);
+            sidechain_into(&mut out, project, model);
+            if model.sidechain.is_none() && session.device_takes_key(id) {
+                out["sidechain_hint"] =
+                    json!("Listens to its own input. update_device `sidechain` has it listen to another track.");
+            }
             if session.loading().contains(&id) {
                 out["loading"] = json!(true);
             }
@@ -783,10 +846,10 @@ impl TrillServer {
         finish(reply)
     }
 
-    /// Change a device: switch preset, set parameters or settings, or bypass it. A preset replaces the device's sound, a
-    /// plugin's as its own preset browser would (get_device and describe_device list and search them; a preset
-    /// file is given by its path);
-    /// `params` in the same call go on top of it, and the whole call is one undo step.
+    /// Change a device: switch preset, set parameters or settings, bypass it, or have it listen to another
+    /// track (`sidechain`). A preset replaces the device's sound, a plugin's as its own preset browser would
+    /// (get_device and describe_device list and search them; a preset file is given by its path); `params` in
+    /// the same call go on top of it, and the whole call is one undo step.
     #[tool(annotations(title = "Update device"))]
     async fn update_device(&self, Parameters(request): Parameters<UpdateDeviceRequest>) -> CallToolResult {
         let id = DeviceId(request.device);
@@ -829,6 +892,10 @@ impl TrillServer {
                         Ok(())
                     })?;
                 }
+                if let Some(track) = request.sidechain {
+                    let track = (track != 0).then_some(TrackId(track));
+                    session.set_sidechain(id, track).map_err(|error| explain(session.project(), error))?;
+                }
                 Ok(())
             })();
             session.end_gesture();
@@ -845,6 +912,12 @@ impl TrillServer {
             }
             if !settings.is_empty() {
                 out["settings"] = json!(settings.into_iter().collect::<BTreeMap<String, String>>());
+            }
+            if request.sidechain.is_some() {
+                sidechain_into(&mut out, session.project(), model);
+                if model.sidechain.is_none() {
+                    out["sidechain"] = json!(null);
+                }
             }
             crate::sounds::preset_note_into(&mut out, &mut session, id);
             Ok(out)
@@ -2552,17 +2625,113 @@ fn add_range_warning(out: &mut Value, session: &Session, clip: ClipId) {
     }
 }
 
+/// A call's future, polled as the call's doing: whatever it changes in
+/// the session while it runs is entered in the journal as that call's.
+struct Acted<'a> {
+    call: Option<CallId>,
+    future: Pin<Box<dyn Future<Output = Result<CallToolResponse, ErrorData>> + Send + 'a>>,
+}
+
+impl Future for Acted<'_> {
+    type Output = Result<CallToolResponse, ErrorData>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        // Only for the length of the poll: between polls the thread is
+        // someone else's, and the next poll may be on another.
+        let _acting = self.call.map(trill_engine::journal::acting);
+        self.future.as_mut().poll(context)
+    }
+}
+
+/// Closes a call in the journal when it ends, however it ends: a call
+/// whose client went away in the middle is closed as one that failed.
+struct Closing<'a> {
+    session: &'a SharedSession,
+    call: Option<CallId>,
+}
+
+impl Closing<'_> {
+    fn with(mut self, outcome: impl FnOnce(&Session) -> Outcome) {
+        if let Some(call) = self.call.take() {
+            let mut session = self.session.lock();
+            let outcome = outcome(&session);
+            session.end_call(call, outcome);
+        }
+    }
+}
+
+impl Drop for Closing<'_> {
+    fn drop(&mut self) {
+        if let Some(call) = self.call.take() {
+            self.session.lock().end_call(call, Outcome { failed: true, ..Outcome::default() });
+        }
+    }
+}
+
+impl TrillServer {
+    /// Who a call is entered in the journal as: the assistant in the
+    /// window for its door, and any other client by the name it gave.
+    fn author(&self, context: &RequestContext<RoleServer>) -> Author {
+        match &self.guard {
+            Some(_) => Author::Assistant,
+            None => {
+                let name = context.peer.peer_info().map(|info| info.client_info.name.clone()).unwrap_or_default();
+                Author::Client(name)
+            }
+        }
+    }
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for TrillServer {
+    /// Runs a tool, entering the call in the session's journal: opened
+    /// before it runs, under what it does in words, and closed after, with
+    /// where it landed and what it heard.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let tool = request.name.to_string();
+        let input = Value::Object(request.arguments.clone().unwrap_or_default());
+        let call = {
+            let by = self.author(&context);
+            let mut session = self.session.lock();
+            let label = crate::words::describe(&tool, &input, session.project()).did;
+            session.begin_call(by, &tool, label)
+        };
+        let closing = Closing { session: &self.session, call };
+        let running = ToolCallContext::new(self, request, context);
+        let response = Acted { call, future: Box::pin(self.tool_router.call(running)) }.await;
+        closing.with(|session| {
+            let answered = match &response {
+                Ok(CallToolResponse::Complete(result)) if result.is_error != Some(true) => {
+                    Some(result.content.first().and_then(|block| block.as_text()).map_or("", |text| text.text.as_str()))
+                }
+                _ => None,
+            };
+            match answered {
+                None => Outcome { failed: true, ..Outcome::default() },
+                Some(answer) => {
+                    let place = crate::words::of_call(&tool, &input, answer);
+                    let places = place.and_then(|place| place.settled(session.project())).into_iter().collect();
+                    Outcome { places, heard: crate::words::heard(&tool, answer), failed: false }
+                }
+            }
+        });
+        response
+    }
+
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}",
+                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
                 crate::sounds::INSTRUCTIONS,
                 crate::music::INSTRUCTIONS,
                 crate::instruments::INSTRUCTIONS,
-                crate::hearing::INSTRUCTIONS
+                crate::hearing::INSTRUCTIONS,
+                crate::story::INSTRUCTIONS
             ))
     }
 }

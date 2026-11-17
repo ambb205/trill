@@ -29,7 +29,7 @@ mod testing;
 pub use level::{controller_support, is_instrument};
 pub use loading::{SampleRef, StateError};
 
-use effects::{delay, dynamics, eq, modulation, reverb, utility};
+use effects::{compressor, delay, dynamics, eq, modulation, reverb, utility};
 use loading::{SampleController, SampleSource, SampleStore};
 use params::{ParamDef, PresetDef};
 use std::sync::Arc;
@@ -116,8 +116,8 @@ static BUILTINS: &[Builtin] = &[
     effect("reverb", "Reverb", reverb::DESCRIPTION, reverb::PARAMS, || Box::new(reverb::Reverb::new())),
     effect("delay", "Delay", delay::DESCRIPTION, delay::PARAMS, || Box::new(delay::Delay::new())),
     effect("eq", "EQ", eq::DESCRIPTION, eq::PARAMS, || Box::new(eq::Eq::new())),
-    effect("compressor", "Compressor", dynamics::COMPRESSOR_DESCRIPTION, dynamics::COMPRESSOR_PARAMS, || {
-        Box::new(dynamics::Compressor::new())
+    effect("compressor", "Compressor", compressor::DESCRIPTION, compressor::PARAMS, || {
+        Box::new(compressor::Compressor::new())
     }),
     effect("limiter", "Limiter", dynamics::LIMITER_DESCRIPTION, dynamics::LIMITER_PARAMS, || {
         Box::new(dynamics::Limiter::new())
@@ -127,6 +127,9 @@ static BUILTINS: &[Builtin] = &[
     }),
     effect("filter", "Auto Filter", modulation::FILTER_DESCRIPTION, modulation::FILTER_PARAMS, || {
         Box::new(modulation::AutoFilter::new())
+    }),
+    effect("tremolo", "Tremolo", modulation::TREMOLO_DESCRIPTION, modulation::TREMOLO_PARAMS, || {
+        Box::new(modulation::Tremolo::new())
     }),
     effect("pump", "Pump", modulation::PUMP_DESCRIPTION, modulation::PUMP_PARAMS, || Box::new(modulation::Pump::new())),
     effect("saturator", "Saturator", utility::SATURATOR_DESCRIPTION, utility::SATURATOR_PARAMS, || {
@@ -458,6 +461,34 @@ mod tests {
         }
     }
 
+    /// The devices that sound different from format 2 on are named in
+    /// `trill-core`, which knows nothing of them: each has to be a device,
+    /// and what a format-1 file is taken to have said has to be something
+    /// it can be told.
+    #[test]
+    fn what_a_song_of_format_1_is_given_are_parameters_of_these_devices() {
+        use trill_core::formats::{FORMAT_1, LEGACY};
+        for (uri, values) in FORMAT_1 {
+            let builtin = find(uri).unwrap_or_else(|| panic!("{uri} is not a built-in device"));
+            assert!(
+                values.iter().any(|(id, value)| *id == LEGACY && *value == 1.0),
+                "{uri} needs its legacy switch on"
+            );
+            for (id, value) in *values {
+                let def = builtin.params.iter().find(|def| def.id == *id).unwrap_or_else(|| panic!("{uri}: no {id}"));
+                assert!((def.min..=def.max).contains(value), "{uri}: {id} = {value}");
+            }
+            let legacy = builtin.params.iter().find(|def| def.id == LEGACY).unwrap();
+            assert!(matches!(legacy.kind, params::Kind::Bool) && legacy.default == 0.0, "{uri}: off in a new device");
+        }
+        // And no device has such a switch without being in the list: it
+        // would be on in no song.
+        for builtin in BUILTINS {
+            let listed = FORMAT_1.iter().any(|(uri, _)| *uri == format!("{BUILTIN_SCHEME}:{}", builtin.key));
+            assert_eq!(builtin.params.iter().any(|def| def.id == LEGACY), listed, "{}", builtin.key);
+        }
+    }
+
     #[test]
     fn every_device_stays_finite_and_bounded() {
         for builtin in BUILTINS {
@@ -500,6 +531,33 @@ mod tests {
             let (tail, _) = run(device.as_mut(), blocks, |_| 0.0, |b| if b == 0 { note_off(57) } else { vec![] });
             assert_eq!(peak(&tail[tail.len() - BLOCK..]), 0.0, "preset {} never goes silent", preset.name);
         }
+    }
+
+    #[test]
+    fn the_keys_preset_is_a_little_wide() {
+        let keys = synth::PRESETS.iter().find(|preset| preset.name == "keys").unwrap();
+        let chord = |b: usize| match b {
+            0 => [48u8, 60, 64, 67].into_iter().flat_map(note_on).collect(),
+            _ => vec![],
+        };
+        let sides_under_middle = |params: &[(&str, f64)]| {
+            let mut device = make("polysynth", params);
+            let (l, r) = run(device.as_mut(), 280, |_| 0.0, chord);
+            let mid: Vec<f32> = l.iter().zip(&r).map(|(l, r)| (l + r) * 0.5).collect();
+            let side: Vec<f32> = l.iter().zip(&r).map(|(l, r)| (l - r) * 0.5).collect();
+            (util::gain_to_db(rms(&mid)) - util::gain_to_db(rms(&side)), util::gain_to_db(rms(&l)))
+        };
+        // An electric piano in a mix has some width (the sampled one of the
+        // bench's first song had its sides 18.9 dB under its middle); a
+        // pad's worth would be wrong for it.
+        let (sides, level) = sides_under_middle(keys.params);
+        assert!((12.0..=20.0).contains(&sides), "the sides are {sides:.1} dB under the middle");
+        // One voice, as the preset was: the same on both sides, and as loud.
+        let one: Vec<(&str, f64)> = keys.params.iter().copied().filter(|(id, _)| !id.starts_with("unison")).collect();
+        let (mono, _) = sides_under_middle(&one);
+        assert!(mono > 100.0, "{mono}");
+        let before: Vec<(&str, f64)> = one.iter().copied().filter(|(id, _)| *id != "volume").collect();
+        assert!((level - sides_under_middle(&before).1).abs() < 0.5, "as loud as it was");
     }
 
     #[test]
@@ -586,7 +644,10 @@ mod tests {
     #[test]
     fn delay_echoes_at_the_synced_time() {
         // 1 beat at 120 BPM = 0.5 s = 24000 samples.
-        let mut device = make("delay", &[("time_beats", 1.0), ("ping_pong", 0.0), ("feedback", 0.0), ("mix", 1.0)]);
+        // With its filter wide open: the echo is filtered on its way in.
+        let open = [("low_cut", 20.0), ("high_cut", 20_000.0)];
+        let set = [("time_beats", 1.0), ("ping_pong", 0.0), ("feedback", 0.0), ("mix", 1.0)];
+        let mut device = make("delay", &[&set[..], &open[..]].concat());
         let (l, _) = run(device.as_mut(), 120, |i| if i == 0 { 1.0 } else { 0.0 }, |_| vec![]);
         let (index, value) =
             l.iter().enumerate().fold((0, 0.0f32), |best, (i, s)| if s.abs() > best.1 { (i, s.abs()) } else { best });

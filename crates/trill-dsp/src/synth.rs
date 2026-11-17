@@ -238,12 +238,19 @@ pub const PRESETS: &[PresetDef] = &[
     },
     PresetDef {
         name: "keys",
-        description: "FM electric piano",
+        description: "FM electric piano, a little wide (builtin:tremolo with spread 180 makes it a suitcase piano)",
         params: &[
             ("osc1_wave", 0.0),
             ("osc2_wave", 0.0),
             ("fm_amount", 0.4),
             ("fm_env", 0.9),
+            // Three voices a few cents apart, the outer two a little to
+            // either side: the sides sit some 16 dB under the middle, where
+            // one voice alone is the same on both sides to the last bit.
+            ("unison", 3.0),
+            ("unison_detune", 4.0),
+            ("unison_spread", 0.2),
+            ("volume", 1.0),
             ("attack", 0.002),
             ("decay", 3.5),
             ("sustain", 0.2),

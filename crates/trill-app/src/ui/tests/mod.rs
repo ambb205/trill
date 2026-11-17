@@ -14,12 +14,14 @@ mod controllers;
 mod editors;
 mod keyboard;
 mod keys;
+mod making_of;
 mod mixer;
 mod perf;
 mod recording;
 mod recovery;
 mod ruler;
 mod sounds;
+mod stage;
 mod tracks;
 
 use super::app::TrillApp;
@@ -988,6 +990,45 @@ fn a_parameter_bar_sets_values_by_click_and_by_drag() {
 }
 
 #[test]
+fn a_compressor_is_given_a_track_to_listen_to_from_its_panel() {
+    let (mut device, mut kick) = (None, None);
+    let mut harness = Harness::new(devices_tab(), |session| {
+        let tracks = session.edit(|project| Ok((project.add_track("Bass"), project.add_track("Kick")))).unwrap();
+        device = Some(session.add_device(ChainRef::Track(tracks.0), "builtin:compressor", None, None).unwrap());
+        session.add_device(ChainRef::Track(tracks.0), "builtin:reverb", None, None).unwrap();
+        kick = Some(tracks.1);
+    });
+    let (device, kick) = (device.unwrap(), kick.unwrap());
+    let listens_to = |harness: &Harness| harness.project().device(device).unwrap().sidechain;
+    let detector = |harness: &Harness| {
+        let params = harness.session.lock().device_params(device).unwrap();
+        params.iter().find(|param| param.info.id == "detector").unwrap().value
+    };
+
+    // The compressor says what it listens to; the reverb beside it, which
+    // listens to nothing but its input, has no such row.
+    assert_eq!(harness.all_labeled("Listen to").len(), 1);
+    let before = harness.undo_depth();
+    harness.click_label("Listen to: Own input");
+    harness.click_last_label("Kick");
+    assert_eq!(listens_to(&harness), Some(kick));
+    assert_eq!(harness.undo_depth(), before + 1, "one step");
+    harness.idle(3);
+    assert!(harness.is_on_screen("Listen to: Kick"), "and the panel says which track");
+
+    // Back to what comes into it.
+    harness.click_label("Listen to: Kick");
+    harness.click_last_label("Own input");
+    assert_eq!(listens_to(&harness), None);
+
+    // The detector is a pair of chips beside it.
+    assert_eq!(detector(&harness), 0.0);
+    harness.settle();
+    harness.click_label("Bus");
+    assert_eq!(detector(&harness), 1.0);
+}
+
+#[test]
 fn an_empty_project_offers_ways_to_start() {
     let mut harness = Harness::new(UiOptions::default(), |_| {});
     harness.click_label("Add first track");
@@ -1239,8 +1280,8 @@ fn a_device_can_be_bypassed_and_removed_from_its_panel() {
     let (mut harness, device) = with_reverb();
     let panel = harness.first_panel();
     let header_y = panel.y + devices::PANEL_HEADER / 2.0;
-    // The reverb's single column makes the narrowest panel there is.
-    let panel_right = panel.x + 150.0 + 2.0 * devices::BODY_PADDING;
+    // The reverb's panel: two columns and the gap between them.
+    let panel_right = panel.x + 2.0 * 150.0 + devices::COLUMN_GAP + 2.0 * devices::BODY_PADDING;
 
     harness.click(pos2(panel.x + 10.0, header_y));
     assert!(!harness.project().device(device).unwrap().enabled, "the dot bypasses");

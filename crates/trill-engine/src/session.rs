@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use trill_core::device::{DeviceDescriptor, DeviceFactory, EventKind, ParamInfo};
+use trill_core::journal::Reversal;
 use trill_core::presets::PresetInfo;
 use trill_core::project::AutomationTarget;
 use trill_core::{ChainRef, Device, DeviceId, EditError, Project, TrackId};
@@ -27,6 +28,7 @@ mod params;
 mod playing;
 mod presets;
 mod probing;
+mod story;
 mod take;
 
 pub use controllers::SilentInstrument;
@@ -97,6 +99,8 @@ pub struct UndoGroup(u64);
 struct Step {
     id: UndoStep,
     project: Project,
+    /// What the step is in the journal.
+    story: story::Story,
 }
 
 /// A group between its [`Session::begin_group`] and [`Session::end_group`].
@@ -155,6 +159,8 @@ pub struct Session {
     metronome: bool,
     /// Arming, the selection, and the take being recorded.
     playing: playing::Playing,
+    /// The journal of the open project: how it came to be.
+    story: story::Keeping,
 }
 
 impl Session {
@@ -218,6 +224,7 @@ impl Session {
             gesture: None,
             metronome: false,
             playing: playing::Playing::new(),
+            story: story::Keeping::new(),
         };
         session.replace_project(Self::blank_project("Untitled"));
         Ok(session)
@@ -395,6 +402,7 @@ impl Session {
 
     pub fn end_gesture(&mut self) {
         self.gesture = None;
+        self.end_journal_gesture();
     }
 
     /// Opens an undo group: everything that changes the project until
@@ -435,8 +443,11 @@ impl Session {
             return None;
         }
         // The oldest of the group's steps holds the project as it was
-        // before any of them; the rest are the stops along the way.
+        // before any of them; the rest are the stops along the way. In the
+        // journal the one step is all of theirs.
+        let story = story::Story::joined(self.undo[floor..].iter().map(|step| &step.story));
         self.undo.truncate(floor + 1);
+        self.undo[floor].story = story;
         let unchanged = self.undo[floor].project == self.project;
         if unchanged {
             self.undo.truncate(floor);
@@ -454,6 +465,7 @@ impl Session {
         if let Some(has_step) = &mut self.gesture {
             *has_step = false;
         }
+        self.end_journal_gesture();
     }
 
     fn fresh_id(&mut self) -> u64 {
@@ -473,9 +485,12 @@ impl Session {
     /// Makes the change from `before` to the project as it is now an undo
     /// step. The engine is the caller's to have brought in line.
     fn make_step(&mut self, before: Project) {
+        let story = self.record_step(&before);
         // Inside a gesture only the state before its first edit is kept.
         if self.gesture != Some(true) {
-            self.push_step(before);
+            self.push_step(before, story);
+        } else if let Some(step) = self.undo.last_mut() {
+            step.story.and(story);
         }
         if let Some(has_step) = &mut self.gesture {
             *has_step = true;
@@ -486,7 +501,7 @@ impl Session {
 
     /// Puts a step on the undo history, forgetting the oldest one when
     /// there are too many.
-    fn push_step(&mut self, before: Project) {
+    fn push_step(&mut self, before: Project, story: story::Story) {
         // Steps older than a group may have been undone since it opened.
         // An edit made from there is the group's, and so is its step.
         let depth = self.undo.len();
@@ -494,7 +509,7 @@ impl Session {
             open.floor = open.floor.min(depth);
         }
         let id = UndoStep(self.fresh_id());
-        self.undo.push(Step { id, project: before });
+        self.undo.push(Step { id, project: before, story });
         if self.undo.len() > UNDO_LIMIT {
             // The oldest step goes, unless it is where an open group began:
             // that group must still be able to undo all the way back, so
@@ -509,24 +524,48 @@ impl Session {
         }
     }
 
+    /// Takes back the last step. In the journal the step stays, followed
+    /// by one that takes it back; a call that undoes what it has just done
+    /// itself backs out of it instead, and leaves no trace.
     pub fn undo(&mut self) -> bool {
-        let Some(Step { id, project: previous }) = self.undo.pop() else { return false };
+        let Some(Step { id, project: previous, story }) = self.undo.pop() else { return false };
         let mut current = std::mem::replace(&mut self.project, previous);
         self.keep_leaving_state(&mut current);
         self.sync(&current, Scope::Everything);
-        self.redo.push(Step { id, project: current });
+        let story = if self.retract_step(&story, true) {
+            story::Story::default()
+        } else {
+            self.record_reversal(Reversal::Undo, &story, &current);
+            Self::settled(story)
+        };
+        self.redo.push(Step { id, project: current, story });
         self.revision += 1;
         true
     }
 
     pub fn redo(&mut self) -> bool {
-        let Some(Step { id, project: next }) = self.redo.pop() else { return false };
+        let Some(Step { id, project: next, story }) = self.redo.pop() else { return false };
         let mut current = std::mem::replace(&mut self.project, next);
         self.keep_leaving_state(&mut current);
         self.sync(&current, Scope::Everything);
-        self.undo.push(Step { id, project: current });
+        self.record_reversal(Reversal::Redo, &story, &current);
+        self.undo.push(Step { id, project: current, story });
         self.revision += 1;
         true
+    }
+
+    /// Takes back the step that was just made and forgets it: for an
+    /// operation that could not be finished. Nothing is left to redo, and
+    /// the journal has it as if it had not been made.
+    fn back_out(&mut self) {
+        let Some(Step { project: previous, story, .. }) = self.undo.pop() else { return };
+        let mut current = std::mem::replace(&mut self.project, previous);
+        self.keep_leaving_state(&mut current);
+        self.sync(&current, Scope::Everything);
+        if !self.retract_step(&story, false) {
+            self.record_reversal(Reversal::Undo, &story, &current);
+        }
+        self.revision += 1;
     }
 
     /// Adds a device, optionally starting from one of its presets, asked
@@ -584,8 +623,7 @@ impl Session {
             _ => None,
         });
         if let Some(error) = failure {
-            self.undo();
-            self.redo.pop();
+            self.back_out();
             return Err(error);
         }
         Ok(id)
@@ -695,8 +733,7 @@ impl Session {
         let revision = self.revision;
         let result = self.set_device_state(id, Some(state));
         if result.is_err() && self.revision != revision {
-            self.undo();
-            self.redo.pop();
+            self.back_out();
         }
         result
     }
@@ -814,6 +851,9 @@ impl Session {
         std::fs::rename(&temporary, path).map_err(|e| io_error(path, e))?;
         self.path = Some(path.to_path_buf());
         self.saved_revision = self.revision;
+        // The journal is written with the song, in the program's own
+        // folder: the file just written holds none of it.
+        self.write_journal(path);
         Ok(())
     }
 
@@ -822,6 +862,7 @@ impl Session {
         let project = self.with_known_instruments(Project::from_json(&json)?);
         self.replace_project(project);
         self.path = Some(path.to_path_buf());
+        self.take_up_journal(path);
         Ok(())
     }
 
@@ -845,6 +886,7 @@ impl Session {
         let project = self.with_known_instruments(Project::from_json(&json)?);
         self.replace_project(project);
         self.path = original.map(Path::to_path_buf);
+        self.take_up_recovered_journal(copy, original);
         self.revision += 1;
         Ok(())
     }
@@ -867,6 +909,7 @@ impl Session {
         self.tend_audio();
         self.recover_lost_messages();
         self.tend_take();
+        self.tend_journal();
         if !self.stand_ins.is_empty() && self.audio.finished() != self.stretches_seen {
             self.compile_and_swap();
         }
@@ -906,6 +949,8 @@ impl Session {
         // Track ids restart too: what was armed or selected was the old
         // project's.
         self.send_live_targets();
+        // And another story begins.
+        self.restart_journal();
         self.revision += 1;
         self.saved_revision = self.revision;
     }
@@ -1067,6 +1112,7 @@ impl Session {
             meta.applied_state = Some(captured.clone());
         }
         self.correct_history(id, &stale, &captured);
+        self.note_device(id, true);
     }
 }
 

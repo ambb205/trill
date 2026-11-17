@@ -3,8 +3,9 @@
 //! audio thread's load and the MCP address.
 
 use super::arrangement::ops;
+use super::files::Confirm;
 use super::shortcuts::{self, Command};
-use super::state::{Clipboard, Cx, DetailTab};
+use super::state::{Clipboard, Cx, DetailTab, StoryAsk};
 use super::{arrangement, audio_settings, brand, files, recording, recovery, timeline};
 use eframe::egui::{self, Align2, Id, Rect, Sense, Ui, pos2, vec2};
 use trill_core::TimeSignature;
@@ -36,8 +37,11 @@ const COUNT_WIDTH: f32 = 66.0;
 /// The song position without its clock, as the narrowest windows show it.
 const POSITION_COMPACT: f32 = 76.0;
 const TRANSPORT_WIDTH: f32 =
-    5.0 * BUTTON_WIDTH + COUNT_WIDTH + 3.0 * 4.0 + 10.0 + POSITION_WIDTH + 6.0 + TEMPO_WIDTH + 6.0 + SIGNATURE_WIDTH;
-const TRANSPORT_COMPACT: f32 = TRANSPORT_WIDTH - (POSITION_WIDTH - POSITION_COMPACT);
+    6.0 * BUTTON_WIDTH + COUNT_WIDTH + 4.0 * 4.0 + 10.0 + POSITION_WIDTH + 6.0 + TEMPO_WIDTH + 6.0 + SIGNATURE_WIDTH;
+/// What the narrowest windows leave out of the transport: the clock, and
+/// the button that opens the stage (its key and the View menu still do).
+const TRANSPORT_GIVES_UP: f32 = (POSITION_WIDTH - POSITION_COMPACT) + BUTTON_WIDTH + 4.0;
+const TRANSPORT_COMPACT: f32 = TRANSPORT_WIDTH - TRANSPORT_GIVES_UP;
 const CPU_METER_WIDTH: f32 = 54.0;
 
 pub fn show(ui: &mut Ui, cx: &mut Cx) {
@@ -185,6 +189,19 @@ fn file_menu(ui: &mut Ui, cx: &mut Cx) {
     if MenuItem::new("Export WAV and stems\u{2026}").enabled(idle).show(ui, theme).clicked() {
         files::export_stems(ui.ctx(), cx);
     }
+    // How the song was made, as a file to hand on: by name, and without
+    // the conversation unless that is what is asked for.
+    trill_noir::menu_separator(ui, theme);
+    trill_noir::menu_heading(ui, theme, "Making of");
+    if MenuItem::new("Export\u{2026}").show(ui, theme).clicked() {
+        files::export_story(ui.ctx(), cx, false);
+    }
+    if MenuItem::new("Export with the conversation\u{2026}").show(ui, theme).clicked() {
+        files::export_story(ui.ctx(), cx, true);
+    }
+    if MenuItem::new("Watch one from a file\u{2026}").show(ui, theme).clicked() {
+        files::watch_story(ui.ctx(), cx);
+    }
     trill_noir::menu_separator(ui, theme);
     if item(ui, "Audio and MIDI\u{2026}", Command::AudioSettings, true) {
         audio_settings::open(cx);
@@ -300,6 +317,22 @@ fn view_menu(ui: &mut Ui, cx: &mut Cx) {
     if MenuItem::new("Computer keyboard").shortcut(&switch).checked(playing).show(ui, theme).clicked() {
         cx.keyboard.toggle();
     }
+    if MenuItem::new("Stage").shortcut(&keys(Command::ToggleStage)).show(ui, theme).clicked() {
+        cx.state.stage_open = true;
+    }
+    // The making-of: the session played again, and the journal it is
+    // played from.
+    trill_noir::menu_separator(ui, theme);
+    if MenuItem::new("Making of").shortcut(&keys(Command::MakingOf)).show(ui, theme).clicked() {
+        cx.state.story = Some(StoryAsk::Watch);
+    }
+    let keeping = cx.with_session(|session| session.keeps_journal());
+    if MenuItem::new("Keep a journal").checked(keeping).show(ui, theme).clicked() {
+        files::keep_journal(cx, !keeping);
+    }
+    if MenuItem::new("Delete this song\u{2019}s journal\u{2026}").enabled(keeping).show(ui, theme).clicked() {
+        cx.jobs.confirm = Some(Confirm::DeleteJournal);
+    }
     trill_noir::menu_separator(ui, theme);
     for (tab, label) in [(DetailTab::Clip, "Clip"), (DetailTab::Devices, "Devices"), (DetailTab::Mixer, "Mixer")] {
         if MenuItem::new(label).checked(cx.state.detail_tab == tab).show(ui, theme).clicked() {
@@ -341,8 +374,9 @@ fn capitalized(name: &str) -> String {
     letters.next().map_or_else(String::new, |first| first.to_uppercase().chain(letters).collect())
 }
 
-/// Play, stop and record with its count-in, loop and metronome, then
-/// position, tempo and time signature. `compact` leaves the clock out.
+/// Play, stop and record with its count-in, loop, metronome and the stage,
+/// then position, tempo and time signature. `compact` leaves out the clock
+/// and the stage's button.
 fn transport_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, left: f32, compact: bool) {
     let theme = cx.theme;
     let id = ui.scope_id().with("transport");
@@ -406,6 +440,16 @@ fn transport_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, left: f32, compact: bool
     cx.hint(&response, shortcuts::with_keys(about, Command::ToggleMetronome, playing));
     if response.clicked() {
         toggle_metronome(cx);
+    }
+    if !compact {
+        // The stage: the same playback, filmed.
+        let rect = button(&mut x);
+        let response = trill_noir::icon_button(ui, theme, rect, id.with("stage"), Icon::Stage, false, theme.ink_dim);
+        let about = "The stage: the song filmed as it plays";
+        cx.hint(&response, shortcuts::with_keys(about, Command::ToggleStage, playing));
+        if response.clicked() {
+            cx.state.stage_open = true;
+        }
     }
     x += 6.0;
 
@@ -689,7 +733,8 @@ mod tests {
         assert_eq!(transport_width(full + 200.0), (TRANSPORT_WIDTH, false));
         assert_eq!(transport_width(full), (TRANSPORT_WIDTH, false), "an exact fit is a fit");
         assert_eq!(transport_width(full - 1.0), (TRANSPORT_COMPACT, true));
-        assert_eq!(TRANSPORT_WIDTH - TRANSPORT_COMPACT, POSITION_WIDTH - POSITION_COMPACT, "the clock is what goes");
+        let given_up = (POSITION_WIDTH - POSITION_COMPACT) + BUTTON_WIDTH + 4.0;
+        assert_eq!(TRANSPORT_WIDTH - TRANSPORT_COMPACT, given_up, "the clock and the stage's button are what go");
         // The smallest window with everything in the bar that can be: the
         // name cut to a few letters, the dot of unsaved work, the MCP chip.
         // Wordmark and menus take about 290 points and the right about
