@@ -470,9 +470,10 @@ fn render_from(
         let analyzer = if file.is_some() { analyzer.with_true_peak() } else { analyzer };
         Box::new(Tap { analyzer, file })
     };
-    // A track that is made only for what it sends to a soloed return adds
-    // nothing itself: it has no row and no file.
-    for node in graph.tracks.iter_mut().filter(|node| node.to_output) {
+    // A track that is made only for what it feeds (a soloed return, a
+    // device that listens to it) is not heard itself: it has no row and
+    // no file.
+    for node in graph.tracks.iter_mut().filter(|node| node.heard) {
         let track = project.track(node.id).ok();
         let file = match (track, stems) {
             (Some(track), Some(stems)) => match stems.kind_of(track) {

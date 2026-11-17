@@ -207,6 +207,10 @@ pub fn device_json(device: &Device) -> Value {
     if !device.enabled {
         out["enabled"] = json!(false);
     }
+    // The track it listens to in place of its own input.
+    if let Some(track) = device.sidechain {
+        out["sidechain"] = json!(track);
+    }
     out
 }
 

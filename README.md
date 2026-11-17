@@ -29,7 +29,7 @@ Development builds are optimized (see `[profile.dev]`), because unoptimized audi
 
 ### Building and testing
 
-`cargo test --workspace` runs about 1,300 tests in about a minute. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 1,930 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -48,6 +48,7 @@ TRILL_TEST_CLAUDE=1 cargo test -p trill-assistant --test real_cli    # talks to 
 TRILL_TEST_CLAUDE=1 cargo test -p trill-app live_ -- --test-threads=1    # ...through the assistant's panel (seven messages)
 cargo test -p trill-engine --test machine -- --include-ignored --nocapture     # opens this machine's audio outputs (silence only) and prints their latency
 cargo test -p trill-runtime --test machine -- --include-ignored --nocapture    # lists and opens this machine's MIDI inputs
+cargo test -p trill-engine --test journal what_recording_a_step_costs -- --ignored --nocapture    # what keeping the journal costs an edit on a large project (a measurement; run it alone)
 ```
 
 Run the first two after touching plugin hosting or audio decoding, and the last two after touching the audio
@@ -119,6 +120,33 @@ through which files are written only into the project's folder or `Documents/Tri
 
 ![The assistant after a turn that added a bass line, with the Undo for it](docs/images/assistant-answered.png)
 
+### Watch how a song was made
+
+Trill keeps a journal of the session: every change to the song is a step in it, with who made it (you at the
+window, the assistant, or a program working through MCP), when, what it was in words and where in the song it
+landed; between the steps, what you and the assistant said, its plan, and what it measured. **Making of**
+(`Ctrl+Shift+M`, or the View menu) plays the session again from it: the arrangement and the piano roll show the
+song as it was, clips arriving and notes filling in in the order they sound, the view going where each step
+landed; the conversation as it came stands down the right; and the whole session is a line along the bottom to
+play, hold, step through (`Left`, `Right`) and scrub, at half speed up to eight times.
+
+- The waiting is cut out. A step is given the time it takes to watch and a long wait is a beat, so an hour of
+  work plays in a few minutes, or in one at a higher speed.
+- Nothing there can change the song: what is watched is a copy, and leaving (`Esc`) puts the window back as it
+  was.
+- Undo takes nothing out of the story. A step that was undone is followed by one that takes it back, and a redo
+  by one that brings it back.
+- **The journal never travels with the song.** It has your conversation in it, so it is kept in Trill's own
+  folder (`journals`, beside the settings), written when the song is saved, and never in the project file or
+  beside it: sending someone a `.trill` file sends the song. To hand the story on, *File, Making of, Export*
+  writes it to a `.trillstory` file, without the conversation unless you choose the item that says with it; the
+  other side watches it with *Watch one from a file*.
+- It costs little: a step holds what it changed, and a plugin's state (megabytes) is held once however many
+  steps it lasts through. A hundred steps on a song with a megabyte of state add about 30 KB. Past 20,000
+  entries or 32 MB of story the oldest entries are let go, and the story begins with the song as it was after
+  them. Journals are kept for the two hundred songs most recently saved.
+- *View, Keep a journal* switches it off; *Delete this song's journal* deletes one.
+
 ## What is in the box
 
 **Instruments**
@@ -130,9 +158,32 @@ through which files are written only into the project's folder or `Documents/Tri
 | `builtin:sampler` | Plays one audio file across the keyboard: loops with crossfade, reverse, one-shot, amp and filter envelopes. |
 | `builtin:drumrack` | Sixteen pads on the General MIDI drum notes, each playing its own audio file, with level, pan, tune, decay and choke groups. |
 
-**Effects**: `reverb`, `delay` (tempo-synced, ping-pong), `eq` (6-band), `compressor`, `limiter` (look-ahead
-brickwall), `chorus`, `filter` (resonant, with LFO), `pump` (sidechain-style ducking locked to the grid),
-`saturator`, `utility`.
+**Effects**
+
+| Device | |
+|---|---|
+| `builtin:eq` | Six bands: a low cut and a high cut of 12, 24 or 48 dB an octave (Butterworth), two shelves with a Q, two bells. Every band reaches from 20 Hz to 20 kHz. |
+| `builtin:compressor` | Two detectors: `peak` follows every sample, for a single track; `bus` holds the peaks, so that a slow attack still works on a group or the whole mix. Automatic release, automatic makeup (0.72 of what a full-scale signal would lose), parallel mix, and a **sidechain**: any other track as its key, with a low cut and a high cut on what it hears. |
+| `builtin:limiter` | Look-ahead brickwall limiter. |
+| `builtin:reverb` | Algorithmic reverb with a filter on what goes in (low cut and high cut, 12 dB an octave), damping, pre-delay, modulation and a stereo width. A longer decay returns more. |
+| `builtin:delay` | Tempo-synced echo, stereo or ping-pong: the left and the right repeat of a pair at one level, feeding back once a pair. Filters what comes in and each time round. |
+| `builtin:filter` | Resonant low-pass, high-pass, band-pass or notch at 12 or 24 dB an octave, with an LFO. |
+| `builtin:chorus` | Stereo chorus with a width. |
+| `builtin:tremolo` | Tremolo and auto-pan: sine, triangle or square, free or in time with the song, the two sides together or taking turns. |
+| `builtin:pump` | Ducking locked to the grid, for when there is no kick to listen to. |
+| `builtin:saturator`, `builtin:utility` | Waveshaping distortion; gain, pan and width. |
+
+A compressor's sidechain is the track as it leaves its devices, ahead of its fader and its mute, so a muted track
+serves as a key. It is set in the compressor's panel ("Listen to") and with `sidechain` on `add_device` and
+`update_device`, and a track that is listened to is still played when only some tracks are heard. A hosted
+plugin's sidechain input is not connected yet.
+
+What these devices do is held to numbers by renders (`trill-engine/tests/effects.rs`): the cuts to a Butterworth
+filter of their order, the compressor to what it takes off a signal of known crest, the delay to its first
+repeats, and the reverb, the makeup and the steep filter to what Ableton Live's were measured to do on one song.
+A song saved before the reverb and the delay were rebuilt (file format 1) keeps the sound it had: opening it
+switches their `legacy` on, and `trill-engine/tests/old_songs.rs` holds every effect to the samples it rendered
+to then.
 
 **Plugins**: installed CLAP and VST3 plugins appear beside the built-in devices as `clap:<plugin id>` and
 `vst3:<class id>`. Their state is saved in the project, and their parameters are automatable and reachable over
@@ -396,6 +447,7 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Area | Tools |
 |---|---|
 | Project | `get_project`, `set_project`, `new_project`, `save_project`, `load_project`, `recover_project`, `import_midi`, `export_midi`, `history` |
+| How it was made | `get_journal` (the steps of the session, who made each and where it landed, a page at a time; found by their words), `get_song_at` (the song as it was after any step), `journal` (keep one or not, write it out to hand on, delete it) |
 | Tracks | `create_track`, `update_track`, `delete_track` |
 | Devices | `list_devices`, `describe_device`, `add_device`, `get_device`, `update_device`, `delete_device`, `show_device_editor` |
 | Presets | `search_presets` (one search across the presets of every installed instrument and the saved ones), `save_preset` (keeps a device's sound under a name) |
@@ -427,11 +479,17 @@ sentence: its presets are in its own window, and `save_preset` keeps what is cho
 
 `get_device` is small whatever the device: for a plugin with hundreds of parameters it gives the count and the
 ones that are not at the plugin's own defaults, `query` finds others by name with their ranges and choices, and
-`show: "all"` pages through every one. Each of a plugin's parameters comes with `text`, the value as the plugin
+`show: "all"` pages through every one. It says which track a compressor listens to (`sidechain`), which
+`add_device` and `update_device` set. Each of a plugin's parameters comes with `text`, the value as the plugin
 displays it, and `update_device` takes that text as well as a number: `{"Cab L Mic Type": "Dynamic 57", "Input
 Gain": "-6 dB"}`. It also says which channels the device takes and gives. Where a plugin's saved state has
 settings that no parameter reaches, `get_device` counts them (`settings_count`), `query` finds them by name beside
 the parameters, and `update_device` sets them: `"settings": {"M-Fret Sound": 1}`.
+
+Every call is entered in the session's journal as it is made, under what it did in words and by the name the
+client gave: `get_journal` lists them, `search: "chorus"` finds the step where the chorus was written, `after`
+lists what changed since, and `get_song_at` shows the song as it was there. Undoing takes nothing out: a step
+that was undone is followed by one that takes it back.
 
 The HTTP server listens on localhost only and has no password: any program on the machine may use it. Pages in a
 web browser may not; requests that carry a browser's `Origin` are refused.
@@ -464,7 +522,8 @@ has been run yet.
 
 ```
 crates/
-  trill-core      Project model, edit operations, and the device API. No audio or UI dependencies.
+  trill-core      Project model, edit operations, the device API, and the journal of a session with its replay.
+                  No audio or UI dependencies.
   trill-dsp       Built-in instruments and effects, and offline time-stretching.
   trill-media     Audio file decoding and caching, waveform overviews, sample-rate conversion, WAV writing.
   trill-engine    Realtime engine, offline renderer, analysis, and the Session.
@@ -503,7 +562,11 @@ Not yet: running plugins out of process (only scanning and the reading of preset
 that crashes while playing or while it loads a preset still takes the app with it; the safety copy is what saves
 the work), a preset browser for plugins in the window (the session lists, searches and loads them, and so does
 MCP; the device panel shows built-in and saved presets only), asking a CLAP plugin for a stereo layout when its
-default is mono (a VST3 plugin is asked), plugin editors on Linux and macOS,
+default is mono (a VST3 plugin is asked), a hosted plugin's sidechain input (the built-in compressor has one),
+plugin editors on Linux and macOS,
+a film of a making-of (the replay gives the song as it was at any moment and where the action is; nothing
+renders it to video yet), hearing a making-of (it is silent: the song as it was is shown, not played),
+finding a song's journal again after its file was moved or renamed (it is kept by where the file is),
 session (clip-launching) view, audio recording (MIDI is recorded; audio is not), polyphonic aftertouch and MPE
 (per-note expression; clips hold one curve per controller for the whole channel), ASIO, warp markers, plugin
 delay compensation, multi-core rendering. Only Windows has been run so far.

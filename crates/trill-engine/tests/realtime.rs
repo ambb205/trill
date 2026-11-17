@@ -11,6 +11,11 @@
 //! frames, putting every one of them back where the loop starts, giving
 //! way to a controller moved by hand and taking it back.
 //!
+//! And so must routing: a compressor that listens to another track is
+//! handed that track's audio block by block, whatever order that puts the
+//! tracks in, and a track that is not heard plays into a group that is
+//! listened to.
+//!
 //! This test binary replaces the global allocator with one that counts the
 //! calls made by the current thread while the processor runs. The devices
 //! get the same treatment in `trill-dsp` and `trill-plugins`.
@@ -187,6 +192,72 @@ fn playing_audio_clips_and_swapping_graphs_never_touches_the_allocator() {
     assert!(level > 0.3);
     assert_eq!(calls, 0, "{calls} allocator calls while handing over from a stand-in");
     assert_eq!(retired.len(), 3);
+}
+
+#[test]
+fn a_device_that_listens_to_another_track_never_touches_the_allocator() {
+    use trill_core::{ChainRef, TrackKind};
+
+    let folder = folder();
+    let tone = write_wav(&file(&folder, "tone.wav"), SR, &sine(110.0, SR, 4.0, 0.5));
+    let clicks = write_wav(&file(&folder, "clicks 120bpm.wav"), SR, &click_track(120.0, 8, SR));
+
+    // A bass whose compressor listens to the drum group, which comes after
+    // it in the track list and is a group: the tracks are played in another
+    // order than they are listed in. The drums send to a return, and the
+    // master has a compressor that listens to the clicks themselves.
+    let (mut project, bass) = audio_project(120.0);
+    add_clip(&mut project, bass, &tone, 0.0, 8.0);
+    let squeeze = project.add_device(ChainRef::Track(bass), "builtin:compressor", "Duck", None).unwrap();
+    let params = &mut project.device_mut(squeeze).unwrap().params;
+    params.extend([("threshold".to_string(), -40.0), ("ratio".to_string(), 20.0), ("attack".to_string(), 0.5)]);
+    let drums = project.add_track_of_kind("Drums", TrackKind::Group);
+    let room = project.add_track_of_kind("Room", TrackKind::Return);
+    project.add_device(ChainRef::Track(room), "builtin:reverb", "Room", None).unwrap();
+    let kit = project.add_track("Kit");
+    add_clip(&mut project, kit, &clicks, 0.0, 8.0);
+    project.set_track_group(kit, Some(drums)).unwrap();
+    project.set_send(kit, room, Some(-6.0)).unwrap();
+    project.set_sidechain(squeeze, Some(drums)).unwrap();
+    let glue = project.add_device(ChainRef::Master, "builtin:compressor", "Glue", None).unwrap();
+    project.device_mut(glue).unwrap().params.insert("detector".to_string(), 1.0);
+    project.set_sidechain(glue, Some(kit)).unwrap();
+    project.set_loop(true, 0.0, 8.0).unwrap();
+
+    let mut controller = Controller {
+        bank: DeviceBank::default(),
+        meters: Meters::default(),
+        stand_ins: StandIns::default(),
+        audio: AudioSources::default(),
+    };
+    let mut processor = Processor::new(SR);
+    let (mut left, mut right) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+    let mut retired = Vec::with_capacity(8);
+    retired.push(processor.swap_graph(controller.compile_prepared(&project)));
+    processor.play();
+    play(&mut processor, &mut left, &mut right, 4_096);
+
+    // The same song with the bass soloed (the kit then plays into its group
+    // for the compressor and into nothing else), and with the sidechain
+    // taken away again: each a graph swapped in while the song plays.
+    let mut soloed = project.clone();
+    soloed.track_mut(bass).unwrap().solo = true;
+    let mut plain = project.clone();
+    plain.set_sidechain(squeeze, None).unwrap();
+    let mut graphs = vec![controller.compile(&plain), controller.compile(&soloed), controller.compile(&project)];
+    let mut levels = Vec::with_capacity(4);
+    let calls = allocator_calls(|| {
+        levels.push(play(&mut processor, &mut left, &mut right, 3 * SR as usize));
+        while let Some(graph) = graphs.pop() {
+            retired.push(processor.swap_graph(graph));
+            levels.push(play(&mut processor, &mut left, &mut right, 3 * SR as usize));
+        }
+        processor.stop();
+        play(&mut processor, &mut left, &mut right, 2_048);
+    });
+    assert!(levels.iter().all(|level| *level > 0.05), "the song should be sounding: {levels:?}");
+    assert_eq!(calls, 0, "{calls} allocator calls while devices listened to other tracks");
+    assert_eq!(retired.len(), 4);
 }
 
 #[test]

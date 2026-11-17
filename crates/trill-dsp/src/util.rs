@@ -201,10 +201,12 @@ impl Biquad {
         self.set(1.0 + alpha * a, -2.0 * cos, 1.0 - alpha * a, 1.0 + alpha / a, -2.0 * cos, 1.0 - alpha / a);
     }
 
-    pub fn set_low_shelf(&mut self, freq: f32, gain_db: f32, sample_rate: f32) {
+    /// A low shelf. `q` is the shelf's slope as a filter's Q: 0.707 is the
+    /// plain shelf, more overshoots on either side of the corner.
+    pub fn set_low_shelf(&mut self, freq: f32, gain_db: f32, q: f32, sample_rate: f32) {
         let a = 10f32.powf(gain_db / 40.0);
         let (sin, cos) = Self::omega(freq, sample_rate);
-        let beta = 2.0 * a.sqrt() * sin / (2.0 * std::f32::consts::FRAC_1_SQRT_2);
+        let beta = 2.0 * a.sqrt() * sin / (2.0 * q.max(0.05));
         self.set(
             a * ((a + 1.0) - (a - 1.0) * cos + beta),
             2.0 * a * ((a - 1.0) - (a + 1.0) * cos),
@@ -215,10 +217,11 @@ impl Biquad {
         );
     }
 
-    pub fn set_high_shelf(&mut self, freq: f32, gain_db: f32, sample_rate: f32) {
+    /// A high shelf; `q` as for [`Biquad::set_low_shelf`].
+    pub fn set_high_shelf(&mut self, freq: f32, gain_db: f32, q: f32, sample_rate: f32) {
         let a = 10f32.powf(gain_db / 40.0);
         let (sin, cos) = Self::omega(freq, sample_rate);
-        let beta = 2.0 * a.sqrt() * sin / (2.0 * std::f32::consts::FRAC_1_SQRT_2);
+        let beta = 2.0 * a.sqrt() * sin / (2.0 * q.max(0.05));
         self.set(
             a * ((a + 1.0) + (a - 1.0) * cos + beta),
             -2.0 * a * ((a - 1.0) + (a + 1.0) * cos),
@@ -253,6 +256,22 @@ impl Biquad {
         self.z1 = 0.0;
         self.z2 = 0.0;
     }
+}
+
+/// The Q of each biquad of a Butterworth filter made of `stages` of them in
+/// a row (order `2 * stages`, so 12 dB an octave a stage): maximally flat
+/// up to the corner, 3 dB down at it. For up to four stages; the unused
+/// places hold the Q of a single stage.
+pub fn butterworth_qs(stages: usize) -> [f32; 4] {
+    let stages = stages.clamp(1, 4);
+    let mut qs = [std::f32::consts::FRAC_1_SQRT_2; 4];
+    if stages > 1 {
+        for (index, q) in qs.iter_mut().take(stages).enumerate() {
+            let angle = std::f64::consts::PI * (2 * index + 1) as f64 / (4 * stages) as f64;
+            *q = (1.0 / (2.0 * angle.cos())) as f32;
+        }
+    }
+    qs
 }
 
 /// One-pole low-pass, also usable as a high-pass via `input - low`.
@@ -355,6 +374,16 @@ mod tests {
         assert_eq!(line.tap(1), 49.0);
         assert_eq!(line.tap(10), 40.0);
         assert_eq!(line.read(10.5), 39.5);
+    }
+
+    #[test]
+    fn butterworth_stages_have_the_textbook_qs() {
+        let close = |qs: [f32; 4], expected: &[f32]| qs.iter().zip(expected).all(|(q, e)| (q - e).abs() < 5e-4);
+        assert!(close(butterworth_qs(1), &[std::f32::consts::FRAC_1_SQRT_2]));
+        assert!(close(butterworth_qs(2), &[0.5412, 1.3066]));
+        assert!(close(butterworth_qs(4), &[0.5098, 0.6013, 0.9000, 2.5629]));
+        // A single stage is the same number the filters always used, to the bit.
+        assert_eq!(butterworth_qs(1)[0], std::f32::consts::FRAC_1_SQRT_2);
     }
 
     #[test]

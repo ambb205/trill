@@ -29,7 +29,7 @@ pub(super) const PANEL_HEADER: f32 = 22.0;
 pub(super) const BODY_PADDING: f32 = 8.0;
 pub(super) const BODY_TOP: f32 = 6.0;
 const BODY_BOTTOM: f32 = 8.0;
-const COLUMN_GAP: f32 = 12.0;
+pub(super) const COLUMN_GAP: f32 = 12.0;
 /// Height of a section heading, its rule included.
 pub(super) const SECTION_HEADER: f32 = 16.0;
 /// Extra space above a section that is not the first of its column.
@@ -531,6 +531,7 @@ fn rows(ui: &mut Ui, cx: &mut Cx, body: &Body, rows: &[Row], left: f32, mut top:
                     choice_chips(ui, cx, body, param, &labels, Some(&values), rect.min, width, chips);
                 }
             }
+            Row::Sidechain => sidechain_row(ui, cx, body, rect),
             Row::Pages(pages) => {
                 let memory = body.id.with("page");
                 // Opens on the first band that has been moved, so the page
@@ -553,6 +554,42 @@ fn rows(ui: &mut Ui, cx: &mut Cx, body: &Body, rows: &[Row], left: f32, mut top:
         top += bar + gap;
     }
     top
+}
+
+/// The track a device listens to in place of its own input, and the tracks
+/// to choose it from: every track but the device's own. One that cannot be
+/// (it plays through, or listens to, this one) is refused in words when it
+/// is chosen.
+fn sidechain_row(ui: &Ui, cx: &mut Cx, body: &Body, rect: Rect) {
+    let theme = cx.theme;
+    let project = &cx.snap.project;
+    let own = match project.device_chain(body.device.id) {
+        Ok(ChainRef::Track(track)) => Some(track),
+        _ => None,
+    };
+    let current = body.device.sidechain;
+    let name = current.and_then(|track| project.track(track).ok()).map(|track| track.name.as_str());
+    let shown = name.unwrap_or("Own input");
+    let response = trill_noir::dropdown(ui, theme, rect, body.id.with("sidechain"), "Listen to", shown, body.dimmed);
+    cx.hint(&response, "The track this device listens to, heard ahead of its fader and mute: a kick to duck a bass to");
+    let mut chosen = None;
+    egui::Popup::menu(&response).gap(1.0).show(|ui| {
+        ui.set_min_width(rect.width());
+        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+            if MenuItem::new("Own input").checked(current.is_none()).show(ui, theme).clicked() {
+                chosen = Some(None);
+            }
+            for track in project.tracks.iter().filter(|track| Some(track.id) != own) {
+                if MenuItem::new(&track.name).checked(current == Some(track.id)).show(ui, theme).clicked() {
+                    chosen = Some(Some(track.id));
+                }
+            }
+        });
+    });
+    if let Some(track) = chosen.filter(|track| *track != current) {
+        let device = body.device.id;
+        cx.try_session(|session| session.set_sidechain(device, track));
+    }
 }
 
 /// Shows a parameter's full name while the pointer is over a row of chips,
@@ -820,7 +857,7 @@ mod tests {
                             Row::Picks { picks, .. } => picks.iter().map(|(label, _)| *label).collect(),
                             Row::Pages(pages) => pages.iter().map(|page| page.label).collect(),
                             Row::Toggles(toggles) => toggles.iter().map(|(_, label)| *label).collect(),
-                            Row::Param { .. } => continue,
+                            Row::Param { .. } | Row::Sidechain => continue,
                         };
                         let width = trill_noir::chip_row_width(ui, &theme, &labels);
                         assert!(width <= column.width, "{}: {labels:?} need {width} of {}", layout.uri, column.width);
@@ -835,11 +872,12 @@ mod tests {
     fn pages_reserve_room_for_their_longest_page() {
         let eq = device_layouts::layout_for("builtin:eq").unwrap();
         let rows = eq.columns[0].sections[0].rows;
-        // The chips, then three bars: Mid 1 and Mid 2 have three parameters.
-        assert_eq!(rows_height(rows, 18.0, 3.0), 18.0 + 3.0 + 3.0 * 18.0 + 2.0 * 3.0);
+        // The chips, then four bars: the cuts have a frequency and a slope each.
+        assert_eq!(rows_height(rows, 18.0, 3.0), 18.0 + 3.0 + 4.0 * 18.0 + 3.0 * 3.0);
         let reverb = device_layouts::layout_for("builtin:reverb").unwrap();
         assert_eq!(rows_height(reverb.columns[0].sections[0].rows, 18.0, 3.0), 3.0 * 18.0 + 2.0 * 3.0);
-        assert_eq!(layout_width(reverb), 150.0 + 2.0 * BODY_PADDING);
+        // Two columns and the gap between them.
+        assert_eq!(layout_width(reverb), 2.0 * 150.0 + COLUMN_GAP + 2.0 * BODY_PADDING);
     }
 
     #[test]

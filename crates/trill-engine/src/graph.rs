@@ -74,6 +74,9 @@ pub(crate) struct DeviceSlot {
     /// already running"; the audio thread fills it in during the swap.
     pub processor: Option<Box<dyn DeviceProcessor>>,
     pub enabled: bool,
+    /// The key the device listens to, as a place in [`Graph::keys`]: only
+    /// for a device that takes a key and was given a track to listen to.
+    pub key: Option<usize>,
 }
 
 pub(crate) struct ParamAutomation {
@@ -286,12 +289,17 @@ pub(crate) struct TrackNode {
     pub chain: Chain,
     pub volume_db: f32,
     pub pan: f32,
-    /// Mute and solo, already resolved: whether the track passes sound at
-    /// all. One that does not is faded to nothing.
+    /// Mute and solo, already resolved: whether the track's own sound is
+    /// wanted in the mix. A render listens to the tracks that are.
+    pub heard: bool,
+    /// Whether the track passes sound at all: on to its output, or into a
+    /// send. One that does not is faded to nothing.
     pub passes: bool,
     /// Whether what it passes goes on to its output, the master or its
     /// group. A track that only feeds a soloed return through a send
-    /// passes sound and does not.
+    /// passes sound and does not. A track that is not heard but plays
+    /// through a group whose sound is wanted all the same (it sends to a
+    /// soloed return, or a device listens to it) does.
     pub to_output: bool,
     pub volume_automation: Option<Vec<AutomationPoint>>,
     pub pan_automation: Option<Vec<AutomationPoint>>,
@@ -304,6 +312,10 @@ pub(crate) struct TrackNode {
     pub output_bus: Option<usize>,
     /// Copies of the faded signal for return tracks.
     pub sends: Vec<SendNode>,
+    /// Where the track leaves a copy of itself as it comes out of its
+    /// devices, ahead of its fader, for the devices that listen to it: a
+    /// place in [`Graph::keys`].
+    pub key_out: Option<usize>,
     /// Listens to the track as it leaves its fader. Only a graph that is
     /// rendered has one; a graph that is played measures nothing.
     pub tap: Option<Box<Tap>>,
@@ -369,10 +381,14 @@ pub(crate) struct MasterNode {
 }
 
 pub struct Graph {
-    /// In processing order: every node comes before the bus it feeds
-    /// (normal tracks, then groups, then returns).
+    /// In processing order: every node comes before the bus it feeds and
+    /// before the tracks whose devices listen to it (normal tracks, then
+    /// groups, then returns, unless a key says otherwise).
     pub(crate) tracks: Vec<TrackNode>,
     pub(crate) buses: Vec<Bus>,
+    /// What the tracks that are listened to put out in the current block,
+    /// one for each such track.
+    pub(crate) keys: Vec<Bus>,
     pub(crate) master: MasterNode,
     pub(crate) tempo: f64,
     pub(crate) time_signature: TimeSignature,
@@ -385,6 +401,7 @@ impl Graph {
         Self {
             tracks: Vec::new(),
             buses: Vec::new(),
+            keys: Vec::new(),
             master: MasterNode {
                 chain: Chain::default(),
                 volume_db: 0.0,

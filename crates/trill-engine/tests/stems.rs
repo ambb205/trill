@@ -444,3 +444,68 @@ fn a_soloed_return_is_heard_as_every_track_feeds_it_and_a_soloed_track_with_its_
     let silent = silent.render(&RenderOptions { max_tail_seconds: 0.5, ..options() }).unwrap();
     assert_eq!(peak(&silent.left), 0.0);
 }
+
+#[test]
+fn a_track_that_a_device_listens_to_is_made_for_whatever_is_heard_and_a_muted_return_can_be_a_key() {
+    // A pad that a compressor turns down under the kick, and sends to a
+    // hall. The kick itself sends nothing there.
+    let squeeze = [("threshold", -40.0), ("ratio", 10.0), ("attack", 1.0), ("release", 60.0)];
+    let build = || {
+        let mut project = Project::new("keyed");
+        let hall = project.add_track_of_kind("Hall", TrackKind::Return);
+        device(&mut project, ChainRef::Track(hall), "builtin:reverb", &[("mix", 1.0)]);
+        let kicks: Vec<Note> = (0..8).map(|beat| note(36, f64::from(beat), 0.25)).collect();
+        let kick = part(&mut project, "Kick", "builtin:drumkit", &kicks);
+        let pad = part(&mut project, "Pad", "builtin:polysynth", &[note(57, 0.0, 8.0)]);
+        let compressor = device(&mut project, ChainRef::Track(pad), "builtin:compressor", &squeeze);
+        project.set_send(pad, hall, Some(-6.0)).unwrap();
+        (project, hall, kick, pad, compressor)
+    };
+    let scripted = ScriptedFactory::new();
+    let folder = tempfile::tempdir().unwrap();
+    let hall_of = |project: &Project, hall: TrackId, name: &str| {
+        let stems = Stems { folder: folder.path().join(name), returns: true, ..Stems::default() };
+        let whole = render(project, &scripted, &RenderOptions { stems: Some(stems), ..options() });
+        let stem = whole.measured.stems.iter().find(|stem| stem.track == Some(hall)).unwrap();
+        read(&stem.path)
+    };
+
+    // The hall heard alone is the hall of the whole song: the pad that
+    // feeds it is made, and so is the kick the pad's compressor listens
+    // to, though the kick is neither heard nor sent anywhere.
+    let (mut project, hall, kick, pad, compressor) = build();
+    let unkeyed = hall_of(&project, hall, "unkeyed");
+    project.set_sidechain(compressor, Some(kick)).unwrap();
+    let keyed = hall_of(&project, hall, "keyed");
+    assert!(apart("the hall with and without the kick as a key", &keyed, (&unkeyed.0, &unkeyed.1)) > 0.01);
+    let alone = render(&project, &scripted, &RenderOptions { only_tracks: Some(vec![hall]), ..options() });
+    let off = apart("the hall heard alone", &keyed, (&alone.left, &alone.right));
+    assert!(off < 1e-6, "{off} from the hall of the whole song");
+    let rows: Vec<TrackId> = alone.measured.tracks.iter().map(|level| level.track).collect();
+    assert_eq!(rows, [hall], "neither the pad nor the kick is heard");
+
+    // A return that is muted can be what a device listens to: the kick's
+    // send still reaches it, and the pad is turned down as by the kick
+    // itself. Heard alone, the pad is turned down the same way: what its
+    // compressor listens to is fed as in the whole song, by a kick that is
+    // not heard.
+    let pad_of = |project: &Project, pad: TrackId, name: &str, only: Option<Vec<TrackId>>| {
+        let stems = Stems { folder: folder.path().join(name), tracks: true, ..Stems::default() };
+        let out = render(project, &scripted, &RenderOptions { stems: Some(stems), only_tracks: only, ..options() });
+        let stem = out.measured.stems.iter().find(|stem| stem.track == Some(pad)).unwrap();
+        read(&stem.path)
+    };
+    let by_itself = pad_of(&build().0, pad, "by itself", None);
+    let by_the_kick = pad_of(&project, pad, "by the kick", None);
+    assert!(apart("the pad with and without a key", &by_the_kick, (&by_itself.0, &by_itself.1)) > 0.01);
+    let side = project.add_track_of_kind("Side", TrackKind::Return);
+    project.set_send(kick, side, Some(0.0)).unwrap();
+    project.track_mut(side).unwrap().mute = true;
+    project.set_sidechain(compressor, Some(side)).unwrap();
+    let by_the_return = pad_of(&project, pad, "by the return", None);
+    let off = apart("the pad under a muted return", &by_the_return, (&by_the_kick.0, &by_the_kick.1));
+    assert!(off < 1e-4, "{off} from the pad under the kick itself");
+    let alone = pad_of(&project, pad, "alone", Some(vec![pad]));
+    let off = apart("the pad heard alone", &alone, (&by_the_return.0, &by_the_return.1));
+    assert!(off < 1e-6, "{off} from the pad in the whole song");
+}

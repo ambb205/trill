@@ -61,6 +61,8 @@ pub enum Command {
     ToggleBrowser,
     ToggleAssistant,
     ToggleKeyboard,
+    /// Opens the making-of of the song, or leaves it.
+    MakingOf,
     /// Starts a take, or ends the one being recorded.
     Record,
     AudioSettings,
@@ -250,6 +252,7 @@ pub const BINDINGS: &[Binding] = &[
     bind(Command::ZoomToSong, SHIFT, Key::Z, When::NotTyping, Section::View, "Zoom to the whole song"),
     bind(Command::ToggleBrowser, CTRL, Key::B, When::NotTyping, Section::View, "Show or hide the browser"),
     bind(Command::ToggleAssistant, CTRL_SHIFT, Key::A, When::Always, Section::View, "Show or hide the assistant"),
+    bind(Command::MakingOf, CTRL_SHIFT, Key::M, When::Always, Section::View, "Watch how the song was made"),
     bind(Command::ShowShortcuts, NONE, Key::F1, When::Always, Section::View, "This reference"),
     bind(
         Command::ToggleKeyboard,
@@ -302,6 +305,17 @@ const GESTURES: &[(&str, &[(&str, &str)])] = &[
             ("Drag below the tracks", "A new audio track"),
             ("Drag onto a pad or a sampler", "It plays that sound"),
             ("Double-click", "Add at the edit cursor"),
+        ],
+    ),
+    (
+        "Making of",
+        &[
+            ("Space", "Play the session again, or hold it"),
+            ("Left and Right", "To the step before, or the next"),
+            ("Home", "To the beginning"),
+            ("Click the line", "Go there"),
+            ("Drag the line", "Scrub"),
+            ("Esc", "Back to the song"),
         ],
     ),
     (

@@ -315,6 +315,70 @@ fn everything_a_turn_changes_is_one_undo_step_with_an_undo_of_its_own() {
 }
 
 #[test]
+fn what_is_asked_said_and_planned_is_entered_in_the_songs_journal_as_it_comes() {
+    use trill_core::journal::{Author, Entry, Outcome, What};
+    use trill_engine::journal::acting;
+    let (mut harness, script, ..) = assisted();
+    let entries = |harness: &Harness| -> Vec<(Author, String)> {
+        let session = harness.session.lock();
+        session.journal().unwrap().entries().map(|entry: &Entry| (entry.by.clone(), entry.line())).collect()
+    };
+    let before = entries(&harness).len();
+
+    harness.tell("add a bass part");
+    script.say([started(), text("I\u{2019}ll add "), text("a track for it.")]);
+    harness.idle(3);
+    script.say([planned("1", "Add the track", None), stands("1", StepStatus::InProgress)]);
+    harness.idle(3);
+    // The reply stands in the journal from its first words, so that a call
+    // made before the window has seen its end comes after it. The server
+    // enters the call itself; here the test does, as the server would.
+    script.say([call("1", "create_track", json!({ "name": "Bass" }))]);
+    {
+        let mut session = harness.session.lock();
+        let call =
+            session.begin_call(Author::Assistant, "create_track", "Added the track \u{201C}Bass\u{201D}").unwrap();
+        {
+            let _acting = acting(call);
+            session.edit(|project| Ok(project.add_track("Bass"))).unwrap();
+        }
+        session.end_call(call, Outcome::default());
+    }
+    harness.idle(3);
+    script.say([answer("1", "create_track", Ok("{\"track_id\":9}"))]);
+    script.say([looks_up("2", WebLookup::Search { query: "walking bass".into() })]);
+    harness.idle(2);
+    script.say([found("2", Ok("Three results."))]);
+    script.say([stands("1", StepStatus::Done), text("Added a bass track."), finished()]);
+    harness.idle(4);
+
+    let told = entries(&harness)[before..].to_vec();
+    let (you, assistant) = (Author::Person, Author::Assistant);
+    assert_eq!(
+        told,
+        [
+            (you, "add a bass part".to_owned()),
+            (assistant.clone(), "I\u{2019}ll add a track for it.".to_owned()),
+            (assistant.clone(), "Plan: 0 of 1 done".to_owned()),
+            (assistant.clone(), "Plan: 0 of 1 done".to_owned()),
+            (assistant.clone(), "Added the track \u{201C}Bass\u{201D}".to_owned()),
+            (assistant.clone(), "Searched the web for \u{201C}walking bass\u{201D}".to_owned()),
+            (assistant.clone(), "Plan: 1 of 1 done".to_owned()),
+            (assistant.clone(), "Added a bass track.".to_owned()),
+            (assistant, "Finished in 21 s".to_owned()),
+        ]
+    );
+    let session = harness.session.lock();
+    let journal = session.journal().unwrap();
+    assert!(
+        journal.entries().any(|entry| matches!(&entry.what, What::Look(look) if look.tool.as_deref() == Some("web")))
+    );
+    assert_eq!(&journal.head().unwrap(), session.project(), "and the story leads to the song");
+    // All of it is as it stays: nothing is left that a file would wait for.
+    assert!(journal.to_text(true).contains("Finished in 21 s"));
+}
+
+#[test]
 fn a_stopped_turn_closes_its_group_and_nothing_is_sent_until_it_has_stopped() {
     let (mut harness, script, tracks, _) = assisted();
     let before = harness.project();
