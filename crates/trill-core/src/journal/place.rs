@@ -123,7 +123,9 @@ pub fn lane(project: &Project, target: &AutomationTarget) -> Option<AutomationTa
 /// whose track or device is gone.
 fn lane_track(project: &Project, target: &AutomationTarget) -> Option<TrackId> {
     match target {
-        AutomationTarget::TrackVolume { track } | AutomationTarget::TrackPan { track } => Some(*track),
+        AutomationTarget::TrackVolume { track }
+        | AutomationTarget::TrackPan { track }
+        | AutomationTarget::Send { track, .. } => Some(*track),
         AutomationTarget::DeviceParam { device, .. } => match project.device_chain(*device).ok()? {
             ChainRef::Track(track) => Some(track),
             ChainRef::Master => None,
