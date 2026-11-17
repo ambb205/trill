@@ -15,6 +15,7 @@ mod editors;
 mod keyboard;
 mod keys;
 mod making_of;
+mod missing;
 mod mixer;
 mod perf;
 mod recording;

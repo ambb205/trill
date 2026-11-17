@@ -94,6 +94,19 @@ pub(crate) fn sample_refs(state: Option<&[u8]>) -> Result<Vec<SampleRef>, StateE
     Ok(state.path.into_iter().map(|path| SampleRef { slot: "sample".to_string(), path }).collect())
 }
 
+/// The stored state with the file it names replaced by the one given for
+/// the slot `sample`; everything else in the document as it is.
+pub(crate) fn relinked(state: Option<&[u8]>, slots: &[(String, String)]) -> Result<Vec<u8>, StateError> {
+    let mut state = State::from_device_state(state)?;
+    for (slot, path) in slots {
+        if slot != "sample" || state.path.is_none() {
+            return Err(StateError::Invalid(format!("a sampler has no file in '{slot}'")));
+        }
+        state.path = Some(path.clone());
+    }
+    Ok(state.to_bytes())
+}
+
 /// Creates a sampler from a stored state, loading its file.
 pub(crate) fn create(state: Option<&[u8]>, source: &SampleSource) -> Result<Box<dyn DeviceProcessor>, String> {
     let sample = match State::from_device_state(state) {

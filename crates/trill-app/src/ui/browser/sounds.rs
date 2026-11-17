@@ -444,10 +444,14 @@ struct TreeNode {
     files: Option<usize>,
     has_subfolders: bool,
     is_root: bool,
+    /// A folder of the library that is not where the library has it.
+    missing: bool,
 }
 
 /// The folders on show: the roots, and what is unfolded beneath them.
-fn tree(index: &Index, roots: &[PathBuf], browser: &SoundBrowser) -> Vec<TreeNode> {
+/// `gone` are the roots that are not on disk: what the library knew in
+/// them is still listed, and they are marked.
+fn tree(index: &Index, roots: &[PathBuf], gone: &[PathBuf], browser: &SoundBrowser) -> Vec<TreeNode> {
     fn add(index: &Index, path: &Path, depth: usize, browser: &SoundBrowser, out: &mut Vec<TreeNode>) {
         let folder = index.find_folder(path).and_then(|id| index.folder(id));
         let name = folder.map(|folder| folder.name().to_owned()).filter(|name| !name.is_empty());
@@ -459,6 +463,7 @@ fn tree(index: &Index, roots: &[PathBuf], browser: &SoundBrowser) -> Vec<TreeNod
             files: folder.map(|folder| folder.all_files().len()),
             has_subfolders: folder.is_some_and(|folder| !folder.subfolders().is_empty()),
             is_root: depth == 0,
+            missing: false,
         });
         if let Some(folder) = folder.filter(|_| browser.expanded.contains(path)) {
             for sub in folder.subfolders().iter().filter_map(|id| index.folder(*id)) {
@@ -468,7 +473,9 @@ fn tree(index: &Index, roots: &[PathBuf], browser: &SoundBrowser) -> Vec<TreeNod
     }
     let mut nodes = Vec::new();
     for root in roots {
+        let at = nodes.len();
         add(index, root, 0, browser, &mut nodes);
+        nodes[at].missing = gone.contains(root);
     }
     nodes
 }
@@ -559,7 +566,8 @@ fn folders(ui: &mut Ui, cx: &mut Cx, area: Rect, roots: &[PathBuf]) -> f32 {
         Some(found) => found.results.index().clone(),
         None => cx.sounds.runtime.library.index(),
     };
-    let nodes = tree(&index, roots, &cx.state.browser.sounds);
+    let gone: Vec<PathBuf> = cx.sounds.missing.found.folders.iter().map(|folder| folder.path.clone()).collect();
+    let nodes = tree(&index, roots, &gone, &cx.state.browser.sounds);
     // "All folders" leads the list.
     let wanted = (nodes.len() + 1) as f32 * TREE_ROW + 4.0;
     let height = wanted.min((area.height() * TREE_SHARE).max(3.0 * TREE_ROW)).min(area.height() - SECTION_HEADER);
@@ -635,10 +643,21 @@ fn folder_row(ui: &mut Ui, cx: &mut Cx, id: egui::Id, node: &TreeNode, selected:
     let unfolded = cx.state.browser.sounds.expanded.contains(&node.path);
     let row_id = id.with(("folder", &node.path));
     let caret = node.has_subfolders.then_some(unfolded);
-    let response = tree_row(ui, cx, row_id, &node.name, node.depth, node.files, selected, caret);
+    // A folder that is gone says so where its count of files would be.
+    let files = if node.missing { None } else { node.files };
+    let response = tree_row(ui, cx, row_id, &node.name, node.depth, files, selected, caret);
+    if node.missing {
+        let room = response.rect.shrink2(vec2(EDGE, 0.0));
+        text::paint(ui.painter(), room, Align2::RIGHT_CENTER, theme.text.micro, "Missing", theme.warn);
+    }
     cx.hint(
         &response,
-        if node.is_root {
+        if node.missing {
+            format!(
+                "{} is not where it was: moved, renamed, or on a drive that is not there \u{00B7} right-click to say where it went",
+                node.path.display()
+            )
+        } else if node.is_root {
             format!("{} \u{00B7} click to look only in here \u{00B7} right-click for more", node.path.display())
         } else {
             format!("{} \u{00B7} click to look only in here", node.path.display())
@@ -679,6 +698,23 @@ fn folder_row(ui: &mut Ui, cx: &mut Cx, id: egui::Id, node: &TreeNode, selected:
         }
         if MenuItem::new("Copy path").show(ui, theme).clicked() {
             cx.state.copied_text = Some(node.path.display().to_string());
+        }
+        if node.missing {
+            trill_noir::menu_separator(ui, theme);
+            if MenuItem::new("Find where it went\u{2026}")
+                .detail("Looks for the folder near where it was, and lists what the song is missing with it.")
+                .show(ui, theme)
+                .clicked()
+            {
+                crate::ui::missing::open(cx);
+            }
+            if MenuItem::new("Locate the folder\u{2026}")
+                .detail("Say where it is now. Favorites stay with their files; nothing on disk is touched.")
+                .show(ui, theme)
+                .clicked()
+            {
+                cx.sounds.locate_library_folder_dialog(node.path.clone());
+            }
         }
         if node.is_root {
             trill_noir::menu_separator(ui, theme);

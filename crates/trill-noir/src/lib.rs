@@ -56,7 +56,7 @@ mod waveform;
 
 pub use automation::{Automation, automation_mark, automation_zone};
 pub use bar::{Bar, BarOutput, bar};
-pub use button::{Variant, bare_icon_button, button, icon_button, tab, tab_width};
+pub use button::{Variant, bare_icon_button, button, button_width, icon_button, tab, tab_width};
 pub use chip::{Chip, chip, chip_row, chip_row_width};
 pub use fader::{Fader, fader};
 pub use field::{NumberField, NumberOutput, number_field, text_field};

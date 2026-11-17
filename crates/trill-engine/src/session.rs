@@ -23,6 +23,7 @@ use trill_media::MediaCache;
 
 mod controllers;
 mod editors;
+mod files;
 mod instruments;
 mod params;
 mod playing;
@@ -32,6 +33,7 @@ mod story;
 mod take;
 
 pub use controllers::SilentInstrument;
+pub use files::file_facts;
 pub use playing::{MAX_COUNT_IN_BARS, RecordState, RecordStatus};
 pub use probing::ProbeTarget;
 pub use take::TakeClip;
@@ -161,6 +163,9 @@ pub struct Session {
     playing: playing::Playing,
     /// The journal of the open project: how it came to be.
     story: story::Keeping,
+    /// What was written down about the files the song plays when it was
+    /// last saved or opened; see `session/files.rs`.
+    files: trill_core::FileTable,
 }
 
 impl Session {
@@ -225,6 +230,7 @@ impl Session {
             metronome: false,
             playing: playing::Playing::new(),
             story: story::Keeping::new(),
+            files: trill_core::FileTable::default(),
         };
         session.replace_project(Self::blank_project("Untitled"));
         Ok(session)
@@ -846,8 +852,10 @@ impl Session {
         }
         // Write beside the target and rename, so a crash mid-save cannot
         // leave a truncated project file.
+        // The song goes into the file with what is known of its files,
+        // and where each is from the folder the song is saved in.
         let temporary = path.with_extension("tmp");
-        std::fs::write(&temporary, self.project.to_json()).map_err(|e| io_error(path, e))?;
+        std::fs::write(&temporary, self.project_text(Some(path))).map_err(|e| io_error(path, e))?;
         std::fs::rename(&temporary, path).map_err(|e| io_error(path, e))?;
         self.path = Some(path.to_path_buf());
         self.saved_revision = self.revision;
@@ -859,8 +867,12 @@ impl Session {
 
     pub fn load(&mut self, path: &Path) -> Result<(), SessionError> {
         let json = std::fs::read_to_string(path).map_err(|e| io_error(path, e))?;
-        let project = self.with_known_instruments(Project::from_json(&json)?);
+        // A file that is beside the song, where the song says it was when
+        // it was saved, is the one it plays: see `session/files.rs`.
+        let (project, files) = self.read_project(&json, Some(path))?;
+        let project = self.with_known_instruments(project);
         self.replace_project(project);
+        self.files = files;
         self.path = Some(path.to_path_buf());
         self.take_up_journal(path);
         Ok(())
@@ -873,7 +885,8 @@ impl Session {
     pub fn snapshot_json(&mut self) -> String {
         self.absorb_editor_edits();
         self.capture_device_state();
-        self.project.to_json()
+        let song = self.path.clone();
+        self.project_text(song.as_deref())
     }
 
     /// Opens `copy`, a project file kept for safety, in place of a project
@@ -883,8 +896,11 @@ impl Session {
     /// whether the copy replaces what the file holds.
     pub fn load_recovered(&mut self, copy: &Path, original: Option<&Path>) -> Result<(), SessionError> {
         let json = std::fs::read_to_string(copy).map_err(|e| io_error(copy, e))?;
-        let project = self.with_known_instruments(Project::from_json(&json)?);
+        // The copy is not where the song lives: its paths stand as they are.
+        let (project, files) = self.read_project(&json, None)?;
+        let project = self.with_known_instruments(project);
         self.replace_project(project);
+        self.files = files;
         self.path = original.map(Path::to_path_buf);
         self.take_up_recovered_journal(copy, original);
         self.revision += 1;
@@ -951,6 +967,7 @@ impl Session {
         self.send_live_targets();
         // And another story begins.
         self.restart_journal();
+        self.files = trill_core::FileTable::default();
         self.revision += 1;
         self.saved_revision = self.revision;
     }

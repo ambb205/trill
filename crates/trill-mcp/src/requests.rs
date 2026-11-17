@@ -699,6 +699,10 @@ pub enum LibraryAction {
     AddFolder,
     /// Take `path` out of the library. Nothing on disk is touched.
     RemoveFolder,
+    /// Say that the library's folder `path` is at `to` now: it was moved or renamed outside Trill. Favorites and
+    /// recently used files that were in it stay with their files, and nothing is read again. Nothing on disk is
+    /// touched.
+    MoveFolder,
     /// Look again for new, changed and deleted files in every folder.
     Rescan,
     /// Folders on this machine that probably hold samples (Splice, DAW packs, a Samples folder), to offer the user.
@@ -708,8 +712,10 @@ pub enum LibraryAction {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LibraryRequest {
     pub action: LibraryAction,
-    /// The folder, for `add_folder` and `remove_folder`.
+    /// The folder, for `add_folder`, `remove_folder` and `move_folder` (the folder as the library has it).
     pub path: Option<String>,
+    /// For `move_folder`: where the folder is now.
+    pub to: Option<String>,
     /// For `add_folder` and `rescan`: how long to wait for the scan before replying, in seconds (default 15, at
     /// most 120). A scan that takes longer carries on in the background; `status` shows its progress.
     pub wait_seconds: Option<f64>,
