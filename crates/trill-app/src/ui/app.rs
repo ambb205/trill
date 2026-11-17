@@ -11,6 +11,7 @@ use super::keyboard::{self, Keyboard};
 use super::making_of::{self, MakingOf};
 use super::missing;
 use super::recovery::{self, Recovery};
+use super::setup::{self, Setup};
 use super::shortcuts::{self, Command};
 use super::snapshot::{Live, Snapshot};
 use super::sounds::{Dropped, Report, Sounds};
@@ -78,6 +79,7 @@ pub struct TrillApp {
     settings: Settings,
     /// The film panel, and the film being made if one is.
     filming: Filming,
+    setup: Setup,
     /// The song filmed as it plays, shown in place of the panes.
     stage: StageView,
     /// Whether the window had the whole screen before the stage took it:
@@ -255,6 +257,7 @@ impl TrillApp {
             keyboard,
             settings: Settings::default(),
             filming: Filming::default(),
+            setup: Setup::default(),
             stage: StageView::new(),
             screen_before: None,
             film_asked: None,
@@ -399,6 +402,7 @@ impl TrillApp {
             keyboard: &mut self.keyboard,
             settings: &mut self.settings,
             filming: &mut self.filming,
+            setup: &mut self.setup,
         }
     }
 
@@ -557,6 +561,11 @@ impl TrillApp {
             // it and for playing the song.
             commands.retain(|command| matches!(command, Command::ExportFilm | Command::Escape | Command::TogglePlay));
         }
+        if self.setup.is_open() {
+            // The Setup panel has the keyboard, but for the keys that close
+            // it and for playing the song.
+            commands.retain(|command| matches!(command, Command::Setup | Command::Escape | Command::TogglePlay));
+        }
         if self.settings.is_open() {
             // The panel has the keyboard, but for the key that closes it
             // and for playing the song to hear what a setting does. While
@@ -619,7 +628,10 @@ impl TrillApp {
             // What is still on its way (a scan, a waveform, a clip being
             // stretched) should be in the picture as it will be once it has
             // arrived: wait for it, then a few frames more.
-            let arriving = self.sounds.is_waiting() || self.live.preparing > 0 || self.settings.is_waiting();
+            let arriving = self.sounds.is_waiting()
+                || self.live.preparing > 0
+                || self.settings.is_waiting()
+                || self.setup.is_waiting();
             if arriving && elapsed < SCREENSHOT_PATIENCE {
                 self.busy_at_frame = self.frames;
             }
@@ -682,6 +694,7 @@ impl TrillApp {
         let replaced = self.jobs.poll(&mut self.state) | self.recovery.poll(&mut self.state);
         self.editors.poll(&mut self.state.toasts);
         self.settings.poll();
+        self.setup.poll();
         self.filming.poll(ctx, &mut self.state);
         self.take_reports();
         self.sync(ctx);
@@ -731,6 +744,7 @@ impl TrillApp {
             keyboard,
             settings,
             filming,
+            setup,
             film_asked,
             ..
         } = self;
@@ -805,6 +819,7 @@ impl TrillApp {
                     keyboard,
                     settings,
                     filming,
+                    setup,
                 };
                 if arrangement {
                     arrangement::show(ui, &mut cx);
@@ -871,6 +886,10 @@ impl TrillApp {
             film_asked.get_or_insert(filming::Of::Song);
         }
         let open_missing = std::mem::take(&mut self.options.show_missing);
+        let open_setup = std::mem::take(&mut self.options.show_setup);
+        if let Some(scene) = self.options.setup_scene.take() {
+            self.setup.show(scene);
+        }
         let mut cx = self.cx();
         if film_asked.is_some() {
             filming::open_on(&ctx, &mut cx, film_asked);
@@ -880,6 +899,9 @@ impl TrillApp {
         }
         if open_settings {
             audio_settings::open(&mut cx);
+        }
+        if open_setup {
+            setup::open(&ctx, &mut cx);
         }
         if open_missing {
             missing::open(&mut cx);
@@ -963,6 +985,7 @@ impl TrillApp {
         recovery::modal(&ctx, &mut cx);
         missing::modal(&ctx, &mut cx);
         audio_settings::modal(&ctx, &mut cx);
+        setup::modal(&ctx, &mut cx);
         filming::modal(&ctx, &mut cx);
         shortcuts::window(&ctx, &mut cx);
         // Clear of the assistant's panel: its Send and Stop are in that corner.
@@ -1087,6 +1110,18 @@ impl TrillApp {
     #[cfg(test)]
     pub fn filming(&self) -> &Filming {
         &self.filming
+    }
+
+    #[cfg(test)]
+    pub fn setup(&self) -> &Setup {
+        &self.setup
+    }
+
+    /// Keeps studies, or the parts of a list, in `folder`: what choosing a
+    /// folder in the system's dialog leads to.
+    #[cfg(test)]
+    pub fn keep_in(&mut self, ctx: &egui::Context, what: setup::Kept, folder: std::path::PathBuf) {
+        setup::keep_in(ctx, &mut self.cx(), what, folder);
     }
 
     /// Makes the film the panel describes at `path`: what choosing a place
@@ -1306,6 +1341,8 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
                 cx.state.shortcuts_open = false;
             } else if cx.settings.is_open() {
                 audio_settings::toggle(cx);
+            } else if cx.setup.is_open() {
+                setup::close(cx);
             } else if cx.filming.is_open() {
                 filming::close(cx);
             } else if dragging::cancel(cx) {
@@ -1354,6 +1391,7 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
         Command::MakingOf => cx.state.story = Some(StoryAsk::Watch),
         Command::Record => recording::toggle(cx),
         Command::AudioSettings => audio_settings::toggle(cx),
+        Command::Setup => setup::toggle(ctx, cx),
         Command::ShowShortcuts => cx.state.shortcuts_open = !cx.state.shortcuts_open,
     }
 }

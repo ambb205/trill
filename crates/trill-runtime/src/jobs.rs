@@ -187,12 +187,15 @@ fn make(told: &serde_json::Value) -> Result<Arc<dyn DeviceFactory>, String> {
 }
 
 /// Turns this process into one that does jobs for the process that
-/// started it, if it was started as one, and otherwise returns at once.
+/// started it (a render, a measurement, a probe, or a study of a
+/// recording), if it was started as one, and otherwise returns at once.
 ///
 /// A program that uses [`Program::CurrentExecutable`] calls this before
 /// anything else in `main`: the process that renders is the program's own
 /// executable, told apart by a variable in its environment.
 pub fn run_as_job_if_requested() {
+    // A study's run is done by the program started a second time too.
+    trill_study::helper::run_if_requested();
     if std::env::var_os(JOB_ENV).is_some() {
         trill_engine::apart::serve(&make)
     }

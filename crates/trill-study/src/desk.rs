@@ -37,8 +37,9 @@ pub struct DeskOptions {
     pub studies: PathBuf,
     pub setup: Arc<Setup>,
     /// The program that is started as the process that studies: one that
-    /// calls [`crate::helper::run_if_requested`] first thing.
-    pub program: PathBuf,
+    /// calls [`crate::helper::run_if_requested`] first thing. Without one
+    /// nothing is studied until one is named ([`Desk::study_by`]).
+    pub program: Option<PathBuf>,
     /// The memory that is free, in place of asking the machine: for tests.
     pub free: Option<fn() -> Option<u64>>,
 }
@@ -71,7 +72,7 @@ struct Turns {
 
 struct Shared {
     setup: Arc<Setup>,
-    program: PathBuf,
+    program: Mutex<Option<PathBuf>>,
     free: fn() -> Option<u64>,
     turns: Mutex<Turns>,
     changed: Condvar,
@@ -118,6 +119,9 @@ impl Shared {
 
     /// Why a run of `study` cannot be begun now, if it cannot.
     fn refused(&self, study: &Study) -> Result<(crate::models::Which, u64), String> {
+        if self.program.lock().is_none() {
+            return Err("this program was not started as one that can study: nothing is studied from here".to_owned());
+        }
         let models = self.setup.models_for(&study.options)?;
         let (need, limit) = Self::needs(study);
         if let Some(free) = (self.free)().filter(|&free| free < need) {
@@ -138,7 +142,8 @@ impl Shared {
             Err(why) => return mark(&folder, State::Failed, Some(why)),
         };
         let order = Order::Study { folder: folder.path.clone(), models, programs: self.setup.found() };
-        let mut job = match Job::start(&self.program, &order) {
+        let program = self.program.lock().clone().unwrap_or_default();
+        let mut job = match Job::start(&program, &order) {
             Ok(job) => job,
             Err(why) => return mark(&folder, State::Failed, Some(why)),
         };
@@ -239,7 +244,7 @@ impl Desk {
         Self {
             shared: Arc::new(Shared {
                 setup: options.setup,
-                program: options.program,
+                program: Mutex::new(options.program),
                 free: options.free.unwrap_or(room::free),
                 turns: Mutex::new(Turns {
                     root: options.studies,
@@ -255,6 +260,17 @@ impl Desk {
 
     pub fn setup(&self) -> &Arc<Setup> {
         &self.shared.setup
+    }
+
+    /// Has `program` started as the process that studies from now on: one
+    /// that calls [`crate::helper::run_if_requested`] first thing.
+    pub fn study_by(&self, program: PathBuf) {
+        *self.shared.program.lock() = Some(program);
+    }
+
+    /// The program that is started to study, if one was named.
+    pub fn program(&self) -> Option<PathBuf> {
+        self.shared.program.lock().clone()
     }
 
     /// The folder studies are kept in.
@@ -314,7 +330,7 @@ impl Desk {
                     .collect();
                 if !lacking.is_empty() {
                     return Err(format!(
-                        "a link is fetched by yt-dlp, which needs ffmpeg, and {} not installed where programs are looked for. Trill ships neither: install {} (Settings, Studies says how) and ask again, or study a file you have",
+                        "a link is fetched by yt-dlp, which needs ffmpeg, and {} not installed where programs are looked for. Trill ships neither: install {} (Setup, in the File menu, says how) and ask again, or study a file you have",
                         if lacking.len() == 1 { format!("{} is", lacking[0]) } else { "both are".to_owned() },
                         if lacking.len() == 1 { "it" } else { "them" },
                     ));

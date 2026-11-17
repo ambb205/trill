@@ -513,11 +513,41 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
             _ => about("Checking", "Checked", "the sound library"),
         },
         "missing_files" => about("Looking for", "Looked for", "the song's missing files"),
+        "study" => {
+            // The recording by its file's name, by the clip that plays it, or as what a link leads to.
+            let recording = match (call.text("path"), call.clip("clip"), call.text("link")) {
+                (Some(path), ..) => quoted(file_name(path)),
+                (None, Some(clip), _) => clip,
+                (None, None, Some(_)) => "the recording behind a link".to_owned(),
+                (None, None, None) => "a recording".to_owned(),
+            };
+            match call.text("action") {
+                Some("start") if call.has("study") => about("Taking up", "Took up", "a study where it was"),
+                Some("start") => about("Starting", "Started", &format!("a study of {recording}")),
+                Some("stop") => about("Stopping", "Stopped", "a study"),
+                Some("delete") => about("Removing", "Removed", "a study"),
+                Some("list") => about("Looking at", "Looked at", "the studies"),
+                _ => about("Checking", "Checked", "on a study"),
+            }
+        }
+        "setup" => {
+            let part =
+                call.text("part").map_or_else(|| "a part".to_owned(), |part| format!("the part {}", quoted(part)));
+            match call.text("action") {
+                Some("fetch") => about("Fetching", "Began fetching", &part),
+                Some("stop") => about("Stopping", "Stopped", &format!("the fetch of {part}")),
+                Some("remove") => about("Removing", "Removed", &part),
+                Some("test") => about("Timing", "Timed", "the models on this machine"),
+                Some("choose") => about("Choosing", "Chose", "what runs the models"),
+                _ => about("Looking at", "Looked at", "what there is to fetch"),
+            }
+        }
         "listen" | "transcribe" => {
             // The sound by its file's name, or the clip that plays it by its own.
             let sound = match (call.text("path"), call.clip("clip")) {
                 (Some(path), _) => quoted(file_name(path)),
                 (None, Some(clip)) => clip,
+                (None, None) if call.has("study") => "a study".to_owned(),
                 (None, None) => "a sound".to_owned(),
             };
             if tool == "listen" {
@@ -759,6 +789,32 @@ pub fn heard(tool: &str, answer: &str) -> Option<String> {
             }
             (!said.is_empty()).then(|| said.join(", "))
         }
+        "study" => {
+            // Where it is: the stage it is at, or how it ended.
+            if let Some(studies) = answer.get("studies").and_then(Value::as_array) {
+                return Some(if studies.len() == 1 {
+                    "1 study".to_owned()
+                } else {
+                    format!("{} studies", studies.len())
+                });
+            }
+            let state = answer.get("state").and_then(Value::as_str)?;
+            let at = answer.get("at").and_then(|at| {
+                let doing = at.get("doing")?.as_str()?;
+                Some(format!("{}, {} %", doing.to_lowercase(), at.get("percent").and_then(Value::as_f64)?))
+            });
+            Some(match (state, at) {
+                ("running", Some(at)) => at,
+                ("waiting", _) => "waiting for its turn".to_owned(),
+                (state, _) => state.to_owned(),
+            })
+        }
+        "setup" => {
+            // What runs the models, where the answer says.
+            let models = answer.get("models").unwrap_or(&answer);
+            let on = models.get("runs_on").and_then(Value::as_str)?;
+            Some(format!("the models run on {on}"))
+        }
         "transcribe" => {
             let notes = answer.get("notes").and_then(Value::as_u64)?;
             Some(if notes == 1 { "1 note".to_owned() } else { format!("{notes} notes") })
@@ -975,6 +1031,27 @@ mod tests {
             "Listened to \u{201C}Swansong.flac\u{201D}"
         );
         assert_eq!(did("listen", json!({}), p), "Listened to a sound");
+        assert_eq!(did("listen", json!({ "study": "0a1b2c3d4e" }), p), "Listened to a study");
+        assert_eq!(
+            did("study", json!({ "action": "start", "path": "D:/refs/Swansong.flac" }), p),
+            "Started a study of \u{201C}Swansong.flac\u{201D}"
+        );
+        assert_eq!(
+            did("study", json!({ "action": "start", "link": "https://example.org/a" }), p),
+            "Started a study of the recording behind a link"
+        );
+        assert_eq!(
+            did("study", json!({ "action": "start", "study": "0a1b2c3d4e" }), p),
+            "Took up a study where it was"
+        );
+        assert_eq!(did("study", json!({ "action": "report" }), p), "Checked on a study");
+        assert_eq!(did("study", json!({ "action": "delete", "study": "0a1b2c3d4e" }), p), "Removed a study");
+        assert_eq!(
+            did("setup", json!({ "action": "fetch", "part": "stems" }), p),
+            "Began fetching the part \u{201C}stems\u{201D}"
+        );
+        assert_eq!(did("setup", json!({ "action": "test" }), p), "Timed the models on this machine");
+        assert_eq!(did("setup", json!({ "action": "report" }), p), "Looked at what there is to fetch");
         assert_eq!(
             did("transcribe", json!({ "path": "D:/loops/break.wav", "part": "groove" }), p),
             "Wrote the drum groove of \u{201C}break.wav\u{201D} as MIDI"
@@ -1225,6 +1302,15 @@ mod tests {
         assert_eq!(heard("listen", &listened.to_string()).as_deref(), Some("101.0 bpm, Dm, 11 parts"));
         assert_eq!(heard("listen", &json!({ "tempo": null, "found": { "parts": 0 } }).to_string()), None);
         assert_eq!(heard("transcribe", &json!({ "notes": 64 }).to_string()).as_deref(), Some("64 notes"));
+        let running = json!({ "state": "running", "at": { "stage": "stems", "doing": "Splitting it into stems", "percent": 40.0 } });
+        assert_eq!(heard("study", &running.to_string()).as_deref(), Some("splitting it into stems, 40 %"));
+        assert_eq!(heard("study", &json!({ "state": "done" }).to_string()).as_deref(), Some("done"));
+        assert_eq!(heard("study", &json!({ "studies": [{}, {}] }).to_string()).as_deref(), Some("2 studies"));
+        assert_eq!(
+            heard("setup", &json!({ "models": { "runs_on": "the processor" } }).to_string()).as_deref(),
+            Some("the models run on the processor")
+        );
+        assert_eq!(heard("setup", &json!({ "removed": "stems" }).to_string()), None);
         assert_eq!(heard("measure", "it went wrong"), None);
         assert_eq!(heard("measure", "{}"), None);
     }

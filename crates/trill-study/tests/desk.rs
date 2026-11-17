@@ -26,7 +26,7 @@ fn desk_with(root: &Path, script: Option<Script>, programs: Programs, free: Opti
     let fetches = Fetches::new(Arc::new(Nothing));
     fetches.add(List { parts: Vec::new(), ..setup::list(root.join("models")) }).unwrap();
     let setup = Setup::over(Arc::new(fetches), script, Some(programs));
-    Desk::new(DeskOptions { studies: root.join("studies"), setup: Arc::new(setup), program: program(), free })
+    Desk::new(DeskOptions { studies: root.join("studies"), setup: Arc::new(setup), program: Some(program()), free })
 }
 
 fn desk(root: &Path, script: Script) -> Desk {

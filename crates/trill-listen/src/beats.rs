@@ -59,6 +59,16 @@ impl Correction {
             }
         }
     }
+
+    /// The word [`Correction::parse`] reads it from.
+    pub fn name(&self) -> String {
+        match self {
+            Self::Half => "half".to_owned(),
+            Self::Double => "double".to_owned(),
+            Self::Rotate => "rotate".to_owned(),
+            Self::BeatsPerBar(count) => format!("bar{count}"),
+        }
+    }
 }
 
 /// Every beat of a recording, which of them start a bar, and the tempo.

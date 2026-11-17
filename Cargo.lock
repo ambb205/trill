@@ -4667,6 +4667,7 @@ dependencies = [
  "trill-core",
  "trill-dsp",
  "trill-engine",
+ "trill-fetch",
  "trill-library",
  "trill-mcp",
  "trill-media",
@@ -4674,6 +4675,7 @@ dependencies = [
  "trill-plugins",
  "trill-runtime",
  "trill-stage",
+ "trill-study",
  "winresource",
 ]
 
@@ -4782,12 +4784,14 @@ dependencies = [
  "trill-core",
  "trill-dsp",
  "trill-engine",
+ "trill-fetch",
  "trill-library",
  "trill-listen",
  "trill-media",
  "trill-plugins",
  "trill-runtime",
  "trill-stage",
+ "trill-study",
  "trill-theory",
 ]
 
@@ -4845,10 +4849,12 @@ dependencies = [
  "trill-core",
  "trill-dsp",
  "trill-engine",
+ "trill-fetch",
  "trill-library",
  "trill-listen",
  "trill-media",
  "trill-plugins",
+ "trill-study",
 ]
 
 [[package]]

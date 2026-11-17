@@ -34,8 +34,11 @@
 //! [`Runtime::add_sound_on_new_track`]; and, for a song whose files are not
 //! where it says, [`Runtime::missing_files`], [`Runtime::relink`] and
 //! [`Runtime::move_library_folder`]; and, for what is in a sound (its beats,
-//! key, chords, parts, loops and notes), [`Runtime::hear`]. A front end
-//! that grew its own version of these would drift from the other.
+//! key, chords, parts, loops and notes), [`Runtime::hear`]; and, for a
+//! recording taken apart by models into a study that is kept,
+//! [`Runtime::studies`], with what Trill fetches for that and for whoever
+//! else has things to fetch, [`Runtime::fetches`]. A front end that grew
+//! its own version of these would drift from the other.
 //!
 //! ```no_run
 //! use trill_runtime::{Runtime, RuntimeOptions};
@@ -56,6 +59,7 @@ mod missing;
 mod recovery;
 mod settings;
 mod sounds;
+mod studying;
 
 pub use jobs::{Jobs, Program};
 pub use listening::{LONGEST_SECONDS, ListenError};
@@ -64,6 +68,7 @@ pub use missing::{Candidate, Confidence, FoundFolder, Look, Missing, MissingFile
 pub use recovery::SafetyCopy;
 pub use settings::Storage;
 pub use sounds::{AddedSound, NewSoundTrack, SoundClip, SoundError, SoundFacts};
+pub use studying::{MODELS_FOLDER, STUDIES_FOLDER, Studied, Studying};
 
 use housekeeping::Housekeeper;
 use midi::{MidiBackend, MidiInputs, SystemMidi};
@@ -132,6 +137,9 @@ pub struct Parts {
     pub audio: Option<Arc<dyn AudioHost>>,
     /// The MIDI ports, in place of the system's.
     pub midi: Option<Box<dyn MidiBackend>>,
+    /// Studies with scripted models and a shelf to fetch from, in place
+    /// of the real ones.
+    pub studying: Studying,
 }
 
 /// The audio stream: what was asked for and what is.
@@ -185,6 +193,8 @@ pub struct Runtime {
     pub library: Arc<Library>,
     /// What was heard in the last few audio files that were listened to.
     listening: listening::Listening,
+    /// Studies of recordings and what is fetched; nothing where nothing is kept.
+    studying: Option<studying::Studies>,
     plugins: Option<PluginHost>,
     settings: Arc<Mutex<SettingsFile>>,
     copies: Arc<Mutex<SafetyCopies>>,
@@ -296,6 +306,7 @@ impl Runtime {
         if !library.roots().is_empty() {
             library.rescan();
         }
+        let studying = studying::Studies::open(&options.storage, settings.current(), settings.folder(), parts.studying);
         let copies = SafetyCopies::open(settings.recovery_folder());
         for copy in copies.orphans() {
             log::warn!("'{}' was not saved before the program last stopped; a copy was kept", copy.name);
@@ -310,6 +321,7 @@ impl Runtime {
             media,
             library,
             listening: listening::Listening::default(),
+            studying,
             plugins,
             settings,
             copies,

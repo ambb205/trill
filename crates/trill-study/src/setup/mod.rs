@@ -256,7 +256,7 @@ impl Setup {
             .collect();
         if !lacking.is_empty() {
             return Err(format!(
-                "a study on {} needs parts that have not been fetched: {}. Settings, Studies lists them with whose they are; over MCP, `setup` does",
+                "a study on {} needs parts that have not been fetched: {}. Setup, in the File menu, lists them with whose they are; over MCP, `setup` does",
                 provider_name(provider),
                 lacking.join("; ")
             ));

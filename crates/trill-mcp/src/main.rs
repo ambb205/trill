@@ -106,6 +106,9 @@ fn main() -> anyhow::Result<()> {
         storage: options.storage,
     })?;
     runtime.do_jobs_as_usual();
+    // And this is a program that may start itself to study a recording,
+    // and fetch what the user asks it to with the system's curl.
+    runtime.study_and_fetch_as_usual();
     {
         let mut session = runtime.session.lock();
         let audio = session.audio_info().clone();

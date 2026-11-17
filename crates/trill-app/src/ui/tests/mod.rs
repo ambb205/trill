@@ -22,6 +22,7 @@ mod perf;
 mod recording;
 mod recovery;
 mod ruler;
+mod setup;
 mod sounds;
 mod stage;
 mod tracks;

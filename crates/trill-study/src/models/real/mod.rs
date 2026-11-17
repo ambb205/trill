@@ -84,7 +84,7 @@ pub struct OnnxModels {
 }
 
 /// What every sentence about a part that is not there ends with.
-const SET_UP: &str = "Settings, Studies shows what there is to fetch";
+const SET_UP: &str = "Setup, in the File menu, shows what there is to fetch";
 
 /// The file `name` of the part `part`, or a sentence that says it has not
 /// been fetched.
@@ -119,7 +119,11 @@ pub(crate) fn tensor<T: ort::value::PrimitiveTensorElementType + std::fmt::Debug
 }
 
 impl OnnxModels {
-    pub fn new(setup: Setup) -> Result<Self, String> {
+    pub fn new(mut setup: Setup) -> Result<Self, String> {
+        // The runtime looks for a part it is handed from where its own library is, unless it is told the whole way.
+        if let Ok(whole) = std::path::absolute(&setup.parts) {
+            setup.parts = whole;
+        }
         let library = part(&setup.parts, RUNTIME, runtime_library(), "the models' runtime")?;
         let (plugin, what) = match setup.provider {
             Provider::Processor => (None, ""),
@@ -186,7 +190,7 @@ impl OnnxModels {
                     return Err(match devices.len() {
                         0 => "the system lists no graphics card that can run the models: the processor can".to_owned(),
                         count => format!(
-                            "there is no graphics card {index} here: the system lists {count}. Run the timed test in Settings, Studies again"
+                            "there is no graphics card {index} here: the system lists {count}. Run the timed test again (Setup, in the File menu)"
                         ),
                     });
                 };

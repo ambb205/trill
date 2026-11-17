@@ -128,6 +128,8 @@ async fn tools_are_listed_with_schemas() {
         "relink_files",
         "listen",
         "transcribe",
+        "study",
+        "setup",
         "edit_time",
         "show_device_editor",
         "recover_project",

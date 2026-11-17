@@ -35,6 +35,7 @@ pub struct Settings {
     pub audio: AudioSettings,
     pub midi: MidiSettings,
     pub journal: JournalSettings,
+    pub studies: StudySettings,
     pub ui: UiSettings,
 }
 
@@ -92,6 +93,18 @@ impl Default for JournalSettings {
     fn default() -> Self {
         Self { keep: true }
     }
+}
+
+/// Where studies of recordings are kept, and what was fetched to make
+/// them. `None` is the program's own data folder ([`data_dir`]).
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct StudySettings {
+    /// The folder studies are kept in, one folder each: a few hundred
+    /// megabytes for a song, most of it its stems.
+    pub folder: Option<PathBuf>,
+    /// The folder the models and what runs them are fetched into: some
+    /// gigabytes.
+    pub parts: Option<PathBuf>,
 }
 
 /// Interface preferences.
@@ -250,6 +263,10 @@ impl Reader {
         if let Some(journal) = self.section(document, "journal") {
             self.value(journal, "journal.keep", &mut settings.journal.keep);
         }
+        if let Some(studies) = self.section(document, "studies") {
+            self.value(studies, "studies.folder", &mut settings.studies.folder);
+            self.value(studies, "studies.parts", &mut settings.studies.parts);
+        }
         if let Some(ui) = self.section(document, "ui") {
             self.value(ui, "ui.theme", &mut settings.ui.theme);
             self.value(ui, "ui.browser_width", &mut settings.ui.browser_width);
@@ -338,6 +355,14 @@ pub fn cache_dir() -> Option<PathBuf> {
     cache_dir_in(&|name| std::env::var_os(name))
 }
 
+/// The folder for what this program keeps that is large and stays on this
+/// machine (studies of recordings, the models that make them):
+/// `%LOCALAPPDATA%\trill` on Windows, `~/Library/Application Support/trill`
+/// on macOS, and `$XDG_DATA_HOME/trill` or `~/.local/share/trill` elsewhere.
+pub fn data_dir() -> Option<PathBuf> {
+    data_dir_in(&|name| std::env::var_os(name))
+}
+
 type Environment<'a> = &'a dyn Fn(&str) -> Option<OsString>;
 
 /// The value of an environment variable naming a folder, if it is set to
@@ -354,6 +379,18 @@ fn config_dir_in(environment: Environment) -> Option<PathBuf> {
         folder(environment, "HOME").map(|home| home.join("Library").join("Application Support"))
     } else {
         folder(environment, "XDG_CONFIG_HOME").or_else(|| folder(environment, "HOME").map(|home| home.join(".config")))
+    };
+    base.map(|base| base.join(APP_FOLDER))
+}
+
+fn data_dir_in(environment: Environment) -> Option<PathBuf> {
+    let base = if cfg!(windows) {
+        folder(environment, "LOCALAPPDATA")
+    } else if cfg!(target_os = "macos") {
+        folder(environment, "HOME").map(|home| home.join("Library").join("Application Support"))
+    } else {
+        folder(environment, "XDG_DATA_HOME")
+            .or_else(|| folder(environment, "HOME").map(|home| home.join(".local").join("share")))
     };
     base.map(|base| base.join(APP_FOLDER))
 }
@@ -390,6 +427,7 @@ mod tests {
             },
             midi: MidiSettings { disabled_inputs: vec!["Loopback".into()] },
             journal: JournalSettings { keep: false },
+            studies: StudySettings { folder: Some("/big disk/studies".into()), parts: None },
             ui: UiSettings { theme: "noir".into(), browser_width: 312.5, window_size: Some([1600.0, 900.0]) },
         }
     }

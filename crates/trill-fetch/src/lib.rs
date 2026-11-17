@@ -392,7 +392,7 @@ struct Going {
 
 /// Everything that can be fetched, and what is being.
 pub struct Fetches {
-    fetcher: Arc<dyn Fetcher>,
+    fetcher: Mutex<Arc<dyn Fetcher>>,
     lists: Mutex<Vec<List>>,
     going: Mutex<HashMap<String, Arc<Going>>>,
     failed: Mutex<HashMap<String, String>>,
@@ -404,12 +404,19 @@ impl Fetches {
     /// An engine with no lists yet, fetching by `fetcher`.
     pub fn new(fetcher: Arc<dyn Fetcher>) -> Self {
         Self {
-            fetcher,
+            fetcher: Mutex::new(fetcher),
             lists: Mutex::new(Vec::new()),
             going: Mutex::new(HashMap::new()),
             failed: Mutex::new(HashMap::new()),
             turn: Mutex::new(()),
         }
+    }
+
+    /// Has `fetcher` fetch from now on. An engine is made fetching nothing
+    /// ([`Nothing`]) wherever a test could be the one to make it, and is
+    /// handed the system's `curl` by a program that is really one.
+    pub fn fetch_by(&self, fetcher: Arc<dyn Fetcher>) {
+        *self.fetcher.lock() = fetcher;
     }
 
     /// Adds a list. Refused when a part of it cannot be fetched by these
@@ -615,7 +622,8 @@ impl Fetches {
             }
             if have < file.size {
                 said(PartState::Fetching, before + have);
-                self.fetcher
+                let fetcher = self.fetcher.lock().clone();
+                fetcher
                     .fetch(&file.url, &partial, stop, &mut |got| said(PartState::Fetching, before + got.min(file.size)))
                     .map_err(|ended| match ended {
                         Ended::Stopped => Ended::Stopped,

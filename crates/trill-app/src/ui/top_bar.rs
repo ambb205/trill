@@ -6,7 +6,7 @@ use super::arrangement::ops;
 use super::files::Confirm;
 use super::shortcuts::{self, Command};
 use super::state::{Clipboard, Cx, DetailTab, StoryAsk};
-use super::{arrangement, audio_settings, brand, files, filming, missing, recording, recovery, timeline};
+use super::{arrangement, audio_settings, brand, files, filming, missing, recording, recovery, setup, timeline};
 use eframe::egui::{self, Align2, Id, Rect, Sense, Ui, pos2, vec2};
 use trill_core::TimeSignature;
 use trill_core::project::{MAX_TEMPO, MIN_TEMPO};
@@ -218,6 +218,11 @@ fn file_menu(ui: &mut Ui, cx: &mut Cx) {
     trill_noir::menu_separator(ui, theme);
     if item(ui, "Audio and MIDI\u{2026}", Command::AudioSettings, true) {
         audio_settings::open(cx);
+    }
+    // What Trill does not ship: the models that take a recording apart,
+    // and whatever else is fetched when it is asked for.
+    if item(ui, "Setup\u{2026}", Command::Setup, true) {
+        setup::open(ui.ctx(), cx);
     }
 }
 

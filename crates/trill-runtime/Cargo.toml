@@ -10,10 +10,12 @@ license.workspace = true
 trill-core.workspace = true
 trill-dsp.workspace = true
 trill-engine.workspace = true
+trill-fetch.workspace = true
 trill-library.workspace = true
 trill-listen.workspace = true
 trill-media.workspace = true
 trill-plugins.workspace = true
+trill-study.workspace = true
 log.workspace = true
 # MIDI ports. Small, and on Windows built on the `windows` crate the audio
 # side already brings in.
