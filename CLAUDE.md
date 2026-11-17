@@ -137,7 +137,7 @@ on the samples.
   in level by measurement (`the_patches_are_as_loud_as_one_another_and_leave_room`): a new one is turned to
   that, and nobody has tuned any of them by ear until the owner has. The numbers it is held to: what is not on a
   harmonic of a sawtooth 80 dB under it at every pitch and 105 dB in the top octave, a voice at the poly synth's
-  level, eight notes of eight copies in a twentieth of a core.
+  level, eight notes of eight copies on both oscillators in a fifteenth of a core.
 - **A change to how a built-in device sounds:** a song saved before must sound as it did. A project file holds
   only the parameters that were set, so a new parameter defaults to what the device did before, or the device
   gets a line in `trill-core/src/formats.rs` (what a file of the older format is taken to have said, written into
