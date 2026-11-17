@@ -25,14 +25,36 @@ pub enum ProbeTarget {
 }
 
 impl Session {
-    /// The plugins of the song that seem to be loading what they play:
-    /// the ones that were made, or given another state or preset, since
-    /// the program last stood still for a few seconds
-    /// ([`LoadWatch`]). Notes played to them now may not sound. This
-    /// looks at the program and never waits; a window asks it every
-    /// frame.
+    /// The devices of the song that are loading what they play. The
+    /// plugins that seem to be: the ones that were made, or given another
+    /// state or preset, since the program last stood still for a few
+    /// seconds ([`LoadWatch`]). And the devices that say so themselves: a
+    /// sampled instrument while the starts of its recordings are being
+    /// read ([`Session::reading`]). Notes played to them now may not
+    /// sound. This looks at the program and never waits; a window asks it
+    /// every frame.
     pub fn loading(&self) -> Vec<DeviceId> {
-        self.bank.loads.loading()
+        let mut loading = self.bank.loads.loading();
+        let mut reading: Vec<DeviceId> = self
+            .bank
+            .devices
+            .iter()
+            .filter(|(id, _)| !loading.contains(id))
+            .filter(|(id, _)| self.reading(**id).is_some_and(|reading| reading.is_loading()))
+            .map(|(id, _)| *id)
+            .collect();
+        reading.sort();
+        loading.extend(reading);
+        loading
+    }
+
+    /// How far a device is with reading what it plays from the disk, for
+    /// a device that reads in the background and says so itself: a
+    /// sampled instrument. `None` for any other, for a device that is not
+    /// there, and while the device is busy answering someone else. Never
+    /// waits.
+    pub fn reading(&self, device: DeviceId) -> Option<trill_core::Reading> {
+        self.bank.devices.get(&device)?.controller.as_ref()?.try_lock()?.reading()
     }
 
     /// The watch behind [`Self::loading`], to ask without the session:

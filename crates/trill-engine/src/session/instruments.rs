@@ -7,7 +7,7 @@ use crate::instruments::InstrumentKnowledge;
 use crate::instruments::kit::{self, KitMap};
 use std::sync::Arc;
 use trill_core::device::{BEND_RANGE_PARAM, DeviceCategory, DeviceDescriptor, PITCH_BEND_SEMITONES};
-use trill_core::{ChainRef, Device, InstrumentProfile, Project, Role, TrackId, TrackKind};
+use trill_core::{ChainRef, Device, DeviceId, InstrumentProfile, Project, Role, SampledInstrument, TrackId, TrackKind};
 
 impl Session {
     /// What is known about instruments by device type: where it is kept is
@@ -35,8 +35,25 @@ impl Session {
     /// [`plays_drums`](Self::plays_drums) falls back on, and what a track
     /// that says nothing is taken for.
     pub fn instrument_plays_drums(&self, track: TrackId) -> bool {
-        let Ok(track) = self.project.track(track) else { return false };
-        track.devices.iter().any(|device| self.factory.plays_drums(&device.uri))
+        let Ok(found) = self.project.track(track) else { return false };
+        found.devices.iter().any(|device| self.factory.plays_drums(&device.uri))
+            // An instrument that is loaded from a file is drums or not as
+            // the file has it.
+            || self.sampled_of(track).is_some_and(|sampled| sampled.profile.role == Some(Role::Drums))
+    }
+
+    /// What a device says of the instrument it has loaded, where it plays
+    /// one that is made of recordings and that a file describes: what the
+    /// instrument is, and what a track that plays through it is told of
+    /// its notes. `None` for any other device, and for one with nothing
+    /// loaded.
+    pub fn sampled(&self, device: DeviceId) -> Option<Arc<SampledInstrument>> {
+        self.bank.devices.get(&device)?.controller.as_ref()?.lock().sampled()
+    }
+
+    /// [`sampled`](Self::sampled) of the instrument a track plays through.
+    pub fn sampled_of(&self, track: TrackId) -> Option<Arc<SampledInstrument>> {
+        self.sampled(self.instrument_of(track)?.id)
     }
 
     /// The device a track's notes play through: the first instrument in
@@ -83,7 +100,12 @@ impl Session {
     /// whoever writes for it: what the track says ([`Track::profile`]);
     /// where it says nothing of the pitch wheel, how far the instrument's
     /// own setting has it bend
-    /// ([`instrument_bend_range`](Self::instrument_bend_range)); and on a
+    /// ([`instrument_bend_range`](Self::instrument_bend_range)); where its
+    /// instrument is one that a file describes, what the file says that
+    /// the track does not (the range, whether the keys are drums, the
+    /// ways of playing a key chooses, the wheel: read from the instrument
+    /// that is loaded each time, and kept nowhere in the song;
+    /// [`sampled_of`](Self::sampled_of)); and on a
     /// drum track whose instrument says what its kit has on its keys, the
     /// kit's drums by name in place of any other map
     /// ([`kit_of`](Self::kit_of)). The default for a track that is not
@@ -97,6 +119,15 @@ impl Session {
             // Two semitones is what a profile that says nothing means.
             profile.bend_range =
                 self.instrument_bend_range(track).filter(|range| *range != f64::from(PITCH_BEND_SEMITONES));
+        }
+        if let Some(sampled) = self.sampled_of(track) {
+            let own = &sampled.profile;
+            profile.role = profile.role.or(own.role);
+            profile.range = profile.range.or(own.range);
+            profile.bend_range = profile.bend_range.or(own.bend_range);
+            if profile.articulations.is_empty() {
+                profile.articulations = own.articulations.clone();
+            }
         }
         if let Some(kit) = self.kit_of(track) {
             let shipped = self

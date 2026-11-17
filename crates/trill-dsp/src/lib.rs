@@ -261,6 +261,30 @@ impl Builtins {
         self.instruments.as_ref()
     }
 
+    /// The instrument in the file at `file` as a preset of the sampled
+    /// instrument, with the state a device is made from to play it. The
+    /// file is read: what the preset says of itself is what the
+    /// instrument is.
+    fn instrument_preset(&self, file: &std::path::Path) -> Result<(trill_core::presets::PresetInfo, Vec<u8>), String> {
+        let Some(instruments) = &self.instruments else {
+            return Err("this device factory was created without an audio loader (use trill_dsp::Builtins::with_loader)"
+                .to_string());
+        };
+        let path = file.to_string_lossy().into_owned();
+        let state = sampled::State::new(path.clone()).to_bytes();
+        let Some(loaded) = instruments.load(Some(&state))? else {
+            return Err("it names no instrument".to_string());
+        };
+        let info = trill_core::presets::PresetInfo {
+            id: trill_core::presets::short_id(&path),
+            name: loaded.summary.name.clone(),
+            description: loaded.about(),
+            locator: path,
+            ..Default::default()
+        };
+        Ok((info, state))
+    }
+
     /// What is wrong with the samples of `device`, as messages for the
     /// user; empty when all is well. See [`sample_problems`].
     pub fn sample_problems(&self, device: &Device) -> Vec<String> {
@@ -315,6 +339,33 @@ impl DeviceFactory for Builtins {
 
     fn plays_drums(&self, uri: &str) -> bool {
         plays_drums(uri)
+    }
+
+    /// An instrument's file is a preset of the sampled instrument; no
+    /// other built-in device takes a file.
+    fn preset_file(
+        &self,
+        uri: &str,
+        file: &std::path::Path,
+        _within: Option<&str>,
+    ) -> Option<Result<trill_core::presets::PresetInfo, String>> {
+        let builtin = find(uri)?;
+        Some(match builtin.create {
+            Create::Instrument { .. } => self.instrument_preset(file).map(|(info, _)| info),
+            _ => Err(format!("{} takes no preset files; its presets are asked for by name", builtin.name)),
+        })
+    }
+
+    fn preset_file_type(&self, file: &std::path::Path) -> Option<String> {
+        sfz::is_sfz(file).then(|| sampled::URI.to_string())
+    }
+
+    fn preset_state(
+        &self,
+        uri: &str,
+        file: &std::path::Path,
+    ) -> Option<Result<(trill_core::presets::PresetInfo, Vec<u8>), String>> {
+        matches!(find(uri)?.create, Create::Instrument { .. }).then(|| self.instrument_preset(file))
     }
 }
 
