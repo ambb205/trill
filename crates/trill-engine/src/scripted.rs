@@ -24,7 +24,12 @@
 //! A factory made with [`ScriptedFactory::loading`] hands out instruments
 //! that are deaf for a while after they are created, on the machine's own
 //! clock, as a sampler is while it reads its samples: notes given to them
-//! meanwhile never sound. Its amplifier passes nothing for as long.
+//! meanwhile never sound. Its amplifier passes nothing for as long. They
+//! can be given the other habits samplers were watched to have as well:
+//! one key that arrives long after the rest, with nothing to show that
+//! anything is still to come; a key that sounds one time and not the
+//! next; notes that begin a moment after their key; and going on with
+//! the sound they had for a while after they are given a preset.
 
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -64,6 +69,17 @@ pub struct Loading {
     /// its samples: some megabytes every twentieth of a second, held for
     /// as long as the instrument lives.
     pub grows: bool,
+    /// One key that arrives later than everything else, and how long
+    /// after the instrument is created: a kit's last drum.
+    pub late: Option<(u8, Duration)>,
+    /// A key that sounds every other time it is pressed, beginning with
+    /// the first.
+    pub fickle: Option<u8>,
+    /// How long after a key goes down its sound begins.
+    pub onset: Duration,
+    /// How long an instrument goes on with the sound it had after it is
+    /// given a preset. Its saved state names the preset at once.
+    pub changes_after: Duration,
 }
 
 /// Makes the scripted instruments, and writes down what each was made for.
@@ -163,6 +179,10 @@ impl DeviceFactory for ScriptedFactory {
             sample_rate,
             ready: (!self.loading.never).then(|| born + self.loading.first),
             upper_ready: (!self.loading.never).then(|| born + self.loading.first.max(self.loading.upper)),
+            late: self.loading.late.map(|(key, after)| (key, born + after)),
+            fickle: self.loading.fickle,
+            presses: 0,
+            onset: self.loading.onset,
             patch: patch.clone(),
             voices: [Voice::default(); VOICES],
             muting: false,
@@ -171,7 +191,7 @@ impl DeviceFactory for ScriptedFactory {
         Ok(DeviceInstance {
             processor: Box::new(processor),
             params: Vec::new(),
-            controller: Some(Box::new(Controller { patch })),
+            controller: Some(Box::new(Controller { patch, changes_after: self.loading.changes_after })),
         })
     }
 
@@ -195,31 +215,55 @@ struct Patch {
     /// The level, in thousandths.
     level: AtomicI32,
     name: Mutex<String>,
+    /// A preset that was asked for and is not played yet: from when it
+    /// is, and its transposition and level.
+    coming: Mutex<Option<(Instant, i32, i32)>>,
 }
 
 impl Default for Patch {
     fn default() -> Self {
-        Self { transpose: AtomicI32::new(-12), level: AtomicI32::new(1000), name: Mutex::new(String::new()) }
+        Self {
+            transpose: AtomicI32::new(-12),
+            level: AtomicI32::new(1000),
+            name: Mutex::new(String::new()),
+            coming: Mutex::new(None),
+        }
     }
 }
 
 impl Patch {
+    /// Takes on the preset now.
     fn load(&self, preset: &str) -> bool {
+        self.load_after(preset, Duration::ZERO)
+    }
+
+    /// Is named after the preset now, and sounds like it after `wait`.
+    fn load_after(&self, preset: &str, wait: Duration) -> bool {
         let (transpose, level) = match preset {
             "up" => (0, 1000),
             "soft" => (-12, 500),
             "" => (-12, 1000),
             _ => return false,
         };
-        self.transpose.store(transpose, Ordering::Relaxed);
-        self.level.store(level, Ordering::Relaxed);
         *self.name.lock() = preset.to_string();
+        *self.coming.lock() = Some((Instant::now() + wait, transpose, level));
+        self.arrive();
         true
+    }
+
+    /// Takes on the sound of a preset that was asked for, once it is time.
+    fn arrive(&self) {
+        let mut coming = self.coming.lock();
+        if let Some((_, transpose, level)) = coming.take_if(|(at, ..)| Instant::now() >= *at) {
+            self.transpose.store(transpose, Ordering::Relaxed);
+            self.level.store(level, Ordering::Relaxed);
+        }
     }
 }
 
 struct Controller {
     patch: Arc<Patch>,
+    changes_after: Duration,
 }
 
 impl DeviceController for Controller {
@@ -228,7 +272,7 @@ impl DeviceController for Controller {
     }
 
     fn load_preset(&mut self, preset: &PresetInfo) -> Result<(), PresetLoadError> {
-        if self.patch.load(&preset.id) {
+        if self.patch.load_after(&preset.id, self.changes_after) {
             Ok(())
         } else {
             Err(PresetLoadError::Failed(format!("there is no preset '{}'", preset.id)))
@@ -282,6 +326,8 @@ struct Voice {
     step: f64,
     phase: f64,
     level: f32,
+    /// How many frames it has yet to wait before it begins.
+    wait: u32,
     /// What the level is multiplied by each frame, while the key is down
     /// and after.
     held_decay: f32,
@@ -303,6 +349,13 @@ struct Instrument {
     /// for an instrument that never answers.
     ready: Option<Instant>,
     upper_ready: Option<Instant>,
+    /// A key that arrives later than the rest, and when.
+    late: Option<(u8, Instant)>,
+    /// A key that sounds every other time, and how often it was pressed.
+    fickle: Option<u8>,
+    presses: u32,
+    /// How long after a key goes down its sound begins.
+    onset: Duration,
     patch: Arc<Patch>,
     voices: [Voice; VOICES],
     /// The mute key is down.
@@ -319,12 +372,21 @@ impl Instrument {
     fn note_on(&mut self, pitch: u8, velocity: f32) {
         let now = Instant::now();
         let ready = if pitch >= 60 { self.upper_ready } else { self.ready };
-        if ready.is_none_or(|ready| now < ready) {
+        let late = self.late.is_some_and(|(key, at)| key == pitch && now < at);
+        if late || ready.is_none_or(|ready| now < ready) {
             // Still loading: the note is lost, as a sampler's is.
             return;
         }
+        if self.fickle == Some(pitch) {
+            self.presses += 1;
+            if self.presses.is_multiple_of(2) {
+                return;
+            }
+        }
+        self.patch.arrive();
         let level = velocity * self.patch.level.load(Ordering::Relaxed) as f32 / 1000.0;
-        let mut voice = Voice { active: true, pitch, level: 0.5 * level, ..Voice::default() };
+        let wait = (self.onset.as_secs_f64() * self.sample_rate) as u32;
+        let mut voice = Voice { active: true, pitch, level: 0.5 * level, wait, ..Voice::default() };
         match self.kind {
             Kind::Bass => {
                 if pitch == MUTE_KEY {
@@ -391,6 +453,10 @@ impl Instrument {
             let white = (self.noise >> 8) as f32 / 8_388_608.0 - 1.0;
             let mut out = 0.0f32;
             for voice in self.voices.iter_mut().filter(|voice| voice.active) {
+                if voice.wait > 0 {
+                    voice.wait -= 1;
+                    continue;
+                }
                 let sample = match voice.sound {
                     Sound::Tone => {
                         let tone = voice.phase.sin() + f64::from(voice.overtone) * (3.0 * voice.phase).sin();

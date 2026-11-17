@@ -164,6 +164,12 @@ pub struct WaitedFor {
     /// False when it never answered the notes it was to play, and the
     /// render went ahead without it.
     pub answered: bool,
+    /// The pitches it is to play that made no sound while it was waited
+    /// for, though others did, the first time that was seen of it: it
+    /// does not play them, or had still not loaded them when the render
+    /// began.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub silent: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -407,14 +413,20 @@ fn render_from(
         .into_iter()
         // A plugin that was ready at once is not news, and neither is an
         // effect that lets no noise through: a gate does that for a living.
-        .filter(|waited| if waited.answered { waited.seconds >= WORTH_SAYING_SECONDS } else { !waited.effect })
-        .map(|Waited { track, device, seconds, answered, .. }| WaitedFor {
+        // But notes that stayed silent on an instrument that played others
+        // are: it may not have had them loaded.
+        .filter(|waited| match waited.answered {
+            true => waited.seconds >= WORTH_SAYING_SECONDS || !waited.silent.is_empty(),
+            false => !waited.effect,
+        })
+        .map(|Waited { track, device, seconds, answered, silent, .. }| WaitedFor {
             track,
             track_name: name_of(track),
             device,
             device_name: project.device(device).map(|device| device.name.clone()).unwrap_or_default(),
             seconds,
             answered,
+            silent,
         })
         .collect();
 

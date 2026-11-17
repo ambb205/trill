@@ -951,16 +951,9 @@ async fn an_assistant_gives_each_plugin_a_preset_of_its_makers_and_probes_it() {
     assert_eq!(drums["preset"], "Black Metal");
     assert!(drums["note"].as_str().unwrap().contains("reads the kit's samples in the background"), "{drums}");
     let arguments = json!({ "track": drums["track_id"], "notes": [36, 38, 49], "detail": true });
-    let mut probed = ok(client, "probe", arguments.clone()).await;
-    // The copy a probe plays reads the kit anew: asked too early, it has
-    // the drums that have arrived.
-    for _ in 0..6 {
-        if !probed.to_string().contains("\"silent\":true") {
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        probed = ok(client, "probe", arguments.clone()).await;
-    }
+    // The copy a probe plays reads the kit anew, and the probe waits for
+    // every drum it is to play: asked once, right away.
+    let probed = ok(client, "probe", arguments.clone()).await;
     said(&format!("probe {arguments}"), &probed);
     assert!(!probed.to_string().contains("\"silent\":true"), "kick, snare and a crash are all heard: {probed}");
 

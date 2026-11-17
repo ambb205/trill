@@ -366,11 +366,21 @@ async fn a_silent_track_is_told_what_its_notes_say_and_sent_to_the_probe() {
     clip(client, switch, 0.0, 4.0, json!([["C0", 0, 4]])).await;
     let fine = track(client, "Fine", BASS).await;
     clip(client, fine, 0.0, 4.0, json!([["E2", 0, 1]])).await;
+    // And a kit that plays its kick, and a key that is no drum of it.
+    let half = track(client, "Half", DRUMS).await;
+    clip(client, half, 0.0, 4.0, json!([["C2", 0, 1], ["A2", 1, 1]])).await;
 
     let begun = Instant::now();
     let report = ok(client, "measure", json!({})).await;
     let notes = strings(&report["notes"]);
     let about = |name: &str| notes.iter().find(|note| note.starts_with(&format!("'{name}'"))).cloned();
+    // A key that plays nothing sounds like a drum that has not been loaded:
+    // the kit was held to it before the render began, and the reply says
+    // which note it was and how to find out.
+    let waited = |notes: &[String]| notes.iter().find(|note| note.contains("on 'Half'")).cloned();
+    let half_note = waited(&notes).unwrap_or_else(|| panic!("{notes:#?}"));
+    assert!(half_note.contains("1 of the notes it plays made no sound the whole time: A2 (45)"), "{half_note}");
+    assert!(half_note.contains("still loading") && half_note.contains(&format!("`probe` with track {half}")));
     let low_note = about("Low").unwrap_or_else(|| panic!("{notes:#?}"));
     assert!(low_note.contains("run from E0 to D1") && low_note.contains("outside its range"), "{low_note}");
     assert!(low_note.contains(&format!("probe with track {low}")), "{low_note}");
@@ -384,12 +394,43 @@ async fn a_silent_track_is_told_what_its_notes_say_and_sent_to_the_probe() {
     // The plugins that never answered were waited for once. Measured again,
     // they are known not to answer and cost a moment.
     let begun = Instant::now();
-    ok(client, "measure", json!({})).await;
+    let again = ok(client, "measure", json!({})).await;
     assert!(begun.elapsed() < first, "{:?} after {first:?}", begun.elapsed());
+    // What the kit was held to once is known of it now, and not said twice.
+    assert_eq!(waited(&strings(&again["notes"])), None);
 
     // And the probe the note asks for says what the instrument plays.
     let probed = ok(client, "probe", json!({ "track": low })).await;
     assert_eq!(probed["sounding"], "E1-G4 (28-67)");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_that_was_just_made_is_marked_as_loading_where_a_model_looks() {
+    let fixture = connect(ScriptedFactory::new()).await;
+    let client = &fixture.client;
+    let bass = track(client, "Bass", BASS).await;
+    let keys = track(client, "Keys", "builtin:polysynth").await;
+    // The plugin may be reading what it plays; the built-in synth is ready
+    // when it exists.
+    let project = ok(client, "get_project", json!({})).await;
+    let devices = |id: u64| {
+        let tracks = project["tracks"].as_array().unwrap();
+        tracks.iter().find(|track| track["id"] == id).unwrap()["devices"].clone()
+    };
+    assert_eq!(devices(bass)[0]["loading"], true, "{project}");
+    assert!(devices(keys)[0].get("loading").is_none(), "{project}");
+    let device = devices(bass)[0]["id"].as_u64().unwrap();
+    let said = project["loading"].as_str().unwrap_or_else(|| panic!("{project}"));
+    assert!(said.contains(&format!("Scripted Bass (device {device})")) && said.contains("may be silent"), "{said}");
+    assert!(said.contains("probe, measure and render wait"), "{said}");
+    assert_eq!(ok(client, "get_device", json!({ "device": device })).await["loading"], true);
+    // Pressing play now is answered with the same warning.
+    let playing = ok(client, "transport", json!({ "action": "play" })).await;
+    assert!(playing["loading"].as_str().is_some_and(|said| said.contains("Scripted Bass")), "{playing}");
+    ok(client, "transport", json!({ "action": "stop" })).await;
+    // A device that is gone is not loading.
+    ok(client, "delete_device", json!({ "device": device })).await;
+    assert!(ok(client, "get_project", json!({})).await.get("loading").is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -416,7 +457,15 @@ async fn the_tools_and_the_instructions_say_how_to_hear() {
     assert!(schema.contains("path") && schema.contains("tracks"), "{schema}");
 
     let instructions = fixture.client.peer_info().unwrap().instructions.clone().unwrap_or_default();
-    for word in ["probe", "measure", "ONCE for every plugin", "gain reduction", "never to check your work"] {
+    let words = [
+        "probe",
+        "measure",
+        "ONCE for every plugin",
+        "gain reduction",
+        "never to check your work",
+        "mark it `loading`",
+    ];
+    for word in words {
         assert!(instructions.contains(word), "the instructions should say '{word}'");
     }
     assert!(!instructions.contains("render writes a WAV and reports"), "the old advice to check by rendering is gone");

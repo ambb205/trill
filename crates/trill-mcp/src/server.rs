@@ -388,6 +388,10 @@ impl TrillServer {
     #[tool(annotations(title = "Get project", read_only_hint = true))]
     fn get_project(&self, Parameters(request): Parameters<GetProjectRequest>) -> CallToolResult {
         let lost = self.runtime.recoverable().len();
+        // Which plugins are loading is asked of the program, over a tenth
+        // of a second if nobody has looked lately: not with the session held.
+        let loads = self.session.lock().load_watch();
+        loads.loading_now();
         let session = self.session.lock();
         let mut out = project_json(&session, request.include_notes);
         if lost > 0 {
@@ -693,6 +697,9 @@ impl TrillServer {
             let states = session.device_params(id).map_err(|error| explain(project, error))?;
             let mut out = device_json(model);
             out["enabled"] = json!(model.enabled);
+            if session.loading().contains(&id) {
+                out["loading"] = json!(true);
+            }
             out["chain"] = match project.device_chain(id).map_err(|e| e.to_string())? {
                 ChainRef::Master => json!("master"),
                 ChainRef::Track(track) => json!({ "track": track }),
@@ -1702,7 +1709,11 @@ impl TrillServer {
                         session.seek(beat);
                     }
                     session.play();
-                    commanded(true, position.unwrap_or(current.position_beats))
+                    let mut out = commanded(true, position.unwrap_or(current.position_beats));
+                    if let Some(note) = crate::view::loading_note(&session) {
+                        out["loading"] = json!(note);
+                    }
+                    out
                 }
                 TransportAction::Stop => {
                     let recording = session.is_recording();

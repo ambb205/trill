@@ -52,7 +52,13 @@ balance, the level and loudness of every track, the loudness of every section be
 dB each compressor and limiter took off. It writes no file. Use it after every change you want to check; set a \
 compressor's threshold from its gain reduction, not by guessing.
 - render does what measure does and writes a WAV file. Call it for the finished result, or when the user asks \
-for a file; never to check your work.";
+for a file; never to check your work.
+A plugin that plays samples (a drum kit, a sampled guitar) reads them after it is made or given another kit or \
+preset, for seconds or as much as a minute, and until a drum has arrived its key is silent. probe, measure and \
+render wait for that on a copy of their own, so what they report is the whole instrument; if notes stayed \
+silent to the end they say which, because a key that plays nothing and a sample that is not loaded yet sound the \
+same. The plugin the user hears is not waited for: get_project and get_device mark it `loading` while it reads, \
+and transport says so when you press play too early.";
 
 /// What a level at or below this is called: nothing at all.
 const SILENT_DB: f32 = -119.0;
@@ -408,10 +414,23 @@ fn observations(report: &RenderReport, project: &Project) -> Vec<String> {
         }
     }
     for waited in report.waited.iter().filter(|waited| waited.answered) {
-        notes.push(format!(
+        let mut note = format!(
             "Waited {:.1} s for {} on '{}' to be ready before the render started.",
             waited.seconds, waited.device_name, waited.track_name
-        ));
+        );
+        if !waited.silent.is_empty() {
+            // The one case a wait cannot settle: a key that plays nothing
+            // and a sample that has not been loaded sound the same.
+            note.push_str(&format!(
+                " {} of the notes it plays made no sound the whole time: {}. Either it does not play them \
+                 (a keyswitch, a note outside its range) or it was still loading them when this was made, and \
+                 then they are missing here. `probe` with track {} and those notes says which.",
+                waited.silent.len(),
+                runs(&waited.silent),
+                waited.track.map_or(0, |track| track.0)
+            ));
+        }
+        notes.push(note);
     }
     notes
 }
@@ -1173,6 +1192,17 @@ impl TrillServer {
         if probed.waited_seconds >= 1.0 && probed.answered {
             notes.push(format!("Waited {:.1} s for the instrument to be ready.", probed.waited_seconds));
         }
+        let unloaded = |pitch: &u8| heard.iter().any(|note| note.note.pitch == *pitch && !note.sounded);
+        if probed.answered && probed.waited_for_silent.iter().any(unloaded) {
+            // Said once for an instrument as it stands: what was waited
+            // out is remembered.
+            notes.push(
+                "Some of these keys made no sound for as long as the instrument was waited for. A key that plays \
+                 nothing and a sample that is still loading sound the same: if a silent key should sound, probe it \
+                 again in a few seconds."
+                    .to_string(),
+            );
+        }
         if !notes.is_empty() {
             out["notes"] = json!(notes);
         }
@@ -1380,6 +1410,7 @@ mod tests {
             device_name: "Amp".into(),
             seconds: 20.0,
             answered: false,
+            silent: Vec::new(),
         }];
         let notes = silent_track_notes(&project, &levels, &waited, 0.0, Some(16.0));
         assert!(notes[0].contains("never did") && !notes[1].contains("never did"), "{notes:#?}");

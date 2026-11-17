@@ -279,6 +279,10 @@ impl TrillApp {
                 self.live.preparing = session.preparing();
                 self.live.update_editors(&self.snapshot, &session);
                 self.live.update_silent(&self.snapshot, &session);
+                // Which plugins are still reading their samples. (Not in a
+                // picture: how long ago a device was made is not part of
+                // what the window looks like.)
+                self.live.loading = if self.options.screenshot.is_some() { Vec::new() } else { session.loading() };
                 // The session's chores (a take written into the project, a
                 // lost audio device replaced) are the runtime's
                 // housekeeping thread's to do: looking for another device

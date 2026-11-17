@@ -273,25 +273,6 @@ fn probe(session: &mut Session, target: &ProbeTarget, pitches: &[u8]) -> Vec<Hea
     probed.heard
 }
 
-/// [`probe`], again and again until the same keys sound twice running: a
-/// sampler's copy reads its samples anew, one drum after another, and a
-/// probe that comes early hears the drums that have arrived.
-fn probe_until_steady(session: &mut Session, target: &ProbeTarget, pitches: &[u8]) -> Vec<Heard> {
-    let sounding = |heard: &[Heard]| heard.iter().filter(|note| note.sounded).count();
-    let mut heard = probe(session, target, pitches);
-    for _ in 0..8 {
-        std::thread::sleep(Duration::from_secs(2));
-        let again = probe(session, target, pitches);
-        let steady = sounding(&again) == sounding(&heard);
-        heard = again;
-        if steady {
-            break;
-        }
-        eprintln!("  ({} of {} keys so far)", sounding(&heard), pitches.len());
-    }
-    heard
-}
-
 fn said(label: &str, heard: &[Heard]) {
     for note in heard {
         eprintln!(
@@ -381,8 +362,11 @@ fn superior_drummers_kits_are_listed_and_a_loaded_one_is_heard() {
     let keys = [36, 38, 42, 48, 51, 49, 57, 55, 52];
     let target =
         |preset: Option<&str>| ProbeTarget::Device { uri: SUPERIOR.into(), preset: preset.map(str::to_string) };
-    let default = probe_until_steady(&mut session, &target(None), &keys);
+    // A sampler's copy reads its kit anew, one drum after another, and
+    // every probe waits for it: asked once, each drum is there.
+    let default = probe(&mut session, &target(None), &keys);
     said("as it comes", &default);
+    assert!(default.iter().all(|note| note.sounded), "every drum of the kit it starts on is there");
     // A plain kit, and one that stacks a second drum on the kick or the
     // snare, as half of the kits do: in another host such kits were
     // thought to lose their cymbals. They do not: the cymbals of the two
@@ -390,7 +374,7 @@ fn superior_drummers_kits_are_listed_and_a_loaded_one_is_heard() {
     let cymbals = |heard: &[Heard]| heard[5..].iter().map(|note| note.peak_db).fold(f32::MIN, f32::max);
     let mut loudest = Vec::new();
     for kit in ["Black Metal", "Hard Rock"] {
-        let heard = probe_until_steady(&mut session, &target(Some(kit)), &keys);
+        let heard = probe(&mut session, &target(Some(kit)), &keys);
         said(kit, &heard);
         heard_to_differ(kit, &default, &heard);
         assert!(heard.iter().all(|note| note.sounded), "{kit}: every drum of the kit is there");
@@ -403,8 +387,9 @@ fn superior_drummers_kits_are_listed_and_a_loaded_one_is_heard() {
     // was the other host's example). The plugin holds the mixer exactly
     // as the preset has it; whether its own browser makes the kit sound
     // otherwise is not known. Said, not judged.
-    let outlier = probe_until_steady(&mut session, &target(Some("Djent Style")), &keys);
+    let outlier = probe(&mut session, &target(Some("Djent Style")), &keys);
     said("Djent Style", &outlier);
+    assert!(outlier.iter().all(|note| note.sounded), "its cymbals are quiet, not missing");
     eprintln!("  loudest cymbal of 'Djent Style': {:.1} dB", cymbals(&outlier));
 }
 

@@ -4,6 +4,8 @@
 
 use super::{Session, SessionError, preset_values};
 use crate::probe::ProbeJob;
+use crate::ready::LoadWatch;
+use std::sync::Arc;
 use trill_core::device::DeviceCategory;
 use trill_core::{Device, DeviceId, TrackId};
 
@@ -23,6 +25,23 @@ pub enum ProbeTarget {
 }
 
 impl Session {
+    /// The plugins of the song that seem to be loading what they play:
+    /// the ones that were made, or given another state or preset, since
+    /// the program last stood still for a few seconds
+    /// ([`LoadWatch`]). Notes played to them now may not sound. This
+    /// looks at the program and never waits; a window asks it every
+    /// frame.
+    pub fn loading(&self) -> Vec<DeviceId> {
+        self.bank.loads.loading()
+    }
+
+    /// The watch behind [`Self::loading`], to ask without the session:
+    /// [`LoadWatch::loading_now`] is for a caller that asks once in a
+    /// while and may wait a tenth of a second for the answer.
+    pub fn load_watch(&self) -> Arc<LoadWatch> {
+        self.bank.loads.clone()
+    }
+
     /// What it takes to find out whether `device` is ready to be played,
     /// after it was added, given another preset or had a kit loaded in
     /// its own window: a snapshot to wait on away from the session, and
@@ -41,8 +60,8 @@ impl Session {
     /// notes that nobody is to hear. A sampler's copy finds the samples
     /// its twin has loaded, so the two are ready together; where a plugin
     /// loads everything again for every copy, this takes as long as that
-    /// does. [`crate::ready::is_loading`] is the quick question instead:
-    /// whether anything in the program is loading right now.
+    /// does. [`Self::loading`] is the quick question instead: which of
+    /// the song's plugins seem to be loading right now.
     pub fn readiness_job(&mut self, device: DeviceId) -> Result<(ProbeJob, Vec<u8>), SessionError> {
         self.capture_state_of(device);
         let found = self.project.device(device)?.clone();

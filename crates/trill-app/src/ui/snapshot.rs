@@ -321,6 +321,9 @@ pub struct Live {
     /// The tracks whose instrument has been given notes and has put out
     /// nothing in answer, with which instrument that is.
     pub silent: Vec<(TrackId, SilentInstrument)>,
+    /// The plugins that seem to be loading what they play: made or given
+    /// another sound lately, with the program still reading.
+    pub loading: Vec<DeviceId>,
     /// Bars of count-in before a take that starts from a stopped song.
     pub count_in: u32,
     pub master: MeterState,

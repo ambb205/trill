@@ -14,10 +14,15 @@
 //! The devices are waited for until they answer ([`crate::ready`]), then
 //! each note is played by itself from silence: whatever the note before
 //! left ringing is waited out, or cut off, first.
+//!
+//! An instrument that is to start from a preset only it can load is made,
+//! given the preset, asked for its state and made again from that: what
+//! is probed is then what a song would hold of it, and it has nothing of
+//! the sound it began with still loaded.
 
 use crate::analysis::{Analyzer, level_db};
 use crate::graph::MAX_BLOCK;
-use crate::ready::{OPENING_NOTES, Opening, OpeningNote, Plugins, Stand, Wait, signature, wait_for};
+use crate::ready::{OPENING_NOTES, Opening, OpeningNote, Plugins, Stand, Wait, device_signature, signature, wait_for};
 use std::sync::Arc;
 use std::time::Duration;
 use trill_core::device::{DeviceFactory, DeviceInstance, DeviceProcessor, Event, EventKind, Purpose};
@@ -121,7 +126,7 @@ pub struct Heard {
 
 /// Whether devices are ready to be played: see
 /// [`ProbeJob::wait_until_ready`].
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Readiness {
     /// Whether they answered what they were given, and went on answering
     /// it alike with nothing loading. `false` after `seconds` of waiting
@@ -129,6 +134,9 @@ pub struct Readiness {
     pub ready: bool,
     /// How long it took.
     pub seconds: f64,
+    /// The pitches that made no sound to the end, though others did: it
+    /// does not play them, or had not loaded them after all that time.
+    pub silent: Vec<u8>,
 }
 
 /// What a probe found.
@@ -141,6 +149,11 @@ pub struct Probed {
     /// Whether it answered while it was waited for. If not, it may not
     /// have been ready, or none of the notes asked for is one it plays.
     pub answered: bool,
+    /// The pitches that made no sound while it was waited for, though
+    /// others did, and that it was not known to be silent on: it was held
+    /// to that for half the patience it was given. It does not play them,
+    /// or had still not loaded them.
+    pub waited_for_silent: Vec<u8>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -167,7 +180,12 @@ impl ProbeJob {
     pub fn run(&self, notes: &[ProbeNote], options: &ProbeOptions) -> Result<Probed, ProbeError> {
         let mut probing = self.open(notes, options)?;
         let heard = probing.play(notes);
-        Ok(Probed { heard, waited_seconds: probing.waited_seconds, answered: probing.answered })
+        Ok(Probed {
+            heard,
+            waited_seconds: probing.waited_seconds,
+            answered: probing.answered,
+            waited_for_silent: probing.silent.clone(),
+        })
     }
 
     /// Makes the devices and waits for them to be ready to play `first`,
@@ -186,12 +204,14 @@ impl ProbeJob {
                     pitch: *pitch,
                     velocity: velocity_of(100),
                     controllers: standing.clone(),
+                    switch: true,
                 });
             }
             opening.notes.push(OpeningNote {
                 pitch: note.pitch,
                 velocity: velocity_of(note.velocity),
                 controllers: standing.clone(),
+                switch: false,
             });
         }
         self.open_asking(opening, options)
@@ -204,28 +224,45 @@ impl ProbeJob {
     /// Waits as long as that takes, up to two minutes while there are
     /// signs of loading; `patience` is how long nothing at all may happen.
     pub fn wait_until_ready(&self, pitches: &[u8], patience: Duration) -> Result<Readiness, ProbeError> {
-        let note = |pitch: &u8| OpeningNote { pitch: *pitch, velocity: velocity_of(100), controllers: Vec::new() };
+        let note = |pitch: &u8| OpeningNote {
+            pitch: *pitch,
+            velocity: velocity_of(100),
+            controllers: Vec::new(),
+            switch: false,
+        };
         let opening = Opening { notes: pitches.iter().map(note).collect(), signal: pitches.is_empty() };
         let options = ProbeOptions { patience, ..ProbeOptions::default() };
         let probing = self.open_asking(opening, &options)?;
-        Ok(Readiness { ready: probing.answered, seconds: probing.waited_seconds })
+        Ok(Readiness { ready: probing.answered, seconds: probing.waited_seconds, silent: probing.silent })
     }
 
     fn open_asking(&self, opening: Opening, options: &ProbeOptions) -> Result<Probing, ProbeError> {
         let sample_rate = f64::from(options.sample_rate);
         let mut instances: Vec<DeviceInstance> = Vec::with_capacity(self.devices.len());
-        for (index, device) in self.devices.iter().enumerate() {
+        let mut devices = self.devices.clone();
+        for (index, device) in devices.iter_mut().enumerate() {
             let failed = |reason: String| ProbeError::Device(format!("{} ({}): {reason}", device.name, device.uri));
-            let mut instance = self
-                .factory
-                .create_for(device, sample_rate, MAX_BLOCK, Purpose::Rendering)
-                .map_err(|error| failed(error.to_string()))?;
+            let make = |device: &Device| {
+                let made = self.factory.create_for(device, sample_rate, MAX_BLOCK, Purpose::Rendering);
+                made.map_err(|error| failed(error.to_string()))
+            };
+            let mut instance = make(device)?;
             if let (0, Some(preset)) = (index, &self.preset) {
                 let loaded = match instance.controller.as_mut() {
                     Some(controller) => controller.load_preset(preset).map_err(|error| error.to_string()),
                     None => Err("it cannot load presets".to_string()),
                 };
                 loaded.map_err(|reason| failed(format!("did not load the preset '{}': {reason}", preset.name)))?;
+                // A sampler that is handed another kit goes on playing
+                // drums of the one it had for a moment, with nothing to
+                // show for it: made again from the state it now has, it
+                // loads the preset's sound and no other.
+                let state = instance.controller.as_mut().and_then(|controller| controller.save_state());
+                if let Some(state) = state {
+                    drop(instance);
+                    device.state = Some(state);
+                    instance = make(device)?;
+                }
             }
             instances.push(instance);
         }
@@ -247,19 +284,22 @@ impl ProbeJob {
             setting,
             waited_seconds: 0.0,
             answered: true,
+            silent: Vec::new(),
         };
 
-        let plugins = self.devices.iter().any(|device| Plugins::is_plugin(&device.uri));
+        let plugins = devices.iter().any(|device| Plugins::is_plugin(&device.uri));
         let mut stand = probing.stand();
         if plugins {
-            let signature = signature(self.devices.iter(), &opening);
-            let mut waits = [Wait::new(stand, opening, signature)];
+            let signature = signature(devices.iter(), &opening);
+            let mut waits = [Wait::new(stand, opening, signature, device_signature(devices.iter()))];
             wait_for(&mut waits, options.patience);
             let [wait] = waits;
             let (waited, answered) = wait.outcome();
+            let silent = wait.silent().to_vec();
             stand = wait.stand;
             let noise = stand.noise();
             (probing.noise, probing.waited_seconds, probing.answered) = (noise, waited.as_secs_f64(), answered);
+            probing.silent = silent;
         } else {
             stand.hear_noise();
             probing.noise = stand.noise();
@@ -285,6 +325,9 @@ pub struct Probing {
     pub waited_seconds: f64,
     /// Whether it answered while it was waited for.
     pub answered: bool,
+    /// The pitches that made no sound while it was waited for, though
+    /// others did: see [`Probed::waited_for_silent`].
+    pub silent: Vec<u8>,
 }
 
 impl Probing {
@@ -354,9 +397,8 @@ fn play(stand: &mut Stand, note: &ProbeNote, options: &ProbeOptions, setting: &[
     if silent < quiet_frames {
         // Still ringing. What rings is waited out, as far as that goes,
         // so that the next note starts from silence: a quiet hit cannot be
-        // measured under a cymbal. (Nothing cuts a sampler's tail short: a
-        // reset is not a thing every plugin acts on, and some take one
-        // badly in the middle of playing.)
+        // measured under a cymbal. (Nothing cuts a tail short here: how
+        // long a note rings is one of the things that are measured.)
         let mut all_off = vec![Event { offset: 0, kind: EventKind::AllNotesOff }];
         all_off.extend_from_slice(setting);
         let mut silent = 0;
