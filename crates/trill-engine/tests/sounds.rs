@@ -392,6 +392,71 @@ fn the_files_a_sounds_devices_name_are_listed_and_relinked_like_any_others() {
 }
 
 #[test]
+fn a_sound_dropped_on_a_track_goes_where_its_instrument_has_its_place() {
+    let mut session = session();
+    // A track without an instrument: the sound goes in front of what is
+    // there.
+    let part = track(&mut session, "Part");
+    session.add_device(ChainRef::Track(part), "builtin:eq", None, None).unwrap();
+    let steps = depth(&mut session);
+    let added = session.give_track(part, WAVETABLE, "Glass Pad").unwrap();
+    assert_eq!(chain(&session, part), ["Wavetable", "Chorus", "Reverb", "EQ"]);
+    assert_eq!(depth(&mut session), steps + 1);
+    let synth = added.device;
+
+    // The same instrument takes another of its sounds on as it is.
+    let again = session.give_track(part, WAVETABLE, "Anthem Saws").unwrap();
+    assert_eq!(again.device, synth);
+    assert_eq!(chain(&session, part), ["Wavetable", "Delay", "Reverb", "EQ"]);
+    assert_eq!(again.given.unwrap().removed, ["Chorus", "Reverb"]);
+
+    // A sound of another instrument: that instrument in the place of the
+    // one that was there, its effects in the place of the last sound's,
+    // in one step that takes all of it back.
+    let tone = SavedPreset {
+        uri: BASS.into(),
+        name: "Tone".into(),
+        after: Some(vec![SoundDevice::new(AMP, "Scripted Amp", &[])]),
+        ..SavedPreset::default()
+    };
+    session.saved_presets().save(tone).unwrap();
+    let steps = depth(&mut session);
+    let other = session.give_track(part, BASS, "Tone").unwrap();
+    assert_eq!(chain(&session, part), ["Scripted Bass", "Scripted Amp", "EQ"]);
+    assert_eq!(other.given.unwrap().removed, ["Delay", "Reverb"]);
+    assert_eq!(depth(&mut session), steps + 1);
+    assert!(session.undo());
+    assert_eq!(chain(&session, part), ["Wavetable", "Delay", "Reverb", "EQ"]);
+    assert_eq!(session.project().track(part).unwrap().devices[0].id, synth);
+    assert!(session.redo());
+
+    // What cannot be given leaves the track as it was: a preset there is
+    // none of, and an instrument there is none of.
+    let before = session.project().clone();
+    let steps = depth(&mut session);
+    assert!(session.give_track(part, WAVETABLE, "No Such Sound").unwrap_err().to_string().contains("has no preset"));
+    assert!(session.give_track(part, "vst3:GONE", "Tone").unwrap_err().to_string().contains("unknown device"));
+    assert_eq!(depth(&mut session), steps);
+    assert_eq!(session.project(), &before);
+
+    // A sound that begins with an effect is taken on by a device of that
+    // type, and otherwise goes to the end of the chain.
+    let room = SavedPreset {
+        uri: AMP.into(),
+        name: "Room Amp".into(),
+        after: Some(vec![SoundDevice::new(REVERB, "Reverb", &[])]),
+        ..SavedPreset::default()
+    };
+    session.saved_presets().save(room).unwrap();
+    session.give_track(part, AMP, "Room Amp").unwrap();
+    assert_eq!(chain(&session, part), ["Scripted Bass", "Scripted Amp", "Reverb", "EQ"]);
+    let di = track(&mut session, "DI");
+    session.add_device(ChainRef::Track(di), "builtin:eq", None, None).unwrap();
+    session.give_track(di, AMP, "Room Amp").unwrap();
+    assert_eq!(chain(&session, di), ["EQ", "Scripted Amp", "Reverb"]);
+}
+
+#[test]
 fn a_sound_given_with_builtin_devices_is_what_the_patch_says() {
     // What ships is what the table of patches says, to the device: a
     // track given a patch through the session has the chain a project

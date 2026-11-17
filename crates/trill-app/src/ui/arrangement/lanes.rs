@@ -61,6 +61,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry) {
     paint_overlays(ui, cx, geometry, &response);
     interact(ui, cx, geometry, &response);
     sound_drop(ui, cx, geometry);
+    preset_drop(ui, cx, geometry);
     context_menu(ui, cx, geometry, &response);
     rename_field(ui, cx, geometry);
 }
@@ -617,6 +618,42 @@ fn sound_drop(ui: &Ui, cx: &mut Cx, geometry: &Geometry) {
             if let Some(drag) = &mut cx.state.sound_drag {
                 drag.offer(DropTarget::NewTrack { beat, colors });
             }
+        }
+    }
+}
+
+/// While a sound of an instrument and its effects is dragged over the
+/// lanes: the track under the pointer is offered, and below the tracks a
+/// track of its own.
+fn preset_drop(ui: &Ui, cx: &mut Cx, geometry: &Geometry) {
+    let theme = cx.theme;
+    let lanes = geometry.lanes;
+    let Some(pointer) = crate::ui::sound_presets::over(cx, lanes) else { return };
+    let painter = ui.painter_at(lanes);
+    match geometry.row_at(pointer.y) {
+        Some(row) => {
+            let index = match row.kind {
+                RowKind::Track { index, .. } => index,
+                RowKind::Lane { track, .. } => track,
+            };
+            let Some(track) = cx.snap.project.tracks.get(index).map(|track| track.id) else { return };
+            if crate::ui::sound_presets::offer_track(cx, track)
+                && let Some(row) = geometry.rows.track(index)
+            {
+                let top = geometry.screen_y(row.top);
+                let band = Rect::from_x_y_ranges(lanes.x_range(), top..=top + row.height - 1.0);
+                paint::frame(&painter, band, theme.ink);
+            }
+        }
+        None => {
+            // The band says a track will appear.
+            let top = geometry.screen_y(geometry.rows.height);
+            let band = Rect::from_x_y_ranges(lanes.x_range(), top..=top + NEW_TRACK_BAND);
+            painter.rect_filled(band, 0.0, theme.hover);
+            paint::hline_above(&painter, band.x_range(), band.bottom(), theme.hairline);
+            let caption = Rect::from_min_max(band.min + vec2(8.0, 0.0), band.max - vec2(8.0, 0.0));
+            text::paint(&painter, caption, Align2::RIGHT_CENTER, theme.text.micro, "New track", theme.ink_faint);
+            crate::ui::sound_presets::offer_new_track(cx);
         }
     }
 }

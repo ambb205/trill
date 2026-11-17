@@ -22,6 +22,7 @@ mod perf;
 mod recording;
 mod recovery;
 mod ruler;
+mod sound_presets;
 mod sounds;
 mod stage;
 mod tracks;
@@ -221,6 +222,27 @@ impl Harness {
     fn labeled_below(&self, label: &str, y: f32) -> Pos2 {
         let found = self.all_labeled(label).into_iter().find(|rect| rect.top() >= y);
         found.unwrap_or_else(|| panic!("nothing below {y} is labeled '{label}'")).center()
+    }
+
+    /// Center of the browser's widget labeled `label`: for telling a row
+    /// of the browser from its namesake in the panes beside it.
+    fn in_browser(&self, label: &str) -> Pos2 {
+        let found = self.all_labeled(label).into_iter().find(|rect| rect.right() <= self.work_left());
+        found.unwrap_or_else(|| panic!("nothing in the browser is labeled '{label}'")).center()
+    }
+
+    /// Center of the widget labeled `label` that is not in the browser.
+    fn beside_browser(&self, label: &str) -> Pos2 {
+        let found = self.all_labeled(label).into_iter().find(|rect| rect.left() >= self.work_left());
+        found.unwrap_or_else(|| panic!("nothing beside the browser is labeled '{label}'")).center()
+    }
+
+    /// Scrolls the browser's Devices tab to its end, where the presets of
+    /// the selected device are listed.
+    fn browse_to_presets(&mut self) {
+        let over = pos2(self.work_left() / 2.0, top_bar::HEIGHT + 300.0);
+        self.wheel(Modifiers::NONE, over, -400.0);
+        self.idle(2);
     }
 
     /// Clicks the first button, menu item or other widget with this label.
@@ -1132,6 +1154,7 @@ fn the_browser_adds_and_swaps_devices_and_applies_presets() {
     // The browser lists the presets of the selected device, the synth, and
     // applies one on a click.
     assert!(harness.project().tracks[0].devices[0].params.is_empty());
+    harness.browse_to_presets();
     harness.click_label("bass");
     let params = harness.project().tracks[0].devices[0].params.clone();
     assert!(!params.is_empty(), "the preset's values were applied");
@@ -1154,11 +1177,10 @@ fn a_devices_preset_chip_opens_its_presets() {
     let mut harness = Harness::new(devices_tab(), |_| {});
     harness.key(Modifiers::COMMAND, Key::T);
     harness.idle(2);
-    // The chip in the synth's header shows the current preset; the browser
-    // row of the same name comes first in reading order.
-    let chips = harness.all_labeled("init");
-    assert_eq!(chips.len(), 2);
-    harness.click(chips[1].center());
+    // The chip in the synth's header shows the current preset; the
+    // browser has a row of the same name.
+    assert_eq!(harness.all_labeled("init").len(), 2);
+    harness.click(harness.beside_browser("init"));
     harness.idle(3);
     // The popup's rows are to the right of the browser's.
     let rows = harness.all_labeled("supersaw");
@@ -1198,6 +1220,7 @@ fn a_devices_sound_is_saved_from_its_preset_menu_and_given_back() {
 
     // Another preset, then the saved one again from the browser: the
     // sound comes back whole.
+    harness.browse_to_presets();
     harness.click_label("bass");
     assert_ne!(synth(&harness).params.get("cutoff"), Some(&432.0));
     harness.idle(2);
@@ -1208,7 +1231,7 @@ fn a_devices_sound_is_saved_from_its_preset_menu_and_given_back() {
     // Escape leaves nothing saved, and the name it offers is the one the
     // device is on.
     harness.idle(2);
-    harness.click_last_label("Dark Pad");
+    harness.click(harness.beside_browser("Dark Pad"));
     harness.click_label("Save preset\u{2026}");
     harness.idle(2);
     assert_eq!(harness.app.state().naming_preset.as_ref().map(|edit| edit.text.as_str()), Some("Dark Pad"));

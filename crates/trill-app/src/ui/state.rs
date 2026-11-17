@@ -698,6 +698,10 @@ pub struct UiState {
     pub renaming_track: Option<TextEditState<TrackId>>,
     /// The name being typed for a preset of this device's sound.
     pub naming_preset: Option<TextEditState<DeviceId>>,
+    /// Whether the name being typed there is for the sound of the device's
+    /// track, the device and every effect after it, and not for a preset
+    /// of the device alone.
+    pub naming_sound: bool,
     pub renaming_clip: Option<TextEditState<ClipId>>,
     /// A clip being renamed on its own name strip in the arrangement.
     pub renaming_clip_inline: Option<TextEditState<InlineClip>>,
@@ -721,6 +725,9 @@ pub struct UiState {
     /// wherever they are dropped.
     pub sound_drag: Option<SoundDrag>,
     pub system_drop: Option<SystemDrop>,
+    /// A sound of an instrument and its effects on its way from the
+    /// browser to a track.
+    pub preset_drag: Option<super::sound_presets::PresetDrag>,
     /// The pad each drum rack's panel shows the controls of, by its note.
     pub selected_pads: HashMap<DeviceId, u8>,
     /// How much of its file the audio clip panel shows: the clip it was
@@ -781,6 +788,7 @@ impl UiState {
             },
             renaming_track: None,
             naming_preset: None,
+            naming_sound: false,
             renaming_clip: None,
             renaming_clip_inline: None,
             audition: None,
@@ -792,6 +800,7 @@ impl UiState {
             browser: BrowserState::new(),
             sound_drag: None,
             system_drop: None,
+            preset_drag: None,
             selected_pads: HashMap::new(),
             audio_view: None,
             hint: Hint::default(),

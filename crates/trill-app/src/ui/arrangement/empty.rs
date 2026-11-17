@@ -127,6 +127,16 @@ pub(super) fn sound_drop(ui: &Ui, cx: &mut Cx, area: Rect) {
     paint::frame(&ui.painter_at(area), area.shrink(4.0), cx.theme.ink);
 }
 
+/// A sound of an instrument and its effects, dragged over the empty
+/// arrangement, starts the song too: on a track of its own.
+pub(super) fn preset_drop(ui: &Ui, cx: &mut Cx, area: Rect) {
+    if crate::ui::sound_presets::over(cx, area).is_none() {
+        return;
+    }
+    crate::ui::sound_presets::offer_new_track(cx);
+    paint::frame(&ui.painter_at(area), area.shrink(4.0), cx.theme.ink);
+}
+
 fn load_demo(cx: &mut Cx) {
     if let Some(clip) = cx.try_session(crate::demo::load)
         && let Ok(track) = cx.session.lock().project().clip_track(clip)

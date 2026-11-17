@@ -1139,6 +1139,7 @@ impl Assistant {
             || view.drag.is_some()
             || state.piano.drag.is_some()
             || state.sound_drag.is_some()
+            || state.preset_drag.is_some()
             || state.renaming_track.is_some()
             || state.naming_preset.is_some()
             || state.renaming_clip.is_some()

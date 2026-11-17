@@ -16,7 +16,7 @@ use super::{colors, displays, editors, sample_panels, wavetable_panel, widgets};
 use eframe::egui::{self, Align2, Color32, FontId, Id, Rect, Role, Sense, Ui, WidgetInfo, pos2, vec2};
 use trill_core::device::{DeviceCategory, DeviceDescriptor, ParamKind};
 use trill_core::presets::PresetInfo;
-use trill_core::{AutomationTarget, ChainRef, Device, DeviceId};
+use trill_core::{AutomationTarget, ChainRef, Device, DeviceId, TrackId};
 use trill_engine::ParamState;
 use trill_noir::{Bar, Chip, Icon, MenuItem, paint, text};
 
@@ -121,6 +121,31 @@ pub fn saved_presets<'a>(cx: &Cx<'a>, device: &Device) -> &'a [PresetInfo] {
 pub fn current_saved<'a>(cx: &Cx<'a>, device: &'a Device) -> Option<&'a str> {
     let reference = device.preset.as_ref()?;
     saved_presets(cx, device).iter().any(|preset| preset.id == reference.id).then_some(reference.id.as_str())
+}
+
+/// The track whose sound begins at `device`: the device is its
+/// instrument, or its first device where it has no instrument. `None` for
+/// any other device, and for a device of the master.
+fn sound_begins_at(cx: &Cx, device: &Device) -> Option<TrackId> {
+    let ChainRef::Track(track) = cx.snap.project.device_chain(device.id).ok()? else { return None };
+    let devices = &cx.snap.track(track)?.devices;
+    let instrument = |device: &&Device| {
+        cx.descriptors.iter().any(|known| known.uri == device.uri && known.category == DeviceCategory::Instrument)
+    };
+    let first = devices.iter().find(instrument).or(devices.first())?;
+    (first.id == device.id).then_some(track)
+}
+
+/// What the saved preset `preset` of the type of `device` brings behind
+/// it, in words, if it is a sound that brings anything: `with Chorus and
+/// Reverb`. Empty otherwise.
+fn brought_by(cx: &Cx, device: &Device, preset: &PresetInfo) -> String {
+    let sound = cx.snap.saved_sounds.iter().find(|sound| sound.uri == device.uri && sound.info.id == preset.id);
+    match sound.map(|sound| sound.after.as_slice()) {
+        None | Some([]) => String::new(),
+        Some([one]) => format!("with {one}"),
+        Some([first @ .., last]) => format!("with {} and {last}", first.join(", ")),
+    }
 }
 
 /// What a device's preset menu shows for the preset it is on: one of its
@@ -340,7 +365,10 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
         let rect = Rect::from_min_size(pos2(name_right - width, header.center().y - 8.0), vec2(width, 16.0));
         let response = trill_noir::dropdown(ui, theme, rect, id.with("preset"), "", shown, !device.enabled);
         cx.hint(&response, "Presets of this device, saving its sound as one, and loading one from a file");
-        let (mut chosen, mut save, mut load) = (None, false, false);
+        let (mut chosen, mut save, mut load, mut save_sound) = (None, false, false, false);
+        // The track whose sound begins at this device, if one does: its
+        // instrument, or its first device where it has none.
+        let begins = sound_begins_at(cx, device);
         egui::Popup::menu(&response).gap(1.0).show(|ui| {
             ui.set_min_width(150.0);
             if !saved.is_empty() {
@@ -348,7 +376,10 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
             }
             for preset in saved {
                 let item = MenuItem::new(&preset.name).checked(current_saved == Some(preset.id.as_str()));
-                if item.detail(&preset.description).show(ui, theme).clicked() {
+                // A sound says what it brings where it says nothing else.
+                let brings = brought_by(cx, device, preset);
+                let detail = if preset.description.is_empty() { brings.as_str() } else { preset.description.as_str() };
+                if item.detail(detail).show(ui, theme).clicked() {
                     chosen = Some(preset.id.clone());
                 }
             }
@@ -366,6 +397,10 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
             }
             let about = "Keep this sound under a name, for every song";
             save = MenuItem::new("Save preset\u{2026}").detail(about).show(ui, theme).clicked();
+            if begins.is_some() {
+                let about = "This device and the effects after it, as one thing";
+                save_sound = MenuItem::new("Save sound\u{2026}").detail(about).show(ui, theme).clicked();
+            }
             let about = "A preset that lies anywhere: one you bought, or were sent";
             load = MenuItem::new("Load preset file\u{2026}").detail(about).show(ui, theme).clicked();
         });
@@ -375,11 +410,12 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
         if load {
             super::files::load_preset_file(&ui.ctx().clone(), cx, device_id);
         }
-        if save {
+        if save || save_sound {
             // The name of the saved preset it is on is the likely one to
             // save over; anything else starts empty.
             let text = current_saved.and(device.preset.as_ref()).map(|preset| preset.name.clone()).unwrap_or_default();
             cx.state.naming_preset = Some(TextEditState { target: device_id, text, focused: false });
+            cx.state.naming_sound = save_sound;
         }
         name_right = rect.left() - 6.0;
     }
@@ -388,7 +424,13 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
     if cx.state.naming_preset.as_ref().is_some_and(|edit| edit.target == device_id) {
         // The name of the preset is typed where the device's name is.
         let field = name.shrink2(vec2(0.0, 3.0));
-        let hint = format!("Name this sound of {} and press Enter; Escape leaves it unsaved", device.name);
+        let hint = match cx.state.naming_sound {
+            true => format!(
+                "Name the sound of this track, {} and the effects after it, and press Enter; Escape leaves it unsaved",
+                device.name
+            ),
+            false => format!("Name this sound of {} and press Enter; Escape leaves it unsaved", device.name),
+        };
         cx.state.hint.set(hint);
         let naming = PresetName(device_id);
         let mut edit = cx.state.naming_preset.take().map(|edit| TextEditState {
@@ -399,11 +441,29 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
         let committed = widgets::name_field(ui, theme, field, naming, "", &mut edit);
         cx.state.naming_preset =
             edit.map(|edit| TextEditState { target: device_id, text: edit.text, focused: edit.focused });
-        if let Some(preset) = committed
-            && let Some(saved) = cx.try_session(|session| session.save_preset(device_id, &preset, "", &[]))
-        {
-            let what = if saved.replaced { "Replaced" } else { "Saved" };
-            cx.state.toasts.info(format!("{what} the preset \u{201C}{}\u{201D} of {}", saved.info.name, device.name));
+        let track = sound_begins_at(cx, device).filter(|_| cx.state.naming_sound);
+        match (committed, track) {
+            (Some(name), Some(track)) => {
+                if let Some(kept) = cx.try_session(|session| session.save_sound(track, &name, "", &[])) {
+                    let what = if kept.saved.replaced { "Replaced" } else { "Saved" };
+                    let made_of = kept.devices.join(", ");
+                    cx.state
+                        .toasts
+                        .info(format!("{what} the sound \u{201C}{}\u{201D}: {made_of}", kept.saved.info.name));
+                    // What a sound does not hold, where the track has any.
+                    for left_out in kept.left_out {
+                        cx.state.toasts.info(left_out);
+                    }
+                }
+            }
+            (Some(preset), None) => {
+                if let Some(saved) = cx.try_session(|session| session.save_preset(device_id, &preset, "", &[])) {
+                    let what = if saved.replaced { "Replaced" } else { "Saved" };
+                    let said = format!("{what} the preset \u{201C}{}\u{201D} of {}", saved.info.name, device.name);
+                    cx.state.toasts.info(said);
+                }
+            }
+            (None, _) => {}
         }
         return;
     }

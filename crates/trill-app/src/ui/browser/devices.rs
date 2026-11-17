@@ -3,8 +3,15 @@
 //!
 //! Double-clicking a device adds it to the chain the Devices tab shows.
 //! Clicking a preset applies it to the selected device.
+//!
+//! After the built-in devices come the sounds that are more than one
+//! device: an instrument and the effects after it, saved from a track or
+//! brought by a built-in instrument. Double-clicking one makes it the sound of the
+//! track that is shown; dragging it to a track does the same there, and
+//! below the tracks makes a track of its own.
 
 use super::{EDGE, ROW, SEARCH_BLOCK, SEARCH_HEIGHT};
+use crate::ui::sound_presets::{self, Listed, Target};
 use crate::ui::state::Cx;
 use crate::ui::{arrangement, devices, widgets};
 use eframe::egui::{self, Align2, Rect, Role, Sense, Ui, WidgetInfo, pos2, vec2};
@@ -125,6 +132,82 @@ fn row(ui: &mut Ui, cx: &Cx, name: &str, badge: &str, selected: bool) -> egui::R
     response
 }
 
+/// The longest name of an instrument a sound's row says in full.
+const SOUND_DEVICE: usize = 12;
+
+/// What a sound's row says beside its name: its instrument, and how many
+/// effects come with it.
+fn sound_badge(sound: &Listed) -> String {
+    let device = match sound.device.chars().count() > SOUND_DEVICE {
+        true => format!("{}\u{2026}", sound.device.chars().take(SOUND_DEVICE - 1).collect::<String>().trim_end()),
+        false => sound.device.clone(),
+    };
+    match sound.after.len() {
+        0 => device.to_uppercase(),
+        count => format!("{} +{count}", device.to_uppercase()),
+    }
+}
+
+/// One sound: its name, and what it is made of. It can be carried off.
+fn sound_row(ui: &mut Ui, cx: &Cx, sound: &Listed) -> egui::Response {
+    let theme = cx.theme;
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click_and_drag());
+    let label = format!("Sound {}", sound.name);
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let lit = response.hovered() || response.dragged();
+        if lit {
+            painter.rect_filled(rect, 0.0, theme.hover);
+        }
+        let mut content = rect.shrink2(vec2(EDGE, 0.0));
+        let quiet = if lit { theme.ink_dim } else { theme.ink_faint };
+        let badge = sound_badge(sound);
+        let width = text::paint(painter, content, Align2::RIGHT_CENTER, theme.text.micro, &badge, quiet);
+        content.max.x -= width + 6.0;
+        let color = if lit { theme.ink } else { theme.ink_dim };
+        text::paint_name(painter, content, Align2::LEFT_CENTER, theme.text.body, &sound.name, color);
+    }
+    response
+}
+
+/// The sounds that are an instrument and the effects after it.
+fn sound_list(ui: &mut Ui, cx: &mut Cx) {
+    let query = cx.state.browser.search.clone();
+    let sounds: Vec<Listed> = sound_presets::listed(cx)
+        .into_iter()
+        .filter(|sound| matches(&sound.name, &query) || matches(&sound.device, &query))
+        .collect();
+    if sounds.is_empty() {
+        return;
+    }
+    let target = match cx.state.shown_chain() {
+        ChainRef::Track(track) => Target::Track(track),
+        ChainRef::Master => Target::NewTrack,
+    };
+    let onto = match target {
+        Target::Track(track) => {
+            let name = cx.snap.track(track).map_or_else(|| "the track".to_owned(), |track| track.name.clone());
+            format!("double-click to make it the sound of {name}")
+        }
+        Target::NewTrack => "double-click for a new track with it".to_owned(),
+    };
+    section(ui, cx, "Sounds");
+    for sound in &sounds {
+        let response = sound_row(ui, cx, sound);
+        cx.hint(&response, format!("{} \u{00B7} {onto}, or drag it to a track", sound.made_of()));
+        if response.drag_started() {
+            sound_presets::start(cx, sound);
+        }
+        if widgets::activated(ui, &response) {
+            sound_presets::give(cx, &sound.uri, &sound.id, &sound.name, target);
+        }
+        if !sound.description.is_empty() && cx.state.preset_drag.is_none() {
+            response.on_hover_text(&sound.description);
+        }
+    }
+}
+
 /// Instruments, effects and plugins.
 fn device_lists(ui: &mut Ui, cx: &mut Cx) {
     let chain = cx.state.shown_chain();
@@ -141,6 +224,11 @@ fn device_lists(ui: &mut Ui, cx: &mut Cx) {
     let query = cx.state.browser.search.clone();
 
     for (which, title) in Shelf::ALL {
+        // The sounds follow what is built in, ahead of the plugins: those
+        // may be a long list.
+        if which == Shelf::Plugins {
+            sound_list(ui, cx);
+        }
         let found = shelf(descriptors, which, &query);
         if found.is_empty() {
             continue;

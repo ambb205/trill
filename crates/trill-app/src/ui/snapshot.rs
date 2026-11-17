@@ -62,6 +62,9 @@ pub struct Snapshot {
     /// The presets that were saved for the device types `params` covers,
     /// by device URI; a type without any is not in it.
     pub saved_presets: HashMap<String, Vec<PresetInfo>>,
+    /// The saved presets that are sounds, of every device type: each with
+    /// what it brings behind its first device.
+    pub saved_sounds: Vec<trill_engine::SavedSound>,
     /// Which MIDI controllers the instrument of each track does something
     /// with, where that is known.
     controller_support: HashMap<TrackId, ControllerSupport>,
@@ -157,6 +160,7 @@ impl Snapshot {
             drum_tracks,
             drum_instruments,
             saved_presets,
+            saved_sounds: session.saved_presets().sounds(),
             revision: session.revision(),
             can_undo: session.can_undo(),
             can_redo: session.can_redo(),
@@ -222,6 +226,7 @@ impl Snapshot {
             drum_tracks,
             drum_instruments,
             saved_presets: HashMap::new(),
+            saved_sounds: Vec::new(),
             revision,
             can_undo: false,
             can_redo: false,

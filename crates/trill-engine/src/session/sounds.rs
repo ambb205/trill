@@ -410,6 +410,65 @@ impl Session {
         Ok(SavedAsSound { saved, uri: first.uri, devices, left_out })
     }
 
+    /// Gives a track a sound: the preset `preset` of the device type
+    /// `uri`, asked for as [`Session::load_preset`] takes one. What a
+    /// front end does when a sound is dropped on a track.
+    ///
+    /// The sound goes where its first device has its place. For an
+    /// instrument that is the track's instrument: one of the same type
+    /// takes the sound on as it is, one of another type gives way to the
+    /// sound's own, in its place, and a track without one gets it in
+    /// front of its effects. For a sound that begins with an effect, a
+    /// device of that type on the track takes it on, and otherwise the
+    /// sound goes to the end of the chain. Either way the effects an
+    /// earlier sound brought behind it go and the sound's own are made
+    /// (see the module documentation), and all of it is one undo step. If
+    /// it cannot be done, the track is as it was.
+    pub fn give_track(&mut self, track: TrackId, uri: &str, preset: &str) -> Result<Added, SessionError> {
+        let descriptors = self.factory.descriptors();
+        let Some(wanted) = descriptors.iter().find(|descriptor| descriptor.uri == uri) else {
+            return Err(SessionError::Device(format!("unknown device '{uri}'")));
+        };
+        let instrument = |device: &Device| {
+            let found = descriptors.iter().find(|descriptor| descriptor.uri == device.uri);
+            found.is_some_and(|descriptor| descriptor.category == DeviceCategory::Instrument)
+        };
+        let devices = &self.project.track(track)?.devices;
+        let place = match wanted.category {
+            DeviceCategory::Instrument => devices.iter().position(instrument),
+            DeviceCategory::Effect => devices.iter().position(|device| device.uri == uri),
+        };
+        let there = place.map(|index| (index, devices[index].id, devices[index].uri == uri));
+        let chain = trill_core::ChainRef::Track(track);
+        match (there, wanted.category) {
+            (Some((_, device, true)), _) => {
+                self.give_preset(device, preset).map(|given| Added { device, given: Some(given) })
+            }
+            (Some((index, old, false)), _) => {
+                // Found before anything is taken away, so that a preset
+                // there is none of leaves the track alone.
+                self.wanted_preset(uri, preset)?;
+                let own_gesture = self.gesture.is_none();
+                if own_gesture {
+                    self.begin_gesture();
+                }
+                let removed = self.edit(|project| project.remove_device(old).map(drop));
+                let added = removed.and_then(|()| self.add_given(chain, uri, Some(preset), Some(index)));
+                // An instrument that was not made took the step with it,
+                // unless it failed before there was one.
+                if added.is_err() && self.project.device(old).is_err() {
+                    self.back_out();
+                }
+                if own_gesture {
+                    self.end_gesture();
+                }
+                added
+            }
+            (None, DeviceCategory::Instrument) => self.add_given(chain, uri, Some(preset), Some(0)),
+            (None, DeviceCategory::Effect) => self.add_given(chain, uri, Some(preset), None),
+        }
+    }
+
     /// What the preset `info` of the device type `uri` brings behind its
     /// device, by name, if it is a sound.
     pub fn sound_after(&self, uri: &str, info: &PresetInfo) -> Option<Vec<String>> {

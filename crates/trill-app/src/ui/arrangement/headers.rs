@@ -285,6 +285,19 @@ fn header(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, number: 
     trill_noir::stereo_meter(&painter, theme, parts.meter, levels, widgets::meter_zones());
     resize_track(ui, cx, track, rect, id);
     sound_drop(ui, cx, geometry, track, rect);
+    preset_drop(ui, cx, geometry, track, rect);
+}
+
+/// A sound of an instrument and its effects, dragged over a header,
+/// becomes the sound of the track.
+fn preset_drop(ui: &Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, rect: Rect) {
+    let visible = rect.intersect(geometry.headers);
+    if crate::ui::sound_presets::over(cx, visible).is_none() {
+        return;
+    }
+    if crate::ui::sound_presets::offer_track(cx, track.id) {
+        paint::frame(ui.painter(), rect.with_max_y(rect.bottom() - 1.0), cx.theme.ink);
+    }
 }
 
 /// A sound dragged over a header goes to the track as a whole: into its
