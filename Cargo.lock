@@ -4761,6 +4761,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "trill-stage"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "egui",
+ "egui-wgpu",
+ "hound",
+ "image",
+ "log",
+ "parking_lot",
+ "pollster",
+ "tempfile",
+ "trill-core",
+ "trill-noir",
+]
+
+[[package]]
 name = "trill-theory"
 version = "0.1.0"
 dependencies = [
