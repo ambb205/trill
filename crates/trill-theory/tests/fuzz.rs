@@ -286,7 +286,7 @@ fn no_input_panics_and_everything_written_is_playable() {
                     Err(error) => assert_explains(&error, &text),
                 }
                 let _ = on_kit.set_lane_on(&kit, ["china", "closed_hat_edge", "ride_bell"][rng.below(3)], &text);
-                let fill = FillPlan { pattern: &pattern, from: rng.unit(), every: rng.below(5), crash: 49 };
+                let fill = FillPlan { pattern: &pattern, from: rng.unit(), every: rng.below(5), crash: Some(49) };
                 let arranged = arrange(&on_kit, Some(&fill), rng.below(9), signature.beats_per_bar(), 0.1 + rng.unit());
                 assert_playable(&arranged.notes, &text);
                 let _ = on_kit.grid();

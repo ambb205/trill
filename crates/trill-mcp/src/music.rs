@@ -30,7 +30,7 @@ use trill_theory::arpeggio::{ArpOrder, Arpeggio, ORDERS};
 use trill_theory::articulation::{Asked, articulate_asked, is_our_writing, keys_for, read_back, unknown};
 use trill_theory::bass::{BassLine, BassStyle, bass_line};
 use trill_theory::chord::QUALITIES;
-use trill_theory::drums::{FillPlan, arrange, drum_names};
+use trill_theory::drums::{FillPlan, Laid, arrange, drum_names};
 use trill_theory::melody::{ORNAMENTS, Phrase, PhraseBar, Tone};
 use trill_theory::ornament::{Playing, perform};
 use trill_theory::phrasing::{self, Phrasing};
@@ -1173,6 +1173,19 @@ fn lay_in_bars(
     Ok(())
 }
 
+/// The drums of a kit by name, the shorter names first, as far as a
+/// sentence has room for.
+fn kit_names(kit: &InstrumentProfile) -> String {
+    let mut names: Vec<String> = kit.drum_map().into_iter().map(|(name, _)| name).collect();
+    names.sort_by_key(|name| (name.len(), name.clone()));
+    let more = names.len().saturating_sub(40);
+    names.truncate(40);
+    match more {
+        0 => format!("{}.", names.join(", ")),
+        more => format!("{}, and {more} more (get_instrument_profile lists them).", names.join(", ")),
+    }
+}
+
 /// The articulations of an instrument that are chosen by how hard a note
 /// is hit, other than its ordinary one.
 fn other_hits(profile: &InstrumentProfile) -> Vec<&str> {
@@ -1400,17 +1413,31 @@ impl TrillServer {
             let refitted = groove
                 .filter(|groove| groove.signature != meter)
                 .map(|groove| groove.pattern().refit(own(groove.signature), bar_length, false));
-            // A groove is written on the General MIDI map; this kit may keep its drums elsewhere.
+            // A groove is written on the General MIDI map; this kit may keep its drums elsewhere,
+            // and may not have them all.
+            let mut lacking: Vec<String> = Vec::new();
             let mut pattern = match (groove, &refitted) {
-                (Some(_), Some(Some(fitted))) => fitted.on_kit(kit),
-                (Some(groove), _) => groove.pattern().on_kit(kit),
+                (Some(_), Some(Some(fitted))) => fitted.on_kit_saying(kit, &mut lacking),
+                (Some(groove), _) => groove.pattern().on_kit_saying(kit, &mut lacking),
                 (None, _) => Default::default(),
             };
             let mut stand_ins: Vec<String> = Vec::new();
             for (drum, steps) in request.lanes.iter().flatten() {
-                if let Some(stand_in) = pattern.set_lane_on(kit, drum, steps).map_err(theory)? {
-                    stand_ins.push(format!("{stand_in} for {}", trill_core::pitch::name_key(drum)));
+                match pattern.lay_lane(kit, drum, steps).map_err(theory)? {
+                    Laid::On(Some(stand_in)) => {
+                        stand_ins.push(format!("{stand_in} for {}", trill_core::pitch::name_key(drum)));
+                    }
+                    Laid::On(None) => {}
+                    Laid::Lacking(name) if !lacking.contains(&name) => lacking.push(name),
+                    Laid::Lacking(_) => {}
                 }
+            }
+            if pattern.lanes.is_empty() && !lacking.is_empty() {
+                return Err(format!(
+                    "nothing was written: the kit on this track has no {}. Its drums: {}",
+                    lacking.join(", "),
+                    kit_names(kit)
+                ));
             }
             if pattern.lanes.is_empty() {
                 return Err(format!(
@@ -1425,8 +1452,8 @@ impl TrillServer {
                 .filter(|fill| fill.signature != meter)
                 .map(|fill| fill.pattern().refit(own(fill.signature), bar_length, true));
             let fill_pattern = fill.map(|fill| match &fill_refitted {
-                Some(Some(fitted)) => fitted.on_kit(kit),
-                _ => fill.pattern().on_kit(kit),
+                Some(Some(fitted)) => fitted.on_kit_saying(kit, &mut lacking),
+                _ => fill.pattern().on_kit_saying(kit, &mut lacking),
             });
             let fill_from = |fill: &Fill| match &fill_refitted {
                 // As many beats before the end of the bar as it is in its own.
@@ -1434,7 +1461,12 @@ impl TrillServer {
                 _ => fill.from,
             };
             let every = request.fill_every.unwrap_or(0) as usize;
-            let crash = kit.drum("crash").map_or(49, |drum| drum.pitch);
+            // The bar after a fill starts with a crash, on a kit that has one.
+            let crash = match kit.find_drum("crash") {
+                trill_core::Drum::Key(drum) => Some(drum.pitch),
+                trill_core::Drum::Unknown => Some(49),
+                trill_core::Drum::Lacking(_) => None,
+            };
             let plan = fill.zip(fill_pattern.as_ref()).map(|(fill, pattern)| FillPlan {
                 pattern,
                 from: fill_from(fill),
@@ -1449,6 +1481,16 @@ impl TrillServer {
             let mut warnings = pattern.odd_lanes(bar_length);
             let mut remarks = Vec::new();
             let mut summary = Map::new();
+            if !lacking.is_empty() {
+                warnings.push(format!(
+                    "The kit on this track has no {}: nothing was written for {}, since the key another kit has it \
+                     on plays something else here. Its drums: {}",
+                    lacking.join(", "),
+                    if lacking.len() == 1 { "it" } else { "them" },
+                    kit_names(kit)
+                ));
+                summary.insert("left_out".into(), json!(lacking));
+            }
             if !stand_ins.is_empty() {
                 remarks.push(format!(
                     "This track's kit has no key of its own for some of these drums; the nearest was played: {}. If \

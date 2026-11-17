@@ -1308,13 +1308,16 @@ impl TrillServer {
         let mut session = self.session.lock();
         let reply = (|| {
             let keys = crate::instruments::TrackKeys::of(&session, TrackId(request.track));
-            let notes = keys.notes(request.notes.as_deref().unwrap_or_default())?;
+            let (notes, how) = keys.played(request.notes.as_deref().unwrap_or_default())?;
+            // Where a note says how it is played, the instrument's keyswitches go in with the notes.
+            let played = crate::instruments::played(&session, TrackId(request.track), &[], &notes, &how)?;
+            let written = played.as_ref().map_or(&notes, |played| &played.all);
             let curves = parse_curves(request.controllers.as_ref())?;
             let name = request.name.clone().unwrap_or_else(|| "Clip".to_string());
             let clip = edit(&mut session, |project| {
                 let id = project.add_midi_clip(TrackId(request.track), name, request.start, request.length)?;
                 let clip = project.clip_mut(id)?;
-                clip.add_notes(&notes)?;
+                clip.add_notes(written)?;
                 if let Some(loop_length) = request.loop_length {
                     clip.set_loop_length(Some(loop_length))?;
                 }
@@ -1324,6 +1327,7 @@ impl TrillServer {
                 Ok(id)
             })?;
             let mut out = json!({ "clip_id": clip, "note_count": notes.len() });
+            say_played(&mut out, played.as_ref());
             if !curves.is_empty() {
                 out["controllers"] = curves.iter().map(|(kind, _)| kind.key()).collect();
                 add_controller_warnings(&mut out, &session, clip, curves.iter().map(|(kind, _)| *kind));
@@ -1582,13 +1586,27 @@ impl TrillServer {
         let mut session = self.session.lock();
         let id = ClipId(request.clip);
         let reply = (|| {
-            let notes = crate::instruments::TrackKeys::of_clip(&session, id).notes(&request.notes)?;
+            let (notes, how) = crate::instruments::TrackKeys::of_clip(&session, id).played(&request.notes)?;
+            let played = match how.iter().any(Option::is_some) {
+                true => {
+                    let project = session.project();
+                    let track = project.clip_track(id).map_err(|error| explain(project, error))?;
+                    let held = project.clip(id).ok().and_then(|clip| clip.midi()).map(|midi| midi.notes.clone());
+                    crate::instruments::played(&session, track, &held.unwrap_or_default(), &notes, &how)?
+                }
+                false => None,
+            };
             let total = edit(&mut session, |project| {
                 let clip = project.clip_mut(id)?;
-                clip.add_notes(&notes)?;
+                match &played {
+                    // The clip's keyswitches were written for all its notes.
+                    Some(played) => clip.set_notes(played.all.clone())?,
+                    None => clip.add_notes(&notes)?,
+                };
                 Ok(clip.notes().len())
             })?;
             let mut out = json!({ "added": notes.len(), "note_count": total });
+            say_played(&mut out, played.as_ref());
             add_range_warning(&mut out, &session, id);
             Ok(out)
         })();
@@ -1601,10 +1619,20 @@ impl TrillServer {
         let mut session = self.session.lock();
         let id = ClipId(request.clip);
         let reply = (|| {
-            let notes = crate::instruments::TrackKeys::of_clip(&session, id).notes(&request.notes)?;
+            let (notes, how) = crate::instruments::TrackKeys::of_clip(&session, id).played(&request.notes)?;
+            let played = match how.iter().any(Option::is_some) {
+                true => {
+                    let project = session.project();
+                    let track = project.clip_track(id).map_err(|error| explain(project, error))?;
+                    crate::instruments::played(&session, track, &[], &notes, &how)?
+                }
+                false => None,
+            };
             let count = notes.len();
-            edit(&mut session, |project| project.clip_mut(id)?.set_notes(notes))?;
+            let written = played.as_ref().map_or(notes, |played| played.all.clone());
+            edit(&mut session, |project| project.clip_mut(id)?.set_notes(written))?;
             let mut out = json!({ "note_count": count });
+            say_played(&mut out, played.as_ref());
             add_range_warning(&mut out, &session, id);
             Ok(out)
         })();
@@ -3092,6 +3120,16 @@ fn add_audio_notes(out: &mut Value, runtime: &Runtime, session: &Session, clip: 
     }
     if !notes.is_empty() {
         out["notes"] = json!(notes);
+    }
+}
+
+/// What became of notes that said how they are played: the keyswitches
+/// that were pressed for them, and what was done unasked.
+fn say_played(out: &mut Value, played: Option<&crate::instruments::Played>) {
+    let Some(played) = played else { return };
+    out["keyswitches"] = json!(played.keyswitches);
+    if !played.remarks.is_empty() {
+        out["notes"] = json!(played.remarks);
     }
 }
 
