@@ -277,11 +277,12 @@ most it plays, take 41 % of one core.
 It holds the start of every recording in memory (a third of a second) and reads the rest of one when it is
 played, on threads of its own, keeping what it has read within 2 GB and letting go of what was played longest
 ago. The audio thread never reads a file and never waits for one. On a concert grand of 637 recordings that is
-1.9 GB on the disk as WAV files, every note could begin 0.13 seconds after loading, with 94 MB held; the rest
-of a note's recording arrived in 13 milliseconds for most and 58 at the worst, well inside the third of a second
-that was there already. (The same piano as FLAC files, 712 MB: 0.78 seconds. These were measured with the files
-in the system's cache; a first read from a cold disk is slower and has not been measured.) Whole, it would be
-2.6 GB in memory and seven seconds of reading. Played before the start of its recording is read, a note is
+1.9 GB on the disk as WAV files, every note could begin 0.13 seconds after loading when the system had read the
+files lately, and 0.9 seconds when it had not for an hour of other work, with 94 MB held; the rest of a note's
+recording arrived in 13 milliseconds for most and 55 at the worst, well inside the third of a second that was
+there already. (As FLAC files, 712 MB, the same piano: 0.13 and 1.1 seconds. A disk that has never read the
+files, after a restart, has not been measured.) Whole, it would be 2.6 GB in memory and six to seven seconds of
+reading. Played before the start of its recording is read, a note is
 silent; one whose start runs out before the rest arrives is faded out in five milliseconds; both are counted,
 and `get_device` says how many. A render never has either: it reads what it plays and waits. An instrument may
 name 16,384 recordings; one that names more is refused in a sentence.
