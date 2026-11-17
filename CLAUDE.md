@@ -31,7 +31,7 @@ cargo run -p trill-stage --example film -- SONG.trill --still 42 out.png   # a p
 - A few tests hold a wall-clock budget and can fail on a machine that is busy with other builds
   (`trill-library` `scale::a_hundred_thousand_files…`, `trill-engine` `session_transport_runs_in_real_time` and
   `the_session_says_how_many_clips_it_is_still_preparing`, its `audio_settings` and `loading` tests, `trill-mcp`
-  `an_agent_arms_a_track_plays_it_and_records_a_take`, the real-plugin tests). If one is the only failure, run it alone before concluding anything.
+  `an_agent_arms_a_track_plays_it_and_records_a_take`, `trill-assistant`'s `pipeline`, the real-plugin tests). If one is the only failure, run it alone before concluding anything.
 - Development builds are optimized (`[profile.dev]` in `Cargo.toml`) because unoptimized audio code cannot keep
   up; what only runs while building is not, and debug info is line tables only.
 - Do not rename or move a `target` folder: tests of `trill-assistant` and `trill-plugins` have its path built in.
