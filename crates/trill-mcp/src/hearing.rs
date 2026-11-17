@@ -55,13 +55,19 @@ compressor's threshold from its gain reduction, not by guessing.
 for a file; never to check your work. With `stems` the same pass also writes every track, group and return to a \
 file of its own: ask once for all of them, never render the song once per track.
 Both hear only some of the song with `tracks`, and then make and wait for only those tracks and what feeds them: \
-hearing one track of a long song costs what that track costs.
+hearing one track of a long song costs what that track costs. Naming a return there gives that return alone, as \
+every track's send feeds it; naming a group gives the group with its members.
+Both run at the engine's sample rate unless `sample_rate` asks for another (without an audio device the engine \
+runs at 48000 Hz, whatever the song's files are at), and their replies state the rate they ran at.
 A plugin that plays samples (a drum kit, a sampled guitar) reads them after it is made or given another kit or \
 preset, for seconds or as much as a minute, and until a drum has arrived its key is silent. probe, measure and \
 render wait for that on a copy of their own, so what they report is the whole instrument; if notes stayed \
 silent to the end they say which, because a key that plays nothing and a sample that is not loaded yet sound the \
 same. The plugin the user hears is not waited for: get_project and get_device mark it `loading` while it reads, \
 and transport says so when you press play too early.";
+
+/// The sample rates a render can be asked to run at.
+const RENDER_RATES: std::ops::RangeInclusive<u32> = 8_000..=384_000;
 
 /// What a level at or below this is called: nothing at all.
 const SILENT_DB: f32 = -119.0;
@@ -98,8 +104,12 @@ pub struct MeasureRequest {
     pub end: Option<f64>,
     /// Hear only these tracks (their ids), as if they were soloed. Mute and solo in the song are not changed.
     /// Only these tracks, and the groups and returns their sound goes through, are made and waited for: one
-    /// track of a song with many plugins costs what that track costs.
+    /// track of a song with many plugins costs what that track costs. A return named here is heard alone, as
+    /// every track's send feeds it, with the tracks themselves unheard; a group is heard with its members.
     pub tracks: Option<Vec<u64>>,
+    /// The sample rate to render at, in Hz: 44100, 48000, 96000 (default: the rate the engine runs at, which
+    /// is 48000 when it has no audio device). The reply's `sample_rate` says what it ran at.
+    pub sample_rate: Option<u32>,
     /// Stretches of the song to measure one by one. Omit to get one per marker (each from its marker to the
     /// next); give [] for none.
     pub sections: Option<Vec<SectionInput>>,
@@ -1155,6 +1165,7 @@ impl TrillServer {
                 Err(error) => return finish(Err(crate::server::explain(session.project(), error))),
             };
             let mut about = json!({ "instrument": job.devices[0].name });
+            about["sample_rate"] = json!(plan.options.sample_rate);
             let mut on_track = None;
             if let ProbeTarget::Track { track, .. } = &plan.target {
                 about["device"] = json!(job.devices[0].id.0);
@@ -1338,8 +1349,21 @@ impl TrillServer {
                     }
                 }
             };
+            let sample_rate = match request.sample_rate {
+                None => session.audio_info().sample_rate as u32,
+                Some(rate) if RENDER_RATES.contains(&rate) => rate,
+                Some(rate) => {
+                    return finish(Err(format!(
+                        "sample_rate {rate} is not a rate to render at: give one from {} to {} Hz (44100 and \
+                         48000 are the usual ones), or leave it out for the engine's own, {} Hz",
+                        RENDER_RATES.start(),
+                        RENDER_RATES.end(),
+                        session.audio_info().sample_rate as u32
+                    )));
+                }
+            };
             let options = RenderOptions {
-                sample_rate: session.audio_info().sample_rate as u32,
+                sample_rate,
                 start_beat: start,
                 end_beat: request.end,
                 max_tail_seconds: request.max_tail_seconds.unwrap_or(defaults.max_tail_seconds),

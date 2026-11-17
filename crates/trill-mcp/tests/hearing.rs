@@ -434,6 +434,60 @@ async fn one_render_writes_the_mix_and_every_part_of_the_song_to_files_of_their_
     // The bass alone waits for the bass.
     let only = ok(client, "measure", json!({ "tracks": [bass] })).await;
     assert!(only["tracks"][0]["peak_db"].as_f64().unwrap() > -40.0, "{only}");
+
+    // The return alone is the return as the song feeds it, not silence:
+    // what its stem of the whole song holds. The keys, which feed it, are
+    // not heard themselves and have no row.
+    let only = ok(client, "measure", json!({ "tracks": [room], "max_tail_seconds": 2 })).await;
+    let rows: Vec<u64> = only["tracks"].as_array().unwrap().iter().map(|row| row["track"].as_u64().unwrap()).collect();
+    assert_eq!(rows, [room], "{only}");
+    let (alone, in_song) = (only["loudness_lufs"].as_f64().unwrap(), stems[0]["loudness_lufs"].as_f64().unwrap());
+    assert!(alone > -60.0 && (alone - in_song).abs() < 0.1, "{alone} LUFS alone, {in_song} in the song: {only}");
+    assert!(strings(&only["notes"]).iter().all(|note| !note.contains("silent")), "{only}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_render_runs_at_the_rate_it_is_asked_for_and_every_reply_says_which() {
+    let fixture = connect(ScriptedFactory::new()).await;
+    let client = &fixture.client;
+    let bass = track(client, "Bass", BASS).await;
+    clip(client, bass, 0.0, 8.0, json!([["E2", 0, 2], ["G2", 2, 2], ["A2", 4, 4]])).await;
+    let keys = track(client, "Keys", "builtin:polysynth").await;
+    clip(client, keys, 0.0, 8.0, json!([["C4", 0, 4], ["E4", 4, 4]])).await;
+
+    // Unasked, it is the engine's rate, and the reply says so.
+    let usual = ok(client, "measure", json!({ "max_tail_seconds": 1 })).await;
+    assert_eq!(usual["sample_rate"], 48_000, "{usual}");
+    // Asked for another, it is the same song at that rate: as long, and
+    // as loud.
+    let asked = ok(client, "measure", json!({ "max_tail_seconds": 1, "sample_rate": 44_100 })).await;
+    assert_eq!(asked["sample_rate"], 44_100, "{asked}");
+    let number = |reply: &Value, name: &str| reply[name].as_f64().unwrap();
+    assert!((number(&asked, "duration_seconds") - number(&usual, "duration_seconds")).abs() < 0.05, "{asked}");
+    assert!((number(&asked, "loudness_lufs") - number(&usual, "loudness_lufs")).abs() < 0.2, "{asked} {usual}");
+    assert_eq!(fixture.session.lock().audio_info().sample_rate as u32, 48_000, "the engine runs as it did");
+
+    // The file, and every stem beside it, is at the rate that was asked.
+    let folder = tempfile::tempdir().unwrap();
+    let mix = folder.path().join("song.wav");
+    let arguments =
+        json!({ "path": mix.display().to_string(), "max_tail_seconds": 1, "sample_rate": 96_000, "stems": ["tracks"] });
+    let report = ok(client, "render", arguments).await;
+    assert_eq!(report["sample_rate"], 96_000);
+    assert_eq!(trill_media::decode(&mix).unwrap().sample_rate, 96_000.0);
+    let stems = report["stems"].as_array().unwrap();
+    assert_eq!(stems.len(), 2, "{report}");
+    for stem in stems {
+        let audio = trill_media::decode(Path::new(stem["file"].as_str().unwrap())).unwrap();
+        assert_eq!(audio.sample_rate, 96_000.0, "{stem}");
+    }
+    // A probe says its rate as well.
+    let probed = ok(client, "probe", json!({ "track": bass, "notes": ["E2"] })).await;
+    assert_eq!(probed["sample_rate"], 48_000, "{probed}");
+
+    // A rate that is none: a sentence that names the ones there are.
+    let error = call(client, "measure", json!({ "sample_rate": 12 })).await.unwrap_err();
+    assert!(error.contains("from 8000 to 384000 Hz") && error.contains("48000"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

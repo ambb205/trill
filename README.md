@@ -259,7 +259,15 @@ that quick and true:
 - *A render makes only what is heard.* A track that is muted, or left out by a solo or by `tracks`, is not put
   into the render at all: its devices are not created and its plugins are not waited for. Hearing one track of
   a song with many plugins costs what that track costs. (What plays live keeps every track running, so that a
-  track is there the moment it is unmuted.)
+  track is there the moment it is unmuted.) What feeds a track that is heard is made with it: the members of a
+  group, and the tracks whose sends reach a soloed return.
+- *A return can be heard alone.* Soloing a return, in the window or by naming it in `tracks`, gives the return
+  as the whole song feeds it: every track's send still reaches it, a group's too, while the tracks themselves
+  and the other returns are not heard. (Soloing a track or a group keeps the returns open, so that it is heard
+  with its reverb.) Each of these opens and closes over one block of audio, so a solo changed while the song
+  plays makes no click.
+- *A render runs at the rate it is asked for.* `measure` and `render` take `sample_rate`; left out, they run at
+  the engine's rate, which is 48 kHz when there is no audio device. The reply says which it was.
 - *One render writes every stem.* Asked to, a render writes parts of the song to files of their own as it
   goes (`render` with `stems`; "Export WAV and stems" in the window): every track as it leaves its fader and
   pan, what goes into each track's effects (its instrument alone), every group, every return fed by every
