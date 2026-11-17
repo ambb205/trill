@@ -178,6 +178,15 @@ impl SongFilm {
     }
 }
 
+/// What the song of `render` sounds like, to light pictures of it by:
+/// rendered whole and measured, the mix and every track. Nothing is
+/// written.
+pub fn listen(render: &RenderJob, sample_rate: u32) -> Result<Sound, String> {
+    let options = RenderOptions { sample_rate, max_tail_seconds: 2.0, ..RenderOptions::default() };
+    let rendered = render.render(&options).map_err(|error| format!("The song could not be rendered: {error}."))?;
+    Ok(sound_of(&rendered))
+}
+
 /// The score of `project`, with `drums` the tracks that play through a
 /// drum instrument.
 pub(crate) fn score_of(project: &Project, drums: &[TrackId]) -> Score {
