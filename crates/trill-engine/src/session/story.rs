@@ -387,6 +387,18 @@ impl Session {
         }
     }
 
+    /// Has what `change` changes go by `label`, as one step, where no
+    /// call, drag or take has a name for it already.
+    pub(super) fn named<T>(&mut self, label: &str, change: impl FnOnce(&mut Self) -> T) -> T {
+        if self.story.run.is_some() {
+            return change(self);
+        }
+        self.begin_run(label);
+        let done = change(self);
+        self.end_run();
+        done
+    }
+
     /// Enters what a device came to on its own in its editor's window:
     /// its state if `state_changed`, and the values it has. Nobody's edit,
     /// and not shown as a step; kept so that the song as it was can be

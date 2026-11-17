@@ -254,6 +254,19 @@ fn same_name_folding(a: &str, b: &str, fold: bool) -> bool {
     if fold { a.to_lowercase() == b.to_lowercase() } else { a == b }
 }
 
+/// Whether two paths are the same path, however their slashes lean.
+pub fn same_path(a: &str, b: &str) -> bool {
+    let (a, b) = (parts(a.trim_end_matches(is_separator)), parts(b.trim_end_matches(is_separator)));
+    a.len() == b.len() && a.iter().zip(&b).all(|(a, b)| same_name(a, b))
+}
+
+/// How many parts two paths end alike in, the file's name counted: 3 for
+/// `A/kit/kicks/k.wav` and `B/kit/kicks/k.wav`, 0 for files of other names.
+pub fn alike(a: &str, b: &str) -> usize {
+    let (a, b) = (parts(a), parts(b));
+    a.iter().rev().zip(b.iter().rev()).take_while(|(a, b)| same_name(a, b)).count()
+}
+
 /// The parts of a path, as written. A path that starts with a slash has an
 /// empty first part.
 fn parts(path: &str) -> Vec<&str> {
@@ -326,7 +339,7 @@ impl FolderMove {
     /// only the file's name is the same, it is the folder the file was in.
     pub fn between(was: &str, is: &str) -> Option<(FolderMove, usize)> {
         let (old, new) = (parts(was), parts(is));
-        let alike = old.iter().rev().zip(new.iter().rev()).take_while(|(a, b)| same_name(a, b)).count();
+        let alike = alike(was, is);
         if alike == 0 || (alike == old.len() && alike == new.len()) {
             return None;
         }
@@ -491,12 +504,13 @@ impl FileTable {
         self.files.binary_search_by(|file| file.path.as_str().cmp(path)).ok().map(|at| &self.files[at])
     }
 
-    /// The table with the entry for `was` now telling of `is`: for a song
-    /// whose file was found elsewhere.
-    pub fn moved(&mut self, was: &str, is: &str) {
+    /// What is known of the file at `was` is known of `is` too: the file
+    /// was found there. The entry for `was` stays, for whatever still
+    /// names it and for a step taken back.
+    pub fn found_at(&mut self, was: &str, is: &str) {
         let Some(known) = self.get(was).cloned() else { return };
         let mut files = std::mem::take(&mut self.files);
-        files.retain(|file| file.path != was && file.path != is);
+        files.retain(|file| file.path != is);
         files.push(KnownFile { path: is.to_owned(), beside: None, ..known });
         *self = Self::new(files);
     }
@@ -762,6 +776,11 @@ mod tests {
         assert_eq!(below("/a/b", "/a/bc/d.wav"), None);
         assert_eq!(below("/a/b", "/a/b"), None);
         assert_eq!(below("/a/b/c", "/a/b"), None);
+        assert!(same_path(r"C:\a\b\k.wav", "C:/a/b/k.wav") && same_path("/a/b/", "/a/b"));
+        assert!(!same_path("/a/b/k.wav", "/a/c/k.wav") && !same_path("/a/b", "/a/b/c"));
+        assert_eq!(alike("A/kit/kicks/k.wav", "B/kit/kicks/k.wav"), 3);
+        assert_eq!(alike("A/kit/kicks/k.wav", "B/k.wav"), 1);
+        assert_eq!(alike("A/kit/kick.wav", "A/kit/snare.wav"), 0);
     }
 
     #[test]
@@ -858,17 +877,17 @@ mod tests {
         assert_eq!(read(&nameless).unwrap().1.files().len(), 1);
         assert!(read("not a project").is_err());
 
-        // A file found elsewhere takes what was known of it along.
+        // What is known of a file is known of it where it was found.
         let mut table = table;
-        table.moved("A/kit/kick.wav", "B/kit/kick.wav");
-        assert_eq!(table.get("A/kit/kick.wav"), None);
+        table.found_at("A/kit/kick.wav", "B/kit/kick.wav");
+        assert_eq!(table.get("A/kit/kick.wav").and_then(|file| file.bytes), Some(88_244), "a step can be taken back");
         let moved = table.get("B/kit/kick.wav").unwrap();
         assert_eq!(
             (moved.bytes, moved.beside.as_deref()),
             (Some(88_244), None),
             "where it is from the song is asked anew"
         );
-        table.moved("A/nothing.wav", "B/nothing.wav");
-        assert_eq!(table.files().len(), 2);
+        table.found_at("A/nothing.wav", "B/nothing.wav");
+        assert_eq!(table.files().len(), 3);
     }
 }
