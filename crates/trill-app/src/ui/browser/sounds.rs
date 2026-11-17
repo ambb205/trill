@@ -81,6 +81,9 @@ pub(in crate::ui) fn query(browser: &SoundBrowser, song_tempo: f64) -> Query {
         folder: browser.folder.clone(),
         favorites_only: browser.favorites,
         include_unreadable: false,
+        // The notes of a sampled instrument are not sounds to pick one
+        // by one; inside a folder that is opened they are what is there.
+        include_recordings: browser.folder.is_some(),
         // Every match: only the rows on screen cost anything.
         limit: None,
     }
