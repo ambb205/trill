@@ -31,9 +31,9 @@
 use crate::Runtime;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use trill_core::files::{self, FileUse, FolderMove, KnownFile, Relink};
-use trill_core::{FileTable, TrackId};
-use trill_engine::{SessionError, file_facts};
+use trill_core::files::{self, FilePlace, FileUse, FolderMove, KnownFile, Relink};
+use trill_core::{FileTable, Project, TrackId};
+use trill_engine::{Session, SessionError, file_facts};
 use trill_library::{Index, MovedRoot};
 
 /// How many folders are listed in all when looking near where a folder was
@@ -186,6 +186,38 @@ impl Missing {
     /// How many places of the song name a file that is not there.
     pub fn places(&self) -> usize {
         self.files.iter().map(|file| file.uses.len()).sum()
+    }
+
+    /// Whether `place` is one that names a file that is not there.
+    pub fn names(&self, place: &FilePlace) -> bool {
+        self.files.iter().flat_map(|file| &file.uses).any(|used| used.place == *place)
+    }
+
+    /// What is missing on the tracks `only` of `project`, and nothing
+    /// else: for whoever hears only those.
+    pub fn on_tracks(&self, only: &[TrackId], project: &Project) -> Missing {
+        let name = |id: TrackId| project.track(id).map(|track| track.name.clone()).unwrap_or_default();
+        let mut files: Vec<MissingFile> = Vec::new();
+        for file in &self.files {
+            let uses: Vec<FileUse> = file
+                .uses
+                .iter()
+                .filter(|used| used.track.is_some_and(|track| only.contains(&track)))
+                .cloned()
+                .collect();
+            if uses.is_empty() {
+                continue;
+            }
+            let mut tracks: Vec<String> = Vec::new();
+            for used in &uses {
+                let track = used.track.map(name).unwrap_or_default();
+                if !tracks.contains(&track) {
+                    tracks.push(track);
+                }
+            }
+            files.push(MissingFile { uses, tracks, ..file.clone() });
+        }
+        Missing { files, moves: self.moves.clone(), folders: Vec::new() }
     }
 
     /// The tracks that have such a place, in the song's order.
@@ -451,6 +483,14 @@ fn difference(was: &KnownFile, is: &KnownFile) -> String {
             _ => "its header says something else".to_owned(),
         },
     }
+}
+
+/// The files the song open in `session` names that are not there:
+/// [`Runtime::files_missing`], for a caller that holds the session.
+pub fn files_missing_in(session: &Session) -> Missing {
+    let tracks: BTreeMap<TrackId, String> =
+        session.project().tracks.iter().map(|track| (track.id, track.name.clone())).collect();
+    Missing { files: missing_of(session.files(), &tracks, session.known_files()), ..Missing::default() }
 }
 
 impl Runtime {

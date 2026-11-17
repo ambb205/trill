@@ -119,6 +119,8 @@ async fn tools_are_listed_with_schemas() {
         "library",
         "preview_sound",
         "set_sample",
+        "missing_files",
+        "relink_files",
         "edit_time",
         "show_device_editor",
         "recover_project",
@@ -154,9 +156,15 @@ async fn tools_are_listed_with_schemas() {
         assert!(schema_of("create_audio_clip").contains(mode) && schema_of("update_clip").contains(mode), "{mode}");
     }
     assert!(schema_of("set_sample").contains("closed_hat") && schema_of("library").contains("add_folder"));
+    // And what to do about a file that is gone.
+    assert!(schema_of("library").contains("move_folder") && schema_of("relink_files").contains("likely"));
+    assert!(schema_of("missing_files").contains("look_in"));
     let info = fixture.client.peer_info().unwrap();
     let instructions = info.instructions.clone().unwrap_or_default();
     for word in ["search_sounds", "preview_sound", "builtin:drumrack", "set_sample", "create_audio_clip", "warp"] {
+        assert!(instructions.contains(word), "the instructions should mention {word}");
+    }
+    for word in ["missing_files", "relink_files", "move_folder", "A file of the same name can be another file"] {
         assert!(instructions.contains(word), "the instructions should mention {word}");
     }
     // And playing live: arming, recording, the devices.
@@ -840,8 +848,14 @@ async fn an_agent_finds_sounds_builds_a_beat_and_warps_a_loop() {
     ok(client, "save_project", json!({ "path": file.display().to_string() })).await;
     std::fs::remove_file(&pack.snare).unwrap();
     let reloaded = ok(client, "load_project", json!({ "path": file.display().to_string() })).await;
-    let problems = reloaded["problems"].as_array().unwrap();
-    assert!(problems.len() == 1 && problems[0].as_str().unwrap().contains("pad 38"), "{problems:?}");
+    // The overview says once that a file is missing, on which track and
+    // what to do, in place of a line for every pad and clip that names it.
+    let missing = &reloaded["missing_files"];
+    assert_eq!((&missing["files"], &missing["places"], &missing["tracks"]), (&json!(1), &json!(1), &json!(["Drums"])));
+    assert!(missing["note"].as_str().unwrap().contains("relink_files"), "{missing}");
+    assert!(reloaded["problems"].is_null(), "{}", reloaded["problems"]);
+    let listed = ok(client, "missing_files", json!({})).await;
+    assert_eq!(listed["files"][0]["used_by"][0]["slot"], "pad 38", "{listed}");
     let broken = ok(client, "get_device", json!({ "device": rack, "query": "volume" })).await;
     assert!(broken["samples"][1]["problem"].as_str().unwrap().contains("Snare Tight.wav"), "{broken}");
     assert!(broken["samples"][0].get("problem").is_none());

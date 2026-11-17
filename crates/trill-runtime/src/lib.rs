@@ -55,7 +55,7 @@ mod settings;
 mod sounds;
 
 pub use midi::MidiInputInfo;
-pub use missing::{Candidate, Confidence, FoundFolder, Look, Missing, MissingFile, MissingFolder};
+pub use missing::{Candidate, Confidence, FoundFolder, Look, Missing, MissingFile, MissingFolder, files_missing_in};
 pub use recovery::SafetyCopy;
 pub use settings::Storage;
 pub use sounds::{AddedSound, NewSoundTrack, SoundClip, SoundError, SoundFacts};
