@@ -33,8 +33,9 @@
 //! parameters, [`sample_panels`] draws what the sampler and the drum rack
 //! play, and [`displays`] draws the devices' small curves from the math in
 //! [`response`]. [`editors`] opens the windows plugins bring with them,
-//! and [`recovery`] offers back the work a crash left unsaved. [`stage`]
-//! shows the song filmed as it plays, in place of all of these.
+//! and [`recovery`] offers back the work a crash left unsaved.
+//! [`making_of`] plays the session of the song again from its journal, and
+//! [`stage`] shows the song filmed as it plays, in place of all of these.
 //! [`files`] runs dialogs, imports and exports off the UI
 //! thread, and [`sounds`] does the same for everything that reads audio
 //! files (waveforms, previews, searches, drops) on the workers of
@@ -61,6 +62,7 @@ mod dragging;
 mod editors;
 mod files;
 mod keyboard;
+mod making_of;
 mod mixer;
 mod piano_roll;
 mod recording;
@@ -85,6 +87,8 @@ mod tests;
 
 pub use assistant::{Options as AssistantOptions, Scene as AssistantScene};
 pub use keyboard::Options as KeyboardOptions;
+pub use making_of::Start as MakingOfStart;
+pub use making_of::scene::play as play_making_of_scene;
 pub use state::{BrowserTab, DetailTab};
 
 use anyhow::anyhow;
@@ -153,6 +157,10 @@ pub struct UiOptions {
     pub record: bool,
     /// Open on the stage.
     pub stage: bool,
+    /// Open with the making-of of the song up, started so.
+    pub making_of: Option<MakingOfStart>,
+    /// Open watching the making-of that was written out to this file.
+    pub watch: Option<PathBuf>,
 }
 
 impl Default for UiOptions {
@@ -180,6 +188,8 @@ impl Default for UiOptions {
             show_settings: false,
             record: false,
             stage: false,
+            making_of: None,
+            watch: None,
         }
     }
 }

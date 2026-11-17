@@ -689,6 +689,18 @@ pub struct UiState {
     /// How many projects this window has had open: it goes up each time
     /// another one takes the place of the open one.
     pub project_generation: u64,
+    /// A making-of that was asked for; the shell opens it once the frame
+    /// is over.
+    pub story: Option<StoryAsk>,
+}
+
+/// Which making-of to open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoryAsk {
+    /// The open song's: its session, played again.
+    Watch,
+    /// One that was written out to a file.
+    WatchFile(std::path::PathBuf),
 }
 
 impl UiState {
@@ -737,6 +749,7 @@ impl UiState {
             theme_request: None,
             toasts: Toasts::default(),
             gesture_open: false,
+            story: None,
             clear_clip_indicator: false,
             project_generation: 0,
         }

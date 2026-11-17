@@ -757,7 +757,7 @@ pub struct Project {
     /// Sorted by beat.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<Marker>,
-    next_id: u64,
+    pub(crate) next_id: u64,
 }
 
 fn format_version_default() -> u32 {

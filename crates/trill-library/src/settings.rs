@@ -34,6 +34,7 @@ pub struct Settings {
     pub recent_projects: Vec<PathBuf>,
     pub audio: AudioSettings,
     pub midi: MidiSettings,
+    pub journal: JournalSettings,
     pub ui: UiSettings,
 }
 
@@ -76,6 +77,21 @@ pub struct MidiSettings {
     /// is listened to, one plugged in for the first time included: a
     /// keyboard should play without a visit to the settings.
     pub disabled_inputs: Vec<String>,
+}
+
+/// Whether a journal is kept of how each song is made.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct JournalSettings {
+    /// Keep one. On unless it was switched off: a journal stays on this
+    /// machine, in the program's own folder, and is what a session is
+    /// played again from.
+    pub keep: bool,
+}
+
+impl Default for JournalSettings {
+    fn default() -> Self {
+        Self { keep: true }
+    }
 }
 
 /// Interface preferences.
@@ -231,6 +247,9 @@ impl Reader {
         if let Some(midi) = self.section(document, "midi") {
             self.value(midi, "midi.disabled_inputs", &mut settings.midi.disabled_inputs);
         }
+        if let Some(journal) = self.section(document, "journal") {
+            self.value(journal, "journal.keep", &mut settings.journal.keep);
+        }
         if let Some(ui) = self.section(document, "ui") {
             self.value(ui, "ui.theme", &mut settings.ui.theme);
             self.value(ui, "ui.browser_width", &mut settings.ui.browser_width);
@@ -370,6 +389,7 @@ mod tests {
                 input_device: Some("Line In (USB Audio)".into()),
             },
             midi: MidiSettings { disabled_inputs: vec!["Loopback".into()] },
+            journal: JournalSettings { keep: false },
             ui: UiSettings { theme: "noir".into(), browser_width: 312.5, window_size: Some([1600.0, 900.0]) },
         }
     }
