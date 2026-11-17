@@ -150,7 +150,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
             "--making-of-scene" => cli.making_of_scene = true,
             "--making-of-at" => {
                 let text = value("how far in, from 0 to 1")?;
-                let at: f64 = text.parse().map_err(|_| anyhow!("--making-of-at '{text}' should be a number from 0 to 1"))?;
+                let at: f64 =
+                    text.parse().map_err(|_| anyhow!("--making-of-at '{text}' should be a number from 0 to 1"))?;
                 if !(0.0..=1.0).contains(&at) {
                     bail!("--making-of-at '{text}' should be from 0 (the beginning) to 1 (the end)");
                 }
@@ -583,6 +584,27 @@ mod tests {
         let error = run(&["--assistant-scene", "live"]).unwrap_err().to_string();
         assert!(error.contains("live") && error.contains("signed-out"), "{error}");
         assert!(run(&["--assistant-model"]).is_err() && run(&["--assistant-scene"]).is_err());
+    }
+
+    #[test]
+    fn the_making_of_can_be_up_when_the_window_opens() {
+        assert_eq!(run(&[]).unwrap().ui_options().making_of, None);
+        // Asked for, it plays from the beginning; in a picture it is held
+        // at the end, or wherever it is told.
+        assert_eq!(run(&["--making-of"]).unwrap().ui_options().making_of, Some(MakingOfStart::default()));
+        let held = run(&["--making-of", "--screenshot", "x.png"]).unwrap().ui_options().making_of;
+        assert_eq!(held, Some(MakingOfStart { at: 1.0, playing: false }));
+        let at = run(&["--making-of-at", "0.25"]).unwrap();
+        assert_eq!(at.ui_options().making_of, Some(MakingOfStart { at: 0.25, playing: false }));
+        assert!(run(&["--making-of-scene"]).unwrap().making_of_scene);
+        let watched = run(&["--watch", "songs/night.trillstory"]).unwrap().ui_options().watch;
+        assert_eq!(watched, Some(PathBuf::from("songs/night.trillstory")));
+        for wrong in [&["--making-of-at", "2"][..], &["--making-of-at", "soon"], &["--making-of-at"], &["--watch"]] {
+            assert!(run(wrong).is_err(), "{wrong:?}");
+        }
+        for flag in ["--making-of ", "--making-of-at", "--making-of-scene", "--watch"] {
+            assert!(USAGE.contains(flag), "the help does not list {flag}");
+        }
     }
 
     #[test]

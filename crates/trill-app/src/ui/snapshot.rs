@@ -175,7 +175,12 @@ impl Snapshot {
     /// holds; nothing is said of meters, editors, files or problems, which
     /// belong to a song that is running. `revision` tells one such
     /// snapshot from the next.
-    pub fn of_song(project: Project, revision: u64, descriptors: &[DeviceDescriptor], factory: &dyn DeviceFactory) -> Self {
+    pub fn of_song(
+        project: Project,
+        revision: u64,
+        descriptors: &[DeviceDescriptor],
+        factory: &dyn DeviceFactory,
+    ) -> Self {
         let chains = || project.tracks.iter().map(|track| &track.devices).chain([&project.master.devices]);
         let params = chains()
             .flatten()
@@ -192,7 +197,8 @@ impl Snapshot {
             })
             .collect();
         let plays_drums = |track: &&Track| track.devices.iter().any(|device| factory.plays_drums(&device.uri));
-        let drum_instruments: HashSet<TrackId> = project.tracks.iter().filter(plays_drums).map(|track| track.id).collect();
+        let drum_instruments: HashSet<TrackId> =
+            project.tracks.iter().filter(plays_drums).map(|track| track.id).collect();
         let drum_tracks = project
             .tracks
             .iter()

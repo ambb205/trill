@@ -269,7 +269,7 @@ pub(crate) fn refresh(session: &SharedSession, copies: &parking_lot::Mutex<Safet
         } else if copied == Some(session.revision()) {
             drop(session);
             // Nothing to write: what the journal's file holds is as it was.
-            let _ = copies.lock().give_journal(written);
+            copies.lock().give_journal(written);
             return;
         } else {
             let text = session.snapshot_json();

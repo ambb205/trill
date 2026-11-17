@@ -97,11 +97,8 @@ pub fn paint_icon(painter: &Painter, center: Pos2, icon: Icon, color: Color32) {
             let way = if icon == Icon::StepBack { -1.0 } else { 1.0 };
             let bar = center.x + way * 4.0 - if way < 0.0 { 0.0 } else { 1.0 };
             painter.rect_filled(Rect::from_min_size(pos2(bar - 0.5, center.y - 4.0), vec2(2.0, 9.0)), 0.0, color);
-            let head = vec![
-                center + vec2(-way * 4.0, -4.5),
-                center + vec2(way * 2.0, 0.5),
-                center + vec2(-way * 4.0, 5.5),
-            ];
+            let head =
+                vec![center + vec2(-way * 4.0, -4.5), center + vec2(way * 2.0, 0.5), center + vec2(-way * 4.0, 5.5)];
             painter.add(Shape::convex_polygon(head, color, Stroke::NONE));
         }
         Icon::Loop => {

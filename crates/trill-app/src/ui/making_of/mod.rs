@@ -28,9 +28,11 @@
 //!
 //! [`scene`] is a canned session, for the pictures of this view.
 //!
-//! A view that films a session (the stage) needs no more than what
-//! [`Watching::moment`] and the replay's `frame` give: a song as it was, a
-//! time, and where the action is.
+//! A view that films a session (the stage) needs none of this: what it is
+//! handed is the replay itself (`trill_core::journal::replay::Replay`),
+//! whose `frame` gives, for any time, the song as it was, the entry under
+//! way and how far through it, where the action is, and the notes that
+//! have just arrived.
 
 pub mod scene;
 mod story;
@@ -54,7 +56,8 @@ use trill_engine::{AudioBackend, Session, SharedSession};
 use trill_noir::{Chip, Icon, Theme, paint, text};
 
 /// The speeds a replay can be watched at, and what each is called.
-pub const SPEEDS: [(f64, &str); 5] = [(0.5, "\u{00BD}\u{00D7}"), (1.0, "1\u{00D7}"), (2.0, "2\u{00D7}"), (4.0, "4\u{00D7}"), (8.0, "8\u{00D7}")];
+pub const SPEEDS: [(f64, &str); 5] =
+    [(0.5, "\u{00BD}\u{00D7}"), (1.0, "1\u{00D7}"), (2.0, "2\u{00D7}"), (4.0, "4\u{00D7}"), (8.0, "8\u{00D7}")];
 /// The most time one frame moves the replay on by, in seconds: a window
 /// that was hidden for a while does not jump.
 const LONGEST_FRAME: f64 = 0.25;
@@ -227,6 +230,7 @@ impl MakingOf {
     }
 
     /// The replay, once it is there.
+    #[cfg(test)]
     pub fn watching(&self) -> Option<&Watching> {
         match &self.stage {
             Stage::Watching(watching) => Some(watching),
@@ -247,10 +251,6 @@ impl MakingOf {
             Stage::Nothing(reason) => Some(reason),
             _ => None,
         }
-    }
-
-    pub fn title(&self) -> &str {
-        &self.title
     }
 
     /// Does what a key asked for. Returns whether the making-of is to be
@@ -349,7 +349,8 @@ impl Watching {
             && let Some(index) = moment
         {
             let project = &self.snapshot.project;
-            let steps = self.replay.moments()[..=index].iter().rev().filter_map(|moment| self.replay.entry(moment).step());
+            let steps =
+                self.replay.moments()[..=index].iter().rev().filter_map(|moment| self.replay.entry(moment).step());
             let worked_on = steps.flat_map(|step| step.places.iter().rev()).find_map(|place| match place {
                 Place::Clips { clips } => clips.iter().rev().find_map(|(id, _)| {
                     let id = trill_core::ClipId(*id);
@@ -391,6 +392,7 @@ impl Watching {
     }
 
     /// The song as it was at this moment, as the views are shown it.
+    #[cfg(test)]
     pub fn snapshot(&self) -> &Snapshot {
         &self.snapshot
     }
@@ -436,9 +438,10 @@ impl Watching {
             (Some(index), true) => self.replay.step_from(index + 1, false),
             (Some(index), false) => {
                 // Well into a step, back is its own beginning.
-                let own = self.replay.step_from(index + 1, true).filter(|found| {
-                    *found < index || self.time - moments[*found].starts > STEP_BACK_GRACE
-                });
+                let own = self
+                    .replay
+                    .step_from(index + 1, true)
+                    .filter(|found| *found < index || self.time - moments[*found].starts > STEP_BACK_GRACE);
                 own.or_else(|| self.replay.step_from(index, true))
             }
         };
@@ -528,7 +531,8 @@ pub fn bar(ui: &mut Ui, theme: &Theme, making_of: &mut MakingOf) -> bool {
         rect
     };
     let playing = watching.is_playing();
-    let response = trill_noir::icon_button(ui, theme, button(&mut x), id.with("back"), Icon::StepBack, false, theme.ink_dim);
+    let response =
+        trill_noir::icon_button(ui, theme, button(&mut x), id.with("back"), Icon::StepBack, false, theme.ink_dim);
     if response.hovered() {
         hint = Some("To the step before \u{00B7} Left".to_owned());
     }
@@ -564,7 +568,10 @@ pub fn bar(ui: &mut Ui, theme: &Theme, making_of: &mut MakingOf) -> bool {
     let response = ui.interact(position, id.with("position"), Sense::hover());
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("Replay at {now} of {whole}")));
     if response.hovered() {
-        hint = Some("Where the replay is, and how long it is at this speed\u{2019}s 1\u{00D7}: the waiting is cut out".to_owned());
+        hint = Some(
+            "Where the replay is, and how long it is at this speed\u{2019}s 1\u{00D7}: the waiting is cut out"
+                .to_owned(),
+        );
     }
     x = position.right() + 8.0;
 
@@ -648,7 +655,8 @@ pub fn waiting(ui: &mut Ui, theme: &Theme, making_of: &MakingOf) {
     let painter = ui.painter();
     painter.rect_filled(area, 0.0, theme.bg);
     let words = making_of.nothing().unwrap_or("Reading the journal\u{2026}");
-    let galley = trill_noir::prose::plain(ui, theme, theme.text.body, theme.ink_dim, words, (area.width() - 80.0).min(520.0));
+    let galley =
+        trill_noir::prose::plain(ui, theme, theme.text.body, theme.ink_dim, words, (area.width() - 80.0).min(520.0));
     let size = galley.size();
     let origin = pos2(area.center().x - size.x / 2.0, area.center().y - size.y / 2.0);
     ui.interact(Rect::from_min_size(origin, size), ui.scope_id().with("making-of-waiting"), Sense::hover())

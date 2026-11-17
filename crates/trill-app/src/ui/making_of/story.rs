@@ -41,7 +41,7 @@ pub fn show(ui: &mut Ui, theme: &Theme, watching: &mut Watching) {
 
     let replay = &watching.replay;
     let moments = replay.moments();
-    let upto = watching.moment.map_or(0, |index| index + 1);
+    let upto = watching.moment().map_or(0, |index| index + 1);
 
     // The heading: what this is, and how far into the session by the
     // clock on the wall.
@@ -67,7 +67,7 @@ pub fn show(ui: &mut Ui, theme: &Theme, watching: &mut Watching) {
     painter.rect_filled(body, 0.0, theme.bg);
 
     let progress = watching.progress;
-    let current = watching.moment;
+    let current = watching.moment();
     let scroll = watching.told != current;
     let mut replies = std::mem::take(&mut watching.replies);
     replies.begin(0, moments.len());
@@ -179,7 +179,8 @@ fn heading(ui: &mut Ui, theme: &Theme, author: &Author) {
     }
     let painter = ui.painter();
     let row = rect.with_min_y(rect.top() + 6.0);
-    let left = paint::dot(painter, pos2(rect.left() + EDGE, row.center().y), theme.metric.dot, hue(theme, author)) + 6.0;
+    let left =
+        paint::dot(painter, pos2(rect.left() + EDGE, row.center().y), theme.metric.dot, hue(theme, author)) + 6.0;
     text::paint(painter, row.with_min_x(left), Align2::LEFT_CENTER, theme.text.micro, &who(author), theme.ink_faint);
 }
 
@@ -277,7 +278,10 @@ fn line(ui: &mut Ui, theme: &Theme, entry: &Entry, what: Line<'_>, under_way: bo
     let room = Rect::from_min_max(pos2(rect.left() + INDENT, row.top()), pos2(rect.right() - EDGE, row.bottom()));
     text::paint(painter, room, Align2::LEFT_CENTER, style, words, color);
     if let Some(heard) = heard {
-        let room = Rect::from_min_max(pos2(rect.left() + INDENT, row.bottom() - 3.0), pos2(rect.right() - EDGE, rect.bottom()));
+        let room = Rect::from_min_max(
+            pos2(rect.left() + INDENT, row.bottom() - 3.0),
+            pos2(rect.right() - EDGE, rect.bottom()),
+        );
         text::paint(painter, room, Align2::LEFT_CENTER, theme.text.value, heard, theme.ink_dim);
     }
 }
@@ -323,8 +327,10 @@ fn plan_block(ui: &mut Ui, theme: &Theme, rect: Rect, items: &[PlanItem]) {
     let first = in_hand.saturating_sub(1).min(items.len() - rows);
     let style = TextStyle { size: 12.0, ..theme.text.body };
     for (place, item) in items.iter().skip(first).take(rows).enumerate() {
-        let row =
-            Rect::from_min_size(pos2(rect.left(), head.bottom() + place as f32 * PLAN_STEP), vec2(rect.width(), PLAN_STEP));
+        let row = Rect::from_min_size(
+            pos2(rect.left(), head.bottom() + place as f32 * PLAN_STEP),
+            vec2(rect.width(), PLAN_STEP),
+        );
         let (state, color) = match item.state {
             PlanState::Done => ("done", theme.ink_faint),
             PlanState::Doing => ("in hand", theme.ink),
@@ -333,7 +339,8 @@ fn plan_block(ui: &mut Ui, theme: &Theme, rect: Rect, items: &[PlanItem]) {
         let response = ui.interact(row, ui.scope_id().with(("making-of-plan-step", first + place)), Sense::hover());
         response.widget_info(|| WidgetInfo::labeled(Role::Label, true, format!("{}: {state}", item.text)));
         plan_mark(&painter, pos2(row.left() + EDGE + 4.0, row.center().y), item.state, theme);
-        let room = Rect::from_min_max(pos2(row.left() + INDENT + 4.0, row.top()), pos2(row.right() - EDGE, row.bottom()));
+        let room =
+            Rect::from_min_max(pos2(row.left() + INDENT + 4.0, row.top()), pos2(row.right() - EDGE, row.bottom()));
         text::paint(&painter, room, Align2::LEFT_CENTER, style, &item.text, color);
     }
 }
@@ -348,7 +355,11 @@ mod tests {
         let words = "I\u{2019}ll add a b\u{00E4}ss line.";
         assert_eq!(arriving(words, &moment, 0.0), Some(""));
         assert_eq!(arriving(words, &moment, 0.4), Some("I\u{2019}ll add a "));
-        assert_eq!(arriving(words, &moment, 0.48), Some("I\u{2019}ll add a b\u{00E4}"), "whole letters, whatever they take");
+        assert_eq!(
+            arriving(words, &moment, 0.48),
+            Some("I\u{2019}ll add a b\u{00E4}"),
+            "whole letters, whatever they take"
+        );
         assert_eq!(arriving(words, &moment, 0.8), None, "all there with a fifth of its time to spare");
         assert_eq!(arriving(words, &moment, 1.0), None);
         let instant = Moment { lasts: 0.0, ..moment };

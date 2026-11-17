@@ -160,6 +160,18 @@ shot min-window-assistant "$song" --select Bass --assistant-scene api-key --size
 shot graphite-assistant-answered "$song" --select Lead --tab mixer --assistant-scene answered --theme graphite
 shot graphite-assistant-markdown "$song" --select Lead --assistant-scene markdown --theme graphite
 
+# The making-of: a canned session (a short tune asked of the assistant, a
+# few edits by hand a while later, a second request) played again from its
+# journal. A clip being written, its notes arriving in the arrangement and
+# in the piano roll; the middle of the session, the plan partly ticked off;
+# its end, with the whole story told; the smallest window; and the other
+# theme. Nothing is read or kept: the session is made in the run itself.
+shot making-of-writing --making-of-scene --making-of-at 0.19
+shot making-of-middle --making-of-scene --making-of-at 0.62
+shot making-of-end --making-of-scene --making-of-at 1
+shot min-window-making-of --making-of-scene --making-of-at 0.62 --size 1060x640
+shot graphite-making-of --making-of-scene --making-of-at 0.62 --theme graphite
+
 # The computer keyboard played as an instrument: a chord held on the lead,
 # lit in the strip and on the piano roll's keys; a kick and a hat held on a
 # drum track, two octaves down; what the strip says when the selected track has nothing to play

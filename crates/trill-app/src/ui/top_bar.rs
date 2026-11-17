@@ -3,8 +3,8 @@
 //! audio thread's load and the MCP address.
 
 use super::arrangement::ops;
-use super::shortcuts::{self, Command};
 use super::files::Confirm;
+use super::shortcuts::{self, Command};
 use super::state::{Clipboard, Cx, DetailTab, StoryAsk};
 use super::{arrangement, audio_settings, brand, files, recording, recovery, timeline};
 use eframe::egui::{self, Align2, Id, Rect, Sense, Ui, pos2, vec2};

@@ -175,7 +175,10 @@ pub fn play(session: &mut Session) {
 
     let steps = ["Set the tempo and the drums", "Write the bass", "Add the chords", "Write a melody", "Check the mix"];
     scene.you(2.0, "Write me a short tune for a night drive: drums, a bass line, chords and a melody. Around 96.");
-    scene.says(6.0, "A night drive at 96 BPM, in **A minor**. I\u{2019}ll lay down the drums first, then build up from the bass.");
+    scene.says(
+        6.0,
+        "A night drive at 96 BPM, in **A minor**. I\u{2019}ll lay down the drums first, then build up from the bass.",
+    );
     scene.plan(&steps, 0);
     scene.look(1.5, "get_project", "Read the project", None);
     scene.call(
@@ -231,7 +234,9 @@ pub fn play(session: &mut Session) {
         3.0,
         "add_device",
         "Added reverb to \u{201C}Pad\u{201D}",
-        |session| session.add_device(ChainRef::Track(pad), "builtin:reverb", None, None).expect("a reverb can be added"),
+        |session| {
+            session.add_device(ChainRef::Track(pad), "builtin:reverb", None, None).expect("a reverb can be added")
+        },
         |device| Some(Place::device(device.0)),
     );
     let cutoff = AutomationTarget::DeviceParam { device: pad_synth, param: "cutoff".into() };
@@ -241,20 +246,38 @@ pub fn play(session: &mut Session) {
         "set_automation",
         "Automated cutoff of \u{201C}Poly Synth\u{201D}",
         |session| {
-            let points = vec![AutomationPoint::new(0.0, 600.0), AutomationPoint::new(32.0, 2400.0), AutomationPoint::new(64.0, 900.0)];
+            let points = vec![
+                AutomationPoint::new(0.0, 600.0),
+                AutomationPoint::new(32.0, 2400.0),
+                AutomationPoint::new(64.0, 900.0),
+            ];
             session.edit(|project| project.set_automation(sweep, points)).expect("an envelope can be written");
         },
         |()| Some(Place::Lane { target: cutoff }),
     );
 
     scene.plan(&steps, 3);
-    scene.says(4.0, "Chords and a slow filter sweep on the pad. The melody comes in at bar 9, once the groove has settled.");
+    scene.says(
+        4.0,
+        "Chords and a slow filter sweep on the pad. The melody comes in at bar 9, once the groove has settled.",
+    );
     let (lead, _) = scene.track(3.0, "Lead", "builtin:polysynth", Some("lead"));
-    let phrase = [(69u8, 0.0, 1.5), (72, 1.5, 0.5), (76, 2.0, 1.0), (74, 3.0, 0.5), (72, 3.5, 0.5), (69, 4.0, 2.0), (67, 6.0, 1.0), (64, 7.0, 1.0)];
+    let phrase = [
+        (69u8, 0.0, 1.5),
+        (72, 1.5, 0.5),
+        (76, 2.0, 1.0),
+        (74, 3.0, 0.5),
+        (72, 3.5, 0.5),
+        (69, 4.0, 2.0),
+        (67, 6.0, 1.0),
+        (64, 7.0, 1.0),
+    ];
     let melody: Vec<Note> = (0..4)
         .flat_map(|turn| {
             let lift = if turn % 2 == 1 { 3 } else { 0 };
-            phrase.into_iter().map(move |(pitch, start, length)| note(pitch + lift, turn as f64 * 8.0 + start, length * 0.9, 96))
+            phrase
+                .into_iter()
+                .map(move |(pitch, start, length)| note(pitch + lift, turn as f64 * 8.0 + start, length * 0.9, 96))
         })
         .collect();
     let lead_clip = scene.write(12.0, "write_melody", "a melody", lead, "Lead line", (32.0, 32.0, None), melody);
@@ -317,7 +340,8 @@ pub fn play(session: &mut Session) {
         |session| {
             let thin = |project: &mut Project| {
                 let clip = project.clip_mut(lead_clip)?;
-                let mut notes: Vec<Note> = clip.notes().iter().filter(|held| held.start < 16.0 || held.length > 0.6).copied().collect();
+                let mut notes: Vec<Note> =
+                    clip.notes().iter().filter(|held| held.start < 16.0 || held.length > 0.6).copied().collect();
                 if let Some(last) = notes.last_mut() {
                     last.length = 4.0;
                 }
@@ -345,12 +369,16 @@ mod tests {
         play(&mut session);
         let project = session.project();
         let names: Vec<&str> = project.tracks.iter().map(|track| track.name.as_str()).collect();
-        assert_eq!((project.name.as_str(), project.tempo, names), ("Night Drive", 96.0, vec!["Drums", "Bass", "Pad", "Lead"]));
+        assert_eq!(
+            (project.name.as_str(), project.tempo, names),
+            ("Night Drive", 96.0, vec!["Drums", "Bass", "Pad", "Lead"])
+        );
         assert!(session.problems().is_empty(), "{:?}", session.problems());
 
         let journal = session.journal().expect("a journal is kept");
         assert_eq!(&journal.head().unwrap(), project, "the story leads to the song");
-        let by = |author: &Author| journal.entries().filter(|entry| entry.by == *author && entry.step().is_some()).count();
+        let by =
+            |author: &Author| journal.entries().filter(|entry| entry.by == *author && entry.step().is_some()).count();
         assert_eq!((by(&Author::Assistant), by(&Author::Person)), (15, 3));
         assert_eq!(journal.entries().filter(|entry| entry.is_conversation()).count(), 13);
 

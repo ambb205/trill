@@ -48,6 +48,7 @@ TRILL_TEST_CLAUDE=1 cargo test -p trill-assistant --test real_cli    # talks to 
 TRILL_TEST_CLAUDE=1 cargo test -p trill-app live_ -- --test-threads=1    # ...through the assistant's panel (seven messages)
 cargo test -p trill-engine --test machine -- --include-ignored --nocapture     # opens this machine's audio outputs (silence only) and prints their latency
 cargo test -p trill-runtime --test machine -- --include-ignored --nocapture    # lists and opens this machine's MIDI inputs
+cargo test -p trill-engine --test journal what_recording_a_step_costs -- --ignored --nocapture    # what keeping the journal costs an edit on a large project (a measurement; run it alone)
 ```
 
 Run the first two after touching plugin hosting or audio decoding, and the last two after touching the audio
@@ -118,6 +119,33 @@ the next time the project is open. The assistant comes in by a door of its own o
 through which files are written only into the project's folder or `Documents/Trill`.
 
 ![The assistant after a turn that added a bass line, with the Undo for it](docs/images/assistant-answered.png)
+
+### Watch how a song was made
+
+Trill keeps a journal of the session: every change to the song is a step in it, with who made it (you at the
+window, the assistant, or a program working through MCP), when, what it was in words and where in the song it
+landed; between the steps, what you and the assistant said, its plan, and what it measured. **Making of**
+(`Ctrl+Shift+M`, or the View menu) plays the session again from it: the arrangement and the piano roll show the
+song as it was, clips arriving and notes filling in in the order they sound, the view going where each step
+landed; the conversation as it came stands down the right; and the whole session is a line along the bottom to
+play, hold, step through (`Left`, `Right`) and scrub, at half speed up to eight times.
+
+- The waiting is cut out. A step is given the time it takes to watch and a long wait is a beat, so an hour of
+  work plays in a few minutes, or in one at a higher speed.
+- Nothing there can change the song: what is watched is a copy, and leaving (`Esc`) puts the window back as it
+  was.
+- Undo takes nothing out of the story. A step that was undone is followed by one that takes it back, and a redo
+  by one that brings it back.
+- **The journal never travels with the song.** It has your conversation in it, so it is kept in Trill's own
+  folder (`journals`, beside the settings), written when the song is saved, and never in the project file or
+  beside it: sending someone a `.trill` file sends the song. To hand the story on, *File, Making of, Export*
+  writes it to a `.trillstory` file, without the conversation unless you choose the item that says with it; the
+  other side watches it with *Watch one from a file*.
+- It costs little: a step holds what it changed, and a plugin's state (megabytes) is held once however many
+  steps it lasts through. A hundred steps on a song with a megabyte of state add about 30 KB. Past 20,000
+  entries or 32 MB of story the oldest entries are let go, and the story begins with the song as it was after
+  them. Journals are kept for the two hundred songs most recently saved.
+- *View, Keep a journal* switches it off; *Delete this song's journal* deletes one.
 
 ## What is in the box
 
@@ -369,6 +397,7 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Area | Tools |
 |---|---|
 | Project | `get_project`, `set_project`, `new_project`, `save_project`, `load_project`, `recover_project`, `import_midi`, `export_midi`, `history` |
+| How it was made | `get_journal` (the steps of the session, who made each and where it landed, a page at a time; found by their words), `get_song_at` (the song as it was after any step), `journal` (keep one or not, write it out to hand on, delete it) |
 | Tracks | `create_track`, `update_track`, `delete_track` |
 | Devices | `list_devices`, `describe_device`, `add_device`, `get_device`, `update_device`, `delete_device`, `show_device_editor` |
 | Presets | `search_presets` (one search across the presets of every installed instrument and the saved ones), `save_preset` (keeps a device's sound under a name) |
@@ -406,6 +435,11 @@ Gain": "-6 dB"}`. It also says which channels the device takes and gives. Where 
 settings that no parameter reaches, `get_device` counts them (`settings_count`), `query` finds them by name beside
 the parameters, and `update_device` sets them: `"settings": {"M-Fret Sound": 1}`.
 
+Every call is entered in the session's journal as it is made, under what it did in words and by the name the
+client gave: `get_journal` lists them, `search: "chorus"` finds the step where the chorus was written, `after`
+lists what changed since, and `get_song_at` shows the song as it was there. Undoing takes nothing out: a step
+that was undone is followed by one that takes it back.
+
 The HTTP server listens on localhost only and has no password: any program on the machine may use it. Pages in a
 web browser may not; requests that carry a browser's `Origin` are refused.
 
@@ -437,7 +471,8 @@ has been run yet.
 
 ```
 crates/
-  trill-core      Project model, edit operations, and the device API. No audio or UI dependencies.
+  trill-core      Project model, edit operations, the device API, and the journal of a session with its replay.
+                  No audio or UI dependencies.
   trill-dsp       Built-in instruments and effects, and offline time-stretching.
   trill-media     Audio file decoding and caching, waveform overviews, sample-rate conversion, WAV writing.
   trill-engine    Realtime engine, offline renderer, analysis, and the Session.
@@ -477,6 +512,9 @@ that crashes while playing or while it loads a preset still takes the app with i
 the work), a preset browser for plugins in the window (the session lists, searches and loads them, and so does
 MCP; the device panel shows built-in and saved presets only), asking a CLAP plugin for a stereo layout when its
 default is mono (a VST3 plugin is asked), plugin editors on Linux and macOS,
+a film of a making-of (the replay gives the song as it was at any moment and where the action is; nothing
+renders it to video yet), hearing a making-of (it is silent: the song as it was is shown, not played),
+finding a song's journal again after its file was moved or renamed (it is kept by where the file is),
 session (clip-launching) view, audio recording (MIDI is recorded; audio is not), polyphonic aftertouch and MPE
 (per-note expression; clips hold one curve per controller for the whole channel), ASIO, warp markers, plugin
 delay compensation, multi-core rendering. Only Windows has been run so far.

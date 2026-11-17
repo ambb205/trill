@@ -42,12 +42,16 @@ pub fn show(ui: &mut Ui, theme: &Theme, watching: &mut Watching) {
     paint::hline(&painter, area.x_range(), area.top(), theme.hairline);
 
     let length = watching.replay.length().max(f64::MIN_POSITIVE);
-    let line = Rect::from_min_max(pos2(area.left() + EDGE, area.top() + WORDS), pos2(area.right() - EDGE, area.bottom() - 4.0));
+    let line = Rect::from_min_max(
+        pos2(area.left() + EDGE, area.top() + WORDS),
+        pos2(area.right() - EDGE, area.bottom() - 4.0),
+    );
     let x_of = |time: f64| line.left() + (time / length).clamp(0.0, 1.0) as f32 * line.width();
     let time_of = |x: f32| f64::from(((x - line.left()) / line.width().max(1.0)).clamp(0.0, 1.0)) * length;
 
     // Scrubbing first, so that what is drawn is where the pointer put it.
-    let response = ui.interact(line.expand2(vec2(EDGE, 4.0)), ui.scope_id().with("making-of-line"), Sense::click_and_drag());
+    let response =
+        ui.interact(line.expand2(vec2(EDGE, 4.0)), ui.scope_id().with("making-of-line"), Sense::click_and_drag());
     let fraction = watching.time() / length;
     response.widget_info(|| WidgetInfo::slider(true, fraction, "Session"));
     if let Some(pointer) = response.interact_pointer_pos().filter(|_| response.clicked() || response.dragged()) {
@@ -58,13 +62,17 @@ pub fn show(ui: &mut Ui, theme: &Theme, watching: &mut Watching) {
     // What is under way, in words; while the pointer is over the line,
     // what it points at instead.
     let moments = watching.replay.moments();
-    let told = over.or(watching.moment).map(|index| (&moments[index], watching.replay.entry(&moments[index])));
-    let words = Rect::from_min_max(pos2(area.left() + EDGE, area.top() + 1.0), pos2(area.right() - EDGE, area.top() + WORDS));
+    let told = over.or(watching.moment()).map(|index| (&moments[index], watching.replay.entry(&moments[index])));
+    let words =
+        Rect::from_min_max(pos2(area.left() + EDGE, area.top() + 1.0), pos2(area.right() - EDGE, area.top() + WORDS));
     match told {
         Some((_, entry)) => {
             let mut room = words;
-            room.min.x = paint::dot(&painter, pos2(room.left(), room.center().y), theme.metric.dot, hue(theme, &entry.by)) + 6.0;
-            room.min.x += text::paint(&painter, room, Align2::LEFT_CENTER, theme.text.micro, &who(&entry.by), theme.ink_faint) + 10.0;
+            room.min.x =
+                paint::dot(&painter, pos2(room.left(), room.center().y), theme.metric.dot, hue(theme, &entry.by)) + 6.0;
+            room.min.x +=
+                text::paint(&painter, room, Align2::LEFT_CENTER, theme.text.micro, &who(&entry.by), theme.ink_faint)
+                    + 10.0;
             let style = TextStyle { size: 12.5, ..theme.text.body };
             // The plan is told by the step it had in hand.
             let line = match &entry.what {
@@ -78,7 +86,14 @@ pub fn show(ui: &mut Ui, theme: &Theme, watching: &mut Watching) {
             text::paint(&painter, room, Align2::LEFT_CENTER, style, first, theme.ink);
         }
         None => {
-            text::paint(&painter, words, Align2::LEFT_CENTER, theme.text.micro, "The song as it began", theme.ink_faint);
+            text::paint(
+                &painter,
+                words,
+                Align2::LEFT_CENTER,
+                theme.text.micro,
+                "The song as it began",
+                theme.ink_faint,
+            );
         }
     }
 
@@ -107,7 +122,11 @@ pub fn show(ui: &mut Ui, theme: &Theme, watching: &mut Watching) {
         if let Some(away) = moment.away.filter(|_| left > line.left() + 2.0) {
             let _ = away;
             // Someone went away here: a break in the line.
-            painter.rect_filled(Rect::from_min_max(pos2(left - 4.0, middle - 1.0), pos2(left - 1.0, middle + 2.0)), 0.0, theme.panel);
+            painter.rect_filled(
+                Rect::from_min_max(pos2(left - 4.0, middle - 1.0), pos2(left - 1.0, middle + 2.0)),
+                0.0,
+                theme.panel,
+            );
         }
     }
 
@@ -131,6 +150,11 @@ fn pointed_at(moment: &Moment, entry: &Entry) -> String {
         What::Plan { .. } => "the plan",
         What::Mark { .. } => "a note",
     };
-    let away = moment.away.map(|away| format!(" \u{00B7} {} after the one before", super::span(away))).unwrap_or_default();
-    format!("Entry {} \u{00B7} {what} by {}{away} \u{00B7} click to go there, drag to scrub", entry.seq, entry.by.name())
+    let away =
+        moment.away.map(|away| format!(" \u{00B7} {} after the one before", super::span(away))).unwrap_or_default();
+    format!(
+        "Entry {} \u{00B7} {what} by {}{away} \u{00B7} click to go there, drag to scrub",
+        entry.seq,
+        entry.by.name()
+    )
 }

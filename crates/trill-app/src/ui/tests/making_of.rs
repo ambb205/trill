@@ -164,7 +164,8 @@ fn a_session_is_played_again_and_the_clips_arrive() {
         "Plan: 1 of 2 done",
         "Write the drums: in hand",
     ] {
-        let story: Vec<&str> = harness.labels.iter().map(|(text, _)| text.as_str()).filter(|text| text.len() > 12).collect();
+        let story: Vec<&str> =
+            harness.labels.iter().map(|(text, _)| text.as_str()).filter(|text| text.len() > 12).collect();
         assert!(harness.tells(told), "the story does not tell '{told}': {story:?}");
     }
     // The view went where the action was: the Clip tab is on a clip that
