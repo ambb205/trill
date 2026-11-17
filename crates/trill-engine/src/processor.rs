@@ -342,6 +342,18 @@ impl Processor {
         self.flush = Flush::Everything;
     }
 
+    /// Forgets what its devices have measured so far (how far each has
+    /// turned the signal down): a render asks this once it has played what
+    /// it keeps nothing of.
+    pub(crate) fn forget_measured(&mut self) {
+        let chains = self.graph.tracks.iter_mut().map(|track| &mut track.chain);
+        for slot in chains.chain(std::iter::once(&mut self.graph.master.chain)).flat_map(|chain| &mut chain.devices) {
+            if let Some(processor) = slot.processor.as_mut() {
+                let _ = processor.gain_reduction();
+            }
+        }
+    }
+
     /// Lets go of every note that sounds, played by hand or by the song,
     /// at the start of the next block.
     pub(crate) fn release_everything(&mut self) {
@@ -1033,6 +1045,9 @@ pub(crate) fn gather(track: &mut TrackNode, common: &Common, room: &mut Room, un
     let ControlBlock { playing, start_beat, beats_per_frame, frames, .. } = common.controls;
     let Room { left, right, events, sorted, .. } = room;
     let (left, right) = (&mut left[..frames], &mut right[..frames]);
+    if common.controls.chase {
+        chase_switches(track, &common.controls, events);
+    }
     let before_notes = events.len();
     if playing {
         collect_notes(track, start_beat, common.notes, beats_per_frame, frames, events);
@@ -1429,6 +1444,45 @@ fn collect_controllers(track: &mut TrackNode, block: &ControlBlock, events: &mut
     }
 }
 
+/// How long a key that switches is held, in beats, when it is pressed for
+/// a song that starts after it: what the writing tools hold one for.
+const SWITCH_BEATS: f64 = 0.03;
+
+/// Presses the keys that choose how notes are played where the song has
+/// just started or jumped to: what the part pressed before that place
+/// and has not undone (see [`crate::graph::chosen_at`]). Starting anywhere
+/// is then starting where the song would have the instrument. A switch
+/// that the part is still holding there is held to where the part lets go
+/// of it; any other for a moment. While the song stands still it is
+/// pressed and let go in the one block, so that a note played by hand
+/// sounds as it would in the song there.
+fn chase_switches(track: &mut TrackNode, block: &ControlBlock, events: &mut Vec<Event>) {
+    let TrackNode { state, switches, .. } = track;
+    if switches.is_empty() {
+        return;
+    }
+    for switch in crate::graph::chosen_at(switches, block.start_beat).into_iter().flatten() {
+        if events.len() + 3 > NOTE_ON_LIMIT {
+            break;
+        }
+        let pitch = usize::from(switch.pitch.min(127));
+        let velocity = f32::from(switch.velocity.clamp(1, 127)) / 127.0;
+        if !block.playing {
+            let last = block.frames.saturating_sub(1) as u32;
+            events.push(Event { offset: 0, kind: EventKind::NoteOn { pitch: switch.pitch, velocity } });
+            events.push(Event { offset: last, kind: EventKind::NoteOff { pitch: switch.pitch } });
+            continue;
+        }
+        if state.active_until[pitch] >= 0.0 {
+            events.push(Event { offset: 0, kind: EventKind::NoteOff { pitch: switch.pitch } });
+        } else {
+            state.active_count += 1;
+        }
+        state.active_until[pitch] = switch.end.max(block.start_beat + SWITCH_BEATS);
+        events.push(Event { offset: 0, kind: EventKind::NoteOn { pitch: switch.pitch, velocity } });
+    }
+}
+
 /// How often, in frames, an instrument that has notes to play and has
 /// made no sound yet is told its controllers again.
 const TELL_AGAIN: u32 = 16_384;
@@ -1815,6 +1869,7 @@ mod tests {
         TrackNode {
             id: TrackId(1),
             notes: notes.iter().map(|&(start, end, pitch)| NoteEvent { start, end, pitch, velocity: 127 }).collect(),
+            switches: Vec::new(),
             controllers: Vec::new(),
             fresh_devices: false,
             audio: Vec::new(),

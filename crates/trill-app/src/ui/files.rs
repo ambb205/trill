@@ -684,6 +684,7 @@ mod tests {
             threads: 1,
             alone: Vec::new(),
             draws: Vec::new(),
+            not_begun: Vec::new(),
             problems,
         }
     }

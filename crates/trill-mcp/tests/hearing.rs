@@ -588,6 +588,32 @@ async fn a_song_whose_instrument_draws_at_random_says_so_and_is_the_same_twice_w
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_stretch_is_measured_with_the_notes_that_are_sounding_where_it_starts_and_says_which_are_not() {
+    let fixture = connect(ScriptedFactory::new()).await;
+    let client = &fixture.client;
+    let bass = track(client, "Bass", BASS).await;
+    // One note held from beat 2 to beat 10, and one from beat 1 to beat 60.
+    clip(client, bass, 0.0, 64.0, json!([[40, 2, 8]])).await;
+    let held = ok(client, "measure", json!({ "start": 4, "end": 8 })).await;
+    assert!(held["peak_db"].as_f64().unwrap() > -30.0, "the note that was sounding is in it: {held}");
+    assert!(!strings(&held["notes"]).join(" ").contains("already sounding"), "{held}");
+    // The same stretch without the note is silent: the stretch itself plays none.
+    let after = ok(client, "measure", json!({ "start": 12, "end": 16 })).await;
+    assert!(after["peak_db"].as_f64().unwrap() < -80.0, "{after}");
+
+    // A note that began longer before than a render goes back for.
+    let drone = track(client, "Drone", BASS).await;
+    clip(client, drone, 0.0, 64.0, json!([[43, 1, 59]])).await;
+    let late = ok(client, "measure", json!({ "start": 48, "end": 52, "tracks": [drone] })).await;
+    let notes = strings(&late["notes"]).join(" | ");
+    assert!(
+        notes.contains("A note on 'Drone' was already sounding where this starts, from more than 32 beats before"),
+        "{notes}"
+    );
+    assert!(notes.contains("it is not in it. Start earlier to hear it."), "{notes}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn measuring_checks_a_mix_without_writing_a_file() {
     let fixture = connect(ScriptedFactory::new()).await;
     let client = &fixture.client;

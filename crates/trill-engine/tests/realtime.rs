@@ -277,6 +277,71 @@ fn playing_envelopes_never_touches_the_allocator() {
 }
 
 #[test]
+fn starting_and_coming_round_after_a_key_that_switches_never_touches_the_allocator() {
+    use trill_core::{Articulation, ChainRef, InstrumentProfile, Lasts, Note};
+
+    // A part that chooses a way of playing at the top, which stays, and
+    // presses another key before every other note, for that note: wherever
+    // the song starts, jumps or comes round, what is chosen there is
+    // pressed again.
+    let (mut project, track) = audio_project(120.0);
+    project.add_device(ChainRef::Track(track), "builtin:polysynth", "Synth", None).unwrap();
+    let profile = InstrumentProfile {
+        articulations: vec![
+            Articulation::key("open", 24).as_default(),
+            Articulation::key("muted", 25),
+            Articulation::key("slide", 27).lasting(Lasts::Once),
+        ],
+        ..InstrumentProfile::default()
+    };
+    project.set_track_profile(track, profile).unwrap();
+    let clip = project.add_midi_clip(track, "part", 0.0, 8.0).unwrap();
+    let note = |pitch: u8, start: f64, length: f64| Note { pitch, start, length, velocity: 100 };
+    let mut notes = vec![note(25, 0.0, 0.03)];
+    for step in 0..32u8 {
+        let at = f64::from(step) * 0.25;
+        if step % 2 == 1 {
+            notes.push(note(27, at - 0.03, 0.03));
+        }
+        notes.push(note(60 + step % 5, at, 0.2));
+    }
+    project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
+    project.set_loop(true, 1.0, 3.0).unwrap();
+
+    let mut controller = Controller {
+        bank: DeviceBank::default(),
+        meters: Meters::default(),
+        stand_ins: StandIns::default(),
+        audio: AudioSources::default(),
+    };
+    let mut processor = Processor::new(SR);
+    let (mut left, mut right) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+    let retired = processor.swap_graph(controller.compile_prepared(&project));
+    processor.play();
+    // Once without watching, to fault in pages.
+    play(&mut processor, &mut left, &mut right, 4_096);
+
+    let mut level = 0.0;
+    let calls = allocator_calls(|| {
+        // Round the loop five times.
+        level = play(&mut processor, &mut left, &mut right, 5 * SR as usize);
+        // To just after a key that is for the next note, while it plays.
+        processor.seek(2.24);
+        play(&mut processor, &mut left, &mut right, 4_096);
+        // And while it stands still, and started again from there.
+        processor.stop();
+        play(&mut processor, &mut left, &mut right, 2_048);
+        processor.seek(1.5);
+        play(&mut processor, &mut left, &mut right, 2_048);
+        processor.play();
+        play(&mut processor, &mut left, &mut right, 4_096);
+    });
+    assert!(level > 0.01, "the part should be sounding: {level}");
+    assert_eq!(calls, 0, "{calls} allocator calls while keys that switch were pressed again");
+    drop(retired);
+}
+
+#[test]
 fn a_tempo_and_a_meter_that_change_never_touch_the_allocator() {
     use trill_core::project::{AutomationPoint, AutomationTarget, WarpMode};
     use trill_core::{ChainRef, Note};

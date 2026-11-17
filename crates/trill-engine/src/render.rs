@@ -402,6 +402,26 @@ pub struct Measured {
     /// render cannot be compared with another to the sample.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub draws: Vec<Draws>,
+    /// How many beats ahead of its start the render began to play, so
+    /// that the notes sounding at its start are heard from where they
+    /// began: nothing of that stretch is kept. 0 where none was sounding.
+    #[serde(default)]
+    pub led_in_beats: f64,
+    /// The notes that were sounding at the start and are not in the
+    /// render, because they began more than [`LEAD_IN_BEATS`] before it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_begun: Vec<NotBegun>,
+}
+
+/// Notes of a track that were sounding where a render started and had
+/// begun too long before it to be played from where they began: they are
+/// not in the render.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NotBegun {
+    pub track: TrackId,
+    pub track_name: String,
+    /// How many notes.
+    pub notes: usize,
 }
 
 /// A device that draws at random what it plays, as far as is known.
@@ -532,12 +552,16 @@ pub struct RenderReport {
     /// See [`Measured::draws`].
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub draws: Vec<Draws>,
+    /// See [`Measured::not_begun`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub not_begun: Vec<NotBegun>,
     pub problems: Vec<String>,
 }
 
 impl RenderReport {
     fn new(path: Option<&Path>, sample_rate: u32, measured: Measured, problems: &[Problem]) -> Self {
-        let Measured { stats, tracks, sections, dynamics, waited, stems, threads, alone, draws } = measured;
+        let Measured { stats, tracks, sections, dynamics, waited, stems, threads, alone, draws, not_begun, .. } =
+            measured;
         Self {
             path: path.map(|path| path.display().to_string()),
             sample_rate,
@@ -550,6 +574,7 @@ impl RenderReport {
             threads,
             alone,
             draws,
+            not_begun,
             problems: problems.iter().map(ToString::to_string).collect(),
         }
     }
@@ -650,6 +675,37 @@ fn same_value(now: &str, wanted: &str) -> bool {
     }
 }
 
+/// How far ahead of its start a render begins to play at the most, in
+/// beats, for the notes that are sounding there: eight bars of four.
+pub const LEAD_IN_BEATS: f64 = 32.0;
+
+/// Where a render that starts at `start` begins to play: where the
+/// earliest of the notes that are sounding at `start` began, if that is no
+/// more than [`LEAD_IN_BEATS`] before; and, by track, how many notes began
+/// earlier than that and are left out. A key that switches is no such
+/// note: it is pressed again where the render begins.
+fn lead_in(graph: &Graph, start: f64) -> (f64, Vec<(TrackId, usize)>) {
+    // Nearer than this, a note ends or begins at the start itself.
+    const AT: f64 = 1e-6;
+    let (mut from, mut not_begun) = (start, Vec::new());
+    for node in &graph.tracks {
+        let mut too_early = 0;
+        for note in node.notes.iter().take_while(|note| note.start < start - AT) {
+            if note.end <= start + AT || node.switches.iter().any(|switch| switch.pitch == note.pitch) {
+                continue;
+            }
+            match note.start < start - LEAD_IN_BEATS {
+                true => too_early += 1,
+                false => from = from.min(note.start),
+            }
+        }
+        if too_early > 0 {
+            not_begun.push((node.id, too_early));
+        }
+    }
+    (from.max(0.0), not_begun)
+}
+
 /// `project` with only `tracks` to be heard: each of them soloed and
 /// unmuted, and no other track soloed.
 fn hearing_only(project: &Project, tracks: &[TrackId]) -> Project {
@@ -698,6 +754,33 @@ fn render_from(
     }
     .compile(project, false);
 
+    // A render is counted in the song's own frames: it starts on the frame
+    // nearest its start as the song has them from its beginning, so that a
+    // stretch rendered alone lies on the frames it has in the whole song.
+    let song_tempo = project.tempo_map();
+    let frame_of_song = |beat: f64| song_tempo.frames_at(beat, sample_rate).round();
+    let on_a_frame = |beat: f64| match beat > 0.0 {
+        true => song_tempo.beat_after(0.0, frame_of_song(beat), sample_rate),
+        false => 0.0,
+    };
+    let start = on_a_frame(start);
+    // Notes that are sounding where it starts are heard from where they
+    // began: the render begins to play there, and keeps nothing until its
+    // start. (A pad is then in its sustain, a sampler where in its
+    // recording the song has it, and what rings over from those notes is
+    // there.) One that began too long before is left out, and said.
+    let (lead_from, not_begun) = lead_in(&graph, start);
+    let lead_from = on_a_frame(lead_from);
+    let lead_frames = (frame_of_song(start) - frame_of_song(lead_from)).max(0.0) as u64;
+    let not_begun: Vec<NotBegun> = not_begun
+        .into_iter()
+        .map(|(track, notes)| NotBegun {
+            track,
+            track_name: project.track(track).map(|track| track.name.clone()).unwrap_or_default(),
+            notes,
+        })
+        .collect();
+
     let plugins = ready::Plugins::of(factory);
     // What listens to the render: every track as it leaves its fader, and
     // whatever is to be a file of its own. The files are begun before the
@@ -710,7 +793,7 @@ fn render_from(
     let listener = |file: Option<WavWriter>| {
         let analyzer = Analyzer::new(options.sample_rate);
         let analyzer = if file.is_some() { analyzer.with_true_peak() } else { analyzer };
-        Box::new(Tap { analyzer, file })
+        Box::new(Tap { analyzer, file, unheard: lead_frames })
     };
     // A track that is made only for what it feeds (a soloed return, a
     // device that listens to it) is not heard itself: it has no row and
@@ -817,7 +900,7 @@ fn render_from(
     let given = options.threads.unwrap_or_else(usual_threads).max(1);
     let threads = if alone.is_empty() { given } else { 1 };
     let patience = (options.patience, threads);
-    let waited = ready::wake(&mut graph, project, (&plugins, factory), (start, end), sample_rate, patience);
+    let waited = ready::wake(&mut graph, project, (&plugins, factory), (lead_from, end), sample_rate, patience);
     let woke = begun.elapsed();
     let name_of = |track: Option<TrackId>| match track {
         Some(track) => project.track(track).map(|track| track.name.clone()).unwrap_or_default(),
@@ -874,7 +957,7 @@ fn render_from(
     let threads = if alone.is_empty() { processor.spread_over(given) } else { 1 };
     // Only where it made a difference is it worth saying.
     let alone = if given > 1 { alone } else { Vec::new() };
-    processor.seek(start);
+    processor.seek(lead_from);
     processor.play();
     crate::apart::stage(Stage::Playing);
     // Whoever watches is told how far it has come, and may stop it: what
@@ -901,6 +984,25 @@ fn render_from(
     let body_frames = frames_to(end).round() as usize;
     let tail_frames = (options.max_tail_seconds.max(0.0) * sample_rate) as usize;
     let mut mix = Analyzer::new(options.sample_rate).with_true_peak();
+
+    // What is played ahead of the start is kept nowhere, and nothing that
+    // was measured on the way is.
+    if lead_frames > 0 {
+        let (mut l, mut r) = (vec![0.0f32; MAX_BLOCK], vec![0.0f32; MAX_BLOCK]);
+        let mut ahead = lead_frames as usize;
+        while ahead > 0 {
+            if stopped() {
+                return Err(given_up(processor));
+            }
+            let frames = ahead.min(MAX_BLOCK);
+            processor.process(&mut l[..frames], &mut r[..frames]);
+            ahead -= frames;
+        }
+        for meter in meters.tracks.values().chain(std::iter::once(&meters.master)) {
+            let _ = meter.take();
+        }
+        processor.forget_measured();
+    }
 
     // The body is measured a block at a time, and held on to only if it is
     // wanted. The tail is held until it is known how much of it is sound.
@@ -1079,7 +1181,19 @@ fn render_from(
         (begun.elapsed() - played).as_secs_f64()
     );
 
-    let measured = Measured { stats: mix.stats(), tracks, sections, dynamics, waited, stems, threads, alone, draws };
+    let measured = Measured {
+        stats: mix.stats(),
+        tracks,
+        sections,
+        dynamics,
+        waited,
+        stems,
+        threads,
+        alone,
+        draws,
+        led_in_beats: start - lead_from,
+        not_begun,
+    };
     Ok(Rendered { sample_rate: options.sample_rate, left, right, track_peaks, track_levels, problems, measured })
 }
 

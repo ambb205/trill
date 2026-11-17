@@ -258,6 +258,7 @@ impl Compiler<'_> {
             let chain = self.chain(&track.devices, project, &routing.keys, &mut problems);
             tracks.push(TrackNode {
                 id: track.id,
+                switches: crate::graph::switches_of(&notes, &track.profile),
                 notes,
                 controllers: track.controller_lanes(),
                 fresh_devices: chain.devices.iter().any(|slot| slot.processor.is_some()),
