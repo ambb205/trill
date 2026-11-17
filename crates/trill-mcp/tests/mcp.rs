@@ -92,6 +92,9 @@ async fn tools_are_listed_with_schemas() {
     for expected in [
         "get_project",
         "set_project",
+        "set_tempo",
+        "set_time_signature",
+        "get_tempo_map",
         "create_track",
         "update_track",
         "delete_track",
@@ -1403,7 +1406,7 @@ async fn a_line_follows_the_travel_of_its_control_and_an_old_file_plays_as_it_di
     let path = folder.path().join("before.trill");
     ok(client, "save_project", json!({ "path": path.display().to_string() })).await;
     let mut saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(saved["format_version"], 3, "this version's file says which it is");
+    assert_eq!(saved["format_version"], trill_core::project::FORMAT_VERSION, "this version's file says which it is");
     let said: Vec<bool> =
         saved["automation"].as_array().unwrap().iter().map(|lane| lane.get("travel").is_some()).collect();
     assert_eq!(said, [false, true, false, true, true, false], "a lane straight in its units says nothing");

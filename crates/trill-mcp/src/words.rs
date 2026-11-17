@@ -154,6 +154,39 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
                 (changed, _) => about("Changing", "Changed", &format!("the {}", list(changed))),
             }
         }
+        "set_tempo" => {
+            let bar = call.input.get("bar").and_then(Value::as_u64).unwrap_or(1);
+            let place = match call.input.get("beat").and_then(Value::as_f64).filter(|beat| *beat > 1.0) {
+                Some(beat) => format!("bar {bar} beat {beat}"),
+                None => format!("bar {bar}"),
+            };
+            let flag = |key: &str| call.input.get(key).and_then(Value::as_bool) == Some(true);
+            match (call.input.get("bpm").and_then(Value::as_f64), flag("remove"), flag("ramp")) {
+                (_, true, _) => about("Removing", "Removed", &format!("the change of tempo at {place}")),
+                (Some(bpm), _, true) => Wording {
+                    doing: format!("Making the tempo glide to {bpm} BPM by {place}"),
+                    did: format!("Made the tempo glide to {bpm} BPM by {place}"),
+                },
+                (Some(bpm), ..) => about("Setting", "Set", &format!("the tempo to {bpm} BPM at {place}")),
+                (None, ..) => about("Setting", "Set", &format!("the tempo at {place}")),
+            }
+        }
+        "set_time_signature" => {
+            let bar = call.input.get("bar").and_then(Value::as_u64).unwrap_or(1);
+            let lasting = match call.input.get("bars").and_then(Value::as_u64) {
+                Some(1) => " for a bar".to_owned(),
+                Some(bars) => format!(" for {bars} bars"),
+                None => String::new(),
+            };
+            match (call.text("time_signature"), call.input.get("remove").and_then(Value::as_bool)) {
+                (_, Some(true)) => about("Removing", "Removed", &format!("the change of time signature at bar {bar}")),
+                (Some(signature), _) => {
+                    about("Setting", "Set", &format!("the time signature to {signature} at bar {bar}{lasting}"))
+                }
+                (None, _) => about("Setting", "Set", &format!("the time signature at bar {bar}")),
+            }
+        }
+        "get_tempo_map" => about("Reading", "Read", "the tempo and the time signature along the song"),
         "history" => {
             let steps = call.input.get("steps").and_then(Value::as_u64).unwrap_or(1);
             let steps = if steps == 1 { "a step".to_owned() } else { format!("{steps} steps") };
@@ -559,6 +592,12 @@ pub fn of_call(tool: &str, input: &Value, answer: &str) -> Option<Place> {
             let (start, end) = (region.get("start")?.as_f64()?, region.get("end")?.as_f64()?);
             (end > start).then_some(Place::Span { start, end })
         }
+        // Where the change lies, and how far it reaches if it was told to.
+        "set_tempo" | "set_time_signature" => {
+            let start = answer.get("at_beat")?.as_f64()?;
+            let end = answer.get("until_beat").and_then(Value::as_f64).unwrap_or(start);
+            (end >= start).then_some(Place::Span { start, end })
+        }
         _ => None,
     }
 }
@@ -633,6 +672,21 @@ mod tests {
         assert_eq!(wording.did, "Added the track \u{201C}Drums\u{201D}");
 
         assert_eq!(did("get_project", json!({}), p), "Read the project");
+        assert_eq!(did("set_tempo", json!({ "bar": 9, "bpm": 140 }), p), "Set the tempo to 140 BPM at bar 9");
+        assert_eq!(
+            did("set_tempo", json!({ "bar": 12, "beat": 3, "bpm": 90.5, "ramp": true }), p),
+            "Made the tempo glide to 90.5 BPM by bar 12 beat 3"
+        );
+        assert_eq!(did("set_tempo", json!({ "bar": 9, "remove": true }), p), "Removed the change of tempo at bar 9");
+        assert_eq!(
+            did("set_time_signature", json!({ "bar": 9, "time_signature": "7/8", "bars": 4 }), p),
+            "Set the time signature to 7/8 at bar 9 for 4 bars"
+        );
+        assert_eq!(
+            did("set_time_signature", json!({ "bar": 9, "remove": true }), p),
+            "Removed the change of time signature at bar 9"
+        );
+        assert_eq!(did("get_tempo_map", json!({}), p), "Read the tempo and the time signature along the song");
         assert_eq!(did("set_project", json!({ "tempo": 96 }), p), "Set the tempo to 96 BPM");
         assert_eq!(did("set_project", json!({ "tempo": 96, "name": "x" }), p), "Changed the name and tempo");
         assert_eq!(
@@ -893,6 +947,16 @@ mod tests {
         let looped = json!({ "tempo": 96, "loop": { "enabled": true, "start": 16, "end": 32 } });
         assert_eq!(of("set_project", looped, json!({})), Some(Place::Span { start: 16.0, end: 32.0 }));
         assert_eq!(of("set_project", json!({ "tempo": 96 }), json!({})), None);
+        let changed = json!({ "at_beat": 32.0, "until_beat": 46.0 });
+        assert_eq!(
+            of("set_time_signature", json!({ "bar": 9, "time_signature": "7/8", "bars": 4 }), changed),
+            Some(Place::Span { start: 32.0, end: 46.0 })
+        );
+        assert_eq!(
+            of("set_tempo", json!({ "bar": 9, "bpm": 140 }), json!({ "at_beat": 32.0 })),
+            Some(Place::Span { start: 32.0, end: 32.0 })
+        );
+        assert_eq!(of("get_tempo_map", json!({}), json!({ "tempo": [] })), None);
 
         // Reading, removing and anything unknown name nothing; nor does an
         // answer that is not what was expected.

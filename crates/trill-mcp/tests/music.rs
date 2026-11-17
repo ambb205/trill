@@ -450,7 +450,7 @@ async fn replies_warn_about_what_cannot_be_heard() {
 
     // A groove against the project's meter or tempo, and a lane with a slip in it.
     let reply = ok(client, "write_drums", json!({ "track": kit, "groove": "six_eight", "start": 8 })).await;
-    assert!(warnings(&reply).contains("'six_eight' groove is written in 6/8, but the project is in 4/4"), "{reply}");
+    assert!(warnings(&reply).contains("'six_eight' groove is written in 6/8, but these bars are in 4/4"), "{reply}");
     let reply = ok(client, "write_drums", json!({ "track": kit, "groove": "drum_and_bass", "start": 16 })).await;
     assert!(
         remarks(&reply).contains("'drum_and_bass' is usually played at 165-176 BPM; the project is at 120"),

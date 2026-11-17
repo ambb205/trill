@@ -271,13 +271,13 @@ fn sections_of(
             .map(|(name, start_beat, end_beat)| Section { name, start_beat, end_beat })
             .collect());
     };
-    let bar = project.time_signature.beats_per_bar();
+    let bars = project.meter_map();
     let mut sections = Vec::with_capacity(asked.len());
     for (index, section) in asked.iter().enumerate() {
         let (from, to, named) = match (section.start, section.end, section.bars.as_deref()) {
             (Some(from), Some(to), None) => (from, to, format!("{}-{}", round(from), round(to))),
             (None, None, Some([first, last])) if *first >= 1 && last >= first => {
-                (f64::from(first - 1) * bar, f64::from(*last) * bar, format!("bars {first}-{last}"))
+                (bars.bar_start(first - 1), bars.bar_start(*last), format!("bars {first}-{last}"))
             }
             _ => {
                 return Err(format!(

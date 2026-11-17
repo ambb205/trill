@@ -26,9 +26,10 @@ pub struct LoopInput {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct SetProjectRequest {
     pub name: Option<String>,
-    /// Beats per minute, 20-999.
+    /// Beats per minute, 20-999: the tempo the song begins at. set_tempo changes it from a later bar on.
     pub tempo: Option<f64>,
-    /// For example "4/4", "3/4", "6/8" or "7/8".
+    /// For example "4/4", "3/4", "6/8" or "7/8": the time signature the song begins in. set_time_signature
+    /// changes it from a later bar on.
     pub time_signature: Option<String>,
     /// Region that live playback repeats. Rendering ignores it.
     #[serde(rename = "loop")]
@@ -591,8 +592,51 @@ pub struct ImportMidiRequest {
     /// Instrument for the new melodic tracks (default "builtin:polysynth"). Drum parts always get
     /// "builtin:drumkit".
     pub instrument: Option<String>,
-    /// Also adopt the file's tempo and time signature. Defaults to true when the project has no tracks yet.
+    /// Also adopt the file's tempo and time signature, with every change of them in the file, from `at` on.
+    /// Defaults to true when the project has no tracks yet.
     pub use_tempo: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct SetTempoRequest {
+    /// Beats per minute, 20-999. Needed unless `remove` is true.
+    pub bpm: Option<f64>,
+    /// The bar the tempo is set at, counted from 1 as get_tempo_map counts them (default 1: the tempo the
+    /// song begins at).
+    pub bar: Option<u32>,
+    /// The beat in that bar, counted from 1 in quarter notes (default 1, the bar line; 3 is two beats in,
+    /// 2.5 a beat and a half in).
+    pub beat: Option<f64>,
+    /// false (default): the tempo jumps to `bpm` here and stays there. true: it glides here, evenly from
+    /// beat to beat, from the change before this one (or from the start of the song) and arrives at `bpm`
+    /// here: an accelerando or a ritardando. For a glide that sets out later than the change before it, first
+    /// set the tempo it sets out from at the bar it sets out at.
+    pub ramp: Option<bool>,
+    /// true removes what the tempo does here (the glide that arrives and the tempo that takes over, whichever
+    /// there is); the tempo before goes on.
+    pub remove: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct SetTimeSignatureRequest {
+    /// For example "4/4", "3/4", "6/8", "7/8" or "5/4": 1 to 32 over 1, 2, 4, 8 or 16. Needed unless
+    /// `remove` is true.
+    pub time_signature: Option<String>,
+    /// The bar it takes over at, counted from 1 as get_tempo_map counts them (default 1: the time signature
+    /// the song begins in).
+    pub bar: Option<u32>,
+    /// For this many bars only: after them, the time signature that was in force here before takes over
+    /// again. Omit to leave it in force until the next change.
+    pub bars: Option<u32>,
+    /// true removes the change at this bar; the time signature before it goes on.
+    pub remove: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct GetTempoMapRequest {
+    /// Bars to look up, counted from 1: for each, the beat it starts at, how many beats long it is, the
+    /// second it starts at, its time signature and the tempo there.
+    pub bars: Option<Vec<u32>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -622,7 +666,8 @@ pub struct EditTimeRequest {
     /// "insert": open up `length` beats of empty time at `start`; what follows moves later.
     /// "copy": copy the time from `start` to `end` to the beat `to`, on every track or on `tracks`.
     pub action: String,
-    /// Where the stretch begins, in beats (bar N of 4/4 starts at (N-1)*4).
+    /// Where the stretch begins, in beats (bar N of 4/4 starts at (N-1)*4; where the time signature changes,
+    /// get_tempo_map gives the beat a bar starts at).
     pub start: f64,
     /// Where the stretch ends, in beats. Needed for "delete", "duplicate" and "copy".
     pub end: Option<f64>,
