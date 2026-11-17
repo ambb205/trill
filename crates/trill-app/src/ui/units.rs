@@ -23,9 +23,10 @@ pub fn gain_to_db(gain: f32) -> f32 {
 ///
 /// It is the travel automation follows ([`Travel::FADER`]), so a line
 /// between two points of a volume's envelope is a straight line in its
-/// lane. Travel is quadratic in dB, so the range around unity where mixing
-/// happens gets most of the fader and the last stretch drops off quickly:
-/// 0 dB sits at 85%, -12 dB at 58%, -48 dB at 8%.
+/// lane, and it is the travel of a fader of Ableton Live's: even in dB
+/// through the top 24 dB, which get three fifths of the fader, and ever
+/// faster below. 0 dB sits at 85%, -12 dB at 55%, -18 dB at 40%, -48 dB
+/// at 10%, and the very bottom is silence.
 pub fn db_to_fader(db: f32) -> f32 {
     // Not a number is silence, as far as a meter is concerned.
     let db = if db.is_nan() { MIN_VOLUME_DB } else { db };
@@ -35,6 +36,19 @@ pub fn db_to_fader(db: f32) -> f32 {
 /// Inverse of [`db_to_fader`].
 pub fn fader_to_db(position: f32) -> f32 {
     Travel::FADER.value_at(position as f64, MIN_VOLUME_DB as f64, MAX_VOLUME_DB as f64) as f32
+}
+
+/// The travel of a send, 0 (shut) to 1 (top), for its level in dB: a
+/// fader's with its knee where a send's is ([`Travel::SEND`]), which is the
+/// travel a send's automation follows. 0 dB sits at 87%.
+pub fn db_to_send(db: f32) -> f32 {
+    let db = if db.is_nan() { MIN_VOLUME_DB } else { db };
+    Travel::SEND.position(db as f64, MIN_VOLUME_DB as f64, MAX_VOLUME_DB as f64) as f32
+}
+
+/// Inverse of [`db_to_send`].
+pub fn send_to_db(position: f32) -> f32 {
+    Travel::SEND.value_at(position as f64, MIN_VOLUME_DB as f64, MAX_VOLUME_DB as f64) as f32
 }
 
 /// `"\u{2212}6.0 dB"`, `"+1.5 dB"`, `"0.0 dB"`, and `"\u{2212}\u{221E} dB"` at the bottom of
@@ -65,7 +79,7 @@ pub fn format_pan(pan: f32) -> String {
 /// How a parameter's range maps onto slider travel: by the travel of its
 /// control ([`Travel::of_param`]), which is also what a line of its
 /// automation is straight along. A frequency or a time moves by ratio, a
-/// level that reaches silence as a fader does, the rest evenly.
+/// level that reaches silence as a fader or a gain does, the rest evenly.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct ParamScale(pub Travel);
 
@@ -188,9 +202,15 @@ mod tests {
         for db in [-70.0, -48.0, -24.0, -12.0, -6.0, 0.0, 3.0, 6.0] {
             assert!((fader_to_db(db_to_fader(db)) - db).abs() < 1e-3, "{db} dB");
         }
-        assert!(db_to_fader(0.0) > 0.8, "unity gain is near the top");
+        assert!((db_to_fader(0.0) - 0.85).abs() < 1e-6, "unity gain is where it is on a fader of Live's");
         assert!(db_to_fader(-12.0) > 0.5, "the top half covers the last 12 dB below unity");
-        assert!(db_to_fader(-48.0) < 0.1);
+        assert!(db_to_fader(-48.0) < 0.11);
+        // A send's bar is a fader's with its knee 6 dB lower.
+        assert_eq!((db_to_send(MIN_VOLUME_DB), db_to_send(MAX_VOLUME_DB), db_to_send(f32::NAN)), (0.0, 1.0, 0.0));
+        assert!((db_to_send(0.0) - 0.868).abs() < 0.001 && (db_to_send(-12.0) - 0.604).abs() < 0.001);
+        for db in [-60.0f32, -24.0, -12.0, -6.0, 0.0, 6.0] {
+            assert!((send_to_db(db_to_send(db)) - db).abs() < 1e-3, "{db} dB");
+        }
     }
 
     #[test]
@@ -236,12 +256,12 @@ mod tests {
     }
 
     #[test]
-    fn a_level_that_reaches_silence_is_laid_out_as_a_fader() {
+    fn a_level_that_reaches_silence_is_laid_out_as_a_gain_s_knob() {
         // A gain's knob gives the last decibels above silence little room
-        // and the range where mixing happens most of it, as a fader does.
+        // and the range where mixing happens most of it, as Live's does.
         let gain = param(-70.0, 24.0, "dB", ParamKind::Float);
         let scale = ParamScale::of(&gain);
-        assert_eq!(scale, ParamScale(Travel::Fader { floor: -70.0 }));
+        assert_eq!(scale, ParamScale(Travel::GAIN));
         assert_eq!((scale.normalize(&gain, -70.0), scale.normalize(&gain, 24.0)), (0.0, 1.0));
         assert!(scale.normalize(&gain, -40.0) < 0.11 && scale.normalize(&gain, 0.0) > 0.5);
         for value in [-70.0, -30.0, -6.0, 0.0, 12.0, 24.0] {

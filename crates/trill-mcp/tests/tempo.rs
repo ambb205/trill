@@ -336,6 +336,73 @@ async fn the_writing_tools_lay_each_bar_in_the_time_signature_it_has() {
     assert_eq!(starts(client, &chords["clip_id"], None).await[..2], [0.0, 4.0]);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn an_arpeggio_runs_through_each_bar_in_the_time_signature_it_has() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    seven_eight_in_the_middle(client).await;
+    let keys = track(client, "Keys", "builtin:polysynth", "soft_keys").await;
+
+    // Six chords in eighths, a chord to a bar: eight steps in a bar of 4/4 and seven in a bar of 7/8, each
+    // bar beginning at its own bar line, and the whole as long as the six bars are.
+    let chart = "Am | F | C | G | Am | F";
+    let arguments = json!({ "track": keys, "progression": chart, "rate": "1/8", "order": "up", "gate": 1.0 });
+    let written = ok(client, "write_arpeggio", arguments).await;
+    assert_eq!((written["bars"].as_u64(), written["written_beats"].as_f64()), (Some(6), Some(23.0)), "{written}");
+    assert_eq!(
+        written["time_signatures"],
+        json!(["4/4 in bar(s) 1, 2, 5, 6", "7/8 in bar(s) 3, 4"]),
+        "the reply says which bars are which: {written}"
+    );
+    let reply = ok(client, "get_notes", json!({ "clip": written["clip_id"] })).await;
+    let at = reply["start"].as_f64().unwrap();
+    let mut notes: Vec<(f64, f64, u64)> = reply["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|note| {
+            let (start, length) = (note["start"].as_f64().unwrap(), note["length"].as_f64().unwrap());
+            (at + start, at + start + length, note["pitch"].as_u64().unwrap())
+        })
+        .collect();
+    notes.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // The tones of each bar's chord, as keys of the octave from C.
+    let chords: [&[u64]; 6] = [&[9, 0, 4], &[5, 9, 0], &[0, 4, 7], &[7, 11, 2], &[9, 0, 4], &[5, 9, 0]];
+    let lines = [0.0, 4.0, 8.0, 11.5, 15.0, 19.0, 23.0];
+    for (bar, line) in lines.windows(2).enumerate() {
+        let inside: Vec<&(f64, f64, u64)> = notes.iter().filter(|note| note.0 >= line[0] && note.0 < line[1]).collect();
+        let steps: Vec<f64> = inside.iter().map(|note| note.0).collect();
+        let eighths: Vec<f64> =
+            (0..((line[1] - line[0]) * 2.0) as usize).map(|step| line[0] + step as f64 * 0.5).collect();
+        assert_eq!(steps, eighths, "bar {}: an eighth to a step from its bar line to the next", bar + 1);
+        assert!(
+            inside.iter().all(|note| chords[bar].contains(&(note.2 % 12))),
+            "bar {} holds its own chord and nothing of the one before: {inside:?}",
+            bar + 1
+        );
+        // The figure begins again with each bar: on the chord's lowest note, and climbing.
+        let lowest = inside.iter().map(|note| note.2).min().unwrap();
+        assert_eq!(inside[0].2, lowest, "bar {}: {inside:?}", bar + 1);
+        assert!(inside[1].2 > inside[0].2, "bar {}: {inside:?}", bar + 1);
+        // And its last step ends with the bar, which in 7/8 is half a beat sooner.
+        assert!(
+            inside.iter().all(|note| note.1 <= line[1] + 1e-6),
+            "bar {}: nothing rings over the bar line: {inside:?}",
+            bar + 1
+        );
+    }
+
+    // Begun inside the bars of 7/8, it is written in 7/8 from there and in 4/4 from where the song is again.
+    let arguments =
+        json!({ "track": keys, "start": 11.5, "progression": "G | Am", "rate": "1/8", "pattern": [1, 3, 2, 3] });
+    let later = ok(client, "write_arpeggio", arguments).await;
+    assert_eq!(later["written_beats"], 7.5, "a bar of 7/8 and a bar of 4/4: {later}");
+    assert_eq!(later["time_signatures"], json!(["7/8 in bar(s) 1", "4/4 in bar(s) 2"]), "{later}");
+    let steps = starts(client, &later["clip_id"], None).await;
+    assert_eq!(steps.iter().filter(|step| **step < 15.0).count(), 7, "{steps:?}");
+    assert_eq!(steps[7..], [15.0, 15.5, 16.0, 16.5, 17.0, 17.5, 18.0, 18.5], "{steps:?}");
+}
+
 /// Where in `samples` something is struck near `second`: the frame at
 /// which what follows is most unlike what went before, in the part of the
 /// sound that a blow has and a ringing drum has not.

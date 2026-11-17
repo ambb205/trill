@@ -25,7 +25,7 @@ fn the_mixer_has_a_strip_for_every_track_and_the_master() {
     let fader = harness.all_labeled("Volume of One")[0];
     harness.drag(fader.center_top() + vec2(0.0, 12.0), fader.center());
     let volume = harness.project().track(first).unwrap().volume_db;
-    assert!((-18.5..-14.5).contains(&volume), "half way up the fader scale: {volume}");
+    assert!((-16.0..-12.0).contains(&volume), "half way up the fader scale: {volume}");
     assert_eq!(harness.undo_depth(), before + 1);
     harness.double_click(fader.center());
     assert_eq!(harness.project().track(first).unwrap().volume_db, 0.0, "a double-click returns to unity");

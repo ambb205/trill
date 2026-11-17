@@ -373,12 +373,12 @@ pub(in crate::ui) fn send_bar(ui: &Ui, cx: &mut Cx, track: &Track, to: &Track, r
     // In a mixer strip there is no room for the return's name and a unit:
     // sends are in decibels throughout, and the hint spells it out.
     let in_bar = if rect.width() < NARROW_SEND { shown.trim_end_matches(" dB") } else { &shown };
-    let bar = Bar::new(&to.name, in_bar, level.map_or(0.0, units::db_to_fader));
+    let bar = Bar::new(&to.name, in_bar, level.map_or(0.0, units::db_to_send));
     let output = trill_noir::bar(ui, cx.theme, rect, id, &bar.automation(hold.mark()));
     let what = format!("{} \u{00B7} {shown}", automation::send_name(&to.name));
     let gestures = "drag to set, double-click to switch off, right-click to automate";
     if let Some(position) = automation::respond(cx, &target, hold, &output, &what, gestures) {
-        let next = (!output.reset && position > 0.005).then(|| units::fader_to_db(position));
+        let next = (!output.reset && position > 0.005).then(|| units::send_to_db(position));
         if next != set {
             let (from, to) = (track.id, to.id);
             cx.edit(|project| project.set_send(from, to, next));

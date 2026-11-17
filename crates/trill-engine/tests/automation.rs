@@ -98,9 +98,11 @@ fn a_send_thrown_open_for_a_note_feeds_the_return_then_and_only_then() {
     assert_eq!(peak(&thrown[..2 * BEAT]), 0.0, "shut means nothing at all is sent");
     assert_eq!(peak(&thrown[8 * BEAT + 64..]), 0.0, "and shut again it is silent again");
     assert!((gain_db(&thrown, &plain, 5.0) + 6.0).abs() < 0.01, "open: {}", gain_db(&thrown, &plain, 5.0));
-    // On the way it is where a fader would be: half way between -70 and
-    // -6 dB along its travel is -24.7 dB, not the -38 dB half way in dB.
-    let half_way = -70.0 + (64.0f64 * 64.0 / 2.0).sqrt();
+    // On the way it is where a send's fader would be: half way between
+    // -70 and -6 dB along its travel is -22.7 dB, not the -38 dB half way
+    // in dB.
+    let half_way = Travel::SEND.between(-70.0, -6.0, 0.5);
+    assert!((half_way + 22.72).abs() < 0.01, "{half_way}");
     assert!((gain_db(&thrown, &plain, 3.0) - half_way).abs() < 0.05, "{}", gain_db(&thrown, &plain, 3.0));
     assert!((gain_db(&thrown, &plain, 7.0) - half_way).abs() < 0.05, "{}", gain_db(&thrown, &plain, 7.0));
     // Smooth: it adds no step of its own to the wave.
@@ -142,20 +144,20 @@ fn a_line_between_two_points_is_straight_along_the_travel_of_what_it_moves() {
     let plain = plain_sine(16.0);
     let fade = vec![point(0.0, 0.0), point(16.0, -60.0)];
 
-    // A track's fader: a stop from 0 dB to -60 dB is at -20 dB half way.
+    // A track's fader: a stop from 0 dB to -60 dB is at -16.3 dB half way.
     let mut project = Project::new("t");
     let track = sine_track(&mut project, "Lead", 16.0);
     let volume = AutomationTarget::TrackVolume { track };
     project.set_automation(volume.clone(), fade.clone()).unwrap();
     let faded = rendered(&project);
-    for (beat, wanted) in [(4.0, -9.17), (8.0, -20.0), (12.0, -33.94)] {
+    for (beat, wanted) in [(4.0, -8.15), (8.0, -16.30), (12.0, -29.99)] {
         let got = gain_db(&faded, &plain, beat);
         assert!((got - wanted).abs() < 0.06, "the fader at beat {beat}: {got} dB");
     }
     // The master's fader goes the same way.
     project.set_automation(volume.clone(), Vec::new()).unwrap();
     project.set_automation(AutomationTarget::MasterVolume, fade.clone()).unwrap();
-    assert!((gain_db(&rendered(&project), &plain, 8.0) + 20.0).abs() < 0.06);
+    assert!((gain_db(&rendered(&project), &plain, 8.0) + 16.30).abs() < 0.06);
     project.set_automation(AutomationTarget::MasterVolume, Vec::new()).unwrap();
 
     // A song saved before lines followed their controls says nothing of
@@ -178,13 +180,115 @@ fn a_line_between_two_points_is_straight_along_the_travel_of_what_it_moves() {
     let late = gain_db(&rendered(&project), &plain, 8.0);
     assert!(late > -12.0 && late < -4.0, "{late}");
 
-    // A gain that reaches silence is a fader of its own, down to its floor.
-    project.set_automation(volume, Vec::new()).unwrap();
+    // A gain that reaches silence has a travel of its own: a little
+    // further down half way than a fader, and less far down later on.
+    project.set_automation(volume.clone(), Vec::new()).unwrap();
     let utility = project.add_device(ChainRef::Track(track), "builtin:utility", "Utility", None).unwrap();
     let gain = AutomationTarget::DeviceParam { device: utility, param: "gain".into() };
-    project.write_automation(gain, fade, Travel::Fader { floor: -70.0 }).unwrap();
-    let got = gain_db(&rendered(&project), &plain, 8.0);
-    assert!((got + 20.0).abs() < 0.3, "the gain half way: {got} dB");
+    project.write_automation(gain.clone(), fade.clone(), Travel::GAIN).unwrap();
+    let on_a_gain = rendered(&project);
+    for (beat, wanted) in [(4.0, -8.37), (8.0, -16.74), (12.0, -27.42)] {
+        let got = gain_db(&on_a_gain, &plain, beat);
+        assert!((got - wanted).abs() < 0.1, "the gain at beat {beat}: {got} dB");
+    }
+
+    // An envelope that a song of formats 3 to 5 saved along the fader of
+    // its day plays along it still: -20 dB half way, on the mixer's fader
+    // and on a gain alike. Such a file calls that law a fader, with the
+    // level it was measured from.
+    let of_its_day = Travel::Square { floor: -70.0 };
+    project.write_automation(volume.clone(), fade.clone(), of_its_day).unwrap();
+    project.set_automation(gain.clone(), Vec::new()).unwrap();
+    let this_format = format!("\"format_version\": {}", trill_core::project::FORMAT_VERSION);
+    let saved = project.to_json();
+    assert!(saved.contains("\"square\": {") && saved.contains(&this_format), "{saved}");
+    let earlier = saved.replace("\"square\": {", "\"fader\": {").replace(&this_format, "\"format_version\": 5");
+    let old = Project::from_json(&earlier).unwrap();
+    assert_eq!(old.automation[0].travel, of_its_day, "what a file of format 5 calls a fader");
+    let as_it_was = rendered(&old);
+    for (beat, wanted) in [(4.0, -9.17), (8.0, -20.0), (12.0, -33.94)] {
+        let got = gain_db(&as_it_was, &plain, beat);
+        assert!((got - wanted).abs() < 0.06, "the fader of formats 3 to 5 at beat {beat}: {got} dB");
+    }
+    assert!(as_it_was == rendered(&project), "and written again by this build it is the same song");
+}
+
+/// How a control of a built-in device travels, as its device says it.
+fn travel_of(uri: &str, param: &str) -> Travel {
+    let descriptors = BuiltinFactory.descriptors();
+    let device = descriptors.iter().find(|descriptor| descriptor.uri == uri).unwrap();
+    Travel::of_param(device.params.iter().find(|info| info.id == param).unwrap())
+}
+
+#[test]
+fn a_fade_of_two_points_falls_as_ableton_live_s_does() {
+    // The three fades of the bench's song: a Utility's gain from 0 dB to
+    // -60 dB, two points each, over 11, 5 and 6.5 beats. What Live shows
+    // along each such line, in the middle of every beat of it, is read
+    // from what it shows at 257 places along a Utility's gain.
+    let fades: [(&str, f64, &[f64]); 3] = [
+        ("the pad, out", 11.0, &[-1.52, -4.56, -7.61, -10.68, -13.71, -16.75, -19.92, -23.87, -28.87, -35.93, -47.97]),
+        ("the lead, out", 5.0, &[-3.34, -10.02, -16.75, -24.76, -39.81]),
+        ("the lead, drifting", 6.5, &[-2.57, -7.72, -12.91, -18.06, -24.38, -34.37]),
+    ];
+    // What the fader of formats 3 to 5 made of the first: Live's for a
+    // third of the way, and 4 to 7 dB under it through the second half.
+    let before = [-1.58, -4.84, -8.28, -11.92, -15.81, -20.0, -24.57, -29.66, -35.49, -42.53, -52.16];
+    assert_eq!(travel_of("builtin:utility", "gain"), Travel::GAIN, "a Utility's gain says it is one");
+    let plain = plain_sine(16.0);
+    let mut worst = 0.0f64;
+    for (name, beats, live) in fades {
+        let mut project = Project::new("t");
+        let track = sine_track(&mut project, "Lead", 16.0);
+        let utility = project.add_device(ChainRef::Track(track), "builtin:utility", "Fade", None).unwrap();
+        let gain = AutomationTarget::DeviceParam { device: utility, param: "gain".into() };
+        let line = vec![point(0.0, 0.0), point(2.0, 0.0), point(2.0 + beats, -60.0)];
+        project.write_automation(gain.clone(), line.clone(), travel_of("builtin:utility", "gain")).unwrap();
+        let faded = rendered(&project);
+        for (index, shown) in live.iter().enumerate() {
+            let got = gain_db(&faded, &plain, 2.5 + index as f64);
+            worst = worst.max((got - shown).abs());
+            assert!((got - shown).abs() < 0.35, "{name}, beat {}: {got:.2} dB where Live shows {shown}", index + 1);
+        }
+        if beats == 11.0 {
+            // The same two points along the fader of before, for the
+            // difference the bench heard.
+            project.write_automation(gain, line, Travel::Square { floor: -70.0 }).unwrap();
+            let was = rendered(&project);
+            for (index, then) in before.iter().enumerate() {
+                let got = gain_db(&was, &plain, 2.5 + index as f64);
+                assert!((got - then).abs() < 0.35, "{name} as it was, beat {}: {got:.2} dB for {then}", index + 1);
+            }
+            assert!(before[7] - live[7] < -5.5, "5.8 dB under Live's three quarters of the way");
+        }
+    }
+    println!("three fades of two points, 22 beats in all: the worst is {worst:.2} dB from what Live shows");
+
+    // A send and an instrument's volume are faders, and travel as Live's
+    // do: from 0 dB to -60 dB over eight beats, what Live shows at each
+    // beat along its mixer's send, and along Operator's volume (which it
+    // shows to the decibel).
+    let sent = [-4.66, -9.32, -13.98, -18.64, -23.3, -30.13, -42.35];
+    let (mut project, track, echo) = through_a_send(16.0);
+    let send = AutomationTarget::Send { track, to: echo };
+    project.set_automation(send.clone(), vec![point(0.0, 0.0), point(2.0, 0.0), point(10.0, -60.0)]).unwrap();
+    assert_eq!(project.automation[0].travel, Travel::SEND);
+    let thrown = rendered(&project);
+    for (index, shown) in sent.iter().enumerate() {
+        let got = gain_db(&thrown, &plain, 3.0 + index as f64);
+        assert!((got - shown).abs() < 0.1, "the send, beat {}: {got:.2} dB where Live shows {shown}", index + 1);
+    }
+    let volume = [-4.11, -8.16, -12.0, -16.0, -21.0, -30.0, -42.94];
+    assert_eq!(travel_of("builtin:polysynth", "volume"), Travel::FADER, "its top is 6 dB over unity, as a track's is");
+    let mut project = Project::new("t");
+    let track = sine_track(&mut project, "Lead", 16.0);
+    let fader = AutomationTarget::TrackVolume { track };
+    project.set_automation(fader, vec![point(0.0, 0.0), point(2.0, 0.0), point(10.0, -60.0)]).unwrap();
+    let faded = rendered(&project);
+    for (index, shown) in volume.iter().enumerate() {
+        let got = gain_db(&faded, &plain, 3.0 + index as f64);
+        assert!((got - shown).abs() < 0.6, "a volume, beat {}: {got:.2} dB where Live shows {shown}", index + 1);
+    }
 }
 
 /// A device with one parameter, a frequency, that writes down what it is
@@ -367,7 +471,7 @@ fn moving_everything(sweep: bool) -> Project {
         .write_automation(
             AutomationTarget::DeviceParam { device: utility, param: "gain".into() },
             vec![point(0.0, 0.0), point(6.0, -40.0), point(8.0, 0.0)],
-            Travel::Fader { floor: -70.0 },
+            Travel::GAIN,
         )
         .unwrap();
     project
@@ -605,7 +709,7 @@ fn a_solo_that_changes_over_a_send_that_moves_makes_no_step_at_any_buffer_size()
         // envelope's alone (with the track's own, where that is heard).
         let at = 5.0;
         let level = gain_db(&reference.0, &plain, at);
-        let sent = Travel::FADER.between(-24.0, 0.0, at / 8.0);
+        let sent = Travel::SEND.between(-24.0, 0.0, at / 8.0);
         let both = 20.0 * (1.0 + 10f64.powf(sent / 20.0)).log10();
         let wanted = match name {
             "soloing the return" => sent,
@@ -696,12 +800,12 @@ fn a_song_of_many_points(points: bool) -> Project {
         }
         if let Some(count) = big.get(index) {
             let gain = AutomationTarget::DeviceParam { device: utility, param: "gain".into() };
-            project.write_automation(gain, dense(*count), Travel::Fader { floor: -70.0 }).unwrap();
+            project.write_automation(gain, dense(*count), Travel::GAIN).unwrap();
         }
         let own = [
             (AutomationTarget::TrackVolume { track }, Travel::FADER, (-60.0, 0.0)),
             (AutomationTarget::TrackPan { track }, Travel::Linear, (-1.0, 1.0)),
-            (AutomationTarget::Send { track, to: returns[index % 3] }, Travel::FADER, (-70.0, 0.0)),
+            (AutomationTarget::Send { track, to: returns[index % 3] }, Travel::SEND, (-70.0, 0.0)),
             (AutomationTarget::DeviceParam { device: filter, param: "cutoff".into() }, Travel::Log, (40.0, 9000.0)),
             (AutomationTarget::DeviceParam { device: eq, param: "low_cut".into() }, Travel::Log, (30.0, 400.0)),
             (AutomationTarget::DeviceParam { device: eq, param: "mid1_gain".into() }, Travel::Linear, (-12.0, 12.0)),
