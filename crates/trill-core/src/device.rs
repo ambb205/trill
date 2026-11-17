@@ -417,6 +417,17 @@ pub trait DeviceProcessor: Send {
         false
     }
 
+    /// Whether the device has to be made again to be given a key, or to
+    /// have it taken away: a plugin whose format has the host switch the
+    /// key input on before the plugin runs, where a plugin may take a key
+    /// input that is switched on to be the one to listen to. The engine
+    /// makes such a device from a model that has a sidechain or from one
+    /// that has none ([`crate::Device::sidechain`]), and again when that
+    /// changes.
+    fn key_is_set_when_made(&self) -> bool {
+        false
+    }
+
     /// [`process`](Self::process), with a key input to listen to: `key` is
     /// as long as `left` and `right`. Only a device that
     /// [takes a key](Self::takes_key) is asked this way; without a key it

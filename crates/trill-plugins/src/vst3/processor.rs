@@ -14,7 +14,7 @@ use crate::main_thread::MainThread;
 use crate::plugin_thread::PluginThread;
 use std::ptr::null_mut;
 use std::time::Duration;
-use trill_core::device::{DeviceProcessor, Event, ProcessInfo};
+use trill_core::device::{DeviceProcessor, Event, KeyInput, ProcessInfo};
 use vst3::Steinberg::Vst::SymbolicSampleSizes_::kSample32;
 use vst3::Steinberg::Vst::{IAudioProcessor, IAudioProcessorTrait, ProcessData};
 use vst3::Steinberg::{int32, kResultOk};
@@ -52,6 +52,14 @@ pub(crate) struct Vst3Processor {
     /// applies to anything without an audio input, which could not have
     /// passed the buffer's contents through.
     additive: bool,
+    /// The input bus a key goes into, if the plugin has one
+    /// ([`crate::signal::key_port`]), and whether it is switched on. An
+    /// instrument's is its first bus, which always is. An effect's is
+    /// switched on when the plugin is made, for a device that listens to
+    /// another track, and not otherwise: so the plugin is made again when
+    /// that changes.
+    key_bus: Option<usize>,
+    key_on: bool,
     inputs: BusBuffers,
     outputs: BusBuffers,
     events: BlockEvents,
@@ -80,11 +88,14 @@ impl Vst3Processor {
         instrument: bool,
         created: Created,
         (sample_rate, max_block): (f64, usize),
-        patient: bool,
+        (patient, keyed): (bool, bool),
     ) -> Result<Self, String> {
         let max_block = max_block.max(1);
+        let key_bus = crate::signal::key_port(&created.buses.inputs, instrument);
         let mut processor = Self {
             patient,
+            key_bus,
+            key_on: key_bus == Some(0) || (keyed && key_bus.is_some()),
             offline: created.offline,
             audio: Some(created.audio),
             active: true,
@@ -226,7 +237,8 @@ impl Vst3Processor {
     }
 
     /// Runs the plugin over one part of a block. `left` and `right` are
-    /// that part and no longer than the plugin's maximum block size.
+    /// that part and no longer than the plugin's maximum block size, and
+    /// `key` that part of what the device listens to, if it listens.
     fn process_part(
         &mut self,
         info: &ProcessInfo,
@@ -234,8 +246,14 @@ impl Vst3Processor {
         part: (usize, usize, usize),
         left: &mut [f32],
         right: &mut [f32],
+        key: Option<KeyInput<'_>>,
     ) {
         self.inputs.load(left, right);
+        // Only into a bus that is switched on: what is in one that is not
+        // is nothing a plugin has been told to expect.
+        if let (Some(bus), true, Some(key)) = (self.key_bus, self.key_on, key) {
+            self.inputs.load_key(bus, key.left, key.right);
+        }
         // A plugin may return without writing its outputs; what it leaves
         // must not be the previous block.
         self.outputs.clear(left.len());
@@ -247,6 +265,34 @@ impl Vst3Processor {
             // the failure when it next idles.
             self.failed = true;
             self.params.report_failure();
+        }
+    }
+}
+
+impl Vst3Processor {
+    /// Processes a block, with what the device listens to if it listens.
+    fn run(
+        &mut self,
+        info: &ProcessInfo,
+        events: &[Event],
+        left: &mut [f32],
+        right: &mut [f32],
+        key: Option<KeyInput<'_>>,
+    ) {
+        let total = left.len().min(right.len());
+        if total == 0 || self.failed || !self.active {
+            return;
+        }
+        // The engine never exceeds `max_block`, the size the plugin was
+        // set up for. Should a caller do so anyway, feed the plugin in
+        // pieces it can take.
+        let mut start = 0;
+        while start < total && !self.failed {
+            let end = (start + self.max_block).min(total);
+            let part = (start, end - start, total);
+            let key = key.map(|key| KeyInput { left: &key.left[start..end], right: &key.right[start..end] });
+            self.process_part(info, events, part, &mut left[start..end], &mut right[start..end], key);
+            start = end;
         }
     }
 }
@@ -272,20 +318,26 @@ impl DeviceProcessor for Vst3Processor {
     }
 
     fn process(&mut self, info: &ProcessInfo, events: &[Event], left: &mut [f32], right: &mut [f32]) {
-        let total = left.len().min(right.len());
-        if total == 0 || self.failed || !self.active {
-            return;
-        }
-        // The engine never exceeds `max_block`, the size the plugin was
-        // set up for. Should a caller do so anyway, feed the plugin in
-        // pieces it can take.
-        let mut start = 0;
-        while start < total && !self.failed {
-            let end = (start + self.max_block).min(total);
-            let part = (start, end - start, total);
-            self.process_part(info, events, part, &mut left[start..end], &mut right[start..end]);
-            start = end;
-        }
+        self.run(info, events, left, right, None);
+    }
+
+    fn takes_key(&self) -> bool {
+        self.key_bus.is_some()
+    }
+
+    fn key_is_set_when_made(&self) -> bool {
+        self.key_bus.is_some_and(|bus| bus > 0)
+    }
+
+    fn process_keyed(
+        &mut self,
+        info: &ProcessInfo,
+        events: &[Event],
+        left: &mut [f32],
+        right: &mut [f32],
+        key: KeyInput<'_>,
+    ) {
+        self.run(info, events, left, right, Some(key));
     }
 
     /// VST3 has no call that silences a plugin. The nearest things are

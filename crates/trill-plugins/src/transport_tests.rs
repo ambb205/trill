@@ -14,7 +14,7 @@
 use crate::transport::written::{self, Block, Format};
 use std::sync::Mutex;
 use trill_core::device::{DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance, Purpose};
-use trill_core::{ChainRef, Device, MeterMap, Note, Project, TempoMap};
+use trill_core::{ChainRef, Device, DeviceId, MeterMap, Note, Project, TempoMap};
 use trill_engine::compile::{Compiler, DeviceBank, Meters};
 use trill_engine::{AudioSources, Processor};
 
@@ -30,16 +30,18 @@ pub(crate) struct Stage<'a> {
     pub serial: fn(&mut DeviceInstance) -> u64,
 }
 
-/// The stage's factory, which has every instance it makes write down what
-/// it is told, and keeps their serials.
-struct Noting<'a> {
-    stage: &'a Stage<'a>,
-    made: Mutex<Vec<u64>>,
+/// A factory that has every instance it makes write down what it is told
+/// of the song, and keeps their serials with the devices they are for.
+pub(crate) struct Noting<'a> {
+    pub format: Format,
+    pub factory: &'a dyn DeviceFactory,
+    pub serial: fn(&mut DeviceInstance) -> u64,
+    pub made: Mutex<Vec<(DeviceId, u64)>>,
 }
 
 impl DeviceFactory for Noting<'_> {
     fn descriptors(&self) -> Vec<DeviceDescriptor> {
-        self.stage.factory.descriptors()
+        self.factory.descriptors()
     }
 
     fn create(&self, device: &Device, sample_rate: f64, max_block: usize) -> Result<DeviceInstance, DeviceError> {
@@ -53,10 +55,10 @@ impl DeviceFactory for Noting<'_> {
         max_block: usize,
         purpose: Purpose,
     ) -> Result<DeviceInstance, DeviceError> {
-        let mut instance = self.stage.factory.create_for(device, sample_rate, max_block, purpose)?;
-        let serial = (self.stage.serial)(&mut instance);
-        written::begin(self.stage.format, serial);
-        self.made.lock().unwrap().push(serial);
+        let mut instance = self.factory.create_for(device, sample_rate, max_block, purpose)?;
+        let serial = (self.serial)(&mut instance);
+        written::begin(self.format, serial);
+        self.made.lock().unwrap().push((device.id, serial));
         Ok(instance)
     }
 }
@@ -92,7 +94,8 @@ fn played(
     block: usize,
     mut between: impl FnMut(&mut Processor, usize) -> bool,
 ) -> Vec<Block> {
-    let noting = Noting { stage, made: Mutex::new(Vec::new()) };
+    let noting =
+        Noting { format: stage.format, factory: stage.factory, serial: stage.serial, made: Mutex::new(Vec::new()) };
     let (mut bank, mut meters, audio) = (DeviceBank::default(), Meters::default(), AudioSources::default());
     let mut compiler = Compiler {
         factory: &noting,
@@ -117,7 +120,7 @@ fn played(
     }
     let made = noting.made.lock().unwrap().clone();
     assert_eq!(made.len(), 1, "the song has one plugin");
-    written::taken(stage.format, made[0])
+    written::taken(stage.format, made[0].1)
 }
 
 /// How far the song moves with a frame of `block`, in beats.

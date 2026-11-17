@@ -484,6 +484,34 @@ fn stage(factory: &Vst3Factory) -> crate::transport_tests::Stage<'_> {
 }
 
 #[test]
+fn a_plugin_with_a_side_chain_hears_the_track_its_device_listens_to_and_has_it_switched_on_only_then() {
+    use vst3::Steinberg::Vst::BusDirections_::kInput;
+    use vst3::Steinberg::Vst::MediaTypes_::kAudio;
+    use vst3::Steinberg::Vst::{BusDirection, MediaType};
+    let factory = factory();
+    crate::key_tests::a_plugin_with_a_key_input_hears_the_track_its_device_listens_to(&crate::key_tests::Stage {
+        format: crate::transport::written::Format::Vst3,
+        factory: &factory,
+        instrument: scripted::uri(kind::IMPULSE),
+        keyed: scripted::uri(kind::STEREO_GAIN),
+        serial,
+        key_input: Some(|serial| {
+            let seen = scripted::seen(serial);
+            let on = seen.activated.contains(&(kAudio as MediaType, kInput as BusDirection, 1, true));
+            let silent = seen.buses.0.get(1).is_some_and(|(_, flags, _)| *flags != 0);
+            (on, silent)
+        }),
+    });
+    // A plugin that has the bus takes a key, and is one that is made
+    // again for it; one without takes none.
+    let keyed = create(&factory, &device(kind::STEREO_GAIN));
+    assert!(keyed.processor.takes_key() && keyed.processor.key_is_set_when_made());
+    let plain = create(&factory, &device(kind::MONO_GAIN));
+    assert!(!plain.processor.takes_key() && !plain.processor.key_is_set_when_made());
+    assert!(!create(&factory, &device(kind::IMPULSE)).processor.takes_key());
+}
+
+#[test]
 fn the_plugin_is_told_the_songs_time_and_bars_through_changes_of_tempo_and_meter_whatever_the_buffer_size() {
     crate::transport_tests::a_plugin_is_told_the_songs_time_and_bars_whatever_the_buffer_size(&stage(&factory()));
 }
@@ -1003,6 +1031,7 @@ fn sets_up_behind(path: std::path::PathBuf) -> super::instance::CreateRequest {
         sample_rate: SR,
         max_block: BLOCK as u32,
         offline: false,
+        key_bus: None,
     }
 }
 

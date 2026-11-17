@@ -339,6 +339,24 @@ fn stage(factory: &ClapFactory) -> crate::transport_tests::Stage<'_> {
 }
 
 #[test]
+fn a_plugin_with_a_second_input_hears_the_track_its_device_listens_to() {
+    let factory = factory();
+    crate::key_tests::a_plugin_with_a_key_input_hears_the_track_its_device_listens_to(&crate::key_tests::Stage {
+        format: crate::transport::written::Format::Clap,
+        factory: &factory,
+        instrument: uri(kind::IMPULSE),
+        keyed: uri(kind::KEYED),
+        serial: |instance| value(instance, scripted::SERIAL) as u64,
+        // CLAP has nothing to switch on.
+        key_input: None,
+    });
+    // Only a plugin that has the input takes a key.
+    assert!(create(&factory, &device(kind::KEYED)).processor.takes_key());
+    assert!(!create(&factory, &device(kind::MONO_GAIN)).processor.takes_key());
+    assert!(!create(&factory, &device(kind::IMPULSE)).processor.takes_key());
+}
+
+#[test]
 fn the_plugin_is_told_the_songs_time_and_bars_through_changes_of_tempo_and_meter_whatever_the_buffer_size() {
     crate::transport_tests::a_plugin_is_told_the_songs_time_and_bars_whatever_the_buffer_size(&stage(&factory()));
 }
