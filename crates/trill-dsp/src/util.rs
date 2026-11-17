@@ -157,7 +157,7 @@ impl Ramp {
 
     /// The gain for the next frame.
     #[inline]
-    pub fn next(&mut self) -> f32 {
+    pub fn tick(&mut self) -> f32 {
         if self.left > 0 {
             self.left -= 1;
             self.value = if self.left == 0 { self.target } else { self.value + self.step };

@@ -119,8 +119,8 @@ value, -70 dB, is silence, so a fade written down to it ends in nothing, a few m
             for i in 0..left.len() {
                 let mid = (left[i] + right[i]) * 0.5;
                 let side = (left[i] - right[i]) * 0.5 * width;
-                left[i] = (mid + side) * self.left.next();
-                right[i] = (mid - side) * self.right.next();
+                left[i] = (mid + side) * self.left.tick();
+                right[i] = (mid - side) * self.right.tick();
             }
         }
 
