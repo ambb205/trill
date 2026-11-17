@@ -324,14 +324,19 @@ fn said(label: &str, heard: &[Heard]) {
 }
 
 /// Whether two sounds of one key differ by more than the same sound does
-/// from one playing to the next: in level, in how long it rings, or in
-/// how bright it is.
+/// from one playing to the next: in level, in how long it rings, in how
+/// bright it is, or in how wide it is (an amplifier's preset that turns
+/// its stereo effects on moves each of the others a little, and that one
+/// plainly: Archetype Tim Henson X's first preset of an artist's is 1 to
+/// 2 dB and a sixth in brightness from how the plugin comes, and two to
+/// three times as wide).
 fn differs(one: &Heard, other: &Heard) -> bool {
     let apart = |a: f64, b: f64, by: f64| (a - b).abs() > by * a.abs().max(b.abs()).max(1e-9);
     one.sounded != other.sounded
         || (one.peak_db - other.peak_db).abs() > 3.0
         || apart(one.rings_seconds, other.rings_seconds, 0.3)
         || apart(one.brightness_hz.unwrap_or(0.0), other.brightness_hz.unwrap_or(0.0), 0.2)
+        || (f64::from(one.width) - f64::from(other.width)).abs() > 0.05
 }
 
 fn heard_to_differ(what: &str, before: &[Heard], after: &[Heard]) {

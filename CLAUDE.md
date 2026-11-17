@@ -12,7 +12,7 @@ this file is the map, so that a task needs only the files it touches.
 ```sh
 cargo run -p trill-app -- --demo                    # the window, on a built-in song
 cargo run -p trill-mcp -- --no-audio --scratch      # no window: MCP on stdio, nothing read or kept
-cargo test --workspace                              # about 2,180 tests, a few minutes once built
+cargo test --workspace                              # about 2,200 tests, a few minutes once built
 cargo test -p trill-engine --test playing           # one integration test file
 cargo test -p trill-app a_take_is_counted_in        # tests whose name contains this (the app's are in its binary)
 cargo test -p trill-core time_ops -- --nocapture
@@ -49,7 +49,8 @@ Three rules hold the program together. A change that breaks one is wrong even if
 2. **The audio thread only plays.** It never allocates, locks or waits. The project is compiled off it
    (`compile.rs`) into an immutable `Graph`, swapped in through a lock-free queue, and old graphs go back to be
    freed elsewhere. `tests/realtime.rs` in `trill-engine` and `trill-plugins` enforce this with a counting
-   allocator: extend them when you touch what the audio thread runs.
+   allocator: extend them when you touch what the audio thread runs. (A render is not the audio thread: it may
+   start threads and wait on them, `spread.rs`, which a processor that plays never does.)
 3. **Everything is a device.** Built-in instruments, effects and hosted plugins implement `DeviceProcessor`
    (audio thread) and `DeviceController` (elsewhere), made by a `DeviceFactory` under a URI: `builtin:reverb`,
    `clap:<id>`, `vst3:<class id>`. The engine does not know which it is driving.
@@ -67,7 +68,7 @@ on the samples.
 | `trill-library` | The sample library (scan, index, search, tags from file names) and the settings file. |
 | `trill-theory` | Music theory as pure functions: chord symbols, progressions, voicings, grooves, bass lines, melody notation with its ornaments (`ornament.rs`: as an instrument's keys or the pitch wheel), keyswitches for articulations (`articulation.rs`), key and chord reading. |
 | `trill-plugins` | CLAP (`clap/`) and VST3 (`vst3/`) hosting. Per format: `factory`, `instance` (the plugin's main-thread half), `processor` (its audio-thread half), `controller`. Plugins are scanned, and their presets read, in a child process (`scan/`, `presets/`, the `trill-plugin-scan` binary) so one that crashes costs a message. `vendor/` reads the presets some makers keep in files of their own (one module per format; `look.rs` says what a state is, for the `inspect` example) and builds the state that loads one. A preset file that lies anywhere is made a preset by `DeviceFactory::preset_file` (`presets/file.rs`), which is what a path given as a preset comes to. All plugin main-thread work runs on one thread (`main_thread.rs`). `vst3/quirks.rs` holds what a particular plugin needs of the host so as not to take the process down, each with what was measured (`tests/lifetimes.rs` counts crashes, an attempt to a process). `scripted.rs` in each format is a fake plugin for tests. |
-| `trill-engine` | `engine.rs` (the stream and its queues), `processor.rs` (the audio thread), `glide.rs` (a gain that is where its envelope has it, frame by frame), `compile.rs`, `graph.rs`, `render.rs` with `analysis.rs` (what a render measures, as it goes) and `ready.rs` (waiting for plugins before one), `probe.rs` (playing an instrument notes to learn what it does), `session.rs` with `session/` (plugin editors, live playing and audio settings, presets, parameters by their text, recording takes, probes, and `story.rs`: the journal the session keeps), `journal.rs` (who is acting on the session, and where journals are kept), `saved.rs` (the sounds a user saved as presets), `instruments.rs` (what is known about a plugin: learned on this machine, or shipped in `instruments/known.rs` from measurements, by its URI), `host/` (audio hosts: the system's, WASAPI exclusive, and `scripted` for tests), `scripted.rs` (instruments for tests that behave like slow plugins), `sources.rs` and `stretcher.rs` (clip audio). |
+| `trill-engine` | `engine.rs` (the stream and its queues), `processor.rs` (the audio thread), `glide.rs` (a gain that is where its envelope has it, frame by frame), `compile.rs`, `graph.rs`, `render.rs` with `analysis.rs` (what a render measures, as it goes), `ready.rs` (waiting for plugins before one) and `spread.rs` with `crew.rs` (a render's blocks made on several threads: which tracks at once, and the threads), `probe.rs` (playing an instrument notes to learn what it does), `session.rs` with `session/` (plugin editors, live playing and audio settings, presets, parameters by their text, recording takes, probes, and `story.rs`: the journal the session keeps), `journal.rs` (who is acting on the session, and where journals are kept), `saved.rs` (the sounds a user saved as presets), `instruments.rs` (what is known about a plugin: learned on this machine, or shipped in `instruments/known.rs` from measurements, by its URI), `host/` (audio hosts: the system's, WASAPI exclusive, and `scripted` for tests), `scripted.rs` (instruments for tests that behave like slow plugins), `sources.rs` and `stretcher.rs` (clip audio). |
 | `trill-runtime` | `Runtime`: the session, media cache, library, settings, MIDI input ports, safety copies of unsaved work and the housekeeping thread, built once. Both programs start from it. `sounds.rs` and `missing.rs` are what both do the same way with sounds: adding one, and looking for the files a song is missing (where their folder went, then by name, each thing found with how sure it is). |
 | `trill-mcp` | The MCP server and the windowless `trill-mcp` binary. `requests.rs` (tool arguments), `server.rs`, `music.rs` and `sounds.rs` (the tools), `hearing.rs` (`probe`, `measure` and `render`, with their arguments and replies), `files.rs` (`missing_files` and `relink_files`, and what the others say of a song that is not whole), `instruments.rs` (what a track's notes mean, read and set, and the warnings that come of it), `story.rs` (the journal's tools), `film.rs` (`film_plan` and `film`: arguments turned into what `trill-stage` takes), `words.rs` (every tool call in plain words, where it landed and what it heard: read by the journal, the server and the window), `view.rs` (replies), `guard.rs` (limits on the in-app assistant's endpoint). |
 | `trill-assistant` | The back end of the in-app assistant: runs the user's own Claude Code CLI, one process per message, confined to Trill's tools. |
@@ -142,12 +143,20 @@ on the samples.
   each ends in a message the user can read (`Session::problems`, `StreamInfo::warning`, a toast) and the song
   keeps playing. No stuck notes: whatever starts a note owns stopping it.
 - **A render is not a quick look.** It creates every device afresh and waits for plugins to be ready
-  (`ready.rs`), as a probe does: until every note asked for sounds, heard one at a time. To find out what an
+  (`ready.rs`), as a probe does: until every note asked for sounds, heard one at a time and each exactly three
+  times, so that an instrument whose takes go round begins every render at the same take. The wait counts what
+  it runs and never runs a plugin for as long as the clock says: what some plugins give depends on how many
+  blocks they were run before. To find out what an
   instrument does, use a probe (`Session::probe_job`, the `probe` tool); to check a mix, `RenderJob::measure`
   (the `measure` tool), which writes nothing. A plugin that plays live is not waited for; `Session::loading`
   says whether it may still be reading its samples. A render compiles only the tracks that are heard
   (`Routing::needed` in `compile.rs`), and writes every stem in the one pass when asked
-  (`RenderOptions::stems`): never render a song once per track. It is refused, with nothing written, when a
+  (`RenderOptions::stems`): never render a song once per track. It makes the tracks that do not feed one another
+  on several threads at once and adds them up in the graph's order, so that the samples are the ones one thread
+  makes (`spread.rs`; `tests/threads.rs` holds that to the bit): a step added to a track's block goes into the
+  functions both paths call (`begin`, `say_controllers`, `play`, `fade`, `mix` in `processor.rs`), and whatever
+  comes to feed a track is one more line in `spread::plan`. What a plugin may be run beside is the factory's to
+  say (`DeviceFactory::beside`): its instances in turn unless it was measured (`trill-plugins/src/beside.rs`). It is refused, with nothing written, when a
   plugin instrument never answered its notes (`RenderError::NotAnswered`).
 - **A line of automation follows its control, and positions are read from the song.** A lane keeps what its
   lines are straight along (`AutomationLane::travel`; `Travel::of_param` says it for a device's parameter); a lane

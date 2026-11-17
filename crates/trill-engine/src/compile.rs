@@ -404,7 +404,7 @@ impl Compiler<'_> {
         // that is played before it.
         let listens = self.bank.devices.get(&device.id).is_some_and(|meta| meta.takes_key);
         let key = device.sidechain.filter(|_| listens).and_then(|track| keys.iter().position(|key| *key == track));
-        DeviceSlot { id: device.id, processor, enabled: device.enabled, key }
+        DeviceSlot { id: device.id, processor, enabled: device.enabled, key, turn: None }
     }
 }
 

@@ -91,6 +91,11 @@ pub(crate) struct DeviceSlot {
     /// The key the device listens to, as a place in [`Graph::keys`]: only
     /// for a device that takes a key and was given a track to listen to.
     pub key: Option<usize>,
+    /// For a render on more than one thread: the devices with the same
+    /// number here are run one at a time and in the order of the song
+    /// ([`trill_core::device::Beside::InTurn`]). Nothing for a device that
+    /// may be run beside anything, and in a graph that is played.
+    pub turn: Option<u32>,
 }
 
 /// An envelope as the audio thread plays it: its points, and what the
