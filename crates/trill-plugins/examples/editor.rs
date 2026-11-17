@@ -177,8 +177,10 @@ fn drive(mut processor: Box<dyn DeviceProcessor>, note: bool, stop: Arc<AtomicBo
             time_signature: Default::default(),
             playing: true,
             position_beats: f64::from(blocks) * BLOCK as f64 / SAMPLE_RATE * 2.0,
+            song: Default::default(),
             loop_range: None,
-        };
+        }
+        .steady();
         let events: &[Event] = if note && blocks == 20 {
             &[Event { offset: 0, kind: EventKind::NoteOn { pitch: 60, velocity: 0.8 } }]
         } else {

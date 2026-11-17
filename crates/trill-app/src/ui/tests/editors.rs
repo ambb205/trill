@@ -12,6 +12,8 @@ use trill_core::device::{
 
 const WITH_EDITOR: &str = "test:synth";
 const WITHOUT_EDITOR: &str = "test:gain";
+/// A plugin that has an input to listen to another track through.
+const LISTENS: &str = "test:ducker";
 
 /// What the stand-in plugins did.
 #[derive(Default)]
@@ -49,13 +51,18 @@ impl Plugins {
     }
 }
 
-struct Silent;
+/// Does nothing to what passes through it; `.0` is whether it could
+/// listen to another track meanwhile.
+struct Silent(bool);
 
 impl DeviceProcessor for Silent {
     fn prepare(&mut self, _sample_rate: f64, _max_block: usize) {}
     fn set_param(&mut self, _index: usize, _value: f64) {}
     fn process(&mut self, _: &ProcessInfo, _: &[DeviceEvent], _: &mut [f32], _: &mut [f32]) {}
     fn reset(&mut self) {}
+    fn takes_key(&self) -> bool {
+        self.0
+    }
 }
 
 struct Controller {
@@ -108,7 +115,7 @@ impl Drop for Controller {
 
 impl DeviceFactory for Plugins {
     fn descriptors(&self) -> Vec<DeviceDescriptor> {
-        [(WITH_EDITOR, "Synth"), (WITHOUT_EDITOR, "Gain")]
+        [(WITH_EDITOR, "Synth"), (WITHOUT_EDITOR, "Gain"), (LISTENS, "Ducker")]
             .map(|(uri, name)| DeviceDescriptor {
                 uri: uri.into(),
                 name: name.into(),
@@ -122,7 +129,7 @@ impl DeviceFactory for Plugins {
     }
 
     fn create(&self, device: &Device, _sample_rate: f64, _max_block: usize) -> Result<DeviceInstance, DeviceError> {
-        if device.uri != WITH_EDITOR && device.uri != WITHOUT_EDITOR {
+        if ![WITH_EDITOR, WITHOUT_EDITOR, LISTENS].contains(&device.uri.as_str()) {
             return Err(DeviceError::Unknown(device.uri.clone()));
         }
         let param = ParamInfo {
@@ -136,7 +143,7 @@ impl DeviceFactory for Plugins {
         };
         let has_editor = device.uri == WITH_EDITOR;
         Ok(DeviceInstance {
-            processor: Box::new(Silent),
+            processor: Box::new(Silent(device.uri == LISTENS)),
             params: vec![param],
             controller: Some(Box::new(Controller { device: device.id, has_editor, seen: self.0.clone() })),
         })
@@ -166,6 +173,41 @@ fn settle_editors(harness: &mut Harness) {
 }
 
 const BUTTON: &str = "Editor of Synth";
+
+/// A plugin has no panel of its own making here, only its parameters in
+/// rows. One that has an input to listen through is given the track to
+/// listen to at the head of them; one that has none is not.
+#[test]
+fn a_plugin_that_can_listen_is_given_a_track_to_listen_to_from_its_panel() {
+    let plugins = Plugins::default();
+    let runtime = Runtime::start_with(RuntimeOptions::hermetic(), vec![Box::new(plugins.clone())]).unwrap();
+    let (mut ducker, mut kick) = (None, None);
+    let mut harness = Harness::on(Arc::new(runtime), devices_tab(), |session| {
+        let tracks = session.edit(|project| Ok((project.add_track("Bass"), project.add_track("Kick")))).unwrap();
+        ducker = Some(session.add_device(ChainRef::Track(tracks.0), LISTENS, None, None).unwrap());
+        session.add_device(ChainRef::Track(tracks.0), WITHOUT_EDITOR, None, None).unwrap();
+        kick = Some(tracks.1);
+    });
+    let (ducker, kick) = (ducker.unwrap(), kick.unwrap());
+    let listens_to = |harness: &Harness| harness.project().device(ducker).unwrap().sidechain;
+
+    // One row for the plugin that can listen, none for the one beside it,
+    // and the plugin's own parameter is still there under it.
+    assert_eq!(harness.all_labeled("Listen to").len(), 1);
+    assert_eq!(harness.all_labeled("Level").len(), 2);
+    let before = harness.undo_depth();
+    harness.click_label("Listen to: Own input");
+    harness.click_last_label("Kick");
+    assert_eq!(listens_to(&harness), Some(kick));
+    assert_eq!(harness.undo_depth(), before + 1, "one step");
+    harness.idle(3);
+    assert!(harness.is_on_screen("Listen to: Kick"), "and the panel says which track");
+
+    // Back to what comes into it.
+    harness.click_label("Listen to: Kick");
+    harness.click_last_label("Own input");
+    assert_eq!(listens_to(&harness), None);
+}
 
 #[test]
 fn a_plugin_that_was_just_made_says_that_it_is_loading_and_a_built_in_device_does_not() {

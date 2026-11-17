@@ -29,7 +29,7 @@ Development builds are optimized (see `[profile.dev]`), because unoptimized audi
 
 ### Building and testing
 
-`cargo test --workspace` runs about 2,200 tests in a few minutes. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 2,240 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -37,6 +37,8 @@ asked for:
 cargo test -p trill-plugins -- --include-ignored    # against the CLAP and VST3 plugins installed here (minutes)
 cargo test -p trill-mcp --test presets -- --include-ignored --nocapture    # an assistant's pass over Surge XT's presets, an amplifier's, a kit, a guitar tone and a patch of their makers', and a bought preset found among the samples
 cargo test -p trill-plugins --test sounds -- --include-ignored --nocapture --test-threads 1    # what installed plugins say of their parameters, channels and presets
+cargo test -p trill-plugins --test key -- --include-ignored --nocapture --test-threads 1    # Surge XT playing what its device listens to, and its effect, as a vocoder, shaping a bass by a muted kick, in both formats
+cargo test -p trill-plugins --test tempo -- --include-ignored --nocapture --test-threads 1    # Serum 2's arpeggiator through two changes of tempo: every step heard where the song's tempo map has its beat
 cargo test -p trill-plugins --test lifetimes -- --include-ignored --nocapture    # plugin instances made and dropped beside one that stays, an attempt to a process: counts the crashes, and says where each was and what the machine had of memory; half an hour, and no attempt is started on a machine short of memory
 cargo test -p trill-plugins --test vendor -- --include-ignored --nocapture --test-threads 1    # the makers' own presets of Serum 2, the Ample guitars, Superior Drummer 3 and the Archetypes: listed, loaded by name and by a file's path, and heard to differ
 cargo test -p trill-mcp --test controllers -- --include-ignored --nocapture    # a SWAM saxophone and Surge XT played from the controller curves of clips
@@ -240,8 +242,15 @@ fader, a send and a Utility's gain, is silence at its lowest value (-70 dB), so 
 
 A compressor's sidechain is the track as it leaves its devices, ahead of its fader and its mute, so a muted track
 serves as a key. It is set in the compressor's panel ("Listen to") and with `sidechain` on `add_device` and
-`update_device`, and a track that is listened to is still played when only some tracks are heard. A hosted
-plugin's sidechain input is not connected yet.
+`update_device`, and a track that is listened to is still played when only some tracks are heard.
+
+A hosted plugin that has an input for it listens the same way: its panel has the same "Listen to", and
+`sidechain` takes it. What it hears goes into the input after an effect's own (the format's sidechain), or into
+an instrument's first, a vocoder's voice; what the plugin does with it is the plugin's business, and most have a
+switch of their own for listening to it. A CLAP plugin's input is simply filled. A VST3 plugin's is switched on
+by the host, and a plugin may take one that is switched on to be the one to listen to; so it is switched on only
+for a device that listens, and the plugin is made again, from the state the song has of it, when its device is
+given a track to listen to or has it taken away.
 
 What these devices do is held to numbers by renders (`trill-engine/tests/effects.rs`): the cuts to a Butterworth
 filter of their order, the compressor to what it takes off a signal of known crest, the delay to its first
@@ -837,7 +846,7 @@ instance is taken down before a message the plugin posted to itself has reached 
 alive, which probes and renders of a song that uses one did; an instance that is let go of is now kept, and taken
 down only when the plugin thread has delivered what was waiting and the plugin has had fifteen seconds of it), a preset browser for plugins in the window (the session lists, searches and loads them, and so does
 MCP; the device panel shows built-in and saved presets only), asking a CLAP plugin for a stereo layout when its
-default is mono (a VST3 plugin is asked), a hosted plugin's sidechain input (the built-in compressor has one),
+default is mono (a VST3 plugin is asked),
 plugin editors on Linux and macOS,
 hearing a making-of in the window (it is silent there: the song as it was is shown, not played; a film of one
 has the finished song under it), filming a making-of that was handed over as a file (a film is of the song that

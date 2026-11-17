@@ -9,7 +9,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
-use trill_core::device::{DeviceFactory, Event, EventKind, ProcessInfo};
+use trill_core::device::{DeviceFactory, Event, EventKind, KeyInput, ProcessInfo};
 use trill_core::{ChainRef, Project};
 use trill_plugins::{ClapConfig, ClapFactory, Scanner, Vst3Config, Vst3Factory};
 
@@ -115,6 +115,7 @@ fn drive(factory: &dyn DeviceFactory, uri: &str) {
         .collect();
     let (mut left, mut right) = (vec![0.0f32; 512], vec![0.0f32; 512]);
     let mut big = (vec![0.0f32; 2_000], vec![0.0f32; 2_000]);
+    let key = (vec![0.25f32; 2_000], vec![-0.25f32; 2_000]);
 
     let calls = allocator_calls(|| {
         for (block, events) in events.iter().enumerate() {
@@ -124,21 +125,33 @@ fn drive(factory: &dyn DeviceFactory, uri: &str) {
                 time_signature: Default::default(),
                 playing: block % 8 != 7,
                 position_beats: block as f64 * 512.0 / 24_000.0,
+                song: Default::default(),
                 loop_range: (block % 4 == 3).then_some((0.0, 8.0)),
-            };
+            }
+            .steady();
             // The very first block also starts the plugin.
             instance.processor.set_param(block % params, first.min);
             instance.processor.set_param((block * 7) % params, first.max);
             instance.processor.set_param(params + 1, 0.5);
             left.fill(0.1);
             right.fill(-0.1);
-            instance.processor.process(&info, events, &mut left, &mut right);
+            // Every third block with a key to listen to, which a plugin
+            // that has an input for one is then handed.
+            match block % 3 {
+                1 => {
+                    let key = KeyInput { left: &key.0[..512], right: &key.1[..512] };
+                    instance.processor.process_keyed(&info, events, &mut left, &mut right, key);
+                }
+                _ => instance.processor.process(&info, events, &mut left, &mut right),
+            }
             if block == 30 {
                 instance.processor.reset();
             }
             if block == 40 {
                 // Larger than the plugin was set up for.
                 instance.processor.process(&info, events, &mut big.0, &mut big.1);
+                let key = KeyInput { left: &key.0, right: &key.1 };
+                instance.processor.process_keyed(&info, events, &mut big.0, &mut big.1, key);
             }
             std::hint::black_box(instance.processor.latency_samples());
         }
@@ -164,6 +177,7 @@ fn drive(factory: &dyn DeviceFactory, uri: &str) {
         time_signature: Default::default(),
         playing: true,
         position_beats: 0.0,
+        song: Default::default(),
         loop_range: None,
     };
     let patience = std::time::Instant::now() + PRESET_PATIENCE;

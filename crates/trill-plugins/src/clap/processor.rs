@@ -14,7 +14,7 @@ use crate::plugin_thread::PluginThread;
 use clack_host::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
-use trill_core::device::{DeviceProcessor, Event, ProcessInfo};
+use trill_core::device::{DeviceProcessor, Event, KeyInput, ProcessInfo};
 
 /// How long to wait for the plugin main thread to tear an instance down
 /// before moving on. A stuck plugin must not hang whoever drops a device.
@@ -47,6 +47,10 @@ struct Block {
     /// applies to anything without an audio input, which could not have
     /// passed the buffer's contents through.
     additive: bool,
+    /// The input port a key goes into, if the plugin has one
+    /// ([`crate::signal::key_port`]). CLAP has nothing to switch on: the
+    /// port is there, and holds silence when nothing is listened to.
+    key_port: Option<usize>,
     inputs: PortBuffers,
     outputs: PortBuffers,
     events: BlockEvents,
@@ -82,6 +86,7 @@ impl ClapProcessor {
                 failed: false,
                 max_block,
                 additive: instrument || created.ports.inputs.is_empty(),
+                key_port: crate::signal::key_port(&created.ports.inputs, instrument),
                 inputs: PortBuffers::new(&created.ports.inputs, max_block),
                 outputs: PortBuffers::new(&created.ports.outputs, max_block),
                 layout: created.ports,
@@ -101,7 +106,9 @@ impl ClapProcessor {
 impl Block {
     /// Runs the plugin over the frames `start..start + left.len()` of a
     /// block of `total` frames. `left` and `right` are that part of the
-    /// block and no longer than the plugin's maximum block size.
+    /// block and no longer than the plugin's maximum block size, and `key`
+    /// that part of what the device listens to, if it listens.
+    #[allow(clippy::too_many_arguments)]
     fn process_part(
         &mut self,
         audio: &mut PluginAudioProcessor<TrillHost>,
@@ -110,6 +117,7 @@ impl Block {
         (start, total): (usize, usize),
         left: &mut [f32],
         right: &mut [f32],
+        key: Option<KeyInput<'_>>,
     ) {
         let frames = left.len();
         // The first block starts the plugin: CLAP wants `start_processing`
@@ -124,6 +132,9 @@ impl Block {
 
         let events = self.events.fill(events, start, frames, total);
         self.inputs.load(left, right);
+        if let (Some(port), Some(key)) = (self.key_port, key) {
+            self.inputs.load_key(port, key.left, key.right);
+        }
         // A plugin may return without writing its outputs; what it leaves
         // must not be the previous block.
         self.outputs.clear(frames);
@@ -141,6 +152,46 @@ impl Block {
             Ok(_) => self.outputs.unload(left, right, self.additive),
             // The device passes its input through untouched from here on.
             Err(_) => self.failed = true,
+        }
+    }
+}
+
+impl ClapProcessor {
+    /// Processes a block, with what the device listens to if it listens.
+    fn run(
+        &mut self,
+        info: &ProcessInfo,
+        events: &[Event],
+        left: &mut [f32],
+        right: &mut [f32],
+        key: Option<KeyInput<'_>>,
+    ) {
+        let total = left.len().min(right.len());
+        let block = &mut self.block;
+        if total == 0 || block.failed {
+            return;
+        }
+        // The processor is this thread's to use except for the moment in
+        // which the main thread flushes a plugin that it took to be idle.
+        // A block that falls into such a moment passes its input through,
+        // and its notes are kept for the next.
+        let processed = self.audio.try_with(|audio| {
+            let Some(audio) = audio else { return };
+            let _audio_thread = AudioContext::enter();
+            // The engine never exceeds `max_block`, the size the plugin was
+            // activated for. Should a caller do so anyway, feed the plugin
+            // in pieces it can take.
+            let mut start = 0;
+            while start < total && !block.failed {
+                let end = (start + block.max_block).min(total);
+                let key = key.map(|key| KeyInput { left: &key.left[start..end], right: &key.right[start..end] });
+                let part = (start, total);
+                block.process_part(audio, info, events, part, &mut left[start..end], &mut right[start..end], key);
+                start = end;
+            }
+        });
+        if processed.is_none() {
+            self.block.events.defer(events);
         }
     }
 }
@@ -179,31 +230,22 @@ impl DeviceProcessor for ClapProcessor {
     }
 
     fn process(&mut self, info: &ProcessInfo, events: &[Event], left: &mut [f32], right: &mut [f32]) {
-        let total = left.len().min(right.len());
-        let block = &mut self.block;
-        if total == 0 || block.failed {
-            return;
-        }
-        // The processor is this thread's to use except for the moment in
-        // which the main thread flushes a plugin that it took to be idle.
-        // A block that falls into such a moment passes its input through,
-        // and its notes are kept for the next.
-        let processed = self.audio.try_with(|audio| {
-            let Some(audio) = audio else { return };
-            let _audio_thread = AudioContext::enter();
-            // The engine never exceeds `max_block`, the size the plugin was
-            // activated for. Should a caller do so anyway, feed the plugin
-            // in pieces it can take.
-            let mut start = 0;
-            while start < total && !block.failed {
-                let end = (start + block.max_block).min(total);
-                block.process_part(audio, info, events, (start, total), &mut left[start..end], &mut right[start..end]);
-                start = end;
-            }
-        });
-        if processed.is_none() {
-            self.block.events.defer(events);
-        }
+        self.run(info, events, left, right, None);
+    }
+
+    fn takes_key(&self) -> bool {
+        self.block.key_port.is_some()
+    }
+
+    fn process_keyed(
+        &mut self,
+        info: &ProcessInfo,
+        events: &[Event],
+        left: &mut [f32],
+        right: &mut [f32],
+        key: KeyInput<'_>,
+    ) {
+        self.run(info, events, left, right, Some(key));
     }
 
     /// CLAP's `reset` is meant to do exactly this, but plugins built on

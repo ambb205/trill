@@ -151,6 +151,8 @@ the peaks, ratio 2, knee 18, attack 10-30 ms, auto_release on: about 2 dB off). 
 0.7 x -threshold x (1 - 1/ratio) dB. measure says what each compressor took off.
 - To make room for the kick, put a compressor on the bass (or the pads) and give it the kick's track as \
 `sidechain`: it then turns its own track down whenever the kick sounds. The kick's track may be muted.
+- A plugin that has a sidechain input (a compressor, a gate, a vocoder) takes `sidechain` the same way; how it \
+uses what it hears is set in the plugin, where it usually has a switch for listening to its sidechain.
 - Reverb and delay belong on return tracks with `mix` 1, fed by sends of -10 to -20 dB: both filter what goes into \
 them (low_cut, high_cut, 12 dB an octave; what lies between them comes back whole), and the reverb returns more \
 the longer its decay (3 to 4 dB for each doubling).

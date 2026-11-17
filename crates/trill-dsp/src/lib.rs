@@ -382,8 +382,10 @@ mod tests {
             time_signature: Default::default(),
             playing: true,
             position_beats,
+            song: Default::default(),
             loop_range: None,
         }
+        .steady()
     }
 
     /// A device model for `builtin:<key>`. The sample players get a state

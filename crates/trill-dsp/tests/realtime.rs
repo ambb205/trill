@@ -100,8 +100,10 @@ fn info(block: usize) -> ProcessInfo {
         time_signature: Default::default(),
         playing: true,
         position_beats: (block * BLOCK) as f64 / SR * 2.0,
+        song: Default::default(),
         loop_range: None,
     }
+    .steady()
 }
 
 /// Events for block `block`: far more notes than any device has voices, on

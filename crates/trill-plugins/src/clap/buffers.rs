@@ -31,6 +31,12 @@ impl PortBuffers {
         self.channels.load(left, right);
     }
 
+    /// Fills the input `port` for the block that was just loaded from a
+    /// key the device listens to.
+    pub(crate) fn load_key(&mut self, port: usize, left: &[f32], right: &[f32]) {
+        self.channels.load_key(port, left, right);
+    }
+
     /// Writes the plugin's main output for one block to the device's
     /// signal, on top of what is there if `additive`.
     pub(crate) fn unload(&self, left: &mut [f32], right: &mut [f32], additive: bool) {

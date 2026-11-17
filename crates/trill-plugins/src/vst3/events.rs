@@ -326,14 +326,12 @@ fn beats_per_frame(info: &ProcessInfo) -> f64 {
 }
 
 /// The transport as of `frame_offset` frames into the block `info`
-/// describes. `continuous_samples` counts the frames processed so far and,
-/// unlike the song position, never jumps or stops.
+/// describes: what [`crate::transport`] says a plugin is told.
+/// `continuous_samples` counts the frames processed so far and, unlike the
+/// song position, never jumps or stops.
 pub(crate) fn process_context(info: &ProcessInfo, frame_offset: usize, continuous_samples: i64) -> ProcessContext {
-    let tempo = tempo(info);
-    let beats = song_position(info) + frame_offset as f64 * beats_per_frame(info);
-    let sample_rate = if info.sample_rate.is_finite() && info.sample_rate > 0.0 { info.sample_rate } else { 0.0 };
+    let info = crate::transport::told(info, frame_offset);
     let signature = info.time_signature;
-    let beats_per_bar = signature.beats_per_bar();
     let (cycle_start, cycle_end) = info.loop_range.unwrap_or((0.0, 0.0));
 
     let mut state =
@@ -350,20 +348,19 @@ pub(crate) fn process_context(info: &ProcessInfo, frame_offset: usize, continuou
         // The SDK's flags are a C `int` on Windows and `unsigned` elsewhere.
         #[allow(clippy::unnecessary_cast)]
         state: state as u32,
-        sampleRate: sample_rate,
-        // Worked out from the tempo of this block alone, which is the song's
-        // time in a song of one tempo. Where the tempo changes inside a
-        // song the engine tells each block its own tempo, and this is then
-        // not the time the song took to get here: `ProcessInfo` does not
-        // carry that yet (nor where the bar began, below).
-        projectTimeSamples: (beats * 60.0 / tempo * sample_rate).round() as i64,
+        sampleRate: info.sample_rate,
+        // The song's own time, which the engine keeps on whole frames:
+        // rounding only takes off what dividing by the sample rate and
+        // multiplying by it again put on. Always valid; there is no flag
+        // for it.
+        projectTimeSamples: (info.song.seconds * info.sample_rate).round() as i64,
         systemTime: 0,
         continousTimeSamples: continuous_samples,
-        projectTimeMusic: beats,
-        barPositionMusic: (beats / beats_per_bar).floor() * beats_per_bar,
+        projectTimeMusic: info.position_beats,
+        barPositionMusic: info.song.bar_start,
         cycleStartMusic: cycle_start,
         cycleEndMusic: cycle_end,
-        tempo,
+        tempo: info.tempo,
         timeSigNumerator: int32::from(signature.numerator),
         timeSigDenominator: int32::from(signature.denominator),
         chord: Chord { keyNote: 0, rootNote: 0, chordMask: 0 },
@@ -385,8 +382,10 @@ mod tests {
             time_signature: Default::default(),
             playing,
             position_beats,
+            song: Default::default(),
             loop_range: None,
         }
+        .steady()
     }
 
     fn on(offset: u32, pitch: u8) -> device::Event {
@@ -646,7 +645,8 @@ mod tests {
             time_signature: trill_core::TimeSignature::new(6, 8).unwrap(),
             loop_range: Some((3.0, 9.0)),
             ..info(true, 9.5)
-        };
+        }
+        .steady();
         let looping = process_context(&waltz, 12_000, 0);
         assert_eq!((looping.timeSigNumerator, looping.timeSigDenominator), (6, 8));
         assert_eq!(looping.barPositionMusic, 9.0);
@@ -667,6 +667,7 @@ mod tests {
             time_signature: Default::default(),
             playing: true,
             position_beats: f64::INFINITY,
+            song: Default::default(),
             loop_range: None,
         };
         let context = process_context(&broken, 100, 0);
