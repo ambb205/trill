@@ -311,7 +311,7 @@ fn unsaved_work_is_copied_and_the_copy_goes_when_it_is_saved_or_the_program_leav
 
     track(&runtime);
     runtime.refresh_safety_copy();
-    assert_eq!(kept(folder.path()), ["json", "lock", "trill"]);
+    assert_eq!(kept(folder.path()), ["journal", "json", "lock", "trill"]);
     let copy = copy_in(folder.path());
     assert_eq!(project_at(&copy).tracks.len(), 1);
 
@@ -342,7 +342,7 @@ fn unsaved_work_is_copied_and_the_copy_goes_when_it_is_saved_or_the_program_leav
     let second = start(folder.path());
     assert!(second.recoverable().is_empty());
     drop(second);
-    assert_eq!(kept(folder.path()), ["json", "lock", "trill"], "the first program's copy is untouched");
+    assert_eq!(kept(folder.path()), ["journal", "json", "lock", "trill"], "the first program's copy is untouched");
 
     // Leaving in the ordinary way takes everything along.
     drop(runtime);
@@ -392,7 +392,7 @@ fn a_project_lost_to_a_crash_is_offered_back() {
         .unwrap();
     assert_eq!(died.code(), Some(3), "the other process was meant to die its own way");
     assert_eq!(project_at(&song).tracks.len(), 1, "the file has what was saved; the rest died with the program");
-    assert_eq!(kept(folder.path()), ["json", "lock", "trill"]);
+    assert_eq!(kept(folder.path()), ["journal", "json", "lock", "trill"]);
 
     let runtime = start(folder.path());
     let lost = runtime.recoverable();
@@ -418,8 +418,23 @@ fn a_project_lost_to_a_crash_is_offered_back() {
     }
     assert_eq!(project_at(&song).tracks.len(), 1);
     assert!(runtime.recoverable().is_empty());
+    // It comes back with how it was made: what was done before the save
+    // and what was done after it, which no file of the song's ever held.
+    {
+        let session = runtime.session.lock();
+        let journal = session.journal().expect("a journal is kept");
+        let told: Vec<String> = journal.entries().map(|entry| entry.line()).collect();
+        assert_eq!(
+            told,
+            [
+                "Added the track \u{201C}Kept\u{201D}, and 1 more change",
+                "Added the track \u{201C}Bass\u{201D}, and 1 more change"
+            ]
+        );
+        assert_eq!(&journal.head().unwrap(), session.project(), "and the story leads to the song");
+    }
     // It is this program's to keep safe now: one copy, its own.
-    assert_eq!(kept(folder.path()), ["json", "lock", "trill"]);
+    assert_eq!(kept(folder.path()), ["journal", "json", "lock", "trill"]);
     assert_eq!(project_at(&copy_in(folder.path())).tracks.len(), 2);
 
     runtime.session.lock().save(&song).unwrap();

@@ -16,15 +16,22 @@ use crate::view::{
     warp_name,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{CallToolRequestParams, CallToolResponse};
 use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
-use rmcp::{ServerHandler, tool, tool_handler, tool_router};
+use rmcp::service::RequestContext;
+use rmcp::{ErrorData, RoleServer, ServerHandler, tool, tool_handler, tool_router};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 use trill_core::device::{BUILTIN_SCHEME, DeviceCategory, DeviceFactory, EditorOptions, EventKind, split_uri};
+use trill_core::journal::{Author, CallId, Outcome};
 use trill_core::midi_file;
 use trill_core::presets::PresetList;
 use trill_core::project::AutomationPoint;
@@ -222,12 +229,32 @@ impl TrillServer {
     /// write wherever it is told.
     pub fn new(runtime: Arc<Runtime>) -> Self {
         let session = runtime.session.clone();
-        let tool_router = Self::tool_router()
+        Self { session, runtime, tool_router: Self::every_tool(), guard: None }
+    }
+
+    /// Every tool the server offers.
+    fn every_tool() -> ToolRouter<Self> {
+        Self::tool_router()
             + Self::music_router()
             + Self::sound_router()
             + Self::hearing_router()
-            + Self::instrument_router();
-        Self { session, runtime, tool_router, guard: None }
+            + Self::instrument_router()
+            + Self::story_router()
+    }
+
+    /// The names of the tools the server offers.
+    pub fn tool_names() -> Vec<String> {
+        Self::every_tool().list_all().into_iter().map(|tool| tool.name.into_owned()).collect()
+    }
+
+    /// Whether this is the door of the assistant in the window, which is
+    /// held to limits a client the user set up is not.
+    pub(crate) fn is_guarded(&self) -> bool {
+        self.guard.is_some()
+    }
+
+    pub(crate) fn runtime(&self) -> &Runtime {
+        &self.runtime
     }
 
     /// A server for a client that works beside the user in the window. It
@@ -2531,17 +2558,113 @@ fn add_range_warning(out: &mut Value, session: &Session, clip: ClipId) {
     }
 }
 
+/// A call's future, polled as the call's doing: whatever it changes in
+/// the session while it runs is entered in the journal as that call's.
+struct Acted<'a> {
+    call: Option<CallId>,
+    future: Pin<Box<dyn Future<Output = Result<CallToolResponse, ErrorData>> + Send + 'a>>,
+}
+
+impl Future for Acted<'_> {
+    type Output = Result<CallToolResponse, ErrorData>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        // Only for the length of the poll: between polls the thread is
+        // someone else's, and the next poll may be on another.
+        let _acting = self.call.map(trill_engine::journal::acting);
+        self.future.as_mut().poll(context)
+    }
+}
+
+/// Closes a call in the journal when it ends, however it ends: a call
+/// whose client went away in the middle is closed as one that failed.
+struct Closing<'a> {
+    session: &'a SharedSession,
+    call: Option<CallId>,
+}
+
+impl Closing<'_> {
+    fn with(mut self, outcome: impl FnOnce(&Session) -> Outcome) {
+        if let Some(call) = self.call.take() {
+            let mut session = self.session.lock();
+            let outcome = outcome(&session);
+            session.end_call(call, outcome);
+        }
+    }
+}
+
+impl Drop for Closing<'_> {
+    fn drop(&mut self) {
+        if let Some(call) = self.call.take() {
+            self.session.lock().end_call(call, Outcome { failed: true, ..Outcome::default() });
+        }
+    }
+}
+
+impl TrillServer {
+    /// Who a call is entered in the journal as: the assistant in the
+    /// window for its door, and any other client by the name it gave.
+    fn author(&self, context: &RequestContext<RoleServer>) -> Author {
+        match &self.guard {
+            Some(_) => Author::Assistant,
+            None => {
+                let name = context.peer.peer_info().map(|info| info.client_info.name.clone()).unwrap_or_default();
+                Author::Client(name)
+            }
+        }
+    }
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for TrillServer {
+    /// Runs a tool, entering the call in the session's journal: opened
+    /// before it runs, under what it does in words, and closed after, with
+    /// where it landed and what it heard.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let tool = request.name.to_string();
+        let input = Value::Object(request.arguments.clone().unwrap_or_default());
+        let call = {
+            let by = self.author(&context);
+            let mut session = self.session.lock();
+            let label = crate::words::describe(&tool, &input, session.project()).did;
+            session.begin_call(by, &tool, label)
+        };
+        let closing = Closing { session: &self.session, call };
+        let running = ToolCallContext::new(self, request, context);
+        let response = Acted { call, future: Box::pin(self.tool_router.call(running)) }.await;
+        closing.with(|session| {
+            let answered = match &response {
+                Ok(CallToolResponse::Complete(result)) if result.is_error != Some(true) => {
+                    Some(result.content.first().and_then(|block| block.as_text()).map_or("", |text| text.text.as_str()))
+                }
+                _ => None,
+            };
+            match answered {
+                None => Outcome { failed: true, ..Outcome::default() },
+                Some(answer) => {
+                    let place = crate::words::of_call(&tool, &input, answer);
+                    let places = place.and_then(|place| place.settled(session.project())).into_iter().collect();
+                    Outcome { places, heard: crate::words::heard(&tool, answer), failed: false }
+                }
+            }
+        });
+        response
+    }
+
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}",
+                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
                 crate::sounds::INSTRUCTIONS,
                 crate::music::INSTRUCTIONS,
                 crate::instruments::INSTRUCTIONS,
-                crate::hearing::INSTRUCTIONS
+                crate::hearing::INSTRUCTIONS,
+                crate::story::INSTRUCTIONS
             ))
     }
 }

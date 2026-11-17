@@ -10,6 +10,7 @@ pub mod controllers;
 pub mod device;
 pub mod ids;
 pub mod instrument;
+pub mod journal;
 pub mod midi_file;
 pub mod pitch;
 pub mod presets;

@@ -18,12 +18,16 @@
 //! Three files make a copy, named after the process that wrote them:
 //! `<id>.lock`, `<id>.trill` (an ordinary project file) and `<id>.json`
 //! (what the project was called, where it lived and when the copy was made).
+//! Where a journal is kept, a fourth holds it as far as the copy goes
+//! (`<id>.journal`), so that a project that comes back comes back with how
+//! it was made. It is added to, not rewritten, as the project changes.
 
 use serde_json::{Value, json};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use trill_core::journal::{Writing, Written};
 use trill_engine::SharedSession;
 
 /// A project that was not saved before the program last stopped.
@@ -53,6 +57,8 @@ pub(crate) struct SafetyCopies {
     own: Option<Own>,
     /// The revision of the project the own copy was made of.
     copied: Option<u64>,
+    /// What the journal beside the own copy holds.
+    journal: Written,
     /// What other programs left behind, each with the lock that claims it.
     orphans: Vec<(SafetyCopy, File)>,
     /// Leave the own copy where it is when this goes: see [`Self::abandon`].
@@ -68,7 +74,7 @@ fn file_of(stem: &Path, extension: &str) -> PathBuf {
 }
 
 fn remove_all(stem: &Path) {
-    for extension in ["trill", "json", "tmp", "lock"] {
+    for extension in ["trill", "json", "tmp", "journal", "lock"] {
         let _ = std::fs::remove_file(file_of(stem, extension));
     }
 }
@@ -78,7 +84,14 @@ impl SafetyCopies {
     /// created yet: a program that never has unsaved changes leaves no
     /// trace.
     pub fn open(folder: Option<PathBuf>) -> Self {
-        let mut copies = Self { folder, own: None, copied: None, orphans: Vec::new(), abandoned: false };
+        let mut copies = Self {
+            folder,
+            own: None,
+            copied: None,
+            journal: Written::default(),
+            orphans: Vec::new(),
+            abandoned: false,
+        };
         let Some(folder) = &copies.folder else { return copies };
         let Ok(entries) = std::fs::read_dir(folder) else { return copies };
         for path in entries.flatten().map(|entry| entry.path()) {
@@ -116,9 +129,24 @@ impl SafetyCopies {
         self.copied
     }
 
+    /// What the journal beside this program's copy holds, taken out to be
+    /// brought up to date ([`Self::write`] takes it back).
+    pub fn take_journal(&mut self) -> Written {
+        std::mem::take(&mut self.journal)
+    }
+
     /// Replaces this program's copy with `project`, the text of a project
     /// file. The old copy stays in place until the new one is complete.
-    pub fn write(&mut self, revision: u64, project: &str, name: &str, original: Option<&Path>) -> io::Result<()> {
+    /// `journal` is what to write to bring the journal beside it up to
+    /// date, after which it holds what `written` says.
+    pub fn write(
+        &mut self,
+        revision: u64,
+        project: &str,
+        name: &str,
+        original: Option<&Path>,
+        (journal, written): (Writing, Written),
+    ) -> io::Result<()> {
         let Some(folder) = self.folder.clone() else { return Ok(()) };
         if self.own.is_none() {
             std::fs::create_dir_all(&folder)?;
@@ -140,14 +168,36 @@ impl SafetyCopies {
         let about = json!({ "name": name, "original": original.map(|path| path.display().to_string()), "made": made });
         std::fs::write(file_of(stem, "json"), about.to_string())?;
         self.copied = Some(revision);
+        // The journal last: a copy without one is still the project. One
+        // that could not be added to is written whole the next time.
+        let kept = file_of(stem, "journal");
+        let wrote = match journal {
+            Writing::Nothing => Ok(()),
+            Writing::Append(text) => {
+                use std::io::Write as _;
+                OpenOptions::new().append(true).open(&kept).and_then(|mut file| file.write_all(text.as_bytes()))
+            }
+            Writing::Whole(text) => std::fs::write(&temporary, text).and_then(|()| std::fs::rename(&temporary, &kept)),
+        };
+        match wrote {
+            Ok(()) => self.journal = written,
+            Err(error) => log::warn!("could not keep the journal beside the safety copy: {error}"),
+        }
         Ok(())
+    }
+
+    /// Puts back what [`Self::take_journal`] took, when nothing was
+    /// written after all.
+    pub fn give_journal(&mut self, written: Written) {
+        self.journal = written;
     }
 
     /// Removes this program's copy: the project is saved, or there is
     /// nothing in it to lose.
     pub fn clear(&mut self) {
+        self.journal = Written::default();
         if let (Some(own), Some(_)) = (&self.own, self.copied.take()) {
-            for extension in ["trill", "json", "tmp"] {
+            for extension in ["trill", "json", "tmp", "journal"] {
                 let _ = std::fs::remove_file(file_of(&own.stem, extension));
             }
         }
@@ -208,25 +258,34 @@ fn described(stem: &Path, file: &Path) -> Option<SafetyCopy> {
 /// project has unsaved changes the copy does not have, removed if the
 /// project has none. Cheap when nothing changed.
 pub(crate) fn refresh(session: &SharedSession, copies: &parking_lot::Mutex<SafetyCopies>) {
-    let copied = copies.lock().copied();
+    let (copied, mut written) = {
+        let mut copies = copies.lock();
+        (copies.copied(), copies.take_journal())
+    };
     let project = {
         let mut session = session.lock();
         if !session.is_modified() {
             None
         } else if copied == Some(session.revision()) {
+            drop(session);
+            // Nothing to write: what the journal's file holds is as it was.
+            copies.lock().give_journal(written);
             return;
         } else {
             let text = session.snapshot_json();
-            // After the snapshot: taking it can itself move the revision on.
-            Some((session.revision(), text, session.project().name.clone(), session.path().map(Path::to_owned)))
+            // After the snapshot: taking it can itself move the revision
+            // on, and enters what the plugins' states came to.
+            let journal = session.journal_since(&mut written);
+            let name = session.project().name.clone();
+            Some((session.revision(), text, name, session.path().map(Path::to_owned), journal))
         }
     };
     // The file is written with the session free again.
     let mut copies = copies.lock();
     match project {
         None => copies.clear(),
-        Some((revision, text, name, original)) => {
-            if let Err(error) = copies.write(revision, &text, &name, original.as_deref()) {
+        Some((revision, text, name, original, journal)) => {
+            if let Err(error) = copies.write(revision, &text, &name, original.as_deref(), (journal, written)) {
                 log::warn!("could not keep a safety copy of the project: {error}");
             }
         }
