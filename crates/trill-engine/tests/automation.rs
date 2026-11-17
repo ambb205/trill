@@ -552,3 +552,174 @@ fn a_lane_of_thousands_of_points_plays_the_curve_it_follows() {
     // And it is saved and loaded as it is.
     assert_eq!(Project::from_json(&project.to_json()).unwrap(), project);
 }
+
+/// A song the size of the bench's second pass: seventeen tracks and three
+/// returns, 7,747 notes, and 29,443 automation points, of which 26,561 are
+/// on seven lanes (one of 7,332) and the rest spread over a hundred more.
+/// With `points` false it is the same song without its envelopes.
+fn a_song_of_many_points(points: bool) -> Project {
+    let mut project = Project::new("many");
+    project.set_tempo(160.0).unwrap();
+    let returns: Vec<TrackId> =
+        (0..3).map(|index| project.add_track_of_kind(format!("Return {index}"), TrackKind::Return)).collect();
+    for id in &returns {
+        project.add_device(ChainRef::Track(*id), "builtin:delay", "Delay", None).unwrap();
+    }
+    let beats = 456.0;
+    let dense = |count: usize| -> Vec<AutomationPoint> {
+        (0..count)
+            .map(|index| index as f64 * beats / count as f64)
+            .map(|beat| point(beat, -12.0 * (-(beat.fract()) * 6.0).exp()))
+            .collect()
+    };
+    // The lanes that are not drawings of a compressor: a hundred of them,
+    // 2,882 points between them.
+    let sparse = |lane: usize| -> Vec<AutomationPoint> {
+        let count = if lane < 82 { 29 } else { 28 };
+        (0..count).map(|index| point(index as f64 * 16.0, ((index * 7 + lane) % 30) as f64 / 30.0)).collect()
+    };
+    let big = [7_332usize, 3_205, 3_205, 3_205, 3_205, 3_205, 3_204];
+    let mut lanes = 0;
+    for index in 0..17 {
+        let track = project.add_track(format!("Track {index}"));
+        project.add_device(ChainRef::Track(track), "builtin:polysynth", "Synth", None).unwrap();
+        let filter = project.add_device(ChainRef::Track(track), "builtin:filter", "Filter", None).unwrap();
+        let utility = project.add_device(ChainRef::Track(track), "builtin:utility", "Utility", None).unwrap();
+        let eq = project.add_device(ChainRef::Track(track), "builtin:eq", "EQ", None).unwrap();
+        let clip = project.add_midi_clip(track, "clip", 0.0, beats).unwrap();
+        let notes: Vec<Note> = (0..456)
+            .map(|step| Note {
+                pitch: 40 + ((step * 5 + index * 3) % 36) as u8,
+                start: step as f64,
+                length: 0.9,
+                velocity: 90,
+            })
+            .collect();
+        project.clip_mut(clip).unwrap().add_notes(&notes[..if index == 0 { 451 } else { 456 }]).unwrap();
+        project.set_send(track, returns[index % 3], Some(-12.0)).unwrap();
+        if !points {
+            continue;
+        }
+        if let Some(count) = big.get(index) {
+            let gain = AutomationTarget::DeviceParam { device: utility, param: "gain".into() };
+            project.write_automation(gain, dense(*count), Travel::Fader { floor: -70.0 }).unwrap();
+        }
+        let own = [
+            (AutomationTarget::TrackVolume { track }, Travel::FADER, (-60.0, 0.0)),
+            (AutomationTarget::TrackPan { track }, Travel::Linear, (-1.0, 1.0)),
+            (AutomationTarget::Send { track, to: returns[index % 3] }, Travel::FADER, (-70.0, 0.0)),
+            (AutomationTarget::DeviceParam { device: filter, param: "cutoff".into() }, Travel::Log, (40.0, 9000.0)),
+            (AutomationTarget::DeviceParam { device: eq, param: "low_cut".into() }, Travel::Log, (30.0, 400.0)),
+            (AutomationTarget::DeviceParam { device: eq, param: "mid1_gain".into() }, Travel::Linear, (-12.0, 12.0)),
+        ];
+        for (target, travel, (low, high)) in own {
+            if lanes == 100 {
+                break;
+            }
+            let mut envelope = sparse(lanes);
+            for point in &mut envelope {
+                point.value = low + (high - low) * point.value;
+            }
+            project.write_automation(target, envelope, travel).unwrap();
+            lanes += 1;
+        }
+    }
+    project
+}
+
+/// Not a correctness test: prints what a song of 29,443 automation points
+/// costs beside the same song without them. Run with
+/// `cargo test -p trill-engine --test automation -- --ignored what_many --nocapture`.
+#[test]
+#[ignore = "a measurement, not an assertion"]
+fn what_many_points_cost() {
+    use std::time::Instant;
+    use trill_engine::{AudioBackend, Session};
+
+    /// The best of `runs` timings of `work`, in milliseconds.
+    fn best(runs: usize, mut work: impl FnMut()) -> f64 {
+        (0..runs)
+            .map(|_| {
+                let started = Instant::now();
+                work();
+                started.elapsed().as_secs_f64() * 1000.0
+            })
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    for with_points in [false, true] {
+        let project = a_song_of_many_points(with_points);
+        let points: usize = project.automation.iter().map(|lane| lane.points.len()).sum();
+        let notes: usize = project.tracks.iter().flat_map(|track| &track.clips).map(|clip| clip.notes().len()).sum();
+        let longest = project.automation.iter().map(|lane| lane.points.len()).max().unwrap_or(0);
+        eprintln!("--- {points} points on {} lanes (the longest {longest}), {notes} notes", project.automation.len());
+
+        let json = project.to_json();
+        eprintln!("project file: {:.0} KB", json.len() as f64 / 1024.0);
+        let written = best(10, || drop(project.to_json()));
+        let read = best(10, || drop(Project::from_json(&json).unwrap()));
+        eprintln!("  written in {written:.2} ms, read in {read:.2} ms");
+        eprintln!("a copy of the project (an undo step): {:.3} ms", best(50, || drop(project.clone())));
+        let other = project.clone();
+        eprintln!("comparing two: {:.3} ms", best(50, || assert!(project == other)));
+
+        // What the session does at every edit: compile, and swap.
+        let (mut bank, mut meters, audio) = (DeviceBank::default(), Meters::default(), AudioSources::default());
+        let mut compile = || {
+            Compiler {
+                factory: &BuiltinFactory,
+                bank: &mut bank,
+                meters: &mut meters,
+                audio: &audio,
+                stand_ins: None,
+                sample_rate: SR,
+                purpose: Purpose::Playing,
+            }
+            .compile(&project, false)
+            .0
+        };
+        let graph = compile();
+        eprintln!("compiling the graph: {:.3} ms", best(50, || drop(compile())));
+
+        // An edit through the front door, all of it: a fader moved.
+        let mut session =
+            Session::new(Arc::new(BuiltinFactory), AudioBackend::Null { sample_rate: SR as u32 }).unwrap();
+        let folder = common::folder();
+        let path = common::file(&folder, "many.trill");
+        std::fs::write(&path, &json).unwrap();
+        session.load(&path).unwrap();
+        let track = project.tracks[5].id;
+        let mut level = -1.0;
+        let edit = best(50, || {
+            level -= 0.1;
+            session.edit(|project| project.set_track_volume(track, level)).unwrap();
+        });
+        eprintln!("an edit through the session (a fader moved): {edit:.3} ms");
+        // And one that rewrites the longest lane, as a drag in it does.
+        if let Some(lane) = project.automation.iter().max_by_key(|lane| lane.points.len()).cloned() {
+            let mut nudge = 0.0;
+            let rewrite = best(50, || {
+                nudge += 0.01;
+                let mut points = lane.points.clone();
+                points[100].value += nudge;
+                session.edit(|project| project.set_automation(lane.target.clone(), points)).unwrap();
+            });
+            eprintln!("an edit that rewrites the lane of {longest} points: {rewrite:.3} ms");
+        }
+
+        // The audio thread: ten seconds of the song from its middle.
+        let mut processor = Processor::new(SR);
+        drop(processor.swap_graph(graph));
+        processor.seek(200.0);
+        processor.play();
+        let (mut left, mut right) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+        let seconds = 10.0;
+        let blocks = (seconds * SR / 512.0) as usize;
+        let playing = best(3, || {
+            for _ in 0..blocks {
+                processor.process(&mut left, &mut right);
+            }
+        });
+        eprintln!("playing {seconds} s of it: {playing:.1} ms ({:.2} % of real time)", playing / (seconds * 10.0));
+    }
+}

@@ -17,6 +17,13 @@
 //! The first part of this file, the envelope as geometry, is shared with
 //! the controller lane of the piano roll (`controller_lane`), which edits a
 //! clip's controller curves with the same gestures.
+//!
+//! An envelope may hold thousands of points (a compressor worked out
+//! elsewhere and drawn in, several to the pixel when the whole song is in
+//! view). What a lane costs to paint follows its width, not their number:
+//! where many fall in one pixel column the line keeps the two that span it,
+//! and where points crowd they are not each marked with a square. What a
+//! gesture costs follows the points it moves, a few at a time by searching.
 
 use super::Geometry;
 use crate::ui::automation::{self, Choice, Scale};
@@ -41,6 +48,15 @@ const POINT_GRAB: f32 = 6.0;
 const LINE_GRAB: f32 = 5.0;
 /// Distance between samples of a curved segment, in pixels.
 const CURVE_STEP: f32 = 3.0;
+/// More points than this within [`CROWD_REACH`] pixels of one, along the
+/// lane, are a crowd: their squares would cover each other and the line, so
+/// there the line alone is drawn. Two or three at one place, the points of
+/// a step, are not.
+const CROWD: usize = 4;
+const CROWD_REACH: f32 = 3.0;
+/// More points of the line than this in one pixel column are drawn as the
+/// two that span it.
+const COLUMN: usize = 3;
 pub(in crate::ui) const LINE_WIDTH: f32 = 1.25;
 /// Where a lane header's content starts: indented under its track's name.
 const HEADER_INDENT: f32 = 26.0;
@@ -147,6 +163,44 @@ pub(in crate::ui) fn segment_at(
     on_line.then(|| [points[next - 1], points[next]])
 }
 
+/// Some points of an envelope, to be looked up among: the selected ones, or
+/// the ones an edit takes away. A point is found by searching, so asking
+/// about every point of a long envelope stays quick however many of them
+/// are in the set.
+pub(in crate::ui) struct PointSet {
+    /// By beat. Points on one beat (a step) are few.
+    points: Vec<AutomationPoint>,
+    /// Which of them an edit has already taken.
+    taken: Vec<bool>,
+}
+
+impl PointSet {
+    pub fn new(points: &[AutomationPoint]) -> Self {
+        let mut points = points.to_vec();
+        if !points.is_sorted_by(|a, b| a.beat <= b.beat) {
+            points.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+        }
+        Self { taken: vec![false; points.len()], points }
+    }
+
+    /// Where the points on `beat` are.
+    fn on(&self, beat: Beats) -> std::ops::Range<usize> {
+        let first = self.points.partition_point(|other| other.beat < beat);
+        let count = self.points[first..].iter().take_while(|other| other.beat == beat).count();
+        first..first + count
+    }
+
+    pub fn holds(&self, point: &AutomationPoint) -> bool {
+        self.points[self.on(point.beat)].contains(point)
+    }
+
+    /// Takes one instance of `point` out of the set, if one is left.
+    fn take(&mut self, point: &AutomationPoint) -> bool {
+        let found = self.on(point.beat).find(|&index| !self.taken[index] && self.points[index] == *point);
+        found.inspect(|&index| self.taken[index] = true).is_some()
+    }
+}
+
 /// `points` without one instance of each point in `remove`, plus `add`,
 /// in time order.
 pub(in crate::ui) fn replaced(
@@ -154,20 +208,17 @@ pub(in crate::ui) fn replaced(
     remove: &[AutomationPoint],
     add: &[AutomationPoint],
 ) -> Vec<AutomationPoint> {
-    let mut result = points.to_vec();
-    for point in remove {
-        if let Some(index) = result.iter().position(|candidate| candidate == point) {
-            result.remove(index);
-        }
-    }
+    // Each point to go takes the first that equals it, in one pass.
+    let mut going = PointSet::new(remove);
+    let mut result: Vec<AutomationPoint> = points.iter().filter(|point| !going.take(point)).copied().collect();
     result.extend_from_slice(add);
     result.sort_by(|a, b| a.beat.total_cmp(&b.beat));
     result
 }
 
 /// `originals` moved by `beats` in time and `height` up the lane, held back
-/// as a group so none passes a point of `others` (the rest of the envelope)
-/// or the start of the song, and each kept inside the scale.
+/// as a group so none passes a point of `others` (the rest of the envelope,
+/// in time order) or the start of the song, and each kept inside the scale.
 pub(in crate::ui) fn moved(
     originals: &[AutomationPoint],
     others: &[AutomationPoint],
@@ -178,8 +229,12 @@ pub(in crate::ui) fn moved(
     let mut earliest = f64::NEG_INFINITY;
     let mut latest = f64::INFINITY;
     for point in originals {
-        let before = others.iter().rev().find(|other| other.beat <= point.beat).map_or(0.0, |other| other.beat);
-        let after = others.iter().find(|other| other.beat >= point.beat).map_or(f64::INFINITY, |other| other.beat);
+        // The neighbours on either side, found by searching: a long
+        // envelope moved as a whole asks this of every one of its points.
+        let later = others.partition_point(|other| other.beat <= point.beat);
+        let before = later.checked_sub(1).map_or(0.0, |index| others[index].beat);
+        let at_or_after = others.partition_point(|other| other.beat < point.beat);
+        let after = others.get(at_or_after).map_or(f64::INFINITY, |other| other.beat);
         earliest = earliest.max(before - point.beat);
         latest = latest.min(after - point.beat);
     }
@@ -405,6 +460,37 @@ pub(in crate::ui) fn curve_path(map: &LaneMap, points: &[AutomationPoint]) -> Ve
     if last.beat < last_beat {
         path.push(pos2(rect.right(), map.y(last.value)));
     }
+    thinned(path)
+}
+
+/// `path` with every run of more than [`COLUMN`] points in one pixel column
+/// drawn as the two that span it, the higher and the lower in the order
+/// they come: on screen it is the same line, and no longer than the lane is
+/// wide. A path that is not that crowded comes back as it is.
+fn thinned(mut path: Vec<Pos2>) -> Vec<Pos2> {
+    let column = |point: &Pos2| point.x.floor();
+    let crowded = |path: &[Pos2]| path.windows(COLUMN + 1).any(|run| column(&run[0]) == column(&run[COLUMN]));
+    if !crowded(&path) {
+        return path;
+    }
+    let (mut kept, mut start) = (0, 0);
+    while start < path.len() {
+        let end = start + path[start..].iter().take_while(|point| column(point) == column(&path[start])).count();
+        if end - start <= COLUMN {
+            path.copy_within(start..end, kept);
+            kept += end - start;
+        } else {
+            let run = start..end;
+            let highest = run.clone().min_by(|a, b| path[*a].y.total_cmp(&path[*b].y)).unwrap_or(start);
+            let lowest = run.max_by(|a, b| path[*a].y.total_cmp(&path[*b].y)).unwrap_or(start);
+            let (first, second) = (path[highest.min(lowest)], path[highest.max(lowest)]);
+            path[kept] = first;
+            path[kept + 1] = second;
+            kept += 2;
+        }
+        start = end;
+    }
+    path.truncate(kept);
     path
 }
 
@@ -434,6 +520,53 @@ pub(in crate::ui) fn paint_curve(
     painter.add(Shape::line(path, Stroke::new(LINE_WIDTH, color)));
 }
 
+/// The squares of the points on screen: those of `chosen` (the selected
+/// ones), which are drawn larger, and the rest. Where points crowd (see
+/// [`CROWD`]) the rest have none, and of the chosen ones there is one to a
+/// pixel column: enough to show that they are selected.
+pub(in crate::ui) fn point_squares(
+    map: &LaneMap,
+    points: &[AutomationPoint],
+    chosen: &[AutomationPoint],
+) -> (Vec<Rect>, Vec<Rect>) {
+    let rect = map.rect;
+    let (first_beat, last_beat) = (map.beat(rect.left()), map.time.x_to_beat(map.left, rect.right()));
+    let from = points.partition_point(|point| point.beat < first_beat);
+    let to = points.partition_point(|point| point.beat <= last_beat);
+    let chosen = PointSet::new(chosen);
+    let reach = CROWD_REACH as f64 / map.time.pixels_per_beat;
+    let (mut selected, mut plain) = (Vec::new(), Vec::new());
+    // The points within reach of the one looked at: `back..ahead`.
+    let (mut back, mut ahead) = (from, from);
+    let mut last_column = f32::NEG_INFINITY;
+    for point in &points[from..to] {
+        while points[back].beat < point.beat - reach {
+            back += 1;
+        }
+        while ahead < points.len() && points[ahead].beat <= point.beat + reach {
+            ahead += 1;
+        }
+        let crowded = ahead - back > CROWD;
+        let is_chosen = !chosen.points.is_empty() && chosen.holds(point);
+        if crowded && !is_chosen {
+            continue;
+        }
+        let center = map.point(point);
+        if crowded && center.x.floor() == last_column {
+            continue;
+        }
+        let corner = pos2((center.x - POINT / 2.0).round(), (center.y - POINT / 2.0).round());
+        let square = Rect::from_min_size(corner, vec2(POINT, POINT));
+        if is_chosen {
+            last_column = center.x.floor();
+            selected.push(square.expand(1.0));
+        } else {
+            plain.push(square);
+        }
+    }
+    (selected, plain)
+}
+
 /// Paints the squares of the points on screen: in `color`, and those of
 /// `chosen` (the selected ones) larger and in `ink`.
 pub(in crate::ui) fn paint_points(
@@ -444,25 +577,15 @@ pub(in crate::ui) fn paint_points(
     color: Color32,
     ink: Color32,
 ) {
-    let rect = map.rect;
-    let (first_beat, last_beat) = (map.beat(rect.left()), map.time.x_to_beat(map.left, rect.right()));
-    let from = points.partition_point(|point| point.beat < first_beat);
+    let (selected, plain) = point_squares(map, points, chosen);
     let mut squares = Mesh::default();
-    let mut outlined = Vec::new();
-    for point in points[from..].iter().take_while(|point| point.beat <= last_beat) {
-        let center = map.point(point);
-        let corner = pos2((center.x - POINT / 2.0).round(), (center.y - POINT / 2.0).round());
-        let square = Rect::from_min_size(corner, vec2(POINT, POINT));
-        if chosen.contains(point) {
-            outlined.push(square);
-        } else {
-            squares.add_colored_rect(square, color);
-        }
+    for square in plain {
+        squares.add_colored_rect(square, color);
+    }
+    for square in selected {
+        squares.add_colored_rect(square, ink);
     }
     painter.add(Shape::mesh(squares));
-    for square in outlined {
-        painter.rect_filled(square.expand(1.0), 0.0, ink);
-    }
 }
 
 /// The rubber band of a selection being dragged out in this lane.
@@ -1119,6 +1242,104 @@ mod tests {
         // A point that is no longer there (removed elsewhere) is not an error.
         assert_eq!(replaced(&points, &[point(5.0, 5.0)], &[]), points);
         assert!(replaced(&points, &points, &[]).is_empty());
+    }
+
+    /// A lane of 7,332 points over 456 beats, a dip on every beat, with
+    /// the whole of it in view: six points to the pixel.
+    fn crowded() -> (LaneMap, Vec<AutomationPoint>) {
+        let rect = Rect::from_min_size(pos2(200.0, 300.0), vec2(1200.0, 100.0 + 2.0 * PAD));
+        let time = TimeView { origin: 0.0, pixels_per_beat: 1200.0 / 456.0 };
+        let map = LaneMap { rect, left: 200.0, time, scale: Scale::Volume, lines: Travel::FADER };
+        let points = (0..7_332)
+            .map(|index| index as f64 * 456.0 / 7_332.0)
+            .map(|beat| point(beat, -12.0 * (-(beat.fract()) * 6.0).exp()))
+            .collect();
+        (map, points)
+    }
+
+    #[test]
+    fn a_lane_of_thousands_of_points_is_drawn_no_longer_than_it_is_wide() {
+        let (map, points) = crowded();
+        let path = curve_path(&map, &points);
+        assert!(path.len() <= 2 * 1200 + 4, "two points to a pixel column at the most: {}", path.len());
+        // It is the same line: in every pixel column it reaches as high and
+        // as low as the points there do.
+        let column = |x: f32| (x - map.rect.left()).floor() as usize;
+        let mut spans = vec![(f32::INFINITY, f32::NEG_INFINITY); 1201];
+        for point in &points {
+            let at = map.point(point);
+            let span = &mut spans[column(at.x)];
+            *span = (span.0.min(at.y), span.1.max(at.y));
+        }
+        let mut drawn = vec![(f32::INFINITY, f32::NEG_INFINITY); 1201];
+        for at in &path {
+            let span = &mut drawn[column(at.x).min(1200)];
+            *span = (span.0.min(at.y), span.1.max(at.y));
+        }
+        for (index, (span, drawn)) in spans.iter().zip(&drawn).enumerate().take(1199).skip(1) {
+            assert!(
+                (span.0 - drawn.0).abs() < 0.01 && (span.1 - drawn.1).abs() < 0.01,
+                "column {index}: {span:?} {drawn:?}"
+            );
+        }
+        // No point has a square of its own there; a step among them would.
+        let (selected, plain) = point_squares(&map, &points, &[]);
+        assert!(selected.is_empty() && plain.is_empty(), "{} squares", plain.len());
+        // Selected, they show it: one square to a pixel column, not 7,332.
+        let (selected, plain) = point_squares(&map, &points, &points);
+        assert!(plain.is_empty() && (1100..=1201).contains(&selected.len()), "{}", selected.len());
+
+        // Zoomed in to where they have room, every point is drawn and marked.
+        let near = LaneMap { time: TimeView { origin: 100.0, pixels_per_beat: 200.0 }, ..map.clone() };
+        let in_view = points.iter().filter(|point| (100.0..=106.0).contains(&point.beat)).count();
+        let (_, plain) = point_squares(&near, &points, &[]);
+        assert_eq!(plain.len(), in_view);
+        assert!(curve_path(&near, &points).len() >= in_view);
+    }
+
+    #[test]
+    fn the_points_of_a_step_keep_their_squares_and_a_sparse_line_its_points() {
+        let map = map();
+        // A step written by the pencil: three points on one beat.
+        let step = [point(0.0, 0.0), point(4.0, 0.5), held(4.0, -1.0), held(4.0, 1.0), point(8.0, 0.0)];
+        let (_, plain) = point_squares(&map, &step, &[]);
+        assert_eq!(plain.len(), 5);
+        assert_eq!(curve_path(&map, &step).len(), 6, "the left edge, the points and the step's corner, as they are");
+        let (selected, plain) = point_squares(&map, &step, &[step[2]]);
+        assert_eq!((selected.len(), plain.len()), (1, 4));
+        assert_eq!(selected[0].width(), POINT + 2.0, "a selected point is drawn larger");
+    }
+
+    #[test]
+    fn replacing_and_moving_do_the_same_for_thousands_of_points_as_for_three() {
+        let (_, points) = crowded();
+        // Every other point goes, and two come.
+        let going: Vec<AutomationPoint> = points.iter().step_by(2).copied().collect();
+        let coming = [point(0.01, -3.0), point(455.99, -3.0)];
+        let result = replaced(&points, &going, &coming);
+        assert_eq!(result.len(), points.len() - going.len() + 2);
+        assert!(result.is_sorted_by(|a, b| a.beat <= b.beat));
+        assert!(going.iter().step_by(97).all(|gone| !result.contains(gone)));
+        assert!(points.iter().skip(1).step_by(194).all(|kept| result.contains(kept)));
+        // One of two points that are the same goes when one is asked to.
+        let twins = [point(1.0, 0.5), point(1.0, 0.5), point(2.0, 0.5)];
+        assert_eq!(replaced(&twins, &[twins[0]], &[]), [twins[1], twins[2]]);
+        assert_eq!(replaced(&twins, &[twins[0], twins[0], twins[0]], &[]), [twins[2]]);
+
+        // The whole envelope moved up as one: nothing holds it back in time
+        // but the start of the song, and every point rises.
+        let lifted = moved(&points, &[], 0.0, 0.1, &Scale::Volume);
+        assert_eq!(lifted.len(), points.len());
+        assert!(lifted.iter().zip(&points).all(|(now, was)| now.beat == was.beat && now.value > was.value));
+        // Half of it, between the other half: held to its neighbours.
+        let (movers, stayers): (Vec<_>, Vec<_>) = points.iter().enumerate().partition(|(index, _)| index % 2 == 1);
+        let movers: Vec<AutomationPoint> = movers.into_iter().map(|(_, point)| *point).collect();
+        let stayers: Vec<AutomationPoint> = stayers.into_iter().map(|(_, point)| *point).collect();
+        let gap = 456.0 / 7_332.0;
+        let pushed = moved(&movers, &stayers, 10.0, 0.0, &Scale::Volume);
+        assert!((pushed[0].beat - movers[0].beat - gap).abs() < 1e-9, "as far as the next point that stays");
+        let pulled = moved(&movers, &stayers, -10.0, 0.0, &Scale::Volume);
+        assert!((movers[0].beat - pulled[0].beat - gap).abs() < 1e-9);
     }
 
     #[test]
