@@ -63,6 +63,14 @@
 //! controller may be named, one of those may be. The others a maker's
 //! player makes up (how fast a key came up, how far a note is from the
 //! one before) are not here.
+//!
+//! Numbers from 150 up are controllers that only a maker's own window
+//! moves (the level of each microphone of a kit). Nothing moves them here,
+//! so each stands where the file puts it (`set_ccN`, `set_hdccN`; at
+//! nothing where it does not say), and what it does is worked out as the
+//! file is read: whether a region sounds at all (`loccN`, `hiccN`), and
+//! its level, place and tuning (`amplitude_onccN`, `volume_onccN`,
+//! `pan_onccN`, `tune_onccN`).
 //! A region that only a controller sets off (`on_loccN`) or that no key
 //! plays (`key=-1`) is left out, and said.
 //!
@@ -186,7 +194,14 @@ struct Reader {
     /// one that is being read: its number and its points.
     curves: BTreeMap<u16, [f32; 128]>,
     curve: Option<CurveRead>,
+    /// Where the file puts the controllers that nothing here moves
+    /// ([`STANDING`]), 0..=1.
+    standing: BTreeMap<u32, f32>,
 }
+
+/// The controllers that only a maker's own window moves, by their
+/// numbers: they stand where the file puts them.
+const STANDING: std::ops::Range<u32> = 150..1024;
 
 /// A curve while its header is being read: its number, if it has said
 /// one, and the points it has given so far.
@@ -278,6 +293,12 @@ impl Reader {
             ("default_path", None) => self.default_path = value.replace('\\', "/"),
             ("note_offset", None) => self.key_offset += integer(value).unwrap_or(0),
             ("octave_offset", None) => self.key_offset += 12 * integer(value).unwrap_or(0),
+            ("set_cc", Some(controller)) if STANDING.contains(&controller) => {
+                self.standing.insert(controller, (number_of(value).unwrap_or(0.0) / 127.0).clamp(0.0, 1.0));
+            }
+            ("set_hdcc", Some(controller)) if STANDING.contains(&controller) => {
+                self.standing.insert(controller, number_of(value).unwrap_or(0.0).clamp(0.0, 1.0));
+            }
             ("set_cc", Some(controller)) if controller < 128 => {
                 let position = (number_of(value).unwrap_or(0.0) / 127.0).clamp(0.0, 1.0);
                 self.instrument.controller_starts.push((controller as u8, position));
@@ -333,16 +354,29 @@ impl Reader {
             sample,
             label,
             curve,
-            disabled,
+            mut disabled,
             filter_envelope,
             filter_depth,
             tune,
             transpose,
             volumes,
             curves,
+            stood,
         } = building;
         region.tune = tune + 100.0 * transpose;
         region.volume += volumes.iter().sum::<f32>();
+        // What the controllers that stand where the file put them come to.
+        for (stem, controller, amount) in &stood {
+            let position = self.standing.get(controller).copied().unwrap_or(0.0);
+            match stem.as_str() {
+                "locc" => disabled |= position * 127.0 < amount - 0.5,
+                "hicc" => disabled |= position * 127.0 > amount + 0.5,
+                "amplitude_oncc" => region.amplitude *= (amount / 100.0 * position).max(0.0),
+                "volume_oncc" => region.volume += amount * position,
+                "pan_oncc" => region.pan = (region.pan + amount / 100.0 * position).clamp(-1.0, 1.0),
+                _ => region.tune += amount * position,
+            }
+        }
         // What a controller moves is read along the curve that was named
         // for it, wherever in the file that was.
         for control in &mut region.controls {
@@ -639,6 +673,21 @@ impl Reader {
             }
             return true;
         }
+        if STANDING.contains(&number) {
+            // One that stands where the file put it: what it does is
+            // worked out when the region is whole.
+            let stem = match canonical(stem).as_str() {
+                "locc" | "hicc" | "amplitude_oncc" | "volume_oncc" | "pan_oncc" | "tune_oncc" => canonical(stem),
+                "lohdcc" | "hihdcc" => canonical(stem).replace("hd", ""),
+                "gain_oncc" => "volume_oncc".to_string(),
+                "pitch_oncc" => "tune_oncc".to_string(),
+                _ => return false,
+            };
+            let amount = if canonical(name_stem(name)).contains("hdcc") { amount * 127.0 } else { amount };
+            building.stood.retain(|(known, controller, _)| !(*known == stem && *controller == number));
+            building.stood.push((stem, number, amount));
+            return true;
+        }
         if !note::is_controller(number) {
             // Other controllers above 127 are a player's own: the pitch
             // wheel, the pressure, how far a note is from the one before.
@@ -743,6 +792,9 @@ struct Building {
     /// The curves named for what controllers move: what, which
     /// controller, which curve.
     curves: Vec<(Option<Moved>, u8, u16)>,
+    /// What is said of controllers that stand where the file put them:
+    /// the pair's name without its number, the controller, the amount.
+    stood: Vec<(String, u32, f32)>,
 }
 
 /// One pair of an envelope: `attack`, `vel2attack`, `attack_oncc72`.
@@ -887,6 +939,11 @@ fn wave_pair(building: &mut Building, name: &str, amount: f32, value: &str) -> b
         region.filter.get_or_insert_default();
     }
     true
+}
+
+/// A name without the number it ends in.
+fn name_stem(name: &str) -> &str {
+    split_number(name).0
 }
 
 /// A name without the number it ends in, and the number.
@@ -1148,6 +1205,32 @@ mod tests {
     }
 
     #[test]
+    fn a_controller_only_its_makers_window_moves_stands_where_the_file_puts_it() {
+        // A kit recorded through three microphones, each with a level of its own in its maker's window.
+        let kit = read_text(
+            "<control> set_hdcc200=0.5 set_cc201=0 set_hdcc202=1 set_cc300=64\n\
+             <global> key=36 amp_veltrack=0\n\
+             <region> sample=close.wav locc200=1 amplitude_oncc200=100 volume=-3 volume_oncc202=-6 pan_oncc300=-100\n\
+             <region> sample=room.wav locc201=1 amplitude_oncc201=100\n\
+             <region> sample=overhead.wav lohdcc202=0.5 amplitude_oncc202=100 tune_oncc202=50 tune=10\n\
+             <region> sample=never.wav amplitude_oncc203=100 hicc200=10\n\
+             <region> sample=moved.wav cutoff_oncc200=1200 amplitude_oncc130=100",
+        )
+        .unwrap();
+        let named: Vec<&str> =
+            kit.regions.iter().map(|region| kit.recordings[region.recording.unwrap() as usize].as_str()).collect();
+        assert_eq!(named, ["close.wav", "overhead.wav", "moved.wav"], "a microphone that is turned off is not played");
+        let (close, overhead) = (&kit.regions[0], &kit.regions[1]);
+        assert_eq!((close.amplitude, close.volume), (0.5, -9.0), "half its level, and 6 dB down for the third's");
+        assert!((close.pan + 64.0 / 127.0).abs() < 1e-6, "as far to the left as the fourth stands: {}", close.pan);
+        assert_eq!((overhead.amplitude, overhead.tune), (1.0, 60.0));
+        assert!(kit.regions.iter().all(|region| region.controls.is_empty() && region.when.is_empty()));
+        // What else is asked of one is said; so is a controller that is a player's own.
+        let said: Vec<&str> = kit.unsupported.iter().map(|un| un.name.as_str()).collect();
+        assert_eq!(said, ["amplitude_oncc130", "cutoff_oncc200"]);
+    }
+
+    #[test]
     fn keys_are_numbers_or_names() {
         for (text, key) in [("60", 60), ("c4", 60), ("C4", 60), ("c#4", 61), ("db4", 61), ("a-1", 9), ("g9", 127)] {
             assert_eq!(key_number(text), Some(key), "{text}");
@@ -1240,7 +1323,7 @@ mod tests {
     #[test]
     fn what_this_player_does_not_do_is_counted_by_name_and_the_rest_still_reads() {
         let kit = read_text(
-            "<control> hint_ram_based=1 set_cc300=1\n<global> eq1_gain=3 eq1_freq=80 eg01_time1=4 lfo01_pitch=10\n\
+            "<control> hint_ram_based=1 set_cc140=1\n<global> eq1_gain=3 eq1_freq=80 eg01_time1=4 lfo01_pitch=10\n\
              <effect> type=reverb\n<midi> x=1\n\
              <group> key=36 loop_mode=one_shot off_by=2 group=1 off_mode=time off_time=0.2 cutoff2=500\n\
              <region> sample=kick.wav on_locc64=1 cutoff=900 fil_type=lpf_2p fil_veltrack=1200 fileg_depth=2400 fileg_decay=0.1\n\
@@ -1260,7 +1343,7 @@ mod tests {
             ("sample=*sine", 1),
             ("direction", 1),
             ("trigger", 1),
-            ("set_cc300", 1),
+            ("set_cc140", 1),
         ] {
             assert!(named.contains(&expected), "{expected:?} is not among {named:?}");
         }
