@@ -269,6 +269,90 @@ async fn two_part_song(client: &Client) -> (u64, u64, u64) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_compressor_is_given_another_track_to_listen_to() {
+    let fixture = connect(ScriptedFactory::new()).await;
+    let client = &fixture.client;
+    // A bass that plays for sixteen beats, and a kick on each of the first
+    // eight.
+    let (bass, drums, _) = two_part_song(client).await;
+    let reduction = |report: &Value, device: u64| -> (f64, f64) {
+        let entries = report["gain_reduction"].as_array().unwrap();
+        let entry = entries.iter().find(|entry| entry["device"] == device).unwrap_or_else(|| panic!("{report}"));
+        (entry["most_db"].as_f64().unwrap(), entry["active"].as_f64().unwrap())
+    };
+
+    // A compressor on the bass that listens to the drums: said when it is
+    // added, and by everything that shows the device afterwards.
+    let squeeze = json!({ "threshold": -30, "ratio": 10, "attack": 1, "release": 40, "knee": 0 });
+    let asked = json!({ "track": bass, "uri": "builtin:compressor", "sidechain": drums, "params": squeeze });
+    let added = ok(client, "add_device", asked).await;
+    let duck = added["device_id"].as_u64().unwrap_or_else(|| panic!("{added}"));
+    assert_eq!(added["sidechain"], json!({ "track": drums, "name": "Drums" }));
+    let shown = ok(client, "get_device", json!({ "device": duck })).await;
+    assert_eq!(shown["sidechain"], json!({ "track": drums, "name": "Drums" }));
+    let project = ok(client, "get_project", json!({})).await;
+    assert!(project.to_string().contains(&format!("\"sidechain\":{drums}")), "{project}");
+
+    // Hearing the bass alone, the drums are still played for it: the bass
+    // is turned down on the kicks, which are in the first half only.
+    let ducked = ok(client, "measure", json!({ "tracks": [bass] })).await;
+    let (most, active) = reduction(&ducked, duck);
+    assert!(most > 6.0 && active > 0.02 && active < 0.5, "takes off {most} dB at most, {active} of the time");
+    assert_eq!(ducked["tracks"].as_array().unwrap().len(), 1, "and only the bass is heard: {ducked}");
+
+    // Back to its own input, which is over the threshold whenever the bass
+    // plays: it works nearly all the time.
+    let own = ok(client, "update_device", json!({ "device": duck, "sidechain": 0 })).await;
+    assert_eq!(own["sidechain"], Value::Null, "{own}");
+    let shown = ok(client, "get_device", json!({ "device": duck })).await;
+    assert!(shown.get("sidechain").is_none(), "{shown}");
+    assert!(shown["sidechain_hint"].as_str().unwrap().contains("update_device"), "{shown}");
+    let (_, steady) = reduction(&ok(client, "measure", json!({ "tracks": [bass] })).await, duck);
+    assert!(steady > active + 0.3, "{steady} of the time on its own input, {active} on the kick");
+
+    // A key that stays under the threshold is named in the notes.
+    ok(client, "update_device", json!({ "device": duck, "sidechain": drums, "params": { "threshold": 0 } })).await;
+    let idle = ok(client, "measure", json!({ "tracks": [bass] })).await;
+    let notes = strings(&idle["notes"]);
+    assert!(notes.iter().any(|note| note.contains("listens to 'Drums'")), "{notes:?}");
+
+    // What cannot be: a device that takes no key, a track listening to
+    // itself, a track there is none of. Each says what to do instead.
+    let reverb = ok(client, "add_device", json!({ "track": bass, "uri": "builtin:reverb" })).await["device_id"].clone();
+    let error = call(client, "update_device", json!({ "device": reverb, "sidechain": drums })).await.unwrap_err();
+    assert!(error.contains("compressor"), "{error}");
+    let error = call(client, "update_device", json!({ "device": duck, "sidechain": bass })).await.unwrap_err();
+    assert!(error.contains("itself"), "{error}");
+    let error = call(client, "update_device", json!({ "device": duck, "sidechain": 999 })).await.unwrap_err();
+    assert!(error.contains("Existing tracks") && error.contains("Drums"), "{error}");
+    // And a device that cannot be given its sidechain is not added at all.
+    let before = fixture.session.lock().project().clone();
+    let asked = json!({ "track": bass, "uri": "builtin:compressor", "sidechain": bass, "params": { "ratio": 2 } });
+    let error = call(client, "add_device", asked).await.unwrap_err();
+    assert!(error.contains("itself") && error.contains("not added"), "{error}");
+    assert_eq!(fixture.session.lock().project().tracks, before.tracks);
+
+    // What a model reads about the devices it mixes with: the choices are
+    // there by name, and the new devices are listed.
+    let compressor = ok(client, "describe_device", json!({ "uri": "builtin:compressor" })).await;
+    let param = |device: &Value, id: &str| -> Value {
+        let params = device["params"].as_array().unwrap();
+        params.iter().find(|param| param["id"] == id).unwrap_or_else(|| panic!("no {id} in {device}")).clone()
+    };
+    assert_eq!(param(&compressor, "detector")["choices"], json!(["peak", "bus"]));
+    assert_eq!(param(&compressor, "auto_makeup")["type"], "bool");
+    assert!(compressor["description"].as_str().unwrap().contains("sidechain"));
+    let eq = ok(client, "describe_device", json!({ "uri": "builtin:eq" })).await;
+    assert_eq!(param(&eq, "low_cut_slope")["choices"], json!(["12 dB", "24 dB", "48 dB"]));
+    assert_eq!(param(&eq, "mid1_freq")["min"], 20.0);
+    let set = json!({ "device": duck, "params": { "detector": "bus", "auto_release": true } });
+    assert_eq!(ok(client, "update_device", set).await["set"], json!({ "auto_release": 1.0, "detector": 1.0 }));
+    let effects = ok(client, "list_devices", json!({ "category": "effect" })).await;
+    let listed: Vec<&str> = effects["devices"].as_array().unwrap().iter().filter_map(|d| d["uri"].as_str()).collect();
+    assert!(listed.contains(&"builtin:tremolo"), "{listed:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn measuring_checks_a_mix_without_writing_a_file() {
     let fixture = connect(ScriptedFactory::new()).await;
     let client = &fixture.client;

@@ -46,6 +46,10 @@ pub enum Row {
     /// Groups of rows that share the space: a chip per group, and the rows
     /// of the chosen one.
     Pages(&'static [Page]),
+    /// The track the device listens to in place of its own input, to
+    /// choose among the tracks there are. Only for a device that takes a
+    /// key; it is no parameter.
+    Sidechain,
 }
 
 pub struct Page {
@@ -67,8 +71,15 @@ pub enum Format {
 /// What a section's display shows; the ids are the parameters it reads.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Display {
-    /// A filter's response. `shapes` maps the type parameter's choices.
-    Filter { kind: &'static str, shapes: &'static [Shape], cutoff: &'static str, resonance: &'static str },
+    /// A filter's response. `shapes` maps the type parameter's choices;
+    /// `slope` names the parameter that makes every shape twice as steep.
+    Filter {
+        kind: &'static str,
+        shapes: &'static [Shape],
+        cutoff: &'static str,
+        resonance: &'static str,
+        slope: Option<&'static str>,
+    },
     /// An envelope's shape.
     Envelope { attack: &'static str, decay: &'static str, sustain: &'static str, release: &'static str },
     /// The equalizer's response. Fills whatever height the column has left.
@@ -79,6 +90,8 @@ pub enum Display {
     Saturator,
     /// One cycle of the pump's gain.
     Pump,
+    /// Two cycles of the tremolo's level, the left side and the right.
+    Tremolo,
 }
 
 /// A filter type, as the display needs it.
@@ -122,6 +135,8 @@ const fn shown(title: &'static str, display: Display, rows: &'static [Row]) -> S
 }
 
 const WAVES: &[&str] = &["Sin", "Tri", "Saw", "Sqr"];
+/// How steep a cut of the equalizer is, per octave.
+const SLOPES: &[&str] = &["12 dB", "24 dB", "48 dB"];
 
 pub static LAYOUTS: &[Layout] = &[
     Layout {
@@ -153,6 +168,7 @@ pub static LAYOUTS: &[Layout] = &[
                         shapes: &[Shape::LowPass, Shape::LowPass24, Shape::HighPass, Shape::BandPass],
                         cutoff: "cutoff",
                         resonance: "resonance",
+                        slope: None,
                     },
                     &[
                         Row::Choice { id: "filter_type", labels: &["LP 12", "LP 24", "HP", "BP"] },
@@ -316,6 +332,7 @@ pub static LAYOUTS: &[Layout] = &[
                         shapes: &[Shape::Off, Shape::LowPass, Shape::LowPass24, Shape::HighPass, Shape::BandPass],
                         cutoff: "cutoff",
                         resonance: "resonance",
+                        slope: None,
                     },
                     &[
                         Row::Choice { id: "filter_type", labels: &["Off", "LP 12", "LP 24", "HP", "BP"] },
@@ -356,10 +373,10 @@ pub static LAYOUTS: &[Layout] = &[
     },
     Layout {
         uri: "builtin:delay",
-        columns: &[Column {
-            width: NARROW,
-            sections: &[
-                section(
+        columns: &[
+            Column {
+                width: NARROW,
+                sections: &[section(
                     "Time",
                     &[
                         Row::Toggles(&[("sync", "Sync"), ("ping_pong", "Ping Pong")]),
@@ -371,22 +388,35 @@ pub static LAYOUTS: &[Layout] = &[
                         p("time_ms", "Free"),
                         p("feedback", "Feedback"),
                     ],
-                ),
-                section("Tone", &[p("low_cut", "Low Cut"), p("high_cut", "High Cut")]),
-                section("Output", &[p("mix", "Mix")]),
-            ],
-        }],
+                )],
+            },
+            Column {
+                width: NARROW,
+                sections: &[
+                    section("Filter", &[p("low_cut", "Low Cut"), p("high_cut", "High Cut")]),
+                    section("Output", &[p("mix", "Mix"), Row::Toggles(&[("legacy", "Legacy")])]),
+                ],
+            },
+        ],
     },
     Layout {
         uri: "builtin:reverb",
-        columns: &[Column {
-            width: NARROW,
-            sections: &[
-                section("Space", &[p("size", "Size"), p("decay", "Decay"), p("predelay", "Pre-delay")]),
-                section("Tone", &[p("damping", "Damping"), p("low_cut", "Low Cut"), p("modulation", "Mod")]),
-                section("Output", &[p("width", "Width"), p("mix", "Mix")]),
-            ],
-        }],
+        columns: &[
+            Column {
+                width: NARROW,
+                sections: &[
+                    section("Space", &[p("size", "Size"), p("decay", "Decay"), p("predelay", "Pre-delay")]),
+                    section("Tail", &[p("damping", "Damping"), p("modulation", "Mod")]),
+                ],
+            },
+            Column {
+                width: NARROW,
+                sections: &[
+                    section("Input", &[p("low_cut", "Low Cut"), p("high_cut", "High Cut")]),
+                    section("Output", &[p("width", "Width"), p("mix", "Mix"), Row::Toggles(&[("legacy", "Legacy")])]),
+                ],
+            },
+        ],
     },
     Layout {
         uri: "builtin:eq",
@@ -396,8 +426,19 @@ pub static LAYOUTS: &[Layout] = &[
                 "",
                 Display::Eq,
                 &[Row::Pages(&[
-                    Page { label: "Cut", rows: &[p("low_cut", "Low Cut"), p("high_cut", "High Cut")] },
-                    Page { label: "Low", rows: &[p("low_freq", "Low Freq"), p("low_gain", "Low Gain")] },
+                    Page {
+                        label: "Cut",
+                        rows: &[
+                            p("low_cut", "Low Cut"),
+                            Row::Choice { id: "low_cut_slope", labels: SLOPES },
+                            p("high_cut", "High Cut"),
+                            Row::Choice { id: "high_cut_slope", labels: SLOPES },
+                        ],
+                    },
+                    Page {
+                        label: "Low",
+                        rows: &[p("low_freq", "Low Freq"), p("low_gain", "Low Gain"), p("low_q", "Low Q")],
+                    },
                     Page {
                         label: "Mid 1",
                         rows: &[p("mid1_freq", "Mid 1 Freq"), p("mid1_gain", "Mid 1 Gain"), p("mid1_q", "Mid 1 Q")],
@@ -406,30 +447,44 @@ pub static LAYOUTS: &[Layout] = &[
                         label: "Mid 2",
                         rows: &[p("mid2_freq", "Mid 2 Freq"), p("mid2_gain", "Mid 2 Gain"), p("mid2_q", "Mid 2 Q")],
                     },
-                    Page { label: "High", rows: &[p("high_freq", "High Freq"), p("high_gain", "High Gain")] },
+                    Page {
+                        label: "High",
+                        rows: &[p("high_freq", "High Freq"), p("high_gain", "High Gain"), p("high_q", "High Q")],
+                    },
                 ])],
             )],
         }],
     },
     Layout {
         uri: "builtin:compressor",
-        columns: &[Column {
-            width: WIDE,
-            sections: &[
-                shown(
+        columns: &[
+            Column {
+                width: WIDE,
+                sections: &[shown(
                     "Dynamics",
                     Display::Compressor,
                     &[
+                        Row::Choice { id: "detector", labels: &["Peak", "Bus"] },
                         p("threshold", "Threshold"),
                         p("ratio", "Ratio"),
                         p("knee", "Knee"),
                         p("attack", "Attack"),
                         p("release", "Release"),
+                        Row::Toggles(&[("auto_release", "Auto Release")]),
                     ],
-                ),
-                section("Output", &[p("makeup", "Makeup"), p("mix", "Mix")]),
-            ],
-        }],
+                )],
+            },
+            Column {
+                width: WIDE,
+                sections: &[
+                    section("Sidechain", &[Row::Sidechain, p("key_low_cut", "Low Cut"), p("key_high_cut", "High Cut")]),
+                    section(
+                        "Output",
+                        &[p("makeup", "Makeup"), Row::Toggles(&[("auto_makeup", "Auto Makeup")]), p("mix", "Mix")],
+                    ),
+                ],
+            },
+        ],
     },
     Layout {
         uri: "builtin:limiter",
@@ -444,7 +499,7 @@ pub static LAYOUTS: &[Layout] = &[
             width: NARROW,
             sections: &[
                 section("Modulation", &[p("rate", "Rate"), p("depth", "Depth"), p("feedback", "Feedback")]),
-                section("Output", &[p("mix", "Mix")]),
+                section("Output", &[p("width", "Width"), p("mix", "Mix")]),
             ],
         }],
     },
@@ -460,15 +515,35 @@ pub static LAYOUTS: &[Layout] = &[
                         shapes: &[Shape::LowPass, Shape::HighPass, Shape::BandPass, Shape::Notch],
                         cutoff: "cutoff",
                         resonance: "resonance",
+                        slope: Some("slope"),
                     },
                     &[
                         Row::Choice { id: "type", labels: &["LP", "HP", "BP", "Notch"] },
+                        Row::Choice { id: "slope", labels: &["12 dB", "24 dB"] },
                         p("cutoff", "Cutoff"),
                         p("resonance", "Reso"),
                     ],
                 ),
                 section("LFO", &[p("lfo_rate", "Rate"), p("lfo_amount", "Amount")]),
             ],
+        }],
+    },
+    Layout {
+        uri: "builtin:tremolo",
+        columns: &[Column {
+            width: WIDE,
+            sections: &[shown(
+                "Tremolo",
+                Display::Tremolo,
+                &[
+                    Row::Choice { id: "shape", labels: &["Sine", "Tri", "Square"] },
+                    Row::Toggles(&[("sync", "Sync")]),
+                    p("rate", "Rate"),
+                    beats("rate_beats", "Synced"),
+                    p("depth", "Depth"),
+                    p("spread", "Spread"),
+                ],
+            )],
         }],
     },
     Layout {
@@ -520,6 +595,7 @@ impl Row {
             Row::Param { id, .. } | Row::Choice { id, .. } | Row::Picks { id, .. } => vec![id],
             Row::Toggles(toggles) => toggles.iter().map(|(id, _)| *id).collect(),
             Row::Pages(pages) => pages.iter().flat_map(|page| page.rows).flat_map(Row::param_ids).collect(),
+            Row::Sidechain => Vec::new(),
         }
     }
 }
@@ -562,7 +638,9 @@ mod tests {
     /// The parameters a display reads.
     fn display_param_ids(display: Display) -> Vec<&'static str> {
         match display {
-            Display::Filter { kind, cutoff, resonance, .. } => vec![kind, cutoff, resonance],
+            Display::Filter { kind, cutoff, resonance, slope, .. } => {
+                [kind, cutoff, resonance].into_iter().chain(slope).collect()
+            }
             Display::Envelope { attack, decay, sustain, release } => vec![attack, decay, sustain, release],
             Display::Eq => vec![
                 "low_cut",
@@ -577,10 +655,15 @@ mod tests {
                 "high_freq",
                 "high_gain",
                 "high_cut",
+                "low_cut_slope",
+                "high_cut_slope",
+                "low_q",
+                "high_q",
             ],
             Display::Compressor => vec!["threshold", "ratio", "knee"],
             Display::Saturator => vec!["shape", "drive"],
             Display::Pump => vec!["depth", "curve"],
+            Display::Tremolo => vec!["depth", "shape", "spread"],
         }
     }
 
@@ -675,9 +758,25 @@ mod tests {
                         }
                     }
                     Row::Pages(pages) => rows.extend(pages.iter().flat_map(|page| page.rows)),
+                    Row::Sidechain => {}
                 }
             }
         }
+    }
+
+    /// A device is offered a track to listen to where it can listen to one,
+    /// and nowhere else.
+    #[test]
+    fn the_devices_that_take_a_key_are_the_ones_with_a_sidechain_row() {
+        for (descriptor, layout) in laid_out() {
+            let rows = layout.columns.iter().flat_map(|column| column.sections).flat_map(|section| section.rows);
+            let offered = rows.filter(|row| matches!(row, Row::Sidechain)).count();
+            let mut project = trill_core::Project::new("t");
+            let id = project.add_device(trill_core::ChainRef::Master, descriptor.uri.clone(), "d", None).unwrap();
+            let Ok(instance) = BuiltinFactory.create(project.device(id).unwrap(), 48_000.0, 512) else { continue };
+            assert_eq!(offered, usize::from(instance.processor.takes_key()), "{}", descriptor.uri);
+        }
+        assert!(layout_for("builtin:compressor").is_some());
     }
 
     #[test]

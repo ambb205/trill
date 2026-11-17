@@ -55,8 +55,8 @@ on the samples.
 
 | Crate | What lives there |
 |---|---|
-| `trill-core` | The model and nothing else: `project.rs` (`Project`, tracks, clips with their notes and controller curves, automation, every edit), `time_ops.rs`, `instrument.rs` (what a track knows of its instrument: drums or pitches, drum map, keyswitches, range, octave), `device.rs` (the device API, `EventKind`), `presets.rs`, `midi_file.rs`. No audio or UI dependencies. |
-| `trill-dsp` | The built-in devices (`synth`, `drums`, `sampler`, `drumrack`, `effects/`) and offline time-stretching. `lib.rs` is the registry. |
+| `trill-core` | The model and nothing else: `project.rs` (`Project`, tracks, clips with their notes and controller curves, automation, every edit), `time_ops.rs`, `instrument.rs` (what a track knows of its instrument: drums or pitches, drum map, keyswitches, range, octave), `device.rs` (the device API, `EventKind`), `presets.rs`, `midi_file.rs`, `formats.rs` (what a file of an older format meant by what it does not say). No audio or UI dependencies. |
+| `trill-dsp` | The built-in devices (`synth`, `drums`, `sampler`, `drumrack`, `effects/`: one file per effect or family, the compressor with its sidechain in `compressor.rs`) and offline time-stretching. `lib.rs` is the registry. |
 | `trill-media` | Decoding audio files, the shared `MediaCache`, waveform peaks, resampling, WAV writing. |
 | `trill-library` | The sample library (scan, index, search, tags from file names) and the settings file. |
 | `trill-theory` | Music theory as pure functions: chord symbols, progressions, voicings, grooves, bass lines, melody notation with its ornaments (`ornament.rs`: as an instrument's keys or the pitch wheel), keyswitches for articulations (`articulation.rs`), key and chord reading. |
@@ -97,7 +97,17 @@ on the samples.
   too (`trill-app/src/ui/assistant/tools.rs`, and what it changed in `places.rs`): without them the panel shows
   the tool's bare name.
 - **A built-in device:** a module in `trill-dsp` registered in `lib.rs`, and a layout in
-  `trill-app/src/ui/device_layouts.rs`.
+  `trill-app/src/ui/device_layouts.rs`. Its parameters' names are the schema a model reads: say the unit, and
+  what the ends of the range do.
+- **A change to how a built-in device sounds:** a song saved before must sound as it did. A project file holds
+  only the parameters that were set, so a new parameter defaults to what the device did before, or the device
+  gets a line in `trill-core/src/formats.rs` (what a file of the older format is taken to have said, written into
+  it as it is read) and the file format's number goes up. `trill-engine/tests/old_songs.rs` holds every effect to
+  the samples a format-1 file rendered to; `tests/effects.rs` holds what they do now to numbers.
+- **Routing:** a device may listen to another track (`Device::sidechain`, `Project::set_sidechain`). The tracks
+  are played in `Project::playing_order`, each after the tracks that feed it (`Project::feeds`: a group's
+  members, a return's senders, a device's key), and the edits refuse a loop. Whatever decides which tracks a
+  render makes has to ask `feeds`.
 - **Something the window remembers:** `Settings` (`trill-library/src/settings.rs`) has fixed fields; state that
   belongs to one part of the window lives in its own file beside it (`browser.json`, `assistant.json`,
   `keyboard.json`).

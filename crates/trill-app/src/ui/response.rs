@@ -39,6 +39,24 @@ pub fn filter_gain(shape: FilterShape, cutoff_hz: f64, resonance: f64, hz: f64) 
     }
 }
 
+/// Linear gain of the filter device at its 24 dB slope: two stages in a
+/// row, each with 0.8 times the root of the Q the resonance stands for.
+pub fn steep_filter_gain(shape: FilterShape, cutoff_hz: f64, resonance: f64, hz: f64) -> f64 {
+    let w = hz / cutoff_hz.max(1.0);
+    let q = 0.8 * resonance_q(resonance).sqrt();
+    let denominator = ((1.0 - w * w).powi(2) + (w / q).powi(2)).sqrt().max(1e-9);
+    let stage = match shape {
+        FilterShape::LowPass | FilterShape::LowPass24 => 1.0 / denominator,
+        FilterShape::HighPass => w * w / denominator,
+        // As the device has it: the band output is not brought to unity.
+        FilterShape::BandPass => (w / q) / denominator * q,
+        FilterShape::Notch => (1.0 - w * w).abs() / denominator,
+    };
+    // The one-stage band-pass is drawn at unity on its center; so is this.
+    let stage = if shape == FilterShape::BandPass { stage / q } else { stage };
+    stage * stage
+}
+
 /// Linear gain to decibels, floored so silence stays finite.
 pub fn to_db(gain: f64) -> f64 {
     20.0 * gain.max(1e-6).log10()
@@ -49,16 +67,23 @@ pub fn to_db(gain: f64) -> f64 {
 pub struct EqBands {
     /// High-pass corner; at or below 12 Hz the band is off.
     pub low_cut: f64,
-    pub low_shelf: (f64, f64),
+    /// How many biquads each cut is made of: 1, 2 or 4, for 12, 24 or
+    /// 48 dB an octave.
+    pub low_cut_stages: usize,
     /// Frequency, gain in dB, Q.
+    pub low_shelf: (f64, f64, f64),
     pub mid1: (f64, f64, f64),
     pub mid2: (f64, f64, f64),
-    pub high_shelf: (f64, f64),
+    pub high_shelf: (f64, f64, f64),
     /// Low-pass corner; at or above 19.9 kHz the band is off.
     pub high_cut: f64,
+    pub high_cut_stages: usize,
 }
 
-const BUTTERWORTH_Q: f64 = std::f64::consts::FRAC_1_SQRT_2;
+/// How many biquads the slope choice `index` of a cut is made of.
+pub fn cut_stages(index: f64) -> usize {
+    [1, 2, 4][(index.round().max(0.0) as usize).min(2)]
+}
 
 /// Magnitude of `(n2 s^2 + n1 s + n0) / (d2 s^2 + d1 s + d0)` at `s = jw`.
 fn biquad_magnitude(w: f64, numerator: [f64; 3], denominator: [f64; 3]) -> f64 {
@@ -72,30 +97,39 @@ fn peak_gain(freq: f64, gain_db: f64, q: f64, hz: f64) -> f64 {
     biquad_magnitude(hz / freq, [1.0, a / q, 1.0], [1.0, 1.0 / (a * q), 1.0])
 }
 
-fn low_shelf_gain(freq: f64, gain_db: f64, hz: f64) -> f64 {
+fn low_shelf_gain(freq: f64, gain_db: f64, q: f64, hz: f64) -> f64 {
     let a = 10f64.powf(gain_db / 40.0);
-    let b = a.sqrt() / BUTTERWORTH_Q;
+    let b = a.sqrt() / q.max(0.05);
     a * biquad_magnitude(hz / freq, [1.0, b, a], [a, b, 1.0])
 }
 
-fn high_shelf_gain(freq: f64, gain_db: f64, hz: f64) -> f64 {
+fn high_shelf_gain(freq: f64, gain_db: f64, q: f64, hz: f64) -> f64 {
     let a = 10f64.powf(gain_db / 40.0);
-    let b = a.sqrt() / BUTTERWORTH_Q;
+    let b = a.sqrt() / q.max(0.05);
     a * biquad_magnitude(hz / freq, [a, b, 1.0], [1.0, b, a])
+}
+
+/// Gain of a Butterworth cut of `stages` biquads at `corner`: a low cut,
+/// or a high cut with `high`.
+fn cut_gain(stages: usize, corner: f64, hz: f64, high: bool) -> f64 {
+    let numerator = if high { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] };
+    let qs = trill_dsp::util::butterworth_qs(stages);
+    let stage = |q: &f32| biquad_magnitude(hz / corner, numerator, [1.0, 1.0 / f64::from(*q), 1.0]);
+    qs.iter().take(stages.clamp(1, 4)).map(stage).product()
 }
 
 /// Gain of the whole equalizer at `hz`, in dB.
 pub fn eq_gain_db(bands: &EqBands, hz: f64) -> f64 {
     let mut gain = 1.0;
     if bands.low_cut > 12.0 {
-        gain *= biquad_magnitude(hz / bands.low_cut, [1.0, 0.0, 0.0], [1.0, 1.0 / BUTTERWORTH_Q, 1.0]);
+        gain *= cut_gain(bands.low_cut_stages, bands.low_cut, hz, false);
     }
-    gain *= low_shelf_gain(bands.low_shelf.0, bands.low_shelf.1, hz);
+    gain *= low_shelf_gain(bands.low_shelf.0, bands.low_shelf.1, bands.low_shelf.2, hz);
     gain *= peak_gain(bands.mid1.0, bands.mid1.1, bands.mid1.2, hz);
     gain *= peak_gain(bands.mid2.0, bands.mid2.1, bands.mid2.2, hz);
-    gain *= high_shelf_gain(bands.high_shelf.0, bands.high_shelf.1, hz);
+    gain *= high_shelf_gain(bands.high_shelf.0, bands.high_shelf.1, bands.high_shelf.2, hz);
     if bands.high_cut < 19_900.0 {
-        gain *= biquad_magnitude(hz / bands.high_cut, [0.0, 0.0, 1.0], [1.0, 1.0 / BUTTERWORTH_Q, 1.0]);
+        gain *= cut_gain(bands.high_cut_stages, bands.high_cut, hz, true);
     }
     to_db(gain)
 }
@@ -125,6 +159,19 @@ pub fn saturate(shape: usize, x: f64) -> f64 {
         _ if x >= 0.0 => x.tanh(),
         _ => (x * 0.7).tanh() / 0.7,
     }
+}
+
+/// Level of the tremolo at `phase` (in cycles) of a cycle that starts at
+/// full level, for a shape by index: sine, triangle, square.
+pub fn tremolo_level(shape: usize, depth: f64, phase: f64) -> f64 {
+    let phase = phase.rem_euclid(1.0);
+    let dip = match shape {
+        0 => 0.5 - 0.5 * (phase * std::f64::consts::TAU).cos(),
+        1 => 1.0 - (2.0 * phase - 1.0).abs(),
+        _ if phase < 0.5 => 0.0,
+        _ => 1.0,
+    };
+    1.0 - depth.clamp(0.0, 1.0) * dip
 }
 
 /// Gain of the pump effect at `phase` (0..1) through its cycle.
@@ -201,14 +248,19 @@ mod tests {
         }
     }
 
+    /// The Q of a plain shelf, and of a cut of 12 dB an octave.
+    const BUTTERWORTH_Q: f64 = std::f64::consts::FRAC_1_SQRT_2;
+
     fn flat() -> EqBands {
         EqBands {
             low_cut: 10.0,
-            low_shelf: (100.0, 0.0),
+            low_cut_stages: 1,
+            low_shelf: (100.0, 0.0, BUTTERWORTH_Q),
             mid1: (500.0, 0.0, 1.0),
             mid2: (3000.0, 0.0, 1.0),
-            high_shelf: (8000.0, 0.0),
+            high_shelf: (8000.0, 0.0, BUTTERWORTH_Q),
             high_cut: 20_000.0,
+            high_cut_stages: 1,
         }
     }
 
@@ -227,7 +279,8 @@ mod tests {
         let cut = EqBands { mid1: (500.0, -9.0, 4.0), ..flat() };
         assert!(close(eq_gain_db(&cut, 500.0), -9.0, 1e-6));
 
-        let shelves = EqBands { low_shelf: (100.0, 6.0), high_shelf: (8000.0, -4.0), ..flat() };
+        let shelves =
+            EqBands { low_shelf: (100.0, 6.0, BUTTERWORTH_Q), high_shelf: (8000.0, -4.0, BUTTERWORTH_Q), ..flat() };
         assert!(close(eq_gain_db(&shelves, 20.0), 6.0, 0.3), "{}", eq_gain_db(&shelves, 20.0));
         assert!(close(eq_gain_db(&shelves, 100.0), 3.0, 0.1), "half the gain at the corner");
         assert!(eq_gain_db(&shelves, 1000.0).abs() < 0.3);
@@ -237,6 +290,44 @@ mod tests {
         assert!(close(eq_gain_db(&cuts, 180.0), -3.01, 0.01), "a Butterworth corner is 3 dB down");
         assert!(close(eq_gain_db(&cuts, 9000.0), -3.01, 0.01));
         assert!(eq_gain_db(&cuts, 45.0) < -23.0 && eq_gain_db(&cuts, 1200.0).abs() < 0.1);
+
+        // Steeper cuts are still 3 dB down at the corner, and fall by 24
+        // and by 48 dB an octave: an octave under it, a Butterworth of the
+        // order is 24.1 and 48.2 dB down.
+        for (stages, octave_down) in [(2, -24.1), (4, -48.2)] {
+            let steep = EqBands { low_cut: 180.0, low_cut_stages: stages, ..flat() };
+            assert!(close(eq_gain_db(&steep, 180.0), -3.01, 0.01), "{stages}: {}", eq_gain_db(&steep, 180.0));
+            assert!(close(eq_gain_db(&steep, 90.0), octave_down, 0.1), "{stages}: {}", eq_gain_db(&steep, 90.0));
+            let top = EqBands { high_cut: 4000.0, high_cut_stages: stages, ..flat() };
+            assert!(close(eq_gain_db(&top, 8000.0), octave_down, 0.1), "{stages}: {}", eq_gain_db(&top, 8000.0));
+        }
+        assert_eq!((cut_stages(0.0), cut_stages(1.0), cut_stages(2.0), cut_stages(9.0)), (1, 2, 4, 4));
+        // A shelf with a Q overshoots under its corner and dips over it
+        // (the cookbook's numbers for +9 dB at 200 Hz and a Q of 1.5).
+        let sharp = EqBands { low_shelf: (200.0, 9.0, 1.5), ..flat() };
+        assert!(close(eq_gain_db(&sharp, 140.0), 11.0, 0.1) && close(eq_gain_db(&sharp, 320.0), -2.3, 0.1));
+        assert!(close(eq_gain_db(&sharp, 200.0), 4.5, 0.01), "still half the gain at the corner");
+    }
+
+    #[test]
+    fn the_steep_filter_is_two_stages_with_no_more_of_a_peak() {
+        use FilterShape::*;
+        let db = |hz| to_db(steep_filter_gain(LowPass, 700.0, 0.12, hz));
+        assert!(close(db(700.0), -6.0, 0.1), "6 dB down at the cutoff at the song's resonance: {}", db(700.0));
+        assert!(close(db(2800.0), -48.0, 1.0), "24 dB an octave: {}", db(2800.0));
+        assert!(close(to_db(steep_filter_gain(BandPass, 1000.0, 0.5, 1000.0)), 0.0, 0.01));
+        assert!(to_db(steep_filter_gain(HighPass, 1000.0, 0.2, 250.0)) < -44.0);
+    }
+
+    #[test]
+    fn a_tremolo_starts_at_full_level_and_dips_half_way() {
+        for shape in 0..3 {
+            assert_eq!(tremolo_level(shape, 0.4, 0.0), 1.0);
+            assert!(close(tremolo_level(shape, 0.4, 0.5), 0.6, 1e-9), "{shape}");
+            assert_eq!(tremolo_level(shape, 0.0, 0.5), 1.0);
+        }
+        assert!(close(tremolo_level(1, 1.0, 0.25), 0.5, 1e-9), "a triangle is half way down a quarter in");
+        assert_eq!(tremolo_level(2, 1.0, 0.25), 1.0, "a square has not moved yet");
     }
 
     #[test]

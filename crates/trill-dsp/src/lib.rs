@@ -534,6 +534,33 @@ mod tests {
     }
 
     #[test]
+    fn the_keys_preset_is_a_little_wide() {
+        let keys = synth::PRESETS.iter().find(|preset| preset.name == "keys").unwrap();
+        let chord = |b: usize| match b {
+            0 => [48u8, 60, 64, 67].into_iter().flat_map(note_on).collect(),
+            _ => vec![],
+        };
+        let sides_under_middle = |params: &[(&str, f64)]| {
+            let mut device = make("polysynth", params);
+            let (l, r) = run(device.as_mut(), 280, |_| 0.0, chord);
+            let mid: Vec<f32> = l.iter().zip(&r).map(|(l, r)| (l + r) * 0.5).collect();
+            let side: Vec<f32> = l.iter().zip(&r).map(|(l, r)| (l - r) * 0.5).collect();
+            (util::gain_to_db(rms(&mid)) - util::gain_to_db(rms(&side)), util::gain_to_db(rms(&l)))
+        };
+        // An electric piano in a mix has some width (the sampled one of the
+        // bench's first song had its sides 18.9 dB under its middle); a
+        // pad's worth would be wrong for it.
+        let (sides, level) = sides_under_middle(keys.params);
+        assert!((12.0..=20.0).contains(&sides), "the sides are {sides:.1} dB under the middle");
+        // One voice, as the preset was: the same on both sides, and as loud.
+        let one: Vec<(&str, f64)> = keys.params.iter().copied().filter(|(id, _)| !id.starts_with("unison")).collect();
+        let (mono, _) = sides_under_middle(&one);
+        assert!(mono > 100.0, "{mono}");
+        let before: Vec<(&str, f64)> = one.iter().copied().filter(|(id, _)| *id != "volume").collect();
+        assert!((level - sides_under_middle(&before).1).abs() < 0.5, "as loud as it was");
+    }
+
+    #[test]
     fn synth_plays_the_right_pitch() {
         let mut device = make("polysynth", &[("osc1_wave", 0.0), ("velocity_sens", 0.0)]);
         let (l, _) = run(device.as_mut(), 200, |_| 0.0, |b| if b == 0 { note_on(69) } else { vec![] });

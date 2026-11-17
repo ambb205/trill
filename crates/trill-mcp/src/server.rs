@@ -101,8 +101,9 @@ expression, as a saxophone is without air. After writing such a line, call shape
 the phrases from the notes and writes an expression curve that rises into the high points, swells through long \
 notes and breathes between phrases. set_controllers writes or adjusts a curve point by point (a pedal, a pitch \
 bend, vibrato on the mod wheel). measure names any track that had notes and made no sound.
-4. Shape the sound: add_device for effects (reverb, delay, eq, compressor, pump...), update_device for \
-parameters, set_automation for movement such as filter sweeps and fades, update_track for the mix.
+4. Shape the sound: add_device for effects (reverb, delay, eq, compressor, filter, chorus, tremolo...), \
+update_device for parameters, set_automation for movement such as filter sweeps and fades, update_track for the \
+mix. describe_device says what each parameter does and in what unit.
 5. measure reports loudness, true peak, spectral balance, every track's level and loudness, each section's \
 loudness and what the compressors and limiters took off, without writing a file. You cannot hear, so read those \
 numbers and adjust, as often as it takes.
@@ -131,7 +132,16 @@ Playing and recording live
 
 Musical guidance
 - Vary velocity and use transform_notes to humanize; identical velocities sound mechanical.
-- Keep bass and kick in the centre; use low_cut on the EQ for everything else; leave headroom on the master.
+- Keep bass and kick in the centre; use low_cut on the EQ for everything else (slope \"24 dB\" or \"48 dB\" \
+clears what is under the corner without thinning what is over it); leave headroom on the master.
+- Compressor: on a single track the \"peak\" detector (the default) with attack 1-10 ms; on a group or the master \
+set detector \"bus\", which is the one that works with a slow attack on a full mix (threshold about 10 dB under \
+the peaks, ratio 2, attack 10-30 ms, auto_release on: about 2 dB off). auto_makeup adds a known amount of gain, \
+0.72 x -threshold x (1 - 1/ratio) dB. measure says what each compressor took off.
+- To make room for the kick, put a compressor on the bass (or the pads) and give it the kick's track as \
+`sidechain`: it then turns its own track down whenever the kick sounds. The kick's track may be muted.
+- Reverb and delay belong on return tracks with `mix` 1, fed by sends of -10 to -20 dB: both filter what goes into \
+them (low_cut, high_cut), and the reverb returns more the longer its decay.
 - Give sections contrast: add and remove parts, automate filters and volume, change the drum pattern.
 - Rearranging: edit_time removes, repeats or opens up a stretch of time on every track at once (drop a \
 section, double a chorus, make room for a bridge).
@@ -150,6 +160,15 @@ pub(crate) fn finish(reply: Reply) -> CallToolResult {
 
 /// Turns an error into a message that says what to do next: a missing id
 /// comes back with the ids that do exist.
+/// Says which track `device` listens to in place of its own input, by id
+/// and by name, if it listens to one.
+fn sidechain_into(out: &mut Value, project: &Project, device: &trill_core::Device) {
+    if let Some(track) = device.sidechain {
+        let name = project.track(track).map(|track| track.name.clone()).unwrap_or_default();
+        out["sidechain"] = json!({ "track": track, "name": name });
+    }
+}
+
 pub(crate) fn explain(project: &Project, error: impl Into<SessionError>) -> String {
     let error = error.into();
     let list = |items: Vec<String>, what: &str| {
@@ -640,20 +659,30 @@ impl TrillServer {
 
     /// Add an instrument or effect to a track's chain, or to the master chain when `track` is omitted. `preset`
     /// starts it from one of its presets, a plugin's included (describe_device lists and searches them);
-    /// `params` go on top of the preset.
+    /// `params` go on top of the preset. `sidechain` has a compressor listen to another track.
     #[tool(annotations(title = "Add device"))]
     async fn add_device(&self, Parameters(request): Parameters<AddDeviceRequest>) -> CallToolResult {
         self.ready_presets(Some(&request.uri), &request.preset).await;
         let mut session = self.session.lock();
         let reply = (|| {
             let chain = request.track.map_or(ChainRef::Master, |track| ChainRef::Track(TrackId(track)));
+            let before = session.undo_step();
             let device = session
                 .add_device(chain, &request.uri, request.preset.as_deref(), request.index)
                 .map_err(|error| preset_hint(explain(session.project(), error), &request.uri))?;
-            if let Some(params) = &request.params
-                && let Err(error) = set_params(&mut session, device, params)
-            {
-                session.undo();
+            let rest: Result<(), String> = (|| {
+                if let Some(params) = &request.params {
+                    set_params(&mut session, device, params)?;
+                }
+                if let Some(track) = request.sidechain {
+                    let listening = session.set_sidechain(device, Some(TrackId(track)));
+                    listening.map_err(|error| explain(session.project(), error))?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = rest {
+                // Back to before the device was added, whatever of it was done.
+                while session.undo_step() != before && session.undo() {}
                 return Err(format!("{error}. The device was not added."));
             }
             let model = session.project().device(device).map_err(|e| e.to_string())?;
@@ -661,6 +690,7 @@ impl TrillServer {
             if let Some(preset) = &model.preset {
                 out["preset"] = json!(preset.name);
             }
+            sidechain_into(&mut out, session.project(), model);
             crate::sounds::preset_note_into(&mut out, &mut session, device);
             Ok(out)
         })();
@@ -697,6 +727,11 @@ impl TrillServer {
             let states = session.device_params(id).map_err(|error| explain(project, error))?;
             let mut out = device_json(model);
             out["enabled"] = json!(model.enabled);
+            sidechain_into(&mut out, project, model);
+            if model.sidechain.is_none() && session.device_takes_key(id) {
+                out["sidechain_hint"] =
+                    json!("Listens to its own input. update_device `sidechain` has it listen to another track.");
+            }
             if session.loading().contains(&id) {
                 out["loading"] = json!(true);
             }
@@ -765,9 +800,10 @@ impl TrillServer {
         finish(reply)
     }
 
-    /// Change a device: switch preset, set parameters or settings, or bypass it. A preset replaces the device's sound, a
-    /// plugin's as its own preset browser would (get_device and describe_device list and search them);
-    /// `params` in the same call go on top of it, and the whole call is one undo step.
+    /// Change a device: switch preset, set parameters or settings, bypass it, or have it listen to another
+    /// track (`sidechain`). A preset replaces the device's sound, a plugin's as its own preset browser would
+    /// (get_device and describe_device list and search them); `params` in the same call go on top of it, and the
+    /// whole call is one undo step.
     #[tool(annotations(title = "Update device"))]
     async fn update_device(&self, Parameters(request): Parameters<UpdateDeviceRequest>) -> CallToolResult {
         let id = DeviceId(request.device);
@@ -802,6 +838,10 @@ impl TrillServer {
                         Ok(())
                     })?;
                 }
+                if let Some(track) = request.sidechain {
+                    let track = (track != 0).then_some(TrackId(track));
+                    session.set_sidechain(id, track).map_err(|error| explain(session.project(), error))?;
+                }
                 Ok(())
             })();
             session.end_gesture();
@@ -818,6 +858,12 @@ impl TrillServer {
             }
             if !settings.is_empty() {
                 out["settings"] = json!(settings.into_iter().collect::<BTreeMap<String, String>>());
+            }
+            if request.sidechain.is_some() {
+                sidechain_into(&mut out, session.project(), model);
+                if model.sidechain.is_none() {
+                    out["sidechain"] = json!(null);
+                }
             }
             crate::sounds::preset_note_into(&mut out, &mut session, id);
             Ok(out)
