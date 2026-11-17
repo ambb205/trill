@@ -579,11 +579,7 @@ impl MakingFilm {
                 max_tail_seconds: 4.0,
                 ..RenderOptions::default()
             };
-            let rendered =
-                self.render.render(&options).map_err(|error| format!("The song could not be rendered: {error}."))?;
-            if progress.is_stopped() {
-                return Err("The film was stopped before its first frame; nothing of it was kept.".to_string());
-            }
+            let rendered = crate::export::sound(&self.render, options, progress)?;
             let song = rendered.left.len() as f64 / f64::from(rendered.sample_rate);
             // The film ends as the song does: on its last bars.
             let length = making.length();

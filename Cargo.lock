@@ -4782,6 +4782,7 @@ dependencies = [
  "trill-engine",
  "trill-media",
  "trill-noir",
+ "trill-runtime",
 ]
 
 [[package]]

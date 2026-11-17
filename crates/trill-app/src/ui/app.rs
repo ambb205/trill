@@ -1089,6 +1089,13 @@ impl TrillApp {
         &self.filming
     }
 
+    /// Exports the song to `path`, with its stems if asked: what choosing
+    /// a place in the system's dialog leads to.
+    #[cfg(test)]
+    pub fn export_to(&mut self, ctx: &egui::Context, path: std::path::PathBuf, stems: bool) {
+        files::export_to(ctx, &mut self.cx(), path, stems);
+    }
+
     /// Makes the film the panel describes at `path`: what choosing a place
     /// in the system's dialog leads to.
     #[cfg(test)]

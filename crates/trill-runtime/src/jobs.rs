@@ -38,6 +38,11 @@ pub enum Program {
     /// This program, which calls [`run_as_job_if_requested`] first thing:
     /// `trill-job`, or any other that does.
     Executable(PathBuf),
+    /// The test program that is running, started again to run only its
+    /// test of this name: a test that calls [`run_as_job_if_requested`]
+    /// and does nothing else. For the tests of a crate that builds no
+    /// program which could do its jobs.
+    ThisTest(String),
 }
 
 /// How a runtime's jobs are done apart: see [`crate::Runtime::do_jobs_apart`].
@@ -132,10 +137,14 @@ struct Devices {
 /// An error is about the program: the one that is running cannot be
 /// found.
 pub(crate) fn apart(jobs: Jobs, plugins: Option<PluginHost>, media: Arc<MediaCache>) -> Result<Apart, String> {
-    let program = match jobs.program {
-        Program::Executable(path) => path,
-        Program::CurrentExecutable => std::env::current_exe()
-            .map_err(|error| format!("this program's own file cannot be found to start it a second time: {error}"))?,
+    let own = || {
+        std::env::current_exe()
+            .map_err(|error| format!("this program's own file cannot be found to start it a second time: {error}"))
+    };
+    let (program, test) = match jobs.program {
+        Program::Executable(path) => (path, None),
+        Program::CurrentExecutable => (own()?, None),
+        Program::ThisTest(test) => (own()?, Some(test)),
     };
     let hosts: Vec<PluginHost> = plugins.into_iter().chain(jobs.plugins).collect();
     let (scripted, patient_teardown) = (jobs.scripted, jobs.patient_teardown);
@@ -162,7 +171,10 @@ pub(crate) fn apart(jobs: Jobs, plugins: Option<PluginHost>, media: Arc<MediaCac
         keep_for_probes: jobs.keep_for_probes,
         keep_for_renders: jobs.keep_for_renders,
         room,
-        ..Setup::new(program, recipe)
+        ..match test {
+            Some(test) => Setup::by_test(&test, recipe).map_err(|error| error.to_string())?,
+            None => Setup::new(program, recipe),
+        }
     };
     Ok(Apart::new(setup))
 }
