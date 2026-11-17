@@ -26,8 +26,10 @@ const AMPLE: &str = "Keyswitches sit under the range and sound nothing: press on
                      then silent closer too, where the instrument has put the upper note on an open string (it \
                      picks strings itself): write the lower note picked where it must sound. A hammered or pulled \
                      note is some 6 dB quieter than a picked one. A harmonic rings an octave above its key and a \
-                     pinch harmonic two (the writing tools write the key under the pitch asked for); both are \
-                     quieter than a picked note. The pitch wheel bends two semitones each way. This depends on \
+                     pinch harmonic two, at every key and however hard it is hit (the writing tools write the key \
+                     under the pitch asked for). How loud one is against a picked note is the preset's doing: a \
+                     pinch harmonic is as loud on most and some 15 dB quieter on some, and the bass's harmonic is \
+                     some 13 dB quieter. The pitch wheel bends two semitones each way. This depends on \
                      the plugin's parameter \"Auto Legato\", its automatic legato. At 1, where the guitars start \
                      and where nearly every preset of the maker's leaves it, a note that begins while a \
                      neighbouring one still rings (up to four keys above it) is hammered on without the hammer key \

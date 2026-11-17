@@ -1247,7 +1247,7 @@ fn crossings(audio: &[f32], start: f64, seconds: f64) -> f64 {
 /// away sooner than an open one (both are still at full level half a second
 /// on), so it is told by its brightness.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs Ample Metal Eclipse (VST3) installed; run with `cargo test -p trill-mcp --test instruments -- --include-ignored --nocapture`"]
+#[ignore = "needs Ample Metal Eclipse (VST3) installed; run with `cargo test -p trill-mcp --test instruments -- --include-ignored --nocapture --test-threads 1`"]
 async fn a_palm_muted_note_is_duller_than_an_open_one_on_the_installed_ample_guitar() {
     let Some(fixture) = connect_installed(ECLIPSE).await else { return };
     let client = &fixture.client;
@@ -1286,7 +1286,7 @@ async fn a_palm_muted_note_is_duller_than_an_open_one_on_the_installed_ample_gui
 /// pitch; and on the two where the entry says a softly hit string is
 /// muted, a note hit softly is duller than one hit hard.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs Ample Guitar PF, Metal Eclipse or Metal Hellrazer (VST3) installed; run with `cargo test -p trill-mcp --test instruments -- --include-ignored --nocapture`"]
+#[ignore = "needs Ample Guitar PF, Metal Eclipse or Metal Hellrazer (VST3) installed; run with `cargo test -p trill-mcp --test instruments -- --include-ignored --nocapture --test-threads 1`"]
 async fn a_probe_hears_what_the_shipped_entries_say_of_the_installed_ample_guitars() {
     const PF: &str = "vst3:ABCDEF019182FAEB4170736441677066";
     const HELLRAZER: &str = "vst3:ABCDEF019182FAEB41707364416D6872";
@@ -1316,8 +1316,9 @@ async fn a_probe_hears_what_the_shipped_entries_say_of_the_installed_ample_guita
         assert_eq!(heard["harmonic"].0, "E4", "{uri}: a natural harmonic is the octave above");
         assert_eq!(heard["palm_mute"].0, "E3", "{uri}");
         assert!(heard["open"].1 > 1.5 * heard["palm_mute"].1, "{uri}: a palm-muted note is duller: {heard:?}");
-        // A pinch harmonic squeals: heard above the note on the metal guitars, and on the PRS at
-        // the note's own pitch but brighter.
+        // A pinch harmonic squeals two octaves above its key on all three. On the PF as it comes
+        // the string's own note is still in the sound under it, and that is the pitch a probe
+        // names there: it is the brighter for the squeal.
         let (pinch, open) = (&heard["pinch_harmonic"], &heard["open"]);
         assert!(pinch.0 != "E3" || pinch.1 > 1.3 * open.1, "{uri}: a pinch harmonic: {heard:?}");
 
@@ -1342,7 +1343,7 @@ async fn a_probe_hears_what_the_shipped_entries_say_of_the_installed_ample_guita
 /// as its shipped entry says, so a line asked for by the notes to be heard
 /// is written an octave up, and a probe hears it where it was asked for.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs Ample Metal R (VST3) installed; run with `cargo test -p trill-mcp --test instruments -- --include-ignored --nocapture`"]
+#[ignore = "needs Ample Metal R (VST3) installed; run with `cargo test -p trill-mcp --test instruments -- --include-ignored --nocapture --test-threads 1`"]
 async fn the_installed_ample_bass_is_heard_an_octave_below_its_keys_as_its_entry_says() {
     let Some(fixture) = connect_installed(RAY5).await else { return };
     let client = &fixture.client;
@@ -1374,85 +1375,233 @@ async fn the_installed_ample_bass_is_heard_an_octave_below_its_keys_as_its_entry
     assert!(right >= 3 && wrong == 0, "{heard:?}");
 }
 
-/// With the installed Superior Drummer 3: the drums its shipped entry
-/// names are on the keys it gives them, every one of them sounds, and they
-/// are what their names say as far as a measurement tells (an open hat
-/// rings longer than a closed one, a cymbal is brighter than a kick).
+/// A track on `instrument` with the maker's preset `preset`, asked for again
+/// while the list of presets is still being read (a few seconds, the first
+/// time). The track's id and its instrument's.
+async fn track_on_preset(client: &Client, name: &str, instrument: &str, preset: &str) -> (u64, u64) {
+    for _ in 0..90 {
+        let made = call(client, "create_track", json!({ "name": name, "instrument": instrument, "preset": preset }));
+        match made.await {
+            Ok(made) => return (made["track_id"].as_u64().unwrap(), made["instrument_device_id"].as_u64().unwrap()),
+            Err(error) if error.contains("still being read") => {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            Err(error) => panic!("create_track on '{preset}': {error}"),
+        }
+    }
+    panic!("the presets of {instrument} were never read");
+}
+
+/// With the installed Superior Drummer 3 and its core library: the drum
+/// map of a track is the kit's own, read from the kit that is loaded, and
+/// follows it when another is. "Metal Organic" hangs its china in the last
+/// cymbal's place (key 52) and a crash in the first (86); "Charlies
+/// Shelter" hangs its china where most kits have a crash (49), and has
+/// neither a splash nor a second crash. A drum written by name lands on
+/// the key of the kit that is loaded, and a drum that kit has not got is
+/// left out. What the kit calls a drum is what a probe hears on its key,
+/// as far as a measurement tells.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs Superior Drummer 3 (VST3) installed; run with `cargo test -p trill-mcp --test instruments -- --include-ignored --nocapture`"]
-async fn the_drums_of_the_installed_superior_drummer_3_are_on_the_keys_its_entry_names() {
+#[ignore = "needs Superior Drummer 3 (VST3) with its core library installed; run with `cargo test -p trill-mcp --test instruments -- --include-ignored --nocapture --test-threads 1`"]
+async fn a_drum_name_lands_on_that_drum_in_the_kit_superior_drummer_3_has_loaded() {
     let Some(fixture) = connect_installed(SUPERIOR).await else { return };
     let client = &fixture.client;
-    let kit = track(client, "Drums", SUPERIOR).await;
+    let (kit, device) = track_on_preset(client, "Drums", SUPERIOR, "Metal Organic").await;
     assert_eq!(shown(client, kit).await["plays"], "drums");
 
-    // One hit of each, by name, a step apart.
-    let drums = [
-        ("kick", 36),
-        ("snare", 38),
-        ("rimshot", 40),
-        ("closed_hat", 42),
-        ("closed_hat_edge", 22),
-        ("open_hat", 46),
-        ("wide_open_hat", 26),
-        ("high_tom", 48),
-        ("floor_tom", 41),
-        ("ride", 51),
-        ("ride_bell", 53),
-        ("china", 52),
-        ("splash", 55),
-        ("cymbal_1", 86),
-    ];
-    let lanes: serde_json::Map<String, Value> = drums
+    let said = ok(client, "get_instrument_profile", json!({ "track": kit })).await;
+    let map = said["drum_map"].clone();
+    eprintln!(
+        "Metal Organic: {} names; has no {}; {}",
+        map.as_object().unwrap().len(),
+        said["kit"]["has_no"],
+        said["kit"]["what"]
+    );
+    let key = |map: &Value, name: &str| map[name].as_u64().unwrap_or_else(|| panic!("the kit has no {name}: {map}"));
+    assert_eq!((key(&map, "kick"), key(&map, "snare"), key(&map, "rimshot")), (36, 38, 40));
+    assert_eq!(
+        (key(&map, "china"), key(&map, "cymbal_5"), key(&map, "crash"), key(&map, "cymbal_1")),
+        (52, 52, 86, 86)
+    );
+    assert_eq!((key(&map, "splash"), key(&map, "crash2"), key(&map, "ride"), key(&map, "ride_bell")), (55, 49, 51, 53));
+    assert_eq!(
+        (key(&map, "high_tom"), key(&map, "mid_tom"), key(&map, "low_tom"), key(&map, "floor_tom")),
+        (48, 47, 43, 41),
+        "four toms, the highest first; the third rack tom's place is empty in this kit"
+    );
+    assert!(map.get("rack_tom_3").is_none() && map.get("cowbell").is_none() && map.get("clap").is_none(), "{map}");
+    let what = said["kit"]["what"].as_str().unwrap();
+    assert!(what.contains("china (cymbal_5): 20\" Masterwork Sehhar China"), "{what}");
+    assert!(what.contains("crash (cymbal_1): 17\" Paiste 2002 Medium Crash"), "{what}");
+
+    // Written by name, every drum is on its key in this kit, and each key sounds as what it is called.
+    let names =
+        ["kick", "snare", "closed_hat", "open_hat", "high_tom", "floor_tom", "crash", "china", "splash", "ride"];
+    let lanes: serde_json::Map<String, Value> = names
         .iter()
         .enumerate()
-        .map(|(step, (name, _))| {
+        .map(|(step, name)| {
             let steps: String = (0..16).map(|at| if at == step { 'x' } else { '.' }).collect();
             ((*name).to_string(), json!(steps))
         })
         .collect();
     let beat = ok(client, "write_drums", json!({ "track": kit, "lanes": lanes })).await;
-    assert!(beat.get("notes").is_none(), "none of them needed a stand-in: {beat}");
+    assert!(beat.get("warnings").is_none() && beat.get("left_out").is_none(), "{beat}");
     let keys: Vec<u64> = notes_of(client, &beat["clip_id"]).await.iter().map(|note| note.0).collect();
-    assert_eq!(keys, drums.map(|(_, key)| key), "each name on the key the entry gives it");
-
-    let begun = std::time::Instant::now();
+    assert_eq!(keys, names.map(|name| key(&map, name)), "each name on the key this kit has it on");
     let probed = ok(client, "probe", json!({ "track": kit, "notes": keys, "detail": true, "tail": 3 })).await;
-    eprintln!("probed in {:.1?}: sounding {}; silent {}", begun.elapsed(), probed["sounding"], probed["silent"]);
     let heard = probed["heard"].as_array().unwrap();
-    // What was measured of the drum on `key`: how long it rings, and how bright it is.
     let measured = |name: &str| -> (f64, f64) {
-        let key = drums.iter().find(|drum| drum.0 == name).unwrap().1;
+        let wanted = key(&map, name);
         let entry = heard
             .iter()
-            .find(|entry| entry["notes"].as_str().unwrap().ends_with(&format!("({key})")))
-            .unwrap_or_else(|| panic!("{name} ({key}) was not played: {probed}"));
-        assert!(entry.get("silent").is_none(), "{name} ({key}) makes no sound: {entry}");
+            .find(|entry| entry["notes"].as_str().unwrap().ends_with(&format!("({wanted})")))
+            .unwrap_or_else(|| panic!("{name} ({wanted}) was not played: {probed}"));
+        assert!(entry.get("silent").is_none(), "{name} ({wanted}) makes no sound: {entry}");
         let rings = match &entry["rings_s"] {
             Value::String(longer) => longer.trim_start_matches('>').parse().unwrap(),
             seconds => seconds.as_f64().unwrap(),
         };
         (rings, entry["bright_hz"].as_f64().unwrap())
     };
-    for (name, key) in drums {
+    for name in names {
         let (rings, bright) = measured(name);
-        eprintln!("   {name} ({key}): rings {rings:.2} s, {bright:.0} Hz");
+        eprintln!("   {name} ({}): rings {rings:.2} s, {bright:.0} Hz", key(&map, name));
     }
-    assert!(probed.get("silent").is_none(), "{probed}");
     assert!(measured("open_hat").0 > measured("closed_hat").0, "an open hat rings longer than a closed one");
-    assert!(measured("wide_open_hat").0 > measured("closed_hat_edge").0, "and so with the two the kit adds");
-    for cymbal in ["china", "splash", "cymbal_1", "ride"] {
-        assert!(measured(cymbal).1 > 2.0 * measured("kick").1, "{cymbal} is brighter than the kick");
+    for cymbal in ["china", "crash", "splash", "ride"] {
+        assert!(measured(cymbal).1 > 5.0 * measured("kick").1, "{cymbal} is far brighter than the kick");
         assert!(measured(cymbal).0 > measured("closed_hat").0, "{cymbal} rings longer than a closed hat");
     }
-    assert!(measured("floor_tom").1 < measured("splash").1, "a floor tom is darker than a splash");
+    assert!(measured("floor_tom").1 < measured("high_tom").1 * 1.2, "the floor tom is no brighter than the high tom");
+    // The probe calls the keys what this kit calls them.
+    let named = heard.iter().find(|entry| entry["notes"] == "E3 (52)").unwrap();
+    assert_eq!(named["drum_name"], "china");
 
-    // General MIDI's high tom key is no tom on this kit, which is why the entry moves the name.
-    let other = ok(client, "probe", json!({ "track": kit, "notes": [50], "tail": 3 })).await;
-    let on_50 = other["heard"][0]["bright_hz"].as_f64().unwrap();
-    eprintln!("   key 50: {}", other["heard"][0]);
-    assert!(other["heard"][0].get("drum_name").is_none(), "and the probe does not call it one");
-    let named = heard.iter().find(|entry| entry["notes"] == "C3 (48)").unwrap();
-    assert_eq!(named["drum_name"], "high_tom", "the probe calls drums what the kit does");
-    assert!(on_50 > 5.0 * measured("high_tom").1, "key 50 is far brighter than a tom: {on_50} Hz");
+    // Another kit is loaded: the same names are that kit's keys, and what it has not got is left out.
+    ok(client, "update_device", json!({ "device": device, "preset": "Charlies Shelter" })).await;
+    let said = ok(client, "get_instrument_profile", json!({ "track": kit })).await;
+    let other = said["drum_map"].clone();
+    eprintln!(
+        "Charlies Shelter: {} names; has no {}; {}",
+        other.as_object().unwrap().len(),
+        said["kit"]["has_no"],
+        said["kit"]["what"]
+    );
+    assert_eq!(
+        (key(&other, "china"), key(&other, "crash"), key(&other, "kick")),
+        (49, 57, 36),
+        "its china is where most kits hang a crash"
+    );
+    assert!(other.get("splash").is_none() && other.get("crash2").is_none(), "{other}");
+    let lacking = strings(&said["kit"]["has_no"]);
+    assert!(lacking.contains(&"splash".to_string()) && lacking.contains(&"crash2".to_string()), "{lacking:?}");
+    let again = ok(
+        client,
+        "write_drums",
+        json!({ "track": kit, "start": 8, "lanes": { "china": "x...............", "crash": "....x...........", "splash": "........x......." } }),
+    )
+    .await;
+    let keys: Vec<u64> = notes_of(client, &again["clip_id"]).await.iter().map(|note| note.0).collect();
+    assert_eq!(keys, [49, 57], "the china and the crash of this kit; nothing for the splash it has not got");
+    assert_eq!(strings(&again["left_out"]), ["splash"]);
+    assert!(joined(&again, "warnings").contains("The kit on this track has no splash"), "{again}");
+    // The song says nothing of this kit: what the track itself holds is what ships for the plugin,
+    // and the kit is read from the plugin each time.
+    let own = ok(client, "get_instrument_profile", json!({ "track": kit })).await["profile"].clone();
+    assert!(own["sounds"].get("china").is_none() && own["sounds"].get("crash").is_none(), "{own}");
+}
+
+/// The pitch of `audio` at `at` seconds, as a MIDI note with fractions, by
+/// the period of the wave; `None` where it has no clear period.
+fn pitch_at(audio: &[f32], at: f64) -> Option<f64> {
+    let rate = 48_000.0;
+    let (start, size) = ((at * rate) as usize, (0.09 * rate) as usize);
+    let piece = audio.get(start..start + size)?;
+    let energy: f64 = piece.iter().map(|sample| f64::from(*sample).powi(2)).sum();
+    if energy / size as f64 <= 1e-8 {
+        return None;
+    }
+    // How alike the wave is to itself a lag later, for the lags of 55 Hz to 1500 Hz.
+    let alike = |lag: usize| -> f64 {
+        let sum: f64 = (0..size - lag).map(|index| f64::from(piece[index]) * f64::from(piece[index + lag])).sum();
+        sum / energy
+    };
+    let (shortest, longest) = ((rate / 1500.0) as usize, (rate / 55.0) as usize);
+    let scores: Vec<f64> = (shortest..longest).map(alike).collect();
+    let best = scores.iter().copied().fold(f64::MIN, f64::max);
+    if best < 0.45 {
+        return None;
+    }
+    // The shortest period that is nearly as good as the best: the note, not an octave under it.
+    let peak = (1..scores.len() - 1).find(|index| {
+        scores[*index] >= 0.92 * best && scores[*index] >= scores[index - 1] && scores[*index] >= scores[index + 1]
+    })?;
+    Some(69.0 + 12.0 * (rate / (peak + shortest) as f64 / 440.0).log2())
+}
+
+/// With the installed Ample Guitar PF: a slide and a scoop written by name
+/// move the pitch, and a harmonic and a bend land on the pitches asked
+/// for. A note marked `!slide` after another is joined to it by the
+/// instrument's glide key and is heard arriving from that note; one marked
+/// `!scoop` is heard arriving from below; `!harmonic` asked as E4 is heard
+/// as E4, which is the key an octave under it; and `!bend=F#3` on E3 ends
+/// on F#3, the instrument's wheel bending two semitones as the track takes
+/// it to.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Ample Guitar PF (VST3) installed; run with `cargo test -p trill-mcp --test instruments -- --include-ignored --nocapture --test-threads 1`"]
+async fn a_slide_a_scoop_a_harmonic_and_a_bend_written_by_name_are_heard_on_the_installed_ample_guitar() {
+    const PF: &str = "vst3:ABCDEF019182FAEB4170736441677066";
+    let Some(fixture) = connect_installed(PF).await else { return };
+    let client = &fixture.client;
+    ok(client, "set_project", json!({ "tempo": 120 })).await;
+    let (guitar, device) = track_on_preset(client, "Lead", PF, "Isolation Years").await;
+    // Its own echo and reverb would blur where a pitch begins; and only the keys are to join notes.
+    for (name, value) in [("Auto Legato", "0"), ("FX-Delay-Toggle", "Off"), ("FX-Reverb-Toggle", "Off")] {
+        let set = call(client, "update_device", json!({ "device": device, "params": { name: value } })).await;
+        if set.is_err() {
+            let number = if value == "Off" { json!(-1) } else { json!(0) };
+            ok(client, "update_device", json!({ "device": device, "settings": { name: number } })).await;
+        }
+    }
+    // Four bars, a second to each half: a plain pair, a slide, a scoop, a harmonic, a bend.
+    let phrase = "E3:2 G3:2 | E3:2 G3:2!slide | r:2 G3:2!scoop | E4:2!harmonic r:2 | E3:4!bend=F#3";
+    let line = ok(
+        client,
+        "write_melody",
+        json!({ "track": guitar, "phrase": phrase, "gate": 1, "velocity": 100, "accent": 0 }),
+    )
+    .await;
+    eprintln!("ornaments {}; keyswitches {}", line["ornaments"], line["keyswitches"]);
+    assert_eq!(line["ornaments"]["slide"], "1 as the instrument's 'glide' keyswitch");
+    assert_eq!(line["ornaments"]["scoop"], "1 as the instrument's 'slide' keyswitch");
+    let wav = fixture.folder.path().join("lead.wav");
+    ok(client, "render", json!({ "path": wav.display().to_string(), "max_tail_seconds": 1 })).await;
+    let audio = trill_media::decode(&wav).unwrap();
+    let heard = |at: f64| pitch_at(&audio.left, at);
+    let said = |pitch: Option<f64>| pitch.map_or("-".to_string(), |pitch| format!("{pitch:.2}"));
+    let near = |pitch: Option<f64>, key: f64| pitch.is_some_and(|pitch| (pitch - key).abs() < 0.5);
+    // Bar 1, plain: E3 (52) and G3 (55).
+    assert!(near(heard(0.4), 52.0) && near(heard(1.5), 55.0), "plain: {} {}", said(heard(0.4)), said(heard(1.5)));
+    // Bar 2, the slide: on its way from E3 just after the second note begins, then G3.
+    let way: Vec<Option<f64>> = [2.4, 3.01, 3.03, 3.05, 3.5].iter().map(|at| heard(*at)).collect();
+    eprintln!("slide: {}", way.iter().map(|pitch| said(*pitch)).collect::<Vec<_>>().join(" "));
+    assert!(near(way[0], 52.0) && near(way[4], 55.0), "from E3 to G3");
+    assert!(
+        way[1..4].iter().flatten().any(|pitch| *pitch > 52.5 && *pitch < 54.6),
+        "and heard between them on the way"
+    );
+    // Bar 3, the scoop: under G3 as it begins, then G3.
+    let way: Vec<Option<f64>> = [5.03, 5.05, 5.08, 5.5].iter().map(|at| heard(*at)).collect();
+    eprintln!("scoop: {}", way.iter().map(|pitch| said(*pitch)).collect::<Vec<_>>().join(" "));
+    assert!(
+        near(way[3], 55.0) && way[..3].iter().flatten().any(|pitch| *pitch < 54.4 && *pitch > 49.0),
+        "up into G3 from below"
+    );
+    // Bar 4, the harmonic: asked for as E4 (64) and heard there.
+    eprintln!("harmonic: {}", said(heard(6.4)));
+    assert!(near(heard(6.4), 64.0), "the harmonic is heard at the pitch that was asked for");
+    // Bar 5, the bend: E3 as it is struck, F#3 (54) once it is up.
+    eprintln!("bend: {} {}", said(heard(8.02)), said(heard(9.2)));
+    assert!(near(heard(9.2), 54.0), "bent up a whole tone, which is how far this instrument's wheel goes");
 }
