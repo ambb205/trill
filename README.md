@@ -29,7 +29,7 @@ Development builds are optimized (see `[profile.dev]`), because unoptimized audi
 
 ### Building and testing
 
-`cargo test --workspace` runs about 1,300 tests in about a minute. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 1,930 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -158,9 +158,32 @@ play, hold, step through (`Left`, `Right`) and scrub, at half speed up to eight 
 | `builtin:sampler` | Plays one audio file across the keyboard: loops with crossfade, reverse, one-shot, amp and filter envelopes. |
 | `builtin:drumrack` | Sixteen pads on the General MIDI drum notes, each playing its own audio file, with level, pan, tune, decay and choke groups. |
 
-**Effects**: `reverb`, `delay` (tempo-synced, ping-pong), `eq` (6-band), `compressor`, `limiter` (look-ahead
-brickwall), `chorus`, `filter` (resonant, with LFO), `pump` (sidechain-style ducking locked to the grid),
-`saturator`, `utility`.
+**Effects**
+
+| Device | |
+|---|---|
+| `builtin:eq` | Six bands: a low cut and a high cut of 12, 24 or 48 dB an octave (Butterworth), two shelves with a Q, two bells. Every band reaches from 20 Hz to 20 kHz. |
+| `builtin:compressor` | Two detectors: `peak` follows every sample, for a single track; `bus` holds the peaks, so that a slow attack still works on a group or the whole mix. Automatic release, automatic makeup (0.72 of what a full-scale signal would lose), parallel mix, and a **sidechain**: any other track as its key, with a low cut and a high cut on what it hears. |
+| `builtin:limiter` | Look-ahead brickwall limiter. |
+| `builtin:reverb` | Algorithmic reverb with a filter on what goes in (low cut and high cut, 12 dB an octave), damping, pre-delay, modulation and a stereo width. A longer decay returns more. |
+| `builtin:delay` | Tempo-synced echo, stereo or ping-pong: the left and the right repeat of a pair at one level, feeding back once a pair. Filters what comes in and each time round. |
+| `builtin:filter` | Resonant low-pass, high-pass, band-pass or notch at 12 or 24 dB an octave, with an LFO. |
+| `builtin:chorus` | Stereo chorus with a width. |
+| `builtin:tremolo` | Tremolo and auto-pan: sine, triangle or square, free or in time with the song, the two sides together or taking turns. |
+| `builtin:pump` | Ducking locked to the grid, for when there is no kick to listen to. |
+| `builtin:saturator`, `builtin:utility` | Waveshaping distortion; gain, pan and width. |
+
+A compressor's sidechain is the track as it leaves its devices, ahead of its fader and its mute, so a muted track
+serves as a key. It is set in the compressor's panel ("Listen to") and with `sidechain` on `add_device` and
+`update_device`, and a track that is listened to is still played when only some tracks are heard. A hosted
+plugin's sidechain input is not connected yet.
+
+What these devices do is held to numbers by renders (`trill-engine/tests/effects.rs`): the cuts to a Butterworth
+filter of their order, the compressor to what it takes off a signal of known crest, the delay to its first
+repeats, and the reverb, the makeup and the steep filter to what Ableton Live's were measured to do on one song.
+A song saved before the reverb and the delay were rebuilt (file format 1) keeps the sound it had: opening it
+switches their `legacy` on, and `trill-engine/tests/old_songs.rs` holds every effect to the samples it rendered
+to then.
 
 **Plugins**: installed CLAP and VST3 plugins appear beside the built-in devices as `clap:<plugin id>` and
 `vst3:<class id>`. Their state is saved in the project, and their parameters are automatable and reachable over
@@ -440,7 +463,8 @@ sentence: its presets are in its own window, and `save_preset` keeps what is cho
 
 `get_device` is small whatever the device: for a plugin with hundreds of parameters it gives the count and the
 ones that are not at the plugin's own defaults, `query` finds others by name with their ranges and choices, and
-`show: "all"` pages through every one. Each of a plugin's parameters comes with `text`, the value as the plugin
+`show: "all"` pages through every one. It says which track a compressor listens to (`sidechain`), which
+`add_device` and `update_device` set. Each of a plugin's parameters comes with `text`, the value as the plugin
 displays it, and `update_device` takes that text as well as a number: `{"Cab L Mic Type": "Dynamic 57", "Input
 Gain": "-6 dB"}`. It also says which channels the device takes and gives. Where a plugin's saved state has
 settings that no parameter reaches, `get_device` counts them (`settings_count`), `query` finds them by name beside
@@ -522,7 +546,8 @@ Not yet: running plugins out of process (only scanning and the reading of preset
 that crashes while playing or while it loads a preset still takes the app with it; the safety copy is what saves
 the work), a preset browser for plugins in the window (the session lists, searches and loads them, and so does
 MCP; the device panel shows built-in and saved presets only), asking a CLAP plugin for a stereo layout when its
-default is mono (a VST3 plugin is asked), plugin editors on Linux and macOS,
+default is mono (a VST3 plugin is asked), a hosted plugin's sidechain input (the built-in compressor has one),
+plugin editors on Linux and macOS,
 a film of a making-of (the replay gives the song as it was at any moment and where the action is; nothing
 renders it to video yet), hearing a making-of (it is silent: the song as it was is shown, not played),
 finding a song's journal again after its file was moved or renamed (it is kept by where the file is),

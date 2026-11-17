@@ -189,15 +189,27 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
         "add_device" => {
             let device = call.text("uri").map_or("a device", |uri| device_kind(uri));
             let owner = call.track("track").unwrap_or_else(|| "the master".to_owned());
-            about("Adding", "Added", &format!("{device} to {owner}"))
+            // One that listens to another track says which.
+            match call.track("sidechain") {
+                Some(key) => about("Adding", "Added", &format!("{device} to {owner}, listening to {key}")),
+                None => about("Adding", "Added", &format!("{device} to {owner}")),
+            }
         }
         "get_device" => about("Reading", "Read", &call.device("device").unwrap_or_else(|| "a device".to_owned())),
         "update_device" => {
             let device = call.device("device").unwrap_or_else(|| "a device".to_owned());
+            // The track it is to listen to; 0 is its own input again.
+            let key = call.id("sidechain").map(|id| match id {
+                0 => "its own input".to_owned(),
+                _ => call.track("sidechain").unwrap_or_else(|| "another track".to_owned()),
+            });
             match (call.text("preset"), call.input.get("enabled").and_then(Value::as_bool), call.has("params")) {
                 (Some(preset), _, _) => about("Setting", "Set", &format!("{device} to the preset {preset}")),
                 (None, Some(true), false) => about("Switching on", "Switched on", &device),
                 (None, Some(false), false) => about("Bypassing", "Bypassed", &device),
+                (None, None, false) if key.is_some() => {
+                    about("Having", "Had", &format!("{device} listen to {}", key.unwrap_or_default()))
+                }
                 _ => about("Adjusting", "Adjusted", &device),
             }
         }
@@ -620,6 +632,18 @@ mod tests {
             "Added reverb to \u{201C}Bass\u{201D}"
         );
         assert_eq!(did("add_device", json!({ "uri": "builtin:eq" }), p), "Added eq to the master");
+        assert_eq!(
+            did("add_device", json!({ "uri": "builtin:compressor", "sidechain": track }), p),
+            "Added compressor to the master, listening to \u{201C}Bass\u{201D}"
+        );
+        assert_eq!(
+            did("update_device", json!({ "device": device, "sidechain": track }), p),
+            "Had \u{201C}Poly Synth\u{201D} listen to \u{201C}Bass\u{201D}"
+        );
+        assert_eq!(
+            did("update_device", json!({ "device": device, "sidechain": 0 }), p),
+            "Had \u{201C}Poly Synth\u{201D} listen to its own input"
+        );
         assert_eq!(
             did("update_device", json!({ "device": device, "params": { "cutoff": 900 } }), p),
             "Adjusted \u{201C}Poly Synth\u{201D}"

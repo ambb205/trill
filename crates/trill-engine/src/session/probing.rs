@@ -132,6 +132,7 @@ impl Session {
                     params: Default::default(),
                     state: None,
                     preset: None,
+                    sidechain: None,
                 };
                 let mut to_load = None;
                 if let Some(wanted) = preset {
