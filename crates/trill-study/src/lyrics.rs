@@ -93,6 +93,40 @@ impl Envelope {
         !self.levels.is_empty() && self.level(start, end) > self.floor
     }
 
+    /// The stretches in which something is sung, in seconds: silences
+    /// shorter than `shortest_silence` do not divide one, a stretch
+    /// shorter than a quarter of a second is none, and each is given
+    /// `pad` seconds either side.
+    pub fn sung_stretches(&self, shortest_silence: f64, pad: f64) -> Vec<(f64, f64)> {
+        let mut stretches: Vec<(f64, f64)> = Vec::new();
+        let mut begun: Option<usize> = None;
+        for frame in 0..=self.levels.len() {
+            let sounding = self.levels.get(frame).is_some_and(|&level| level > self.floor);
+            match (begun, sounding) {
+                (None, true) => begun = Some(frame),
+                (Some(first), false) => {
+                    let (start, end) = (self.seconds(first), self.seconds(frame));
+                    match stretches.last_mut() {
+                        Some(last) if start - last.1 < shortest_silence => last.1 = end,
+                        _ => stretches.push((start, end)),
+                    }
+                    begun = None;
+                }
+                _ => {}
+            }
+        }
+        let total = self.seconds(self.levels.len());
+        let mut padded: Vec<(f64, f64)> = Vec::new();
+        for (start, end) in stretches.into_iter().filter(|(start, end)| end - start >= 0.25) {
+            let (start, end) = ((start - pad).max(0.0), (end + pad).min(total));
+            match padded.last_mut() {
+                Some(last) if start <= last.1 => last.1 = end,
+                _ => padded.push((start, end)),
+            }
+        }
+        padded
+    }
+
     /// How much the voice drops away between two words, 0 to 0.4: the mark
     /// of a breath, even where no silence separates them.
     fn dip(&self, before: &Word, after: &Word) -> f64 {
@@ -338,6 +372,11 @@ mod tests {
         assert!((words[0].start - 1.0).abs() < 0.02 && (words[0].end - 1.5).abs() < 0.03, "{:?}", words[0]);
         assert!((words[1].start - 2.2).abs() < 0.02 && (words[1].end - 2.9).abs() < 0.03, "{:?}", words[1]);
         assert!(envelope.sung(1.0, 1.5) && !envelope.sung(1.7, 2.0));
+        // What is sung, with a breath's room either side; a silence under 0.7 s does not divide it.
+        let stretches = envelope.sung_stretches(0.7, 0.3);
+        assert_eq!(stretches.len(), 1, "{stretches:?}");
+        assert!((stretches[0].0 - 0.7).abs() < 0.02 && (stretches[0].1 - 3.2).abs() < 0.03, "{stretches:?}");
+        assert_eq!(envelope.sung_stretches(0.5, 0.0).len(), 2);
     }
 
     #[test]

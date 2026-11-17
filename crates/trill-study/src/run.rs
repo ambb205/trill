@@ -18,6 +18,10 @@ use trill_core::audio::AudioBuffer;
 use trill_listen::{Options, RATE, Recording, Sound, Stem};
 use trill_media::WavFormat;
 
+/// A recording in a format Trill does not read, as `ffmpeg` wrote it out:
+/// kept only until the stems are written.
+const CONVERTED: &str = "converted.wav";
+
 /// What a run says as it goes.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
@@ -95,7 +99,7 @@ fn read(folder: &StudyFolder, programs: &Programs) -> Result<Sound, String> {
         Err(error) => match &programs.ffmpeg {
             // A format Trill does not read itself: `ffmpeg` does, where it is installed.
             Some(ffmpeg) if path.is_file() => {
-                let converted = crate::link::convert(ffmpeg, &path, &folder.path.join("source.wav"))?;
+                let converted = crate::link::convert(ffmpeg, &path, &folder.path.join(CONVERTED))?;
                 trill_media::decode(&converted).map_err(|error| error.to_string())?
             }
             _ => {
@@ -165,18 +169,22 @@ pub fn run(
     said(Event::Device(models.device()));
     let options = study.options.clone();
 
+    // Stems that are there add up to the recording: it need not be read again.
+    let mut stems: Option<Vec<Stem>> = stems_of(folder, &folder.study()?.stems);
     let mut mix: Option<Sound> = None;
     stage(folder, Stage::Read, said, |_| {
-        let sound = read(folder, programs)?;
+        let (sound, note) = match &stems {
+            Some(stems) => (Recording::of_stems(stems.clone()).mix, "already done"),
+            None => (read(folder, programs)?, ""),
+        };
         let mut study = folder.study()?;
         study.seconds = (sound.seconds() * 1e4).round() / 1e4;
         folder.write(&study)?;
         mix = Some(sound);
-        Ok(Some(String::new()))
+        Ok(Some(note.to_owned()))
     })?;
     let mix = mix.expect("the stage before did not fail");
 
-    let mut stems: Option<Vec<Stem>> = stems_of(folder, &folder.study()?.stems);
     stage(folder, Stage::Stems, said, |said| {
         if stems.is_some() {
             return Ok(Some("already done".to_owned()));
@@ -211,6 +219,8 @@ pub fn run(
         study.stems = found.iter().map(|stem| stem.name.clone()).collect();
         folder.write(&study)?;
         stems = Some(found);
+        // What ffmpeg made of a recording Trill does not read is not needed again.
+        let _ = std::fs::remove_file(folder.path.join(CONVERTED));
         Ok(Some(String::new()))
     })?;
     let stems = stems.expect("the stage before did not fail");
