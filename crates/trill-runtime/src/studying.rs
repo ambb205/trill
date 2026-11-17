@@ -248,6 +248,13 @@ pub struct Studied {
     pub lyrics: Option<Lyrics>,
 }
 
+impl Studied {
+    /// The outline of each stem, for drawing them without reading them.
+    pub fn outlines(&self) -> Option<trill_study::store::Outlines> {
+        self.folder.outlines()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

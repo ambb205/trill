@@ -255,6 +255,7 @@ pub fn run(
             write_stem(folder, stem)?;
             said(Event::Progress(0.9 + 0.1 * (index + 1) as f32 / found.len() as f32));
         }
+        folder.write_outlines(&found)?;
         let mut study = folder.study()?;
         study.stems = found.iter().map(|stem| stem.name.clone()).collect();
         folder.write(&study)?;
@@ -341,6 +342,10 @@ pub fn run(
             return Ok(Some("already done".to_owned()));
         }
         said(Event::Progress(0.05));
+        // A study made before outlines were kept gets its own now.
+        if folder.outlines().is_none() {
+            folder.write_outlines(&stems)?;
+        }
         let options = Options { beats: folder.beats(), corrections: folder.study()?.corrections };
         let heard = trill_listen::hear(&Recording::of_stems(stems.clone()), &options);
         if let Some(mut lyrics) = folder.lyrics().filter(|lyrics| !lyrics.lines.is_empty()) {

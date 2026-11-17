@@ -116,6 +116,11 @@ fn a_recording_is_studied_stage_by_stage_in_a_process_of_its_own() {
     assert_eq!(heard.grid.tracker, trill_listen::Tracker::Model);
     assert_eq!(heard.stems, study.stems);
     assert!(!heard.bass.is_empty() && !heard.loops.is_empty());
+    // And the outline of each stem, for whoever draws them: a column for each fiftieth of a second.
+    let outlines = folder.outlines().unwrap();
+    assert_eq!(outlines.stems.iter().map(|outline| outline.name.as_str()).collect::<Vec<_>>(), study.stems);
+    assert_eq!(outlines.stems[2].max.len(), 1005);
+    assert!(outlines.stems[2].max.iter().any(|&high| high > 40), "the bass is in its outline");
     assert!(partial_files(&folder.path).is_empty());
 }
 

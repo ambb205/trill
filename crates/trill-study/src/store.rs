@@ -6,6 +6,7 @@
 //!   study.json    what it is of, how it was asked for, and how far it has come
 //!   source.*      the recording itself, only when it was fetched or had to be converted
 //!   stems/*.wav   the stems, which add up to the recording
+//!   outlines.json the outline of each stem, for drawing it without reading it
 //!   beats.json    the beats and downbeats a model found
 //!   words.json    the words as the transcriber heard them, a stretch at a time
 //!   lyrics.json   the words in sung lines, each word with its time and its note
@@ -267,6 +268,17 @@ impl StudyFolder {
         write_json(&self.product("lyrics.json"), lyrics)
     }
 
+    /// The outline of each stem, in the stems' order: what a waveform is
+    /// drawn from without reading the stem, and after the stems were dropped.
+    pub fn outlines(&self) -> Option<Outlines> {
+        read_json(&self.product("outlines.json"))
+    }
+
+    pub fn write_outlines(&self, stems: &[trill_listen::Stem]) -> Result<(), String> {
+        let outlines = Outlines { per_second: OUTLINE_PER_SECOND, stems: stems.iter().map(Outline::of).collect() };
+        write_json(&self.product("outlines.json"), &outlines)
+    }
+
     pub fn heard(&self) -> Option<Heard> {
         read_json(&self.product("heard.json"))
     }
@@ -303,6 +315,52 @@ impl StudyFolder {
         }
         Ok(())
     }
+}
+
+/// How many columns of an outline there are to a second of the stem:
+/// enough to draw a whole song across a window, and a third of a megabyte
+/// for four stems of four minutes. Closer in, the stem itself is read.
+pub const OUTLINE_PER_SECOND: f64 = 50.0;
+
+/// The outline of one stem: the lowest and the highest it goes in each
+/// column, both channels together, in 127ths of full scale.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Outline {
+    pub name: String,
+    pub min: Vec<i8>,
+    pub max: Vec<i8>,
+}
+
+impl Outline {
+    /// The outline of `stem`.
+    pub fn of(stem: &trill_listen::Stem) -> Self {
+        let per_column = (trill_listen::RATE / OUTLINE_PER_SECOND) as usize;
+        let frames = stem.sound.left.len();
+        let columns = frames.div_ceil(per_column);
+        let (mut min, mut max) = (Vec::with_capacity(columns), Vec::with_capacity(columns));
+        let scaled = |sample: f32| (sample.clamp(-1.0, 1.0) * 127.0).round() as i8;
+        for column in 0..columns {
+            let (from, to) = (column * per_column, ((column + 1) * per_column).min(frames));
+            let (mut low, mut high) = (0.0f32, 0.0f32);
+            for channel in [&stem.sound.left, &stem.sound.right] {
+                for &sample in channel.get(from..to.min(channel.len())).unwrap_or_default() {
+                    low = low.min(sample);
+                    high = high.max(sample);
+                }
+            }
+            min.push(scaled(low));
+            max.push(scaled(high));
+        }
+        Self { name: stem.name.clone(), min, max }
+    }
+}
+
+/// What `outlines.json` holds.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Outlines {
+    /// How many columns there are to a second.
+    pub per_second: f64,
+    pub stems: Vec<Outline>,
 }
 
 /// What `beats.json` holds.
@@ -459,6 +517,21 @@ mod tests {
         assert!(folder.size() > 4096);
         folder.drop_stems().unwrap();
         assert!(folder.size() < 4096 && folder.beats().is_some());
+
+        // The outline of a stem: its lowest and highest in each fiftieth of a second, and kept when the stems go.
+        let mut left = vec![0.0f32; 44_100];
+        (left[10], left[900], left[44_099]) = (0.5, -1.0, 0.25);
+        let stem =
+            trill_listen::Stem { name: "drums".into(), sound: trill_listen::Sound { right: vec![0.0; 44_100], left } };
+        folder.write_outlines(std::slice::from_ref(&stem)).unwrap();
+        let outlines = folder.outlines().unwrap();
+        assert_eq!((outlines.per_second, outlines.stems.len()), (OUTLINE_PER_SECOND, 1));
+        let outline = &outlines.stems[0];
+        assert_eq!((outline.name.as_str(), outline.min.len(), outline.max.len()), ("drums", 50, 50));
+        assert_eq!((outline.max[0], outline.min[0], outline.min[1], outline.max[1]), (64, 0, -127, 0));
+        assert_eq!((outline.max[49], outline.max[20]), (32, 0));
+        folder.drop_stems().unwrap();
+        assert!(folder.outlines().is_some());
     }
 
     #[test]
