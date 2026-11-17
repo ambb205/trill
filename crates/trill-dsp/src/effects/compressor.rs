@@ -1,5 +1,7 @@
 //! Compressor: two detectors (one for a track, one for a bus), automatic
-//! release and makeup, and a key input with a filter of its own.
+//! release and makeup, and a key input with a filter of its own. Of a
+//! stereo sound the peak detector hears the two sides' power together, and
+//! the bus detector the louder side.
 
 use super::dynamics::ReductionMeter;
 use crate::define_params;
@@ -32,7 +34,7 @@ define_params!(P, PARAMS, [
     ),
     AutoMakeup => boolean(
         "auto_makeup",
-        "Auto Makeup (adds 0.72 x -threshold x (1 - 1/ratio) dB on top of Makeup Gain)",
+        "Auto Makeup (adds 0.7 x -threshold x (1 - 1/ratio) dB on top of Makeup Gain)",
         false
     ),
     KeyLowCut => float(
@@ -51,6 +53,12 @@ define_params!(P, PARAMS, [
         20000.0,
         "Hz"
     ),
+    Legacy => boolean(
+        "legacy",
+        "Legacy (the compressor of songs saved before format 7: the peak detector hears the louder of the two \
+         sides, and automatic makeup is 0.72 of what a full-scale signal would lose)",
+        false
+    ),
 ]);
 
 pub const DESCRIPTION: &str = "Stereo-linked compressor with two detectors. \"peak\" follows every sample of what \
@@ -59,18 +67,24 @@ it only catches what stays loud, so on a full mix it does little. \"bus\" holds 
 and builds the reduction over `attack`, so a slow attack still works on the body of a mix: use it on a group or \
 the master (threshold about 10 dB under the peaks, ratio 2, `knee` 18, attack 10-30 ms, `auto_release` on: about \
 2 dB off; the wide knee is what lets it work on the quiet passages too, as a console's bus compressor does). \
-`auto_makeup` adds 0.72 x -threshold x (1 - 1/ratio) dB (threshold -24 at ratio 4: +13 dB; Ableton Live's Makeup \
-comes to the same), so a track comes out louder the less of it is over the threshold; `makeup` comes on top. What \
-it hears is its own input, \
+`auto_makeup` adds 0.7 x -threshold x (1 - 1/ratio) dB (threshold -24 at ratio 4: +12.6 dB; Ableton Live's Makeup \
+is the same), so a track comes out louder the less of it is over the threshold; `makeup` comes on top. What \
+it hears is its own input (of a stereo sound the peak detector hears the power of the two sides together, so a \
+sound on one side only reads 3 dB lower than the same sound in the middle; the bus detector hears the louder \
+side), \
 or another track when the device is given a `sidechain` (a kick ducking a bass: sidechain = the kick's track, \
 attack 1 ms, release 100-200 ms). `key_low_cut` and `key_high_cut` filter what it hears, never the sound \
 (key_low_cut 100-150 Hz on the master keeps the kick from pumping the mix). `render` and `measure` report how many \
 dB it took off.";
 
 /// The share of what a full-scale signal would lose that automatic makeup
-/// gives back. Ableton Live's Compressor with Makeup on comes to the same:
-/// between 0.70 and 0.74 of it, measured on six tracks of one song.
-pub const AUTO_MAKEUP: f32 = 0.72;
+/// gives back. It is Ableton Live's: read where its Compressor had let go
+/// of two guitars (threshold -24 dB at 4:1) it added 12.60 dB, and of a
+/// third (-30 dB at 4:1) 15.7 dB.
+pub const AUTO_MAKEUP: f32 = 0.7;
+/// And in songs of formats up to 6, where it was fitted to the levels of
+/// whole tracks, which hold what the detector does as well.
+const LEGACY_AUTO_MAKEUP: f32 = 0.72;
 
 /// Automatic release: how fast the reduction comes back after a single hit,
 /// and how slowly the level it comes back to follows the music, up and
@@ -83,7 +97,12 @@ const AUTO_SLOW_DOWN_SECONDS: f32 = 8.0;
 
 /// What automatic makeup adds, in dB, at `threshold` dB and `ratio`.
 pub fn auto_makeup_db(threshold: f32, ratio: f32) -> f32 {
-    AUTO_MAKEUP * -threshold * (1.0 - 1.0 / ratio.max(1.0))
+    AUTO_MAKEUP * full_scale_loss(threshold, ratio)
+}
+
+/// What a full-scale signal would lose, in dB.
+fn full_scale_loss(threshold: f32, ratio: f32) -> f32 {
+    -threshold * (1.0 - 1.0 / ratio.max(1.0))
 }
 
 pub struct Compressor {
@@ -114,6 +133,9 @@ pub struct Compressor {
     slow_down: f32,
     filter_low: bool,
     filter_high: bool,
+    /// Hears the louder side: the bus detector, and the peak detector of
+    /// songs of formats up to 6.
+    louder_side: bool,
     makeup: f32,
     dry: f32,
     wet: f32,
@@ -142,6 +164,7 @@ impl Compressor {
             slow_down: 1.0,
             filter_low: false,
             filter_high: false,
+            louder_side: false,
             makeup: 1.0,
             dry: 0.0,
             wet: 1.0,
@@ -163,9 +186,12 @@ impl Compressor {
         self.release = smooth_coef(release, sr);
         self.slow_up = smooth_coef(AUTO_SLOW_UP_SECONDS, sr);
         self.slow_down = smooth_coef(AUTO_SLOW_DOWN_SECONDS, sr);
+        let legacy = p.on(P::Legacy as usize);
+        self.louder_side = legacy || self.bus;
         let mut makeup = p.get(P::Makeup as usize);
         if p.on(P::AutoMakeup as usize) {
-            makeup += auto_makeup_db(self.threshold, ratio);
+            let share = if legacy { LEGACY_AUTO_MAKEUP } else { AUTO_MAKEUP };
+            makeup += share * full_scale_loss(self.threshold, ratio);
         }
         self.makeup = db_to_gain(makeup);
         let (low, high) = (p.get(P::KeyLowCut as usize), p.get(P::KeyHighCut as usize));
@@ -209,7 +235,14 @@ impl Compressor {
             left = self.key_high[0].tick(left);
             right = self.key_high[1].tick(right);
         }
-        left.abs().max(right.abs())
+        if self.louder_side {
+            left.abs().max(right.abs())
+        } else {
+            // The two sides' power together. Ableton Live's Compressor was
+            // measured on stereo guitars to follow this, and not the
+            // louder side, which reads their peaks most of a dB higher.
+            ((left * left + right * right) * 0.5).sqrt()
+        }
     }
 
     /// The peak detector: the reduction moves towards what each sample's

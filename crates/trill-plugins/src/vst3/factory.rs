@@ -351,7 +351,12 @@ impl DeviceFactory for Vst3Factory {
             sample_rate,
             max_block: u32::try_from(max_block).unwrap_or(u32::MAX),
             offline: purpose == Purpose::Rendering,
+            // Where the key would go, for a device that is to listen to
+            // one. Whether the plugin has such an input is found when its
+            // buses are read.
+            key_bus: device.sidechain.map(|_| usize::from(!installed.instrument)),
         };
+        let keyed = request.key_bus.is_some();
 
         let created = instantiate(main, request, CREATE_TIMEOUT).map_err(failed)?;
 
@@ -364,7 +369,7 @@ impl DeviceFactory for Vst3Factory {
             installed.instrument,
             created,
             (sample_rate, max_block),
-            self.shared.patient,
+            (self.shared.patient, keyed),
         )
         .map_err(failed)?;
         Ok(DeviceInstance { processor: Box::new(processor), params, controller: Some(Box::new(controller)) })
@@ -573,6 +578,7 @@ mod tests {
             sample_rate: 48_000.0,
             max_block: 64,
             offline: false,
+            key_bus: None,
         };
         let main = &factory.shared.main;
         let before = scripted::instances(kind::SLOW_INIT).len();

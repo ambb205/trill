@@ -42,10 +42,14 @@ pub const MAX_VOLUME_DB: f32 = 6.0;
 ///   What a file of formats 3 to 5 calls a fader, with a floor, is the law
 ///   of its day ([`Travel::Square`]), and its lanes keep it: they are read
 ///   so by their words, and nothing is written into them.
+/// * 7: the reverb sounds from its pre-delay on and is voiced anew, the
+///   echo's cuts are 12 dB an octave, the compressor's peak detector hears
+///   the two sides' power and not the louder side, and the poly synth's
+///   volume moves in a line where it moved in steps.
 ///
 /// A device of an older file keeps the sound it had, and an envelope the
 /// curve it played: see [`crate::formats`].
-pub const FORMAT_VERSION: u32 = 6;
+pub const FORMAT_VERSION: u32 = 7;
 /// The furthest an audio clip can be transposed, in semitones either way.
 pub const MAX_TRANSPOSE: f64 = 24.0;
 /// Shortest loop a clip repeats, so a tiny loop length cannot explode into
@@ -2602,8 +2606,9 @@ mod tests {
         assert_eq!(params(fade), BTreeMap::from([("legacy".to_string(), 1.0)]));
         assert_eq!(line(&gain), (vec![0.0, -70.0], travels[2]));
         assert_eq!(line(&fader), (vec![0.0, -70.0], travels[3]));
-        // What changed in format 2 is as the file has it.
-        assert!(params(reverb).is_empty());
+        // What changed in format 2 is as the file has it, which is what it
+        // was until format 7.
+        assert_eq!(params(reverb), BTreeMap::from([("legacy".to_string(), 2.0)]));
         // Saved again it is a file of this format, and reads back the same.
         assert_eq!(Project::from_json(&read.to_json()).unwrap(), read);
         // And a file of format 1 is given all of it at once.

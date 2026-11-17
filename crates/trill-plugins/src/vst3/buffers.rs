@@ -31,6 +31,8 @@ pub(crate) struct BusBuffers {
     /// Whether these are the plugin's inputs, whose side buses the host
     /// declares silent.
     inputs: bool,
+    /// The side bus that holds a key in this block, and so is not silent.
+    keyed: Option<usize>,
 }
 
 // SAFETY: the raw pointers (those in `pointers`, and those to `pointers` in
@@ -52,6 +54,7 @@ impl BusBuffers {
             pointers: layout.iter().map(|&count| vec![null_mut(); count as usize]).collect(),
             buses: vec![empty; layout.len()],
             inputs,
+            keyed: None,
         }
     }
 
@@ -79,6 +82,14 @@ impl BusBuffers {
     /// Fills the plugin's inputs for one block from the device's signal.
     pub(crate) fn load(&mut self, left: &[f32], right: &[f32]) {
         self.channels.load(left, right);
+        self.keyed = None;
+    }
+
+    /// Fills the input bus `bus` for the block that was just loaded from a
+    /// key the device listens to.
+    pub(crate) fn load_key(&mut self, bus: usize, left: &[f32], right: &[f32]) {
+        self.channels.load_key(bus, left, right);
+        self.keyed = Some(bus);
     }
 
     /// Writes the plugin's main output for one block to the device's
@@ -102,7 +113,8 @@ impl BusBuffers {
             // One bit per channel that holds nothing but silence: all of a
             // side bus the host feeds nothing into. A plugin sets the bits
             // of its outputs itself.
-            bus.silenceFlags = if self.inputs && index > 0 { all_channels(pointers.len()) } else { 0 };
+            let silent = self.inputs && index > 0 && self.keyed != Some(index);
+            bus.silenceFlags = if silent { all_channels(pointers.len()) } else { 0 };
             let channels = if pointers.is_empty() { null_mut() } else { pointers.as_mut_ptr() };
             bus.__field0 = AudioBusBuffers__type0 { channelBuffers32: channels };
         }

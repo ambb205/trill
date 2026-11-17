@@ -165,6 +165,7 @@ fn run(instance: &mut DeviceInstance, blocks: usize) {
         time_signature: TimeSignature::default(),
         playing: true,
         position_beats: 0.0,
+        song: Default::default(),
         loop_range: None,
     };
     for block in 0..blocks {

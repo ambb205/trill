@@ -6,8 +6,9 @@
 //! Only the first port in each direction, the "main" one, carries the
 //! device's signal: stereo as it is, mono folded down on the way in and
 //! duplicated on the way out, and anything wider on its first two channels.
-//! Further ports, such as side-chain inputs and auxiliary outputs, get
-//! silence and are ignored.
+//! One more input can carry a key, the signal of another track that the
+//! device listens to and does not pass on ([`key_port`]): the same way.
+//! Further ports, such as auxiliary outputs, get silence and are ignored.
 //!
 //! Each plugin format wraps these buffers in the structures its API passes
 //! to `process`.
@@ -53,9 +54,21 @@ impl PortChannels {
     /// Fills the plugin's inputs for one block from the device's signal.
     /// `left` and `right` have the block's length.
     pub(crate) fn load(&mut self, left: &[f32], right: &[f32]) {
+        self.clear(left.len());
+        self.fill(0, left, right);
+    }
+
+    /// Fills the input `port` for the block that was just
+    /// [loaded](Self::load) from a key the device listens to.
+    pub(crate) fn load_key(&mut self, port: usize, left: &[f32], right: &[f32]) {
+        self.fill(port, left, right);
+    }
+
+    /// Puts a stereo signal into `port`: as it is, folded down to mono, or
+    /// on the first two of more channels.
+    fn fill(&mut self, port: usize, left: &[f32], right: &[f32]) {
         let frames = left.len();
-        self.clear(frames);
-        match self.channels.first_mut().map_or(&mut [][..], Vec::as_mut_slice) {
+        match self.channels.get_mut(port).map_or(&mut [][..], Vec::as_mut_slice) {
             [] => {}
             [mono] => {
                 for ((sample, left), right) in mono.iter_mut().zip(left).zip(right) {
@@ -91,9 +104,44 @@ impl PortChannels {
     }
 }
 
+/// The input of a plugin that a key goes into, if it has one: `inputs` is
+/// the channel count of each of its input ports.
+///
+/// An effect's first input is its own signal, and the one after it is
+/// what both formats have for a sidechain. An instrument has no signal of
+/// its own to take in, so an input it has is one to listen to: a vocoder's
+/// voice.
+pub(crate) fn key_port(inputs: &[u32], instrument: bool) -> Option<usize> {
+    let port = usize::from(!instrument);
+    inputs.get(port).is_some_and(|channels| *channels > 0).then_some(port)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_key_goes_into_the_input_after_an_effects_own_and_into_an_instruments_first() {
+        assert_eq!(key_port(&[2, 1], false), Some(1));
+        assert_eq!(key_port(&[2], false), None, "an effect with one input listens to that");
+        assert_eq!(key_port(&[2, 0], false), None, "an input without channels takes nothing");
+        assert_eq!(key_port(&[2, 2, 2], false), Some(1), "the first of several");
+        assert_eq!(key_port(&[2], true), Some(0));
+        assert_eq!(key_port(&[], true), None);
+
+        // The key is laid into its port as the signal is into the first:
+        // folded down for a mono port, and beside the signal, not over it.
+        let mut buffers = PortChannels::new(&[2, 1, 2], 8);
+        buffers.load(&LEFT, &RIGHT);
+        buffers.load_key(1, &[1.0, 1.0, 0.0, 0.0], &[0.0, 1.0, 0.0, -2.0]);
+        assert_eq!(buffers.channels[0][0][..4], LEFT);
+        assert_eq!(buffers.channels[0][1][..4], RIGHT);
+        assert_eq!(buffers.channels[1][0][..4], [0.5, 1.0, 0.0, -1.0]);
+        assert_eq!(buffers.channels[2][0][..4], [0.0; 4], "a port beyond it stays silent");
+        // The next block without a key has none left in it.
+        buffers.load(&LEFT, &RIGHT);
+        assert_eq!(buffers.channels[1][0][..4], [0.0; 4]);
+    }
 
     const LEFT: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
     const RIGHT: [f32; 4] = [-1.0, 0.0, 1.0, 2.0];

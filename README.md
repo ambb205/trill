@@ -29,7 +29,7 @@ Development builds are optimized (see `[profile.dev]`), because unoptimized audi
 
 ### Building and testing
 
-`cargo test --workspace` runs about 2,200 tests in a few minutes. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 2,240 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -37,6 +37,8 @@ asked for:
 cargo test -p trill-plugins -- --include-ignored    # against the CLAP and VST3 plugins installed here (minutes)
 cargo test -p trill-mcp --test presets -- --include-ignored --nocapture    # an assistant's pass over Surge XT's presets, an amplifier's, a kit, a guitar tone and a patch of their makers', and a bought preset found among the samples
 cargo test -p trill-plugins --test sounds -- --include-ignored --nocapture --test-threads 1    # what installed plugins say of their parameters, channels and presets
+cargo test -p trill-plugins --test key -- --include-ignored --nocapture --test-threads 1    # Surge XT playing what its device listens to, and its effect, as a vocoder, shaping a bass by a muted kick, in both formats
+cargo test -p trill-plugins --test tempo -- --include-ignored --nocapture --test-threads 1    # Serum 2's arpeggiator through two changes of tempo: every step heard where the song's tempo map has its beat
 cargo test -p trill-plugins --test lifetimes -- --include-ignored --nocapture    # plugin instances made and dropped beside one that stays, an attempt to a process: counts the crashes, and says where each was and what the machine had of memory; half an hour, and no attempt is started on a machine short of memory
 cargo test -p trill-plugins --test vendor -- --include-ignored --nocapture --test-threads 1    # the makers' own presets of Serum 2, the Ample guitars, Superior Drummer 3 and the Archetypes: listed, loaded by name and by a file's path, and heard to differ
 cargo test -p trill-mcp --test controllers -- --include-ignored --nocapture    # a SWAM saxophone and Surge XT played from the controller curves of clips
@@ -226,10 +228,10 @@ fader, a send and a Utility's gain, is silence at its lowest value (-70 dB), so 
 | Device | |
 |---|---|
 | `builtin:eq` | Six bands: a low cut and a high cut of 12, 24 or 48 dB an octave (Butterworth), two shelves with a Q, two bells. Every band reaches from 20 Hz to 20 kHz. |
-| `builtin:compressor` | Two detectors: `peak` follows every sample, for a single track; `bus` holds the peaks, so that a slow attack still works on a group or the whole mix. Automatic release, automatic makeup (0.72 of what a full-scale signal would lose), parallel mix, and a **sidechain**: any other track as its key, with a low cut and a high cut on what it hears. |
+| `builtin:compressor` | Two detectors: `peak` follows every sample, for a single track; `bus` holds the peaks, so that a slow attack still works on a group or the whole mix. Of a stereo sound the peak detector hears the power of the two sides together. Automatic release, automatic makeup (0.7 of what a full-scale signal would lose, as Ableton Live's), parallel mix, and a **sidechain**: any other track as its key, with a low cut and a high cut on what it hears. |
 | `builtin:limiter` | Look-ahead brickwall limiter. |
-| `builtin:reverb` | Algorithmic reverb with a filter on what goes in (low cut and high cut, 12 dB an octave), damping, pre-delay, modulation and a stereo width. A longer decay returns more. |
-| `builtin:delay` | Tempo-synced echo, stereo or ping-pong: the left and the right repeat of a pair at one level, feeding back once a pair. Filters what comes in and each time round. |
+| `builtin:reverb` | Algorithmic reverb that sounds from its pre-delay on, with a filter on what goes in (low cut and high cut, 12 dB an octave), a damping that shortens and quietens the highs, modulation and a stereo width. A longer decay returns more: 3 to 4 dB for each doubling. |
+| `builtin:delay` | Tempo-synced echo, stereo or ping-pong: the left and the right repeat of a pair at one level, feeding back once a pair. Filters what comes in and each time round, 12 dB an octave, and returns whole what lies between the cuts. |
 | `builtin:filter` | Resonant low-pass, high-pass, band-pass or notch at 12 or 24 dB an octave, with an LFO. |
 | `builtin:chorus` | Stereo chorus with a width. |
 | `builtin:tremolo` | Tremolo and auto-pan: sine, triangle or square, free or in time with the song, the two sides together or taking turns. |
@@ -240,8 +242,15 @@ fader, a send and a Utility's gain, is silence at its lowest value (-70 dB), so 
 
 A compressor's sidechain is the track as it leaves its devices, ahead of its fader and its mute, so a muted track
 serves as a key. It is set in the compressor's panel ("Listen to") and with `sidechain` on `add_device` and
-`update_device`, and a track that is listened to is still played when only some tracks are heard. A hosted
-plugin's sidechain input is not connected yet.
+`update_device`, and a track that is listened to is still played when only some tracks are heard.
+
+A hosted plugin that has an input for it listens the same way: its panel has the same "Listen to", and
+`sidechain` takes it. What it hears goes into the input after an effect's own (the format's sidechain), or into
+an instrument's first, a vocoder's voice; what the plugin does with it is the plugin's business, and most have a
+switch of their own for listening to it. A CLAP plugin's input is simply filled. A VST3 plugin's is switched on
+by the host, and a plugin may take one that is switched on to be the one to listen to; so it is switched on only
+for a device that listens, and the plugin is made again, from the state the song has of it, when its device is
+given a track to listen to or has it taken away.
 
 What these devices do is held to numbers by renders (`trill-engine/tests/effects.rs`): the cuts to a Butterworth
 filter of their order, the compressor to what it takes off a signal of known crest, the delay to its first
@@ -255,7 +264,10 @@ A song saved before a device was changed keeps the sound it had. The project fil
 opening an older one writes into each device what that format meant: the reverb and the delay of format 1 have
 their `legacy` switched on, and so have the sample players (the velocity law they had), the saturator (its level
 turned down as the drive rises), the utility (a lowest gain that is 70 dB down and not silence, smoothed over a
-hundredth of a second) and the synth (its noise) of formats 1 to 3. The synth volumes of those formats are also
+hundredth of a second) and the synth (its noise) of formats 1 to 3; and the reverb (which began a line's length
+after its pre-delay, as wide as it could be), the delay (cuts of 6 dB an octave), the compressor (a peak detector
+that heard the louder side, and 0.72 for its automatic makeup) and the synth (a volume that moved in steps) of
+formats up to 6 are set to the sound of those. The synth volumes of formats 1 to 3 are also
 written 21 dB down the scale, where they mean what they did, and so is an envelope on one: its points, and the
 level its line's travel is measured from where it follows the fader of those formats, so that it plays the curve
 it played. A journal
@@ -834,7 +846,7 @@ instance is taken down before a message the plugin posted to itself has reached 
 alive, which probes and renders of a song that uses one did; an instance that is let go of is now kept, and taken
 down only when the plugin thread has delivered what was waiting and the plugin has had fifteen seconds of it), a preset browser for plugins in the window (the session lists, searches and loads them, and so does
 MCP; the device panel shows built-in and saved presets only), asking a CLAP plugin for a stereo layout when its
-default is mono (a VST3 plugin is asked), a hosted plugin's sidechain input (the built-in compressor has one),
+default is mono (a VST3 plugin is asked),
 plugin editors on Linux and macOS,
 hearing a making-of in the window (it is silent there: the song as it was is shown, not played; a film of one
 has the finished song under it), filming a making-of that was handed over as a file (a film is of the song that

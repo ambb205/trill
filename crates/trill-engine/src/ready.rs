@@ -579,6 +579,7 @@ impl<'a> Stand<'a> {
             time_signature: TimeSignature::default(),
             playing: false,
             position_beats: 0.0,
+            song: Default::default(),
             loop_range: None,
         };
         Self {

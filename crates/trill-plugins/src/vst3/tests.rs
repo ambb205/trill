@@ -63,6 +63,7 @@ fn playing() -> ProcessInfo {
         time_signature: Default::default(),
         playing: true,
         position_beats: 0.0,
+        song: Default::default(),
         loop_range: None,
     }
 }
@@ -451,8 +452,10 @@ fn the_plugin_is_told_where_the_song_is() {
         time_signature: Default::default(),
         playing: true,
         position_beats: 12.5,
+        song: Default::default(),
         loop_range: Some((8.0, 16.0)),
-    };
+    }
+    .steady();
     let (mut left, mut right) = (vec![0.0f32; BLOCK], vec![0.0f32; BLOCK]);
     instance.processor.process(&info, &[], &mut left, &mut right);
     let context = seen(&mut instance).context.expect("a process context");
@@ -462,13 +465,60 @@ fn the_plugin_is_told_where_the_song_is() {
     assert_eq!((context.sampleRate, context.continousTimeSamples), (SR, 0));
     assert!(context.state & kPlaying as u32 != 0);
 
-    info.playing = false;
-    info.position_beats = 3.0;
+    info = ProcessInfo { playing: false, position_beats: 3.0, ..info }.steady();
     instance.processor.process(&info, &[], &mut left, &mut right);
     let context = seen(&mut instance).context.expect("a process context");
     assert!(context.state & kPlaying as u32 == 0);
     assert_eq!(context.projectTimeMusic, 3.0);
     assert_eq!(context.continousTimeSamples, BLOCK as i64, "the clock counts frames");
+}
+
+/// The scripted plugin as [`crate::transport_tests`] stages it.
+fn stage(factory: &Vst3Factory) -> crate::transport_tests::Stage<'_> {
+    crate::transport_tests::Stage {
+        format: crate::transport::written::Format::Vst3,
+        factory,
+        uri: scripted::uri(kind::IMPULSE),
+        serial,
+    }
+}
+
+#[test]
+fn a_plugin_with_a_side_chain_hears_the_track_its_device_listens_to_and_has_it_switched_on_only_then() {
+    use vst3::Steinberg::Vst::BusDirections_::kInput;
+    use vst3::Steinberg::Vst::MediaTypes_::kAudio;
+    use vst3::Steinberg::Vst::{BusDirection, MediaType};
+    let factory = factory();
+    crate::key_tests::a_plugin_with_a_key_input_hears_the_track_its_device_listens_to(&crate::key_tests::Stage {
+        format: crate::transport::written::Format::Vst3,
+        factory: &factory,
+        instrument: scripted::uri(kind::IMPULSE),
+        keyed: scripted::uri(kind::STEREO_GAIN),
+        serial,
+        key_input: Some(|serial| {
+            let seen = scripted::seen(serial);
+            let on = seen.activated.contains(&(kAudio as MediaType, kInput as BusDirection, 1, true));
+            let silent = seen.buses.0.get(1).is_some_and(|(_, flags, _)| *flags != 0);
+            (on, silent)
+        }),
+    });
+    // A plugin that has the bus takes a key, and is one that is made
+    // again for it; one without takes none.
+    let keyed = create(&factory, &device(kind::STEREO_GAIN));
+    assert!(keyed.processor.takes_key() && keyed.processor.key_is_set_when_made());
+    let plain = create(&factory, &device(kind::MONO_GAIN));
+    assert!(!plain.processor.takes_key() && !plain.processor.key_is_set_when_made());
+    assert!(!create(&factory, &device(kind::IMPULSE)).processor.takes_key());
+}
+
+#[test]
+fn the_plugin_is_told_the_songs_time_and_bars_through_changes_of_tempo_and_meter_whatever_the_buffer_size() {
+    crate::transport_tests::a_plugin_is_told_the_songs_time_and_bars_whatever_the_buffer_size(&stage(&factory()));
+}
+
+#[test]
+fn the_plugin_is_told_where_the_song_went_when_it_loops_or_is_moved() {
+    crate::transport_tests::a_plugin_is_told_where_the_song_went_when_it_loops_or_is_moved(&stage(&factory()));
 }
 
 #[test]
@@ -981,6 +1031,7 @@ fn sets_up_behind(path: std::path::PathBuf) -> super::instance::CreateRequest {
         sample_rate: SR,
         max_block: BLOCK as u32,
         offline: false,
+        key_bus: None,
     }
 }
 

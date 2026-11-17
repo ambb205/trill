@@ -363,9 +363,16 @@ async fn measure_and_render_use_the_machine_and_what_they_give_is_what_one_proce
     if trill_engine::render::usual_threads() > 1 {
         assert_eq!(all["threads"], 2, "the bass and the drums at once: {all}");
     }
-    for said in ["loudness_lufs", "peak_db", "true_peak_db", "duration_seconds", "tracks", "gain_reduction", "notes"] {
+    for said in ["loudness_lufs", "peak_db", "true_peak_db", "duration_seconds", "tracks", "gain_reduction"] {
         assert_eq!(all[said], one[said], "{said}");
     }
+    // What is said of the sound is the same too. How long the plugins were
+    // waited for is the machine's doing, not the render's: on a busy one
+    // the first measurement says it and the second, which knows them, not.
+    let said_of_the_sound = |reply: &Value| -> Vec<String> {
+        strings(&reply["notes"]).into_iter().filter(|n| !n.starts_with("Waited ")).collect()
+    };
+    assert_eq!(said_of_the_sound(&all), said_of_the_sound(&one), "notes");
 
     // And the same files, the mix and every part of it.
     let folder = tempfile::tempdir().unwrap();
