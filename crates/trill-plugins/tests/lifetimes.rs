@@ -15,18 +15,22 @@
 //! cargo test -p trill-plugins --test lifetimes -- --include-ignored --nocapture
 //! ```
 //!
-//! What it found (2026-11-17, Archetype Cory Wong X, the machine busy):
-//! an instance of the amplifier that is destroyed within seconds of being
-//! made, while another instance of it is alive, leaves work behind that
-//! the plugin then does on the destroyed object: an access violation in
-//! the plugin's module, on the plugin main thread, in a message the
-//! plugin posted to itself (`RtlEnterCriticalSection` on a deleted
-//! critical section, called from the plugin, called from its window
-//! procedure, called from the host's message loop). `vst3/quirks.rs` has
-//! the numbers and what the host does about it. Neither Serum 2 nor the
-//! Ample instruments were seen to do anything of the kind: sixty of their
-//! instances were handed a preset and dropped at once in each of four
-//! attempts.
+//! What it found (2026-11-17, Archetype Cory Wong X): an instance of the
+//! amplifier that is destroyed before it has heard from the work it does
+//! to set itself up, while another instance of it is alive, has that work
+//! done on the destroyed object: an access violation in the plugin's
+//! module, on the plugin main thread, in a message the plugin posted to
+//! itself (`RtlEnterCriticalSection` on a deleted critical section, called
+//! from the plugin, called from its window procedure, called from the
+//! host's message loop; once, a write through memory that had been given
+//! to something else since). It takes a destroyed instance and a message
+//! that is still to come: on a busy machine because the plugin's work
+//! takes longer than the instance lives, and on any machine when the
+//! plugin thread is kept from its windows by its jobs while the instance
+//! is let go of. `vst3/quirks.rs` has the numbers and what the host does
+//! about it. Neither Serum 2 nor the Ample instruments were seen to do
+//! anything of the kind: sixty of their instances were handed a preset and
+//! dropped at once in each of four attempts.
 //!
 //! `TRILL_LIFETIMES_ATTEMPTS` says how many attempts each part makes (4
 //! unless said). Nothing of the user's is read or written, and no window
@@ -73,13 +77,13 @@ const BUSY: &str = "TRILL_LIFETIMES_BUSY";
 const STEP: &str = "STEP ";
 /// How many instances an attempt makes beside the one that stays.
 const COPIES: usize = 12;
-/// How long an attempt keeps the plugin thread busy where it does: longer
-/// than the host keeps an instance of the amplifier that it was told to
-/// let go of.
+/// Longer than the host keeps an instance of the amplifier that it was
+/// told to let go of.
 const KEPT_BUSY: Duration = Duration::from_secs(20);
-/// How many instances an attempt has reading their state without a break,
-/// which is what keeps the plugin thread busy.
-const READERS: usize = 3;
+/// How many instances are asked for at the same moment where an attempt
+/// keeps the plugin thread busy. An instance is about 27 MB, five threads
+/// and 25 handles, all of which it gives back.
+const CROWD: usize = 40;
 /// How many instances are weighed.
 const WEIGHED: usize = 4;
 /// What an attempt says what the process has of memory with.
@@ -232,48 +236,70 @@ fn song(factory: &Vst3Factory, amplifier: &str) {
 
 /// The attempt that keeps the plugin thread busy, which is what a render
 /// of a song does when it makes its instruments from several threads at
-/// once. A few instances have their state read without a break, each from
-/// a thread of its own, for longer than the host keeps an instance it was
-/// told to let go of: their reading queues up on the plugin thread, which
-/// serves no window until it stops. Meanwhile one more instance is made
-/// and let go of. What the plugin posts to itself for that one waits until
-/// the thread is free, and its time passes on the clock before then. A
-/// host that takes it down when its time has passed, on its way from one
-/// reading to the next, has the plugin's messages for it delivered
-/// afterwards; so has one that takes it down at once.
+/// once. Beside the one that stays, one instance is made, and while it is
+/// being made [`CROWD`] more are asked for at the same moment, each from a
+/// thread of its own. Their making queues up on the plugin thread, one
+/// behind the other, and the thread serves no window until the last is
+/// made: longer than the host keeps an instance it was told to let go of,
+/// where a machine takes the 0.4 s to make one that this one does. What
+/// the plugin posts to itself for the first waits all that time. The
+/// first is let go of as soon as it is made, which the plugin thread
+/// comes to behind the others. A host that takes it down there and then,
+/// because its time has passed by the clock, has the plugin's messages for
+/// it delivered a moment later, to an instance that is gone.
 ///
-/// It has as many instances as it has rounds and readers, and one that
-/// stays.
+/// It has [`CROWD`] instances and two, once: the number is fixed, whatever
+/// the machine's speed. When they are let go of it waits for the host to
+/// have taken them down, and says what the process has of memory then.
 fn crowd(factory: &Vst3Factory, amplifier: &str) {
     step("the one that stays");
     let mut stays = make(factory, amplifier, None);
     run(&mut stays, 8);
     let state = stays.controller.as_mut().and_then(|controller| controller.save_state());
-    step("those that keep the plugin thread busy");
-    let mut readers: Vec<DeviceInstance> = (0..READERS).map(|_| make(factory, amplifier, state.clone())).collect();
-    for round in 0..2 {
-        step(&format!("the plugin thread kept busy, and one made and let go meanwhile, {round}"));
-        let until = Instant::now() + KEPT_BUSY;
-        std::thread::scope(|scope| {
-            for reader in &mut readers {
-                scope.spawn(move || {
-                    let controller = reader.controller.as_mut().expect("the amplifier has a controller");
-                    while Instant::now() < until {
-                        controller.save_state();
-                    }
-                });
-            }
-            // Once the reading is under way: the making is then one job
-            // among theirs, with no window served before it or after.
-            std::thread::sleep(Duration::from_millis(500));
-            let mut other = make(factory, amplifier, state.clone());
-            run(&mut other, 40);
-            drop(other);
-        });
-        run(&mut stays, 8);
+    let alone = machine::own();
+    step("one made, and let go while many are being made");
+    let began = Instant::now();
+    let others: Vec<DeviceInstance> = std::thread::scope(|scope| {
+        let making: Vec<_> = (0..CROWD)
+            .map(|_| {
+                scope.spawn(|| {
+                    // Behind the first, and long before the first is made.
+                    std::thread::sleep(Duration::from_millis(50));
+                    make(factory, amplifier, state.clone())
+                })
+            })
+            .collect();
+        let mut other = make(factory, amplifier, state.clone());
+        run(&mut other, 40);
+        // Let go of while the others are still being made: the plugin
+        // thread comes to it behind them, without having served a window
+        // since before it was made.
+        drop(other);
+        step(&format!("the first, gone from its owner {:.0} s after it was asked for", began.elapsed().as_secs_f64()));
+        making.into_iter().map(|made| made.join().expect("an instance is made")).collect()
+    });
+    run(&mut stays, 8);
+    step("the many, let go");
+    let most = machine::own();
+    drop(others);
+    run(&mut stays, 8);
+    // The host keeps them for a while, and takes them down one by one.
+    // Their memory is back when the process has little more than it had
+    // with the one that stays.
+    let let_go = Instant::now();
+    let back = |own: u64| own <= alone + (64 << 20);
+    while !back(machine::own()) && let_go.elapsed() < KEPT_BUSY * 6 {
+        std::thread::sleep(Duration::from_secs(1));
     }
-    step("all, let go");
-    drop(readers);
+    eprintln!(
+        "{WEIGHT}{} MB with the one that stays, {} MB with {CROWD} more, {} MB {:.0} s after they were let go of",
+        megabytes(alone),
+        megabytes(most),
+        megabytes(machine::own()),
+        let_go.elapsed().as_secs_f64()
+    );
+    assert!(back(machine::own()), "the memory of {CROWD} instances did not come back");
+    step("the one that stays, let go");
     drop(stays);
     step("done");
 }
@@ -743,16 +769,21 @@ fn a_process_that_makes_and_lets_go_of_plugin_instances_goes_on_hosting() {
     }
     let attempts = std::env::var(ATTEMPTS).ok().and_then(|value| value.parse().ok()).unwrap_or(4);
 
+    // What an instance weighs, and whether what it took comes back.
+    let (weighed, _) = attempt("weigh", true);
+    assert_eq!(weighed, Outcome::Survived, "weighing the amplifier");
+
     // What the plugin does to a host that takes it down as soon as it is
-    // let go of. Counted and said, not asserted: when this comes to none
-    // of the attempts, time after time, the plugin has been mended and
-    // `vst3/quirks.rs` can let go of it.
-    let unprotected = count("copies", false, attempts);
-    eprintln!("taken down at once, the amplifier ended {unprotected} of {attempts} attempts");
+    // let go of, while the plugin thread is kept from its windows. Counted
+    // and said, not asserted: when this comes to none of the attempts,
+    // time after time, the plugin has been mended and `vst3/quirks.rs` can
+    // let go of it.
+    let unprotected = count("crowd", false, attempts);
+    eprintln!(
+        "taken down at once behind a busy plugin thread, the amplifier ended {unprotected} of {attempts} attempts"
+    );
 
     // And with the host as it is.
-    let copies = count("copies", true, attempts);
-    let song = count("song", true, attempts);
-    let render = count("render", true, attempts);
-    assert_eq!((copies, song, render), (0, 0, 0), "attempts that did not get to the end, of {attempts} each");
+    let kept = ["crowd", "copies", "song", "render"].map(|kind| count(kind, true, attempts));
+    assert_eq!(kept, [0; 4], "attempts that did not get to the end, of {attempts} each");
 }

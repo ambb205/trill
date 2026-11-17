@@ -61,10 +61,25 @@
 //! to 23 seconds; the kept instance's time ran out meanwhile, it was
 //! taken down on the way out of that job, and the messages that had
 //! waited were delivered a moment later, to an instance that was gone.
-//! The scripted plugin does the same (`kind::SETS_UP_BEHIND`), so the
-//! default tests hold this.
 //!
-//! What this costs is the memory of an amplifier for some seconds more.
+//! That can be had on demand, on any machine (`tests/lifetimes.rs`, the
+//! attempt that keeps the plugin thread busy): one instance is made and
+//! let go of while forty more are being made at the same moment, which
+//! keeps the thread from its windows for some 26 seconds. Kept by the
+//! clock and taken down on the way, the amplifier ended 3 attempts of 3;
+//! taken down at once, 6 of 6; as the host is now, none of 7, in turn
+//! with the others on the same machine. A lost attempt is not always a
+//! crash. Twice the plugin wrote through memory that had been given to
+//! something else since, and once it did not fault at all: the plugin
+//! thread never came back, and nothing could be taken down or asked of
+//! any plugin for the rest of the attempt. The scripted plugin fails in
+//! the same way as the real one (`kind::SETS_UP_BEHIND`), so the default
+//! tests hold the order.
+//!
+//! What this costs is the memory of an amplifier for some seconds more:
+//! about 27 MB, five threads and 25 handles to an instance, all of which
+//! the plugin gives back (after forty were let go of, the process was
+//! back from 1.2 GB to within 60 MB of where it began in about a minute).
 //! It does not make the plugin correct: its work could take longer than
 //! the host waits, on a machine slow enough, and the crash would be back.
 //! The only thing that contains every fault of this kind is a process of
