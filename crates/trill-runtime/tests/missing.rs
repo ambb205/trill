@@ -194,7 +194,7 @@ fn a_library_folder_that_was_moved_nearby_is_found_with_the_songs_files_and_put_
 
     let runtime = start(folder.path());
     scanned(&runtime);
-    assert_eq!(runtime.library.roots(), [old.clone()], "the library still has the folder where it was");
+    assert_eq!(runtime.library.roots(), std::slice::from_ref(&old), "the library still has the folder where it was");
     runtime.session.lock().load(&song_file).unwrap();
 
     let missing = runtime.missing_files(&Look::default());

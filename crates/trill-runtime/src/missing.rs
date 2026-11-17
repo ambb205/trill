@@ -688,7 +688,7 @@ impl Runtime {
         // Whoever said it first, then the one that finds most, then the
         // one that says most exactly which folder it was. One that finds
         // nothing the ones before it do not is left out.
-        counted.sort_by(|a, b| (b.1, b.2.len(), b.0.from.len()).cmp(&(a.1, a.2.len(), a.0.from.len())));
+        counted.sort_by_key(|(moved, word, finds)| std::cmp::Reverse((*word, finds.len(), moved.from.len())));
         let mut found_so_far: HashSet<usize> = HashSet::new();
         counted.retain(|(_, word, finds)| {
             let news = finds.iter().any(|at| !found_so_far.contains(at));
@@ -853,7 +853,7 @@ fn judge(file: &MissingFile, found: Vec<(String, How)>) -> Vec<Candidate> {
     }
     // The surest first; among equals the one whose folders are most like
     // the missing file's. The order they were found in settles the rest.
-    judged.sort_by(|a, b| (b.0.confidence, b.1).cmp(&(a.0.confidence, a.1)));
+    judged.sort_by_key(|(candidate, alike)| std::cmp::Reverse((candidate.confidence, *alike)));
     // Two that are equally the best cannot both be the file for sure.
     if let [(first, first_alike), (second, second_alike), ..] = judged.as_mut_slice()
         && first.confidence == Confidence::Sure

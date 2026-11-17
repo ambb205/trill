@@ -158,7 +158,7 @@ async fn a_song_with_missing_files_says_so_wherever_it_is_looked_at_and_is_put_r
     assert_eq!(without["missing_files"]["files"], 2);
     assert_eq!(without["problems"], json!([]), "the lines for each clip give way to that");
     println!("FX without its files: {} dB, with them: {} dB", peak_of(&without, song.fx), peak_of(&whole, song.fx));
-    assert!(!(peak_of(&without, song.fx) > -90.0), "{without}");
+    assert!(peak_of(&without, song.fx) <= -90.0, "{without}");
     // Heard alone, a track is told of its own files only.
     let kit = ok(client, "get_project", json!({})).await["tracks"][1]["id"].as_u64().unwrap();
     let alone = ok(client, "measure", json!({ "tracks": [kit] })).await;

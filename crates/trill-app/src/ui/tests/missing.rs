@@ -283,7 +283,7 @@ fn a_library_folder_that_is_gone_is_marked_and_goes_along_with_the_songs_files()
     harness.settle_library();
 
     // The library still lists what it knew, and the folder is said to be gone.
-    assert_eq!(harness.runtime.library.roots(), [old.clone()]);
+    assert_eq!(harness.runtime.library.roots(), std::slice::from_ref(&old));
     let found = harness.app.sounds().missing.found.clone();
     assert_eq!(found.folders.len(), 1, "{found:#?}");
     assert!(found.folders[0].found.as_ref().is_some_and(|there| there.sure() && there.path == new));
@@ -299,7 +299,7 @@ fn a_library_folder_that_is_gone_is_marked_and_goes_along_with_the_songs_files()
     harness.click_label("Relink all 1");
     harness.settle_library();
     assert_eq!(harness.song_files(), [new.join("FX").join("Riser 2 Bars.wav")]);
-    assert_eq!(harness.runtime.library.roots(), [new.clone()]);
+    assert_eq!(harness.runtime.library.roots(), std::slice::from_ref(&new));
     assert!(harness.runtime.library.is_favorite(&new.join("Kit").join("Kick 01.wav")));
     assert!(harness.app.sounds().missing.found.is_empty());
     assert_eq!(harness.missing_line(), None);

@@ -670,7 +670,7 @@ fn a_folder_of_the_library_that_moved_is_said_to_be_missing_and_takes_what_is_ke
     // simply joins it.
     let moved = library.move_root(&other, &new).unwrap();
     assert_eq!(moved.favorites, 1);
-    assert_eq!(library.roots(), [new.clone()]);
+    assert_eq!(library.roots(), std::slice::from_ref(&new));
     assert!(library.wait_until_idle(WAIT));
     assert_eq!(library.index().roots().len(), 1);
 }
