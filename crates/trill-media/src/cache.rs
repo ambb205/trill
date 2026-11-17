@@ -319,6 +319,15 @@ impl AudioLoader for MediaCache {
         };
         loaded.map_err(|error| error.to_string())
     }
+
+    /// The file itself, read as far as it is asked: nothing of it is kept
+    /// here, and it is at its own sample rate.
+    fn open(&self, path: &str) -> Result<Box<dyn trill_core::audio::AudioStream>, String> {
+        match crate::open(Path::new(path)) {
+            Ok(file) => Ok(Box::new(file)),
+            Err(error) => Err(error.to_string()),
+        }
+    }
 }
 
 /// What the cache holds for a key, for the current version of its file.
