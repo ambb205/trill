@@ -420,8 +420,8 @@ within the whole decibel Live shows one to. From 0 dB to −60 dB, a quarter, a 
 | A track's or an instrument's volume | −8.2, −16.3, −30.0 dB | −8, −16, −30 dB (Operator's) |
 
 A send's fader and a volume's are the same law, with its knee 23.8 dB under the top of the control (0 dB for a
-send in Live, +6 dB for a volume); a gain's is another, and the two are as much as 3 dB apart on the way down,
-which is why they are two. A volume's fader in the window is laid out by it too: 0 dB at 85% of its travel, as on
+send in Live, +6 dB for a volume); a gain's is another, and in Live's own figures the two are 2.6 dB apart three
+quarters of the way down such a fade and 5 dB apart near its end, which is why they are two. A volume's fader in the window is laid out by it too: 0 dB at 85% of its travel, as on
 Live's, −12 dB at 55% and −48 dB at 10%. `trill-engine/tests/automation.rs` renders three fades of two points
 and holds every beat of them to what Live shows.
 
