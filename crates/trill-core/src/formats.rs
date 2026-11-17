@@ -62,11 +62,11 @@ pub struct Moved {
 
 /// The parameters that moved from format 3 on:
 ///
-/// * the poly synth's volume is 20 dB up, so that one voice at a volume
-///   setting is as loud as one of the synths a mix is translated from: what
-///   was 0 dB is now −20 dB.
+/// * the poly synth's volume is 21 dB up, so that one voice at a volume
+///   setting is as loud as one of the synth a mix is translated from: what
+///   was 0 dB is now −21 dB.
 pub const MOVED_2: &[Moved] =
-    &[Moved { uri: "builtin:polysynth", param: "volume", unsaid: 0.0, by: -20.0, since: "osc_level" }];
+    &[Moved { uri: "builtin:polysynth", param: "volume", unsaid: 0.0, by: -21.0, since: "osc_level" }];
 
 fn give(table: &[(&str, &[(&str, f64)])], uri: &str, params: &mut BTreeMap<String, f64>) {
     let Some((_, values)) = table.iter().find(|(device, _)| *device == uri) else { return };
@@ -187,11 +187,11 @@ mod tests {
             // in the device and wherever else the file has it.
             let mut loud = BTreeMap::from([("volume".to_string(), 8.0)]);
             keep(format, "builtin:polysynth", &mut loud);
-            assert_eq!(loud, BTreeMap::from([("volume".to_string(), -12.0)]));
+            assert_eq!(loud, BTreeMap::from([("volume".to_string(), -13.0)]));
             let mut unsaid = BTreeMap::new();
             keep(format, "builtin:polysynth", &mut unsaid);
-            assert_eq!(unsaid, BTreeMap::from([("volume".to_string(), -20.0)]));
-            assert_eq!(kept_value(format, "builtin:polysynth", "volume", -48.0), -68.0);
+            assert_eq!(unsaid, BTreeMap::from([("volume".to_string(), -21.0)]));
+            assert_eq!(kept_value(format, "builtin:polysynth", "volume", -48.0), -69.0);
             assert_eq!(kept_value(format, "builtin:polysynth", "cutoff", 900.0), 900.0);
             assert_eq!(kept_value(format, "builtin:sampler", "volume", -6.0), -6.0);
         }
@@ -231,9 +231,9 @@ mod tests {
         // that came with the move; one saved since has, and is left alone.
         let mut old = BTreeMap::from([("volume".to_string(), 5.0), ("cutoff".to_string(), 900.0)]);
         keep_complete("builtin:polysynth", &mut old);
-        assert_eq!(old.get("volume"), Some(&-15.0));
-        let mut new = BTreeMap::from([("volume".to_string(), -15.0), ("osc_level".to_string(), 1.0)]);
+        assert_eq!(old.get("volume"), Some(&-16.0));
+        let mut new = BTreeMap::from([("volume".to_string(), -16.0), ("osc_level".to_string(), 1.0)]);
         keep_complete("builtin:polysynth", &mut new);
-        assert_eq!(new.get("volume"), Some(&-15.0));
+        assert_eq!(new.get("volume"), Some(&-16.0));
     }
 }

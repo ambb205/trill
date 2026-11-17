@@ -236,7 +236,9 @@ fn the_engine_renders_a_drum_rack_pattern() {
     let factory = Builtins::with_loader(loader.clone());
     let pads = [(36, "kick.wav"), (38, "snare.wav"), (42, "closed.wav"), (46, "open.wav"), (49, "missing.wav")];
     let state = drumrack::State::with_pads(pads).unwrap().to_bytes();
-    let (mut project, track, id) = project_with("builtin:drumrack", Some(state), &[("pad38_level", 0.5)]);
+    // Every hit as its file is, whatever its velocity.
+    let plain = [("volume", 0.0), ("velocity_sens", 0.0), ("pad38_level", 0.5)];
+    let (mut project, track, id) = project_with("builtin:drumrack", Some(state), &plain);
     let clip = project.add_midi_clip(track, "beat", 0.0, 4.0).unwrap();
     project
         .clip_mut(clip)

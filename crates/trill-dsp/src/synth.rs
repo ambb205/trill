@@ -17,12 +17,14 @@ const MAX_UNISON: usize = 7;
 const MAX_HELD: usize = 16;
 /// Samples between control-rate updates (pitch, filter cutoff, LFO).
 const CONTROL_BLOCK: usize = 16;
-/// The level of one voice at a volume of 0 dB and full velocity. At the
-/// default volume, -20 dB, a voice peaks 13 dB under full scale, which is
-/// the room a chord needs; at the same volume setting a sine is as loud as
-/// one from the synths a mix is translated from. (Before format 3 this was
-/// 0.22 and the default volume 0 dB: the same sound, 20 dB down the scale.)
-const VOICE_GAIN: f32 = 2.2;
+/// The level of one voice at a volume of 0 dB and full velocity: 21 dB
+/// over what it was before format 3 (0.22, with a default volume of 0 dB:
+/// the same sound, 21 dB down the scale). At the default volume a voice
+/// peaks 13 dB under full scale, which is the room a chord needs; and at
+/// the same volume setting, envelope and velocity a sine is as loud as the
+/// one of the synth it was measured against (Ableton Live's Operator, on
+/// the bench's second song: within 0.2 dB at velocities 112 and 127).
+const VOICE_GAIN: f32 = 2.468_44;
 /// Frames between two readings of a voice's pitch envelope, counted from
 /// the start of its note: a third of a millisecond at 48 kHz.
 const PITCH_STEP: u32 = 16;
@@ -66,11 +68,11 @@ define_params!(P, PARAMS, [
     VelocitySens => float("velocity_sens", "Velocity Sensitivity", 0.0, 1.0, 0.6, ""),
     Volume => float(
         "volume",
-        "Volume (silent at -70; at 0 one voice at full velocity is 7 dB over full scale, so chords need the room \
+        "Volume (silent at -70; at 0 one voice at full velocity is 8 dB over full scale, so chords need the room \
          the default leaves)",
         SILENT_DB as f64,
         0.0,
-        -20.0,
+        -21.0,
         "dB"
     ),
     PitchEnv => float(
@@ -159,7 +161,7 @@ pub const PRESETS: &[PresetDef] = &[
             ("lfo_pitch", 0.08),
             ("velocity_sens", 0.4),
             ("key_track", 0.3),
-            ("volume", -23.0),
+            ("volume", -24.0),
         ],
     },
     PresetDef {
@@ -201,7 +203,7 @@ pub const PRESETS: &[PresetDef] = &[
             ("glide", 0.03),
             ("velocity_sens", 0.4),
             ("osc2_detune", 6.0),
-            ("volume", -12.0),
+            ("volume", -13.0),
         ],
     },
     PresetDef {
@@ -217,7 +219,7 @@ pub const PRESETS: &[PresetDef] = &[
             ("mono", 1.0),
             ("glide", 0.04),
             ("velocity_sens", 0.2),
-            ("volume", -15.0),
+            ("volume", -16.0),
         ],
     },
     PresetDef {
@@ -238,7 +240,7 @@ pub const PRESETS: &[PresetDef] = &[
             ("filter_release", 0.1),
             ("mono", 1.0),
             ("glide", 0.06),
-            ("volume", -18.0),
+            ("volume", -19.0),
         ],
     },
     PresetDef {
@@ -262,7 +264,7 @@ pub const PRESETS: &[PresetDef] = &[
             ("filter_sustain", 0.0),
             ("filter_release", 0.35),
             ("key_track", 0.5),
-            ("volume", -14.0),
+            ("volume", -15.0),
         ],
     },
     PresetDef {
@@ -285,7 +287,7 @@ pub const PRESETS: &[PresetDef] = &[
             ("glide", 0.05),
             ("lfo_rate", 5.5),
             ("lfo_pitch", 0.12),
-            ("volume", -16.0),
+            ("volume", -17.0),
         ],
     },
     PresetDef {
@@ -302,7 +304,7 @@ pub const PRESETS: &[PresetDef] = &[
             ("unison", 3.0),
             ("unison_detune", 4.0),
             ("unison_spread", 0.2),
-            ("volume", -19.0),
+            ("volume", -20.0),
             ("attack", 0.002),
             ("decay", 3.5),
             ("sustain", 0.2),
@@ -371,7 +373,7 @@ pub const PRESETS: &[PresetDef] = &[
             ("velocity_sens", 0.0),
             ("lfo_rate", 6.5),
             ("lfo_pitch", 0.05),
-            ("volume", -24.0),
+            ("volume", -25.0),
         ],
     },
     PresetDef {
@@ -415,7 +417,7 @@ pub const PRESETS: &[PresetDef] = &[
             ("filter_release", 0.6),
             ("key_track", 0.6),
             ("velocity_sens", 0.8),
-            ("volume", -17.0),
+            ("volume", -18.0),
         ],
     },
 ];

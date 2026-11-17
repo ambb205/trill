@@ -26,7 +26,7 @@ pub const MAX_VOLUME_DB: f32 = 6.0;
 /// * 3: the sampler and the drum rack follow velocity by a law in decibels
 ///   that plays a hard hit louder than the volume, the saturator no longer
 ///   turns its level down as its drive rises, the lowest value of a level
-///   is silence, and the poly synth's volume is 20 dB up.
+///   is silence, and the poly synth's volume is 21 dB up.
 ///
 /// A device of an older file keeps the sound it had: see [`crate::formats`].
 pub const FORMAT_VERSION: u32 = 3;
@@ -1952,9 +1952,9 @@ mod tests {
         };
         // The synth's volume is the same sound under another number,
         // wherever the file has it; nothing else of it has moved.
-        assert_eq!(params(synth), BTreeMap::from([("volume".to_string(), -12.0)]));
-        assert_eq!(params(plain), BTreeMap::from([("volume".to_string(), -20.0)]));
-        assert_eq!(values(&volume(synth)), [-68.0, -12.0]);
+        assert_eq!(params(synth), BTreeMap::from([("volume".to_string(), -13.0)]));
+        assert_eq!(params(plain), BTreeMap::from([("volume".to_string(), -21.0)]));
+        assert_eq!(values(&volume(synth)), [-69.0, -13.0]);
         assert_eq!(values(&cutoff), [200.0, 8000.0]);
         // The sampler keeps its law and the defaults of the day; its own
         // volume means what it did.
@@ -1971,7 +1971,7 @@ mod tests {
         assert_eq!(Project::from_json(&read.to_json()).unwrap(), read);
         // And a file of format 1 is given all of it at once.
         let oldest = Project::from_json(&old.replace("\"format_version\": 2", "\"format_version\": 1")).unwrap();
-        assert_eq!(oldest.device(synth).unwrap().params.get("volume"), Some(&-12.0));
+        assert_eq!(oldest.device(synth).unwrap().params.get("volume"), Some(&-13.0));
         assert_eq!(oldest.device(reverb).unwrap().params.get("legacy"), Some(&1.0));
     }
 
