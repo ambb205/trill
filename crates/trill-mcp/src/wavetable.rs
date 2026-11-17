@@ -23,10 +23,13 @@ use trill_engine::session::{TableReport, factory_tables};
 /// Appended to the server's instructions.
 pub(crate) const INSTRUCTIONS: &str = "\
 Shaping a sound: the wavetable synth
-- builtin:wavetable is the built-in instrument for electronic sounds: basses, leads, pads, plucks and keys. Its \
-presets say in a sentence what each sounds like and what it is for; search_presets finds them (\"reese bass\", \
-\"glass pad\", \"electric piano\") and create_track takes one as it takes any preset. It loads at once, needs no \
-file and renders to the same samples every time.
+- builtin:wavetable is the built-in instrument for electronic sounds. Its bank is eighty-two sounds for house and \
+techno, drum and bass, dubstep, trance, synthwave, lo-fi, pop, ambient and film: basses first (a sub, an 808, a \
+reese, an acid line, wobbles and growls), leads, plucks and stabs, pads, keys, bells and mallets, strings and \
+brass, textures that move, and the effects a song is built with (risers, a fall, an impact, a sub drop, a sweep). \
+Each says in a sentence what it sounds like, what it is for, which keys it is for and what its macros do; \
+search_presets finds them by those words (\"808 sub\", \"reese bass\", \"warm pad\", \"riser\") and create_track \
+takes one as it takes any preset. It loads at once, needs no file and renders to the same samples every time.
 - It is the one synth here whose every part you can read and set, so reach for it when a sound is to be shaped \
 and not only chosen. describe_device \"builtin:wavetable\" explains the parts; get_device on one shows its tables, \
 what its matrix sends where (in words) and its macros. A sound is: a table for each oscillator and a position in \
@@ -41,11 +44,14 @@ the recipe it is made from; set_wavetable gives an oscillator one of them, or a 
 shape the numbers move), or one read from an audio file (a wavetable file of single cycles, or a recording of a \
 held note). describe_wavetable with `recipe` shows what a recipe would be, frame by frame, changing nothing.
 - You cannot hear it. After shaping a sound, probe its track (how loud, how bright, how long each note rings) and \
-measure the song. Its presets are matched in level by measurement, and nobody has tuned them by ear yet: for a \
-sound a maker's preset of an installed instrument covers, that preset may well be the better one. For plain analog \
-sounds with fewer parts to set there is builtin:polysynth.
-- It has no effects inside. Its presets other than the basses are sounds that bring a chorus, a delay or a reverb \
-as devices behind it: the reply that gives one says which were made, and they are yours to change or delete. A \
+measure the song. Its sounds are matched in level by measurement, each through its effects: within a kind the \
+same playing is the same loudness, so a fader balances a part and not a preset. Beside builtin:drumkit they are \
+quiet (at the same fader a drum pattern measured 2 to 8 LU over a bass of the bank and some 10 over its chords): \
+set the faders and measure. Sixteen of them were heard and passed by a person; the others are held to \
+measurements and nobody has heard them: for a sound a maker's preset of an installed instrument covers, that \
+preset may well be the better one. For plain analog sounds with fewer parts to set there is builtin:polysynth.
+- It has no effects inside. Its sounds bring the chorus, the delay or the reverb they want as devices behind it \
+(most basses bring none): the reply that gives one says which were made, and they are yours to change or delete. A \
 sound shaped from `init` brings none: add builtin:chorus, builtin:delay or builtin:reverb after it, or a send to a \
 return that has them.";
 
@@ -413,7 +419,7 @@ mod tests {
     #[test]
     fn the_instructions_say_what_is_so() {
         // Every preset category it names, and nothing it does not have.
-        for word in ["describe_wavetable", "set_wavetable", "macro1", "builtin:polysynth", "nobody has tuned"] {
+        for word in ["describe_wavetable", "set_wavetable", "macro1", "builtin:polysynth", "nobody has heard"] {
             assert!(INSTRUCTIONS.contains(word), "{word}");
         }
         assert!(patches::all().count() > 12);
