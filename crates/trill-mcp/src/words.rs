@@ -364,6 +364,18 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
                 None => about("Rendering", "Rendered", what),
             }
         }
+        "film" | "film_plan" => {
+            let what = match (call.text("of"), call.text("section")) {
+                (Some("making_of"), _) => "how the song was made".to_owned(),
+                (_, Some(section)) => format!("{} of the song", quoted(section)),
+                _ => "the song".to_owned(),
+            };
+            match (tool, call.text("path")) {
+                ("film_plan", _) => about("Planning", "Planned", &format!("a film of {what}")),
+                (_, Some(path)) => about("Filming", "Filmed", &format!("{what} to {}", quoted(file_name(path)))),
+                (_, None) => about("Filming", "Filmed", &what),
+            }
+        }
         "measure" => match call.has("tracks") {
             true => about("Measuring", "Measured", "some of the tracks"),
             false => about("Measuring", "Measured", "the song"),
@@ -555,6 +567,27 @@ fn number(value: &Value) -> Option<String> {
 pub fn heard(tool: &str, answer: &str) -> Option<String> {
     let answer: Value = serde_json::from_str(answer).ok()?;
     match tool {
+        "film" => {
+            // How long it is and how it sounds: what a film is known by.
+            let seconds = answer.get("seconds").and_then(Value::as_f64)?;
+            let mut said = vec![format!("{}:{:02}", seconds as u64 / 60, seconds as u64 % 60)];
+            if let Some(size) = answer.get("size").and_then(Value::as_str) {
+                said.push(size.to_owned());
+            }
+            if let Some(loudness) = answer.get("loudness_lufs").and_then(number) {
+                said.push(format!("{loudness} LUFS"));
+            }
+            Some(said.join(", "))
+        }
+        "film_plan" => {
+            let takes = answer.get("takes").and_then(Value::as_array).map(Vec::len);
+            let shots = answer.get("shots").and_then(Value::as_u64);
+            match (takes, shots) {
+                (Some(takes), _) => Some(format!("{takes} takes")),
+                (None, Some(shots)) => Some(format!("{shots} shots")),
+                (None, None) => None,
+            }
+        }
         "measure" | "render" => {
             let mut said = Vec::new();
             if let Some(loudness) = answer.get("loudness_lufs").and_then(number) {

@@ -779,3 +779,109 @@ pub struct JournalRequest {
     #[serde(default)]
     pub conversation: bool,
 }
+
+// ---- films ---------------------------------------------------------------------------
+
+/// What a film is of.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FilmOf {
+    /// The song as it plays: its lanes, clips and piano rolls on the stage, filmed by a director, with the
+    /// song's own sound.
+    #[default]
+    Song,
+    /// How the song was made: the session's journal played again, step by step, with the finished song under it.
+    MakingOf,
+}
+
+/// How a stretch of a film is framed.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FilmShot {
+    /// The whole song in the frame, the playhead crossing it.
+    Song,
+    /// The lanes of every part that plays, eight bars across.
+    Wide,
+    /// The lanes above and the piano rolls of two or three parts below, four bars across.
+    Ensemble,
+    /// One part's piano roll, large, with the lanes as a strip above it.
+    Close,
+}
+
+/// How a stretch of a film is entered.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FilmEntry {
+    /// At once, on the beat, with a flash.
+    Cut,
+    /// The camera travels there over a bar.
+    Move,
+}
+
+/// What is asked of the director for one stretch of the song. Whatever is left out stays the director's choice.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+pub struct FilmDirection {
+    /// The stretch, as a section by its marker's name ("CHORUS 2"). Give this, or `from_bar`.
+    pub section: Option<String>,
+    /// The stretch, in bars counted from 1: from the start of this bar…
+    pub from_bar: Option<f64>,
+    /// …to the end of this one (default: the same bar as `from_bar`, or the end of `section`).
+    pub to_bar: Option<f64>,
+    /// How to frame it. Omit and name `parts` to let them decide: one part is held close, two or three are an
+    /// ensemble.
+    pub shot: Option<FilmShot>,
+    /// Ids of the tracks to show as piano rolls, top to bottom: for "close" the one to hold close, for
+    /// "ensemble" up to three. Omit to let the director pick who drives the stretch.
+    pub parts: Option<Vec<u64>>,
+    /// How to come to it. Omit for a cut where the frame changes and a move where it does not.
+    pub enter: Option<FilmEntry>,
+}
+
+/// How much work goes into each frame.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FilmQuality {
+    /// Each frame exposed from eight moments (the blur of motion) and drawn at twice its size. About half real
+    /// time at 1920x1080 on a good graphics card.
+    #[default]
+    Fine,
+    /// One moment a frame at its own size, as the window shows the stage: about twice as fast.
+    Plain,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct FilmPlanRequest {
+    /// What the film would be of (default "song").
+    #[serde(default)]
+    pub of: FilmOf,
+    /// Film only this section, by its marker's name. Omit for the whole song (or give `start`/`end`).
+    pub section: Option<String>,
+    /// Film from this beat (default 0).
+    pub start: Option<f64>,
+    /// Film up to this beat (default: the end of the song).
+    pub end: Option<f64>,
+    /// What you ask of the director, stretch by stretch, in order: where two speak of the same bars the later
+    /// one has them. Omit for the director's own plan.
+    pub direct: Option<Vec<FilmDirection>>,
+    /// With "making_of": how many seconds of the story a second of film is (default 1, or as much more as it
+    /// takes for the film to be no longer than the song under it).
+    pub speed: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct FilmRequest {
+    /// Where to write the film, as an .mp4. Defaults to a `films` folder beside the project file (for a song
+    /// that has not been saved: the system temp folder, or the folder the assistant works in).
+    pub path: Option<String>,
+    /// "1080p" (1920x1080, the default), "2160p" (3840x2160), "upright" (1080x1920, for phones), or any
+    /// "WIDTHxHEIGHT" with even sides from 320 to 3840.
+    pub size: Option<String>,
+    /// Frames a second, 24 to 60 (default 60).
+    pub rate: Option<u32>,
+    #[serde(default)]
+    pub quality: FilmQuality,
+    /// With "making_of": false for a silent film. Default true: the finished song plays under it.
+    pub music: Option<bool>,
+    #[serde(flatten)]
+    pub what: FilmPlanRequest,
+}

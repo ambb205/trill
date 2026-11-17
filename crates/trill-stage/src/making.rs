@@ -263,6 +263,12 @@ impl Making {
         if room > 0.0 { story / room } else { 1.0 }
     }
 
+    /// When in the film a moment of the story is, in seconds: after the
+    /// title, at the film's speed.
+    pub fn film_time(&self, story: f64) -> f64 {
+        LEAD_IN + story / self.speed
+    }
+
     /// The shots of the story, in order.
     pub fn shots(&self) -> &[StoryShot] {
         &self.shots
@@ -534,12 +540,28 @@ impl MakingFilm {
         outcome
     }
 
+    /// The story as it will be filmed, at the speed the film will have.
+    /// Nothing is rendered for this, so a plan can be read from it.
+    ///
+    /// A film is no longer than its music unless a speed was asked for:
+    /// the story is told as much faster as it takes to end with the song.
+    pub fn making(&self) -> Result<Making, String> {
+        let request = &self.request;
+        let speed = request.speed.unwrap_or(1.0);
+        let mut making = Making::of(self.journal.clone(), &self.render.project, &self.drums, speed)?;
+        let song = making.finished.duration();
+        if request.speed.is_none() && request.music && making.length() > song && song > LEAD_IN + HOLD + 4.0 {
+            making.speed = Making::speed_to_last(making.story_length(), song).max(1.0);
+        }
+        Ok(making)
+    }
+
     fn make(self, progress: &Progress) -> Result<Exported, String> {
         let started = Instant::now();
         let request = &self.request;
         let mut filmer = Filmer::new()?;
         let finished = &self.render.project;
-        let mut making = Making::of(self.journal, finished, &self.drums, request.speed.unwrap_or(1.0))?;
+        let mut making = self.making()?;
         let mut notes = Vec::new();
         if let Some(broken) = making.broken() {
             notes.push(format!("The journal could not be followed to its end ({broken}); the film stops there."));
@@ -563,10 +585,6 @@ impl MakingFilm {
                 return Err("The film was stopped before its first frame; nothing of it was kept.".to_string());
             }
             let song = rendered.left.len() as f64 / f64::from(rendered.sample_rate);
-            // A film is no longer than its music, unless a speed was asked for.
-            if request.speed.is_none() && making.length() > song && song > LEAD_IN + HOLD + 4.0 {
-                making.speed = Making::speed_to_last(making.story_length(), song).max(1.0);
-            }
             // The film ends as the song does: on its last bars.
             let length = making.length();
             let (from, delay) = ((song - length).max(0.0), (length - song).max(0.0));

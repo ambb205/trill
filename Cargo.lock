@@ -4700,6 +4700,7 @@ dependencies = [
  "trill-media",
  "trill-plugins",
  "trill-runtime",
+ "trill-stage",
  "trill-theory",
 ]
 
