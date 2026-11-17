@@ -33,11 +33,11 @@ const AMPLE: &str = "Keyswitches sit under the range and sound nothing: press on
                      while a neighbouring one still rings (up to four keys above it) is hammered on without the hammer \
                      key, which spoils a picked chord and a fast run over neighbouring keys; at 2 the bass joins such \
                      notes another way. Set it to 0 so that only the keys join notes: update_device with params \
-                     {\"Auto Legato\": \"0\"}, again after any preset, which brings its own value. As it comes, two \
-                     renders of it are not the same samples: it draws at random which recording of a note it plays (the guitars) \
-                     and the noise of the hand moving between frets. Where renders must repeat, have it take them in \
-                     turn: update_device with settings {\"Cycle Mode Switch\": 1, \"M-Fret Sound\": 0}, after any \
-                     preset.";
+                     {\"Auto Legato\": \"0\"}, again after any preset, which brings its own value. As it comes it \
+                     draws at random which recording of a note it plays (the guitars) and the noise of the hand between \
+                     frets: a change to its part changes later notes too. To compare renders, give measure and render \
+                     `repeatable: true`, or set it in turn: update_device with settings \
+                     {\"Cycle Mode Switch\": 1, \"M-Fret Sound\": 0}, after any preset.";
 
 /// What the instruments modelled by Audio Modeling have in common.
 const SWAM: &str = "A physical model, not recordings: it is silent until it is given expression (controller 11), \
