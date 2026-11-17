@@ -279,8 +279,7 @@ async fn the_writing_tools_lay_each_bar_in_the_time_signature_it_has() {
     let hits = starts(client, &own["clip_id"], Some(KICK)).await;
     assert_eq!(hits[8..], [8.0, 9.0, 10.0, 11.5, 13.0, 14.5], "eighths, grouped as the lane groups them: {hits:?}");
 
-    // A line is counted through in one time signature: in the bars of 7/8 it is checked against 3.5 beats,
-    // and across the change it is two calls.
+    // A line is counted through the song's own bars: in the bars of 7/8 it is checked against 3.5 beats.
     let seven = ":0.5 1 2 3 4 5 6 7 | 1' 7 6 5 4 3 2";
     let melody =
         ok(client, "write_melody", json!({ "track": lead, "start": 8, "key": "A minor", "phrase": seven })).await;
@@ -292,11 +291,46 @@ async fn the_writing_tools_lay_each_bar_in_the_time_signature_it_has() {
     )
     .await
     .unwrap_err();
-    assert!(error.contains("but a bar of 7/8 has 3.5"), "{error}");
-    let across = ":1 1 2 3 4 | 5 4 3 2 | :0.5 1 2 3 4 5 6 7";
+    assert!(error.contains("but the song's bar there, one of 7/8, has 3.5"), "{error}");
+
+    // And across the change it is one call: two bars of 4/4, the two of 7/8, and one of 4/4 again, each
+    // bar line where the song has it, the stress on each bar's own beats.
+    let across = ":1 1 2 3 4 | 5 4 3 2 | :0.5 1 2 3 4 5 6 7 | 1' 7 6 5 4 3 2 | :1 1:4";
+    let line = ok(
+        client,
+        "write_melody",
+        json!({ "track": lead, "start": 0, "name": "Across", "key": "A minor", "phrase": across, "velocity": 80, "accent": 20 }),
+    )
+    .await;
+    assert_eq!((line["bars"].as_u64(), line["written_beats"].as_f64()), (Some(5), Some(19.0)), "{line}");
+    assert_eq!(line["time_signatures"], json!(["4/4 in bar(s) 1, 2, 5", "7/8 in bar(s) 3, 4"]), "{line}");
+    assert_eq!(line["pitches"], "A4 B4 C5 D5 | E5 D5 C5 B4 | A4 B4 C5 D5 E5 F5 G5 | A5 G5 F5 E5 D5 C5 B4 | A4");
+    assert!(line["notes"].to_string().contains("counted through the song's own bars"), "{line}");
+    let read = ok(client, "get_notes", json!({ "clip": line["clip_id"] })).await;
+    let notes: Vec<(f64, u64, u64)> = read["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|note| {
+            (note["start"].as_f64().unwrap(), note["pitch"].as_u64().unwrap(), note["velocity"].as_u64().unwrap())
+        })
+        .collect();
+    let at = |beat: f64| *notes.iter().find(|note| (note.0 - beat).abs() < 1e-6).unwrap_or_else(|| panic!("{beat}"));
+    // The downbeats of bars 3, 4 and 5 are where the song has them, and are the loudest of their bars.
+    assert_eq!((at(8.0).1, at(11.5).1, at(15.0).1), (69, 81, 69));
+    assert!(at(8.0).2 > at(8.5).2 && at(11.5).2 > at(12.0).2, "{notes:?}");
+    // In 7/8 the felt beats are two, two and three eighths: the fifth eighth is stressed, the fourth is not.
+    assert!(at(10.0).2 > at(9.5).2 && at(10.0).2 > at(10.5).2, "{notes:?}");
+
+    // A bar that is too long for the song's bar there is said by its own number and meter.
+    let long = ":1 1 2 3 4 | 5 4 3 2 | 1 2 3 4 |";
     let error =
-        call(client, "write_melody", json!({ "track": lead, "key": "A minor", "phrase": across })).await.unwrap_err();
-    assert!(error.contains("cross a change of time signature (4/4 in bar(s) 1, 2; 7/8 in bar(s) 3)"), "{error}");
+        call(client, "write_melody", json!({ "track": lead, "key": "A minor", "phrase": long })).await.unwrap_err();
+    assert!(
+        error.contains("bar 3 of the phrase is 4 beats long, but the song's bar there, one of 7/8, has 3.5"),
+        "{error}"
+    );
+    // A phrase is not repeated into bars that are not like its own.
     let error = call(
         client,
         "write_melody",
@@ -305,10 +339,17 @@ async fn the_writing_tools_lay_each_bar_in_the_time_signature_it_has() {
     .await
     .unwrap_err();
     assert!(
-        error.contains("cross a change of time signature (4/4 in bar(s) 1; 7/8 in bar(s) 2)")
-            && error.contains("in a call of their own"),
+        error.contains("the bars it would repeat into from bar 2 are not as long as the ones it was written through"),
         "{error}"
     );
+    // In bars that are alike it repeats as it always did.
+    let twice = ok(
+        client,
+        "write_melody",
+        json!({ "track": lead, "start": 15, "key": "A minor", "phrase": ":1 1 2 3 4", "bars": 2 }),
+    )
+    .await;
+    assert_eq!(twice["written_beats"], 8.0, "{twice}");
 
     // What was written reads back bar by bar, in the song's own bars.
     let heard = ok(client, "analyze_music", json!({ "track": keys })).await;

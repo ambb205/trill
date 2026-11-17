@@ -13,7 +13,13 @@
 //! was learned wins. A store that was given no folder keeps what it learns
 //! in memory, for as long as the program runs: what a test or a scratch
 //! session wants.
+//!
+//! One thing is not known by device type at all: which drum is on which
+//! key of a drum plugin, since that is the kit's doing and kits differ.
+//! Where the plugin says what its kit has on its keys, the names come
+//! from that ([`kit`]), each time they are asked for.
 
+pub mod kit;
 mod known;
 
 use parking_lot::Mutex;

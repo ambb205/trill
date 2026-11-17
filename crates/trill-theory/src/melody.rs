@@ -18,6 +18,8 @@
 //! * `|` is an optional bar line. When bar lines are written, every bar is
 //!   checked to be the right length, which catches slips in counting. The
 //!   first bar may be shorter: a pickup leading into the first full bar.
+//!   In a song whose time signature changes the bars are the song's own,
+//!   each as long as it is there ([`Phrase::parse_through`]).
 //!
 //! # Ornaments
 //!
@@ -31,6 +33,7 @@
 //! :0.5 5 6!hammer 5!pull  hammered on and pulled off: no new attack
 //! 3:1!slide               slid into from the note before, or from below if there is none
 //! 3:1!slide=1             slid into from the first degree
+//! 3:1!scoop               slid up into from just below, whatever came before
 //! 5:2!fall                falling away at its end
 //! 1:0.5!palm_mute         by one of the instrument's own articulations, by name
 //! ```
@@ -58,6 +61,8 @@ pub enum Mark {
     /// Slid into: from this pitch, or with `None` from the note before it,
     /// or from below where no note comes right before.
     Slide(Option<u8>),
+    /// Slid up into from just below, whatever came before it.
+    Scoop,
     /// Falling away in pitch at its end.
     Fall,
     /// With vibrato, this many semitones each way if given.
@@ -78,6 +83,7 @@ impl Mark {
             Mark::Release => "release",
             Mark::Prebend(_) => "prebend",
             Mark::Slide(_) => "slide",
+            Mark::Scoop => "scoop",
             Mark::Fall => "fall",
             Mark::Vibrato(_) => "vib",
             Mark::Join => "hammer",
@@ -92,6 +98,7 @@ pub const ORNAMENTS: &[(&str, &str)] = &[
     ("release", "after bend=P: let back to its own pitch before the note ends"),
     ("prebend=P", "struck already bent to P, then let down to its own pitch"),
     ("slide", "slid into from the note before it, or from below if no note comes right before; slide=P slides from P"),
+    ("scoop", "slid up into from just below, whatever came before it: a guitar's slide into a note"),
     ("hammer", "joined to the note before it with no new attack: a hammer-on or pull-off (also pull, legato, h, p)"),
     ("vib", "vibrato, after a moment; vib=0.5 sets how wide in semitones (default 0.3)"),
     ("fall", "falls away in pitch at its end"),
@@ -117,6 +124,37 @@ impl Tone {
     }
 }
 
+/// A bar a phrase is written through: how long it is, and its time
+/// signature, which says where its beats fall.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct PhraseBar {
+    pub length: f64,
+    pub signature: TimeSignature,
+}
+
+impl PhraseBar {
+    /// A whole bar of `signature`.
+    pub fn of(signature: TimeSignature) -> Self {
+        Self { length: signature.beats_per_bar(), signature }
+    }
+
+    /// The bar of `bars` that `beat` falls in, with where it begins: the
+    /// last one goes on repeating past the end of the list. `bars` has at
+    /// least one.
+    pub fn at(bars: &[PhraseBar], beat: f64) -> (f64, PhraseBar) {
+        let mut start = 0.0;
+        for bar in bars {
+            if beat < start + bar.length - EPSILON {
+                return (start, *bar);
+            }
+            start += bar.length;
+        }
+        let last = *bars.last().expect("a phrase is written through at least one bar");
+        let past = ((beat - start + EPSILON) / last.length).floor().max(0.0);
+        (start + past * last.length, last)
+    }
+}
+
 /// A parsed melodic phrase.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Phrase {
@@ -138,7 +176,16 @@ impl Phrase {
     /// Parses a phrase. Degrees are read in `key`, with degree 1 in
     /// `octave`; a phrase of note names needs no key.
     pub fn parse(text: &str, key: Option<&Scale>, octave: i32, signature: TimeSignature) -> Result<Self> {
-        let bar_length = signature.beats_per_bar();
+        Self::parse_through(text, key, octave, &[PhraseBar::of(signature)])
+    }
+
+    /// [`parse`](Self::parse) for a phrase written through bars that are
+    /// not all alike: `bars` are the bars from the one the phrase's first
+    /// bar line closes, in order, the last going on for as long as the
+    /// phrase does. Each bar that is written is checked against its own.
+    pub fn parse_through(text: &str, key: Option<&Scale>, octave: i32, bars: &[PhraseBar]) -> Result<Self> {
+        let bar_at = |number: usize| bars[(number - 1).min(bars.len() - 1)];
+        let alike = bars.iter().all(|bar| *bar == bars[0]);
         let spaced = text.replace('|', " | ");
         let mut tones: Vec<Tone> = Vec::new();
         let (mut position, mut default, mut bar_start, mut bar) = (0.0f64, 1.0f64, 0.0f64, 1usize);
@@ -151,18 +198,27 @@ impl Phrase {
         for token in spaced.split_whitespace() {
             if token == "|" {
                 let written = position - bar_start;
+                let PhraseBar { length: bar_length, signature } = bar_at(bar);
                 // Only the first bar may be short: it is then a pickup.
                 let short_first = bar == 1 && bar_start == 0.0 && written < bar_length - EPSILON;
                 if short_first {
                     pickup = written;
                 }
                 if (written - bar_length).abs() > EPSILON && !short_first {
+                    let whole = (bar_length - signature.beats_per_bar()).abs() < EPSILON;
                     return Err(Error::new(format!(
-                        "bar {bar} of the phrase is {} beats long, but a bar of {}/{} has {bar_length}; check the \
-                         lengths: a note without :beats is as long as the last bare :beats said (1 to begin with)",
+                        "bar {bar} of the phrase is {} beats long, but {} has {}; check the lengths: a note without \
+                         :beats is as long as the last bare :beats said (1 to begin with)",
                         round(written),
-                        signature.numerator,
-                        signature.denominator
+                        match (whole, alike) {
+                            (true, true) => format!("a bar of {}/{}", signature.numerator, signature.denominator),
+                            (true, _) => format!(
+                                "the song's bar there, one of {}/{},",
+                                signature.numerator, signature.denominator
+                            ),
+                            (false, _) => "the song's bar there, cut short by a change of time signature,".to_string(),
+                        },
+                        round(bar_length),
                     )));
                 }
                 if written.abs() > EPSILON {
@@ -293,6 +349,7 @@ fn parse_marks(
                 Some(_) => Mark::Slide(Some(target("slide")?)),
                 None => Mark::Slide(None),
             },
+            "scoop" => plain("scoop").map(|()| Mark::Scoop)?,
             "vib" | "vibrato" => match value {
                 None => Mark::Vibrato(None),
                 Some(depth) => match depth.parse::<f64>() {
@@ -322,8 +379,12 @@ fn parse_marks(
     if has(|mark| matches!(mark, Mark::Bend(_))) && has(|mark| matches!(mark, Mark::Prebend(_))) {
         return Err("a note is bent (bend=P) or struck already bent (prebend=P), not both".to_string());
     }
-    if has(|mark| matches!(mark, Mark::Join)) && has(|mark| matches!(mark, Mark::Slide(_))) {
+    let slid = has(|mark| matches!(mark, Mark::Slide(_))) || has(|mark| matches!(mark, Mark::Scoop));
+    if has(|mark| matches!(mark, Mark::Join)) && slid {
         return Err("a note is hammered on or slid into, not both".to_string());
+    }
+    if has(|mark| matches!(mark, Mark::Slide(_))) && has(|mark| matches!(mark, Mark::Scoop)) {
+        return Err("a note is slid into (slide) or scooped up into from below (scoop), not both".to_string());
     }
     Ok(marks)
 }
@@ -498,6 +559,36 @@ mod tests {
         let triplets = phrase(":0.33 1 2 3 4:1", "C major");
         assert!((triplets.tones[3].start - 1.0).abs() < 1e-12);
         assert!((triplets.length - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_phrase_is_checked_against_the_songs_own_bars_where_they_change() {
+        // Two bars of 4/4, one of 7/8, then 3/4 for as long as it lasts.
+        let (four, seven, three) = (four(), TimeSignature::new(7, 8).unwrap(), TimeSignature::new(3, 4).unwrap());
+        let bars = [PhraseBar::of(four), PhraseBar::of(four), PhraseBar::of(seven), PhraseBar::of(three)];
+        let key = Scale::parse("C").unwrap();
+        let through = |text: &str| Phrase::parse_through(text, Some(&key), 4, &bars);
+        let line = through("1:4 | 2:2 3:2 | :0.5 4 4 4 4 4 4 4 | 5:3 | :1 6 7 1' | 2':3").unwrap();
+        assert_eq!(line.length, 20.5);
+        assert_eq!(line.tones.last().unwrap().start, 17.5, "the bars after the list are the last one's again");
+        let error = through("1:4 | 2:4 | 3:4 | 4:3").unwrap_err();
+        assert!(
+            error
+                .message()
+                .starts_with("bar 3 of the phrase is 4 beats long, but the song's bar there, one of 7/8, has 3.5"),
+            "{error}"
+        );
+        // A bar that a change of time signature cuts short is as long as it is cut to.
+        let cut = [PhraseBar::of(four), PhraseBar { length: 2.0, signature: four }, PhraseBar::of(three)];
+        assert!(Phrase::parse_through("1:4 | 2:2 | 3:3", Some(&key), 4, &cut).is_ok());
+        let error = Phrase::parse_through("1:4 | 2:4 | 3:3", Some(&key), 4, &cut).unwrap_err();
+        assert!(error.message().contains("cut short by a change of time signature, has 2"), "{error}");
+        // Where a beat falls, and in which bar: past the end the last bar repeats.
+        let at = |beat: f64| PhraseBar::at(&bars, beat);
+        assert_eq!(
+            (at(0.0).0, at(7.9).0, at(8.0), at(11.5).0, at(14.5).0, at(20.0).0),
+            (0.0, 4.0, (8.0, bars[2]), 11.5, 14.5, 17.5)
+        );
     }
 
     #[test]

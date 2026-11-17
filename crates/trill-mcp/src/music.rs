@@ -27,11 +27,11 @@ use trill_core::{ClipId, ControllerKind, InstrumentProfile, MeterMap, Note, Time
 use trill_dsp::BuiltinFactory;
 use trill_engine::Session;
 use trill_theory::arpeggio::{ArpOrder, Arpeggio, ORDERS};
-use trill_theory::articulation::{articulate, unknown};
+use trill_theory::articulation::{Asked, articulate_asked, is_our_writing, keys_for, read_back, unknown};
 use trill_theory::bass::{BassLine, BassStyle, bass_line};
 use trill_theory::chord::QUALITIES;
-use trill_theory::drums::{FillPlan, arrange, drum_names};
-use trill_theory::melody::{ORNAMENTS, Phrase, Tone};
+use trill_theory::drums::{FillPlan, Laid, arrange, drum_names};
+use trill_theory::melody::{ORNAMENTS, Phrase, PhraseBar, Tone};
 use trill_theory::ornament::{Playing, perform};
 use trill_theory::phrasing::{self, Phrasing};
 use trill_theory::progression::{Comping, Progression, RHYTHMS, Rhythm, StrumDirection, comp};
@@ -54,14 +54,18 @@ voice-led into a clip, in a rhythm (sustain, stabs, offbeats, tresillo, a step p
 - write_drums: a groove by name (house, boom_bap, trap, drum_and_bass, uk_garage, reggaeton, funk, rock, \
 half_time, shuffle, six_eight, bossa_nova, jazz_swing) with an optional fill, and/or your own lanes in step \
 notation, e.g. {\"kick\": \"x...x...x...x...\", \"snare\": \"....x.......x...\"}. Drums are named, and the \
-name lands on the key the track's kit uses: china, splash, ride_bell, crash2, floor_tom, rimshot, \
-closed_hat_edge, half_open_hat, wide_open_hat beside the usual ones. A fill's reply says what it replaced.
+name lands on the key the track's kit has that drum on: china, splash, ride_bell, crash2, floor_tom, rimshot, \
+closed_hat_edge, half_open_hat, wide_open_hat beside the usual ones, and whatever else get_instrument_profile \
+lists for the kit (crash_choke, flam, rack_tom_1). A drum the kit has not got is left out, and the reply names \
+it (`left_out`) with the drums the kit has. A fill's reply says what it replaced.
 - write_bass and write_arpeggio: a bass line or an arpeggio that follows the same progression text.
 - write_melody: one line as scale degrees or note names with lengths, e.g. \":0.5 5 6 5 4 3:2 | 1:4\". A lead \
 is more than its notes: mark bends, slides, vibrato and hammer-ons on the notes that have them \
-(\"4:2!bend=5!vib\", \"6!hammer\", \"3!slide\", \"5:2!fall\"). The tool writes the instrument's own keyswitch \
+(\"4:2!bend=5!vib\", \"6!hammer\", \"3!slide\", \"3!scoop\", \"5:2!fall\"), and one of the instrument's own \
+ways of playing on any note (\"1!palm_mute\", \"5!harmonic\"). The tool writes the instrument's own keyswitch \
 where it has one and a pitch-bend curve where not; never draw such curves by hand. Keep a line with ornaments \
-on a track of its own: the pitch wheel bends every note of a track at once.
+on a track of its own: the pitch wheel bends every note of a track at once. It is also how to write any single \
+line note by note with a rhythm of your own: a riff, a bass line with a dead note and an accent in it.
 - shape_dynamics: gives a line its dynamics from its notes, as an expression curve in the clip: a rise into each \
 phrase's high point, a swell through long notes, a breath between phrases. Call it after writing a melody for a \
 wind, brass or string instrument (those modelled on breath or a bow make no sound without it), and whenever a \
@@ -78,7 +82,9 @@ the pitches that are heard: for an instrument that sounds an octave from its key
 octave, and says so. Give all parts of a section the same progression, key \
 and swing so they agree. A song usually goes: set_project, create_track per part, write_drums, write_chords, \
 write_bass, write_arpeggio, write_melody, analyze_music, then effects, automation and render.
-Use create_clip and add_notes for what these cannot say: single hits, sound effects, a voicing spelled by hand.";
+Use create_clip and add_notes for what these cannot say: single hits, sound effects, a voicing spelled by hand, \
+a riff of chords with muted notes between them. There a note may say how it is played, by the name of one of \
+the track's articulations: [\"E2\", 1, 0.25, 100, \"palm_mute\"]. The keyswitches are written for you there too.";
 
 const MAX_BARS: u32 = 512;
 const MAX_NOTES: usize = 50_000;
@@ -217,10 +223,12 @@ pub struct WriteDrumsRequest {
     /// "grooves" describes them).
     pub groove: Option<String>,
     /// Lanes by drum name, added to the groove or replacing its lane for that drum. A name is one of the
-    /// track's own drums (get_instrument_profile lists its map) or a General MIDI one: kick, snare, rimshot,
-    /// rim, clap, closed_hat, closed_hat_edge, pedal_hat, half_open_hat, open_hat, wide_open_hat, low_tom,
-    /// mid_tom, high_tom, floor_tom, crash, crash2, china, splash, ride, ride_bell, tambourine, cowbell,
-    /// shaker... Where a kit has no key for a drum the nearest is played and the reply says so. One character per step:
+    /// drums of the track's kit (get_instrument_profile lists them: for a plugin whose kit Trill reads they
+    /// are that kit's and no others) or, on a kit Trill knows nothing of, a General MIDI one: kick, snare,
+    /// rimshot, rim, clap, closed_hat, closed_hat_edge, pedal_hat, half_open_hat, open_hat, wide_open_hat,
+    /// low_tom, mid_tom, high_tom, floor_tom, crash, crash2, china, splash, ride, ride_bell, tambourine,
+    /// cowbell, shaker... A degree of open hi-hat a kit has no key for is played on its open hat, and the
+    /// reply says so; a drum the kit has not got at all is left out, and the reply names it. One character per step:
     /// x hit, X accent, g ghost note, . rest, _ lengthens the hit before it, a digit after a hit makes a roll
     /// (x3_ is three hits across two steps), | separates bars. Each bar's characters divide the bar evenly:
     /// 16 make sixteenths, 12 triplet eighths, 8 eighths. A lane of only rests removes that drum.
@@ -316,11 +324,13 @@ pub struct WriteMelodyRequest {
     /// The line, note by note: ":0.5 5 6 5 4 3:2 | :1 1:2 r 7, | 1:4". A pitch is a scale degree of `key`
     /// (1-7; b3 and #4 alter it; 5' is an octave up, 7, an octave down) or a note name with its octave (C4,
     /// F#5). "5:0.5" gives that note a length in beats; a bare ":0.5" sets the length of the notes after it
-    /// (1 beat to begin with). "r" rests, "~" lengthens the note before it, "|" marks a bar and is checked.
-    /// Ornaments are marks after a note, each begun by "!": "4:2!bend=5" bends up to the fifth degree,
-    /// "!bend=5!release" lets it back down, "!prebend=5", "5:2!vib" (vibrato), "6!hammer" and "5!pull" join a
-    /// note to the one before with no new attack, "3!slide" slides into it, "5:2!fall" drops off at the end;
-    /// "1!palm_mute" asks for one of the instrument's own articulations. They combine: "4:2!bend=5!vib".
+    /// (1 beat to begin with). "r" rests, "~" lengthens the note before it, "|" marks a bar and is checked
+    /// against the song's own bar there (3.5 beats for a bar of 7/8), so a line may cross a change of time
+    /// signature. Ornaments are marks after a note, each begun by "!": "4:2!bend=5" bends up to the fifth
+    /// degree, "!bend=5!release" lets it back down, "!prebend=5", "5:2!vib" (vibrato), "6!hammer" and "5!pull"
+    /// join a note to the one before with no new attack, "3!slide" slides into it from the note before,
+    /// "3!scoop" slides up into it from just below, "5:2!fall" drops off at the end; "1!palm_mute" asks for
+    /// one of the instrument's own articulations (get_project lists them). They combine: "4:2!bend=5!vib".
     pub phrase: String,
     /// The key the degrees are in: "A minor", "D dorian", "Bb". Not needed for note names.
     pub key: Option<String>,
@@ -679,6 +689,10 @@ struct Setting {
     bars: Option<usize>,
     /// What the track knows about its instrument.
     profile: InstrumentProfile,
+    /// The song's bars from where the part begins, in order: more of them
+    /// than a part can be long. They are all bars of `signature` unless
+    /// the song's time signature changes under the part.
+    song_bars: Vec<WrittenBar>,
 }
 
 /// How long before the stretch being written a keyswitch of an earlier
@@ -710,14 +724,31 @@ fn write(
     };
     // With how far its instrument's wheel bends, where the track says nothing of it.
     let profile = session.profile_of(destination.track);
-    let mut part = build(&Setting { signature, tempo, bars, profile: profile.clone() })?;
+    let song_bars = written_bars(&meter, destination.origin, MAX_BARS as usize + 2);
+    let mut part = build(&Setting { signature, tempo, bars, profile: profile.clone(), song_bars })?;
     // The bars it is written into are the song's from there on. Where
     // they are not all the first one's, each is laid in its own meter.
     let places = written_bars(&meter, destination.origin, part.bars);
     let even = places.iter().all(|bar| bar.signature == signature && (bar.length - bar_length).abs() < EPSILON);
-    if !even {
+    if !even && part.line {
+        // A line was counted through the song's own bars as it was read.
+        let said = meters_said(&places);
+        part.remarks.push(format!(
+            "The time signature changes under these bars ({}): the line was counted through the song's own bars, \
+             each as long as it is there.",
+            said.join("; ")
+        ));
+        part.summary.insert("time_signatures".into(), json!(said));
+    } else if !even {
         lay_in_bars(&mut part, &places, signature, |signature| {
-            build(&Setting { signature, tempo, bars: Some(places.len()), profile: profile.clone() })
+            let bar = WrittenBar { start: 0.0, length: signature.beats_per_bar(), signature };
+            build(&Setting {
+                signature,
+                tempo,
+                bars: Some(places.len()),
+                profile: profile.clone(),
+                song_bars: vec![bar],
+            })
         })?;
     }
     if part.notes.len() > MAX_NOTES {
@@ -782,16 +813,74 @@ fn write(
         Humanize { timing, velocity, seed: feel.seed.unwrap_or(1) as u64 }.apply(&mut part.notes);
     }
 
+    let written = match even {
+        true => part.bars as f64 * bar_length,
+        false => places.iter().map(|bar| bar.length).sum(),
+    };
+    let replace = target.mode.unwrap_or_default() == WriteMode::Replace;
+
     // The instrument's keyswitches, pressed where they belong, and the
     // velocities that play what was asked for.
-    let music = part.notes.clone();
+    let mut music = part.notes.clone();
     let offset = destination.offset;
     let mut presses: BTreeMap<String, usize> = BTreeMap::new();
+    // Every note the clip is to hold, where its presses were written anew.
+    let mut whole_clip: Option<Vec<Note>> = None;
     if pitched && !profile.articulations.is_empty() {
         let how = |index: usize| part.how.get(index).cloned().flatten();
-        let asked: Vec<(Note, Option<String>)> =
-            part.notes.iter().enumerate().map(|(index, note)| (*note, how(index))).collect();
-        let articulated = articulate(&profile, &asked, offset).map_err(theory)?;
+        let mut asked: Vec<Asked> =
+            part.notes.iter().enumerate().map(|(index, note)| Asked::new(*note, how(index))).collect();
+        // What is asked for is what is heard: a harmonic's key is under its note.
+        for (name, (semitones, count)) in keys_for(&profile, &mut asked).map_err(theory)? {
+            part.remarks.push(format!(
+                "{count} note(s) played as '{name}' sound {semitones} semitones above their keys on this instrument, \
+                 so their keys were written that far under the pitches asked for."
+            ));
+        }
+        music = asked.iter().map(|asked| asked.note).collect();
+        // The instrument is in one state at a time: where the clip already
+        // has notes, its presses are written again for all of them, so
+        // that these notes leave the others played as they were.
+        let held: Vec<Note> = destination
+            .clip
+            .and_then(|id| session.project().clip(id).ok())
+            .and_then(|clip| clip.midi().map(|midi| midi.notes.clone()))
+            .unwrap_or_default();
+        // A clip without a keyswitch in it has none that was placed by hand.
+        let ours = !held.is_empty()
+            && (!held.iter().any(|note| profile.is_keyswitch(note.pitch)) || is_our_writing(&profile, &held));
+        let articulated = if ours {
+            let inside = |note: &Note| note.start >= offset - EPSILON && note.start < offset + written - EPSILON;
+            let mut all = read_back(&profile, &held);
+            if replace {
+                all.retain(|asked| !inside(&asked.note));
+            }
+            // What the notes that stay took by themselves, so as to say what these added.
+            let kept = articulate_asked(&profile, &all, 0.0).map_err(theory)?.presses;
+            all.extend(asked.iter().map(|asked| Asked {
+                note: Note { start: (asked.note.start + offset).max(0.0), ..asked.note },
+                ..asked.clone()
+            }));
+            let mut articulated = articulate_asked(&profile, &all, 0.0).map_err(theory)?;
+            for (name, count) in &mut articulated.presses {
+                *count = count.saturating_sub(kept.get(name).copied().unwrap_or(0));
+            }
+            articulated.presses.retain(|_, count| *count > 0);
+            whole_clip = Some(articulated.notes.clone());
+            articulated
+        } else {
+            if !held.is_empty() {
+                part.warnings.push(
+                    "This clip holds keyswitches that were placed by hand, another way than these tools place them. \
+                     They were left as they are, and these notes were given switches of their own: check how the \
+                     notes after them are played (analyze_music reads it), or write the clip again with these tools."
+                        .to_string(),
+                );
+            }
+            let articulated = articulate_asked(&profile, &asked, offset).map_err(theory)?;
+            part.notes = articulated.notes.clone();
+            articulated
+        };
         if let (Some((low, high)), true) = (articulated.default_range, articulated.fitted > 0) {
             part.remarks.push(format!(
                 "{} note(s) were outside the velocities {low}-{high} that play this instrument's ordinary note \
@@ -802,15 +891,10 @@ fn write(
             ));
         }
         presses = articulated.presses;
-        part.notes = articulated.notes;
     } else if let Some(name) = part.how.iter().flatten().next() {
         return Err(theory(unknown(&profile, name)));
     }
 
-    let written = match even {
-        true => part.bars as f64 * bar_length,
-        false => places.iter().map(|bar| bar.length).sum(),
-    };
     for note in &mut part.notes {
         note.start = (note.start + offset).max(0.0);
     }
@@ -821,7 +905,6 @@ fn write(
         Some(length) => length,
         None => written,
     };
-    let replace = target.mode.unwrap_or_default() == WriteMode::Replace;
     let name = target.name.clone().unwrap_or_else(|| default_name.to_string());
     let (track, notes) = (destination.track, &part.notes);
     // The wheel's course within the stretch that was written.
@@ -835,15 +918,20 @@ fn write(
     let clip = edit(session, |project| match destination.clip {
         Some(id) => {
             let clip = project.clip_mut(id)?;
-            if replace {
-                let inside = |note: &Note| note.start >= offset - EPSILON && note.start < offset + written - EPSILON;
-                // With them go the keyswitches an earlier write pressed just before the stretch.
-                let leading = |note: &Note| {
-                    profile.is_keyswitch(note.pitch) && note.start >= offset - SWITCH_REACH && note.start < offset
-                };
-                clip.remove_notes(|note| inside(note) || leading(note))?;
+            if let Some(all) = &whole_clip {
+                clip.set_notes(all.clone())?;
+            } else {
+                if replace {
+                    let inside =
+                        |note: &Note| note.start >= offset - EPSILON && note.start < offset + written - EPSILON;
+                    // With them go the keyswitches an earlier write pressed just before the stretch.
+                    let leading = |note: &Note| {
+                        profile.is_keyswitch(note.pitch) && note.start >= offset - SWITCH_REACH && note.start < offset
+                    };
+                    clip.remove_notes(|note| inside(note) || leading(note))?;
+                }
+                clip.add_notes(notes)?;
             }
-            clip.add_notes(notes)?;
             if let Some(wheel) = &wheel {
                 let kind = ControllerKind::PitchBend;
                 let existing = clip.controller(kind).map(|curve| curve.points.clone()).unwrap_or_default();
@@ -974,6 +1062,30 @@ fn written_bars(meter: &MeterMap, origin: f64, count: usize) -> Vec<WrittenBar> 
     bars
 }
 
+/// Which bars of `places` are in which time signature, counted from where
+/// the part begins.
+fn meters_of(places: &[WrittenBar]) -> Vec<(TimeSignature, Vec<usize>)> {
+    let mut meters: Vec<(TimeSignature, Vec<usize>)> = Vec::new();
+    for (index, bar) in places.iter().enumerate() {
+        match meters.iter_mut().find(|(signature, _)| *signature == bar.signature) {
+            Some((_, bars)) => bars.push(index + 1),
+            None => meters.push((bar.signature, vec![index + 1])),
+        }
+    }
+    meters
+}
+
+/// [`meters_of`] in words: "4/4 in bar(s) 1, 2; 7/8 in bar(s) 3".
+fn meters_said(places: &[WrittenBar]) -> Vec<String> {
+    meters_of(places)
+        .iter()
+        .map(|(signature, bars)| {
+            let bars: Vec<String> = bars.iter().map(usize::to_string).collect();
+            format!("{} in bar(s) {}", said_signature(*signature), bars.join(", "))
+        })
+        .collect()
+}
+
 /// Lays `part`, built in bars of `first`, into `places`: bars that are not
 /// all alike. What a part holds in bar N is what it would hold there in a
 /// song that was in that bar's time signature throughout, so the part is
@@ -985,31 +1097,8 @@ fn lay_in_bars(
     first: TimeSignature,
     build: impl Fn(TimeSignature) -> Result<Part, String>,
 ) -> Result<(), String> {
-    // Which bars are in which time signature, said as the song counts
-    // them from where the part begins.
-    let mut meters: Vec<(TimeSignature, Vec<usize>)> = Vec::new();
-    for (index, bar) in places.iter().enumerate() {
-        match meters.iter_mut().find(|(signature, _)| *signature == bar.signature) {
-            Some((_, bars)) => bars.push(index + 1),
-            None => meters.push((bar.signature, vec![index + 1])),
-        }
-    }
-    let said: Vec<String> = meters
-        .iter()
-        .map(|(signature, bars)| {
-            let bars: Vec<String> = bars.iter().map(usize::to_string).collect();
-            format!("{} in bar(s) {}", said_signature(*signature), bars.join(", "))
-        })
-        .collect();
-    if part.line {
-        return Err(format!(
-            "these {} bars cross a change of time signature ({}), and a line is counted through in one: write the \
-             bars of each time signature in a call of their own, each starting at its own `start` (get_tempo_map \
-             gives the beat each bar starts at)",
-            places.len(),
-            said.join("; ")
-        ));
-    }
+    let meters = meters_of(places);
+    let said = meters_said(places);
 
     // The part as it is in each of the other time signatures.
     let mut others: Vec<(TimeSignature, Part)> = Vec::new();
@@ -1094,6 +1183,19 @@ fn lay_in_bars(
         said_signature(first)
     ));
     Ok(())
+}
+
+/// The drums of a kit by name, the shorter names first, as far as a
+/// sentence has room for.
+fn kit_names(kit: &InstrumentProfile) -> String {
+    let mut names: Vec<String> = kit.drum_map().into_iter().map(|(name, _)| name).collect();
+    names.sort_by_key(|name| (name.len(), name.clone()));
+    let more = names.len().saturating_sub(40);
+    names.truncate(40);
+    match more {
+        0 => format!("{}.", names.join(", ")),
+        more => format!("{}, and {more} more (get_instrument_profile lists them).", names.join(", ")),
+    }
 }
 
 /// The articulations of an instrument that are chosen by how hard a note
@@ -1323,17 +1425,31 @@ impl TrillServer {
             let refitted = groove
                 .filter(|groove| groove.signature != meter)
                 .map(|groove| groove.pattern().refit(own(groove.signature), bar_length, false));
-            // A groove is written on the General MIDI map; this kit may keep its drums elsewhere.
+            // A groove is written on the General MIDI map; this kit may keep its drums elsewhere,
+            // and may not have them all.
+            let mut lacking: Vec<String> = Vec::new();
             let mut pattern = match (groove, &refitted) {
-                (Some(_), Some(Some(fitted))) => fitted.on_kit(kit),
-                (Some(groove), _) => groove.pattern().on_kit(kit),
+                (Some(_), Some(Some(fitted))) => fitted.on_kit_saying(kit, &mut lacking),
+                (Some(groove), _) => groove.pattern().on_kit_saying(kit, &mut lacking),
                 (None, _) => Default::default(),
             };
             let mut stand_ins: Vec<String> = Vec::new();
             for (drum, steps) in request.lanes.iter().flatten() {
-                if let Some(stand_in) = pattern.set_lane_on(kit, drum, steps).map_err(theory)? {
-                    stand_ins.push(format!("{stand_in} for {}", trill_core::pitch::name_key(drum)));
+                match pattern.lay_lane(kit, drum, steps).map_err(theory)? {
+                    Laid::On(Some(stand_in)) => {
+                        stand_ins.push(format!("{stand_in} for {}", trill_core::pitch::name_key(drum)));
+                    }
+                    Laid::On(None) => {}
+                    Laid::Lacking(name) if !lacking.contains(&name) => lacking.push(name),
+                    Laid::Lacking(_) => {}
                 }
+            }
+            if pattern.lanes.is_empty() && !lacking.is_empty() {
+                return Err(format!(
+                    "nothing was written: the kit on this track has no {}. Its drums: {}",
+                    lacking.join(", "),
+                    kit_names(kit)
+                ));
             }
             if pattern.lanes.is_empty() {
                 return Err(format!(
@@ -1348,8 +1464,8 @@ impl TrillServer {
                 .filter(|fill| fill.signature != meter)
                 .map(|fill| fill.pattern().refit(own(fill.signature), bar_length, true));
             let fill_pattern = fill.map(|fill| match &fill_refitted {
-                Some(Some(fitted)) => fitted.on_kit(kit),
-                _ => fill.pattern().on_kit(kit),
+                Some(Some(fitted)) => fitted.on_kit_saying(kit, &mut lacking),
+                _ => fill.pattern().on_kit_saying(kit, &mut lacking),
             });
             let fill_from = |fill: &Fill| match &fill_refitted {
                 // As many beats before the end of the bar as it is in its own.
@@ -1357,7 +1473,12 @@ impl TrillServer {
                 _ => fill.from,
             };
             let every = request.fill_every.unwrap_or(0) as usize;
-            let crash = kit.drum("crash").map_or(49, |drum| drum.pitch);
+            // The bar after a fill starts with a crash, on a kit that has one.
+            let crash = match kit.find_drum("crash") {
+                trill_core::Drum::Key(drum) => Some(drum.pitch),
+                trill_core::Drum::Unknown => Some(49),
+                trill_core::Drum::Lacking(_) => None,
+            };
             let plan = fill.zip(fill_pattern.as_ref()).map(|(fill, pattern)| FillPlan {
                 pattern,
                 from: fill_from(fill),
@@ -1372,6 +1493,16 @@ impl TrillServer {
             let mut warnings = pattern.odd_lanes(bar_length);
             let mut remarks = Vec::new();
             let mut summary = Map::new();
+            if !lacking.is_empty() {
+                warnings.push(format!(
+                    "The kit on this track has no {}: nothing was written for {}, since the key another kit has it \
+                     on plays something else here. Its drums: {}",
+                    lacking.join(", "),
+                    if lacking.len() == 1 { "it" } else { "them" },
+                    kit_names(kit)
+                ));
+                summary.insert("left_out".into(), json!(lacking));
+            }
             if !stand_ins.is_empty() {
                 remarks.push(format!(
                     "This track's kit has no key of its own for some of these drums; the nearest was played: {}. If \
@@ -1589,13 +1720,29 @@ impl TrillServer {
             if !(-1..=9).contains(&octave) {
                 return Err(format!("`octave` {octave} is outside -1..=9"));
             }
-            let phrase = Phrase::parse(&request.phrase, key.as_ref(), octave, setting.signature).map_err(theory)?;
+            // The bars the line is counted through are the song's from where it begins.
+            let through: Vec<PhraseBar> = setting
+                .song_bars
+                .iter()
+                .map(|bar| PhraseBar { length: bar.length, signature: bar.signature })
+                .collect();
+            let phrase = Phrase::parse_through(&request.phrase, key.as_ref(), octave, &through).map_err(theory)?;
             let gate = within(request.gate, 0.95, 0.05..=2.0, "gate")?;
-            let bar_length = setting.signature.beats_per_bar();
             let mut remarks = Vec::new();
+            // Where each of those bars begins, in beats from the first.
+            let starts: Vec<f64> = setting.song_bars.iter().map(|bar| bar.start).collect();
+            let bar_start = |index: usize| {
+                let last = starts.len() - 1;
+                starts[index.min(last)] + index.saturating_sub(last) as f64 * through[last].length
+            };
+            let said_at = |beat: f64| {
+                let (start, _) = PhraseBar::at(&through, beat);
+                let bar = starts.iter().position(|at| (at - start).abs() < EPSILON).unwrap_or(starts.len() - 1);
+                format!("{}.{}", bar + 1, round(beat - start + 1.0))
+            };
 
             // A pickup belongs before a bar line: start it late in the first bar.
-            let lead_in = if phrase.pickup > 0.0 { bar_length - phrase.pickup } else { 0.0 };
+            let lead_in = if phrase.pickup > 0.0 { through[0].length - phrase.pickup } else { 0.0 };
             if lead_in > 0.0 {
                 remarks.push(format!(
                     "The phrase opens with a pickup of {} beat(s); it was placed at the end of bar 1 so that its bar \
@@ -1603,15 +1750,30 @@ impl TrillServer {
                     round(phrase.pickup)
                 ));
             }
-            let own_bars = (((lead_in + phrase.length) / bar_length) - EPSILON).ceil().max(1.0) as usize;
+            let own_bars =
+                (1..).find(|bars| bar_start(*bars) >= lead_in + phrase.length - EPSILON).expect("bars go on");
             let bars = setting.bars.unwrap_or(own_bars);
             // The phrase where it falls in the clip, repeated to fill more bars or cut to fit fewer.
-            let period = own_bars as f64 * bar_length;
-            let total = bars as f64 * bar_length;
+            let total = bar_start(bars);
             let mut tones: Vec<Tone> = Vec::new();
             let mut repeat = 0;
-            while (repeat as f64) * period < total - EPSILON {
-                let later = lead_in + repeat as f64 * period;
+            while repeat * own_bars < bars {
+                // A repeat is laid in the bars after the last, which have to be bars like its own.
+                let from = repeat * own_bars;
+                let alike = (0..own_bars.min(bars - from)).all(|bar| {
+                    let (own, there) =
+                        (bar_start(bar + 1) - bar_start(bar), bar_start(from + bar + 1) - bar_start(from + bar));
+                    (own - there).abs() < EPSILON
+                });
+                if !alike {
+                    return Err(format!(
+                        "the phrase is {own_bars} bar(s) long and was asked to fill {bars}, but the bars it would \
+                         repeat into from bar {} are not as long as the ones it was written through (the time \
+                         signature changes there): write those bars as a phrase of their own",
+                        from + 1
+                    ));
+                }
+                let later = lead_in + bar_start(from);
                 tones.extend(
                     phrase
                         .tones
@@ -1626,6 +1788,7 @@ impl TrillServer {
                 gate,
                 dynamics: dynamics(request.velocity, request.accent, (90, 8))?,
                 signature: setting.signature,
+                bars: &through,
                 tempo: setting.tempo,
                 profile: &setting.profile,
                 articulation: request.articulation.as_deref(),
@@ -1642,7 +1805,7 @@ impl TrillServer {
                     .iter()
                     .zip(&spelled)
                     .filter(|(tone, _)| !key.contains(tone.pitch))
-                    .map(|(_, (start, name))| format!("{name} at {}", bar_beat(*start, bar_length)))
+                    .map(|(_, (start, name))| format!("{name} at {}", said_at(*start)))
                     .collect();
                 if !outside.is_empty() {
                     let shown = outside.iter().take(6).cloned().collect::<Vec<_>>().join(", ");
@@ -1656,7 +1819,7 @@ impl TrillServer {
             }
             let by_bar: Vec<String> = (0..own_bars.min(16))
                 .map(|bar| {
-                    let (from, to) = (bar as f64 * bar_length, (bar + 1) as f64 * bar_length);
+                    let (from, to) = (bar_start(bar), bar_start(bar + 1));
                     let names: Vec<&str> = spelled
                         .iter()
                         .filter(|(start, _)| *start >= from - EPSILON && *start < to - EPSILON)
@@ -1854,6 +2017,9 @@ struct LeftOut {
     /// Whether some notes were read at another octave than they are
     /// written at, because that is where they sound.
     moved: bool,
+    /// How many notes were read away from their keys because of how they
+    /// are played: a harmonic rings above the key that plays it.
+    heard_elsewhere: usize,
 }
 
 impl LeftOut {
@@ -1861,6 +2027,17 @@ impl LeftOut {
     /// describes, at the pitch they sound at. The rest is counted.
     fn music(&mut self, profile: &InstrumentProfile, played: Vec<Note>) -> Vec<Note> {
         let mut music = Vec::with_capacity(played.len());
+        // How far from its key each note is heard, by the keyswitch it is played under.
+        let mut away: BTreeMap<(u8, u64), i8> = BTreeMap::new();
+        if profile.articulations.iter().any(|articulation| articulation.sounds != 0) {
+            for asked in read_back(profile, &played) {
+                let heard =
+                    asked.how.as_deref().and_then(|name| profile.articulation(name)).map_or(0, |how| how.sounds);
+                if heard != 0 {
+                    away.insert((asked.note.pitch, asked.note.start.to_bits()), heard);
+                }
+            }
+        }
         for note in played.into_iter().filter(|note| note.end() > self.from && note.start < self.to) {
             if profile.is_keyswitch(note.pitch) {
                 self.keyswitches += 1;
@@ -1870,7 +2047,10 @@ impl LeftOut {
                 self.outside_range += 1;
             } else {
                 self.moved |= profile.sounds_octaves != 0;
-                music.push(Note { pitch: profile.sounding(note.pitch), ..note });
+                let heard = away.get(&(note.pitch, note.start.to_bits())).copied().unwrap_or(0);
+                self.heard_elsewhere += usize::from(heard != 0);
+                let pitch = (i32::from(profile.sounding(note.pitch)) + i32::from(heard)).clamp(0, 127) as u8;
+                music.push(Note { pitch, ..note });
             }
         }
         music
@@ -1888,6 +2068,15 @@ impl LeftOut {
         }
         if self.moved {
             out.insert("read_at".into(), json!("the octave the instrument sounds at, not the keys in the clip"));
+        }
+        if self.heard_elsewhere > 0 {
+            out.insert(
+                "read_as_heard".into(),
+                json!(format!(
+                    "{} note(s) are played a way that sounds away from the key (a harmonic): read at the pitch heard",
+                    self.heard_elsewhere
+                )),
+            );
         }
         (!out.is_empty()).then_some(Value::Object(out))
     }
@@ -1950,7 +2139,8 @@ fn analyze(session: &Session, request: &AnalyzeMusicRequest) -> Reply {
             let track = project.clip_track(id).map_err(|error| explain(project, error))?;
             let profile = &project.track(track).map_err(|error| explain(project, error))?.profile;
             let notes = if session.plays_drums(track) {
-                drum_kit = Some(profile.clone());
+                // By the names of the kit that is loaded, where the instrument says which that is.
+                drum_kit = Some(session.profile_of(track));
                 found.timeline_notes()
             } else {
                 left_out.music(profile, found.timeline_notes())
@@ -1963,7 +2153,7 @@ fn analyze(session: &Session, request: &AnalyzeMusicRequest) -> Reply {
             let played: Vec<Note> =
                 found.clips.iter().filter(|clip| !clip.muted).flat_map(|clip| clip.timeline_notes()).collect();
             let notes = if session.plays_drums(id) {
-                drum_kit = Some(found.profile.clone());
+                drum_kit = Some(session.profile_of(id));
                 played
             } else {
                 left_out.music(&found.profile, played)
@@ -2297,7 +2487,9 @@ fn reference(topic: Option<&str>) -> Reply {
                 "4:2!bend=5!release 3:2!vib": "a bend let back down, then a note with vibrato",
                 ":0.5 5 6!hammer 5!pull 3": "a hammer-on and a pull-off: one attack for three notes",
                 "1:1 3:1!slide": "the third slid into from the first",
+                "1:1 3:1!scoop": "the third struck and slid up into from just below, as a guitarist slides into a note",
                 "E5:2!fall": "a note that drops away at its end",
+                "E4:2!harmonic": "one of the instrument's own ways of playing, by name: heard as E4, whatever key plays it",
             },
             "what_they_become": "The instrument's own articulation where it has one (a sampled guitar's hammer, \
                                  glide and slide keyswitches); otherwise a pitch_bend curve in the clip, scaled by \
@@ -2329,9 +2521,17 @@ fn reference(topic: Option<&str>) -> Reply {
                 },
                 "sounds": { "scrape": 101 },
             },
-            "asking": "`articulation` on write_chords, write_bass, write_arpeggio and write_melody, or a mark on one \
-                       note of a melody (1:0.5!palm_mute). The keyswitch is pressed just before the note; never \
-                       place keyswitch notes by hand.",
+            "asking": "`articulation` on write_chords, write_bass, write_arpeggio and write_melody; a mark on one \
+                       note of a melody (1:0.5!palm_mute); or `how` on a note of create_clip, add_notes and \
+                       set_notes ([\"E2\", 1, 0.25, 100, \"palm_mute\"]). The keyswitch is pressed just before the \
+                       note; never place keyswitch notes by hand. A clip's keyswitches are written again for all \
+                       its notes whenever notes are added that way, so parts written in several calls stay right.",
+            "drums": "On a drum track the names are drums. For a plugin whose kit Trill reads (Superior Drummer 3) \
+                      they are the drums of the kit that is loaded, read each time: get_instrument_profile lists \
+                      them, says what each is and which usual drums the kit has not got. A drum it has not got is \
+                      left out of what is written, never played on another kit's key.",
+            "pitches": "The writing tools take the pitches that are to be heard and write the keys (an octave up \
+                        for a bass that sounds an octave down; the key under a harmonic). The note tools take keys.",
             "lasts": "stays: until another keyswitch; once: the next note only; joins: notes that overlap are \
                       joined (hammer-ons, a slide along the string)",
         }),

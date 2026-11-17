@@ -145,6 +145,8 @@ struct Shared {
     files: file::Readings,
     /// See [`Vst3Config::patient_teardown`].
     patient: bool,
+    /// Where makers keep what belongs to their plugins.
+    places: VendorPlaces,
 }
 
 impl Vst3Factory {
@@ -159,10 +161,10 @@ impl Vst3Factory {
         let scanner = config.scanner.clone();
         let patient = config.patient_teardown;
         let settings: Settings = config.into();
-        let presets = PresetStore::new(&PRESETS, settings.preset_settings(folders, places), main.clone());
+        let presets = PresetStore::new(&PRESETS, settings.preset_settings(folders, places.clone()), main.clone());
         let installed = Inventory::new(&FORMAT, settings, main.clone());
         let files = file::Readings::default();
-        Ok(Self { shared: Arc::new(Shared { main, installed, presets, scanner, files, patient }) })
+        Ok(Self { shared: Arc::new(Shared { main, installed, presets, scanner, files, patient, places }) })
     }
 
     /// The preset that the file at `file` holds for `plugin`: see
@@ -341,7 +343,8 @@ impl DeviceFactory for Vst3Factory {
 
         let params = created.params.iter().map(|spec| spec.info.clone()).collect();
         let scanner = self.shared.scanner.clone();
-        let controller = Vst3Controller::new(main.clone(), installed.name.clone(), &created, class, scanner);
+        let places = self.shared.places.clone();
+        let controller = Vst3Controller::new(main.clone(), installed.name.clone(), &created, class, scanner, places);
         let processor = Vst3Processor::new(
             main.clone(),
             installed.name.clone(),

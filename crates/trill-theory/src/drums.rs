@@ -20,7 +20,7 @@ use crate::expression::{Level, MIN_LENGTH};
 use crate::steps::StepPattern;
 use crate::timing::EPSILON;
 use trill_core::pitch::{DRUM_NAMES, DRUM_STAND_INS};
-use trill_core::{InstrumentProfile, Note};
+use trill_core::{Drum, InstrumentProfile, Note};
 
 /// One drum and its rhythm.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,6 +83,16 @@ pub fn drum_names() -> Vec<&'static str> {
     names
 }
 
+/// What came of putting a lane on a kit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Laid {
+    /// It is on the kit, played by the drum that stands in for the one
+    /// asked for where the kit has no key of its own for that.
+    On(Option<&'static str>),
+    /// The kit has no such drum, by this name: nothing was written.
+    Lacking(String),
+}
+
 impl DrumPattern {
     /// Parses lanes given as `(drum, steps)` pairs, on the General MIDI
     /// map.
@@ -104,23 +114,43 @@ impl DrumPattern {
     /// the keys of the kit `profile` describes. A lane of nothing but rests
     /// removes the drum, which is how a groove's part is silenced. Returns
     /// the drum that stands in, when the kit has no key for the one asked
-    /// for (an open hi-hat for a half-open one).
+    /// for (an open hi-hat for a half-open one). A drum the kit has not
+    /// got is an error here; [`lay_lane`](Self::lay_lane) leaves it out and
+    /// says so.
     pub fn set_lane_on(
         &mut self,
         profile: &InstrumentProfile,
         drum: &str,
         steps: &str,
     ) -> Result<Option<&'static str>> {
-        let key = profile.drum(drum).ok_or_else(|| {
-            let known: Vec<String> = profile.drum_map().into_iter().map(|(name, _)| name).collect();
-            Error::new(format!("'{drum}' is not a drum; expected one of {}", list(known)))
-        })?;
+        match self.lay_lane(profile, drum, steps)? {
+            Laid::On(stand_in) => Ok(stand_in),
+            Laid::Lacking(name) => Err(Error::new(format!("this kit has no {name}"))),
+        }
+    }
+
+    /// [`set_lane_on`](Self::set_lane_on), for a kit that may not have the
+    /// drum: a lane for a drum it has not got is not written anywhere, and
+    /// the drum is handed back by the name it goes by.
+    pub fn lay_lane(&mut self, profile: &InstrumentProfile, drum: &str, steps: &str) -> Result<Laid> {
+        let key = match profile.find_drum(drum) {
+            Drum::Key(key) => key,
+            Drum::Lacking(name) => {
+                // The steps are still read: a mistake in them is one whatever the kit.
+                StepPattern::parse(steps).map_err(|error| error.within(format!("lane '{name}'")))?;
+                return Ok(Laid::Lacking(name));
+            }
+            Drum::Unknown => {
+                let known: Vec<String> = profile.drum_map().into_iter().map(|(name, _)| name).collect();
+                return Err(Error::new(format!("'{drum}' is not a drum; expected one of {}", list(known))));
+            }
+        };
         let pattern = StepPattern::parse(steps).map_err(|error| error.within(format!("lane '{}'", key.name)))?;
         self.lanes.retain(|lane| lane.pitch != key.pitch);
         if !pattern.is_silent() {
             self.lanes.push(Lane { drum: key.name, pitch: key.pitch, pattern });
         }
-        Ok(key.stand_in)
+        Ok(Laid::On(key.stand_in))
     }
 
     /// The pattern on the keys of the kit `profile` describes: each lane
@@ -128,11 +158,24 @@ impl DrumPattern {
     /// on the General MIDI map (a groove of the library) is played on
     /// another kit this way.
     pub fn on_kit(&self, profile: &InstrumentProfile) -> Self {
+        self.on_kit_saying(profile, &mut Vec::new())
+    }
+
+    /// [`on_kit`](Self::on_kit), with the drums the kit has not got added
+    /// to `lacking`: their lanes are left out, since the key they were
+    /// written on plays something else there.
+    pub fn on_kit_saying(&self, profile: &InstrumentProfile, lacking: &mut Vec<String>) -> Self {
         let mut pattern = Self::default();
         for lane in &self.lanes {
-            let (drum, pitch) = match profile.drum(&lane.drum) {
-                Some(key) => (key.name, key.pitch),
-                None => (lane.drum.clone(), lane.pitch),
+            let (drum, pitch) = match profile.find_drum(&lane.drum) {
+                Drum::Key(key) => (key.name, key.pitch),
+                Drum::Unknown => (lane.drum.clone(), lane.pitch),
+                Drum::Lacking(name) => {
+                    if !lacking.contains(&name) {
+                        lacking.push(name);
+                    }
+                    continue;
+                }
             };
             pattern.lanes.retain(|other| other.pitch != pitch);
             pattern.lanes.push(Lane { drum, pitch, pattern: lane.pattern.clone() });
@@ -221,8 +264,9 @@ pub struct FillPlan<'a> {
     /// The fill replaces the end of every this-many bars (4 or 8 are
     /// usual). 0 means only the last bar.
     pub every: usize,
-    /// The key of the crash that the bar after a fill starts with.
-    pub crash: u8,
+    /// The key of the crash that the bar after a fill starts with, on a
+    /// kit that has one.
+    pub crash: Option<u8>,
 }
 
 /// What a fill did to one bar.
@@ -275,11 +319,11 @@ pub fn arrange(groove: &DrumPattern, fill: Option<&FillPlan>, bars: usize, bar_l
             .map(|note| Note { start: note.start + start, ..note })
             .collect();
         notes.extend(played.iter().copied());
-        let crashed = notes.iter().any(|note| note.pitch == fill.crash && (note.start - end).abs() < EPSILON);
-        let crash = bar + 1 < bars && !crashed;
-        if crash {
+        let crashed = notes.iter().any(|note| Some(note.pitch) == fill.crash && (note.start - end).abs() < EPSILON);
+        let crash = bar + 1 < bars && !crashed && fill.crash.is_some();
+        if let (true, Some(key)) = (crash, fill.crash) {
             let velocity = Level::Normal.velocity(usual_velocity("crash") * level);
-            notes.push(Note { pitch: fill.crash, start: end, length: 0.5, velocity });
+            notes.push(Note { pitch: key, start: end, length: 0.5, velocity });
         }
         fills.push(FillBar { bar: bar + 1, from: from - start, replaced, played, crash });
     }
@@ -290,6 +334,35 @@ pub fn arrange(groove: &DrumPattern, fill: Option<&FillPlan>, bars: usize, bar_l
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_drum_the_kit_has_not_got_is_left_out_and_named_instead_of_hit_on_another_key() {
+        // A kit that said what is on every key: no ride, and its hat is elsewhere.
+        let kit = InstrumentProfile {
+            sounds: [("kick", 36), ("snare", 38), ("closed_hat", 61), ("crash", 86)]
+                .map(|(name, key)| (name.to_string(), key))
+                .into(),
+            whole: true,
+            ..InstrumentProfile::default()
+        };
+        let mut pattern = DrumPattern::default();
+        assert_eq!(pattern.lay_lane(&kit, "hat", "x.x.x.x."), Ok(Laid::On(None)));
+        assert_eq!(pattern.lay_lane(&kit, "ride", "x...x..."), Ok(Laid::Lacking("ride".to_string())));
+        assert_eq!(pattern.lay_lane(&kit, "cowbell", "x..."), Ok(Laid::Lacking("cowbell".to_string())));
+        assert!(pattern.lay_lane(&kit, "ride", "x.q.").is_err(), "its steps are read all the same");
+        assert!(pattern.lay_lane(&kit, "gong", "x...").unwrap_err().message().contains("'gong' is not a drum"));
+        assert_eq!(pattern.set_lane_on(&kit, "ride", "x...").unwrap_err().message(), "this kit has no ride");
+        let keys: Vec<u8> = pattern.lanes.iter().map(|lane| lane.pitch).collect();
+        assert_eq!(keys, [61], "nothing was written for the ride or the cowbell");
+
+        // A groove of the library, written on the General MIDI map, loses the lanes this kit cannot play.
+        let general =
+            DrumPattern::parse([("kick", "x...x..."), ("ride", "x.x.x.x."), ("open_hat", "..x...x.")]).unwrap();
+        let mut lacking = Vec::new();
+        let moved = general.on_kit_saying(&kit, &mut lacking);
+        assert_eq!(lacking, ["ride", "open_hat"]);
+        assert_eq!(moved.lanes.len(), 1);
+    }
     use crate::expression::Swing;
 
     const KICK: u8 = 36;
@@ -416,7 +489,7 @@ mod tests {
     fn fills_take_over_the_end_of_a_bar() {
         let groove = basic();
         let fill = DrumPattern::parse([("snare", "........xxxxxxxx"), ("kick", "x.......x.......")]).unwrap();
-        let plan = FillPlan { pattern: &fill, from: 0.5, every: 0, crash: CRASH };
+        let plan = FillPlan { pattern: &fill, from: 0.5, every: 0, crash: Some(CRASH) };
         let arranged = arrange(&groove, Some(&plan), 4, 4.0, 1.0);
         let notes = &arranged.notes;
         // Three bars of groove, then half a bar of groove and the fill.
@@ -446,7 +519,7 @@ mod tests {
     fn a_fill_says_what_it_took_the_place_of() {
         let groove = basic();
         let fill = DrumPattern::parse([("snare", "........xxxxxxxx"), ("kick", "x.......x.......")]).unwrap();
-        let plan = FillPlan { pattern: &fill, from: 0.5, every: 2, crash: CRASH };
+        let plan = FillPlan { pattern: &fill, from: 0.5, every: 2, crash: Some(CRASH) };
         let arranged = arrange(&groove, Some(&plan), 4, 4.0, 1.0);
         let bars: Vec<(usize, f64, bool)> =
             arranged.fills.iter().map(|fill| (fill.bar, fill.from, fill.crash)).collect();

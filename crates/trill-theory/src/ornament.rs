@@ -23,7 +23,7 @@
 use crate::articulation::{JOIN_OVERLAP, unknown};
 use crate::error::Result;
 use crate::expression::{Dynamics, MIN_LENGTH, clamp_velocity};
-use crate::melody::{Mark, Tone};
+use crate::melody::{Mark, PhraseBar, Tone};
 use crate::timing::EPSILON;
 use std::collections::BTreeMap;
 use trill_core::project::{AutomationPoint, Segment};
@@ -53,6 +53,10 @@ pub struct Playing<'a> {
     pub gate: f64,
     pub dynamics: Dynamics,
     pub signature: TimeSignature,
+    /// The bars the line is laid through, from its beat 0, where they are
+    /// not all bars of `signature`: the last goes on repeating. Empty for a
+    /// line in one time signature.
+    pub bars: &'a [PhraseBar],
     /// Beats a minute: vibrato has a speed in seconds.
     pub tempo: f64,
     /// What is known about the instrument.
@@ -92,6 +96,12 @@ enum Entry {
 /// top of the line's range, the way a singer or player leans on the high
 /// notes.
 pub fn velocities(tones: &[Tone], dynamics: &Dynamics, signature: TimeSignature) -> Vec<u8> {
+    velocities_through(tones, dynamics, &[PhraseBar::of(signature)])
+}
+
+/// [`velocities`] for a line laid through `bars`, each stressed on its own
+/// beats.
+pub fn velocities_through(tones: &[Tone], dynamics: &Dynamics, bars: &[PhraseBar]) -> Vec<u8> {
     let lowest = tones.iter().map(|tone| tone.pitch).min().unwrap_or(0) as f64;
     let highest = tones.iter().map(|tone| tone.pitch).max().unwrap_or(0) as f64;
     let span = highest - lowest;
@@ -99,7 +109,8 @@ pub fn velocities(tones: &[Tone], dynamics: &Dynamics, signature: TimeSignature)
         .iter()
         .map(|tone| {
             let lift = if span > 0.0 { ((tone.pitch as f64 - lowest) / span - 0.5) * 8.0 } else { 0.0 };
-            clamp_velocity(dynamics.at(tone.start, signature) + lift)
+            let (start, bar) = PhraseBar::at(bars, tone.start);
+            clamp_velocity(dynamics.at(tone.start - start, bar.signature) + lift)
         })
         .collect()
 }
@@ -155,7 +166,10 @@ impl Wheel {
 pub fn perform(tones: &[Tone], playing: &Playing) -> Result<Performance> {
     let profile = playing.profile;
     let range = profile.bend_semitones();
-    let velocity = velocities(tones, &playing.dynamics, playing.signature);
+    let velocity = match playing.bars {
+        [] => velocities(tones, &playing.dynamics, playing.signature),
+        bars => velocities_through(tones, &playing.dynamics, bars),
+    };
     let gate = playing.gate.max(0.0);
     let mut out = Performance::default();
     let mut wheel = Wheel::default();
@@ -204,6 +218,14 @@ pub fn perform(tones: &[Tone], playing: &Playing) -> Result<Performance> {
             } else {
                 struck_anew += 1;
                 count("hammer", "an ordinary note");
+            }
+        } else if has(|mark| matches!(mark, Mark::Scoop)).is_some() {
+            if let Some(slide) = profile.articulation_like(&SLIDE_IN_NAMES, Lasts::Once) {
+                how = Some(slide.name.clone());
+                count("scoop", &format!("the instrument's '{}' keyswitch", slide.name));
+            } else {
+                slide_from = Some(-SCOOP);
+                count("scoop", "a pitch bend into the note, from below");
             }
         } else if let Some(Mark::Slide(from)) = has(|mark| matches!(mark, Mark::Slide(_))) {
             match (from, follows) {
@@ -367,6 +389,7 @@ mod tests {
             gate: 1.0,
             dynamics: Dynamics { velocity: 90, accent: 0 },
             signature: four(),
+            bars: &[],
             tempo: 120.0,
             profile,
             articulation: None,
@@ -491,6 +514,11 @@ mod tests {
         let scooped = perform(&tones("r 5:1!slide"), &playing(&plain)).unwrap();
         assert_eq!(pitches(&scooped), [(76, 1.0, 1.0)]);
         assert_eq!(bent(&scooped, &[1.0, 1.125, 1.25, 1.9]), [-2.0, -1.0, 0.0, 0.0]);
+        // A scoop is from below whatever came before it, and the note is struck.
+        let scoop = perform(&tones("4:1 5:1!scoop"), &playing(&plain)).unwrap();
+        assert_eq!(pitches(&scoop), [(74, 0.0, 1.0), (76, 1.0, 1.0)]);
+        assert_eq!(bent(&scoop, &[0.5, 1.0, 1.125, 1.25]), [0.0, -2.0, -1.0, 0.0]);
+        assert_eq!(how(&scoop, "scoop"), [("a pitch bend into the note, from below".to_string(), 1)]);
         // From a pitch that is named.
         let named = perform(&tones("5:1!slide=4"), &playing(&plain)).unwrap();
         assert_eq!(bent(&named, &[0.0, 0.25]), [-2.0, 0.0]);
@@ -536,6 +564,12 @@ mod tests {
         );
         // Only the bend, which it has no articulation for, moves the wheel.
         assert_eq!(bent(&line, &[0.0, 2.9, 3.5, 5.0]), [0.0, 0.0, 0.0, 2.0]);
+
+        // A scoop is the instrument's slide into a note, also where a note comes right before.
+        let scooped = perform(&tones(":0.5 5 6!scoop 3!slide"), &playing(&guitar)).unwrap();
+        let asked: Vec<Option<&str>> = scooped.notes.iter().map(|(_, how)| how.as_deref()).collect();
+        assert_eq!(asked, [None, Some("slide"), Some("glide")]);
+        assert!(scooped.wheel.is_empty());
 
         // Every note can be given one articulation, which a mark overrides.
         let muted = Playing { articulation: Some("palm_mute"), ..playing(&guitar) };

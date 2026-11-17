@@ -65,6 +65,9 @@ pub(crate) struct Vst3Controller {
     class: ClassId,
     /// Where a vendor's preset is made into a state.
     scanner: Scanner,
+    /// Where makers keep what belongs to their plugins: a drum library
+    /// says there what its drums are called.
+    places: vendor::VendorPlaces,
     /// What the plugin goes on doing after the preset it was last given,
     /// until someone asks.
     note: Option<String>,
@@ -77,11 +80,13 @@ impl Vst3Controller {
         created: &Created,
         class: ClassId,
         scanner: Scanner,
+        places: vendor::VendorPlaces,
     ) -> Self {
         let listed = created.params.iter().enumerate().map(|(index, spec)| (spec.slot, (index, spec.mapping)));
         Self {
             class,
             scanner,
+            places,
             note: None,
             main,
             instance: created.id,
@@ -341,6 +346,13 @@ impl DeviceController for Vst3Controller {
     fn settings(&mut self) -> Option<Vec<(String, String)>> {
         let format = vendor::Format::of_class(&self.class.to_string())?;
         vendor::settings(format, &self.states().ok()?)
+    }
+
+    /// The plugin's own state is read here, and beside it the few words a
+    /// maker's library has for its drums.
+    fn key_sounds(&mut self) -> Option<Vec<trill_core::KeySound>> {
+        let format = vendor::Format::of_class(&self.class.to_string())?;
+        vendor::key_sounds(format, &self.states().ok()?, &self.places)
     }
 
     fn set_settings(&mut self, values: &[(String, String)]) -> Result<(), PresetLoadError> {

@@ -19,13 +19,24 @@
 //! threads of its own: seconds if the files were read lately, most of a
 //! minute from a cold disk. Until a drum has arrived its keys play
 //! nothing.
+//!
+//! Which key plays what is the kit's to say, and it does ([`key_sounds`]):
+//! each place's block names the drum that is in it, by the library's code
+//! for it, and lists under `alias` the keys for each way of striking it.
+//! Kits of one library do not agree on them: one hangs its china where
+//! another has a crash, moves the toms, or leaves a place empty. What a
+//! code or a stroke *is* in words ("20\" china", "Rimshot") is in a file
+//! of the library, `uberconf`, beside its presets.
 
 use super::{Built, Mark, VendorPlaces};
 use crate::presets::store::PluginRef;
 use crate::presets::{Locator, NAME_LIMIT, Sink, Watch, tidy};
 use crate::vst3::state::PluginState;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use trill_core::KeySound;
 use trill_core::presets::PresetInfo;
 
 /// Superior Drummer 3's processor class: `VST` and the four letters of
@@ -33,6 +44,10 @@ use trill_core::presets::PresetInfo;
 pub(crate) const CLASS: &str = "565354534433617375706572696F7220";
 /// The file a sound library keeps its factory presets in.
 const PRESETS_FILE: &str = "s3presetconf";
+/// The file a sound library says in what its places, drums and strokes
+/// are called, and the one it says its own id in.
+const WORDS_FILE: &str = "uberconf";
+const NAME_FILE: &str = "Name";
 /// The form of preset this reader knows.
 const KNOWN_VERSION: u32 = 5;
 /// What begins a bank, and how far into one the size of its chunk is:
@@ -350,6 +365,217 @@ pub(crate) fn shown(state: &PluginState, name: &str) -> Option<String> {
     drums(lines[kit].iter().copied()).into_iter().nth(index)
 }
 
+/// What a sound library calls its places, drums and strokes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Words {
+    /// By the place's code (`Cymbal6`).
+    places: HashMap<String, PlaceWords>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PlaceWords {
+    /// "Cymbal 5".
+    description: String,
+    /// What each drum that can be in the place is, by its code.
+    drums: HashMap<String, String>,
+    /// What each way of striking it is, by the name its keys are listed
+    /// under.
+    strokes: HashMap<String, String>,
+}
+
+/// The words of a line: split at spaces, with what is between double
+/// quotes kept whole.
+fn words(line: &str) -> Vec<String> {
+    let (mut found, mut word, mut inside, mut any) = (Vec::new(), String::new(), false, false);
+    for c in line.chars() {
+        match c {
+            '"' => {
+                inside = !inside;
+                any = true;
+            }
+            c if c.is_whitespace() && !inside => {
+                if any {
+                    found.push(std::mem::take(&mut word));
+                    any = false;
+                }
+            }
+            c => {
+                word.push(c);
+                any = true;
+            }
+        }
+    }
+    if any {
+        found.push(word);
+    }
+    found
+}
+
+/// Reads a library's file of words. The file lists, for each place, a
+/// description, the drums that can be in it (`code id "what it is"`) and
+/// under `pads` the strokes (`name id description`); several places share
+/// a list of strokes through a template, `USE name 3`, in which `$1` is
+/// the number. Whatever else it holds is passed over, and nothing in it is
+/// trusted to end: a line is read by itself.
+fn parse_words(text: &str) -> Words {
+    let lines: Vec<&str> =
+        text.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#')).collect();
+    // The templates first, wherever they are.
+    let mut templates: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut open: Option<(&str, Vec<&str>)> = None;
+    let mut body: Vec<&str> = Vec::new();
+    for line in &lines {
+        match (&mut open, line.strip_prefix("TEMPLATE ")) {
+            (None, Some(name)) => open = Some((name.trim(), Vec::new())),
+            (Some(_), _) if *line == "END" => {
+                let (name, held) = open.take().expect("a template is open");
+                templates.insert(name, held);
+            }
+            (Some((_, held)), _) => held.push(line),
+            (None, None) => body.push(line),
+        }
+    }
+
+    let mut found = Words::default();
+    // A place is open from `Code NN {` to the brace that closes it.
+    let (mut within, mut depth, mut place_at) = (false, 0i64, 0i64);
+    let mut place: Option<(String, PlaceWords)> = None;
+    let mut strokes_at: Option<i64> = None;
+    let mut queue: std::collections::VecDeque<String> = body.iter().map(|line| (*line).to_string()).collect();
+    // No more lines than the file and its templates can make.
+    let mut budget = 64 * lines.len() + 1024;
+    while let Some(line) = queue.pop_front() {
+        budget -= 1;
+        if budget == 0 {
+            break;
+        }
+        let said = words(&line);
+        let opens = nesting(&line);
+        if !within {
+            within = said.first().is_some_and(|word| word == "positions") && opens > 0;
+            depth = if within { 1 } else { 0 };
+            continue;
+        }
+        match &mut place {
+            None => {
+                if said.len() == 3 && said[2] == "{" && depth == 1 {
+                    place = Some((said[0].clone(), PlaceWords::default()));
+                    place_at = depth;
+                }
+            }
+            Some((_, held)) => {
+                if let Some(at) = strokes_at {
+                    if depth + opens <= at {
+                        strokes_at = None;
+                    } else if said.len() >= 3 {
+                        held.strokes.insert(said[0].clone(), said[2].clone());
+                    }
+                } else if said.first().is_some_and(|word| word == "pads") && opens > 0 {
+                    strokes_at = Some(depth);
+                } else if said.first().is_some_and(|word| word == "description") && said.len() >= 2 {
+                    held.description = said[1].clone();
+                } else if said.first().is_some_and(|word| word == "USE") && said.len() >= 2 {
+                    // A template's lines take this line's place, with its number in them.
+                    let number = said.get(2).map(String::as_str).unwrap_or_default();
+                    for line in templates.get(said[1].as_str()).into_iter().flatten().rev() {
+                        queue.push_front(line.replace("$1", number));
+                    }
+                    continue;
+                } else if said.len() == 3 && opens == 0 && line.trim_end().ends_with('"') {
+                    held.drums.insert(said[0].clone(), said[2].replace('^', "\""));
+                }
+            }
+        }
+        depth += opens;
+        if place.is_some() && depth <= place_at {
+            let (code, held) = place.take().expect("a place is open");
+            found.places.insert(code, held);
+            strokes_at = None;
+        }
+        if depth <= 0 {
+            within = false;
+        }
+    }
+    found
+}
+
+/// The words of the sound library that calls itself `id`, among the
+/// libraries installed in `places`: read once, and `None` for a library
+/// that is not there or says nothing that can be read.
+fn library_words(id: &str, places: &VendorPlaces) -> Option<Arc<Words>> {
+    type Read = HashMap<(String, Vec<PathBuf>), Option<Arc<Words>>>;
+    static READ: OnceLock<Mutex<Read>> = OnceLock::new();
+    let key = (id.to_string(), places.programs.clone());
+    let mut read = READ.get_or_init(Mutex::default).lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(known) = read.get(&key) {
+        return known.clone();
+    }
+    // A file Trill did not write: no more of it is read than a file of
+    // words can be, and a reader that gives up on it costs the names only.
+    let found = std::panic::catch_unwind(|| {
+        let folder = library_folders(places).into_iter().find_map(|libraries| {
+            let entries = std::fs::read_dir(&libraries).ok()?;
+            entries.flatten().map(|entry| entry.path()).find(|folder| {
+                let name = super::read_start(&folder.join(NAME_FILE), 4096).unwrap_or_default();
+                let first = latin1(&name);
+                first.lines().next().and_then(|line| words(line).pop()).is_some_and(|said| said == id)
+            })
+        })?;
+        let bytes = super::read_start(&folder.join(WORDS_FILE), 4 * 1024 * 1024).ok()?;
+        Some(Arc::new(parse_words(&latin1(&bytes))))
+    })
+    .unwrap_or(None);
+    read.insert(key, found.clone());
+    found
+}
+
+/// What the keys of the kit in `state` play: for every key that strikes a
+/// drum the kit has, the place, what is in it and the stroke, in the
+/// library's own words where the library is installed in `places` and in
+/// its codes where not. A place the kit leaves empty has no keys. `None`
+/// for a state that is not the text this reader knows.
+pub(crate) fn key_sounds(state: &PluginState, places: &VendorPlaces) -> Option<Vec<KeySound>> {
+    let unwrapped = unwrap(&state.component).ok()?;
+    let lines: Vec<&str> = unwrapped.text.split('\n').map(str::trim).collect();
+    let kit = kit_of(&lines)?;
+    let loaded = library(lines.iter().copied(), "soundlib ");
+    let mut found: Vec<KeySound> = Vec::new();
+    // The library, the place and the drum of the pad the lines are in.
+    let (mut of, mut place, mut drum): (Option<String>, String, Option<String>) = (None, String::new(), None);
+    for line in &lines[kit] {
+        let said = words(line);
+        match said.first().map(String::as_str) {
+            Some("xpad") => {
+                of = said.get(2).filter(|word| *word != "{").cloned().or_else(|| loaded.map(str::to_string));
+                (place, drum) = (String::new(), None);
+            }
+            Some("pos") => place = said.get(1).cloned().unwrap_or_default(),
+            // A dash is a place with nothing in it.
+            Some("drum") => drum = said.get(1).filter(|code| *code != "-" && !code.is_empty()).cloned(),
+            Some("alias") => {
+                let (Some(code), Some(stroke)) = (&drum, said.get(1)) else { continue };
+                let library = of.as_deref().and_then(|id| library_words(id, places));
+                let named = library.as_ref().and_then(|library| library.places.get(&place));
+                let sound = KeySound {
+                    key: 0,
+                    place: named
+                        .map(|named| named.description.clone())
+                        .filter(|description| !description.is_empty())
+                        .unwrap_or_else(|| place.clone()),
+                    instrument: named.and_then(|named| named.drums.get(code)).cloned().unwrap_or_default(),
+                    stroke: named.and_then(|named| named.strokes.get(stroke)).unwrap_or(stroke).clone(),
+                };
+                // A key is a note; the triggers and controllers listed with them are not.
+                for key in said[2..].iter().filter_map(|word| word.parse::<u8>().ok()).filter(|key| *key <= 127) {
+                    found.push(KeySound { key, ..sound.clone() });
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(found)
+}
+
 /// A file of presets made here, in the format: each of `kits` a name, the
 /// menu it is in, and the drum in its one place.
 #[cfg(test)]
@@ -391,11 +617,121 @@ pub(crate) fn state(drum: &str) -> PluginState {
     PluginState { component, controller: Vec::new() }
 }
 
+/// A state of the plugin made here, of the library `library`, whose kit is
+/// `places`: each a place's code, the drum in it (`-` for none) and the
+/// keys of its strokes as the plugin lists them.
+#[cfg(test)]
+pub(crate) fn kit_state(library: &str, places: &[(&str, &str, &[&str])]) -> PluginState {
+    let mut text = format!("PlugVersion 3.4.4\nSAMPLER {{\nHQ {{\nsoundlib \"{library}\"\n}}\n");
+    for (index, (place, drum, strokes)) in places.iter().enumerate() {
+        let drum = if *drum == "-" { "-".to_string() } else { format!("\"{drum}\"") };
+        text.push_str(&format!(
+            "instbox {index} {{\nxpad 0 {library} {{\npos \"{place}\"\nmastermics {{\nnrmaster 0\n}}\ndrum {drum}  \"Drumsticks\" 1\n\
+             pads {{\nfader {{\nvolume 1\n}}\n"
+        ));
+        for stroke in *strokes {
+            text.push_str(&format!("alias {stroke}\n"));
+        }
+        text.push_str("}\n}\n}\n");
+    }
+    text.push_str("mixer {\nlatcomp\n}\nmacros {\n}\nmidilearn {\n}\n}\nSongTrack 0 {\nTempo 120 0 0\n}\n");
+    let unwrapped = state("Kick1");
+    let wrapper = unwrap(&unwrapped.component).expect("the state made here is one");
+    PluginState { component: wrapper.wrap(&text), controller: Vec::new() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::presets::Found;
     use crate::test_support::TestDir;
+
+    /// A library's file of words made here, in the format: two places with
+    /// strokes of their own and two cymbals that share a template.
+    const WORDS: &str = "# words \"Test library\"\n\nproducts {\n\t\"TEST\"\n}\n\npositions {\n\n\tKickR 01 {\n\t\tdescription \"Kick\"\n\
+        \t\tkicktool\n\t\tclose\tKick-In\n\n\t\tKick1\tKD01\t\"16x24^ Test Maple\"\n\t\tKick2\tKD02\t\"18x20^ Test Birch\"\n\n\
+        \t\tpads {\n\t\t\tkickO\t\tO1_R Open\n\t\t\tkickR\t\tFH_R Hit\t\n\t\t}\n\t}\n\n\tSnare 01 {\n\t\tdescription \"Snare\"\n\n\
+        \t\tSnare3\t\tSD03\t\"6.5x14^ Test Brass\"\n\n\t\tpads {\n\t\t\tsnareR\tFH_R Center\n\t\t\tsnareFX\tFX_R Rimshot\n\
+        \t\t\tsnareRO\tRO_R \"Rim Only\"\n\t\t\tsnareRF\tRF_R \"Closed Roll\"\tlonefader\n\t\t\tsnareTrig\tnone \"Zone Trigger\"\n\t\t}\n\t}\n\n\
+        TEMPLATE StdCrash\n\t\tclose Oh\n\n\t\tpads {\n\t\t\tcrash$1\t\tCR_R\tCrash\n\t\t\tcrash$1BL\tBL_R\t\"Bell Shank\"\n\
+        \t\t\tcrash$1M\tMT_R\t\"Mute Hit\"\t\tlonevelvol\n\t\t}\nEND\n\n\tCymbal1 01 {\n\t\tdescription \"Cymbal 1\"\n\t\tUSE StdCrash 1\n\n\
+        \t\tcymbal2_1\tCR02\t\"18^ Test Crash\"\n\t\tcymbal3_1\tCR03\t\"20^ Test China\"\n\t}\n\n\tCymbal6 06 {\n\t\tdescription \"Cymbal 5\"\n\
+        \t\tUSE StdCrash 6\n\n\t\tcymbal1_6\tCR03\t\"20^ Other China\"\n\t}\n}\n\ndrumsets {\n\tKit1 {\n\t\tKickR\tKick1\n\t}\n}\n";
+
+    #[test]
+    fn a_librarys_words_say_what_its_places_drums_and_strokes_are() {
+        let found = parse_words(WORDS);
+        let mut places: Vec<&String> = found.places.keys().collect();
+        places.sort();
+        assert_eq!(places, ["Cymbal1", "Cymbal6", "KickR", "Snare"]);
+        let kick = &found.places["KickR"];
+        assert_eq!(kick.description, "Kick");
+        assert_eq!(kick.drums["Kick2"], "18x20\" Test Birch", "inches are written as the mark for them");
+        assert_eq!((kick.strokes["kickO"].as_str(), kick.strokes["kickR"].as_str()), ("Open", "Hit"));
+        assert_eq!(kick.drums.len(), 2, "what else a place says is no drum: {kick:?}");
+        let snare = &found.places["Snare"];
+        assert_eq!(snare.strokes["snareRO"], "Rim Only");
+        assert_eq!(snare.strokes["snareRF"], "Closed Roll", "what follows a description is not part of it");
+        // A template's strokes are each place's own, by its number.
+        let (first, last) = (&found.places["Cymbal1"], &found.places["Cymbal6"]);
+        assert_eq!((first.strokes["crash1"].as_str(), first.strokes["crash1M"].as_str()), ("Crash", "Mute Hit"));
+        assert_eq!(last.strokes["crash6BL"], "Bell Shank");
+        assert!(!last.strokes.contains_key("crash1") && last.drums["cymbal1_6"] == "20\" Other China");
+        assert_eq!(last.description, "Cymbal 5", "a place is called what it says, not what its code says");
+
+        // Text that is something else, or is cut off, says what it can and never hangs.
+        assert_eq!(parse_words("not a file of words\n{{{{\n"), Words::default());
+        assert!(parse_words(&WORDS[..WORDS.len() / 2]).places.contains_key("KickR"));
+        let endless = "positions {\nA 01 {\nUSE Loop 1\n}\n}\nTEMPLATE Loop\nUSE Loop 1\nEND\n";
+        assert!(parse_words(endless).places.len() <= 1, "a template that uses itself is given up on");
+        assert_eq!(words("alias \"two words\"  7 \"\" x"), ["alias", "two words", "7", "", "x"]);
+    }
+
+    #[test]
+    fn a_kit_says_which_key_strikes_which_drum_how() {
+        // The library is installed where libraries are, under a folder name of its own.
+        let dir = TestDir::new();
+        dir.file("programs/Toontrack/Superior/Superior Drummer/SL-Other/Name", b"\"OTHER\" SL-OTHER\n");
+        dir.file(
+            "programs/Toontrack/Superior/Superior Drummer/SL-TestLib/Name",
+            b"\"TEST LIBRARY\" SL-TEST\r\n\"Description\" Doc.pdf\r\n",
+        );
+        dir.file("programs/Toontrack/Superior/Superior Drummer/SL-TestLib/uberconf", WORDS.as_bytes());
+        let places = VendorPlaces { programs: vec![dir.path().join("programs")], ..VendorPlaces::default() };
+        // A kit with its china in the first cymbal's place, no snare, and a second cymbal on two keys.
+        let state = kit_state(
+            "SL-TEST",
+            &[
+                ("KickR", "Kick2", &["kickO 36 34", "kickR 35"]),
+                ("Snare", "-", &["snareR 38", "snareFX 40"]),
+                ("Cymbal1", "cymbal3_1", &["crash1 86", "crash1M 83", "crash1Trig 144 CC16"]),
+                ("Cymbal6", "cymbal1_6", &["crash6 52 110", "crash6BL 109"]),
+            ],
+        );
+        let found = key_sounds(&state, &places).unwrap();
+        let said = |key: u8| {
+            let sound =
+                found.iter().find(|sound| sound.key == key).unwrap_or_else(|| panic!("no key {key}: {found:?}"));
+            format!("{} / {} / {}", sound.place, sound.instrument, sound.stroke)
+        };
+        assert_eq!(said(36), "Kick / 18x20\" Test Birch / Open");
+        assert_eq!(said(34), "Kick / 18x20\" Test Birch / Open");
+        assert_eq!(said(35), "Kick / 18x20\" Test Birch / Hit");
+        assert_eq!(said(86), "Cymbal 1 / 20\" Test China / Crash");
+        assert_eq!(said(83), "Cymbal 1 / 20\" Test China / Mute Hit");
+        assert_eq!(said(52), "Cymbal 5 / 20\" Other China / Crash");
+        assert_eq!(said(109), "Cymbal 5 / 20\" Other China / Bell Shank");
+        let keys: Vec<u8> = found.iter().map(|sound| sound.key).collect();
+        assert_eq!(keys, [36, 34, 35, 86, 83, 52, 110, 109], "an empty place has no keys, and a trigger is no key");
+
+        // Without the library's words a kit still says its keys, in the library's codes.
+        let bare = key_sounds(&state, &VendorPlaces::default()).unwrap();
+        let china = bare.iter().find(|sound| sound.key == 86).unwrap();
+        assert_eq!((china.place.as_str(), china.instrument.as_str(), china.stroke.as_str()), ("Cymbal1", "", "crash1"));
+        // A state that is something else says nothing.
+        let opaque = PluginState { component: b"opaque".to_vec(), controller: Vec::new() };
+        assert_eq!(key_sounds(&opaque, &places), None);
+    }
 
     const KITS: [(&str, &str, &str); 4] = [
         ("Ayotte Default", "Clean Kits", "Kick2"),

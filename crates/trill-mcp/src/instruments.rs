@@ -10,7 +10,7 @@
 //! articulation is asked for by name, and analysis leaves keyswitches and
 //! drums out of the harmony.
 
-use crate::input::{NoteInput, parse_notes_with, parse_pitch_with};
+use crate::input::{NoteInput, parse_pitch_with, parse_played};
 use crate::server::{Reply, TrillServer, edit, explain, finish};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use trill_core::pitch::{parse_drum, pitch_name};
-use trill_core::{Articulation, ClipId, InstrumentProfile, Lasts, Note, Role, TrackId};
+use trill_core::{Articulation, ClipId, Drum, InstrumentProfile, Lasts, Note, Role, TrackId};
 use trill_engine::Session;
 use trill_engine::instruments::{InstrumentKnowledge, Known};
 
@@ -32,18 +32,34 @@ What a track's notes mean
 the articulations it can be asked for, its range, the octave it sounds at. A track is given this with its \
 instrument: Trill ships it for some plugins and remembers what you taught it about others. A song that is \
 opened takes it too, for the tracks that say nothing themselves.
-- A drum track's notes are drums: write_drums and drum names (\"china\", \"ride_bell\", \"closed_hat_edge\") go \
-by the track's own map, and analyze_music keeps them out of the key and the chords.
+- get_instrument_profile on a track is what to read before writing for it. For the instruments Trill knows \
+(the Ample guitars and bass, Superior Drummer 3, the SWAM winds and strings, and whatever was taught on this \
+machine) it is enough to write a part without probing anything.
+- A drum track's notes are drums, written by name: write_drums lanes, and drum names in create_clip and \
+add_notes. Which key a drum is on is the kit's business, and kits of one plugin differ: one hangs its china \
+where another has a crash, or has no splash at all. Where the plugin says what its kit has on its keys \
+(Superior Drummer 3 does), Trill reads the kit that is loaded, each time: get_instrument_profile lists its \
+drums (`drum_map`), says what each is (`kit`) and which usual drums it has not got (`has_no`), and that changes \
+when another kit is loaded. A drum the kit has not got is left out and the reply says so; it is never played on \
+the key some other kit has it on. Never write a drum by key number, and do not assume General MIDI.
 - Sampled guitars and basses choose how a note is played with keyswitches: silent keys under the range. Never \
-place those by hand. Ask by name: `articulation` on write_chords, write_bass, write_arpeggio and write_melody \
-(\"palm_mute\"), or a mark on one note of a melody (\"1:0.5!palm_mute\"). The tool presses the key just before \
-the note and fits the velocity where velocity decides (on some guitars a note under 64 is a muted one).
+place those as notes. Ask by name: `articulation` on write_chords, write_bass, write_arpeggio and write_melody \
+(\"palm_mute\"), a mark on one note of a melody (\"1:0.5!palm_mute\"), or `how` on a note given to create_clip, \
+add_notes or set_notes ([\"E2\", 1, 0.25, 100, \"palm_mute\"]). The tool presses the key just before the note \
+and fits the velocity where velocity decides (on the metal guitars and the bass a note hit under 64 is a muted \
+one: ask for \"muted\" or \"dead\" by name, and a plain note is raised to where it rings). A note that says \
+nothing is played the ordinary way, and the keyswitches of a clip are kept right for all its notes however \
+many calls put them there.
+- A hammer-on or pull-off (\"!hammer\", `how: \"hammer\"`) joins a note to the one before; a slide from the \
+note before is \"!slide\", a slide up into a note from below \"!scoop\". A harmonic rings above the key that \
+plays it: the writing tools take the pitch you want to hear and write the key; in create_clip and add_notes a \
+pitch is the key itself, as it is for a bass that sounds an octave under its keys.
 - When you learn something about an instrument that the track does not know (a key that switches, a drum on \
 another note, where its range ends, that it sounds an octave down, how far it bends), call \
 set_instrument_profile once with all of it. It is kept in the song and remembered for that plugin in every \
-song. get_instrument_profile reads it back, with the instrument's whole drum map and, in `notes`, what else \
-there is to know before writing for it: a setting of the plugin its keyswitches depend on, keys that are not \
-what General MIDI says.";
+song. get_instrument_profile reads it back and, in `notes`, says what else there is to know before writing for \
+it: a setting of the plugin its keyswitches depend on, how far a hammer-on reaches, what was measured and what \
+was not.";
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct GetInstrumentProfileRequest {
@@ -113,8 +129,8 @@ pub(crate) struct TrackKeys {
 
 impl TrackKeys {
     pub(crate) fn of(session: &Session, track: TrackId) -> Self {
-        let profile = session.project().track(track).map(|track| track.profile.clone()).unwrap_or_default();
-        Self { profile, drums: session.plays_drums(track) }
+        // With what the kit that is loaded says of its keys, where it says.
+        Self { profile: session.profile_of(track), drums: session.plays_drums(track) }
     }
 
     /// The keys of the track a clip is on; General MIDI for a clip that
@@ -127,12 +143,28 @@ impl TrackKeys {
     }
 
     fn key(&self, name: &str) -> Option<u8> {
+        if self.drums && self.profile.whole {
+            // The kit said what is on every key: a drum it has not got is on none of them.
+            return match self.profile.find_drum(name) {
+                Drum::Key(key) => Some(key.pitch),
+                Drum::Lacking(_) | Drum::Unknown => None,
+            };
+        }
         // A drum name means the General MIDI drum on any track, as it always has.
         self.profile.named_key(name, self.drums).or_else(|| parse_drum(name))
     }
 
     /// What a name could have been, for the error that it is none.
     fn expected(&self) -> String {
+        if self.drums && self.profile.whole {
+            let mut names: Vec<String> = self.profile.sounds.keys().cloned().collect();
+            names.sort_by_key(|name| (name.len(), name.clone()));
+            names.truncate(40);
+            return format!(
+                "a drum of this track's kit, which has no other (the shorter names of those it has: {})",
+                names.join(", ")
+            );
+        }
         let named: Vec<String> = if self.drums {
             self.profile.sounds.keys().cloned().collect()
         } else {
@@ -154,9 +186,100 @@ impl TrackKeys {
         parse_pitch_with(value, &|name| self.key(name), &self.expected())
     }
 
-    pub(crate) fn notes(&self, notes: &[NoteInput]) -> Result<Vec<Note>, String> {
-        parse_notes_with(notes, &|name| self.key(name), &self.expected())
+    /// The notes with, in step with them, how each asks to be played.
+    pub(crate) fn played(&self, notes: &[NoteInput]) -> Result<(Vec<Note>, Vec<Option<String>>), String> {
+        parse_played(notes, &|name| self.key(name), &self.expected())
     }
+}
+
+/// Notes that say how they are played, as the clip they go into is to
+/// hold them.
+pub(crate) struct Played {
+    /// Every note the clip is to hold: the ones it had, these, and the
+    /// keyswitches for all of them.
+    pub all: Vec<Note>,
+    /// The keyswitches these notes took, by articulation.
+    pub keyswitches: BTreeMap<String, usize>,
+    /// What was done that was not asked for, in words.
+    pub remarks: Vec<String>,
+}
+
+/// Works out what a clip on `track` holds once `notes` are in it, on an
+/// instrument that has articulations: the instrument's keyswitches are
+/// written for the whole clip, `held` being what it holds now, so that
+/// each note is played as it says (`how`, in step with the notes; a note
+/// that says nothing is played the instrument's ordinary way) and leaves
+/// the others played as they were.
+///
+/// `None` where the notes go in as they are, as they always did: on a
+/// track whose instrument has no articulations, and where the notes
+/// themselves hold keyswitches that someone placed as notes.
+pub(crate) fn played(
+    session: &Session,
+    track: TrackId,
+    held: &[Note],
+    notes: &[Note],
+    how: &[Option<String>],
+) -> Result<Option<Played>, String> {
+    use trill_theory::articulation::{Asked, articulate_asked, is_our_writing, read_back, unknown};
+    let profile = session.profile_of(track);
+    let drums = session.plays_drums(track);
+    let by_hand = notes.iter().find(|note| !drums && profile.is_keyswitch(note.pitch));
+    match (how.iter().flatten().next(), by_hand) {
+        (Some(first), _) if drums => {
+            return Err(format!(
+                "'{first}': track {} is a drum track, whose notes are drums by name; `how` is for an instrument                  with articulations (a sampled guitar or bass)",
+                track.0
+            ));
+        }
+        (Some(first), _) if profile.articulations.is_empty() => return Err(unknown(&profile, first).to_string()),
+        (Some(_), Some(switch)) => {
+            return Err(format!(
+                "{} is this instrument's '{}' keyswitch, placed as a note beside notes that say how they are                  played: leave it out and give `how` to the notes it was meant for",
+                pitch_name(switch.pitch),
+                profile.keyswitch_name(switch.pitch).unwrap_or_default()
+            ));
+        }
+        // Nothing to press for, or presses placed by hand: the notes are their own.
+        (None, _) if drums || profile.articulations.is_empty() || by_hand.is_some() || notes.is_empty() => {
+            return Ok(None);
+        }
+        _ => {}
+    }
+    let asked: Vec<Asked> = notes.iter().zip(how).map(|(note, how)| Asked::new(*note, how.clone())).collect();
+    let mut remarks = Vec::new();
+    // A clip without a keyswitch in it has none that was placed by hand.
+    let ours = !held.iter().any(|note| profile.is_keyswitch(note.pitch)) || is_our_writing(&profile, held);
+    let (articulated, keyswitches) = if ours {
+        let mut all = read_back(&profile, held);
+        let kept = articulate_asked(&profile, &all, 0.0).map_err(|error| error.to_string())?.presses;
+        all.extend(asked);
+        let articulated = articulate_asked(&profile, &all, 0.0).map_err(|error| error.to_string())?;
+        let mut added = articulated.presses.clone();
+        for (name, count) in &mut added {
+            *count = count.saturating_sub(kept.get(name).copied().unwrap_or(0));
+        }
+        added.retain(|_, count| *count > 0);
+        (articulated, added)
+    } else {
+        remarks.push(
+            "This clip holds keyswitches that were placed by hand, another way than these tools place them. They \
+             were left as they are, and these notes were given switches of their own: check how the notes after \
+             them are played (analyze_music reads it), or write the clip again with `how` on its notes."
+                .to_string(),
+        );
+        let mut articulated = articulate_asked(&profile, &asked, 0.0).map_err(|error| error.to_string())?;
+        let keyswitches = articulated.presses.clone();
+        articulated.notes.extend(held.iter().copied());
+        (articulated, keyswitches)
+    };
+    if let (Some((low, high)), true) = (articulated.default_range, articulated.fitted > 0) {
+        remarks.push(format!(
+            "{} note(s) played the ordinary way (a note that is slid or hammered into is one too) were outside              the velocities {low}-{high} that play it; they were moved to the nearest of those. Say how such a note              is to be played if softer or harder was meant.",
+            articulated.fitted
+        ));
+    }
+    Ok(Some(Played { all: articulated.notes, keyswitches, remarks }))
 }
 
 /// A profile as it is written and read back: the same shape both ways.
@@ -200,7 +323,10 @@ fn role_name(role: Role) -> &'static str {
 }
 
 fn articulation_json(articulation: &Articulation) -> Value {
-    let plain = articulation.lasts == Lasts::Stays && articulation.velocity.is_none() && !articulation.default;
+    let plain = articulation.lasts == Lasts::Stays
+        && articulation.velocity.is_none()
+        && !articulation.default
+        && articulation.sounds == 0;
     match articulation.key {
         Some(key) if plain => json!(key),
         key => {
@@ -218,6 +344,9 @@ fn articulation_json(articulation: &Articulation) -> Value {
             }
             if articulation.default {
                 out.insert("default".into(), json!(true));
+            }
+            if articulation.sounds != 0 {
+                out.insert("sounds_semitones".into(), json!(articulation.sounds));
             }
             Value::Object(out)
         }
@@ -288,16 +417,18 @@ fn split_names(run: &str) -> Vec<String> {
     }
 }
 
+/// What an articulation may say of itself.
+const ARTICULATION_FIELDS: [&str; 6] = ["key", "lasts", "latches", "velocity", "default", "sounds_semitones"];
+
 fn articulation_of(name: &str, value: &Value) -> Result<Articulation, String> {
     let what = format!("articulation '{name}'");
     let Value::Object(fields) = value else {
         return Ok(Articulation::key(name, key_of(value, &what)?));
     };
-    if let Some(unknown) =
-        fields.keys().find(|field| !["key", "lasts", "latches", "velocity", "default"].contains(&field.as_str()))
-    {
+    if let Some(unknown) = fields.keys().find(|field| !ARTICULATION_FIELDS.contains(&field.as_str())) {
         return Err(format!(
-            "{what}: '{unknown}' is not something an articulation has; it has key, lasts (or latches), velocity and default"
+            "{what}: '{unknown}' is not something an articulation has; it has key, lasts (or latches), velocity, \
+             default and sounds_semitones"
         ));
     }
     let key = fields.get("key").filter(|key| !key.is_null()).map(|key| key_of(key, &what)).transpose()?;
@@ -332,7 +463,19 @@ fn articulation_of(name: &str, value: &Value) -> Result<Articulation, String> {
         Some(other) => return Err(format!("{what}: `velocity` {other} should be [lowest, highest]")),
     };
     let default = fields.get("default").and_then(Value::as_bool).unwrap_or(false);
-    Ok(Articulation { name: name.to_string(), key, lasts, velocity, default })
+    let sounds = match fields.get("sounds_semitones").filter(|sounds| !sounds.is_null()) {
+        None => 0,
+        Some(sounds) => match sounds.as_i64().filter(|semitones| (-48..=48).contains(semitones)) {
+            Some(semitones) => semitones as i8,
+            None => {
+                return Err(format!(
+                    "{what}: `sounds_semitones` {sounds} should be how many semitones above its key a note \
+                     played this way is heard, as a whole number (12 for a harmonic an octave up)"
+                ));
+            }
+        },
+    };
+    Ok(Articulation { name: name.to_string(), key, lasts, velocity, default, sounds })
 }
 
 /// The profile `request` asks for, on top of `base`.
@@ -655,13 +798,57 @@ fn track_reply(session: &Session, id: TrackId, profile: &InstrumentProfile) -> V
              this track follow (set that parameter to change it)"
         ));
     }
+    if !drums && !profile.articulations.is_empty() {
+        out["ask_by_name"] = json!(
+            "`articulation` on write_chords, write_bass, write_arpeggio and write_melody; a mark on one note of a \
+             melody (\"E3:0.5!palm_mute\"); `how` on a note of create_clip, add_notes and set_notes ([\"E2\", 0, \
+             0.5, 100, \"palm_mute\"]). The keyswitches are pressed for you: never write them as notes."
+        );
+    }
     if drums {
-        // The whole map, the kit's own names first: what a lane or a note may be called.
-        let map: Map<String, Value> = profile.drum_map().into_iter().map(|(name, key)| (name, json!(key))).collect();
+        // The whole map, the kit's own names first: what a lane or a note may be called. Where the
+        // instrument says what its kit has on its keys, it is that kit's, read now.
+        let whole = session.profile_of(id);
+        let map: Map<String, Value> = whole.drum_map().into_iter().map(|(name, key)| (name, json!(key))).collect();
         out["drum_map"] = Value::Object(map);
+        if whole.whole {
+            let lacking: Vec<&str> =
+                USUAL_DRUMS.iter().copied().filter(|name| matches!(whole.find_drum(name), Drum::Lacking(_))).collect();
+            out["kit"] = json!({
+                "read_from": "the plugin's own state, now: it is the kit that is loaded, and changes with it",
+                "what": whole.notes,
+                "has_no": lacking,
+                "note": "These names are the whole kit: a drum that is not in `drum_map` is not played by any key, \
+                         and the writing tools leave it out and say so rather than hit another drum. General \
+                         MIDI's keys do not hold here.",
+            });
+        }
     }
     out
 }
+
+/// The drums a song is usually written with: which of them a kit has not
+/// got is worth saying before a part is written for it.
+const USUAL_DRUMS: [&str; 18] = [
+    "kick",
+    "snare",
+    "rimshot",
+    "rim",
+    "clap",
+    "closed_hat",
+    "pedal_hat",
+    "open_hat",
+    "high_tom",
+    "mid_tom",
+    "low_tom",
+    "floor_tom",
+    "crash",
+    "crash2",
+    "china",
+    "splash",
+    "ride",
+    "ride_bell",
+];
 
 fn write(session: &mut Session, request: &SetInstrumentProfileRequest) -> Reply {
     let id = TrackId(request.track);
