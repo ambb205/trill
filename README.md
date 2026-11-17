@@ -232,7 +232,8 @@ The tables that ship are such recipes, to read and to change, and a table is sho
 the same samples on every render, at any buffer size and on any number of threads: what a note draws by lot is
 drawn from the note. Measured (and held in tests): what is not on a harmonic of a sawtooth lies 84 dB under it
 at the worst pitch and 110 to 129 dB under it in the top octave of a piano at 48 kHz; a voice is as loud as the
-poly synth's at the same volume; eight notes of eight copies on both oscillators take 6 % of one core. It has no
+poly synth's at the same volume; eight notes of eight copies on both oscillators take 4 % of one core, and thirty-two
+notes of sixteen a quarter of one. It has no
 effects inside: the chorus, the delay and the reverb are devices to put after it. Its presets are matched in
 level by measurement and have not been tuned by ear yet. In the window its panel draws the wave an oscillator
 reads at its position, the envelopes and the LFOs, and lists the matrix slot by slot.
