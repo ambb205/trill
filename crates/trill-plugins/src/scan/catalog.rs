@@ -67,6 +67,23 @@ impl Settings {
     }
 }
 
+/// An installed plugin as a host that has looked for plugins knows it:
+/// what another process needs to host it without looking for it. A host
+/// that renders in a process of its own hands these over, so that the
+/// process scans nothing and reads no cache ([`crate::PluginHost::knowing`]).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Known {
+    /// The plugin's URI: the scheme of its format and its id.
+    pub uri: String,
+    /// The plugin file it is in.
+    pub path: PathBuf,
+    pub name: String,
+    pub vendor: String,
+    pub instrument: bool,
+    /// Whether it calls itself a drum instrument.
+    pub drums: bool,
+}
+
 /// An installed plugin.
 pub(crate) struct Installed {
     /// The plugin file it was found in.
@@ -119,6 +136,50 @@ impl Catalog {
         // by name.
         catalog.descriptors.sort_by_cached_key(|descriptor| (descriptor.name.to_lowercase(), descriptor.uri.clone()));
         catalog
+    }
+
+    /// A catalog of the plugins of `format` among `known`, as if a scan
+    /// had found them.
+    fn of_known(format: &Format, known: &[Known]) -> Self {
+        let mut catalog = Self::default();
+        for plugin in known {
+            let Some((scheme, id)) = plugin.uri.split_once(':') else { continue };
+            if scheme != format.scheme || catalog.plugins.contains_key(id) {
+                continue;
+            }
+            catalog.descriptors.push(DeviceDescriptor {
+                uri: plugin.uri.clone(),
+                name: plugin.name.clone(),
+                vendor: plugin.vendor.clone(),
+                category: if plugin.instrument { DeviceCategory::Instrument } else { DeviceCategory::Effect },
+                description: String::new(),
+                params: Vec::new(),
+                presets: Vec::new(),
+            });
+            let installed = Installed {
+                path: plugin.path.clone(),
+                name: plugin.name.clone(),
+                vendor: plugin.vendor.clone(),
+                instrument: plugin.instrument,
+                drums: plugin.drums,
+            };
+            catalog.plugins.insert(id.to_string(), installed);
+        }
+        catalog.descriptors.sort_by_cached_key(|descriptor| (descriptor.name.to_lowercase(), descriptor.uri.clone()));
+        catalog
+    }
+
+    /// What is known of the installed plugin with this id.
+    fn known(&self, scheme: &str, id: &str) -> Option<Known> {
+        let installed = self.plugins.get(id)?;
+        Some(Known {
+            uri: format!("{scheme}:{id}"),
+            path: installed.path.clone(),
+            name: installed.name.clone(),
+            vendor: installed.vendor.clone(),
+            instrument: installed.instrument,
+            drums: installed.drums,
+        })
     }
 
     /// The installed plugin with this id, or why a device cannot be made of
@@ -218,6 +279,18 @@ impl Inventory {
             None => Err(PresetList::reading(Vec::new())),
             Some(catalog) => catalog.plugin_ref(self.format.scheme, id).ok_or_else(PresetList::default),
         }
+    }
+
+    /// What is known of the installed plugin `id`. Never scans: `None`
+    /// while plugins have not been looked for.
+    pub(crate) fn known(&self, id: &str) -> Option<Known> {
+        self.scanned()?.known(self.format.scheme, id)
+    }
+
+    /// Takes the plugins of this format among `known` to be what is
+    /// installed, without looking.
+    pub(crate) fn know(&self, known: &[Known]) {
+        self.replace(Catalog::of_known(self.format, known));
     }
 
     /// Makes `results` the catalog, as if a scan had produced them.

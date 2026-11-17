@@ -1,7 +1,7 @@
 //! Measurements of rendered audio: level, loudness and spectral balance.
 //! These let a caller that cannot listen (a script, an AI) judge a mix.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::f64::consts::PI;
 
 const FLOOR_DB: f32 = -120.0;
@@ -10,7 +10,7 @@ const FFT_SIZE: usize = 4096;
 /// Upper edges of the spectral bands, in Hz. The last band is open-ended.
 const BAND_EDGES: [f64; 5] = [60.0, 250.0, 2000.0, 6000.0, f64::INFINITY];
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AudioStats {
     pub duration_seconds: f64,
     /// Highest sample peak, dBFS. Above 0 means the file would clip.
@@ -32,7 +32,7 @@ pub struct AudioStats {
     pub spectrum: Spectrum,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Spectrum {
     /// Below 60 Hz.
     pub sub_db: f32,

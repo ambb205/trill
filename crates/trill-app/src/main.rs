@@ -13,8 +13,10 @@ use std::sync::Arc;
 use trill_runtime::Runtime;
 
 fn main() -> anyhow::Result<()> {
-    // Plugin files are scanned in a child process of this same executable.
+    // Plugin files are scanned in a child process of this same executable,
+    // and songs with plugins are rendered, measured and probed in one.
     trill_plugins::scan::run_as_scanner_if_requested();
+    trill_runtime::jobs::run_as_job_if_requested();
 
     let cli = match cli::parse(std::env::args().skip(1))? {
         cli::Parsed::Run(cli) => cli,
@@ -34,6 +36,7 @@ fn main() -> anyhow::Result<()> {
         None => Runtime::start(cli.runtime_options()),
     };
     let runtime = Arc::new(started.context("could not start Trill")?);
+    runtime.do_jobs_as_usual();
     if let Some(scene) = cli.audio_scene {
         scene.stage(&runtime);
     }

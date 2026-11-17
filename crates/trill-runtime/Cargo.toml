@@ -11,6 +11,7 @@ trill-core.workspace = true
 trill-dsp.workspace = true
 trill-engine.workspace = true
 trill-library.workspace = true
+trill-listen.workspace = true
 trill-media.workspace = true
 trill-plugins.workspace = true
 log.workspace = true
@@ -18,6 +19,7 @@ log.workspace = true
 # side already brings in.
 midir = "0.11"
 parking_lot.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 

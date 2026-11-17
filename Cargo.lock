@@ -4657,6 +4657,7 @@ dependencies = [
  "parking_lot",
  "rtrb",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "trill-core",
@@ -4681,6 +4682,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "trill-listen"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "trill-core",
+ "trill-dsp",
+ "trill-media",
+]
+
+[[package]]
 name = "trill-mcp"
 version = "0.1.0"
 dependencies = [
@@ -4697,6 +4709,7 @@ dependencies = [
  "trill-dsp",
  "trill-engine",
  "trill-library",
+ "trill-listen",
  "trill-media",
  "trill-plugins",
  "trill-runtime",
@@ -4751,6 +4764,7 @@ dependencies = [
  "log",
  "midir",
  "parking_lot",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
@@ -4758,6 +4772,7 @@ dependencies = [
  "trill-dsp",
  "trill-engine",
  "trill-library",
+ "trill-listen",
  "trill-media",
  "trill-plugins",
 ]

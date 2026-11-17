@@ -14,6 +14,7 @@ trill-core = { path = "crates/trill-core" }
 trill-dsp = { path = "crates/trill-dsp" }
 trill-engine = { path = "crates/trill-engine" }
 trill-library = { path = "crates/trill-library" }
+trill-listen = { path = "crates/trill-listen" }
 trill-plugins = { path = "crates/trill-plugins" }
 trill-runtime = { path = "crates/trill-runtime" }
 trill-stage = { path = "crates/trill-stage" }

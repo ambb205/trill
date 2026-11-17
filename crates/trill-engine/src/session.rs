@@ -149,6 +149,9 @@ pub struct Session {
     /// What is known about instruments by device type, which a track is
     /// given along with its instrument.
     instruments: Arc<InstrumentKnowledge>,
+    /// Where renders, measurements and probes of songs with plugins are
+    /// done, if not in this process: see [`Session::do_jobs_apart`].
+    apart: Option<crate::apart::Apart>,
     meters: Meters,
     audio: AudioSources,
     /// The clips playing a stand-in until their stretched audio is ready.
@@ -221,6 +224,7 @@ impl Session {
             factory,
             saved,
             instruments: Arc::new(InstrumentKnowledge::default()),
+            apart: None,
             engine,
             bank: DeviceBank::default(),
             meters: Meters::default(),
@@ -968,7 +972,24 @@ impl Session {
     /// A snapshot that can be rendered without holding the session.
     pub fn render_job(&mut self) -> RenderJob {
         self.capture_device_state();
-        RenderJob { project: self.project.clone(), factory: self.factory.clone(), audio: self.audio.clone() }
+        RenderJob {
+            project: self.project.clone(),
+            factory: self.factory.clone(),
+            audio: self.audio.clone(),
+            apart: self.apart.clone(),
+        }
+    }
+
+    /// Has the renders, measurements and probes of songs with plugins done
+    /// in a process of their own from now on ([`crate::apart`]), or, with
+    /// `None`, in this one.
+    pub fn do_jobs_apart(&mut self, apart: Option<crate::apart::Apart>) {
+        self.apart = apart;
+    }
+
+    /// Where jobs are done that are not done in this process, if anywhere.
+    pub fn jobs_apart(&self) -> Option<&crate::apart::Apart> {
+        self.apart.as_ref()
     }
 
     /// The session's regular chores; call it a few times a second. Frees

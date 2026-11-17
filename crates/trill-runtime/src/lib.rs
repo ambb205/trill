@@ -33,8 +33,9 @@
 //! [`Runtime::preview`], [`Runtime::add_sound`] and
 //! [`Runtime::add_sound_on_new_track`]; and, for a song whose files are not
 //! where it says, [`Runtime::missing_files`], [`Runtime::relink`] and
-//! [`Runtime::move_library_folder`]. A front end that grew its own version
-//! of these would drift from the other.
+//! [`Runtime::move_library_folder`]; and, for what is in a sound (its beats,
+//! key, chords, parts, loops and notes), [`Runtime::hear`]. A front end
+//! that grew its own version of these would drift from the other.
 //!
 //! ```no_run
 //! use trill_runtime::{Runtime, RuntimeOptions};
@@ -48,12 +49,16 @@
 //! ```
 
 mod housekeeping;
+pub mod jobs;
+mod listening;
 pub mod midi;
 mod missing;
 mod recovery;
 mod settings;
 mod sounds;
 
+pub use jobs::{Jobs, Program};
+pub use listening::{LONGEST_SECONDS, ListenError};
 pub use midi::MidiInputInfo;
 pub use missing::{Candidate, Confidence, FoundFolder, Look, Missing, MissingFile, MissingFolder, files_missing_in};
 pub use recovery::SafetyCopy;
@@ -178,6 +183,8 @@ pub struct Runtime {
     /// The sound library. Changes to its folders, favorites and recently
     /// used files are saved with the settings without further ado.
     pub library: Arc<Library>,
+    /// What was heard in the last few audio files that were listened to.
+    listening: listening::Listening,
     plugins: Option<PluginHost>,
     settings: Arc<Mutex<SettingsFile>>,
     copies: Arc<Mutex<SafetyCopies>>,
@@ -296,7 +303,18 @@ impl Runtime {
         let copies = Arc::new(Mutex::new(copies));
         let settings = Arc::new(Mutex::new(settings));
         let housekeeper = Housekeeper::start(session.clone(), library.clone(), settings.clone(), copies.clone())?;
-        Ok(Self { _housekeeper: housekeeper, midi, session, media, library, plugins, settings, copies, audio_host })
+        Ok(Self {
+            _housekeeper: housekeeper,
+            midi,
+            session,
+            media,
+            library,
+            listening: listening::Listening::default(),
+            plugins,
+            settings,
+            copies,
+            audio_host,
+        })
     }
 
     // ---- the audio device ----------------------------------------------
@@ -446,6 +464,36 @@ impl Runtime {
     #[doc(hidden)]
     pub fn abandon(self) {
         self.copies.lock().abandon();
+    }
+
+    /// Has the renders, measurements and probes of songs with plugins
+    /// done in a process of their own from now on, as `jobs` says: a
+    /// plugin that takes its process down then takes that one, and the
+    /// error says so ([`trill_engine::apart`]). A song of built-in devices
+    /// is rendered here as before. An error is about the program that was
+    /// to do them, and leaves things as they were.
+    pub fn do_jobs_apart(&self, jobs: Jobs) -> Result<(), String> {
+        let apart = jobs::apart(jobs, self.plugins.clone(), self.media.clone())?;
+        self.session.lock().do_jobs_apart(Some(apart));
+        Ok(())
+    }
+
+    /// [`Runtime::do_jobs_apart`] as a program does it that has called
+    /// [`jobs::run_as_job_if_requested`] first thing: by itself, started
+    /// a second time, unless its environment says otherwise
+    /// ([`Jobs::usual`]). A program that cannot find its own file goes on
+    /// doing its jobs here, and says so in its log.
+    pub fn do_jobs_as_usual(&self) {
+        match Jobs::usual(Program::CurrentExecutable).map(|jobs| self.do_jobs_apart(jobs)) {
+            Some(Err(reason)) => log::warn!("renders and probes are done in this process: {reason}"),
+            Some(Ok(())) => {}
+            None => log::info!("renders and probes are done in this process, as the environment says"),
+        }
+    }
+
+    /// Has every job done in this process from now on.
+    pub fn do_jobs_here(&self) {
+        self.session.lock().do_jobs_apart(None);
     }
 
     /// The plugin host, when plugins are on: for rescanning and for what

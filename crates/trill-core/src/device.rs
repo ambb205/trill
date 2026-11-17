@@ -808,6 +808,43 @@ impl Beside {
     }
 }
 
+/// What is known of a device that does not do the same thing twice as it
+/// comes (a sampled instrument that draws at random which recording of a
+/// note it plays, say), and what makes it: that is what a render gives its
+/// own copy of the device when it is asked to be one that can be compared
+/// with another ([`DeviceFactory::repeating`]). Where nothing is known
+/// that makes it (no setting and no parameter is named), a render can
+/// only say so.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Repeating {
+    /// What it does, in words that go on from its name: "draws at random
+    /// which recording of a note it plays".
+    pub what: String,
+    /// Settings of the device's saved state to give these values, by name
+    /// ([`DeviceController::set_settings`]).
+    pub settings: Vec<(String, String)>,
+    /// Parameters to set, by name, to these values in their own units. A
+    /// name the device has no parameter of is passed over.
+    pub params: Vec<(String, f64)>,
+    /// What that costs the sound, in a few words that finish "it is
+    /// rendered with ...". Empty where nothing is known that stops it.
+    pub costs: String,
+    /// The device begins its draws at the same place in every process
+    /// that has just started, and what it draws depends on nothing but
+    /// what it and its like were played there: the same song, rendered in
+    /// two such processes, is the same samples all the same. Measured,
+    /// not assumed. (A change to the song still moves every draw after
+    /// it, which is what [`Repeating`] is for.)
+    pub begins_alike: bool,
+}
+
+impl Repeating {
+    /// Whether anything is known that makes the device repeat itself.
+    pub fn can_be_stopped(&self) -> bool {
+        !self.settings.is_empty() || !self.params.is_empty()
+    }
+}
+
 pub trait DeviceFactory: Send + Sync {
     /// Everything this factory can create.
     fn descriptors(&self) -> Vec<DeviceDescriptor>;
@@ -848,6 +885,26 @@ pub trait DeviceFactory: Send + Sync {
     fn beside(&self, uri: &str) -> Beside {
         let _ = uri;
         Beside::Anything
+    }
+
+    /// What makes a device of this factory do the same thing twice, if it
+    /// is known not to as it comes and how to stop it: see [`Repeating`].
+    /// `None` for a device that repeats itself anyway, and for one nothing
+    /// is known of. A factory that hands the work to another must hand
+    /// this on too.
+    fn repeating(&self, uri: &str) -> Option<Repeating> {
+        let _ = uri;
+        None
+    }
+
+    /// The file the code of a device of this factory is in, where that is
+    /// not the program's own: a plugin's file. It is what tells which
+    /// plugin a fault was in. `None` for a device that is not this
+    /// factory's and for one that is part of the program. A factory that
+    /// hands the work to another must hand this on too.
+    fn module(&self, uri: &str) -> Option<std::path::PathBuf> {
+        let _ = uri;
+        None
     }
 
     /// What is wrong with `device` as this factory would create it, short
@@ -967,6 +1024,14 @@ impl<T: DeviceFactory + ?Sized> DeviceFactory for std::sync::Arc<T> {
         (**self).beside(uri)
     }
 
+    fn module(&self, uri: &str) -> Option<std::path::PathBuf> {
+        (**self).module(uri)
+    }
+
+    fn repeating(&self, uri: &str) -> Option<Repeating> {
+        (**self).repeating(uri)
+    }
+
     fn warnings(&self, device: &Device) -> Vec<DeviceWarning> {
         (**self).warnings(device)
     }
@@ -1027,6 +1092,14 @@ impl DeviceFactory for CompositeFactory {
 
     fn beside(&self, uri: &str) -> Beside {
         self.factories.iter().map(|factory| factory.beside(uri)).fold(Beside::Anything, Beside::or)
+    }
+
+    fn module(&self, uri: &str) -> Option<std::path::PathBuf> {
+        self.factories.iter().find_map(|factory| factory.module(uri))
+    }
+
+    fn repeating(&self, uri: &str) -> Option<Repeating> {
+        self.factories.iter().find_map(|factory| factory.repeating(uri))
     }
 
     fn create(&self, device: &Device, sample_rate: f64, max_block: usize) -> Result<DeviceInstance, DeviceError> {

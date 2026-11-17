@@ -79,8 +79,13 @@ impl Session {
                 pitches = (24..=96).step_by(6).collect();
             }
         }
-        let job =
-            ProbeJob { devices: vec![found], factory: self.factory.clone(), preset: None, tempo: self.project.tempo };
+        let job = ProbeJob {
+            devices: vec![found],
+            factory: self.factory.clone(),
+            preset: None,
+            tempo: self.project.tempo,
+            apart: self.apart.clone(),
+        };
         Ok((job, pitches))
     }
 
@@ -152,6 +157,12 @@ impl Session {
                 (vec![device], to_load)
             }
         };
-        Ok(ProbeJob { devices, factory: self.factory.clone(), preset, tempo: self.project.tempo })
+        Ok(ProbeJob {
+            devices,
+            factory: self.factory.clone(),
+            preset,
+            tempo: self.project.tempo,
+            apart: self.apart.clone(),
+        })
     }
 }

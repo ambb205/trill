@@ -29,7 +29,7 @@ Development builds are optimized (see `[profile.dev]`), because unoptimized audi
 
 ### Building and testing
 
-`cargo test --workspace` runs about 2,300 tests in a few minutes. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 2,380 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -48,6 +48,7 @@ cargo test -p trill-app a_modelled_saxophone -- --include-ignored --nocapture   
 cargo test -p trill-mcp --test wavetable against_the_installed -- --ignored --nocapture    # a sawtooth on the wavetable synth beside Serum 2's and Surge XT's as they come: what of each is not on a harmonic, its pitch and its level (a measurement)
 cargo test -p trill-dsp --lib share_of_a_core -- --ignored --nocapture    # what the wavetable synth costs, from one voice to thirty-two notes of sixteen copies (a measurement; run it alone)
 cargo test -p trill-media -- --include-ignored      # decoding audio files found in this machine's usual folders
+TRILL_MAGPIE_PROJECTS=<...>/data/projects cargo test -p trill-listen --test magpie -- --ignored --nocapture --test-threads 1    # what Trill hears in recordings that Magpie took apart, against what Magpie found in them (the owner's Magpie project and its saved projects; minutes)
 TRILL_TEST_PLUGIN_WINDOWS=1 cargo test -p trill-plugins --test editor_windows -- --test-threads=1   # opens windows
 TRILL_TEST_CLAUDE=1 cargo test -p trill-assistant --test real_cli    # talks to an installed, signed-in Claude Code
 TRILL_TEST_CLAUDE=1 cargo test -p trill-app live_ -- --test-threads=1    # ...through the assistant's panel (seven messages)
@@ -415,6 +416,28 @@ tags, tempo, key and length (all read from file and folder names). Audio clips p
 Vorbis at any sample rate, and can be warped to follow the project tempo: `beats` keeps drum hits sharp, `tonal`
 keeps sustained sound smooth, `repitch` plays faster or slower like a record; warped clips can be transposed.
 
+**Listening to a recording.** Trill says what is in an audio file, with no model and nothing changed: the
+**beat grid** (every beat and bar line, each beat moved onto the hit it belongs to, and the tempo), how far the
+recording sits from A = 440, its **key** with the runners-up, a **chord** for each stretch of beats, its **parts**
+lettered so that parts that return share a letter (`A B A B C B`), the **loops** worth having ranked by how well
+they come back round, the cleanest **single hits** of each kind of drum and a bass note for each pitch, the drum
+**groove**, and the **notes** of a bass line and of a melody. Any of the last four is written as **MIDI on the
+recording's own beats**, so it stays in time where the recording's tempo wanders: into a file, or into the song on
+a new track. When the tracker has the beat wrong it is reread: half or double the tempo, the bar one beat later,
+or so many beats to a bar; everything else follows.
+
+- It works on one file and better on one instrument. A drum loop's groove, a bass line's notes and a voice's
+  melody are right; of a whole mix the groove is a sketch (the bass plays in the kick's band), and bass and melody
+  are what was loudest in their registers. Chords and parts are estimates: a map, not a transcription. Without a
+  model the start of the bar is the least sure thing in an answer.
+- Over MCP today (`listen`, `transcribe`); the window does not show it yet.
+- The method is the one the owner's Magpie project proved, translated from its Python (`crates/trill-listen`). On
+  five recordings Magpie had taken apart, over its own beat grids, Trill finds the same parts, 313 of its 316
+  loops to the bar, 187 of its 189 one-shots, its groove and every bass and vocal note; chords are the same 52 to
+  84 % of the time (11 % on one recording whose chords Magpie has in another key), read from a chroma of Trill's
+  own. Taking a recording apart into stems, beats from a model, and lyrics with a time for every word are not
+  built yet: they need models.
+
 **Files that moved**: a song names its audio files by their paths, and a folder of samples that is moved or
 renamed leaves it with clips and pads that play nothing. Trill says so in one place (a line in the status bar and
 the list it opens, `missing_files` in `get_project`, and first in the notes of a `measure` or a `render`, which
@@ -552,10 +575,13 @@ that quick and true:
   nothing more has arrived for a quarter of a second or more, with the program not growing meanwhile: while
   samples are being read its memory rises. Every rehearsed note is sounded exactly three times and then left
   alone, however long the wait lasts: an instrument that plays its recordings of a note in turn then begins
-  every render at the same one, and the same song renders to the same samples again. (That cannot hold an
-  instrument that draws its recordings at random from a stream all its instances share, which only a program
-  that has just started begins at the same place. Ample Sound's do as they come, and go in turn when they are
-  set to: their profiles say how.) What a plugin has been run by the time a render begins is counted the
+  every render at the same one, and the same song renders to the same samples again. A key that the track
+  knows for a keyswitch is not asked to sound: it is pressed with the notes the part plays under it, each of
+  which is rehearsed so (a pitch played under two switches is two notes, with recordings of their own), and
+  where a part begins before it has chosen anything the instrument is left on the way of playing its track
+  calls the default. An instrument that listens to another track (a vocoder, a synthesizer on a patch that
+  plays what it is fed) is lent noise to listen to while its notes are tried, since by itself it would answer
+  none. What a plugin has been run by the time a render begins is counted the
   same way, because what some give depends on it to the block (an amplifier was measured whose sound is
   another after one block more of silence, whatever a reset does): an effect is tried until it has passed
   three bursts and no more, the effects after an instrument are run only on the notes the instrument itself
@@ -601,6 +627,44 @@ that quick and true:
   `cargo run -p trill-plugins --example beside` measures an installed plugin, or all of them, each in a
   process of its own). A plugin that is listed as one not to run beside anything leaves the render on one
   thread, and the reply says which it was.
+- *A song's plugins are rendered in a process of their own.* A render, a measurement and a probe of a song
+  with plugins are done by the program started a second time (`trill` and `trill-mcp` start themselves; nothing
+  else is installed or looked for). It is handed the song with every plugin's state, the options, where the
+  plugins' files are and what is known of them, and nothing else of the user's; it makes its own copies of the
+  plugins and hands back the figures, the files and what it has to say. The song that is open, its history and
+  what plays live stay where they are. Every job has a process that has just started, which ends where it
+  stands when the job is done, with no plugin taken down (taking plugins down is where they fault most).
+  - *A plugin that crashes costs a sentence, not the program*: at what stage it happened, which plugin where
+    that can be told (the device that was being made, or the one whose file the fault was in), that the song is
+    untouched, and what to do next. The window says it where it says that an export failed, the tools as the
+    call's error, and the film export in place of its film.
+  - *The same song is the same samples.* An instrument that draws its recordings at random begins at the same
+    place in every process that has just started: the four instruments of Ample Sound, as they come, rendered
+    to the same samples to the bit each time (in a program that rendered for itself, beside the song's own
+    instruments, two renders of the bass left -33 dB of one another). A change to the song still moves every
+    draw after it, which is what `repeatable` is for (below).
+  - *It gives back all it took.* A song of seventeen plugin instruments held 8.0 GB open, its render another
+    8.6 GB in the process that made it, and nothing two seconds after the answer. A job the machine has no room
+    for is refused in a sentence before it is started.
+  - *It can be stopped at once*: the process is ended, and nothing half-written is left under a name that was
+    asked for (files are written under other names and given theirs when they are whole).
+  - *It costs seconds.* A song of eight plugins was measured in 45.5 s in a process of its own and in 42.3 s in
+    the program; the song of seventeen was rendered with every instrument's stem in 116 to 121 s and in 131 s.
+    The two processes together hold a seventh to a fifth more at their fullest than the program alone did (6.0
+    GB against 5.0 GB; 16.6 GB against 14.5 GB).
+  A song without plugins is rendered where it is (nothing in it can fault, and it is the same samples either
+  way), and decoded audio is not handed over: the process reads and stretches a song's files itself.
+  `TRILL_JOBS=here` has a program do every job itself; `TRILL_JOB_LOG=trace` has the process say every try of
+  its waits in the program's log.
+- *A render can be asked to repeat itself.* `repeatable` on `measure` and `render` takes what is known to
+  draw at random out of the render's own copies of the instruments (Ample Sound's: their recordings in turn,
+  no noise of the fretting hand), and leaves the song as it is: two such renders are the same samples and can
+  be compared, where a change to the song would otherwise show in every note after it. Without it the reply
+  names the instruments that draw, and says what a change will do. An instrument that is already set so in the
+  song is not named. Superior Drummer 3 is named for what nothing was found to stop: it chooses for itself,
+  anew every time it is made, which recording a cymbal plays when it is struck again while it still rings
+  (`trill-plugins/src/repeats.rs` has what was measured and what was ruled out, and
+  `cargo run -p trill-plugins --example takes` makes one part of a song again with one thing changed).
 - *A render makes only what is heard.* A track that is muted, or left out by a solo or by `tracks`, is not put
   into the render at all: its devices are not created and its plugins are not waited for. Hearing one track of
   a song with many plugins costs what that track costs. (What plays live keeps every track running, so that a
@@ -753,6 +817,7 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Presets | `search_presets` (one search across the presets of every installed instrument and the saved ones), `save_preset` (keeps a device's sound under a name) |
 | Clips | `create_clip`, `create_audio_clip`, `update_clip`, `split_clip`, `duplicate_clip`, `delete_clip` |
 | Sounds | `search_sounds`, `library` (its folders, and `move_folder` for one that went elsewhere), `preview_sound`, `set_sample` |
+| Listening | `listen` (what is in an audio file of the library, of the user's or of a clip: tempo and bars, key, tuning, and on request its chords, parts, loops, single hits, groove, bass and melody in the recording's own bars, paged; corrections to its beat grid), `transcribe` (its bass line, melody, groove or chords as MIDI on its own beats: into a file, or into the song on a new track in one undo step) |
 | Wavetables | `describe_wavetable` (the tables of `builtin:wavetable` that ship, any of them or a recipe of your own shown frame by frame in numbers; changes nothing), `set_wavetable` (gives an oscillator a table that ships, one made from a recipe, or one read from an audio file; names the macros) |
 | Missing files | `missing_files` (what the song names that is not on disk, where it is used, and what was found with how sure it is), `relink_files` (what is sure, or more on request, or a folder or files named by hand: one undo step) |
 | Notes | `get_notes`, `add_notes`, `set_notes`, `remove_notes`, `transform_notes` |
@@ -846,6 +911,8 @@ crates/
   trill-media     Audio file decoding and caching, waveform overviews, sample-rate conversion, WAV writing.
   trill-engine    Realtime engine, offline renderer, analysis, and the Session.
   trill-library   The sound library (scanning, indexing, searching sample folders) and the settings file.
+  trill-listen    What is heard in a recording without a model: beats and bars, tuning, key and chords, parts,
+                  loops, single hits, notes, and MIDI of them.
   trill-plugins   Plugin hosting: scanning and preset discovery in a child process, the plugin main thread, CLAP
                   and VST3, and the readers of the presets some makers keep in files of their own.
   trill-runtime   What both programs share, built once: session, media cache, library, settings, housekeeping,
@@ -902,6 +969,9 @@ General MIDI, not from what the plugin says is on its keys; over MCP every tool 
 notes drawn by hand in the window (the tools write them; a note that is drawn is a plain key), kits of drum
 plugins other than Superior Drummer 3 (none of the others on the machine says what is on its keys in a state
 Trill reads),
+taking a recording apart into stems, its beats from a model and its lyrics with a time for every word (what
+is heard today is heard without a model, in one sound), a place in the window for what was heard in a recording
+(over MCP only), taking a recording from a link,
 for the wavetable synth: presets tuned by ear (they are matched in level by measurement, and its bank is a
 first sixteen), effects inside it or a preset that brings effects with it (a sound that wants a chorus or a
 reverb is given the device), making a table or naming a macro in the window (over MCP; the window chooses among

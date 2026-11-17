@@ -28,9 +28,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use trill_engine::SharedSession;
-use trill_engine::scripted::{BASS, DRUMS, Loading, ScriptedFactory};
+use trill_engine::scripted::{BASS, DRUMS, Dies, Loading, ScriptedFactory};
 use trill_mcp::{HttpServer, serve_http};
-use trill_runtime::{Parts, Runtime, RuntimeOptions};
+use trill_runtime::{Jobs, Parts, Program, Runtime, RuntimeOptions};
 
 type Client = RunningService<RoleClient, ClientConfig>;
 
@@ -51,6 +51,22 @@ async fn serve(runtime: Arc<Runtime>) -> Fixture {
 
 /// A server that offers the scripted instruments beside the built-in
 /// devices. Nothing of the user's is read or written.
+/// The program that does jobs for the servers of these tests: the
+/// server's own, as it is built for them.
+fn job_program() -> Program {
+    Program::Executable(std::path::PathBuf::from(env!("CARGO_BIN_EXE_trill-mcp")))
+}
+
+/// A server whose scripted instruments are as `loading` says, and whose
+/// renders, measurements and probes of them are done in a process of
+/// their own.
+async fn connect_apart(loading: Loading) -> Fixture {
+    let parts = Parts { devices: vec![Box::new(ScriptedFactory::loading(loading))], ..Parts::default() };
+    let runtime = Runtime::start_custom(RuntimeOptions::hermetic(), parts).unwrap();
+    runtime.do_jobs_apart(Jobs { scripted: Some(loading), keep_for_probes: true, ..Jobs::by(job_program()) }).unwrap();
+    serve(Arc::new(runtime)).await
+}
+
 async fn connect(scripted: ScriptedFactory) -> Fixture {
     let parts = Parts { devices: vec![Box::new(scripted)], ..Parts::default() };
     serve(Arc::new(Runtime::start_custom(RuntimeOptions::hermetic(), parts).unwrap())).await
@@ -408,6 +424,167 @@ async fn a_device_that_is_not_run_beside_others_keeps_a_measure_on_one_processor
     // Asked for one, there is nothing to explain.
     let asked = ok(client, "measure", json!({ "threads": 1 })).await;
     assert!(!strings(&asked["notes"]).iter().any(|note| note.contains("one processor")), "{asked}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_that_takes_its_process_down_costs_the_call_an_error_that_says_so_and_the_song_is_as_it_was() {
+    // The bass takes its process down in the middle of the song: every
+    // tool that would have made one for it says so, and none of them is
+    // the server.
+    let dying = Loading { dies: Some(Dies::Played(40)), ..Loading::default() };
+    let fixture = connect_apart(dying).await;
+    let client = &fixture.client;
+    let (bass, _, _) = two_part_song(client).await;
+    let folder = tempfile::tempdir().unwrap();
+    let before = ok(client, "get_project", json!({})).await;
+
+    let refused = call(client, "measure", json!({})).await.unwrap_err();
+    assert!(refused.contains("the measurement was taken down while it was being played"), "{refused}");
+    assert!(refused.contains("the song that is open is untouched") && refused.contains("Try again"), "{refused}");
+    let wav = folder.path().join("mix.wav");
+    let arguments = json!({ "path": wav.display().to_string(), "stems": ["all"] });
+    let refused = call(client, "render", arguments.clone()).await.unwrap_err();
+    assert!(refused.contains("the render was taken down while it was being played"), "{refused}");
+    assert!(refused.contains("what it had begun to write was removed"), "{refused}");
+    assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0, "nothing was written");
+    // The song is what it was, and the server goes on serving it.
+    assert_eq!(ok(client, "get_project", json!({})).await, before);
+    // A probe plays the instrument's notes while the song stands still,
+    // which this bass lives through: in a process of its own as well.
+    let probed = ok(client, "probe", json!({ "track": bass, "notes": [40, 43] })).await;
+    assert_eq!(probed["sounding"], "E2 (40), G2 (43)", "{probed}");
+
+    // With the track muted, the rest is measured and rendered.
+    ok(client, "update_track", json!({ "track": bass, "mute": true })).await;
+    let report = ok(client, "measure", json!({})).await;
+    assert!(report["peak_db"].as_f64().unwrap() > -60.0, "{report}");
+    let report = ok(client, "render", arguments).await;
+    assert!(wav.exists() && !report["stems"].as_array().unwrap().is_empty(), "{report}");
+
+    // One that goes as it is made is named, with its track.
+    let fixture = connect_apart(Loading { dies: Some(Dies::Made), ..Loading::default() }).await;
+    let client = &fixture.client;
+    let (bass, _, _) = two_part_song(client).await;
+    let refused = call(client, "measure", json!({})).await.unwrap_err();
+    assert!(refused.contains("a plugin took the measurement down while its devices were being made: "), "{refused}");
+    assert!(
+        refused.contains(" on 'Bass' (") && refused.contains("mute that track or take the device out"),
+        "{refused}"
+    );
+    let refused = call(client, "probe", json!({ "track": bass, "notes": [40] })).await.unwrap_err();
+    assert!(refused.contains("a plugin took the probe down while its devices were being made"), "{refused}");
+    assert!(ok(client, "get_project", json!({})).await["tracks"].as_array().is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_instrument_that_plays_what_it_listens_to_is_heard_in_its_song_and_a_probe_says_what_it_gave_it() {
+    // A bass that plays its notes as loud as the track it listens to, and
+    // not at all by itself, as a vocoder does: it listens to the drums.
+    let fixture = connect(ScriptedFactory::loading(Loading { listens: true, ..Loading::default() })).await;
+    let client = &fixture.client;
+    let (bass, drums, _) = two_part_song(client).await;
+    let device = standing(&fixture).0.track(trill_core::TrackId(bass)).unwrap().devices[0].id.0;
+    let set = ok(client, "update_device", json!({ "device": device, "sidechain": drums })).await;
+    assert_eq!(set["sidechain"], json!({ "track": drums, "name": "Drums" }), "{set}");
+
+    // Tried by itself before a render it would answer no note, and the
+    // song would not be measured for want of it. It is, and the bass is
+    // in it where the kicks are.
+    let report = ok(client, "measure", json!({ "tracks": [bass] })).await;
+    assert!(report["peak_db"].as_f64().unwrap() > -30.0, "{report}");
+    assert!(!report.to_string().contains("never answered"), "{report}");
+    // A probe plays an instrument alone. It says what it gave this one to
+    // listen to, and where the song can be heard.
+    let probed = ok(client, "probe", json!({ "track": bass, "notes": [40, 43] })).await;
+    assert_eq!(probed["sounding"], "E2 (40), G2 (43)", "{probed}");
+    assert_eq!(probed["listens_to"], "Drums", "{probed}");
+    let notes = strings(&probed["notes"]).join(" | ");
+    assert!(notes.contains("listens to the track 'Drums' and plays what it hears there"), "{notes}");
+    assert!(notes.contains("given noise to listen to") && notes.contains("`measure` with `tracks`"), "{notes}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_song_whose_instrument_draws_at_random_says_so_and_is_the_same_twice_when_it_is_to_be_repeatable() {
+    // A bass that draws how loud each note is from a stream nothing puts
+    // back, as a sampled guitar draws which recording it plays.
+    let fixture = connect(ScriptedFactory::loading(Loading { random: true, ..Loading::default() })).await;
+    let client = &fixture.client;
+    two_part_song(client).await;
+    let said = |report: &Value| strings(&report["notes"]).join(" | ");
+    let figures = |report: &Value| format!("{} {} {}", report["loudness_lufs"], report["peak_db"], report["tracks"]);
+
+    // As it is, two measurements are not of the same samples, and each
+    // says which instrument that is and how to have it otherwise.
+    let (first, second) = (ok(client, "measure", json!({})).await, ok(client, "measure", json!({})).await);
+    assert_ne!(figures(&first), figures(&second));
+    // (A measurement takes down what state the song's own instruments
+    // have, which is no step of the song's.)
+    let before = standing(&fixture);
+    let note = said(&first);
+    assert!(note.contains("Scripted Bass on 'Bass' draws at random what it plays as it is set"), "{note}");
+    assert!(note.contains("To compare two renders, make both with `repeatable: true`"), "{note}");
+    assert!(note.contains("the song is left as it is"), "{note}");
+
+    // Asked to be repeatable, they are, and say what that cost.
+    let asked = json!({ "repeatable": true });
+    let (third, fourth) = (ok(client, "measure", asked.clone()).await, ok(client, "measure", asked).await);
+    assert_eq!(figures(&third), figures(&fourth));
+    let note = said(&third);
+    assert!(
+        note.contains("Made repeatable: Scripted Bass on 'Bass' rendered with every note as loud as the last"),
+        "{note}"
+    );
+    assert!(note.contains("The song itself is unchanged") && !note.contains("draws at random"), "{note}");
+    // A file is written the same way.
+    let folder = tempfile::tempdir().unwrap();
+    let path = |name: &str| folder.path().join(name).display().to_string();
+    let one = ok(client, "render", json!({ "path": path("one.wav"), "repeatable": true })).await;
+    ok(client, "render", json!({ "path": path("two.wav"), "repeatable": true })).await;
+    assert!(std::fs::read(path("one.wav")).unwrap() == std::fs::read(path("two.wav")).unwrap());
+    assert!(said(&one).contains("Made repeatable"), "{one}");
+    // And the song is what it was: nothing to undo, and it draws as before.
+    assert_eq!(standing(&fixture), before);
+    assert!(said(&ok(client, "measure", json!({})).await).contains("draws at random"));
+
+    // Set in the song itself to take its notes in turn, it draws nothing:
+    // nothing is said of it, and two measurements are of the same samples.
+    let device = before.0.tracks[0].devices[0].id.0;
+    ok(client, "update_device", json!({ "device": device, "settings": { "takes": "in turn" } })).await;
+    let (fifth, sixth) = (ok(client, "measure", json!({})).await, ok(client, "measure", json!({})).await);
+    assert_eq!(figures(&fifth), figures(&sixth));
+    assert_eq!(figures(&fifth), figures(&third), "what the render that was to be repeatable gave");
+    assert!(!said(&fifth).contains("at random") && !said(&fifth).contains("repeatable"), "{fifth}");
+
+    // Where every measurement has a process of its own, the bass begins
+    // its draws at the same place each time: the same song is the same
+    // samples, and what is said is why two renders may differ all the same.
+    let fixture = connect_apart(Loading { random: true, ..Loading::default() }).await;
+    let client = &fixture.client;
+    two_part_song(client).await;
+    let (first, second) = (ok(client, "measure", json!({})).await, ok(client, "measure", json!({})).await);
+    assert_eq!(figures(&first), figures(&second));
+    let note = said(&first);
+    assert!(note.contains("Scripted Bass on 'Bass' draws at random what it plays as it is set. Rendered like this"));
+    assert!(note.contains("the same song comes out the same every time; but a change to what it plays"), "{note}");
+    assert!(note.contains("make both with `repeatable: true`") && !note.contains("will not be these"), "{note}");
+
+    // Drums that nothing is known to stop are named, and left as they are
+    // whatever was asked.
+    let fixture = connect(ScriptedFactory::loading(Loading { unruly: true, ..Loading::default() })).await;
+    two_part_song(&fixture.client).await;
+    let note = said(&ok(&fixture.client, "measure", json!({ "repeatable": true })).await);
+    assert!(
+        note.contains("Scripted Drums on 'Drums' chooses for itself how loud each hit is. Two renders of"),
+        "{note}"
+    );
+    assert!(note.contains("nothing is known that stops it: `repeatable` leaves it as it is"), "{note}");
+    assert!(note.contains("go by that track's levels") && !note.contains("Made repeatable"), "{note}");
+
+    // Nothing is said of a song whose instruments repeat themselves.
+    let fixture = connect(ScriptedFactory::new()).await;
+    two_part_song(&fixture.client).await;
+    let report = ok(&fixture.client, "measure", json!({ "repeatable": true })).await;
+    assert!(!said(&report).contains("repeatable") && !said(&report).contains("at random"), "{report}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -782,6 +959,11 @@ const SWAM_SAX: &str = "vst3:565354575361337377616D20616C746F";
 /// Ample Metal R, a sampled bass guitar with keyswitches, as a VST3 plugin.
 const AMPLE_BASS: &str = "vst3:ABCDEF019182FAEB41707364416D7274";
 
+/// Surge XT, as a CLAP plugin, and a patch of its makers' whose first
+/// oscillator is the audio that comes into the plugin.
+const SURGE: &str = "clap:org.surge-synth-team.surge-xt";
+const SURGE_AUDIO_IN: &str = "Audio In Stereo Osc 1";
+
 /// The plugins installed on this machine, found with caches of the test's
 /// own; `None` if `uri` is not among them.
 fn installed(uri: &str) -> Option<trill_plugins::PluginHost> {
@@ -807,6 +989,13 @@ fn installed(uri: &str) -> Option<trill_plugins::PluginHost> {
 /// A server whose devices include the plugins installed on this machine;
 /// `None` if `uri` is not among them.
 async fn connect_with_plugins(uri: &str) -> Option<(Fixture, tempfile::TempDir)> {
+    connect_with_plugins_keeping(uri, false).await
+}
+
+/// [`connect_with_plugins`], whose renders, measurements and probes are
+/// all done by one process when `one_process` says so: what a program was
+/// that rendered for itself, but for the song's own devices.
+async fn connect_with_plugins_keeping(uri: &str, one_process: bool) -> Option<(Fixture, tempfile::TempDir)> {
     let host = installed(uri)?;
     let folder = tempfile::tempdir().unwrap();
     let storage = trill_runtime::Storage::At {
@@ -817,7 +1006,76 @@ async fn connect_with_plugins(uri: &str) -> Option<(Fixture, tempfile::TempDir)>
     let options = RuntimeOptions { audio, plugins: None, storage };
     let parts = Parts { devices: host.factories(), ..Parts::default() };
     let runtime = Arc::new(Runtime::start_custom(options, parts).unwrap());
+    // As the programs do it: what makes and lets go of plugins is done in
+    // a process of its own, which here is the server's own program.
+    let (keep_for_probes, keep_for_renders) = (one_process, one_process);
+    let jobs = Jobs { plugins: Some(host), keep_for_probes, keep_for_renders, ..Jobs::by(job_program()) };
+    runtime.do_jobs_apart(jobs).unwrap();
     Some((serve(runtime).await, folder))
+}
+
+/// A synthesizer on a patch that plays what comes into it, listening to a
+/// track of the song: by itself it answers no note, and a render tries
+/// every plugin instrument by itself before it begins. It is lent
+/// something to listen to while it is tried, and the song is measured.
+///
+/// What it found (2026-11-17, the measurement in a process of its own):
+/// with nothing to listen to the measurement is refused after 10.8 s, the
+/// plugin never having answered; listening to the muted synth the song is
+/// measured in 0.7 s and peaks at -24.5 dB, and a probe of the track
+/// hears both its notes and says that it lent the plugin noise.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Surge XT (CLAP); run with `cargo test -p trill-mcp --test hearing a_synth_that_plays_what_comes_into_it -- --ignored --nocapture`"]
+async fn a_synth_that_plays_what_comes_into_it_is_measured_in_the_song_where_it_listens_to_a_track() {
+    let Some((fixture, _folder)) = connect_with_plugins(SURGE).await else { return };
+    let client = &fixture.client;
+    // What is listened to: four notes of the built-in synth, on a track
+    // that is muted, so that nothing of it is heard by itself.
+    let voice = track(client, "Voice", "builtin:polysynth").await;
+    clip(client, voice, 0.0, 8.0, json!([[48, 0.5, 1.5], [55, 2.5, 1.5], [60, 4.5, 1.5], [64, 6.5, 1.5]])).await;
+    ok(client, "update_track", json!({ "track": voice, "mute": true })).await;
+    // What listens: a key held for the whole of it.
+    let listener = track(client, "Listener", SURGE).await;
+    clip(client, listener, 0.0, 8.0, json!([[60, 0, 8]])).await;
+    let device = standing(&fixture).0.track(trill_core::TrackId(listener)).unwrap().devices[0].id.0;
+    // Its presets are read behind the scenes: asked for until they are.
+    let mut set = Err("it was never asked".to_string());
+    for _ in 0..60 {
+        set = call(client, "update_device", json!({ "device": device, "preset": SURGE_AUDIO_IN })).await;
+        if set.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    if let Err(refusal) = set {
+        eprintln!("skipping: Surge XT has no preset '{SURGE_AUDIO_IN}' here: {refusal}");
+        return;
+    }
+
+    // With nothing to listen to it plays nothing, and the song is not
+    // measured without it: that is said.
+    let begun = Instant::now();
+    let refused = call(client, "measure", json!({})).await.unwrap_err();
+    let refused_after = begun.elapsed();
+    assert!(refused.contains("never answered"), "{refused}");
+
+    // Listening to the muted synth, it is heard in the song.
+    ok(client, "update_device", json!({ "device": device, "sidechain": voice })).await;
+    let begun = Instant::now();
+    let report = ok(client, "measure", json!({})).await;
+    let peak = report["peak_db"].as_f64().unwrap();
+    eprintln!(
+        "Surge XT on '{SURGE_AUDIO_IN}': refused after {refused_after:.1?} with nothing to listen to; listening to \
+         the muted synth the song is measured in {:.1?} and peaks at {peak:.1} dB",
+        begun.elapsed()
+    );
+    assert!(peak > -40.0, "nothing of the track it listens to is heard through the plugin: {report}");
+    // A probe plays it alone, and says what it gave it to listen to.
+    let probed = ok(client, "probe", json!({ "track": listener, "notes": [60, 64] })).await;
+    eprintln!("probed: {probed}");
+    assert_eq!(probed["listens_to"], "Voice", "{probed}");
+    assert_ne!(probed["sounding"], "none", "{probed}");
+    assert!(strings(&probed["notes"]).join(" ").contains("given noise to listen to"), "{probed}");
 }
 
 /// The highest sample of `audio` in each of the windows that start at
@@ -1124,14 +1382,28 @@ const AMPLE: [(&str, &str); 4] = [
 
 /// Renders `track` alone `times` times, with a probe of it and a measure
 /// of the whole song in between (other instances of the plugin, played
-/// other notes), and returns what is left of each later render when it is
-/// taken from the first, in dB.
-async fn rendered_again(client: &Client, folder: &Path, name: &str, track: u64, times: usize) -> Vec<f64> {
+/// other notes), and returns the left channel of each, with what the last
+/// reply said of instruments that draw at random.
+async fn rendered_again(
+    client: &Client,
+    folder: &Path,
+    name: &str,
+    (track, repeatable): (u64, bool),
+    times: usize,
+) -> (Vec<Vec<f32>>, String) {
     let mut renders: Vec<Vec<f32>> = Vec::new();
+    let mut said = String::new();
     for index in 0..times {
         let wav = folder.join(format!("{name}-{index}.wav"));
         let begun = Instant::now();
-        let arguments = json!({ "path": wav.display().to_string(), "tracks": [track], "start": 0, "end": 8, "max_tail_seconds": 2 });
+        let arguments = json!({
+            "path": wav.display().to_string(),
+            "tracks": [track],
+            "start": 0,
+            "end": 8,
+            "max_tail_seconds": 2,
+            "repeatable": repeatable,
+        });
         let report = ok(client, "render", arguments).await;
         let audio = trill_media::decode(&wav).unwrap();
         eprintln!(
@@ -1140,6 +1412,10 @@ async fn rendered_again(client: &Client, folder: &Path, name: &str, track: u64, 
             report["loudness_lufs"].as_f64().unwrap_or(f64::NAN),
             strings(&report["notes"]).into_iter().filter(|note| note.contains("Waited")).collect::<String>()
         );
+        said = strings(&report["notes"])
+            .into_iter()
+            .filter(|note| note.contains("at random") || note.contains("repeatable"))
+            .collect();
         renders.push(audio.left);
         std::fs::remove_file(&wav).unwrap();
         // Between two renders, other instances of the plugin play: a probe
@@ -1150,77 +1426,149 @@ async fn rendered_again(client: &Client, folder: &Path, name: &str, track: u64, 
             _ => {}
         }
     }
+    (renders, said)
+}
+
+/// A track of the instrument `uri`, on `preset` if one is given: its id
+/// and its instrument's.
+async fn part(client: &Client, uri: &str, name: String, preset: Option<&str>) -> (u64, u64) {
+    let mut arguments = json!({ "name": name, "instrument": uri });
+    if let Some(preset) = preset {
+        arguments["preset"] = json!(preset);
+    }
+    let made = ok(client, "create_track", arguments).await;
+    (made["track_id"].as_u64().unwrap(), made["instrument_device_id"].as_u64().unwrap())
+}
+
+/// What is left of each later render when it is taken from the first, in
+/// dB.
+fn nulls(renders: &[Vec<f32>]) -> Vec<f64> {
     renders[1..].iter().map(|render| null_db(&renders[0], render)).collect()
 }
 
-/// With the installed instruments of Ample Sound, set to take their
-/// recordings in turn: sixteen notes on two pitches, rendered four times
-/// with other things played in between, come out as the same samples each
-/// time, because the wait before a render sounds every note it rehearses
-/// the same number of times, whatever it waited for and for how long.
+/// With the installed instruments of Ample Sound, sixteen notes on two
+/// pitches, rendered again and again with other things played in between.
 ///
-/// **What this cannot hold, and so reports instead of asserting:** a patch
-/// that draws at random from a stream which every instance of the plugin
-/// in the program shares. These instruments do as they come: the guitars
-/// draw every take that way (their `Cycle Mode Switch` is 0), the bass the
-/// noise of the hand moving between two frets (`M-Fret Sound`), and its
-/// preset "Stingray" a fret buzz on top. Every such draw on any instance
-/// moves the stream, nothing a host does puts it back while an instance
-/// lives (and the song's own always does), and only a program that has
-/// just started begins it at the same place. Two renders of such a patch
-/// in one program differ, and the test says by how much.
+/// **Set in the song to take their recordings in turn**, they come out as
+/// the same samples each time: the wait before a render sounds every note
+/// it rehearses the same number of times, whatever it waited for and for
+/// how long. Nothing is said of them.
+///
+/// **As they come** they draw at random from a stream which every
+/// instance of the plugin in a program shares: the guitars which recording
+/// they play (their `Cycle Mode Switch` is 0), the bass the noise of the
+/// hand moving between two frets (`M-Fret Sound`), and its preset
+/// "Stingray" a fret buzz on top. Every draw on any instance moves the
+/// stream, and nothing a host does puts it back while an instance lives:
+/// in a program that rendered for itself, beside the song's own
+/// instruments, two renders of the bass left -33 dB of one another. The
+/// stream begins at the same place in every process that has just
+/// started, and every render here has one, as the programs do it: the
+/// same samples each time, and each render says that it is so and what a
+/// change to the song would do. (Where one process makes every render and
+/// lets go of its instruments in between, which is reported for the bass
+/// and not asserted, it was the same samples too.)
+///
+/// **As they come, in a render that is to be repeatable**, they are the
+/// same samples each time, in one process and in several, and those of
+/// the instrument that the song has set so: the render's own copy was
+/// told to take its recordings in turn, and the song's was not touched.
+///
+/// What it found (2026-11-17): every one of the four, each of the three
+/// ways, leaves less than -113 dB of its first render in the later ones,
+/// and all but the two guitars' "to be repeatable against set in the
+/// song" (-114 to -120 dB) and one render of Ample Guitar PF (-133 dB)
+/// less than -330 dB, which is nothing at all.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs Ample Sound's instruments (VST3) installed; run with `cargo test -p trill-mcp --test hearing the_same_song_rendered_again -- --include-ignored --nocapture`"]
-async fn the_same_song_rendered_again_is_the_same_samples_where_takes_go_round_and_is_not_where_they_are_drawn_at_random()
- {
+async fn the_same_song_rendered_again_is_the_same_samples_with_its_takes_in_turn_drawn_at_random_or_made_to_repeat() {
     let notes: Vec<Value> =
         (0..16).map(|index| json!([if index % 2 == 0 { 45 } else { 52 }, f64::from(index) * 0.5, 0.45, 104])).collect();
-    let (mut held, mut not_held) = (Vec::new(), Vec::new());
+    let (mut held, mut said_only) = (Vec::new(), Vec::new());
     for (name, uri) in AMPLE {
-        // A program of plugins for each instrument.
+        // A program of plugins for each instrument: its renders each in a
+        // process that has just started.
         let Some((fixture, folder)) = connect_with_plugins(uri).await else { continue };
         let client = &fixture.client;
         ok(client, "set_project", json!({ "tempo": 156 })).await;
-        let part = |name: String, preset: Option<&'static str>| async move {
-            let mut arguments = json!({ "name": name, "instrument": uri });
-            if let Some(preset) = preset {
-                arguments["preset"] = json!(preset);
-            }
-            let made = ok(client, "create_track", arguments).await;
-            (made["track_id"].as_u64().unwrap(), made["instrument_device_id"].as_u64().unwrap())
-        };
 
         // Its takes in turn, and no noise that is drawn at random.
-        let (round, device) = part(format!("{name} in turn"), None).await;
+        let (round, device) = part(client, uri, format!("{name} in turn"), None).await;
         let in_turn = json!({ "Cycle Mode Switch": 1, "M-Fret Sound": 0 });
         ok(client, "update_device", json!({ "device": device, "settings": in_turn })).await;
         clip(client, round, 0.0, 8.0, json!(notes)).await;
         // And as it comes, beside it in the same song.
-        let (random, _) = part(format!("{name} as it comes"), None).await;
+        let (random, _) = part(client, uri, format!("{name} as it comes"), None).await;
         clip(client, random, 0.0, 8.0, json!(notes)).await;
-
-        let nulls = rendered_again(client, folder.path(), &format!("{name}, its takes in turn"), round, 4).await;
-        eprintln!("{name}, its takes in turn: taken from the first render, the others leave {nulls:.1?} dB");
-        assert!(nulls.iter().all(|null| *null < -60.0), "{name}: the same samples every time: {nulls:?}");
-        held.push(name);
-
-        let mut cases = vec![("as it comes".to_string(), random)];
+        let mut cases = vec![("as it comes".to_string(), random, true)];
         if uri == AMPLE_BASS {
-            let (buzz, _) = part("Stingray".to_string(), Some("Stingray")).await;
+            let (buzz, _) = part(client, uri, "Stingray".to_string(), Some("Stingray")).await;
             clip(client, buzz, 0.0, 8.0, json!(notes)).await;
-            cases.push(("with its preset Stingray".to_string(), buzz));
+            cases.push(("with its preset Stingray".to_string(), buzz, false));
         }
-        for (what, track) in cases {
-            let nulls = rendered_again(client, folder.path(), &format!("{name} {what}"), track, 3).await;
-            not_held.push(format!("{name} {what} {nulls:.1?} dB"));
+        let steps = standing(&fixture).1;
+
+        let what = format!("{name}, its takes in turn");
+        let (in_turn, said) = rendered_again(client, folder.path(), &what, (round, false), 4).await;
+        let left = nulls(&in_turn);
+        eprintln!("{what}: taken from the first render, the others leave {left:.1?} dB");
+        assert!(left.iter().all(|null| *null < -60.0), "{name}: the same samples every time: {left:?}");
+        assert!(said.is_empty(), "{name}: it is set in the song not to draw, and this was said of it: {said}");
+
+        for (what, track, as_set_in_the_song) in cases {
+            let what = format!("{name} {what}");
+            // As it is, each render in a process that has just started:
+            // the same samples, and it is said what that rests on.
+            let (as_it_is, said) = rendered_again(client, folder.path(), &what, (track, false), 3).await;
+            assert!(said.contains("at random") && said.contains("`repeatable: true`"), "{what}: {said}");
+            assert!(said.contains("the same song comes out the same every time; but a change"), "{what}: {said}");
+            let left = nulls(&as_it_is);
+            eprintln!("{what}, each render in a process of its own: the others leave {left:.1?} dB");
+            assert!(
+                left.iter().all(|null| *null < -60.0),
+                "{what}: a process of its own each, and not the same: {left:?}"
+            );
+            // In a render that is to be repeatable: the same samples.
+            let (asked, said) = rendered_again(client, folder.path(), &what, (track, true), 3).await;
+            let left = nulls(&asked);
+            eprintln!("{what}, to be repeatable: taken from the first render, the others leave {left:.1?} dB");
+            assert!(left.iter().all(|null| *null < -60.0), "{what}: repeatable, and not the same samples: {left:?}");
+            assert!(said.contains("Made repeatable") && !said.contains("draw"), "{what}: {said}");
+            if as_set_in_the_song {
+                let against = null_db(&in_turn[0], &asked[0]);
+                eprintln!("{what}, to be repeatable, taken from the one that is set so in the song: {against:.1} dB");
+                assert!(against < -60.0, "{what}: not what the instrument gives that the song has set so: {against}");
+            }
+            held.push(what);
         }
+        // Nothing of that was done to the song.
+        assert_eq!(standing(&fixture).1, steps, "{name}: the renders added steps to the song");
+
+        // And where one process makes every render, as a program did that
+        // rendered for itself: the bass, as it comes and to be repeatable.
+        if uri == AMPLE_BASS {
+            drop(fixture);
+            let Some((fixture, folder)) = connect_with_plugins_keeping(uri, true).await else { continue };
+            let client = &fixture.client;
+            ok(client, "set_project", json!({ "tempo": 156 })).await;
+            let (random, _) = part(client, uri, format!("{name} as it comes"), None).await;
+            clip(client, random, 0.0, 8.0, json!(notes)).await;
+            let what = format!("{name} as it comes, one process for every render");
+            let (as_it_is, _) = rendered_again(client, folder.path(), &what, (random, false), 3).await;
+            let left = nulls(&as_it_is);
+            eprintln!("{what}: the others leave {left:.1?} dB");
+            said_only.push(format!("{what} {left:.1?} dB"));
+            let (asked, _) = rendered_again(client, folder.path(), &what, (random, true), 3).await;
+            let left = nulls(&asked);
+            eprintln!("{what}, to be repeatable: taken from the first render, the others leave {left:.1?} dB");
+            assert!(left.iter().all(|null| *null < -60.0), "{what}: repeatable, and not the same samples: {left:?}");
+        }
+        held.insert(0, format!("{name}, its takes in turn"));
     }
-    eprintln!("HELD, the same samples every time with the takes in turn: {held:?}");
+    eprintln!("HELD, the same samples every time: {held:?}");
     eprintln!(
-        "NOT HELD, and not asserted: patches that draw at random from a stream every instance in the program shares. \
-         Taken from their first render, later renders in the same program leave: {}. Only a program that has just \
-         started repeats these.",
-        not_held.join("; ")
+        "SAID, and not asserted: where one process makes every render, later renders leave of the first: {}.",
+        said_only.join("; ")
     );
 }
 

@@ -59,6 +59,11 @@ impl Call<'_> {
         self.input.get(key).is_some_and(|value| !value.is_null())
     }
 
+    /// Whether a switch was given, and on.
+    fn is(&self, key: &str) -> bool {
+        self.input.get(key).and_then(Value::as_bool).unwrap_or(false)
+    }
+
     /// A number given at the top of the arguments or, for the writing
     /// tools, in their `target`.
     fn id(&self, key: &str) -> Option<u64> {
@@ -418,9 +423,12 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
         "render" => {
             // With stems, every track becomes a file of its own as well.
             let what = if call.has("stems") { "the song and its tracks" } else { "the song" };
+            // A render that was to be the same samples every time is not
+            // quite the song as it plays, and says so.
+            let how = if call.is("repeatable") { ", repeatably," } else { "" };
             match call.text("path") {
-                Some(path) => about("Rendering", "Rendered", &format!("{what} to {}", quoted(file_name(path)))),
-                None => about("Rendering", "Rendered", what),
+                Some(path) => about("Rendering", "Rendered", &format!("{what}{how} to {}", quoted(file_name(path)))),
+                None => about("Rendering", "Rendered", &format!("{what}{}", how.trim_end_matches(','))),
             }
         }
         "film" | "film_plan" => {
@@ -435,9 +443,11 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
                 (_, None) => about("Filming", "Filmed", &what),
             }
         }
-        "measure" => match call.has("tracks") {
-            true => about("Measuring", "Measured", "some of the tracks"),
-            false => about("Measuring", "Measured", "the song"),
+        "measure" => match (call.has("tracks"), call.is("repeatable")) {
+            (true, false) => about("Measuring", "Measured", "some of the tracks"),
+            (true, true) => about("Measuring", "Measured", "some of the tracks, repeatably"),
+            (false, false) => about("Measuring", "Measured", "the song"),
+            (false, true) => about("Measuring", "Measured", "the song, repeatably"),
         },
         "probe" => match (call.track("track"), call.text("device")) {
             (Some(track), _) => about("Trying out", "Tried out", &format!("the instrument of {track}")),
@@ -508,6 +518,26 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
             _ => about("Checking", "Checked", "the sound library"),
         },
         "missing_files" => about("Looking for", "Looked for", "the song's missing files"),
+        "listen" | "transcribe" => {
+            // The sound by its file's name, or the clip that plays it by its own.
+            let sound = match (call.text("path"), call.clip("clip")) {
+                (Some(path), _) => quoted(file_name(path)),
+                (None, Some(clip)) => clip,
+                (None, None) => "a sound".to_owned(),
+            };
+            if tool == "listen" {
+                about("Listening to", "Listened to", &sound)
+            } else {
+                let part = match call.text("part") {
+                    Some("bass") => "the bass line",
+                    Some("melody") => "the melody",
+                    Some("groove") => "the drum groove",
+                    Some("chords") => "the chords",
+                    _ => "a part",
+                };
+                about("Writing", "Wrote", &format!("{part} of {sound} as MIDI"))
+            }
+        }
         "relink_files" => match crate::files::one_file(input) {
             Some(file) => about("Relinking", "Relinked", &quoted(file)),
             None => about("Relinking", "Relinked", "the song's missing files"),
@@ -602,7 +632,7 @@ pub fn of_call(tool: &str, input: &Value, answer: &str) -> Option<Place> {
             let copies = answer.get("copies").and_then(Value::as_array);
             Place::clips(copies.into_iter().flatten().filter_map(|copy| copy.get("clip_id")?.as_u64()))
         }
-        "import_midi" => {
+        "import_midi" | "transcribe" => {
             let parts = answer.get("tracks").and_then(Value::as_array);
             Place::clips(parts.into_iter().flatten().filter_map(|part| part.get("clip_id")?.as_u64()))
         }
@@ -717,6 +747,26 @@ pub fn heard(tool: &str, answer: &str) -> Option<String> {
                 }
                 (false, _) => format!("{drums} drums by name"),
             })
+        }
+        "listen" => {
+            // What a musician would say first: the tempo, the key, the form.
+            let mut said = Vec::new();
+            if let Some(bpm) = answer.get("tempo").and_then(|tempo| tempo.get("bpm")).and_then(number) {
+                said.push(format!("{bpm} bpm"));
+            }
+            if let Some(key) = answer.get("key").and_then(|key| key.get("name")).and_then(Value::as_str) {
+                said.push(key.to_owned());
+            }
+            match answer.get("found").and_then(|found| found.get("parts")).and_then(Value::as_u64) {
+                Some(1) => said.push("1 part".to_owned()),
+                Some(parts) if parts > 1 => said.push(format!("{parts} parts")),
+                _ => {}
+            }
+            (!said.is_empty()).then(|| said.join(", "))
+        }
+        "transcribe" => {
+            let notes = answer.get("notes").and_then(Value::as_u64)?;
+            Some(if notes == 1 { "1 note".to_owned() } else { format!("{notes} notes") })
         }
         "probe" => {
             let played = answer.get("played").and_then(Value::as_u64)?;
@@ -919,10 +969,27 @@ mod tests {
         );
         assert_eq!(did("measure", json!({}), p), "Measured the song");
         assert_eq!(did("measure", json!({ "tracks": [1] }), p), "Measured some of the tracks");
+        // One that was to be the same samples every time says so.
+        assert_eq!(did("measure", json!({ "repeatable": true }), p), "Measured the song, repeatably");
+        assert_eq!(did("measure", json!({ "repeatable": false }), p), "Measured the song");
+        assert_eq!(did("render", json!({ "repeatable": true }), p), "Rendered the song, repeatably");
+        assert_eq!(
+            did("render", json!({ "path": "mix.wav", "repeatable": true }), p),
+            "Rendered the song, repeatably, to \u{201C}mix.wav\u{201D}"
+        );
         assert!(did("probe", json!({ "track": track }), p).starts_with("Tried out the instrument of "));
         assert_eq!(did("probe", json!({ "device": "builtin:polysynth" }), p), "Tried out polysynth");
         assert_eq!(did("import_midi", json!({ "path": "D:/midi/riff.mid" }), p), "Imported \u{201C}riff.mid\u{201D}");
         assert_eq!(did("export_midi", json!({ "path": "out.mid" }), p), "Exported the song as \u{201C}out.mid\u{201D}");
+        assert_eq!(
+            did("listen", json!({ "path": "D:/refs/Swansong.flac" }), p),
+            "Listened to \u{201C}Swansong.flac\u{201D}"
+        );
+        assert_eq!(did("listen", json!({}), p), "Listened to a sound");
+        assert_eq!(
+            did("transcribe", json!({ "path": "D:/loops/break.wav", "part": "groove" }), p),
+            "Wrote the drum groove of \u{201C}break.wav\u{201D} as MIDI"
+        );
         assert_eq!(
             did("recover_project", json!({ "action": "open", "index": 0 }), p),
             "Brought back a project that was not saved"
@@ -1166,6 +1233,10 @@ mod tests {
         assert_eq!(heard("probe", &silent.to_string()).as_deref(), Some("1 note played, none sounding"));
         // A call that does not listen, and answers that say nothing.
         assert_eq!(heard("create_track", "{\"track_id\":3}"), None);
+        let listened = json!({ "tempo": { "bpm": 101.02 }, "key": { "name": "Dm" }, "found": { "parts": 11 } });
+        assert_eq!(heard("listen", &listened.to_string()).as_deref(), Some("101.0 bpm, Dm, 11 parts"));
+        assert_eq!(heard("listen", &json!({ "tempo": null, "found": { "parts": 0 } }).to_string()), None);
+        assert_eq!(heard("transcribe", &json!({ "notes": 64 }).to_string()).as_deref(), Some("64 notes"));
         assert_eq!(heard("measure", "it went wrong"), None);
         assert_eq!(heard("measure", "{}"), None);
     }
