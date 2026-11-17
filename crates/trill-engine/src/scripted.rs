@@ -48,6 +48,9 @@ pub const AMP: &str = "scripted:amp";
 
 /// The key that palm-mutes the bass while it is held: C0.
 pub const MUTE_KEY: u8 = 12;
+/// The key that has a bass whose mute stays ([`Loading::latches`]) play
+/// open again: C#0.
+pub const OPEN_KEY: u8 = 13;
 /// The bass's range, as written.
 pub const BASS_RANGE: std::ops::RangeInclusive<u8> = 28..=67;
 
@@ -147,6 +150,10 @@ pub struct Loading {
     /// setting `takes`, which is `at random` as it comes, stops it when
     /// it is given `in turn` ([`DeviceFactory::repeating`] says so).
     pub random: bool,
+    /// The bass's mute stays chosen once [`MUTE_KEY`] was pressed, through
+    /// a reset too, until [`OPEN_KEY`] is: as the keyswitches of a sampled
+    /// guitar do.
+    pub latches: bool,
     /// The drums draw how loud each hit is from the same stream, and have
     /// no setting that stops it: what is known of them
     /// ([`DeviceFactory::repeating`]) names none.
@@ -303,7 +310,8 @@ impl DeviceFactory for ScriptedFactory {
             fickle: self.loading.fickle,
             presses: 0,
             takes: self.loading.takes,
-            sounded: [0; 128],
+            sounded: [0; 256],
+            latches: self.loading.latches && kind == Kind::Bass,
             shared: self.loading.shares.then(|| self.shared.clone()),
             dies,
             blocks: 0,
@@ -571,7 +579,10 @@ struct Instrument {
     /// How many recordings it has of each key, and how often each key has
     /// sounded since the instrument was made.
     takes: u32,
-    sounded: [u32; 128],
+    sounded: [u32; 256],
+    /// Its mute stays chosen until it is told to play open: see
+    /// [`Loading::latches`].
+    latches: bool,
     /// What it keeps with the factory's other instruments, if anything.
     shared: Option<Arc<Shared>>,
     /// When it takes its process down, and how many blocks of the song it
@@ -621,6 +632,10 @@ impl Instrument {
                     self.muting = true;
                     return;
                 }
+                if self.latches && pitch == OPEN_KEY {
+                    self.muting = false;
+                    return;
+                }
                 if !BASS_RANGE.contains(&pitch) {
                     return;
                 }
@@ -661,7 +676,8 @@ impl Instrument {
         // The next of the key's recordings: each is a twelfth quieter than
         // the one before.
         if self.takes > 1 {
-            let key = &mut self.sounded[usize::from(pitch.min(127))];
+            // A muted note is another recording than the open one.
+            let key = &mut self.sounded[usize::from(pitch.min(127)) + if self.muting { 128 } else { 0 }];
             voice.level *= 1.0 - (*key % self.takes) as f32 / 12.0;
             *key += 1;
         }
@@ -673,7 +689,7 @@ impl Instrument {
         match kind {
             EventKind::NoteOn { pitch, velocity } => self.note_on(pitch, velocity),
             EventKind::NoteOff { pitch } => {
-                if self.kind == Kind::Bass && pitch == MUTE_KEY {
+                if self.kind == Kind::Bass && pitch == MUTE_KEY && !self.latches {
                     self.muting = false;
                 }
                 for voice in self.voices.iter_mut().filter(|voice| voice.pitch == pitch) {
@@ -681,7 +697,7 @@ impl Instrument {
                 }
             }
             EventKind::AllNotesOff => {
-                self.muting = false;
+                self.muting &= self.latches;
                 self.voices.iter_mut().for_each(|voice| voice.released = true);
             }
             _ => {}
@@ -769,7 +785,8 @@ impl DeviceProcessor for Instrument {
 
     fn reset(&mut self) {
         self.voices = [Voice::default(); VOICES];
-        self.muting = false;
+        // A mute that stays is not something a reset undoes.
+        self.muting &= self.latches;
         self.noise = NOISE_SEED;
     }
 }

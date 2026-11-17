@@ -274,7 +274,7 @@ impl ProbeJob {
             controllers: Vec::new(),
             switch: false,
         };
-        let opening = Opening { notes: pitches.iter().map(note).collect(), signal: pitches.is_empty() };
+        let opening = Opening { notes: pitches.iter().map(note).collect(), signal: pitches.is_empty(), left_on: None };
         let options = ProbeOptions { patience, ..ProbeOptions::default() };
         let probing = self.open_asking(opening, &options)?;
         let readiness =

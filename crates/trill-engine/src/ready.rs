@@ -53,6 +53,24 @@
 //! when a render begins is then a matter of what it was asked and how it
 //! answered, and not of how long it took to load.
 //!
+//! **A key that switches is pressed, not heard.** On an instrument with
+//! articulations some keys choose how the notes after them are played and
+//! sound nothing themselves, and the track says which
+//! ([`trill_core::InstrumentProfile::is_keyswitch`]). They are not asked
+//! as notes: one would be held to answering for half the caller's
+//! patience and then said to have made no sound, and pressed by itself it
+//! would leave every note after it in the rehearsal on that way of
+//! playing. A note is rehearsed under the switch the part plays it with
+//! (pressed just before it, let go with it), and a pitch that the part
+//! plays under two switches is two notes, with recordings of their own:
+//! each sounds three times. A switch that is for the next note only is
+//! pressed with that note and no other. A note the part plays before it
+//! has chosen anything is rehearsed on the way of playing the track calls
+//! its default, where a key chooses that, and the instrument is left on
+//! it when the rehearsal is over, so that the song begins as it would
+//! have with nothing rehearsed; a part that chooses before its first note
+//! leaves nothing to restore.
+//!
 //! **Each note is heard alone.** A drum that has not been loaded sounds
 //! exactly like a key that plays nothing, and under the ringing of the
 //! drum before it, it sounds like nothing at all: a tom that is there
@@ -553,6 +571,10 @@ pub(crate) struct Opening {
     pub notes: Vec<OpeningNote>,
     /// For effects, which take no notes: a burst of noise to pass.
     pub signal: bool,
+    /// The key the instrument is left on when the rehearsal is over: the
+    /// one that chooses the way of playing the song begins in, where the
+    /// rehearsal chose others and the song says nothing of it itself.
+    pub left_on: Option<OpeningNote>,
 }
 
 impl Opening {
@@ -882,6 +904,16 @@ impl<'a> Stand<'a> {
         while self.run(&[], block) > quiet && waited < HUSH_SECONDS {
             waited += block;
         }
+    }
+
+    /// Presses a key that chooses how notes are played and lets go of it:
+    /// the instrument is left on that.
+    pub fn choose(&mut self, key: &OpeningNote) {
+        let block = self.block_seconds();
+        let mut events: Vec<Event> = key.controllers.iter().map(|kind| Event { offset: 0, kind: *kind }).collect();
+        events.push(Event { offset: 0, kind: EventKind::NoteOn { pitch: key.pitch, velocity: key.velocity } });
+        self.run(&events, block);
+        self.run(&[Event { offset: 0, kind: EventKind::NoteOff { pitch: key.pitch } }], block);
     }
 
     /// Lets go of every note, silences the devices, leaves what still
@@ -1360,7 +1392,12 @@ pub(crate) fn wait_for(waits: &mut [Wait], patience: Duration, held_up: &(dyn Fn
         }
         std::thread::sleep(BETWEEN_TRIES);
     }
-    each(waits, crew.as_ref(), &|wait| wait.stand.settle());
+    each(waits, crew.as_ref(), &|wait| {
+        if let Some(key) = &wait.opening.left_on {
+            wait.stand.choose(key);
+        }
+        wait.stand.settle();
+    });
     drop(crew);
     let (mut silent, mut ready, mut keys) = (KNOWN_NOT_TO_ANSWER.lock(), KNOWN_READY.lock(), KNOWN_KEYS.lock());
     for wait in waits.iter_mut() {
@@ -1468,6 +1505,7 @@ pub(crate) fn signature<'a>(devices: impl Iterator<Item = &'a Device>, opening: 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     hash_devices(devices, &mut hasher);
     opening.signal.hash(&mut hasher);
+    opening.left_on.as_ref().map(|key| key.pitch).hash(&mut hasher);
     for note in &opening.notes {
         (note.pitch, note.velocity.to_bits(), note.switch).hash(&mut hasher);
         for kind in &note.controllers {
@@ -1537,12 +1575,41 @@ pub(crate) fn wake(
             .filter(|instrument| plugins.is_instrument(&instrument.uri));
         let mut notes: Vec<OpeningNote> = Vec::new();
         let opening_notes = node.notes.iter().filter(|note| note.start >= from - 1e-9 && note.start < to);
+        // The keys the track knows for switches choose how the notes after
+        // them are played and sound nothing themselves. They are not
+        // rehearsed as notes; each note is rehearsed under the switch the
+        // part plays it with: the one that stays chosen where the part has
+        // got to, or one that is for the next note only.
+        let articulation = |pitch: u8| track.profile.articulations.iter().find(|way| way.key == Some(pitch));
+        let (mut stays, mut once): (Option<OpeningNote>, Option<OpeningNote>) = (None, None);
+        // Which notes are rehearsed: a pitch under each switch it is first
+        // played with, which are other recordings.
+        let mut rehearsing: Vec<(Option<u8>, u8)> = Vec::new();
+        // The way a note is played when nothing is said, where the track
+        // says which key chooses it: what the instrument is taken to be on
+        // as it is made.
+        let unsaid = track.profile.articulations.iter().find(|way| way.default && way.key.is_some());
+        let unsaid = unsaid.and_then(|way| way.key).map(|pitch| OpeningNote {
+            pitch,
+            velocity: 100.0 / 127.0,
+            controllers: Vec::new(),
+            switch: true,
+        });
+        // Whether the part begins on what nothing was said of, and whether
+        // a switch that stays is pressed at all.
+        let (mut begins_unsaid, mut stayed) = (false, false);
         for note in opening_notes.filter(|_| instrument.is_some()) {
-            if notes.len() == OPENING_NOTES {
-                break;
-            }
-            if notes.iter().any(|known| known.pitch == note.pitch) {
-                continue;
+            let switches = articulation(note.pitch).map(|way| way.lasts);
+            if switches.is_none() {
+                if rehearsing.len() == OPENING_NOTES {
+                    break;
+                }
+                let under = once.as_ref().or(stays.as_ref()).map(|key| key.pitch);
+                if rehearsing.contains(&(under, note.pitch)) {
+                    // It is played again, and what was for one note is over.
+                    once = None;
+                    continue;
+                }
             }
             let controllers = node
                 .controllers
@@ -1559,8 +1626,32 @@ pub(crate) fn wake(
                 })
                 .collect();
             let velocity = f32::from(note.velocity.clamp(1, 127)) / 127.0;
-            notes.push(OpeningNote { pitch: note.pitch, velocity, controllers, switch: false });
+            match switches {
+                Some(trill_core::Lasts::Stays) => {
+                    stays = Some(OpeningNote { pitch: note.pitch, velocity, controllers, switch: true });
+                    (once, stayed) = (None, true);
+                }
+                Some(_) => once = Some(OpeningNote { pitch: note.pitch, velocity, controllers, switch: true }),
+                None => {
+                    let under = once.take().or_else(|| stays.clone());
+                    begins_unsaid |= rehearsing.is_empty() && stays.is_none();
+                    rehearsing.push((under.as_ref().map(|key| key.pitch), note.pitch));
+                    // A note nothing was said of is one on the way the
+                    // instrument plays unasked: by then another may be
+                    // chosen, here as in the part.
+                    notes.extend(under.or_else(|| unsaid.clone().filter(|_| stays.is_none())));
+                    notes.push(OpeningNote { pitch: note.pitch, velocity, controllers, switch: false });
+                }
+            }
         }
+        // Without a switch that stays, nothing is chosen that the
+        // instrument would not be on anyway: it is asked as it always was.
+        if !stayed {
+            notes.retain(|note| !note.switch || Some(note.pitch) != unsaid.as_ref().map(|key| key.pitch));
+        }
+        // What the instrument is left on: where the part begins on what
+        // nothing was said of, that, if a rehearsal chose anything else.
+        let left_on = unsaid.filter(|_| begins_unsaid && stayed);
         // The instrument and the plugins after it are what a note goes
         // through before it is heard, the built-in devices left out. With
         // no notes to play, there is nothing to rehearse them with.
@@ -1595,7 +1686,7 @@ pub(crate) fn wake(
         // (A plugin that could not be created is a problem of its own,
         // and what is left of its chain is not rehearsed without it.)
         if let (Some(instrument), true) = (instrument, !rehearsed.is_empty() && with_notes.len() == rehearsed.len()) {
-            let opening = Opening { notes, signal: false };
+            let opening = Opening { notes, signal: false, left_on };
             let signature = signature(rehearsed.iter().copied(), &opening);
             let devices = device_signature(rehearsed.iter().copied());
             let stand = Stand::new(with_notes, sample_rate, tempo).listening(listening);
@@ -1603,7 +1694,7 @@ pub(crate) fn wake(
             who.push((Some(node.id), instrument.id, false));
         }
         if let (Some(first), true) = (effects.first(), with_noise.len() == effects.len()) {
-            let opening = Opening { notes: Vec::new(), signal: true };
+            let opening = Opening { notes: Vec::new(), signal: true, left_on: None };
             let signature = signature(effects.iter().copied(), &opening);
             let devices = device_signature(effects.iter().copied());
             let stand = Stand::new(with_noise, sample_rate, tempo);
@@ -1619,7 +1710,7 @@ pub(crate) fn wake(
     let master_turns: Vec<u32> = slots.iter().filter_map(|slot| slot.turn).collect();
     let processors: Vec<_> = slots.into_iter().filter_map(|slot| slot.processor.as_mut()).collect();
     if let (Some(first), true) = (effects.first(), processors.len() == effects.len()) {
-        let opening = Opening { notes: Vec::new(), signal: true };
+        let opening = Opening { notes: Vec::new(), signal: true, left_on: None };
         let signature = signature(effects.iter().copied(), &opening);
         let devices = device_signature(effects.iter().copied());
         let stand = Stand::new(processors, sample_rate, tempo);

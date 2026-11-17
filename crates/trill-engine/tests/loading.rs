@@ -429,8 +429,9 @@ fn a_render_does_not_go_on_without_an_instrument_that_never_answered_and_writes_
     explained.track_mut(drums).unwrap().profile = profile.validated().unwrap();
     let rendered = job(&explained).render(&options).unwrap();
     assert!(peak(&rendered.left) > 0.05);
-    let waited: Vec<bool> = rendered.measured.waited.iter().map(|waited| waited.answered).collect();
-    assert_eq!(waited, [false], "said, and no more: {:?}", rendered.measured.waited);
+    // A key that switches is not asked to sound, so there is nothing to
+    // say of it either.
+    assert!(rendered.measured.waited.is_empty(), "{:?}", rendered.measured.waited);
 }
 
 #[test]
@@ -558,4 +559,76 @@ fn an_instrument_that_nothing_is_known_to_stop_is_named_and_left_as_it_is() {
     let [draws] = &first.measured.draws[..] else { panic!("{:?}", first.measured.draws) };
     assert_eq!(draws.what, "chooses for itself how loud each hit is");
     assert!(!draws.held && !draws.again && draws.costs.is_empty() && draws.failed.is_none(), "{draws:?}");
+}
+
+/// A bass line whose keys the track knows: C0 mutes it for as long as it
+/// stays chosen, C#0 has it play open again, which is how a note is
+/// played when nothing is said.
+fn with_switches(notes: &[(u8, f64, f64)]) -> Project {
+    let mut project = Project::new("switches");
+    let track = project.add_track("Part");
+    project.add_device(ChainRef::Track(track), BASS, "Instrument", None).unwrap();
+    let clip = project.add_midi_clip(track, "clip", 0.0, 8.0).unwrap();
+    let notes: Vec<Note> = notes
+        .iter()
+        .map(|(pitch, start, length)| Note { pitch: *pitch, start: *start, length: *length, velocity: 100 })
+        .collect();
+    project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
+    let profile = trill_core::InstrumentProfile {
+        articulations: vec![
+            trill_core::Articulation::key("open", trill_engine::scripted::OPEN_KEY).as_default(),
+            trill_core::Articulation::key("muted", trill_engine::scripted::MUTE_KEY),
+        ],
+        ..trill_core::InstrumentProfile::default()
+    };
+    project.track_mut(track).unwrap().profile = profile.validated().unwrap();
+    project
+}
+
+#[test]
+fn a_key_that_switches_is_pressed_with_its_notes_and_not_held_to_sounding() {
+    let _alone = ONE_AT_A_TIME.lock();
+    // An E played open, then the key that mutes, and the same E muted: on
+    // a bass with five recordings of each note, open and muted apart.
+    let part = with_switches(&[(40, 0.0, 0.5), (12, 1.9, 0.1), (40, 2.0, 0.5)]);
+    let latches = Loading { latches: true, takes: 5, ..Loading::default() };
+    let options = RenderOptions {
+        sample_rate: SR,
+        max_tail_seconds: 0.5,
+        patience: Duration::from_secs(3),
+        ..RenderOptions::default()
+    };
+    let (took, out) = timed(&part, &ScriptedFactory::loading(latches), &options);
+    // The switch is not a note that never answered: nothing is held to
+    // it for half the patience, and nothing is said of it.
+    assert!(took < Duration::from_millis(1400), "the wait hung on the key that switches: {took:?}");
+    assert!(out.measured.waited.is_empty(), "{:?}", out.measured.waited);
+
+    // Each of the two is three recordings on when the song begins, the
+    // muted E as much as the open one: it was rehearsed under its switch,
+    // where it is another recording. (A recording is a twelfth quieter
+    // than the one before.)
+    let one_recording = Loading { latches: true, ..Loading::default() };
+    let plain = render(&part, &ScriptedFactory::loading(one_recording), &options).unwrap();
+    let beat = 0.5 * f64::from(SR);
+    let onset = |rendered: &Rendered, at: f64| {
+        let from = (at * beat) as usize;
+        peak(&rendered.left[from..from + (0.02 * f64::from(SR)) as usize])
+    };
+    for (what, at) in [("open", 0.0), ("muted", 2.0)] {
+        let (heard, written) = (onset(&out, at), onset(&plain, at));
+        assert!((heard / written - 0.75).abs() < 1e-3, "the {what} E: {heard} of {written}");
+    }
+    // And the song begins as it would with nothing rehearsed: its first E
+    // rings open, though the rehearsal chose the mute after it. (A muted
+    // note is gone after a tenth of a second.)
+    let ringing = |rendered: &Rendered, at: f64| {
+        let from = (at * beat + 0.1 * f64::from(SR)) as usize;
+        peak(&rendered.left[from..from + (0.02 * f64::from(SR)) as usize])
+    };
+    assert!(ringing(&out, 0.0) > 0.1, "the first note was left muted: {}", ringing(&out, 0.0));
+    assert!(ringing(&out, 2.0) < 0.05, "the second is not muted: {}", ringing(&out, 2.0));
+    // The same samples the next time, when the instrument is known.
+    let again = render(&part, &ScriptedFactory::loading(latches), &options).unwrap();
+    assert!(again.left == out.left);
 }
