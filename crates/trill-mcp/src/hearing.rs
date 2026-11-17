@@ -63,7 +63,9 @@ A plugin that plays samples (a drum kit, a sampled guitar) reads them after it i
 preset, for seconds or as much as a minute, and until a drum has arrived its key is silent. probe, measure and \
 render wait for that on a copy of their own, so what they report is the whole instrument; if notes stayed \
 silent to the end they say which, because a key that plays nothing and a sample that is not loaded yet sound the \
-same. The plugin the user hears is not waited for: get_project and get_device mark it `loading` while it reads, \
+same. If a plugin never answers ANY of the notes it is to play, nothing is measured or rendered and the call \
+fails, naming the track and what its notes say: a mix without one of its instruments is not the song. Ask again \
+if it was loading; otherwise fix the track, or mute it to hear the rest. The plugin the user hears is not waited for: get_project and get_device mark it `loading` while it reads, \
 and transport says so when you press play too early.";
 
 /// The sample rates a render can be asked to run at.
@@ -328,10 +330,24 @@ fn silent_track_notes(
     start: f64,
     end: Option<f64>,
 ) -> Vec<String> {
+    let silent: Vec<TrackId> =
+        levels.iter().filter(|level| level.peak_db <= SILENT_DB).map(|level| level.track).collect();
+    silent_notes(project, &silent, waited, start, end)
+}
+
+/// [`silent_track_notes`], for tracks that are known to have made no
+/// sound.
+fn silent_notes(
+    project: &Project,
+    silent: &[TrackId],
+    waited: &[WaitedFor],
+    start: f64,
+    end: Option<f64>,
+) -> Vec<String> {
     let soloing = project.tracks.iter().any(|track| track.solo);
     let mut notes = Vec::new();
-    for level in levels.iter().filter(|level| level.peak_db <= SILENT_DB) {
-        let Ok(track) = project.track(level.track) else { continue };
+    for id in silent {
+        let Ok(track) = project.track(*id) else { continue };
         // Silenced on purpose is not news.
         if track.mute || (soloing && !track.solo) || track.clips.iter().all(|clip| clip.muted) {
             continue;
@@ -464,26 +480,68 @@ fn observations(report: &RenderReport, project: &Project) -> Vec<String> {
             ));
         }
     }
-    for waited in report.waited.iter().filter(|waited| waited.answered) {
-        let mut note = format!(
-            "Waited {:.1} s for {} on '{}' to be ready before the render started.",
-            waited.seconds, waited.device_name, waited.track_name
-        );
-        if !waited.silent.is_empty() {
-            // The one case a wait cannot settle: a key that plays nothing
-            // and a sample that has not been loaded sound the same.
-            note.push_str(&format!(
-                " {} of the notes it plays made no sound the whole time: {}. Either it does not play them \
-                 (a keyswitch, a note outside its range) or it was still loading them when this was made, and \
-                 then they are missing here. `probe` with track {} and those notes says which.",
-                waited.silent.len(),
-                runs(&waited.silent),
-                waited.track.map_or(0, |track| track.0)
-            ));
-        }
-        notes.push(note);
-    }
+    notes.extend(report.waited.iter().filter(|waited| waited.answered).map(waited_note));
     notes
+}
+
+/// What to say of a plugin that was waited for and answered: how long it
+/// took, and which of its notes stayed silent, if any did.
+fn waited_note(waited: &WaitedFor) -> String {
+    let mut note = format!(
+        "Waited {:.1} s for {} on '{}' to be ready before the render started.",
+        waited.seconds, waited.device_name, waited.track_name
+    );
+    if !waited.silent.is_empty() {
+        // The one case a wait cannot settle: a key that plays nothing and
+        // a sample that has not been loaded sound the same.
+        note.push_str(&format!(
+            " {} of the notes it plays made no sound the whole time: {}. Either it does not play them (a \
+             keyswitch, a note outside its range) or it was still loading them when this was made, and then \
+             they are missing here. `probe` with track {} and those notes says which.",
+            waited.silent.len(),
+            runs(&waited.silent),
+            waited.track.map_or(0, |track| track.0)
+        ));
+    }
+    note
+}
+
+/// What to say of a render that was not made because instruments never
+/// answered the notes they are to play: which, what their notes say of
+/// why, and what to do.
+fn not_answered(session: &Session, waited: &[WaitedFor], start: f64, end: Option<f64>) -> String {
+    let project = session.project();
+    let (missing, others): (Vec<WaitedFor>, Vec<WaitedFor>) =
+        waited.iter().cloned().partition(|waited| !waited.answered);
+    let (missing, others) = (missing.as_slice(), others.as_slice());
+    let tracks: Vec<TrackId> = missing.iter().filter_map(|waited| waited.track).collect();
+    let mut said = format!(
+        "Nothing was rendered: {} of the song's instruments never answered the notes {} to play, for as long as {} \
+         waited for ({:.0} s). A mix without {} is not the song, so there are no numbers and no file.",
+        missing.len(),
+        if missing.len() == 1 { "it is" } else { "they are" },
+        if missing.len() == 1 { "it was" } else { "they were" },
+        missing.iter().map(|waited| waited.seconds).fold(0.0, f64::max),
+        if missing.len() == 1 { "it" } else { "them" },
+    );
+    for note in silent_notes(project, &tracks, missing, start, end) {
+        said.push_str("\n- ");
+        said.push_str(&note);
+    }
+    // What else the wait found, which it finds once.
+    for other in others {
+        said.push_str("\nBesides: ");
+        said.push_str(&waited_note(other));
+    }
+    let loading = session.loading();
+    let reading = missing.iter().any(|waited| loading.contains(&waited.device));
+    said.push_str(if reading {
+        "\nA plugin of the song is still loading what it plays: ask again in a few seconds."
+    } else {
+        "\nIf a plugin had only just been made or given another sound, ask again: it may have been loading. \
+         Otherwise mend the track as above, or mute it (update_track) to hear the song without it."
+    });
+    said
 }
 
 /// A render's report as a reply: the mix, every track in two numbers, the
@@ -1311,7 +1369,7 @@ impl TrillServer {
     async fn hear(&self, request: MeasureRequest, file: Option<(Option<String>, Vec<StemChoice>)>) -> CallToolResult {
         // Snapshot under the lock, render outside it: a long bounce must not
         // freeze the GUI or other tools.
-        let (job, path, options) = {
+        let (job, path, options, start, end) = {
             let mut session = self.session.lock();
             let path = match &file {
                 None => None,
@@ -1362,6 +1420,7 @@ impl TrillServer {
                     )));
                 }
             };
+            let (start, end) = (start, request.end);
             let options = RenderOptions {
                 sample_rate,
                 start_beat: start,
@@ -1372,7 +1431,7 @@ impl TrillServer {
                 stems,
                 ..defaults
             };
-            (session.render_job(), path, options)
+            (session.render_job(), path, options, start, end)
         };
         let detail = request.detail;
         let outcome = tokio::task::spawn_blocking(move || {
@@ -1404,6 +1463,7 @@ impl TrillServer {
         .await;
         finish(match outcome {
             Ok(Ok(reply)) => Reply::Ok(reply),
+            Ok(Err(RenderError::NotAnswered(missing))) => Err(not_answered(&self.session.lock(), &missing, start, end)),
             Ok(Err(error)) => Err(error.to_string()),
             Err(error) => Err(format!("the render did not finish: {error}")),
         })

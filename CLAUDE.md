@@ -114,7 +114,8 @@ on the samples.
   (the `measure` tool), which writes nothing. A plugin that plays live is not waited for; `Session::loading`
   says whether it may still be reading its samples. A render compiles only the tracks that are heard
   (`Routing::needed` in `compile.rs`), and writes every stem in the one pass when asked
-  (`RenderOptions::stems`): never render a song once per track.
+  (`RenderOptions::stems`): never render a song once per track. It is refused, with nothing written, when a
+  plugin instrument never answered its notes (`RenderError::NotAnswered`).
 - **Hermetic by default.** Tests, screenshots and scripts never read or write the user's settings
   (`%APPDATA%\trill`), sample library or safety copies: `RuntimeOptions::hermetic()` or `Storage::At` on a
   temporary folder in tests, `trill-mcp --scratch`, or `--profile <folder>` on either program, by hand.

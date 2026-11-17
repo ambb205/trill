@@ -251,6 +251,14 @@ that quick and true:
   `transport` tell a model, so that neither presses play into half a kit unawares.
   `cargo run -p trill-plugins --example loading -- "vst3:<class id>" --preset "<kit>"` watches an installed
   sampler load, key by key, beside the program's memory, reads and processor time.
+- *A render does not go on without an instrument.* If a plugin never answers any of the notes it is to play
+  for as long as it is waited for, the render is refused before its first sample: nothing is measured, no file
+  is written, and the refusal names the track, says what its notes say of why (their range, or that they are
+  keyswitches) and what to do. A mix without one of its instruments is not the song, and a line in a reply
+  that otherwise looks like a success is easily missed. A track that is muted is left out on purpose, and a
+  silence the track itself explains (its notes are keyswitches of its instrument, or outside its range) is
+  no refusal. While the plugins' own thread is behind with other work (a song's plugins being let go of, each
+  taking its time), a plugin that has not had its turn to load is waited for and not given up on.
 - *A render measures everything as it goes*, without keeping a stem per track: the mix (peak, true peak, LUFS,
   stereo correlation, spectral balance), every track after its fader in the same terms, the loudness of every
   section between the markers (or of bar ranges), and how many dB each built-in compressor and limiter took

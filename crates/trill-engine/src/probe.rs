@@ -292,7 +292,7 @@ impl ProbeJob {
         if plugins {
             let signature = signature(devices.iter(), &opening);
             let mut waits = [Wait::new(stand, opening, signature, device_signature(devices.iter()))];
-            wait_for(&mut waits, options.patience);
+            wait_for(&mut waits, options.patience, &|| self.factory.busy());
             let [wait] = waits;
             let (waited, answered) = wait.outcome();
             let silent = wait.silent().to_vec();

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use trill_core::device::{CompositeFactory, DeviceFactory};
 use trill_core::{ChainRef, Note, Project};
 use trill_dsp::BuiltinFactory;
-use trill_engine::render::{RenderOptions, Rendered, render};
+use trill_engine::render::{RenderError, RenderJob, RenderOptions, Rendered, Stems, render};
 use trill_engine::scripted::{AMP, BASS, DRUMS, Loading, ScriptedFactory};
 use trill_engine::{AudioBackend, Session};
 
@@ -262,9 +262,15 @@ fn what_never_answered_is_not_waited_for_as_long_again_and_what_was_ready_is_rea
     // A plugin that never answers costs the caller's patience once.
     let never = ScriptedFactory::loading(Loading { never: true, ..Loading::default() });
     let patient = RenderOptions { patience: Duration::from_millis(2500), ..options.clone() };
-    let (first, out) = timed(&line(), &never, &patient);
-    assert!(first >= Duration::from_millis(2500) && !out.measured.waited[0].answered, "{first:?}");
-    let (again, _) = timed(&line(), &never, &patient);
+    let refused = |options: &RenderOptions| {
+        let begun = Instant::now();
+        let refused = render(&line(), &never, options);
+        assert!(matches!(refused, Err(RenderError::NotAnswered(_))), "it went on without the instrument");
+        begun.elapsed()
+    };
+    let first = refused(&patient);
+    assert!(first >= Duration::from_millis(2500), "{first:?}");
+    let again = refused(&patient);
     assert!(again < Duration::from_millis(2000), "known not to answer: {again:?} after {first:?}");
 
     // One that answers is held to its answers for a while the first time,
@@ -275,4 +281,91 @@ fn what_never_answered_is_not_waited_for_as_long_again_and_what_was_ready_is_rea
     let (again, same) = timed(&line(), &ready, &options);
     assert!(again < first, "{again:?} after {first:?}");
     assert!(same.left == out.left);
+}
+
+#[test]
+fn a_render_does_not_go_on_without_an_instrument_that_never_answered_and_writes_nothing() {
+    let _alone = ONE_AT_A_TIME.lock();
+    // A bass that plays, and drums that never answer: one of two.
+    let mut project = song(BASS, &[(40, 0.0), (43, 1.0)]);
+    let drums = project.add_track("Drums");
+    project.add_device(ChainRef::Track(drums), DRUMS, "Kit", None).unwrap();
+    let clip = project.add_midi_clip(drums, "clip", 0.0, 8.0).unwrap();
+    project.clip_mut(clip).unwrap().add_notes(&[Note { pitch: 77, start: 0.0, length: 0.5, velocity: 100 }]).unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let (mix, stems) = (folder.path().join("song.wav"), folder.path().join("song stems"));
+    let options = RenderOptions {
+        sample_rate: SR,
+        max_tail_seconds: 0.5,
+        patience: Duration::from_millis(1500),
+        stems: Some(Stems::all(&stems)),
+        ..RenderOptions::default()
+    };
+    let scripted = ScriptedFactory::new();
+    let job = |project: &Project| RenderJob {
+        project: project.clone(),
+        factory: factory(&scripted),
+        audio: trill_engine::sources::AudioSources::default(),
+    };
+    // Key 77 is no drum of the kit. The render stops and names the track
+    // that is missing, and that one only; no file is left anywhere.
+    let Err(RenderError::NotAnswered(missing)) = job(&project).render_to_file(&mix, &options) else {
+        panic!("a file was written without the drums")
+    };
+    let names: Vec<&str> = missing.iter().map(|waited| waited.track_name.as_str()).collect();
+    assert_eq!(names, ["Drums"]);
+    assert!(!mix.exists(), "no file where the song was to go");
+    assert!(!stems.exists(), "and no stems, finished or begun, nor a folder for them");
+    // Measuring is refused the same way: the numbers would not be the
+    // song's.
+    assert!(matches!(job(&project).measure(&options), Err(RenderError::NotAnswered(_))));
+
+    // Muted, the track is left out on purpose, and the rest is rendered.
+    let mut without = project.clone();
+    without.track_mut(drums).unwrap().mute = true;
+    let report = job(&without).render_to_file(&mix, &options).unwrap();
+    assert!(mix.exists() && report.stats.peak_db > -40.0 && report.waited.iter().all(|waited| waited.answered));
+
+    // And where the track itself says why its notes are silent (it knows
+    // the key as a keyswitch of its instrument), the render goes on.
+    let mut explained = project.clone();
+    let profile = trill_core::InstrumentProfile {
+        articulations: vec![trill_core::Articulation::key("choke", 77)],
+        ..trill_core::InstrumentProfile::default()
+    };
+    explained.track_mut(drums).unwrap().profile = profile.validated().unwrap();
+    let rendered = job(&explained).render(&options).unwrap();
+    assert!(peak(&rendered.left) > 0.05);
+    let waited: Vec<bool> = rendered.measured.waited.iter().map(|waited| waited.answered).collect();
+    assert_eq!(waited, [false], "said, and no more: {:?}", rendered.measured.waited);
+}
+
+#[test]
+fn a_plugin_that_is_held_up_while_others_are_let_go_is_waited_for_beyond_the_patience() {
+    let _alone = ONE_AT_A_TIME.lock();
+    // The host is behind with other work for two seconds after the bass
+    // is made, and the bass does not begin to load before: for longer
+    // than the caller has patience, nothing at all happens, and none of
+    // it is the instrument's doing.
+    let held_up = Loading { held_up: Duration::from_secs(2), first: Duration::from_millis(200), ..Loading::default() };
+    let options = RenderOptions {
+        sample_rate: SR,
+        max_tail_seconds: 0.5,
+        patience: Duration::from_millis(800),
+        ..RenderOptions::default()
+    };
+    let (took, out) = timed(&line(), &ScriptedFactory::loading(held_up), &options);
+    assert!(took >= Duration::from_millis(2200), "{took:?}");
+    assert!(peak(&out.left) > 0.1, "and it is in the render");
+    let waited = &out.measured.waited[0];
+    assert!(waited.answered && waited.seconds >= 2.2, "{waited:?}");
+
+    // One that does nothing with nothing in its way is still given up on
+    // when the patience is over.
+    // (Other notes than the tests beside this one play: what never
+    // answered is remembered by what it was asked.)
+    let idle = Loading { first: Duration::from_secs(3), ..Loading::default() };
+    let begun = Instant::now();
+    let refused = render(&song(BASS, &[(51, 0.0), (53, 1.0)]), &ScriptedFactory::loading(idle), &options);
+    assert!(matches!(refused, Err(RenderError::NotAnswered(_))) && begun.elapsed() < Duration::from_millis(2800));
 }

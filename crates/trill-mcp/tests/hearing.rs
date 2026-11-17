@@ -506,34 +506,54 @@ async fn a_silent_track_is_told_what_its_notes_say_and_sent_to_the_probe() {
     let half = track(client, "Half", DRUMS).await;
     clip(client, half, 0.0, 4.0, json!([["C2", 0, 1], ["A2", 1, 1]])).await;
 
+    // Two instruments that never answer any of their notes: a mix
+    // without them is not the song. Nothing is measured, no file is
+    // written, and the refusal says of each what its notes say and what
+    // to do about it.
+    let folder = tempfile::tempdir().unwrap();
+    let mix = folder.path().join("song.wav");
     let begun = Instant::now();
-    let report = ok(client, "measure", json!({})).await;
-    let notes = strings(&report["notes"]);
-    let about = |name: &str| notes.iter().find(|note| note.starts_with(&format!("'{name}'"))).cloned();
-    // A key that plays nothing sounds like a drum that has not been loaded:
-    // the kit was held to it before the render began, and the reply says
-    // which note it was and how to find out.
-    let waited = |notes: &[String]| notes.iter().find(|note| note.contains("on 'Half'")).cloned();
-    let half_note = waited(&notes).unwrap_or_else(|| panic!("{notes:#?}"));
-    assert!(half_note.contains("1 of the notes it plays made no sound the whole time: A2 (45)"), "{half_note}");
-    assert!(half_note.contains("still loading") && half_note.contains(&format!("`probe` with track {half}")));
-    let low_note = about("Low").unwrap_or_else(|| panic!("{notes:#?}"));
+    let refused = call(client, "measure", json!({})).await.unwrap_err();
+    let first = begun.elapsed();
+    assert!(refused.starts_with("Nothing was rendered: 2 of the song's instruments never answered"), "{refused}");
+    let lines: Vec<&str> = refused.lines().collect();
+    let about = |name: &str| lines.iter().find(|line| line.starts_with(&format!("- '{name}'"))).copied();
+    let low_note = about("Low").unwrap_or_else(|| panic!("{refused}"));
     assert!(low_note.contains("run from E0 to D1") && low_note.contains("outside its range"), "{low_note}");
     assert!(low_note.contains(&format!("probe with track {low}")), "{low_note}");
     let switch_note = about("Switch").unwrap();
     assert!(switch_note.contains("keyswitches") && !switch_note.contains("expression"), "{switch_note}");
-    assert!(about("Fine").is_none());
+    assert!(about("Fine").is_none() && about("Half").is_none(), "{refused}");
+    // A key that plays nothing sounds like a drum that has not been loaded:
+    // the kit, which plays its kick, was held to its other key before the
+    // refusal, and that is said with it, since it is found once.
+    let half_note = lines.iter().find(|line| line.contains("on 'Half'")).unwrap_or_else(|| panic!("{refused}"));
+    assert!(half_note.starts_with("Besides: Waited"), "{half_note}");
+    assert!(half_note.contains("1 of the notes it plays made no sound the whole time: A2 (45)"), "{half_note}");
+    assert!(half_note.contains("still loading") && half_note.contains(&format!("`probe` with track {half}")));
     // Neither leads with breath or a bow.
-    assert!(notes.iter().all(|note| !note.contains("saxophone")), "{notes:#?}");
-    let first = begun.elapsed();
-
-    // The plugins that never answered were waited for once. Measured again,
-    // they are known not to answer and cost a moment.
+    assert!(!refused.contains("saxophone"), "{refused}");
+    assert!(refused.contains("ask again") && refused.contains("mute it (update_track)"), "{refused}");
+    let rendered = call(client, "render", json!({ "path": mix.display().to_string(), "stems": ["all"] })).await;
+    assert!(rendered.unwrap_err().starts_with("Nothing was rendered"));
+    assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0, "no file, and no folder of stems");
+    // What never answered was waited for once: asked again, it costs a
+    // moment.
     let begun = Instant::now();
-    let again = ok(client, "measure", json!({})).await;
+    call(client, "measure", json!({})).await.unwrap_err();
     assert!(begun.elapsed() < first, "{:?} after {first:?}", begun.elapsed());
-    // What the kit was held to once is known of it now, and not said twice.
-    assert_eq!(waited(&strings(&again["notes"])), None);
+
+    // Muted, they are left out on purpose, and the rest is measured. What
+    // the kit was held to once is known of it now, and not said twice.
+    for silent in [low, switch] {
+        ok(client, "update_track", json!({ "track": silent, "mute": true })).await;
+    }
+    let report = ok(client, "measure", json!({})).await;
+    let notes = strings(&report["notes"]);
+    assert!(notes.iter().all(|note| !note.contains("made no sound")), "{notes:#?}");
+    let rows: Vec<u64> =
+        report["tracks"].as_array().unwrap().iter().map(|row| row["track"].as_u64().unwrap()).collect();
+    assert_eq!(rows, [fine, half], "{report}");
 
     // And the probe the note asks for says what the instrument plays.
     let probed = ok(client, "probe", json!({ "track": low })).await;
