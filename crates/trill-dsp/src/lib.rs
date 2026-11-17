@@ -217,6 +217,11 @@ fn describe(builtin: &Builtin) -> DeviceDescriptor {
     }
 }
 
+/// What the built-in device with this key is called.
+pub(crate) fn name_of(key: &str) -> Option<&'static str> {
+    BUILTINS.iter().find(|builtin| builtin.key == key).map(|builtin| builtin.name)
+}
+
 fn find(uri: &str) -> Option<&'static Builtin> {
     match split_uri(uri) {
         Some((BUILTIN_SCHEME, key)) => BUILTINS.iter().find(|builtin| builtin.key == key),

@@ -29,10 +29,12 @@ mod params;
 mod playing;
 mod presets;
 mod probing;
+mod sounds;
 mod story;
 mod take;
 mod wavetable;
 
+pub use sounds::{Added, Given, ListedSound, SavedAsSound, listed_sounds, sound_after};
 pub use wavetable::{TableReport, factory_tables};
 
 pub use controllers::SilentInstrument;
@@ -581,6 +583,9 @@ impl Session {
     /// for by name or id as [`Session::load_preset`] takes them. One undo
     /// step. Fails, leaving the project untouched, if the device cannot be
     /// instantiated or the preset cannot be found or loaded.
+    ///
+    /// A preset that is a sound brings its effects, made behind the device
+    /// in the same step; [`Session::add_given`] also says which they are.
     pub fn add_device(
         &mut self,
         chain: ChainRef,
@@ -588,6 +593,21 @@ impl Session {
         preset: Option<&str>,
         index: Option<usize>,
     ) -> Result<DeviceId, SessionError> {
+        self.add_given(chain, uri, preset, index).map(|added| added.device)
+    }
+
+    /// [`Session::add_device`], with what the preset came to: which preset
+    /// it was and, for a sound, the devices that were made behind the
+    /// first, the ones an earlier sound had brought there and that went,
+    /// and what the sound names that this machine could not make. One undo
+    /// step for all of it.
+    pub fn add_given(
+        &mut self,
+        chain: ChainRef,
+        uri: &str,
+        preset: Option<&str>,
+        index: Option<usize>,
+    ) -> Result<Added, SessionError> {
         let descriptors = self.factory.descriptors();
         let descriptor = descriptors
             .iter()
@@ -608,8 +628,18 @@ impl Session {
         // the device is created as the preset has it. Any other is the
         // device's own to load, once there is a device.
         let values = preset.as_ref().and_then(|info| preset_values(&descriptor, info));
+        // What a sound brings behind its device, as far as this machine
+        // has it.
+        let after = preset.as_ref().and_then(|info| sounds::after_of(Some(&descriptor), info, saved.as_ref()));
+        let (after, without) = sounds::makeable(&descriptors, after);
 
-        let id = self.edit(|project| {
+        // The effects of a sound that do not start are taken out again,
+        // which is to be part of the one step.
+        let own_gesture = self.gesture.is_none() && after.as_ref().is_some_and(|after| !after.is_empty());
+        if own_gesture {
+            self.begin_gesture();
+        }
+        let added = self.edit(|project| {
             let id = project.add_device(chain, uri, descriptor.name.clone(), index)?;
             let device = project.device_mut(id)?;
             if let (Some(info), Some(saved)) = (&preset, &saved) {
@@ -628,8 +658,21 @@ impl Session {
             if let Some((track, profile)) = profile {
                 project.set_track_profile(track, profile)?;
             }
-            Ok(id)
-        })?;
+            let brought = match (&preset, &after) {
+                (Some(info), Some(after)) => project.bring_after(id, &info.reference(), after)?,
+                _ => trill_core::presets::Brought::default(),
+            };
+            Ok((id, brought))
+        });
+        let (id, brought) = match added {
+            Ok(added) => added,
+            Err(error) => {
+                if own_gesture {
+                    self.end_gesture();
+                }
+                return Err(error);
+            }
+        };
 
         let failure = self.bank.devices.get(&id).and_then(|meta| meta.error.clone()).map(SessionError::Device);
         let failure = failure.or_else(|| match (&preset, &values, &saved) {
@@ -638,9 +681,16 @@ impl Session {
         });
         if let Some(error) = failure {
             self.back_out();
+            if own_gesture {
+                self.end_gesture();
+            }
             return Err(error);
         }
-        Ok(id)
+        let given = preset.map(|info| self.given(info, after.is_some(), brought, without));
+        if own_gesture {
+            self.end_gesture();
+        }
+        Ok(Added { device: id, given })
     }
 
     /// Gives a device one of its presets, by the preset's name or id. The
