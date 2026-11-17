@@ -85,6 +85,12 @@ pub struct Loading {
     /// go of. The instrument does not have its turn before: everything
     /// else it takes its time over begins after this.
     pub held_up: Duration,
+    /// How many recordings it has of each key, if more than one: every
+    /// time a key sounds it plays the next of them, each a little quieter
+    /// than the one before, and then the first again. It begins with the
+    /// first when it is made, and a reset does not take it back there: a
+    /// sampled instrument's takes, going round.
+    pub takes: u32,
 }
 
 /// Makes the scripted instruments, and writes down what each was made for.
@@ -194,6 +200,8 @@ impl DeviceFactory for ScriptedFactory {
             late: self.loading.late.map(|(key, after)| (key, born + after)),
             fickle: self.loading.fickle,
             presses: 0,
+            takes: self.loading.takes,
+            sounded: [0; 128],
             onset: self.loading.onset,
             patch: patch.clone(),
             voices: [Voice::default(); VOICES],
@@ -370,6 +378,10 @@ struct Instrument {
     /// A key that sounds every other time, and how often it was pressed.
     fickle: Option<u8>,
     presses: u32,
+    /// How many recordings it has of each key, and how often each key has
+    /// sounded since the instrument was made.
+    takes: u32,
+    sounded: [u32; 128],
     /// How long after a key goes down its sound begins.
     onset: Duration,
     patch: Arc<Patch>,
@@ -435,6 +447,13 @@ impl Instrument {
                 voice.step = std::f64::consts::TAU * hz / self.sample_rate;
                 (voice.held_decay, voice.released_decay) = (self.halving(rings), self.halving(rings));
             }
+        }
+        // The next of the key's recordings: each is a twelfth quieter than
+        // the one before.
+        if self.takes > 1 {
+            let key = &mut self.sounded[usize::from(pitch.min(127))];
+            voice.level *= 1.0 - (*key % self.takes) as f32 / 12.0;
+            *key += 1;
         }
         let free = self.voices.iter().position(|voice| !voice.active).unwrap_or(0);
         self.voices[free] = voice;

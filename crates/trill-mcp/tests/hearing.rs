@@ -1040,3 +1040,127 @@ async fn a_note_on_the_first_sample_comes_through_an_amplifier_that_takes_a_mome
     assert!((notes[0] - notes[1]).abs() < 3.0, "as loud as the same note later: {notes:?}");
     assert!((opening[0] - opening[1]).abs() < 6.0, "from its beginning: {opening:?}");
 }
+
+/// What is left when one render is taken from another, against the first:
+/// far down means the same samples.
+fn null_db(one: &[f32], other: &[f32]) -> f64 {
+    let frames = one.len().min(other.len());
+    let (mut left, mut whole) = (0.0f64, 1e-30f64);
+    for frame in 0..frames {
+        left += f64::from(one[frame] - other[frame]).powi(2);
+        whole += f64::from(one[frame]).powi(2);
+    }
+    10.0 * (left.max(1e-30) / whole).log10()
+}
+
+/// The sampled instruments of Ample Sound, as VST3 plugins: three guitars
+/// and the bass. Each keeps several recordings of a note and plays
+/// another one every time the note sounds.
+const AMPLE: [(&str, &str); 4] = [
+    ("Ample Metal R", AMPLE_BASS),
+    ("Ample Metal Eclipse", "vst3:ABCDEF019182FAEB41707364416D6574"),
+    ("Ample Metal Hellrazer", "vst3:ABCDEF019182FAEB41707364416D6872"),
+    ("Ample Guitar PF", "vst3:ABCDEF019182FAEB4170736441677066"),
+];
+
+/// Renders `track` alone `times` times, with a probe of it and a measure
+/// of the whole song in between (other instances of the plugin, played
+/// other notes), and returns what is left of each later render when it is
+/// taken from the first, in dB.
+async fn rendered_again(client: &Client, folder: &Path, name: &str, track: u64, times: usize) -> Vec<f64> {
+    let mut renders: Vec<Vec<f32>> = Vec::new();
+    for index in 0..times {
+        let wav = folder.join(format!("{name}-{index}.wav"));
+        let begun = Instant::now();
+        let arguments = json!({ "path": wav.display().to_string(), "tracks": [track], "start": 0, "end": 8, "max_tail_seconds": 2 });
+        let report = ok(client, "render", arguments).await;
+        let audio = trill_media::decode(&wav).unwrap();
+        eprintln!(
+            "  {name}, render {index} in {:.1?}: {:.2} LUFS. {}",
+            begun.elapsed(),
+            report["loudness_lufs"].as_f64().unwrap_or(f64::NAN),
+            strings(&report["notes"]).into_iter().filter(|note| note.contains("Waited")).collect::<String>()
+        );
+        renders.push(audio.left);
+        std::fs::remove_file(&wav).unwrap();
+        // Between two renders, other instances of the plugin play: a probe
+        // of other keys, and the song measured.
+        match index {
+            0 => drop(ok(client, "probe", json!({ "track": track, "notes": [47, 50, 54] })).await),
+            1 => drop(ok(client, "measure", json!({ "start": 2, "end": 6 })).await),
+            _ => {}
+        }
+    }
+    renders[1..].iter().map(|render| null_db(&renders[0], render)).collect()
+}
+
+/// With the installed instruments of Ample Sound, set to take their
+/// recordings in turn: sixteen notes on two pitches, rendered four times
+/// with other things played in between, come out as the same samples each
+/// time, because the wait before a render sounds every note it rehearses
+/// the same number of times, whatever it waited for and for how long.
+///
+/// **What this cannot hold, and so reports instead of asserting:** a patch
+/// that draws at random from a stream which every instance of the plugin
+/// in the program shares. These instruments do as they come: the guitars
+/// draw every take that way (their `Cycle Mode Switch` is 0), the bass the
+/// noise of the hand moving between two frets (`M-Fret Sound`), and its
+/// preset "Stingray" a fret buzz on top. Every such draw on any instance
+/// moves the stream, nothing a host does puts it back while an instance
+/// lives (and the song's own always does), and only a program that has
+/// just started begins it at the same place. Two renders of such a patch
+/// in one program differ, and the test says by how much.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Ample Sound's instruments (VST3) installed; run with `cargo test -p trill-mcp --test hearing the_same_song_rendered_again -- --include-ignored --nocapture`"]
+async fn the_same_song_rendered_again_is_the_same_samples_where_takes_go_round_and_is_not_where_they_are_drawn_at_random()
+ {
+    let notes: Vec<Value> =
+        (0..16).map(|index| json!([if index % 2 == 0 { 45 } else { 52 }, f64::from(index) * 0.5, 0.45, 104])).collect();
+    let (mut held, mut not_held) = (Vec::new(), Vec::new());
+    for (name, uri) in AMPLE {
+        // A program of plugins for each instrument.
+        let Some((fixture, folder)) = connect_with_plugins(uri).await else { continue };
+        let client = &fixture.client;
+        ok(client, "set_project", json!({ "tempo": 156 })).await;
+        let part = |name: String, preset: Option<&'static str>| async move {
+            let mut arguments = json!({ "name": name, "instrument": uri });
+            if let Some(preset) = preset {
+                arguments["preset"] = json!(preset);
+            }
+            let made = ok(client, "create_track", arguments).await;
+            (made["track_id"].as_u64().unwrap(), made["instrument_device_id"].as_u64().unwrap())
+        };
+
+        // Its takes in turn, and no noise that is drawn at random.
+        let (round, device) = part(format!("{name} in turn"), None).await;
+        let in_turn = json!({ "Cycle Mode Switch": 1, "M-Fret Sound": 0 });
+        ok(client, "update_device", json!({ "device": device, "settings": in_turn })).await;
+        clip(client, round, 0.0, 8.0, json!(notes)).await;
+        // And as it comes, beside it in the same song.
+        let (random, _) = part(format!("{name} as it comes"), None).await;
+        clip(client, random, 0.0, 8.0, json!(notes)).await;
+
+        let nulls = rendered_again(client, folder.path(), &format!("{name}, its takes in turn"), round, 4).await;
+        eprintln!("{name}, its takes in turn: taken from the first render, the others leave {nulls:.1?} dB");
+        assert!(nulls.iter().all(|null| *null < -60.0), "{name}: the same samples every time: {nulls:?}");
+        held.push(name);
+
+        let mut cases = vec![("as it comes".to_string(), random)];
+        if uri == AMPLE_BASS {
+            let (buzz, _) = part("Stingray".to_string(), Some("Stingray")).await;
+            clip(client, buzz, 0.0, 8.0, json!(notes)).await;
+            cases.push(("with its preset Stingray".to_string(), buzz));
+        }
+        for (what, track) in cases {
+            let nulls = rendered_again(client, folder.path(), &format!("{name} {what}"), track, 3).await;
+            not_held.push(format!("{name} {what} {nulls:.1?} dB"));
+        }
+    }
+    eprintln!("HELD, the same samples every time with the takes in turn: {held:?}");
+    eprintln!(
+        "NOT HELD, and not asserted: patches that draw at random from a stream every instance in the program shares. \
+         Taken from their first render, later renders in the same program leave: {}. Only a program that has just \
+         started repeats these.",
+        not_held.join("; ")
+    );
+}

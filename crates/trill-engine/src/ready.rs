@@ -10,17 +10,33 @@
 //! it is ready.
 //!
 //! So readiness is measured by the one thing that shows it: **a plugin is
-//! ready when it answers every note it is about to be given, each by
-//! itself, and has gone on answering them the same way for a quarter of a
-//! second.** Before a render begins, each track whose instrument is a
-//! plugin is rehearsed on its own: the first different notes it will play,
-//! in their order, each with the controllers the song has for it. How much
-//! comes out while each note is down is written down. When a rehearsal is
-//! answered, and answered again note for note as the ones before it were
-//! for a quarter of a second, the plugin has stopped changing and is taken
-//! to be ready; until then it is rehearsed again some ten times a second.
-//! Then the notes are let go of, the plugins are silenced and reset, and
-//! the render starts from the top.
+//! ready when every note it is about to be given has sounded, each by
+//! itself, and nothing has been loading for a quarter of a second since.**
+//! Before a render begins, each track whose instrument is a plugin is
+//! rehearsed on its own: the first different notes it will play, in their
+//! order, each with the controllers the song has for it, some ten times a
+//! second. Then the notes are let go of, the plugins are silenced and
+//! reset, and the render starts from the top.
+//!
+//! **Every note sounds the same number of times.** A sampled instrument
+//! keeps several recordings of a note and plays the next one each time,
+//! and where it is in that round is not something a reset puts back. If
+//! the rehearsal went on for as long as the clock said, a render would
+//! begin at another place in the round each time, and the same song would
+//! not render to the same samples twice. So a note is rehearsed until it
+//! has sounded three times, and then not again: however long the wait
+//! lasts, and whether or not the plugin was found ready before, a render
+//! begins with every rehearsed note three takes on. (What is left to the
+//! clock is for how long nothing more may arrive before the plugin is
+//! taken as ready, and nothing is played once every note has sounded as
+//! often as it is to.) This holds an instrument whose takes go round. It
+//! cannot hold
+//! one that draws its takes at random from a stream its maker shares
+//! between every instance in the program (some patches of Ample Sound's
+//! do, for a fret noise): whatever else was played in the program moved
+//! that, and only a program that has just started begins it at the same
+//! place. Nor a note that sounded and then stopped for good while it was
+//! rehearsed: the wait does not hang on it.
 //!
 //! **Each note is heard alone.** A drum that has not been loaded sounds
 //! exactly like a key that plays nothing, and under the ringing of the
@@ -86,17 +102,17 @@
 //! what it was (the plugins, their state, the notes), and the next render
 //! of the same thing waits only a moment for it.
 //!
-//! A plugin that was slow to give its first answer is asked to hold its
-//! answers for longer (half as long as it took, up to two seconds). One
-//! whose answers never settle (a kit that plays another recording of the
-//! drum each time, a key that makes a noise one time and not the next) is
-//! ready once no note has sounded for a second that had not before, with
-//! nothing loading.
+//! A plugin that was slow to give its first answer is held to it for
+//! longer before it is taken as ready (half as long as it took, up to two
+//! seconds), and so is one whose three answers to a note were not alike
+//! (a second): a kit that plays another recording each time sounds like
+//! one that is still arriving.
 //!
 //! **What was ready is remembered** for as long as the program runs: the
-//! plugin, its state, the notes and how it answered them. A plugin that
-//! answers as it did when it was last found ready, twice and with nothing
-//! loading between the two, is ready without being held to it for longer.
+//! plugin, its state, the notes and which of them sounded. A plugin whose
+//! notes sound as they did when it was last found ready, with nothing
+//! loading, is not held to it for longer than a moment. It is rehearsed
+//! just as often.
 //!
 //! **While it plays, nothing waits.** A plugin in the song that is heard
 //! live is not rehearsed: nobody is to hear notes that are not in the
@@ -161,8 +177,14 @@ const SIGNAL_LEVEL: f32 = 0.25;
 const SIGNAL_STRETCHES: usize = 3;
 /// How long a rehearsal waits between tries.
 const BETWEEN_TRIES: Duration = Duration::from_millis(100);
-/// How many tries in a row must be answered alike.
+/// How many tries in a row an effect must answer alike.
 const ALIKE_RUNNING: u32 = 3;
+/// How many times each rehearsed note is to sound, and then is not played
+/// again: see the module documentation.
+const SOUNDINGS: usize = 3;
+/// A note that has sounded and then stays silent for this many tries is
+/// one that may not come back: the wait does not hang on it.
+const STALLED_TRIES: u32 = 2;
 /// The program is loading something while its memory grows faster than
 /// this, in bytes a second: a slow disk reads samples faster.
 const LOADING_BYTES_A_SECOND: f64 = 4.0 * 1024.0 * 1024.0;
@@ -648,51 +670,66 @@ impl<'a> Stand<'a> {
         answer
     }
 
-    /// Plays `opening` a note at a time, each from silence, and returns
-    /// what came out while each was down: one answer for every note that
-    /// is not a key held with another. For effects: what came out while
-    /// the noise went in, stretch by stretch, and after it.
-    fn rehearse(&mut self, opening: &Opening) -> Vec<Answer> {
-        if opening.signal {
-            let mut seed = 0x2545_F491u32;
-            let mut answers: Vec<Answer> = (0..SIGNAL_STRETCHES).map(|_| self.pass(&mut seed, NOTE_SECONDS)).collect();
-            let mut after = Answer::default();
-            self.hear(&[], AFTER_SECONDS, &mut after);
-            answers.push(after);
-            return answers;
-        }
+    /// Puts a burst of noise through the devices, which is how an effect
+    /// is asked: what came out while the noise went in, stretch by
+    /// stretch, and after it.
+    fn rehearse_noise(&mut self) -> Vec<Answer> {
+        let mut seed = 0x2545_F491u32;
+        let mut answers: Vec<Answer> = (0..SIGNAL_STRETCHES).map(|_| self.pass(&mut seed, NOTE_SECONDS)).collect();
+        let mut after = Answer::default();
+        self.hear(&[], AFTER_SECONDS, &mut after);
+        answers.push(after);
+        answers
+    }
+
+    /// Plays the notes of `opening` that are `asked` for, one at a time
+    /// and each from silence, and returns what came out while each was
+    /// down. `asked` and what is returned have a place for every note that
+    /// is not a key held with another; a note that was not asked for is
+    /// not played, and neither are the keys held with it.
+    fn rehearse(&mut self, opening: &Opening, asked: &[bool]) -> Vec<Option<Answer>> {
         let floor = self.heard_above();
         // What comes out does so as late as the devices make it.
         let (held, block) = (NOTE_SECONDS + self.latency_seconds(), self.block_seconds());
-        let mut answers = Vec::with_capacity(opening.notes.len());
+        let mut answers = Vec::with_capacity(asked.len());
         let mut events: Vec<Event> = Vec::new();
+        // The keys that go down with the next note, and what is down.
+        let mut with: Vec<&OpeningNote> = Vec::new();
         let mut down: Vec<u8> = Vec::new();
         for note in &opening.notes {
+            if note.switch {
+                with.push(note);
+                continue;
+            }
+            let wanted = asked.get(answers.len()).copied().unwrap_or(false);
+            if !wanted {
+                with.clear();
+                answers.push(None);
+                continue;
+            }
+            // A key held with the note goes down a moment ahead of it and
+            // comes up with it.
+            for key in with.drain(..) {
+                events.extend(key.controllers.iter().map(|kind| Event { offset: 0, kind: *kind }));
+                events.push(Event { offset: 0, kind: EventKind::NoteOn { pitch: key.pitch, velocity: key.velocity } });
+                down.push(key.pitch);
+                self.run(&events, block);
+                events.clear();
+            }
             events.extend(note.controllers.iter().map(|kind| Event { offset: 0, kind: *kind }));
             events.push(Event { offset: 0, kind: EventKind::NoteOn { pitch: note.pitch, velocity: note.velocity } });
             down.push(note.pitch);
-            if note.switch {
-                // A key held with the note after it goes down a moment
-                // ahead of that note and comes up with it.
-                self.run(&events, block);
-                events.clear();
-                continue;
-            }
             let mut answer = Answer::default();
             self.hear(&events, held, &mut answer);
             if answer.peak <= floor {
                 // An instrument that speaks late is given longer.
                 self.hear(&[], LATE_SECONDS, &mut answer);
             }
-            answers.push(answer);
+            answers.push(Some(answer));
             events.clear();
             events.extend(down.drain(..).map(|pitch| Event { offset: 0, kind: EventKind::NoteOff { pitch } }));
             self.hush(&events);
             events.clear();
-        }
-        if !down.is_empty() {
-            events.extend(down.drain(..).map(|pitch| Event { offset: 0, kind: EventKind::NoteOff { pitch } }));
-            self.hush(&events);
         }
         answers
     }
@@ -790,23 +827,31 @@ pub(crate) struct Wait<'a> {
     /// The plugins alone, whatever they are asked: for what is known of
     /// their keys.
     pub devices: u64,
-    /// The answers of the last try, if it was answered at all.
+    /// For an instrument: what came out each time a note sounded, note by
+    /// note, [`SOUNDINGS`] times each at the most.
+    sounded: Vec<Vec<Answer>>,
+    /// For how many tries in a row a note that has sounded has stayed
+    /// silent since.
+    missed: Vec<u32>,
+    /// How many tries there have been.
+    tries: u32,
+    /// For effects: the answers of the last try, if it was answered at
+    /// all; how many tries in a row were answered alike with nothing
+    /// loading, and since when; and whether it answers as it did when it
+    /// was last found ready.
     last: Option<Vec<Answer>>,
-    /// How many tries in a row were answered alike with nothing loading,
-    /// and since when.
     alike: u32,
     alike_since: Option<Instant>,
-    /// Which of the things asked have made a sound at some try so far.
-    ever: Vec<bool>,
+    known: bool,
     /// Since when nothing has been loading and no note has sounded that
     /// had not before.
     steady_since: Option<Instant>,
-    /// It answers as it did when it was last found ready.
-    known: bool,
+    /// Whether the program showed signs of loading while this went on.
+    saw_loading: bool,
     /// How long after the wait began the first answer came.
     first_answer: Option<Duration>,
-    /// When there was last a sign of life: an answer that was not like
-    /// the one before, or the program loading.
+    /// When there was last a sign of life: a note that sounded and was
+    /// still to, an effect that answered differently, the program loading.
     stirred: Instant,
     /// When it was found ready, or given up on.
     outcome: Option<(Duration, bool)>,
@@ -824,12 +869,15 @@ impl<'a> Wait<'a> {
             opening,
             signature,
             devices,
+            sounded: Vec::new(),
+            missed: Vec::new(),
+            tries: 0,
             last: None,
             alike: 0,
             alike_since: None,
-            ever: Vec::new(),
-            steady_since: None,
             known: false,
+            steady_since: None,
+            saw_loading: false,
             first_answer: None,
             stirred: Instant::now(),
             outcome: None,
@@ -843,38 +891,122 @@ impl<'a> Wait<'a> {
     /// only some of its notes is held to that. Returns whether the wait
     /// is over.
     fn attempt(&mut self, begun: Instant, loading: bool, known: Known, partly: Duration) -> bool {
+        if loading {
+            (self.stirred, self.saw_loading) = (Instant::now(), true);
+        }
+        match self.opening.signal {
+            true => self.attempt_noise(begun, loading, known),
+            false => self.attempt_notes(begun, loading, known, partly),
+        }
+    }
+
+    /// A try of an instrument: every note that is still to sound is
+    /// played once.
+    fn attempt_notes(&mut self, begun: Instant, loading: bool, known: Known, partly: Duration) -> bool {
         let floor = self.stand.heard_above();
         let now = Instant::now();
-        let answers = self.stand.rehearse(&self.opening);
-        if loading {
-            self.stirred = now;
+        let pitches: Vec<u8> = self.opening.pitches().collect();
+        self.sounded.resize(pitches.len(), Vec::new());
+        self.missed.resize(pitches.len(), 0);
+        let expected_silent = |pitch: u8| known.keys.is_some_and(|keys| keys[usize::from(pitch)] == Some(false));
+        // A note is done with when it has sounded as often as it is to.
+        // One that has sounded and then stopped is asked on, without the
+        // wait hanging on it; one that has never sounded is asked on too,
+        // unless that is what is known of it, and then only while there
+        // are others to ask.
+        let done = |heard: &Vec<Answer>| heard.len() >= SOUNDINGS;
+        let stalled = |heard: &Vec<Answer>, missed: u32| !heard.is_empty() && !done(heard) && missed >= STALLED_TRIES;
+        let others = self
+            .sounded
+            .iter()
+            .zip(&self.missed)
+            .any(|(heard, missed)| !heard.is_empty() && !done(heard) && !stalled(heard, *missed));
+        let asked: Vec<bool> = (pitches.iter().zip(&self.sounded))
+            .map(|(pitch, heard)| !done(heard) && (!expected_silent(*pitch) || others || self.tries == 0))
+            .collect();
+        // With nothing left to ask, the plugins are not run either: how
+        // much they have been given by the time a render begins is then a
+        // matter of how often their notes sounded and not of how long
+        // this took, which a tail that a reset does not cut would show.
+        let answers = match asked.contains(&true) {
+            true => self.stand.rehearse(&self.opening, &asked),
+            false => vec![None; asked.len()],
+        };
+        self.tries += 1;
+        // Whether a note sounded that was still to, and whether one did
+        // that had not before, or had stopped: something has arrived.
+        let (mut progressed, mut arrived) = (false, false);
+        for ((heard, missed), answer) in self.sounded.iter_mut().zip(&mut self.missed).zip(answers) {
+            match answer {
+                Some(answer) if answer.peak > floor => {
+                    arrived |= heard.is_empty() || *missed > 0;
+                    heard.push(answer);
+                    (*missed, progressed) = (0, true);
+                }
+                Some(_) if !heard.is_empty() => *missed += 1,
+                _ => {}
+            }
         }
-        if answers.iter().all(|answer| answer.peak <= floor) {
-            (self.last, self.alike, self.alike_since, self.steady_since) = (None, 0, None, None);
-            self.ever.clear();
+        if self.sounded.iter().all(Vec::is_empty) {
+            self.steady_since = None;
             self.silent.clear();
             return false;
         }
         let first = *self.first_answer.get_or_insert(begun.elapsed());
-        // What sounds now and never did before has arrived: a sampler's
-        // kit comes a drum at a time, and what it has it keeps. (A key
-        // that sounds one time and not the next is no sign of anything.)
-        self.ever.resize(answers.len(), false);
-        let mut arrived = false;
-        for (ever, answer) in self.ever.iter_mut().zip(&answers) {
-            arrived |= answer.peak > floor && !*ever;
-            *ever |= answer.peak > floor;
+        if progressed {
+            self.stirred = now;
         }
         // The notes that have made no sound yet, unless that is what is
         // known of them: the instrument may not have loaded them.
         self.silent.clear();
-        for (pitch, ever) in self.opening.pitches().zip(&self.ever) {
-            let expected = known.keys.is_some_and(|keys| keys[usize::from(pitch)] == Some(false));
-            if !*ever && !expected && !self.silent.contains(&pitch) {
-                self.silent.push(pitch);
+        for (pitch, heard) in pitches.iter().zip(&self.sounded) {
+            if heard.is_empty() && !expected_silent(*pitch) && !self.silent.contains(pitch) {
+                self.silent.push(*pitch);
             }
         }
-        let whole = self.silent.is_empty();
+        let waiting =
+            |(heard, missed): (&Vec<Answer>, &u32)| !heard.is_empty() && !done(heard) && !stalled(heard, *missed);
+        let complete = !self.sounded.iter().zip(&self.missed).any(waiting);
+        let whole = self.silent.is_empty()
+            && !self.sounded.iter().zip(&self.missed).any(|(heard, missed)| stalled(heard, *missed));
+        if loading || arrived || self.steady_since.is_none() {
+            self.steady_since = Some(now);
+        }
+        let steady = self.steady_since.map_or(Duration::ZERO, |since| now.duration_since(since));
+        // For how long nothing may have arrived or been loading before it
+        // is taken as ready: a moment if its notes sound as they did when
+        // it was last found ready; longer if it was slow to answer at all,
+        // or did not answer a note the same way each time.
+        let as_before = known.answers.is_some_and(|before| {
+            before.len() == self.sounded.len()
+                && before.iter().zip(&self.sounded).all(|(before, heard)| (before.peak > floor) != heard.is_empty())
+        });
+        let slow = (first / 2).clamp(SETTLED_FOR, SETTLED_AT_MOST);
+        let level = self.sounded.iter().all(|heard| heard.windows(2).all(|pair| pair[0].like(&pair[1], floor)));
+        let hold = match (as_before && !self.saw_loading, level) {
+            (true, _) => BETWEEN_TRIES,
+            (false, true) => slow,
+            (false, false) => slow.max(UNSETTLED_FOR),
+        };
+        // And one that leaves notes unanswered may be between two parts of
+        // what it loads.
+        if complete && !loading && steady >= hold && (whole || steady >= partly) {
+            (self.outcome, self.found) = (Some((begun.elapsed(), true)), true);
+        }
+        self.outcome.is_some()
+    }
+
+    /// A try of effects: a burst of noise is put through them.
+    fn attempt_noise(&mut self, begun: Instant, loading: bool, known: Known) -> bool {
+        let floor = self.stand.heard_above();
+        let now = Instant::now();
+        let answers = self.stand.rehearse_noise();
+        self.tries += 1;
+        if answers.iter().all(|answer| answer.peak <= floor) {
+            (self.last, self.alike, self.alike_since, self.steady_since) = (None, 0, None, None);
+            return false;
+        }
+        let first = *self.first_answer.get_or_insert(begun.elapsed());
         // What answers as it did when it was last found ready has one
         // like answer behind it already, and need not be held for long.
         let as_before = known.answers.is_some_and(|before| alike(&answers, before, floor));
@@ -885,7 +1017,7 @@ impl<'a> Wait<'a> {
         if self.last.is_some() && !same {
             self.stirred = now;
         }
-        if loading || arrived {
+        if loading || self.steady_since.is_none() {
             self.steady_since = Some(now);
         }
         if same && !loading {
@@ -901,16 +1033,28 @@ impl<'a> Wait<'a> {
         let held = self.alike_since.is_some_and(|since| now.duration_since(since) >= hold);
         let enough = if self.known { ALIKE_RUNNING - 1 } else { ALIKE_RUNNING };
         let steady = self.steady_since.map_or(Duration::ZERO, |since| now.duration_since(since));
-        // An instrument that never plays a note the same way twice is
-        // ready all the same, once no more notes have come to it for a
-        // while with nothing loading.
-        let settled = (self.alike >= enough && held) || steady >= hold.max(UNSETTLED_FOR);
-        // And one that leaves notes unanswered may be between two parts of
-        // what it loads.
-        if settled && !loading && (whole || steady >= partly) {
+        // An effect that never passes a burst the same way twice is ready
+        // all the same, once it has passed them for a while with nothing
+        // loading.
+        if !loading && ((self.alike >= enough && held) || steady >= hold.max(UNSETTLED_FOR)) {
             (self.outcome, self.found) = (Some((begun.elapsed(), true)), true);
         }
         self.outcome.is_some()
+    }
+
+    /// Whether anything has come out at all.
+    fn answered(&self) -> bool {
+        self.last.is_some() || self.sounded.iter().any(|heard| !heard.is_empty())
+    }
+
+    /// What to remember of how it answered, to know it by when it is
+    /// waited for again: an effect's last answers; for an instrument, the
+    /// last sound of each note, or nothing for a note that made none.
+    fn remembered(&mut self) -> Vec<Answer> {
+        match self.opening.signal {
+            true => self.last.take().unwrap_or_default(),
+            false => self.sounded.iter().map(|heard| heard.last().copied().unwrap_or_default()).collect(),
+        }
     }
 
     /// How the wait went: how long it took, and whether it was answered.
@@ -942,8 +1086,20 @@ fn tell(begun: Instant, first: &Vitals, loading: bool, waits: &[Wait]) {
                 true => format!("{:.0}", 20.0 * answer.peak.log10()),
                 false => "-".to_string(),
             };
-            let said: Vec<String> = wait.last.as_deref().unwrap_or_default().iter().map(level).collect();
-            format!("alike {} [{}]", wait.alike, said.join(" "))
+            match wait.opening.signal {
+                true => {
+                    let said: Vec<String> = wait.last.as_deref().unwrap_or_default().iter().map(level).collect();
+                    format!("alike {} [{}]", wait.alike, said.join(" "))
+                }
+                // How often each note has sounded, and how loud the last time.
+                false => {
+                    let said = wait.sounded.iter().map(|heard| match heard.last() {
+                        Some(last) => format!("{}x{}", heard.len(), level(last)),
+                        None => "-".to_string(),
+                    });
+                    format!("[{}]", said.collect::<Vec<_>>().join(" "))
+                }
+            }
         })
         .collect();
     log::trace!(
@@ -999,7 +1155,7 @@ pub(crate) fn wait_for(waits: &mut [Wait], patience: Duration, held_up: &dyn Fn(
             // wait that was answered is then taken as it is; one that
             // never was went unanswered.
             if wait.stirred.elapsed() >= patience || begun.elapsed() >= LOADING_LIMIT {
-                wait.outcome = Some((begun.elapsed(), wait.last.is_some()));
+                wait.outcome = Some((begun.elapsed(), wait.answered()));
             } else {
                 pending = true;
             }
@@ -1014,26 +1170,27 @@ pub(crate) fn wait_for(waits: &mut [Wait], patience: Duration, held_up: &dyn Fn(
         wait.stand.settle();
         silent.retain(|signature| *signature != wait.signature);
         ready.retain(|(signature, _)| *signature != wait.signature);
-        match (wait.outcome().1, wait.last.take()) {
-            (true, Some(answers)) => {
+        match wait.outcome().1 {
+            true => {
                 // What is now known of these plugins' keys: the ones that
                 // sounded do, and the ones that stayed silent for as long
                 // as it was held to them are keys that play nothing.
                 if !wait.opening.signal {
                     let at = keys.iter().position(|(devices, _)| *devices == wait.devices);
                     let mut known = at.map_or([None; 128], |at| keys.remove(at).1);
-                    for (pitch, ever) in wait.opening.pitches().zip(&wait.ever) {
-                        match *ever {
-                            true => known[usize::from(pitch)] = Some(true),
-                            false if wait.found => known[usize::from(pitch)] = Some(false),
-                            false => {}
+                    for (pitch, heard) in wait.opening.pitches().zip(&wait.sounded) {
+                        match heard.is_empty() {
+                            false => known[usize::from(pitch)] = Some(true),
+                            true if wait.found => known[usize::from(pitch)] = Some(false),
+                            true => {}
                         }
                     }
                     keys.push((wait.devices, known));
                 }
+                let answers = wait.remembered();
                 ready.push((wait.signature, answers));
             }
-            _ => silent.push(wait.signature),
+            false => silent.push(wait.signature),
         }
     }
     let surplus = silent.len().saturating_sub(REMEMBERED);

@@ -129,7 +129,8 @@ on the samples.
   each ends in a message the user can read (`Session::problems`, `StreamInfo::warning`, a toast) and the song
   keeps playing. No stuck notes: whatever starts a note owns stopping it.
 - **A render is not a quick look.** It creates every device afresh and waits for plugins to be ready
-  (`ready.rs`), as a probe does: until every note asked for sounds, heard one at a time. To find out what an
+  (`ready.rs`), as a probe does: until every note asked for sounds, heard one at a time and each exactly three
+  times, so that an instrument whose takes go round begins every render at the same take. To find out what an
   instrument does, use a probe (`Session::probe_job`, the `probe` tool); to check a mix, `RenderJob::measure`
   (the `measure` tool), which writes nothing. A plugin that plays live is not waited for; `Session::loading`
   says whether it may still be reading its samples. A render compiles only the tracks that are heard

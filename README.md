@@ -302,8 +302,13 @@ that quick and true:
   they are being rendered offline (VST3 process mode, CLAP `render`). Before the first sample each plugin
   instrument is rehearsed on the notes it is about to play, each note by itself (a tom that rings would hide a
   cymbal that has not arrived), and each plugin effect on a burst of noise, until every note has answered and
-  gone on answering alike for a quarter of a second or more, with the program not growing meanwhile: while
-  samples are being read its memory rises. A sampler was watched to pause for seconds between two drums with
+  nothing more has arrived for a quarter of a second or more, with the program not growing meanwhile: while
+  samples are being read its memory rises. Every rehearsed note is sounded exactly three times and then left
+  alone, however long the wait lasts: an instrument that plays its recordings of a note in turn then begins
+  every render at the same one, and the same song renders to the same samples again. (That cannot hold an
+  instrument that draws its recordings at random from a stream all its instances share, which only a program
+  that has just started begins at the same place. Ample Sound's do as they come, and go in turn when they are
+  set to: their profiles say how.) A sampler was watched to pause for seconds between two drums with
   nothing to show for it, so an instrument that answers some of its notes and not others is held to that for
   five seconds before the silent ones are taken to be keys that play nothing; that is remembered of the plugin,
   and the reply names the notes, because a key that plays nothing and a sample that is still loading sound the
