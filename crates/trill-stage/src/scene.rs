@@ -1145,45 +1145,103 @@ fn top_strip(canvas: &Canvas<'_>, moment: &Moment<'_>, layout: &Layout) {
     text::paint(base, cell(right, 90.0), Align2::RIGHT_CENTER, theme.text.readout, &position, theme.ink);
 }
 
+/// How far in from its mark a section's name begins on the line under the
+/// picture, and what is left clear between its end and the next mark.
+const NAME_IN: f32 = 5.0;
+const NAME_CLEAR: f32 = 4.0;
+/// How many times larger than the whole song fitted to it the line may be
+/// drawn for its names to fit. Past that a section goes by too fast to be
+/// read, and its name is left out as it would be on a line that stood still.
+const LINE_ZOOM: f32 = 4.0;
+
+/// How the song lies along the line under the picture.
+///
+/// Where every section's name fits between its mark and the next, the
+/// whole song is on the line, mark for mark. Where the picture is too
+/// narrow for that (an upright one), the song is drawn as much larger as
+/// the names need and the line shows a part of it, which scrolls with the
+/// song: its first beat stands at the line's left end as the song begins,
+/// its last at the right end as it ends, and in between the head is where
+/// it would be on the whole song. So the head still says how far the song
+/// is, and the section it is in is named with its neighbours either side.
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct SongLine {
+    left: f32,
+    /// Points a beat.
+    scale: f32,
+    /// How far the song has been drawn past the line's left end.
+    scrolled: f32,
+}
+
+impl SongLine {
+    /// The line across `span` for a song of `length` beats that is at
+    /// `beat`. `sections` are each section's length in beats and the
+    /// width of its name.
+    fn of(span: Rangef, length: Beats, beat: Beats, sections: impl Iterator<Item = (Beats, f32)>) -> Self {
+        let length = length.max(1e-9);
+        let whole = span.span() / length as f32;
+        let wanted = |(beats, name): (Beats, f32)| (name + NAME_IN + NAME_CLEAR) / (beats.max(1e-9) as f32);
+        let needed = sections.filter(|(_, name)| *name > 0.0).map(wanted).fold(whole, f32::max);
+        let scale = needed.min(whole * LINE_ZOOM);
+        // The head is where it is on the whole song; the rest follows.
+        let head = (beat / length).clamp(0.0, 1.0) as f32 * span.span();
+        let scrolled = beat.clamp(0.0, length) as f32 * scale - head;
+        Self { left: span.min, scale, scrolled }
+    }
+
+    fn x(&self, beat: Beats) -> f32 {
+        self.left + beat as f32 * self.scale - self.scrolled
+    }
+}
+
 fn song_line(canvas: &Canvas<'_>, moment: &Moment<'_>, layout: &Layout) {
     let (theme, rect) = (canvas.theme, layout.line);
     let (score, camera) = (moment.score, moment.camera);
     let base = canvas.base.with_clip_rect(rect.expand(4.0));
     let y = paint::snap(&base, rect.bottom() - 7.0);
-    let x_of = |beat: Beats| rect.left() + (beat / score.length.max(1e-9)) as f32 * rect.width();
+    let style = theme.text.micro;
+    let names =
+        score.sections.iter().map(|section| (section.end - section.start, text::width(&base, style, &section.name)));
+    let line = SongLine::of(rect.x_range(), score.length, camera.beat, names);
+    let x_of = |beat: Beats| line.x(beat);
     let head = x_of(camera.beat);
     let hair = paint::hair(&base);
     paint::hline(&base, rect.x_range(), y, theme.hairline);
     // What has been played, a pixel thicker and in ink.
     base.rect_filled(Rect::from_min_max(pos2(rect.left(), y - hair), pos2(head, y + hair)), 0.0, theme.ink_dim);
     let now = score.section_at(camera.beat);
-    // The section the song is in is always named: where its name does not
-    // fit before the next mark it runs on past it, and the names it runs
-    // over are left out. In a narrow picture that is most of them.
-    let style = theme.text.micro;
+    // The section the song is in is always named: its name stays on the
+    // line when its mark has scrolled off, and where it does not fit
+    // before the next mark it runs on past it.
     let named = |index: usize| -> Option<Rect> {
         let section = score.sections.get(index)?;
         let width = text::width(&base, style, &section.name);
-        let left = (x_of(section.start) + 5.0).min(rect.right() - width).max(rect.left());
+        let home = x_of(section.start) + NAME_IN;
+        let left = if index == now { home.min(rect.right() - width).max(rect.left()) } else { home };
         (width > 0.0).then(|| Rect::from_min_max(pos2(left, rect.top()), pos2(left + width, y - 5.0)))
     };
     let current = named(now);
     for (index, section) in score.sections.iter().enumerate() {
         let (left, next) = (x_of(section.start), x_of(section.end));
-        paint::vline(
-            &base,
-            left,
-            Rangef::new(y - 5.0, y + hair),
-            if index <= now { theme.ink_dim } else { theme.ghost },
-        );
+        if next < rect.left() || left > rect.right() {
+            continue;
+        }
+        if left >= rect.left() - hair {
+            paint::vline(
+                &base,
+                left,
+                Rangef::new(y - 5.0, y + hair),
+                if index <= now { theme.ink_dim } else { theme.ghost },
+            );
+        }
         let Some(room) = named(index) else { continue };
         if index == now {
             text::paint(&base, room.expand2(vec2(1.0, 0.0)), Align2::LEFT_BOTTOM, style, &section.name, theme.ink);
             continue;
         }
-        // The others where they fit between their mark and the next, and
-        // keep clear of the one the song is in.
-        let fits = room.right() <= next - 4.0;
+        // The others where they stand whole on the line between their mark
+        // and the next, and keep clear of the one the song is in.
+        let fits = left >= rect.left() - hair && room.right() <= (next - NAME_CLEAR).min(rect.right()) + 0.5;
         let clear =
             current.is_none_or(|current| room.right() + 8.0 < current.left() || room.left() > current.right() + 8.0);
         if fits && clear {
@@ -1529,6 +1587,47 @@ mod tests {
         assert_eq!(position_text(3.0, TimeSignature::new(6, 8).unwrap()), "2. 1. 1");
         assert_eq!(clock_text(0.0), "0:00.0");
         assert_eq!(clock_text(67.46), "1:07.4");
+    }
+
+    #[test]
+    fn the_line_of_sections_holds_the_whole_song_where_its_names_fit_and_scrolls_with_it_where_they_do_not() {
+        let span = Rangef::new(40.0, 1040.0);
+        // Ten sections of forty beats, their names fifty across: on a line
+        // a thousand wide each has a hundred, and the song is on it whole.
+        let roomy = |beat: Beats| SongLine::of(span, 400.0, beat, (0..10).map(|_| (40.0, 50.0)));
+        for beat in [0.0, 130.0, 400.0] {
+            let line = roomy(beat);
+            assert_eq!((line.scale, line.scrolled), (2.5, 0.0));
+            assert_eq!((line.x(0.0), line.x(200.0), line.x(400.0)), (40.0, 540.0, 1040.0));
+        }
+        // Sections of sixteen beats with those names need more than the
+        // line has: the song is drawn larger, and the line shows a part of it.
+        let narrow = |beat: Beats| SongLine::of(span, 400.0, beat, (0..25).map(|_| (16.0, 50.0)));
+        let scale = (50.0 + NAME_IN + NAME_CLEAR) / 16.0;
+        assert!(scale > 2.5 && narrow(0.0).scale == scale);
+        // Every name has its room between two marks.
+        assert!(narrow(0.0).x(16.0) - narrow(0.0).x(0.0) >= 50.0 + NAME_IN + NAME_CLEAR);
+        // The song's first beat is at the left end as it begins and its
+        // last at the right end as it ends…
+        assert_eq!(narrow(0.0).x(0.0), 40.0);
+        assert!((narrow(400.0).x(400.0) - 1040.0).abs() < 1e-3);
+        // …and in between the head is where it is on the whole song, with
+        // song to either side of it: the sections before and after.
+        for beat in [100.0, 200.0, 300.0] {
+            let line = narrow(beat);
+            assert!((line.x(beat) - roomy(beat).x(beat)).abs() < 1e-3, "at beat {beat}");
+            assert!(line.x(beat - 32.0) > 40.0 && line.x(beat + 32.0) < 1040.0, "its neighbours are on the line");
+            assert!(line.x(0.0) < 40.0 && line.x(400.0) > 1040.0, "and the ends of the song are not");
+        }
+        // It never runs backwards.
+        let scrolled: Vec<f32> = (0..=40).map(|step| narrow(f64::from(step) * 10.0).scrolled).collect();
+        assert!(scrolled.windows(2).all(|pair| pair[1] >= pair[0]), "{scrolled:?}");
+        // A name far too long for its section does not make the song fly
+        // by: the line is no more than so many times the whole song.
+        let hopeless = SongLine::of(span, 400.0, 0.0, [(4.0, 400.0)].into_iter());
+        assert_eq!(hopeless.scale, 2.5 * LINE_ZOOM);
+        // A song with nothing in it is a line all the same.
+        assert!(SongLine::of(span, 0.0, 0.0, std::iter::empty()).x(0.0).is_finite());
     }
 
     #[test]
