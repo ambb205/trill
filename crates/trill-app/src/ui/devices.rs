@@ -401,6 +401,7 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
             None => cx.hint(&response, about),
         }
         let (mut chosen, mut save, mut load, mut save_sound) = (None, false, false, false);
+        let (mut renamed, mut doomed) = (None, None);
         // The track whose sound begins at this device, if one does: its
         // instrument, or its first device where it has none.
         let begins = sound_begins_at(cx, device);
@@ -436,6 +437,19 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
                 let about = "This device and the effects after it, as one thing";
                 save_sound = MenuItem::new("Save sound\u{2026}").detail(about).show(ui, theme).clicked();
             }
+            // The saved preset or sound it is on can be renamed, described
+            // and deleted from here.
+            if let Some(on) = current_saved.and_then(|id| saved.iter().find(|preset| preset.id == id)) {
+                trill_noir::menu_separator(ui, theme);
+                let label = format!("Rename or describe \u{201C}{}\u{201D}\u{2026}", on.name);
+                if MenuItem::new(&label).show(ui, theme).clicked() {
+                    renamed = Some(on.name.clone());
+                }
+                let label = format!("Delete \u{201C}{}\u{201D}\u{2026}", on.name);
+                if MenuItem::new(&label).show(ui, theme).clicked() {
+                    doomed = Some(on.name.clone());
+                }
+            }
             let about = "A preset that lies anywhere: one you bought, or were sent";
             load = MenuItem::new("Load preset file\u{2026}").detail(about).show(ui, theme).clicked();
         });
@@ -445,12 +459,21 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
         if load {
             super::files::load_preset_file(&ui.ctx().clone(), cx, device_id);
         }
-        if save || save_sound {
+        if save {
             // The name of the saved preset it is on is the likely one to
             // save over; anything else starts empty.
             let text = current_saved.and(device.preset.as_ref()).map(|preset| preset.name.clone()).unwrap_or_default();
             cx.state.naming_preset = Some(TextEditState { target: device_id, text, focused: false });
-            cx.state.naming_sound = save_sound;
+        }
+        if let (true, Some(track)) = (save_sound, begins) {
+            // A sound says more of itself than a name: it has a form.
+            super::sound_presets::save_form(cx, track, device);
+        }
+        if let Some(preset) = renamed {
+            super::sound_presets::edit_form(cx, &device.uri, &preset);
+        }
+        if let Some(preset) = doomed {
+            cx.state.deleting_preset = Some((device.uri.clone(), preset));
         }
         name_right = rect.left() - 6.0;
     }
@@ -459,13 +482,7 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
     if cx.state.naming_preset.as_ref().is_some_and(|edit| edit.target == device_id) {
         // The name of the preset is typed where the device's name is.
         let field = name.shrink2(vec2(0.0, 3.0));
-        let hint = match cx.state.naming_sound {
-            true => format!(
-                "Name the sound of this track, {} and the effects after it, and press Enter; Escape leaves it unsaved",
-                device.name
-            ),
-            false => format!("Name this sound of {} and press Enter; Escape leaves it unsaved", device.name),
-        };
+        let hint = format!("Name this sound of {} and press Enter; Escape leaves it unsaved", device.name);
         cx.state.hint.set(hint);
         let naming = PresetName(device_id);
         let mut edit = cx.state.naming_preset.take().map(|edit| TextEditState {
@@ -476,29 +493,11 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
         let committed = widgets::name_field(ui, theme, field, naming, "", &mut edit);
         cx.state.naming_preset =
             edit.map(|edit| TextEditState { target: device_id, text: edit.text, focused: edit.focused });
-        let track = sound_begins_at(cx, device).filter(|_| cx.state.naming_sound);
-        match (committed, track) {
-            (Some(name), Some(track)) => {
-                if let Some(kept) = cx.try_session(|session| session.save_sound(track, &name, "", &[])) {
-                    let what = if kept.saved.replaced { "Replaced" } else { "Saved" };
-                    let made_of = kept.devices.join(", ");
-                    cx.state
-                        .toasts
-                        .info(format!("{what} the sound \u{201C}{}\u{201D}: {made_of}", kept.saved.info.name));
-                    // What a sound does not hold, where the track has any.
-                    for left_out in kept.left_out {
-                        cx.state.toasts.info(left_out);
-                    }
-                }
-            }
-            (Some(preset), None) => {
-                if let Some(saved) = cx.try_session(|session| session.save_preset(device_id, &preset, "", &[])) {
-                    let what = if saved.replaced { "Replaced" } else { "Saved" };
-                    let said = format!("{what} the preset \u{201C}{}\u{201D} of {}", saved.info.name, device.name);
-                    cx.state.toasts.info(said);
-                }
-            }
-            (None, _) => {}
+        if let Some(preset) = committed
+            && let Some(saved) = cx.try_session(|session| session.save_preset(device_id, &preset, "", &[]))
+        {
+            let what = if saved.replaced { "Replaced" } else { "Saved" };
+            cx.state.toasts.info(format!("{what} the preset \u{201C}{}\u{201D} of {}", saved.info.name, device.name));
         }
         return;
     }

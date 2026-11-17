@@ -12,15 +12,22 @@
 //!
 //! A sound in the air is a [`PresetDrag`]. As with audio files
 //! (`dragging`), each frame runs in three steps: [`begin`] before the
-//! views, the views that can take it saying so with [`offer`], and [`end`]
-//! after them, where a drag that was let go is carried out.
+//! views, the views that can take it saying so with [`offer_track`] or
+//! [`offer_new_track`], and [`end`] after them, where a drag that was let
+//! go is carried out.
+//!
+//! A sound that is saved says more of itself than a name, so saving one
+//! is a small form ([`Form`]: name, description, tags), and the same form
+//! renames and describes anew what was saved, a preset of one device
+//! included. Deleting what was saved cannot be taken back: it is asked
+//! about first. Both are drawn by [`modals`].
 
-use super::colors;
 use super::state::Cx;
-use eframe::egui::{self, Align2, CursorIcon, Id, LayerId, Order, Pos2, Rect, vec2};
+use super::{colors, widgets};
+use eframe::egui::{self, Align2, CursorIcon, Id, LayerId, Order, Pos2, Rect, Role, Sense, WidgetInfo, vec2};
 use trill_core::device::DeviceCategory;
-use trill_core::{ChainRef, TrackId, TrackKind};
-use trill_noir::{paint, text};
+use trill_core::{ChainRef, Device, TrackId, TrackKind};
+use trill_noir::{Variant, paint, text};
 
 /// A sound as the browser lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,6 +43,9 @@ pub struct Listed {
     pub after: Vec<String>,
     /// Whether someone saved it; otherwise its device type brings it.
     pub saved: bool,
+    /// Where its device type files it (`Bass`, `Pad`); empty for one that
+    /// was saved.
+    pub kind: String,
 }
 
 impl Listed {
@@ -70,13 +80,16 @@ pub fn listed(cx: &Cx) -> Vec<Listed> {
                 description: sound.info.description.clone(),
                 after: sound.after.clone(),
                 saved: true,
+                kind: String::new(),
             })
         })
         .collect();
     sounds.sort_by_key(|sound| sound.name.to_lowercase());
     for descriptor in cx.descriptors {
         for preset in &descriptor.presets {
-            let Some(after) = preset.after.as_deref().filter(|after| !after.is_empty()) else { continue };
+            // A sound that is dry is a sound too; a preset that is filed
+            // nowhere (a synth's plain starting point) is not one to choose.
+            let Some(after) = preset.after.as_deref().filter(|_| !preset.category.is_empty()) else { continue };
             sounds.push(Listed {
                 uri: descriptor.uri.clone(),
                 device: descriptor.name.clone(),
@@ -85,6 +98,7 @@ pub fn listed(cx: &Cx) -> Vec<Listed> {
                 description: preset.description.clone(),
                 after: trill_core::presets::names_after(after),
                 saved: false,
+                kind: preset.category.clone(),
             });
         }
     }
@@ -265,9 +279,211 @@ fn floating_label(ctx: &egui::Context, cx: &Cx, drag: &PresetDrag) {
     text::paint_name(&painter, plate.shrink2(vec2(8.0, 0.0)), Align2::LEFT_CENTER, theme.text.body, &drag.label, ink);
 }
 
+// ---- saving, renaming, describing, deleting ----------------------------------
+
+/// What a [`Form`] is for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FormFor {
+    /// The sound of a track, to be saved.
+    Save { track: TrackId },
+    /// What the device type `uri` has saved under `name`, to be given
+    /// another name, description or tags.
+    Edit { uri: String, name: String },
+}
+
+/// A sound's name and what it says of itself, as they are typed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Form {
+    pub what: FormFor,
+    pub name: String,
+    pub description: String,
+    /// The tags, with commas between.
+    pub tags: String,
+    /// The name's field has yet to be given the keyboard.
+    pub fresh: bool,
+}
+
+/// Opens the form that saves the sound of `track`, whose first device is
+/// `first`: under the name of the saved sound the device is on, if it is
+/// on one, since that is the likely one to save over.
+pub fn save_form(cx: &mut Cx, track: TrackId, first: &Device) {
+    let on = first.preset.as_ref().and_then(|preset| {
+        let saved = cx.snap.saved_presets.get(&first.uri)?;
+        saved.iter().find(|saved| saved.id == preset.id)
+    });
+    cx.state.preset_form = Some(Form {
+        what: FormFor::Save { track },
+        name: on.map(|saved| saved.name.clone()).unwrap_or_default(),
+        description: on.map(|saved| saved.description.clone()).unwrap_or_default(),
+        tags: on.map(|saved| saved.tags.join(", ")).unwrap_or_default(),
+        fresh: true,
+    });
+}
+
+/// Opens the form on what the device type `uri` has saved under `name`.
+pub fn edit_form(cx: &mut Cx, uri: &str, name: &str) {
+    let saved = cx.session.lock().saved_presets().list(uri);
+    let Some(saved) = saved.into_iter().find(|saved| saved.name == name) else { return };
+    cx.state.preset_form = Some(Form {
+        what: FormFor::Edit { uri: uri.to_owned(), name: saved.name.clone() },
+        name: saved.name,
+        description: saved.description,
+        tags: saved.tags.join(", "),
+        fresh: true,
+    });
+}
+
+/// The tags typed into a form, one by one.
+fn tags_of(typed: &str) -> Vec<String> {
+    typed.split(',').map(|tag| tag.trim().to_owned()).filter(|tag| !tag.is_empty()).collect()
+}
+
+/// The form, and the question before something saved is deleted, while
+/// either is up. Call once the views have run.
+pub fn modals(ctx: &egui::Context, cx: &mut Cx) {
+    form(ctx, cx);
+    delete_question(ctx, cx);
+}
+
+fn form(ctx: &egui::Context, cx: &mut Cx) {
+    let Some(mut form) = cx.state.preset_form.take() else { return };
+    let theme = cx.theme;
+    let (title, proceed) = match &form.what {
+        FormFor::Save { .. } => ("Save this track\u{2019}s sound", "Save"),
+        FormFor::Edit { .. } => ("Rename or describe what was saved", "Keep"),
+    };
+    let mut choice: Option<bool> = None;
+    let frame = egui::Frame::NONE
+        .fill(theme.panel)
+        .stroke(egui::Stroke::new(1.0, theme.hairline))
+        .inner_margin(egui::Margin::symmetric(14, 12));
+    let modal =
+        egui::Modal::new(Id::unique("preset-form")).frame(frame).backdrop_color(theme.backdrop).show(ctx, |ui| {
+            ui.set_width(440.0);
+            ui.spacing_mut().item_spacing = vec2(theme.metric.gap, 0.0);
+            let (heading, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
+            text::paint(ui.painter(), heading, Align2::LEFT_CENTER, theme.text.caps, title, theme.ink_dim);
+            ui.add_space(6.0);
+            let (rule, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+            paint::hline(ui.painter(), rule.x_range(), rule.top(), theme.hairline);
+            let fields: [(&str, &str, &mut String); 3] = [
+                ("Name", "What to call it", &mut form.name),
+                ("Description", "What it sounds like and what it is for, in a sentence", &mut form.description),
+                ("Tags", "Words to find it by, with commas between: bass, warm, house", &mut form.tags),
+            ];
+            for (index, (label, hint, buffer)) in fields.into_iter().enumerate() {
+                ui.add_space(10.0);
+                let (caption, response) = ui.allocate_exact_size(vec2(ui.available_width(), 14.0), Sense::hover());
+                response.widget_info(|| WidgetInfo::labeled(Role::Label, true, format!("Sound {label}")));
+                let caps = label.to_uppercase();
+                text::paint(ui.painter(), caption, Align2::LEFT_CENTER, theme.text.micro, &caps, theme.ink_faint);
+                ui.add_space(3.0);
+                let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
+                let field = trill_noir::text_field(ui, theme, rect, Id::unique(("preset-form", index)), buffer, hint);
+                if index == 0 && form.fresh {
+                    field.request_focus();
+                }
+            }
+            form.fresh = false;
+            ui.add_space(14.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if trill_noir::button(ui, theme, proceed, Variant::Primary).clicked() {
+                    choice = Some(true);
+                }
+                if trill_noir::button(ui, theme, "Cancel", Variant::Default).clicked() {
+                    choice = Some(false);
+                }
+            });
+        });
+    // Enter in any of the fields is the button.
+    if choice.is_none() && ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
+        choice = Some(true);
+    }
+    if modal.should_close() {
+        choice.get_or_insert(false);
+    }
+    match choice {
+        None => cx.state.preset_form = Some(form),
+        Some(false) => {}
+        // What cannot be done is said, and the form stays for another try,
+        // with the keyboard back in the name: Enter took it out of its field.
+        Some(true) => {
+            if !carry_out(cx, &form) {
+                form.fresh = true;
+                cx.state.preset_form = Some(form);
+            }
+        }
+    }
+}
+
+/// Does what a form that was confirmed asks, and says whether it was done.
+fn carry_out(cx: &mut Cx, form: &Form) -> bool {
+    let tags = tags_of(&form.tags);
+    match &form.what {
+        FormFor::Save { track } => {
+            let track = *track;
+            let kept = cx.try_session(|session| session.save_sound(track, &form.name, &form.description, &tags));
+            let Some(kept) = kept else { return false };
+            let what = if kept.saved.replaced { "Replaced" } else { "Saved" };
+            let made_of = kept.devices.join(", ");
+            cx.state.toasts.info(format!("{what} the sound \u{201C}{}\u{201D}: {made_of}", kept.saved.info.name));
+            // What a sound does not hold, where the track has any of it.
+            for left_out in kept.left_out {
+                cx.state.toasts.info(left_out);
+            }
+            true
+        }
+        FormFor::Edit { uri, name } => {
+            let change = trill_engine::PresetChange {
+                name: Some(form.name.clone()),
+                description: Some(form.description.clone()),
+                tags: Some(tags),
+            };
+            let changed = cx.try_session(|session| session.change_saved_preset(uri, name, &change));
+            let Some(changed) = changed else { return false };
+            let said = match changed.info.name == *name {
+                true => format!("Kept what \u{201C}{name}\u{201D} says of itself"),
+                false => format!("Renamed \u{201C}{name}\u{201D} to \u{201C}{}\u{201D}", changed.info.name),
+            };
+            cx.state.toasts.info(said);
+            true
+        }
+    }
+}
+
+fn delete_question(ctx: &egui::Context, cx: &mut Cx) {
+    let Some((uri, name)) = cx.state.deleting_preset.clone() else { return };
+    let whose = cx
+        .descriptors
+        .iter()
+        .find(|descriptor| descriptor.uri == uri)
+        .map_or("its device", |found| found.name.as_str());
+    let body = format!(
+        "\u{201C}{name}\u{201D}, which was saved for {whose}, will be gone for good, from every song\u{2019}s list. \
+         Devices that were given it keep the sound they have."
+    );
+    let title = "Delete what was saved?";
+    let Some(proceed) = widgets::question(ctx, cx.theme, "delete-preset", title, &body, "Delete", "Cancel") else {
+        return;
+    };
+    cx.state.deleting_preset = None;
+    if proceed {
+        match cx.with_session(|session| session.delete_saved_preset(&uri, &name)) {
+            true => cx.state.toasts.info(format!("Deleted \u{201C}{name}\u{201D}")),
+            false => cx.state.toasts.error(format!("\u{201C}{name}\u{201D} was no longer there to delete")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tags_are_typed_with_commas_between() {
+        assert_eq!(tags_of(" bass, warm ,, deep house ,"), ["bass", "warm", "deep house"]);
+        assert!(tags_of("  ").is_empty());
+    }
 
     #[test]
     fn a_sound_says_what_it_is_made_of() {
@@ -279,6 +495,7 @@ mod tests {
             description: String::new(),
             after: after.iter().map(|name| name.to_string()).collect(),
             saved: false,
+            kind: "Pad".into(),
         };
         assert_eq!(sound(&[]).made_of(), "Wavetable alone");
         assert_eq!(sound(&["Reverb"]).made_of(), "Wavetable, then Reverb");

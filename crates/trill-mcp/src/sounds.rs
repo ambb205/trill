@@ -82,6 +82,8 @@ save_preset also keeps a sound you have shaped by parameter. Saved presets are f
 to a device by `preset` like any other, in every song.
 - A sound is often more than one device: a guitar and its amplifier, a synth with its chorus and reverb. save_sound keeps a track's instrument and every effect after it as one thing, each as it is now. Save one when a chain is worth having again: when the user has settled on a tone that takes two plugins, or when a part's instrument and effects are to go on another track or into another song. It is then a preset of that instrument: search_presets lists it with what it brings (`with`), and `preset` gives it like any other, in create_track (with the instrument as `instrument`), add_device and update_device, which make the effects behind the instrument in the same undo step. The reply's `sound` says which devices were made.
 - Given to an instrument that is on a track already, a sound replaces the instrument's own sound and the effects the sound before it had brought; effects that were added otherwise, or given a preset of their own since, stay, behind the new ones. The reply says what was removed. A sound that names a plugin this machine has not got is made without it, and the reply says which (`without`). A sound holds no fader, pan, send, automation or sidechain: those belong to a song, so set them again.
+- What was saved can be renamed or described anew with edit_preset. delete_preset removes one for good, which \
+nothing takes back: ask the user first.
 - builtin:wavetable has no effects inside; its presets are sounds. Its leads, pads, plucks and keys bring a chorus, a delay or a reverb, which are devices of their own to change or delete; its basses are dry.
 - A plugin's parameters are numbers whose meaning only the plugin knows. get_device shows each value as the \
 plugin displays it (`text`), lists the parameters that were moved from their defaults, and finds others by name \
@@ -168,6 +170,29 @@ pub struct SaveSoundRequest {
     pub description: Option<String>,
     /// Words to find it by: "guitar", "rhythm", "high gain".
     pub tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EditPresetRequest {
+    /// The device type the saved preset or sound belongs to, by its URI: `device` of a search_presets item.
+    pub device: String,
+    /// The name of the saved preset or sound: one that is filed under "Saved". What a device type brings itself
+    /// cannot be changed.
+    pub preset: String,
+    /// Another name for it. Refused if another saved preset of the device type has it.
+    pub name: Option<String>,
+    /// Another description: what it sounds like and what it is for, in a sentence.
+    pub description: Option<String>,
+    /// Other words to find it by, in place of the ones it has.
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeletePresetRequest {
+    /// The device type the saved preset or sound belongs to, by its URI.
+    pub device: String,
+    /// The name of the saved preset or sound to delete: one that is filed under "Saved".
+    pub preset: String,
 }
 
 /// One device type that was looked through, with its presets as far as
@@ -530,6 +555,20 @@ pub(crate) fn preset_note_into(out: &mut Value, session: &mut Session, device: D
     }
 }
 
+/// An error about a saved preset of the device type `uri`, with the ones
+/// that are saved for it: what there is to change or delete.
+fn saved_hint(session: &Session, uri: &str, error: String) -> String {
+    if !error.contains("no saved preset") {
+        return error;
+    }
+    let saved: Vec<String> =
+        session.saved_presets().list(uri).into_iter().take(NAMED_SAVED).map(|preset| preset.name).collect();
+    match saved.is_empty() {
+        true => format!("{error}. Nothing is saved for that device type; search_presets files what is under \"Saved\""),
+        false => format!("{error}. Saved for it: {}", saved.join(", ")),
+    }
+}
+
 /// Says in a reply what a sound that was just given came to: the devices
 /// it made behind its first, the ones an earlier sound had brought and
 /// that went, and what it names that was not made. Nothing for a preset of
@@ -748,6 +787,69 @@ impl TrillServer {
                 saved.info.name, device.name
             ));
             Ok(out)
+        })();
+        finish(reply)
+    }
+
+    /// Rename a saved preset or sound, or change its description or its tags; everything it holds stays as it is.
+    /// Devices of the open song that were on it are on it under its new name. Only what was saved can be
+    /// changed (search_presets files it under "Saved"), not what a device type brings itself.
+    #[tool(annotations(title = "Edit saved preset"))]
+    fn edit_preset(&self, Parameters(request): Parameters<EditPresetRequest>) -> CallToolResult {
+        let mut session = self.session.lock();
+        let reply = (|| {
+            if request.name.is_none() && request.description.is_none() && request.tags.is_none() {
+                return Err("give `name`, `description` or `tags`: what to change about it".to_string());
+            }
+            let change = trill_engine::PresetChange {
+                name: request.name.clone(),
+                description: request.description.clone(),
+                tags: request.tags.clone(),
+            };
+            let saved = session
+                .change_saved_preset(&request.device, &request.preset, &change)
+                .map_err(|error| saved_hint(&session, &request.device, error.to_string()))?;
+            let mut out = json!({ "saved": saved.info.path(), "id": saved.info.id, "device": request.device });
+            if !saved.info.description.is_empty() {
+                out["description"] = json!(saved.info.description);
+            }
+            if !saved.info.tags.is_empty() {
+                out["tags"] = json!(saved.info.tags);
+            }
+            if request.name.is_some() {
+                out["note"] = json!(
+                    "It is asked for by its new name from now on; devices of the open song that were on it are on \
+                     it under that name."
+                );
+            }
+            Ok(out)
+        })();
+        finish(reply)
+    }
+
+    /// Delete a saved preset or sound for good: its file is removed, and nothing brings it back. Devices that
+    /// were given it keep the sound they have. Only what was saved can be deleted, not what a device type brings
+    /// itself. Ask the user before deleting something they made.
+    #[tool(annotations(title = "Delete saved preset", destructive_hint = true))]
+    fn delete_preset(&self, Parameters(request): Parameters<DeletePresetRequest>) -> CallToolResult {
+        if self.is_guarded() {
+            return finish(Err("from here a saved preset cannot be deleted: that cannot be taken back. The user can \
+                               do it from the window: a right-click on it in the browser, or the preset menu of a \
+                               device of its type."
+                .to_string()));
+        }
+        let mut session = self.session.lock();
+        let reply = (|| {
+            let name = request.preset.trim();
+            if !session.delete_saved_preset(&request.device, name) {
+                let missing = format!("there is no saved preset '{name}' of '{}'", request.device);
+                return Err(saved_hint(&session, &request.device, missing));
+            }
+            Ok(json!({
+                "deleted": name,
+                "device": request.device,
+                "note": "Its file is gone. Devices that were given it keep the sound they have.",
+            }))
         })();
         finish(reply)
     }
