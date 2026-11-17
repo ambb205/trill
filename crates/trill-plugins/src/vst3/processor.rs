@@ -328,7 +328,9 @@ impl Drop for Vst3Processor {
         self.stop();
         let (instance, audio, patient) = (self.instance, self.audio.take(), self.patient);
         let destroy = move |thread: &mut PluginThread| thread.vst3.destroy(instance, audio, patient);
-        if let Err(error) = self.main.call(TEARDOWN_TIMEOUT, destroy) {
+        // At rest: a plugin is not taken away from under an event loop
+        // that its own code may have started.
+        if let Err(error) = self.main.call_at_rest(TEARDOWN_TIMEOUT, destroy) {
             log::warn!("[{}] was not torn down cleanly: {error}", self.name);
         }
     }

@@ -279,8 +279,12 @@ impl Instance {
                 }
                 if !state.component.is_empty() {
                     let stream = MemoryStream::new(state.component.clone());
-                    // SAFETY: the component is live and inactive, and the
-                    // stream outlives the call.
+                    // SAFETY: the component is live, and the stream
+                    // outlives the call. The plugin is inactive when it
+                    // is being made, and may be active and processing
+                    // when it is handed a preset: VST3 lets a state be
+                    // set then, from this thread, and leaves it to the
+                    // plugin to bring it over to its audio side.
                     let result = unsafe { self.component.setState(interface(&stream)) };
                     if result != kResultOk {
                         return Err(format!("the plugin rejected its saved state ({})", result_name(result)));
