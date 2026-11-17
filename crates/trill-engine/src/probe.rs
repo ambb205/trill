@@ -56,7 +56,7 @@ const HIGHEST_HZ: f64 = 4200.0;
 const CLEAR_PITCH: f64 = 0.7;
 
 /// A note to play.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProbeNote {
     pub pitch: u8,
     /// 1..=127.
@@ -65,7 +65,7 @@ pub struct ProbeNote {
     pub with: Vec<u8>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ProbeOptions {
     pub sample_rate: u32,
     /// How long each note is held.
@@ -96,7 +96,7 @@ impl Default for ProbeOptions {
 }
 
 /// What came of one note.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Heard {
     pub note: ProbeNote,
     /// Whether anything was heard at all.
@@ -126,7 +126,7 @@ pub struct Heard {
 
 /// Whether devices are ready to be played: see
 /// [`ProbeJob::wait_until_ready`].
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Readiness {
     /// Whether they answered what they were given, and went on answering
     /// it alike with nothing loading. `false` after `seconds` of waiting
@@ -140,7 +140,7 @@ pub struct Readiness {
 }
 
 /// What a probe found.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Probed {
     /// One entry per note asked for, in order.
     pub heard: Vec<Heard>,
@@ -160,6 +160,12 @@ pub struct Probed {
 pub enum ProbeError {
     #[error("{0}")]
     Device(String),
+    /// The probe ran in a process of its own, which was taken down, by a
+    /// plugin as far as anyone can tell; or could not be run there, which
+    /// is told in the words that come with it. Nothing of the song that
+    /// is open was touched. See [`crate::apart`].
+    #[error("{0}")]
+    Apart(String),
 }
 
 /// What to play through, taken from a session so that the probe runs
@@ -173,19 +179,39 @@ pub struct ProbeJob {
     /// the plugin itself can load.
     pub preset: Option<PresetInfo>,
     pub tempo: f64,
+    /// Where a plugin is probed: in a process of its own, if the session
+    /// was given one ([`crate::apart`]). `None` probes here, as a
+    /// built-in instrument always is.
+    pub apart: Option<crate::apart::Apart>,
 }
 
 impl ProbeJob {
     /// Plays `notes` one at a time and measures each.
     pub fn run(&self, notes: &[ProbeNote], options: &ProbeOptions) -> Result<Probed, ProbeError> {
+        match self.apart.as_ref().and_then(|apart| apart.probe(self, notes, options)) {
+            Some(done) => done,
+            None => self.run_here(notes, options).map(|(probed, _)| probed),
+        }
+    }
+
+    /// [`ProbeJob::run`] in this process. The instrument comes back with
+    /// what it was heard to do, for whoever has a reason to keep it: a
+    /// process that probes for another and ends in a moment leaves it as
+    /// it is.
+    pub(crate) fn run_here(
+        &self,
+        notes: &[ProbeNote],
+        options: &ProbeOptions,
+    ) -> Result<(Probed, Probing), ProbeError> {
         let mut probing = self.open(notes, options)?;
         let heard = probing.play(notes);
-        Ok(Probed {
+        let probed = Probed {
             heard,
             waited_seconds: probing.waited_seconds,
             answered: probing.answered,
             waited_for_silent: probing.silent.clone(),
-        })
+        };
+        Ok((probed, probing))
     }
 
     /// Makes the devices and waits for them to be ready to play `first`,
@@ -224,6 +250,15 @@ impl ProbeJob {
     /// Waits as long as that takes, up to two minutes while there are
     /// signs of loading; `patience` is how long nothing at all may happen.
     pub fn wait_until_ready(&self, pitches: &[u8], patience: Duration) -> Result<Readiness, ProbeError> {
+        match self.apart.as_ref().and_then(|apart| apart.ready(self, pitches, patience)) {
+            Some(done) => done,
+            None => self.wait_here(pitches, patience).map(|(readiness, _)| readiness),
+        }
+    }
+
+    /// [`ProbeJob::wait_until_ready`] in this process: see
+    /// [`ProbeJob::run_here`].
+    pub(crate) fn wait_here(&self, pitches: &[u8], patience: Duration) -> Result<(Readiness, Probing), ProbeError> {
         let note = |pitch: &u8| OpeningNote {
             pitch: *pitch,
             velocity: velocity_of(100),
@@ -233,7 +268,9 @@ impl ProbeJob {
         let opening = Opening { notes: pitches.iter().map(note).collect(), signal: pitches.is_empty() };
         let options = ProbeOptions { patience, ..ProbeOptions::default() };
         let probing = self.open_asking(opening, &options)?;
-        Ok(Readiness { ready: probing.answered, seconds: probing.waited_seconds, silent: probing.silent })
+        let readiness =
+            Readiness { ready: probing.answered, seconds: probing.waited_seconds, silent: probing.silent.clone() };
+        Ok((readiness, probing))
     }
 
     fn open_asking(&self, opening: Opening, options: &ProbeOptions) -> Result<Probing, ProbeError> {

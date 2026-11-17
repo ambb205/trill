@@ -351,6 +351,7 @@ fn an_effect_is_run_the_same_amount_before_every_render_however_long_its_instrum
             project: project.clone(),
             factory: factory(&ScriptedFactory::loading(loading)),
             audio: trill_engine::sources::AudioSources::default(),
+            apart: None,
         };
         let begun = Instant::now();
         (job.render(&options).unwrap(), begun.elapsed())
@@ -397,6 +398,7 @@ fn a_render_does_not_go_on_without_an_instrument_that_never_answered_and_writes_
         project: project.clone(),
         factory: factory(&scripted),
         audio: trill_engine::sources::AudioSources::default(),
+        apart: None,
     };
     // Key 77 is no drum of the kit. The render stops and names the track
     // that is missing, and that one only; no file is left anywhere.

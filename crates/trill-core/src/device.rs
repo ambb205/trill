@@ -743,6 +743,16 @@ pub trait DeviceFactory: Send + Sync {
         Beside::Anything
     }
 
+    /// The file the code of a device of this factory is in, where that is
+    /// not the program's own: a plugin's file. It is what tells which
+    /// plugin a fault was in. `None` for a device that is not this
+    /// factory's and for one that is part of the program. A factory that
+    /// hands the work to another must hand this on too.
+    fn module(&self, uri: &str) -> Option<std::path::PathBuf> {
+        let _ = uri;
+        None
+    }
+
     /// What is wrong with `device` as this factory would create it, short
     /// of failing to create it. Empty when all is well, and for devices of
     /// other factories. Called off the audio thread, and often: it should
@@ -860,6 +870,10 @@ impl<T: DeviceFactory + ?Sized> DeviceFactory for std::sync::Arc<T> {
         (**self).beside(uri)
     }
 
+    fn module(&self, uri: &str) -> Option<std::path::PathBuf> {
+        (**self).module(uri)
+    }
+
     fn warnings(&self, device: &Device) -> Vec<DeviceWarning> {
         (**self).warnings(device)
     }
@@ -920,6 +934,10 @@ impl DeviceFactory for CompositeFactory {
 
     fn beside(&self, uri: &str) -> Beside {
         self.factories.iter().map(|factory| factory.beside(uri)).fold(Beside::Anything, Beside::or)
+    }
+
+    fn module(&self, uri: &str) -> Option<std::path::PathBuf> {
+        self.factories.iter().find_map(|factory| factory.module(uri))
     }
 
     fn create(&self, device: &Device, sample_rate: f64, max_block: usize) -> Result<DeviceInstance, DeviceError> {

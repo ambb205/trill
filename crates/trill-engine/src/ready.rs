@@ -857,10 +857,59 @@ impl<'a> Stand<'a> {
     }
 }
 
+/// What is remembered of plugins from one wait to the next, as it goes to
+/// a process that waits for this one and comes back from it: without it,
+/// such a process would wait out every key that plays nothing, and every
+/// instrument that never answers, each time anew.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Memory {
+    silent: Vec<u64>,
+    ready: Vec<(u64, Vec<Answer>)>,
+    keys: Vec<(u64, Vec<Option<bool>>)>,
+}
+
+/// What is remembered now.
+pub(crate) fn remembered() -> Memory {
+    Memory {
+        silent: KNOWN_NOT_TO_ANSWER.lock().clone(),
+        ready: KNOWN_READY.lock().clone(),
+        keys: KNOWN_KEYS.lock().iter().map(|(devices, keys)| (*devices, keys.to_vec())).collect(),
+    }
+}
+
+/// Takes up what another process remembers. What it has found ready is
+/// no longer known not to answer here, what it found not to answer is no
+/// longer known as ready, and what it knows of keys takes the place of
+/// what was known of the same plugins.
+pub(crate) fn remember(memory: Memory) {
+    let (mut silent, mut ready, mut keys) = (KNOWN_NOT_TO_ANSWER.lock(), KNOWN_READY.lock(), KNOWN_KEYS.lock());
+    for (signature, answers) in memory.ready {
+        silent.retain(|known| *known != signature);
+        ready.retain(|(known, _)| *known != signature);
+        ready.push((signature, answers));
+    }
+    for signature in memory.silent {
+        if !ready.iter().any(|(known, _)| *known == signature) && !silent.contains(&signature) {
+            silent.push(signature);
+        }
+    }
+    for (devices, known) in memory.keys {
+        let Ok(known) = Keys::try_from(known) else { continue };
+        keys.retain(|(other, _)| *other != devices);
+        keys.push((devices, known));
+    }
+    let surplus = silent.len().saturating_sub(REMEMBERED);
+    silent.drain(..surplus);
+    let surplus = ready.len().saturating_sub(REMEMBERED);
+    ready.drain(..surplus);
+    let surplus = keys.len().saturating_sub(REMEMBERED);
+    keys.drain(..surplus);
+}
+
 /// What came out of a plugin over a short stretch: its highest sample, by
 /// which it is known to have answered at all, and its energy, by which
 /// one answer is compared with the next.
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Answer {
     peak: f32,
     energy: f64,

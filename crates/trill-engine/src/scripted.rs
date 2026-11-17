@@ -55,8 +55,37 @@ const VOICES: usize = 16;
 /// Where the noise of the drums begins, and begins again after a reset.
 const NOISE_SEED: u32 = 0x2545_F491;
 
+/// When a bass that is made for a render takes its process down with it,
+/// as a plugin that faults does: by writing where nothing may be
+/// written. The bass a song plays live never does, and neither do the
+/// drums and the amplifier beside it. For showing what
+/// becomes of a render when a plugin does this: such a render has to be
+/// done in a process of its own ([`crate::apart`]), or whoever asked for
+/// it goes down too.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Dies {
+    /// As it is made.
+    Made,
+    /// At the first note it is tried with before the song is played.
+    Rehearsed,
+    /// In this block of the song, counted from one.
+    Played(u32),
+    /// As it is let go of.
+    LetGo,
+}
+
+/// The fault itself.
+fn die() -> ! {
+    // SAFETY: there is none, on purpose: the address is not one that may
+    // be written to, and the system ends the process for it. Only a test
+    // asks for this, of a process it started for the purpose.
+    unsafe { std::ptr::write_volatile(std::hint::black_box(8usize) as *mut u8, 1) };
+    std::process::abort()
+}
+
 /// When the instruments a factory hands out are ready to play.
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Loading {
     /// How long after it is created an instrument first answers a note.
     pub first: Duration,
@@ -108,6 +137,9 @@ pub struct Loading {
     /// reset does not put that back. (An amplifier plugin was measured
     /// that is like this.)
     pub free: bool,
+    /// A bass that is made for a render takes its process down: see
+    /// [`Dies`].
+    pub dies: Option<Dies>,
 }
 
 /// What the instruments of a factory keep between them: see
@@ -212,6 +244,11 @@ impl DeviceFactory for ScriptedFactory {
             let amp = Amp { ready, free: self.loading.free, frames: 0 };
             return Ok(DeviceInstance { processor: Box::new(amp), params: Vec::new(), controller: None });
         }
+        // Only a bass that is made for a render ever takes its process down.
+        let dies = self.loading.dies.filter(|_| purpose == Purpose::Rendering && kind == Kind::Bass);
+        if dies == Some(Dies::Made) {
+            die();
+        }
         let patch = Arc::new(Patch::default());
         // The sound a saved state stands for: the preset it was saved with.
         if let Some(saved) = device.state.as_deref().and_then(|state| std::str::from_utf8(state).ok()) {
@@ -239,6 +276,8 @@ impl DeviceFactory for ScriptedFactory {
             takes: self.loading.takes,
             sounded: [0; 128],
             shared: self.loading.shares.then(|| self.shared.clone()),
+            dies,
+            blocks: 0,
             onset: self.loading.onset,
             patch: patch.clone(),
             voices: [Voice::default(); VOICES],
@@ -356,6 +395,14 @@ enum Kind {
     Amp,
 }
 
+impl Drop for Instrument {
+    fn drop(&mut self) {
+        if self.dies == Some(Dies::LetGo) {
+            die();
+        }
+    }
+}
+
 /// The amplifier: half of what goes in comes out, once it is ready.
 struct Amp {
     /// When it begins to pass sound; `None` for one that never does.
@@ -442,6 +489,10 @@ struct Instrument {
     sounded: [u32; 128],
     /// What it keeps with the factory's other instruments, if anything.
     shared: Option<Arc<Shared>>,
+    /// When it takes its process down, and how many blocks of the song it
+    /// has played.
+    dies: Option<Dies>,
+    blocks: u32,
     /// How long after a key goes down its sound begins.
     onset: Duration,
     patch: Arc<Patch>,
@@ -595,7 +646,14 @@ impl DeviceProcessor for Instrument {
 
     fn set_param(&mut self, _index: usize, _value: f64) {}
 
-    fn process(&mut self, _info: &ProcessInfo, events: &[Event], left: &mut [f32], right: &mut [f32]) {
+    fn process(&mut self, info: &ProcessInfo, events: &[Event], left: &mut [f32], right: &mut [f32]) {
+        self.blocks += u32::from(info.playing);
+        let note = events.iter().any(|event| matches!(event.kind, EventKind::NoteOn { .. }));
+        match self.dies {
+            Some(Dies::Rehearsed) if !info.playing && note => die(),
+            Some(Dies::Played(block)) if info.playing && self.blocks >= block => die(),
+            _ => {}
+        }
         // Instruments that keep something between them notice when two of
         // them are run at once, and take long enough over a block for that
         // to show.

@@ -89,7 +89,8 @@ fn options() -> RenderOptions {
 }
 
 fn render(project: &Project, scripted: &ScriptedFactory, options: &RenderOptions) -> Rendered {
-    let job = RenderJob { project: project.clone(), factory: factory(scripted), audio: AudioSources::default() };
+    let job =
+        RenderJob { project: project.clone(), factory: factory(scripted), audio: AudioSources::default(), apart: None };
     job.render(options).unwrap()
 }
 
@@ -298,7 +299,8 @@ fn only_the_stems_that_are_asked_for_are_written_and_a_folder_that_cannot_be_mad
     let taken = folder.path().join("taken");
     std::fs::write(&taken, b"a file").unwrap();
     let slow = ScriptedFactory::loading(Loading { first: std::time::Duration::from_secs(30), ..Loading::default() });
-    let job = RenderJob { project: project.clone(), factory: factory(&slow), audio: AudioSources::default() };
+    let job =
+        RenderJob { project: project.clone(), factory: factory(&slow), audio: AudioSources::default(), apart: None };
     let begun = std::time::Instant::now();
     let refused = job.render(&RenderOptions { stems: Some(Stems::all(&taken)), ..options() });
     let error = refused.err().expect("the folder cannot be made").to_string();
@@ -441,7 +443,7 @@ fn a_soloed_return_is_heard_as_every_track_feeds_it_and_a_soloed_track_with_its_
     {
         change(muted.track_mut(hall).unwrap());
     }
-    let silent = RenderJob { project: muted, factory: factory(&scripted), audio: AudioSources::default() };
+    let silent = RenderJob { project: muted, factory: factory(&scripted), audio: AudioSources::default(), apart: None };
     let silent = silent.render(&RenderOptions { max_tail_seconds: 0.5, ..options() }).unwrap();
     assert_eq!(peak(&silent.left), 0.0);
 }

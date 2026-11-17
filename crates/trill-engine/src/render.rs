@@ -48,15 +48,17 @@
 //! which the report says ([`Measured::alone`]).
 
 use crate::analysis::{Analyzer, AudioStats, Spectrum};
+use crate::apart::{Apart, Mix, Stage};
 use crate::compile::{Compiler, DeviceBank, Meters, Problem};
 use crate::graph::{Chain, Graph, MAX_BLOCK, Tap, TrackNode};
 use crate::processor::Processor;
 use crate::ready::{self, Waited};
 use crate::sources::AudioSources;
 use crate::spread;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use trill_core::audio::AudioBuffer;
 use trill_core::device::{DeviceFactory, Purpose};
@@ -67,7 +69,7 @@ use trill_media::{MediaError, WavFormat, WavWriter, write_wav};
 const SILENCE: f32 = 1e-5;
 const SILENCE_SECONDS: f64 = 0.25;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RenderOptions {
     pub sample_rate: u32,
     pub start_beat: f64,
@@ -99,6 +101,47 @@ pub struct RenderOptions {
     /// is known of it ([`trill_core::device::Beside`]). For finding out
     /// what a plugin does when it is, and for nothing else.
     pub trusting: bool,
+    /// Who watches the render: it is stopped through it, and says how far
+    /// it has come. It stays with whoever asks: a render that is done in a
+    /// process of its own is watched from here.
+    #[serde(skip)]
+    pub watch: Option<Arc<Watch>>,
+}
+
+/// A render as someone watches it from another thread: how far it has
+/// come, and a way to stop it at once. A render that is stopped writes
+/// nothing: what it had begun is removed.
+#[derive(Debug, Default)]
+pub struct Watch {
+    stop: AtomicBool,
+    /// How far it has come, in thousandths.
+    done: AtomicU32,
+}
+
+impl Watch {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Stops the render: it ends with [`RenderError::Stopped`] at its next
+    /// block, or, in a process of its own, as that process is ended.
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
+    pub fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+
+    /// How much of the render is made, from 0 to 1: of the song itself,
+    /// the wait for its plugins before it not counted.
+    pub fn done(&self) -> f32 {
+        self.done.load(Ordering::Relaxed) as f32 / 1000.0
+    }
+
+    pub(crate) fn came_to(&self, share: f32) {
+        self.done.store((share.clamp(0.0, 1.0) * 1000.0) as u32, Ordering::Relaxed);
+    }
 }
 
 /// Which parts of the song a render writes to files of their own, beside
@@ -106,7 +149,7 @@ pub struct RenderOptions {
 /// the render, so that a part which goes over full scale before the
 /// master brings it down is kept as it is. Only what the render plays has
 /// a file: a track that is muted has none.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Stems {
     /// The folder the files go in. It is made if it is not there; files
     /// of the same names are replaced.
@@ -164,7 +207,7 @@ fn plays(track: &Track) -> bool {
 }
 
 /// What a stem is of.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StemKind {
     /// A track as it leaves its fader and pan.
@@ -193,14 +236,14 @@ impl StemKind {
 
 /// A file a render wrote beside the mix, and what is in it, measured as
 /// the mix is.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Stem {
     pub path: String,
     pub what: StemKind,
     /// The track it is of; `None` for the mix before the master.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub track: Option<TrackId>,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
     #[serde(flatten)]
     pub stats: AudioStats,
@@ -219,6 +262,7 @@ impl Default for RenderOptions {
             stems: None,
             threads: None,
             trusting: false,
+            watch: None,
         }
     }
 }
@@ -247,7 +291,7 @@ pub fn usual_threads() -> usize {
 }
 
 /// A part of the song to measure on its own: a verse, eight bars.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Section {
     pub name: String,
     pub start_beat: f64,
@@ -267,6 +311,24 @@ pub enum RenderError {
     /// notes and not others), which is found once and would be lost.
     #[error("{}", not_answered(.0))]
     NotAnswered(Vec<WaitedFor>),
+    /// The render ran in a process of its own, and that process was taken
+    /// down, by a plugin as far as anyone can tell. Nothing of the song
+    /// that is open was touched. See [`crate::apart`].
+    #[error("{0}")]
+    Crashed(Box<crate::apart::Crash>),
+    /// It was stopped through its [`Watch`], and what it had begun to
+    /// write was removed.
+    #[error("the render was stopped, and what it had begun to write was removed")]
+    Stopped,
+    /// It was not begun: the machine does not have the memory free that a
+    /// process of its own would take.
+    #[error("{0}")]
+    NoRoom(String),
+    /// What a render in a process of its own came to that is none of the
+    /// above: the process could not be started, or what went wrong in it
+    /// is told in its own words.
+    #[error("{0}")]
+    Apart(String),
 }
 
 fn not_answered(waited: &[WaitedFor]) -> String {
@@ -302,7 +364,7 @@ pub struct Rendered {
 }
 
 /// What a render measured.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Measured {
     /// The mix.
     #[serde(flatten)]
@@ -325,7 +387,7 @@ pub struct Measured {
 
 /// A device that is not to be run beside anything, which leaves a render
 /// on one thread.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Alone {
     /// The track it is on; `None` for the master.
     pub track: Option<TrackId>,
@@ -337,7 +399,7 @@ pub struct Alone {
 
 /// One track as it leaves its fader: what it adds to the mix or to its
 /// group. A group's or a return's is what comes out of it.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TrackLevel {
     pub track: TrackId,
     pub name: String,
@@ -353,7 +415,7 @@ pub struct TrackLevel {
 }
 
 /// One part of the song, in the mix.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SectionLevel {
     #[serde(flatten)]
     pub section: Section,
@@ -362,7 +424,7 @@ pub struct SectionLevel {
 }
 
 /// What a compressor or limiter took off over the render, in dB.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DynamicsLevel {
     pub device: DeviceId,
     pub name: String,
@@ -377,7 +439,7 @@ pub struct DynamicsLevel {
 }
 
 /// A plugin that was waited for before the render started.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WaitedFor {
     /// The track it is on; `None` for the master.
     pub track: Option<TrackId>,
@@ -393,7 +455,7 @@ pub struct WaitedFor {
     /// for, though others did, the first time that was seen of it: it
     /// does not play them, or had still not loaded them when the render
     /// began.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub silent: Vec<u8>,
 }
 
@@ -449,18 +511,29 @@ pub struct RenderJob {
     /// The session's decoded files and stretched audio, so that the render
     /// decodes and stretches nothing the session already has.
     pub audio: AudioSources,
+    /// Where a render of a song with plugins is made: in a process of its
+    /// own, if the session was given one ([`crate::apart`]), so that a
+    /// plugin that takes its process down takes that one. `None` renders
+    /// here, as a song of built-in devices always is.
+    pub apart: Option<Apart>,
 }
 
 impl RenderJob {
     pub fn render(&self, options: &RenderOptions) -> Result<Rendered, RenderError> {
-        render_from(&self.project, self.factory.as_ref(), &self.audio, options, true)
+        match self.apart.as_ref().and_then(|apart| apart.render(self, options, Mix::Samples)) {
+            Some(done) => done,
+            None => render_from(&self.project, self.factory.as_ref(), &self.audio, options, true),
+        }
     }
 
     /// Renders to a 24-bit WAV file and measures the result.
     pub fn render_to_file(&self, path: &Path, options: &RenderOptions) -> Result<RenderReport, RenderError> {
-        let Rendered { sample_rate, left, right, problems, measured, .. } = self.render(options)?;
-        let audio = AudioBuffer { sample_rate: f64::from(sample_rate), left, right };
-        write_wav(path, &audio, WavFormat::Int24)?;
+        if let Some(done) = self.apart.as_ref().and_then(|apart| apart.render(self, options, Mix::File(path))) {
+            let Rendered { sample_rate, problems, measured, .. } = done?;
+            return Ok(RenderReport::new(Some(path), sample_rate, measured, &problems));
+        }
+        let rendered = render_from(&self.project, self.factory.as_ref(), &self.audio, options, true)?;
+        let Rendered { sample_rate, problems, measured, .. } = written(rendered, path, WavFormat::Int24)?;
         Ok(RenderReport::new(Some(path), sample_rate, measured, &problems))
     }
 
@@ -468,9 +541,41 @@ impl RenderJob {
     /// audio itself is let go of as it is made. The numbers are the ones
     /// [`RenderJob::render_to_file`] would report.
     pub fn measure(&self, options: &RenderOptions) -> Result<RenderReport, RenderError> {
-        let rendered = render_from(&self.project, self.factory.as_ref(), &self.audio, options, false)?;
+        let rendered = match self.apart.as_ref().and_then(|apart| apart.render(self, options, Mix::Nothing)) {
+            Some(done) => done?,
+            None => render_from(&self.project, self.factory.as_ref(), &self.audio, options, false)?,
+        };
         Ok(RenderReport::new(None, rendered.sample_rate, rendered.measured, &rendered.problems))
     }
+}
+
+/// Writes the mix of `rendered` to `path` and hands back the rest of it.
+pub(crate) fn written(mut rendered: Rendered, path: &Path, format: WavFormat) -> Result<Rendered, RenderError> {
+    let (left, right) = (std::mem::take(&mut rendered.left), std::mem::take(&mut rendered.right));
+    let audio = AudioBuffer { sample_rate: f64::from(rendered.sample_rate), left, right };
+    write_wav(path, &audio, format)?;
+    Ok(rendered)
+}
+
+/// The devices a render of `project` with `options` makes: those of the
+/// tracks that are heard and of what feeds them, and the master's.
+pub(crate) fn devices_made(project: &Project, options: &RenderOptions) -> Vec<trill_core::Device> {
+    let only = options.only_tracks.as_deref().map(|tracks| hearing_only(project, tracks));
+    let project = only.as_ref().unwrap_or(project);
+    let needed = crate::compile::needed(project);
+    let tracks = project.tracks.iter().filter(|track| needed.contains(&track.id));
+    tracks.flat_map(|track| track.devices.iter()).chain(&project.master.devices).cloned().collect()
+}
+
+/// [`render_from`] for a process that renders for another: the song's
+/// audio is read through caches of its own.
+pub(crate) fn render_for_another(
+    project: &Project,
+    factory: &dyn DeviceFactory,
+    options: &RenderOptions,
+    keep: bool,
+) -> Result<Rendered, RenderError> {
+    render_from(project, factory, &AudioSources::default(), options, keep)
 }
 
 /// Renders `project` with freshly created devices, reading its audio files
@@ -572,6 +677,7 @@ fn render_from(
         graph.master.tap = Some(listener(Some(stems.begin(StemKind::Premaster, None, sample_rate)?)));
     }
     let made = begun.elapsed();
+    crate::apart::stage(Stage::Waiting);
     // How many threads make it: as many as it was given and can use,
     // unless a device of it is not to be run beside anything. The plugins
     // are rehearsed on them too.
@@ -638,6 +744,18 @@ fn render_from(
     let alone = if given > 1 { alone } else { Vec::new() };
     processor.seek(start);
     processor.play();
+    crate::apart::stage(Stage::Playing);
+    // Whoever watches is told how far it has come, and may stop it: what
+    // was begun goes with the graph, and the folder that was made for it.
+    let watch = options.watch.as_deref();
+    let stopped = || watch.is_some_and(Watch::stopped);
+    let given_up = |processor: Processor| {
+        drop(processor);
+        if let Some(folder) = made_folder {
+            let _ = std::fs::remove_dir(folder);
+        }
+        RenderError::Stopped
+    };
 
     // How many frames into the render a beat of the song falls: through
     // whatever the tempo does on the way, and for one tempo as it was
@@ -657,19 +775,40 @@ fn render_from(
     let kept_frames = if keep { body_frames } else { 0 };
     let mut left = vec![0.0f32; kept_frames + tail_frames];
     let mut right = vec![0.0f32; kept_frames + tail_frames];
+    // How far it has come is said every so many blocks: two thirds of a
+    // second of the song.
+    let came_to = |frames: usize| {
+        if (frames / MAX_BLOCK).is_multiple_of(64) {
+            let share = frames as f32 / (body_frames + tail_frames).max(1) as f32;
+            crate::apart::progress(share);
+            if let Some(watch) = watch {
+                watch.came_to(share);
+            }
+        }
+    };
     if keep {
+        let mut done = 0;
         for (l, r) in left[..body_frames].chunks_mut(MAX_BLOCK).zip(right[..body_frames].chunks_mut(MAX_BLOCK)) {
+            if stopped() {
+                return Err(given_up(processor));
+            }
             processor.process(l, r);
             mix.push(l, r);
+            done += l.len();
+            came_to(done);
         }
     } else {
         let (mut l, mut r) = (vec![0.0f32; MAX_BLOCK], vec![0.0f32; MAX_BLOCK]);
         let mut done = 0;
         while done < body_frames {
+            if stopped() {
+                return Err(given_up(processor));
+            }
             let frames = (body_frames - done).min(MAX_BLOCK);
             processor.process(&mut l[..frames], &mut r[..frames]);
             mix.push(&l[..frames], &r[..frames]);
             done += frames;
+            came_to(done);
         }
     }
 
@@ -679,6 +818,9 @@ fn render_from(
     let mut rendered = kept_frames;
     let mut quiet = 0;
     while rendered < left.len() {
+        if stopped() {
+            return Err(given_up(processor));
+        }
         let frames = (left.len() - rendered).min(MAX_BLOCK);
         let (l, r) = (&mut left[rendered..rendered + frames], &mut right[rendered..rendered + frames]);
         processor.process(l, r);
@@ -782,8 +924,18 @@ fn render_from(
         .collect();
 
     let played = begun.elapsed();
+    if let Some(watch) = watch {
+        watch.came_to(1.0);
+    }
     // The devices go, each plugin in its turn on the plugins' own thread.
-    drop(graph);
+    // A process that renders for another and has nothing more to do
+    // leaves them as they are: it ends in a moment, and taking a plugin
+    // down is where a plugin is most likely to take a process with it.
+    crate::apart::stage(Stage::LettingGo);
+    match crate::apart::leaves_devices() {
+        true => std::mem::forget(graph),
+        false => drop(graph),
+    }
     log::info!(
         "a render of {:.1} s of audio on {threads} thread(s): its devices were made in {:.1} s, waited for {:.1} s, \
          played in {:.1} s (of which {:.1} s waiting for its threads) and let go of in {:.1} s",

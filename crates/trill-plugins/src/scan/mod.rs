@@ -36,6 +36,8 @@ pub const SCANNER_ENV: &str = "TRILL_PLUGIN_SCAN";
 /// by loading libraries from disk, so more does not help.
 const MAX_PARALLEL_SCANS: usize = 4;
 
+pub use catalog::Known;
+
 /// One plugin found in a plugin file, as the plugin describes itself.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginRecord {

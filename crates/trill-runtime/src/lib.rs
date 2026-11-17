@@ -48,12 +48,14 @@
 //! ```
 
 mod housekeeping;
+pub mod jobs;
 pub mod midi;
 mod missing;
 mod recovery;
 mod settings;
 mod sounds;
 
+pub use jobs::{Jobs, Program};
 pub use midi::MidiInputInfo;
 pub use missing::{Candidate, Confidence, FoundFolder, Look, Missing, MissingFile, MissingFolder, files_missing_in};
 pub use recovery::SafetyCopy;
@@ -446,6 +448,23 @@ impl Runtime {
     #[doc(hidden)]
     pub fn abandon(self) {
         self.copies.lock().abandon();
+    }
+
+    /// Has the renders, measurements and probes of songs with plugins
+    /// done in a process of their own from now on, as `jobs` says: a
+    /// plugin that takes its process down then takes that one, and the
+    /// error says so ([`trill_engine::apart`]). A song of built-in devices
+    /// is rendered here as before. An error is about the program that was
+    /// to do them, and leaves things as they were.
+    pub fn do_jobs_apart(&self, jobs: Jobs) -> Result<(), String> {
+        let apart = jobs::apart(jobs, self.plugins.clone(), self.media.clone())?;
+        self.session.lock().do_jobs_apart(Some(apart));
+        Ok(())
+    }
+
+    /// Has every job done in this process from now on.
+    pub fn do_jobs_here(&self) {
+        self.session.lock().do_jobs_apart(None);
     }
 
     /// The plugin host, when plugins are on: for rescanning and for what
