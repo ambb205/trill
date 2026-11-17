@@ -1001,6 +1001,30 @@ impl Project {
         Ok(())
     }
 
+    /// Moves what the tempo does at `from` (the glide that arrives and the
+    /// tempo that takes over, whichever there is) to `to`, in place of
+    /// what the tempo did there.
+    pub fn move_tempo_at(&mut self, from: Beats, to: Beats) -> Result<(), EditError> {
+        if valid_position(to, "a tempo")? <= SAME_BEAT {
+            return invalid("a change of tempo lies after the start of the song, which has the tempo it begins at");
+        }
+        let at = |change: &TempoChange, beat: Beats| (change.beat - beat).abs() <= SAME_BEAT;
+        let moved: Vec<TempoChange> = self
+            .tempo_changes
+            .iter()
+            .filter(|change| at(change, from))
+            .map(|change| TempoChange { beat: to, ..*change })
+            .collect();
+        if moved.is_empty() {
+            // Nothing is there: said as removing it would say it.
+            return self.remove_tempo_at(from);
+        }
+        self.tempo_changes.retain(|change| !at(change, from) && !at(change, to));
+        self.tempo_changes.extend(moved);
+        sort_tempo_changes(&mut self.tempo_changes);
+        Ok(())
+    }
+
     /// Replaces every change of tempo after the start of the song.
     pub fn set_tempo_changes(&mut self, mut changes: Vec<TempoChange>) -> Result<(), EditError> {
         for change in &changes {
@@ -1056,6 +1080,22 @@ impl Project {
                 }
             });
         }
+        Ok(())
+    }
+
+    /// Moves the change of time signature at `from` to `to`, in place of
+    /// one that was there.
+    pub fn move_time_signature_at(&mut self, from: Beats, to: Beats) -> Result<(), EditError> {
+        if valid_position(to, "a time signature")? <= SAME_BEAT {
+            return invalid("a change of time signature lies after the start of the song, which has its own");
+        }
+        let at = |change: &MeterChange, beat: Beats| (change.beat - beat).abs() <= SAME_BEAT;
+        let Some(moved) = self.meter_changes.iter().find(|change| at(change, from)).copied() else {
+            return self.remove_time_signature_at(from);
+        };
+        self.meter_changes.retain(|change| !at(change, from) && !at(change, to));
+        self.meter_changes.push(MeterChange { beat: to, ..moved });
+        self.meter_changes.sort_by(|a, b| a.beat.total_cmp(&b.beat));
         Ok(())
     }
 
@@ -2751,6 +2791,11 @@ mod tests {
         project.set_tempo_at(0.0, 110.0, false).unwrap();
         assert_eq!(project.tempo, 110.0);
         assert_eq!(project.tempo_changes, [jump(8.0, 150.0), jump(16.0, 140.0), glide(24.0, 100.0), jump(24.0, 120.0)]);
+        // Moved, a beat takes what it holds along, in place of what was there.
+        let mut moved = project.clone();
+        moved.move_tempo_at(24.0, 16.0).unwrap();
+        assert_eq!(moved.tempo_changes, [jump(8.0, 150.0), glide(16.0, 100.0), jump(16.0, 120.0)]);
+        assert!(moved.move_tempo_at(12.0, 20.0).is_err() && moved.move_tempo_at(16.0, 0.0).is_err());
         project.remove_tempo_at(24.0).unwrap();
         assert_eq!(project.tempo_changes, [jump(8.0, 150.0), jump(16.0, 140.0)]);
 
@@ -2793,6 +2838,10 @@ mod tests {
         project.set_time_signature_at(10.0, 3, 4).unwrap();
         let cut: Vec<(u32, Beats)> = project.meter_map().cut_bars().map(|bar| (bar.number(), bar.length)).collect();
         assert_eq!(cut, [(3, 2.0), (5, 2.0)], "the 7/8 bar at 8 has two beats, and so has the 3/4 bar before 15");
+        project.move_time_signature_at(10.0, 11.5).unwrap();
+        assert_eq!(project.meter_changes[1], meter(11.5, 3, 4), "moved to the next bar line of the 7/8");
+        assert!(project.move_time_signature_at(10.0, 12.0).is_err(), "nothing is at beat 10 any more");
+        project.move_time_signature_at(11.5, 10.0).unwrap();
         project.remove_time_signature_at(10.0).unwrap();
         assert_eq!(project.meter_map().cut_bars().count(), 0);
 

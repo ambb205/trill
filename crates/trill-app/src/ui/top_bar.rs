@@ -285,7 +285,7 @@ fn edit_menu(ui: &mut Ui, cx: &mut Cx) {
         ops::add_marker(cx);
     }
     // Every marker, to jump to.
-    let signature = cx.snap.project.time_signature;
+    let signature = &cx.snap.project.meter_map();
     let markers = cx.snap.project.markers.clone();
     if !markers.is_empty() {
         trill_noir::menu_heading(ui, theme, "Go to marker");
@@ -453,15 +453,21 @@ fn transport_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, left: f32, compact: bool
     }
     x += 6.0;
 
-    let signature = cx.snap.project.time_signature;
+    // Bars are counted, and time is told, through every change of time
+    // signature and of tempo up to where the song is.
+    let meter = cx.snap.project.meter_map();
+    let tempo_map = cx.snap.project.tempo_map();
     let painter = ui.painter().clone();
     let position = boxed(bar, x, if compact { POSITION_COMPACT } else { POSITION_WIDTH });
     paint::frame(&painter, position, theme.hairline);
     let inner = position.shrink2(vec2(8.0, 0.0));
-    let bars = timeline::format_position(cx.live.position, signature).replace('.', ". ");
+    let bars = timeline::format_position(cx.live.position, &meter).replace('.', ". ");
     text::paint(&painter, inner, Align2::LEFT_CENTER, theme.text.readout, &bars, theme.ink);
     if !compact {
-        let clock = timeline::format_clock(cx.live.position, cx.snap.project.tempo);
+        let clock = match tempo_map.is_constant() {
+            true => timeline::format_clock(cx.live.position, cx.snap.project.tempo),
+            false => timeline::format_clock_through(cx.live.position, &tempo_map),
+        };
         let clock_style = TextStyle { size: 12.0, ..theme.text.value };
         text::paint(&painter, inner, Align2::RIGHT_CENTER, clock_style, &clock, theme.ink_dim);
     }
@@ -469,7 +475,19 @@ fn transport_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, left: f32, compact: bool
     cx.hint(&response, "Song position in bars, beats and sixteenths, and in minutes and seconds");
     x = position.right() + 6.0;
 
-    let tempo = cx.snap.project.tempo;
+    // The tempo the song has where it is, and what setting it changes: the
+    // tempo that took over last, or the one the song is gliding to.
+    let here = cx.live.position;
+    let tempo = if tempo_map.is_constant() { cx.snap.project.tempo } else { tempo_map.tempo_at(here) };
+    let changes = &cx.snap.project.tempo_changes;
+    let set_at = match tempo_map.is_ramping_at(here) {
+        true => changes.iter().find(|change| change.ramp && change.beat > here).map(|change| (change.beat, true)),
+        false => changes
+            .iter()
+            .rev()
+            .find(|change| !change.ramp && change.beat <= here + 1e-9)
+            .map(|change| (change.beat, false)),
+    };
     let field = NumberField {
         label: "",
         text: &format!("{tempo:.2}"),
@@ -481,14 +499,23 @@ fn transport_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, left: f32, compact: bool
         name: "Tempo",
     };
     let output = trill_noir::number_field(ui, theme, boxed(bar, x, TEMPO_WIDTH), id.with("tempo"), &field);
-    cx.hint(&output.response, "Tempo \u{00B7} drag, or double-click to type");
+    cx.hint(
+        &output.response,
+        match changes.is_empty() {
+            true => "Tempo \u{00B7} drag, or double-click to type",
+            false => "The tempo where the song is \u{00B7} drag, or double-click to type \u{00B7} the ruler shows where it changes",
+        },
+    );
     if output.response.drag_started() {
         cx.begin_gesture();
     }
     if let Some(tempo) = output.value.filter(|value| *value != tempo) {
         // Dragging lands on quarter steps; typing keeps what was typed.
         let tempo = if output.response.dragged() { (tempo * 4.0).round() / 4.0 } else { tempo };
-        cx.edit(|project| project.set_tempo(tempo));
+        cx.edit(|project| match set_at {
+            Some((beat, glide)) => project.set_tempo_at(beat, tempo, glide),
+            None => project.set_tempo(tempo),
+        });
     }
     x += TEMPO_WIDTH + 6.0;
 
@@ -565,7 +592,11 @@ fn stepped_signature(start: TimeSignature, numerator: bool, steps: i32) -> (u8, 
 /// number up or down changes it.
 fn time_signature(ui: &mut Ui, cx: &mut Cx, rect: Rect, id: Id) {
     let theme = cx.theme;
-    let signature = cx.snap.project.time_signature;
+    // The time signature the song is in where it is, which is the one
+    // that is set: from the bar it took over at.
+    let meter = cx.snap.project.meter_map();
+    let signature = meter.signature_at(cx.live.position);
+    let since = meter.since(cx.live.position);
     let response = ui.interact(rect, id, Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeVertical);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Time signature"));
     let painter = ui.painter_at(rect);
@@ -594,7 +625,7 @@ fn time_signature(ui: &mut Ui, cx: &mut Cx, rect: Rect, id: Id) {
     {
         let (beats, note) = stepped_signature(start, numerator, (-travel.y / SIGNATURE_STEP).round() as i32);
         if (beats, note) != (signature.numerator, signature.denominator) {
-            cx.edit(|project| project.set_time_signature(beats, note));
+            cx.edit(|project| project.set_time_signature_at(since, beats, note));
         }
     }
 
@@ -607,7 +638,7 @@ fn time_signature(ui: &mut Ui, cx: &mut Cx, rect: Rect, id: Id) {
             }
             let current = (signature.numerator, signature.denominator) == (beats, note);
             if MenuItem::new(&format!("{beats} / {note}")).checked(current).show(ui, theme).clicked() {
-                cx.edit(|project| project.set_time_signature(beats, note));
+                cx.edit(|project| project.set_time_signature_at(since, beats, note));
             }
         }
     });

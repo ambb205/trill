@@ -3,7 +3,97 @@
 //! hit-testing. Nothing here touches egui's context, so all of it is
 //! unit-tested.
 
-use trill_core::{Beats, Note, TimeSignature};
+use trill_core::{Beats, MeterMap, Note, TempoMap, TimeSignature};
+
+/// What a grid is laid in and a position counted in: one time signature
+/// all through (a [`TimeSignature`]), or a song's bars through every change
+/// of it (a [`MeterMap`]).
+pub trait Bars {
+    /// The stretch in one time signature that `beat` lies in.
+    fn stretch(&self, beat: Beats) -> Stretch;
+}
+
+/// A stretch of time in one time signature.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Stretch {
+    /// Where it begins, which is a bar line, and where it ends: infinite
+    /// if nothing follows it.
+    pub start: Beats,
+    pub end: Beats,
+    /// How many bars lie before it.
+    pub bars_before: u32,
+    pub signature: TimeSignature,
+}
+
+impl Bars for TimeSignature {
+    fn stretch(&self, _: Beats) -> Stretch {
+        Stretch { start: 0.0, end: f64::INFINITY, bars_before: 0, signature: *self }
+    }
+}
+
+impl Bars for MeterMap {
+    fn stretch(&self, beat: Beats) -> Stretch {
+        let start = self.since(beat);
+        let first = self.bar_at(start);
+        let end = self.next_change(beat.max(start)).unwrap_or(f64::INFINITY);
+        Stretch { start, end, bars_before: first.index, signature: first.signature }
+    }
+}
+
+/// The first stretches of a song's bars, as something that can be copied
+/// about: what the view of one clip keeps of the time signatures under it.
+/// A clip that lies under more changes than it holds is counted in the
+/// last one it holds from there on.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct FewBars {
+    stretches: [Stretch; FewBars::MOST],
+    count: usize,
+}
+
+impl FewBars {
+    const MOST: usize = 8;
+
+    /// One time signature all through.
+    pub fn constant(signature: TimeSignature) -> Self {
+        Self { stretches: [signature.stretch(0.0); Self::MOST], count: 1 }
+    }
+
+    pub fn of(bars: &MeterMap) -> Self {
+        let mut few = Self::constant(bars.signature_at(0.0));
+        few.count = 0;
+        for bar in bars.sections().take(Self::MOST) {
+            if let Some(before) = few.count.checked_sub(1) {
+                few.stretches[before].end = bar.start;
+            }
+            few.stretches[few.count] =
+                Stretch { start: bar.start, end: f64::INFINITY, bars_before: bar.index, signature: bar.signature };
+            few.count += 1;
+        }
+        few
+    }
+}
+
+impl Bars for FewBars {
+    fn stretch(&self, beat: Beats) -> Stretch {
+        let held = &self.stretches[..self.count.max(1)];
+        let after = held.partition_point(|stretch| stretch.start <= beat + 1e-9);
+        held[after.saturating_sub(1)]
+    }
+}
+
+impl<T: Bars + ?Sized> Bars for &T {
+    fn stretch(&self, beat: Beats) -> Stretch {
+        (**self).stretch(beat)
+    }
+}
+
+/// A grid step chosen for bars of `first`, as it is in bars of
+/// `signature`: so many whole bars stay so many whole bars, and a step
+/// within the bar is never longer than a bar is.
+fn step_in(step: Beats, first: TimeSignature, signature: TimeSignature) -> Beats {
+    let (own, other) = (first.beats_per_bar(), signature.beats_per_bar());
+    if step >= own - 1e-9 { (step / own).round().max(1.0) * other } else { step.min(other) }
+}
 
 /// Horizontal mapping between beats and pixels: a scroll position and a zoom
 /// level.
@@ -117,8 +207,41 @@ pub fn grid_step(pixels_per_beat: f64, signature: TimeSignature, min_pixels: f64
 ///
 /// Lines are laid out bar by bar, so that when a bar is not a whole number
 /// of `step`s (7/8 with a quarter-note snap) every bar still starts on a
-/// line.
+/// line. Where the time signature changes a bar begins, and the lines go
+/// on from there in the new one: `step` is the step of the first time
+/// signature, and each other one gets what it comes to there.
 pub fn for_each_grid_line(
+    start: Beats,
+    end: Beats,
+    bars: impl Bars,
+    step: Beats,
+    mut line: impl FnMut(Beats, GridLevel),
+) {
+    if !(step > 0.0 && end >= start) {
+        return;
+    }
+    let first = bars.stretch(0.0).signature;
+    let mut from = start;
+    loop {
+        let stretch = bars.stretch(from.max(0.0));
+        let local = step_in(step, first, stretch.signature);
+        let lines = |beat: Beats, level: GridLevel| {
+            // The line a change lies on is the first of what follows it.
+            let beat = beat + stretch.start;
+            if beat < stretch.end - 1e-9 {
+                line(beat, level);
+            }
+        };
+        grid_lines_of(from - stretch.start, end.min(stretch.end) - stretch.start, stretch.signature, local, lines);
+        if stretch.end > end {
+            return;
+        }
+        from = stretch.end;
+    }
+}
+
+/// [`for_each_grid_line`] in one time signature, counted from beat 0.
+fn grid_lines_of(
     start: Beats,
     end: Beats,
     signature: TimeSignature,
@@ -127,7 +250,7 @@ pub fn for_each_grid_line(
 ) {
     let beats_per_bar = signature.beats_per_bar();
     let unit = beat_unit(signature);
-    if !(step > 0.0 && end >= start) {
+    if end < start {
         return;
     }
     if step >= beats_per_bar {
@@ -302,6 +425,17 @@ pub fn snap_to_bar_grid(beat: Beats, beats_per_bar: Beats, step: Beats) -> Beats
     (bar_start + within).max(0.0)
 }
 
+/// Rounds `beat` to the nearest line of the grid that [`for_each_grid_line`]
+/// draws through `bars` with `step`: bar by bar, and through every change
+/// of time signature, where a bar line is.
+pub fn snap_in(beat: Beats, bars: impl Bars, step: Beats) -> Beats {
+    let first = bars.stretch(0.0).signature;
+    let stretch = bars.stretch(beat.max(0.0));
+    let local = step_in(step, first, stretch.signature);
+    let within = snap_to_bar_grid(beat - stretch.start, stretch.signature.beats_per_bar(), local);
+    (stretch.start + within).min(stretch.end).max(0.0)
+}
+
 /// A song position split into musical units, all 1-based as musicians count.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct BarPosition {
@@ -312,28 +446,37 @@ pub struct BarPosition {
 
 /// Splits a position in quarter notes into bar, beat and sixteenth. A "beat"
 /// is the note value of the signature's denominator (an eighth in 6/8).
-pub fn bar_position(beat: Beats, signature: TimeSignature) -> BarPosition {
+/// The bar is counted through every change of time signature, and the beat
+/// in the signature the bar has.
+pub fn bar_position(beat: Beats, bars: impl Bars) -> BarPosition {
     // The epsilon keeps positions that are a hair under a boundary (after
     // float arithmetic) from displaying as the previous unit.
     let beat = beat.max(0.0) + 1e-9;
+    let stretch = bars.stretch(beat);
+    let signature = stretch.signature;
+    let beat = beat - stretch.start;
     let per_bar = signature.beats_per_bar();
     let unit = 4.0 / signature.denominator as f64;
     let bar = (beat / per_bar).floor();
     let in_bar = beat - bar * per_bar;
     let beat_index = (in_bar / unit).floor();
     let in_beat = in_bar - beat_index * unit;
-    BarPosition { bar: bar as u32 + 1, beat: beat_index as u32 + 1, sixteenth: (in_beat / 0.25).floor() as u32 + 1 }
+    BarPosition {
+        bar: stretch.bars_before + bar as u32 + 1,
+        beat: beat_index as u32 + 1,
+        sixteenth: (in_beat / 0.25).floor() as u32 + 1,
+    }
 }
 
 /// `"5.3.2"`: bar, beat, sixteenth.
-pub fn format_position(beat: Beats, signature: TimeSignature) -> String {
-    let p = bar_position(beat, signature);
+pub fn format_position(beat: Beats, bars: impl Bars) -> String {
+    let p = bar_position(beat, bars);
     format!("{}.{}.{}", p.bar, p.beat, p.sixteenth)
 }
 
 /// `"5.3"`, or just `"5"` on a bar line. Used for ruler labels.
-pub fn format_bar_beat(beat: Beats, signature: TimeSignature) -> String {
-    let p = bar_position(beat, signature);
+pub fn format_bar_beat(beat: Beats, bars: impl Bars) -> String {
+    let p = bar_position(beat, bars);
     if p.beat == 1 && p.sixteenth == 1 { p.bar.to_string() } else { format!("{}.{}", p.bar, p.beat) }
 }
 
@@ -350,7 +493,17 @@ pub fn format_length(length: Beats, signature: TimeSignature) -> String {
 
 /// Elapsed time at a fixed tempo, `"1:05.2"`.
 pub fn format_clock(beat: Beats, tempo: f64) -> String {
-    let seconds = (beat.max(0.0) * 60.0 / tempo.max(1.0) * 10.0).floor() / 10.0;
+    format_seconds(beat.max(0.0) * 60.0 / tempo.max(1.0))
+}
+
+/// The time a song takes to get to `beat`, through every tempo it has on
+/// the way, `"1:05.2"`.
+pub fn format_clock_through(beat: Beats, tempo: &TempoMap) -> String {
+    format_seconds(tempo.seconds_at(beat.max(0.0)))
+}
+
+fn format_seconds(seconds: f64) -> String {
+    let seconds = (seconds * 10.0).floor() / 10.0;
     let minutes = (seconds / 60.0).floor();
     format!("{}:{:04.1}", minutes as u64, seconds - minutes * 60.0)
 }
@@ -500,6 +653,71 @@ pub fn is_black_key(pitch: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two bars of 4/4, two of 7/8 from beat 8, and 3/4 from beat 15.
+    fn changing() -> MeterMap {
+        let mut song = trill_core::Project::new("t");
+        song.set_time_signature_at(8.0, 7, 8).unwrap();
+        song.set_time_signature_at(15.0, 3, 4).unwrap();
+        song.meter_map()
+    }
+
+    #[test]
+    fn a_grid_goes_on_from_every_change_of_time_signature() {
+        let bars = changing();
+        let lines = |start: Beats, end: Beats, step: Beats| {
+            let mut lines = Vec::new();
+            for_each_grid_line(start, end, &bars, step, |beat, level| lines.push((beat, level)));
+            lines
+        };
+        // Bar lines only: the bars of each signature, each as long as it is.
+        let bar_lines: Vec<Beats> = lines(0.0, 22.0, 4.0).into_iter().map(|(beat, _)| beat).collect();
+        assert_eq!(bar_lines, [0.0, 4.0, 8.0, 11.5, 15.0, 18.0, 21.0]);
+        assert!(lines(0.0, 22.0, 4.0).iter().all(|(_, level)| *level == GridLevel::Bar));
+        // Every other bar, counted in each stretch from where it begins.
+        let wide: Vec<Beats> = lines(0.0, 30.0, 8.0).into_iter().map(|(beat, _)| beat).collect();
+        assert_eq!(wide, [0.0, 8.0, 15.0, 21.0, 27.0]);
+        // Quarter notes: a bar of 7/8 has three and a half of them, and
+        // the next bar begins on a line all the same.
+        let quarters = lines(7.0, 16.0, 1.0);
+        let at: Vec<Beats> = quarters.iter().map(|(beat, _)| *beat).collect();
+        assert_eq!(at, [7.0, 8.0, 9.0, 10.0, 11.0, 11.5, 12.5, 13.5, 14.5, 15.0, 16.0]);
+        let strong: Vec<Beats> =
+            quarters.iter().filter(|(_, level)| *level == GridLevel::Bar).map(|(beat, _)| *beat).collect();
+        assert_eq!(strong, [8.0, 11.5, 15.0]);
+        // One signature all through is what it always was.
+        let mut plain = Vec::new();
+        for_each_grid_line(0.0, 8.0, TimeSignature::default(), 1.0, |beat, _| plain.push(beat));
+        assert_eq!(plain, [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    }
+
+    #[test]
+    fn positions_and_snapping_are_counted_through_the_changes() {
+        let bars = changing();
+        for (beat, said) in [(0.0, "1.1.1"), (7.75, "2.4.4"), (8.0, "3.1.1"), (11.0, "3.7.1"), (11.5, "4.1.1")] {
+            assert_eq!(format_position(beat, &bars), said, "at beat {beat}");
+        }
+        assert_eq!((format_position(15.0, &bars), format_position(19.25, &bars)), ("5.1.1".into(), "6.2.2".into()));
+        assert_eq!((format_bar_beat(11.5, &bars), format_bar_beat(12.0, &bars)), ("4".into(), "4.2".into()));
+        assert_eq!(bar_position(100.0, &bars).bar, 5 + 28);
+
+        // To the bar: the bars of the song, not multiples of four beats.
+        for (beat, snapped) in [(9.0, 8.0), (10.0, 11.5), (13.0, 11.5), (13.5, 15.0), (16.4, 15.0), (16.6, 18.0)] {
+            assert_eq!(snap_in(beat, &bars, 4.0), snapped, "beat {beat} to the bar");
+        }
+        // To the quarter note: from each bar line on, and to the next bar
+        // line where a bar ends between two quarters.
+        for (beat, snapped) in [(11.2, 11.0), (11.3, 11.5), (11.9, 11.5), (12.1, 12.5), (14.8, 15.0)] {
+            assert_eq!(snap_in(beat, &bars, 1.0), snapped, "beat {beat} to the quarter");
+        }
+        assert_eq!(snap_in(5.4, TimeSignature::default(), 1.0), snap_to_bar_grid(5.4, 4.0, 1.0));
+        // What a clip's view keeps of the bars says the same.
+        let few = FewBars::of(&bars);
+        for beat in [0.0, 7.75, 8.0, 11.5, 14.9, 15.0, 40.0] {
+            assert_eq!(few.stretch(beat), bars.stretch(beat), "at beat {beat}");
+        }
+        assert_eq!(FewBars::constant(TimeSignature::default()).stretch(9.0), TimeSignature::default().stretch(9.0));
+    }
 
     fn signature(numerator: u8, denominator: u8) -> TimeSignature {
         TimeSignature::new(numerator, denominator).unwrap()

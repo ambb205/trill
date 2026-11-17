@@ -71,8 +71,9 @@ fn rewarp(
     source_tempo: Option<f64>,
     transpose: f64,
 ) -> Result<(), EditError> {
-    let tempo = project.tempo;
     let before = project.clip(clip)?.clone();
+    // At the tempo the song has where the clip starts.
+    let tempo = project.tempo_map().tempo_at(before.start);
     let Some(audio) = before.audio() else { return Ok(()) };
     let covered = before.length * audio.seconds_per_beat(tempo);
     project.set_clip_warp(clip, warp, source_tempo, transpose)?;
@@ -510,7 +511,8 @@ fn waveform(
     if view.width() < 8.0 || view.height() < RULER + 8.0 {
         return;
     }
-    let tempo = cx.snap.project.tempo;
+    // At the tempo the song has where the clip starts.
+    let tempo = cx.snap.project.tempo_map().tempo_at(clip.start);
     let file_seconds = wave.seconds();
     let (clip_start, clip_end) = played(clip, audio, tempo);
     // What is in view: kept while the same clip is shown, framed afresh

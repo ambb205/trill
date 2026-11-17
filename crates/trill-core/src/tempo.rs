@@ -402,6 +402,17 @@ impl MeterMap {
         &self.sections[next.saturating_sub(1)]
     }
 
+    /// The bars as they are counted from `from` on: `from` is beat 0 of
+    /// the map made, a bar begins there in the time signature the song has
+    /// there, and every later change is as far after it as it was. What a
+    /// clip that starts at `from` counts its own bars by.
+    pub fn counted_from(&self, from: Beats) -> MeterMap {
+        let later = self.sections.iter().filter(|section| section.beat > from + SAME_BEAT);
+        let changes: Vec<MeterChange> =
+            later.map(|section| MeterChange { beat: section.beat - from, signature: section.signature }).collect();
+        MeterMap::new(self.signature_at(from), &changes)
+    }
+
     /// The time signature at `beat`.
     pub fn signature_at(&self, beat: Beats) -> TimeSignature {
         self.section_at(beat.max(0.0)).signature
@@ -740,6 +751,13 @@ mod tests {
             (map.said(8.0), map.said(13.0), map.said(0.25)),
             ("bar 3".into(), "bar 4 beat 2.5".into(), "bar 1 beat 1.25".into())
         );
+        // Counted from where a clip starts: its own first bar, and the
+        // changes as far on as they are.
+        let own = map.counted_from(6.0);
+        let starts: Vec<Beats> = (0..5).map(|index| own.bar_start(index)).collect();
+        assert_eq!(starts, [0.0, 2.0, 5.5, 9.0, 12.0], "two beats of 4/4 are left, then 7/8, then 3/4");
+        assert_eq!(map.counted_from(8.0).signature_at(0.0), TimeSignature::new(7, 8).unwrap());
+        assert!(map.counted_from(40.0).is_constant());
         // A rounding error short of a bar line is on it.
         assert_eq!(map.bar_at(11.5 - 1e-12).index, 3);
     }

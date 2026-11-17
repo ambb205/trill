@@ -20,7 +20,7 @@ use crate::ui::units;
 use eframe::egui::{Align2, Color32, Mesh, Painter, Pos2, Rect, Shape, Stroke, pos2, vec2};
 use std::sync::Arc;
 use trill_core::project::{AudioContent, ClipContent, MidiContent};
-use trill_core::{Beats, Clip, ClipId, Track, TrackId};
+use trill_core::{Beats, Clip, ClipId, TempoMap, Track, TrackId};
 use trill_noir::{Theme, fade, paint, text};
 
 /// Height of a clip's name strip.
@@ -163,13 +163,37 @@ pub(super) fn paint_clip(
 }
 
 /// Where in its file, in seconds, an audio clip is at timeline position
-/// `beat`. A straight line whatever the warp mode: the clip enters the file
-/// at its offset, and from there every beat covers the same stretch of the
-/// recording (see [`AudioContent`]). This is what puts a waveform under a
-/// clip: trimming the clip's start moves the offset with it, so the picture
-/// stays put, and warping changes how much of the file a beat covers.
-pub(in crate::ui) fn file_second(clip: &Clip, audio: &AudioContent, tempo: f64, beat: Beats) -> f64 {
-    audio.offset_seconds + (beat - clip.start) * audio.seconds_per_beat(tempo)
+/// `beat`, in a song whose tempo is `tempo`. The clip enters the file at
+/// its offset, and from there every beat covers the stretch of the
+/// recording it covers (see [`AudioContent`]): a straight line for a clip
+/// that follows the tempo and for a song of one tempo, and for a clip at
+/// its own speed a line that bends where the tempo changes under it. This
+/// is what puts a waveform under a clip: trimming the clip's start moves
+/// the offset with it, so the picture stays put, and warping changes how
+/// much of the file a beat covers.
+pub(in crate::ui) fn file_second(clip: &Clip, audio: &AudioContent, tempo: &TempoMap, beat: Beats) -> f64 {
+    audio.offset_seconds + audio.seconds_over(tempo, clip.start, beat - clip.start)
+}
+
+/// Where the line of [`file_second`] bends between the timeline positions
+/// `from` and `to`: nowhere for most clips. A glide is taken a beat at a
+/// time, which no eye tells from the curve.
+fn bends(audio: &AudioContent, tempo: &TempoMap, from: Beats, to: Beats) -> Vec<Beats> {
+    let mut bends = Vec::new();
+    if audio.followed_tempo().is_some() || tempo.is_constant() {
+        return bends;
+    }
+    let mut beat = from.max(0.0);
+    while bends.len() < 4096 {
+        let change = tempo.next_change(beat).unwrap_or(f64::INFINITY);
+        let next = if tempo.is_ramping_at(beat) { change.min(beat + 1.0) } else { change };
+        if next >= to {
+            break;
+        }
+        bends.push(next);
+        beat = next;
+    }
+    bends
 }
 
 /// The length `clip` may take when it is asked to be `wanted` beats long.
@@ -186,7 +210,7 @@ pub(in crate::ui) fn allowed_length(cx: &Cx, clip: &Clip, wanted: Beats) -> Beat
     match cx.sounds.wave(&audio.path) {
         WaveState::Ready(wave) => {
             let seconds = (wave.seconds() - audio.offset_seconds).max(0.0);
-            let room = seconds / audio.seconds_per_beat(cx.snap.project.tempo);
+            let room = audio.beats_over(&cx.snap.project.tempo_map(), clip.start, seconds);
             wanted.min(room.max(clip.length))
         }
         WaveState::Loading => clip.length,
@@ -222,20 +246,29 @@ fn paint_audio(
             return;
         }
     };
-    let tempo = cx.snap.project.tempo;
-    let per_beat = audio.seconds_per_beat(tempo);
+    let tempo = &cx.snap.project.tempo_map();
     let second_at = |x: f32| file_second(clip, audio, tempo, geometry.beat(x));
-    let columns = trill_noir::waveform_columns(painter, content.width());
-    let found = wave.columns(second_at(content.left())..second_at(content.right()), columns);
-    let bands: Vec<(f32, f32)> = found.iter().map(|column| (column.mixed.min, column.mixed.max)).collect();
     let area = content.shrink2(vec2(0.0, 2.0f32.min(content.height() / 6.0)));
     let mut mesh = Mesh::default();
     let gain = 10f32.powf(audio.gain_db / 20.0);
-    trill_noir::waveform(&mut mesh, area, &bands, gain, fade(ink, 0.9), paint::hair(painter));
+    // Drawn in the stretches through which a beat covers the same length
+    // of the recording: one, unless the tempo changes under a clip that
+    // keeps its own speed.
+    let mut edges = vec![content.left()];
+    let inside = bends(audio, tempo, geometry.beat(content.left()), geometry.beat(content.right()));
+    edges.extend(inside.into_iter().map(|beat| geometry.x(beat)));
+    edges.push(content.right());
+    for edge in edges.windows(2).filter(|edge| edge[1] > edge[0]) {
+        let piece = Rect::from_x_y_ranges(edge[0]..=edge[1], area.y_range());
+        let columns = trill_noir::waveform_columns(painter, piece.width());
+        let found = wave.columns(second_at(edge[0])..second_at(edge[1]), columns);
+        let bands: Vec<(f32, f32)> = found.iter().map(|column| (column.mixed.min, column.mixed.max)).collect();
+        trill_noir::waveform(&mut mesh, piece, &bands, gain, fade(ink, 0.9), paint::hair(painter));
+    }
     painter.with_clip_rect(content).add(Shape::mesh(Arc::new(mesh)));
 
     // Where the recording runs out before the clip does, a mark.
-    let end = clip.start + (wave.seconds() - audio.offset_seconds) / per_beat;
+    let end = clip.start + audio.beats_over(tempo, clip.start, wave.seconds() - audio.offset_seconds);
     let x = geometry.x(end).round();
     if end < clip.end() - 1e-6 && x > content.left() && x < content.right() {
         paint::vline(painter, x, content.y_range(), theme.ink_faint);
@@ -429,7 +462,7 @@ mod tests {
         let mut view = UiState::new(DetailTab::Clip).arrangement;
         view.time = TimeView { origin: 0.0, pixels_per_beat: 20.0 };
         let area = Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 500.0));
-        Geometry::new(area, &view, Rows::build(&project.tracks, &view), project.time_signature)
+        Geometry::new(area, &view, Rows::build(&project.tracks, &view), project.meter_map())
     }
 
     fn project_with_clips() -> (Project, TrackId, ClipId, ClipId) {
@@ -534,7 +567,7 @@ mod tests {
         let id = project.add_audio_clip(track, "Take", 4.0, 8.0, content).unwrap();
         let second = |project: &Project, beat: f64| {
             let clip = project.clip(id).unwrap();
-            file_second(clip, clip.audio().unwrap(), project.tempo, beat)
+            file_second(clip, clip.audio().unwrap(), &project.tempo_map(), beat)
         };
         // At 120 a beat is half a second; the clip enters a second in.
         assert_eq!(second(&project, 4.0), 1.0);
@@ -549,7 +582,26 @@ mod tests {
         // So does splitting, for the half that is cut off.
         let rest = project.split_clip(id, 8.0).unwrap();
         let half = project.clip(rest).unwrap();
-        assert_eq!(file_second(half, half.audio().unwrap(), 120.0, 8.0), 3.0);
+        assert_eq!(file_second(half, half.audio().unwrap(), &TempoMap::constant(120.0), 8.0), 3.0);
+
+        // Under a tempo that changes, a clip at its own speed is as far
+        // into its file as the song has been going since it began: the
+        // line bends where the tempo does, and nowhere for a clip that
+        // follows the tempo.
+        let mut song = Project::new("t");
+        song.set_tempo_at(8.0, 60.0, false).unwrap();
+        let lane = song.add_track("A");
+        let take = song.add_audio_clip(lane, "Take", 4.0, 8.0, AudioContent::new("take.wav")).unwrap();
+        let (clip, map) = (song.clip(take).unwrap().clone(), song.tempo_map());
+        let own = clip.audio().unwrap();
+        for (beat, second) in [(4.0, 0.0), (8.0, 2.0), (10.0, 4.0), (12.0, 6.0)] {
+            assert_eq!(file_second(&clip, own, &map, beat), second, "at beat {beat}");
+        }
+        assert_eq!(bends(own, &map, 4.0, 12.0), [8.0]);
+        let follows =
+            AudioContent { warp: trill_core::project::WarpMode::Beats, source_tempo: Some(120.0), ..own.clone() };
+        assert!(bends(&follows, &map, 4.0, 12.0).is_empty());
+        assert_eq!(file_second(&clip, &follows, &map, 12.0), 4.0, "eight beats of a recording at 120");
 
         // Warped, a beat covers a beat of the recording, whatever the
         // song's tempo; unwarped it covers a beat of the song's.

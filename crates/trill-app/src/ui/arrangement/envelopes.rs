@@ -630,7 +630,7 @@ fn interact(
     let modifiers = ui.input(|input| input.modifiers);
     let pencil = cx.state.arrangement.tool == Tool::Draw;
     let inside = |position: &Pos2| map.rect.contains(*position);
-    let signature = geometry.signature;
+    let signature = &geometry.meter;
 
     if cx.state.arrangement.drag.is_none()
         && let Some(pointer) = response.hover_pos().filter(inside)
@@ -761,7 +761,7 @@ fn step(
     pointer: Pos2,
 ) -> LaneDrag {
     let modifiers = ui.input(|input| input.modifiers);
-    let signature = geometry.signature;
+    let signature = &geometry.meter;
     match drag {
         LaneDrag::Points { originals, current, grabbed, press } => {
             ui.set_cursor_icon(CursorIcon::Grabbing);
