@@ -224,14 +224,9 @@ impl Harness {
         found.unwrap_or_else(|| panic!("nothing below {y} is labeled '{label}'")).center()
     }
 
-    /// Center of the browser's widget labeled `label`: for telling a row
-    /// of the browser from its namesake in the panes beside it.
-    fn in_browser(&self, label: &str) -> Pos2 {
-        let found = self.all_labeled(label).into_iter().find(|rect| rect.right() <= self.work_left());
-        found.unwrap_or_else(|| panic!("nothing in the browser is labeled '{label}'")).center()
-    }
-
-    /// Center of the widget labeled `label` that is not in the browser.
+    /// Center of the widget labeled `label` that is not in the browser:
+    /// for telling a control in the panes from its namesake among the
+    /// browser's rows.
     fn beside_browser(&self, label: &str) -> Pos2 {
         let found = self.all_labeled(label).into_iter().find(|rect| rect.left() >= self.work_left());
         found.unwrap_or_else(|| panic!("nothing beside the browser is labeled '{label}'")).center()

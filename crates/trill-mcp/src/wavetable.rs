@@ -44,8 +44,10 @@ held note). describe_wavetable with `recipe` shows what a recipe would be, frame
 measure the song. Its presets are matched in level by measurement, and nobody has tuned them by ear yet: for a \
 sound a maker's preset of an installed instrument covers, that preset may well be the better one. For plain analog \
 sounds with fewer parts to set there is builtin:polysynth.
-- It has no effects of its own. A pad or a lead usually wants builtin:chorus, builtin:delay or builtin:reverb \
-after it, or a send to a return that has them.";
+- It has no effects inside. Its presets other than the basses are sounds that bring a chorus, a delay or a reverb \
+as devices behind it: the reply that gives one says which were made, and they are yours to change or delete. A \
+sound shaped from `init` brings none: add builtin:chorus, builtin:delay or builtin:reverb after it, or a send to a \
+return that has them.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DescribeWavetableRequest {

@@ -1147,7 +1147,8 @@ fine_pitch at 0.2, brightness by touch velocity -> osc1_position. Four macros (`
 preset names: get_device shows the names, and moving one moves what the matrix sends it to. Poly, mono or legato \
 with glide. Start from a preset (search_presets) and change what you need; a preset's description says what its \
 macros do. Tables are band-limited at every pitch and the same song renders to the same samples every time. It \
-has no effects of its own: put builtin:chorus, builtin:delay or builtin:reverb after it.";
+has no effects inside: a preset that wants them brings them as devices behind it (its leads, pads, plucks and keys \
+do), and to a sound of your own you add builtin:chorus, builtin:delay or builtin:reverb.";
 
 #[cfg(test)]
 mod tests;
