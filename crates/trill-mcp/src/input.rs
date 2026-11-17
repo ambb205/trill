@@ -385,7 +385,24 @@ pub fn parse_param_value(info: &ParamInfo, value: &Value) -> Result<f64, String>
         }
         other => return Err(format!("{}: expected a number, boolean or choice name, got {other}", info.id)),
     };
-    if parsed < info.min || parsed > info.max { Err(out_of_range(parsed)) } else { Ok(parsed) }
+    if parsed < info.min || parsed > info.max {
+        return Err(out_of_range(parsed));
+    }
+    // A parameter that counts steps or choices takes a whole one. A plugin's
+    // other parameters run from 0 to 1, so a number such as 0.25 given to
+    // one of these is most often meant as a quarter of the way, and would
+    // otherwise be taken as the step nearest to it without a word.
+    if matches!(info.kind, ParamKind::Int | ParamKind::Enum(_)) && parsed.fract() != 0.0 {
+        let numbered = info.id.parse::<u64>().is_ok();
+        let called = if numbered { format!("{} ({})", info.name, info.id) } else { info.id.clone() };
+        return Err(format!(
+            "{called} counts whole steps from {} to {}{}, and {parsed} is not one (nor is it taken as a share of              the way). Give a step, or as a string the text the device shows for the value you want",
+            info.min,
+            info.max,
+            unit_suffix(info)
+        ));
+    }
+    Ok(parsed)
 }
 
 fn unit_suffix(info: &ParamInfo) -> String {
@@ -560,5 +577,37 @@ mod tests {
         assert_eq!(find_param(&params, "cutoff").unwrap().id, "cutoff");
         assert_eq!(find_param(&params, "filter cutoff").unwrap().id, "cutoff");
         assert!(find_param(&params, "resonance").unwrap_err().contains("osc1_wave, cutoff"));
+    }
+
+    #[test]
+    fn a_parameter_that_counts_steps_refuses_a_number_between_two_of_them() {
+        // A plugin's stepped parameter, as a host is told of it: numbered,
+        // from 0 to its number of steps.
+        let transpose = ParamInfo {
+            id: "214".into(),
+            name: "Transpose".into(),
+            min: 0.0,
+            max: 48.0,
+            default: 24.0,
+            unit: String::new(),
+            kind: ParamKind::Int,
+        };
+        assert_eq!(parse_param_value(&transpose, &json!(12)), Ok(12.0));
+        assert_eq!(parse_param_value(&transpose, &json!(12.0)), Ok(12.0));
+        let error = parse_param_value(&transpose, &json!(0.25)).unwrap_err();
+        assert!(error.starts_with("Transpose (214) counts whole steps from 0 to 48, and 0.25 is not one"), "{error}");
+        assert!(error.contains("the text the device shows"), "{error}");
+
+        // A choice by its place in the list is a whole number too.
+        let wave = ParamInfo {
+            id: "osc1_wave".into(),
+            name: "Osc 1 Wave".into(),
+            min: 0.0,
+            max: 3.0,
+            default: 2.0,
+            unit: String::new(),
+            kind: ParamKind::Enum(vec!["sine".into(), "triangle".into(), "saw".into(), "square".into()]),
+        };
+        assert!(parse_param_value(&wave, &json!(1.5)).unwrap_err().starts_with("osc1_wave counts whole steps"));
     }
 }
