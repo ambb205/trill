@@ -124,6 +124,8 @@ async fn tools_are_listed_with_schemas() {
         "set_sample",
         "missing_files",
         "relink_files",
+        "listen",
+        "transcribe",
         "edit_time",
         "show_device_editor",
         "recover_project",

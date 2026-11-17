@@ -34,7 +34,8 @@ fn projects() -> Vec<PathBuf> {
 }
 
 fn json(path: &Path) -> Value {
-    serde_json::from_str(&std::fs::read_to_string(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))).unwrap()
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap_or_else(|error| panic!("{}: {error}", path.display())))
+        .unwrap()
 }
 
 fn recording(folder: &Path, project: &Value) -> Recording {
@@ -99,7 +100,14 @@ fn tempo(beats: &[f64]) -> f64 {
 
 fn notes_of(list: &Value) -> Vec<(f64, f64, i64)> {
     list.as_array()
-        .map(|notes| notes.iter().map(|note| (note["start"].as_f64().unwrap(), note["end"].as_f64().unwrap(), note["midi"].as_i64().unwrap())).collect())
+        .map(|notes| {
+            notes
+                .iter()
+                .map(|note| {
+                    (note["start"].as_f64().unwrap(), note["end"].as_f64().unwrap(), note["midi"].as_i64().unwrap())
+                })
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -110,7 +118,11 @@ fn compare(folder: &Path) -> (f64, f64) {
     let detail = json(&folder.join("detail.json"));
     let recording = recording(folder, &project);
     let name = folder.file_name().unwrap().to_string_lossy().into_owned();
-    println!("\n== {name}: {:.0} s, stems {:?}", recording.seconds(), recording.stems.iter().map(|stem| stem.name.as_str()).collect::<Vec<_>>());
+    println!(
+        "\n== {name}: {:.0} s, stems {:?}",
+        recording.seconds(),
+        recording.stems.iter().map(|stem| stem.name.as_str()).collect::<Vec<_>>()
+    );
 
     // The grid from the onsets alone.
     let started = Instant::now();
@@ -118,9 +130,14 @@ fn compare(folder: &Path) -> (f64, f64) {
     let took = started.elapsed().as_secs_f64();
     let grid = &project["grid"];
     let their_beats = times(&grid["beats"]);
-    let their_bars: Vec<f64> = grid["bars"].as_array().unwrap().iter().map(|index| their_beats[index.as_u64().unwrap() as usize]).collect();
-    let (low, high) = (own.grid.beats.first().copied().unwrap_or(0.0).max(their_beats[0]) - 0.05, own.grid.beats.last().copied().unwrap_or(0.0).min(*their_beats.last().unwrap()) + 0.05);
-    let within = |list: &[f64]| -> Vec<f64> { list.iter().copied().filter(|time| (low..=high).contains(time)).collect() };
+    let their_bars: Vec<f64> =
+        grid["bars"].as_array().unwrap().iter().map(|index| their_beats[index.as_u64().unwrap() as usize]).collect();
+    let (low, high) = (
+        own.grid.beats.first().copied().unwrap_or(0.0).max(their_beats[0]) - 0.05,
+        own.grid.beats.last().copied().unwrap_or(0.0).min(*their_beats.last().unwrap()) + 0.05,
+    );
+    let within =
+        |list: &[f64]| -> Vec<f64> { list.iter().copied().filter(|time| (low..=high).contains(time)).collect() };
     let own_bars: Vec<f64> = own.grid.bars.iter().map(|&index| own.grid.beats[index]).collect();
     let beats_agree = agreement(&within(&their_beats), &within(&own.grid.beats), 0.07);
     println!(
@@ -134,7 +151,10 @@ fn compare(folder: &Path) -> (f64, f64) {
     );
 
     // Everything else over Magpie's own grid.
-    let options = Options { beats: Some(TrackedBeats { beats: their_beats.clone(), downbeats: their_bars.clone() }), corrections: Vec::new() };
+    let options = Options {
+        beats: Some(TrackedBeats { beats: their_beats.clone(), downbeats: their_bars.clone() }),
+        corrections: Vec::new(),
+    };
     let heard: Heard = hear(&recording, &options);
     let harmony = heard.harmony.as_ref().unwrap();
     let their_key = &project["key"];
@@ -155,10 +175,19 @@ fn compare(folder: &Path) -> (f64, f64) {
         .as_array()
         .unwrap()
         .iter()
-        .map(|chord| (chord["start"].as_f64().unwrap(), chord["end"].as_f64().unwrap(), (chord["root"].as_i64().unwrap(), chord["quality"].as_str().unwrap().to_owned())))
+        .map(|chord| {
+            (
+                chord["start"].as_f64().unwrap(),
+                chord["end"].as_f64().unwrap(),
+                (chord["root"].as_i64().unwrap(), chord["quality"].as_str().unwrap().to_owned()),
+            )
+        })
         .collect();
-    let our_chords: Vec<(f64, f64, (i64, String))> =
-        harmony.chords.iter().map(|chord| (chord.start, chord.end, (i64::from(chord.root), chord.quality.suffix().to_owned()))).collect();
+    let our_chords: Vec<(f64, f64, (i64, String))> = harmony
+        .chords
+        .iter()
+        .map(|chord| (chord.start, chord.end, (i64::from(chord.root), chord.quality.suffix().to_owned())))
+        .collect();
     let chords_same = share(&their_chords, &our_chords, |a, b| a == b);
     let roots_same = share(&their_chords, &our_chords, |a, b| a.0 == b.0);
     let sevenths = |list: &[(f64, f64, (i64, String))]| list.iter().filter(|chord| chord.2.1.contains('7')).count();
@@ -193,13 +222,22 @@ fn compare(folder: &Path) -> (f64, f64) {
         sevenths(&our_chords),
         sevenths(&their_chords),
     );
-    println!("   chords made of the key's notes: {:.0} % of ours, {:.0} % of theirs", in_key(&our_chords), in_key(&their_chords));
+    println!(
+        "   chords made of the key's notes: {:.0} % of ours, {:.0} % of theirs",
+        in_key(&our_chords),
+        in_key(&their_chords)
+    );
 
-    let their_parts: Vec<(usize, String)> =
-        project["sections"].as_array().unwrap().iter().map(|part| (part["bar"].as_u64().unwrap() as usize, part["label"].as_str().unwrap().to_owned())).collect();
+    let their_parts: Vec<(usize, String)> = project["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|part| (part["bar"].as_u64().unwrap() as usize, part["label"].as_str().unwrap().to_owned()))
+        .collect();
     let starts = |list: &[(usize, String)]| -> Vec<f64> { list.iter().map(|part| part.0 as f64).collect() };
     let our_parts: Vec<(usize, String)> = heard.parts.iter().map(|part| (part.bar, part.label.clone())).collect();
-    let letters = |list: &[(usize, String)]| -> String { list.iter().map(|part| part.1.as_str()).collect::<Vec<_>>().join(" ") };
+    let letters =
+        |list: &[(usize, String)]| -> String { list.iter().map(|part| part.1.as_str()).collect::<Vec<_>>().join(" ") };
     println!(
         "   parts: {} against {}; boundaries agree {:.2} within a bar\n      ours   {}\n      theirs {}",
         our_parts.len(),
@@ -209,12 +247,22 @@ fn compare(folder: &Path) -> (f64, f64) {
         letters(&their_parts),
     );
 
-    let their_loops: Vec<String> = project["loops"].as_array().unwrap().iter().map(|found| found["id"].as_str().unwrap().to_owned()).collect();
+    let their_loops: Vec<String> =
+        project["loops"].as_array().unwrap().iter().map(|found| found["id"].as_str().unwrap().to_owned()).collect();
     let same_loops = their_loops.iter().filter(|id| heard.loops.iter().any(|found| &found.id == *id)).count();
-    println!("   loops: {} against {}; {} of theirs are ours to the bar", heard.loops.len(), their_loops.len(), same_loops);
+    println!(
+        "   loops: {} against {}; {} of theirs are ours to the bar",
+        heard.loops.len(),
+        their_loops.len(),
+        same_loops
+    );
 
-    let their_shots: Vec<(String, f64)> =
-        project["oneshots"].as_array().unwrap().iter().map(|shot| (shot["kind"].as_str().unwrap().to_owned(), shot["start"].as_f64().unwrap())).collect();
+    let their_shots: Vec<(String, f64)> = project["oneshots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|shot| (shot["kind"].as_str().unwrap().to_owned(), shot["start"].as_f64().unwrap()))
+        .collect();
     let mut kinds = String::new();
     for kind in HitKind::DRUMS.into_iter().chain([HitKind::Bass]) {
         let ours = heard.one_shots.iter().filter(|shot| shot.kind == kind).count();
@@ -223,24 +271,47 @@ fn compare(folder: &Path) -> (f64, f64) {
             kinds.push_str(&format!(" {} {ours}/{theirs}", kind.key()));
         }
     }
-    let same_shots = their_shots.iter().filter(|shot| heard.one_shots.iter().any(|ours| ours.kind.key() == shot.0 && (ours.start - shot.1).abs() < 0.02)).count();
+    let same_shots = their_shots
+        .iter()
+        .filter(|shot| {
+            heard.one_shots.iter().any(|ours| ours.kind.key() == shot.0 && (ours.start - shot.1).abs() < 0.02)
+        })
+        .count();
     println!("   one-shots (ours/theirs):{kinds}; {same_shots} of their {} are ours", their_shots.len());
 
     let their_groove = detail["groove"].as_array().cloned().unwrap_or_default();
     let mut groove = String::new();
     for kind in [HitKind::Kick, HitKind::Snare, HitKind::Hat] {
-        let theirs: Vec<f64> = their_groove.iter().filter(|note| note["kind"] == kind.key()).map(|note| note["time"].as_f64().unwrap()).collect();
+        let theirs: Vec<f64> = their_groove
+            .iter()
+            .filter(|note| note["kind"] == kind.key())
+            .map(|note| note["time"].as_f64().unwrap())
+            .collect();
         let ours: Vec<f64> = heard.groove.iter().filter(|note| note.kind == kind).map(|note| note.time).collect();
-        groove.push_str(&format!(" {} {}/{} agree {:.2};", kind.key(), ours.len(), theirs.len(), agreement(&theirs, &ours, 0.03)));
+        groove.push_str(&format!(
+            " {} {}/{} agree {:.2};",
+            kind.key(),
+            ours.len(),
+            theirs.len(),
+            agreement(&theirs, &ours, 0.03)
+        ));
     }
     println!("   groove (ours/theirs):{groove}");
 
     for (name, ours) in [("bass", &heard.bass), ("vocals", &heard.melody)] {
         let theirs = notes_of(&detail["notes"][name]);
         let ours: Vec<(f64, f64, i64)> = ours.iter().map(|note| (note.start, note.end, i64::from(note.midi))).collect();
-        println!("   {name} notes: {} against {}; the same note {:.0} % of the time theirs sound", ours.len(), theirs.len(), 100.0 * share(&theirs, &ours, |a, b| a == b));
+        println!(
+            "   {name} notes: {} against {}; the same note {:.0} % of the time theirs sound",
+            ours.len(),
+            theirs.len(),
+            100.0 * share(&theirs, &ours, |a, b| a == b)
+        );
     }
-    assert!(key_same || alternates.iter().any(|other| other == their_key["name"].as_str().unwrap()), "{name}: the key is not even among the runners-up");
+    assert!(
+        key_same || alternates.iter().any(|other| other == their_key["name"].as_str().unwrap()),
+        "{name}: the key is not even among the runners-up"
+    );
     (chords_same, beats_agree)
 }
 

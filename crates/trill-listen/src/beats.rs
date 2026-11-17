@@ -114,7 +114,8 @@ fn tempo_of(beats: &[f64]) -> (f64, f64, bool) {
 fn agreed_tempo(beats: &[f64]) -> f64 {
     let intervals: Vec<f64> = beats.windows(2).map(|pair| pair[1] - pair[0]).collect();
     let period = median(&intervals);
-    let close: Vec<f64> = intervals.iter().copied().filter(|interval| (interval - period).abs() < 0.02 * period).collect();
+    let close: Vec<f64> =
+        intervals.iter().copied().filter(|interval| (interval - period).abs() < 0.02 * period).collect();
     if close.len() * 2 >= intervals.len() && !close.is_empty() {
         60.0 * close.len() as f64 / close.iter().sum::<f64>()
     } else {

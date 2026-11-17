@@ -4708,6 +4708,7 @@ dependencies = [
  "trill-dsp",
  "trill-engine",
  "trill-library",
+ "trill-listen",
  "trill-media",
  "trill-plugins",
  "trill-runtime",

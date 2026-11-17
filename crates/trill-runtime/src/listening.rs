@@ -57,7 +57,9 @@ impl Runtime {
         let stamp = FileStamp::of(path);
         {
             let mut kept = self.listening.kept.lock();
-            if let Some(index) = kept.iter().position(|kept| kept.path == path && kept.stamp == stamp && kept.corrections == corrections) {
+            if let Some(index) =
+                kept.iter().position(|kept| kept.path == path && kept.stamp == stamp && kept.corrections == corrections)
+            {
                 // The most recently asked for is kept longest.
                 let found = kept.remove(index);
                 let heard = found.heard.clone();
@@ -102,7 +104,8 @@ mod tests {
                 samples[start + index] += fade * (index as f32 * if beat % 4 == 0 { 0.02 } else { 0.35 }).sin() * 0.8;
             }
         }
-        write_wav(path, &AudioBuffer { sample_rate: rate, left: samples.clone(), right: samples }, WavFormat::Int16).unwrap();
+        write_wav(path, &AudioBuffer { sample_rate: rate, left: samples.clone(), right: samples }, WavFormat::Int16)
+            .unwrap();
     }
 
     #[test]
@@ -131,6 +134,9 @@ mod tests {
         std::fs::write(&text, "not audio at all").unwrap();
         assert!(!runtime.hear(&text, &[]).unwrap_err().to_string().is_empty());
         let long = ListenError::TooLong { path: PathBuf::from("set.wav"), minutes: 61.0 }.to_string();
-        assert_eq!(long, "set.wav is 61 minutes long, and a recording is listened to up to 15 minutes: cut the part you want into a file of its own");
+        assert_eq!(
+            long,
+            "set.wav is 61 minutes long, and a recording is listened to up to 15 minutes: cut the part you want into a file of its own"
+        );
     }
 }
