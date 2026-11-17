@@ -235,7 +235,9 @@ impl Loaded {
             .iter()
             .map(|name| match overrides.get(name) {
                 Some(elsewhere) => elsewhere.clone(),
-                None if is_rooted(name) => name.clone(),
+                // A whole path stands as it is; so does a name beside a
+                // file that has no folder to its name.
+                None if is_rooted(name) || folder.is_empty() => name.clone(),
                 None => resolve(folder, name).unwrap_or_else(|| format!("{folder}/{name}")),
             })
             .collect();

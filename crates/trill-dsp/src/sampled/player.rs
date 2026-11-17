@@ -633,6 +633,11 @@ impl Voice {
                 self.wait -= 1;
                 continue;
             }
+            if self.ended {
+                // Past its last frame there is nothing to read, however
+                // much of the buffer is left.
+                break;
+            }
             let envelope = self.envelope.tick();
             let fade = self.fade.tick();
             let (mut l, mut r) = self.next(&audio);

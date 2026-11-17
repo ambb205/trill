@@ -453,7 +453,8 @@ mod tests {
     }
 
     /// A device model for `builtin:<key>`. The sample players get a state
-    /// that puts `tone.wav` on the sampler and on every pad of the rack.
+    /// that puts `tone.wav` on the sampler and on every pad of the rack,
+    /// and the sampled instrument one that names `tone.sfz`.
     fn model(key: &str, params: &[(&str, f64)]) -> Device {
         let mut project = Project::new("t");
         let id = project.add_device(ChainRef::Master, format!("builtin:{key}"), key, None).unwrap();
@@ -466,13 +467,15 @@ mod tests {
             "drumrack" => {
                 Some(drumrack::State::with_pads(drumrack::PAD_NOTES.map(|note| (note, "tone.wav"))).unwrap().to_bytes())
             }
+            "sampled" => Some(sampled::State::new("tone.sfz").to_bytes()),
             _ => None,
         };
         device.clone()
     }
 
     /// A factory whose loader knows one file, `tone.wav`: a decaying 220 Hz
-    /// tone half a second long.
+    /// tone half a second long. And one instrument, `tone.sfz`, which plays
+    /// it on every key.
     fn factory() -> Builtins {
         let loader = MemoryLoader::default();
         let tone = testing::sine(220.0, SR, 24_000);
@@ -481,11 +484,23 @@ mod tests {
             tone.iter().enumerate().map(|(i, s)| s * 0.5 * (-(i as f32) / 6_000.0).exp()).collect(),
             SR,
         );
-        Builtins::with_loader(Arc::new(loader))
+        let texts = testing::MemoryTexts::default();
+        texts.insert("tone.sfz", "<region> sample=tone.wav");
+        Builtins::with_sources(Arc::new(loader), Box::new(texts))
+    }
+
+    /// A device of `factory`, once it has read what it plays.
+    fn ready(factory: &Builtins, device: &Device) -> DeviceInstance {
+        let instance = factory.create(device, SR, BLOCK).unwrap();
+        let reading = || instance.controller.as_ref().and_then(|controller| controller.reading());
+        while reading().is_some_and(|reading| reading.is_loading()) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        instance
     }
 
     fn make(key: &str, params: &[(&str, f64)]) -> Box<dyn DeviceProcessor> {
-        factory().create(&model(key, params), SR, BLOCK).unwrap().processor
+        ready(&factory(), &model(key, params)).processor
     }
 
     /// Runs `blocks` blocks. `input` fills each block before processing and
@@ -851,8 +866,8 @@ mod tests {
             let device = Device { state: None, ..model(builtin.key, &[]) };
             let instance = BuiltinFactory.create(&device, SR, BLOCK).unwrap_or_else(|e| panic!("{}: {e}", builtin.key));
             assert_eq!(instance.params.len(), builtin.params.len());
-            let sampled = matches!(builtin.create, Create::Sampled { .. });
-            assert_eq!(instance.controller.is_some(), sampled, "{}", builtin.key);
+            let plays_files = !matches!(builtin.create, Create::Plain(_));
+            assert_eq!(instance.controller.is_some(), plays_files, "{}", builtin.key);
         }
         // An empty sampler is silent, not broken.
         let empty = Device { state: Some(sampler::State::default().to_bytes()), ..model("sampler", &[]) };
@@ -863,13 +878,13 @@ mod tests {
 
     #[test]
     fn the_unit_factory_says_how_to_load_samples() {
-        for key in ["sampler", "drumrack"] {
+        for key in ["sampler", "drumrack", "sampled"] {
             let Err(error) = BuiltinFactory.create(&model(key, &[]), SR, BLOCK) else {
                 panic!("{key}: created a device that needs a file without a loader")
             };
             let DeviceError::LoadFailed { uri, reason } = &error else { panic!("{key}: {error}") };
             assert_eq!(uri, &format!("builtin:{key}"));
-            assert!(reason.contains("tone.wav") && reason.contains("Builtins::with_loader"), "{reason}");
+            assert!(reason.contains("tone.") && reason.contains("Builtins::with_loader"), "{reason}");
             // The same goes for a `Builtins` that was given no loader.
             assert!(matches!(
                 Builtins::default().create(&model(key, &[]), SR, BLOCK),

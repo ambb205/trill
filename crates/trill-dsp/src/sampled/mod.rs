@@ -152,3 +152,6 @@ impl DeviceController for Controller {
         ControllerSupport::Listed(kinds)
     }
 }
+
+#[cfg(test)]
+mod player_tests;
