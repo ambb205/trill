@@ -29,7 +29,7 @@ Development builds are optimized (see `[profile.dev]`), because unoptimized audi
 
 ### Building and testing
 
-`cargo test --workspace` runs about 2,250 tests in a few minutes. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 2,300 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -45,6 +45,8 @@ cargo test -p trill-mcp --test controllers -- --include-ignored --nocapture    #
 cargo test -p trill-mcp --test hearing -- --include-ignored --nocapture    # renders and probes of Superior Drummer 3, a SWAM saxophone and an Ample bass; the Ample instruments rendered again to the same samples; a song of installed plugins on one processor and on several
 cargo test -p trill-mcp --test instruments -- --include-ignored --nocapture --test-threads 1    # what Trill ships about the Ample guitars and bass and Superior Drummer 3, checked on the plugins themselves: a drum asked for by name and heard on two kits, a slide, a scoop, a harmonic and a bend written by name and heard
 cargo test -p trill-app a_modelled_saxophone -- --include-ignored --nocapture    # the same saxophone typed on the computer keyboard, through the window's own code (no window opens)
+cargo test -p trill-mcp --test wavetable against_the_installed -- --ignored --nocapture    # a sawtooth on the wavetable synth beside Serum 2's and Surge XT's as they come: what of each is not on a harmonic, its pitch and its level (a measurement)
+cargo test -p trill-dsp --lib share_of_a_core -- --ignored --nocapture    # what the wavetable synth costs, from one voice to thirty-two notes of sixteen copies (a measurement; run it alone)
 cargo test -p trill-media -- --include-ignored      # decoding audio files found in this machine's usual folders
 TRILL_TEST_PLUGIN_WINDOWS=1 cargo test -p trill-plugins --test editor_windows -- --test-threads=1   # opens windows
 TRILL_TEST_CLAUDE=1 cargo test -p trill-assistant --test real_cli    # talks to an installed, signed-in Claude Code
@@ -214,9 +216,26 @@ window, a song that plays through the built-in devices is filmed by
 | Device | |
 |---|---|
 | `builtin:polysynth` | 16-voice subtractive/FM synth: two oscillators that can be turned off, unison, sub, noise (as wide as it is set), multimode filter, two envelopes, a pitch envelope (an 808's knock), LFO, mono/glide, a pitch wheel whose range can be set. 15 presets from pads and basses to FM keys and bells. |
+| `builtin:wavetable` | Wavetable synth, and the instrument to shape a sound with: two oscillators that each read a table of waves at a position that can move (unison to 16, sync, bend and squeeze, FM of one by the other), a sub, noise, two filters (12 and 24 dB low, band, high and notch, two combs; in a row, side by side or one for each oscillator), three envelopes, three LFOs (free or in time with the song), four macros a sound gives names to, and a matrix of sixteen slots that says what moves what. 22 tables ship, made in code; a table can also be made from a recipe or read from an audio file. 16 presets across bass, lead, pad, pluck and keys. |
 | `builtin:drumkit` | Synthesized drum machine on the General MIDI map, with 808, 909, tight, trap and lo-fi kits. Each drum is shaped after measurements of recorded ones: where its energy sits and how long it rings. |
 | `builtin:sampler` | Plays one audio file across the keyboard: loops with crossfade, reverse, one-shot, amp and filter envelopes, a pitch wheel whose range can be set. |
 | `builtin:drumrack` | Sixteen pads on the General MIDI drum notes, each playing its own audio file, with level, pan, tune, decay and choke groups. |
+
+The wavetable synth is built to be shaped by someone who cannot hear it, which is what an assistant is. Every
+part of it is a parameter whose name says what it does and in what unit; nothing is routed that the matrix does
+not say (`mod1_source` x `mod1_amount` -> `mod1_dest`); a preset says in a sentence what it sounds like, what it
+is for and what its macros do, and `search_presets` finds it by those words. A table is data too: a recipe is a
+few key frames, each a named shape with its numbers (`{"shape": "pulse", "width": 0.3}`) or a list of harmonics,
+and between two key frames of the same shape the numbers move, so two pulses make a table that sweeps the width.
+The tables that ship are such recipes, to read and to change, and a table is shown as what it is frame by frame
+(how bright, how hollow, how loud) in place of being heard. It needs no file and no loading, and the same song is
+the same samples on every render, at any buffer size and on any number of threads: what a note draws by lot is
+drawn from the note. Measured (and held in tests): what is not on a harmonic of a sawtooth lies 84 dB under it
+at the worst pitch and 110 to 129 dB under it in the top octave of a piano at 48 kHz; a voice is as loud as the
+poly synth's at the same volume; eight notes of eight copies on both oscillators take 6 % of one core. It has no
+effects inside: the chorus, the delay and the reverb are devices to put after it. Its presets are matched in
+level by measurement and have not been tuned by ear yet. In the window its panel draws the wave an oscillator
+reads at its position, the envelopes and the LFOs, and lists the matrix slot by slot.
 
 The two sample players follow velocity by one law, in decibels: the volume is the level of a note at velocity 75,
 and the sensitivity moves harder and softer notes from it by 0.4 dB a step at full (half of that at 0.5), so a
@@ -733,6 +752,7 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Presets | `search_presets` (one search across the presets of every installed instrument and the saved ones), `save_preset` (keeps a device's sound under a name) |
 | Clips | `create_clip`, `create_audio_clip`, `update_clip`, `split_clip`, `duplicate_clip`, `delete_clip` |
 | Sounds | `search_sounds`, `library` (its folders, and `move_folder` for one that went elsewhere), `preview_sound`, `set_sample` |
+| Wavetables | `describe_wavetable` (the tables of `builtin:wavetable` that ship, any of them or a recipe of your own shown frame by frame in numbers; changes nothing), `set_wavetable` (gives an oscillator a table that ships, one made from a recipe, or one read from an audio file; names the macros) |
 | Missing files | `missing_files` (what the song names that is not on disk, where it is used, and what was found with how sure it is), `relink_files` (what is sure, or more on request, or a folder or files named by hand: one undo step) |
 | Notes | `get_notes`, `add_notes`, `set_notes`, `remove_notes`, `transform_notes` |
 | Controllers | `get_controllers`, `set_controllers`, `shape_dynamics` (gives a line its dynamics from its notes, as an expression curve) |
@@ -881,6 +901,13 @@ General MIDI, not from what the plugin says is on its keys; over MCP every tool 
 notes drawn by hand in the window (the tools write them; a note that is drawn is a plain key), kits of drum
 plugins other than Superior Drummer 3 (none of the others on the machine says what is on its keys in a state
 Trill reads),
+for the wavetable synth: presets tuned by ear (they are matched in level by measurement, and its bank is a
+first sixteen), effects inside it or a preset that brings effects with it (a sound that wants a chorus or a
+reverb is given the device), making a table or naming a macro in the window (over MCP; the window chooses among
+the tables there are and shows the one that is played), a formant filter, moving the unison's detune or an
+envelope's times from the matrix, and warps free of what a corner in the cycle adds (sync, bend and squeeze leave
+42 to 57 dB under the note what does not belong to it and is heard, two octaves over middle C; FM by a bright
+wave far more),
 session (clip-launching) view, audio recording (MIDI is recorded; audio is not), polyphonic aftertouch and MPE
 (per-note expression; clips hold one curve per controller for the whole channel), ASIO, warp markers, plugin
 delay compensation, multi-core rendering. Only Windows has been run so far.
