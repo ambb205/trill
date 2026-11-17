@@ -94,10 +94,8 @@ pub fn read(path: &Path, source: &dyn Fn(&Path) -> Result<String, String>) -> Re
             instrument.switches.keys = Some((*low, *high));
         }
     }
-    instrument.unsupported = unsupported
-        .into_iter()
-        .map(|(name, count)| Unsupported { miss: missed(&name), name, count })
-        .collect();
+    instrument.unsupported =
+        unsupported.into_iter().map(|(name, count)| Unsupported { miss: missed(&name), name, count }).collect();
     Ok(instrument)
 }
 
@@ -221,7 +219,8 @@ impl Reader {
         let mut building = Building::default();
         // The levels are taken out while they are read, since reading one
         // may note something about the instrument as a whole.
-        let levels = [std::mem::take(&mut self.global), std::mem::take(&mut self.master), std::mem::take(&mut self.group)];
+        let levels =
+            [std::mem::take(&mut self.global), std::mem::take(&mut self.master), std::mem::take(&mut self.group)];
         for (name, value) in levels.iter().flatten().chain(&pairs) {
             if !self.apply(&mut building, name, value) {
                 *self.unsupported.entry(name.clone()).or_default() += 1;
@@ -489,13 +488,37 @@ impl Reader {
                     region.when.push((controller, 0.0, 127.0));
                 }
                 let span = region.when.iter_mut().find(|(number, _, _)| *number == controller).expect("just put");
-                if stem == "locc" { span.1 = amount } else { span.2 = amount }
+                if stem == "locc" {
+                    span.1 = amount
+                } else {
+                    span.2 = amount
+                }
                 return true;
             }
-            "xfin_locc" => return { fade(region, &|fade| fade.in_low = amount); true },
-            "xfin_hicc" => return { fade(region, &|fade| fade.in_high = amount); true },
-            "xfout_locc" => return { fade(region, &|fade| fade.out_low = amount); true },
-            "xfout_hicc" => return { fade(region, &|fade| fade.out_high = amount); true },
+            "xfin_locc" => {
+                return {
+                    fade(region, &|fade| fade.in_low = amount);
+                    true
+                };
+            }
+            "xfin_hicc" => {
+                return {
+                    fade(region, &|fade| fade.in_high = amount);
+                    true
+                };
+            }
+            "xfout_locc" => {
+                return {
+                    fade(region, &|fade| fade.out_low = amount);
+                    true
+                };
+            }
+            "xfout_hicc" => {
+                return {
+                    fade(region, &|fade| fade.out_high = amount);
+                    true
+                };
+            }
             "volume_oncc" | "gain_oncc" => Moved::Volume,
             "amplitude_oncc" => Moved::Amplitude,
             "pan_oncc" => Moved::Pan,
@@ -767,11 +790,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(piano.name, "Small Grand");
-        assert_eq!(piano.recordings, ["Samples/C2 soft.wav", "Samples/E2 soft.wav", "Samples/C2 loud.wav", "Shared/noise.wav"]);
+        assert_eq!(
+            piano.recordings,
+            ["Samples/C2 soft.wav", "Samples/E2 soft.wav", "Samples/C2 loud.wav", "Shared/noise.wav"]
+        );
         let [soft, e, loud, noise] = piano.regions.as_slice() else { panic!("{} regions", piano.regions.len()) };
         assert_eq!((soft.keys, soft.root, soft.velocities), ((35, 37), 36, (1, 60)));
         assert_eq!((soft.volume, soft.envelope.release, soft.level_by_velocity), (-3.0, 0.8, 0.9));
-        assert_eq!((e.keys, e.root, e.tune, e.volume), ((40, 40), 40, 88.0, 2.0), "its own volume in place of the group's");
+        assert_eq!(
+            (e.keys, e.root, e.tune, e.volume),
+            ((40, 40), 40, 88.0, 2.0),
+            "its own volume in place of the group's"
+        );
         assert_eq!((loud.velocities, loud.volume, loud.pan), ((61, 127), 0.0, -0.3), "a new group starts afresh");
         assert_eq!((noise.trigger, noise.release_decay, noise.level_by_velocity), (Trigger::Release, 6.0, 0.5));
         assert_eq!(noise.velocities, (0, 127), "a new master starts the groups afresh too");
@@ -800,7 +830,10 @@ mod tests {
         assert_eq!(strings.switches.labels, [(24, "Sustain".to_string()), (26, "Pizzicato".to_string())].into());
         let [soft, loud, first, second] = strings.regions.as_slice() else { panic!() };
         assert_eq!(soft.switched.last, Some((24, 24)));
-        assert_eq!((soft.loop_mode, soft.loop_start, soft.loop_end), (Some(LoopMode::Sustain), Some(1_000), Some(9_000)));
+        assert_eq!(
+            (soft.loop_mode, soft.loop_start, soft.loop_end),
+            (Some(LoopMode::Sustain), Some(1_000), Some(9_000))
+        );
         assert_eq!(soft.loop_crossfade, 0.05);
         assert_eq!(soft.fade_controllers, [(1, Fade { in_low: 0.0, in_high: 0.0, out_low: 40.0, out_high: 90.0 })]);
         assert_eq!(loud.fade_controllers, [(1, Fade { in_low: 40.0, in_high: 90.0, out_low: 127.0, out_high: 127.0 })]);
@@ -813,7 +846,9 @@ mod tests {
         assert_eq!((second.turn, second.random), ((2, 2), (0.5, 1.0)));
         assert_eq!(second.loop_mode, Some(LoopMode::OneShot));
         let curve = second.velocity_curve.as_ref().unwrap();
-        assert!((curve[64] - 0.8).abs() < 1e-6 && (curve[32] - 0.4).abs() < 1e-6 && curve[127] == 1.0 && curve[0] == 0.0);
+        assert!(
+            (curve[64] - 0.8).abs() < 1e-6 && (curve[32] - 0.4).abs() < 1e-6 && curve[127] == 1.0 && curve[0] == 0.0
+        );
         let summary = strings.summary();
         assert_eq!(summary.switches, [(24, "Sustain".to_string()), (26, "Pizzicato".to_string())]);
         assert_eq!(summary.controllers.iter().map(|(number, _)| *number).collect::<Vec<_>>(), [1, 73]);

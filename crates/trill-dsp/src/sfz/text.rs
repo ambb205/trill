@@ -209,9 +209,10 @@ fn filled(text: &str, defines: &BTreeMap<String, String>) -> String {
         let after = &rest[dollar + 1..];
         let word = after.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(after.len());
         // The longest defined name the word begins with.
-        let found = (1..=word).rev().filter(|end| after.is_char_boundary(*end)).find_map(|end| {
-            defines.get(&after[..end]).map(|value| (end, value))
-        });
+        let found = (1..=word)
+            .rev()
+            .filter(|end| after.is_char_boundary(*end))
+            .find_map(|end| defines.get(&after[..end]).map(|value| (end, value)));
         match found {
             Some((end, value)) => {
                 out.push_str(value);
@@ -250,7 +251,9 @@ mod tests {
 
     #[test]
     fn headers_and_pairs_are_read_wherever_they_stand() {
-        let text = one("<group> lokey=c2 hikey=48 // the low end\n<region>sample=Grand Piano/C 2 soft.wav LoVel=1\n\n  hivel=40<region> sample=b.wav");
+        let text = one(
+            "<group> lokey=c2 hikey=48 // the low end\n<region>sample=Grand Piano/C 2 soft.wav LoVel=1\n\n  hivel=40<region> sample=b.wav",
+        );
         assert_eq!(
             pairs(&text),
             [
@@ -270,13 +273,17 @@ mod tests {
 
     #[test]
     fn comments_are_gone_whether_they_end_a_line_or_span_several() {
-        let text = one("<region> /* not\nthis key=1\nat all */ key=60 /* nor this */ sample=a.wav // c4\n// <region>\nvolume=-3");
+        let text = one(
+            "<region> /* not\nthis key=1\nat all */ key=60 /* nor this */ sample=a.wav // c4\n// <region>\nvolume=-3",
+        );
         assert_eq!(pairs(&text), [("<>", "region"), ("key", "60"), ("sample", "a.wav"), ("volume", "-3")]);
     }
 
     #[test]
     fn defined_names_are_filled_in_by_the_longest_that_fits() {
-        let text = one("#define $KEY 36\n#define $KEY2 38 #define $DIR Drums\n<region> key=$KEY sample=$DIR/kick_$KEY.wav\n<region> key=$KEY2 locc$KEY=1 sample=$NOPE.wav");
+        let text = one(
+            "#define $KEY 36\n#define $KEY2 38 #define $DIR Drums\n<region> key=$KEY sample=$DIR/kick_$KEY.wav\n<region> key=$KEY2 locc$KEY=1 sample=$NOPE.wav",
+        );
         assert_eq!(
             pairs(&text),
             [
@@ -294,14 +301,21 @@ mod tests {
     #[test]
     fn included_files_stand_where_they_are_included() {
         let read = |path: &Path| match path.to_string_lossy().replace('\\', "/").as_str() {
-            "/i/main.sfz" => Ok("<control> default_path=samples/\n#include \"parts/low.sfz\"\n<region> key=72 #include \"gone.sfz\"".to_string()),
-            "/i/parts/low.sfz" => Ok("#define $ROOT 36\n<region> key=$ROOT\n#include \"parts/deep.sfz\" #include \"near.sfz\"".to_string()),
+            "/i/main.sfz" => {
+                Ok("<control> default_path=samples/\n#include \"parts/low.sfz\"\n<region> key=72 #include \"gone.sfz\""
+                    .to_string())
+            }
+            "/i/parts/low.sfz" => {
+                Ok("#define $ROOT 36\n<region> key=$ROOT\n#include \"parts/deep.sfz\" #include \"near.sfz\""
+                    .to_string())
+            }
             "/i/parts/deep.sfz" => Ok("<region> key=24 #include \"parts/deep.sfz\"".to_string()),
             "/i/parts/near.sfz" => Ok("<region> key=25".to_string()),
             _ => Err("no such file".to_string()),
         };
         let text = tokens(Path::new("/i/main.sfz"), &read).unwrap();
-        let keys: Vec<&str> = pairs(&text).into_iter().filter(|(name, _)| *name == "key").map(|(_, value)| value).collect();
+        let keys: Vec<&str> =
+            pairs(&text).into_iter().filter(|(name, _)| *name == "key").map(|(_, value)| value).collect();
         // From the folder of the main file, and failing that from the folder of the file that asks.
         assert_eq!(keys[..3], ["36", "24", "24"]);
         assert_eq!(*keys.last().unwrap(), "72");
@@ -315,8 +329,11 @@ mod tests {
 
     #[test]
     fn what_makes_no_sense_is_said_and_passed_over() {
-        let text = one("<region> stray words key=60 sample=a.wav\njust words\n<group\n#include nothing\n#define $X\n<region> key=61");
-        let keys: Vec<&str> = pairs(&text).into_iter().filter(|(name, _)| *name == "key").map(|(_, value)| value).collect();
+        let text = one(
+            "<region> stray words key=60 sample=a.wav\njust words\n<group\n#include nothing\n#define $X\n<region> key=61",
+        );
+        let keys: Vec<&str> =
+            pairs(&text).into_iter().filter(|(name, _)| *name == "key").map(|(_, value)| value).collect();
         assert_eq!(keys, ["60", "61"]);
         assert_eq!(text.problems.len(), 5, "{:?}", text.problems);
         assert!(text.problems[0].contains("'stray words' is neither"));

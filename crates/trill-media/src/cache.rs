@@ -328,6 +328,10 @@ impl AudioLoader for MediaCache {
             Err(error) => Err(error.to_string()),
         }
     }
+
+    fn size(&self, path: &str) -> Option<u64> {
+        std::fs::metadata(path).ok().filter(std::fs::Metadata::is_file).map(|found| found.len())
+    }
 }
 
 /// What the cache holds for a key, for the current version of its file.

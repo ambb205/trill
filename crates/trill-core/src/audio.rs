@@ -44,6 +44,15 @@ pub trait AudioLoader: Send + Sync {
     fn open(&self, path: &str) -> Result<Box<dyn AudioStream>, String> {
         Ok(Box::new(Loaded::new(self.load(path)?)))
     }
+
+    /// How large the file at `path` is, in bytes; `None` if there is no
+    /// such file. Costs what asking the file system does: an instrument
+    /// asks it of every recording it names, to say which are missing.
+    ///
+    /// Without an implementation of its own this loads the file to see.
+    fn size(&self, path: &str) -> Option<u64> {
+        self.load(path).ok().map(|buffer| buffer.frames() as u64 * 8)
+    }
 }
 
 /// A sustain loop a file carries in itself (the `smpl` chunk of a WAV

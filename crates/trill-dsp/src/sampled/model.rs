@@ -533,8 +533,28 @@ pub struct Summary {
 
 /// Words in the name of a recording or a key that make it a drum's.
 const DRUM_WORDS: &[&str] = &[
-    "kick", "snare", "hihat", "hi-hat", "hat", "tom", "crash", "ride", "cymbal", "clap", "rim", "cowbell", "shaker",
-    "tambourine", "conga", "bongo", "splash", "china", "stick", "bd", "sd", "hh",
+    "kick",
+    "snare",
+    "hihat",
+    "hi-hat",
+    "hat",
+    "tom",
+    "crash",
+    "ride",
+    "cymbal",
+    "clap",
+    "rim",
+    "cowbell",
+    "shaker",
+    "tambourine",
+    "conga",
+    "bongo",
+    "splash",
+    "china",
+    "stick",
+    "bd",
+    "sd",
+    "hh",
 ];
 
 impl Instrument {
@@ -603,9 +623,7 @@ impl Instrument {
                     .collect();
                 keys.sort_unstable();
                 keys.dedup();
-                keys.into_iter()
-                    .map(|key| (key, self.switches.labels.get(&key).cloned().unwrap_or_default()))
-                    .collect()
+                keys.into_iter().map(|key| (key, self.switches.labels.get(&key).cloned().unwrap_or_default())).collect()
             }
             None => Vec::new(),
         };
@@ -725,7 +743,9 @@ mod tests {
             by_controller: vec![(Stage::Release, 72, 2.0)],
             ..Envelope::default()
         };
-        let at = |stage, velocity, wheel: f32| envelope.stage(stage, velocity, |number| if number == 72 { wheel } else { 0.0 });
+        let at = |stage, velocity, wheel: f32| {
+            envelope.stage(stage, velocity, |number| if number == 72 { wheel } else { 0.0 })
+        };
         assert!((at(Stage::Attack, 1.0, 0.0) - 0.02).abs() < 1e-6);
         assert_eq!(at(Stage::Attack, 0.0, 0.0), 0.1);
         assert_eq!(at(Stage::Release, 0.0, 0.5), 1.5);
@@ -769,7 +789,8 @@ mod tests {
 
         // Two takes of each note in turn, and two ways of playing chosen by a key.
         let mut guitar = piano();
-        guitar.switches = Switches { keys: Some((24, 25)), default: Some(24), labels: [(24, "Open".to_string())].into() };
+        guitar.switches =
+            Switches { keys: Some((24, 25)), default: Some(24), labels: [(24, "Open".to_string())].into() };
         let regions = std::mem::take(&mut guitar.regions);
         for region in regions.iter().filter(|region| region.on_key_down()) {
             for turn in 1..=2 {
