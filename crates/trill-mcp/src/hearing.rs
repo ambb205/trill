@@ -59,9 +59,9 @@ hearing one track of a long song costs what that track costs. Naming a return th
 every track's send feeds it; naming a group gives the group with its members.
 Both run at the engine's sample rate unless `sample_rate` asks for another (without an audio device the engine \
 runs at 48000 Hz, whatever the song's files are at), and their replies state the rate they ran at.
-Both use every processor the machine has: tracks that do not feed one another are made at once, and what comes \
-out is the samples one processor would have made, sooner. The reply's `threads` says how many it was; `threads` \
-in the call holds it to fewer.
+Both use several of the machine's processors (half of them, eight at the most): tracks that do not feed one \
+another are made at once, and what comes out is the samples one processor would have made, sooner. The reply's \
+`threads` says how many it was; `threads` in the call asks for another number.
 A plugin that plays samples (a drum kit, a sampled guitar) reads them after it is made or given another kit or \
 preset, for seconds or as much as a minute, and until a drum has arrived its key is silent. probe, measure and \
 render wait for that on a copy of their own, so what they report is the whole instrument; if notes stayed \
@@ -124,10 +124,10 @@ pub struct MeasureRequest {
     pub detail: bool,
     /// Longest reverb/delay tail to keep after the end, in seconds (default 10; trimmed when silent sooner).
     pub max_tail_seconds: Option<f64>,
-    /// How many of the machine's processors make it at the most. Leave it out: all of them are used, tracks
-    /// that do not feed one another are made at once, and the samples are the ones a single processor makes.
-    /// 1 makes it a track at a time: to compare the time, or to leave the machine to other work. The reply's
-    /// `threads` says how many it was.
+    /// How many of the machine's processors make it at the most. Leave it out: half of them are used (eight
+    /// at the most), tracks that do not feed one another are made at once, and the samples are the ones a
+    /// single processor makes. 1 makes it a track at a time: to compare the time, or to leave the machine to
+    /// other work. The reply's `threads` says how many it was.
     pub threads: Option<usize>,
 }
 

@@ -15,7 +15,7 @@ use trill_core::device::{CompositeFactory, DeviceFactory};
 use trill_core::project::{AutomationPoint, AutomationTarget};
 use trill_core::{ChainRef, DeviceId, Note, Project, TrackId, TrackKind};
 use trill_dsp::BuiltinFactory;
-use trill_engine::render::{RenderJob, RenderOptions, Rendered, Stems};
+use trill_engine::render::{RenderJob, RenderOptions, Rendered, Stems, usual_threads};
 use trill_engine::scripted::{AMP, BASS, DRUMS, Loading, ScriptedFactory};
 use trill_engine::sources::AudioSources;
 
@@ -123,9 +123,10 @@ fn options(threads: Option<usize>) -> RenderOptions {
     RenderOptions { sample_rate: SR, max_tail_seconds: 3.0, threads, ..RenderOptions::default() }
 }
 
-/// How many threads this machine lets a render have.
+/// How many threads a render takes on this machine when it is not told:
+/// half its processors, eight at the most, or what the environment says.
 fn processors() -> usize {
-    std::thread::available_parallelism().map_or(1, usize::from)
+    usual_threads()
 }
 
 #[test]
@@ -147,7 +148,7 @@ fn a_song_renders_to_the_same_samples_on_one_thread_and_on_many() {
         if processors() > 1 {
             assert!(many.measured.threads > 1, "{name}: it used {} thread(s)", many.measured.threads);
         }
-        assert!(many.measured.threads <= threads.unwrap_or(usize::MAX).min(processors().max(64)));
+        assert!(many.measured.threads <= threads.unwrap_or_else(usual_threads));
         // Not close: the same.
         assert!(many.left == one.left && many.right == one.right, "{name}: the mix is other samples");
         assert_eq!(many.track_peaks, one.track_peaks, "{name}");
@@ -171,6 +172,53 @@ fn a_song_renders_to_the_same_samples_on_one_thread_and_on_many() {
         }
     }
     assert!(Path::new(&one.measured.stems[0].path).exists());
+}
+
+#[test]
+fn a_render_takes_half_the_machine_at_the_most_unless_it_is_told() {
+    // (The environment may say another number for the whole program,
+    // which is then what is taken; the tests here read it the same way.)
+    let machine = std::thread::available_parallelism().map_or(1, usize::from);
+    if std::env::var_os("TRILL_RENDER_THREADS").is_none() {
+        assert_eq!(usual_threads(), (machine / 2).clamp(1, 8));
+    }
+    // The song has five tracks that wait for nothing (the bass listens
+    // to the drums): told nothing, a render takes no more threads than
+    // that, and no more than usual.
+    let rendered = render(&song(), &ScriptedFactory::new(), &options(None));
+    assert_eq!(rendered.measured.threads, usual_threads().min(5));
+    // Told, it takes what it is told, up to what the song can use.
+    let told = render(&song(), &ScriptedFactory::new(), &options(Some(64)));
+    assert_eq!(told.measured.threads, 5);
+    assert_eq!(render(&song(), &ScriptedFactory::new(), &options(Some(3))).measured.threads, 3);
+}
+
+#[test]
+fn a_song_whose_tempo_and_time_signature_change_is_the_same_samples_on_many_threads() {
+    // A jump, a glide that arrives and a tempo that takes over, and a bar
+    // of seven: blocks end where the tempo and the meter change, on every
+    // thread alike.
+    let mut project = song();
+    project.set_tempo_at(3.0, 96.0, false).unwrap();
+    project.set_tempo_at(6.0, 96.0, false).unwrap();
+    project.set_tempo_at(10.0, 168.0, true).unwrap();
+    project.set_tempo_at(10.0, 120.0, false).unwrap();
+    project.set_time_signature_at(8.0, 7, 8).unwrap();
+    let scripted = ScriptedFactory::new();
+    let folder = tempfile::tempdir().unwrap();
+    let with_stems = |threads: Option<usize>, name: &str| RenderOptions {
+        stems: Some(Stems::all(folder.path().join(name))),
+        ..options(threads)
+    };
+    let one = render(&project, &scripted, &with_stems(Some(1), "one"));
+    let plain = render(&song(), &scripted, &options(Some(1)));
+    assert!(one.left.len() != plain.left.len(), "the changes of tempo are heard: the song is another length");
+    let many = render(&project, &scripted, &with_stems(Some(6), "many"));
+    assert!(many.left == one.left && many.right == one.right);
+    for (stem, single) in many.measured.stems.iter().zip(&one.measured.stems) {
+        let (written, expected) = (std::fs::read(&stem.path).unwrap(), std::fs::read(&single.path).unwrap());
+        assert!(written == expected, "{} is other samples than {}", stem.path, single.path);
+    }
 }
 
 #[test]

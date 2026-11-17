@@ -29,7 +29,7 @@ Development builds are optimized (see `[profile.dev]`), because unoptimized audi
 
 ### Building and testing
 
-`cargo test --workspace` runs about 2,180 tests in a few minutes. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 2,200 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -503,10 +503,11 @@ that quick and true:
   off, at the most and typically. It can be made without writing a file, and with only some tracks heard,
   the song's mute and solo left alone.
 - *A render uses the machine.* While a song plays one thread makes every block, a track at a time. A render
-  hands the tracks that do not feed one another to as many threads as the machine has processors, and then
-  adds them up, by one thread, in the order one thread would have: the mix, every stem and every number
-  measured are the same samples and the same figures as on one, sooner (`threads` holds it to fewer; the
-  reply says how many it was). A track waits for what feeds it: a group for its members, a return for the
+  hands the tracks that do not feed one another to several threads (half as many as the machine has
+  processors, eight at the most, unless `threads` or `TRILL_RENDER_THREADS` in the environment says another
+  number), and then adds them up, by one thread, in the order one thread would have: the mix, every stem and
+  every number measured are the same samples and the same figures as on one, sooner (the reply says how many
+  threads it was). It makes no more devices for it than it does on one: a plugin of the song is there once. A track waits for what feeds it: a group for its members, a return for the
   tracks that send to it, a track for the one its compressor listens to. Plugins take more care. The
   instances of one plugin share its module, and some modules keep things for all their instances: run at
   once, the instruments of Ample Sound give other samples than run one after the other. So the instances

@@ -36,10 +36,13 @@
 //! song has tracks and none of them is held in memory. A track's stem is
 //! what a render of a project holding that track alone gives.
 //!
-//! **A render uses the machine.** The tracks of a block that do not feed
-//! one another are made on several threads at once ([`crate::spread`]),
-//! and added up in the order one thread would have added them: the
-//! samples are the same, in less time. Plugins that are not known to keep
+//! **A render uses the machine, within bounds.** The tracks of a block
+//! that do not feed one another are made on several threads at once
+//! ([`crate::spread`]), and added up in the order one thread would have
+//! added them: the samples are the same, in less time. Half the machine's
+//! processors at the most, and eight, unless it is told another number
+//! ([`usual_threads`]); and no device is made that one thread would not
+//! have made. Plugins that are not known to keep
 //! nothing between their instances are run in turn all the same, and one
 //! that is not to be run beside anything leaves the render on one thread,
 //! which the report says ([`Measured::alone`]).
@@ -86,12 +89,11 @@ pub struct RenderOptions {
     /// Parts of the song to write to files of their own as the render
     /// goes. `None` writes none.
     pub stems: Option<Stems>,
-    /// How many threads make the render at the most: as many as the
-    /// machine has processors where this is `None`, and never more than
-    /// the song has tracks that can be made at once. With 1 it is made as
-    /// a song is played, a track after the other. The samples are the
-    /// same whatever this is, wherever the devices themselves do the same
-    /// thing twice.
+    /// How many threads make the render at the most: [`usual_threads`]
+    /// where this is `None`, and never more than the song has tracks that
+    /// can be made at once. With 1 it is made as a song is played, a
+    /// track after the other. The samples are the same whatever this is,
+    /// wherever the devices themselves do the same thing twice.
     pub threads: Option<usize>,
     /// Takes every device to tolerate being run beside any other, whatever
     /// is known of it ([`trill_core::device::Beside`]). For finding out
@@ -219,6 +221,29 @@ impl Default for RenderOptions {
             trusting: false,
         }
     }
+}
+
+/// The most threads a render uses on a machine that has few.
+const FEWEST_USUAL_THREADS: usize = 1;
+/// The most threads a render uses unless it is told otherwise.
+const MOST_USUAL_THREADS: usize = 8;
+
+/// How many threads a render uses when it is not told
+/// ([`RenderOptions::threads`]): half as many as the machine has
+/// processors, and eight at the most. A render has no claim on the whole
+/// machine: something else is usually running on it, the song is being
+/// played beside it, and the last threads add little, because a few tracks
+/// of a song cost most of it. `TRILL_RENDER_THREADS` in the environment
+/// sets another number for every render of the program (1 for none
+/// beside the thread that asks).
+///
+/// The threads cost a render no plugins: it makes one instance of each
+/// device of the song, as it does on one thread, and what it holds beside
+/// them is room for a block of each track.
+pub fn usual_threads() -> usize {
+    let processors = std::thread::available_parallelism().map_or(1, usize::from);
+    let asked = std::env::var("TRILL_RENDER_THREADS").ok().and_then(|number| number.trim().parse::<usize>().ok());
+    asked.filter(|number| *number >= 1).unwrap_or((processors / 2).clamp(FEWEST_USUAL_THREADS, MOST_USUAL_THREADS))
 }
 
 /// A part of the song to measure on its own: a verse, eight bars.
@@ -551,7 +576,7 @@ fn render_from(
     // unless a device of it is not to be run beside anything. The plugins
     // are rehearsed on them too.
     let alone = spread::company(&mut graph, project, factory, options.trusting);
-    let given = options.threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from)).max(1);
+    let given = options.threads.unwrap_or_else(usual_threads).max(1);
     let threads = if alone.is_empty() { given } else { 1 };
     let patience = (options.patience, threads);
     let waited = ready::wake(&mut graph, project, (&plugins, factory), (start, end), sample_rate, patience);

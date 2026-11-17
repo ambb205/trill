@@ -360,7 +360,7 @@ async fn measure_and_render_use_the_machine_and_what_they_give_is_what_one_proce
     let all = ok(client, "measure", json!({})).await;
     let one = ok(client, "measure", json!({ "threads": 1 })).await;
     assert_eq!(one["threads"], 1, "{one}");
-    if std::thread::available_parallelism().map_or(1, usize::from) > 1 {
+    if trill_engine::render::usual_threads() > 1 {
         assert_eq!(all["threads"], 2, "the bass and the drums at once: {all}");
     }
     for said in ["loudness_lufs", "peak_db", "true_peak_db", "duration_seconds", "tracks", "gain_reduction", "notes"] {
@@ -755,7 +755,7 @@ async fn the_tools_and_the_instructions_say_how_to_hear() {
         "gain reduction",
         "never to check your work",
         "mark it `loading`",
-        "every processor the machine has",
+        "several of the machine's processors",
     ];
     for word in words {
         assert!(instructions.contains(word), "the instructions should say '{word}'");
