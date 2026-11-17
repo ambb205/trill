@@ -50,11 +50,19 @@ pub struct Arrived {
     pub library_folder: Option<PathBuf>,
 }
 
+/// The checksum of a file as it was when it was read: of that size, last
+/// written then.
+struct Summed {
+    size: u64,
+    modified: Option<SystemTime>,
+    sum: String,
+}
+
 /// The checksums of instrument files that were read, each for as long as
 /// its file is the one that was read.
 #[derive(Default)]
 pub(crate) struct Known {
-    sums: Mutex<HashMap<PathBuf, (u64, Option<SystemTime>, String)>>,
+    sums: Mutex<HashMap<PathBuf, Summed>>,
 }
 
 impl Known {
@@ -62,14 +70,14 @@ impl Known {
     /// one that was read before.
     fn sum(&self, path: &Path) -> Option<String> {
         let found = std::fs::metadata(path).ok()?;
-        let stamp = (found.len(), found.modified().ok());
-        if let Some((size, modified, sum)) = self.sums.lock().get(path)
-            && (*size, *modified) == stamp
+        let (size, modified) = (found.len(), found.modified().ok());
+        if let Some(known) = self.sums.lock().get(path)
+            && (known.size, known.modified) == (size, modified)
         {
-            return Some(sum.clone());
+            return Some(known.sum.clone());
         }
         let sum = file_sum(path).ok()?;
-        self.sums.lock().insert(path.to_path_buf(), (stamp.0, stamp.1, sum.clone()));
+        self.sums.lock().insert(path.to_path_buf(), Summed { size, modified, sum: sum.clone() });
         Some(sum)
     }
 }

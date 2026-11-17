@@ -4,8 +4,8 @@
 //! * `instrument_catalogue` reads the catalogue: counted by kind and by
 //!   licence, searched by words, or one set with its licence as its maker
 //!   wrote it. It says which instruments are in the sound library already
-//!   and where. It fetches nothing: a set is fetched by the user, who is
-//!   shown its size and its licence first.
+//!   and where. It fetches nothing: fetching a set is the user's to do
+//!   and to decide, having seen its size and its licence.
 //! * `song_credits` reads the song: for the sampled instruments it plays,
 //!   the lines of the makers who ask to be named.
 
@@ -29,10 +29,10 @@ that let anyone use them and hand them on: pianos, electric pianos, strings, bas
 and more. instrument_catalogue lists them: with no arguments what there is by kind, with `query` or `kind` the \
 instruments (each with a sentence on what it is, its size, its licence, what was measured against it, and `here` \
 with its file where it is in the sound library already), with `set` one set with its licence in its maker's words.
-- You cannot fetch one, and must not try another way: a set is fetched by the user, in Trill's settings, who is \
-shown its size and its licence first. When a song wants an instrument that is not `here`, say which set has it \
-and how large it is, and go on with what is there. One that is `here` loads by its file: `preset` on create_track \
-or add_device with builtin:sampled.
+- You cannot fetch one, and must not try another way: a set is fetched by the user, who decides having seen its \
+size and its licence. When a song wants an instrument that is not `here`, say which set has it, how large it is \
+and where it is published (`set` gives that), and go on with what is there. One that is `here` loads by its file: \
+`preset` on create_track or add_device with builtin:sampled.
 - Some of those makers ask to be named when their instrument is used. song_credits says what the open song owes: \
 the lines to put where the song is released, each with the tracks it is for. Say so when a song is finished and \
 plays such an instrument; nothing is owed for the ones in the public domain.";
@@ -197,7 +197,7 @@ fn set_json(set: &Set, here: &HashMap<String, PathBuf>) -> Value {
         "version": set.version,
         "fetched": { "how": how, "from": from },
         "instruments": instruments,
-        "fetching": "The user fetches a set in Trill's settings, where its size and licence are shown first. This tool fetches nothing.",
+        "fetching": "Fetching a set is the user's to do and to decide: from where it is published, into a folder of the sound library. This tool fetches nothing.",
     });
     match &set.credit {
         Some(line) => out["credit"] = json!(line),
@@ -253,7 +253,7 @@ fn overview(catalogue: &Catalogue, here: &HashMap<String, PathBuf>) -> Value {
         "left_out": catalogue.left_out.len(),
         "next": "Give `query` or `kind` for instruments, `set` for one set with its licence. `put_forward` counts \
                  the instruments nothing that was measured speaks against; the others are listed with \
-                 `include_marked`. Nothing here is fetched by a tool: the user fetches a set in Trill's settings.",
+                 `include_marked`. Nothing here is fetched by a tool: fetching a set is the user's to do.",
     })
 }
 
@@ -339,8 +339,8 @@ impl TrillServer {
     /// (builtin:sampled) once the user has fetched them: with no arguments what there is by kind and by
     /// licence, with `query` or `kind` the instruments (each with what it is, its size, its licence, what was
     /// measured against it, and `here` with its file if it is in the sound library already), with `set` one
-    /// set with its licence as its maker wrote it. Reads only; it fetches nothing, and no tool does: the user
-    /// fetches a set in Trill's settings.
+    /// set with its licence as its maker wrote it. Reads only; it fetches nothing, and no tool does: fetching
+    /// a set is the user's to do.
     #[tool(annotations(title = "Instrument catalogue", read_only_hint = true))]
     fn instrument_catalogue(&self, Parameters(request): Parameters<InstrumentCatalogueRequest>) -> CallToolResult {
         let runtime = self.runtime();
@@ -400,7 +400,7 @@ mod tests {
         assert_eq!(all["sets"], json!(catalogue.sets.len()));
         assert!(all["by_kind"]["piano"]["instruments"].as_u64().unwrap() > 0, "{all}");
         assert!(all["by_licence"]["CC0-1.0"]["sets"].as_u64().unwrap() > 0, "{all}");
-        assert!(all["next"].as_str().unwrap().contains("the user fetches a set in Trill's settings"));
+        assert!(all["next"].as_str().unwrap().contains("fetching a set is the user's to do"));
 
         let pianos =
             ask(InstrumentCatalogueRequest { kind: Some("piano".into()), limit: Some(3), ..Default::default() });
