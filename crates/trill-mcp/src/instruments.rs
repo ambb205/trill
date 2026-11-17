@@ -32,18 +32,34 @@ What a track's notes mean
 the articulations it can be asked for, its range, the octave it sounds at. A track is given this with its \
 instrument: Trill ships it for some plugins and remembers what you taught it about others. A song that is \
 opened takes it too, for the tracks that say nothing themselves.
-- A drum track's notes are drums: write_drums and drum names (\"china\", \"ride_bell\", \"closed_hat_edge\") go \
-by the track's own map, and analyze_music keeps them out of the key and the chords.
+- get_instrument_profile on a track is what to read before writing for it. For the instruments Trill knows \
+(the Ample guitars and bass, Superior Drummer 3, the SWAM winds and strings, and whatever was taught on this \
+machine) it is enough to write a part without probing anything.
+- A drum track's notes are drums, written by name: write_drums lanes, and drum names in create_clip and \
+add_notes. Which key a drum is on is the kit's business, and kits of one plugin differ: one hangs its china \
+where another has a crash, or has no splash at all. Where the plugin says what its kit has on its keys \
+(Superior Drummer 3 does), Trill reads the kit that is loaded, each time: get_instrument_profile lists its \
+drums (`drum_map`), says what each is (`kit`) and which usual drums it has not got (`has_no`), and that changes \
+when another kit is loaded. A drum the kit has not got is left out and the reply says so; it is never played on \
+the key some other kit has it on. Never write a drum by key number, and do not assume General MIDI.
 - Sampled guitars and basses choose how a note is played with keyswitches: silent keys under the range. Never \
-place those by hand. Ask by name: `articulation` on write_chords, write_bass, write_arpeggio and write_melody \
-(\"palm_mute\"), or a mark on one note of a melody (\"1:0.5!palm_mute\"). The tool presses the key just before \
-the note and fits the velocity where velocity decides (on some guitars a note under 64 is a muted one).
+place those as notes. Ask by name: `articulation` on write_chords, write_bass, write_arpeggio and write_melody \
+(\"palm_mute\"), a mark on one note of a melody (\"1:0.5!palm_mute\"), or `how` on a note given to create_clip, \
+add_notes or set_notes ([\"E2\", 1, 0.25, 100, \"palm_mute\"]). The tool presses the key just before the note \
+and fits the velocity where velocity decides (on the metal guitars and the bass a note hit under 64 is a muted \
+one: ask for \"muted\" or \"dead\" by name, and a plain note is raised to where it rings). A note that says \
+nothing is played the ordinary way, and the keyswitches of a clip are kept right for all its notes however \
+many calls put them there.
+- A hammer-on or pull-off (\"!hammer\", `how: \"hammer\"`) joins a note to the one before; a slide from the \
+note before is \"!slide\", a slide up into a note from below \"!scoop\". A harmonic rings above the key that \
+plays it: the writing tools take the pitch you want to hear and write the key; in create_clip and add_notes a \
+pitch is the key itself, as it is for a bass that sounds an octave under its keys.
 - When you learn something about an instrument that the track does not know (a key that switches, a drum on \
 another note, where its range ends, that it sounds an octave down, how far it bends), call \
 set_instrument_profile once with all of it. It is kept in the song and remembered for that plugin in every \
-song. get_instrument_profile reads it back, with the instrument's whole drum map and, in `notes`, what else \
-there is to know before writing for it: a setting of the plugin its keyswitches depend on, keys that are not \
-what General MIDI says.";
+song. get_instrument_profile reads it back and, in `notes`, says what else there is to know before writing for \
+it: a setting of the plugin its keyswitches depend on, how far a hammer-on reaches, what was measured and what \
+was not.";
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct GetInstrumentProfileRequest {
@@ -307,7 +323,10 @@ fn role_name(role: Role) -> &'static str {
 }
 
 fn articulation_json(articulation: &Articulation) -> Value {
-    let plain = articulation.lasts == Lasts::Stays && articulation.velocity.is_none() && !articulation.default;
+    let plain = articulation.lasts == Lasts::Stays
+        && articulation.velocity.is_none()
+        && !articulation.default
+        && articulation.sounds == 0;
     match articulation.key {
         Some(key) if plain => json!(key),
         key => {
@@ -325,6 +344,9 @@ fn articulation_json(articulation: &Articulation) -> Value {
             }
             if articulation.default {
                 out.insert("default".into(), json!(true));
+            }
+            if articulation.sounds != 0 {
+                out.insert("sounds_semitones".into(), json!(articulation.sounds));
             }
             Value::Object(out)
         }
@@ -395,16 +417,18 @@ fn split_names(run: &str) -> Vec<String> {
     }
 }
 
+/// What an articulation may say of itself.
+const ARTICULATION_FIELDS: [&str; 6] = ["key", "lasts", "latches", "velocity", "default", "sounds_semitones"];
+
 fn articulation_of(name: &str, value: &Value) -> Result<Articulation, String> {
     let what = format!("articulation '{name}'");
     let Value::Object(fields) = value else {
         return Ok(Articulation::key(name, key_of(value, &what)?));
     };
-    if let Some(unknown) =
-        fields.keys().find(|field| !["key", "lasts", "latches", "velocity", "default"].contains(&field.as_str()))
-    {
+    if let Some(unknown) = fields.keys().find(|field| !ARTICULATION_FIELDS.contains(&field.as_str())) {
         return Err(format!(
-            "{what}: '{unknown}' is not something an articulation has; it has key, lasts (or latches), velocity and default"
+            "{what}: '{unknown}' is not something an articulation has; it has key, lasts (or latches), velocity, \
+             default and sounds_semitones"
         ));
     }
     let key = fields.get("key").filter(|key| !key.is_null()).map(|key| key_of(key, &what)).transpose()?;
@@ -439,7 +463,19 @@ fn articulation_of(name: &str, value: &Value) -> Result<Articulation, String> {
         Some(other) => return Err(format!("{what}: `velocity` {other} should be [lowest, highest]")),
     };
     let default = fields.get("default").and_then(Value::as_bool).unwrap_or(false);
-    Ok(Articulation { name: name.to_string(), key, lasts, velocity, default, sounds: 0 })
+    let sounds = match fields.get("sounds_semitones").filter(|sounds| !sounds.is_null()) {
+        None => 0,
+        Some(sounds) => match sounds.as_i64().filter(|semitones| (-48..=48).contains(semitones)) {
+            Some(semitones) => semitones as i8,
+            None => {
+                return Err(format!(
+                    "{what}: `sounds_semitones` {sounds} should be how many semitones above its key a note \
+                     played this way is heard, as a whole number (12 for a harmonic an octave up)"
+                ));
+            }
+        },
+    };
+    Ok(Articulation { name: name.to_string(), key, lasts, velocity, default, sounds })
 }
 
 /// The profile `request` asks for, on top of `base`.
@@ -761,6 +797,13 @@ fn track_reply(session: &Session, id: TrackId, profile: &InstrumentProfile) -> V
             "bends {range} semitone(s) each way: the instrument's `bend_range` parameter, which bends written for \
              this track follow (set that parameter to change it)"
         ));
+    }
+    if !drums && !profile.articulations.is_empty() {
+        out["ask_by_name"] = json!(
+            "`articulation` on write_chords, write_bass, write_arpeggio and write_melody; a mark on one note of a \
+             melody (\"E3:0.5!palm_mute\"); `how` on a note of create_clip, add_notes and set_notes ([\"E2\", 0, \
+             0.5, 100, \"palm_mute\"]). The keyswitches are pressed for you: never write them as notes."
+        );
     }
     if drums {
         // The whole map, the kit's own names first: what a lane or a note may be called. Where the

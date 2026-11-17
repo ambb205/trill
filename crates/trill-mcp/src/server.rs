@@ -87,8 +87,9 @@ user hears and sees every change live.
 Conventions
 - Time is in beats (quarter notes), starting at 0. In 4/4, bar N starts at beat (N-1)*4. A beat is a quarter \
 note in every time signature: a bar of 7/8 is 3.5 beats, a bar of 6/8 is 3.
-- Pitch is a MIDI number (60 = C4 = middle C), a note name (\"C4\", \"F#3\", \"Bb2\") or, on drum kits, a drum \
-name (\"kick\", \"snare\", \"closed_hat\", \"open_hat\", \"clap\", ...). Velocity is 1-127.
+- Pitch is a MIDI number (60 = C4 = middle C), a note name (\"C4\", \"F#3\", \"Bb2\") or, on a drum track, the \
+name of a drum of its kit (\"kick\", \"snare\", \"closed_hat\", \"open_hat\", \"china\", ...). Write drums by name, \
+never by number: which key a drum is on depends on the instrument and on the kit it has loaded. Velocity is 1-127.
 - Every track, clip and device has an integer id, returned when it is created and listed by get_project.
 - Note positions inside a clip are relative to the clip start.
 - A MIDI clip also holds controller curves beside its notes: expression, mod_wheel, pitch_bend, sustain, \
@@ -101,9 +102,13 @@ A good workflow
    A plugin (clap:, vst3:) may have thousands of presets: before programming one by hand, search them with \
 describe_device `preset_query` (\"warm pad\") and give `preset` the name or id to create_track, add_device or \
 update_device.
-   Before you write for a plugin you have not used, call probe on its track once: it tells you which notes the \
-instrument plays, at what pitch they sound, and which keys switch its articulation.
-3. create_clip with notes. For repeating parts, write one or two bars and set loop_length, or duplicate_clip.
+   Before you write for a plugin, call get_instrument_profile on its track: it says what Trill knows of the \
+instrument (its range, the octave it sounds at, its articulations by name, a drum kit's drums by name). Where it \
+knows the instrument, that is all you need and no probe is called for. Where it knows nothing, call probe on \
+the track once: it tells you which notes the instrument plays, at what pitch they sound, and which keys switch \
+its articulation.
+3. Write the parts: the writing tools below for chords, drums, bass lines and melodies, create_clip with notes \
+for anything else. For repeating parts, write one or two bars and set loop_length, or duplicate_clip.
    Instruments modelled on breath or a bow (solo winds, brass, strings) are silent until they are given \
 expression, as a saxophone is without air. After writing such a line, call shape_dynamics on its clip: it reads \
 the phrases from the notes and writes an expression curve that rises into the high points, swells through long \
@@ -190,7 +195,8 @@ starts at; within one time signature, bar N starts at that signature's first `be
 `bar`) times its `beats_per_bar`.
 - The writing tools write the song's own bars from `start` on, each in the time signature it has there: a \
 progression's fourth chord fills the fourth bar written, whether that is four beats long or three and a half. \
-write_melody is counted through in one time signature: write a line that crosses a change in two calls. A named \
+write_melody counts its line through the same bars: a bar line in the phrase is checked against the song's bar \
+there, so a line that crosses a change is one call, its bar of 7/8 written as 3.5 beats. A named \
 groove or fill is written in a meter of its own (music_reference \"grooves\"); in a bar of another meter its \
 steps keep their length, the groove is cut off or begins again to fill the bar, and a fill ends with the bar. \
 Lanes you give divide each bar evenly, so write a bar of 7/8 as 7 or 14 steps.

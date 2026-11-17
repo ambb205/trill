@@ -39,8 +39,9 @@ Hearing what you wrote
 You cannot listen, so measure. Three tools, from quick to slow:
 - probe plays one instrument a list of notes and measures each, in a second or two, without touching the song. \
 Call it ONCE for every plugin that Trill does not know yet, before you write for it. A track says what it knows \
-in get_project (`plays`, `articulations`, `range`), and a probe's reply says whether the plugin has an entry: \
-one that has needs no probe. With no `notes` it plays the whole keyboard and tells you which notes sound (the \
+in get_project (`plays`, `articulations`, `range`) and all of it in get_instrument_profile, and a probe's reply \
+says whether the plugin has an entry: one that has needs no probe, and a drum plugin whose kit Trill reads \
+(get_instrument_profile shows `kit`) needs none to find its drums. With no `notes` it plays the whole keyboard and tells you which notes sound (the \
 range), at what pitch (an instrument may sound an octave away from what is written) and, for a drum plugin, \
 what each note is (a low thump, a noisy mid hit, a long bright wash). With `keyswitches` it tells you which \
 keys change the articulation and how (shorter, darker). Then write down what it found, once, with \

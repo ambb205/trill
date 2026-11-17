@@ -17,9 +17,17 @@ use trill_core::{Articulation, InstrumentProfile, Lasts, Role};
 /// played, and keys over the range that play a noise.
 const AMPLE: &str = "Keyswitches sit under the range and sound nothing: press one just before its note (0.03 beats, \
                      held 0.01, never two at once). open, palm_mute, harmonic, tap and pinch_harmonic stay chosen until \
-                     another is pressed; slide slides into the next note from below, once; hammer and glide join \
-                     notes that overlap (hammer-ons and pull-offs, or a slide along the string) and must be pressed \
-                     before the first of them. The keys above the range play noises, not notes. This depends on \
+                     another is pressed; slide slides up into the next note from below, once; hammer and glide join \
+                     notes that overlap (hammer-ons and pull-offs, or a slide along the string from the note before) \
+                     and must be pressed before the first of them. The writing tools do all of that when a note is \
+                     asked for by the articulation's name. The keys above the range play noises, not notes. \
+                     Measured on the plugin: a hammer-on up to seven semitones above the note before sounds wherever \
+                     it was tried; a pull-off down is safe to four semitones and silent beyond five, and now and \
+                     then silent closer too, where the instrument has put the upper note on an open string (it \
+                     picks strings itself): write the lower note picked where it must sound. A hammered or pulled \
+                     note is some 6 dB quieter than a picked one. A harmonic rings an octave above its key and a \
+                     pinch harmonic two (the writing tools write the key under the pitch asked for); both are \
+                     quieter than a picked note. The pitch wheel bends two semitones each way. This depends on \
                      the plugin's parameter \"Auto Legato\", its automatic legato. At 1, where the guitars start \
                      and where nearly every preset of the maker's leaves it, a note that begins while a \
                      neighbouring one still rings (up to four keys above it) is hammered on without the hammer key \
@@ -90,22 +98,13 @@ fn sounds(keys: &[(&str, u8)]) -> std::collections::BTreeMap<String, u8> {
 fn ample_switches(open: u8, open_hit: (u8, u8)) -> Vec<Articulation> {
     vec![
         Articulation::key("open", open).hit(open_hit.0, open_hit.1).as_default(),
-        Articulation::key("harmonic", open + 1),
+        // Measured on all four: a key held with the harmonic key is heard an octave up.
+        Articulation::key("harmonic", open + 1).sounding(12),
         Articulation::key("palm_mute", open + 2),
         Articulation::key("slide", open + 3).lasting(Lasts::Once),
         Articulation::key("glide", open + 4).lasting(Lasts::Joins),
         Articulation::key("hammer", open + 5).lasting(Lasts::Joins),
     ]
-}
-
-/// On the three guitars a natural harmonic rings an octave above the key
-/// that plays it (measured: E3 held with the harmonic key is heard as E4),
-/// and on the two metal ones a pinch harmonic two octaves above.
-fn harmonics_an_octave_up(mut articulations: Vec<Articulation>) -> Vec<Articulation> {
-    for articulation in articulations.iter_mut().filter(|articulation| articulation.name == "harmonic") {
-        articulation.sounds = 12;
-    }
-    articulations
 }
 
 /// The noises above the range of the three guitars.
@@ -116,8 +115,8 @@ fn guitar_noises() -> std::collections::BTreeMap<String, u8> {
 /// A PRS Custom 24 with humbuckers. Every velocity up to 126 plays an open
 /// note.
 fn ample_guitar_pf() -> InstrumentProfile {
-    let mut articulations = harmonics_an_octave_up(ample_switches(24, (1, 126)));
-    articulations.extend([Articulation::key("tap", 22), Articulation::key("pinch_harmonic", 23)]);
+    let mut articulations = ample_switches(24, (1, 126));
+    articulations.extend([Articulation::key("tap", 22), Articulation::key("pinch_harmonic", 23).sounding(24)]);
     InstrumentProfile {
         sounds: guitar_noises(),
         articulations,
@@ -131,7 +130,7 @@ fn ample_guitar_pf() -> InstrumentProfile {
 /// it is played: under 64 the string is muted.
 fn ample_metal_eclipse() -> InstrumentProfile {
     let open = 24;
-    let mut articulations = harmonics_an_octave_up(ample_switches(open, (64, 126)));
+    let mut articulations = ample_switches(open, (64, 126));
     articulations.extend([
         Articulation::key("tap", 30),
         Articulation::key("pinch_harmonic", 31).sounding(24),
@@ -155,7 +154,7 @@ fn ample_metal_eclipse() -> InstrumentProfile {
 /// bass's notes, with its switches an octave lower than the others'.
 fn ample_metal_hellrazer() -> InstrumentProfile {
     let open = 12;
-    let mut articulations = harmonics_an_octave_up(ample_switches(open, (64, 126)));
+    let mut articulations = ample_switches(open, (64, 126));
     articulations.extend([
         Articulation::key("tap", 18),
         Articulation::key("pinch_harmonic", 19).sounding(24),
@@ -210,13 +209,15 @@ fn superior_drummer_3() -> InstrumentProfile {
             ("high_tom", 48),
             ("cymbal_1", 86),
         ]),
-        notes: "The core library's kits. Snare: snare 38, rimshot 40, rim (sidestick) 37. Hi-hat: closed_hat 42 is \
-                the tip and closed_hat_edge 22 the edge, pedal_hat 44, open_hat 46, wide_open_hat 26. Toms: \
-                high_tom 48, mid_tom 47, low_tom 43 and floor_tom 41. ride 51 and ride_bell 53. The five cymbal \
-                positions are cymbal_1 86, crash 49, splash 55, crash2 57 and china 52; which cymbal hangs in each \
-                depends on the kit, so those names are General MIDI's and not a promise. General MIDI's \
-                high tom key 50 and tambourine key 54 are neither here: each plays a short, muted cymbal hit. A \
-                kit takes most of a minute to load its samples."
+        notes: "Which drum is on which key is the kit's doing, and the kits of this plugin differ (one hangs its \
+                china where another has a crash, a third has no splash or a tom less). Trill reads the kit that is \
+                loaded from the plugin's own state, each time it is asked: get_instrument_profile lists that \
+                kit's drums by name, and they are the only ones it has. The keys named here are only how most \
+                kits of the core library have them, for when the kit cannot be read: snare 38, rimshot 40, rim \
+                (sidestick) 37; closed_hat 42 is the tip and closed_hat_edge 22 the edge, pedal_hat 44, open_hat \
+                46, wide_open_hat 26; high_tom 48, mid_tom 47, low_tom 43, floor_tom 41; ride 51, ride_bell 53; \
+                the five cymbal places 86, 49, 55, 57 and 52. General MIDI's high tom key 50 and tambourine key \
+                54 are neither here: each chokes a cymbal. A kit takes most of a minute to load its samples."
             .to_string(),
         ..InstrumentProfile::default()
     }
@@ -281,11 +282,13 @@ mod tests {
         assert_eq!(key(RAY5, "tap"), None, "the bass has no tapping");
         // A harmonic is heard above its key, where that was measured.
         let heard = |uri: &str, name: &str| entry(uri).unwrap().1.articulation(name).map(|a| a.sounds);
-        for uri in [PF, ECLIPSE, HELLRAZER] {
+        for uri in [PF, ECLIPSE, HELLRAZER, RAY5] {
             assert_eq!(heard(uri, "harmonic"), Some(12));
         }
-        assert_eq!((heard(ECLIPSE, "pinch_harmonic"), heard(HELLRAZER, "pinch_harmonic")), (Some(24), Some(24)));
-        assert_eq!((heard(PF, "pinch_harmonic"), heard(PF, "palm_mute")), (Some(0), Some(0)));
+        for uri in [PF, ECLIPSE, HELLRAZER] {
+            assert_eq!(heard(uri, "pinch_harmonic"), Some(24));
+        }
+        assert_eq!((heard(RAY5, "pinch_harmonic"), heard(PF, "palm_mute")), (None, Some(0)));
         // Soft notes are muted on the metal instruments, not on the PRS.
         let hit = |uri: &str, name: &str| entry(uri).unwrap().1.articulation(name).and_then(|a| a.velocity);
         assert_eq!((hit(PF, "open"), hit(PF, "muted")), (Some((1, 126)), None));

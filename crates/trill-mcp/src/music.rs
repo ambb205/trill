@@ -54,14 +54,18 @@ voice-led into a clip, in a rhythm (sustain, stabs, offbeats, tresillo, a step p
 - write_drums: a groove by name (house, boom_bap, trap, drum_and_bass, uk_garage, reggaeton, funk, rock, \
 half_time, shuffle, six_eight, bossa_nova, jazz_swing) with an optional fill, and/or your own lanes in step \
 notation, e.g. {\"kick\": \"x...x...x...x...\", \"snare\": \"....x.......x...\"}. Drums are named, and the \
-name lands on the key the track's kit uses: china, splash, ride_bell, crash2, floor_tom, rimshot, \
-closed_hat_edge, half_open_hat, wide_open_hat beside the usual ones. A fill's reply says what it replaced.
+name lands on the key the track's kit has that drum on: china, splash, ride_bell, crash2, floor_tom, rimshot, \
+closed_hat_edge, half_open_hat, wide_open_hat beside the usual ones, and whatever else get_instrument_profile \
+lists for the kit (crash_choke, flam, rack_tom_1). A drum the kit has not got is left out, and the reply names \
+it (`left_out`) with the drums the kit has. A fill's reply says what it replaced.
 - write_bass and write_arpeggio: a bass line or an arpeggio that follows the same progression text.
 - write_melody: one line as scale degrees or note names with lengths, e.g. \":0.5 5 6 5 4 3:2 | 1:4\". A lead \
 is more than its notes: mark bends, slides, vibrato and hammer-ons on the notes that have them \
-(\"4:2!bend=5!vib\", \"6!hammer\", \"3!slide\", \"5:2!fall\"). The tool writes the instrument's own keyswitch \
+(\"4:2!bend=5!vib\", \"6!hammer\", \"3!slide\", \"3!scoop\", \"5:2!fall\"), and one of the instrument's own \
+ways of playing on any note (\"1!palm_mute\", \"5!harmonic\"). The tool writes the instrument's own keyswitch \
 where it has one and a pitch-bend curve where not; never draw such curves by hand. Keep a line with ornaments \
-on a track of its own: the pitch wheel bends every note of a track at once.
+on a track of its own: the pitch wheel bends every note of a track at once. It is also how to write any single \
+line note by note with a rhythm of your own: a riff, a bass line with a dead note and an accent in it.
 - shape_dynamics: gives a line its dynamics from its notes, as an expression curve in the clip: a rise into each \
 phrase's high point, a swell through long notes, a breath between phrases. Call it after writing a melody for a \
 wind, brass or string instrument (those modelled on breath or a bow make no sound without it), and whenever a \
@@ -78,7 +82,9 @@ the pitches that are heard: for an instrument that sounds an octave from its key
 octave, and says so. Give all parts of a section the same progression, key \
 and swing so they agree. A song usually goes: set_project, create_track per part, write_drums, write_chords, \
 write_bass, write_arpeggio, write_melody, analyze_music, then effects, automation and render.
-Use create_clip and add_notes for what these cannot say: single hits, sound effects, a voicing spelled by hand.";
+Use create_clip and add_notes for what these cannot say: single hits, sound effects, a voicing spelled by hand, \
+a riff of chords with muted notes between them. There a note may say how it is played, by the name of one of \
+the track's articulations: [\"E2\", 1, 0.25, 100, \"palm_mute\"]. The keyswitches are written for you there too.";
 
 const MAX_BARS: u32 = 512;
 const MAX_NOTES: usize = 50_000;
@@ -217,10 +223,12 @@ pub struct WriteDrumsRequest {
     /// "grooves" describes them).
     pub groove: Option<String>,
     /// Lanes by drum name, added to the groove or replacing its lane for that drum. A name is one of the
-    /// track's own drums (get_instrument_profile lists its map) or a General MIDI one: kick, snare, rimshot,
-    /// rim, clap, closed_hat, closed_hat_edge, pedal_hat, half_open_hat, open_hat, wide_open_hat, low_tom,
-    /// mid_tom, high_tom, floor_tom, crash, crash2, china, splash, ride, ride_bell, tambourine, cowbell,
-    /// shaker... Where a kit has no key for a drum the nearest is played and the reply says so. One character per step:
+    /// drums of the track's kit (get_instrument_profile lists them: for a plugin whose kit Trill reads they
+    /// are that kit's and no others) or, on a kit Trill knows nothing of, a General MIDI one: kick, snare,
+    /// rimshot, rim, clap, closed_hat, closed_hat_edge, pedal_hat, half_open_hat, open_hat, wide_open_hat,
+    /// low_tom, mid_tom, high_tom, floor_tom, crash, crash2, china, splash, ride, ride_bell, tambourine,
+    /// cowbell, shaker... A degree of open hi-hat a kit has no key for is played on its open hat, and the
+    /// reply says so; a drum the kit has not got at all is left out, and the reply names it. One character per step:
     /// x hit, X accent, g ghost note, . rest, _ lengthens the hit before it, a digit after a hit makes a roll
     /// (x3_ is three hits across two steps), | separates bars. Each bar's characters divide the bar evenly:
     /// 16 make sixteenths, 12 triplet eighths, 8 eighths. A lane of only rests removes that drum.
@@ -316,11 +324,13 @@ pub struct WriteMelodyRequest {
     /// The line, note by note: ":0.5 5 6 5 4 3:2 | :1 1:2 r 7, | 1:4". A pitch is a scale degree of `key`
     /// (1-7; b3 and #4 alter it; 5' is an octave up, 7, an octave down) or a note name with its octave (C4,
     /// F#5). "5:0.5" gives that note a length in beats; a bare ":0.5" sets the length of the notes after it
-    /// (1 beat to begin with). "r" rests, "~" lengthens the note before it, "|" marks a bar and is checked.
-    /// Ornaments are marks after a note, each begun by "!": "4:2!bend=5" bends up to the fifth degree,
-    /// "!bend=5!release" lets it back down, "!prebend=5", "5:2!vib" (vibrato), "6!hammer" and "5!pull" join a
-    /// note to the one before with no new attack, "3!slide" slides into it, "5:2!fall" drops off at the end;
-    /// "1!palm_mute" asks for one of the instrument's own articulations. They combine: "4:2!bend=5!vib".
+    /// (1 beat to begin with). "r" rests, "~" lengthens the note before it, "|" marks a bar and is checked
+    /// against the song's own bar there (3.5 beats for a bar of 7/8), so a line may cross a change of time
+    /// signature. Ornaments are marks after a note, each begun by "!": "4:2!bend=5" bends up to the fifth
+    /// degree, "!bend=5!release" lets it back down, "!prebend=5", "5:2!vib" (vibrato), "6!hammer" and "5!pull"
+    /// join a note to the one before with no new attack, "3!slide" slides into it from the note before,
+    /// "3!scoop" slides up into it from just below, "5:2!fall" drops off at the end; "1!palm_mute" asks for
+    /// one of the instrument's own articulations (get_project lists them). They combine: "4:2!bend=5!vib".
     pub phrase: String,
     /// The key the degrees are in: "A minor", "D dorian", "Bb". Not needed for note names.
     pub key: Option<String>,
@@ -2477,7 +2487,9 @@ fn reference(topic: Option<&str>) -> Reply {
                 "4:2!bend=5!release 3:2!vib": "a bend let back down, then a note with vibrato",
                 ":0.5 5 6!hammer 5!pull 3": "a hammer-on and a pull-off: one attack for three notes",
                 "1:1 3:1!slide": "the third slid into from the first",
+                "1:1 3:1!scoop": "the third struck and slid up into from just below, as a guitarist slides into a note",
                 "E5:2!fall": "a note that drops away at its end",
+                "E4:2!harmonic": "one of the instrument's own ways of playing, by name: heard as E4, whatever key plays it",
             },
             "what_they_become": "The instrument's own articulation where it has one (a sampled guitar's hammer, \
                                  glide and slide keyswitches); otherwise a pitch_bend curve in the clip, scaled by \
@@ -2509,9 +2521,17 @@ fn reference(topic: Option<&str>) -> Reply {
                 },
                 "sounds": { "scrape": 101 },
             },
-            "asking": "`articulation` on write_chords, write_bass, write_arpeggio and write_melody, or a mark on one \
-                       note of a melody (1:0.5!palm_mute). The keyswitch is pressed just before the note; never \
-                       place keyswitch notes by hand.",
+            "asking": "`articulation` on write_chords, write_bass, write_arpeggio and write_melody; a mark on one \
+                       note of a melody (1:0.5!palm_mute); or `how` on a note of create_clip, add_notes and \
+                       set_notes ([\"E2\", 1, 0.25, 100, \"palm_mute\"]). The keyswitch is pressed just before the \
+                       note; never place keyswitch notes by hand. A clip's keyswitches are written again for all \
+                       its notes whenever notes are added that way, so parts written in several calls stay right.",
+            "drums": "On a drum track the names are drums. For a plugin whose kit Trill reads (Superior Drummer 3) \
+                      they are the drums of the kit that is loaded, read each time: get_instrument_profile lists \
+                      them, says what each is and which usual drums the kit has not got. A drum it has not got is \
+                      left out of what is written, never played on another kit's key.",
+            "pitches": "The writing tools take the pitches that are to be heard and write the keys (an octave up \
+                        for a bass that sounds an octave down; the key under a harmonic). The note tools take keys.",
             "lasts": "stays: until another keyswitch; once: the next note only; joins: notes that overlap are \
                       joined (hammer-ons, a slide along the string)",
         }),
