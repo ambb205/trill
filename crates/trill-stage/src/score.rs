@@ -247,32 +247,27 @@ pub fn tempo_said(tempo: f64) -> String {
 /// Every place where the tempo or the time signature of `project` changes,
 /// in order; what changes at one beat is one change.
 fn changes_of(project: &Project) -> Vec<Change> {
-    let mut changes: Vec<Change> = Vec::new();
-    let mut at = |beat: Beats| -> usize {
-        match changes.iter().position(|change| (change.beat - beat).abs() < 1e-6) {
+    /// The change at `beat`: a new one where nothing changed there yet.
+    fn at(changes: &mut Vec<Change>, beat: Beats) -> &mut Change {
+        let index = match changes.iter().position(|change| (change.beat - beat).abs() < 1e-6) {
             Some(index) => index,
             None => {
                 changes.push(Change { beat, signature: None, tempo: None, glides_from: None });
                 changes.len() - 1
             }
-        }
-    };
-    let mut marks: Vec<(usize, Option<TimeSignature>, Option<(f64, Option<Beats>)>)> = Vec::new();
-    for change in &project.meter_changes {
-        marks.push((at(change.beat), Some(change.signature), None));
+        };
+        &mut changes[index]
     }
+    let mut changes: Vec<Change> = Vec::new();
+    for change in &project.meter_changes {
+        at(&mut changes, change.beat).signature = Some(change.signature);
+    }
+    // A glide comes from the change of tempo before it, or from the start.
     let mut before = 0.0;
     for change in &project.tempo_changes {
-        marks.push((at(change.beat), None, Some((change.tempo, change.ramp.then_some(before)))));
+        let there = at(&mut changes, change.beat);
+        (there.tempo, there.glides_from) = (Some(change.tempo), change.ramp.then_some(before));
         before = change.beat;
-    }
-    for (index, signature, tempo) in marks {
-        if let Some(signature) = signature {
-            changes[index].signature = Some(signature);
-        }
-        if let Some((tempo, glides_from)) = tempo {
-            (changes[index].tempo, changes[index].glides_from) = (Some(tempo), glides_from);
-        }
     }
     changes.sort_by(|a, b| a.beat.total_cmp(&b.beat));
     changes
