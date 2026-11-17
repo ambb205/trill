@@ -1106,6 +1106,10 @@ async fn a_device_is_given_a_preset_file_by_its_path() {
         assert!(error.starts_with(&said), "{error}");
         let error = call(client, "update_device", json!({ "device": device, "preset": path })).await.unwrap_err();
         assert!(error.starts_with(&said), "{error}");
+        // A probe starts an instrument from a preset the same way.
+        let arguments = json!({ "device": SYNTH, "preset": path, "notes": ["C3"] });
+        let error = call(client, "probe", arguments).await.unwrap_err();
+        assert!(error.starts_with(&said), "{error}");
     }
     assert_eq!(ok(client, "get_project", json!({})).await["tracks"].as_array().unwrap().len(), tracks);
     assert_eq!(fixture.synths.patch(device), "file:bought lead");
@@ -1207,6 +1211,8 @@ async fn the_assistant_is_given_preset_files_of_this_machine_and_no_other() {
         assert!(error.starts_with(&refused) && error.ends_with("The device was not added."), "{error}");
         let error = call(assistant, "update_device", json!({ "device": device, "preset": share })).await.unwrap_err();
         assert!(error.starts_with(&refused) && error.ends_with("The device is as it was."), "{error}");
+        let error = call(assistant, "probe", json!({ "device": SYNTH, "preset": share })).await.unwrap_err();
+        assert!(error.starts_with(&refused), "{error}");
     }
     assert_eq!(ok(assistant, "get_project", json!({})).await["tracks"].as_array().unwrap().len(), tracks);
     assert_eq!(fixture.synths.patch(device), "file:bought lead");

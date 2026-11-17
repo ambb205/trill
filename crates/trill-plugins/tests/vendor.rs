@@ -580,3 +580,147 @@ fn an_ample_instruments_automatic_legato_joins_notes_that_ring_over_each_other_u
         assert!(note.contains("The preset has \"Auto Legato\" at 1"), "{name}: the reply says so: {note}");
     }
 }
+
+// ---- a preset file that lies where nothing is listed from -------------------
+
+/// A copy of a listed preset's file in a folder of the test's own: a
+/// preset as someone keeps one they bought, outside the maker's folders.
+/// The maker's file is only read.
+fn copied(preset: &trill_core::presets::PresetInfo) -> PathBuf {
+    let source = trill_plugins::preset_file_of(preset).expect("a preset that is in a file");
+    let folder = scratch("bought");
+    std::fs::create_dir_all(&folder).unwrap();
+    let copy = folder.join(source.file_name().unwrap());
+    std::fs::copy(&source, &copy).unwrap_or_else(|error| panic!("{}: {error}", source.display()));
+    copy
+}
+
+/// A track of a plucked synth through the amplifier `uri`: what its notes
+/// come to is what the amplifier makes of them.
+fn amplified(session: &mut Session, uri: &str) -> (TrackId, DeviceId) {
+    let track = session.edit(|project| Ok(project.add_track("Guitar"))).unwrap();
+    session.add_device(ChainRef::Track(track), "builtin:polysynth", Some("pluck"), None).unwrap();
+    (track, session.add_device(ChainRef::Track(track), uri, None, None).unwrap())
+}
+
+/// A synth's patch and the guitars' tones, each as a file kept somewhere
+/// else, loaded by the file's path into the installed plugins and heard
+/// to differ from what the plugin starts with; and for each, the state
+/// another host would save as a `.vstpreset`, loaded by its path.
+#[test]
+#[ignore = "needs Serum 2 and the Ample Sound instruments, with their presets; run with `cargo test -p trill-plugins --test vendor -- --include-ignored --nocapture --test-threads 1`"]
+fn a_makers_preset_file_kept_elsewhere_is_loaded_by_its_path_and_heard() {
+    let factory = vst3();
+    // The plugins, each with one of its maker's presets and keys to play.
+    let mut plugins: Vec<(String, String, [u8; 3])> =
+        vec![(SERUM_2.to_string(), "PD - Warm Room".to_string(), [48, 60, 72])];
+    plugins.extend(AMPLE.map(|(_, uri, preset)| (uri.to_string(), preset.to_string(), [52, 59, 64])));
+    for (uri, preset, keys) in plugins {
+        if !installed(&factory, &uri) {
+            continue;
+        }
+        let mut session = session(&factory);
+        let list = listed(&factory, &uri);
+        let Some(preset) = list.presets.iter().find(|listed| listed.name == preset) else {
+            eprintln!("skipping '{uri}': it has no preset '{preset}' here");
+            continue;
+        };
+        let copy = copied(preset);
+        eprintln!("{} -> {}", preset.path(), copy.display());
+        assert_eq!(factory.preset_file_type(&copy).as_deref(), Some(uri.as_str()), "whose it is, by its name");
+        let target = |preset: Option<&Path>| ProbeTarget::Device {
+            uri: uri.clone(),
+            preset: preset.map(|path| path.to_string_lossy().into_owned()),
+        };
+        let default = probe(&mut session, &target(None), &keys);
+        let heard = probe(&mut session, &target(Some(&copy)), &keys);
+        said("by the path of a copy", &heard);
+        heard_to_differ(&copy.to_string_lossy(), &default, &heard);
+
+        // A device in the song is given it as one undo step, and the state
+        // it then has is what another host would save as a .vstpreset: that
+        // file, loaded by its path, is heard to be the preset too.
+        let device = session.add_device(ChainRef::Master, &uri, None, None).unwrap();
+        let step = session.undo_step();
+        let loaded = session.load_preset(device, &copy.to_string_lossy()).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(loaded.name, preset.name);
+        if let Some(note) = session.take_preset_note(device) {
+            eprintln!("  note: {note}");
+        }
+        session.snapshot_json();
+        let state = session.project().device(device).unwrap().state.clone().expect("the plugin has a state");
+        let saved = scratch("bought").join(format!("{} from another host.vstpreset", preset.name));
+        std::fs::write(&saved, &state).unwrap();
+        assert_eq!(factory.preset_file_type(&saved).as_deref(), Some(uri.as_str()), "whose it is, by its first bytes");
+        let again = probe(&mut session, &target(Some(&saved)), &keys);
+        said("by the path of a .vstpreset", &again);
+        heard_to_differ(&saved.to_string_lossy(), &default, &again);
+        assert!(session.undo());
+        assert_eq!((session.undo_step(), session.device_preset(device)), (step, None));
+    }
+}
+
+/// An amplifier's preset, kept somewhere else, through a synth that feeds
+/// the amplifier.
+#[test]
+#[ignore = "needs a Neural DSP Archetype and its presets; run with `cargo test -p trill-plugins --test vendor -- --include-ignored --nocapture --test-threads 1`"]
+fn an_amplifiers_preset_file_kept_elsewhere_is_loaded_by_its_path_and_heard() {
+    let factory = vst3();
+    let neural: Vec<String> = factory
+        .descriptors()
+        .into_iter()
+        .map(|descriptor| descriptor.uri)
+        .filter(|uri| uri.starts_with(NEURAL))
+        .collect();
+    if neural.is_empty() {
+        eprintln!("skipping: no Neural DSP plugin is installed");
+    }
+    for uri in neural.iter().take(1) {
+        let mut session = session(&factory);
+        let list = listed(&factory, uri);
+        let Some(preset) = list.presets.iter().find(|preset| preset.category.starts_with("Artists")) else { continue };
+        let copy = copied(preset);
+        eprintln!("{} -> {}", preset.path(), copy.display());
+        assert_eq!(factory.preset_file_type(&copy), None, "an Archetype's file is called .xml, which says nothing");
+        let (track, amplifier) = amplified(&mut session, uri);
+        let keys = [40, 52, 64];
+        let target = ProbeTarget::Track { track, effects: true };
+        let default = probe(&mut session, &target, &keys);
+        let loaded = session.load_preset(amplifier, &copy.to_string_lossy()).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(loaded.name, preset.name);
+        let heard = probe(&mut session, &target, &keys);
+        said("by the path of a copy", &heard);
+        heard_to_differ(&copy.to_string_lossy(), &default, &heard);
+        // What is no preset of an Archetype is refused in a sentence, and
+        // the amplifier keeps the sound it has.
+        let other = scratch("bought").join("Not an amplifier's.xml");
+        std::fs::write(&other, b"<?xml version=\"1.0\"?><settings/>").unwrap();
+        let error = session.load_preset(amplifier, &other.to_string_lossy()).unwrap_err().to_string();
+        eprintln!("  {error}");
+        assert!(error.contains("it is not a preset of one of Neural DSP's Archetypes"), "{error}");
+    }
+}
+
+/// A file of kits holds many: one is named after the path.
+#[test]
+#[ignore = "needs Superior Drummer 3 and its core library; run with `cargo test -p trill-plugins --test vendor -- --include-ignored --nocapture --test-threads 1`"]
+fn a_kit_in_a_file_of_kits_kept_elsewhere_is_named_after_the_files_path() {
+    let factory = vst3();
+    if !installed(&factory, SUPERIOR) {
+        return;
+    }
+    let mut session = session(&factory);
+    let list = listed(&factory, SUPERIOR);
+    let kit = list.presets.iter().find(|preset| preset.name == "Black Metal").expect("the core library's kit");
+    let copy = copied(kit);
+    let keys = [36, 38, 42, 46, 49, 51, 45, 43, 41];
+    let target = |preset: Option<String>| ProbeTarget::Device { uri: SUPERIOR.into(), preset };
+    let error = session.probe_job(&target(Some(copy.to_string_lossy().into_owned()))).err().expect("several kits");
+    eprintln!("  {error}");
+    assert!(error.to_string().contains("presets (") && error.to_string().contains("say which with"), "{error}");
+    let default = probe(&mut session, &target(None), &keys);
+    let within = format!("{}#Black Metal", copy.display());
+    let heard = probe(&mut session, &target(Some(within.clone())), &keys);
+    said("Black Metal, by the path of a copy", &heard);
+    heard_to_differ(&within, &default, &heard);
+}

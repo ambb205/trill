@@ -300,7 +300,7 @@ impl TrillServer {
     /// path of its file: a guarded client is refused a file it may not be
     /// pointed at, and the file is asked what it holds, so that the
     /// session, asking again, has the answer at once.
-    async fn ready_presets(&self, uri: Option<&str>, preset: &Option<String>) -> Result<(), String> {
+    pub(crate) async fn ready_presets(&self, uri: Option<&str>, preset: &Option<String>) -> Result<(), String> {
         let (Some(uri), Some(preset)) = (uri, preset) else { return Ok(()) };
         let Some(asked) = PresetFile::asked(preset) else {
             self.presets_of(uri).await;
