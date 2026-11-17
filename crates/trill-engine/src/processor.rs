@@ -797,7 +797,7 @@ impl Processor {
                 None => (&mut *mix_left, &mut *mix_right),
             };
             match state.out.fill(track.to_output, declick, shares) {
-                Some(share) if share == 0.0 => {}
+                Some(0.0) => {}
                 Some(share) => {
                     add_scaled(left, out_left, share);
                     add_scaled(right, out_right, share);
@@ -824,7 +824,7 @@ impl Processor {
                 let flat = gated(flat, send.gate.fill(send.open, declick, shares), shares, &mut gains);
                 let Some(bus) = buses.get_mut(send.bus) else { continue };
                 match flat {
-                    Some([gain]) if gain == 0.0 => {}
+                    Some([0.0]) => {}
                     Some([gain]) => {
                         add_scaled(left, &mut bus.left[..frames], gain);
                         add_scaled(right, &mut bus.right[..frames], gain);
