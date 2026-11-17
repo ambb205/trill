@@ -1220,3 +1220,104 @@ async fn the_assistant_is_given_preset_files_of_this_machine_and_no_other() {
     let error = call(assistant, "update_device", json!({ "device": device, "preset": "Pads/No Such" })).await;
     assert!(error.unwrap_err().contains("has no preset 'Pads/No Such'"));
 }
+
+/// What an assistant does with a preset the user bought and keeps with
+/// their samples: finds it by its name in the sample library, gives it to
+/// the plugin by its path, and hears that it is another sound than the
+/// plugin starts with. The "bought" preset is a copy of one of Serum 2's
+/// own in a folder of the test's; the maker's file is only read. Prints
+/// the calls' replies.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Serum 2 and its factory presets; run with `cargo test -p trill-mcp --test presets an_assistant_finds -- --include-ignored --nocapture`"]
+async fn an_assistant_finds_a_bought_preset_among_the_samples_and_loads_it_by_its_path() {
+    use trill_plugins::{ClapConfig, PluginHost, Scanner, Vst3Config};
+    const SERUM_2: &str = "vst3:56534558667350736572756D20320000";
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("mcp-bought");
+    let clap =
+        ClapConfig { cache_path: Some(scratch.join("clap.json")), scanner: Scanner::Auto, ..ClapConfig::default() };
+    let vst3 = Vst3Config {
+        cache_path: Some(scratch.join("vst3.json")),
+        scanner: Scanner::Auto,
+        preset_paths: vec![scratch.join("vst3 presets")],
+        ..Vst3Config::default()
+    };
+    let host = PluginHost::with_configs(clap, vst3).unwrap();
+    if !host.vst3().descriptors().iter().any(|descriptor| descriptor.uri == SERUM_2) {
+        eprintln!("skipping: Serum 2 is not installed");
+        return;
+    }
+    let listed = host.vst3().presets_within(SERUM_2, Duration::from_secs(120)).unwrap_or_default();
+    let Some(source) = listed.presets.iter().find(|preset| preset.name == "PD - Warm Room") else {
+        eprintln!("skipping: Serum 2 has no preset 'PD - Warm Room' here");
+        return;
+    };
+    let folder = tempfile::tempdir().unwrap();
+    // The pack: the preset under another file name, beside a sample.
+    let pack = folder.path().join("samples").join("Some Pack Vol. 1").join("SERUM 2 PRESETS");
+    std::fs::create_dir_all(&pack).unwrap();
+    let bought = pack.join("SOMEPACK - OMEGA ROOM.SerumPreset");
+    std::fs::copy(trill_plugins::preset_file_of(source).unwrap(), &bought).unwrap();
+    let storage = Storage::At {
+        settings: folder.path().join("config").join("settings.json"),
+        library_index: Some(folder.path().join("cache").join("library-index.json")),
+    };
+    let options = RuntimeOptions { audio: AudioBackend::Null { sample_rate: 48_000 }, plugins: None, storage };
+    let parts = Parts { devices: host.factories(), ..Parts::default() };
+    let runtime = Arc::new(Runtime::start_custom(options, parts).unwrap());
+    let server = serve_http(runtime, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let transport =
+        StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(server.url()));
+    let client = &ClientConfig::default().serve(transport).await.unwrap();
+    let said = |call: &str, reply: &Value| eprintln!("\n> {call}\n{reply}");
+
+    // The plugin's own list has no preset of that name.
+    let before = ok(client, "search_presets", json!({ "query": "somepack", "device": "serum" })).await;
+    said("search_presets \"somepack\" (before the folder is in the library)", &before);
+    assert_eq!(before["matching"], 0, "{before}");
+    let samples = folder.path().join("samples").to_string_lossy().into_owned();
+    ok(client, "library", json!({ "action": "add_folder", "path": samples })).await;
+
+    // Found by the name of its file, with the plugin it is for.
+    assert_eq!(ok(client, "search_presets", json!({ "query": "somepack" })).await["matching"], 1);
+    let found = ok(client, "search_presets", json!({ "query": "omega room", "device": "serum" })).await;
+    said("search_presets \"omega room\"", &found);
+    assert_eq!(found["matching"], 1, "{found}");
+    let item = &found["items"][0];
+    assert_eq!((item["device"].as_str(), item["preset"].as_str()), (Some(SERUM_2), Some("SOMEPACK - OMEGA ROOM")));
+    assert_eq!(item["category"], "Library/Some Pack Vol. 1/SERUM 2 PRESETS");
+    let file = item["file"].as_str().unwrap().to_string();
+
+    // Heard before it is used: the plugin as it comes, and from the file.
+    let notes = json!(["C2", "C3", "C4"]);
+    let plain = ok(client, "probe", json!({ "device": SERUM_2, "notes": notes, "detail": true })).await;
+    let arguments = json!({ "device": SERUM_2, "preset": file, "notes": notes, "detail": true });
+    let probed = ok(client, "probe", arguments.clone()).await;
+    said(&format!("probe {arguments}"), &probed);
+    assert_ne!(plain["heard"], probed["heard"], "the file's patch is another sound than the one Serum starts with");
+
+    // A track starts from it; the reply says what was loaded, which is the
+    // name the file gives the patch, and the project keeps the sound.
+    let arguments = json!({ "name": "Saws", "instrument": SERUM_2, "preset": file });
+    let track = ok(client, "create_track", arguments.clone()).await;
+    said(&format!("create_track {arguments}"), &track);
+    assert_eq!(track["preset"], "PD - Warm Room");
+    let device = track["instrument_device_id"].as_u64().unwrap();
+    let on_track = ok(client, "probe", json!({ "track": track["track_id"], "notes": notes, "detail": true })).await;
+    assert_ne!(plain["heard"], on_track["heard"], "{on_track}");
+    // One undo step for a device that is switched to it.
+    let other = ok(client, "add_device", json!({ "uri": SERUM_2, "track": track["track_id"] })).await;
+    let second = other["device_id"].as_u64().unwrap();
+    let switched = ok(client, "update_device", json!({ "device": second, "preset": file })).await;
+    said("update_device with the file", &switched);
+    assert_eq!(switched["preset"], "PD - Warm Room");
+    ok(client, "history", json!({ "action": "undo" })).await;
+    assert!(ok(client, "get_device", json!({ "device": second })).await.get("preset").is_none());
+    assert_eq!(ok(client, "get_device", json!({ "device": device })).await["preset"], "PD - Warm Room");
+
+    // A file that is not Serum's says what it is.
+    let wav = pack.join("Kick.wav");
+    std::fs::write(&wav, b"RIFF").unwrap();
+    let error = call(client, "update_device", json!({ "device": device, "preset": wav })).await.unwrap_err();
+    said("update_device with a .wav", &json!(error));
+    assert!(error.contains("it is not one of Xfer's files. Serum 2 takes a .SerumPreset file or a .vstpreset file"));
+}
