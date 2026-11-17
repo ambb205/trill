@@ -152,13 +152,17 @@ pub fn describe(before: &Project, after: &Project, change: &Change) -> String {
         [(clip, on)] => said.push(format!("Added the clip {} to {on}", quoted(&clip.name))),
         clips => said.push(format!("Added {} clips", clips.len())),
     }
-    let gone: Vec<&Clip> = before
-        .tracks
-        .iter()
-        .filter(|track| after.track(track.id).is_ok())
-        .flat_map(|track| &track.clips)
-        .filter(|clip| after.clip(clip.id).is_err())
-        .collect();
+    // Only the tracks whose clips are not the ones they were are looked
+    // through: a song has thousands of clips, and most edits touch none.
+    let mut gone: Vec<&Clip> = Vec::new();
+    for op in change.ops() {
+        let Op::Clips(orders) = op else { continue };
+        for (track, kept) in orders {
+            let Ok(was) = before.track(*track) else { continue };
+            let missing = was.clips.iter().filter(|clip| !kept.contains(&clip.id));
+            gone.extend(missing.filter(|clip| after.clip(clip.id).is_err()));
+        }
+    }
     match gone.as_slice() {
         [] => {}
         [clip] => said.push(format!("Deleted the clip {}", quoted(&clip.name))),
@@ -214,10 +218,13 @@ pub fn describe(before: &Project, after: &Project, change: &Change) -> String {
             Err(_) => said.push(format!("Added {} to {}", now.name, owner(*chain, after))),
         }
     }
-    let kept_chains = before.tracks.iter().filter(|track| after.track(track.id).is_ok()).map(|track| &track.devices);
-    for device in kept_chains.chain([&before.master.devices]).flatten() {
-        if after.device(device.id).is_err() {
-            said.push(format!("Removed {}", quoted(&device.name)));
+    for op in change.ops() {
+        let Op::Devices(orders) = op else { continue };
+        for (chain, kept) in orders {
+            let Ok(was) = before.chain(*chain) else { continue };
+            let missing = was.iter().filter(|device| !kept.contains(&device.id));
+            let removed = missing.filter(|device| after.device(device.id).is_err());
+            said.extend(removed.map(|device| format!("Removed {}", quoted(&device.name))));
         }
     }
 

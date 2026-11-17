@@ -50,7 +50,7 @@ pub mod words;
 pub use change::{BlobId, Blobs, Broken, Change, Op, StateChange, States};
 pub use place::{Focus, Place};
 
-use crate::{DeviceId, Project};
+use crate::{ChainRef, Device, DeviceId, Project};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
@@ -117,6 +117,12 @@ pub struct Step {
     /// For a step that takes steps back or brings them back: which.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverses: Option<Reversed>,
+    /// A step nobody made: what a device came to on its own in its
+    /// editor's window, kept so that the song as it was can be rebuilt as
+    /// it was. It is not shown as part of the story and takes no time in a
+    /// replay.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub aside: bool,
     pub change: Change,
 }
 
@@ -230,6 +236,11 @@ impl Entry {
         }
     }
 
+    /// Whether it is an aside: a step nobody made, which is not shown.
+    pub fn is_aside(&self) -> bool {
+        self.step().is_some_and(|step| step.aside)
+    }
+
     /// Whether it is part of a conversation: what would hand someone the
     /// words exchanged with the assistant.
     pub fn is_conversation(&self) -> bool {
@@ -269,6 +280,22 @@ pub struct Mark {
     pub seq: u64,
     from: usize,
     to: usize,
+}
+
+impl Mark {
+    /// The mark of this edit and `later`, the next one, together: `None`
+    /// unless the later one went to the same entry right after this one.
+    pub fn through(self, later: Mark) -> Option<Mark> {
+        (self.seq == later.seq && self.to == later.from).then_some(Mark { seq: self.seq, from: self.from, to: later.to })
+    }
+}
+
+/// The calls that are open, for taking along when another song's journal
+/// takes the place of this one ([`Journal::take_calls`]).
+#[derive(Default)]
+pub struct OpenCalls {
+    calls: Vec<OpenCall>,
+    last: u64,
 }
 
 /// What a call came to, said when it ends.
@@ -461,9 +488,9 @@ impl Journal {
         self.entries.back()
     }
 
-    /// How many steps are held.
+    /// How many steps are held, asides not counted.
     pub fn steps(&self) -> usize {
-        self.entries.iter().filter(|entry| entry.step().is_some()).count()
+        self.entries.iter().filter(|entry| entry.step().is_some_and(|step| !step.aside)).count()
     }
 
     /// The number of the oldest entry held, or of the next one if none is.
@@ -597,7 +624,7 @@ impl Journal {
         };
         let to = change.len();
         let places = place::of_change(&change, after);
-        let step = Step { label, places, tool, heard: None, reverses: None, change };
+        let step = Step { label, places, tool, heard: None, reverses: None, aside: false, change };
         let seq = self.push(at, by, What::Step(step), open);
         Some(Mark { seq, from: 0, to })
     }
@@ -643,7 +670,7 @@ impl Journal {
         let to = change.len();
         let places = place::of_change(&change, after);
         let reverses = Some(Reversed { kind, first, last });
-        let step = Step { label, places, tool, heard: None, reverses, change };
+        let step = Step { label, places, tool, heard: None, reverses, aside: false, change };
         let seq = self.push(at, by, What::Step(step), open);
         Some(Mark { seq, from: 0, to })
     }
@@ -702,6 +729,24 @@ impl Journal {
         self.calls.iter().any(|open| open.id == call.0)
     }
 
+    /// Hands over the calls that are open: another song is taking this
+    /// one's place in the middle of them. What they made here stands as
+    /// it is.
+    pub fn take_calls(&mut self) -> OpenCalls {
+        for entry in self.entries.iter_mut().filter(|entry| matches!(entry.open, Some(Open::Call(_)))) {
+            entry.open = None;
+        }
+        let calls = std::mem::take(&mut self.calls);
+        OpenCalls { calls: calls.into_iter().map(|call| OpenCall { entries: 0, ..call }).collect(), last: self.last_call }
+    }
+
+    /// Takes on calls that were opened in the journal of the song this
+    /// one's song replaced: what they do from here on is entered here.
+    pub fn adopt_calls(&mut self, open: OpenCalls) {
+        self.last_call = self.last_call.max(open.last);
+        self.calls.extend(open.calls);
+    }
+
     /// Closes a call. Its steps are told where they landed, if the call
     /// says; one that changed nothing is entered as a look.
     pub fn end_call(&mut self, at: u64, call: CallId, outcome: Outcome) {
@@ -751,36 +796,33 @@ impl Journal {
         self.push(at, by, What::Mark { label: label.into() }, None)
     }
 
-    /// Enters a step that sets one device's state, for a state the device
-    /// came to on its own (in its editor's window) and that is not an edit
-    /// of anybody's. One that follows another for the same device takes
+    /// Enters, as an aside ([`Step::aside`]), what a device came to on
+    /// its own in its editor's window, which is not an edit of anybody's:
+    /// `device` as it is now, in `chain`, with its state if
+    /// `state_changed`. One that follows another for the same device takes
     /// its place: a state is megabytes, and a knob turned for a minute
     /// would otherwise be kept at every look.
-    pub fn note_state(&mut self, at: u64, before: &Project, after: &Project, device: DeviceId, label: &str) {
-        let change = Change::between(before, after, &mut self.blobs);
-        if change.is_empty() {
-            return;
-        }
-        let only_this = |change: &Change| matches!(change.ops(), [Op::Device { device: held, state, .. }] if held.id == device && *state != StateChange::Keep);
-        if only_this(&change)
-            && let Some(last) = self.entries.back_mut()
+    pub fn note_device(&mut self, at: u64, chain: ChainRef, device: &Device, state_changed: bool, label: &str) {
+        let change = Change::of_device(chain, device, state_changed, &mut self.blobs);
+        if let Some(last) = self.entries.back_mut()
             && last.open.is_none()
             && let What::Step(step) = &mut last.what
             && step.tool.is_none()
             && step.label == label
-            && only_this(&step.change)
+            && step.change.is_of_device(device.id)
         {
-            step.change = change;
+            step.change.follow_device(change);
             last.at = at;
             last.size = 0;
             // A file that holds the entry as it was is written anew, and
-            // the state it named is let go.
+            // a state only it named is let go.
             self.generation += 1;
             self.sweep();
             return;
         }
-        let places = place::of_change(&change, after);
-        let step = Step { label: label.to_owned(), places, tool: None, heard: None, reverses: None, change };
+        let places = vec![Place::Device { id: device.id.0, name: device.name.clone() }];
+        let step =
+            Step { label: label.to_owned(), places, tool: None, heard: None, reverses: None, aside: true, change };
         self.push(at, Author::Person, What::Step(step), None);
     }
 
@@ -1052,7 +1094,7 @@ impl Journal {
                 let change = Change::between(&head, song, &mut self.blobs);
                 let places = place::of_change(&change, song);
                 let label = "The song was changed while no journal was kept".to_owned();
-                let step = Step { label, places, tool: None, heard: None, reverses: None, change };
+                let step = Step { label, places, tool: None, heard: None, reverses: None, aside: false, change };
                 self.push(at, Author::Person, What::Step(step), None);
                 self
             }
@@ -1554,36 +1596,88 @@ mod tests {
     }
 
     #[test]
-    fn a_state_a_device_came_to_on_its_own_is_one_step_however_often_it_is_looked_at() {
+    fn what_a_device_came_to_on_its_own_is_one_step_however_often_it_is_looked_at() {
         let mut song = Project::new("Song");
         let track = song.add_track("Keys");
-        let device = song.add_device(ChainRef::Track(track), "clap:pad", "Pad", None).unwrap();
+        let chain = ChainRef::Track(track);
+        let device = song.add_device(chain, "clap:pad", "Pad", None).unwrap();
         let mut journal = Journal::begin(&song, 0);
         let label = "Changed \u{201C}Pad\u{201D} in its own window";
         for look in 1..=5u8 {
-            let before = song.clone();
             song.device_mut(device).unwrap().state = Some(vec![look; 50_000]);
-            journal.note_state(u64::from(look), &before, &song, device, label);
+            journal.note_device(u64::from(look), chain, song.device(device).unwrap(), true, label);
         }
+        // A knob of it that the project keeps, turned in the same window:
+        // the state that came before is not lost for it.
+        song.device_mut(device).unwrap().params.insert("cutoff".into(), 0.25);
+        journal.note_device(6, chain, song.device(device).unwrap(), false, label);
         assert_eq!(labels(&journal), [label]);
-        assert_eq!(journal.last().unwrap().at, 5);
+        assert_eq!(journal.last().unwrap().at, 6);
         assert_eq!(journal.head().unwrap(), song);
-        journal.set_limits(Limits { entries: 0, bytes: 0 });
-        journal.keep_within_limits();
         assert_eq!(journal.blobs().len(), 1, "the states it passed through are let go");
+        assert_eq!(
+            journal.last().unwrap().step().unwrap().places,
+            [Place::Device { id: device.0, name: "Pad".into() }]
+        );
 
         // Anything in between, and the next one is its own step.
-        let mut journal = Journal::begin(&song, 0);
-        let before = song.clone();
-        song.device_mut(device).unwrap().state = Some(vec![9; 100]);
-        journal.note_state(1, &before, &song, device, label);
         let before = song.clone();
         song.set_tempo(99.0).unwrap();
-        journal.record(2, Who::Person, &before, &song, None);
-        let before = song.clone();
-        song.device_mut(device).unwrap().state = Some(vec![8; 100]);
-        journal.note_state(3, &before, &song, device, label);
+        journal.record(7, Who::Person, &before, &song, None);
+        song.device_mut(device).unwrap().state = None;
+        journal.note_device(8, chain, song.device(device).unwrap(), true, label);
         assert_eq!(journal.len(), 3);
         assert_eq!(journal.head().unwrap(), song);
+    }
+
+    #[test]
+    fn calls_that_are_open_go_along_when_another_song_is_opened() {
+        let mut song = Project::new("Old");
+        let mut journal = Journal::begin(&song, 0);
+        let call = journal.begin_call(Author::Assistant, "new_project", "Started a new project");
+        step(&mut journal, &mut song, Who::Call(call), |p| p.add_track("Left behind"));
+
+        // The call replaces the song: its journal ends, another begins,
+        // and what the call does from here on is entered there.
+        let mut song = Project::new("New");
+        let mut next = Journal::begin(&song, 5);
+        next.adopt_calls(journal.take_calls());
+        assert!(next.is_open(call) && !journal.is_open(call));
+        step(&mut next, &mut song, Who::Call(call), |p| p.name = "Sketch".into());
+        next.end_call(6, call, Outcome::default());
+        let entry = next.last().unwrap();
+        assert_eq!((entry.line().as_str(), &entry.by), ("Started a new project", &Author::Assistant));
+        assert_eq!(next.head().unwrap(), song);
+        // The journal that was left has the call's step there as it stood.
+        assert!(journal.to_text(true).contains("Left behind"));
+
+        // A call that did nothing in the new song is a look in it.
+        let call = next.begin_call(Author::Assistant, "load_project", "Opened \u{201C}day.trill\u{201D}");
+        let mut loaded = Journal::begin(&song, 9);
+        loaded.adopt_calls(next.take_calls());
+        loaded.end_call(10, call, Outcome::default());
+        assert_eq!(loaded.last().unwrap().line(), "Opened \u{201C}day.trill\u{201D}");
+    }
+
+    #[test]
+    fn edits_of_one_undo_step_are_backed_out_of_together() {
+        let mut song = Project::new("Song");
+        let mut journal = Journal::begin(&song, 0);
+        let blank = song.clone();
+        // A drag of three edits, backed out of as one.
+        let first = step(&mut journal, &mut song, Who::Gesture { continues: false }, |p| p.add_track("A")).unwrap();
+        let second = step(&mut journal, &mut song, Who::Gesture { continues: true }, |p| p.set_tempo(90.0)).unwrap();
+        let third = step(&mut journal, &mut song, Who::Gesture { continues: true }, |p| p.set_tempo(91.0)).unwrap();
+        let whole = first.through(second).and_then(|mark| mark.through(third)).expect("they follow one another");
+        assert!(journal.retract(whole));
+        assert!(journal.is_empty());
+        assert_eq!(journal.head().unwrap(), blank);
+
+        // Edits that went to different entries are not one mark.
+        let mut song = blank;
+        let one = step(&mut journal, &mut song, Who::Person, |p| p.set_tempo(90.0)).unwrap();
+        let other = step(&mut journal, &mut song, Who::Person, |p| p.set_tempo(91.0)).unwrap();
+        assert_eq!(one.through(other), None);
+        assert_eq!(first.through(third), None, "nor are edits with one between them");
     }
 }

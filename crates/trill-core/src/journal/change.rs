@@ -516,6 +516,35 @@ impl Change {
         Change { ops }
     }
 
+    /// The change that makes a device what `device` is, in `chain`: the
+    /// device without its state, and its state too if `state_changed`.
+    pub(super) fn of_device(chain: ChainRef, device: &Device, state_changed: bool, blobs: &mut Blobs) -> Change {
+        let state = match (&device.state, state_changed) {
+            (_, false) => StateChange::Keep,
+            (Some(bytes), true) => StateChange::Set(blobs.keep(bytes)),
+            (None, true) => StateChange::Clear,
+        };
+        Change { ops: vec![Op::Device { chain, device: Box::new(device_of(device)), state }] }
+    }
+
+    /// Whether this is a change to the device `id` and to nothing else.
+    pub(super) fn is_of_device(&self, id: DeviceId) -> bool {
+        matches!(self.ops.as_slice(), [Op::Device { device, .. }] if device.id == id)
+    }
+
+    /// Makes this change to one device the one that also does what
+    /// `newer`, a change to the same device, does: the device as the newer
+    /// has it, with the state the newer sets or, if it sets none, this one.
+    pub(super) fn follow_device(&mut self, newer: Change) {
+        let (Some(Op::Device { state: older, .. }), Some(Op::Device { chain, device, state })) =
+            (self.ops.first(), newer.ops.into_iter().next())
+        else {
+            return;
+        };
+        let state = if state == StateChange::Keep { *older } else { state };
+        self.ops = vec![Op::Device { chain, device, state }];
+    }
+
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
     }

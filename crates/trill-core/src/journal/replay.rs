@@ -224,6 +224,17 @@ impl Replay {
         let mut song = journal.base(States::Without).unwrap_or_else(|_| Project::new("Untitled"));
         let mut previous: Option<&Entry> = None;
         for (index, entry) in journal.entries().enumerate() {
+            // An aside is nobody's doing: it is applied in passing.
+            if entry.is_aside() {
+                if let Some(step) = entry.step()
+                    && let Err(error) = step.change.apply(&mut song, States::Without)
+                {
+                    broken = Some((index, error.0));
+                    break;
+                }
+                moments.push(Moment { entry: index, starts: clock, lasts: 0.0, away: None, arrivals: 0 });
+                continue;
+            }
             let gap = previous.map_or(0.0, |before| waited(before, entry));
             let (wait, away) = match gap {
                 gap if gap < pace.short_wait => (0.0, None),
@@ -324,7 +335,7 @@ impl Replay {
     /// The moment of the first step at or after the moment numbered
     /// `from`, or before it when `back`: where a viewer steps to.
     pub fn step_from(&self, from: usize, back: bool) -> Option<usize> {
-        let is_step = |index: &usize| self.entry(&self.moments[*index]).step().is_some();
+        let is_step = |index: &usize| self.entry(&self.moments[*index]).step().is_some_and(|step| !step.aside);
         if back {
             (0..from.min(self.moments.len())).rev().find(is_step)
         } else {
@@ -389,6 +400,7 @@ impl Replay {
     /// last step before it.
     fn places_at(&self, index: usize) -> &[Place] {
         let steps = self.moments[..=index].iter().rev().filter_map(|moment| self.entry(moment).step());
+        let steps = steps.filter(|step| !step.aside);
         steps.map(|step| step.places.as_slice()).find(|places| !places.is_empty()).unwrap_or(&[])
     }
 }

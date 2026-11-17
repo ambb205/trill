@@ -13,6 +13,7 @@ pub mod engine;
 pub mod graph;
 pub mod host;
 pub mod instruments;
+pub mod journal;
 pub mod live;
 mod monitor;
 pub mod probe;
