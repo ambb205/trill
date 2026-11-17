@@ -270,6 +270,10 @@ impl Models for OnnxModels {
         }
     }
 
+    fn places_words(&self) -> bool {
+        self.setup.parts.join(WORD_TIMES).join("model.onnx").is_file()
+    }
+
     fn stems(&mut self, mix: &Sound, choice: StemChoice, progress: Progress) -> Result<Vec<Stem>, String> {
         let files = match choice {
             StemChoice::Fast => {

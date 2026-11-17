@@ -86,6 +86,20 @@ fn stage(
     outcome
 }
 
+/// Has the models ready before a stage asks anything of them, and says
+/// and keeps what runs them.
+fn using(folder: &StudyFolder, models: &mut dyn Models, said: &mut dyn FnMut(Event)) -> Result<(), String> {
+    models.ready()?;
+    let device = models.device();
+    let mut study = folder.study()?;
+    if study.device.as_deref() != Some(device.as_str()) {
+        study.device = Some(device.clone());
+        folder.write(&study)?;
+    }
+    said(Event::Device(device));
+    Ok(())
+}
+
 /// Reads the recording a study is of, at the rate everything works at.
 fn read(folder: &StudyFolder, programs: &Programs) -> Result<Sound, String> {
     let study = folder.study()?;
@@ -158,7 +172,7 @@ pub fn run(
     said: &mut dyn FnMut(Event),
 ) -> Result<(), String> {
     let mut study = folder.study()?;
-    (study.state, study.error, study.device) = (State::Running, None, Some(models.device()));
+    (study.state, study.error) = (State::Running, None);
     // What was running when a run was ended is to be done again.
     for report in &mut study.stages {
         if matches!(report.state, StageState::Running | StageState::Failed) {
@@ -166,12 +180,37 @@ pub fn run(
         }
     }
     folder.write(&study)?;
-    said(Event::Device(models.device()));
     let options = study.options.clone();
 
     // Stems that are there add up to the recording: it need not be read again.
     let mut stems: Option<Vec<Stem>> = stems_of(folder, &folder.study()?.stems);
     let mut mix: Option<Sound> = None;
+    if let Source::Link { url, .. } = &study.source {
+        stage(folder, Stage::Fetch, said, |said| {
+            if stems.is_some() || folder.kept_source().is_some() {
+                return Ok(Some("already done".to_owned()));
+            }
+            let Some(fetcher) = &programs.fetcher else {
+                return Err("a link is fetched by yt-dlp, which was not found on this machine: install it, or study a file you have".to_owned());
+            };
+            let fetched = crate::link::fetch(
+                fetcher,
+                programs.ffmpeg.as_deref(),
+                url,
+                &folder.path,
+                LONGEST_SECONDS,
+                &mut |share| said(Event::Progress(share)),
+            )?;
+            let mut study = folder.study()?;
+            // A study that was given no name of its own takes the recording's.
+            if let Some(title) = fetched.title.filter(|_| study.title == *url) {
+                study.title = title;
+            }
+            study.source = Source::Link { url: url.clone(), by: fetched.by };
+            folder.write(&study)?;
+            Ok(Some(String::new()))
+        })?;
+    }
     stage(folder, Stage::Read, said, |_| {
         let (sound, note) = match &stems {
             Some(stems) => (Recording::of_stems(stems.clone()).mix, "already done"),
@@ -189,6 +228,7 @@ pub fn run(
         if stems.is_some() {
             return Ok(Some("already done".to_owned()));
         }
+        using(folder, models, said)?;
         let mut found = models.stems(&mix, options.stems, &mut |share| said(Event::Progress(share * 0.9)))?;
         if found.is_empty() {
             return Err("the model gave no stems".to_owned());
@@ -229,6 +269,7 @@ pub fn run(
         if folder.beats().is_some() {
             return Ok(Some("already done".to_owned()));
         }
+        using(folder, models, said)?;
         let beats = models.beats(&mix.mono(), &mut |share| said(Event::Progress(share)))?;
         folder.write_beats(&beats)?;
         Ok(Some(format!("{} beats", beats.beats.len())))
@@ -248,6 +289,7 @@ pub fn run(
         if folder.transcript().is_some() {
             return Ok(Some("already done".to_owned()));
         }
+        using(folder, models, said)?;
         let transcript = models.words(vocal, options.language.as_deref(), &mut |share| said(Event::Progress(share)))?;
         folder.write_transcript(&transcript)?;
         Ok(Some(format!("{} words", transcript.stretches.iter().map(|stretch| stretch.words.len()).sum::<usize>())))
@@ -263,10 +305,18 @@ pub fn run(
         }
         let envelope = Envelope::new(vocal);
         let mut words = transcript.rough_words();
+        let mut unplaced = "";
         let placed = if words.is_empty() {
             false
         } else {
-            models.word_times(vocal, &mut words, &mut |share| said(Event::Progress(share)))?
+            using(folder, models, said)?;
+            if models.places_words() {
+                unplaced = "the words are in a script the aligner does not read";
+                models.word_times(vocal, &mut words, &mut |share| said(Event::Progress(share)))?
+            } else {
+                unplaced = "the part that places words has not been fetched";
+                false
+            }
         };
         lyrics::settle(&mut words);
         // A word with nothing sung under it was made up.
@@ -280,8 +330,8 @@ pub fn run(
         if invented > 0 {
             note.push_str(&format!("; {invented} words with nothing sung under them were left out"));
         }
-        if !placed {
-            note.push_str("; the words are in a script the aligner does not read, and are placed only as well as the transcriber heard them");
+        if !placed && !unplaced.is_empty() {
+            note.push_str(&format!("; {unplaced}, and they are placed only as well as the transcriber heard them"));
         }
         Ok(Some(note))
     })?;

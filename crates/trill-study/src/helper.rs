@@ -66,6 +66,8 @@ pub enum Order {
     /// Time the models on this machine: split so many seconds of noise
     /// into stems, and say how long a minute of music takes.
     Check { models: Which, seconds: f64 },
+    /// Say which graphics cards the part for any card finds here.
+    Cards { setup: crate::models::real::Setup },
 }
 
 /// What a timed test found.
@@ -90,6 +92,8 @@ pub enum Said {
     Progress(f32),
     Device(String),
     Checked(Checked),
+    /// The graphics cards there are, by who made each, in the system's order.
+    Cards(Vec<String>),
     /// It did what it was asked.
     Done,
     /// It could not, and why.
@@ -99,6 +103,9 @@ pub enum Said {
 /// A process that studies, as whoever started it has it.
 pub struct Job {
     process: Child,
+    /// Its input, held open for as long as it is wanted: a process whose
+    /// asker has gone finds out by its closing, and ends.
+    _input: Option<std::process::ChildStdin>,
     lines: Receiver<Said>,
     /// What it wrote last to its standard error.
     words: Arc<Mutex<String>>,
@@ -138,20 +145,19 @@ impl Job {
             std::thread::Builder::new().name("trill-study-said".into()).spawn(move || listen(stdout, &said)),
             std::thread::Builder::new().name("trill-study-log".into()).spawn(move || overhear(stderr, &kept)),
         ];
-        let mut job = Self { process, lines, words };
+        let mut job = Self { process, _input: None, lines, words };
         if threads.iter().any(Result::is_err) {
             job.end();
             return Err(cannot("its output could not be read".to_owned()));
         }
-        // Its one order, and then its input is closed: a process whose
-        // asker has gone finds out by that.
+        // Its one order. Its input stays open after it, and says nothing more.
         let line = serde_json::to_string(order).map_err(|error| cannot(error.to_string()))?;
         if stdin.write_all(line.as_bytes()).and_then(|()| stdin.write_all(b"\n")).and_then(|()| stdin.flush()).is_err()
         {
             job.end();
             return Err(cannot("it took no order".to_owned()));
         }
-        drop(stdin);
+        job._input = Some(stdin);
         match job.lines.recv_timeout(HELLO_WITHIN) {
             Ok(Said::Hello(VERSION)) => Ok(job),
             Ok(Said::Hello(other)) => {
@@ -270,7 +276,7 @@ pub fn attend(job: &mut Job, limit: Option<u64>, stop: &AtomicBool, on: &mut dyn
                     Said::Checked(found) => checked = Some(found),
                     Said::Done => break checked.take().map_or(Outcome::Done, Outcome::Checked),
                     Said::Failed(why) => break Outcome::Failed(why),
-                    Said::Hello(_) | Said::Progress(_) | Said::Device(_) => {}
+                    Said::Hello(_) | Said::Progress(_) | Said::Device(_) | Said::Cards(_) => {}
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -343,8 +349,10 @@ fn check(models: &Which, seconds: f64) -> Result<Checked, String> {
 fn serve(order: Order) -> Result<(), String> {
     match order {
         Order::Study { folder, models, programs } => {
-            let mut models = models.make()?;
-            run::run(&StudyFolder::new(folder), models.as_mut(), &programs, &mut |event| match event {
+            // Made when a stage first asks for one: a study with only
+            // listening left to do loads no runtime.
+            let mut models = crate::models::Lazy::new(models);
+            run::run(&StudyFolder::new(folder), &mut models, &programs, &mut |event| match event {
                 Event::Stage(stage) => say(&Said::Stage(stage)),
                 Event::Progress(share) => say(&Said::Progress(share)),
                 Event::Device(device) => say(&Said::Device(device)),
@@ -354,6 +362,10 @@ fn serve(order: Order) -> Result<(), String> {
             let checked = check(&models, seconds)?;
             say(&Said::Device(checked.device.clone()));
             say(&Said::Checked(checked));
+            Ok(())
+        }
+        Order::Cards { setup } => {
+            say(&Said::Cards(crate::models::real::OnnxModels::new(setup)?.cards()));
             Ok(())
         }
     }
@@ -376,6 +388,15 @@ pub fn run_if_requested() {
         }
         _ => Err("it was given no order".to_owned()),
     };
+    // Whoever started this holds its input open and says nothing more on
+    // it. When the input closes, the asker has gone (stopped, or taken
+    // down), and what is done here would be done for nobody: on a
+    // graphics card, with nothing watching what it takes.
+    let _ = std::thread::Builder::new().name("trill-study-asker".into()).spawn(|| {
+        let mut rest = Vec::new();
+        let _ = std::io::stdin().lock().read_to_end(&mut rest);
+        std::process::exit(2)
+    });
     let ended = order.and_then(|order| {
         // An error of Trill's own is a sentence too, and not a process gone without a word.
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| serve(order))).unwrap_or_else(|panic| {

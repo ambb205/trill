@@ -71,8 +71,20 @@ pub type Progress<'a> = &'a mut dyn FnMut(f32);
 /// What a run asks of models. Audio is at [`trill_listen::RATE`]; times
 /// are seconds of the recording. An error is a sentence that says what to do.
 pub trait Models {
+    /// Makes them ready to be asked, where that is not done when they are
+    /// made: called before the first stage that asks anything of them.
+    fn ready(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
     /// What runs them, as a person reads it: "the processor", or a card by name.
     fn device(&self) -> String;
+
+    /// Whether words can be placed at all: not where the model that
+    /// places them was not fetched, and then they keep their rough times.
+    fn places_words(&self) -> bool {
+        true
+    }
 
     /// Splits a recording into stems, in the model's order. They need not
     /// add up to the recording: whoever asks puts what is left over into
@@ -107,6 +119,57 @@ impl Which {
             Which::Real(setup) => Ok(Box::new(real::OnnxModels::new(setup.clone())?)),
             Which::Scripted(script) => Ok(Box::new(scripted::ScriptedModels::new(script.clone()))),
         }
+    }
+}
+
+/// Models that are made when the first stage asks for one, in place of
+/// when the process starts.
+pub struct Lazy {
+    which: Which,
+    made: Option<Box<dyn Models>>,
+}
+
+impl Lazy {
+    pub fn new(which: Which) -> Self {
+        Self { which, made: None }
+    }
+
+    fn made(&mut self) -> Result<&mut dyn Models, String> {
+        if self.made.is_none() {
+            self.made = Some(self.which.make()?);
+        }
+        Ok(self.made.as_deref_mut().expect("just made"))
+    }
+}
+
+impl Models for Lazy {
+    fn ready(&mut self) -> Result<(), String> {
+        self.made()?.ready()
+    }
+
+    /// Nothing until they are made.
+    fn device(&self) -> String {
+        self.made.as_ref().map_or_else(String::new, |models| models.device())
+    }
+
+    fn places_words(&self) -> bool {
+        self.made.as_ref().is_none_or(|models| models.places_words())
+    }
+
+    fn stems(&mut self, mix: &Sound, choice: StemChoice, progress: Progress) -> Result<Vec<Stem>, String> {
+        self.made()?.stems(mix, choice, progress)
+    }
+
+    fn beats(&mut self, mix: &[f32], progress: Progress) -> Result<TrackedBeats, String> {
+        self.made()?.beats(mix, progress)
+    }
+
+    fn words(&mut self, vocal: &[f32], language: Option<&str>, progress: Progress) -> Result<Transcript, String> {
+        self.made()?.words(vocal, language, progress)
+    }
+
+    fn word_times(&mut self, vocal: &[f32], words: &mut [Word], progress: Progress) -> Result<bool, String> {
+        self.made()?.word_times(vocal, words, progress)
     }
 }
 
