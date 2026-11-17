@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+trill-catalogue.workspace = true
 trill-core.workspace = true
 trill-dsp.workspace = true
 trill-engine.workspace = true

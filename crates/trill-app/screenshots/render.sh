@@ -76,7 +76,7 @@ keys=$sounds/night-keys.trill
 if making sounds-browser sounds-drum-rack sounds-sampler sounds-missing-file min-window-sounds \
     graphite-sounds-browser graphite-sounds-drum-rack missing-files missing-files-status \
     missing-library-folder min-window-missing-files graphite-missing-files \
-    sampled-instrument sampled-kit min-window-sampled-instrument graphite-sampled-instrument; then
+    sampled-instrument sampled-kit min-window-sampled-instrument graphite-sampled-instrument credits; then
     cargo run -p trill-app --example sound_fixtures -- "$sounds"
 fi
 
@@ -168,6 +168,10 @@ shot min-window-sampled-instrument "$keys" --browse devices --library "$pack" --
     --size 1060x640
 shot graphite-sampled-instrument "$keys" --browse devices --library "$pack" --select "Glass line" --tab devices \
     --theme graphite
+# The credits (File, Credits): what the song owes for the sampled
+# instruments it plays, here two of the pack that Trill's catalogue does not
+# know, and the makers Trill names for the sets it offers.
+shot credits "$keys" --browse devices --library "$pack" --credits
 
 # Missing files: the same song after its pack was moved. The line in the
 # status bar and the clips marked, with the library pointed at where the

@@ -4604,6 +4604,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "trill-assistant",
+ "trill-catalogue",
  "trill-core",
  "trill-dsp",
  "trill-engine",
@@ -4627,6 +4628,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "trill-catalogue"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "sha2",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "trill-core"
 version = "0.1.0"
 dependencies = [
@@ -4642,6 +4653,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "trill-core",
  "trill-engine",
@@ -4706,6 +4718,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "trill-catalogue",
  "trill-core",
  "trill-dsp",
  "trill-engine",
@@ -4769,6 +4782,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "trill-catalogue",
  "trill-core",
  "trill-dsp",
  "trill-engine",

@@ -441,6 +441,7 @@ impl TrillServer {
             + Self::files_router()
             + Self::listening_router()
             + Self::wavetable_router()
+            + Self::catalogue_router()
     }
 
     /// The names of the tools the server offers.
@@ -3297,8 +3298,9 @@ impl ServerHandler for TrillServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
                 crate::sounds::INSTRUCTIONS,
+                crate::catalogue::INSTRUCTIONS,
                 crate::listening::INSTRUCTIONS,
                 crate::wavetable::INSTRUCTIONS,
                 crate::files::INSTRUCTIONS,

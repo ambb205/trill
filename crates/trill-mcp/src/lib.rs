@@ -16,6 +16,7 @@
 //! journal under what it did, in words ([`words`]): by the name the client
 //! gave, or as the assistant's for the second door.
 
+mod catalogue;
 mod files;
 mod film;
 mod guard;

@@ -9,6 +9,7 @@
 //! cargo run -p trill-engine --example sampled -- measure <file.sfz>
 //! cargo run -p trill-engine --example sampled -- play <file.sfz> <piano|keys|strings|bass|drums> <out.wav>
 //! cargo run -p trill-engine --example sampled -- facts <folder> <out.jsonl>
+//! cargo run -p trill-engine --example sampled -- tour <list.txt> <out.wav>
 //! ```
 //!
 //! * `survey` reads every `.sfz` under a folder and says of each what it
@@ -29,6 +30,12 @@
 //!   the player does not do, what `measure` finds, and how loud a few
 //!   notes of it come out of the player. It is what an entry of the
 //!   catalogue (`catalogue/README.md`) is written from.
+//! * `tour` plays many instruments one after the other into one file,
+//!   each a short phrase, and writes the times beside it (`<out>.txt`):
+//!   for hearing a kind of instrument side by side. A line of the list
+//!   is `<phrase><tab><file.sfz><tab><what to call it>`, the phrases
+//!   being `short-keys`, `short-line`, `short-chords`, `short-bass`,
+//!   `short-drums` and `each` (every key it has, for what is struck).
 //!
 //! Nothing is written but the file `play` names, and nothing of the user's
 //! is read: point it at folders of your own.
@@ -60,8 +67,9 @@ fn main() {
         ["measure", file] => measure(file),
         ["play", file, phrase, out] => play(file, phrase, Path::new(out)),
         ["facts", folder, out] => facts(Path::new(folder), Path::new(out)),
+        ["tour", list, out] => tour(Path::new(list), Path::new(out)),
         _ => Err("usage: sampled survey <folder> | about <file> | load <file> | measure <file> | play <file> \
-                  <piano|keys|strings|bass|drums> <out.wav> | facts <folder> <out.jsonl>"
+                  <piano|keys|strings|bass|drums> <out.wav> | facts <folder> <out.jsonl> | tour <list.txt> <out.wav>"
             .to_string()),
     };
     if let Err(problem) = done {
@@ -497,12 +505,16 @@ struct Heard {
     /// root mean square and the most. `None` for a kit, whose keys are
     /// different drums.
     steps: Option<(f64, f64)>,
+    /// The peak of each of those keys, in dB.
+    levels: Vec<(u8, f64)>,
 }
 
 /// The instrument in `file` through the player, as a render makes it: the
 /// keys it has recordings of, one after the other (at most forty of them,
 /// from all over it), and a chord. A kit is hit on every key it has.
-fn heard(file: &str) -> Result<Heard, String> {
+/// `woken` are controllers to hold at their middle: for an instrument that
+/// says nothing until one of them is moved.
+fn heard(file: &str, woken: &[u8]) -> Result<Heard, String> {
     let media = Arc::new(MediaCache::default());
     let factory = Arc::new(Builtins::with_loader(media.clone()));
     let mut session = Session::with_media(factory, media, AudioBackend::Null { sample_rate: SR as u32 })
@@ -552,6 +564,10 @@ fn heard(file: &str) -> Result<Heard, String> {
                 let (_, top) = kind.range();
                 project.clip_mut(clip)?.set_controller(kind, vec![AutomationPoint::new(0.0, top * 0.8)])?;
             }
+            for kind in woken.iter().filter_map(|number| ControllerKind::numbered(*number)) {
+                let (_, top) = kind.range();
+                project.clip_mut(clip)?.set_controller(kind, vec![AutomationPoint::new(0.0, top * 0.5)])?;
+            }
             Ok(())
         })
         .map_err(|error| error.to_string())?;
@@ -579,6 +595,7 @@ fn heard(file: &str) -> Result<Heard, String> {
         problems,
         keys: keys.len(),
         steps,
+        levels: keys.iter().copied().zip(levels.iter().copied()).collect(),
     })
 }
 
@@ -627,7 +644,13 @@ fn facts(folder: &Path, out: &Path) -> Result<(), String> {
             .collect();
         let missing: Vec<String> =
             loaded.missing.iter().map(|index| below(Path::new(&loaded.paths[*index as usize]))).collect();
-        let played = heard(&name);
+        let played = heard(&name, &[]);
+        // An instrument that says nothing as it loads may be waiting for a
+        // controller: its own, all at their middle.
+        let silent = played.as_ref().is_ok_and(|heard| heard.peak_db < -60.0);
+        let own: Vec<u8> =
+            summary.controllers.iter().map(|(number, _)| *number).filter(|number| *number != 64).collect();
+        let woken = (silent && !own.is_empty()).then(|| heard(&name, &own).map(|heard| heard.peak_db).ok()).flatten();
         let line = json!({
             "file": below(file),
             "name": summary.name,
@@ -649,6 +672,8 @@ fn facts(folder: &Path, out: &Path) -> Result<(), String> {
             "problems": loaded.instrument.problems,
             "noise": found.noise().map(|(middle, noisiest)| [middle, noisiest]),
             "tuning": found.tuning().map(|(mean, spread, worst, key)| json!({ "keys": found.cents.len(), "mean": mean, "spread": spread, "worst": worst, "worst_key": key })),
+            "cents": found.cents,
+            "unreadable": loaded.unreadable_why(),
             "evenness": found.evenness().map(|(spread, worst)| [spread, worst]),
             "heard": match &played {
                 Ok(heard) => json!({
@@ -657,6 +682,8 @@ fn facts(folder: &Path, out: &Path) -> Result<(), String> {
                     "problems": heard.problems,
                     "keys": heard.keys,
                     "steps": heard.steps.map(|(spread, worst)| [spread, worst]),
+                    "levels": heard.levels,
+                    "woken": woken,
                 }),
                 Err(reason) => json!({ "failed": reason }),
             },
@@ -821,11 +848,201 @@ fn phrase(
             notes.push(note(kick, 16.0, 0.3, 120));
             Ok((notes, curves, 20.0))
         }
-        other => Err(format!("'{other}' is no phrase: piano, keys, strings, bass or drums")),
+        "short-keys" => {
+            // Two bars of broken chords, soft then loud, and a chord left to ring.
+            for (bar, chord) in chords.iter().take(2).enumerate() {
+                let at = bar as f64 * 4.0;
+                let loud = [64u8, 100][bar];
+                notes.push(note(chord[0] - 12, at, 3.8, loud));
+                for step in 0..8 {
+                    let key = chord[[0, 1, 2, 3, 2, 1, 2, 3][step]] + if step > 3 { 12 } else { 0 };
+                    notes.push(note(key, at + step as f64 * 0.5, 0.45, loud + (step as u8 % 3) * 4));
+                }
+            }
+            for key in [48u8, 60, 64, 67, 72] {
+                notes.push(note(key, 8.0, 4.0, 96));
+            }
+            Ok((notes, curves, 12.0))
+        }
+        "short-line" | "short-chords" => {
+            if kind == "short-chords" {
+                // Two held chords, then the line in octaves.
+                for (bar, chord) in chords.iter().take(2).enumerate() {
+                    for key in chord {
+                        notes.push(note(*key, bar as f64 * 4.0, 3.9, 84));
+                    }
+                    notes.push(note(chord[0] - 12, bar as f64 * 4.0, 3.9, 84));
+                }
+                for (step, key) in [69u8, 72, 76, 79].iter().enumerate() {
+                    notes.push(note(*key, 8.0 + step as f64, 0.95, 96));
+                    notes.push(note(key - 12, 8.0 + step as f64, 0.95, 96));
+                }
+            } else {
+                // A line that rises and falls, each note held, and a last long one.
+                for (step, key) in [69u8, 72, 76, 79, 77, 76, 72, 74].iter().enumerate() {
+                    notes.push(note(*key, step as f64, 0.95, 92));
+                }
+                notes.push(note(69, 8.0, 4.0, 100));
+            }
+            let swell = vec![(0.0, 96.0), (7.9, 84.0), (8.0, 60.0), (10.0, 122.0), (12.0, 70.0)];
+            curves.push((ControllerKind::MOD_WHEEL, swell.clone()));
+            curves.push((
+                ControllerKind::EXPRESSION,
+                swell.into_iter().map(|(beat, value)| (beat, 60.0 + value * 0.5)).collect(),
+            ));
+            Ok((notes, curves, 12.0))
+        }
+        "short-bass" => {
+            // A bar of a walking line, twice, and a long low note.
+            for (step, up) in [0u8, 4, 7, 9, 12, 9, 7, 5].iter().enumerate() {
+                let short = step % 4 == 3;
+                notes.push(note(33 + up, step as f64, if short { 0.4 } else { 0.92 }, 78 + (step as u8 % 4) * 9));
+            }
+            notes.push(note(33, 8.0, 3.0, 110));
+            Ok((notes, curves, 11.0))
+        }
+        "short-drums" | "each" => {
+            let profile = session.profile_of(track);
+            let key = |names: &[&str]| names.iter().find_map(|name| profile.drum(name).map(|drum| drum.pitch));
+            let (kick, snare) = (key(&["kick"]), key(&["snare", "rimshot"]));
+            if let (Some(kick), Some(snare), true) = (kick, snare, kind == "short-drums") {
+                // Two bars of a groove, a fill and a crash.
+                let hat = key(&["closed_hat", "ride", "hat"]);
+                let crash = key(&["crash", "china", "splash"]);
+                let toms: Vec<u8> =
+                    ["high_tom", "mid_tom", "low_tom", "floor_tom"].iter().filter_map(|name| key(&[name])).collect();
+                for bar in 0..2 {
+                    let at = bar as f64 * 4.0;
+                    for beat in [0.0, 1.5, 2.0] {
+                        notes.push(note(kick, at + beat, 0.2, 112));
+                    }
+                    for beat in [1.0, 3.0] {
+                        notes.push(note(snare, at + beat, 0.2, 110));
+                    }
+                    notes.push(note(snare, at + 1.75, 0.1, 42));
+                    if let Some(hat) = hat {
+                        for step in 0..8 {
+                            if !(bar == 1 && step >= 6) {
+                                let loud = if step % 2 == 0 { 96 } else { 62 };
+                                notes.push(note(hat, at + step as f64 * 0.5, 0.2, loud));
+                            }
+                        }
+                    }
+                }
+                for (step, tom) in toms.iter().cycle().take(4).enumerate() {
+                    notes.push(note(*tom, 7.0 + step as f64 * 0.25, 0.2, 90 + step as u8 * 8));
+                }
+                notes.push(note(kick, 8.0, 0.3, 120));
+                if let Some(crash) = crash {
+                    notes.push(note(crash, 8.0, 2.0, 118));
+                }
+                return Ok((notes, curves, 11.0));
+            }
+            // Every key it has a sound on, one after the other: sixteen of them at most, from all over it.
+            let device = session.instrument_of(track).map(|device| device.id).ok_or("the track has no instrument")?;
+            let said = session.sampled(device).ok_or("the instrument did not load")?;
+            let mut keys: Vec<u8> =
+                said.regions.iter().filter(|region| !region.release).map(|region| region.keys.0).collect();
+            keys.sort_unstable();
+            keys.dedup();
+            if keys.is_empty() {
+                return Err("no key of it plays anything".to_string());
+            }
+            let every = keys.len().div_ceil(16).max(1);
+            let keys: Vec<u8> = keys.into_iter().step_by(every).collect();
+            for (step, key) in keys.iter().enumerate() {
+                notes.push(note(*key, step as f64 * 0.75, 0.6, 104));
+            }
+            Ok((notes, curves, keys.len() as f64 * 0.75 + 1.0))
+        }
+        other => Err(format!(
+            "'{other}' is no phrase: piano, keys, strings, bass, drums, or short-keys, short-line, short-chords, \
+             short-bass, short-drums, each"
+        )),
     }
 }
 
+/// Whether a phrase names the keys it means, and is not to be moved to
+/// where an instrument's range is.
+fn keys_as_written(kind: &str) -> bool {
+    matches!(kind, "drums" | "short-drums" | "each")
+}
+
+/// A phrase as it was rendered: brought to a peak of -3 dB.
+struct Played {
+    sound: trill_core::audio::AudioBuffer,
+    notes: usize,
+    /// Its peak at the device's own volume, in dB.
+    peak_db: f64,
+    took: std::time::Duration,
+}
+
 fn play(file: &str, kind: &str, out: &Path) -> Result<(), String> {
+    let played = played(file, kind, 6.0, true)?;
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    trill_media::write_wav(out, &played.sound, WavFormat::Int24).map_err(|error| error.to_string())?;
+    println!(
+        "{} notes, {:.1} s of sound rendered in {:.2} s; its peak was {:.1} dB at the device's own volume; written to {}",
+        played.notes,
+        played.sound.left.len() as f64 / SR,
+        played.took.as_secs_f64(),
+        played.peak_db,
+        out.display()
+    );
+    Ok(())
+}
+
+/// Every instrument of a list, one after the other: see the notes at the
+/// top.
+fn tour(list: &Path, out: &Path) -> Result<(), String> {
+    use std::fmt::Write;
+    let lines = text(list)?;
+    let (mut left, mut right) = (Vec::new(), Vec::new());
+    let mut times = String::new();
+    let gap = (0.7 * SR) as usize;
+    let mut count = 0;
+    for line in lines.lines().filter(|line| !line.trim().is_empty() && !line.starts_with('#')) {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let [kind, file, name] = fields[..] else {
+            return Err(format!("a line of the list is not '<phrase><tab><file><tab><name>': {line}"));
+        };
+        let at = left.len() as f64 / SR;
+        let stamp = format!("{}:{:02}", (at / 60.0) as u32, (at % 60.0) as u32);
+        match played(file, kind, 2.5, false) {
+            Ok(played) => {
+                let _ = writeln!(times, "{stamp}  {name}");
+                left.extend_from_slice(&played.sound.left);
+                right.extend_from_slice(&played.sound.right);
+                left.extend(std::iter::repeat_n(0.0, gap));
+                right.extend(std::iter::repeat_n(0.0, gap));
+                count += 1;
+            }
+            // One that cannot be played is said, and the rest are played.
+            Err(reason) => {
+                let _ = writeln!(times, "  --   {name}: not played ({reason})");
+            }
+        }
+    }
+    if left.is_empty() {
+        return Err(format!("nothing of '{}' could be played", list.display()));
+    }
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let seconds = left.len() as f64 / SR;
+    let sound = trill_core::audio::AudioBuffer { sample_rate: SR, left, right };
+    trill_media::write_wav(out, &sound, WavFormat::Int16).map_err(|error| error.to_string())?;
+    let beside = out.with_extension("txt");
+    std::fs::write(&beside, &times).map_err(|error| format!("{}: {error}", beside.display()))?;
+    println!("{count} instruments, {:.0} s: {} and {}", seconds, out.display(), beside.display());
+    Ok(())
+}
+
+/// The phrase `kind` on the instrument in `file` (several joined by `|`
+/// are played together), with at most `tail` seconds after its last note.
+fn played(file: &str, kind: &str, tail: f64, said_aloud: bool) -> Result<Played, String> {
     let media = Arc::new(MediaCache::default());
     let factory = Arc::new(Builtins::with_loader(media.clone()));
     let mut session = Session::with_media(factory, media, AudioBackend::Null { sample_rate: SR as u32 })
@@ -841,7 +1058,9 @@ fn play(file: &str, kind: &str, out: &Path) -> Result<(), String> {
             .add_device(ChainRef::Track(track), sampled::URI, Some(file), None)
             .map_err(|error| error.to_string())?;
         let said = session.sampled(device).ok_or("the instrument did not load")?;
-        println!("{}", said.about);
+        if said_aloud {
+            println!("{}", said.about);
+        }
         let (notes, curves, beats) = phrase(kind, &session, track)?;
         // A bass that is written an octave up, a kit: what the instrument's
         // range says. One instrument takes every note, moved by octaves to
@@ -850,7 +1069,7 @@ fn play(file: &str, kind: &str, out: &Path) -> Result<(), String> {
         let notes: Vec<Note> = notes
             .into_iter()
             .filter_map(|mut note| {
-                if let (Some((low, high)), false) = (range, kind == "drums") {
+                if let (Some((low, high)), false) = (range, keys_as_written(kind)) {
                     if files.len() > 1 {
                         return (low..=high).contains(&note.pitch).then_some(note);
                     }
@@ -881,32 +1100,25 @@ fn play(file: &str, kind: &str, out: &Path) -> Result<(), String> {
             })
             .map_err(|error| error.to_string())?;
     }
-    for problem in session.problems() {
-        println!("problem: {problem:?}");
+    if said_aloud {
+        for problem in session.problems() {
+            println!("problem: {problem:?}");
+        }
     }
     let begun = Instant::now();
-    let options = RenderOptions { sample_rate: SR as u32, max_tail_seconds: 6.0, ..RenderOptions::default() };
+    let options = RenderOptions { sample_rate: SR as u32, max_tail_seconds: tail, ..RenderOptions::default() };
     let rendered = session.render_job().render(&options).map_err(|error| error.to_string())?;
     let took = begun.elapsed();
     let peak = rendered.left.iter().chain(&rendered.right).fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    if peak < 1e-4 {
+        return Err("it came out silent".to_string());
+    }
     // Brought to a peak of -3 dB, so that the files are heard at one level.
-    let gain = if peak > 0.0 { 0.707 / peak } else { 1.0 };
-    let buffer = trill_core::audio::AudioBuffer {
+    let gain = 0.707 / peak;
+    let sound = trill_core::audio::AudioBuffer {
         sample_rate: SR,
         left: rendered.left.iter().map(|sample| sample * gain).collect(),
         right: rendered.right.iter().map(|sample| sample * gain).collect(),
     };
-    if let Some(parent) = out.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    trill_media::write_wav(out, &buffer, WavFormat::Int24).map_err(|error| error.to_string())?;
-    println!(
-        "{} notes, {:.1} s of sound rendered in {:.2} s; its peak was {:.1} dB at the device's own volume; written to {}",
-        written,
-        buffer.left.len() as f64 / SR,
-        took.as_secs_f64(),
-        20.0 * f64::from(peak.max(1e-9)).log10(),
-        out.display()
-    );
-    Ok(())
+    Ok(Played { sound, notes: written, peak_db: 20.0 * f64::from(peak.max(1e-9)).log10(), took })
 }

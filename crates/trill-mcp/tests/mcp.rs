@@ -126,6 +126,8 @@ async fn tools_are_listed_with_schemas() {
         "set_wavetable",
         "missing_files",
         "relink_files",
+        "instrument_catalogue",
+        "song_credits",
         "listen",
         "transcribe",
         "edit_time",

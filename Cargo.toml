@@ -10,6 +10,7 @@ license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
 trill-assistant = { path = "crates/trill-assistant" }
+trill-catalogue = { path = "crates/trill-catalogue" }
 trill-core = { path = "crates/trill-core" }
 trill-dsp = { path = "crates/trill-dsp" }
 trill-engine = { path = "crates/trill-engine" }

@@ -729,6 +729,9 @@ pub struct UiState {
     pub copied_text: Option<String>,
     /// Whether the shortcut reference is up.
     pub shortcuts_open: bool,
+    /// Whether the credits are up: what the song owes for its sampled
+    /// instruments, and the makers Trill names.
+    pub credits_open: bool,
     /// Whether the window shows the stage instead of its panes. Nothing
     /// else here changes while it does: leaving the stage puts the window
     /// back as it was.
@@ -805,6 +808,7 @@ impl UiState {
             clipboard: None,
             copied_text: None,
             shortcuts_open: false,
+            credits_open: false,
             stage_open: false,
             browser: BrowserState::new(),
             sound_drag: None,

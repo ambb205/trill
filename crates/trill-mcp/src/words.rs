@@ -513,6 +513,14 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
             _ => about("Checking", "Checked", "the sound library"),
         },
         "missing_files" => about("Looking for", "Looked for", "the song's missing files"),
+        "instrument_catalogue" => match (call.text("set"), call.text("query").or(call.text("kind"))) {
+            (Some(set), _) => about("Reading", "Read", &format!("what the catalogue says of {}", quoted(set))),
+            (None, Some(words)) => {
+                about("Looking through", "Looked through", &format!("the instruments to be had for {}", quoted(words)))
+            }
+            (None, None) => about("Looking through", "Looked through", "the instruments to be had"),
+        },
+        "song_credits" => about("Working out", "Worked out", "what the song owes for its instruments"),
         "listen" | "transcribe" => {
             // The sound by its file's name, or the clip that plays it by its own.
             let sound = match (call.text("path"), call.clip("clip")) {

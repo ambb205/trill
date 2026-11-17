@@ -34,8 +34,11 @@
 //! [`Runtime::add_sound_on_new_track`]; and, for a song whose files are not
 //! where it says, [`Runtime::missing_files`], [`Runtime::relink`] and
 //! [`Runtime::move_library_folder`]; and, for what is in a sound (its beats,
-//! key, chords, parts, loops and notes), [`Runtime::hear`]. A front end
-//! that grew its own version of these would drift from the other.
+//! key, chords, parts, loops and notes), [`Runtime::hear`]; and, for the
+//! sampled instruments others publish, what happens when a set of them
+//! has arrived and what a song owes for the ones it plays
+//! ([`Runtime::set_arrived`], [`Runtime::take_set`], [`Runtime::owed`]). A
+//! front end that grew its own version of these would drift from the other.
 //!
 //! ```no_run
 //! use trill_runtime::{Runtime, RuntimeOptions};
@@ -49,6 +52,7 @@
 //! ```
 
 mod housekeeping;
+mod instruments;
 pub mod jobs;
 mod listening;
 pub mod midi;
@@ -57,6 +61,7 @@ mod recovery;
 mod settings;
 mod sounds;
 
+pub use instruments::Arrived;
 pub use jobs::{Jobs, Program};
 pub use listening::{LONGEST_SECONDS, ListenError};
 pub use midi::MidiInputInfo;
@@ -185,6 +190,9 @@ pub struct Runtime {
     pub library: Arc<Library>,
     /// What was heard in the last few audio files that were listened to.
     listening: listening::Listening,
+    /// The checksums of the instrument files that were read: how one on a
+    /// disk is known for one of the catalogue's.
+    instruments: instruments::Known,
     plugins: Option<PluginHost>,
     settings: Arc<Mutex<SettingsFile>>,
     copies: Arc<Mutex<SafetyCopies>>,
@@ -310,6 +318,7 @@ impl Runtime {
             media,
             library,
             listening: listening::Listening::default(),
+            instruments: instruments::Known::default(),
             plugins,
             settings,
             copies,

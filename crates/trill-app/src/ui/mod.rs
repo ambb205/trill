@@ -56,6 +56,7 @@ mod brand;
 mod browser;
 mod colors;
 mod controller_lane;
+mod credits;
 mod detail;
 mod device_layouts;
 mod devices;
@@ -163,6 +164,8 @@ pub struct UiOptions {
     pub show_film: bool,
     /// Open with the list of missing files up.
     pub show_missing: bool,
+    /// Open with the credits up.
+    pub show_credits: bool,
     /// Start a take on the armed tracks as soon as the window opens.
     pub record: bool,
     /// Open on the stage.
@@ -198,6 +201,7 @@ impl Default for UiOptions {
             show_settings: false,
             show_film: false,
             show_missing: false,
+            show_credits: false,
             record: false,
             stage: false,
             making_of: None,

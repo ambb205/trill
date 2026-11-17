@@ -19,8 +19,8 @@ use super::state::{
     AudioSummary, BrowserState, BrowserTab, Cx, FocusArea, LaneOwner, StoryAsk, Tool, UiState, lane_owner,
 };
 use super::{
-    UiOptions, arrangement, automation, browser, controller_lane, detail, dragging, piano_roll, recording, status_bar,
-    top_bar,
+    UiOptions, arrangement, automation, browser, controller_lane, credits, detail, dragging, piano_roll, recording,
+    status_bar, top_bar,
 };
 use eframe::egui;
 use parking_lot::Mutex;
@@ -882,6 +882,7 @@ impl TrillApp {
             film_asked.get_or_insert(filming::Of::Song);
         }
         let open_missing = std::mem::take(&mut self.options.show_missing);
+        let open_credits = std::mem::take(&mut self.options.show_credits);
         let mut cx = self.cx();
         if film_asked.is_some() {
             filming::open_on(&ctx, &mut cx, film_asked);
@@ -894,6 +895,9 @@ impl TrillApp {
         }
         if open_missing {
             missing::open(&mut cx);
+        }
+        if open_credits {
+            credits::open(&mut cx);
         }
         if let Some(name) = open_editor {
             editors::open_named(&mut cx, &name);
@@ -976,6 +980,7 @@ impl TrillApp {
         audio_settings::modal(&ctx, &mut cx);
         filming::modal(&ctx, &mut cx);
         shortcuts::window(&ctx, &mut cx);
+        credits::window(&ctx, &mut cx);
         // Clear of the assistant's panel: its Send and Stop are in that corner.
         let aside = if cx.assistant.is_open() { cx.assistant.width() } else { 0.0 };
         let corner = ctx.content_rect().right_bottom() - egui::vec2(12.0 + aside, status_bar::HEIGHT + 10.0);
@@ -1315,6 +1320,8 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
                 cx.state.stage_open = false;
             } else if cx.state.shortcuts_open {
                 cx.state.shortcuts_open = false;
+            } else if cx.state.credits_open {
+                cx.state.credits_open = false;
             } else if cx.settings.is_open() {
                 audio_settings::toggle(cx);
             } else if cx.filming.is_open() {

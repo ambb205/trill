@@ -1,0 +1,18 @@
+[package]
+name = "trill-catalogue"
+description = "The sampled instruments others publish that Trill may hand on: what each is, its licence in its maker's words, where it is fetched from and how what arrives is checked"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+# The catalogue is a text file people read and correct: TOML, with the
+# licence sentences in it as they were quoted. Reading only.
+toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
+# Checksums of what arrived. In the tree already, through other crates.
+sha2 = "0.11"
+
+[dev-dependencies]
+tempfile = "3"
