@@ -25,7 +25,7 @@ pub mod travel;
 pub use controllers::{ControllerCurve, ControllerKind, ControllerLane};
 pub use files::{DeviceFiles, FilePlace, FileTable, FileUse, FolderMove, KnownFile, Relink};
 pub use ids::{ClipId, DeviceId, TrackId};
-pub use instrument::{Articulation, InstrumentProfile, KnownInstrument, Lasts, Role};
+pub use instrument::{Articulation, Drum, DrumKey, InstrumentProfile, KeySound, KnownInstrument, Lasts, Role};
 pub use project::{
     AutomationLane, AutomationPoint, AutomationTarget, ChainRef, Clip, Device, EditError, LoopRegion, Marker, Master,
     Note, Project, Segment, Send, Track, TrackKind, WarpMode,

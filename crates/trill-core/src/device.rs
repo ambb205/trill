@@ -501,6 +501,15 @@ pub trait DeviceController: Send {
         Err(PresetLoadError::Unsupported)
     }
 
+    /// What the device's keys play, where its saved state says: a drum
+    /// sampler's kit says which drum hangs in each place and which keys
+    /// strike it how, and that differs from kit to kit. Every key that
+    /// plays something is listed; a key that is not plays nothing. `None`
+    /// for a device whose state does not say, which is nearly all.
+    fn key_sounds(&mut self) -> Option<Vec<crate::KeySound>> {
+        None
+    }
+
     /// Which MIDI controllers the device does something with, if it can
     /// say. Cheap: a view may ask whenever it is drawn.
     fn controller_support(&self) -> ControllerSupport {

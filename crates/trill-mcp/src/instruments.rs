@@ -332,7 +332,7 @@ fn articulation_of(name: &str, value: &Value) -> Result<Articulation, String> {
         Some(other) => return Err(format!("{what}: `velocity` {other} should be [lowest, highest]")),
     };
     let default = fields.get("default").and_then(Value::as_bool).unwrap_or(false);
-    Ok(Articulation { name: name.to_string(), key, lasts, velocity, default })
+    Ok(Articulation { name: name.to_string(), key, lasts, velocity, default, sounds: 0 })
 }
 
 /// The profile `request` asks for, on top of `base`.

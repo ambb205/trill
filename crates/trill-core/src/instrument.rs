@@ -79,6 +79,10 @@ pub struct Articulation {
     /// instrument on another.
     #[serde(default, skip_serializing_if = "is_false")]
     pub default: bool,
+    /// How many semitones above its key a note played this way is heard:
+    /// 12 for a harmonic that rings an octave over the fretted note.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub sounds: i8,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -92,7 +96,13 @@ fn is_zero(value: &i8) -> bool {
 impl Articulation {
     /// An articulation chosen by `key` that stays chosen.
     pub fn key(name: &str, key: u8) -> Self {
-        Self { name: name_key(name), key: Some(key), lasts: Lasts::Stays, velocity: None, default: false }
+        Self { name: name_key(name), key: Some(key), lasts: Lasts::Stays, velocity: None, default: false, sounds: 0 }
+    }
+
+    /// The same, heard `semitones` above the key that is played.
+    pub fn sounding(mut self, semitones: i8) -> Self {
+        self.sounds = semitones;
+        self
     }
 
     /// The same, lasting as `lasts` says.
@@ -150,6 +160,41 @@ pub struct InstrumentProfile {
     /// Anything else worth knowing when writing for it, in words.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
+    /// Whether [`sounds`](Self::sounds) is the whole of what a drum track's
+    /// instrument plays: its kit said what is on every key, so a drum it
+    /// does not name is a drum this kit has not got, and General MIDI is
+    /// not asked. Never in a song file: it is true of a profile that was
+    /// made from the kit that is loaded ([`KeySound`]), while it is.
+    #[serde(skip)]
+    pub whole: bool,
+}
+
+/// What one key of an instrument plays, as the instrument's own state says
+/// it: a drum sampler's kit says which drum hangs in each place, and which
+/// keys strike it how.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeySound {
+    pub key: u8,
+    /// The place in the kit: "Snare", "Racktom 2", "Cymbal 5".
+    pub place: String,
+    /// What is in that place, as its maker describes it: "20\" Sehhar China".
+    /// Empty where the kit only has the maker's own code for it.
+    pub instrument: String,
+    /// The way of striking it that the key plays: "Center", "Rimshot",
+    /// "Closed Edge", "Mute Hit".
+    pub stroke: String,
+}
+
+/// What a drum name comes to on a track.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Drum {
+    /// It is played by this key.
+    Key(DrumKey),
+    /// It is a drum, and this track's kit has none: its map is the whole of
+    /// what it plays ([`InstrumentProfile::whole`]) and does not name it.
+    Lacking(String),
+    /// It is not the name of a drum.
+    Unknown,
 }
 
 /// What is known about one kind of instrument, as it is kept in a file of
@@ -242,6 +287,12 @@ impl InstrumentProfile {
             if articulation.default && articulation.lasts != Lasts::Stays {
                 return invalid(format!("'{name}' cannot be the default: it does not stay chosen"));
             }
+            if !(-48..=48).contains(&articulation.sounds) {
+                return invalid(format!(
+                    "'{name}' sounding {} semitones from its key is outside -48..=48",
+                    articulation.sounds
+                ));
+            }
         }
         if self.articulations.iter().filter(|articulation| articulation.default).count() > 1 {
             return invalid("only one articulation can be the default".to_string());
@@ -322,9 +373,12 @@ impl InstrumentProfile {
         self.articulations.iter().find(|a| a.key == Some(pitch)).map(|articulation| articulation.name.as_str())
     }
 
-    /// The name a key has in [`sounds`](Self::sounds), if it has one.
+    /// The name a key has in [`sounds`](Self::sounds), if it has one: the
+    /// shortest where it has several ("china" before "cymbal_5"), which is
+    /// the one it is usually asked for by.
     pub fn sound_name(&self, pitch: u8) -> Option<&str> {
-        self.sounds.iter().find(|(_, key)| **key == pitch).map(|(name, _)| name.as_str())
+        let named = self.sounds.iter().filter(|(_, key)| **key == pitch).map(|(name, _)| name.as_str());
+        named.min_by_key(|name| name.len())
     }
 
     /// Whether `pitch` plays a pitched note on this instrument: not a
@@ -352,29 +406,50 @@ impl InstrumentProfile {
 
     /// The key that plays the drum `name`: by the track's own map, then
     /// by General MIDI, then by the General MIDI drum that stands in for
-    /// one the map has no note for.
+    /// one the map has no note for. `None` for a name that is no drum, and
+    /// for a drum this track's kit has not got ([`find_drum`](Self::find_drum)
+    /// tells the two apart).
     pub fn drum(&self, name: &str) -> Option<DrumKey> {
+        match self.find_drum(name) {
+            Drum::Key(key) => Some(key),
+            Drum::Lacking(_) | Drum::Unknown => None,
+        }
+    }
+
+    /// What the drum `name` comes to on this track. Where the track's map
+    /// is the whole of what its kit plays, General MIDI is not asked: a
+    /// drum the map does not name is one the kit has not got, and playing
+    /// General MIDI's key for it would hit whatever the kit keeps there.
+    pub fn find_drum(&self, name: &str) -> Drum {
         let wanted = name_key(name);
         if let Some(pitch) = self.sounds.get(&wanted) {
-            return Some(DrumKey { pitch: *pitch, name: wanted, stand_in: None });
+            return Drum::Key(DrumKey { pitch: *pitch, name: wanted, stand_in: None });
         }
-        if let Some(pitch) = parse_drum(&wanted) {
+        if let Some(general) = parse_drum(&wanted) {
             // Under the name the map has for that drum, so that two names
             // of one drum are one lane.
-            let canonical = drum_name(pitch).unwrap_or("drum");
-            let pitch = self.sounds.get(canonical).copied().unwrap_or(pitch);
-            return Some(DrumKey { pitch, name: self.drum_name(pitch), stand_in: None });
+            let canonical = drum_name(general).unwrap_or("drum");
+            return match (self.sounds.get(canonical).copied(), self.whole) {
+                (Some(pitch), _) => Drum::Key(DrumKey { pitch, name: self.drum_name(pitch), stand_in: None }),
+                (None, false) => Drum::Key(DrumKey { pitch: general, name: self.drum_name(general), stand_in: None }),
+                (None, true) => Drum::Lacking(canonical.to_string()),
+            };
         }
-        let (stand_in, general) = drum_stand_in(&wanted)?;
-        let pitch = self.sounds.get(stand_in).copied().unwrap_or(general);
-        Some(DrumKey { pitch, name: self.drum_name(pitch), stand_in: Some(stand_in) })
+        let Some((stand_in, general)) = drum_stand_in(&wanted) else { return Drum::Unknown };
+        match (self.sounds.get(stand_in).copied(), self.whole) {
+            (Some(pitch), _) => Drum::Key(DrumKey { pitch, name: self.drum_name(pitch), stand_in: Some(stand_in) }),
+            (None, false) => {
+                Drum::Key(DrumKey { pitch: general, name: self.drum_name(general), stand_in: Some(stand_in) })
+            }
+            (None, true) => Drum::Lacking(wanted),
+        }
     }
 
     /// What the drum on `pitch` is called: by the track's map, then by
-    /// General MIDI, else the key's name.
+    /// General MIDI (unless the map is the whole kit), else the key's name.
     pub fn drum_name(&self, pitch: u8) -> String {
         // A key the map gives to another drum is not the General MIDI one.
-        let general = drum_name(pitch).filter(|name| !self.sounds.contains_key(*name));
+        let general = drum_name(pitch).filter(|name| !self.whole && !self.sounds.contains_key(*name));
         match (self.sound_name(pitch), general) {
             (Some(name), _) => name.to_string(),
             (None, Some(name)) => name.to_string(),
@@ -383,9 +458,13 @@ impl InstrumentProfile {
     }
 
     /// The drums of the track by name, with their keys: the track's own
-    /// first, then those of General MIDI that it does not replace.
+    /// first, then those of General MIDI that it does not replace (none,
+    /// where its own are the whole kit).
     pub fn drum_map(&self) -> Vec<(String, u8)> {
         let mut map: Vec<(String, u8)> = self.sounds.iter().map(|(name, pitch)| (name.clone(), *pitch)).collect();
+        if self.whole {
+            return map;
+        }
         let mut taken: Vec<u8> = map.iter().map(|(_, pitch)| *pitch).collect();
         for (name, pitch) in crate::pitch::DRUM_NAMES {
             // Under its first name only, and not a drum the track has moved.
@@ -510,6 +589,39 @@ mod tests {
     }
 
     #[test]
+    fn a_kit_that_said_what_is_on_every_key_has_no_general_midi_behind_it() {
+        // A kit with its china where General MIDI has none, two toms, and no cowbell.
+        let kit = InstrumentProfile {
+            role: Some(Role::Drums),
+            sounds: [("kick", 36), ("snare", 38), ("china", 86), ("cymbal_1", 86), ("high_tom", 48), ("open_hat", 25)]
+                .map(|(name, pitch)| (name.to_string(), pitch))
+                .into(),
+            whole: true,
+            ..Default::default()
+        };
+        let key = |name: &str| kit.find_drum(name);
+        assert!(matches!(key("china"), Drum::Key(DrumKey { pitch: 86, .. })));
+        assert!(matches!(key("bd"), Drum::Key(DrumKey { pitch: 36, .. })), "another name of a drum it has");
+        // General MIDI's key for a drum the kit has not got is not played: something else is there.
+        assert_eq!(key("cowbell"), Drum::Lacking("cowbell".to_string()));
+        assert_eq!(key("tom_mid"), Drum::Lacking("mid_tom".to_string()), "by the name the drum is listed under");
+        assert_eq!(key("closed_hat_edge"), Drum::Lacking("closed_hat_edge".to_string()), "nor a stand-in's");
+        assert!(matches!(key("half_open_hat"), Drum::Key(DrumKey { pitch: 25, stand_in: Some("open_hat"), .. })));
+        assert_eq!(key("gong"), Drum::Unknown);
+        assert_eq!(kit.drum("cowbell"), None);
+        // Read back by the kit's names alone: the shortest where a key has two.
+        assert_eq!(
+            (kit.drum_name(86), kit.drum_name(52), kit.drum_name(56)),
+            ("china".into(), "E3".into(), "G#3".into())
+        );
+        assert_eq!(kit.drum_map().len(), 6, "no drums but its own");
+        // The same map without the kit's word for it is filled out by General MIDI, as before.
+        let partial = InstrumentProfile { whole: false, ..kit.clone() };
+        assert!(matches!(partial.find_drum("cowbell"), Drum::Key(DrumKey { pitch: 56, .. })));
+        assert!(serde_json::to_string(&kit).unwrap() == serde_json::to_string(&partial).unwrap(), "never in a file");
+    }
+
+    #[test]
     fn a_profile_that_contradicts_itself_is_refused_with_the_reason() {
         let with = |change: fn(&mut InstrumentProfile)| {
             let mut profile = guitar();
@@ -525,6 +637,7 @@ mod tests {
         assert!(with(|p| p.articulations[2].key = None).contains("neither a keyswitch nor a velocity range"));
         assert!(with(|p| p.articulations[1].key = Some(200)).contains("outside 0..=127"));
         assert!(with(|p| p.sounds_octaves = 9).contains("octaves"));
+        assert!(with(|p| p.articulations[2].sounds = 60).contains("semitones from its key"));
         assert!(with(|p| p.bend_range = Some(0.0)).contains("bend range"));
         assert!(with(|p| p.sounds = [("!!".to_string(), 3)].into()).contains("cannot be a name"));
         assert!(with(|p| p.sounds = [("42".to_string(), 3)].into()).contains("at least one letter"));
