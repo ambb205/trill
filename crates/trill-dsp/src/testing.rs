@@ -21,6 +21,11 @@ impl MemoryLoader {
         let buffer = Arc::new(AudioBuffer { sample_rate, left, right });
         self.files.lock().unwrap().insert(path.to_string(), buffer);
     }
+
+    /// Takes a file away, as if it had been moved or deleted.
+    pub fn remove(&self, path: &str) {
+        self.files.lock().unwrap().remove(path);
+    }
 }
 
 impl AudioLoader for MemoryLoader {
@@ -108,4 +113,43 @@ pub fn amplitude(samples: &[f32], hz: f64, sample_rate: f64) -> f32 {
         im += f64::from(*sample) * phase.sin();
     }
     (2.0 * (re * re + im * im).sqrt() / samples.len().max(1) as f64) as f32
+}
+
+/// The level of each frequency in `samples`, in dB where a sine of full
+/// scale is 0: one figure for each bin from 0 Hz up to half the sample
+/// rate. `samples` has to be a power of two long.
+pub fn spectrum_db(samples: &[f32]) -> Vec<f32> {
+    let mut fft = crate::fft::RealFft::new(samples.len());
+    let window = crate::fft::hann(samples.len());
+    let windowed: Vec<f32> = samples.iter().zip(&window).map(|(sample, weight)| sample * weight).collect();
+    let (mut re, mut im) = (vec![0.0f32; fft.bins()], vec![0.0f32; fft.bins()]);
+    fft.forward(&windowed, &mut re, &mut im);
+    let scale = 2.0 / window.iter().sum::<f32>();
+    re.iter().zip(&im).map(|(re, im)| 20.0 * ((re * re + im * im).sqrt() * scale).max(1e-12).log10()).collect()
+}
+
+/// Instrument files that are in memory instead of on a disk.
+#[derive(Default)]
+pub struct MemoryTexts {
+    files: Mutex<HashMap<std::path::PathBuf, (String, u64)>>,
+}
+
+impl MemoryTexts {
+    /// Adds a file, or changes it.
+    pub fn insert(&self, path: &str, text: &str) {
+        let mut files = self.files.lock().unwrap();
+        let version = files.get(std::path::Path::new(path)).map_or(0, |(_, version)| version + 1);
+        files.insert(path.into(), (text.to_string(), version));
+    }
+}
+
+impl crate::sampled::loaded::Texts for MemoryTexts {
+    fn read(&self, path: &std::path::Path) -> Result<String, String> {
+        let files = self.files.lock().unwrap();
+        files.get(path).map(|(text, _)| text.clone()).ok_or_else(|| "there is no such file".to_string())
+    }
+
+    fn stamp(&self, path: &std::path::Path) -> Option<u64> {
+        self.files.lock().unwrap().get(path).map(|(_, version)| *version)
+    }
 }

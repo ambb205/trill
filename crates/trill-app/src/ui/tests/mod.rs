@@ -13,6 +13,7 @@ mod clips;
 mod controllers;
 mod editors;
 mod film;
+mod instruments;
 mod keyboard;
 mod keys;
 mod making_of;
@@ -224,14 +225,6 @@ impl Harness {
         found.unwrap_or_else(|| panic!("nothing below {y} is labeled '{label}'")).center()
     }
 
-    /// Center of the widget labeled `label` that is not in the browser:
-    /// for telling a control in the panes from its namesake among the
-    /// browser's rows.
-    fn beside_browser(&self, label: &str) -> Pos2 {
-        let found = self.all_labeled(label).into_iter().find(|rect| rect.left() >= self.work_left());
-        found.unwrap_or_else(|| panic!("nothing beside the browser is labeled '{label}'")).center()
-    }
-
     /// Scrolls the browser's Devices tab to its end, where the presets of
     /// the selected device are listed.
     fn browse_to_presets(&mut self) {
@@ -256,6 +249,18 @@ impl Harness {
         let position =
             self.all_labeled(label).last().unwrap_or_else(|| panic!("nothing is labeled '{label}'")).center();
         self.click(position);
+    }
+
+    /// Center of the widget labeled `label` that is in the browser, or
+    /// (`in_browser` false) to the right of it: for telling a row of the
+    /// browser from its namesake in a panel, whichever of the two happens
+    /// to be higher up. Waits a few frames first, as a click by label does.
+    fn labeled_beside(&mut self, label: &str, in_browser: bool) -> Pos2 {
+        self.idle(3);
+        let edge = self.work_left();
+        let found = self.all_labeled(label).into_iter().find(|rect| (rect.left() < edge) == in_browser);
+        let whereabouts = if in_browser { "in" } else { "to the right of" };
+        found.unwrap_or_else(|| panic!("nothing {whereabouts} the browser is labeled '{label}'")).center()
     }
 
     /// Lets enough time pass that the next click is not taken for the
@@ -1172,10 +1177,11 @@ fn a_devices_preset_chip_opens_its_presets() {
     let mut harness = Harness::new(devices_tab(), |_| {});
     harness.key(Modifiers::COMMAND, Key::T);
     harness.idle(2);
-    // The chip in the synth's header shows the current preset; the
-    // browser has a row of the same name.
+    // The chip in the synth's header shows the current preset, and so does
+    // the browser's row of the same name.
     assert_eq!(harness.all_labeled("init").len(), 2);
-    harness.click(harness.beside_browser("init"));
+    let chip = harness.labeled_beside("init", false);
+    harness.click(chip);
     harness.idle(3);
     // The popup's rows are to the right of the browser's.
     let rows = harness.all_labeled("supersaw");
@@ -1220,13 +1226,15 @@ fn a_devices_sound_is_saved_from_its_preset_menu_and_given_back() {
     assert_ne!(synth(&harness).params.get("cutoff"), Some(&432.0));
     harness.idle(2);
     assert_eq!(harness.all_labeled("Dark Pad").len(), 1, "the header shows the preset the device is on now");
-    harness.click_label("Dark Pad");
+    let row = harness.labeled_beside("Dark Pad", true);
+    harness.click(row);
     assert_eq!(synth(&harness).params.get("cutoff"), Some(&432.0));
 
     // Escape leaves nothing saved, and the name it offers is the one the
     // device is on.
     harness.idle(2);
-    harness.click(harness.beside_browser("Dark Pad"));
+    let chip = harness.labeled_beside("Dark Pad", false);
+    harness.click(chip);
     harness.click_label("Save preset\u{2026}");
     harness.idle(2);
     assert_eq!(harness.app.state().naming_preset.as_ref().map(|edit| edit.text.as_str()), Some("Dark Pad"));

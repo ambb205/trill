@@ -641,9 +641,12 @@ fn sound_query(request: &SearchSoundsRequest, folder: Option<PathBuf>) -> Result
         Some("midi") => Some(EntryKind::Midi),
         Some("project") => Some(EntryKind::Project),
         Some("preset") => Some(EntryKind::Preset),
+        Some("instrument" | "instruments") => Some(EntryKind::Instrument),
         Some("any" | "all") => None,
         Some(other) => {
-            return Err(format!("kind '{other}' should be \"audio\", \"midi\", \"project\", \"preset\" or \"any\""));
+            return Err(format!(
+                "kind '{other}' should be \"audio\", \"midi\", \"project\", \"preset\", \"instrument\" or \"any\""
+            ));
         }
     };
     let key = match request.key.as_deref() {
@@ -666,6 +669,7 @@ fn sound_query(request: &SearchSoundsRequest, folder: Option<PathBuf>) -> Result
         folder,
         favorites_only: request.favorites_only,
         include_unreadable: false,
+        include_recordings: request.include_recordings,
         limit: Some(request.limit.unwrap_or(DEFAULT_SOUNDS).clamp(1, MAX_SOUNDS)),
     })
 }
@@ -962,6 +966,7 @@ impl TrillServer {
                         }
                         crate::sounds::given_into(&mut out, &session, added.given.as_ref());
                         crate::sounds::preset_note_into(&mut out, &mut session, device);
+                        crate::sounds::instrument_into(&mut out, &session, device);
                     }
                     Err(error) => {
                         session.undo();
@@ -1177,6 +1182,7 @@ impl TrillServer {
             sidechain_into(&mut out, session.project(), model);
             crate::sounds::given_into(&mut out, &session, added.given.as_ref());
             crate::sounds::preset_note_into(&mut out, &mut session, device);
+            crate::sounds::instrument_into(&mut out, &session, device);
             Ok(out)
         })();
         finish(reply)
@@ -1190,7 +1196,8 @@ impl TrillServer {
     /// ranges and choices), `show: "all"` lists every one, a page at a time. `preset_query` and the other
     /// `preset_` arguments search and page the presets, as in describe_device. For the sample players
     /// (builtin:sampler, builtin:drumrack) also the audio files they play, per slot, with what is wrong with
-    /// any that is missing.
+    /// any that is missing. For a sampled instrument (builtin:sampled) also `instrument`: what it has loaded
+    /// and what that is, enough to write for it.
     #[tool(annotations(title = "Get device", read_only_hint = true))]
     async fn get_device(&self, Parameters(request): Parameters<GetDeviceRequest>) -> CallToolResult {
         let id = DeviceId(request.device);
@@ -1230,6 +1237,15 @@ impl TrillServer {
                     out["samples_hint"] = json!("No sample loaded, so the device is silent. Use set_sample.");
                 }
                 out["samples"] = samples_json(&files);
+            }
+            if model.uri == trill_dsp::sampled::URI {
+                crate::sounds::instrument_into(&mut out, &session, id);
+                if out.get("instrument").is_none() {
+                    out["instrument_hint"] = json!(
+                        "No instrument loaded, so the device is silent. update_device `preset` takes the whole path \
+                         of an instrument's .sfz file; search_presets finds the ones in the sample library."
+                    );
+                }
             }
             crate::wavetable::device_into(&mut out, &session, model);
             if session.device_has_editor(id) {
@@ -1353,9 +1369,10 @@ impl TrillServer {
             if let Some(shown) = shown {
                 out["shown"] = shown;
             }
-            if let Some(given) = &loaded {
-                out["preset"] = json!(given.preset.path());
-                crate::sounds::given_into(&mut out, &session, Some(given));
+            let given = loaded.is_some();
+            if let Some(sound) = &loaded {
+                out["preset"] = json!(sound.preset.path());
+                crate::sounds::given_into(&mut out, &session, Some(sound));
             }
             if !settings.is_empty() {
                 out["settings"] = json!(settings.into_iter().collect::<BTreeMap<String, String>>());
@@ -1367,6 +1384,9 @@ impl TrillServer {
                 }
             }
             crate::sounds::preset_note_into(&mut out, &mut session, id);
+            if given {
+                crate::sounds::instrument_into(&mut out, &session, id);
+            }
             Ok(out)
         })();
         finish(reply)

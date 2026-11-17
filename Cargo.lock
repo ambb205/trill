@@ -4678,6 +4678,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "trill-core",
+ "trill-dsp",
  "trill-media",
 ]
 

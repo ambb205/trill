@@ -120,6 +120,8 @@ fn synthetic_library(base: &Path) -> Index {
                             tempo: inferred.tempo,
                             key: inferred.key,
                             tags: inferred.tags,
+                            instrument: None,
+                            of_instrument: false,
                         })
                         .unwrap();
                     made += 1;

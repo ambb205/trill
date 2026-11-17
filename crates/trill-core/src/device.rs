@@ -608,6 +608,33 @@ pub trait DeviceController: Send {
         None
     }
 
+    /// The instrument the device has loaded, where the device plays one
+    /// that is made of recordings and that a file describes: what it is,
+    /// and what a track that plays through it is told of its notes.
+    /// `None` for any other device, and for one with nothing loaded.
+    /// Cheap after the first time: a view may ask whenever it is drawn.
+    fn sampled(&mut self) -> Option<std::sync::Arc<crate::SampledInstrument>> {
+        None
+    }
+
+    /// How far the device is with reading what it plays from the disk,
+    /// where it reads in the background and says so itself: a device that
+    /// plays live is not waited for, and a note whose recording is not
+    /// there yet does not sound. `None` for a device that does not say.
+    /// Cheap, and never waits.
+    fn reading(&self) -> Option<crate::Reading> {
+        None
+    }
+
+    /// The files the device looked for and did not find that its saved
+    /// state does not itself name: the recordings an instrument's file
+    /// names. Each with the slot it is in and where it was looked for.
+    /// Giving such a slot another file ([`crate::DeviceFiles::relinked`])
+    /// writes that into the state.
+    fn missing_files(&mut self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     /// Which MIDI controllers the device does something with, if it can
     /// say. Cheap: a view may ask whenever it is drawn.
     fn controller_support(&self) -> ControllerSupport {
@@ -994,6 +1021,20 @@ pub trait DeviceFactory: Send + Sync {
         let _ = file;
         None
     }
+
+    /// The preset in the file at `file` as the saved state a device of the
+    /// type `uri` is made from to play it, for a type whose state is what
+    /// names such a file: a sampled instrument, whose state says which
+    /// instrument's file it plays. A device is given such a preset by
+    /// being given the state, like one that was saved. `None` for every
+    /// other type, whose devices load their preset files themselves
+    /// ([`DeviceController::load_preset`]). An error is the end of a
+    /// sentence about the file. A factory that hands the work to another
+    /// must hand this on too.
+    fn preset_state(&self, uri: &str, file: &Path) -> Option<Result<(PresetInfo, Vec<u8>), String>> {
+        let _ = (uri, file);
+        None
+    }
 }
 
 /// A shared factory is a factory, so one instance can serve several owners.
@@ -1062,6 +1103,10 @@ impl<T: DeviceFactory + ?Sized> DeviceFactory for std::sync::Arc<T> {
 
     fn preset_file_type(&self, file: &Path) -> Option<String> {
         (**self).preset_file_type(file)
+    }
+
+    fn preset_state(&self, uri: &str, file: &Path) -> Option<Result<(PresetInfo, Vec<u8>), String>> {
+        (**self).preset_state(uri, file)
     }
 }
 
@@ -1154,6 +1199,10 @@ impl DeviceFactory for CompositeFactory {
 
     fn preset_file_type(&self, file: &Path) -> Option<String> {
         self.factories.iter().find_map(|factory| factory.preset_file_type(file))
+    }
+
+    fn preset_state(&self, uri: &str, file: &Path) -> Option<Result<(PresetInfo, Vec<u8>), String>> {
+        self.factories.iter().find_map(|factory| factory.preset_state(uri, file))
     }
 }
 

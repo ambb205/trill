@@ -7,6 +7,7 @@
 //! snapshot, which costs one project clone per edit and lets the session
 //! lock be released before any painting starts.
 
+use super::instrument_panel::Shown;
 use super::timeline;
 use super::units::{METER_FLOOR_DB, gain_to_db};
 use std::cell::RefCell;
@@ -46,6 +47,9 @@ pub struct Snapshot {
     /// The files of the sample-playing devices `params` covers, with what
     /// is wrong with each.
     pub samples: HashMap<DeviceId, Vec<SampleFile>>,
+    /// What the Sampled Instruments `params` covers say they have loaded,
+    /// as their panels draw it; one with nothing loaded is in it too.
+    pub instruments: HashMap<DeviceId, Shown>,
     /// The tracks whose devices `params` covers, besides the master's, in
     /// ascending order.
     pub params_tracks: Vec<TrackId>,
@@ -128,6 +132,22 @@ impl Snapshot {
             .filter(|device| crate::ui::sample_panels::plays_samples(&device.uri))
             .filter_map(|device| Some((device.id, session.sample_files(device.id).ok()?)))
             .collect();
+        let instruments = shown
+            .iter()
+            .flat_map(|track| track.devices.iter())
+            .filter(|device| device.uri == crate::ui::instrument_panel::SAMPLED)
+            .map(|device| {
+                let problems = session.problems().iter().filter_map(|problem| match problem {
+                    Problem::Device { device: id, reason } | Problem::Sample { device: id, reason, .. }
+                        if *id == device.id =>
+                    {
+                        Some(reason.clone())
+                    }
+                    _ => None,
+                });
+                (device.id, Shown::of(session.sampled(device.id), problems.collect()))
+            })
+            .collect();
         let track_meters = project
             .tracks
             .iter()
@@ -169,6 +189,7 @@ impl Snapshot {
             problems: session.problems().iter().map(ToString::to_string).collect(),
             clip_problems,
             samples,
+            instruments,
             params_tracks: shown.iter().map(|track| track.id).collect(),
             params,
             editors,
@@ -235,6 +256,7 @@ impl Snapshot {
             problems: Vec::new(),
             clip_problems: HashMap::new(),
             samples: HashMap::new(),
+            instruments: HashMap::new(),
             params_tracks,
             params,
             editors: Vec::new(),
@@ -406,6 +428,10 @@ pub struct Live {
     /// The plugins that seem to be loading what they play: made or given
     /// another sound lately, with the program still reading.
     pub loading: Vec<DeviceId>,
+    /// How far each Sampled Instrument on show is with reading its
+    /// recordings from the disk; a device that has nothing to read, or
+    /// that was busy when asked, is not in it.
+    pub reading: HashMap<DeviceId, trill_core::Reading>,
     /// Bars of count-in before a take that starts from a stopped song.
     pub count_in: u32,
     pub master: MeterState,
@@ -437,6 +463,17 @@ impl Live {
         self.silent.clear();
         let tracks = snapshot.project.tracks.iter();
         self.silent.extend(tracks.filter_map(|track| Some((track.id, session.silent_instrument(track.id)?))));
+    }
+
+    /// Reads how far the snapshot's Sampled Instruments are with their
+    /// recordings: a number or two per device, and no waiting. With
+    /// `shown` false nothing is said of any.
+    pub fn update_reading(&mut self, snapshot: &Snapshot, session: &Session, shown: bool) {
+        self.reading.clear();
+        if shown {
+            let devices = snapshot.instruments.keys();
+            self.reading.extend(devices.filter_map(|device| Some((*device, session.reading(*device)?))));
+        }
     }
 
     /// Reads what is armed and whether a take is running.

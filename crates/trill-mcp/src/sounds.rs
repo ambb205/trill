@@ -65,6 +65,17 @@ preset switched a setting on that changes how a part is played.
 bought and keeps with their samples, or names to you. search_presets finds such files in the sample library's \
 folders by their names, with the plugin each is for; an item with `file` is one, and `file` is what to give \
 `preset`. A file that is another plugin's is refused in a sentence.
+- An instrument that was recorded note by note (a piano, an electric piano, strings, a bass, a drum kit) is \
+played by builtin:sampled, whose preset is the instrument itself: the whole path of its .sfz file. search_presets \
+finds the ones in the sample library by name (an item with `file`, under device builtin:sampled), and \
+search_sounds `kind: \"instrument\"` lists them with what each is (size, range, layers, ways of playing). Give \
+the path to create_track or add_device as `preset`. The reply's `instrument` says what was loaded, and that is \
+enough to write for it without a probe: its range, how many layers of loudness and takes it has, whether its \
+keys are drums (then write them by name: the names are this kit's, in get_instrument_profile), the ways of \
+playing it switches between by a key (ask for them by name, as articulations), the controllers it listens to \
+(a mod wheel that swells strings), and whatever its file asks for that Trill does not do, by name. The sustain \
+pedal (the sustain controller) holds its notes. It reads its recordings in the background, so played live at \
+once its first notes may be silent (`loading`); measure and render wait for what they play.
 - A few plugins still list no presets: they keep them where a host cannot read them, and only the user can choose \
 one, in the plugin's own window (show_device_editor opens it). Then save_preset keeps that sound under a name. \
 save_preset also keeps a sound you have shaped by parameter. Saved presets are found by search_presets and given \
@@ -206,8 +217,11 @@ fn library_presets(
 ) -> Vec<Searched> {
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     let roots = library.roots();
-    let found = library.search(&Query { kind: Some(EntryKind::Preset), ..Query::default() });
-    if found.is_empty() {
+    // Preset files, and the files of sampled instruments, which are the
+    // presets of the device that plays them.
+    let presets = library.search(&Query { kind: Some(EntryKind::Preset), ..Query::default() });
+    let instruments = library.search(&Query { kind: Some(EntryKind::Instrument), ..Query::default() });
+    if presets.is_empty() && instruments.is_empty() {
         return Vec::new();
     }
     let listed: HashSet<String> = searched
@@ -219,7 +233,7 @@ fn library_presets(
     let descriptors = factory.descriptors();
     let mut by_device: BTreeMap<String, Vec<PresetInfo>> = BTreeMap::new();
     let mut asked = 0;
-    for entry in found.entries() {
+    for entry in presets.entries().chain(instruments.entries()) {
         let below = roots.iter().find_map(|root| entry.path.parent()?.strip_prefix(root).ok());
         let folders: Vec<String> = below
             .into_iter()
@@ -244,6 +258,8 @@ fn library_presets(
             id: entry.path.display().to_string(),
             name: entry.name.clone(),
             category,
+            // An instrument says what it is.
+            description: entry.instrument.as_deref().map(crate::view::instrument_line).unwrap_or_default(),
             ..PresetInfo::default()
         });
     }
@@ -548,6 +564,45 @@ pub(crate) fn given_into(out: &mut Value, session: &Session, given: Option<&Give
     note.push_str(" One undo takes all of it back.");
     sound["note"] = json!(note);
     out["sound"] = sound;
+}
+
+/// Says in a reply what a sampled instrument's device has loaded: what the
+/// instrument is, enough to write for it; whether its recordings are
+/// still being read; and what is wrong with it that it plays in spite of.
+pub(crate) fn instrument_into(out: &mut Value, session: &Session, device: DeviceId) {
+    let Some(said) = session.sampled(device) else { return };
+    let mut instrument = json!({ "name": said.name, "file": said.file, "about": said.about });
+    if let Some(reading) = session.reading(device) {
+        if reading.is_loading() {
+            instrument["loading"] = json!(format!(
+                "{} of {} recordings read. Played live now, a note whose recording is not read yet is silent; \
+                 measure and render wait for what they play.",
+                reading.ready, reading.of
+            ));
+        }
+        if reading.unready_notes + reading.short_notes > 0 {
+            instrument["played_short"] = json!(format!(
+                "Played live since the program started, {} notes were silent because their recording had not \
+                 been read yet, and {} were cut short because the rest of it was not read in time. A render \
+                 has neither.",
+                reading.unready_notes, reading.short_notes
+            ));
+        }
+    }
+    let problems: Vec<&str> = session
+        .problems()
+        .iter()
+        .filter_map(|problem| match problem {
+            trill_engine::Problem::Sample { device: of, reason, .. } if *of == device => Some(reason.as_str()),
+            _ => None,
+        })
+        .collect();
+    if !problems.is_empty() {
+        instrument["problems"] = json!(problems);
+        instrument["problems_hint"] =
+            json!("missing_files lists what is missing; relink_files gives it another place.");
+    }
+    out["instrument"] = instrument;
 }
 
 /// Adds to a `get_device` reply the settings in the device's saved state

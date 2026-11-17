@@ -6,7 +6,7 @@
 //! it (damage, a version this build does not write, a tree that does not
 //! hold together) means it is set aside and rebuilt, not repaired.
 
-use crate::entry::{AudioFacts, Entry, EntryKind, without_extension};
+use crate::entry::{AudioFacts, Entry, EntryKind, InstrumentFacts, without_extension};
 use crate::index::{FolderId, Index, IndexBuilder};
 use crate::key::Key;
 use crate::tags::Tags;
@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// Bump whenever the meaning of the file changes: a field added or
 /// reinterpreted, or inference rules changed in a way stored results should
 /// not survive. Older files are then rebuilt on first launch.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// The first line of the file. Read on its own, so that the version can be
 /// checked before the rest is trusted to have the expected shape.
@@ -78,6 +78,34 @@ struct StoredFile {
     key: Option<u8>,
     #[serde(rename = "t", default, skip_serializing_if = "is_zero_u64")]
     tags: u64,
+    /// The file is a recording of an instrument of the library.
+    #[serde(rename = "q", default, skip_serializing_if = "is_false")]
+    of_instrument: bool,
+    /// What an instrument's file says of it.
+    #[serde(rename = "i", default, skip_serializing_if = "Option::is_none")]
+    instrument: Option<StoredInstrument>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredInstrument {
+    #[serde(rename = "n")]
+    recordings: u32,
+    #[serde(rename = "g")]
+    regions: u32,
+    #[serde(rename = "f", default)]
+    found: u32,
+    #[serde(rename = "b", default)]
+    bytes: u64,
+    #[serde(rename = "r", default, skip_serializing_if = "Option::is_none")]
+    range: Option<(u8, u8)>,
+    #[serde(rename = "l", default)]
+    layers: u16,
+    #[serde(rename = "t", default)]
+    takes: u16,
+    #[serde(rename = "d", default, skip_serializing_if = "is_false")]
+    drums: bool,
+    #[serde(rename = "w", default, skip_serializing_if = "Vec::is_empty")]
+    ways: Vec<String>,
 }
 
 fn is_zero(value: &u16) -> bool {
@@ -207,6 +235,18 @@ impl StoredFile {
             tempo: entry.tempo,
             key: entry.key.map(Key::code),
             tags: entry.tags.bits(),
+            of_instrument: entry.of_instrument,
+            instrument: entry.instrument.as_deref().map(|facts| StoredInstrument {
+                recordings: facts.recordings,
+                regions: facts.regions,
+                found: facts.found,
+                bytes: facts.bytes,
+                range: facts.range,
+                layers: facts.layers,
+                takes: facts.takes,
+                drums: facts.drums,
+                ways: facts.ways.clone(),
+            }),
         })
     }
 
@@ -230,6 +270,20 @@ impl StoredFile {
             tempo: self.tempo.filter(|tempo| tempo.is_finite()),
             key: self.key.and_then(Key::from_code),
             tags: Tags::from_bits(self.tags),
+            of_instrument: self.of_instrument && kind == EntryKind::Audio,
+            instrument: self.instrument.filter(|_| kind == EntryKind::Instrument).map(|stored| {
+                Box::new(InstrumentFacts {
+                    recordings: stored.recordings,
+                    regions: stored.regions,
+                    found: stored.found,
+                    bytes: stored.bytes,
+                    range: stored.range,
+                    layers: stored.layers,
+                    takes: stored.takes,
+                    drums: stored.drums,
+                    ways: stored.ways,
+                })
+            }),
         })
     }
 }
@@ -329,18 +383,21 @@ mod tests {
         assert!(matches!(load(&path), Err(LoadError::Damaged(_))), "a file cut short");
         write(b"{\"trill-library-index\":999}\n{\"folders\":[]}");
         assert_eq!(load(&path).err(), Some(LoadError::Outdated(999)));
-        write(b"{\"trill-library-index\":1}\n{\"folders\":\"none\"}");
+        // One from before the library knew instruments is rebuilt too.
+        write(b"{\"trill-library-index\":1}\n{\"folders\":[]}");
+        assert_eq!(load(&path).err(), Some(LoadError::Outdated(1)));
+        write(b"{\"trill-library-index\":2}\n{\"folders\":\"none\"}");
         assert!(matches!(load(&path), Err(LoadError::Damaged(_))));
         // A tree that does not hold together.
-        write(b"{\"trill-library-index\":1}\n{\"folders\":[{\"p\":\"a\",\"u\":0}]}");
+        write(b"{\"trill-library-index\":2}\n{\"folders\":[{\"p\":\"a\",\"u\":0}]}");
         assert!(matches!(load(&path), Err(LoadError::Damaged(_))), "a folder that is its own parent");
-        write(b"{\"trill-library-index\":1}\n{\"folders\":[{\"p\":\"a\"},{\"p\":\"b\",\"u\":7}]}");
+        write(b"{\"trill-library-index\":2}\n{\"folders\":[{\"p\":\"a\"},{\"p\":\"b\",\"u\":7}]}");
         assert!(matches!(load(&path), Err(LoadError::Damaged(_))));
-        write(b"{\"trill-library-index\":1}\n{\"folders\":[{\"p\":\"a\",\"f\":[{\"n\":\"x.wav\",\"k\":77,\"s\":1}]}]}");
+        write(b"{\"trill-library-index\":2}\n{\"folders\":[{\"p\":\"a\",\"f\":[{\"n\":\"x.wav\",\"k\":77,\"s\":1}]}]}");
         assert!(matches!(load(&path), Err(LoadError::Damaged(_))), "a kind nobody knows");
         // Names that would lead out of the folder they are listed in.
         for name in ["../../elsewhere.wav", "..", "", "sub/x.wav"] {
-            let head = "{\"trill-library-index\":1}\n";
+            let head = "{\"trill-library-index\":2}\n";
             write(
                 format!("{head}{{\"folders\":[{{\"p\":\"a\",\"f\":[{{\"n\":\"{name}\",\"k\":0,\"s\":1}}]}}]}}")
                     .as_bytes(),
@@ -365,7 +422,7 @@ mod tests {
 
         // Odd values in a well-formed file are tidied, not trusted.
         write(
-            b"{\"trill-library-index\":1}\n{\"folders\":[{\"p\":\"a\",\"f\":[{\"n\":\"x.mid\",\"k\":1,\"s\":1,\"r\":44100,\"x\":true,\"y\":99,\"t\":18446744073709551615,\"m\":-9223372036854775808}]}]}",
+            b"{\"trill-library-index\":2}\n{\"folders\":[{\"p\":\"a\",\"f\":[{\"n\":\"x.mid\",\"k\":1,\"s\":1,\"r\":44100,\"x\":true,\"y\":99,\"t\":18446744073709551615,\"m\":-9223372036854775808}]}]}",
         );
         let odd = load(&path).unwrap();
         let entry = &odd.entries()[0];

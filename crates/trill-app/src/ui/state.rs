@@ -596,10 +596,27 @@ impl SoundDrag {
         }
     }
 
-    /// Offers `target` as the place the drag would land.
+    /// Whether what is dragged is an instrument's file: something a
+    /// track plays through, not a sound that becomes a clip.
+    pub fn is_instrument(&self) -> bool {
+        self.paths.first().is_some_and(|path| super::sounds::is_instrument(path))
+    }
+
+    /// Offers `target` as the place the drag would land. An instrument
+    /// over a track is offered as the track's instrument, and what cannot
+    /// take the thing dragged refuses it with a reason
+    /// ([`DropTarget::for_drag`]).
     pub fn offer(&mut self, target: DropTarget) {
-        self.target = Some(target);
-        self.refusal = None;
+        match target.for_drag(self.is_instrument()) {
+            Ok(target) => {
+                self.target = Some(target);
+                self.refusal = None;
+            }
+            Err(refusal) => {
+                self.target = None;
+                self.refusal = Some(refusal);
+            }
+        }
     }
 }
 

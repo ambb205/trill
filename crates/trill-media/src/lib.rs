@@ -4,6 +4,8 @@
 //! - [`decode`] reads a whole file (WAV, AIFF, FLAC, MP3, Ogg Vorbis) into
 //!   the shared [`AudioBuffer`](trill_core::audio::AudioBuffer); [`probe`]
 //!   reads only its header.
+//! - [`open`] reads a file a piece at a time, for what wants the start of
+//!   a thousand recordings and the rest of only some.
 //! - [`MediaCache`] keeps decoded files and their [`Peaks`] in memory within
 //!   a budget, and is the [`AudioLoader`](trill_core::audio::AudioLoader) the
 //!   engine and devices load through.
@@ -22,6 +24,7 @@ mod decode;
 mod error;
 mod peaks;
 mod resample;
+mod stream;
 mod wav;
 mod wav_vorbis;
 
@@ -30,4 +33,5 @@ pub use decode::{AUDIO_EXTENSIONS, AudioInfo, decode, is_audio_file, probe};
 pub use error::MediaError;
 pub use peaks::{MinMax, PeakColumn, Peaks, scan_columns};
 pub use resample::{Resampler, resample};
+pub use stream::{AudioFile, open, wav_loop};
 pub use wav::{WavFormat, WavWriter, write_wav};

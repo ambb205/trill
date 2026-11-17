@@ -12,7 +12,7 @@ this file is the map, so that a task needs only the files it touches.
 ```sh
 cargo run -p trill-app -- --demo                    # the window, on a built-in song
 cargo run -p trill-mcp -- --no-audio --scratch      # no window: MCP on stdio, nothing read or kept
-cargo test --workspace                              # about 2,400 tests, a few minutes once built
+cargo test --workspace                              # about 2,460 tests, a few minutes once built
 cargo test -p trill-engine --test playing           # one integration test file
 cargo test -p trill-app a_take_is_counted_in        # tests whose name contains this (the app's are in its binary)
 cargo test -p trill-core time_ops -- --nocapture
@@ -23,6 +23,7 @@ sh crates/trill-app/screenshots/render.sh <word>    # pictures of the window, in
 cargo run -p trill-stage --example film -- SONG.trill --still 42 out.png   # a picture of the stage (see the example)
 cargo run -p trill-stage --example film -- SONG.trill --film out.mp4       # the whole song filmed with its own sound
 cargo run -p trill-app --example wavetable_listen -- target/wavetable-listening   # every preset of the wavetable synth as a WAV file, to listen to
+cargo run -p trill-engine --example sampled -- about FILE.sfz   # what a sampled instrument is; also survey, load, measure and play (see the example)
 ```
 
 - The default test run needs nothing installed and reads nothing of the user's. Tests that need this machine
@@ -33,7 +34,8 @@ cargo run -p trill-app --example wavetable_listen -- target/wavetable-listening 
 - A few tests hold a wall-clock budget and can fail on a machine that is busy with other builds
   (`trill-library` `scale::a_hundred_thousand_files…`, `trill-engine` `session_transport_runs_in_real_time` and
   `changing_a_sample_while_playing_keeps_the_song_going` and
-  `the_session_says_how_many_clips_it_is_still_preparing`, its `audio_settings` and `loading` tests, `trill-dsp`
+  `the_session_says_how_many_clips_it_is_still_preparing`, its `audio_settings` and `loading` tests and
+  `a_hundred_and_twenty_eight_voices_of_a_sampled_instrument_cost_less_than_the_time_they_play`, `trill-dsp`
   `eight_notes_of_eight_voices_leave_most_of_a_core`, `trill-mcp`
   `an_agent_arms_a_track_plays_it_and_records_a_take`, `trill-assistant`'s `pipeline`, the real-plugin tests). If one is the only failure, run it alone before concluding anything.
 - Development builds are optimized (`[profile.dev]` in `Cargo.toml`) because unoptimized audio code cannot keep
@@ -65,9 +67,9 @@ on the samples.
 | Crate | What lives there |
 |---|---|
 | `trill-core` | The model and nothing else: `project.rs` (`Project`, tracks, clips with their notes and controller curves, automation, every edit), `files.rs` (the files a song names: `Project::files`, `Project::relink`, where a folder went read from one file that was found, and the table a project file carries of where its files are from the song's folder and what they were), `travel.rs` (how a control's values lie along its travel, and so how an automation line gets from one point to the next), `tempo.rs` (how beats become time and how they become bars: the tempo map and the meter map of a song whose tempo and time signature change), `time_ops.rs`, `instrument.rs` (what a track knows of its instrument: drums or pitches, drum map, keyswitches, range, octave), `device.rs` (the device API, `EventKind`), `presets.rs` (a device type's presets as something to browse, a preset that was saved, and a *sound*: a preset of its first device that says which effects follow it, with the edit that makes them, `Project::bring_after`), `midi_file.rs`, `formats.rs` (what a file of an older format meant by what it does not say), and `journal/` (how a song came to be: `mod.rs` the entries and their text, `change.rs` what a step keeps, `place.rs` where it landed, `words.rs` an edit in words, `replay.rs` a session laid out to be watched). No audio or UI dependencies. |
-| `trill-dsp` | The built-in devices (`synth`, `wavetable/`, `drums`, `sampler`, `drumrack`, `effects/`: one file per effect or family, the compressor with its sidechain in `compressor.rs`) and offline time-stretching. `lib.rs` is the registry. The wavetable synth is a folder: `table.rs` (a table as an oscillator reads it: every frame at every brightness a pitch may have), `recipe.rs` (a table written down as key frames of shapes and harmonics, or read from an audio file), `factory.rs` (the tables that ship, each a recipe), `params.rs` (its parameters, whose names are what a model reads), `voice.rs` (one note: oscillators, filters, the matrix), `mod.rs` (the device, its state document and what all its notes share), `patches.rs` (its sounds, with the names of their macros). |
-| `trill-media` | Decoding audio files, the shared `MediaCache`, waveform peaks, resampling, WAV writing. |
-| `trill-library` | The sample library (scan, index, search, tags from file names) and the settings file. |
+| `trill-dsp` | The built-in devices (`synth`, `wavetable/`, `drums`, `sampler`, `drumrack`, `effects/`: one file per effect or family, the compressor with its sidechain in `compressor.rs`) and offline time-stretching. `lib.rs` is the registry. The wavetable synth is a folder: `table.rs` (a table as an oscillator reads it: every frame at every brightness a pitch may have), `recipe.rs` (a table written down as key frames of shapes and harmonics, or read from an audio file), `factory.rs` (the tables that ship, each a recipe), `params.rs` (its parameters, whose names are what a model reads), `voice.rs` (one note: oscillators, filters, the matrix), `mod.rs` (the device, its state document and what all its notes share), `patches.rs` (its sounds, with the names of their macros). The sampled instrument is a reader and a player that know nothing of each other's insides: `sfz/` (`text.rs`: a file as headers and opcodes, with what it includes and defines; `mod.rs`: what they mean, the list of the opcodes that are done, and for one that is not what a listener misses) and `sampled/` (`model.rs` an instrument as the player takes it, `pool.rs` the recordings in memory and the threads that read them, `read.rs` a recording read at another pitch, `loaded.rs` an instrument that is loaded: its state document, its files, what it says of itself; `kit.rs` the drums of a kit by name, `player.rs` the device, `mod.rs` what speaks for it). |
+| `trill-media` | Decoding audio files, the shared `MediaCache`, waveform peaks, resampling, WAV writing. `stream.rs` reads a file a piece at a time, and the loop a WAV file carries. |
+| `trill-library` | The sample library (scan, index, search, tags from file names) and the settings file. A sampled instrument is one entry that says what it is (`EntryKind::Instrument`, `InstrumentFacts`); its recordings are entries that a search leaves out unless it asks for them (`Entry::of_instrument`, `Query::include_recordings`). |
 | `trill-theory` | Music theory as pure functions: chord symbols, progressions, voicings, grooves, bass lines, melody notation with its ornaments (`ornament.rs`: as an instrument's keys or the pitch wheel), keyswitches for articulations (`articulation.rs`), key and chord reading. |
 | `trill-listen` | What is heard in a recording without a model, as pure functions of the audio: `beats.rs` (the pulse of the onsets, the `Grid` with its corrections, seconds to beats), `onsets.rs` (where hits begin, to the foot of the attack; beats moved onto them), `harmony.rs` (tuning, a chroma read from three transforms by register, key, chords), `structure.rs` (what each bar sounds like; the parts), `loops.rs`, `hits.rs` (drum hits told apart, one-shots, bass notes, the groove), `pitch.rs` (YIN: a bass line, a melody), `midi.rs` (any of it as a `MidiFile` on the recording's own beats), `spectrum.rs` and `signal.rs` (the transforms and measurements they share). `lib.rs` is `hear`: a `Recording` (one sound, or its stems) in, a `Heard` out. The method is Magpie's (see "Code is written here"). |
 | `trill-plugins` | CLAP (`clap/`) and VST3 (`vst3/`) hosting. Per format: `factory`, `instance` (the plugin's main-thread half), `processor` (its audio-thread half), `controller`. Plugins are scanned, and their presets read, in a child process (`scan/`, `presets/`, the `trill-plugin-scan` binary) so one that crashes costs a message. `vendor/` reads the presets some makers keep in files of their own (one module per format; `look.rs` says what a state is, for the `inspect` example) and builds the state that loads one; it also reads out of a drum plugin's state what its kit has on each key (`vendor::key_sounds`, `DeviceController::key_sounds`). A preset file that lies anywhere is made a preset by `DeviceFactory::preset_file` (`presets/file.rs`), which is what a path given as a preset comes to. All plugin main-thread work runs on one thread (`main_thread.rs`). What a plugin is told of the song with each block, in either format, is said and filled in one place (`transport.rs`). `vst3/quirks.rs` holds what a particular plugin needs of the host so as not to take the process down, each with what was measured (`tests/lifetimes.rs` counts crashes, an attempt to a process). `repeats.rs` holds what was measured of plugins that do not do the same thing twice, and what stops them (`examples/takes.rs` is how to measure another). `scripted.rs` in each format is a fake plugin for tests. |
@@ -75,7 +77,7 @@ on the samples.
 | `trill-runtime` | `Runtime`: the session, media cache, library, settings, MIDI input ports, safety copies of unsaved work and the housekeeping thread, built once. Both programs start from it. `jobs.rs` says which program does a session's renders and probes in a process of its own, and makes the devices there (the `trill-job` binary is that process for tests). `sounds.rs` and `missing.rs` are what both do the same way with sounds: adding one, and looking for the files a song is missing (where their folder went, then by name, each thing found with how sure it is). `listening.rs` is `Runtime::hear`: an audio file listened to (`trill-listen`), kept for the last few files. |
 | `trill-mcp` | The MCP server and the windowless `trill-mcp` binary. `requests.rs` (tool arguments), `server.rs`, `music.rs` and `sounds.rs` (the tools; `sounds.rs` has the search across every preset, `save_preset` and `save_sound`, and what a reply says of a sound that was given), `hearing.rs` (`probe`, `measure` and `render`, with their arguments and replies), `files.rs` (`missing_files` and `relink_files`, and what the others say of a song that is not whole), `listening.rs` (`listen` and `transcribe`: what is in an audio file, in the recording's own bars, and MIDI of it), `instruments.rs` (what a track's notes mean, read and set, the warnings that come of it, and how a note that says how it is played becomes keyswitches), `story.rs` (the journal's tools), `film.rs` (`film_plan` and `film`: arguments turned into what `trill-stage` takes), `wavetable.rs` (`describe_wavetable` and `set_wavetable`: a table shown frame by frame in numbers, chosen, made from a recipe or read from a file; and what `get_device` says of the synth: its matrix in words, its macros by name), `words.rs` (every tool call in plain words, where it landed and what it heard: read by the journal, the server and the window), `view.rs` (replies), `guard.rs` (limits on the in-app assistant's endpoint). |
 | `trill-assistant` | The back end of the in-app assistant: runs the user's own Claude Code CLI, one process per message, confined to Trill's tools. |
-| `trill-noir` | The egui widget kit and theme ("Instrument Noir"): Bars, Chips, Faders, text, icons, tokens, the mark. |
+| `trill-noir` | The egui widget kit and theme ("Instrument Noir"): Bars, Chips, Faders, text, icons, tokens, the mark, the Key Map (`keymap.rs`: boxes over keys and how hard they are struck). |
 | `trill-stage` | The stage: the song's own interface, filmed. A frame is a function of the song, what was measured of its sound, a time and the shot, and of nothing else. `score.rs` (what it reads of a project: sections, each part's notes, the drum hits, its time and its bars through the tempo and meter maps, and where either changes), `director.rs` (the takes: which shot each stretch gets, from the song alone), `camera.rs` (where the camera is at a beat), `light.rs` (what lights when, from the notes), `sound.rs` (what was measured of the audio, which sets the mood), `scene.rs` (the painting, with the kit, in three layers: the interface, what emits light, how far out of focus each part is), `gpu/` (the passes over those layers, on wgpu: bloom, focus blur, exposure from several moments, the finish), `stage.rs` (a song and a time in, a picture out), `voice.rs` (the outlines of the recordings a song plays, for their waveforms), `film.rs` (a `Subject` has a picture for any moment; its frames are handed to ffmpeg with the audio; `Progress` is how another thread watches a film and stops it), `export.rs` (the whole of a film of a song: its own sound rendered and measured, each part lit by its own level, then filmed), `making.rs` (a journal's replay staged: where the camera goes for each step, the cards, and its film with the finished song under it). |
 | `trill-app` | The window (binary `trill`), all under `src/ui/`. |
 
@@ -92,9 +94,11 @@ on the samples.
 - Areas: `arrangement/` (lanes, clips, headers, ruler, automation envelopes), `piano_roll.rs` (notes, and the lane of
   velocities and controller curves under them), `devices.rs` with
   `device_layouts.rs` (and `wavetable_panel.rs`: the wave an oscillator reads, which is more than its parameters
-  say), `mixer.rs`, `browser/` and `sounds/`, `sound_presets.rs` (sounds of more than one device: which there
-  are for the browser to list, and one carried from there to a track; the browser's other tab calls audio files
-  sounds), `audio_clip.rs`, `sample_panels.rs`, `recording.rs`,
+  say, and `instrument_panel.rs`: what a Sampled Instrument plays), `mixer.rs`, `browser/` and `sounds/`
+  (`sounds/instruments.rs`: the library's sampled instruments, and what dropping one does), `sound_presets.rs`
+  (sounds of more than one device: which there are for the browser to list, and one carried from there to a
+  track; the browser's other tab calls audio files sounds), `audio_clip.rs`,
+  `sample_panels.rs`, `recording.rs`,
   `audio_settings.rs`, `missing.rs` (the list of the song's missing files; what it shows is looked for by a worker,
   `sounds/missing.rs`), `keyboard/` (the computer keyboard as a MIDI keyboard), `assistant/` (the chat panel),
   `making_of/` (the session played again from its journal), `recovery.rs`, `files.rs`, `stage.rs` (F11: the stage
@@ -158,6 +162,28 @@ on the samples.
   sends, the fader, automation, what the track's notes mean), and saving says what it left out. Each device of
   a saved sound is read by the format the sound was saved in, as a saved preset is (`formats::keep_complete`).
   A front end does nothing of its own with a sound: it names the sound and the track.
+- **The sampled instrument** (`trill-dsp/src/sampled`, read by `trill-dsp/src/sfz`): the reader knows nothing of
+  playing and the player nothing of SFZ. An opcode that is added is read in `sfz/mod.rs`, added to the list at
+  the top of that file, taken out of `missed`, and played in `player.rs`. One that is not done is counted by its
+  name and said with what a listener misses (`Loaded::unsupported`): never passed over without a word, and never
+  a reason not to load. The same song is the same samples at any buffer size and on any number of threads:
+  everything that moves a voice is worked out every `TICK` frames of the device's own clock; recordings taken
+  in turn count from where playing began (`reset`), and one taken at random is drawn from the key and the
+  note's place in the song. The audio thread plays what is in memory and nothing else (`pool.rs`): the start of
+  every recording, read by workers when the instrument loads, and whole recordings as workers hand them over,
+  within a budget; it looks with `try_lock`, asks with an atomic, and never frees a recording. A device made
+  for a render (`Purpose::Rendering`) reads what it plays where it stands; one that plays never waits, and says
+  how far its reading is and what was silent or cut short for it (`DeviceController::reading`). What the
+  instrument says of itself (`DeviceController::sampled`: its range, drums or pitches, its ways of playing by
+  name) is laid under the track's own words by `Session::profile_of`, each time it is asked, and kept nowhere
+  in the song. Its file is a preset of the device (`DeviceFactory::preset_state`): that is how a path given
+  as a preset, a row of the browser and a file dropped on a track all load it. Nothing that is anyone's
+  recording is in the repository: tests write their own instruments (`write_instrument` in
+  `trill-engine/tests/common`), and the one that reads real files reads their text only and is opt-in
+  (`trill-dsp/tests/real_sfz.rs`). The numbers it is held to (`trill-engine/tests/instruments.rs`): every key
+  within a hundredth of a cent of its pitch, what folds 70 dB under what belongs up to two octaves above a
+  recording's pitch, no click at a loop, a release, a taken voice or a layer crossing, and 128 voices in less
+  than the time they play.
 - **A change to how a built-in device sounds:** a song saved before must sound as it did. A project file holds
   only the parameters that were set, so a new parameter defaults to what the device did before, or the device
   gets a line in `trill-core/src/formats.rs` (what a file of the older format is taken to have said, written into
@@ -191,7 +217,10 @@ on the samples.
   `listen` tool's `heard_as`).
 - **Something that names a file:** a song's files are its audio clips' and what its devices say theirs are
   (`DeviceFiles`; `trill_dsp::SampleFiles` for the sampler and the drum rack). A device that keeps a path in its
-  state and does not say so there is not listed as missing, not looked for and not relinked. The project file's
+  state and does not say so there is not listed as missing, not looked for and not relinked. A sampled
+  instrument names its own file, and of its recordings only the ones that are not where that file says: those
+  that were given another place, and those that are missing (`Session::song_files` adds what a device says is
+  missing to what its state names). A song does not list the hundreds that are where they belong. The project file's
   `files` table (`trill_core::files`, written by `Session::save`) is beside the song, not part of it: no edit
   touches it, and it needs no format number.
 - **Something that changes the song without being an edit** (a state a plugin came to in its own window):
@@ -229,7 +258,9 @@ on the samples.
   `RenderOptions::repeatable` stops it on its own copies. To find out what an
   instrument does, use a probe (`Session::probe_job`, the `probe` tool); to check a mix, `RenderJob::measure`
   (the `measure` tool), which writes nothing. A plugin that plays live is not waited for; `Session::loading`
-  says whether it may still be reading its samples. A render compiles only the tracks that are heard
+  says whether it may still be reading its samples. A sampled instrument is the same: made for a render it
+  reads the recordings it plays and waits for them, and played live it is listed as loading until the start of
+  every recording is in memory. A render compiles only the tracks that are heard
   (`Routing::needed` in `compile.rs`), and writes every stem in the one pass when asked
   (`RenderOptions::stems`): never render a song once per track. It makes the tracks that do not feed one another
   on several threads at once and adds them up in the graph's order, so that the samples are the ones one thread
