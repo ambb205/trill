@@ -152,9 +152,11 @@ pub struct StageView {
 }
 
 impl StageView {
-    pub fn new(theme: &Theme) -> Self {
+    /// The stage is in Noir whatever theme the window is in: it is a dark
+    /// room, and a film of a song should not depend on who made it.
+    pub fn new() -> Self {
         Self {
-            stage: Stage::new(theme.clone()),
+            stage: Stage::new(Theme::noir()),
             song: None,
             drawing: Drawing::NotYet,
             shown: None,

@@ -225,7 +225,7 @@ impl TrillApp {
             recovery,
             keyboard,
             settings: Settings::default(),
-            stage: StageView::new(&theme),
+            stage: StageView::new(),
             graphics: None,
             theme,
             descriptors: BuiltinFactory.descriptors(),
