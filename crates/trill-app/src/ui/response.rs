@@ -39,6 +39,72 @@ pub fn filter_gain(shape: FilterShape, cutoff_hz: f64, resonance: f64, hz: f64) 
     }
 }
 
+/// Linear gain of a filter of the wavetable synth of kind `kind` (as its
+/// type parameter counts them: off, then low-pass, band-pass, high-pass
+/// and notch at 12 and 24 dB, then the two combs) at `hz`.
+pub fn table_filter_gain(kind: usize, cutoff_hz: f64, resonance: f64, hz: f64) -> f64 {
+    let w = hz / cutoff_hz.max(1.0);
+    let q = resonance_q(resonance);
+    let denominator = |q: f64| ((1.0 - w * w).powi(2) + (w / q).powi(2)).sqrt().max(1e-9);
+    // The second stage of a steep low-pass or high-pass is a gentle one.
+    let gentle = std::f64::consts::FRAC_1_SQRT_2;
+    let band = (w / denominator(q)) / q.sqrt();
+    let notch = (1.0 - w * w).abs() / denominator(q);
+    match kind {
+        1 => 1.0 / denominator(q),
+        2 => 1.0 / (denominator(q) * denominator(gentle)),
+        3 => band,
+        4 => band * band,
+        5 => w * w / denominator(q),
+        6 => w * w * w * w / (denominator(q) * denominator(gentle)),
+        7 => notch,
+        8 => notch * notch,
+        // A comb rings at the cutoff and its multiples; the other one at
+        // the odd multiples of half of it.
+        9 | 10 => {
+            let feedback = 0.98 * resonance.clamp(0.0, 1.0) * if kind == 9 { 1.0 } else { -1.0 };
+            let turn = std::f64::consts::TAU * w;
+            (1.0 - feedback * feedback).sqrt()
+                / (1.0 + feedback * feedback - 2.0 * feedback * turn.cos()).sqrt().max(1e-9)
+        }
+        _ => 1.0,
+    }
+}
+
+/// What an LFO of the wavetable synth puts out, from -1 to 1, `at` cycles
+/// from where it started, by its shape as the shape parameter counts them.
+/// The two that are drawn by lot are shown as a lot that stays the same.
+pub fn lfo_level(shape: usize, at: f64) -> f64 {
+    let phase = at.rem_euclid(1.0);
+    let lot = |step: f64| ((step * 12.9898).sin() * 43_758.545).rem_euclid(1.0) * 2.0 - 1.0;
+    match shape {
+        0 => (std::f64::consts::TAU * phase).sin(),
+        1 => {
+            if phase < 0.25 {
+                4.0 * phase
+            } else if phase < 0.75 {
+                2.0 - 4.0 * phase
+            } else {
+                4.0 * phase - 4.0
+            }
+        }
+        2 => 2.0 * phase - 1.0,
+        3 => 1.0 - 2.0 * phase,
+        4 => {
+            if phase < 0.5 {
+                1.0
+            } else {
+                -1.0
+            }
+        }
+        5 => lot(at.floor()),
+        _ => {
+            let eased = phase * phase * (3.0 - 2.0 * phase);
+            lot(at.floor()) + (lot(at.floor() + 1.0) - lot(at.floor())) * eased
+        }
+    }
+}
+
 /// Linear gain of the filter device at its 24 dB slope: two stages in a
 /// row, each with 0.8 times the root of the Q the resonance stands for.
 pub fn steep_filter_gain(shape: FilterShape, cutoff_hz: f64, resonance: f64, hz: f64) -> f64 {

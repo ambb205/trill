@@ -519,6 +519,28 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
             }
         }
 
+        "describe_wavetable" => match (call.text("table"), input.get("recipe").is_some(), call.device("device")) {
+            (_, true, _) => about("Looking at", "Looked at", "the table a recipe would make"),
+            (_, _, Some(device)) => about("Looking at", "Looked at", &format!("a table of {device}")),
+            (Some(table), ..) => about("Looking at", "Looked at", &format!("the wavetable {}", quoted(table))),
+            _ => about("Listing", "Listed", "the wavetables"),
+        },
+        "set_wavetable" => {
+            let device = call.device("device").unwrap_or_else(|| "a device".to_owned());
+            let recipe = input.get("recipe").and_then(|recipe| recipe.get("name")).and_then(Value::as_str);
+            match (call.text("table"), input.get("recipe").is_some(), call.text("file")) {
+                (Some(table), ..) => about("Giving", "Gave", &format!("{device} the wavetable {}", quoted(table))),
+                (_, true, _) => match recipe {
+                    Some(name) => about("Making", "Made", &format!("the wavetable {} for {device}", quoted(name))),
+                    None => about("Making", "Made", &format!("a wavetable for {device}")),
+                },
+                (_, _, Some(file)) => {
+                    about("Reading", "Read", &format!("a wavetable for {device} from {}", quoted(file_name(file))))
+                }
+                _ => about("Naming", "Named", &format!("the macros of {device}")),
+            }
+        }
+
         other => {
             let words = spelled_out(other);
             Wording::new(words.clone(), words)
@@ -554,7 +576,9 @@ pub fn of_call(tool: &str, input: &Value, answer: &str) -> Option<Place> {
         "update_track" | "set_instrument_profile" => given("track").map(Place::track),
 
         "add_device" => answered("device_id").map(Place::device),
-        "update_device" | "set_sample" | "show_device_editor" | "save_preset" => given("device").map(Place::device),
+        "update_device" | "set_sample" | "set_wavetable" | "show_device_editor" | "save_preset" => {
+            given("device").map(Place::device)
+        }
 
         "create_clip" | "create_audio_clip" => Place::clips(answered("clip_id")),
         "relink_files" => {
@@ -1030,6 +1054,8 @@ mod tests {
         assert_eq!(of("update_track", json!({ "track": 4, "volume_db": -6 }), json!({})), Some(Place::track(4)));
         assert_eq!(of("update_device", json!({ "device": 5, "params": {} }), json!({})), Some(Place::device(5)));
         assert_eq!(of("set_sample", json!({ "device": 5, "path": "k.wav" }), json!({})), Some(Place::device(5)));
+        assert_eq!(of("set_wavetable", json!({ "device": 5, "table": "Acid" }), json!({})), Some(Place::device(5)));
+        assert_eq!(of("describe_wavetable", json!({ "device": 5 }), json!({})), None);
         for tool in ["update_clip", "add_notes", "set_notes", "remove_notes", "transform_notes"] {
             assert_eq!(of(tool, json!({ "clip": 7 }), json!({})), clips(&[ClipId(7)]), "{tool}");
         }

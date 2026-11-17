@@ -40,8 +40,11 @@ pub(crate) const INSTRUCTIONS: &str = "\
 Finding and keeping sounds
 - search_presets finds a sound by words (\"warm pad\", \"808 sub\", \"glass bell\") across the presets of every \
 installed instrument and the ones that were saved, and answers with the device and the preset to give \
-create_track. Look there before settling for a built-in synth: an installed instrument usually has the better \
-sound. The first search reads each plugin's presets, in the background; the reply says which are still being read.
+create_track. Look there before setting a synth up parameter by parameter: a preset its maker tuned by ear \
+usually has the better sound, and an installed instrument's is the first place to look for one. The built-in \
+synths' presets are found too: builtin:wavetable's say what each sounds like and is for (they are matched in level \
+by measurement and not yet tuned by ear), builtin:polysynth's are plain analog sounds. The first search reads each \
+plugin's presets, in the background; the reply says which are still being read.
 - Presets are the way to a good sound: the makers' own, by people who can hear. Trill lists a plugin's presets \
 whichever way the plugin keeps them, the files of its maker's own format included (drum kits, guitar tones, \
 amplifier presets, synth patches), so give every plugin instrument and amplifier a preset before touching a \

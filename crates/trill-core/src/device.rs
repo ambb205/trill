@@ -158,11 +158,24 @@ impl ChannelLayout {
 /// A plugin's presets are not of this kind. They are found some time after
 /// the plugin is, there may be thousands, and only the plugin can load
 /// one; see [`DeviceFactory::presets`], which lists both kinds alike.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Preset {
     pub name: String,
     pub description: String,
     pub params: Vec<(String, f64)>,
+    /// Where a browser files the preset (`Bass`, `Pad`); empty for one
+    /// that is filed nowhere.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub category: String,
+    /// Words the preset is found by, besides its name and description.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// The state the preset gives the device, for a device whose sound is
+    /// more than its parameters (a wavetable synth's own tables, and what
+    /// its macros are called). A preset without one leaves the device's
+    /// state as it is: a sampler keeps its file.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::project::state_base64")]
+    pub state: Option<Vec<u8>>,
 }
 
 impl Preset {
@@ -171,6 +184,8 @@ impl Preset {
         PresetInfo {
             id: self.name.clone(),
             name: self.name.clone(),
+            category: self.category.clone(),
+            tags: self.tags.clone(),
             description: self.description.clone(),
             ..PresetInfo::default()
         }

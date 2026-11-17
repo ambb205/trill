@@ -80,6 +80,36 @@ impl<'a> Plot<'a> {
         }
     }
 
+    /// A wave about the middle of the plot: `samples` from -1 to 1, spread
+    /// evenly across it, tinted to its middle. One cycle of an oscillator.
+    pub fn wave(&self, color: Color32, samples: &[f32]) {
+        if samples.len() < 2 {
+            return;
+        }
+        let last = (samples.len() - 1) as f32;
+        let points: Vec<Pos2> = samples
+            .iter()
+            .enumerate()
+            // A little room above and below, so a wave at full level does
+            // not touch the frame.
+            .map(|(index, sample)| self.point(index as f32 / last, 0.5 + 0.44 * sample.clamp(-1.1, 1.1)))
+            .collect();
+        self.tint(&points, 0.5, color);
+        self.painter.add(Shape::line(points, Stroke::new(LINE_WIDTH, color)));
+    }
+
+    /// A tick on the bottom edge at `x` across the plot: where along
+    /// something the picture above it was taken.
+    pub fn position(&self, color: Color32, x: f32) {
+        let at = self.point(x.clamp(0.0, 1.0), 0.0);
+        let left = (at.x.round() - 1.0).clamp(self.area.left(), self.area.right() - 3.0);
+        self.painter.rect_filled(
+            Rect::from_min_size(pos2(left, self.area.bottom() - 4.0), egui::vec2(3.0, 4.0)),
+            0.0,
+            color,
+        );
+    }
+
     /// A straight reference line between two points, in the grid color.
     pub fn reference(&self, from: (f32, f32), to: (f32, f32)) {
         let stroke = Stroke::new(1.0, self.theme.grid);
