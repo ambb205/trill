@@ -679,6 +679,12 @@ fn same_value(now: &str, wanted: &str) -> bool {
 /// beats, for the notes that are sounding there: eight bars of four.
 pub const LEAD_IN_BEATS: f64 = 32.0;
 
+/// How far ahead of the first note it is for a render presses a key that
+/// chooses how notes are played, in beats: twice what the writing tools
+/// put between such a key and its note, so that a key that stays and one
+/// for the next note both come before it.
+pub const SWITCH_AHEAD_BEATS: f64 = 0.06;
+
 /// Where a render that starts at `start` begins to play: where the
 /// earliest of the notes that are sounding at `start` began, if that is no
 /// more than [`LEAD_IN_BEATS`] before; and, by track, how many notes began
@@ -770,6 +776,14 @@ fn render_from(
     // recording the song has it, and what rings over from those notes is
     // there.) One that began too long before is left out, and said.
     let (lead_from, not_begun) = lead_in(&graph, start);
+    // A key that chooses how notes are played is pressed where the render
+    // begins to play, and some instruments take it only if it comes
+    // before its note: where one is chosen, the render begins a moment
+    // earlier still.
+    let chosen = |beat: f64| {
+        graph.tracks.iter().any(|node| crate::graph::chosen_at(&node.switches, beat).iter().any(Option::is_some))
+    };
+    let lead_from = if chosen(lead_from) { (lead_from - SWITCH_AHEAD_BEATS).max(0.0) } else { lead_from };
     let lead_from = on_a_frame(lead_from);
     let lead_frames = (frame_of_song(start) - frame_of_song(lead_from)).max(0.0) as u64;
     let not_begun: Vec<NotBegun> = not_begun

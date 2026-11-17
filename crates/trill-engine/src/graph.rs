@@ -45,6 +45,21 @@ pub(crate) struct Switch {
     pub staying: u32,
 }
 
+/// What [`TrackState::latched`] is while the song has pressed no key that
+/// stays: the instrument is on what it was made on.
+pub(crate) const AS_MADE: u8 = 255;
+/// What it is when the song cannot tell.
+pub(crate) const UNKNOWN: u8 = 254;
+
+/// The pitches of `switches` as a bit each: all of them, and those that
+/// stay chosen.
+pub(crate) fn switch_keys(switches: &[Switch]) -> (u128, u128) {
+    let bit = |switch: &Switch| 1u128 << switch.pitch.min(127);
+    let all = switches.iter().fold(0, |keys, switch| keys | bit(switch));
+    let stay = switches.iter().filter(|switch| switch.stays).fold(0, |keys, switch| keys | bit(switch));
+    (all, stay)
+}
+
 /// The switches among `notes`, which are sorted by start, as `profile`
 /// names the keys: in the same order.
 pub(crate) fn switches_of(notes: &[NoteEvent], profile: &trill_core::InstrumentProfile) -> Vec<Switch> {
@@ -303,6 +318,14 @@ pub(crate) struct TrackState {
     /// Set to have the next block tell the instrument everything again: it
     /// is new, or was reset, and knows nothing of what it was told.
     pub resend: bool,
+    /// The key that stays chosen on the instrument, as far as the song
+    /// knows: the last such key it pressed. [`AS_MADE`] before it pressed
+    /// any, [`UNKNOWN`] once a hand pressed one or the instrument may
+    /// have missed what it was told.
+    pub latched: u8,
+    /// Set to have the next block press what is chosen where the song is,
+    /// as a start does.
+    pub rechoose: bool,
     /// Set when the graph changed: a controller the song moved may have
     /// lost its curve.
     pub lanes_changed: bool,
@@ -331,6 +354,8 @@ impl Default for TrackState {
             live: [f32::NAN; CONTROLLER_KINDS],
             sent: [f32::NAN; CONTROLLER_KINDS],
             resend: false,
+            latched: AS_MADE,
+            rechoose: false,
             lanes_changed: false,
             release_routed: false,
             had_notes: false,
@@ -410,6 +435,14 @@ pub(crate) struct TrackNode {
     /// The keys among the notes that choose how the notes after them are
     /// played: see [`Switch`]. Sorted by start; none on most tracks.
     pub switches: Vec<Switch>,
+    /// Which pitches of the part are such keys, a bit each, and which of
+    /// them stay chosen.
+    pub switch_keys: u128,
+    pub stay_keys: u128,
+    /// The key that chooses how a note is played when nothing is said, if
+    /// the track says one does: what a song is on before its part has
+    /// chosen anything.
+    pub unsaid_key: Option<u8>,
     /// What each controller the track's clips move is worth over the song.
     pub controllers: Vec<ControllerLane>,
     /// Whether the graph came with a device of this track created anew,
@@ -586,6 +619,9 @@ impl Graph {
                 }
             }
             if track.fresh_devices {
+                // It is on whatever it was made on, and where the song
+                // stands a key may be chosen.
+                (track.state.latched, track.state.rechoose) = (AS_MADE, true);
                 track.state.resend = true;
             }
         }

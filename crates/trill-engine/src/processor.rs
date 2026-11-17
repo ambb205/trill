@@ -17,7 +17,9 @@
 
 use crate::engine::RecordPhase;
 use crate::glide::{DECLICK_SECONDS, STEP, Span, gated};
-use crate::graph::{AudioData, Bus, Chain, DeviceSlot, Graph, MAX_BLOCK, RegionAudio, TrackNode, TrackState};
+use crate::graph::{
+    AS_MADE, AudioData, Bus, Chain, DeviceSlot, Graph, MAX_BLOCK, RegionAudio, Switch, TrackNode, TrackState, UNKNOWN,
+};
 use crate::live::{Captured, LiveTarget, TrackSet};
 use crate::monitor::{Beats, Monitor};
 use crate::spread::Spread;
@@ -850,6 +852,13 @@ impl Processor {
                         }
                         by_hand = true;
                         let offset = event.offset - block.start;
+                        // A key that switches, pressed by hand: what the
+                        // instrument is on is the hand's doing now.
+                        if let EventKind::NoteOn { pitch, .. } = event.kind
+                            && track.switch_keys & (1 << pitch.min(127)) != 0
+                        {
+                            track.state.latched = UNKNOWN;
+                        }
                         track.state.played(event.kind, routed);
                         events.push(Event { offset, kind: event.kind });
                         let keeps = matches!(event.kind, EventKind::NoteOn { .. } | EventKind::NoteOff { .. })
@@ -1045,7 +1054,7 @@ pub(crate) fn gather(track: &mut TrackNode, common: &Common, room: &mut Room, un
     let ControlBlock { playing, start_beat, beats_per_frame, frames, .. } = common.controls;
     let Room { left, right, events, sorted, .. } = room;
     let (left, right) = (&mut left[..frames], &mut right[..frames]);
-    if common.controls.chase {
+    if common.controls.chase | std::mem::take(&mut track.state.rechoose) {
         chase_switches(track, &common.controls, events);
     }
     let before_notes = events.len();
@@ -1444,42 +1453,79 @@ fn collect_controllers(track: &mut TrackNode, block: &ControlBlock, events: &mut
     }
 }
 
-/// How long a key that switches is held, in beats, when it is pressed for
-/// a song that starts after it: what the writing tools hold one for.
-const SWITCH_BEATS: f64 = 0.03;
+/// How long a key that switches is held, in beats, when the song presses
+/// it for a start: what the writing tools hold one for
+/// (`trill_theory::articulation::SWITCH_HOLD`), so that no two are down
+/// together.
+const SWITCH_HOLD_BEATS: f64 = 0.01;
+/// How hard the key that chooses the default way of playing is pressed.
+const SWITCH_VELOCITY: f32 = 100.0 / 127.0;
 
 /// Presses the keys that choose how notes are played where the song has
 /// just started or jumped to: what the part pressed before that place
 /// and has not undone (see [`crate::graph::chosen_at`]). Starting anywhere
-/// is then starting where the song would have the instrument. A switch
-/// that the part is still holding there is held to where the part lets go
-/// of it; any other for a moment. While the song stands still it is
-/// pressed and let go in the one block, so that a note played by hand
-/// sounds as it would in the song there.
+/// is then starting where the song would have the instrument.
+///
+/// The key that stays is pressed only if the instrument is not on it
+/// already, as far as the song knows ([`TrackState::latched`]): a song
+/// that was put somewhere while it stood still pressed it then, well
+/// ahead of the first note, and a loop that comes round to the way of
+/// playing it ends in presses nothing. (Some instruments take a key only
+/// if it comes before its note: a render therefore begins to play a
+/// moment ahead of its start, which a song that plays cannot.) Where the
+/// part has chosen nothing yet and the instrument was left on something,
+/// the key the track calls its default is pressed, if it names one.
+///
+/// A key the part is still holding there is held to where the part lets
+/// go of it, whatever the instrument is on; any other for a moment. While
+/// the song stands still a key is pressed and let go in the one block,
+/// and one that is for the next note only is left to the start.
 fn chase_switches(track: &mut TrackNode, block: &ControlBlock, events: &mut Vec<Event>) {
-    let TrackNode { state, switches, .. } = track;
+    let TrackNode { state, switches, unsaid_key, .. } = track;
     if switches.is_empty() {
         return;
     }
-    for switch in crate::graph::chosen_at(switches, block.start_beat).into_iter().flatten() {
+    let [stays, once] = crate::graph::chosen_at(switches, block.start_beat);
+    let held_until = |switch: &Switch| switch.end.max(block.start_beat + SWITCH_HOLD_BEATS);
+    // (pitch, velocity, the beat it is let go at)
+    let mut presses: [Option<(u8, f32, f64)>; 2] = [None, None];
+    match stays {
+        Some(switch) => {
+            let still_held = switch.end > block.start_beat + SWITCH_HOLD_BEATS;
+            if state.latched != switch.pitch || (block.playing && still_held) {
+                presses[0] = Some((switch.pitch, f32::from(switch.velocity.clamp(1, 127)) / 127.0, held_until(switch)));
+            }
+        }
+        None => {
+            if let Some(key) = unsaid_key.filter(|key| state.latched != AS_MADE && state.latched != *key) {
+                presses[0] = Some((key, SWITCH_VELOCITY, block.start_beat + SWITCH_HOLD_BEATS));
+            }
+        }
+    }
+    if let Some((pitch, ..)) = presses[0] {
+        state.latched = pitch;
+    }
+    if let (true, Some(switch)) = (block.playing, once) {
+        presses[1] = Some((switch.pitch, f32::from(switch.velocity.clamp(1, 127)) / 127.0, held_until(switch)));
+    }
+    for (pitch, velocity, until) in presses.into_iter().flatten() {
         if events.len() + 3 > NOTE_ON_LIMIT {
             break;
         }
-        let pitch = usize::from(switch.pitch.min(127));
-        let velocity = f32::from(switch.velocity.clamp(1, 127)) / 127.0;
         if !block.playing {
             let last = block.frames.saturating_sub(1) as u32;
-            events.push(Event { offset: 0, kind: EventKind::NoteOn { pitch: switch.pitch, velocity } });
-            events.push(Event { offset: last, kind: EventKind::NoteOff { pitch: switch.pitch } });
+            events.push(Event { offset: 0, kind: EventKind::NoteOn { pitch, velocity } });
+            events.push(Event { offset: last, kind: EventKind::NoteOff { pitch } });
             continue;
         }
-        if state.active_until[pitch] >= 0.0 {
-            events.push(Event { offset: 0, kind: EventKind::NoteOff { pitch: switch.pitch } });
+        let key = usize::from(pitch.min(127));
+        if state.active_until[key] >= 0.0 {
+            events.push(Event { offset: 0, kind: EventKind::NoteOff { pitch } });
         } else {
             state.active_count += 1;
         }
-        state.active_until[pitch] = switch.end.max(block.start_beat + SWITCH_BEATS);
-        events.push(Event { offset: 0, kind: EventKind::NoteOn { pitch: switch.pitch, velocity } });
+        state.active_until[key] = until;
+        events.push(Event { offset: 0, kind: EventKind::NoteOn { pitch, velocity } });
     }
 }
 
@@ -1514,6 +1560,8 @@ fn listen_for_an_answer(track: &mut TrackNode, left: &[f32], right: &[f32]) {
             let before = state.unanswered;
             state.unanswered = before.saturating_add(left.len() as u32);
             if state.unanswered / TELL_AGAIN != before / TELL_AGAIN {
+                // And the key that is chosen, which it may have missed too.
+                (state.latched, state.rechoose) = (UNKNOWN, true);
                 state.resend = true;
             }
         }
@@ -1627,6 +1675,7 @@ fn collect_notes(
     let first_new = events.len();
     let last = frames.saturating_sub(1) as f64;
     let offset_of = |beat: f64| ((beat - start_beat) / beats_per_frame).round().clamp(0.0, last) as u32;
+    let stay_keys = track.stay_keys;
     let state = &mut track.state;
 
     // Notes from earlier blocks that end in this one.
@@ -1665,6 +1714,10 @@ fn collect_notes(
             offset,
             kind: EventKind::NoteOn { pitch: note.pitch, velocity: note.velocity as f32 / 127.0 },
         });
+        // A key that stays chosen is what the instrument is on from here.
+        if stay_keys & (1 << pitch) != 0 {
+            state.latched = note.pitch;
+        }
         started = true;
     }
 
@@ -1870,6 +1923,9 @@ mod tests {
             id: TrackId(1),
             notes: notes.iter().map(|&(start, end, pitch)| NoteEvent { start, end, pitch, velocity: 127 }).collect(),
             switches: Vec::new(),
+            switch_keys: 0,
+            stay_keys: 0,
+            unsaid_key: None,
             controllers: Vec::new(),
             fresh_devices: false,
             audio: Vec::new(),

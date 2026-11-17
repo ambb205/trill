@@ -53,13 +53,23 @@ fn guitar(rig: &mut Rig, notes: &[Note]) -> TrackId {
     track
 }
 
-/// Puts the song at `beat`, starts it, runs `buffers` buffers and returns
-/// what the probe was told, with frames counted from the song's first.
-fn started_at(rig: &mut Rig, beat: f64, buffers: usize) -> Vec<(u64, EventKind)> {
+/// Puts the song at `beat` while it stands still and returns what the
+/// probe was told in the buffer that follows, with frames counted from
+/// that buffer's first.
+fn put_at(rig: &mut Rig, beat: f64) -> Vec<(u64, EventKind)> {
     rig.session.stop();
     rig.run(2);
+    rig.probes.take();
+    let before = rig.probes.frames.load(Ordering::Relaxed);
     rig.session.seek(beat);
-    rig.run(2);
+    rig.run(1);
+    rig.probes.events().into_iter().map(|(frame, kind)| (frame - before, kind)).collect()
+}
+
+/// Starts the song where it stands, runs `buffers` buffers and returns
+/// what the probe was told, with frames counted from the song's first.
+fn started(rig: &mut Rig, buffers: usize) -> Vec<(u64, EventKind)> {
+    rig.run(1);
     rig.probes.take();
     let start = rig.probes.frames.load(Ordering::Relaxed);
     rig.session.play();
@@ -71,60 +81,97 @@ fn at(events: &[(u64, EventKind)], frame: u64) -> Vec<EventKind> {
     events.iter().filter(|(when, _)| *when == frame).map(|(_, kind)| *kind).collect()
 }
 
+/// The keys that went down among `events`, in order.
+fn pressed(events: &[(u64, EventKind)]) -> Vec<EventKind> {
+    events.iter().map(|(_, kind)| *kind).filter(|kind| matches!(kind, EventKind::NoteOn { .. })).collect()
+}
+
+const LAST: u64 = BUFFER as u64 - 1;
+/// A hundredth of a beat, for which a key is held: in frames.
+const HELD: u64 = 240;
+
 #[test]
-fn a_song_started_after_a_key_that_switches_presses_it_again_ahead_of_its_first_note() {
+fn a_song_that_starts_after_a_key_that_switches_is_on_that_key_before_its_first_note() {
     let mut rig = Rig::new();
-    // The mute is chosen at the top and never undone; the slide is pressed
-    // just before the note at beat 8, for that note.
+    // The mute is chosen at the top; at beat 6 the part goes back to open;
+    // the slide is pressed just before the note at beat 8, for that note.
     let part = [
-        note(MUTED, 0.0, 0.03),
+        note(MUTED, 0.0, 0.01),
         note(60, 0.5, 0.5),
         note(62, 4.0, 0.5),
-        note(SLIDE, 7.97, 0.03),
+        note(OPEN, 6.0, 0.01),
+        note(63, 6.5, 0.5),
+        note(SLIDE, 7.97, 0.01),
         note(64, 8.0, 0.5),
         note(65, 9.0, 0.5),
     ];
     guitar(&mut rig, &part);
 
-    // From the top nothing is pressed that the part does not press.
-    let events = started_at(&mut rig, 0.0, 2);
-    assert_eq!(at(&events, 0), [on(MUTED)]);
+    // Put at beat 4 while it stands still, where the mute is chosen: the
+    // key is pressed there and then, and let go of at once. A note played
+    // by hand is muted as the song would mute it, and when the song is
+    // started the instrument has been on the key for as long as it stood.
+    let events = put_at(&mut rig, 4.0);
+    assert_eq!(events, [(0, EventKind::AllNotesOff), (0, on(MUTED)), (LAST, off(MUTED))]);
+    let events = started(&mut rig, 4);
+    assert_eq!(at(&events, 0), [on(62)], "the key it is on already is not pressed again with the note");
 
-    // Started at beat 4, where the mute is chosen: it is pressed on the
-    // song's first frame, ahead of the note that begins there, and let go
-    // of 0.03 beats on, as the part itself holds it.
-    let events = started_at(&mut rig, 4.0, 4);
-    assert_eq!(at(&events, 0), [on(MUTED), on(62)]);
-    assert_eq!(at(&events, 720), [off(MUTED)]);
-
-    // Started on the note the slide was pressed for: the mute, which
-    // stays, then the slide, which was not used yet, then the note.
-    let events = started_at(&mut rig, 8.0, 2);
-    assert_eq!(at(&events, 0), [on(MUTED), on(SLIDE), on(64)]);
-
-    // A beat later the slide has had its note: the mute alone.
-    let events = started_at(&mut rig, 9.0, 2);
-    assert_eq!(at(&events, 0), [on(MUTED), on(65)]);
-
-    // Put there while it stands still, the song presses the key and lets
-    // go of it at once: a note played by hand is then played as the song
-    // would play it there.
-    rig.session.stop();
-    rig.run(2);
+    // On it plays, past the key that has it play open at beat 6. Jumping
+    // back to beat 4 while it plays, it is told to mute again on the very
+    // frame it arrives, ahead of the note there, and holds the key for a
+    // hundredth of a beat.
+    rig.run(2 * FRAMES_PER_BEAT as usize / BUFFER + 10);
     rig.probes.take();
-    let before = rig.probes.frames.load(Ordering::Relaxed);
-    rig.session.seek(6.0);
-    rig.run(1);
+    let jump = rig.probes.frames.load(Ordering::Relaxed);
+    rig.session.seek(4.0);
+    rig.run(2);
     let events: Vec<(u64, EventKind)> =
-        rig.probes.events().into_iter().map(|(frame, kind)| (frame - before, kind)).collect();
-    assert_eq!(events, [(0, EventKind::AllNotesOff), (0, on(MUTED)), (BUFFER as u64 - 1, off(MUTED))], "{events:?}");
+        rig.probes.events().into_iter().map(|(frame, kind)| (frame - jump, kind)).collect();
+    assert_eq!(at(&events, 0), [EventKind::AllNotesOff, on(MUTED), on(62)]);
+    assert_eq!(at(&events, HELD), [off(MUTED)]);
 
-    // And where a loop comes round to a place after the key, it is
-    // pressed again there.
+    // Put on the note the slide was pressed for: open, which stays, is
+    // pressed as it is put there; the slide, which is for one note, as it
+    // starts, ahead of that note.
+    assert_eq!(pressed(&put_at(&mut rig, 8.0)), [on(OPEN)]);
+    assert_eq!(at(&started(&mut rig, 2), 0), [on(SLIDE), on(64)]);
+    // A beat later the slide has had its note, and the instrument is on
+    // open already: nothing is pressed.
+    assert_eq!(pressed(&put_at(&mut rig, 9.0)), []);
+    assert_eq!(at(&started(&mut rig, 2), 0), [on(65)]);
+
+    // A loop that comes round to the way of playing it ends in presses
+    // nothing as it does.
     rig.session.edit(|project| project.set_loop(true, 4.0, 5.0)).unwrap();
-    let events = started_at(&mut rig, 4.0, 60);
+    assert_eq!(pressed(&put_at(&mut rig, 4.0)), [on(MUTED)]);
+    let events = started(&mut rig, 60);
     let wrap = FRAMES_PER_BEAT as u64;
-    assert_eq!(at(&events, wrap), [EventKind::AllNotesOff, on(MUTED), on(62)], "{:?}", at(&events, wrap));
+    assert_eq!(at(&events, wrap), [EventKind::AllNotesOff, on(62)], "{:?}", at(&events, wrap));
+    // One that ends on another does: from beat 5.5, where the mute is
+    // chosen, over the key for open at beat 6, and round at beat 7.
+    rig.session.edit(|project| project.set_loop(true, 5.5, 7.0)).unwrap();
+    assert_eq!(pressed(&put_at(&mut rig, 5.5)), []);
+    let events = started(&mut rig, 100);
+    let wrap = 3 * FRAMES_PER_BEAT as u64 / 2;
+    assert_eq!(at(&events, wrap), [EventKind::AllNotesOff, on(MUTED)], "{:?}", at(&events, wrap));
+    assert_eq!(rig.session.audio_faults(), 0);
+}
+
+#[test]
+fn a_song_put_back_before_its_part_chose_anything_is_on_the_key_its_track_calls_the_default() {
+    let mut rig = Rig::new();
+    // A note before anything is chosen, then the mute.
+    let part = [note(60, 0.0, 0.5), note(MUTED, 2.0, 0.01), note(62, 2.5, 0.5)];
+    guitar(&mut rig, &part);
+    // As it was made, nothing is pressed for the start of the song.
+    assert_eq!(pressed(&put_at(&mut rig, 0.0)), []);
+    assert_eq!(at(&started(&mut rig, 2), 0), [on(60)]);
+    // Once the part has muted it, the top of the song is no longer what
+    // the instrument is on: put back there, it is told to play open, as a
+    // note is played when nothing is said.
+    rig.run(3 * FRAMES_PER_BEAT as usize / BUFFER);
+    assert_eq!(put_at(&mut rig, 0.0), [(0, EventKind::AllNotesOff), (0, on(OPEN)), (LAST, off(OPEN))]);
+    assert_eq!(at(&started(&mut rig, 2), 0), [on(60)]);
     assert_eq!(rig.session.audio_faults(), 0);
 }
 
@@ -137,16 +184,20 @@ fn a_song_that_plays_does_not_begin_a_note_that_was_sounding_where_it_starts_and
     let part = [note(MUTED, 0.0, 8.0), note(60, 1.0, 6.0), note(67, 5.0, 0.5)];
     guitar(&mut rig, &part);
 
-    let events = started_at(&mut rig, 4.0, 220);
-    // The key goes down at the start and comes up where the part lets go
-    // of it, four beats on. The long note is not begun: only the note
-    // that starts after the song does.
+    assert_eq!(pressed(&put_at(&mut rig, 4.0)), [on(MUTED)]);
+    let events = started(&mut rig, 220);
+    // The key goes down again at the start, though the instrument is on
+    // it, and comes up where the part lets go of it, four beats on. The
+    // long note is not begun: only the note that starts after the song
+    // does. (The probe makes no sound, so it is told the key again a few
+    // times a second, as an instrument is that has not answered.)
     assert_eq!(at(&events, 0), [on(MUTED)]);
-    let ons: Vec<EventKind> =
-        events.iter().map(|(_, kind)| *kind).filter(|kind| matches!(kind, EventKind::NoteOn { .. })).collect();
-    assert_eq!(ons, [on(MUTED), on(67)]);
+    assert!(!pressed(&events).contains(&on(60)), "the note that was sounding was begun");
     assert_eq!(at(&events, FRAMES_PER_BEAT as u64), [on(67)]);
     assert_eq!(at(&events, 4 * FRAMES_PER_BEAT as u64), [off(MUTED)]);
+    let after: Vec<&(u64, EventKind)> =
+        events.iter().filter(|(frame, _)| *frame > 4 * FRAMES_PER_BEAT as u64).collect();
+    assert!(after.iter().all(|(_, kind)| *kind != on(MUTED)), "the key went down again after the part let go of it");
     assert_eq!(rig.session.audio_faults(), 0);
 }
 
@@ -225,7 +276,9 @@ fn a_stretch_rendered_alone_is_that_stretch_of_the_whole_song_where_a_key_was_ch
     // on the same frames, on the same recordings.
     assert!(apart(&alone.left, cut) < 1e-6, "the stretch alone is {} from the song's", apart(&alone.left, cut));
     assert!(apart(&alone.right, &whole.right[4 * BEAT..]) < 1e-6);
-    assert_eq!(alone.measured.led_in_beats, 0.0, "nothing was sounding where it starts");
+    // The key was pressed a moment ahead of the stretch, as an instrument
+    // may need it: the render began that much earlier and kept none of it.
+    assert!((alone.measured.led_in_beats - 0.06).abs() < 1e-9, "{}", alone.measured.led_in_beats);
 
     // A part that undoes the choice before the stretch is played open
     // there, alone as in the song.

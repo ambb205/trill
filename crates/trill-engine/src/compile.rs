@@ -256,9 +256,15 @@ impl Compiler<'_> {
 
             let meter = self.meters.tracks.entry(track.id).or_default().clone();
             let chain = self.chain(&track.devices, project, &routing.keys, &mut problems);
+            let switches = crate::graph::switches_of(&notes, &track.profile);
+            let (switch_keys, stay_keys) = crate::graph::switch_keys(&switches);
+            let unsaid = track.profile.articulations.iter().find(|way| way.default && way.key.is_some());
             tracks.push(TrackNode {
                 id: track.id,
-                switches: crate::graph::switches_of(&notes, &track.profile),
+                switches,
+                switch_keys,
+                stay_keys,
+                unsaid_key: unsaid.and_then(|way| way.key),
                 notes,
                 controllers: track.controller_lanes(),
                 fresh_devices: chain.devices.iter().any(|slot| slot.processor.is_some()),
