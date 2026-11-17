@@ -203,7 +203,7 @@ async fn a_table_is_chosen_looked_at_and_made() {
     // The tables that ship, each with a sentence; and how one is made.
     let listed = ok(client, "describe_wavetable", json!({})).await;
     let tables = listed["tables"].as_array().unwrap();
-    assert_eq!(tables.len(), 22);
+    assert_eq!(tables.len(), 24);
     assert!(tables.iter().any(|table| table["name"] == "Growl" && table["about"].as_str().unwrap().contains("phaser")));
     assert!(listed["making"].as_str().unwrap().contains("set_wavetable"));
     // One of them, frame by frame, with the recipe it is made from.

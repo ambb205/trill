@@ -8,6 +8,7 @@
 
 pub mod analysis;
 pub mod apart;
+pub mod character;
 mod clock;
 pub mod compile;
 mod crew;
@@ -40,7 +41,7 @@ pub use instruments::InstrumentKnowledge;
 pub use live::LiveSender;
 pub use processor::Processor;
 pub use render::{RenderError, RenderJob, RenderOptions, RenderReport, Rendered, Watch};
-pub use saved::{Saved, SavedPresets, SavedSound};
+pub use saved::{Change as PresetChange, Saved, SavedPresets, SavedSound};
 pub use session::{
     Added, Given, ListedSound, MAX_COUNT_IN_BARS, ParamState, ProbeTarget, RecordState, RecordStatus, SampleFile,
     SavedAsSound, Session, SessionError, SilentInstrument, TakeClip, TransportStatus, file_facts, listed_sounds,

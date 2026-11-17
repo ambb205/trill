@@ -994,6 +994,7 @@ impl TrillApp {
 
         dragging::end(&ctx, &mut cx);
         sound_presets::end(&ctx, &mut cx);
+        sound_presets::modals(&ctx, &mut cx);
         files::confirm_modal(&ctx, &mut cx);
         recovery::modal(&ctx, &mut cx);
         missing::modal(&ctx, &mut cx);

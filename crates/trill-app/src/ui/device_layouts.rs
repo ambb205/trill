@@ -581,6 +581,7 @@ pub static LAYOUTS: &[Layout] = &[
                             p("voices", "Voices"),
                             p("glide", "Glide"),
                             p("bend_range", "Wheel"),
+                            p("mono_below", "Mono Below"),
                         ],
                     ),
                 ],
