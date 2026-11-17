@@ -16,6 +16,7 @@ use std::time::Duration;
 use trill_core::midi_file::{self, MidiFile};
 use trill_core::project::ImportedPart;
 use trill_core::{Beats, ChainRef};
+use trill_engine::render::Stems;
 use trill_engine::{RenderOptions, RenderReport, Session, SessionError, SharedSession};
 
 pub const PROJECT_EXTENSION: &str = "trill";
@@ -32,7 +33,7 @@ enum Event {
     Saved(Result<PathBuf, String>),
     /// The export dialog was answered and rendering has begun.
     ExportStarted(PathBuf),
-    Exported(Result<RenderReport, String>),
+    Exported(Result<Box<RenderReport>, String>),
     /// The name of the MIDI file read and how many tracks it became.
     MidiImported(Result<(String, usize), String>),
     MidiExported(Result<PathBuf, String>),
@@ -222,12 +223,22 @@ fn write(session: &SharedSession, path: &Path) -> Result<PathBuf, String> {
 
 /// Asks where to put a WAV file, then renders the song into it.
 pub fn export_wav(ctx: &egui::Context, cx: &mut Cx) {
+    export(ctx, cx, false);
+}
+
+/// [`export_wav`], with every track, group and return written to a file
+/// of its own as well, in a folder beside the song's.
+pub fn export_stems(ctx: &egui::Context, cx: &mut Cx) {
+    export(ctx, cx, true);
+}
+
+fn export(ctx: &egui::Context, cx: &mut Cx, stems: bool) {
     if cx.jobs.exporting.is_some() || std::mem::replace(&mut cx.jobs.dialog_open, true) {
         return;
     }
     let session = cx.session.clone();
     let mut dialog = rfd::AsyncFileDialog::new()
-        .set_title("Export audio")
+        .set_title(if stems { "Export audio and stems" } else { "Export audio" })
         .add_filter("WAV audio", &["wav"])
         .set_file_name(format!("{}.wav", file_stem_for(&cx.snap.project.name)));
     if let Some(folder) = cx.snap.path.as_deref().and_then(Path::parent) {
@@ -240,13 +251,21 @@ pub fn export_wav(ctx: &egui::Context, cx: &mut Cx) {
         };
         let path = with_extension(file.path(), "wav");
         report(Event::ExportStarted(path.clone()));
-        report(Event::Exported(render(&session, &path)));
+        report(Event::Exported(render(&session, &path, stems).map(Box::new)));
     });
 }
 
+/// The folder the stems of the song at `path` go in: beside it, named
+/// after it.
+fn stems_folder(path: &Path) -> PathBuf {
+    let name = path.file_stem().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    path.with_file_name(format!("{name} stems"))
+}
+
 /// Renders the song as it is right now into a WAV file at the engine's
-/// sample rate.
-fn render(session: &SharedSession, path: &Path) -> Result<RenderReport, String> {
+/// sample rate. With `stems`, the same pass writes every track, group and
+/// return to a file of its own in a folder beside it.
+fn render(session: &SharedSession, path: &Path, stems: bool) -> Result<RenderReport, String> {
     // The job is a copy of the project, so the session is free again before
     // the long part starts and editing can continue meanwhile.
     let (job, sample_rate) = {
@@ -254,7 +273,14 @@ fn render(session: &SharedSession, path: &Path) -> Result<RenderReport, String> 
         let sample_rate = session.audio_info().sample_rate.round() as u32;
         (session.render_job(), sample_rate)
     };
-    let options = RenderOptions { sample_rate, ..RenderOptions::default() };
+    let stems = stems.then(|| Stems {
+        folder: stems_folder(path),
+        tracks: true,
+        groups: true,
+        returns: true,
+        ..Stems::default()
+    });
+    let options = RenderOptions { sample_rate, stems, ..RenderOptions::default() };
     job.render_to_file(path, &options).map_err(|error| error.to_string())
 }
 
@@ -422,6 +448,10 @@ fn export_summary(report: &RenderReport) -> String {
         stats.peak_db,
         stats.loudness_lufs,
     );
+    if let Some(first) = report.stems.first() {
+        let folder = Path::new(&first.path).parent().map(file_name).unwrap_or_default();
+        summary.push_str(&format!(" {} stems in \u{201C}{folder}\u{201D}.", report.stems.len()));
+    }
     if stats.clipped_samples > 0 {
         summary
             .push_str(&format!(" {} samples clip: lower the master volume and export again.", stats.clipped_samples));
@@ -477,6 +507,7 @@ mod tests {
             sections: Vec::new(),
             dynamics: Vec::new(),
             waited: Vec::new(),
+            stems: Vec::new(),
             problems,
         }
     }
@@ -544,7 +575,7 @@ mod tests {
         crate::demo::load(&mut session.lock()).unwrap();
 
         let path = scratch.0.join("night drive.wav");
-        let report = render(&session, &path).unwrap();
+        let report = render(&session, &path, false).unwrap();
         assert_eq!(report.sample_rate, 48_000);
         // Sixteen bars at 112 BPM are 34.3 s; the tail rings a little longer.
         assert!((34.0..46.0).contains(&report.stats.duration_seconds), "{} s", report.stats.duration_seconds);
@@ -554,10 +585,31 @@ mod tests {
         let bytes = std::fs::metadata(&path).unwrap().len();
         assert!(bytes > 1_000_000, "a real file was written: {bytes} bytes");
         assert!(export_summary(&report).starts_with("Exported night drive.wav (0:"));
+        assert!(!scratch.0.join("night drive stems").exists(), "no stems unless they are asked for");
+
+        // With stems: the same song, and every track that plays, every
+        // group and every return in a folder beside it.
+        let with_stems = render(&session, &path, true).unwrap();
+        assert_eq!(with_stems.stats, report.stats, "the song itself is the same");
+        let playing = {
+            let session = session.lock();
+            let has_clips =
+                |track: &&trill_core::Track| track.kind != trill_core::TrackKind::Normal || !track.clips.is_empty();
+            session.project().tracks.iter().filter(has_clips).count()
+        };
+        assert!(playing > 2 && with_stems.stems.len() == playing, "{} of {playing}", with_stems.stems.len());
+        for stem in &with_stems.stems {
+            let file = Path::new(&stem.path);
+            assert_eq!(file.parent(), Some(scratch.0.join("night drive stems").as_path()));
+            assert!(std::fs::metadata(file).unwrap().len() > 1_000_000, "{}", stem.path);
+        }
+        let summary = export_summary(&with_stems);
+        let ending = format!(" {playing} stems in \u{201C}night drive stems\u{201D}.");
+        assert!(summary.ends_with(&ending), "{summary}");
 
         // An empty project has nothing to render, and says so.
         session.lock().new_project();
-        let error = render(&session, &scratch.0.join("empty.wav")).unwrap_err();
+        let error = render(&session, &scratch.0.join("empty.wav"), false).unwrap_err();
         assert!(error.contains("nothing to render"), "{error}");
     }
 
