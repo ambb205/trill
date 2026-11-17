@@ -49,6 +49,8 @@ pub const MAX_RECORDINGS: usize = 16_384;
 /// How many of the things an instrument asks for and does not get are
 /// named for each kind of thing.
 const NAMED: usize = 4;
+/// How many recordings of one key of a kit are asked what the key is.
+const HEARD_OF_A_KEY: usize = 48;
 /// How many of an instrument's missing recordings are looked for again
 /// each time the instrument is asked for.
 const LOOKED_FOR_AGAIN: usize = 16;
@@ -395,22 +397,24 @@ impl Loaded {
         if !self.summary.drums {
             return None;
         }
-        let mut sounds: Vec<KeySound> = Vec::new();
+        // Each key that sounds, with the label the instrument has for it
+        // and the recordings its regions play (a few dozen say as much as
+        // all of them).
+        let mut keys: Vec<(u8, Option<&str>, Vec<&str>)> = Vec::new();
         for key in 0..128u8 {
-            let Some(region) = self.down[usize::from(key)].first().map(|index| &self.instrument.regions[*index as usize])
-            else {
-                continue;
-            };
-            let words = match self.instrument.key_labels.get(&key) {
-                Some(label) => label.clone(),
-                None => match region.recording {
-                    Some(index) => recording_words(&self.instrument.recordings[index as usize]),
-                    None => continue,
-                },
-            };
-            sounds.push(super::kit::sound(key, &words));
+            let mut recordings: Vec<&str> = Vec::new();
+            for index in &self.down[usize::from(key)] {
+                let Some(recording) = self.instrument.regions[*index as usize].recording else { continue };
+                let name = self.instrument.recordings[recording as usize].as_str();
+                if recordings.len() < HEARD_OF_A_KEY && !recordings.contains(&name) {
+                    recordings.push(name);
+                }
+            }
+            if !recordings.is_empty() {
+                keys.push((key, self.instrument.key_labels.get(&key).map(String::as_str), recordings));
+            }
         }
-        Some(sounds)
+        Some(super::kit::sounds(&keys))
     }
 
     /// What the device says of the instrument: see [`SampledInstrument`].
@@ -527,14 +531,6 @@ impl Loaded {
 /// Whether a recording's name is a whole path already.
 fn is_rooted(name: &str) -> bool {
     name.starts_with('/') || name.as_bytes().get(1) == Some(&b':')
-}
-
-/// The name of a recording's file as words: `Drums/Kick_01.wav` is
-/// "Kick 01".
-fn recording_words(name: &str) -> String {
-    let file = name.rsplit('/').next().unwrap_or(name);
-    let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
-    stem.replace(['_', '-'], " ").split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]

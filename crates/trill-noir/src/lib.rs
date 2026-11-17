@@ -27,6 +27,8 @@
 //!   into a mesh the caller owns, so that many can be painted as one.
 //! * So was [`prose`]: running text that wraps, mixes faces (Inter SemiBold
 //!   for strong text was added for it) and can be selected and copied.
+//! * The Key Map ([`key_map`]) was written here too: boxes over a
+//!   keyboard, for an instrument made of recordings.
 //! * The [`mark`] is here so that the window and the stage draw the same
 //!   one, and [`Theme::stored_hue`] so that both show a track in the same
 //!   hue.
@@ -41,6 +43,7 @@ mod fader;
 mod field;
 pub mod format;
 mod icon;
+mod keymap;
 pub mod mark;
 mod menu;
 mod meter;
@@ -61,6 +64,7 @@ pub use chip::{Chip, chip, chip_row, chip_row_width};
 pub use fader::{Fader, fader};
 pub use field::{NumberField, NumberOutput, number_field, text_field};
 pub use icon::{Icon, paint_icon};
+pub use keymap::{KeyBox, KeyMap, key_map};
 pub use menu::{MenuItem, dropdown, dropdown_width, menu_heading, menu_separator, menu_title};
 pub use meter::{Levels, Zones, mini_meter, stereo_meter};
 pub use plot::Plot;

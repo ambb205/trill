@@ -11,8 +11,10 @@ use std::path::{Path, PathBuf};
 /// Files included deeper than this are not read: a file that includes
 /// itself would otherwise never end.
 const MAX_DEPTH: usize = 16;
-/// The most files one instrument may be made of.
-const MAX_FILES: usize = 512;
+/// The most times one instrument may include a file. A kit recorded
+/// through sixteen microphones includes the same few files hundreds of
+/// times; this only bounds a file made to include without end.
+const MAX_INCLUDES: usize = 20_000;
 
 /// One piece of an SFZ file.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,8 +32,11 @@ pub struct Text {
     /// What could not be made sense of, in words: a file that is not
     /// there, a line that is neither a header nor a pair.
     pub problems: Vec<String>,
-    /// Every file that was read, the first being the one asked for.
+    /// Every file that was read, each once, the first being the one
+    /// asked for.
     pub files: Vec<PathBuf>,
+    /// How many times a file was included.
+    includes: usize,
 }
 
 /// Reads the SFZ file at `root`, and every file it includes, through
@@ -99,14 +104,12 @@ fn file(
                 continue;
             }
             // A pair: the name is the word the `=` ends.
-            let Some(equals) = rest.find('=') else {
-                text.problems.push(format!("'{}' is neither a header nor a name=value", rest.trim()));
-                break;
-            };
+            // Words that are neither are passed over: a note somebody
+            // left in the file without marking it as one.
+            let Some(equals) = rest.find('=') else { break };
             let name = &rest[..equals];
             if let Some(space) = name.rfind(char::is_whitespace) {
                 // Words before the name belong to nothing.
-                text.problems.push(format!("'{}' is neither a header nor a name=value", name[..space].trim()));
                 rest = rest[space..].trim_start();
                 continue;
             }
@@ -141,7 +144,8 @@ fn include(
     text: &mut Text,
     depth: usize,
 ) {
-    if depth >= MAX_DEPTH || text.files.len() >= MAX_FILES {
+    text.includes += 1;
+    if depth >= MAX_DEPTH || text.includes > MAX_INCLUDES {
         text.problems.push(format!("'{name}' is included too deep, or by itself; it was left out"));
         return;
     }
@@ -156,7 +160,9 @@ fn include(
             continue;
         }
         if let Ok(source) = read(&path) {
-            text.files.push(path.clone());
+            if !text.files.contains(&path) {
+                text.files.push(path.clone());
+            }
             file(&source, &path, root, read, defines, text, depth + 1);
             return;
         }
@@ -328,7 +334,7 @@ mod tests {
         assert!(text.problems.iter().any(|problem| problem.contains("'gone.sfz' it includes is not there")));
         assert!(text.problems.iter().any(|problem| problem.contains("included too deep")), "{:?}", text.problems);
         assert_eq!(text.files[0], Path::new("/i/main.sfz"));
-        assert!(text.files.len() > 3);
+        assert_eq!(text.files.len(), 4, "each file once, however often it is included");
         assert!(tokens(Path::new("/i/none.sfz"), &read).is_err());
     }
 
@@ -340,7 +346,8 @@ mod tests {
         let keys: Vec<&str> =
             pairs(&text).into_iter().filter(|(name, _)| *name == "key").map(|(_, value)| value).collect();
         assert_eq!(keys, ["60", "61"]);
-        assert_eq!(text.problems.len(), 5, "{:?}", text.problems);
-        assert!(text.problems[0].contains("'stray words' is neither"));
+        // Words that are in the way are passed over without a word; what is broken is said.
+        assert_eq!(text.problems.len(), 3, "{:?}", text.problems);
+        assert!(text.problems[0].contains("is a header that never closes"));
     }
 }
