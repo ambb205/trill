@@ -8,11 +8,17 @@
 //! None of these has been heard by whoever wrote them: they are built
 //! from how such sounds are made, and matched in level by measurement
 //! (the tests hold that). The bank is to be shaped by ear.
+//!
+//! The synth has no effects inside. A patch that wants an echo or a room
+//! says so ([`Patch::effects`]) and is a *sound*: given to a track, the
+//! effects are made behind the synth as devices of their own, to be seen,
+//! changed and taken away like any other.
 
 use super::State;
 use super::params::PARAMS;
 use crate::params::Kind;
 use trill_core::device::Preset;
+use trill_core::presets::SoundDevice;
 
 /// A value a patch sets: a number, or one of a parameter's choices by
 /// its name.
@@ -35,7 +41,39 @@ pub struct Patch {
     /// use.
     pub macros: [&'static str; 4],
     pub params: &'static [(&'static str, Value)],
+    /// The effects it brings behind the synth, which make it a sound
+    /// (`trill_core::presets::SoundDevice`): in the order the signal goes
+    /// through them. Empty for a patch that is dry, which is still a
+    /// sound: given to a track, it takes the last sound's effects away.
+    pub effects: &'static [Effect],
 }
+
+/// An effect a patch brings: one of the built-in devices by its key, with
+/// the values it is given. Every other parameter is as the device comes.
+pub struct Effect {
+    pub key: &'static str,
+    pub params: &'static [(&'static str, f64)],
+}
+
+/// The chains the patches share, one for each kind of sound. They are the
+/// chains the first listening files were rendered through.
+const DRY: &[Effect] = &[];
+/// An echo on the dotted eighth and a short room.
+const LEAD: &[Effect] = &[
+    Effect { key: "delay", params: &[("time_beats", 0.75), ("feedback", 0.35), ("mix", 0.18)] },
+    Effect { key: "reverb", params: &[("decay", 1.8), ("mix", 0.18)] },
+];
+/// A chorus as it comes and a long hall.
+const PAD: &[Effect] =
+    &[Effect { key: "chorus", params: &[] }, Effect { key: "reverb", params: &[("decay", 4.0), ("mix", 0.3)] }];
+/// A longer echo on the dotted eighth and a room.
+const PLUCK: &[Effect] = &[
+    Effect { key: "delay", params: &[("time_beats", 0.75), ("feedback", 0.4), ("mix", 0.22)] },
+    Effect { key: "reverb", params: &[("decay", 2.2), ("mix", 0.2)] },
+];
+/// A chorus as it comes and a small room.
+const KEYS: &[Effect] =
+    &[Effect { key: "chorus", params: &[] }, Effect { key: "reverb", params: &[("decay", 1.6), ("mix", 0.16)] }];
 
 impl Patch {
     /// The patch's values as numbers, by parameter id. A choice that the
@@ -66,7 +104,17 @@ impl Patch {
             category: self.category.to_string(),
             tags: self.tags.iter().map(|tag| tag.to_string()).collect(),
             state: Some(State::with_macros(&self.macros).to_bytes()),
+            after: Some(self.after()),
         }
+    }
+
+    /// The effects the patch brings, as devices to make behind the synth.
+    pub fn after(&self) -> Vec<SoundDevice> {
+        let device = |effect: &Effect| {
+            let uri = format!("{}:{}", trill_core::device::BUILTIN_SCHEME, effect.key);
+            SoundDevice::new(&uri, crate::name_of(effect.key).unwrap_or(effect.key), effect.params)
+        };
+        self.effects.iter().map(device).collect()
     }
 }
 
@@ -74,6 +122,7 @@ pub static PATCHES: &[Patch] = &[
     Patch {
         name: "init",
         category: "",
+        effects: DRY,
         description: "A plain sawtooth with nothing done to it: the place to start a sound from nothing",
         tags: &["plain", "saw"],
         macros: ["", "", "", ""],
@@ -82,6 +131,7 @@ pub static PATCHES: &[Patch] = &[
     Patch {
         name: "Solid Bass",
         category: "Bass",
+        effects: DRY,
         description: "A firm, round analog bass with a short filter pluck on every note: saw and square over a \
                       sine at the note itself that goes past the filter. For bass lines of any style; write it between E1 and G2. \
                       Macros: Cutoff opens it, Drive roughens it, Sub adds weight, Resonance makes the pluck ring",
@@ -137,6 +187,7 @@ pub static PATCHES: &[Patch] = &[
     Patch {
         name: "Reese",
         category: "Bass",
+        effects: DRY,
         description: "Two detuned sawtooth stacks grinding slowly against each other through a low-pass: the dark, \
                       moving bass of drum and bass and garage. Long notes show its movement, and notes that overlap \
                       slide; write it between E1 and E3. Macros: Cutoff, Movement (how far the filter drifts), \
@@ -196,6 +247,7 @@ pub static PATCHES: &[Patch] = &[
     Patch {
         name: "Acid Line",
         category: "Bass",
+        effects: DRY,
         description: "A squelching resonant bass in the manner of a 303: every note opens the resonance and lets it \
                       fall, harder notes further, and notes that overlap slide into each other. For acid lines and \
                       rubbery plucked basses between C1 and C4. Macros: Squelch (how far open it sits), Drive, \
@@ -243,6 +295,7 @@ pub static PATCHES: &[Patch] = &[
     Patch {
         name: "Growl Bass",
         category: "Bass",
+        effects: DRY,
         description: "A snarling bass whose tone wobbles in time with the song, one cycle to the quarter note \
                       (`lfo1_sync` sets another length): the talking bass of dubstep and electro. Hold long notes \
                       between C1 and C3. Macros: Wobble (how far it moves), Tone, Dirt, Vowel (where the wobble \
@@ -297,6 +350,7 @@ pub static PATCHES: &[Patch] = &[
     Patch {
         name: "Deep Sub",
         category: "Bass",
+        effects: DRY,
         description: "A clean, heavy sub with a short knock at the front of each note, as an 808 has: a sine that \
                       falls an octave onto its pitch in a few hundredths of a second, then rings. For the bottom \
                       of a track; write it between C1 and C3. Macros: Tone (adds harmonics, so that it is heard on \
@@ -336,6 +390,7 @@ pub static PATCHES: &[Patch] = &[
     Patch {
         name: "Sync Lead",
         category: "Lead",
+        effects: LEAD,
         description: "A tearing, vocal lead: each note rips upward through oscillator sync and settles, with \
                       vibrato that comes in on held notes and more of it on the mod wheel. One note at a time, \
                       sliding between notes that overlap; for solos and hooks from C3 to C6. Macros: Rip (how \
@@ -395,6 +450,7 @@ pub static PATCHES: &[Patch] = &[
     Patch {
         name: "Anthem Saws",
         category: "Lead",
+        effects: LEAD,
         description: "Seven detuned sawtooths with an octave on top: the wide, bright wall of trance and big-room \
                       chords and leads. Play chords in the middle of the keyboard or a single line up high. \
                       Macros: Bright, Octave (the upper stack), Air (a breath of noise on top)",
@@ -436,6 +492,7 @@ pub static PATCHES: &[Patch] = &[
     Patch {
         name: "Talk Lead",
         category: "Lead",
+        effects: LEAD,
         description: "A lead that speaks: one vocal resonance that the mod wheel and macro 1 move from 'oo' \
                       through 'ah' to 'ee', drifting a little on its own. One note at a time; for hooks and bass \
                       lines that should sound like a voice, from C2 to C5. Macros: Vowel, Drift, Vibrato, Body",
@@ -488,6 +545,7 @@ pub static PATCHES: &[Patch] = &[
     Patch {
         name: "Glass Pad",
         category: "Pad",
+        effects: PAD,
         description: "A slow, glittering pad: thin high partials that shift over a soft warm bed, each note \
                       drifting at its own pace. For held chords behind a track; it takes a second to come in and \
                       three to go. Macros: Shimmer (moves the glitter), Warmth (the bed under it), Close (shuts \
@@ -553,6 +611,7 @@ pub static PATCHES: &[Patch] = &[
     Patch {
         name: "PWM Strings",
         category: "Pad",
+        effects: PAD,
         description: "Warm string-machine strings: pulse waves whose width drifts slowly, each note at its own \
                       pace, over a bowed-string tone, with a gentle vibrato on held notes. For chords and slow \
                       lines. Macros: Bright, Movement (how far the pulse width drifts), Vibrato",
@@ -616,6 +675,7 @@ pub static PATCHES: &[Patch] = &[
     Patch {
         name: "Choir",
         category: "Pad",
+        effects: PAD,
         description: "Voices holding a vowel that the mod wheel and macro 1 change, from 'ah' through 'ee' and \
                       'oh' to 'oo', with a breath of air on top. For choir pads and slow lines between C2 and C5, \
                       where the vowels are truest. Macros: Vowel, Breath, Vibrato, Dark",
@@ -672,6 +732,7 @@ pub static PATCHES: &[Patch] = &[
     Patch {
         name: "Glass Pluck",
         category: "Pluck",
+        effects: PLUCK,
         description: "A short, glassy pluck that starts bright and rings down to a soft tone: bell-like, clean \
                       and digital, brighter the harder it is played. For arpeggios and melodies from C3 up. \
                       Macros: Bright, Octave (a pure tone an octave up), Snap (how far each note opens)",
@@ -720,6 +781,7 @@ pub static PATCHES: &[Patch] = &[
     Patch {
         name: "String Pluck",
         category: "Pluck",
+        effects: PLUCK,
         description: "A plucked string made by a comb filter that rings at the note: a burst of noise and \
                       sawtooth goes in, a string comes out. Between a harp, a koto and a clean guitar; for \
                       arpeggios and picked lines from C2 to C6. Macros: Damp (a shorter ring), Bright, Pick (a \
@@ -768,6 +830,7 @@ pub static PATCHES: &[Patch] = &[
     Patch {
         name: "Trance Pluck",
         category: "Pluck",
+        effects: PLUCK,
         description: "The classic short synth pluck: bright sawtooths through a low-pass that snaps shut on \
                       every note. For arpeggios, stabs and chord rhythms anywhere on the keyboard. Macros: Cutoff, \
                       Snap (how far each note opens it), Resonance",
@@ -813,6 +876,7 @@ pub static PATCHES: &[Patch] = &[
     Patch {
         name: "Tine Piano",
         category: "Keys",
+        effects: KEYS,
         description: "An electric piano with a struck metal tine: a round body with a bell on top that harder \
                       notes bring out and that fades as the note rings. For chords, comping and ballads. Macros: \
                       Bell, Tremolo (pans the sound slowly from side to side), Dark",
@@ -866,6 +930,7 @@ pub static PATCHES: &[Patch] = &[
     Patch {
         name: "FM Keys",
         category: "Keys",
+        effects: KEYS,
         description: "A glassy FM electric piano: a sine bent by another, more the harder the key is struck, \
                       dying away to a pure tone. For ballads, city-pop chords and bell-like comping. Macros: Bite \
                       (how hard the tone is bent), Hollow (the bending sine goes an octave up), Tremolo",

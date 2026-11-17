@@ -176,6 +176,12 @@ pub struct Preset {
     /// state as it is: a sampler keeps its file.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::project::state_base64")]
     pub state: Option<Vec<u8>>,
+    /// The effects the preset brings after its device, for one that is a
+    /// *sound* ([`SoundDevice`](crate::presets::SoundDevice)): a pad with
+    /// its chorus and reverb. Empty for a sound that is dry and says so;
+    /// `None` for a preset that says nothing of what follows its device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<Vec<crate::presets::SoundDevice>>,
 }
 
 impl Preset {

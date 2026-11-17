@@ -12,8 +12,8 @@ use crate::requests::*;
 use crate::view::{
     ParamDetail, ParamSpan, PresetSearch, audio_device_json, audio_json, clip_json, controller_json, descriptor_json,
     descriptor_summary_json, device_json, lane_json, midi_input_json, param_state_json, plugin_param_json,
-    presets_json, project_json, round, samples_json, scan_json, sound_json, take_json, target_json, tempo_map_json,
-    track_json, transport_json, warp_name,
+    presets_json_with, project_json, round, samples_json, scan_json, sound_json, take_json, target_json,
+    tempo_map_json, track_json, transport_json, warp_name,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -958,12 +958,14 @@ impl TrillServer {
             })?;
             let mut out = json!({ "track_id": track });
             if let Some(uri) = &request.instrument {
-                match session.add_device(ChainRef::Track(track), uri, request.preset.as_deref(), None) {
-                    Ok(device) => {
+                match session.add_given(ChainRef::Track(track), uri, request.preset.as_deref(), None) {
+                    Ok(added) => {
+                        let device = added.device;
                         out["instrument_device_id"] = json!(device);
                         if let Some(preset) = session.device_preset(device) {
                             out["preset"] = json!(preset.name);
                         }
+                        crate::sounds::given_into(&mut out, &session, added.given.as_ref());
                         crate::sounds::preset_note_into(&mut out, &mut session, device);
                         crate::sounds::instrument_into(&mut out, &session, device);
                     }
@@ -1107,8 +1109,10 @@ impl TrillServer {
             limit: request.preset_limit.unwrap_or(DEFAULT_PRESETS).min(MAX_PRESETS),
         };
         let list = self.presets_of(&request.uri).await;
+        let saved = self.session.lock().saved_presets().clone();
         let mut out = descriptor_json(descriptor);
-        out["presets"] = presets_json(&list, &search);
+        let after = |preset: &trill_core::presets::PresetInfo| trill_engine::sound_after(descriptor, &saved, preset);
+        out["presets"] = presets_json_with(&list, &search, &after);
         // A plugin that lists no presets in one format may list them in
         // another: which of its formats a plugin was built to tell a host
         // of its presets in is its maker's choice.
@@ -1152,9 +1156,10 @@ impl TrillServer {
         let reply = (|| {
             let chain = request.track.map_or(ChainRef::Master, |track| ChainRef::Track(TrackId(track)));
             let before = session.undo_step();
-            let device = session
-                .add_device(chain, &request.uri, request.preset.as_deref(), request.index)
+            let added = session
+                .add_given(chain, &request.uri, request.preset.as_deref(), request.index)
                 .map_err(|error| preset_hint(explain(session.project(), error), &request.uri))?;
+            let device = added.device;
             let rest: Result<(), String> = (|| {
                 if let Some(params) = &request.params {
                     set_params(&mut session, device, params)?;
@@ -1176,6 +1181,7 @@ impl TrillServer {
                 out["preset"] = json!(preset.name);
             }
             sidechain_into(&mut out, session.project(), model);
+            crate::sounds::given_into(&mut out, &session, added.given.as_ref());
             crate::sounds::preset_note_into(&mut out, &mut session, device);
             crate::sounds::instrument_into(&mut out, &session, device);
             Ok(out)
@@ -1255,9 +1261,14 @@ impl TrillServer {
                     );
                 }
             }
-            if let Some(preset) = &model.preset {
-                out["preset"] = json!(preset.name);
+            match &model.preset {
+                // An effect a sound brought says so, not that it is on a
+                // preset of its own type.
+                Some(preset) if preset.bringer().is_some() => out["from_sound"] = json!(preset.name),
+                Some(preset) => out["preset"] = json!(preset.name),
+                None => {}
             }
+            let after = |preset: &trill_core::presets::PresetInfo| session.sound_after(&model.uri, preset);
             match &searched {
                 Some(list) => {
                     let search = PresetSearch {
@@ -1266,14 +1277,15 @@ impl TrillServer {
                         offset: request.preset_offset.unwrap_or(0),
                         limit: request.preset_limit.unwrap_or(DEFAULT_PRESETS).min(MAX_PRESETS),
                     };
-                    out["presets"] = presets_json(list, &search);
+                    out["presets"] = presets_json_with(list, &search, &after);
                 }
                 // Not asked for: how many there are, and the presets
                 // themselves only where they are few.
                 None => {
                     let list = session.presets(&model.uri);
                     let limit = if list.len() <= UNASKED_PRESETS { UNASKED_PRESETS } else { 0 };
-                    let mut presets = presets_json(&list, &PresetSearch { limit, ..PresetSearch::default() });
+                    let shown = PresetSearch { limit, ..PresetSearch::default() };
+                    let mut presets = presets_json_with(&list, &shown, &after);
                     if let (0, Some(fields)) = (limit, presets.as_object_mut()) {
                         fields.remove("items");
                         fields.remove("kinds");
@@ -1326,10 +1338,10 @@ impl TrillServer {
             let mut loaded = None;
             let result: Result<(), String> = (|| {
                 if let Some(preset) = &request.preset {
-                    let preset = session.load_preset(id, preset).map_err(|error| {
+                    let given = session.give_preset(id, preset).map_err(|error| {
                         preset_hint(explain(session.project(), error), uri.as_deref().unwrap_or_default())
                     })?;
-                    loaded = Some(preset.path());
+                    loaded = Some(given);
                 }
                 if !resolved.is_empty() {
                     session.set_device_params(id, &resolved).map_err(|error| explain(session.project(), error))?;
@@ -1359,8 +1371,9 @@ impl TrillServer {
                 out["shown"] = shown;
             }
             let given = loaded.is_some();
-            if let Some(preset) = loaded {
-                out["preset"] = json!(preset);
+            if let Some(sound) = &loaded {
+                out["preset"] = json!(sound.preset.path());
+                crate::sounds::given_into(&mut out, &session, Some(sound));
             }
             if !settings.is_empty() {
                 out["settings"] = json!(settings.into_iter().collect::<BTreeMap<String, String>>());

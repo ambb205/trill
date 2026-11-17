@@ -408,3 +408,48 @@ async fn the_library_says_which_of_its_folders_is_missing_and_goes_along_with_th
     let saved = std::fs::read_to_string(fixture.folder.path().join("config").join("settings.json")).unwrap();
     assert!(saved.contains("Third") && !saved.contains("trill_samples"), "{saved}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_files_a_sounds_devices_name_are_missed_and_relinked_like_any_others() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let old = fixture.folder.path().join("Music").join("packs");
+    let new = fixture.folder.path().join("Other").join("a").join("b").join("c").join("d").join("packs");
+    let kick = tone(old.join("Kit").join("Kick 01.wav"), 0.25);
+    // A drum rack with a kick on it and a room behind it, kept as a sound.
+    let kit = ok(client, "create_track", json!({ "name": "Kit", "instrument": "builtin:drumrack" })).await;
+    ok(client, "set_sample", json!({ "device": kit["instrument_device_id"], "pad": "kick", "path": kick })).await;
+    ok(client, "add_device", json!({ "track": kit["track_id"], "uri": "builtin:reverb" })).await;
+    ok(client, "save_sound", json!({ "track": kit["track_id"], "name": "Room Kit" })).await;
+
+    // The pack goes elsewhere. Another song is given the sound all the
+    // same: it is made, and the song says what it is missing, once.
+    move_folder(&old, &new);
+    ok(client, "new_project", json!({})).await;
+    let arguments = json!({ "name": "Drums", "instrument": "builtin:drumrack", "preset": "Room Kit" });
+    let drums = ok(client, "create_track", arguments).await;
+    let rack = drums["instrument_device_id"].as_u64().unwrap();
+    assert_eq!(drums["sound"]["made"][0]["name"], "Reverb");
+    let project = ok(client, "get_project", json!({})).await;
+    let brief = &project["missing_files"];
+    assert_eq!((&brief["files"], &brief["places"], &brief["tracks"]), (&json!(1), &json!(1), &json!(["Drums"])));
+    let lost = ok(client, "missing_files", json!({})).await;
+    assert_eq!(lost["files"][0]["file"], json!(kick));
+    assert_eq!(
+        lost["files"][0]["used_by"],
+        json!([{ "device": rack, "slot": "pad 36", "name": "Drum Rack", "track": "Drums" }])
+    );
+
+    // Found by its name where the library now is: not for sure, since a
+    // name is all there is to go by, so it is taken by being asked for.
+    // Given back in one step.
+    ok(client, "library", json!({ "action": "add_folder", "path": text(new.parent().unwrap()) })).await;
+    let found = ok(client, "missing_files", json!({})).await;
+    assert_eq!(found["files"][0]["found"]["path"], json!(text(&new.join("Kit").join("Kick 01.wav"))), "{found}");
+    assert_eq!(ok(client, "relink_files", json!({})).await["relinked"], json!({ "files": 0, "places": 0 }));
+    let relinked = ok(client, "relink_files", json!({ "found": "all" })).await;
+    assert_eq!(relinked["relinked"], json!({ "files": 1, "places": 1 }), "{relinked}");
+    assert!(ok(client, "get_project", json!({})).await["missing_files"].is_null());
+    ok(client, "history", json!({ "action": "undo" })).await;
+    assert_eq!(ok(client, "get_project", json!({})).await["missing_files"]["places"], 1);
+}

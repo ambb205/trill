@@ -12,6 +12,7 @@ mod automation;
 mod clips;
 mod controllers;
 mod editors;
+mod export;
 mod film;
 mod instruments;
 mod keyboard;
@@ -23,6 +24,7 @@ mod perf;
 mod recording;
 mod recovery;
 mod ruler;
+mod sound_presets;
 mod sounds;
 mod stage;
 mod tracks;
@@ -222,6 +224,14 @@ impl Harness {
     fn labeled_below(&self, label: &str, y: f32) -> Pos2 {
         let found = self.all_labeled(label).into_iter().find(|rect| rect.top() >= y);
         found.unwrap_or_else(|| panic!("nothing below {y} is labeled '{label}'")).center()
+    }
+
+    /// Scrolls the browser's Devices tab to its end, where the presets of
+    /// the selected device are listed.
+    fn browse_to_presets(&mut self) {
+        let over = pos2(self.work_left() / 2.0, top_bar::HEIGHT + 300.0);
+        self.wheel(Modifiers::NONE, over, -400.0);
+        self.idle(2);
     }
 
     /// Clicks the first button, menu item or other widget with this label.
@@ -1145,6 +1155,7 @@ fn the_browser_adds_and_swaps_devices_and_applies_presets() {
     // The browser lists the presets of the selected device, the synth, and
     // applies one on a click.
     assert!(harness.project().tracks[0].devices[0].params.is_empty());
+    harness.browse_to_presets();
     harness.click_label("bass");
     let params = harness.project().tracks[0].devices[0].params.clone();
     assert!(!params.is_empty(), "the preset's values were applied");
@@ -1211,6 +1222,7 @@ fn a_devices_sound_is_saved_from_its_preset_menu_and_given_back() {
 
     // Another preset, then the saved one again from the browser: the
     // sound comes back whole.
+    harness.browse_to_presets();
     harness.click_label("bass");
     assert_ne!(synth(&harness).params.get("cutoff"), Some(&432.0));
     harness.idle(2);

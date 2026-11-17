@@ -1128,6 +1128,38 @@ fn every_patch_sounds_ends_and_answers_its_macros() {
     }
 }
 
+#[test]
+fn every_patch_is_a_sound_and_eleven_bring_effects_that_there_are() {
+    use trill_core::device::DeviceFactory;
+    let devices = crate::BuiltinFactory.descriptors();
+    let own = devices.iter().find(|descriptor| descriptor.uri == URI).unwrap();
+    let mut with_effects = 0;
+    for patch in patches::PATCHES {
+        // The descriptor says what the table does: a model and the window
+        // read it there.
+        let listed = own.presets.iter().find(|preset| preset.name == patch.name).unwrap();
+        let after = listed.after.as_deref().unwrap_or_else(|| panic!("{} is no sound", patch.name));
+        assert_eq!(after, patch.after());
+        let dry = matches!(patch.category, "" | "Bass");
+        assert_eq!(after.is_empty(), dry, "{}: a bass is dry, and everything else is not", patch.name);
+        with_effects += usize::from(!after.is_empty());
+        for device in after {
+            // An effect that is built in, called what it is called, with
+            // values its parameters take, and switched on.
+            let effect = devices.iter().find(|descriptor| descriptor.uri == device.uri);
+            let effect = effect.unwrap_or_else(|| panic!("{}: there is no {}", patch.name, device.uri));
+            assert_eq!(effect.category, trill_core::device::DeviceCategory::Effect);
+            assert_eq!((device.device.as_str(), device.enabled, &device.state), (effect.name.as_str(), true, &None));
+            for (id, value) in &device.params {
+                let param = effect.params.iter().find(|param| param.id == *id);
+                let param = param.unwrap_or_else(|| panic!("{}: {} has no '{id}'", patch.name, effect.name));
+                assert!((param.min..=param.max).contains(value), "{}: {id} = {value}", patch.name);
+            }
+        }
+    }
+    assert_eq!(with_effects, 11);
+}
+
 /// Not a test: how loud the poly synth's presets are by the same measure,
 /// which is where the level the patches are matched to comes from.
 #[test]

@@ -21,10 +21,11 @@ use crate::sound::Sound;
 use crate::stage::Song;
 use crate::voice::Waves;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use trill_core::audio::AudioBuffer;
 use trill_core::{Beats, Project, TrackId};
-use trill_engine::render::{RenderJob, RenderOptions, Rendered};
+use trill_engine::render::{RenderError, RenderJob, RenderOptions, Rendered, Watch};
 use trill_media::{WavFormat, write_wav};
 
 /// Values a second in the levels a render keeps of every track.
@@ -144,11 +145,7 @@ impl SongFilm {
             patience: request.patience,
             ..RenderOptions::default()
         };
-        let rendered =
-            self.render.render(&options).map_err(|error| format!("The song could not be rendered: {error}."))?;
-        if progress.is_stopped() {
-            return Err("The film was stopped before its first frame; nothing of it was kept.".to_string());
-        }
+        let rendered = sound(&self.render, options, progress)?;
         let sound = sound_of(&rendered).starting_at(song.score.seconds(from));
         let seconds = rendered.left.len() as f64 / f64::from(rendered.sample_rate);
         let mut notes = notes_of(&rendered);
@@ -175,6 +172,40 @@ impl SongFilm {
             loudness_lufs: Some(loudness),
             peak_db: Some(peak),
         })
+    }
+}
+
+/// What a film that was stopped while its sound was rendered says.
+pub const STOPPED_BEFORE_ITS_FIRST_FRAME: &str = "The film was stopped before its first frame; nothing of it was kept.";
+
+/// Renders the sound a film is made with, as `options` say, while
+/// `progress` is watched: a film that is stopped while its sound is being
+/// rendered stops the render, which ends at once wherever it is done and
+/// leaves nothing behind. The error is a sentence: that the film was
+/// stopped, or why the song could not be rendered (a plugin that took the
+/// render's process down is named there, with what to do next).
+pub fn sound(render: &RenderJob, options: RenderOptions, progress: &Progress) -> Result<Rendered, String> {
+    let watch = Watch::new();
+    let options = RenderOptions { watch: Some(watch.clone()), ..options };
+    let over = AtomicBool::new(false);
+    let rendered = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !over.load(Ordering::Relaxed) {
+                if progress.is_stopped() {
+                    watch.stop();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let rendered = render.render(&options);
+        over.store(true, Ordering::Relaxed);
+        rendered
+    });
+    match rendered {
+        Ok(_) | Err(RenderError::Stopped) if progress.is_stopped() => Err(STOPPED_BEFORE_ITS_FIRST_FRAME.to_string()),
+        Ok(rendered) => Ok(rendered),
+        Err(error) => Err(format!("The song could not be rendered: {error}.")),
     }
 }
 

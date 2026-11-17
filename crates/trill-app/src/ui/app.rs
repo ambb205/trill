@@ -20,7 +20,7 @@ use super::state::{
 };
 use super::{
     UiOptions, arrangement, automation, browser, controller_lane, credits, detail, dragging, piano_roll, recording,
-    status_bar, top_bar,
+    sound_presets, status_bar, top_bar,
 };
 use eframe::egui;
 use parking_lot::Mutex;
@@ -913,6 +913,7 @@ impl TrillApp {
         self.stage.closed(self.graphics.as_ref());
         let mut cx = self.cx();
         dragging::begin(&ctx, &mut cx);
+        sound_presets::begin(&ctx, &mut cx);
 
         // Panels are claimed from the outside in: the bars, the browser
         // down the left, the detail panel under what is left, and the
@@ -974,6 +975,7 @@ impl TrillApp {
         egui::CentralPanel::no_frame().show(ui, |ui| arrangement::show(ui, &mut cx));
 
         dragging::end(&ctx, &mut cx);
+        sound_presets::end(&ctx, &mut cx);
         files::confirm_modal(&ctx, &mut cx);
         recovery::modal(&ctx, &mut cx);
         missing::modal(&ctx, &mut cx);
@@ -1103,6 +1105,13 @@ impl TrillApp {
     #[cfg(test)]
     pub fn filming(&self) -> &Filming {
         &self.filming
+    }
+
+    /// Exports the song to `path`, with its stems if asked: what choosing
+    /// a place in the system's dialog leads to.
+    #[cfg(test)]
+    pub fn export_to(&mut self, ctx: &egui::Context, path: std::path::PathBuf, stems: bool) {
+        files::export_to(ctx, &mut self.cx(), path, stems);
     }
 
     /// Makes the film the panel describes at `path`: what choosing a place
@@ -1326,7 +1335,7 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
                 audio_settings::toggle(cx);
             } else if cx.filming.is_open() {
                 filming::close(cx);
-            } else if dragging::cancel(cx) {
+            } else if dragging::cancel(cx) || sound_presets::cancel(cx) {
                 // The sound in the air was put down.
             } else if cx.sounds.preview.is_playing() || cx.sounds.preview.loading.is_some() {
                 // A sound being auditioned is the first thing Escape ends.

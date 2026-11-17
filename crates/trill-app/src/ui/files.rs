@@ -288,6 +288,20 @@ pub fn export_stems(ctx: &egui::Context, cx: &mut Cx) {
     export(ctx, cx, true);
 }
 
+/// Renders the song into `path`, without asking where: what the system's
+/// dialog leads to once it is answered.
+#[cfg(test)]
+pub fn export_to(ctx: &egui::Context, cx: &mut Cx, path: PathBuf, stems: bool) {
+    if cx.jobs.exporting.is_some() {
+        return;
+    }
+    let session = cx.session.clone();
+    cx.jobs.spawn(ctx, move |report| {
+        report(Event::ExportStarted(path.clone()));
+        report(Event::Exported(render(&session, &path, stems).map(Box::new)));
+    });
+}
+
 fn export(ctx: &egui::Context, cx: &mut Cx, stems: bool) {
     if cx.jobs.exporting.is_some() || std::mem::replace(&mut cx.jobs.dialog_open, true) {
         return;
@@ -684,6 +698,7 @@ mod tests {
             threads: 1,
             alone: Vec::new(),
             draws: Vec::new(),
+            not_begun: Vec::new(),
             problems,
         }
     }

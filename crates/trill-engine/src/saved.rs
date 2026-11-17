@@ -38,6 +38,9 @@ const STATE_SUFFIX: &str = "-state";
 /// text is a few kilobytes, a plugin's state at most some megabytes.
 const MAX_PRESET_TEXT: u64 = 64 * 1024 * 1024;
 const MAX_PRESET_STATE: u64 = 256 * 1024 * 1024;
+/// The most devices a sound may bring after its first: far more than a
+/// chain has, and what bounds the looking for their state files.
+pub const MAX_AFTER: usize = 32;
 
 /// The presets that were saved, of every device type. See the module
 /// documentation.
@@ -71,6 +74,18 @@ pub struct Saved {
     pub replaced: bool,
     /// The file it was written to; `None` when nothing is kept on disk.
     pub file: Option<PathBuf>,
+}
+
+/// A saved preset that is a sound, as a browser lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedSound {
+    /// The device type it is a preset of: its first device.
+    pub uri: String,
+    /// What that type was called when the sound was saved.
+    pub device: String,
+    pub info: PresetInfo,
+    /// What it brings after its first device, by name.
+    pub after: Vec<String>,
 }
 
 impl SavedPresets {
@@ -128,6 +143,9 @@ impl SavedPresets {
     /// name (in either case) if there is one.
     pub fn save(&self, mut preset: SavedPreset) -> Result<Saved, String> {
         preset.name = SavedPreset::checked_name(&preset.name)?;
+        if preset.after.as_ref().is_some_and(|after| after.len() > MAX_AFTER) {
+            return Err(format!("a sound can bring {MAX_AFTER} devices after its first at most"));
+        }
         let info = preset.info();
         let mut inner = self.inner.lock();
         let file = match &inner.folder {
@@ -135,8 +153,11 @@ impl SavedPresets {
             None => None,
         };
         if file.is_some() {
-            // The state is in its file, and is read from there.
+            // The states are in their files, and are read from there.
             preset.state = None;
+            for device in preset.after.iter_mut().flatten() {
+                device.state = None;
+            }
         }
         let same = |entry: &Entry| entry.preset.uri == preset.uri && same_name(&entry.preset.name, &preset.name);
         let replaced = inner.entries.iter().any(same);
@@ -168,14 +189,51 @@ impl SavedPresets {
             (entry.preset.clone(), entry.file.clone())
         };
         if let Some(file) = file {
-            let state = state_file(&file);
-            match std::fs::read(&state) {
-                Ok(bytes) => preset.state = Some(bytes),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(format!("cannot read '{}': {error}", state.display())),
+            let read = |state: PathBuf| match std::fs::read(&state) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(format!("cannot read '{}': {error}", state.display())),
+            };
+            // A state written into the preset itself stays where there
+            // is no file of it.
+            if let Some(bytes) = read(state_file(&file))? {
+                preset.state = Some(bytes);
+            }
+            for (place, device) in preset.after.iter_mut().flatten().enumerate() {
+                if let Some(bytes) = read(state_file_after(&file, place))? {
+                    device.state = Some(bytes);
+                }
             }
         }
         Ok(Some(preset))
+    }
+
+    /// What the saved preset `info` lists brings after its device, by
+    /// name, if it is a sound: `Some` and empty for one that is dry.
+    /// `None` for a preset of one device, and for one that is not saved
+    /// for the device type `uri`.
+    pub fn after(&self, uri: &str, info: &PresetInfo) -> Option<Vec<String>> {
+        let name = SavedPreset::name_of(info)?;
+        let inner = self.inner.lock();
+        let entry = inner.entries.iter().find(|entry| entry.preset.uri == uri && entry.preset.name == name)?;
+        entry.preset.after.as_deref().map(trill_core::presets::names_after)
+    }
+
+    /// Every saved preset that is a sound, of all device types: the type
+    /// it is a preset of, what that was called, the preset, and what it
+    /// brings after its device by name.
+    pub fn sounds(&self) -> Vec<SavedSound> {
+        let inner = self.inner.lock();
+        let sounds = inner.entries.iter().filter_map(|entry| {
+            let after = entry.preset.after.as_deref()?;
+            Some(SavedSound {
+                uri: entry.preset.uri.clone(),
+                device: entry.preset.device.clone(),
+                info: entry.info.clone(),
+                after: trill_core::presets::names_after(after),
+            })
+        });
+        sounds.collect()
     }
 
     /// Whether `file` is named as a saved preset's file is.
@@ -192,11 +250,21 @@ impl SavedPresets {
         let text = String::from_utf8(text).map_err(|_| "it is not a saved preset (it is not text)".to_string())?;
         let mut preset =
             SavedPreset::from_json(&text).map_err(|reason| format!("it is not a saved preset ({reason})"))?;
-        let state = state_file(file);
-        if state.is_file() {
+        let read = |state: PathBuf| -> Result<Option<Vec<u8>>, String> {
+            if !state.is_file() {
+                return Ok(None);
+            }
             let bytes = read_bounded(&state, MAX_PRESET_STATE)
                 .map_err(|reason| format!("the file with its state, '{}', is no good: {reason}", state.display()))?;
+            Ok(Some(bytes))
+        };
+        if let Some(bytes) = read(state_file(file))? {
             preset.state = Some(bytes);
+        }
+        for (place, device) in preset.after.iter_mut().flatten().enumerate() {
+            if let Some(bytes) = read(state_file_after(file, place))? {
+                device.state = Some(bytes);
+            }
         }
         Ok(preset)
     }
@@ -260,8 +328,30 @@ fn state_file(preset_file: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// The file the state of a sound's device is kept in that comes `place`
+/// places after its first (from 0): beside the sound's own, numbered.
+fn state_file_after(preset_file: &Path, place: usize) -> PathBuf {
+    let mut name = preset_file.as_os_str().to_owned();
+    name.push(format!("{STATE_SUFFIX}-{}", place + 1));
+    PathBuf::from(name)
+}
+
 fn remove(preset_file: &Path) {
     for file in [preset_file.to_path_buf(), state_file(preset_file)] {
+        match std::fs::remove_file(&file) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => log::warn!("cannot remove '{}': {error}", file.display()),
+        }
+    }
+    remove_states_after(preset_file, 0);
+}
+
+/// Removes the state files of a sound's devices from `place` on: every
+/// one there is, since they are numbered without a gap that matters.
+fn remove_states_after(preset_file: &Path, place: usize) {
+    for place in place..MAX_AFTER {
+        let file = state_file_after(preset_file, place);
         match std::fs::remove_file(&file) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -314,11 +404,29 @@ fn write(folder: &Path, preset: &SavedPreset) -> Result<PathBuf, String> {
             Err(error) => return Err(format!("cannot remove '{}': {error}", state.display())),
         },
     }
+    // A sound's other devices, each in a file of its own; and none left
+    // of a sound that had more of them.
+    let after = preset.after.as_deref().unwrap_or_default();
+    for (place, device) in after.iter().enumerate() {
+        let state = state_file_after(&file, place);
+        match &device.state {
+            Some(bytes) => replace(&state, bytes)?,
+            None => match std::fs::remove_file(&state) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("cannot remove '{}': {error}", state.display())),
+            },
+        }
+    }
+    remove_states_after(&file, after.len());
     // What is written says the format it is written in: a preset made
     // here without one is of this build.
     let format = preset.format.or(Some(trill_core::project::FORMAT_VERSION));
-    let text = SavedPreset { state: None, format, ..preset.clone() }.to_json();
-    replace(&file, text.as_bytes())?;
+    let mut written = SavedPreset { state: None, format, ..preset.clone() };
+    for device in written.after.iter_mut().flatten() {
+        device.state = None;
+    }
+    replace(&file, written.to_json().as_bytes())?;
     Ok(file)
 }
 
@@ -614,6 +722,68 @@ mod tests {
         let revision = store.revision();
         store.refresh();
         assert_eq!(store.revision(), revision, "nothing changed");
+    }
+
+    /// A guitar through an amplifier and a reverb: three devices, two of
+    /// them with a state.
+    fn tone(name: &str) -> SavedPreset {
+        use trill_core::presets::SoundDevice;
+        let amp = SoundDevice { state: Some(vec![7, 7]), ..SoundDevice::new(AMP, "Amp", &[("gain", 0.8)]) };
+        let reverb = SoundDevice::new("builtin:reverb", "Reverb", &[("decay", 1.5)]);
+        SavedPreset { after: Some(vec![amp, reverb]), ..preset("vst3:GUITAR", name, Some(&[1])) }
+    }
+
+    #[test]
+    fn a_sound_is_kept_with_the_state_of_each_of_its_devices() {
+        let folder = tempfile::tempdir().unwrap();
+        let store = SavedPresets::default();
+        store.open(folder.path().to_path_buf());
+        let saved = store.save(tone("Tone")).unwrap();
+        let file = saved.file.clone().unwrap();
+        // One text file that says what the sound is made of, and beside it
+        // a file for each state: none of them in the text.
+        assert_eq!(std::fs::read(state_file(&file)).unwrap(), [1]);
+        assert_eq!(std::fs::read(state_file_after(&file, 0)).unwrap(), [7, 7]);
+        assert!(!state_file_after(&file, 1).exists(), "the reverb has no state");
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains(r#""after""#) && !text.contains("state"), "{text}");
+
+        // It is a preset of its first device's type, and says what follows.
+        assert_eq!(names(&store.list("vst3:GUITAR")), ["Tone"]);
+        assert_eq!(store.after("vst3:GUITAR", &saved.info), Some(vec!["Amp".to_string(), "Reverb".to_string()]));
+        let plain = store.save(preset("vst3:GUITAR", "Plain", None)).unwrap();
+        assert_eq!(store.after("vst3:GUITAR", &plain.info), None, "a preset of one device says nothing");
+        let sounds = store.sounds();
+        assert_eq!(sounds.len(), 1);
+        assert_eq!(
+            (sounds[0].uri.as_str(), sounds[0].info.name.as_str(), sounds[0].after.len()),
+            ("vst3:GUITAR", "Tone", 2)
+        );
+
+        // Whole again in another run of the program, and from its file
+        // wherever that lies.
+        let again = SavedPresets::default();
+        again.open(folder.path().to_path_buf());
+        assert_eq!(again.load("vst3:GUITAR", &saved.info).unwrap().unwrap(), tone("Tone"));
+        assert_eq!(SavedPresets::read_file(&file).unwrap(), tone("Tone"));
+
+        // Saved again with less after it, nothing of the longer sound is
+        // left; and nothing at all once it is deleted.
+        let shorter = SavedPreset { after: Some(Vec::new()), ..tone("Tone") };
+        store.save(shorter.clone()).unwrap();
+        assert!(!state_file_after(&file, 0).exists());
+        assert_eq!(store.load("vst3:GUITAR", &saved.info).unwrap().unwrap(), shorter);
+        assert_eq!(store.after("vst3:GUITAR", &saved.info), Some(Vec::new()), "dry, and it says so");
+        store.save(tone("Tone")).unwrap();
+        assert!(store.delete("vst3:GUITAR", "Tone"));
+        assert!(!file.exists() && !state_file(&file).exists() && !state_file_after(&file, 0).exists());
+
+        // In memory the states stay where they are.
+        let memory = SavedPresets::default();
+        let saved = memory.save(tone("Tone")).unwrap();
+        assert_eq!(memory.load("vst3:GUITAR", &saved.info).unwrap().unwrap(), tone("Tone"));
+        let long = SavedPreset { after: Some(vec![Default::default(); MAX_AFTER + 1]), ..tone("Long") };
+        assert!(memory.save(long).unwrap_err().contains("at most"));
     }
 
     #[test]
