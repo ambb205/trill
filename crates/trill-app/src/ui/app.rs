@@ -12,6 +12,7 @@ use super::recovery::{self, Recovery};
 use super::shortcuts::{self, Command};
 use super::snapshot::{Live, Snapshot};
 use super::sounds::{Dropped, Report, Sounds};
+use super::stage::StageView;
 use super::state::{
     AudioSummary, BrowserState, BrowserTab, Cx, FocusArea, LaneOwner, StoryAsk, Tool, UiState, lane_owner,
 };
@@ -73,6 +74,11 @@ pub struct TrillApp {
     keyboard: Keyboard,
     /// The Audio and MIDI panel.
     settings: Settings,
+    /// The song filmed as it plays, shown in place of the panes.
+    stage: StageView,
+    /// The window's graphics device, which the stage draws on. `None`
+    /// where the window has none to give (the tests).
+    graphics: Option<eframe::egui_wgpu::RenderState>,
     /// The colors, type and metrics the window is painted with.
     theme: Theme,
     /// The devices that can be added. Starts as the built-in ones and is
@@ -157,6 +163,7 @@ impl TrillApp {
         }
         state.browser.sounds.pending_select = options.select_sound.clone();
         state.shortcuts_open = options.show_shortcuts;
+        state.stage_open = options.stage;
         if let Some(kind) = options.lane {
             state.piano.lane = super::state::LaneShown::Controller(kind);
         }
@@ -233,6 +240,8 @@ impl TrillApp {
             recovery,
             keyboard,
             settings: Settings::default(),
+            stage: StageView::new(),
+            graphics: None,
             theme,
             descriptors: BuiltinFactory.descriptors(),
             catalog,
@@ -503,6 +512,21 @@ impl TrillApp {
         if state.shortcuts_open {
             commands.retain(|command| matches!(command, Command::ShowShortcuts | Command::Escape));
         }
+        if state.stage_open {
+            // The stage is watched, not worked in: the transport's keys
+            // and the ones that leave it are all it answers.
+            commands.retain(|command| {
+                matches!(
+                    command,
+                    Command::ToggleStage
+                        | Command::Escape
+                        | Command::TogglePlay
+                        | Command::Rewind
+                        | Command::ToggleLoop
+                        | Command::ToggleMetronome
+                )
+            });
+        }
         if self.settings.is_open() {
             // The panel has the keyboard, but for the key that closes it
             // and for playing the song to hear what a setting does. While
@@ -605,6 +629,16 @@ impl TrillApp {
                     self.audio.info.output,
                     self.live.audio_faults,
                 );
+                // How the window kept up: frames since it opened, and what
+                // the stage's part of them cost while it was shown.
+                eprintln!(
+                    "trill: {} frames, {:.1} a second",
+                    self.frames,
+                    self.frames as f32 / elapsed.as_secs_f32().max(1e-3)
+                );
+                if let Some(report) = self.stage.report() {
+                    eprintln!("trill: {report}");
+                }
                 self.capture = Capture::Done;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -782,7 +816,11 @@ impl TrillApp {
         // Before even those, the computer keyboard's: a note leaves for
         // the engine before anything else in the frame is looked at.
         keyboard::keys(&ctx, &mut self.cx(), typing);
-        browser::keys(&ctx, &mut self.cx(), typing);
+        // Not on the stage, where the browser is not to be seen: Space is
+        // the transport's there, whatever was being worked in before.
+        if !self.state.stage_open {
+            browser::keys(&ctx, &mut self.cx(), typing);
+        }
         let commands = self.read_commands(&ctx);
         let open_editor = self.options.open_editor.take();
         let open_settings = std::mem::take(&mut self.options.show_settings);
@@ -796,6 +834,14 @@ impl TrillApp {
         if let Some(name) = open_editor {
             editors::open_named(&mut cx, &name);
         }
+        if cx.state.stage_open {
+            // The stage has the whole window: no pane is laid out, and so
+            // none is touched.
+            self.show_stage(ui);
+            return;
+        }
+        self.stage.closed(self.graphics.as_ref());
+        let mut cx = self.cx();
         dragging::begin(&ctx, &mut cx);
 
         // Panels are claimed from the outside in: the bars, the browser
@@ -916,6 +962,36 @@ impl TrillApp {
     /// (plugin editors).
     pub fn set_native_window(&mut self, window: Option<isize>) {
         self.editors.set_owner(window);
+    }
+
+    /// Hands over the window's graphics device, for the stage to draw on.
+    pub fn set_graphics(&mut self, graphics: Option<eframe::egui_wgpu::RenderState>) {
+        self.graphics = graphics;
+    }
+
+    /// The frame while the stage is open: the stage, and what has to go
+    /// on whatever the window shows.
+    fn show_stage(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        egui::CentralPanel::no_frame().show(ui, |ui| {
+            self.stage.show(ui, &self.snapshot, &self.live, self.audio.latency_ms, self.graphics.as_ref());
+        });
+        // A question that came up meanwhile (unsaved work on closing the
+        // window) is asked over the stage.
+        let mut cx = self.cx();
+        files::confirm_modal(&ctx, &mut cx);
+        keyboard::settle(&ctx, &mut cx);
+        if let Some(theme) = self.state.theme_request.take().and_then(Theme::named) {
+            trill_noir::install(&ctx, &theme);
+            self.theme = theme;
+        }
+        self.tell_selection();
+        self.was_typing = ctx.text_edit_focused();
+        let moving = self.live.playing || self.live.take.is_some() || self.live.meters_moving();
+        if moving {
+            ctx.request_repaint();
+        }
+        self.automate(&ctx);
     }
 
     #[cfg(test)]
@@ -1109,7 +1185,9 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
             FocusArea::Arrangement | FocusArea::Browser => ops::select_all(cx),
         },
         Command::Escape => {
-            if cx.state.shortcuts_open {
+            if cx.state.stage_open {
+                cx.state.stage_open = false;
+            } else if cx.state.shortcuts_open {
                 cx.state.shortcuts_open = false;
             } else if cx.settings.is_open() {
                 audio_settings::toggle(cx);
@@ -1155,6 +1233,7 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
         Command::ToggleBrowser => cx.state.browser.open = !cx.state.browser.open,
         Command::ToggleAssistant => cx.assistant.toggle(),
         Command::ToggleKeyboard => cx.keyboard.toggle(),
+        Command::ToggleStage => cx.state.stage_open = !cx.state.stage_open,
         Command::MakingOf => cx.state.story = Some(StoryAsk::Watch),
         Command::Record => recording::toggle(cx),
         Command::AudioSettings => audio_settings::toggle(cx),

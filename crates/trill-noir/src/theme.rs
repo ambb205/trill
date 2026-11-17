@@ -15,6 +15,16 @@ use egui::Color32;
 /// How many track hues a theme provides.
 pub const TRACK_HUES: usize = 10;
 
+/// The colors a project hands its tracks when nothing chooses one, in
+/// order.
+///
+/// They say "the nth track", not "this hue": two of the ten are greens of
+/// one hue and two are purples. Mapped by hue they would collapse onto
+/// seven palette entries, so [`Theme::stored_hue`] maps them by position
+/// instead and ten tracks stay ten colors.
+pub const POSITIONAL: [u32; TRACK_HUES] =
+    [0xF2994A, 0x56CCF2, 0xBB6BD9, 0x6FCF97, 0xEB5757, 0xF2C94C, 0x2D9CDB, 0x9B51E0, 0x27AE60, 0xE27AB0];
+
 /// A text style: size in points, letter spacing, and how the text is set.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct TextStyle {
@@ -285,6 +295,27 @@ impl Theme {
         self.tracks[index % TRACK_HUES]
     }
 
+    /// The hue to draw a track in, given the color stored on it as
+    /// 0xRRGGBB. A song stores a color; what is painted is the theme's
+    /// hue that stands for it, so a song from before the palette existed
+    /// (or from another program) still looks like part of the design.
+    pub fn stored_hue(&self, stored: u32) -> Color32 {
+        // Compared against Noir's hues whatever the theme, since those are
+        // what new tracks store: a track made in one theme keeps its place
+        // in the palette of another.
+        let noir = Theme::noir();
+        let stored_hue = rgb(stored);
+        let index = POSITIONAL
+            .iter()
+            .position(|legacy| *legacy == stored & 0xFF_FFFF)
+            .or_else(|| noir.tracks.iter().position(|hue| *hue == stored_hue))
+            .or_else(|| {
+                let nearest = noir.nearest_track_hue(stored_hue);
+                noir.tracks.iter().position(|hue| *hue == nearest)
+            });
+        index.map_or(stored_hue, |index| self.track_hue(index))
+    }
+
     /// The palette hue that stands in for an arbitrary color, such as one
     /// stored in a project made before this palette existed: the hue
     /// closest in angle, or the least chromatic one for grays.
@@ -493,6 +524,24 @@ mod tests {
         assert_eq!(noir.nearest_track_hue(rgb(0xE27AB0)), rose, "pink");
         assert_eq!(noir.nearest_track_hue(rgb(0x808080)), slate, "grays take the neutral hue");
         assert_eq!(noir.nearest_track_hue(rgb(0x000000)), slate);
+    }
+
+    #[test]
+    fn a_stored_color_is_shown_in_the_hue_that_stands_for_it() {
+        let (noir, graphite) = (Theme::noir(), Theme::graphite());
+        let stored = |color: Color32| (color.r() as u32) << 16 | (color.g() as u32) << 8 | color.b() as u32;
+        for (index, legacy) in POSITIONAL.into_iter().enumerate() {
+            // What a project hands out goes by its place, in any theme.
+            assert_eq!(noir.stored_hue(legacy), noir.tracks[index], "the {index}th default color");
+            assert_eq!(graphite.stored_hue(legacy), graphite.tracks[index]);
+            // A hue of the palette is itself, and its place in another.
+            assert_eq!(noir.stored_hue(stored(noir.tracks[index])), noir.tracks[index]);
+            assert_eq!(graphite.stored_hue(stored(noir.tracks[index])), graphite.tracks[index]);
+        }
+        // Anything else takes the nearest hue; only the low three bytes count.
+        assert_eq!(noir.stored_hue(0x00FF40), noir.tracks[3]);
+        assert_eq!(noir.stored_hue(0xFF00FF40), noir.tracks[3]);
+        assert_eq!(noir.stored_hue(0x777777), noir.tracks[6], "grays take the neutral hue");
     }
 
     #[test]
