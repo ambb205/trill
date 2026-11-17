@@ -109,7 +109,7 @@ impl StandIns {
 }
 
 /// Something that went wrong while compiling but did not stop it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Problem {
     /// The device could not be created; audio passes through where it sits.
     Device { device: DeviceId, reason: String },
@@ -357,6 +357,10 @@ impl Compiler<'_> {
         let processor = if running {
             None
         } else {
+            // A render in a process of its own says which device it is
+            // making: a plugin that takes the process down as it is made
+            // is then known by name.
+            crate::apart::stage(crate::apart::Stage::Making(device.id));
             match self.factory.create_for(device, self.sample_rate, MAX_BLOCK, self.purpose) {
                 Ok(instance) => {
                     if self.purpose == Purpose::Playing && Plugins::is_plugin(&device.uri) {
@@ -713,6 +717,11 @@ impl Routing {
         }
         feeds
     }
+}
+
+/// The tracks a render of `project` makes: see [`Routing::needed`].
+pub(crate) fn needed(project: &Project) -> HashSet<TrackId> {
+    Routing::of(project).needed(project)
 }
 
 /// How one track feeds another.

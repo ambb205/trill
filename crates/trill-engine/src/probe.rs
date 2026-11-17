@@ -56,7 +56,7 @@ const HIGHEST_HZ: f64 = 4200.0;
 const CLEAR_PITCH: f64 = 0.7;
 
 /// A note to play.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProbeNote {
     pub pitch: u8,
     /// 1..=127.
@@ -65,7 +65,7 @@ pub struct ProbeNote {
     pub with: Vec<u8>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ProbeOptions {
     pub sample_rate: u32,
     /// How long each note is held.
@@ -96,7 +96,7 @@ impl Default for ProbeOptions {
 }
 
 /// What came of one note.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Heard {
     pub note: ProbeNote,
     /// Whether anything was heard at all.
@@ -126,7 +126,7 @@ pub struct Heard {
 
 /// Whether devices are ready to be played: see
 /// [`ProbeJob::wait_until_ready`].
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Readiness {
     /// Whether they answered what they were given, and went on answering
     /// it alike with nothing loading. `false` after `seconds` of waiting
@@ -140,7 +140,7 @@ pub struct Readiness {
 }
 
 /// What a probe found.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Probed {
     /// One entry per note asked for, in order.
     pub heard: Vec<Heard>,
@@ -154,12 +154,25 @@ pub struct Probed {
     /// to that for half the patience it was given. It does not play them,
     /// or had still not loaded them.
     pub waited_for_silent: Vec<u8>,
+    /// The instrument listens to another track of the song and plays what
+    /// it hears there (a vocoder does). A probe plays it by itself, so it
+    /// was lent noise to listen to for as long as each note was held: that
+    /// it sounds was heard, and how loud and how bright is the noise's
+    /// doing as much as its own.
+    #[serde(default)]
+    pub lent: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProbeError {
     #[error("{0}")]
     Device(String),
+    /// The probe ran in a process of its own, which was taken down, by a
+    /// plugin as far as anyone can tell; or could not be run there, which
+    /// is told in the words that come with it. Nothing of the song that
+    /// is open was touched. See [`crate::apart`].
+    #[error("{0}")]
+    Apart(String),
 }
 
 /// What to play through, taken from a session so that the probe runs
@@ -173,19 +186,41 @@ pub struct ProbeJob {
     /// the plugin itself can load.
     pub preset: Option<PresetInfo>,
     pub tempo: f64,
+    /// Where a plugin is probed: in a process of its own, if the session
+    /// was given one ([`crate::apart`]). `None` probes here, as a
+    /// built-in instrument always is.
+    pub apart: Option<crate::apart::Apart>,
 }
 
 impl ProbeJob {
     /// Plays `notes` one at a time and measures each.
     pub fn run(&self, notes: &[ProbeNote], options: &ProbeOptions) -> Result<Probed, ProbeError> {
+        match self.apart.as_ref().and_then(|apart| apart.probe(self, notes, options)) {
+            Some(done) => done,
+            None => self.run_here(notes, options).map(|(probed, _)| probed),
+        }
+    }
+
+    /// [`ProbeJob::run`] in this process. The instrument comes back with
+    /// what it was heard to do, for whoever has a reason to keep it: a
+    /// process that probes for another and ends in a moment leaves it as
+    /// it is.
+    pub(crate) fn run_here(
+        &self,
+        notes: &[ProbeNote],
+        options: &ProbeOptions,
+    ) -> Result<(Probed, Probing), ProbeError> {
         let mut probing = self.open(notes, options)?;
+        crate::apart::stage(crate::apart::Stage::Playing);
         let heard = probing.play(notes);
-        Ok(Probed {
+        let probed = Probed {
             heard,
             waited_seconds: probing.waited_seconds,
             answered: probing.answered,
             waited_for_silent: probing.silent.clone(),
-        })
+            lent: probing.listening.contains(&true),
+        };
+        Ok((probed, probing))
     }
 
     /// Makes the devices and waits for them to be ready to play `first`,
@@ -224,16 +259,27 @@ impl ProbeJob {
     /// Waits as long as that takes, up to two minutes while there are
     /// signs of loading; `patience` is how long nothing at all may happen.
     pub fn wait_until_ready(&self, pitches: &[u8], patience: Duration) -> Result<Readiness, ProbeError> {
+        match self.apart.as_ref().and_then(|apart| apart.ready(self, pitches, patience)) {
+            Some(done) => done,
+            None => self.wait_here(pitches, patience).map(|(readiness, _)| readiness),
+        }
+    }
+
+    /// [`ProbeJob::wait_until_ready`] in this process: see
+    /// [`ProbeJob::run_here`].
+    pub(crate) fn wait_here(&self, pitches: &[u8], patience: Duration) -> Result<(Readiness, Probing), ProbeError> {
         let note = |pitch: &u8| OpeningNote {
             pitch: *pitch,
             velocity: velocity_of(100),
             controllers: Vec::new(),
             switch: false,
         };
-        let opening = Opening { notes: pitches.iter().map(note).collect(), signal: pitches.is_empty() };
+        let opening = Opening { notes: pitches.iter().map(note).collect(), signal: pitches.is_empty(), left_on: None };
         let options = ProbeOptions { patience, ..ProbeOptions::default() };
         let probing = self.open_asking(opening, &options)?;
-        Ok(Readiness { ready: probing.answered, seconds: probing.waited_seconds, silent: probing.silent })
+        let readiness =
+            Readiness { ready: probing.answered, seconds: probing.waited_seconds, silent: probing.silent.clone() };
+        Ok((readiness, probing))
     }
 
     fn open_asking(&self, opening: Opening, options: &ProbeOptions) -> Result<Probing, ProbeError> {
@@ -243,6 +289,9 @@ impl ProbeJob {
         for (index, device) in devices.iter_mut().enumerate() {
             let failed = |reason: String| ProbeError::Device(format!("{} ({}): {reason}", device.name, device.uri));
             let make = |device: &Device| {
+                // A probe in a process of its own says which device it is
+                // making, as a render does.
+                crate::apart::stage(crate::apart::Stage::Making(device.id));
                 let made = self.factory.create_for(device, sample_rate, MAX_BLOCK, Purpose::Rendering);
                 made.map_err(|error| failed(error.to_string()))
             };
@@ -276,8 +325,16 @@ impl ProbeJob {
                 kind: EventKind::NoteOn { pitch: *pitch, velocity: velocity_of(100) },
             }),
         );
+        // An instrument that listens to another track is lent something to
+        // listen to while its notes are down (see [`crate::ready`]). Not
+        // an effect that does: a compressor that ducks under the drums is
+        // heard here as it is while the drums are silent.
+        let listens = devices.first().is_some_and(|device| device.sidechain.is_some())
+            && instances.first().is_some_and(|instance| instance.processor.takes_key());
+        let listening: Vec<bool> = (0..instances.len()).map(|index| index == 0 && listens).collect();
         let mut probing = Probing {
             instances,
+            listening,
             options: options.clone(),
             tempo: self.tempo,
             noise: 0.0,
@@ -289,6 +346,7 @@ impl ProbeJob {
 
         let plugins = devices.iter().any(|device| Plugins::is_plugin(&device.uri));
         let mut stand = probing.stand();
+        crate::apart::stage(crate::apart::Stage::Waiting);
         if plugins {
             let signature = signature(devices.iter(), &opening);
             let mut waits = [Wait::new(stand, opening, signature, device_signature(devices.iter()))];
@@ -315,6 +373,9 @@ fn velocity_of(velocity: u8) -> f32 {
 /// An instrument that was made for a probe and is ready to be played.
 pub struct Probing {
     instances: Vec<DeviceInstance>,
+    /// Which of them is lent something to listen to while a note is down:
+    /// the instrument, where it listens to another track.
+    listening: Vec<bool>,
     options: ProbeOptions,
     tempo: f64,
     /// The most the devices put out when they were given nothing.
@@ -332,9 +393,10 @@ pub struct Probing {
 
 impl Probing {
     fn stand(&mut self) -> Stand<'_> {
+        let listening = self.listening.clone();
         let processors: Vec<&mut Box<dyn DeviceProcessor>> =
             self.instances.iter_mut().map(|instance| &mut instance.processor).collect();
-        let mut stand = Stand::new(processors, f64::from(self.options.sample_rate), self.tempo);
+        let mut stand = Stand::new(processors, f64::from(self.options.sample_rate), self.tempo).listening(listening);
         stand.set_noise(self.noise);
         stand
     }
@@ -360,6 +422,9 @@ fn play(stand: &mut Stand, note: &ProbeNote, options: &ProbeOptions, setting: &[
 
     let velocity = velocity_of;
     let mut with_sounded = false;
+    // An instrument that listens has something to listen to from here to
+    // where the note is let go.
+    stand.lend(true);
     if !note.with.is_empty() {
         let keys: Vec<Event> = note
             .with
@@ -378,6 +443,7 @@ fn play(stand: &mut Stand, note: &ProbeNote, options: &ProbeOptions, setting: &[
     });
 
     // Let go, and listen until it has died away or long enough.
+    stand.lend(false);
     let mut off = vec![Event { offset: 0, kind: EventKind::NoteOff { pitch: note.pitch } }];
     off.extend(note.with.iter().map(|pitch| Event { offset: 0, kind: EventKind::NoteOff { pitch: *pitch } }));
     let quiet_frames = stand.frames(QUIET_SECONDS);

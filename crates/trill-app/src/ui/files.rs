@@ -683,6 +683,7 @@ mod tests {
             stems: Vec::new(),
             threads: 1,
             alone: Vec::new(),
+            draws: Vec::new(),
             problems,
         }
     }

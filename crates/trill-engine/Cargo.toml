@@ -15,6 +15,8 @@ log.workspace = true
 parking_lot.workspace = true
 rtrb.workspace = true
 serde.workspace = true
+# What crosses to a process that renders for this one, and back.
+serde_json.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]
@@ -29,6 +31,16 @@ windows = { version = "0.62", features = [
     # How much memory the process holds: plugins that load samples show in it.
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
+    # For a process that renders for another: how much memory the machine
+    # has left before one is started, and, in it, which module a fault was
+    # in, said on its way down.
+    "Win32_System_SystemInformation",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Console",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
 ] }
 
 [dev-dependencies]

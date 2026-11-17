@@ -273,6 +273,22 @@ impl Vst3Factory {
     }
 }
 
+impl Vst3Factory {
+    /// What is known of the installed plugin `uri`: `None` for a plugin of
+    /// another format or one that is not installed, and while plugins
+    /// have not been looked for.
+    pub fn known(&self, uri: &str) -> Option<scan::Known> {
+        let (VST3_SCHEME, class) = split_uri(uri)? else { return None };
+        self.shared.installed.known(&ClassId::parse(class)?.to_string())
+    }
+
+    /// Takes the VST3 plugins among `plugins` to be what is installed,
+    /// without looking: no file is scanned.
+    pub fn know(&self, plugins: &[scan::Known]) {
+        self.shared.installed.know(plugins);
+    }
+}
+
 impl DeviceFactory for Vst3Factory {
     fn descriptors(&self) -> Vec<DeviceDescriptor> {
         self.shared.installed.catalog().descriptors.clone()
@@ -286,6 +302,17 @@ impl DeviceFactory for Vst3Factory {
     /// format waits for its turn on it.
     fn busy(&self) -> bool {
         self.shared.main.behind()
+    }
+
+    /// The plugin's file.
+    fn module(&self, uri: &str) -> Option<PathBuf> {
+        self.known(uri).map(|known| known.path)
+    }
+
+    /// What was measured to make the plugin repeat itself: see
+    /// [`crate::repeats`].
+    fn repeating(&self, uri: &str) -> Option<trill_core::device::Repeating> {
+        crate::repeats::of(uri)
     }
 
     /// In turn with the other instances of its module, unless more is

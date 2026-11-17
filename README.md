@@ -29,7 +29,7 @@ Development builds are optimized (see `[profile.dev]`), because unoptimized audi
 
 ### Building and testing
 
-`cargo test --workspace` runs about 2,300 tests in a few minutes. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 2,330 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -552,10 +552,13 @@ that quick and true:
   nothing more has arrived for a quarter of a second or more, with the program not growing meanwhile: while
   samples are being read its memory rises. Every rehearsed note is sounded exactly three times and then left
   alone, however long the wait lasts: an instrument that plays its recordings of a note in turn then begins
-  every render at the same one, and the same song renders to the same samples again. (That cannot hold an
-  instrument that draws its recordings at random from a stream all its instances share, which only a program
-  that has just started begins at the same place. Ample Sound's do as they come, and go in turn when they are
-  set to: their profiles say how.) What a plugin has been run by the time a render begins is counted the
+  every render at the same one, and the same song renders to the same samples again. A key that the track
+  knows for a keyswitch is not asked to sound: it is pressed with the notes the part plays under it, each of
+  which is rehearsed so (a pitch played under two switches is two notes, with recordings of their own), and
+  where a part begins before it has chosen anything the instrument is left on the way of playing its track
+  calls the default. An instrument that listens to another track (a vocoder, a synthesizer on a patch that
+  plays what it is fed) is lent noise to listen to while its notes are tried, since by itself it would answer
+  none. What a plugin has been run by the time a render begins is counted the
   same way, because what some give depends on it to the block (an amplifier was measured whose sound is
   another after one block more of silence, whatever a reset does): an effect is tried until it has passed
   three bursts and no more, the effects after an instrument are run only on the notes the instrument itself
@@ -601,6 +604,44 @@ that quick and true:
   `cargo run -p trill-plugins --example beside` measures an installed plugin, or all of them, each in a
   process of its own). A plugin that is listed as one not to run beside anything leaves the render on one
   thread, and the reply says which it was.
+- *A song's plugins are rendered in a process of their own.* A render, a measurement and a probe of a song
+  with plugins are done by the program started a second time (`trill` and `trill-mcp` start themselves; nothing
+  else is installed or looked for). It is handed the song with every plugin's state, the options, where the
+  plugins' files are and what is known of them, and nothing else of the user's; it makes its own copies of the
+  plugins and hands back the figures, the files and what it has to say. The song that is open, its history and
+  what plays live stay where they are. Every job has a process that has just started, which ends where it
+  stands when the job is done, with no plugin taken down (taking plugins down is where they fault most).
+  - *A plugin that crashes costs a sentence, not the program*: at what stage it happened, which plugin where
+    that can be told (the device that was being made, or the one whose file the fault was in), that the song is
+    untouched, and what to do next. The window says it where it says that an export failed, the tools as the
+    call's error, and the film export in place of its film.
+  - *The same song is the same samples.* An instrument that draws its recordings at random begins at the same
+    place in every process that has just started: the four instruments of Ample Sound, as they come, rendered
+    to the same samples to the bit each time (in a program that rendered for itself, beside the song's own
+    instruments, two renders of the bass left -33 dB of one another). A change to the song still moves every
+    draw after it, which is what `repeatable` is for (below).
+  - *It gives back all it took.* A song of seventeen plugin instruments held 8.0 GB open, its render another
+    8.6 GB in the process that made it, and nothing two seconds after the answer. A job the machine has no room
+    for is refused in a sentence before it is started.
+  - *It can be stopped at once*: the process is ended, and nothing half-written is left under a name that was
+    asked for (files are written under other names and given theirs when they are whole).
+  - *It costs seconds.* A song of eight plugins was measured in 45.5 s in a process of its own and in 42.3 s in
+    the program; the song of seventeen was rendered with every instrument's stem in 116 to 121 s and in 131 s.
+    The two processes together hold a seventh to a fifth more at their fullest than the program alone did (6.0
+    GB against 5.0 GB; 16.6 GB against 14.5 GB).
+  A song without plugins is rendered where it is (nothing in it can fault, and it is the same samples either
+  way), and decoded audio is not handed over: the process reads and stretches a song's files itself.
+  `TRILL_JOBS=here` has a program do every job itself; `TRILL_JOB_LOG=trace` has the process say every try of
+  its waits in the program's log.
+- *A render can be asked to repeat itself.* `repeatable` on `measure` and `render` takes what is known to
+  draw at random out of the render's own copies of the instruments (Ample Sound's: their recordings in turn,
+  no noise of the fretting hand), and leaves the song as it is: two such renders are the same samples and can
+  be compared, where a change to the song would otherwise show in every note after it. Without it the reply
+  names the instruments that draw, and says what a change will do. An instrument that is already set so in the
+  song is not named. Superior Drummer 3 is named for what nothing was found to stop: it chooses for itself,
+  anew every time it is made, which recording a cymbal plays when it is struck again while it still rings
+  (`trill-plugins/src/repeats.rs` has what was measured and what was ruled out, and
+  `cargo run -p trill-plugins --example takes` makes one part of a song again with one thing changed).
 - *A render makes only what is heard.* A track that is muted, or left out by a solo or by `tracks`, is not put
   into the render at all: its devices are not created and its plugins are not waited for. Hearing one track of
   a song with many plugins costs what that track costs. (What plays live keeps every track running, so that a
