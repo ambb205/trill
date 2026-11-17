@@ -179,10 +179,12 @@ fn summary(draft: &Draft, project: &Project, selection: Option<(Beats, Beats)>, 
     }
     let (from, to) = stretch_of(draft, project, selection);
     let to = to.unwrap_or(length).min(length).max(from);
-    let bar = project.time_signature.beats_per_bar();
-    let (first, last) =
-        ((from / bar).floor() as u64 + 1, ((to / bar).ceil() as u64).max((from / bar).floor() as u64 + 1));
-    let seconds = (to - from) * 60.0 / project.tempo.max(1.0);
+    // Bars and seconds as the song counts them, through whatever its
+    // tempo and its time signature do on the way.
+    let bars = project.meter_map();
+    let first = bars.bar_at(from).number();
+    let last = bars.bar_at((to - 1e-6).max(from)).number().max(first);
+    let seconds = project.tempo_map().seconds_between(from, to);
     let frames = (seconds * f64::from(rate)).round() as u64;
     let bars = if first == last { format!("Bar {first}") } else { format!("Bars {first} to {last}") };
     format!("{bars} \u{00B7} {} \u{00B7} {} frames", clock(seconds), counted(frames))
@@ -746,6 +748,15 @@ mod tests {
         let making = Draft { of: Of::Making, ..whole };
         assert!(summary(&making, &project, None, 1204).starts_with("1,204 steps of the journal"));
         assert!(summary(&whole, &Project::new("Empty"), None, 0).contains("nothing to film"));
+        // Through a change: bars 3 and 4 in 7/8 at 140 are seven beats and three seconds.
+        let mut changing = song();
+        changing.set_time_signature_at(8.0, 7, 8).unwrap();
+        changing.set_tempo_at(8.0, 140.0, false).unwrap();
+        changing.set_time_signature_at(15.0, 4, 4).unwrap();
+        changing.set_tempo_at(15.0, 120.0, false).unwrap();
+        let seven = Draft { stretch: Stretch::Selection, ..whole };
+        assert_eq!(summary(&seven, &changing, Some((8.0, 15.0)), 0), "Bars 3 to 4 \u{00B7} 0:03 \u{00B7} 180 frames");
+        assert_eq!(summary(&seven, &changing, Some((0.0, 15.0)), 0), "Bars 1 to 4 \u{00B7} 0:07 \u{00B7} 420 frames");
     }
 
     #[test]

@@ -70,10 +70,12 @@ fn a_lane_unfolds_under_its_track_and_a_click_adds_a_point() {
     assert_eq!(harness.app.state().focus, FocusArea::Automation);
     assert_eq!(harness.app.state().arrangement.points.as_ref().unwrap().points, points, "the new point is selected");
 
-    harness.click(at_volume(&harness, 8.0, 0.0));
-    assert_eq!(envelope(&harness, &target).len(), 2);
+    harness.click(at_volume(&harness, 8.0, -48.0));
+    let ends = envelope(&harness, &target);
+    assert_eq!(ends.len(), 2);
     // A click on the line adds a point on it rather than off it.
-    harness.click(at_volume(&harness, 6.0, -6.0));
+    let on_line = Travel::FADER.between(ends[0].value, ends[1].value, 0.5);
+    harness.click(at_volume(&harness, 6.0, on_line as f32));
     let points = envelope(&harness, &target);
     assert_eq!(points.len(), 3);
     let (before, middle, after) = (points[0].value, points[1].value, points[2].value);
@@ -313,7 +315,7 @@ fn dragging_an_automated_control_takes_hold_of_it_as_one_undo_step() {
     let before = harness.undo_depth();
 
     harness.drag(harness.volume_bar(0, 0.84), harness.volume_bar(0, 0.4));
-    assert!((-23.0..-21.0).contains(&volume(&harness)), "the bar set the volume: {}", volume(&harness));
+    assert!((-19.0..-17.0).contains(&volume(&harness)), "the bar set the volume: {}", volume(&harness));
     assert!(!lane_on(&harness, &target), "and switched the envelope off");
     assert_eq!(envelope(&harness, &target).len(), 2, "without touching it");
     assert_eq!(harness.undo_depth(), before + 1, "the whole takeover is one undo step");
@@ -340,7 +342,7 @@ fn dragging_an_automated_control_takes_hold_of_it_as_one_undo_step() {
     harness.settle();
     harness.click_label(off_mark);
     assert!(lane_on(&harness, &target));
-    assert!((-23.0..-21.0).contains(&volume(&harness)));
+    assert!((-19.0..-17.0).contains(&volume(&harness)));
     harness.idle(1);
     assert!((harness.shown("Vol") - at_minus_12).abs() < 0.01, "{}", harness.shown("Vol"));
     assert!(!harness.is_on_screen(off_mark));
@@ -354,7 +356,7 @@ fn dragging_an_automated_control_takes_hold_of_it_as_one_undo_step() {
     assert_eq!(volume(&harness), 0.0, "and the volume back as it was");
     assert_eq!(harness.undo_depth(), before);
     harness.key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
-    assert!(!lane_on(&harness, &target) && volume(&harness) < -20.0, "redo takes hold again, in one step");
+    assert!(!lane_on(&harness, &target) && volume(&harness) < -17.0, "redo takes hold again, in one step");
 
     // A press without a drag takes hold too: the pointer is the value.
     harness.settle();
@@ -400,7 +402,7 @@ fn a_lane_shows_that_it_is_off_and_one_click_switches_it_back_on() {
     harness.click_label(switch);
     assert!(!lane_on(&harness, &target));
     let held = harness.project().tracks[0].volume_db;
-    assert!((-23.0..-21.0).contains(&held), "what the drag set earlier: {held}");
+    assert!((-19.0..-17.0).contains(&held), "what the drag set earlier: {held}");
 
     // The menus of the lane and of the control say the same.
     harness.right_click(at_volume(&harness, 20.0, -50.0));
@@ -448,7 +450,7 @@ fn pan_and_the_master_volume_are_taken_hold_of_the_same_way() {
     let at = |fraction: f32| pos2(right - arrangement::MASTER_VOLUME_WIDTH * (1.0 - fraction), y);
     harness.drag(at(0.8), at(0.5));
     let volume = harness.project().master.volume_db;
-    assert!((-17.5..-15.0).contains(&volume), "halfway up the fader scale: {volume}");
+    assert!((-15.0..-13.0).contains(&volume), "halfway up the fader scale: {volume}");
     assert!(!lane_on(&harness, &AutomationTarget::MasterVolume));
     assert_eq!(harness.undo_depth(), before + 1);
     harness.key(Modifiers::COMMAND, Key::Z);
@@ -650,10 +652,10 @@ fn a_send_has_a_lane_and_a_throw_is_drawn_in_it() {
     // Shut, open, shut: three clicks, on a scale whose floor is "nothing".
     let top = arrangement::TRACK_HEIGHT;
     harness.click(in_lane(&harness, top, 4.0, 0.0));
-    harness.click(in_lane(&harness, top, 6.0, units::db_to_fader(-6.0)));
+    harness.click(in_lane(&harness, top, 6.0, units::db_to_send(-6.0)));
     harness.click(in_lane(&harness, top, 8.0, 0.0));
     let lane = harness.project().automation[0].clone();
-    assert_eq!((&lane.target, lane.travel), (&throw, Travel::FADER), "it travels as a fader does");
+    assert_eq!((&lane.target, lane.travel), (&throw, Travel::SEND), "it travels as a send's bar does");
     let values: Vec<f64> = lane.points.iter().map(|point| point.value).collect();
     assert_eq!((values[0], values[2]), (-70.0, -70.0));
     assert!((values[1] + 6.0).abs() < 0.6, "{values:?}");
@@ -760,13 +762,15 @@ fn an_envelope_from_an_older_file_is_shown_as_it_plays_and_can_be_made_to_follow
     harness.move_to(on_curve);
     harness.idle(1);
     assert!(harness.hint().contains("drag moves the line"), "{}", harness.hint());
-    harness.move_to(at_volume(&harness, 8.0, -20.0));
+    let half_way = Travel::FADER.between(0.0, -60.0, 0.5);
+    assert!((half_way + 16.3).abs() < 0.01, "{half_way}");
+    harness.move_to(at_volume(&harness, 8.0, half_way as f32));
     harness.idle(1);
     assert!(harness.hint().contains("click adds a point"), "nothing is drawn there: {}", harness.hint());
     // Moving one of its points leaves the rest of it as it sounded.
-    harness.drag(at_volume(&harness, 16.0, -60.0), at_volume(&harness, 16.0, -40.0));
+    harness.drag(at_volume(&harness, 16.0, -60.0), at_volume(&harness, 16.0, -30.0));
     assert_eq!(lane(&harness).travel, Travel::Linear);
-    assert!((lane(&harness).value_at(8.0) + 20.0).abs() < 0.6, "half of -40 dB: {}", lane(&harness).value_at(8.0));
+    assert!((lane(&harness).value_at(8.0) + 15.0).abs() < 0.6, "half of -30 dB: {}", lane(&harness).value_at(8.0));
     harness.key(Modifiers::COMMAND, Key::Z);
     harness.idle(1);
 
@@ -776,17 +780,36 @@ fn an_envelope_from_an_older_file_is_shown_as_it_plays_and_can_be_made_to_follow
     assert!(harness.is_on("Lines straight in dB") && !harness.is_on("Lines follow the fader"));
     harness.click_label("Lines follow the fader");
     harness.idle(1);
-    assert_eq!((lane(&harness).travel, lane(&harness).points), (Travel::FADER, fade));
-    assert!((lane(&harness).value_at(8.0) + 20.0).abs() < 1e-9, "the same two points are now a fader's fade");
+    assert_eq!((lane(&harness).travel, lane(&harness).points), (Travel::FADER, fade.clone()));
+    assert!((lane(&harness).value_at(8.0) - half_way).abs() < 1e-9, "the same two points are now a fader's fade");
     assert_eq!(harness.undo_depth(), before + 1);
     // Now the line is where the straight line is.
+    harness.move_to(at_volume(&harness, 8.0, half_way as f32));
+    harness.idle(1);
+    assert!(harness.hint().contains("drag moves the line"), "{}", harness.hint());
+    harness.right_click(at_volume(&harness, 8.0, half_way as f32));
+    assert!(harness.is_on("Lines follow the fader"));
+    harness.click_label("Lines straight in dB");
+    assert_eq!(lane(&harness).travel, Travel::Linear);
+
+    // A fade that a song saved along the fader of its day (formats 3 to 5)
+    // goes neither way: it is at -20 dB half way, it is drawn there, and
+    // its menu says that it is as the song saved it until one is chosen.
+    let of_its_day = Travel::Square { floor: -70.0 };
+    harness.session.lock().edit(|project| project.write_automation(target.clone(), fade.clone(), of_its_day)).unwrap();
+    harness.idle(2);
+    assert!((lane(&harness).value_at(8.0) + 20.0).abs() < 1e-9);
     harness.move_to(at_volume(&harness, 8.0, -20.0));
     harness.idle(1);
     assert!(harness.hint().contains("drag moves the line"), "{}", harness.hint());
     harness.right_click(at_volume(&harness, 8.0, -20.0));
-    assert!(harness.is_on("Lines follow the fader"));
-    harness.click_label("Lines straight in dB");
-    assert_eq!(lane(&harness).travel, Travel::Linear);
+    assert!(harness.is_on("Lines as the song saved them"));
+    assert!(!harness.is_on("Lines follow the fader") && !harness.is_on("Lines straight in dB"));
+    harness.click_label("Lines follow the fader");
+    harness.idle(1);
+    assert_eq!((lane(&harness).travel, lane(&harness).points), (Travel::FADER, fade));
+    harness.right_click(at_volume(&harness, 8.0, half_way as f32));
+    assert!(harness.is_on("Lines follow the fader") && !harness.is_on_screen("Lines as the song saved them"));
 }
 
 #[test]

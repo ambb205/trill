@@ -12,6 +12,7 @@ use super::links::ParamLinks;
 use super::module::Module;
 use super::params::{self, ParamSpec};
 use super::presets;
+use super::quirks;
 use super::state::{self, PluginState};
 use super::stream::MemoryStream;
 use crate::editor::{EditorStatus, Placement};
@@ -21,6 +22,7 @@ use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use vst3::Steinberg::Vst::BusDirections_::{kInput, kOutput};
 use vst3::Steinberg::Vst::MediaTypes_::{kAudio, kEvent};
 use vst3::Steinberg::Vst::ProcessModes_::{kOffline, kRealtime};
@@ -136,6 +138,11 @@ pub(super) struct Instance {
     active: bool,
     /// Set up for offline processing: see [`CreateRequest::offline`].
     offline: bool,
+    /// When it was made, or last handed a state: what a plugin may go on
+    /// working at behind the scenes for a while ([`quirks`]). Moved on by
+    /// the time the plugin thread has since been kept from its windows,
+    /// which the plugin has not had ([`Vst3Thread::served`]).
+    settled: Instant,
     processor: ComPtr<IAudioProcessor>,
     /// Declared last: the component is the plugin, and is released after
     /// every other reference to it.
@@ -173,6 +180,7 @@ impl Instance {
             listed: Vec::new(),
             active: false,
             offline: false,
+            settled: Instant::now(),
             processor,
             component,
         })
@@ -266,14 +274,19 @@ impl Instance {
         // "nothing saved" rather than handing the plugin zero bytes.
         let state = match saved.filter(|bytes| !bytes.is_empty()) {
             Some(bytes) => {
+                self.settled = Instant::now();
                 let (class, state) = state::decode(bytes)?;
                 if class != self.class {
                     return Err(format!("the saved state belongs to another plugin ({class})"));
                 }
                 if !state.component.is_empty() {
                     let stream = MemoryStream::new(state.component.clone());
-                    // SAFETY: the component is live and inactive, and the
-                    // stream outlives the call.
+                    // SAFETY: the component is live, and the stream
+                    // outlives the call. The plugin is inactive when it
+                    // is being made, and may be active and processing
+                    // when it is handed a preset: VST3 lets a state be
+                    // set then, from this thread, and leaves it to the
+                    // plugin to bring it over to its audio side.
                     let result = unsafe { self.component.setState(interface(&stream)) };
                     if result != kResultOk {
                         return Err(format!("the plugin rejected its saved state ({})", result_name(result)));
@@ -482,6 +495,11 @@ impl Drop for Instance {
 pub(crate) struct Vst3Thread {
     /// Declared first: instances must be gone before their modules are.
     pub(super) instances: HashMap<InstanceId, Instance>,
+    /// Instances that were let go of and are of a plugin that is taken
+    /// down with care ([`quirks`]), each with when it may be, in the order
+    /// they were let go of. They are as they were then: active, and no
+    /// longer processed. [`served`](ThreadState::served) takes them down.
+    leaving: Vec<(Instant, Instance)>,
     /// Modules stay loaded once used: reloading one for every instance is
     /// slow, and plugins are rarely tested against repeated unloading.
     modules: HashMap<PathBuf, Module>,
@@ -492,11 +510,17 @@ pub(crate) struct Vst3Thread {
 
 impl ThreadState for Vst3Thread {
     fn new() -> Self {
-        Self { instances: HashMap::new(), modules: HashMap::new(), host: HostApplication::new(), next_id: 1 }
+        Self {
+            instances: HashMap::new(),
+            leaving: Vec::new(),
+            modules: HashMap::new(),
+            host: HostApplication::new(),
+            next_id: 1,
+        }
     }
 
     fn wants_idle(&self) -> bool {
-        !self.instances.is_empty()
+        !self.instances.is_empty() || !self.leaving.is_empty()
     }
 
     /// Carries values from each plugin's processor to its controller,
@@ -507,6 +531,31 @@ impl ThreadState for Vst3Thread {
             instance.sync_controller();
             instance.report();
             instance.service_editor(nested);
+        }
+    }
+
+    /// Takes down an instance that was being kept and has had its time:
+    /// one to a call, so that the thread's windows are served again
+    /// before the next.
+    ///
+    /// This is the only place such an instance is taken down in. Here the
+    /// thread has just delivered what was waiting for its windows, so what
+    /// the plugin had posted to itself for the instance has reached it
+    /// while the instance was there; taken down on the way out of a job
+    /// instead, it would be gone when the messages that waited through
+    /// the job are delivered. And the time jobs kept the thread counts
+    /// towards no instance's age: a plugin that is waiting to hear from
+    /// its own work has not had it.
+    fn served(&mut self, away: Duration) {
+        for instance in self.instances.values_mut() {
+            instance.settled += away;
+        }
+        for (due, _) in &mut self.leaving {
+            *due += away;
+        }
+        let now = Instant::now();
+        if let Some(place) = self.leaving.iter().position(|(due, _)| *due <= now) {
+            drop(self.leaving.remove(place));
         }
     }
 }
@@ -608,11 +657,24 @@ impl Vst3Thread {
 
     /// Deactivates and destroys an instance. `audio` is the processing
     /// interface its audio half held, which must have stopped processing.
-    pub(crate) fn destroy(&mut self, id: InstanceId, audio: Option<ComPtr<IAudioProcessor>>) {
+    ///
+    /// An instance of a plugin that is known not to survive being taken
+    /// down while it is young ([`quirks`]) is not taken down here, unless
+    /// `patient` is false. Nothing uses it any more, and it goes when it
+    /// is old enough and the thread has served its windows
+    /// ([`served`](ThreadState::served)), or with the thread. Its editor
+    /// goes now.
+    pub(crate) fn destroy(&mut self, id: InstanceId, audio: Option<ComPtr<IAudioProcessor>>, patient: bool) {
         // The audio half's reference goes first, so that the last one is
         // released by the instance, after the plugin is terminated.
         drop(audio);
-        self.instances.remove(&id);
+        let Some(mut instance) = self.instances.remove(&id) else { return };
+        let patience = quirks::patience(instance.class);
+        if patient && !patience.is_zero() {
+            instance.close_editor();
+            log::debug!("[{}] is kept until the plugin thread has had time for it", instance.name);
+            self.leaving.push((instance.settled + patience, instance));
+        }
     }
 
     /// Re-activates an instance, whose audio half has stopped processing,
@@ -727,7 +789,9 @@ impl Vst3Thread {
         index: u32,
         steps: u32,
     ) -> Result<(), String> {
-        let instance = self.instances.get(&id).ok_or("the plugin instance no longer exists")?;
+        let instance = self.instances.get_mut(&id).ok_or("the plugin instance no longer exists")?;
+        // A program may bring as much with it as a state does.
+        instance.settled = Instant::now();
         let (Some(controller), Some(links)) = (&instance.controller, &instance.links) else {
             return Err("the plugin has no programs to choose from".to_string());
         };

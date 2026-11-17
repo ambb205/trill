@@ -616,7 +616,7 @@ mod tests {
         let volume = AutomationTarget::TrackVolume { track };
         session
             .edit(|project| {
-                let points = vec![AutomationPoint::new(0.0, -12.0), AutomationPoint::new(4.0, 0.0)];
+                let points = vec![AutomationPoint::new(0.0, -48.0), AutomationPoint::new(4.0, 0.0)];
                 project.set_automation(volume.clone(), points)
             })
             .unwrap();
@@ -625,7 +625,7 @@ mod tests {
         // What is heard half way: half way along the fader between the two,
         // which is what the engine plays, not the middle of the decibels.
         let half_way = snapshot.automated(&volume, 2.0).unwrap();
-        assert!((half_way + 5.72).abs() < 0.01, "{half_way}");
+        assert!((half_way + 14.925).abs() < 0.01, "{half_way}");
         assert_eq!(snapshot.automated(&AutomationTarget::TrackPan { track }, 2.0), None);
 
         // Switched off, the envelope is still there and says nothing.

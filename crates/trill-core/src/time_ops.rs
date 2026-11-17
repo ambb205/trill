@@ -673,8 +673,8 @@ mod tests {
 
     #[test]
     fn an_envelope_that_follows_a_fader_keeps_its_course_through_every_edit_of_time() {
-        // A fade and a throw of a send, both straight along a fader: no
-        // part of either is a straight line in decibels, so a cut that
+        // A fade and a throw of a send, both straight along a fader: under
+        // its knee neither is a straight line in decibels, so a cut that
         // read the envelope in decibels would bend what is left of it.
         let (mut project, track, _) = project();
         let echo = project.add_track_of_kind("Echo", crate::TrackKind::Return);
@@ -685,7 +685,7 @@ mod tests {
         project.set_automation(send.clone(), throw).unwrap();
         let before = project.clone();
         assert_eq!(played(&before, &volume).travel, Travel::FADER);
-        assert!((played(&before, &volume).value_at(8.0) + 20.0).abs() < 1e-9, "not the -30 dB of a line in decibels");
+        assert!((played(&before, &volume).value_at(8.0) + 16.3).abs() < 0.01, "not the -30 dB of a line in decibels");
         let same = |project: &Project, beat: Beats, was_at: Beats, what: &str| {
             for target in [&volume, &send] {
                 let (now, was) = (played(project, target).value_at(beat), played(&before, target).value_at(was_at));

@@ -13,6 +13,7 @@
 //! the files, which is the one part of a frame that is not the song's own:
 //! [`Waves`] reads them once and keeps them.
 
+use crate::score::Time;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -80,21 +81,39 @@ pub struct Voiced {
     pub wave: Arc<Wave>,
     /// Where in the recording it enters, in seconds.
     pub enters: f64,
-    /// How much of the recording a beat runs through, in seconds.
-    pub seconds_per_beat: f64,
+    /// How the recording runs against the song from there.
+    pub pace: Pace,
     /// What it is played at, as a factor.
     pub gain: f32,
+}
+
+/// How a recording runs against the song that plays it.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum Pace {
+    /// At a speed of its own, whatever the song's tempo does: so many
+    /// seconds of it to a second of the song. A clip that does not follow
+    /// the tempo (1), a sample played as a note (faster the higher).
+    Time(f64),
+    /// With the song's beats: so many seconds of it to a beat. A clip that
+    /// follows the tempo, which a faster song runs through faster.
+    Beat(f64),
 }
 
 impl Voiced {
     /// How far the recording swings each way between two beats of the
     /// timeline, as it is played there.
-    pub fn between(&self, from: Beats, to: Beats) -> (f32, f32) {
+    pub fn between(&self, from: Beats, to: Beats, time: &Time) -> (f32, f32) {
         if to <= self.start || from >= self.end {
             return (0.0, 0.0);
         }
-        let second =
-            |beat: Beats| self.enters + (beat.clamp(self.start, self.end) - self.start) * self.seconds_per_beat;
+        let second = |beat: Beats| {
+            let beat = beat.clamp(self.start, self.end);
+            self.enters
+                + match self.pace {
+                    Pace::Time(rate) => time.between(self.start, beat) * rate,
+                    Pace::Beat(seconds) => (beat - self.start) * seconds,
+                }
+        };
         let (low, high) = self.wave.between(second(from), second(to));
         (low * self.gain, high * self.gain)
     }
@@ -116,7 +135,10 @@ pub fn voiced(project: &Project, mut wave: impl FnMut(&str) -> Option<Arc<Wave>>
                 end: clip.end(),
                 wave,
                 enters: audio.offset_seconds,
-                seconds_per_beat: audio.seconds_per_beat(project.tempo),
+                pace: match audio.followed_tempo() {
+                    Some(recorded) => Pace::Beat(60.0 / recorded),
+                    None => Pace::Time(1.0),
+                },
                 gain: 10f32.powf(audio.gain_db / 20.0),
             });
         }
@@ -132,7 +154,7 @@ pub fn voiced(project: &Project, mut wave: impl FnMut(&str) -> Option<Arc<Wave>>
                         end: note.end(),
                         wave: wave.clone(),
                         enters: 0.0,
-                        seconds_per_beat: 60.0 / project.tempo * pace,
+                        pace: Pace::Time(pace),
                         gain: f32::from(note.velocity) / 127.0,
                     });
                 }
@@ -196,7 +218,7 @@ impl Waves {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trill_core::project::AudioContent;
+    use trill_core::project::{AudioContent, WarpMode};
     use trill_core::{ChainRef, Note};
 
     /// One second at 8 kHz: silent, then a swing of `high` from the middle on.
@@ -229,14 +251,15 @@ mod tests {
         let found = voiced(&project, |path| (path == "take.wav").then(|| recording(1.0)));
         let [(id, spans)] = found.as_slice() else { panic!("{found:?}") };
         let [span] = spans.as_slice() else { panic!("{spans:?}") };
+        let time = Time::of(&project);
         assert_eq!((*id, span.start, span.end), (track, 8.0, 12.0));
         // Half a second a beat at 120; the file is silent until half a
         // second in, which is half a beat after the clip enters it.
-        assert_eq!(span.between(8.0, 8.4), (0.0, 0.0));
-        let (_, high) = span.between(8.6, 8.8);
+        assert_eq!(span.between(8.0, 8.4, &time), (0.0, 0.0));
+        let (_, high) = span.between(8.6, 8.8, &time);
         assert!((high - 0.501).abs() < 0.01, "at -6 dB: {high}");
-        assert_eq!(span.between(2.0, 8.0), (0.0, 0.0), "nothing before the clip");
-        assert_eq!(span.between(12.0, 20.0), (0.0, 0.0));
+        assert_eq!(span.between(2.0, 8.0, &time), (0.0, 0.0), "nothing before the clip");
+        assert_eq!(span.between(12.0, 20.0, &time), (0.0, 0.0));
         // A file nobody could read leaves the track without a picture.
         assert!(voiced(&project, |_| None).is_empty());
         project.track_mut(track).unwrap().mute = true;
@@ -261,14 +284,43 @@ mod tests {
         let found = voiced(&project, |path| (path == "hey.wav").then(|| recording(0.8)));
         let spans = &found[0].1;
         assert_eq!(spans.len(), 2, "one stretch for each note");
-        assert_eq!((spans[0].start, spans[0].end, spans[0].seconds_per_beat), (4.0, 6.0, 1.0));
+        let time = Time::of(&project);
+        assert_eq!((spans[0].start, spans[0].end, spans[0].pace), (4.0, 6.0, Pace::Time(1.0)));
         // At the root the file's second half begins half a beat in; an
         // octave up, a quarter of a beat in.
-        assert_eq!(spans[0].between(4.0, 4.4), (0.0, 0.0));
-        assert_eq!(spans[0].between(4.6, 4.8), (0.0, 0.8));
-        assert_eq!((spans[1].start, spans[1].seconds_per_beat), (8.0, 2.0));
-        assert_eq!(spans[1].between(8.3, 8.4), (0.0, 0.8));
+        assert_eq!(spans[0].between(4.0, 4.4, &time), (0.0, 0.0));
+        assert_eq!(spans[0].between(4.6, 4.8, &time), (0.0, 0.8));
+        assert_eq!((spans[1].start, spans[1].pace), (8.0, Pace::Time(2.0)));
+        assert_eq!(spans[1].between(8.3, 8.4, &time), (0.0, 0.8));
         // The file is a second long: after that a held note is silent.
-        assert_eq!(spans[0].between(5.5, 6.0), (0.0, 0.0));
+        assert_eq!(spans[0].between(5.5, 6.0, &time), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_recording_at_its_own_speed_keeps_it_through_a_change_of_tempo_and_one_that_follows_does_not() {
+        // 60, and from beat 4 on twice as fast: a second a beat, then half.
+        let mut project = Project::new("song");
+        project.set_tempo(60.0).unwrap();
+        project.set_tempo_at(4.0, 120.0, false).unwrap();
+        let track = project.add_track("Voice");
+        project.add_audio_clip(track, "Take", 3.0, 4.0, AudioContent::new("take.wav")).unwrap();
+        let followed =
+            AudioContent { source_tempo: Some(60.0), warp: WarpMode::Beats, ..AudioContent::new("loop.wav") };
+        project.add_audio_clip(track, "Loop", 8.0, 4.0, followed).unwrap();
+        // Two seconds: silent for the first, then sounding.
+        let two: Vec<f32> = (0..16_000).map(|frame| if frame < 8000 { 0.0 } else { 0.5 }).collect();
+        let wave = Arc::new(Wave::of(&two, &two, 8000.0));
+        let found = voiced(&project, |_| Some(wave.clone()));
+        let spans = &found[0].1;
+        let time = Time::of(&project);
+        assert_eq!((spans[0].pace, spans[1].pace), (Pace::Time(1.0), Pace::Beat(1.0)));
+        // The take enters at beat 3, a second before the change: its second
+        // second begins at beat 4, and lasts two beats of the faster song.
+        assert_eq!(spans[0].between(3.0, 3.9, &time), (0.0, 0.0));
+        assert_eq!(spans[0].between(4.1, 5.9, &time), (0.0, 0.5));
+        assert_eq!(spans[0].between(6.1, 7.0, &time), (0.0, 0.0), "the file is over two seconds after it began");
+        // The loop follows the tempo: a beat of it to a beat of the song.
+        assert_eq!(spans[1].between(8.0, 8.9, &time), (0.0, 0.0));
+        assert_eq!(spans[1].between(9.1, 9.9, &time), (0.0, 0.5));
     }
 }

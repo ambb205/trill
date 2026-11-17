@@ -489,17 +489,17 @@ fn transport_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, left: f32, compact: bool
     x = position.right() + 6.0;
 
     // The tempo the song has where it is, and what setting it changes: the
-    // tempo that took over last, or the one the song is gliding to.
+    // one the song is gliding to, or the one it has had since the last
+    // change, which is a glide's once it has arrived and nothing has taken
+    // over from it.
     let here = cx.live.position;
     let tempo = if tempo_map.is_constant() { cx.snap.project.tempo } else { tempo_map.tempo_at(here) };
     let changes = &cx.snap.project.tempo_changes;
     let set_at = match tempo_map.is_ramping_at(here) {
         true => changes.iter().find(|change| change.ramp && change.beat > here).map(|change| (change.beat, true)),
-        false => changes
-            .iter()
-            .rev()
-            .find(|change| !change.ramp && change.beat <= here + 1e-9)
-            .map(|change| (change.beat, false)),
+        false => {
+            changes.iter().rev().find(|change| change.beat <= here + 1e-9).map(|change| (change.beat, change.ramp))
+        }
     };
     let field = NumberField {
         label: "",

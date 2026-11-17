@@ -37,10 +37,15 @@ pub const MAX_VOLUME_DB: f32 = 6.0;
 /// * 5: the tempo and the time signature can change inside a song
 ///   ([`Project::tempo_changes`], [`Project::meter_changes`]). A file of
 ///   an earlier format has one of each, and nothing is written into it.
+/// * 6: a level travels as Ableton Live's does: a fader has a knee
+///   ([`Travel::Fader`]) and a gain a law of its own ([`Travel::Gain`]).
+///   What a file of formats 3 to 5 calls a fader, with a floor, is the law
+///   of its day ([`Travel::Square`]), and its lanes keep it: they are read
+///   so by their words, and nothing is written into them.
 ///
 /// A device of an older file keeps the sound it had, and an envelope the
 /// curve it played: see [`crate::formats`].
-pub const FORMAT_VERSION: u32 = 5;
+pub const FORMAT_VERSION: u32 = 6;
 /// The furthest an audio clip can be transposed, in semitones either way.
 pub const MAX_TRANSPOSE: f64 = 24.0;
 /// Shortest loop a clip repeats, so a tiny loop length cannot explode into
@@ -707,9 +712,8 @@ impl AutomationTarget {
     /// ([`Travel::of_param`]).
     pub fn travel(&self) -> Option<Travel> {
         match self {
-            AutomationTarget::TrackVolume { .. } | AutomationTarget::MasterVolume | AutomationTarget::Send { .. } => {
-                Some(Travel::FADER)
-            }
+            AutomationTarget::TrackVolume { .. } | AutomationTarget::MasterVolume => Some(Travel::FADER),
+            AutomationTarget::Send { .. } => Some(Travel::SEND),
             AutomationTarget::TrackPan { .. } => Some(Travel::Linear),
             AutomationTarget::DeviceParam { .. } => None,
         }
@@ -2078,7 +2082,10 @@ fn validate_span(start: Beats, length: Beats) -> Result<(), EditError> {
 
 fn validate_travel(travel: Travel) -> Result<(), EditError> {
     match travel {
-        Travel::Fader { floor } if !floor.is_finite() => invalid("a fader's floor must be a number of dB"),
+        Travel::Fader { knee } | Travel::Gain { knee } if !knee.is_finite() => {
+            invalid("the knee of a fader or of a gain must be a number of dB")
+        }
+        Travel::Square { floor } if !floor.is_finite() => invalid("a floor must be a number of dB"),
         _ => Ok(()),
     }
 }
@@ -2149,10 +2156,11 @@ mod tests {
         ];
         project.set_automation(throw.clone(), points.clone()).unwrap();
         assert!(project.track(lead).unwrap().sends.is_empty());
-        assert_eq!((lane(&project, &throw).travel, &lane(&project, &throw).points), (Travel::FADER, &points));
-        // Half way up it is where a fader would be half way between the two.
+        assert_eq!((lane(&project, &throw).travel, &lane(&project, &throw).points), (Travel::SEND, &points));
+        // Half way up it is where a send's fader would be half way between
+        // the two: not the -38 dB of a line in decibels.
         let half = lane(&project, &throw).value_at(7.5);
-        assert!((half - (-70.0 + (64.0f64 * 64.0 / 2.0).sqrt())).abs() < 1e-9, "{half}");
+        assert!((half + 22.72).abs() < 0.01 && half == Travel::SEND.between(-70.0, -6.0, 0.5), "{half}");
         assert_eq!(lane(&project, &throw).value_at(20.0), -70.0);
         // A group sends as a track does.
         project.set_automation(AutomationTarget::Send { track: bus, to: hall }, points.clone()).unwrap();
@@ -2223,7 +2231,7 @@ mod tests {
             .unwrap();
         assert_eq!(lane(&project, &volume).travel, Travel::FADER);
         assert_eq!(lane(&project, &AutomationTarget::MasterVolume).travel, Travel::FADER);
-        assert!((lane(&project, &volume).value_at(4.0) + 20.0).abs() < 1e-9, "a fade is still heard half way");
+        assert!((lane(&project, &volume).value_at(4.0) + 16.3).abs() < 0.01, "a fade is still heard half way");
         assert_eq!((lane(&project, &pan).travel, lane(&project, &pan).value_at(4.0)), (Travel::Linear, 0.0));
 
         // A device's parameter is what its device says: whoever knows says so.
@@ -2242,9 +2250,9 @@ mod tests {
         project.set_automation_travel(&volume, Travel::Linear).unwrap();
         assert_eq!((lane(&project, &volume).value_at(4.0), &lane(&project, &volume).points), (-30.0, &fade));
         project.set_automation_travel(&volume, Travel::FADER).unwrap();
-        assert!(project.set_automation_travel(&volume, Travel::Fader { floor: f64::NAN }).is_err());
+        assert!(project.set_automation_travel(&volume, Travel::Square { floor: f64::NAN }).is_err());
         assert!(
-            project.write_automation(volume.clone(), fade.clone(), Travel::Fader { floor: f64::INFINITY }).is_err()
+            project.write_automation(volume.clone(), fade.clone(), Travel::Square { floor: f64::INFINITY }).is_err()
         );
         let unwritten = AutomationTarget::DeviceParam { device: filter, param: "resonance".into() };
         assert!(project.set_automation_travel(&unwritten, Travel::Log).is_err(), "no lane, nothing to change");
@@ -2530,9 +2538,9 @@ mod tests {
         // A file of format 2 has envelopes that are straight in their
         // units, one of format 3 envelopes that follow their controls: the
         // faders of the day, silent at the bottom of the ranges of the day.
-        let then = |floor: f64| Travel::Fader { floor };
+        let then = |floor: f64| Travel::Square { floor };
         an_older_file_keeps_its_devices(2, [Travel::Linear; 4]);
-        an_older_file_keeps_its_devices(3, [then(-48.0), then(-48.0), then(-70.0), Travel::FADER]);
+        an_older_file_keeps_its_devices(3, [then(-48.0), then(-48.0), then(-70.0), then(-70.0)]);
     }
 
     /// `travels`: of the envelopes on the synth's volume, the sampler's
@@ -2578,7 +2586,7 @@ mod tests {
         // and with them the level a fader's travel is measured from. Half
         // way it is where it was, less the 21 dB.
         let moved = match travels[0] {
-            Travel::Fader { floor } => Travel::Fader { floor: floor - 21.0 },
+            Travel::Square { floor } => Travel::Square { floor: floor - 21.0 },
             other => other,
         };
         assert_eq!(line(&volume(synth)), (vec![-69.0, -13.0], moved));

@@ -26,11 +26,10 @@ fn main() {
     };
     let score = Score::read(&project);
     let reading = Reading::of(&score);
-    let bar = score.bar();
     println!(
-        "{}: {} bars at {} BPM, {:.1} s; {} parts; {} kicks, {} snares, {} crashes",
+        "{}: {} bars from {} BPM, {:.1} s; {} parts; {} kicks, {} snares, {} crashes",
         score.name,
-        score.length / bar,
+        score.bar_count(),
         score.tempo,
         score.duration(),
         score.parts.len(),
@@ -52,8 +51,8 @@ fn main() {
         println!(
             "  {:<10} bars {:>3}-{:<3} {:.2}  {}",
             section.name,
-            section.start / bar + 1.0,
-            section.end / bar,
+            score.bar_number(section.start),
+            score.bar_number((section.end - 1e-6).max(section.start)),
             reading.fullness[index],
             parts.join(", ")
         );
@@ -65,8 +64,8 @@ fn main() {
             take.shot.rolls.iter().filter_map(|track| score.part(*track)).map(|part| part.name.as_str()).collect();
         println!(
             "  bars {:>3}-{:<3} {:>6.1}s  {:<10} {:<9} {:<10} window {:>5.1}->{:<5.1} {}",
-            take.start / bar + 1.0,
-            take.end / bar,
+            score.bar_number(take.start),
+            score.bar_number((take.end - 1e-6).max(take.start)),
             score.seconds(take.start),
             score.sections[take.section].name,
             format!("{:?}", take.shot.kind),

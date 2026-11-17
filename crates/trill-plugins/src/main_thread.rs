@@ -77,6 +77,20 @@ pub(crate) trait ThreadState: 'static {
     /// its stack. Whatever takes something away from a plugin waits for a
     /// call without it.
     fn idle(&mut self, nested: bool);
+
+    /// Called from the thread's own loop, and never from inside a loop of
+    /// someone else's, each time it has just handed the operating system's
+    /// events to the thread's windows. `away` is how long the thread had
+    /// been kept from them before that: by its jobs and its idling.
+    ///
+    /// What a plugin posted to itself while the thread was away has
+    /// reached it when this is called, and nothing else has run since.
+    /// That makes this the place to take from a plugin what such a
+    /// message may be about, and `away` the time a plugin that is waiting
+    /// to hear from its own work has not had.
+    fn served(&mut self, away: Duration) {
+        let _ = away;
+    }
 }
 
 type Job<S> = Box<dyn FnOnce(&mut S) + Send>;
@@ -240,7 +254,10 @@ impl<S> Clone for MainThread<S> {
 }
 
 impl<S: ThreadState> MainThread<S> {
-    fn spawn(name: &str) -> std::io::Result<Self> {
+    /// Starts a thread. The process's plugins all share the one that
+    /// [`SharedMainThread`] hands out; a thread beside it is for tests of
+    /// what a thread does.
+    pub(crate) fn spawn(name: &str) -> std::io::Result<Self> {
         let (sender, receiver) = mpsc::channel();
         let (ready, started) = mpsc::sync_channel(1);
         let exit = Arc::new(Exit::default());
@@ -475,6 +492,15 @@ impl<S: ThreadState> Home<S> {
         }
     }
 
+    /// Tells the state that the thread's windows have just been served.
+    fn served(&self, away: Duration) {
+        // Nothing is running here: this is the thread's own loop.
+        let Ok(mut state) = self.state.try_borrow_mut() else { return };
+        if catch_unwind(AssertUnwindSafe(|| state.served(away))).is_err() {
+            log::error!("the plugin main thread panicked on its way back from its windows");
+        }
+    }
+
     /// How long the thread may sleep before `idle` is due, or `None` if
     /// nothing needs it to wake by itself.
     fn until_idle(&self) -> Option<Duration> {
@@ -492,15 +518,19 @@ fn run<S: ThreadState>(receiver: Receiver<Message<S>>, pump: &os_events::Pump) {
         last_idle: Cell::new(Instant::now()),
     };
     let _registered = Registered::new(&home);
+    let mut left = Instant::now();
     loop {
         home.service(false);
         if home.shutdown.get() {
             break;
         }
+        let away = left.elapsed();
         // Dispatches what the operating system has for this thread's
         // windows. That is where an event loop of someone else's may start,
         // and call back into `service`.
         pump.wait(home.until_idle());
+        left = Instant::now();
+        home.served(away);
     }
     // `home` drops here, and the state with it: on the thread that created
     // it, and while the thread's OS resources (`pump`) still exist.
@@ -605,11 +635,28 @@ mod tests {
         /// else's.
         nested_idles: usize,
         busy: bool,
+        /// How often the thread said it had served its windows, and how
+        /// long it said it had been kept from them, in all.
+        served: usize,
+        away: Duration,
     }
 
     impl ThreadState for Counter {
         fn new() -> Self {
-            Self { thread: thread::current().id(), jobs: 0, idles: 0, nested_idles: 0, busy: false }
+            Self {
+                thread: thread::current().id(),
+                jobs: 0,
+                idles: 0,
+                nested_idles: 0,
+                busy: false,
+                served: 0,
+                away: Duration::ZERO,
+            }
+        }
+
+        fn served(&mut self, away: Duration) {
+            self.served += 1;
+            self.away += away;
         }
 
         fn wants_idle(&self) -> bool {
@@ -630,6 +677,23 @@ mod tests {
     }
 
     const WAIT: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn the_state_is_told_when_the_windows_were_served_and_how_long_jobs_kept_the_thread_from_them() {
+        let main = MainThread::<Counter>::spawn("test-main").unwrap();
+        let before = main.call(WAIT, |state| (state.served, state.away)).unwrap();
+        let long = Duration::from_millis(120);
+        main.call(WAIT, move |_| thread::sleep(long)).unwrap();
+        // The thread goes back to its windows after the job, and says so
+        // before it takes the next one.
+        let after = main.call(WAIT, |state| (state.served, state.away)).unwrap();
+        assert!(after.0 > before.0, "{before:?}, then {after:?}");
+        assert!(after.1 - before.1 >= long, "{before:?}, then {after:?}");
+        // Waiting is not being kept away.
+        thread::sleep(long);
+        let rested = main.call(WAIT, |state| state.away).unwrap();
+        assert!(rested - after.1 < long, "{:?} more while it was waiting", rested - after.1);
+    }
 
     #[test]
     fn the_thread_is_behind_while_it_has_had_work_for_a_while_and_not_for_work_done_in_passing() {
