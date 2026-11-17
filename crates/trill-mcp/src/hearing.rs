@@ -58,6 +58,11 @@ file of its own: ask once for all of them, never render the song once per track.
 Both hear only some of the song with `tracks`, and then make and wait for only those tracks and what feeds them: \
 hearing one track of a long song costs what that track costs. Naming a return there gives that return alone, as \
 every track's send feeds it; naming a group gives the group with its members.
+A stretch (`start`, `end`) begins as the song has it there: the keyswitch a part chose before it and its \
+controllers, wheel and pedals are where the part left them, and a note that is sounding at the start is heard \
+from where it began (up to 32 beats before; the reply says if one began earlier and is left out). What only \
+rings over from notes that ended before the start is not in it. The transport does the same wherever it is \
+started, but does not begin notes that are already sounding there.
 Both run at the engine's sample rate unless `sample_rate` asks for another (without an audio device the engine \
 runs at 48000 Hz, whatever the song's files are at), and their replies state the rate they ran at.
 probe, measure and render make their copies of a song's plugins in a process of their own. A plugin that \
@@ -517,6 +522,21 @@ fn observations(report: &RenderReport, project: &Project) -> Vec<String> {
     notes
 }
 
+/// What to say of notes that were sounding where a render started and
+/// began too long before it to be played from where they began.
+fn not_begun_note(left_out: &trill_engine::render::NotBegun) -> String {
+    format!(
+        "{} on '{}' {} already sounding where this starts, from more than {} beats before: {} not in it. Start \
+         earlier to hear {}.",
+        if left_out.notes == 1 { "A note".to_string() } else { format!("{} notes", left_out.notes) },
+        left_out.track_name,
+        if left_out.notes == 1 { "was" } else { "were" },
+        trill_engine::render::LEAD_IN_BEATS,
+        if left_out.notes == 1 { "it is" } else { "they are" },
+        if left_out.notes == 1 { "it" } else { "them" },
+    )
+}
+
 /// What to say of the instruments of a render that draw at random what
 /// they play: that the next render will differ and how to stop it, or,
 /// where it was stopped, that this is not quite the song as it plays.
@@ -771,6 +791,7 @@ fn report_json(
     all.append(&mut observations(report, project));
     all.extend(alone_note(&report.alone));
     all.extend(draws_notes(&report.draws));
+    all.extend(report.not_begun.iter().map(not_begun_note));
     all.append(&mut notes);
     out["notes"] = json!(all);
     out

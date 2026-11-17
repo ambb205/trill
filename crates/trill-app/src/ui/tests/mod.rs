@@ -12,6 +12,7 @@ mod automation;
 mod clips;
 mod controllers;
 mod editors;
+mod export;
 mod film;
 mod instruments;
 mod keyboard;

@@ -210,3 +210,63 @@ fn a_film_is_made_from_the_window_while_it_says_how_far_it_is_and_one_can_be_sto
     assert!(kept.is_empty(), "nothing of it was kept, but there is {kept:?}");
     assert_eq!(harness.project(), song, "and a film edits nothing");
 }
+
+#[test]
+#[ignore = "needs a graphics card; run with `cargo test -p trill-app a_film_whose_song -- --ignored --nocapture`"]
+fn a_film_whose_song_takes_its_render_down_is_said_in_the_window_and_one_stopped_in_its_sound_stops_at_once() {
+    use trill_engine::scripted::{Dies, Loading};
+    let folder = tempfile::tempdir().unwrap();
+    let kept = |folder: &tempfile::TempDir| std::fs::read_dir(folder.path()).unwrap().count();
+
+    // A song whose bass takes the process that renders it down, in the
+    // middle of the song: the window says so in place of the film.
+    let dying = Loading { dies: Some(Dies::Played(40)), ..Loading::default() };
+    let (mut harness, _) = super::export::with_a_bass(dying);
+    harness.key(CTRL_SHIFT, Key::F);
+    harness.idle(3);
+    harness.click_label("24 a second");
+    harness.click_label("Plain");
+    harness.idle(2);
+    let before = harness.app.state().toasts.len();
+    harness.app.film_to(&harness.ctx.clone(), folder.path().join("fallen.mp4"));
+    let said = super::export::next_toast(&mut harness, before);
+    println!("{said}");
+    assert!(said.contains("The song could not be rendered: the render was taken down while it was being played"));
+    assert!(said.contains("the song that is open is untouched") && said.contains("Try again"), "{said}");
+    assert_eq!(kept(&folder), 0, "something of the film was kept");
+    assert!(harness.app.filming().making().is_none());
+
+    // A song of most of an hour, stopped while its sound is rendered: the
+    // render ends there and then, and nothing is kept.
+    let (mut harness, bass) = super::export::with_a_bass(Loading::default());
+    harness
+        .session
+        .lock()
+        .edit(|project| {
+            let clip = project.track(bass)?.clips[0].id;
+            project.clip_mut(clip)?.set_loop_length(Some(16.0))?;
+            project.set_clip_span(clip, 0.0, 6_400.0)
+        })
+        .unwrap();
+    harness.key(CTRL_SHIFT, Key::F);
+    harness.idle(3);
+    harness.click_label("24 a second");
+    harness.click_label("Plain");
+    harness.idle(2);
+    harness.app.film_to(&harness.ctx.clone(), folder.path().join("stopped.mp4"));
+    harness.wait_until("the film to begin", |harness| harness.app.filming().making().is_some());
+    harness.wait_until("a way to stop it", |harness| harness.is_on_screen("Stop the film"));
+    // Well into its sound, and long before its first picture.
+    std::thread::sleep(Duration::from_millis(1_500));
+    harness.idle(2);
+    assert!(line(&harness, "Frame ").is_none(), "its sound is still being rendered");
+    let stopped = Instant::now();
+    harness.click_label("Stop the film");
+    harness.wait_until("the film to stop", |harness| harness.app.filming().making().is_none());
+    let after = stopped.elapsed();
+    let said = harness.app.state().toasts.texts().last().map(|text| (*text).to_owned()).unwrap();
+    println!("{said} (after {after:.1?})");
+    assert!(said.starts_with("The film was stopped before its first frame"), "{said}");
+    assert!(after < Duration::from_secs(5), "the render went on for {after:?} after the film was stopped");
+    assert_eq!(kept(&folder), 0, "something of the film was kept");
+}

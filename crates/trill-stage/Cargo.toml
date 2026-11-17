@@ -39,3 +39,6 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # The examples read a finished mix to light the picture with.
 hound.workspace = true
 tempfile = "3"
+# A film's sound is rendered through a runtime's session in the tests, by
+# a process of its own.
+trill-runtime.workspace = true
