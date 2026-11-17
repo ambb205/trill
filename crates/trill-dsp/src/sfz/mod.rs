@@ -42,12 +42,27 @@
 //! * Vibrato and tremolo: `pitchlfo_freq`, `pitchlfo_depth`,
 //!   `pitchlfo_delay`, `pitchlfo_fade`, `pitchlfo_depth_onccN`, and the
 //!   same of `amplfo_`.
+//! * Up to six more slow waves, numbered: `lfoN_freq`, `lfoN_delay`,
+//!   `lfoN_fade`, `lfoN_phase`, `lfoN_wave` (sine, triangle, square, the
+//!   two saws, and a level drawn by lot each time round), and what each
+//!   moves: `lfoN_pitch`, `lfoN_volume`, `lfoN_cutoff`, `lfoN_pan`, and
+//!   the rate of another (`lfoN_freq_lfoM`). Every one of those may be
+//!   moved by a controller (`…_onccN`, along `…_curveccN`).
+//! * By a controller when a note begins: where in the recording it starts
+//!   (`offset_onccN`) and how long it waits (`delay_onccN`); and while it
+//!   sounds, how far the filter rings (`resonance_onccN`) and how far its
+//!   envelope opens it (`fileg_depth_onccN`).
 //! * The curves controllers are read along: `…_curveccN` on everything a
 //!   controller moves here, with the seven curves every player has and
 //!   the instrument's own (`<curve>` with `curve_index` and `vNNN`).
 //!
-//! Controllers are the 128 of MIDI. The ones a maker's player makes up
-//! beyond those (how fast a key came up, a random number) are not here.
+//! Controllers are the 128 of MIDI, and five that a note has of its own,
+//! by the numbers the format's makers gave them: how hard it was struck
+//! (131), its key (133), a number at random (135, and 136 for one that
+//! goes both ways) and one that is 0 and 1 by turns (137). Wherever a
+//! controller may be named, one of those may be. The others a maker's
+//! player makes up (how fast a key came up, how far a note is from the
+//! one before) are not here.
 //! A region that only a controller sets off (`on_loccN`) or that no key
 //! plays (`key=-1`) is left out, and said.
 //!
@@ -57,8 +72,8 @@
 mod text;
 
 use crate::sampled::model::{
-    BUILT_IN_CURVES, Control, Envelope, Fade, FadeCurve, FilterKind, Instrument, LoopMode, Moved, OffMode, Region,
-    Stage, Trigger, Unsupported, built_in_curves,
+    BUILT_IN_CURVES, Control, Envelope, Fade, FadeCurve, FilterKind, Instrument, LoopMode, MAX_WAVES, Moved, OffMode,
+    Region, SlowWave, Stage, Swing, Swung, Trigger, Unsupported, Wave, built_in_curves, note,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -364,8 +379,11 @@ impl Reader {
         if !curve.is_empty() {
             region.velocity_curve = Some(velocity_curve(&curve));
         }
+        // The filter has an envelope where something says how far it opens
+        // the filter: the file, or a controller.
+        let opened_by_controller = region.controls.iter().any(|control| control.moved == Moved::FilterEnvelope);
         if let Some(filter) = &mut region.filter
-            && filter_depth != 0.0
+            && (filter_depth != 0.0 || opened_by_controller)
         {
             filter.envelope = Some((filter_envelope, filter_depth));
         }
@@ -556,13 +574,17 @@ impl Reader {
             "lochan" | "hichan" | "output" | "sample_quality" | "region_label" | "group_label" | "master_label"
             | "global_label" | "script" | "md5" | "ampeg_dynamic" | "off_shape" => {}
             _ if name.starts_with("hint_") => {}
-            // Every controller is smoothed here, the same for all.
-            _ if name.contains("_smoothcc") || name.contains("_stepcc") => {}
+            // Every controller is smoothed here, the same for all, and so
+            // is the wheel.
+            _ if name.contains("_smoothcc") || name.contains("_stepcc") || name == "bend_smooth" => {}
             // A region that a controller sets off, not a key: it is left
             // out, since nothing here would set it off, and said.
             _ if name.starts_with("on_locc") || name.starts_with("on_hicc") => {
                 building.disabled = true;
                 return false;
+            }
+            _ if name.starts_with("lfo") && name.as_bytes().get(3).is_some_and(u8::is_ascii_digit) => {
+                return wave_pair(building, name, amount, value);
             }
             _ => return self.numbered(building, name, amount, value),
         }
@@ -572,8 +594,14 @@ impl Reader {
     /// The pairs whose name ends in a number: a controller's, or a point
     /// of a curve.
     fn numbered(&mut self, building: &mut Building, name: &str, amount: f32, value: &str) -> bool {
+        // How far the filter's envelope opens it is a controller's to move
+        // like anything else of the region, not a stage of the envelope.
+        let depth_of_envelope = name.starts_with("fileg_depth") && name.contains("cc");
         // The envelopes, with and without a controller.
         for (prefix, filter) in [("ampeg_", false), ("fileg_", true)] {
+            if depth_of_envelope {
+                break;
+            }
             let Some(rest) = name.strip_prefix(prefix) else { continue };
             let envelope = if filter { &mut building.filter_envelope } else { &mut building.region.envelope };
             return envelope_pair(envelope, rest, amount);
@@ -592,9 +620,13 @@ impl Reader {
                 "amplfo_depth" => Moved::Tremolo,
                 "amp_veltrack" => Moved::Dynamics,
                 "width" => Moved::Width,
+                "offset" => Moved::Offset,
+                "delay" => Moved::Delay,
+                "resonance" => Moved::Resonance,
+                "fileg_depth" => Moved::FilterEnvelope,
                 _ => return false,
             };
-            if number > 127 {
+            if !note::is_controller(number) {
                 return false;
             }
             building.curves.push((Some(moved), number as u8, amount.max(0.0) as u16));
@@ -607,9 +639,9 @@ impl Reader {
             }
             return true;
         }
-        if number > 127 {
-            // Controllers above 127 are a player's own: the pitch wheel,
-            // the pressure, a random number.
+        if !note::is_controller(number) {
+            // Other controllers above 127 are a player's own: the pitch
+            // wheel, the pressure, how far a note is from the one before.
             return false;
         }
         let controller = number as u8;
@@ -622,12 +654,17 @@ impl Reader {
             set(&mut found.expect("it was just put there").1);
         };
         let moved = match stem.as_str() {
-            "locc" | "hicc" => {
+            // A span of a controller's travel, in MIDI's 0..=127 or as a
+            // share of it.
+            "locc" | "hicc" | "lohdcc" | "hihdcc" => {
+                // One that goes both ways is in the span when nothing is said.
+                let lowest = if controller == note::RANDOM_EITHER_WAY { -127.0 } else { 0.0 };
                 if !region.when.iter().any(|(number, _, _)| *number == controller) {
-                    region.when.push((controller, 0.0, 127.0));
+                    region.when.push((controller, lowest, 127.0));
                 }
                 let span = region.when.iter_mut().find(|(number, _, _)| *number == controller).expect("just put");
-                if stem == "locc" {
+                let amount = if stem.contains("hd") { amount * 127.0 } else { amount };
+                if stem.starts_with("lo") {
                     span.1 = amount
                 } else {
                     span.2 = amount
@@ -667,13 +704,17 @@ impl Reader {
             "amplfo_depth_oncc" => Moved::Tremolo,
             "amp_veltrack_oncc" => Moved::Dynamics,
             "width_oncc" => Moved::Width,
+            "offset_oncc" => Moved::Offset,
+            "delay_oncc" => Moved::Delay,
+            "resonance_oncc" => Moved::Resonance,
+            "fileg_depth_oncc" => Moved::FilterEnvelope,
             _ => return false,
         };
         let _ = value;
         match moved {
             Moved::Vibrato => drop(region.vibrato.get_or_insert_default()),
             Moved::Tremolo => drop(region.tremolo.get_or_insert_default()),
-            Moved::Cutoff => drop(region.filter.get_or_insert_default()),
+            Moved::Cutoff | Moved::Resonance | Moved::FilterEnvelope => drop(region.filter.get_or_insert_default()),
             _ => {}
         }
         region.controls.retain(|control| !(control.controller == controller && control.moved == moved));
@@ -752,7 +793,7 @@ fn envelope_pair(envelope: &mut Envelope, rest: &str, amount: f32) -> bool {
                 true
             }
             // Said before the amount it belongs to: kept with nothing to move yet.
-            None if controller <= 127 => {
+            None if note::is_controller(controller) => {
                 envelope.by_controller.push((stage, controller as u8, 0.0, amount.max(0.0) as u16));
                 true
             }
@@ -761,7 +802,7 @@ fn envelope_pair(envelope: &mut Envelope, rest: &str, amount: f32) -> bool {
     }
     let word = stem.strip_suffix("_oncc").or_else(|| stem.strip_suffix("cc"));
     match (word.and_then(stage_of), number) {
-        (Some(stage), Some(controller)) if controller <= 127 => {
+        (Some(stage), Some(controller)) if note::is_controller(controller) => {
             let controller = controller as u8;
             let curve = envelope
                 .by_controller
@@ -774,6 +815,78 @@ fn envelope_pair(envelope: &mut Envelope, rest: &str, amount: f32) -> bool {
         }
         _ => false,
     }
+}
+
+/// One pair of a numbered slow wave: `lfo01_freq`, `lfo2_pitch_oncc111`,
+/// `lfo03_freq_lfo01_oncc118`, `lfo01_pitch_curvecc111`.
+fn wave_pair(building: &mut Building, name: &str, amount: f32, value: &str) -> bool {
+    let rest = &name[3..];
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    let Ok(number) = rest[..digits].parse::<u8>() else { return false };
+    let Some(rest) = rest[digits..].strip_prefix('_') else { return false };
+    // What the pair is about, and the controller that moves it if one does.
+    let (stem, last) = split_number(rest);
+    let (word, controller, names_curve) = match (stem.strip_suffix("_curvecc"), last) {
+        (Some(word), Some(controller)) => (word, Some(controller), true),
+        _ => match (stem.strip_suffix("_oncc").or_else(|| stem.strip_suffix("_cc")), last) {
+            (Some(word), Some(controller)) => (word, Some(controller), false),
+            _ => (rest, None, false),
+        },
+    };
+    let kind = match (word, integer(value)) {
+        ("wave", Some(0)) => Some(Wave::Triangle),
+        ("wave", Some(1)) => Some(Wave::Sine),
+        ("wave", Some(3)) => Some(Wave::Square),
+        ("wave", Some(6)) => Some(Wave::Ramp),
+        ("wave", Some(7)) => Some(Wave::Saw),
+        ("wave", Some(-1 | 12)) => Some(Wave::Random),
+        ("wave", _) => return false,
+        _ => None,
+    };
+    let swung = match word {
+        "wave" => Swung::Rate,
+        "freq" => Swung::Rate,
+        "delay" => Swung::Delay,
+        "fade" => Swung::Fade,
+        "phase" => Swung::Phase,
+        "pitch" => Swung::Pitch,
+        "volume" => Swung::Volume,
+        "cutoff" => Swung::Cutoff,
+        "pan" => Swung::Pan,
+        other => match other.strip_prefix("freq_lfo").and_then(|of| of.parse::<u8>().ok()) {
+            Some(of) => Swung::RateOf(of),
+            None => return false,
+        },
+    };
+    let controller = match controller {
+        Some(controller) if note::is_controller(controller) => Some(controller as u8),
+        Some(_) => return false,
+        None => None,
+    };
+    let region = &mut building.region;
+    if !region.waves.iter().any(|wave| wave.number == number) {
+        if region.waves.len() >= MAX_WAVES {
+            return false;
+        }
+        region.waves.push(SlowWave { number, ..SlowWave::default() });
+    }
+    let wave = region.waves.iter_mut().find(|wave| wave.number == number).expect("it was just put there");
+    if let Some(kind) = kind {
+        wave.wave = kind;
+        return true;
+    }
+    let known = wave.swings.iter_mut().find(|swing| swing.swung == swung && swing.controller == controller);
+    match (known, names_curve) {
+        (Some(swing), true) => swing.curve = amount.max(0.0) as u16,
+        (Some(swing), false) => swing.amount = amount,
+        // A curve said before the amount it belongs to moves nothing yet.
+        (None, true) => wave.swings.push(Swing { swung, controller, amount: 0.0, curve: amount.max(0.0) as u16 }),
+        (None, false) => wave.swings.push(Swing { swung, controller, amount, curve: 0 }),
+    }
+    if swung == Swung::Cutoff {
+        region.filter.get_or_insert_default();
+    }
+    true
 }
 
 /// A name without the number it ends in, and the number.
@@ -789,7 +902,8 @@ fn split_number(name: &str) -> (&str, Option<u32>) {
 /// The one name a controller's pair goes by: `gain_cc7` and
 /// `volume_oncc7` are the same thing said in two versions of the format.
 fn canonical(stem: &str) -> String {
-    const AS_WRITTEN: &[&str] = &["locc", "hicc", "xfin_locc", "xfin_hicc", "xfout_locc", "xfout_hicc"];
+    const AS_WRITTEN: &[&str] =
+        &["locc", "hicc", "lohdcc", "hihdcc", "xfin_locc", "xfin_hicc", "xfout_locc", "xfout_hicc"];
     if AS_WRITTEN.contains(&stem) || stem.ends_with("_oncc") {
         return stem.to_string();
     }
@@ -885,9 +999,9 @@ fn missed(name: &str) -> &'static str {
     let name = name.trim_start_matches('<');
     let starts = |words: &[&str]| words.iter().any(|word| name.starts_with(word));
     let (stem, number) = split_number(name);
-    if stem.ends_with("cc") && number.is_some_and(|number| number > 127) {
-        return "what its maker's player makes up as controllers beyond the 128 of MIDI (how fast a key came up, a \
-                number at random)";
+    if stem.ends_with("cc") && number.is_some_and(|number| !note::is_controller(number)) {
+        return "what its maker's player makes up as controllers beyond the ones here (how fast a key came up, how \
+                far a note is from the one before)";
     }
     if starts(&["effect", "reverb", "chorus", "fx", "apan", "comp_", "gate_", "disto", "strings_"]) {
         "effects of its own (a reverb, a chorus)"
@@ -937,6 +1051,100 @@ mod tests {
         read(Path::new("/kits/Small Grand.sfz"), &|path| {
             if path == Path::new("/kits/Small Grand.sfz") { Ok(source.to_string()) } else { Err("no such file".into()) }
         })
+    }
+
+    #[test]
+    fn a_notes_own_controllers_numbered_waves_and_what_begins_a_note_are_read() {
+        let mut reader = Reader::default();
+        let region = reader
+            .region_of(&[
+                ("sample", "a.wav"),
+                ("locc131", "64"),
+                ("hihdcc135", "0.5"),
+                ("amplitude_oncc131", "100"),
+                ("offset_cc131", "4800"),
+                ("offset_curvecc131", "1"),
+                ("delay_oncc135", "0.02"),
+                ("resonance_cc20", "6"),
+                ("fileg_depthcc21", "1200"),
+                ("bend_smooth", "50"),
+                ("lfo01_freq", "2"),
+                ("lfo01_freq_oncc112", "8"),
+                ("lfo1_pitch_oncc111", "22"),
+                ("lfo01_pitch_curvecc111", "4"),
+                ("lfo01_phase", "0.25"),
+                ("lfo2_freq", "0.01"),
+                ("lfo02_wave", "-1"),
+                ("lfo2_freq_lfo1_oncc119", "3"),
+                ("lfo02_volume", "1.5"),
+                ("lfo02_delay_oncc116", "1"),
+                ("lfo02_freq_smoothcc117", "20"),
+                // What is not done, and stays said.
+                ("lfo02_eq1gain_oncc115", "6"),
+                ("lfo02_wave", "9"),
+                ("tune_oncc140", "100"),
+                ("locc132", "1"),
+            ])
+            .unwrap();
+        assert_eq!(region.when, [(131, 64.0, 127.0), (135, 0.0, 63.5)]);
+        let moved = |moved: Moved| region.controls.iter().find(|control| control.moved == moved).copied();
+        assert_eq!(
+            moved(Moved::Amplitude),
+            Some(Control { controller: 131, moved: Moved::Amplitude, depth: 100.0, curve: 0 })
+        );
+        assert_eq!(
+            moved(Moved::Offset),
+            Some(Control { controller: 131, moved: Moved::Offset, depth: 4_800.0, curve: 1 })
+        );
+        assert_eq!(moved(Moved::Delay).map(|control| (control.controller, control.depth)), Some((135, 0.02)));
+        assert_eq!(moved(Moved::Resonance).map(|control| (control.controller, control.depth)), Some((20, 6.0)));
+        assert_eq!(
+            moved(Moved::FilterEnvelope).map(|control| (control.controller, control.depth)),
+            Some((21, 1_200.0))
+        );
+        assert!(region.filter.is_some(), "what moves a filter makes one");
+        assert!(Moved::Offset.at_the_start() && Moved::Delay.at_the_start() && !Moved::Resonance.at_the_start());
+
+        assert_eq!(region.waves.len(), 2, "lfo1 and lfo01 are one wave");
+        let (first, second) = (&region.waves[0], &region.waves[1]);
+        assert_eq!((first.number, first.wave, second.number, second.wave), (1, Wave::Sine, 2, Wave::Random));
+        let swing = |swung, controller, amount, curve| Swing { swung, controller, amount, curve };
+        assert_eq!(
+            first.swings,
+            [
+                swing(Swung::Rate, None, 2.0, 0),
+                swing(Swung::Rate, Some(112), 8.0, 0),
+                swing(Swung::Pitch, Some(111), 22.0, 4),
+                swing(Swung::Phase, None, 0.25, 0),
+            ]
+        );
+        assert_eq!(
+            second.swings,
+            [
+                swing(Swung::Rate, None, 0.01, 0),
+                swing(Swung::RateOf(1), Some(119), 3.0, 0),
+                swing(Swung::Volume, None, 1.5, 0),
+                swing(Swung::Delay, Some(116), 1.0, 0),
+            ]
+        );
+        let mut said: Vec<&str> = reader.unsupported.keys().map(String::as_str).collect();
+        said.sort_unstable();
+        assert_eq!(said, ["lfo02_eq1gain_oncc115", "lfo02_wave", "locc132", "tune_oncc140"]);
+        assert!(missed("tune_oncc140").contains("how far a note is from the one before"));
+        assert!(
+            note::is_controller(127)
+                && note::is_controller(137)
+                && !note::is_controller(132)
+                && !note::is_controller(400)
+        );
+
+        // No more waves than a voice has room for.
+        let pairs: Vec<(String, &str)> = (1..=7).map(|number| (format!("lfo{number}_freq"), "1")).collect();
+        let mut pairs: Vec<(&str, &str)> = pairs.iter().map(|(name, value)| (name.as_str(), *value)).collect();
+        pairs.push(("sample", "a.wav"));
+        let mut reader = Reader::default();
+        assert_eq!(reader.region_of(&pairs).unwrap().waves.len(), MAX_WAVES);
+        assert_eq!(reader.unsupported.keys().collect::<Vec<_>>(), ["lfo7_freq"]);
     }
 
     #[test]
@@ -1032,7 +1240,7 @@ mod tests {
     #[test]
     fn what_this_player_does_not_do_is_counted_by_name_and_the_rest_still_reads() {
         let kit = read_text(
-            "<control> hint_ram_based=1 set_cc300=1\n<global> eq1_gain=3 eq1_freq=80 lfo01_freq=4 lfo01_pitch=10\n\
+            "<control> hint_ram_based=1 set_cc300=1\n<global> eq1_gain=3 eq1_freq=80 eg01_time1=4 lfo01_pitch=10\n\
              <effect> type=reverb\n<midi> x=1\n\
              <group> key=36 loop_mode=one_shot off_by=2 group=1 off_mode=time off_time=0.2 cutoff2=500\n\
              <region> sample=kick.wav on_locc64=1 cutoff=900 fil_type=lpf_2p fil_veltrack=1200 fileg_depth=2400 fileg_decay=0.1\n\
@@ -1044,7 +1252,7 @@ mod tests {
         for expected in [
             ("eq1_gain", 4),
             ("eq1_freq", 4),
-            ("lfo01_freq", 4),
+            ("eg01_time1", 4),
             ("<effect>", 1),
             ("<midi>", 1),
             ("cutoff2", 4),

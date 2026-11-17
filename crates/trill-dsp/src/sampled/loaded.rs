@@ -212,6 +212,12 @@ impl Instruments {
 }
 
 impl Loaded {
+    /// Every file the instrument's text was read from: its own, and the
+    /// ones that includes.
+    pub fn text_files(&self) -> Vec<&Path> {
+        self.texts.iter().map(|(path, _)| path.as_path()).collect()
+    }
+
     /// Whether the recordings that were there when the instrument was
     /// read still are, as far as a few of them from all over it say:
     /// enough to notice a folder that was moved, without asking after

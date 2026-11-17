@@ -141,6 +141,76 @@ pub enum Moved {
     /// How much of a stereo recording's width is kept, in percent at the
     /// top.
     Width,
+    /// How far into the recording a note begins, in frames at the top:
+    /// read when the note begins.
+    Offset,
+    /// How long a note waits before it sounds, in seconds at the top:
+    /// read when the note begins.
+    Delay,
+    /// How far the filter rings at its cutoff, in dB at the top.
+    Resonance,
+    /// How far the filter's own envelope opens it, in cents at the top.
+    FilterEnvelope,
+}
+
+impl Moved {
+    /// Read once, when the note begins, and not while it sounds.
+    pub fn at_the_start(self) -> bool {
+        matches!(self, Moved::Dynamics | Moved::Offset | Moved::Delay)
+    }
+}
+
+/// The controllers a player makes up for each note, beside the 128 of
+/// MIDI, by the numbers the format's makers gave them. A note's own are
+/// fixed when it begins.
+pub mod note {
+    /// How hard the key was struck, 0..=1.
+    pub const VELOCITY: u8 = 131;
+    /// Which key, as a share of the keyboard: key 127 is 1.
+    pub const KEY: u8 = 133;
+    /// A number at random from 0 up to 1, one for the note.
+    pub const RANDOM: u8 = 135;
+    /// A number at random from -1 up to 1, one for the note.
+    pub const RANDOM_EITHER_WAY: u8 = 136;
+    /// 0 and 1 by turns, from one note to the next.
+    pub const ALTERNATE: u8 = 137;
+
+    /// Whether `number` is a controller this player has: one of MIDI's,
+    /// or one of a note's own.
+    pub fn is_controller(number: u32) -> bool {
+        number < 128 || is_own(number.min(255) as u8)
+    }
+
+    /// Whether `number` is one of a note's own.
+    pub fn is_own(number: u8) -> bool {
+        matches!(number, VELOCITY | KEY | RANDOM | RANDOM_EITHER_WAY | ALTERNATE)
+    }
+
+    /// A note's own controllers, as they were when it began.
+    #[derive(Copy, Clone, Debug, Default, PartialEq)]
+    pub struct Own {
+        pub velocity: f32,
+        pub key: f32,
+        pub random: f32,
+        pub random_either_way: f32,
+        pub alternate: f32,
+    }
+
+    impl Own {
+        /// Where the controller `number` is: one of the note's own, or
+        /// one of `controllers`.
+        #[inline]
+        pub fn or(&self, controllers: &[f32; 128], number: u8) -> f32 {
+            match number {
+                VELOCITY => self.velocity,
+                KEY => self.key,
+                RANDOM => self.random,
+                RANDOM_EITHER_WAY => self.random_either_way,
+                ALTERNATE => self.alternate,
+                number => controllers[usize::from(number.min(127))],
+            }
+        }
+    }
 }
 
 /// A controller that moves something of a region.
@@ -170,6 +240,11 @@ pub fn built_in_curves() -> Vec<[f32; 128]> {
 /// of `curves`. A curve there is none of is the straight line.
 #[inline]
 pub fn along(curves: &[[f32; 128]], curve: u16, position: f32) -> f32 {
+    // A controller that goes both ways (a note's own number at random)
+    // is read along the curve on either side of nothing.
+    if position < 0.0 {
+        return -along(curves, curve, -position);
+    }
     let position = position.clamp(0.0, 1.0);
     let Some(table) = curves.get(usize::from(curve)).filter(|_| curve != 0) else { return position };
     let at = position * 127.0;
@@ -303,6 +378,110 @@ pub struct Wobble {
     pub fade: f32,
 }
 
+/// The shape of a slow wave.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum Wave {
+    #[default]
+    Sine,
+    Triangle,
+    Square,
+    /// Rising, then falling back at once.
+    Ramp,
+    /// Falling, then rising back at once.
+    Saw,
+    /// Another level each time round, drawn by lot and held.
+    Random,
+}
+
+impl Wave {
+    /// The wave at `phase` (in rounds: 0.25 is a quarter of the way
+    /// round), from -1 to 1. `round` is how many times it has been round
+    /// and `seed` a number of the note's own: what the lot is drawn from,
+    /// so that the same note draws the same.
+    #[inline]
+    pub fn at(self, phase: f32, round: u32, seed: u64) -> f32 {
+        let phase = phase - phase.floor();
+        match self {
+            Wave::Random => {
+                let mut x = seed ^ (u64::from(round) + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                x ^= x >> 31;
+                (x >> 40) as f32 / (1u64 << 23) as f32 - 1.0
+            }
+            Wave::Sine => (std::f32::consts::TAU * phase).sin(),
+            Wave::Triangle => {
+                if phase < 0.25 {
+                    phase * 4.0
+                } else if phase < 0.75 {
+                    2.0 - phase * 4.0
+                } else {
+                    phase * 4.0 - 4.0
+                }
+            }
+            Wave::Square => {
+                if phase < 0.5 {
+                    1.0
+                } else {
+                    -1.0
+                }
+            }
+            Wave::Ramp => phase * 2.0 - 1.0,
+            Wave::Saw => 1.0 - phase * 2.0,
+        }
+    }
+}
+
+/// What a slow wave of a region moves, or what a controller moves of the
+/// wave.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum Swung {
+    /// The wave's own rate, in cycles a second.
+    Rate,
+    /// Seconds before it begins, and seconds it takes to reach its depth.
+    Delay,
+    Fade,
+    /// Where in its round it begins, in rounds.
+    Phase,
+    /// The pitch, in cents at the top of its swing.
+    Pitch,
+    /// The level, in dB.
+    Volume,
+    /// The filter's cutoff, in cents.
+    Cutoff,
+    /// The place between the sides, in percent.
+    Pan,
+    /// The rate of another wave of the region, by its number, in cycles a
+    /// second: a vibrato that is not the same from one cycle to the next.
+    RateOf(u8),
+}
+
+/// How far a wave swings something, or how far a controller moves
+/// something of the wave.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Swing {
+    pub swung: Swung,
+    /// The controller whose position the amount is taken at; `None` for
+    /// an amount that stands as it is.
+    pub controller: Option<u8>,
+    pub amount: f32,
+    /// The curve the controller is read along ([`Control::curve`]).
+    pub curve: u16,
+}
+
+/// A slow wave of a region, of the kind an instrument may have several
+/// of, each moving what it says ([`Region::waves`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SlowWave {
+    /// Its number in the instrument's file.
+    pub number: u8,
+    pub wave: Wave,
+    pub swings: Vec<Swing>,
+}
+
+/// The most slow waves a region may have.
+pub const MAX_WAVES: usize = 6;
+
 /// What a keyswitch has to be for a region to sound.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Switched {
@@ -403,6 +582,8 @@ pub struct Region {
     pub filter: Option<Filter>,
     pub vibrato: Option<Wobble>,
     pub tremolo: Option<Wobble>,
+    /// More slow waves, each moving what it says: at most [`MAX_WAVES`].
+    pub waves: Vec<SlowWave>,
     pub controls: Vec<Control>,
 
     pub fade_keys: Fade,
@@ -459,6 +640,7 @@ impl Default for Region {
             filter: None,
             vibrato: None,
             tremolo: None,
+            waves: Vec::new(),
             controls: Vec::new(),
             fade_keys: Fade::default(),
             fade_velocities: Fade::default(),
@@ -619,7 +801,11 @@ impl Instrument {
             used.extend(region.controls.iter().map(|control| control.controller));
             used.extend(region.fade_controllers.iter().map(|(controller, _)| *controller));
             used.extend(region.envelope.by_controller.iter().map(|(_, controller, _, _)| *controller));
+            let swings = region.waves.iter().flat_map(|wave| &wave.swings);
+            used.extend(swings.filter_map(|swing| swing.controller));
         }
+        // A note's own are nobody's to move.
+        used.retain(|number| *number < 128);
         used.sort_unstable();
         used.dedup();
         used
@@ -829,7 +1015,8 @@ mod tests {
         let mut curves = built_in_curves();
         assert_eq!(curves.len(), BUILT_IN_CURVES);
         let at = |curve: u16, position: f32| along(&curves, curve, position);
-        assert_eq!((at(0, 0.25), at(0, 2.0), at(0, -1.0)), (0.25, 1.0, 0.0));
+        // (Under nothing a controller is the same way from nothing as over it: one of a note's own goes both ways.)
+        assert_eq!((at(0, 0.25), at(0, 2.0), at(0, -0.25), at(0, -3.0)), (0.25, 1.0, -0.25, -1.0));
         assert!((at(1, 0.5)).abs() < 1e-6 && at(1, 0.0) == -1.0 && at(1, 1.0) == 1.0, "from -1 to 1");
         assert!((at(2, 0.25) - 0.75).abs() < 1e-6 && (at(3, 0.25) - 0.5).abs() < 1e-6);
         assert!(

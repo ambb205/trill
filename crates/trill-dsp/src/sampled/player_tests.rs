@@ -528,6 +528,167 @@ fn a_filter_a_vibrato_and_controllers_do_what_the_instrument_says() {
     assert!((bent("<region> sample=tone.wav bend_up=1200", 5.0, 0.5) - 250.0).abs() < 0.1, "the device's own range");
 }
 
+/// The peaks of `heard` over stretches of `window` frames.
+fn peaks(heard: &[f32], window: usize) -> Vec<f32> {
+    heard.chunks(window).filter(|chunk| chunk.len() == window).map(peak).collect()
+}
+
+#[test]
+fn the_controllers_a_note_has_of_its_own_choose_what_sounds_and_how_loud() {
+    let files = [("a.wav", level(4_000, 0.1)), ("b.wav", level(4_000, 0.4))];
+    // How hard a key is struck, as a controller: which recording, and its level.
+    let by_velocity = "<global> amp_veltrack=0 key=60\n<region> sample=a.wav hicc131=63\n\
+                       <region> sample=b.wav locc131=64 amplitude_oncc131=100\n";
+    let mut player = rendered(by_velocity, &files);
+    let heard = play(&mut player, 256, 12_000, &[(0, on(60, 40)), (4_000, on(60, 127)), (8_000, on(60, 64))]);
+    assert!((heard[200] - 0.1).abs() < 1e-4, "struck softly it is the first: {}", heard[200]);
+    assert!((heard[4_200] - 0.4).abs() < 1e-4, "struck hard, the second at its whole level: {}", heard[4_200]);
+    assert!((heard[8_200] - 0.4 * 64.0 / 127.0).abs() < 1e-3, "and at the share its velocity is: {}", heard[8_200]);
+
+    // Its key, as a share of the keyboard.
+    let mut player = rendered("<region> sample=a.wav amp_veltrack=0 pitch_keytrack=0 amplitude_oncc133=100", &files);
+    let heard = play(&mut player, 256, 8_000, &[(0, on(127, 100)), (4_000, on(64, 100))]);
+    assert!((heard[200] - 0.1).abs() < 1e-4 && (heard[4_200] - 0.1 * 64.0 / 127.0).abs() < 1e-4);
+
+    // A number drawn by lot for the note: which of two, the same in every render at any buffer size.
+    let by_lot = "<global> amp_veltrack=0 key=60\n<region> sample=a.wav hicc135=63\n<region> sample=b.wav locc135=64\n";
+    let notes: Vec<(usize, EventKind)> = (0..40).map(|note| (note * 4_100 + (note * 53) % 97, on(60, 100))).collect();
+    let song = |block: usize| play(&mut rendered(by_lot, &files), block, 165_000, &notes);
+    let heard = song(256);
+    let drawn: Vec<bool> = notes.iter().map(|(frame, _)| heard[frame + 100] > 0.2).collect();
+    let second = drawn.iter().filter(|second| **second).count();
+    assert!((10..=30).contains(&second), "the second of two was drawn {second} times of 40");
+    assert!(notes.iter().all(|(frame, _)| [0.1f32, 0.4].iter().any(|level| (heard[frame + 100] - level).abs() < 1e-4)));
+    for block in [1, 37, 4_096] {
+        assert!(song(block) == heard, "buffers of {block} frames");
+    }
+    // One that goes both ways moves the level up or down, never the same way for every note.
+    let either = "<region> sample=a.wav key=60 amp_veltrack=0 volume_oncc136=6";
+    let heard = play(&mut rendered(either, &files), 256, 165_000, &notes);
+    let levels: Vec<f32> = notes.iter().map(|(frame, _)| heard[frame + 100]).collect();
+    assert!(levels.iter().any(|level| *level > 0.105) && levels.iter().any(|level| *level < 0.095), "{levels:?}");
+    assert!(levels.iter().all(|level| (0.05..=0.2).contains(level)), "within 6 dB either way: {levels:?}");
+
+    // One that is 0 and 1 by turns: a down stroke, an up stroke, from where playing began.
+    let by_turns =
+        "<global> amp_veltrack=0 key=60\n<region> sample=a.wav hicc137=63\n<region> sample=b.wav locc137=64\n";
+    let mut player = rendered(by_turns, &files);
+    let strokes: Vec<(usize, EventKind)> = (0..6).map(|note| (note * 4_100, on(60, 100))).collect();
+    let heard = play(&mut player, 256, 25_000, &strokes);
+    let taken: Vec<u8> = strokes.iter().map(|(frame, _)| (heard[frame + 100] * 10.0).round() as u8).collect();
+    assert_eq!(taken, [1, 4, 1, 4, 1, 4]);
+    player.reset();
+    assert!(play(&mut player, 256, 25_000, &strokes) == heard, "counted again from where playing begins");
+}
+
+#[test]
+fn a_numbered_slow_wave_moves_what_it_says_as_far_as_a_controller_has_it() {
+    let files = [("held.wav", level(96_000, 0.25))];
+    // Four times a second, 6 dB either way, once the wheel is up.
+    let tremolo = "<region> sample=held.wav key=60 amp_veltrack=0 loop_mode=no_loop\n\
+                   lfo01_freq=4 lfo01_volume_oncc1=6";
+    let heard = play(&mut rendered(tremolo, &files), 256, 48_000, &[(0, on(60, 100))]);
+    assert!(peaks(&heard, 480).iter().all(|peak| (peak - 0.25).abs() < 1e-4), "with the wheel down nothing moves");
+    let swung = play(&mut rendered(tremolo, &files), 256, 48_000, &[(0, control(1, 1.0)), (0, on(60, 100))]);
+    let levels = peaks(&swung, 480);
+    let (lowest, highest) =
+        levels.iter().fold((f32::MAX, 0.0f32), |(low, high), level| (low.min(*level), high.max(*level)));
+    assert!((20.0 * (highest / 0.25).log10() - 6.0).abs() < 0.2, "up 6 dB at the top: {highest}");
+    assert!((20.0 * (lowest / 0.25).log10() + 6.0).abs() < 0.2, "down 6 dB at the bottom: {lowest}");
+    // Four rounds in a second: it comes up through the middle every quarter of one.
+    let rising: Vec<usize> =
+        levels.windows(2).enumerate().filter(|(_, pair)| pair[0] < 0.25 && pair[1] >= 0.25).map(|(at, _)| at).collect();
+    assert_eq!(rising, [24, 49, 74], "{levels:?}");
+
+    // It waits, and then comes in over a while.
+    let late = "<region> sample=held.wav key=60 amp_veltrack=0 lfo2_freq=8 lfo2_volume=6 lfo2_delay=0.5 lfo2_fade=0.25";
+    let levels = peaks(&play(&mut rendered(late, &files), 256, 48_000, &[(0, on(60, 100))]), 480);
+    assert!(levels[..49].iter().all(|peak| (peak - 0.25).abs() < 1e-4), "nothing for half a second");
+    let swing = |from: usize, to: usize| levels[from..to].iter().fold(0.0f32, |most, level| most.max(*level));
+    assert!(swing(50, 62) < swing(62, 75) && swing(62, 75) < swing(88, 100), "then further and further: {levels:?}");
+
+    // The pitch: a tone that is a semitone sharp and flat by turns passes its own pitch twice a round.
+    let tone = [("tone.wav", sine(1_000.0, SR, 96_000))];
+    let vibrato = "<region> sample=tone.wav key=60 lfo01_freq=5 lfo01_pitch=100 lfo01_phase=0.25";
+    let heard = play(&mut rendered(vibrato, &tone), 256, 48_000, &[(0, on(60, 127))]);
+    let pitches: Vec<f64> = heard.chunks(1_200).map(|chunk| zero_crossing_hz(chunk, SR)).collect();
+    let (lowest, highest) = pitches.iter().fold((f64::MAX, 0.0f64), |(low, high), hz| (low.min(*hz), high.max(*hz)));
+    assert!(cents(highest, 1_000.0) > 60.0 && cents(lowest, 1_000.0) < -60.0, "{lowest} to {highest}");
+    assert!(cents(pitches[0], 1_000.0) > 60.0, "begun a quarter of the way round, at its top: {}", pitches[0]);
+
+    // One wave moves the rate of another: its rounds are no longer all as long.
+    let steady = "<region> sample=held.wav key=60 amp_veltrack=0 lfo01_freq=6 lfo01_volume=6";
+    let unsteady = format!("{steady} lfo02_freq=1.3 lfo02_freq_lfo01=4");
+    let lengths = |sfz: &str| -> Vec<usize> {
+        let levels = peaks(&play(&mut rendered(sfz, &files), 256, 96_000, &[(0, on(60, 100))]), 96);
+        let ups: Vec<usize> = levels
+            .windows(2)
+            .enumerate()
+            .filter(|(_, pair)| pair[0] < 0.25 && pair[1] >= 0.25)
+            .map(|(at, _)| at)
+            .collect();
+        ups.windows(2).map(|pair| pair[1] - pair[0]).collect()
+    };
+    let (even, uneven) = (lengths(steady), lengths(&unsteady));
+    assert!(even.iter().all(|length| (82..=85).contains(length)), "a sixth of a second each: {even:?}");
+    let (shortest, longest) = (uneven.iter().min().unwrap(), uneven.iter().max().unwrap());
+    assert!(*longest > shortest + 20, "some rounds much longer than others: {uneven:?}");
+
+    // A wave that draws a level by lot each time round, and the same samples at any buffer size.
+    let stepped = "<region> sample=held.wav key=60 amp_veltrack=0 lfo03_wave=-1 lfo03_freq=10 lfo03_volume=6\n\
+                   lfo01_freq=5 lfo01_pan=100 lfo02_freq=0.7 lfo02_freq_lfo01_oncc1=3";
+    let events = [(0, control(1, 0.8)), (300, on(60, 100)), (20_000, on(60, 90))];
+    let song = |block: usize| play_from(&mut rendered(stepped, &files), 0, block, 48_000, &events);
+    let (left, right) = song(256);
+    let steps: Vec<f32> = left[4_000..40_000].chunks_exact(4_800).map(|chunk| chunk[2_400]).collect();
+    assert!(steps.windows(2).filter(|pair| (pair[0] - pair[1]).abs() > 0.01).count() >= 4, "{steps:?}");
+    assert!(left.iter().zip(&right).any(|(l, r)| (l - r).abs() > 0.05), "and it moves between the sides");
+    for block in [1, 16, 333, 4_096] {
+        assert!(song(block) == (left.clone(), right.clone()), "buffers of {block} frames");
+    }
+}
+
+#[test]
+fn a_controller_moves_where_a_note_starts_how_long_it_waits_and_what_its_filter_does() {
+    // A recording that says how far into it a frame is: frame n is n / 48,000.
+    let ramp: Vec<f32> = (0..48_000).map(|frame| frame as f32 / 48_000.0).collect();
+    let files = [("ramp.wav", ramp)];
+    let started = "<region> sample=ramp.wav key=60 amp_veltrack=0 offset=1200 offset_cc1=9600 delay_oncc4=0.1";
+    let first = |events: &[(usize, EventKind)]| -> (usize, f32) {
+        let heard = play(&mut rendered(started, &files), 256, 12_000, events);
+        let at = heard.iter().position(|sample| *sample != 0.0).expect("it sounds");
+        (at, heard[at])
+    };
+    // (The device's own volume is a hair under unity: what it reads is told to a frame all the same.)
+    let frame = |level: f32| (level * 48_000.0).round() as usize;
+    let (at, level) = first(&[(0, on(60, 100))]);
+    assert_eq!((at, frame(level)), (0, 1_200), "where its file says, at once");
+    let (at, level) = first(&[(0, control(1, 0.5)), (0, on(60, 100))]);
+    assert_eq!((at, frame(level)), (0, 6_000), "half of what the controller adds further in");
+    let (at, level) = first(&[(0, control(4, 1.0)), (0, on(60, 100))]);
+    assert_eq!((at, frame(level)), (4_800, 1_200), "and a tenth of a second later");
+    // By how hard it is struck: a soft note skips less of the attack.
+    let by_velocity = "<region> sample=ramp.wav key=60 amp_veltrack=0 offset_oncc131=4800";
+    let heard = play(&mut rendered(by_velocity, &files), 256, 2_000, &[(0, on(60, 127)), (1_000, off(60))]);
+    assert_eq!(frame(heard[0]), 4_800);
+    let heard = play(&mut rendered(by_velocity, &files), 256, 2_000, &[(0, on(60, 64))]);
+    assert_eq!(frame(heard[0]), 2_418, "4,800 frames at the top: at 64 of 127, that share of them in whole frames");
+
+    // The filter: how far it rings at its cutoff, and how far its envelope opens it.
+    let tone = [("tone.wav", sine(1_000.0, SR, 48_000))];
+    let ringing = "<region> sample=tone.wav key=60 amp_veltrack=0 fil_type=lpf_2p cutoff=1000 resonance_cc1=12";
+    let loud = |sfz: &str, wheel: f32| {
+        let events = [(0, control(1, wheel)), (0, on(60, 100))];
+        rms(&play(&mut rendered(sfz, &tone), 256, 24_000, &events)[12_000..])
+    };
+    let rung = 20.0 * (loud(ringing, 1.0) / loud(ringing, 0.0)).log10();
+    assert!((rung - 12.0).abs() < 1.0, "a tone at the cutoff is up by what the filter rings: {rung} dB");
+    let opening = "<region> sample=tone.wav key=60 amp_veltrack=0 fil_type=lpf_2p cutoff=125 fileg_sustain=100\n\
+                   fileg_depth_oncc1=4800";
+    let opened = 20.0 * (loud(opening, 1.0) / loud(opening, 0.0)).log10();
+    assert!(opened > 30.0, "three octaves under the tone, and with the controller up an octave over it: {opened} dB");
+}
+
 #[test]
 fn the_volume_pan_and_level_controllers_set_the_level_of_the_whole_instrument() {
     let files = [("dc.wav", level(48_000, 0.5))];

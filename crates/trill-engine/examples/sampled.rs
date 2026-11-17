@@ -8,6 +8,7 @@
 //! cargo run -p trill-engine --example sampled -- load <file.sfz>
 //! cargo run -p trill-engine --example sampled -- measure <file.sfz>
 //! cargo run -p trill-engine --example sampled -- play <file.sfz> <piano|keys|strings|bass|drums> <out.wav>
+//! cargo run -p trill-engine --example sampled -- facts <folder> <out.jsonl>
 //! ```
 //!
 //! * `survey` reads every `.sfz` under a folder and says of each what it
@@ -23,6 +24,11 @@
 //!   file, for listening. Several files joined by `|` are played together,
 //!   each the notes of the phrase that lie in its range: the sections of
 //!   a string orchestra.
+//! * `facts` writes a line of JSON for every instrument under a folder:
+//!   what its file says, the files it is made of, what it asks for that
+//!   the player does not do, what `measure` finds, and how loud a few
+//!   notes of it come out of the player. It is what an entry of the
+//!   catalogue (`catalogue/README.md`) is written from.
 //!
 //! Nothing is written but the file `play` names, and nothing of the user's
 //! is read: point it at folders of your own.
@@ -53,8 +59,9 @@ fn main() {
         ["load", file] => load(file),
         ["measure", file] => measure(file),
         ["play", file, phrase, out] => play(file, phrase, Path::new(out)),
+        ["facts", folder, out] => facts(Path::new(folder), Path::new(out)),
         _ => Err("usage: sampled survey <folder> | about <file> | load <file> | measure <file> | play <file> \
-                  <piano|keys|strings|bass|drums> <out.wav>"
+                  <piano|keys|strings|bass|drums> <out.wav> | facts <folder> <out.jsonl>"
             .to_string()),
     };
     if let Err(problem) = done {
@@ -342,9 +349,56 @@ fn rms_db(samples: &[f32]) -> f64 {
     10.0 * power.max(1e-20).log10()
 }
 
-fn measure(file: &str) -> Result<(), String> {
-    let factory = factory();
-    let loaded = loaded(&factory, file)?;
+/// What reading an instrument's recordings found.
+#[derive(Default)]
+struct Measured {
+    /// How many recordings were read, and how many keys have one of their own.
+    read: usize,
+    keys: usize,
+    /// How far under its peak the quietest twentieth of a second of each
+    /// recording lies, in dB, the quietest first.
+    noise: Vec<f64>,
+    /// By recorded key: how far off equal temperament it is, in cents.
+    cents: Vec<(u8, f64)>,
+    /// By recorded key: its peak as the instrument levels it, in dB.
+    levels: Vec<(u8, f64)>,
+}
+
+impl Measured {
+    /// The mean, the spread (one deviation) and the worst, with its key.
+    fn tuning(&self) -> Option<(f64, f64, f64, u8)> {
+        let cents = &self.cents;
+        if cents.is_empty() {
+            return None;
+        }
+        let mean = cents.iter().map(|(_, off)| off).sum::<f64>() / cents.len() as f64;
+        let spread = (cents.iter().map(|(_, off)| (off - mean).powi(2)).sum::<f64>() / cents.len() as f64).sqrt();
+        let worst = cents.iter().max_by(|a, b| a.1.abs().total_cmp(&b.1.abs())).copied().unwrap_or((0, 0.0));
+        Some((mean, spread, worst.1, worst.0))
+    }
+
+    /// How the peak steps from one recorded key to the next: root mean
+    /// square, and the most.
+    fn evenness(&self) -> Option<(f64, f64)> {
+        if self.levels.len() <= 2 {
+            return None;
+        }
+        let steps: Vec<f64> = self.levels.windows(2).map(|pair| pair[1].1 - pair[0].1).collect();
+        let worst = steps.iter().fold(0.0f64, |worst, step| worst.max(step.abs()));
+        let spread = (steps.iter().map(|step| step * step).sum::<f64>() / steps.len() as f64).sqrt();
+        Some((spread, worst))
+    }
+
+    /// The noise at the middle recording, and of the noisiest tenth.
+    fn noise(&self) -> Option<(f64, f64)> {
+        (!self.noise.is_empty()).then(|| (-self.noise[self.noise.len() / 2], -self.noise[self.noise.len() * 9 / 10]))
+    }
+}
+
+/// Reads an instrument's recordings: every one for its noise, or with
+/// `sampled` at most that many of them from all over it; and the loudest
+/// of each recorded key for its pitch and its level.
+fn measured(factory: &Builtins, loaded: &Loaded, sampled: Option<usize>) -> Result<Measured, String> {
     let pool = &factory.instruments().ok_or("no instruments")?.pool;
     let regions = &loaded.instrument.regions;
     // The loudest layer of every root key, among the regions a key going down sounds.
@@ -363,7 +417,8 @@ fn measure(file: &str) -> Result<(), String> {
     let mut levels: Vec<(u8, f64)> = Vec::new();
     let mut noise: Vec<f64> = Vec::new();
     let mut measured = 0;
-    for recording in &loaded.recordings {
+    let every = sampled.map_or(1, |most| loaded.recordings.len().div_ceil(most.max(1)).max(1));
+    for recording in loaded.recordings.iter().step_by(every) {
         let Some(audio) = pool.whole_now(recording) else { continue };
         let (left, _) = audio.channels();
         let samples = &left[sampled::pool::GUARD..sampled::pool::GUARD + audio.frames()];
@@ -400,36 +455,219 @@ fn measure(file: &str) -> Result<(), String> {
         // How hard it speaks: its peak, as the instrument levels it.
         levels.push((*root, peak_db(&samples[..to]) + f64::from(region.volume)));
     }
-    println!("{}: {measured} recordings read, {} keys recorded at their loudest", loaded.summary.name, loudest.len());
     noise.sort_by(f64::total_cmp);
-    if !noise.is_empty() {
+    Ok(Measured { read: measured, keys: loudest.len(), noise, cents, levels })
+}
+
+fn measure(file: &str) -> Result<(), String> {
+    let factory = factory();
+    let loaded = loaded(&factory, file)?;
+    let found = measured(&factory, &loaded, None)?;
+    println!("{}: {} recordings read, {} keys recorded at their loudest", loaded.summary.name, found.read, found.keys);
+    if let Some((middle, noisiest)) = found.noise() {
         println!(
-            "  noise: the quietest twentieth of a second of a recording lies {:.0} dB under its peak at the middle, {:.0} dB for the noisiest tenth",
-            -noise[noise.len() / 2],
-            -noise[noise.len() * 9 / 10]
+            "  noise: the quietest twentieth of a second of a recording lies {middle:.0} dB under its peak at the middle, {noisiest:.0} dB for the noisiest tenth"
         );
     }
-    if !cents.is_empty() {
-        let mean = cents.iter().map(|(_, off)| off).sum::<f64>() / cents.len() as f64;
-        let spread = (cents.iter().map(|(_, off)| (off - mean).powi(2)).sum::<f64>() / cents.len() as f64).sqrt();
-        let worst = cents.iter().max_by(|a, b| a.1.abs().total_cmp(&b.1.abs())).copied().unwrap_or((0, 0.0));
-        println!(
-            "  tuning (C2 to C7, {} keys): {mean:+.1} cents from equal temperament on average, {spread:.1} cents of spread (one deviation), the worst {:+.1} on key {}",
-            cents.len(),
-            worst.1,
-            worst.0
-        );
-    } else {
-        println!("  tuning: not measured (no recordings that follow the keys, or none long enough)");
+    match found.tuning() {
+        Some((mean, spread, worst, key)) => println!(
+            "  tuning (C2 to C7, {} keys): {mean:+.1} cents from equal temperament on average, {spread:.1} cents of spread (one deviation), the worst {worst:+.1} on key {key}",
+            found.cents.len(),
+        ),
+        None => println!("  tuning: not measured (no recordings that follow the keys, or none long enough)"),
     }
-    if levels.len() > 2 {
-        let steps: Vec<f64> = levels.windows(2).map(|pair| pair[1].1 - pair[0].1).collect();
-        let worst = steps.iter().fold(0.0f64, |worst, step| worst.max(step.abs()));
-        let spread = (steps.iter().map(|step| step * step).sum::<f64>() / steps.len() as f64).sqrt();
+    if let Some((spread, worst)) = found.evenness() {
         println!(
             "  evenness: from one recorded key to the next the peak steps by {spread:.1} dB (root mean square), {worst:.1} dB at the most"
         );
     }
+    Ok(())
+}
+
+/// What an instrument was heard to do when the player played it.
+struct Heard {
+    /// The peak of all of it at the device's own volume, in dB.
+    peak_db: f64,
+    seconds: f64,
+    /// What the session said was wrong.
+    problems: Vec<String>,
+    /// How many keys were played one after the other.
+    keys: usize,
+    /// How the peak steps from one of those keys to the next, in dB: the
+    /// root mean square and the most. `None` for a kit, whose keys are
+    /// different drums.
+    steps: Option<(f64, f64)>,
+}
+
+/// The instrument in `file` through the player, as a render makes it: the
+/// keys it has recordings of, one after the other (at most forty of them,
+/// from all over it), and a chord. A kit is hit on every key it has.
+fn heard(file: &str) -> Result<Heard, String> {
+    let media = Arc::new(MediaCache::default());
+    let factory = Arc::new(Builtins::with_loader(media.clone()));
+    let mut session = Session::with_media(factory, media, AudioBackend::Null { sample_rate: SR as u32 })
+        .map_err(|error| error.to_string())?;
+    let limiter = session.project().master.devices[0].id;
+    session.edit(|project| project.remove_device(limiter)).map_err(|error| error.to_string())?;
+    // A second to a beat: a note's place in the song is its place in seconds.
+    session.edit(|project| project.set_tempo(60.0)).map_err(|error| error.to_string())?;
+    let track = session.edit(|project| Ok(project.add_track("Heard"))).map_err(|error| error.to_string())?;
+    let device = session
+        .add_device(ChainRef::Track(track), sampled::URI, Some(file), None)
+        .map_err(|error| error.to_string())?;
+    let said = session.sampled(device).ok_or("the instrument did not load")?;
+    let drums = session.plays_drums(track);
+    let sounding = || said.regions.iter().filter(|region| !region.release);
+    let mut keys: Vec<u8> = if drums {
+        sounding().map(|region| region.keys.0).collect()
+    } else {
+        // The key each recording was made on, where it plays that key.
+        sounding().map(|region| region.root.clamp(region.keys.0, region.keys.1)).collect()
+    };
+    keys.sort_unstable();
+    keys.dedup();
+    if keys.is_empty() {
+        return Err("no key of it plays anything".to_string());
+    }
+    let every = keys.len().div_ceil(40).max(1);
+    let keys: Vec<u8> = keys.into_iter().step_by(every).collect();
+    let (low, high) = (keys[0], keys[keys.len() - 1]);
+    let mut notes: Vec<Note> = keys
+        .iter()
+        .enumerate()
+        .map(|(step, key)| note(*key, step as f64, if drums { 0.25 } else { 0.8 }, 100))
+        .collect();
+    let after = keys.len() as f64;
+    if !drums {
+        let middle = low + (high - low) / 2;
+        notes.extend([middle, (middle + 4).min(high), (middle + 7).min(high)].map(|key| note(key, after, 1.8, 100)));
+    }
+    let beats = after + 2.0;
+    session
+        .edit(|project| {
+            let clip = project.add_midi_clip(track, "Heard", 0.0, beats)?;
+            project.clip_mut(clip)?.add_notes(&notes)?;
+            // An instrument that is silent until its wheel or its expression is up.
+            for kind in [ControllerKind::MOD_WHEEL, ControllerKind::EXPRESSION] {
+                let (_, top) = kind.range();
+                project.clip_mut(clip)?.set_controller(kind, vec![AutomationPoint::new(0.0, top * 0.8)])?;
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    let problems: Vec<String> = session.problems().iter().map(ToString::to_string).collect();
+    let options = RenderOptions { sample_rate: SR as u32, max_tail_seconds: 2.0, ..RenderOptions::default() };
+    let rendered = session.render_job().render(&options).map_err(|error| error.to_string())?;
+    if rendered.left.iter().chain(&rendered.right).any(|sample| !sample.is_finite()) {
+        return Err("it came out of the player as something that is not a number".to_string());
+    }
+    let peak_of = |from: usize, to: usize| -> f64 {
+        let (from, to) = (from.min(rendered.left.len()), to.min(rendered.left.len()));
+        let all = rendered.left[from..to].iter().chain(&rendered.right[from..to]);
+        20.0 * f64::from(all.fold(0.0f32, |peak, sample| peak.max(sample.abs())).max(1e-9)).log10()
+    };
+    let second = SR as usize;
+    let levels: Vec<f64> = (0..keys.len()).map(|step| peak_of(step * second, (step + 1) * second)).collect();
+    let steps = (!drums && levels.len() > 2).then(|| {
+        let steps: Vec<f64> = levels.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        let worst = steps.iter().fold(0.0f64, |worst, step| worst.max(step.abs()));
+        ((steps.iter().map(|step| step * step).sum::<f64>() / steps.len() as f64).sqrt(), worst)
+    });
+    Ok(Heard {
+        peak_db: peak_of(0, rendered.left.len()),
+        seconds: rendered.left.len() as f64 / SR,
+        problems,
+        keys: keys.len(),
+        steps,
+    })
+}
+
+/// A line of JSON for every instrument under `folder`; see the notes at
+/// the top.
+fn facts(folder: &Path, out: &Path) -> Result<(), String> {
+    use serde_json::json;
+    use std::io::Write;
+    // Whole paths: an instrument is given to a device by the whole path of its file.
+    let folder = &std::path::absolute(folder).map_err(|error| format!("{}: {error}", folder.display()))?;
+    let mut files = Vec::new();
+    files_under(folder, &mut files);
+    if files.is_empty() {
+        return Err(format!("there are no .sfz files under '{}'", folder.display()));
+    }
+    let said = |error: std::io::Error| format!("{}: {error}", out.display());
+    let mut written = std::io::BufWriter::new(std::fs::File::create(out).map_err(said)?);
+    let below = |path: &Path| path.strip_prefix(folder).unwrap_or(path).to_string_lossy().replace('\\', "/");
+    let (mut instruments, mut parts, mut unreadable) = (0, 0, 0);
+    for file in &files {
+        let name = file.to_string_lossy().into_owned();
+        // A pool of its own for each: what one read is let go of before the next.
+        let factory = factory();
+        let loaded = match loaded(&factory, &name) {
+            Ok(loaded) => loaded,
+            Err(reason) => {
+                unreadable += 1;
+                let line = json!({ "file": below(file), "unreadable": reason });
+                writeln!(written, "{line}").map_err(said)?;
+                continue;
+            }
+        };
+        // A file that others include is not an instrument.
+        if loaded.instrument.regions.is_empty() {
+            parts += 1;
+            continue;
+        }
+        instruments += 1;
+        let summary = &loaded.summary;
+        let found = measured(&factory, &loaded, Some(160))?;
+        let unsupported: Vec<_> = loaded
+            .instrument
+            .unsupported
+            .iter()
+            .map(|un| json!({ "name": un.name, "count": un.count, "miss": un.miss }))
+            .collect();
+        let missing: Vec<String> =
+            loaded.missing.iter().map(|index| below(Path::new(&loaded.paths[*index as usize]))).collect();
+        let played = heard(&name);
+        let line = json!({
+            "file": below(file),
+            "name": summary.name,
+            "regions": summary.regions,
+            "recordings": loaded.paths.iter().map(|path| below(Path::new(path))).collect::<Vec<_>>(),
+            "texts": loaded.text_files().iter().map(|path| below(path)).collect::<Vec<_>>(),
+            "missing": missing,
+            "bytes": loaded.bytes,
+            "range": summary.range,
+            "drums": summary.drums,
+            "layers": summary.layers,
+            "takes": summary.takes,
+            "ways": summary.switches.iter().map(|(_, name)| name).collect::<Vec<_>>(),
+            "controllers": summary.controllers,
+            "releases": summary.releases,
+            "loops": summary.loops,
+            "unsupported": unsupported,
+            "says": loaded.unsupported(),
+            "problems": loaded.instrument.problems,
+            "noise": found.noise().map(|(middle, noisiest)| [middle, noisiest]),
+            "tuning": found.tuning().map(|(mean, spread, worst, key)| json!({ "keys": found.cents.len(), "mean": mean, "spread": spread, "worst": worst, "worst_key": key })),
+            "evenness": found.evenness().map(|(spread, worst)| [spread, worst]),
+            "heard": match &played {
+                Ok(heard) => json!({
+                    "peak_db": heard.peak_db,
+                    "seconds": heard.seconds,
+                    "problems": heard.problems,
+                    "keys": heard.keys,
+                    "steps": heard.steps.map(|(spread, worst)| [spread, worst]),
+                }),
+                Err(reason) => json!({ "failed": reason }),
+            },
+        });
+        writeln!(written, "{line}").map_err(said)?;
+        written.flush().map_err(said)?;
+    }
+    println!(
+        "{instruments} instruments, {parts} files that are parts of others, {unreadable} that could not be read: {}",
+        out.display()
+    );
     Ok(())
 }
 
