@@ -17,6 +17,13 @@
 //! The first part of this file, the envelope as geometry, is shared with
 //! the controller lane of the piano roll (`controller_lane`), which edits a
 //! clip's controller curves with the same gestures.
+//!
+//! An envelope may hold thousands of points (a compressor worked out
+//! elsewhere and drawn in, several to the pixel when the whole song is in
+//! view). What a lane costs to paint follows its width, not their number:
+//! where many fall in one pixel column the line keeps the two that span it,
+//! and where points crowd they are not each marked with a square. What a
+//! gesture costs follows the points it moves, a few at a time by searching.
 
 use super::Geometry;
 use crate::ui::automation::{self, Choice, Scale};
@@ -26,8 +33,8 @@ use eframe::egui::{
     self, Align2, Color32, CursorIcon, Id, Mesh, PointerButton, Pos2, Rect, Response, Role, Sense, Shape, Stroke, Ui,
     WidgetInfo, pos2, vec2,
 };
-use trill_core::project::automation_value;
-use trill_core::{AutomationPoint, AutomationTarget, Beats, Segment};
+use trill_core::project::envelope_value;
+use trill_core::{AutomationPoint, AutomationTarget, Beats, Segment, Travel};
 use trill_noir::{Icon, MenuItem, fade, paint, text};
 
 /// Space kept clear above the highest and below the lowest value, so a
@@ -41,6 +48,15 @@ const POINT_GRAB: f32 = 6.0;
 const LINE_GRAB: f32 = 5.0;
 /// Distance between samples of a curved segment, in pixels.
 const CURVE_STEP: f32 = 3.0;
+/// More points than this within [`CROWD_REACH`] pixels of one, along the
+/// lane, are a crowd: their squares would cover each other and the line, so
+/// there the line alone is drawn. Two or three at one place, the points of
+/// a step, are not.
+const CROWD: usize = 4;
+const CROWD_REACH: f32 = 3.0;
+/// More points of the line than this in one pixel column are drawn as the
+/// two that span it.
+const COLUMN: usize = 3;
 pub(in crate::ui) const LINE_WIDTH: f32 = 1.25;
 /// Where a lane header's content starts: indented under its track's name.
 const HEADER_INDENT: f32 = 26.0;
@@ -63,11 +79,19 @@ pub(in crate::ui) struct LaneMap {
     pub left: f32,
     pub time: timeline::TimeView,
     pub scale: Scale,
+    /// What the envelope's lines are straight along. Where that is the
+    /// travel the scale is laid out by, they are straight lines here.
+    pub lines: Travel,
 }
 
 impl LaneMap {
-    fn new(geometry: &Geometry, rect: Rect, scale: Scale) -> Self {
-        Self { rect, left: geometry.lanes.left(), time: geometry.time, scale }
+    fn new(geometry: &Geometry, rect: Rect, scale: Scale, lines: Travel) -> Self {
+        Self { rect, left: geometry.lanes.left(), time: geometry.time, scale, lines }
+    }
+
+    /// What the envelope `points` of this lane is worth at `beat`.
+    pub fn worth(&self, points: &[AutomationPoint], beat: Beats) -> f64 {
+        envelope_value(points, self.lines, beat)
     }
 
     pub fn x(&self, beat: Beats) -> f32 {
@@ -135,8 +159,46 @@ pub(in crate::ui) fn segment_at(
     if next == 0 || next == points.len() {
         return None;
     }
-    let on_line = (map.y(automation_value(points, beat)) - position.y).abs() <= LINE_GRAB;
+    let on_line = (map.y(map.worth(points, beat)) - position.y).abs() <= LINE_GRAB;
     on_line.then(|| [points[next - 1], points[next]])
+}
+
+/// Some points of an envelope, to be looked up among: the selected ones, or
+/// the ones an edit takes away. A point is found by searching, so asking
+/// about every point of a long envelope stays quick however many of them
+/// are in the set.
+pub(in crate::ui) struct PointSet {
+    /// By beat. Points on one beat (a step) are few.
+    points: Vec<AutomationPoint>,
+    /// Which of them an edit has already taken.
+    taken: Vec<bool>,
+}
+
+impl PointSet {
+    pub fn new(points: &[AutomationPoint]) -> Self {
+        let mut points = points.to_vec();
+        if !points.is_sorted_by(|a, b| a.beat <= b.beat) {
+            points.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+        }
+        Self { taken: vec![false; points.len()], points }
+    }
+
+    /// Where the points on `beat` are.
+    fn on(&self, beat: Beats) -> std::ops::Range<usize> {
+        let first = self.points.partition_point(|other| other.beat < beat);
+        let count = self.points[first..].iter().take_while(|other| other.beat == beat).count();
+        first..first + count
+    }
+
+    pub fn holds(&self, point: &AutomationPoint) -> bool {
+        self.points[self.on(point.beat)].contains(point)
+    }
+
+    /// Takes one instance of `point` out of the set, if one is left.
+    fn take(&mut self, point: &AutomationPoint) -> bool {
+        let found = self.on(point.beat).find(|&index| !self.taken[index] && self.points[index] == *point);
+        found.inspect(|&index| self.taken[index] = true).is_some()
+    }
 }
 
 /// `points` without one instance of each point in `remove`, plus `add`,
@@ -146,20 +208,17 @@ pub(in crate::ui) fn replaced(
     remove: &[AutomationPoint],
     add: &[AutomationPoint],
 ) -> Vec<AutomationPoint> {
-    let mut result = points.to_vec();
-    for point in remove {
-        if let Some(index) = result.iter().position(|candidate| candidate == point) {
-            result.remove(index);
-        }
-    }
+    // Each point to go takes the first that equals it, in one pass.
+    let mut going = PointSet::new(remove);
+    let mut result: Vec<AutomationPoint> = points.iter().filter(|point| !going.take(point)).copied().collect();
     result.extend_from_slice(add);
     result.sort_by(|a, b| a.beat.total_cmp(&b.beat));
     result
 }
 
 /// `originals` moved by `beats` in time and `height` up the lane, held back
-/// as a group so none passes a point of `others` (the rest of the envelope)
-/// or the start of the song, and each kept inside the scale.
+/// as a group so none passes a point of `others` (the rest of the envelope,
+/// in time order) or the start of the song, and each kept inside the scale.
 pub(in crate::ui) fn moved(
     originals: &[AutomationPoint],
     others: &[AutomationPoint],
@@ -170,8 +229,12 @@ pub(in crate::ui) fn moved(
     let mut earliest = f64::NEG_INFINITY;
     let mut latest = f64::INFINITY;
     for point in originals {
-        let before = others.iter().rev().find(|other| other.beat <= point.beat).map_or(0.0, |other| other.beat);
-        let after = others.iter().find(|other| other.beat >= point.beat).map_or(f64::INFINITY, |other| other.beat);
+        // The neighbours on either side, found by searching: a long
+        // envelope moved as a whole asks this of every one of its points.
+        let later = others.partition_point(|other| other.beat <= point.beat);
+        let before = later.checked_sub(1).map_or(0.0, |index| others[index].beat);
+        let at_or_after = others.partition_point(|other| other.beat < point.beat);
+        let after = others.get(at_or_after).map_or(f64::INFINITY, |other| other.beat);
         earliest = earliest.max(before - point.beat);
         latest = latest.min(after - point.beat);
     }
@@ -197,9 +260,11 @@ pub(in crate::ui) fn bend(up: f32, travel: f32, rising: bool) -> f32 {
 /// `points` with a step of `value` written over the grid cells from
 /// `first` to `last` (their starts, in either order), each `step` beats
 /// long. What the stroke passes over is replaced; where it ends the
-/// envelope carries on as it was.
+/// envelope carries on as it was. `lines` is what the envelope's lines are
+/// straight along.
 pub(in crate::ui) fn drawn(
     points: &[AutomationPoint],
+    lines: Travel,
     first: Beats,
     last: Beats,
     step: Beats,
@@ -213,12 +278,12 @@ pub(in crate::ui) fn drawn(
     let mut written = Vec::new();
     // A line arriving at the step keeps the slope it had, then jumps.
     if at > 0 && result[at - 1].shape != Segment::Hold {
-        written.push(AutomationPoint::new(from, arriving(points, from)));
+        written.push(AutomationPoint::new(from, arriving(points, lines, from)));
     }
     written.push(AutomationPoint { beat: from, value, shape: Segment::Hold });
     let resumes = result.get(at).is_some_and(|next| (next.beat - to).abs() < 1e-9);
     if !resumes && !points.is_empty() {
-        written.push(AutomationPoint::new(to, automation_value(points, to)));
+        written.push(AutomationPoint::new(to, envelope_value(points, lines, to)));
     }
     result.splice(at..at, written);
     result
@@ -226,13 +291,13 @@ pub(in crate::ui) fn drawn(
 
 /// The value the envelope reaches `beat` with, coming from before it. Where
 /// the envelope jumps at `beat` this is the value before the jump, which
-/// [`automation_value`] has already left behind.
-fn arriving(points: &[AutomationPoint], beat: Beats) -> f64 {
+/// [`envelope_value`] has already left behind.
+fn arriving(points: &[AutomationPoint], lines: Travel, beat: Beats) -> f64 {
     let next = points.partition_point(|point| point.beat < beat);
     match (next.checked_sub(1).map(|before| points[before]), points.get(next)) {
         // The line from the point before to the first one at or after
         // `beat`, evaluated on its own so a later point there is not seen.
-        (Some(before), Some(after)) => automation_value(&[before, *after], beat),
+        (Some(before), Some(after)) => envelope_value(&[before, *after], lines, beat),
         (Some(only), None) | (None, Some(&only)) => only.value,
         (None, None) => 0.0,
     }
@@ -283,7 +348,8 @@ pub(super) fn show(
         text::paint(&painter, room, Align2::LEFT_CENTER, theme.text.micro, "Unavailable", theme.ink_faint);
         return;
     };
-    let map = LaneMap::new(geometry, rect, scale);
+    let (lines, _) = automation::lines(snapshot, &view.target);
+    let map = LaneMap::new(geometry, rect, scale, lines);
     let points = snapshot.envelope(&view.target).unwrap_or_default();
     let color = lane_color(cx, &view);
     let off = snapshot.lane(&view.target).is_some_and(|lane| !lane.enabled);
@@ -367,7 +433,7 @@ pub(in crate::ui) fn curve_path(map: &LaneMap, points: &[AutomationPoint]) -> Ve
     let to = (points.partition_point(|point| point.beat <= last_beat) + 1).min(points.len());
     let visible = &points[from..to];
 
-    let mut path = vec![pos2(rect.left(), map.y(automation_value(points, first_beat)))];
+    let mut path = vec![pos2(rect.left(), map.y(map.worth(points, first_beat)))];
     if visible[0].beat > first_beat {
         path.push(map.point(&visible[0]));
     }
@@ -376,13 +442,14 @@ pub(in crate::ui) fn curve_path(map: &LaneMap, points: &[AutomationPoint]) -> Ve
         let end = map.point(&b);
         match a.shape {
             Segment::Hold => path.push(pos2(end.x, map.y(a.value))),
-            Segment::Linear if map.scale.linear() => {}
-            // A bent line, or a straight one on a scale that is not: drawn
-            // through the values it really takes.
+            Segment::Linear if map.scale.straight(map.lines) => {}
+            // A bent line, or one that does not follow the travel the
+            // scale is laid out by: drawn through the values it really
+            // takes.
             _ => {
                 let mut x = map.x(a.beat).max(rect.left()) + CURVE_STEP;
                 while x < end.x.min(rect.right()) {
-                    path.push(pos2(x, map.y(automation_value(pair, map.time.x_to_beat(map.left, x)))));
+                    path.push(pos2(x, map.y(map.worth(pair, map.time.x_to_beat(map.left, x)))));
                     x += CURVE_STEP;
                 }
             }
@@ -393,6 +460,37 @@ pub(in crate::ui) fn curve_path(map: &LaneMap, points: &[AutomationPoint]) -> Ve
     if last.beat < last_beat {
         path.push(pos2(rect.right(), map.y(last.value)));
     }
+    thinned(path)
+}
+
+/// `path` with every run of more than [`COLUMN`] points in one pixel column
+/// drawn as the two that span it, the higher and the lower in the order
+/// they come: on screen it is the same line, and no longer than the lane is
+/// wide. A path that is not that crowded comes back as it is.
+fn thinned(mut path: Vec<Pos2>) -> Vec<Pos2> {
+    let column = |point: &Pos2| point.x.floor();
+    let crowded = |path: &[Pos2]| path.windows(COLUMN + 1).any(|run| column(&run[0]) == column(&run[COLUMN]));
+    if !crowded(&path) {
+        return path;
+    }
+    let (mut kept, mut start) = (0, 0);
+    while start < path.len() {
+        let end = start + path[start..].iter().take_while(|point| column(point) == column(&path[start])).count();
+        if end - start <= COLUMN {
+            path.copy_within(start..end, kept);
+            kept += end - start;
+        } else {
+            let run = start..end;
+            let highest = run.clone().min_by(|a, b| path[*a].y.total_cmp(&path[*b].y)).unwrap_or(start);
+            let lowest = run.max_by(|a, b| path[*a].y.total_cmp(&path[*b].y)).unwrap_or(start);
+            let (first, second) = (path[highest.min(lowest)], path[highest.max(lowest)]);
+            path[kept] = first;
+            path[kept + 1] = second;
+            kept += 2;
+        }
+        start = end;
+    }
+    path.truncate(kept);
     path
 }
 
@@ -422,6 +520,53 @@ pub(in crate::ui) fn paint_curve(
     painter.add(Shape::line(path, Stroke::new(LINE_WIDTH, color)));
 }
 
+/// The squares of the points on screen: those of `chosen` (the selected
+/// ones), which are drawn larger, and the rest. Where points crowd (see
+/// [`CROWD`]) the rest have none, and of the chosen ones there is one to a
+/// pixel column: enough to show that they are selected.
+pub(in crate::ui) fn point_squares(
+    map: &LaneMap,
+    points: &[AutomationPoint],
+    chosen: &[AutomationPoint],
+) -> (Vec<Rect>, Vec<Rect>) {
+    let rect = map.rect;
+    let (first_beat, last_beat) = (map.beat(rect.left()), map.time.x_to_beat(map.left, rect.right()));
+    let from = points.partition_point(|point| point.beat < first_beat);
+    let to = points.partition_point(|point| point.beat <= last_beat);
+    let chosen = PointSet::new(chosen);
+    let reach = CROWD_REACH as f64 / map.time.pixels_per_beat;
+    let (mut selected, mut plain) = (Vec::new(), Vec::new());
+    // The points within reach of the one looked at: `back..ahead`.
+    let (mut back, mut ahead) = (from, from);
+    let mut last_column = f32::NEG_INFINITY;
+    for point in &points[from..to] {
+        while points[back].beat < point.beat - reach {
+            back += 1;
+        }
+        while ahead < points.len() && points[ahead].beat <= point.beat + reach {
+            ahead += 1;
+        }
+        let crowded = ahead - back > CROWD;
+        let is_chosen = !chosen.points.is_empty() && chosen.holds(point);
+        if crowded && !is_chosen {
+            continue;
+        }
+        let center = map.point(point);
+        if crowded && center.x.floor() == last_column {
+            continue;
+        }
+        let corner = pos2((center.x - POINT / 2.0).round(), (center.y - POINT / 2.0).round());
+        let square = Rect::from_min_size(corner, vec2(POINT, POINT));
+        if is_chosen {
+            last_column = center.x.floor();
+            selected.push(square.expand(1.0));
+        } else {
+            plain.push(square);
+        }
+    }
+    (selected, plain)
+}
+
 /// Paints the squares of the points on screen: in `color`, and those of
 /// `chosen` (the selected ones) larger and in `ink`.
 pub(in crate::ui) fn paint_points(
@@ -432,25 +577,15 @@ pub(in crate::ui) fn paint_points(
     color: Color32,
     ink: Color32,
 ) {
-    let rect = map.rect;
-    let (first_beat, last_beat) = (map.beat(rect.left()), map.time.x_to_beat(map.left, rect.right()));
-    let from = points.partition_point(|point| point.beat < first_beat);
+    let (selected, plain) = point_squares(map, points, chosen);
     let mut squares = Mesh::default();
-    let mut outlined = Vec::new();
-    for point in points[from..].iter().take_while(|point| point.beat <= last_beat) {
-        let center = map.point(point);
-        let corner = pos2((center.x - POINT / 2.0).round(), (center.y - POINT / 2.0).round());
-        let square = Rect::from_min_size(corner, vec2(POINT, POINT));
-        if chosen.contains(point) {
-            outlined.push(square);
-        } else {
-            squares.add_colored_rect(square, color);
-        }
+    for square in plain {
+        squares.add_colored_rect(square, color);
+    }
+    for square in selected {
+        squares.add_colored_rect(square, ink);
     }
     painter.add(Shape::mesh(squares));
-    for square in outlined {
-        painter.rect_filled(square.expand(1.0), 0.0, ink);
-    }
 }
 
 /// The rubber band of a selection being dragged out in this lane.
@@ -470,13 +605,7 @@ fn paint_band(ui: &Ui, painter: &egui::Painter, cx: &Cx, map: &LaneMap, target: 
 /// Replaces `remove` with `add` in the envelope of `target`, as one edit
 /// against the envelope as it is right now.
 fn swap(cx: &mut Cx, target: &AutomationTarget, remove: &[AutomationPoint], add: &[AutomationPoint]) -> bool {
-    let target = target.clone();
-    cx.edit(|project| {
-        let lane = project.automation.iter().find(|lane| lane.target == target);
-        let now = lane.map(|lane| lane.points.clone()).unwrap_or_default();
-        project.set_automation(target, replaced(&now, remove, add))
-    })
-    .is_some()
+    automation::rewrite(cx, target, |now, _| replaced(now, remove, add))
 }
 
 fn select(cx: &mut Cx, target: &AutomationTarget, points: Vec<AutomationPoint>) {
@@ -523,7 +652,7 @@ fn interact(
             }
             (false, None, Some(_)) => {
                 ui.set_cursor_icon(CursorIcon::ResizeVertical);
-                let value = automation_value(points, map.beat(pointer.x));
+                let value = map.worth(points, map.beat(pointer.x));
                 format!(
                     "{} at {at} \u{00B7} drag moves the line, Alt-drag bends it \u{00B7} click adds a point",
                     map.scale.format(value)
@@ -562,7 +691,7 @@ fn interact(
                 // where the pointer is.
                 let beat = geometry.snap(map.beat(pointer.x), modifiers.alt);
                 let value = match segment_at(points, map, pointer) {
-                    Some(_) => automation_value(points, beat),
+                    Some(_) => map.worth(points, beat),
                     None => map.value(pointer.y),
                 };
                 let shape = if map.scale.stepped() { Segment::Hold } else { Segment::Linear };
@@ -700,12 +829,7 @@ fn step(
 /// Writes a step of `value` over the grid cells from `first` to `last`
 /// into the envelope of `target`, as it is right now.
 fn write_steps(cx: &mut Cx, target: &AutomationTarget, first: Beats, last: Beats, grid: Beats, value: f64) {
-    let target = target.clone();
-    cx.edit(|project| {
-        let lane = project.automation.iter().find(|lane| lane.target == target);
-        let now = lane.map(|lane| lane.points.clone()).unwrap_or_default();
-        project.set_automation(target, drawn(&now, first, last, grid, value))
-    });
+    automation::rewrite(cx, target, |now, lines| drawn(now, lines, first, last, grid, value));
 }
 
 /// Removes the selected points: Delete, with an automation lane in focus.
@@ -745,7 +869,8 @@ pub(super) fn menu_subject(cx: &mut Cx, geometry: &Geometry, pointer: Pos2) -> O
     let super::rows::RowKind::Lane { lane, .. } = row.kind else { return None };
     let target = cx.state.arrangement.lanes.get(lane)?.target.clone();
     let scale = Scale::of(cx.snap, &target)?;
-    let map = LaneMap::new(geometry, geometry.row_rect(row), scale);
+    let (lines, _) = automation::lines(cx.snap, &target);
+    let map = LaneMap::new(geometry, geometry.row_rect(row), scale, lines);
     let points = cx.snap.envelope(&target).unwrap_or_default();
     let point = point_at(points, &map, pointer);
     let line = segment_at(points, &map, pointer).map(|ends| ends[0]);
@@ -788,6 +913,20 @@ pub(super) fn menu(ui: &mut Ui, cx: &mut Cx, subject: &MenuSubject) {
         select(cx, target, vec![subject.place]);
     }
     trill_noir::menu_separator(ui, theme);
+    // How the lines go, where there are two ways: along the control, as a
+    // fade or a sweep is meant, or straight in the units, as an envelope
+    // from a file saved before envelopes followed their controls is.
+    let (lines, control) = automation::lines(cx.snap, target);
+    let words = Scale::of(cx.snap, target).and_then(|scale| scale.travel_words());
+    if let (Some((follow, straight)), true) = (words, cx.snap.lane(target).is_some()) {
+        for (label, travel) in [(follow, control), (straight.as_str(), Travel::Linear)] {
+            if MenuItem::new(label).checked(lines == travel).show(ui, theme).clicked() && lines != travel {
+                let target = target.clone();
+                cx.edit(|project| project.set_automation_travel(&target, travel));
+            }
+        }
+        trill_noir::menu_separator(ui, theme);
+    }
     let on = cx.snap.lane(target).map(|lane| lane.enabled);
     let label = if on == Some(false) { "Switch the envelope back on" } else { "Switch the envelope off" };
     if MenuItem::new(label).enabled(on.is_some()).show(ui, theme).clicked() {
@@ -996,7 +1135,13 @@ mod tests {
     /// A lane 100 px of travel tall at 20 px per beat, showing pan.
     fn map() -> LaneMap {
         let rect = Rect::from_min_size(pos2(200.0, 300.0), vec2(800.0, 100.0 + 2.0 * PAD));
-        LaneMap { rect, left: 200.0, time: TimeView { origin: 0.0, pixels_per_beat: 20.0 }, scale: Scale::Pan }
+        let time = TimeView { origin: 0.0, pixels_per_beat: 20.0 };
+        LaneMap { rect, left: 200.0, time, scale: Scale::Pan, lines: Travel::Linear }
+    }
+
+    /// What `points` are worth at `beat`, straight in their units.
+    fn automation_value(points: &[AutomationPoint], beat: Beats) -> f64 {
+        envelope_value(points, Travel::Linear, beat)
     }
 
     #[test]
@@ -1015,9 +1160,38 @@ mod tests {
             assert!((map.value(map.y(value)) - value).abs() < 0.011, "{value}");
         }
 
-        let volume = LaneMap { scale: Scale::Volume, ..map };
+        let volume = LaneMap { scale: Scale::Volume, lines: Travel::FADER, ..map };
         assert!(volume.y(0.0) < volume.y(-12.0), "louder is higher");
         assert_eq!(volume.value(volume.y(-6.0)), -6.0);
+    }
+
+    #[test]
+    fn an_envelope_that_follows_its_control_is_drawn_with_straight_lines() {
+        // A fade on a fader's lane: two points, one line, which passes
+        // half way between them in height half way between them in time.
+        let fade = [point(0.0, 0.0), point(16.0, -60.0)];
+        let fader = LaneMap { scale: Scale::Volume, lines: Travel::FADER, ..map() };
+        let path = curve_path(&fader, &fade);
+        assert_eq!(path.len(), 3, "the lane's left edge, the two points, and no samples between: {path:?}");
+        let middle = fader.y(fader.worth(&fade, 8.0));
+        assert!((middle - (fader.y(0.0) + fader.y(-60.0)) / 2.0).abs() < 0.01, "{middle}");
+        assert!((fader.worth(&fade, 8.0) + 20.0).abs() < 1e-9);
+        // The line is grabbed where it is drawn, and a point added on it
+        // sits on it.
+        let on_line = pos2(fader.x(8.0), middle);
+        assert_eq!(segment_at(&fade, &fader, on_line), Some(fade));
+        assert_eq!(segment_at(&fade, &fader, pos2(fader.x(8.0), fader.y(-30.0))), None, "not where -30 dB is");
+
+        // The same points in a lane that is straight in decibels (a file
+        // saved before) take another course, drawn through its values.
+        let old = LaneMap { lines: Travel::Linear, ..fader.clone() };
+        let path = curve_path(&old, &fade);
+        assert!(path.len() > 50, "sampled along its length: {}", path.len());
+        assert_eq!(old.worth(&fade, 8.0), -30.0);
+        let drawn_at_8 =
+            path.iter().min_by(|a, b| (a.x - old.x(8.0)).abs().total_cmp(&(b.x - old.x(8.0)).abs())).unwrap();
+        assert!((drawn_at_8.y - old.y(-30.0)).abs() < 1.0);
+        assert_eq!(segment_at(&fade, &old, pos2(old.x(8.0), old.y(-30.0))), Some(fade));
     }
 
     #[test]
@@ -1070,6 +1244,104 @@ mod tests {
         assert!(replaced(&points, &points, &[]).is_empty());
     }
 
+    /// A lane of 7,332 points over 456 beats, a dip on every beat, with
+    /// the whole of it in view: six points to the pixel.
+    fn crowded() -> (LaneMap, Vec<AutomationPoint>) {
+        let rect = Rect::from_min_size(pos2(200.0, 300.0), vec2(1200.0, 100.0 + 2.0 * PAD));
+        let time = TimeView { origin: 0.0, pixels_per_beat: 1200.0 / 456.0 };
+        let map = LaneMap { rect, left: 200.0, time, scale: Scale::Volume, lines: Travel::FADER };
+        let points = (0..7_332)
+            .map(|index| index as f64 * 456.0 / 7_332.0)
+            .map(|beat| point(beat, -12.0 * (-(beat.fract()) * 6.0).exp()))
+            .collect();
+        (map, points)
+    }
+
+    #[test]
+    fn a_lane_of_thousands_of_points_is_drawn_no_longer_than_it_is_wide() {
+        let (map, points) = crowded();
+        let path = curve_path(&map, &points);
+        assert!(path.len() <= 2 * 1200 + 4, "two points to a pixel column at the most: {}", path.len());
+        // It is the same line: in every pixel column it reaches as high and
+        // as low as the points there do.
+        let column = |x: f32| (x - map.rect.left()).floor() as usize;
+        let mut spans = vec![(f32::INFINITY, f32::NEG_INFINITY); 1201];
+        for point in &points {
+            let at = map.point(point);
+            let span = &mut spans[column(at.x)];
+            *span = (span.0.min(at.y), span.1.max(at.y));
+        }
+        let mut drawn = vec![(f32::INFINITY, f32::NEG_INFINITY); 1201];
+        for at in &path {
+            let span = &mut drawn[column(at.x).min(1200)];
+            *span = (span.0.min(at.y), span.1.max(at.y));
+        }
+        for (index, (span, drawn)) in spans.iter().zip(&drawn).enumerate().take(1199).skip(1) {
+            assert!(
+                (span.0 - drawn.0).abs() < 0.01 && (span.1 - drawn.1).abs() < 0.01,
+                "column {index}: {span:?} {drawn:?}"
+            );
+        }
+        // No point has a square of its own there; a step among them would.
+        let (selected, plain) = point_squares(&map, &points, &[]);
+        assert!(selected.is_empty() && plain.is_empty(), "{} squares", plain.len());
+        // Selected, they show it: one square to a pixel column, not 7,332.
+        let (selected, plain) = point_squares(&map, &points, &points);
+        assert!(plain.is_empty() && (1100..=1201).contains(&selected.len()), "{}", selected.len());
+
+        // Zoomed in to where they have room, every point is drawn and marked.
+        let near = LaneMap { time: TimeView { origin: 100.0, pixels_per_beat: 200.0 }, ..map.clone() };
+        let in_view = points.iter().filter(|point| (100.0..=106.0).contains(&point.beat)).count();
+        let (_, plain) = point_squares(&near, &points, &[]);
+        assert_eq!(plain.len(), in_view);
+        assert!(curve_path(&near, &points).len() >= in_view);
+    }
+
+    #[test]
+    fn the_points_of_a_step_keep_their_squares_and_a_sparse_line_its_points() {
+        let map = map();
+        // A step written by the pencil: three points on one beat.
+        let step = [point(0.0, 0.0), point(4.0, 0.5), held(4.0, -1.0), held(4.0, 1.0), point(8.0, 0.0)];
+        let (_, plain) = point_squares(&map, &step, &[]);
+        assert_eq!(plain.len(), 5);
+        assert_eq!(curve_path(&map, &step).len(), 6, "the left edge, the points and the step's corner, as they are");
+        let (selected, plain) = point_squares(&map, &step, &[step[2]]);
+        assert_eq!((selected.len(), plain.len()), (1, 4));
+        assert_eq!(selected[0].width(), POINT + 2.0, "a selected point is drawn larger");
+    }
+
+    #[test]
+    fn replacing_and_moving_do_the_same_for_thousands_of_points_as_for_three() {
+        let (_, points) = crowded();
+        // Every other point goes, and two come.
+        let going: Vec<AutomationPoint> = points.iter().step_by(2).copied().collect();
+        let coming = [point(0.01, -3.0), point(455.99, -3.0)];
+        let result = replaced(&points, &going, &coming);
+        assert_eq!(result.len(), points.len() - going.len() + 2);
+        assert!(result.is_sorted_by(|a, b| a.beat <= b.beat));
+        assert!(going.iter().step_by(97).all(|gone| !result.contains(gone)));
+        assert!(points.iter().skip(1).step_by(194).all(|kept| result.contains(kept)));
+        // One of two points that are the same goes when one is asked to.
+        let twins = [point(1.0, 0.5), point(1.0, 0.5), point(2.0, 0.5)];
+        assert_eq!(replaced(&twins, &[twins[0]], &[]), [twins[1], twins[2]]);
+        assert_eq!(replaced(&twins, &[twins[0], twins[0], twins[0]], &[]), [twins[2]]);
+
+        // The whole envelope moved up as one: nothing holds it back in time
+        // but the start of the song, and every point rises.
+        let lifted = moved(&points, &[], 0.0, 0.1, &Scale::Volume);
+        assert_eq!(lifted.len(), points.len());
+        assert!(lifted.iter().zip(&points).all(|(now, was)| now.beat == was.beat && now.value > was.value));
+        // Half of it, between the other half: held to its neighbours.
+        let (movers, stayers): (Vec<_>, Vec<_>) = points.iter().enumerate().partition(|(index, _)| index % 2 == 1);
+        let movers: Vec<AutomationPoint> = movers.into_iter().map(|(_, point)| *point).collect();
+        let stayers: Vec<AutomationPoint> = stayers.into_iter().map(|(_, point)| *point).collect();
+        let gap = 456.0 / 7_332.0;
+        let pushed = moved(&movers, &stayers, 10.0, 0.0, &Scale::Volume);
+        assert!((pushed[0].beat - movers[0].beat - gap).abs() < 1e-9, "as far as the next point that stays");
+        let pulled = moved(&movers, &stayers, -10.0, 0.0, &Scale::Volume);
+        assert!((movers[0].beat - pulled[0].beat - gap).abs() < 1e-9);
+    }
+
     #[test]
     fn dragging_up_bows_a_line_upward_whichever_way_it_runs() {
         assert_eq!(bend(25.0, 100.0, true), -0.5, "a rising line that starts fast bows upward");
@@ -1086,6 +1358,9 @@ mod tests {
     #[test]
     fn the_pencil_writes_steps_and_lets_the_envelope_resume() {
         // On an empty lane a stroke is a single held value.
+        let drawn = |points: &[AutomationPoint], first, last, step, value| {
+            super::drawn(points, Travel::Linear, first, last, step, value)
+        };
         assert_eq!(drawn(&[], 4.0, 4.0, 1.0, 0.5), [held(4.0, 0.5)]);
 
         // Over a ramp from 0 to 8: the ramp runs up to the step, the step
@@ -1110,12 +1385,21 @@ mod tests {
     #[test]
     fn the_value_a_line_arrives_with_is_the_one_before_a_jump() {
         let jump = [point(0.0, 0.0), point(2.0, 2.0), held(2.0, 9.0), point(4.0, 4.0)];
+        let arriving = |points: &[AutomationPoint], beat| super::arriving(points, Travel::Linear, beat);
         assert_eq!(arriving(&jump, 2.0), 2.0);
         assert_eq!(automation_value(&jump, 2.0), 9.0, "the envelope itself has already jumped");
         assert_eq!(arriving(&jump, 1.0), 1.0, "between points it is simply the value");
         assert_eq!(arriving(&jump, 9.0), 4.0);
         assert_eq!(arriving(&jump, 0.0), 0.0);
         assert_eq!(arriving(&[], 3.0), 0.0);
+
+        // Along a fader, the pencil's step leaves the fade before it as it was.
+        let fade = [point(0.0, 0.0), point(16.0, -60.0)];
+        let stepped = super::drawn(&fade, Travel::FADER, 8.0, 8.0, 1.0, -6.0);
+        assert!((stepped[1].value + 20.0).abs() < 1e-9, "the fade arrives at beat 8 where it was: {stepped:?}");
+        assert_eq!((stepped[2].value, stepped[2].shape), (-6.0, Segment::Hold));
+        let before = envelope_value(&fade, Travel::FADER, 9.0);
+        assert!((stepped[3].value - before).abs() < 1e-9, "and goes on from where it would have been");
     }
 
     #[test]

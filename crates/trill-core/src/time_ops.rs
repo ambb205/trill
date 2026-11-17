@@ -7,11 +7,10 @@
 //! An edit that fails may leave the project half changed; run it where a
 //! failure is rolled back, as the session's edits are.
 
-use crate::controllers::{splice, value_before};
-use crate::project::{
-    AutomationPoint, AutomationTarget, ChainRef, Clip, EditError, Project, Segment, automation_value,
-};
+use crate::controllers::{splice_along, value_before_along};
+use crate::project::{AutomationPoint, AutomationTarget, ChainRef, Clip, EditError, Project, Segment, envelope_value};
 use crate::time::Beats;
+use crate::travel::Travel;
 use crate::{ClipId, TrackId};
 
 /// What a stretch of time holds, lifted out of the song: the clips of the
@@ -79,11 +78,10 @@ impl Project {
             }
         }
 
-        let lanes: Vec<_> = self.automation.iter().map(|lane| (lane.target.clone(), lane.points.clone())).collect();
-        for (target, points) in lanes {
+        for (target, points, travel) in self.envelopes() {
             // An envelope that has settled before the cut is the same after it.
             if points.last().is_some_and(|last| last.beat >= start) {
-                self.set_automation(target, cut_envelope(&points, start, end))?;
+                self.set_automation(target, cut_envelope(&points, travel, start, end))?;
             }
         }
 
@@ -119,10 +117,9 @@ impl Project {
             }
         }
 
-        let lanes: Vec<_> = self.automation.iter().map(|lane| (lane.target.clone(), lane.points.clone())).collect();
-        for (target, points) in lanes {
+        for (target, points, travel) in self.envelopes() {
             if points.last().is_some_and(|last| last.beat >= start) {
-                self.set_automation(target, repeated_envelope(&points, start, end))?;
+                self.set_automation(target, repeated_envelope(&points, travel, start, end))?;
             }
         }
         self.shift_marks(end, length)
@@ -138,10 +135,9 @@ impl Project {
             )));
         }
         self.make_room(at, length)?;
-        let lanes: Vec<_> = self.automation.iter().map(|lane| (lane.target.clone(), lane.points.clone())).collect();
-        for (target, points) in lanes {
+        for (target, points, travel) in self.envelopes() {
             if points.last().is_some_and(|last| last.beat >= at) {
-                self.set_automation(target, held_envelope(&points, at, length))?;
+                self.set_automation(target, held_envelope(&points, travel, at, length))?;
             }
         }
         self.shift_marks(at, length)
@@ -189,7 +185,7 @@ impl Project {
                 // The master's own automation goes with the whole song only.
                 None => tracks.is_none(),
             })
-            .map(|lane| (lane.target.clone(), course(&lane.points, start, end)))
+            .map(|lane| (lane.target.clone(), course(&lane.points, lane.travel, start, end)))
             .collect();
         Ok(TimeExcerpt { length, clips, lanes, tracks: tracks.map(<[TrackId]>::to_vec) })
     }
@@ -218,13 +214,11 @@ impl Project {
             }
         }
         for (target, piece) in &excerpt.lanes {
-            let Some(base) = self.automation.iter().find(|lane| lane.target == *target).map(|lane| lane.points.clone())
-            else {
-                continue;
-            };
+            let Some(lane) = self.automation.iter().find(|lane| lane.target == *target) else { continue };
+            let (base, travel) = (lane.points.clone(), lane.travel);
             let moved: Vec<AutomationPoint> =
                 piece.iter().map(|point| AutomationPoint { beat: point.beat + at, ..*point }).collect();
-            let spliced = tidied(splice(&base, at, Some(end), &moved));
+            let spliced = tidied(splice_along(&base, travel, at, Some(end), &moved));
             if spliced != base {
                 self.set_automation(target.clone(), spliced)?;
             }
@@ -271,10 +265,18 @@ impl Project {
         Ok(())
     }
 
+    /// Every envelope as it stands: what it moves, its points, and what
+    /// its lines are straight along.
+    fn envelopes(&self) -> Vec<(AutomationTarget, Vec<AutomationPoint>, Travel)> {
+        self.automation.iter().map(|lane| (lane.target.clone(), lane.points.clone(), lane.travel)).collect()
+    }
+
     /// The track an automation target belongs to; `None` for the master's.
     fn target_track(&self, target: &AutomationTarget) -> Option<TrackId> {
         match target {
-            AutomationTarget::TrackVolume { track } | AutomationTarget::TrackPan { track } => Some(*track),
+            AutomationTarget::TrackVolume { track }
+            | AutomationTarget::TrackPan { track }
+            | AutomationTarget::Send { track, .. } => Some(*track),
             AutomationTarget::DeviceParam { device, .. } => match self.device_chain(*device) {
                 Ok(ChainRef::Track(track)) => Some(track),
                 _ => None,
@@ -316,28 +318,29 @@ impl Project {
 /// The course `points` take from `start` to `end`, in beats from `start`:
 /// a point at 0 with the value there, the points inside, and a point at the
 /// end with the value the envelope arrives at.
-fn course(points: &[AutomationPoint], start: Beats, end: Beats) -> Vec<AutomationPoint> {
+fn course(points: &[AutomationPoint], travel: Travel, start: Beats, end: Beats) -> Vec<AutomationPoint> {
     // The shape of the segment `start` falls in carries on from the cut.
     let shape = match points.partition_point(|point| point.beat <= start) {
         0 => Segment::Linear,
         next if next == points.len() => Segment::Hold,
         next => points[next - 1].shape,
     };
-    let mut course = vec![AutomationPoint { beat: 0.0, value: automation_value(points, start), shape }];
+    let mut course = vec![AutomationPoint { beat: 0.0, value: envelope_value(points, travel, start), shape }];
     course.extend(
         points
             .iter()
             .filter(|point| point.beat > start && point.beat < end)
             .map(|point| AutomationPoint { beat: point.beat - start, ..*point }),
     );
-    course.push(AutomationPoint { beat: end - start, value: value_before(points, end), shape: Segment::Hold });
+    let arrives = value_before_along(points, travel, end);
+    course.push(AutomationPoint { beat: end - start, value: arrives, shape: Segment::Hold });
     course
 }
 
 /// `points` with `length` beats opened up at `at`, through which the
 /// envelope holds the value it had there.
-fn held_envelope(points: &[AutomationPoint], at: Beats, length: Beats) -> Vec<AutomationPoint> {
-    let value = automation_value(points, at);
+fn held_envelope(points: &[AutomationPoint], travel: Travel, at: Beats, length: Beats) -> Vec<AutomationPoint> {
+    let value = envelope_value(points, travel, at);
     let mut result: Vec<AutomationPoint> = points.iter().filter(|point| point.beat < at).copied().collect();
     result.push(AutomationPoint::new(at, value));
     result.push(AutomationPoint::new(at + length, value));
@@ -353,7 +356,7 @@ fn held_envelope(points: &[AutomationPoint], at: Beats, length: Beats) -> Vec<Au
 /// `points` with the stretch `start..end` cut out. A point is left on each
 /// side of the cut holding the value the envelope had there, so its shape
 /// before and after is what it was.
-fn cut_envelope(points: &[AutomationPoint], start: Beats, end: Beats) -> Vec<AutomationPoint> {
+fn cut_envelope(points: &[AutomationPoint], travel: Travel, start: Beats, end: Beats) -> Vec<AutomationPoint> {
     let length = end - start;
     let before = points.iter().filter(|point| point.beat < start).copied();
     let after = points
@@ -361,22 +364,22 @@ fn cut_envelope(points: &[AutomationPoint], start: Beats, end: Beats) -> Vec<Aut
         .filter(|point| point.beat >= end)
         .map(|point| AutomationPoint { beat: point.beat - length, ..*point });
     let mut result: Vec<AutomationPoint> = before.collect();
-    result.push(AutomationPoint::new(start, automation_value(points, start)));
-    result.push(AutomationPoint::new(start, automation_value(points, end)));
+    result.push(AutomationPoint::new(start, envelope_value(points, travel, start)));
+    result.push(AutomationPoint::new(start, envelope_value(points, travel, end)));
     result.extend(after);
     tidied(result)
 }
 
 /// `points` with the stretch `start..end` played twice.
-fn repeated_envelope(points: &[AutomationPoint], start: Beats, end: Beats) -> Vec<AutomationPoint> {
+fn repeated_envelope(points: &[AutomationPoint], travel: Travel, start: Beats, end: Beats) -> Vec<AutomationPoint> {
     let length = end - start;
     let later = |point: &AutomationPoint| AutomationPoint { beat: point.beat + length, ..*point };
     let mut result: Vec<AutomationPoint> = points.iter().filter(|point| point.beat < end).copied().collect();
-    let at_end = automation_value(points, end);
+    let at_end = envelope_value(points, travel, end);
     // The first pass ends where it did, the second starts where the first
     // started, and after it the envelope picks up again.
     result.push(AutomationPoint::new(end, at_end));
-    result.push(AutomationPoint::new(end, automation_value(points, start)));
+    result.push(AutomationPoint::new(end, envelope_value(points, travel, start)));
     result.extend(points.iter().filter(|point| point.beat > start && point.beat < end).map(later));
     result.push(AutomationPoint::new(end + length, at_end));
     result.extend(points.iter().filter(|point| point.beat >= end).map(later));
@@ -405,7 +408,10 @@ fn tidied(points: Vec<AutomationPoint>) -> Vec<AutomationPoint> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AutomationTarget, ClipId, Note, TrackId};
+    use crate::project::automation_value;
+    use crate::{AutomationLane, AutomationTarget, ClipId, Note, TrackId};
+
+    const STRAIGHT: Travel = Travel::Linear;
 
     fn note(start: Beats) -> Note {
         Note { pitch: 60, start, length: 0.5, velocity: 100 }
@@ -506,15 +512,18 @@ mod tests {
     fn a_cut_envelope_keeps_its_shape_on_both_sides() {
         // A ramp from 0 at beat 0 to 16 at beat 16.
         let ramp = envelope(&[(0.0, 0.0), (16.0, 16.0)]);
-        let cut = cut_envelope(&ramp, 4.0, 8.0);
+        let cut = cut_envelope(&ramp, STRAIGHT, 4.0, 8.0);
         assert_eq!(cut, envelope(&[(0.0, 0.0), (4.0, 4.0), (4.0, 8.0), (12.0, 16.0)]));
         assert_eq!(values(&cut, &[2.0, 3.99, 4.0, 8.0, 12.0]), [2.0, 3.99, 8.0, 12.0, 16.0]);
 
         // Points inside the cut go; a flat stretch needs no step.
         let stepped = envelope(&[(0.0, 1.0), (5.0, 9.0), (6.0, 1.0), (10.0, 1.0)]);
-        assert_eq!(cut_envelope(&stepped, 4.0, 8.0), envelope(&[(0.0, 1.0), (4.0, 7.4), (4.0, 1.0), (6.0, 1.0)]));
         assert_eq!(
-            cut_envelope(&envelope(&[(0.0, 3.0), (20.0, 3.0)]), 4.0, 8.0),
+            cut_envelope(&stepped, STRAIGHT, 4.0, 8.0),
+            envelope(&[(0.0, 1.0), (4.0, 7.4), (4.0, 1.0), (6.0, 1.0)])
+        );
+        assert_eq!(
+            cut_envelope(&envelope(&[(0.0, 3.0), (20.0, 3.0)]), STRAIGHT, 4.0, 8.0),
             envelope(&[(0.0, 3.0), (4.0, 3.0), (16.0, 3.0)])
         );
     }
@@ -522,14 +531,14 @@ mod tests {
     #[test]
     fn a_repeated_envelope_plays_the_stretch_twice() {
         let ramp = envelope(&[(0.0, 0.0), (16.0, 16.0)]);
-        let twice = repeated_envelope(&ramp, 4.0, 8.0);
+        let twice = repeated_envelope(&ramp, STRAIGHT, 4.0, 8.0);
         assert_eq!(
             values(&twice, &[2.0, 6.0, 7.99, 8.0, 10.0, 12.0, 14.0, 20.0]),
             [2.0, 6.0, 7.99, 4.0, 6.0, 8.0, 10.0, 16.0]
         );
         // A point inside the stretch is copied with it.
         let bump = envelope(&[(0.0, 0.0), (6.0, 10.0), (8.0, 0.0)]);
-        let twice = repeated_envelope(&bump, 4.0, 8.0);
+        let twice = repeated_envelope(&bump, STRAIGHT, 4.0, 8.0);
         assert_eq!(values(&twice, &[6.0, 10.0, 12.0, 14.0]), [10.0, 10.0, 0.0, 0.0]);
     }
 
@@ -538,7 +547,7 @@ mod tests {
         let (mut project, track, _) = project();
         let volume = AutomationTarget::TrackVolume { track };
         let pan = AutomationTarget::TrackPan { track };
-        project.set_automation(volume.clone(), envelope(&[(0.0, -12.0), (16.0, 4.0)])).unwrap();
+        project.write_automation(volume.clone(), envelope(&[(0.0, -12.0), (16.0, 4.0)]), STRAIGHT).unwrap();
         project.set_automation(pan.clone(), envelope(&[(0.0, -1.0), (1.0, 0.0)])).unwrap();
         project.delete_time(4.0, 8.0).unwrap();
         let lane = |project: &Project, target: &AutomationTarget| {
@@ -550,6 +559,74 @@ mod tests {
         project.duplicate_time(4.0, 6.0).unwrap();
         assert_eq!(values(&lane(&project, &volume), &[4.0, 5.0, 6.0, 7.0, 8.0]), [-4.0, -3.0, -4.0, -3.0, -2.0]);
         assert_eq!(lane(&project, &pan).len(), 2);
+    }
+
+    /// The envelope of `target`, as it is played.
+    fn played<'a>(project: &'a Project, target: &AutomationTarget) -> &'a AutomationLane {
+        project.automation.iter().find(|lane| lane.target == *target).expect("the target has an envelope")
+    }
+
+    #[test]
+    fn an_envelope_that_follows_a_fader_keeps_its_course_through_every_edit_of_time() {
+        // A fade and a throw of a send, both straight along a fader: no
+        // part of either is a straight line in decibels, so a cut that
+        // read the envelope in decibels would bend what is left of it.
+        let (mut project, track, _) = project();
+        let echo = project.add_track_of_kind("Echo", crate::TrackKind::Return);
+        let volume = AutomationTarget::TrackVolume { track };
+        let send = AutomationTarget::Send { track, to: echo };
+        project.set_automation(volume.clone(), envelope(&[(0.0, 0.0), (16.0, -60.0)])).unwrap();
+        let throw = envelope(&[(0.0, -70.0), (6.0, -70.0), (9.0, -6.0), (16.0, -70.0)]);
+        project.set_automation(send.clone(), throw).unwrap();
+        let before = project.clone();
+        assert_eq!(played(&before, &volume).travel, Travel::FADER);
+        assert!((played(&before, &volume).value_at(8.0) + 20.0).abs() < 1e-9, "not the -30 dB of a line in decibels");
+        let same = |project: &Project, beat: Beats, was_at: Beats, what: &str| {
+            for target in [&volume, &send] {
+                let (now, was) = (played(project, target).value_at(beat), played(&before, target).value_at(was_at));
+                assert!((now - was).abs() < 1e-9, "{what}: {target:?} at {beat} is {now}, was {was} at {was_at}");
+            }
+        };
+
+        // Cut 5..10 out: what is left plays as it did, on both sides.
+        let mut cut = before.clone();
+        cut.delete_time(5.0, 10.0).unwrap();
+        for beat in [0.0, 2.5, 4.9] {
+            same(&cut, beat, beat, "before the cut");
+        }
+        for beat in [5.0, 7.3, 11.0] {
+            same(&cut, beat, beat + 5.0, "after the cut");
+        }
+        assert_eq!(played(&cut, &volume).travel, Travel::FADER, "an edit of time leaves the travel alone");
+
+        // Repeat 6..10: the stretch is heard twice, then the rest.
+        let mut twice = before.clone();
+        twice.duplicate_time(6.0, 10.0).unwrap();
+        for beat in [6.0, 7.5, 9.9] {
+            same(&twice, beat, beat, "the first time");
+            same(&twice, beat + 4.0, beat, "the second time");
+        }
+        same(&twice, 17.0, 13.0, "what followed");
+
+        // Open four beats at 8: held there, then on as before.
+        let mut room = before.clone();
+        room.insert_time(8.0, 4.0).unwrap();
+        for beat in [8.0, 10.0, 11.9] {
+            same(&room, beat, 8.0, "through the new time");
+        }
+        same(&room, 7.0, 7.0, "before it");
+        same(&room, 15.0, 11.0, "after it");
+
+        // Copy 6..10 over 12..16: the copy plays what the stretch played,
+        // and before it the envelope is as it was.
+        let mut copied = before.clone();
+        copied.copy_time(6.0, 10.0, 12.0, None, PasteMode::Replace).unwrap();
+        for beat in [6.0, 7.5, 9.9] {
+            same(&copied, beat + 6.0, beat, "the copy");
+        }
+        for beat in [3.0, 8.0, 11.9] {
+            same(&copied, beat, beat, "before the copy");
+        }
     }
 
     #[test]
@@ -573,18 +650,21 @@ mod tests {
     #[test]
     fn an_envelope_holds_through_inserted_time() {
         let ramp = envelope(&[(0.0, 0.0), (16.0, 16.0)]);
-        let held = held_envelope(&ramp, 4.0, 8.0);
+        let held = held_envelope(&ramp, STRAIGHT, 4.0, 8.0);
         assert_eq!(held, envelope(&[(0.0, 0.0), (4.0, 4.0), (12.0, 4.0), (24.0, 16.0)]));
         assert_eq!(values(&held, &[2.0, 4.0, 8.0, 12.0, 18.0, 24.0]), [2.0, 4.0, 4.0, 4.0, 10.0, 16.0]);
         // A point exactly where the time opens moves with what follows, and
         // the envelope still reaches its value at the same moment as before.
         let stepped = envelope(&[(0.0, 1.0), (4.0, 5.0), (8.0, 5.0)]);
-        assert_eq!(held_envelope(&stepped, 4.0, 2.0), envelope(&[(0.0, 1.0), (4.0, 5.0), (6.0, 5.0), (10.0, 5.0)]));
+        assert_eq!(
+            held_envelope(&stepped, STRAIGHT, 4.0, 2.0),
+            envelope(&[(0.0, 1.0), (4.0, 5.0), (6.0, 5.0), (10.0, 5.0)])
+        );
 
         let (mut project, track, _) = project();
         let volume = AutomationTarget::TrackVolume { track };
         let pan = AutomationTarget::TrackPan { track };
-        project.set_automation(volume.clone(), envelope(&[(0.0, -12.0), (16.0, 4.0)])).unwrap();
+        project.write_automation(volume.clone(), envelope(&[(0.0, -12.0), (16.0, 4.0)]), STRAIGHT).unwrap();
         project.set_automation(pan.clone(), envelope(&[(0.0, -1.0), (1.0, 0.0)])).unwrap();
         project.insert_time(8.0, 4.0).unwrap();
         let lane = |target: &AutomationTarget| {
@@ -651,9 +731,8 @@ mod tests {
     fn copied_time_carries_automation_and_controller_curves() {
         let (mut project, track) = expressive();
         let volume = AutomationTarget::TrackVolume { track };
-        project
-            .set_automation(volume.clone(), envelope(&[(0.0, -12.0), (4.0, -12.0), (8.0, 0.0), (16.0, 0.0)]))
-            .unwrap();
+        let swell = envelope(&[(0.0, -12.0), (4.0, -12.0), (8.0, 0.0), (16.0, 0.0)]);
+        project.write_automation(volume.clone(), swell, STRAIGHT).unwrap();
         let before = project.clone();
         // The first half of the swell (4..8) onto the last clip (12..16).
         project.copy_time(4.0, 8.0, 12.0, None, PasteMode::Replace).unwrap();
@@ -686,7 +765,7 @@ mod tests {
     #[test]
     fn the_course_of_an_envelope_through_a_stretch_keeps_its_shape() {
         let ramp = envelope(&[(0.0, 0.0), (16.0, 16.0)]);
-        let piece = course(&ramp, 4.0, 8.0);
+        let piece = course(&ramp, STRAIGHT, 4.0, 8.0);
         assert_eq!(values(&piece, &[0.0, 2.0, 3.99]), [4.0, 6.0, 7.99]);
         assert_eq!(piece.last().map(|point| (point.beat, point.value)), Some((4.0, 8.0)));
         // A step keeps stepping: held, then the jump, then held to the end.
@@ -695,10 +774,10 @@ mod tests {
             AutomationPoint { beat: 0.0, value: 1.0, shape: hold },
             AutomationPoint { beat: 6.0, value: 5.0, shape: hold },
         ];
-        let piece = course(&steps, 4.0, 8.0);
+        let piece = course(&steps, STRAIGHT, 4.0, 8.0);
         assert_eq!(values(&piece, &[0.0, 1.9, 2.0, 3.9]), [1.0, 1.0, 5.0, 5.0]);
         // Past its last point an envelope is flat.
-        assert_eq!(values(&course(&ramp, 20.0, 24.0), &[0.0, 4.0]), [16.0, 16.0]);
+        assert_eq!(values(&course(&ramp, STRAIGHT, 20.0, 24.0), &[0.0, 4.0]), [16.0, 16.0]);
     }
 
     /// The project of [`project`], with a swell over the whole of the long

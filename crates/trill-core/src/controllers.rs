@@ -30,8 +30,9 @@
 //!   about it: the instrument keeps whatever it has.
 
 use crate::device::{CONTROLLER_MOD_WHEEL, CONTROLLER_SUSTAIN, EventKind};
-use crate::project::{AutomationPoint, EditError, Segment, automation_value};
+use crate::project::{AutomationPoint, EditError, Segment, automation_value, envelope_value};
 use crate::time::Beats;
+use crate::travel::Travel;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -359,6 +360,11 @@ pub(crate) fn validated(
 /// The value an envelope has just before `beat`: the same as
 /// [`automation_value`] except on a step, where this is the side before it.
 pub fn value_before(points: &[AutomationPoint], beat: Beats) -> f64 {
+    value_before_along(points, Travel::Linear, beat)
+}
+
+/// [`value_before`], of an envelope whose lines are straight along `travel`.
+pub fn value_before_along(points: &[AutomationPoint], travel: Travel, beat: Beats) -> f64 {
     let next = points.partition_point(|p| p.beat < beat);
     if next == 0 {
         return points[0].value;
@@ -373,7 +379,7 @@ pub fn value_before(points: &[AutomationPoint], beat: Beats) -> f64 {
     }
     match a.shape {
         Segment::Hold => a.value,
-        _ => automation_value(&[a, b], beat),
+        _ => envelope_value(&[a, b], travel, beat),
     }
 }
 
@@ -628,6 +634,17 @@ pub fn splice(
     to: Option<Beats>,
     piece: &[AutomationPoint],
 ) -> Vec<AutomationPoint> {
+    splice_along(base, Travel::Linear, from, to, piece)
+}
+
+/// [`splice`], into an envelope whose lines are straight along `travel`.
+pub fn splice_along(
+    base: &[AutomationPoint],
+    travel: Travel,
+    from: Beats,
+    to: Option<Beats>,
+    piece: &[AutomationPoint],
+) -> Vec<AutomationPoint> {
     if piece.is_empty() {
         return base.to_vec();
     }
@@ -635,7 +652,7 @@ pub fn splice(
         return piece.to_vec();
     }
     // Up to the splice the old curve keeps its course...
-    let before = value_before(base, from);
+    let before = value_before_along(base, travel, from);
     let mut result: Vec<AutomationPoint> = base.iter().filter(|point| point.beat < from).copied().collect();
     let cut = result.len();
     if let (Some(last), Some(next)) = (result.last_mut(), base.get(cut)) {
@@ -660,7 +677,7 @@ pub fn splice(
         }
         _ => Segment::Linear,
     };
-    result.push(AutomationPoint { beat: to, value: automation_value(base, to), shape });
+    result.push(AutomationPoint { beat: to, value: envelope_value(base, travel, to), shape });
     result.extend(base[next..].iter().copied());
     tidied(result)
 }
