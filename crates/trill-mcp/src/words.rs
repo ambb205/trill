@@ -59,6 +59,11 @@ impl Call<'_> {
         self.input.get(key).is_some_and(|value| !value.is_null())
     }
 
+    /// Whether a switch was given, and on.
+    fn is(&self, key: &str) -> bool {
+        self.input.get(key).and_then(Value::as_bool).unwrap_or(false)
+    }
+
     /// A number given at the top of the arguments or, for the writing
     /// tools, in their `target`.
     fn id(&self, key: &str) -> Option<u64> {
@@ -412,9 +417,12 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
         "render" => {
             // With stems, every track becomes a file of its own as well.
             let what = if call.has("stems") { "the song and its tracks" } else { "the song" };
+            // A render that was to be the same samples every time is not
+            // quite the song as it plays, and says so.
+            let how = if call.is("repeatable") { ", repeatably," } else { "" };
             match call.text("path") {
-                Some(path) => about("Rendering", "Rendered", &format!("{what} to {}", quoted(file_name(path)))),
-                None => about("Rendering", "Rendered", what),
+                Some(path) => about("Rendering", "Rendered", &format!("{what}{how} to {}", quoted(file_name(path)))),
+                None => about("Rendering", "Rendered", &format!("{what}{}", how.trim_end_matches(','))),
             }
         }
         "film" | "film_plan" => {
@@ -429,9 +437,11 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
                 (_, None) => about("Filming", "Filmed", &what),
             }
         }
-        "measure" => match call.has("tracks") {
-            true => about("Measuring", "Measured", "some of the tracks"),
-            false => about("Measuring", "Measured", "the song"),
+        "measure" => match (call.has("tracks"), call.is("repeatable")) {
+            (true, false) => about("Measuring", "Measured", "some of the tracks"),
+            (true, true) => about("Measuring", "Measured", "some of the tracks, repeatably"),
+            (false, false) => about("Measuring", "Measured", "the song"),
+            (false, true) => about("Measuring", "Measured", "the song, repeatably"),
         },
         "probe" => match (call.track("track"), call.text("device")) {
             (Some(track), _) => about("Trying out", "Tried out", &format!("the instrument of {track}")),
@@ -843,6 +853,14 @@ mod tests {
         );
         assert_eq!(did("measure", json!({}), p), "Measured the song");
         assert_eq!(did("measure", json!({ "tracks": [1] }), p), "Measured some of the tracks");
+        // One that was to be the same samples every time says so.
+        assert_eq!(did("measure", json!({ "repeatable": true }), p), "Measured the song, repeatably");
+        assert_eq!(did("measure", json!({ "repeatable": false }), p), "Measured the song");
+        assert_eq!(did("render", json!({ "repeatable": true }), p), "Rendered the song, repeatably");
+        assert_eq!(
+            did("render", json!({ "path": "mix.wav", "repeatable": true }), p),
+            "Rendered the song, repeatably, to \u{201C}mix.wav\u{201D}"
+        );
         assert!(did("probe", json!({ "track": track }), p).starts_with("Tried out the instrument of "));
         assert_eq!(did("probe", json!({ "device": "builtin:polysynth" }), p), "Tried out polysynth");
         assert_eq!(did("import_midi", json!({ "path": "D:/midi/riff.mid" }), p), "Imported \u{201C}riff.mid\u{201D}");

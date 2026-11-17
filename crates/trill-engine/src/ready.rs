@@ -96,6 +96,15 @@
 //! song gives back as it goes does not hide what a kit takes as it comes:
 //! the mark that growth is measured against comes down with it.
 //!
+//! **An instrument that listens is lent something to listen to.** A
+//! device may listen to another track of the song (a vocoder to a voice,
+//! a synthesizer on a patch that plays what it is fed), and a rehearsal
+//! plays one track by itself: such an instrument would answer no note,
+//! and the render would be refused for want of it. So while a note is
+//! tried, every device of the track that listens is handed noise in the
+//! place of the track it listens to, the same noise each time, and
+//! silence between notes.
+//!
 //! **Effects wait too.** An amplifier or a reverb that is a plugin may
 //! pass no sound for a moment after it is made. Behind a plugin
 //! instrument it is rehearsed with it: the notes are heard at the end of
@@ -161,7 +170,7 @@ use parking_lot::Mutex;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use trill_core::device::{DeviceCategory, DeviceFactory, DeviceProcessor, Event, EventKind, ProcessInfo};
+use trill_core::device::{DeviceCategory, DeviceFactory, DeviceProcessor, Event, EventKind, KeyInput, ProcessInfo};
 use trill_core::{ControllerKind, Device, DeviceId, Project, TimeSignature, TrackId};
 
 /// The most notes of a track that are rehearsed: the different pitches it
@@ -205,6 +214,9 @@ const SIGNAL_LEVEL: f32 = 0.25;
 const SIGNAL_STRETCHES: usize = 3;
 /// How long a rehearsal waits between tries.
 const BETWEEN_TRIES: Duration = Duration::from_millis(100);
+/// Where the noise begins that a device which listens to another track is
+/// lent while it is tried.
+const KEY_SEED: u32 = 0x9E37_79B9;
 /// How many times each rehearsed note is to sound, and an effect to pass a
 /// burst of noise, before it is not asked again: see the module
 /// documentation.
@@ -564,6 +576,16 @@ pub(crate) struct Stand<'a> {
     /// played, so that what comes after it is run; and whether it ever has.
     engaged: bool,
     ever_engaged: bool,
+    /// Which of the devices listen to another track of the song, where
+    /// any does. Here there is no other track: while a note is tried they
+    /// are lent noise to listen to ([`Stand::lending`]), or an instrument
+    /// that only plays what it hears would never be heard to answer.
+    listening: Vec<bool>,
+    /// Whether the key is being lent, the noise it is made of, and where
+    /// that noise has got to.
+    lent: bool,
+    key: Vec<f32>,
+    key_seed: u32,
     info: ProcessInfo,
     left: Vec<f32>,
     right: Vec<f32>,
@@ -587,11 +609,28 @@ impl<'a> Stand<'a> {
             sources: 0,
             engaged: false,
             ever_engaged: false,
+            listening: Vec::new(),
+            lent: false,
+            key: vec![0.0; BLOCK],
+            key_seed: KEY_SEED,
             info,
             left: vec![0.0; BLOCK],
             right: vec![0.0; BLOCK],
             noise: 0.0,
         }
+    }
+
+    /// Says which of the devices listen to another track: one flag for
+    /// each, in their order.
+    pub fn listening(mut self, listening: Vec<bool>) -> Self {
+        self.listening = listening;
+        self
+    }
+
+    /// Lends the devices that listen a key from now on, or takes it away:
+    /// the same noise from its beginning every time it is lent.
+    pub fn lend(&mut self, lent: bool) {
+        (self.lent, self.key_seed) = (lent && self.listening.contains(&true), KEY_SEED);
     }
 
     /// From here on the first device is an instrument that is rehearsed,
@@ -645,17 +684,38 @@ impl<'a> Stand<'a> {
             let (left, right) = (&mut self.left[..count], &mut self.right[..count]);
             feed(left, right);
             let events = if done == 0 { events } else { &[] };
-            let (sources, effects) = self.devices.split_at_mut(self.sources);
-            for device in sources.iter_mut() {
-                device.process(&self.info, events, left, right);
+            // What the devices that listen are lent for this block.
+            let key = &mut self.key[..count];
+            if self.lent {
+                for sample in key.iter_mut() {
+                    self.key_seed ^= self.key_seed << 13;
+                    self.key_seed ^= self.key_seed >> 17;
+                    self.key_seed ^= self.key_seed << 5;
+                    *sample = ((self.key_seed >> 8) as f32 / 8_388_608.0 - 1.0) * SIGNAL_LEVEL;
+                }
             }
-            if !sources.is_empty() && !self.engaged {
+            let (info, lent, listening) = (&self.info, self.lent, &self.listening);
+            // A device that listens is handed the key; any other is run
+            // as it always is.
+            let run =
+                |index: usize, device: &mut Box<dyn DeviceProcessor>, left: &mut [f32], right: &mut [f32]| match lent
+                    && listening.get(index).copied().unwrap_or(false)
+                {
+                    true => device.process_keyed(info, events, left, right, KeyInput { left: key, right: key }),
+                    false => device.process(info, events, left, right),
+                };
+            let (sources, effects) = self.devices.split_at_mut(self.sources);
+            let sourced = sources.len();
+            for (index, device) in sources.iter_mut().enumerate() {
+                run(index, device, left, right);
+            }
+            if sourced > 0 && !self.engaged {
                 self.engaged = left.iter().chain(right.iter()).any(|sample| sample.abs() > ANSWER);
                 self.ever_engaged |= self.engaged;
             }
-            if sources.is_empty() || self.engaged {
-                for device in effects.iter_mut() {
-                    device.process(&self.info, events, left, right);
+            if sourced == 0 || self.engaged {
+                for (index, device) in effects.iter_mut().enumerate() {
+                    run(sourced + index, device, left, right);
                 }
             }
             done += count;
@@ -778,6 +838,9 @@ impl<'a> Stand<'a> {
             // What comes after the instrument waits for it to sound, note
             // by note.
             self.engaged = false;
+            // An instrument that listens to another track is lent
+            // something to listen to for as long as the note is down.
+            self.lend(true);
             // A key held with the note goes down a moment ahead of it and
             // comes up with it.
             for key in with.drain(..) {
@@ -799,6 +862,7 @@ impl<'a> Stand<'a> {
             answers.push(Some(answer));
             events.clear();
             events.extend(down.drain(..).map(|pitch| Event { offset: 0, kind: EventKind::NoteOff { pitch } }));
+            self.lend(false);
             self.hush(&events);
             events.clear();
         }
@@ -1514,11 +1578,14 @@ pub(crate) fn wake(
             .collect();
         let (mut with_notes, mut with_noise) = (Vec::new(), Vec::new());
         let (mut note_turns, mut noise_turns) = (Vec::new(), Vec::new());
+        // Which of the rehearsed devices listen to another track.
+        let mut listening = Vec::new();
         for slot in node.chain.devices.iter_mut() {
-            let (id, turn) = (slot.id, slot.turn);
+            let (id, turn, listens) = (slot.id, slot.turn, slot.key.is_some());
             let Some(processor) = slot.processor.as_mut() else { continue };
             if rehearsed.iter().any(|device| device.id == id) {
                 with_notes.push(processor);
+                listening.push(listens);
                 note_turns.extend(turn);
             } else if effects.iter().any(|device| device.id == id) {
                 with_noise.push(processor);
@@ -1531,7 +1598,7 @@ pub(crate) fn wake(
             let opening = Opening { notes, signal: false };
             let signature = signature(rehearsed.iter().copied(), &opening);
             let devices = device_signature(rehearsed.iter().copied());
-            let stand = Stand::new(with_notes, sample_rate, tempo);
+            let stand = Stand::new(with_notes, sample_rate, tempo).listening(listening);
             waits.push(Wait::new(stand, opening, signature, devices).taking_turns(note_turns));
             who.push((Some(node.id), instrument.id, false));
         }

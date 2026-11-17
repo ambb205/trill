@@ -101,6 +101,17 @@ pub struct RenderOptions {
     /// is known of it ([`trill_core::device::Beside`]). For finding out
     /// what a plugin does when it is, and for nothing else.
     pub trusting: bool,
+    /// Renders the devices that are known not to do the same thing twice
+    /// (a sampled instrument that draws at random which recording it
+    /// plays) with that taken out of them: on the render's own copies,
+    /// which every render makes afresh, so that the song is as it was.
+    /// Two such renders of one song are the same samples and can be
+    /// compared; they are not quite what the song sounds like as it plays
+    /// ([`trill_core::device::DeviceFactory::repeating`] says what it
+    /// costs). Off, such devices are rendered as they are, and
+    /// [`Measured::draws`] names them.
+    #[serde(default)]
+    pub repeatable: bool,
     /// Who watches the render: it is stopped through it, and says how far
     /// it has come. It stays with whoever asks: a render that is done in a
     /// process of its own is watched from here.
@@ -262,6 +273,7 @@ impl Default for RenderOptions {
             stems: None,
             threads: None,
             trusting: false,
+            repeatable: false,
             watch: None,
         }
     }
@@ -383,6 +395,30 @@ pub struct Measured {
     /// The devices that kept it on one thread though it was given more:
     /// they are not to be run beside anything.
     pub alone: Vec<Alone>,
+    /// The devices of the render that are known not to do the same thing
+    /// twice as they come, each with whether it was made to for this
+    /// render ([`RenderOptions::repeatable`]). While one of them was not,
+    /// the next render of the same song is other samples.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub draws: Vec<Draws>,
+}
+
+/// A device that draws at random what it plays, as far as is known.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Draws {
+    /// The track it is on; `None` for the master.
+    pub track: Option<TrackId>,
+    /// That track's name, or "master".
+    pub track_name: String,
+    pub device: DeviceId,
+    pub device_name: String,
+    /// Whether the render's copy of it was made to repeat itself.
+    pub held: bool,
+    /// What that costs its sound, in a few words.
+    pub costs: String,
+    /// Why it could not be made to, where that was asked and it was not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed: Option<String>,
 }
 
 /// A device that is not to be run beside anything, which leaves a render
@@ -481,12 +517,15 @@ pub struct RenderReport {
     /// See [`Measured::alone`].
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub alone: Vec<Alone>,
+    /// See [`Measured::draws`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub draws: Vec<Draws>,
     pub problems: Vec<String>,
 }
 
 impl RenderReport {
     fn new(path: Option<&Path>, sample_rate: u32, measured: Measured, problems: &[Problem]) -> Self {
-        let Measured { stats, tracks, sections, dynamics, waited, stems, threads, alone } = measured;
+        let Measured { stats, tracks, sections, dynamics, waited, stems, threads, alone, draws } = measured;
         Self {
             path: path.map(|path| path.display().to_string()),
             sample_rate,
@@ -498,6 +537,7 @@ impl RenderReport {
             stems,
             threads,
             alone,
+            draws,
             problems: problems.iter().map(ToString::to_string).collect(),
         }
     }
@@ -676,6 +716,49 @@ fn render_from(
     if let Some(stems) = stems.filter(|stems| stems.premaster) {
         graph.master.tap = Some(listener(Some(stems.begin(StemKind::Premaster, None, sample_rate)?)));
     }
+    // What is known not to do the same thing twice as it comes: said,
+    // and, in a render that is to be one that can be compared, taken out
+    // of the render's own copies before they are waited for.
+    let mut draws: Vec<Draws> = Vec::new();
+    let made_devices: Vec<(Option<TrackId>, DeviceId)> = (graph.tracks.iter())
+        .flat_map(|node| node.chain.devices.iter().map(|slot| (Some(node.id), slot.id)))
+        .chain(graph.master.chain.devices.iter().map(|slot| (None, slot.id)))
+        .collect();
+    for (track, id) in made_devices {
+        let Ok(device) = project.device(id) else { continue };
+        let Some(how) = factory.repeating(&device.uri) else { continue };
+        let mut failed = None;
+        if options.repeatable {
+            let meta = bank.devices.get(&id);
+            if !how.settings.is_empty() {
+                failed = match meta.and_then(|meta| meta.controller.as_ref()) {
+                    Some(controller) => {
+                        controller.lock().set_settings(&how.settings).err().map(|error| error.to_string())
+                    }
+                    None => Some("it could not be given settings".to_string()),
+                };
+            }
+            for (name, value) in &how.params {
+                let index = meta.and_then(|meta| meta.params.iter().position(|param| param.name == *name));
+                if let (Some(index), Some(processor)) = (index, graph.processor_mut(id)) {
+                    processor.set_param(index, *value);
+                }
+            }
+        }
+        draws.push(Draws {
+            track,
+            track_name: match track.and_then(|track| project.track(track).ok()) {
+                Some(track) => track.name.clone(),
+                None => "master".to_string(),
+            },
+            device: id,
+            device_name: device.name.clone(),
+            held: options.repeatable && failed.is_none(),
+            costs: how.costs,
+            failed,
+        });
+    }
+
     let made = begun.elapsed();
     crate::apart::stage(Stage::Waiting);
     // How many threads make it: as many as it was given and can use,
@@ -947,7 +1030,7 @@ fn render_from(
         (begun.elapsed() - played).as_secs_f64()
     );
 
-    let measured = Measured { stats: mix.stats(), tracks, sections, dynamics, waited, stems, threads, alone };
+    let measured = Measured { stats: mix.stats(), tracks, sections, dynamics, waited, stems, threads, alone, draws };
     Ok(Rendered { sample_rate: options.sample_rate, left, right, track_peaks, track_levels, problems, measured })
 }
 

@@ -477,6 +477,83 @@ async fn a_plugin_that_takes_its_process_down_costs_the_call_an_error_that_says_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_instrument_that_plays_what_it_listens_to_is_heard_in_its_song_and_a_probe_says_what_it_gave_it() {
+    // A bass that plays its notes as loud as the track it listens to, and
+    // not at all by itself, as a vocoder does: it listens to the drums.
+    let fixture = connect(ScriptedFactory::loading(Loading { listens: true, ..Loading::default() })).await;
+    let client = &fixture.client;
+    let (bass, drums, _) = two_part_song(client).await;
+    let device = standing(&fixture).0.track(trill_core::TrackId(bass)).unwrap().devices[0].id.0;
+    let set = ok(client, "update_device", json!({ "device": device, "sidechain": drums })).await;
+    assert_eq!(set["sidechain"], json!({ "track": drums, "name": "Drums" }), "{set}");
+
+    // Tried by itself before a render it would answer no note, and the
+    // song would not be measured for want of it. It is, and the bass is
+    // in it where the kicks are.
+    let report = ok(client, "measure", json!({ "tracks": [bass] })).await;
+    assert!(report["peak_db"].as_f64().unwrap() > -30.0, "{report}");
+    assert!(!report.to_string().contains("never answered"), "{report}");
+    // A probe plays an instrument alone. It says what it gave this one to
+    // listen to, and where the song can be heard.
+    let probed = ok(client, "probe", json!({ "track": bass, "notes": [40, 43] })).await;
+    assert_eq!(probed["sounding"], "E2 (40), G2 (43)", "{probed}");
+    assert_eq!(probed["listens_to"], "Drums", "{probed}");
+    let notes = strings(&probed["notes"]).join(" | ");
+    assert!(notes.contains("listens to the track 'Drums' and plays what it hears there"), "{notes}");
+    assert!(notes.contains("given noise to listen to") && notes.contains("`measure` with `tracks`"), "{notes}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_song_whose_instrument_draws_at_random_says_so_and_is_the_same_twice_when_it_is_to_be_repeatable() {
+    // A bass that draws how loud each note is from a stream nothing puts
+    // back, as a sampled guitar draws which recording it plays.
+    let fixture = connect(ScriptedFactory::loading(Loading { random: true, ..Loading::default() })).await;
+    let client = &fixture.client;
+    two_part_song(client).await;
+    let said = |report: &Value| strings(&report["notes"]).join(" | ");
+    let figures = |report: &Value| format!("{} {} {}", report["loudness_lufs"], report["peak_db"], report["tracks"]);
+
+    // As it is, two measurements are not of the same samples, and each
+    // says which instrument that is and how to have it otherwise.
+    let (first, second) = (ok(client, "measure", json!({})).await, ok(client, "measure", json!({})).await);
+    assert_ne!(figures(&first), figures(&second));
+    // (A measurement takes down what state the song's own instruments
+    // have, which is no step of the song's.)
+    let before = standing(&fixture);
+    let note = said(&first);
+    assert!(note.contains("Scripted Bass on 'Bass' draws at random what it plays as it is set"), "{note}");
+    assert!(note.contains("To compare two renders, make both with `repeatable: true`"), "{note}");
+    assert!(note.contains("the song is left as it is"), "{note}");
+
+    // Asked to be repeatable, they are, and say what that cost.
+    let asked = json!({ "repeatable": true });
+    let (third, fourth) = (ok(client, "measure", asked.clone()).await, ok(client, "measure", asked).await);
+    assert_eq!(figures(&third), figures(&fourth));
+    let note = said(&third);
+    assert!(
+        note.contains("Made repeatable: Scripted Bass on 'Bass' rendered with every note as loud as the last"),
+        "{note}"
+    );
+    assert!(note.contains("The song itself is unchanged") && !note.contains("draws at random"), "{note}");
+    // A file is written the same way.
+    let folder = tempfile::tempdir().unwrap();
+    let path = |name: &str| folder.path().join(name).display().to_string();
+    let one = ok(client, "render", json!({ "path": path("one.wav"), "repeatable": true })).await;
+    ok(client, "render", json!({ "path": path("two.wav"), "repeatable": true })).await;
+    assert!(std::fs::read(path("one.wav")).unwrap() == std::fs::read(path("two.wav")).unwrap());
+    assert!(said(&one).contains("Made repeatable"), "{one}");
+    // And the song is what it was: nothing to undo, and it draws as before.
+    assert_eq!(standing(&fixture), before);
+    assert!(said(&ok(client, "measure", json!({})).await).contains("draws at random"));
+
+    // Nothing is said of a song whose instruments repeat themselves.
+    let fixture = connect(ScriptedFactory::new()).await;
+    two_part_song(&fixture.client).await;
+    let report = ok(&fixture.client, "measure", json!({ "repeatable": true })).await;
+    assert!(!said(&report).contains("repeatable") && !said(&report).contains("at random"), "{report}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn measuring_checks_a_mix_without_writing_a_file() {
     let fixture = connect(ScriptedFactory::new()).await;
     let client = &fixture.client;

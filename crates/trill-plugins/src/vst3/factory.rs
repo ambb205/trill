@@ -307,6 +307,12 @@ impl DeviceFactory for Vst3Factory {
         self.known(uri).map(|known| known.path)
     }
 
+    /// What was measured to make the plugin repeat itself: see
+    /// [`crate::repeats`].
+    fn repeating(&self, uri: &str) -> Option<trill_core::device::Repeating> {
+        crate::repeats::of(uri)
+    }
+
     /// In turn with the other instances of its module, unless more is
     /// known of the plugin: see [`crate::beside`].
     fn beside(&self, uri: &str) -> Beside {

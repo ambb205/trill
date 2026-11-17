@@ -778,6 +778,24 @@ impl Beside {
     }
 }
 
+/// What makes a device do the same thing twice that does not as it comes:
+/// a sampled instrument that draws at random which recording of a note it
+/// plays, say. It is what a render is given to its own copy of the device
+/// when it is asked to be one that can be compared with another
+/// ([`DeviceFactory::repeating`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Repeating {
+    /// Settings of the device's saved state to give these values, by name
+    /// ([`DeviceController::set_settings`]).
+    pub settings: Vec<(String, String)>,
+    /// Parameters to set, by name, to these values in their own units. A
+    /// name the device has no parameter of is passed over.
+    pub params: Vec<(String, f64)>,
+    /// What that costs the sound, in a few words that finish "it is
+    /// rendered with ...".
+    pub costs: String,
+}
+
 pub trait DeviceFactory: Send + Sync {
     /// Everything this factory can create.
     fn descriptors(&self) -> Vec<DeviceDescriptor>;
@@ -818,6 +836,16 @@ pub trait DeviceFactory: Send + Sync {
     fn beside(&self, uri: &str) -> Beside {
         let _ = uri;
         Beside::Anything
+    }
+
+    /// What makes a device of this factory do the same thing twice, if it
+    /// is known not to as it comes and how to stop it: see [`Repeating`].
+    /// `None` for a device that repeats itself anyway, and for one nothing
+    /// is known of. A factory that hands the work to another must hand
+    /// this on too.
+    fn repeating(&self, uri: &str) -> Option<Repeating> {
+        let _ = uri;
+        None
     }
 
     /// The file the code of a device of this factory is in, where that is
@@ -951,6 +979,10 @@ impl<T: DeviceFactory + ?Sized> DeviceFactory for std::sync::Arc<T> {
         (**self).module(uri)
     }
 
+    fn repeating(&self, uri: &str) -> Option<Repeating> {
+        (**self).repeating(uri)
+    }
+
     fn warnings(&self, device: &Device) -> Vec<DeviceWarning> {
         (**self).warnings(device)
     }
@@ -1015,6 +1047,10 @@ impl DeviceFactory for CompositeFactory {
 
     fn module(&self, uri: &str) -> Option<std::path::PathBuf> {
         self.factories.iter().find_map(|factory| factory.module(uri))
+    }
+
+    fn repeating(&self, uri: &str) -> Option<Repeating> {
+        self.factories.iter().find_map(|factory| factory.repeating(uri))
     }
 
     fn create(&self, device: &Device, sample_rate: f64, max_block: usize) -> Result<DeviceInstance, DeviceError> {

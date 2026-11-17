@@ -154,6 +154,13 @@ pub struct Probed {
     /// to that for half the patience it was given. It does not play them,
     /// or had still not loaded them.
     pub waited_for_silent: Vec<u8>,
+    /// The instrument listens to another track of the song and plays what
+    /// it hears there (a vocoder does). A probe plays it by itself, so it
+    /// was lent noise to listen to for as long as each note was held: that
+    /// it sounds was heard, and how loud and how bright is the noise's
+    /// doing as much as its own.
+    #[serde(default)]
+    pub lent: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -211,6 +218,7 @@ impl ProbeJob {
             waited_seconds: probing.waited_seconds,
             answered: probing.answered,
             waited_for_silent: probing.silent.clone(),
+            lent: probing.listening.contains(&true),
         };
         Ok((probed, probing))
     }
@@ -317,8 +325,16 @@ impl ProbeJob {
                 kind: EventKind::NoteOn { pitch: *pitch, velocity: velocity_of(100) },
             }),
         );
+        // An instrument that listens to another track is lent something to
+        // listen to while its notes are down (see [`crate::ready`]). Not
+        // an effect that does: a compressor that ducks under the drums is
+        // heard here as it is while the drums are silent.
+        let listens = devices.first().is_some_and(|device| device.sidechain.is_some())
+            && instances.first().is_some_and(|instance| instance.processor.takes_key());
+        let listening: Vec<bool> = (0..instances.len()).map(|index| index == 0 && listens).collect();
         let mut probing = Probing {
             instances,
+            listening,
             options: options.clone(),
             tempo: self.tempo,
             noise: 0.0,
@@ -357,6 +373,9 @@ fn velocity_of(velocity: u8) -> f32 {
 /// An instrument that was made for a probe and is ready to be played.
 pub struct Probing {
     instances: Vec<DeviceInstance>,
+    /// Which of them is lent something to listen to while a note is down:
+    /// the instrument, where it listens to another track.
+    listening: Vec<bool>,
     options: ProbeOptions,
     tempo: f64,
     /// The most the devices put out when they were given nothing.
@@ -374,9 +393,10 @@ pub struct Probing {
 
 impl Probing {
     fn stand(&mut self) -> Stand<'_> {
+        let listening = self.listening.clone();
         let processors: Vec<&mut Box<dyn DeviceProcessor>> =
             self.instances.iter_mut().map(|instance| &mut instance.processor).collect();
-        let mut stand = Stand::new(processors, f64::from(self.options.sample_rate), self.tempo);
+        let mut stand = Stand::new(processors, f64::from(self.options.sample_rate), self.tempo).listening(listening);
         stand.set_noise(self.noise);
         stand
     }
@@ -402,6 +422,9 @@ fn play(stand: &mut Stand, note: &ProbeNote, options: &ProbeOptions, setting: &[
 
     let velocity = velocity_of;
     let mut with_sounded = false;
+    // An instrument that listens has something to listen to from here to
+    // where the note is let go.
+    stand.lend(true);
     if !note.with.is_empty() {
         let keys: Vec<Event> = note
             .with
@@ -420,6 +443,7 @@ fn play(stand: &mut Stand, note: &ProbeNote, options: &ProbeOptions, setting: &[
     });
 
     // Let go, and listen until it has died away or long enough.
+    stand.lend(false);
     let mut off = vec![Event { offset: 0, kind: EventKind::NoteOff { pitch: note.pitch } }];
     off.extend(note.with.iter().map(|pitch| Event { offset: 0, kind: EventKind::NoteOff { pitch: *pitch } }));
     let quiet_frames = stand.frames(QUIET_SECONDS);

@@ -140,7 +140,22 @@ pub struct Loading {
     /// A bass that is made for a render takes its process down: see
     /// [`Dies`].
     pub dies: Option<Dies>,
+    /// The bass draws how loud each note is at random, from a stream that
+    /// every bass in the program shares and that begins at the same place
+    /// in a program that has just started: as some sampled instruments
+    /// draw which recording they play. Nothing puts the stream back. Its
+    /// setting `takes`, which is `at random` as it comes, stops it when
+    /// it is given `in turn` ([`DeviceFactory::repeating`] says so).
+    pub random: bool,
+    /// The bass only plays what it listens to: it says it takes a key,
+    /// and what its notes come to is as loud as the key it is handed,
+    /// which is nothing where it is handed none. A vocoder is like this.
+    pub listens: bool,
 }
+
+/// How many notes the basses that draw at random have drawn for, in this
+/// program.
+static DRAWS: AtomicU32 = AtomicU32::new(0);
 
 /// What the instruments of a factory keep between them: see
 /// [`Loading::shares`].
@@ -278,6 +293,8 @@ impl DeviceFactory for ScriptedFactory {
             shared: self.loading.shares.then(|| self.shared.clone()),
             dies,
             blocks: 0,
+            random: self.loading.random && kind == Kind::Bass,
+            listens: self.loading.listens && kind == Kind::Bass,
             onset: self.loading.onset,
             patch: patch.clone(),
             voices: [Voice::default(); VOICES],
@@ -287,12 +304,24 @@ impl DeviceFactory for ScriptedFactory {
         Ok(DeviceInstance {
             processor: Box::new(processor),
             params: Vec::new(),
-            controller: Some(Box::new(Controller { patch, changes_after: self.loading.changes_after })),
+            controller: Some(Box::new(Controller {
+                patch,
+                changes_after: self.loading.changes_after,
+                random: self.loading.random && kind == Kind::Bass,
+            })),
         })
     }
 
     fn busy(&self) -> bool {
         self.behind_until.lock().is_some_and(|until| Instant::now() < until)
+    }
+
+    fn repeating(&self, uri: &str) -> Option<trill_core::device::Repeating> {
+        (uri == BASS && self.loading.random).then(|| trill_core::device::Repeating {
+            settings: vec![("takes".into(), "in turn".into())],
+            params: Vec::new(),
+            costs: "every note as loud as the last".into(),
+        })
     }
 
     fn beside(&self, uri: &str) -> Beside {
@@ -326,6 +355,9 @@ struct Patch {
     /// A preset that was asked for and is not played yet: from when it
     /// is, and its transposition and level.
     coming: Mutex<Option<(Instant, i32, i32)>>,
+    /// The setting `takes` is `in turn`: a bass that draws at random does
+    /// not.
+    in_turn: AtomicBool,
 }
 
 impl Default for Patch {
@@ -335,6 +367,7 @@ impl Default for Patch {
             level: AtomicI32::new(1000),
             name: Mutex::new(String::new()),
             coming: Mutex::new(None),
+            in_turn: AtomicBool::new(false),
         }
     }
 }
@@ -372,11 +405,36 @@ impl Patch {
 struct Controller {
     patch: Arc<Patch>,
     changes_after: Duration,
+    /// The instrument draws at random, and has a setting that stops it.
+    random: bool,
 }
 
 impl DeviceController for Controller {
     fn save_state(&mut self) -> Option<Vec<u8>> {
         Some(self.patch.name.lock().clone().into_bytes())
+    }
+
+    fn settings(&mut self) -> Option<Vec<(String, String)>> {
+        let takes = if self.patch.in_turn.load(Ordering::Relaxed) { "in turn" } else { "at random" };
+        self.random.then(|| vec![("takes".to_string(), takes.to_string())])
+    }
+
+    fn set_settings(&mut self, values: &[(String, String)]) -> Result<(), PresetLoadError> {
+        if !self.random {
+            return Err(PresetLoadError::Unsupported);
+        }
+        for (name, value) in values {
+            match (name.as_str(), value.as_str()) {
+                ("takes", "in turn") => self.patch.in_turn.store(true, Ordering::Relaxed),
+                ("takes", "at random") => self.patch.in_turn.store(false, Ordering::Relaxed),
+                _ => {
+                    return Err(PresetLoadError::Failed(format!(
+                        "there is no setting '{name}' with a value '{value}'"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn load_preset(&mut self, preset: &PresetInfo) -> Result<(), PresetLoadError> {
@@ -493,6 +551,10 @@ struct Instrument {
     /// has played.
     dies: Option<Dies>,
     blocks: u32,
+    /// It draws how loud a note is at random, and it only plays what it
+    /// listens to: see [`Loading`].
+    random: bool,
+    listens: bool,
     /// How long after a key goes down its sound begins.
     onset: Duration,
     patch: Arc<Patch>,
@@ -563,6 +625,11 @@ impl Instrument {
         // loud this note is.
         if let Some(shared) = &self.shared {
             voice.level *= 1.0 - (shared.notes.fetch_add(1, Ordering::Relaxed) % 5) as f32 / 10.0;
+        }
+        // A draw from what every such bass in the program draws from.
+        if self.random && !self.patch.in_turn.load(Ordering::Relaxed) {
+            let draw = DRAWS.fetch_add(1, Ordering::Relaxed).wrapping_mul(2_654_435_761) >> 28;
+            voice.level *= 1.0 - (draw % 5) as f32 / 10.0;
         }
         // The next of the key's recordings: each is a twelfth quieter than
         // the one before.
@@ -646,7 +713,43 @@ impl DeviceProcessor for Instrument {
 
     fn set_param(&mut self, _index: usize, _value: f64) {}
 
+    fn takes_key(&self) -> bool {
+        self.listens
+    }
+
+    fn process_keyed(
+        &mut self,
+        info: &ProcessInfo,
+        events: &[Event],
+        left: &mut [f32],
+        right: &mut [f32],
+        key: trill_core::device::KeyInput<'_>,
+    ) {
+        // As loud as what it listens to, up to its own level.
+        let heard = key.left.iter().chain(key.right).fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+        self.play(info, events, left, right);
+        let gain = (heard * 4.0).min(1.0);
+        left.iter_mut().chain(right.iter_mut()).for_each(|sample| *sample *= gain);
+    }
+
     fn process(&mut self, info: &ProcessInfo, events: &[Event], left: &mut [f32], right: &mut [f32]) {
+        self.play(info, events, left, right);
+        if self.listens {
+            // Handed nothing to listen to, it plays nothing.
+            left.iter_mut().chain(right.iter_mut()).for_each(|sample| *sample = 0.0);
+        }
+    }
+
+    fn reset(&mut self) {
+        self.voices = [Voice::default(); VOICES];
+        self.muting = false;
+        self.noise = NOISE_SEED;
+    }
+}
+
+impl Instrument {
+    /// What its notes come to over one block, added to what is there.
+    fn play(&mut self, info: &ProcessInfo, events: &[Event], left: &mut [f32], right: &mut [f32]) {
         self.blocks += u32::from(info.playing);
         let note = events.iter().any(|event| matches!(event.kind, EventKind::NoteOn { .. }));
         match self.dies {
@@ -676,11 +779,5 @@ impl DeviceProcessor for Instrument {
         if let Some(shared) = &shared {
             shared.inside.store(false, Ordering::SeqCst);
         }
-    }
-
-    fn reset(&mut self) {
-        self.voices = [Voice::default(); VOICES];
-        self.muting = false;
-        self.noise = NOISE_SEED;
     }
 }

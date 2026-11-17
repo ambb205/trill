@@ -73,6 +73,7 @@ mod param_text;
 mod plugin_host;
 mod plugin_thread;
 mod presets;
+mod repeats;
 pub mod scan;
 mod signal;
 #[cfg(test)]

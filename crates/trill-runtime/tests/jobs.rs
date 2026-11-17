@@ -401,6 +401,42 @@ fn probes_in_a_process_of_their_own_hear_what_they_hear_here_and_one_that_is_kep
 }
 
 #[test]
+fn an_instrument_that_draws_at_random_is_the_same_samples_in_every_process_that_has_just_started() {
+    // A bass that draws how loud each note is from a stream that every
+    // bass of its program shares, that nothing puts back, and that begins
+    // at the same place in a program that has just started: as a sampled
+    // instrument draws which recording it plays.
+    let random = Loading { random: true, ..Loading::default() };
+    let runtime = apart(random);
+    song(&runtime);
+    let (first, second) = (rendered(&runtime, &plain()).unwrap(), rendered(&runtime, &plain()).unwrap());
+    assert!(first.left == second.left && first.right == second.right, "two processes drew differently");
+    assert_eq!(jobs_done(&runtime), (2, 2));
+    // What it is known to do comes back with the render, across the
+    // processes: it was rendered as it is.
+    let [draws] = &first.measured.draws[..] else { panic!("{:?}", first.measured.draws) };
+    assert_eq!((draws.track_name.as_str(), draws.device_name.as_str(), draws.held), ("Bass", "Bass", false));
+
+    // One process that renders the song twice has drawn on by the second
+    // time: other samples, as in a program that renders for itself.
+    runtime.do_jobs_apart(Jobs { scripted: Some(random), keep_for_renders: true, ..Jobs::by(program()) }).unwrap();
+    let (third, fourth) = (rendered(&runtime, &plain()).unwrap(), rendered(&runtime, &plain()).unwrap());
+    assert_eq!(jobs_done(&runtime), (2, 1), "one process for the two");
+    assert!(third.left == first.left, "its first is what any process begins with");
+    assert!(fourth.left != third.left, "it drew the same twice");
+
+    // A render that is to be repeatable takes the chance out of its own
+    // copy of the bass, in whatever process: the same samples from the one
+    // that has drawn before, and what was done is said.
+    let repeatable = RenderOptions { repeatable: true, ..plain() };
+    let (fifth, sixth) = (rendered(&runtime, &repeatable).unwrap(), rendered(&runtime, &repeatable).unwrap());
+    assert!(fifth.left == sixth.left && fifth.right == sixth.right);
+    assert!(fifth.left != first.left, "nothing was taken out of it");
+    assert!(fifth.measured.draws[0].held && fifth.measured.draws[0].costs == "every note as loud as the last");
+    assert_eq!(jobs_done(&runtime), (4, 1));
+}
+
+#[test]
 fn what_one_process_learned_of_a_plugin_the_next_one_knows() {
     // A note the bass does not play is waited out for half the patience
     // the first time it is met, and is known as a key that plays nothing

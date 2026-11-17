@@ -462,3 +462,83 @@ fn a_plugin_that_is_held_up_while_others_are_let_go_is_waited_for_beyond_the_pat
     let refused = render(&song(BASS, &[(51, 0.0), (53, 1.0)]), &ScriptedFactory::loading(idle), &options);
     assert!(matches!(refused, Err(RenderError::NotAnswered(_))) && begun.elapsed() < Duration::from_millis(2800));
 }
+
+#[test]
+fn an_instrument_that_only_plays_what_it_listens_to_is_lent_something_while_it_is_tried_and_is_rendered() {
+    let _alone = ONE_AT_A_TIME.lock();
+    // A bass that plays its notes as loud as the track it listens to, and
+    // not at all where it is handed nothing: as a vocoder does. It listens
+    // to the drums, whose snare falls on its first note; under its second
+    // there is nothing.
+    let listening = ScriptedFactory::loading(Loading { listens: true, ..Loading::default() });
+    let mut project = song(BASS, &[(41, 0.0), (44, 4.0)]);
+    let (bass, device) = (project.tracks[0].id, project.tracks[0].devices[0].id);
+    let drums = project.add_track("Drums");
+    project.add_device(ChainRef::Track(drums), DRUMS, "Kit", None).unwrap();
+    let clip = project.add_midi_clip(drums, "clip", 0.0, 8.0).unwrap();
+    project.clip_mut(clip).unwrap().add_notes(&[Note { pitch: 38, start: 0.0, length: 0.5, velocity: 127 }]).unwrap();
+    project.set_sidechain(device, Some(drums)).unwrap();
+    let options = RenderOptions {
+        sample_rate: SR,
+        max_tail_seconds: 0.5,
+        patience: Duration::from_millis(1500),
+        ..RenderOptions::default()
+    };
+
+    // Tried by itself before the render, it would answer no note and the
+    // render would be refused for want of it. It is lent something to
+    // listen to, answers, and is rendered.
+    let out = render(&project, &listening, &options).expect("it is not held to answering what it cannot hear");
+    let waited = &out.measured.waited;
+    assert!(waited.iter().all(|waited| waited.answered && waited.silent.is_empty()), "{waited:?}");
+    // What it plays is in the render: the song is other samples with the
+    // track muted, under the snare and nowhere else.
+    let mut without = project.clone();
+    without.track_mut(bass).unwrap().mute = true;
+    let rest = render(&without, &listening, &options).unwrap();
+    let beat = (0.5 * f64::from(SR)) as usize;
+    let apart = |frames: std::ops::Range<usize>| {
+        frames.map(|frame| (out.left[frame] - rest.left[frame]).abs()).fold(0.0f32, f32::max)
+    };
+    assert!(apart(0..beat / 4) > 0.1, "the bass under the snare: {}", apart(0..beat / 4));
+    assert!(apart(4 * beat..5 * beat) < 1e-4, "and nothing of it where the drums are silent");
+
+    // Listening to nothing, it plays nothing, and that is still said: a
+    // render does not go on without it.
+    let deaf = song(BASS, &[(46, 0.0), (48, 4.0)]);
+    let refused = render(&deaf, &listening, &options);
+    assert!(matches!(refused, Err(RenderError::NotAnswered(_))), "it was rendered though it never sounded");
+}
+
+#[test]
+fn an_instrument_that_draws_at_random_is_other_samples_every_time_and_the_same_in_a_render_that_is_to_be_repeatable() {
+    let _alone = ONE_AT_A_TIME.lock();
+    // A bass that draws how loud each note is from a stream nothing puts
+    // back, as a sampled guitar draws which recording it plays.
+    let part = song(BASS, &[(40, 0.0), (43, 0.5), (40, 1.0), (45, 1.5), (43, 2.0), (40, 2.5)]);
+    let scripted = ScriptedFactory::loading(Loading { random: true, ..Loading::default() });
+    let as_it_is = RenderOptions { sample_rate: SR, max_tail_seconds: 0.5, ..RenderOptions::default() };
+    let repeatable = RenderOptions { repeatable: true, ..as_it_is.clone() };
+
+    // As it comes, the next render is other samples, and each says of
+    // which device that is and what would stop it.
+    let (first, second) = (render(&part, &scripted, &as_it_is).unwrap(), render(&part, &scripted, &as_it_is).unwrap());
+    assert!(first.left != second.left, "it drew the same twice");
+    let [draws] = &first.measured.draws[..] else { panic!("{:?}", first.measured.draws) };
+    assert_eq!((draws.track_name.as_str(), draws.device_name.as_str(), draws.held), ("Part", "Instrument", false));
+    assert_eq!((draws.costs.as_str(), &draws.failed), ("every note as loud as the last", &None));
+
+    // Asked to be one that can be compared, the render's own copy of the
+    // bass is told to take its notes in turn: the same samples every time,
+    // which are what the instrument gives where it does not draw.
+    let (third, fourth) =
+        (render(&part, &scripted, &repeatable).unwrap(), render(&part, &scripted, &repeatable).unwrap());
+    assert!(third.left == fourth.left, "two renders that were to be the same are not");
+    assert!(third.measured.draws[0].held, "{:?}", third.measured.draws);
+    let steady = render(&part, &ScriptedFactory::new(), &as_it_is).unwrap();
+    assert!(third.left == steady.left);
+    assert!(steady.measured.draws.is_empty(), "nothing is said of an instrument that repeats itself");
+    // Nothing of that stays: the song's instrument draws as before.
+    let fifth = render(&part, &scripted, &as_it_is).unwrap();
+    assert!(fifth.left != third.left && !fifth.measured.draws[0].held);
+}
