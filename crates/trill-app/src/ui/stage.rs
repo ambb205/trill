@@ -135,7 +135,13 @@ enum Drawing {
 }
 
 pub struct StageView {
-    stage: Stage,
+    /// The stage's painter, with an egui context and the kit's type of its
+    /// own: made the first time the stage is drawn, so that a window that
+    /// never opens the stage pays nothing for it.
+    stage: Option<Stage>,
+    /// The stage is in Noir whatever theme the window is in: it is a dark
+    /// room, and a film of a song should not depend on who made it.
+    theme: Theme,
     /// The song as the stage films it, and the revision it was read at.
     song: Option<(u64, Song)>,
     drawing: Drawing,
@@ -152,11 +158,10 @@ pub struct StageView {
 }
 
 impl StageView {
-    /// The stage is in Noir whatever theme the window is in: it is a dark
-    /// room, and a film of a song should not depend on who made it.
     pub fn new() -> Self {
         Self {
-            stage: Stage::new(Theme::noir()),
+            stage: None,
+            theme: Theme::noir(),
             song: None,
             drawing: Drawing::NotYet,
             shown: None,
@@ -257,7 +262,8 @@ impl StageView {
         match (&mut self.drawing, gpu) {
             (Drawing::Ready(renderer), Some(gpu)) => {
                 let look = Look::of(song, &camera, &heard, self.frames);
-                let picture = self.stage.paint(song, &camera, &heard, format, 1, look);
+                let stage = self.stage.get_or_insert_with(|| Stage::new(self.theme.clone()));
+                let picture = stage.paint(song, &camera, &heard, format, 1, look);
                 let painted = Instant::now();
                 renderer.draw(&picture);
                 card = painted.elapsed();
@@ -269,7 +275,7 @@ impl StageView {
             }
             _ => plain(
                 &ctx,
-                self.stage.theme(),
+                &self.theme,
                 rect,
                 &Moment { score: &song.score, plan: &song.plan, camera: &camera, heard: &heard },
             ),
@@ -293,7 +299,7 @@ impl StageView {
         ui.ctx().request_repaint_after(HINT_FOR - since);
         let left = (HINT_FOR - since).as_secs_f32();
         let shown = (left / 0.6).min(1.0);
-        let theme = self.stage.theme();
+        let theme = &self.theme;
         let style = theme.text.micro;
         let words = "F11 or Esc leaves the stage \u{00B7} Space plays";
         let painter = ui.painter();
