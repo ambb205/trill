@@ -2,13 +2,14 @@
 //! that can be checked exactly, and everything that depends on a plugin
 //! misbehaving. The integration tests cover real, installed plugins.
 
-use super::Vst3Factory;
 use super::class_id::ClassId;
 use super::probe::records;
 use super::scripted::{self, Seen, kind};
 use super::state::{self, PluginState};
+use super::{Vst3Config, Vst3Factory};
 use crate::plugin_thread::plugin_thread;
-use std::time::Duration;
+use crate::test_support::eventually;
+use std::time::{Duration, Instant};
 use trill_core::device::{
     DeviceCategory, DeviceError, DeviceFactory, DeviceInstance, Event, EventKind, ParamKind, ProcessInfo,
 };
@@ -917,4 +918,155 @@ fn the_engine_renders_a_plugin_note_on_its_exact_frame() {
     assert_eq!(sounding, [24_000, 48_000], "one sample for the note-on and one for the note-off");
     assert!(out.left[24_000] > 0.0 && out.left[48_000] < 0.0);
     assert_eq!(out.left, out.right);
+}
+
+// ---- plugins that must not be taken down too soon ---------------------------
+
+/// A plugin that goes on setting itself up after it is made, and does not
+/// look whether it is still wanted when that is done, is one the host is
+/// told to leave alone for a while ([`super::quirks`]): let go of young,
+/// it is kept until it is old enough, and taken down then, in order.
+#[test]
+fn a_plugin_that_goes_on_setting_itself_up_is_not_taken_down_under_its_work() {
+    let factory = factory();
+    let patience = scripted::SETTING_UP * 3;
+    let mut instance = create(&factory, &device(kind::SETS_UP_BEHIND));
+    let serial = serial(&mut instance);
+    let made = Instant::now();
+    block(&mut instance, BLOCK, &[], 0.0);
+
+    // Let go of at once. Whoever let go does not wait for it: the plugin
+    // has been told to stop, and that is all.
+    let DeviceInstance { processor, mut controller, .. } = instance;
+    drop(processor);
+    assert!(made.elapsed() < scripted::SETTING_UP, "the test was too slow to say anything");
+    assert_eq!(scripted::lifecycle(serial).last(), Some(&"stop"));
+    // It no longer answers for the device that had it.
+    assert_eq!(controller.as_mut().unwrap().save_state(), None);
+
+    // When it is old enough it goes, by the plugin thread's own doing,
+    // and in the order VST3 requires.
+    let gone = || scripted::lifecycle(serial).last() == Some(&"destroy");
+    assert!(eventually(Duration::from_secs(20), gone), "{:?}", scripted::lifecycle(serial));
+    assert!(made.elapsed() >= patience, "taken down after {:?}", made.elapsed());
+    let ending: Vec<&str> = scripted::lifecycle(serial).into_iter().rev().take(5).rev().collect();
+    assert_eq!(ending, ["stop", "deactivate", "handler cleared", "terminate", "destroy"]);
+    assert!(!scripted::taken_down_under_its_work(serial));
+
+    // One that has had its time goes when the plugin thread has next
+    // served its windows.
+    let mut old = create(&factory, &device(kind::SETS_UP_BEHIND));
+    let older = self::serial(&mut old);
+    std::thread::sleep(patience + Duration::from_millis(50));
+    drop(old);
+    let gone = || scripted::lifecycle(older).last() == Some(&"destroy");
+    assert!(eventually(Duration::from_secs(20), gone), "{:?}", scripted::lifecycle(older));
+    assert!(!scripted::taken_down_under_its_work(older));
+}
+
+/// The serial of an instance that was made on a plugin thread's state
+/// directly: what its serial parameter says.
+fn serial_of(created: &super::instance::Created) -> u64 {
+    let serial = created.params.iter().find(|spec| spec.id == scripted::SERIAL).expect("the serial parameter");
+    (serial.info.default * 1e6).round() as u64
+}
+
+fn sets_up_behind(path: std::path::PathBuf) -> super::instance::CreateRequest {
+    super::instance::CreateRequest {
+        path,
+        class: ClassId::parse(scripted::uri(kind::SETS_UP_BEHIND).strip_prefix("vst3:").unwrap()).unwrap(),
+        name: "kept".into(),
+        state: None,
+        values: Vec::new(),
+        sample_rate: SR,
+        max_block: BLOCK as u32,
+        offline: false,
+    }
+}
+
+/// What a plugin posts to itself for an instance reaches the instance,
+/// however long the thread was kept from its windows meanwhile. An
+/// instance that is being kept is not taken down on the way out of a job
+/// that outlasted its time: what the plugin posted while the job ran is
+/// delivered first, and the time the job took is time the plugin has not
+/// had. (Taken down in the thread's idling, as kept instances once were,
+/// this plugin complains. The Archetype it stands for ended the process
+/// that way: in 3 of 19 attempts at six renders of a song with three of
+/// them, each time straight after the plugin thread had made the next
+/// render's.) On a plugin thread of the test's own, because the test keeps
+/// it busy.
+#[cfg(windows)]
+#[test]
+fn a_plugin_that_is_kept_hears_from_its_work_before_it_is_taken_down_however_busy_the_thread_was() {
+    use crate::main_thread::MainThread;
+    use crate::plugin_thread::PluginThread;
+    const WAIT: Duration = Duration::from_secs(20);
+    let main = MainThread::<PluginThread>::spawn("kept and heard").unwrap();
+    let patience = scripted::SETTING_UP * 3;
+    let made = move |thread: &mut PluginThread| {
+        let (path, _) = thread.vst3.preload("kept and heard", scripted::factory());
+        let created = thread.vst3.create(sets_up_behind(path)).unwrap_or_else(|error| panic!("{error}"));
+        let serial = serial_of(&created);
+        thread.vst3.destroy(created.id, Some(created.audio), true);
+        serial
+    };
+    let serial = main.call(WAIT, made).unwrap();
+    let let_go = Instant::now();
+
+    // The thread is kept from its windows until the plugin's work is done
+    // and the instance's time is up, by the clock.
+    let busy = patience + scripted::SETTING_UP;
+    main.call(WAIT, move |_| std::thread::sleep(busy)).unwrap();
+    let gone = || scripted::lifecycle(serial).last() == Some(&"destroy");
+    assert!(eventually(Duration::from_secs(20), gone), "{:?}", scripted::lifecycle(serial));
+    assert!(!scripted::taken_down_under_its_work(serial), "what the plugin posted to itself found the instance gone");
+    // And it had its time after the job, not during it.
+    assert!(let_go.elapsed() >= busy + patience / 2, "taken down {:?} after it was let go of", let_go.elapsed());
+}
+
+/// What the patience is for: without it, the same plugin is taken down
+/// while it is still at work, and says so.
+#[test]
+fn without_that_patience_the_plugin_is_taken_down_under_its_work() {
+    let config = Vst3Config {
+        search_paths: Vec::new(),
+        scanner: crate::Scanner::InProcess,
+        cache_path: None,
+        scan_timeout: Duration::from_secs(5),
+        preset_paths: Vec::new(),
+        vendor_places: crate::VendorPlaces::default(),
+        patient_teardown: false,
+    };
+    let factory = Vst3Factory::with_modules_in(config, vec![("scripted", scripted::factory())]);
+    let mut instance = create(&factory, &device(kind::SETS_UP_BEHIND));
+    let serial = serial(&mut instance);
+    drop(instance);
+    assert_eq!(scripted::lifecycle(serial).last(), Some(&"destroy"), "gone at once");
+    assert!(eventually(Duration::from_secs(20), || scripted::taken_down_under_its_work(serial)));
+}
+
+/// Plugins that are waiting to be old enough go with the plugin thread
+/// when that ends first: nothing is left behind, and nothing waits. (The
+/// thread's state is made here and not on the thread every test shares,
+/// which ends when the last of them is done with it.)
+#[test]
+fn plugins_that_are_being_kept_go_with_the_plugin_thread() {
+    use super::instance::Vst3Thread;
+    use crate::main_thread::ThreadState;
+    let mut thread = Vst3Thread::new();
+    let (path, _) = thread.preload("kept", scripted::factory());
+    let made = Instant::now();
+    let created = thread.create(sets_up_behind(path)).unwrap_or_else(|error| panic!("{error}"));
+    let serial = serial_of(&created);
+    thread.destroy(created.id, Some(created.audio), true);
+    assert_eq!(scripted::lifecycle(serial).last(), Some(&"activate"), "kept as it was");
+    assert!(thread.wants_idle(), "the thread goes on looking after it");
+    // Before its time it is left, whatever the thread does; the thread
+    // ending takes it down.
+    thread.idle(false);
+    thread.served(Duration::ZERO);
+    assert_eq!(scripted::lifecycle(serial).last(), Some(&"activate"));
+    drop(thread);
+    assert_eq!(scripted::lifecycle(serial).last(), Some(&"destroy"));
+    assert!(made.elapsed() < scripted::SETTING_UP * 3, "it was not waited for");
 }
