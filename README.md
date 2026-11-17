@@ -37,7 +37,7 @@ asked for:
 cargo test -p trill-plugins -- --include-ignored    # against the CLAP and VST3 plugins installed here (minutes)
 cargo test -p trill-mcp --test presets -- --include-ignored --nocapture    # an assistant's pass over Surge XT's presets, an amplifier's, a kit, a guitar tone and a patch of their makers', and a bought preset found among the samples
 cargo test -p trill-plugins --test sounds -- --include-ignored --nocapture --test-threads 1    # what installed plugins say of their parameters, channels and presets
-cargo test -p trill-plugins --test lifetimes -- --include-ignored --nocapture    # plugin instances made and dropped beside one that stays, an attempt to a process: counts the crashes, and says where each was
+cargo test -p trill-plugins --test lifetimes -- --include-ignored --nocapture    # plugin instances made and dropped beside one that stays, an attempt to a process: counts the crashes, and says where each was and what the machine had of memory; half an hour, and no attempt is started on a machine short of memory
 cargo test -p trill-plugins --test vendor -- --include-ignored --nocapture --test-threads 1    # the makers' own presets of Serum 2, the Ample guitars, Superior Drummer 3 and the Archetypes: listed, loaded by name and by a file's path, and heard to differ
 cargo test -p trill-mcp --test controllers -- --include-ignored --nocapture    # a SWAM saxophone and Surge XT played from the controller curves of clips
 cargo test -p trill-mcp --test hearing -- --include-ignored --nocapture    # renders and probes of Superior Drummer 3, a SWAM saxophone and an Ample bass
@@ -772,8 +772,9 @@ Working: everything listed above, with tests.
 Not yet: running plugins out of process (only scanning and the reading of presets are isolated today, so a plugin
 that crashes while playing or while it loads a preset still takes the app with it; the safety copy is what saves
 the work. One such crash is known and worked around: Neural DSP's Archetypes take the process down when an
-instance is destroyed within seconds of being made while another is alive, which every probe and render of a song
-that uses one did; an instance that is let go of young is now kept for fifteen seconds first), a preset browser for plugins in the window (the session lists, searches and loads them, and so does
+instance is taken down before a message the plugin posted to itself has reached it while another instance is
+alive, which probes and renders of a song that uses one did; an instance that is let go of is now kept, and taken
+down only when the plugin thread has delivered what was waiting and the plugin has had fifteen seconds of it), a preset browser for plugins in the window (the session lists, searches and loads them, and so does
 MCP; the device panel shows built-in and saved presets only), asking a CLAP plugin for a stereo layout when its
 default is mono (a VST3 plugin is asked), a hosted plugin's sidechain input (the built-in compressor has one),
 plugin editors on Linux and macOS,
