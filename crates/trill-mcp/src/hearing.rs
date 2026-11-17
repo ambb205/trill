@@ -186,8 +186,8 @@ pub struct ProbeRequest {
     /// URI of an instrument that need not be in the song, e.g. "builtin:polysynth" or a plugin's (see
     /// `list_devices`): try it before adding it.
     pub device: Option<String>,
-    /// With `device`: the preset to start from, by name, "Category/Name" or id. Omit for the instrument as it
-    /// comes.
+    /// With `device`: the preset to start from, by name, "Category/Name" or id, or the whole path of a preset
+    /// file (as add_device takes one). Omit for the instrument as it comes.
     pub preset: Option<String>,
     /// What to play, each note by itself: pitches and runs of pitches, e.g. ["E1-G4"], [36, 38, "42-51"],
     /// ["E2", "E3"]. Omit to play the whole keyboard quickly, which finds the range of an instrument or the
@@ -1153,6 +1153,11 @@ impl TrillServer {
     /// change the articulation.
     #[tool(annotations(title = "Probe an instrument", read_only_hint = true))]
     async fn probe(&self, Parameters(request): Parameters<ProbeRequest>) -> CallToolResult {
+        // A preset that is a file is asked what it holds before the
+        // session is, and a guarded client is kept to this machine's.
+        if let Err(refusal) = self.ready_presets(request.device.as_deref(), &request.preset).await {
+            return finish(Err(refusal));
+        }
         let (job, plan, about, kit) = {
             let mut session = self.session.lock();
             let plan = match Plan::of(request, session.audio_info().sample_rate as u32) {

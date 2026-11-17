@@ -5,6 +5,7 @@ use super::class_id::ClassId;
 use super::instance::{Created, InstanceId};
 use super::links::ParamLinks;
 use super::params::Mapping;
+use super::state;
 use crate::editor::{EDITOR_TIMEOUT, EditorStatus};
 use crate::edits::Edit;
 use crate::main_thread::{CallError, MainThread};
@@ -25,6 +26,11 @@ use trill_core::presets::PresetInfo;
 /// How long a plugin may take to serialize its state or report its
 /// parameter values before the request is abandoned.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// What is said of a plugin that agreed to a preset file and whose state
+/// was the same a moment later, though the file's is another.
+const NOT_SEEN_TO_CHANGE: &str = "The plugin took the file without complaint, but its state was the same a moment \
+                                  later: it may take the preset on with its next block of sound, or not have taken \
+                                  it at all. get_device shows what it has now.";
 /// How long a plugin that was handed a state built from a vendor's preset
 /// is given to show the preset in its own state, and how often it is
 /// looked at meanwhile. Plugins take a state on a moment after they are
@@ -285,17 +291,37 @@ impl DeviceController for Vst3Controller {
         if let Locator::Vendor { format, path, key } = &locator {
             return self.load_vendor_preset(*format, path, key.as_deref());
         }
+        // A file is read here, whole if it is no larger than a preset can
+        // be, and not on the thread the plugins share.
+        let file = match &locator {
+            Locator::Vst3File { path } => Some(
+                vendor::read_bounded(path)
+                    .map_err(|reason| PresetLoadError::Failed(format!("'{}' {reason}", path.display())))?,
+            ),
+            _ => None,
+        };
+        let brings = file.as_deref().and_then(|file| state::decode(file).ok()).map(|(_, state)| state);
         let before = self.save_state();
-        let loaded = self.main.call(LOAD_TIMEOUT, move |thread| match locator {
-            Locator::Vst3File { path } => thread.vst3.load_preset_file(instance, &path),
-            Locator::Vst3Program { param, index, steps } => thread.vst3.load_program(instance, param, index, steps),
+        let loaded = self.main.call(LOAD_TIMEOUT, move |thread| match (locator, file) {
+            (Locator::Vst3File { .. }, Some(file)) => thread.vst3.load_preset_file(instance, &file),
+            (Locator::Vst3Program { param, index, steps }, _) => {
+                thread.vst3.load_program(instance, param, index, steps)
+            }
             _ => Err("it is not a preset of a VST3 plugin".to_string()),
         });
         if matches!(loaded, Ok(Ok(()))) {
             // A program is switched to by the plugin's processor, with its
             // next block; and plugins take even a state they are handed
             // on the spot a moment later, on their own time.
-            await_arrival(before.as_deref(), || self.save_state());
+            let arrived = await_arrival(before.as_deref(), || self.save_state());
+            // A file's state that is another than the plugin had, and a
+            // plugin that still has what it had: whoever asked is told.
+            let had = before.as_deref().and_then(|before| state::decode(before).ok()).map(|(_, state)| state);
+            if let (false, Some(brings), Some(had)) = (arrived, brings, had)
+                && brings != had
+            {
+                self.note = Some(NOT_SEEN_TO_CHANGE.to_string());
+            }
         }
         match loaded {
             Ok(Ok(())) => Ok(()),

@@ -29,7 +29,14 @@ const EXTENSIONS: &[(&str, EntryKind)] = &[
     ("fxp", EntryKind::Preset),
     ("fxb", EntryKind::Preset),
     ("aupreset", EntryKind::Preset),
+    // A plugin maker's own format: Serum 2's patches, which are sold in
+    // packs and kept with the samples.
+    ("serumpreset", EntryKind::Preset),
 ];
+
+/// What the extension of a preset of one of Ample Sound's instruments
+/// ends with: the instrument's letters come before it (`amhstate`).
+const INSTRUMENT_STATE: &str = "state";
 
 impl EntryKind {
     pub const ALL: [EntryKind; 4] = [EntryKind::Audio, EntryKind::Midi, EntryKind::Project, EntryKind::Preset];
@@ -41,7 +48,14 @@ impl EntryKind {
             return Some(EntryKind::Audio);
         }
         let extension = path.extension()?.to_str()?;
-        EXTENSIONS.iter().find(|(known, _)| known.eq_ignore_ascii_case(extension)).map(|(_, kind)| *kind)
+        let known = EXTENSIONS.iter().find(|(known, _)| known.eq_ignore_ascii_case(extension)).map(|(_, kind)| *kind);
+        known.or_else(|| {
+            let letters = extension.len().checked_sub(INSTRUMENT_STATE.len()).filter(|letters| *letters >= 2)?;
+            let named_so = extension.is_char_boundary(letters)
+                && extension[letters..].eq_ignore_ascii_case(INSTRUMENT_STATE)
+                && extension[..letters].chars().all(|c| c.is_ascii_alphanumeric());
+            named_so.then_some(EntryKind::Preset)
+        })
     }
 
     /// A word for the kind, as shown to the user.
@@ -146,6 +160,13 @@ mod tests {
         assert_eq!(EntryKind::of(Path::new("riff.MID")), Some(EntryKind::Midi));
         assert_eq!(EntryKind::of(Path::new("song.trill")), Some(EntryKind::Project));
         assert_eq!(EntryKind::of(Path::new("Lead.vstpreset")), Some(EntryKind::Preset));
+        // Presets in formats of the plugins' makers.
+        assert_eq!(EntryKind::of(Path::new("OMEGA SAW.SerumPreset")), Some(EntryKind::Preset));
+        assert_eq!(EntryKind::of(Path::new("9 String Metal.amhstate")), Some(EntryKind::Preset));
+        assert_eq!(EntryKind::of(Path::new("Clean.AGPFState")), Some(EntryKind::Preset));
+        for other in ["song.state", "x.estate", "notes.über-state", "a.b state"] {
+            assert_eq!(EntryKind::of(Path::new(other)), None, "{other}");
+        }
         assert_eq!(EntryKind::of(Path::new("notes.txt")), None);
         assert_eq!(EntryKind::of(Path::new("Kick.wav.asd")), None);
         assert_eq!(EntryKind::of(Path::new("wav")), None);

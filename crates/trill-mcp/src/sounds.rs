@@ -11,6 +11,12 @@
 //! Also here: what the device tools say after a preset that takes the
 //! plugin a while to make ready, and the settings in a plugin's saved
 //! state that it has no parameter for.
+//!
+//! A preset somebody bought is a file among their samples, not in the
+//! folder its plugin lists presets from. The sample library has scanned
+//! those folders and knows the file by its name, and the plugin host can
+//! tell whose preset a file is; the search puts the two together, and
+//! answers with the file's path, which is what `preset` takes for it.
 
 use crate::server::{TrillServer, explain, finish, is_plugin};
 use rmcp::handler::server::wrapper::Parameters;
@@ -19,12 +25,14 @@ use rmcp::schemars::{self, JsonSchema};
 use rmcp::{tool, tool_router};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::Path;
 use std::time::{Duration, Instant};
 use trill_core::DeviceId;
 use trill_core::device::{DeviceCategory, DeviceDescriptor, DeviceFactory};
-use trill_core::presets::{PresetInfo, PresetList, PresetStatus, SavedPreset};
+use trill_core::presets::{CATEGORY_SEPARATOR, PresetInfo, PresetList, PresetStatus, SavedPreset};
 use trill_engine::Session;
+use trill_library::{EntryKind, Library, Query};
 
 /// Appended to the server's instructions so a model knows these tools
 /// exist and when to reach for them.
@@ -42,6 +50,10 @@ what its notes sound like or which keys it answers to.
 - A reply's `note` after a preset says what to know about it: that a drum sampler or a sampled guitar reads its \
 samples for seconds, up to a minute, silent until it has (probe, measure and render wait for that), or that the \
 preset switched a setting on that changes how a part is played.
+- A preset need not be one that is listed. `preset` also takes the whole path of a preset file: one the user \
+bought and keeps with their samples, or names to you. search_presets finds such files in the sample library's \
+folders by their names, with the plugin each is for; an item with `file` is one, and `file` is what to give \
+`preset`. A file that is another plugin's is refused in a sentence.
 - A few plugins still list no presets: they keep them where a host cannot read them, and only the user can choose \
 one, in the plugin's own window (show_device_editor opens it). Then save_preset keeps that sound under a name. \
 save_preset also keeps a sound you have shaped by parameter. Saved presets are found by search_presets and given \
@@ -71,13 +83,20 @@ const MAX_WAIT: f64 = 60.0;
 const NAMED_DEVICES: usize = 12;
 /// The most saved presets a device listing names.
 const NAMED_SAVED: usize = 24;
+/// The most preset files of the sample library that one search asks the
+/// plugin host about: each costs a look at the file's first bytes at most.
+const MAX_LIBRARY_FILES: usize = 2_000;
+/// What a preset file of the sample library is filed under, before the
+/// folders it lies in.
+const LIBRARY_CATEGORY: &str = "Library";
 
 /// What `describe_device` and `get_device` say of a plugin that lists no
 /// presets, in place of an empty list.
 pub(crate) const NO_PRESETS: &str = "This plugin gives a host no presets to list, and keeps them in no files that \
     Trill reads: they are in its own window, where only the user can reach them. Ask the user to choose one there \
     (show_device_editor opens it), then save_preset keeps the sound under a name, for this song and every other; \
-    or shape the sound by parameter (get_device `query` finds parameters by name).";
+    or shape the sound by parameter (get_device `query` finds parameters by name). A preset file the user has \
+    for it (a .vstpreset) is given to it by its path, as `preset`.";
 /// The most settings a search of a device's saved state lists.
 const SHOWN_SETTINGS: usize = 40;
 
@@ -117,6 +136,100 @@ pub struct SavePresetRequest {
 struct Searched {
     descriptor: DeviceDescriptor,
     list: PresetList,
+    /// Whether these are not the device's listed presets but preset files
+    /// for it in the sample library: each has its path for an id.
+    library: bool,
+}
+
+/// Whether a search that is kept to `category` and to devices called
+/// something like `device` looks through the device type `descriptor`.
+fn looked_through(descriptor: &DeviceDescriptor, category: Option<DeviceCategory>, device: Option<&str>) -> bool {
+    category.is_none_or(|category| descriptor.category == category)
+        && device.is_none_or(|text| {
+            [&descriptor.name, &descriptor.vendor, &descriptor.uri]
+                .iter()
+                .any(|field| field.to_lowercase().contains(text))
+        })
+}
+
+/// A path as it is compared with another: where the file system does not
+/// tell upper case from lower, neither does this.
+fn folded(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('/', "\\");
+    if cfg!(windows) { text.to_lowercase() } else { text }
+}
+
+/// The preset files in the sample library that could be what `query` is
+/// after, with the device each is a preset of, as presets of those
+/// devices to search with the rest. A file's name is the preset's, and
+/// the folders it lies in, from the library's folder down, are what it is
+/// filed under: that is where a pack says what it is.
+///
+/// Left out: files that are among the listed presets of `searched`
+/// already (the library may cover a plugin's own preset folder), files no
+/// installed device is known to take, and devices the search is not
+/// looking through.
+fn library_presets(
+    library: &Library,
+    factory: &dyn DeviceFactory,
+    query: &str,
+    searched: &[Searched],
+    looked_through: impl Fn(&DeviceDescriptor) -> bool,
+) -> Vec<Searched> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    let roots = library.roots();
+    let found = library.search(&Query { kind: Some(EntryKind::Preset), ..Query::default() });
+    if found.is_empty() {
+        return Vec::new();
+    }
+    let listed: HashSet<String> = searched
+        .iter()
+        .flat_map(|entry| entry.list.presets.iter())
+        .filter_map(trill_plugins::preset_file_of)
+        .map(|path| folded(&path))
+        .collect();
+    let descriptors = factory.descriptors();
+    let mut by_device: BTreeMap<String, Vec<PresetInfo>> = BTreeMap::new();
+    let mut asked = 0;
+    for entry in found.entries() {
+        let below = roots.iter().find_map(|root| entry.path.parent()?.strip_prefix(root).ok());
+        let folders: Vec<String> = below
+            .into_iter()
+            .flat_map(Path::components)
+            .map(|part| part.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        let category = std::iter::once(LIBRARY_CATEGORY.to_string())
+            .chain(folders)
+            .collect::<Vec<_>>()
+            .join(&CATEGORY_SEPARATOR.to_string());
+        // Only what has one of the words is worth asking about.
+        let text = format!("{} {category}", entry.name).to_lowercase();
+        if !words.iter().any(|word| text.contains(word.as_str())) || listed.contains(&folded(&entry.path)) {
+            continue;
+        }
+        if asked >= MAX_LIBRARY_FILES {
+            break;
+        }
+        asked += 1;
+        let Some(uri) = factory.preset_file_type(&entry.path) else { continue };
+        by_device.entry(uri).or_default().push(PresetInfo {
+            id: entry.path.display().to_string(),
+            name: entry.name.clone(),
+            category,
+            ..PresetInfo::default()
+        });
+    }
+    by_device
+        .into_iter()
+        .filter_map(|(uri, presets)| {
+            let descriptor = descriptors.iter().find(|descriptor| descriptor.uri == uri)?.clone();
+            looked_through(&descriptor).then(|| Searched {
+                descriptor,
+                list: PresetList::ready(presets),
+                library: true,
+            })
+        })
+        .collect()
 }
 
 /// One preset a search found.
@@ -139,20 +252,13 @@ fn read_presets(
     wait: Duration,
 ) -> Vec<Searched> {
     let deadline = Instant::now() + wait;
-    let wanted = |descriptor: &DeviceDescriptor| {
-        category.is_none_or(|category| descriptor.category == category)
-            && device.is_none_or(|text| {
-                [&descriptor.name, &descriptor.vendor, &descriptor.uri]
-                    .iter()
-                    .any(|field| field.to_lowercase().contains(text))
-            })
-    };
+    let wanted = |descriptor: &DeviceDescriptor| looked_through(descriptor, category, device);
     let presets = |uri: &str| factory.presets(uri).unwrap_or_default();
     let mut searched: Vec<Searched> = factory
         .descriptors()
         .into_iter()
         .filter(wanted)
-        .map(|descriptor| Searched { list: presets(&descriptor.uri), descriptor })
+        .map(|descriptor| Searched { list: presets(&descriptor.uri), descriptor, library: false })
         .collect();
     for entry in searched.iter_mut().filter(|entry| entry.list.is_reading()) {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -229,22 +335,28 @@ fn search_json(searched: &[Searched], query: &str, offset: usize, limit: usize) 
         .skip(offset)
         .take(limit)
         .map(|hit| {
-            let descriptor = &searched[hit.device].descriptor;
+            let Searched { descriptor, library, .. } = &searched[hit.device];
             let preset = hit.preset;
             let mut item = json!({ "device": descriptor.uri, "device_name": descriptor.name, "preset": preset.name });
             if !preset.category.is_empty() {
                 item["category"] = json!(preset.category);
             }
-            // A built-in device's presets are asked for by their names.
-            if preset.id != preset.name {
+            if *library {
+                // A file is asked for by where it is.
+                item["file"] = json!(preset.id);
+            } else if preset.id != preset.name {
+                // A built-in device's presets are asked for by their names.
                 item["id"] = json!(preset.id);
             }
             item
         })
         .collect();
+    let files = items.iter().any(|item| item.get("file").is_some());
 
-    let total: usize = searched.iter().map(|entry| entry.list.len()).sum();
-    let with_presets = searched.iter().filter(|entry| !entry.list.is_empty()).count();
+    // What a device lists is counted; files in the library are only found.
+    let listing = || searched.iter().filter(|entry| !entry.library);
+    let total: usize = listing().map(|entry| entry.list.len()).sum();
+    let with_presets = listing().filter(|entry| !entry.list.is_empty()).count();
     let mut out = json!({
         "matching": hits.len(),
         "searched": format!("{total} presets of {with_presets} devices"),
@@ -265,9 +377,15 @@ fn search_json(searched: &[Searched], query: &str, offset: usize, limit: usize) 
              and update_device take them the same way."
         );
     }
+    if files {
+        out["files"] = json!(
+            "An item with `file` is a preset file in the sample library, not one the device lists: give `file` \
+             as `preset`."
+        );
+    }
 
     let name = |entry: &Searched| format!("{} ({})", entry.descriptor.name, entry.descriptor.uri);
-    let reading: Vec<String> = searched.iter().filter(|entry| entry.list.is_reading()).map(name).collect();
+    let reading: Vec<String> = listing().filter(|entry| entry.list.is_reading()).map(name).collect();
     if !reading.is_empty() {
         out["still_reading"] = json!(named(&reading));
         let whose = match reading.len() {
@@ -277,8 +395,7 @@ fn search_json(searched: &[Searched], query: &str, offset: usize, limit: usize) 
         out["status"] =
             json!(format!("{whose} still being read, in the background: search again in a few seconds for theirs."));
     }
-    let failed: Vec<String> = searched
-        .iter()
+    let failed: Vec<String> = listing()
         .filter_map(|entry| match &entry.list.status {
             PresetStatus::Failed(reason) => Some(format!("{}: {reason}", entry.descriptor.name)),
             _ => None,
@@ -294,8 +411,7 @@ fn search_json(searched: &[Searched], query: &str, offset: usize, limit: usize) 
     let has_presets = |name: &str| {
         searched.iter().any(|entry| !entry.list.is_empty() && entry.descriptor.name.eq_ignore_ascii_case(name))
     };
-    let mut silent: Vec<String> = searched
-        .iter()
+    let mut silent: Vec<String> = listing()
         .filter(|entry| is_plugin(&entry.descriptor.uri))
         .filter(|entry| entry.list.is_empty() && entry.list.status == PresetStatus::Ready)
         .filter(|entry| !has_presets(&entry.descriptor.name))
@@ -402,7 +518,8 @@ pub(crate) fn known_presets_into(out: &mut Value, factory: &dyn DeviceFactory, d
 #[tool_router(router = sound_router, vis = "pub(crate)")]
 impl TrillServer {
     /// Find a sound among the presets of everything installed: every instrument plugin, the built-in
-    /// instruments, and the presets that were saved. `query` is words such as "warm pad", "808 sub" or
+    /// instruments, the presets that were saved, and the preset files in the sample library's folders (presets
+    /// the user bought, kept with their samples). `query` is words such as "warm pad", "808 sub" or
     /// "glass bell"; the reply lists the best matches with the device and the preset, ready to give to
     /// create_track (`instrument`, `preset`). Use it before settling for a built-in synth. A plugin's presets
     /// are read the first time they are asked for, in the background, and remembered: the reply names the
@@ -410,6 +527,7 @@ impl TrillServer {
     #[tool(annotations(title = "Search presets", read_only_hint = true))]
     async fn search_presets(&self, Parameters(request): Parameters<SearchPresetsRequest>) -> CallToolResult {
         let factory = self.session.lock().factory();
+        let runtime = self.runtime.clone();
         let reply = async {
             let query = request.query.trim().to_string();
             if query.is_empty() {
@@ -429,9 +547,14 @@ impl TrillServer {
             let wait = Duration::from_secs_f64(wait.clamp(0.0, MAX_WAIT));
             // The wait is spent off the async threads and without the
             // session.
-            let asked = device.clone();
-            let read =
-                tokio::task::spawn_blocking(move || read_presets(factory.as_ref(), category, asked.as_deref(), wait));
+            let (asked, words) = (device.clone(), query.clone());
+            let read = tokio::task::spawn_blocking(move || {
+                let mut searched = read_presets(factory.as_ref(), category, asked.as_deref(), wait);
+                let wanted = |descriptor: &DeviceDescriptor| looked_through(descriptor, category, asked.as_deref());
+                let files = library_presets(&runtime.library, factory.as_ref(), &words, &searched, wanted);
+                searched.extend(files);
+                searched
+            });
             let searched = read.await.map_err(|error| format!("the presets could not be read: {error}"))?;
             if let (true, Some(device)) = (searched.is_empty(), &device) {
                 return Err(format!("no installed device is called anything like '{device}'; list_devices shows them"));
@@ -505,7 +628,7 @@ mod tests {
             params: Vec::new(),
             presets: Vec::new(),
         };
-        Searched { descriptor, list }
+        Searched { descriptor, list, library: false }
     }
 
     fn found(reply: &Value) -> Vec<String> {
