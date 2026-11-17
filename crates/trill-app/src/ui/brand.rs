@@ -1,37 +1,17 @@
-//! The mark: a T whose right arm is a second bar raised a step, like two
-//! notes a step apart in a piano roll.
+//! The mark as the window uses it: in the top bar, and as its icon.
 //!
-//! It is drawn from the same three rectangles everywhere (the top bar, the
-//! window icon), on a 14 x 11 grid, so a size that is a multiple of the
-//! grid lands every edge on a whole pixel. `assets/trill-mark.svg` is the
-//! same drawing for use outside the program.
+//! The drawing itself is the kit's ([`trill_noir::mark`]): a T whose right
+//! arm is a second bar raised a step, three rectangles on a 14 x 11 grid.
+//! `assets/trill-mark.svg` is the same drawing for use outside the program.
 
-use eframe::egui::{Color32, IconData, Painter, Pos2, Rect, pos2, vec2};
+use eframe::egui::IconData;
+use trill_noir::mark::BARS;
+pub use trill_noir::mark::{HEIGHT, WIDTH, paint_centered};
+#[cfg(test)]
+use {eframe::egui::Color32, trill_noir::mark::TEAL};
 
-pub const WIDTH: u32 = 14;
-pub const HEIGHT: u32 = 11;
-/// The mark's own colours. They do not follow the theme.
-const VIOLET: Color32 = Color32::from_rgb(0xA8, 0x7F, 0xD1);
-const TEAL: Color32 = Color32::from_rgb(0x4E, 0xC9, 0xB0);
-/// `(x, y, width, height, colour)` in grid units, back to front.
-const BARS: [(u32, u32, u32, u32, Color32); 3] = [(0, 2, 9, 3, VIOLET), (5, 2, 4, 9, VIOLET), (7, 0, 7, 3, TEAL)];
 /// Side of the square the mark sits in as an icon, in grid units.
 const ICON_GRID: u32 = 16;
-
-/// Paints the mark with its top-left corner at `origin`, `unit` points per
-/// grid unit, and returns the rectangle it covers.
-pub fn paint(painter: &Painter, origin: Pos2, unit: f32) -> Rect {
-    for (x, y, width, height, color) in BARS {
-        let min = origin + vec2(x as f32, y as f32) * unit;
-        painter.rect_filled(Rect::from_min_size(min, vec2(width as f32, height as f32) * unit), 0.0, color);
-    }
-    Rect::from_min_size(origin, vec2(WIDTH as f32, HEIGHT as f32) * unit)
-}
-
-/// The mark centered at `center`, for a row of the given height.
-pub fn paint_centered(painter: &Painter, left: f32, center_y: f32, unit: f32) -> Rect {
-    paint(painter, pos2(left, (center_y - HEIGHT as f32 * unit / 2.0).round()), unit)
-}
 
 /// The window's icon: the mark on a transparent square of `size` pixels,
 /// which should be a multiple of 16.

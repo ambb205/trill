@@ -1,7 +1,7 @@
 //! Command-line options.
 
 use crate::audio_scene::AudioScene;
-use crate::ui::{AssistantOptions, AssistantScene, BrowserTab, DetailTab, KeyboardOptions, UiOptions};
+use crate::ui::{AssistantOptions, AssistantScene, BrowserTab, DetailTab, KeyboardOptions, MakingOfStart, UiOptions};
 use anyhow::{Context, anyhow, bail};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -44,9 +44,17 @@ Options:
   --assistant-scene <NAME>    Show a canned conversation in the assistant, for screenshots: ready, working,
                           answered, markdown, model, effort, song, song-done, limit, api-key, signed-out
                           or not-installed
+  --making-of             Start with the making-of of the song up: its session played again
+                          (Ctrl+Shift+M shows it)
+  --making-of-at <0..1>   Hold the making-of that far in instead of playing it: 0 is the beginning,
+                          1 the end
+  --making-of-scene       Put a canned session in place of the project, for screenshots: a short tune
+                          and the journal of how it was made
+  --watch <FILE.trillstory>   Start watching a making-of that was written out to a file
   --keyboard              Start with the computer keyboard playing notes (Ctrl+K switches it)
   --arm <TRACK NAME>      Arm this track at startup; may be given several times
   --record                Start recording on the armed tracks when the window opens (F9 does it)
+  --stage                 Open on the stage: the song filmed as it plays (F11 shows it)
   --settings              Start with the Audio and MIDI panel open (Ctrl+, shows it)
   --audio-scene <NAME>    Show made-up audio and MIDI devices in that panel, for screenshots:
                           studio, fallback or none
@@ -97,12 +105,22 @@ pub struct Cli {
     pub assistant: bool,
     pub assistant_model: Option<String>,
     pub assistant_scene: Option<AssistantScene>,
+    /// Open the making-of of the song.
+    pub making_of: bool,
+    /// Hold it this far in, from 0 to 1, instead of playing it.
+    pub making_of_at: Option<f64>,
+    /// Put a canned session in place of the project.
+    pub making_of_scene: bool,
+    /// A making-of written out to a file, to watch.
+    pub watch: Option<PathBuf>,
     /// How the computer keyboard starts, when not as it was left.
     pub keyboard: KeyboardOptions,
     /// Names of tracks to arm at startup.
     pub arm: Vec<String>,
     /// Start a take when the window opens.
     pub record: bool,
+    /// Open on the stage.
+    pub stage: bool,
     /// Open the Audio and MIDI panel.
     pub settings: bool,
     /// Made-up audio and MIDI devices to show in it.
@@ -131,6 +149,18 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
         match arg.as_str() {
             "-h" | "--help" => return Ok(Parsed::Help),
             "--demo" => cli.demo = true,
+            "--making-of" => cli.making_of = true,
+            "--making-of-scene" => cli.making_of_scene = true,
+            "--making-of-at" => {
+                let text = value("how far in, from 0 to 1")?;
+                let at: f64 =
+                    text.parse().map_err(|_| anyhow!("--making-of-at '{text}' should be a number from 0 to 1"))?;
+                if !(0.0..=1.0).contains(&at) {
+                    bail!("--making-of-at '{text}' should be from 0 (the beginning) to 1 (the end)");
+                }
+                cli.making_of_at = Some(at);
+            }
+            "--watch" => cli.watch = Some(PathBuf::from(value("a .trillstory file")?)),
             "--play" => cli.play = true,
             "--null-audio" => cli.null_audio = true,
             "--real-audio" => cli.real_audio = true,
@@ -150,6 +180,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
             "--keyboard" => cli.keyboard.on = true,
             "--arm" => cli.arm.push(value("a track name")?),
             "--record" => cli.record = true,
+            "--stage" => cli.stage = true,
             "--settings" => cli.settings = true,
             "--audio-scene" => {
                 let name = value("the name of a scene")?;
@@ -335,6 +366,15 @@ impl Cli {
             keyboard: self.keyboard.clone(),
             show_settings: self.settings,
             record: self.record,
+            stage: self.stage,
+            making_of: (self.making_of || self.making_of_at.is_some()).then(|| match self.making_of_at {
+                Some(at) => MakingOfStart { at, playing: false },
+                // A picture is of one moment: the end, where the whole
+                // story is told, unless another is asked for.
+                None if self.screenshot.is_some() => MakingOfStart { at: 1.0, playing: false },
+                None => MakingOfStart::default(),
+            }),
+            watch: self.watch.clone(),
         }
     }
 
@@ -549,6 +589,27 @@ mod tests {
         let error = run(&["--assistant-scene", "live"]).unwrap_err().to_string();
         assert!(error.contains("live") && error.contains("signed-out"), "{error}");
         assert!(run(&["--assistant-model"]).is_err() && run(&["--assistant-scene"]).is_err());
+    }
+
+    #[test]
+    fn the_making_of_can_be_up_when_the_window_opens() {
+        assert_eq!(run(&[]).unwrap().ui_options().making_of, None);
+        // Asked for, it plays from the beginning; in a picture it is held
+        // at the end, or wherever it is told.
+        assert_eq!(run(&["--making-of"]).unwrap().ui_options().making_of, Some(MakingOfStart::default()));
+        let held = run(&["--making-of", "--screenshot", "x.png"]).unwrap().ui_options().making_of;
+        assert_eq!(held, Some(MakingOfStart { at: 1.0, playing: false }));
+        let at = run(&["--making-of-at", "0.25"]).unwrap();
+        assert_eq!(at.ui_options().making_of, Some(MakingOfStart { at: 0.25, playing: false }));
+        assert!(run(&["--making-of-scene"]).unwrap().making_of_scene);
+        let watched = run(&["--watch", "songs/night.trillstory"]).unwrap().ui_options().watch;
+        assert_eq!(watched, Some(PathBuf::from("songs/night.trillstory")));
+        for wrong in [&["--making-of-at", "2"][..], &["--making-of-at", "soon"], &["--making-of-at"], &["--watch"]] {
+            assert!(run(wrong).is_err(), "{wrong:?}");
+        }
+        for flag in ["--making-of ", "--making-of-at", "--making-of-scene", "--watch"] {
+            assert!(USAGE.contains(flag), "the help does not list {flag}");
+        }
     }
 
     #[test]

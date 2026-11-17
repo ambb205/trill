@@ -161,7 +161,9 @@ fn a_line_between_two_points_is_straight_along_the_travel_of_what_it_moves() {
     // A song saved before lines followed their controls says nothing of
     // how they travel, and plays them straight in decibels as it did.
     project.write_automation(volume.clone(), fade.clone(), Travel::Linear).unwrap();
-    let old = Project::from_json(&project.to_json().replace("\"format_version\": 2", "\"format_version\": 1")).unwrap();
+    let this_format = format!("\"format_version\": {}", trill_core::project::FORMAT_VERSION);
+    assert!(project.to_json().contains(&this_format));
+    let old = Project::from_json(&project.to_json().replace(&this_format, "\"format_version\": 1")).unwrap();
     assert!(!project.to_json().contains("travel"));
     let straight = rendered(&old);
     for (beat, wanted) in [(4.0, -15.0), (8.0, -30.0), (12.0, -45.0)] {

@@ -663,6 +663,10 @@ pub struct UiState {
     pub copied_text: Option<String>,
     /// Whether the shortcut reference is up.
     pub shortcuts_open: bool,
+    /// Whether the window shows the stage instead of its panes. Nothing
+    /// else here changes while it does: leaving the stage puts the window
+    /// back as it was.
+    pub stage_open: bool,
     pub browser: BrowserState,
     /// Sounds on their way from the browser, or from another program, to
     /// wherever they are dropped.
@@ -685,6 +689,18 @@ pub struct UiState {
     /// How many projects this window has had open: it goes up each time
     /// another one takes the place of the open one.
     pub project_generation: u64,
+    /// A making-of that was asked for; the shell opens it once the frame
+    /// is over.
+    pub story: Option<StoryAsk>,
+}
+
+/// Which making-of to open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoryAsk {
+    /// The open song's: its session, played again.
+    Watch,
+    /// One that was written out to a file.
+    WatchFile(std::path::PathBuf),
 }
 
 impl UiState {
@@ -723,6 +739,7 @@ impl UiState {
             clipboard: None,
             copied_text: None,
             shortcuts_open: false,
+            stage_open: false,
             browser: BrowserState::new(),
             sound_drag: None,
             system_drop: None,
@@ -732,6 +749,7 @@ impl UiState {
             theme_request: None,
             toasts: Toasts::default(),
             gesture_open: false,
+            story: None,
             clear_clip_indicator: false,
             project_generation: 0,
         }

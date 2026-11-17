@@ -7,11 +7,15 @@ use super::audio_settings::{self, Settings};
 use super::editors::{self, Editors};
 use super::files::{self, Confirm, Jobs};
 use super::keyboard::{self, Keyboard};
+use super::making_of::{self, MakingOf};
 use super::recovery::{self, Recovery};
 use super::shortcuts::{self, Command};
 use super::snapshot::{Live, Snapshot};
 use super::sounds::{Dropped, Report, Sounds};
-use super::state::{AudioSummary, BrowserState, BrowserTab, Cx, FocusArea, LaneOwner, Tool, UiState, lane_owner};
+use super::stage::StageView;
+use super::state::{
+    AudioSummary, BrowserState, BrowserTab, Cx, FocusArea, LaneOwner, StoryAsk, Tool, UiState, lane_owner,
+};
 use super::{
     UiOptions, arrangement, automation, browser, controller_lane, detail, dragging, piano_roll, recording, status_bar,
     top_bar,
@@ -70,6 +74,11 @@ pub struct TrillApp {
     keyboard: Keyboard,
     /// The Audio and MIDI panel.
     settings: Settings,
+    /// The song filmed as it plays, shown in place of the panes.
+    stage: StageView,
+    /// The window's graphics device, which the stage draws on. `None`
+    /// where the window has none to give (the tests).
+    graphics: Option<eframe::egui_wgpu::RenderState>,
     /// The colors, type and metrics the window is painted with.
     theme: Theme,
     /// The devices that can be added. Starts as the built-in ones and is
@@ -109,6 +118,12 @@ pub struct TrillApp {
     /// What is written there, what the browser showed on the last frame,
     /// and the frame it last changed on.
     remembered: (browser::Remembered, browser::Remembered, u32),
+    /// The making-of, while it is up: the session of the song played
+    /// again, in place of the window's usual views.
+    making_of: Option<MakingOf>,
+    /// Who makes the session's devices: asked which of them are drums, for
+    /// a song as it was.
+    factory: Arc<dyn DeviceFactory>,
 }
 
 impl TrillApp {
@@ -148,6 +163,7 @@ impl TrillApp {
         }
         state.browser.sounds.pending_select = options.select_sound.clone();
         state.shortcuts_open = options.show_shortcuts;
+        state.stage_open = options.stage;
         if let Some(kind) = options.lane {
             state.piano.lane = super::state::LaneShown::Controller(kind);
         }
@@ -187,6 +203,12 @@ impl TrillApp {
         };
         let (catalog_tx, catalog) = mpsc::channel();
         let repaint = ctx.clone();
+        let devices = factory.clone();
+        let making_of = match (&options.watch, options.making_of) {
+            (Some(file), _) => Some(MakingOf::of_file(ctx, file.clone(), devices.clone())),
+            (None, Some(start)) => Some(MakingOf::open(ctx, &session, devices.clone(), start)),
+            (None, None) => None,
+        };
         std::thread::spawn(move || {
             // The receiver is gone if the window closed first.
             if catalog_tx.send(factory.descriptors()).is_ok() {
@@ -218,6 +240,8 @@ impl TrillApp {
             recovery,
             keyboard,
             settings: Settings::default(),
+            stage: StageView::new(),
+            graphics: None,
             theme,
             descriptors: BuiltinFactory.descriptors(),
             catalog,
@@ -237,6 +261,8 @@ impl TrillApp {
             busy_at_frame: 0,
             remember_in,
             remembered: (remembered.clone(), remembered, 0),
+            making_of,
+            factory: devices,
         }
     }
 
@@ -486,6 +512,21 @@ impl TrillApp {
         if state.shortcuts_open {
             commands.retain(|command| matches!(command, Command::ShowShortcuts | Command::Escape));
         }
+        if state.stage_open {
+            // The stage is watched, not worked in: the transport's keys
+            // and the ones that leave it are all it answers.
+            commands.retain(|command| {
+                matches!(
+                    command,
+                    Command::ToggleStage
+                        | Command::Escape
+                        | Command::TogglePlay
+                        | Command::Rewind
+                        | Command::ToggleLoop
+                        | Command::ToggleMetronome
+                )
+            });
+        }
         if self.settings.is_open() {
             // The panel has the keyboard, but for the key that closes it
             // and for playing the song to hear what a setting does. While
@@ -588,6 +629,16 @@ impl TrillApp {
                     self.audio.info.output,
                     self.live.audio_faults,
                 );
+                // How the window kept up: frames since it opened, and what
+                // the stage's part of them cost while it was shown.
+                eprintln!(
+                    "trill: {} frames, {:.1} a second",
+                    self.frames,
+                    self.frames as f32 / elapsed.as_secs_f32().max(1e-3)
+                );
+                if let Some(report) = self.stage.report() {
+                    eprintln!("trill: {report}");
+                }
                 self.capture = Capture::Done;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -615,9 +666,130 @@ impl TrillApp {
             self.assistant.tick(ctx, &self.snapshot, &mut self.state, &self.live);
         }
         self.release_audition(ctx);
+        if let Some(making_of) = &mut self.making_of {
+            making_of.tick(ctx, &self.descriptors);
+        }
         // Edits from other front ends arrive without any input event, so an
         // idle window has to look for them.
         ctx.request_repaint_after(IDLE_POLL);
+    }
+
+    /// Lays out and paints the making-of in place of the window's usual
+    /// views: its own bars, the story down the right, the session as a
+    /// line along the bottom, and between them the arrangement and the
+    /// detail panel showing the song as it was. Those two are the window's
+    /// own views, handed the replay's snapshot and view state and a session
+    /// that is not the song's, and they are under glass: nothing done here
+    /// reaches the song.
+    fn frame_of_making(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let Self {
+            making_of: held,
+            theme,
+            descriptors,
+            catalog_ready,
+            audio,
+            editors,
+            jobs,
+            recovery,
+            sounds,
+            assistant,
+            keyboard,
+            settings,
+            ..
+        } = self;
+        let Some(making_of) = held else { return };
+        let mut leave = false;
+        // The keys: the transport's, the arrows, and the way out. The
+        // arrows are read as they are with something selected.
+        for command in shortcuts::read(&ctx, false, true, false) {
+            leave |= making_of.run(command);
+        }
+
+        let bare = egui::Frame::NONE;
+        let (bar, status) = making_of::bar_heights();
+        egui::Panel::top("making-of-bar")
+            .exact_size(bar)
+            .show_separator_line(false)
+            .frame(bare)
+            .show(ui, |ui| leave |= making_of::bar(ui, theme, making_of));
+        egui::Panel::bottom("making-of-status")
+            .exact_size(status)
+            .show_separator_line(false)
+            .frame(bare)
+            .show(ui, |ui| making_of::status(ui, theme, making_of));
+        let Some(watching) = making_of.watching_mut() else {
+            egui::CentralPanel::no_frame().show(ui, |ui| making_of::waiting(ui, theme, making_of));
+            if leave {
+                *held = None;
+            }
+            return;
+        };
+        egui::Panel::bottom("making-of-line")
+            .exact_size(making_of::STRIP_HEIGHT)
+            .show_separator_line(false)
+            .frame(bare)
+            .show(ui, |ui| making_of::strip(ui, theme, watching));
+        let (width, limits) = making_of::story_width();
+        let widest = (ui.available_width() - assistant::WINDOW_REST).clamp(*limits.start(), *limits.end());
+        egui::Panel::right("making-of-story")
+            .resizable(true)
+            .default_size(width.min(widest))
+            .size_range(*limits.start()..=widest)
+            .show_separator_line(false)
+            .frame(bare)
+            .show(ui, |ui| making_of::story(ui, theme, watching));
+
+        // The song as it was, in the window's own views.
+        let tallest = (ui.available_height() - MIN_ARRANGEMENT_HEIGHT).clamp(detail::MIN_HEIGHT, detail::MAX_HEIGHT);
+        let mut song = |ui: &mut egui::Ui, watching: &mut making_of::Watching, name: &str, arrangement: bool| {
+            let area = ui.max_rect();
+            {
+                let (session, snap, live, state) = watching.parts();
+                let mut cx = Cx {
+                    session,
+                    snap,
+                    live,
+                    theme,
+                    descriptors,
+                    catalog_ready: *catalog_ready,
+                    audio,
+                    mcp_url: None,
+                    state,
+                    editors,
+                    jobs,
+                    recovery,
+                    sounds,
+                    assistant,
+                    keyboard,
+                    settings,
+                };
+                if arrangement {
+                    arrangement::show(ui, &mut cx);
+                } else {
+                    detail::show(ui, &mut cx);
+                }
+            }
+            making_of::glass(ui, watching, area, ui.scope_id().with(name));
+        };
+        egui::Panel::bottom("detail")
+            .resizable(true)
+            .default_size(detail::DEFAULT_HEIGHT.min(tallest))
+            .size_range(detail::MIN_HEIGHT..=tallest)
+            .show_separator_line(false)
+            .frame(bare)
+            .show(ui, |ui| song(ui, watching, "making-of-detail-glass", false));
+        egui::CentralPanel::no_frame().show(ui, |ui| song(ui, watching, "making-of-song-glass", true));
+
+        // The status bar is laid out before what asks for hints, so a new
+        // hint is shown by the frame after this one.
+        if watching.hint().end_frame() {
+            ctx.request_repaint();
+        }
+        if leave {
+            *held = None;
+            ctx.request_repaint();
+        }
     }
 
     /// Lays out and paints the whole window into `ui`.
@@ -627,13 +799,28 @@ impl TrillApp {
         self.guard_close(&ctx);
         self.update_title(&ctx);
 
+        // A question on screen is about the song as it is: it is asked
+        // there, not over the making-of.
+        if self.jobs.confirm.is_some() || self.recovery.is_open() {
+            self.making_of = None;
+        }
+        if self.making_of.is_some() {
+            self.frame_of_making(ui);
+            self.automate(&ctx);
+            return;
+        }
+
         // The sound browser's keys come first: while its list is being
         // worked in, Space and the letters are its own.
         let typing = ctx.text_edit_focused() || self.was_typing;
         // Before even those, the computer keyboard's: a note leaves for
         // the engine before anything else in the frame is looked at.
         keyboard::keys(&ctx, &mut self.cx(), typing);
-        browser::keys(&ctx, &mut self.cx(), typing);
+        // Not on the stage, where the browser is not to be seen: Space is
+        // the transport's there, whatever was being worked in before.
+        if !self.state.stage_open {
+            browser::keys(&ctx, &mut self.cx(), typing);
+        }
         let commands = self.read_commands(&ctx);
         let open_editor = self.options.open_editor.take();
         let open_settings = std::mem::take(&mut self.options.show_settings);
@@ -647,6 +834,14 @@ impl TrillApp {
         if let Some(name) = open_editor {
             editors::open_named(&mut cx, &name);
         }
+        if cx.state.stage_open {
+            // The stage has the whole window: no pane is laid out, and so
+            // none is touched.
+            self.show_stage(ui);
+            return;
+        }
+        self.stage.closed(self.graphics.as_ref());
+        let mut cx = self.cx();
         dragging::begin(&ctx, &mut cx);
 
         // Panels are claimed from the outside in: the bars, the browser
@@ -736,6 +931,18 @@ impl TrillApp {
             ctx.request_repaint();
         }
 
+        // A making-of was asked for: the session of the song, or a file's.
+        match self.state.story.take() {
+            Some(StoryAsk::Watch) => {
+                let start = making_of::Start::default();
+                self.making_of = Some(MakingOf::open(&ctx, &self.session, self.factory.clone(), start));
+            }
+            Some(StoryAsk::WatchFile(file)) => {
+                self.making_of = Some(MakingOf::of_file(&ctx, file, self.factory.clone()));
+            }
+            None => {}
+        }
+
         self.close_gesture(&ctx);
         self.tell_selection();
         self.save_browser_width(&ctx);
@@ -755,6 +962,46 @@ impl TrillApp {
     /// (plugin editors).
     pub fn set_native_window(&mut self, window: Option<isize>) {
         self.editors.set_owner(window);
+    }
+
+    /// Hands over the window's graphics device, for the stage to draw on.
+    pub fn set_graphics(&mut self, graphics: Option<eframe::egui_wgpu::RenderState>) {
+        self.graphics = graphics;
+    }
+
+    /// The frame while the stage is open: the stage, and what has to go
+    /// on whatever the window shows.
+    fn show_stage(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        egui::CentralPanel::no_frame().show(ui, |ui| {
+            self.stage.show(ui, &self.snapshot, &self.live, self.audio.latency_ms, self.graphics.as_ref());
+        });
+        // A question that came up meanwhile (unsaved work on closing the
+        // window) is asked over the stage.
+        let mut cx = self.cx();
+        files::confirm_modal(&ctx, &mut cx);
+        keyboard::settle(&ctx, &mut cx);
+        if let Some(theme) = self.state.theme_request.take().and_then(Theme::named) {
+            trill_noir::install(&ctx, &theme);
+            self.theme = theme;
+        }
+        self.tell_selection();
+        self.was_typing = ctx.text_edit_focused();
+        let moving = self.live.playing || self.live.take.is_some() || self.live.meters_moving();
+        if moving {
+            ctx.request_repaint();
+        }
+        self.automate(&ctx);
+    }
+
+    #[cfg(test)]
+    pub fn making_of(&self) -> Option<&MakingOf> {
+        self.making_of.as_ref()
+    }
+
+    #[cfg(test)]
+    pub fn making_of_mut(&mut self) -> Option<&mut MakingOf> {
+        self.making_of.as_mut()
     }
 
     #[cfg(test)]
@@ -938,7 +1185,9 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
             FocusArea::Arrangement | FocusArea::Browser => ops::select_all(cx),
         },
         Command::Escape => {
-            if cx.state.shortcuts_open {
+            if cx.state.stage_open {
+                cx.state.stage_open = false;
+            } else if cx.state.shortcuts_open {
                 cx.state.shortcuts_open = false;
             } else if cx.settings.is_open() {
                 audio_settings::toggle(cx);
@@ -984,6 +1233,8 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
         Command::ToggleBrowser => cx.state.browser.open = !cx.state.browser.open,
         Command::ToggleAssistant => cx.assistant.toggle(),
         Command::ToggleKeyboard => cx.keyboard.toggle(),
+        Command::ToggleStage => cx.state.stage_open = !cx.state.stage_open,
+        Command::MakingOf => cx.state.story = Some(StoryAsk::Watch),
         Command::Record => recording::toggle(cx),
         Command::AudioSettings => audio_settings::toggle(cx),
         Command::ShowShortcuts => cx.state.shortcuts_open = !cx.state.shortcuts_open,

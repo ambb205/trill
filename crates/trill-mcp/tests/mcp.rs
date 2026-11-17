@@ -132,6 +132,9 @@ async fn tools_are_listed_with_schemas() {
         "get_instrument_profile",
         "set_instrument_profile",
         "history",
+        "get_journal",
+        "get_song_at",
+        "journal",
         "save_project",
         "load_project",
         "new_project",
@@ -170,6 +173,12 @@ async fn tools_are_listed_with_schemas() {
     assert!(schema_of("set_automation").contains("\"send\"") && schema_of("set_automation").contains("travel"));
     assert!(schema_of("get_automation").contains("offset") && schema_of("get_automation").contains("limit"));
     assert!(instructions.contains("throw") && instructions.contains("control's travel"), "{instructions}");
+    // And how the song was made: the journal, and the song as it was.
+    for word in ["get_journal", "get_song_at", "takes nothing out of the journal", "never in the project file"] {
+        assert!(instructions.contains(word), "the instructions should mention {word}");
+    }
+    assert!(schema_of("get_journal").contains("search") && schema_of("get_song_at").contains("step"));
+    assert!(schema_of("journal").contains("export") && schema_of("journal").contains("conversation"));
     assert!(schema_of("audio").contains("exclusive") && schema_of("midi_inputs").contains("disable"));
     let create_clip = tools.iter().find(|tool| tool.name == "create_clip").unwrap();
     let schema = serde_json::to_string(&create_clip.input_schema).unwrap();
@@ -1394,7 +1403,7 @@ async fn a_line_follows_the_travel_of_its_control_and_an_old_file_plays_as_it_di
     let path = folder.path().join("before.trill");
     ok(client, "save_project", json!({ "path": path.display().to_string() })).await;
     let mut saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(saved["format_version"], 2, "this version's file says which it is");
+    assert_eq!(saved["format_version"], 3, "this version's file says which it is");
     let said: Vec<bool> =
         saved["automation"].as_array().unwrap().iter().map(|lane| lane.get("travel").is_some()).collect();
     assert_eq!(said, [false, true, false, true, true, false], "a lane straight in its units says nothing");
@@ -1818,4 +1827,251 @@ async fn without_audio_hardware_the_device_tools_say_so() {
     assert!(inputs["note"].as_str().unwrap().contains("No MIDI input"));
     let error = call(client, "midi_inputs", json!({ "action": "enable", "name": "Keys" })).await.unwrap_err();
     assert!(error.contains("none is plugged in"), "{error}");
+}
+
+/// The entries of a journal page, as (step, who, what it did).
+fn told(page: &Value) -> Vec<(u64, String, String)> {
+    let entries = page["entries"].as_array().expect("a page has entries");
+    let line = |entry: &Value| {
+        let words = ["did", "said", "looked", "note"].iter().find_map(|key| entry[*key].as_str());
+        let words = words.map(str::to_owned).unwrap_or_else(|| entry["plan"].to_string());
+        (entry["step"].as_u64().unwrap(), entry["by"].as_str().unwrap().to_owned(), words)
+    };
+    entries.iter().map(line).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_song_made_in_several_calls_is_read_back_as_it_was_after_each() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let me = fixture.client.peer_info().map(|_| ()).map(|()| ClientConfig::default().client_info.name).unwrap();
+
+    // A song, made the way a client makes one: a call at a time.
+    ok(client, "set_project", json!({ "name": "Night Drive", "tempo": 96 })).await;
+    let bass = ok(client, "create_track", json!({ "name": "Bass", "instrument": "builtin:polysynth" })).await;
+    let (bass, synth) = (bass["track_id"].as_u64().unwrap(), bass["instrument_device_id"].as_u64().unwrap());
+    let verse = ok(
+        client,
+        "create_clip",
+        json!({ "track": bass, "start": 0, "length": 8, "name": "Verse", "notes": [["A1", 0, 1.5], ["C2", 4, 1.5]] }),
+    )
+    .await["clip_id"]
+        .as_u64()
+        .unwrap();
+    ok(client, "get_project", json!({})).await;
+    let drums = ok(client, "create_track", json!({ "name": "Drums", "instrument": "builtin:drumkit" })).await;
+    let drums = drums["track_id"].as_u64().unwrap();
+    let chorus = ok(
+        client,
+        "create_clip",
+        json!({ "track": drums, "start": 8, "length": 8, "name": "Chorus", "notes": [["kick", 0, 0.25], ["snare", 1, 0.25]] }),
+    )
+    .await["clip_id"]
+        .as_u64()
+        .unwrap();
+    ok(client, "update_track", json!({ "track": bass, "volume_db": -6 })).await;
+    ok(client, "add_notes", json!({ "clip": verse, "notes": [["E2", 6, 1]] })).await;
+    let measured = ok(client, "measure", json!({})).await;
+    assert!(measured["loudness_lufs"].is_number(), "{measured}");
+    // A call that is refused, and a step taken back.
+    call(client, "delete_track", json!({ "track": 999 })).await.unwrap_err();
+    ok(client, "history", json!({ "action": "undo" })).await;
+
+    // The steps, oldest first: each says who, what, with which tool and
+    // where it landed.
+    let page = ok(client, "get_journal", json!({})).await;
+    assert_eq!(page["keeping"], true);
+    let steps = told(&page);
+    let words: Vec<&str> = steps.iter().map(|(_, _, words)| words.as_str()).collect();
+    assert_eq!(
+        words,
+        [
+            "Changed the name and tempo",
+            "Added the track \u{201C}Bass\u{201D}",
+            "Added the clip \u{201C}Verse\u{201D} to \u{201C}Bass\u{201D}",
+            "Added the track \u{201C}Drums\u{201D}",
+            "Added the clip \u{201C}Chorus\u{201D} to \u{201C}Drums\u{201D}",
+            "Changed the volume of \u{201C}Bass\u{201D}",
+            "Added 1 note to \u{201C}Verse\u{201D}",
+            "Took back: Added 1 note to \u{201C}Verse\u{201D}",
+        ]
+    );
+    assert!(steps.iter().all(|(_, by, _)| *by == me), "every step is this client's ({me}): {steps:?}");
+    assert_eq!(page["steps"], 8);
+    let entries = page["entries"].as_array().unwrap();
+    assert_eq!(entries[1]["tool"], "create_track");
+    assert_eq!(entries[1]["where"], json!({ "tracks": [bass] }));
+    assert_eq!(entries[2]["where"], json!({ "clips": [verse] }));
+    assert_eq!(entries[7]["took_back"], entries[6]["step"]);
+    assert!(entries.iter().all(|entry| entry["t"].is_number()));
+    assert!(page["began"].as_str().unwrap().ends_with(" UTC"));
+    assert!(page.get("more").is_none() && page.get("earlier").is_none());
+
+    // The song as it was after each of them.
+    let step = |index: usize| steps[index].0;
+    let at = |step: u64| ok(client, "get_song_at", json!({ "step": step, "include_notes": true }));
+    let began = at(0).await;
+    assert_eq!((began["name"].clone(), began["tempo"].clone()), (json!("Untitled"), json!(120.0)));
+    assert_eq!(began["tracks"], json!([]));
+    assert!(began["as_of"]["did"].as_str().unwrap().contains("when the story begins"));
+    let named = at(step(0)).await;
+    assert_eq!((named["name"].clone(), named["tempo"].clone()), (json!("Night Drive"), json!(96.0)));
+    let with_bass = at(step(1)).await;
+    assert_eq!(with_bass["tracks"].as_array().unwrap().len(), 1);
+    assert_eq!(with_bass["tracks"][0]["devices"][0]["id"], synth);
+    assert_eq!(with_bass["tracks"][0]["clips"], json!([]));
+    assert_eq!(with_bass["as_of"]["did"], "Added the track \u{201C}Bass\u{201D}");
+    let with_verse = at(step(2)).await;
+    assert_eq!(with_verse["tracks"][0]["clips"][0]["notes"].as_array().unwrap().len(), 2);
+    assert_eq!(with_verse["tracks"].as_array().unwrap().len(), 1, "the drums are not there yet");
+    let with_chorus = at(step(4)).await;
+    assert_eq!(with_chorus["tracks"][1]["clips"][0]["id"], chorus);
+    assert_eq!(with_chorus["tracks"][0]["volume_db"], 0.0);
+    let turned_down = at(step(5)).await;
+    assert_eq!(turned_down["tracks"][0]["volume_db"], -6.0);
+    let three_notes = at(step(6)).await;
+    assert_eq!(three_notes["tracks"][0]["clips"][0]["notes"].as_array().unwrap().len(), 3);
+    // The last step took the third note back: the song as it is now.
+    let now = at(step(7)).await;
+    assert_eq!(now["tracks"][0]["clips"][0]["notes"].as_array().unwrap().len(), 2);
+    assert!(now["note"].as_str().unwrap().contains("as it is now"));
+    let current = ok(client, "get_project", json!({ "include_notes": true })).await;
+    assert_eq!(now["tracks"][0]["clips"], current["tracks"][0]["clips"]);
+    let error = call(client, "get_song_at", json!({ "step": 9_999 })).await.unwrap_err();
+    assert!(error.contains("there is no step 9999") && error.contains("get_journal"), "{error}");
+
+    // "What changed since the chorus was written": found by its words,
+    // then listed from there.
+    let found = ok(client, "get_journal", json!({ "search": "chorus" })).await;
+    assert_eq!(told(&found).len(), 1);
+    let since = ok(client, "get_journal", json!({ "after": found["entries"][0]["step"] })).await;
+    let since: Vec<String> = told(&since).into_iter().map(|(_, _, words)| words).collect();
+    assert_eq!(
+        since,
+        [
+            "Changed the volume of \u{201C}Bass\u{201D}",
+            "Added 1 note to \u{201C}Verse\u{201D}",
+            "Took back: Added 1 note to \u{201C}Verse\u{201D}"
+        ]
+    );
+
+    // A page at a time, and the latest.
+    let first = ok(client, "get_journal", json!({ "limit": 3 })).await;
+    assert_eq!(told(&first).len(), 3);
+    let next = ok(client, "get_journal", json!({ "limit": 3, "after": first["more"]["after"] })).await;
+    assert_eq!(told(&next)[0].2, "Added the track \u{201C}Drums\u{201D}");
+    let last = ok(client, "get_journal", json!({ "last": 2 })).await;
+    assert_eq!(
+        told(&last).iter().map(|(_, _, words)| words.as_str()).collect::<Vec<_>>(),
+        ["Added 1 note to \u{201C}Verse\u{201D}", "Took back: Added 1 note to \u{201C}Verse\u{201D}"]
+    );
+    assert!(last.get("more").is_none());
+    let nobody = ok(client, "get_journal", json!({ "by": "assistant" })).await;
+    assert_eq!(nobody["entries"], json!([]));
+    assert!(nobody["note"].as_str().unwrap().contains("No entry matches"));
+
+    // Everything: the looks too, with what the measurement heard and the
+    // call that was refused. Reading the journal is itself a look.
+    let all = ok(client, "get_journal", json!({ "show": "all", "limit": 200 })).await;
+    let looks: Vec<&Value> =
+        all["entries"].as_array().unwrap().iter().filter(|entry| entry.get("looked").is_some()).collect();
+    assert_eq!(looks[0]["looked"], "Read the project");
+    let heard = looks.iter().find(|look| look["looked"] == "Measured the song").expect("the measurement is a look");
+    assert!(heard["heard"].as_str().unwrap().contains("LUFS"), "{heard}");
+    let refused = looks.iter().find(|look| look["failed"] == true).expect("the refused call is there");
+    assert_eq!(refused["looked"], "Deleted the track track 999");
+    assert!(looks.iter().any(|look| look["looked"] == "Read how the song was made"));
+    assert!(looks.iter().any(|look| look["looked"] == "Read the song as it was after step 9999"));
+
+    // The session's own journal says the same, and leads to the song.
+    let session = fixture.session.lock();
+    let journal = session.journal().unwrap();
+    assert_eq!(&journal.head().unwrap(), session.project());
+    assert_eq!(journal.steps(), 8);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_journal_is_kept_written_out_and_deleted_on_request() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let journals = fixture.folder.path().join("config").join("journals");
+    ok(client, "create_track", json!({ "name": "Keys", "instrument": "builtin:polysynth" })).await;
+    fixture.session.lock().say(trill_core::journal::Author::Person, "Between the user and the assistant.");
+
+    let status = ok(client, "journal", json!({})).await;
+    assert_eq!((status["keeping"].clone(), status["steps"].clone()), (json!(true), json!(1)));
+    assert!(status["kept_in"].as_str().unwrap().contains("never in the project file"));
+    assert!(status["story_bytes"].as_u64().unwrap() > 100 && status["bytes"].as_u64() > status["story_bytes"].as_u64());
+    assert!(status["limits"].as_str().unwrap().contains("the oldest entries are let go"));
+
+    // Saved: the song in its folder, the journal in the program's own.
+    let song = fixture.folder.path().join("songs").join("keys.trill");
+    ok(client, "save_project", json!({ "path": song })).await;
+    let saved = std::fs::read_to_string(&song).unwrap();
+    assert!(!saved.contains("Between the user") && !saved.contains("journal"));
+    let kept: Vec<_> = std::fs::read_dir(&journals).unwrap().flatten().collect();
+    assert_eq!(kept.len(), 1);
+    assert!(std::fs::read_to_string(kept[0].path()).unwrap().contains("Between the user and the assistant."));
+
+    // Written out to hand on: without the conversation unless asked.
+    let story = fixture.folder.path().join("songs").join("keys.trillstory");
+    let exported = ok(client, "journal", json!({ "action": "export", "path": story })).await;
+    assert_eq!(exported["conversation"], false);
+    let text = std::fs::read_to_string(&story).unwrap();
+    assert!(text.contains("Added the track") && !text.contains("Between the user"), "{text}");
+    ok(client, "journal", json!({ "action": "export", "path": story, "conversation": true })).await;
+    assert!(std::fs::read_to_string(&story).unwrap().contains("Between the user and the assistant."));
+    let error = call(client, "journal", json!({ "action": "export" })).await.unwrap_err();
+    assert!(error.contains("needs `path`"), "{error}");
+
+    // Deleted: the file is gone and the story begins again.
+    let deleted = ok(client, "journal", json!({ "action": "delete" })).await;
+    assert_eq!((deleted["deleted"].clone(), deleted["steps"].clone()), (json!(true), json!(0)));
+    assert_eq!(std::fs::read_dir(&journals).unwrap().count(), 0);
+    let empty = ok(client, "get_journal", json!({})).await;
+    assert!(empty["note"].as_str().unwrap().contains("Nothing has changed"));
+
+    // Switched off, and remembered as switched off; the tools say so.
+    let stopped = ok(client, "journal", json!({ "action": "stop" })).await;
+    assert_eq!(stopped["keeping"], false);
+    assert!(!trill_library::Settings::load(&fixture.settings_file()).settings.journal.keep);
+    ok(client, "create_track", json!({ "name": "Unrecorded" })).await;
+    let off = ok(client, "get_journal", json!({})).await;
+    assert_eq!((off["keeping"].clone(), off["entries"].clone()), (json!(false), json!([])));
+    assert!(call(client, "get_song_at", json!({})).await.unwrap_err().contains("switched off"));
+    let kept = ok(client, "journal", json!({ "action": "keep" })).await;
+    assert_eq!(kept["keeping"], true);
+    assert!(trill_library::Settings::load(&fixture.settings_file()).settings.journal.keep);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_assistant_is_entered_as_itself_and_cannot_do_away_with_the_journal() {
+    let (fixture, work) = connect_guarded().await;
+    let client = &fixture.client;
+    ok(client, "create_track", json!({ "name": "Pad" })).await;
+    ok(client, "get_project", json!({})).await;
+    let page = ok(client, "get_journal", json!({ "show": "all" })).await;
+    let entries = told(&page);
+    assert_eq!(entries[0].1, "assistant");
+    assert_eq!(entries[0].2, "Added the track \u{201C}Pad\u{201D}");
+    assert!(entries.iter().all(|(_, by, _)| by == "assistant"), "{entries:?}");
+
+    for action in ["stop", "delete"] {
+        let error = call(client, "journal", json!({ "action": action })).await.unwrap_err();
+        assert!(error.contains("from here the journal cannot be") && error.contains("Making Of"), "{action}: {error}");
+    }
+    assert!(fixture.session.lock().keeps_journal());
+    assert_eq!(ok(client, "journal", json!({})).await["steps"], 1);
+    // It may write the story out into the user's working folders, without
+    // the conversation.
+    let error = call(client, "journal", json!({ "action": "export", "path": "story", "conversation": true }))
+        .await
+        .unwrap_err();
+    assert!(error.contains("without the conversation"), "{error}");
+    let outside = fixture.folder.path().join("elsewhere").join("story.trillstory");
+    let error = call(client, "journal", json!({ "action": "export", "path": outside })).await.unwrap_err();
+    assert!(error.contains("can only be written inside"), "{error}");
+    let exported = ok(client, "journal", json!({ "action": "export", "path": "story" })).await;
+    assert!(exported["exported"].as_str().unwrap().ends_with("story.trillstory"));
+    assert!(work.join("story.trillstory").is_file());
 }

@@ -21,6 +21,7 @@ trill-media.workspace = true
 trill-noir.workspace = true
 trill-plugins.workspace = true
 trill-runtime.workspace = true
+trill-stage.workspace = true
 
 anyhow.workspace = true
 log.workspace = true

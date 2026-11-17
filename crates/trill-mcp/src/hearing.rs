@@ -439,8 +439,17 @@ fn observations(report: &RenderReport, project: &Project) -> Vec<String> {
             Some(track) => format!("on '{}'", track.name),
             None => "on the master".to_string(),
         };
-        let limiter = project.device(dynamics.device).is_ok_and(|device| device.uri == "builtin:limiter");
-        if dynamics.most_db == 0.0 && !limiter {
+        let device = project.device(dynamics.device).ok();
+        let limiter = device.is_some_and(|device| device.uri == "builtin:limiter");
+        // The track it listens to in place of its own, if it does.
+        let key = device.and_then(|device| device.sidechain).and_then(|track| project.track(track).ok());
+        if let (0.0, Some(key)) = (dynamics.most_db, key) {
+            notes.push(format!(
+                "{} (device {}) {on} listens to '{}', which never reached its threshold over this stretch: it does \
+                 nothing. Lower the threshold to below that track's peak as it leaves its devices.",
+                dynamics.name, dynamics.device.0, key.name
+            ));
+        } else if dynamics.most_db == 0.0 && !limiter {
             notes.push(format!(
                 "{} (device {}) {on} never reached its threshold: it does nothing. Lower the threshold to below \
                  that track's peak, or remove it.",

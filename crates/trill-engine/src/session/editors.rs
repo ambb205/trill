@@ -84,6 +84,7 @@ impl Session {
     /// the start and end of each gesture, for whoever records automation.
     pub fn absorb_editor_edits(&mut self) -> Vec<(DeviceId, ParamEdit)> {
         let mut absorbed = Vec::new();
+        let mut followed = Vec::new();
         for (id, meta) in &self.bank.devices {
             let Some(controller) = &meta.controller else { continue };
             for edit in controller.lock().take_param_edits() {
@@ -96,6 +97,9 @@ impl Session {
                     continue;
                 };
                 let stale = std::mem::replace(held, value);
+                if !followed.contains(id) {
+                    followed.push(*id);
+                }
                 for step in self.undo.iter_mut().chain(self.redo.iter_mut()) {
                     if let Some(old) =
                         step.project.device_mut(*id).ok().and_then(|device| device.params.get_mut(&info.id))
@@ -110,6 +114,10 @@ impl Session {
         // whether or not the project stores that parameter.
         if absorbed.iter().any(|(_, edit)| matches!(edit.kind, ParamEditKind::Value(_))) {
             self.revision += 1;
+        }
+        // The journal follows too, in passing: nobody made a step.
+        for id in followed {
+            self.note_device(id, false);
         }
         absorbed
     }

@@ -62,6 +62,9 @@ fn main() -> anyhow::Result<()> {
     if cli.demo {
         options.select_clip = Some(demo::load(&mut session.lock()).context("could not build the demo song")?);
     }
+    if cli.making_of_scene {
+        ui::play_making_of_scene(&mut session.lock());
+    }
     if let Some(clip) = cli.clip_to_select(session.lock().project())? {
         options.select_clip = Some(clip);
     }

@@ -30,6 +30,11 @@
 //!   pages; every search and every page is a line with the query or the
 //!   address. Off, the tools are not offered to it at all. What a page can
 //!   and cannot make it do is set out in `trill-assistant`.
+//! * **It is part of how the song was made.** What the user asked, what
+//!   the assistant said and planned, and how each request ended are entered
+//!   in the session's journal as they come, between the steps its tool
+//!   calls make there (which the server enters). The journal stays on this
+//!   machine and is what the making of a song is played again from.
 //! * **It shows what it changed.** When a turn that changed the song has
 //!   ended, what it made or edited is selected and brought into view
 //!   ([`places`]): once, at the end, and not if the user is at work
@@ -59,9 +64,9 @@
 
 mod backend;
 mod context;
-mod markdown;
-mod places;
-mod reply;
+pub(in crate::ui) mod markdown;
+pub(in crate::ui) mod places;
+pub(in crate::ui) mod reply;
 mod scenes;
 mod store;
 mod tools;
@@ -85,8 +90,9 @@ use store::Store;
 use transcript::{Ending, Item, Offer, Spent, Tone, Transcript, TurnEnd};
 use trill_assistant::{Effort, Event, FailureReason, LoginMethod, Progress, SessionId};
 use trill_core::Project;
-use trill_engine::SharedSession;
+use trill_core::journal::{Author, Outcome, PlanItem, PlanState};
 use trill_engine::session::{UndoGroup, UndoStep};
+use trill_engine::{Session, SharedSession};
 use trill_runtime::Runtime;
 
 pub const DEFAULT_WIDTH: f32 = 360.0;
@@ -176,6 +182,19 @@ struct Turn {
     progress: Option<Progress>,
     /// When the conversation was last kept while this turn ran.
     kept: Instant,
+}
+
+/// Something for the session's journal that the turn under way has said
+/// or done: entered when the session is next free, in the order it came.
+enum Entry {
+    /// More of the assistant's reply.
+    Said(String),
+    /// The passage of the reply that was arriving is over.
+    Parted,
+    /// The plan as it stands.
+    Plan(Vec<PlanItem>),
+    /// A look at the web, in words, and whether it came to nothing.
+    Web { label: String, failed: bool },
 }
 
 /// How the turn under way stands, for whoever shows it.
@@ -328,6 +347,10 @@ pub struct Assistant {
     /// How long the turn under way claims to have run, when a picture must
     /// not depend on the clock.
     frozen_seconds: Option<u64>,
+    /// What is still to be entered in the session's journal.
+    entries: Vec<Entry>,
+    /// The journal's entry for the passage of the reply that is arriving.
+    saying: Option<u64>,
 }
 
 impl Assistant {
@@ -400,6 +423,8 @@ impl Assistant {
             field: egui::Rect::NOTHING,
             scene,
             frozen_seconds: None,
+            entries: Vec::new(),
+            saying: None,
         }
     }
 
@@ -565,6 +590,8 @@ impl Assistant {
             log::warn!("the assistant did not take the message: {error}");
             return false;
         }
+        // What was asked is where this part of the song's story begins.
+        self.session.lock().say(Author::Person, message);
         // A plan that was carried out belongs to the request before.
         self.transcript.plan.begin_request();
         self.transcript.push_user(message);
@@ -830,8 +857,80 @@ impl Assistant {
                 other => {
                     let opened = self.transcript.opens_another_project(&other);
                     self.transcript.apply(&other, project);
+                    self.note(&other);
                     if let (true, Some(turn)) = (opened, &mut self.turn) {
                         turn.opened_another = true;
+                    }
+                }
+            }
+        }
+        // Entered when the session is free: if a tool has it this moment,
+        // the next look will do.
+        if !self.entries.is_empty()
+            && let Some(mut session) = self.session.try_lock()
+        {
+            Self::enter(&mut self.entries, &mut self.saying, &mut session);
+        }
+    }
+
+    /// Notes for the session's journal what an event of the turn under
+    /// way says or does. The calls of Trill's own tools are not noted: the
+    /// server enters each as it is made.
+    fn note(&mut self, event: &Event) {
+        match event {
+            Event::Text(piece) => self.entries.push(Entry::Said(piece.clone())),
+            // What parts one passage of the reply from the next in the
+            // conversation parts them in the journal.
+            Event::ToolCallStarted { .. } | Event::WebStarted { .. } | Event::Notice(_) => {
+                self.entries.push(Entry::Parted);
+            }
+            Event::Plan(_) => {
+                let state = |state| match state {
+                    transcript::StepState::Pending => PlanState::Pending,
+                    transcript::StepState::Doing => PlanState::Doing,
+                    transcript::StepState::Done => PlanState::Done,
+                };
+                let steps = self.transcript.plan.steps.iter();
+                let items = steps.map(|step| PlanItem { text: step.title.clone(), state: state(step.state) });
+                self.entries.push(Entry::Plan(items.collect()));
+            }
+            Event::WebFinished { id, result } => {
+                let line = self.transcript.items.iter().rev().find_map(|item| match item {
+                    Item::Tool(line) if line.id == *id => Some(line),
+                    _ => None,
+                });
+                if let Some(line) = line {
+                    self.entries.push(Entry::Web { label: line.did.clone(), failed: result.is_err() });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Enters in the session's journal what has been noted for it:
+    /// `entries`, in order; `saying` is the journal's entry for the passage
+    /// of the reply that is arriving.
+    fn enter(entries: &mut Vec<Entry>, saying: &mut Option<u64>, session: &mut Session) {
+        for entry in entries.drain(..) {
+            match entry {
+                Entry::Said(piece) => match *saying {
+                    Some(saying) => session.say_more(saying, &piece),
+                    None => {
+                        let piece = piece.trim_start();
+                        if !piece.is_empty() {
+                            *saying = session.say_open(Author::Assistant, piece);
+                        }
+                    }
+                },
+                Entry::Parted => {
+                    if let Some(saying) = saying.take() {
+                        session.say_done(saying);
+                    }
+                }
+                Entry::Plan(items) => session.note_plan(items),
+                Entry::Web { label, failed } => {
+                    if let Some(call) = session.begin_call(Author::Assistant, "web", label) {
+                        session.end_call(call, Outcome { failed, ..Outcome::default() });
                     }
                 }
             }
@@ -918,6 +1017,15 @@ impl Assistant {
         };
         let (step, places, route) = {
             let mut session = self.session.lock();
+            // The story of the request ends with how it ended.
+            self.entries.push(Entry::Parted);
+            Self::enter(&mut self.entries, &mut self.saying, &mut session);
+            let how = match &ending {
+                Ending::Finished { seconds, .. } => format!("Finished in {}", transcript::format_seconds(*seconds)),
+                Ending::Stopped => "Stopped".to_owned(),
+                Ending::Failed { .. } => "Stopped by a problem".to_owned(),
+            };
+            session.mark_journal(Author::Assistant, &how);
             let step = turn.group.and_then(|group| session.end_group(group));
             let project = session.project();
             // Where the turn's lines lead, as the song now is; and if a

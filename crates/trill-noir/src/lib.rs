@@ -27,6 +27,9 @@
 //!   into a mesh the caller owns, so that many can be painted as one.
 //! * So was [`prose`]: running text that wraps, mixes faces (Inter SemiBold
 //!   for strong text was added for it) and can be selected and copied.
+//! * The [`mark`] is here so that the window and the stage draw the same
+//!   one, and [`Theme::stored_hue`] so that both show a track in the same
+//!   hue.
 //!
 //! Nothing here knows about audio or projects.
 
@@ -38,6 +41,7 @@ mod fader;
 mod field;
 pub mod format;
 mod icon;
+pub mod mark;
 mod menu;
 mod meter;
 pub mod paint;
@@ -61,5 +65,5 @@ pub use menu::{MenuItem, dropdown, dropdown_width, menu_heading, menu_separator,
 pub use meter::{Levels, Zones, mini_meter, stereo_meter};
 pub use plot::Plot;
 pub use style::install;
-pub use theme::{Metrics, TRACK_HUES, TextStyle, Theme, Type, fade};
+pub use theme::{Metrics, POSITIONAL, TRACK_HUES, TextStyle, Theme, Type, fade};
 pub use waveform::{Column, waveform, waveform_columns};

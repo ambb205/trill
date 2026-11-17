@@ -19,14 +19,18 @@ pub const MIN_TEMPO: f64 = 20.0;
 pub const MAX_TEMPO: f64 = 999.0;
 pub const MIN_VOLUME_DB: f32 = -70.0;
 pub const MAX_VOLUME_DB: f32 = 6.0;
-/// The version of the project file this build writes, and the newest it
+/// The format of the project file this build writes, and the newest it
 /// reads.
 ///
-/// 2: an automation lane says how its lines travel between points
-/// ([`AutomationLane::travel`]), and a send can be automated. A file of
-/// version 1 says neither; its lanes are straight in their units, as they
-/// were played when it was saved.
-pub const FORMAT_VERSION: u32 = 2;
+/// * 1: the first.
+/// * 2: the reverb returns some 10 dB less and filters what goes into it,
+///   and the ping-pong delay feeds back once a pair of repeats. A device of
+///   a format-1 file keeps the sound it had: see [`crate::formats`].
+/// * 3: an automation lane says how its lines travel between points
+///   ([`AutomationLane::travel`]), and a send can be automated. A file of
+///   an earlier format says neither; its lanes are straight in their
+///   units, as they were played when it was saved.
+pub const FORMAT_VERSION: u32 = 3;
 /// The furthest an audio clip can be transposed, in semitones either way.
 pub const MAX_TRANSPOSE: f64 = 24.0;
 /// Shortest loop a clip repeats, so a tiny loop length cannot explode into
@@ -494,6 +498,14 @@ pub struct Device {
     /// whatever has been changed about it since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<PresetRef>,
+    /// The track the device listens to in place of its own input: the key
+    /// of a compressor, such as the kick a bass is ducked to. It is that
+    /// track as it leaves its devices, ahead of its fader and its mute, so
+    /// a track that is turned down or muted still serves as a key. Only a
+    /// device that takes a key does anything with it. See
+    /// [`Project::set_sidechain`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidechain: Option<TrackId>,
 }
 
 fn enabled_default() -> bool {
@@ -805,7 +817,7 @@ pub struct Project {
     /// Sorted by beat.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<Marker>,
-    next_id: u64,
+    pub(crate) next_id: u64,
 }
 
 fn format_version_default() -> u32 {
@@ -911,6 +923,11 @@ impl Project {
             }
             other.sends.retain(|send| send.to != id);
         }
+        for device in self.devices_mut() {
+            if device.sidechain == Some(id) {
+                device.sidechain = None;
+            }
+        }
         self.prune_automation();
         Ok(track)
     }
@@ -926,7 +943,13 @@ impl Project {
         {
             return invalid(format!("{group} is not a group track"));
         }
-        self.track_mut(id)?.group = group;
+        let before = std::mem::replace(&mut self.track_mut(id)?.group, group);
+        if let Some(group) = group
+            && let Err(error) = self.no_loop(format!("putting {id} in {group}"))
+        {
+            self.track_mut(id)?.group = before;
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -947,10 +970,15 @@ impl Project {
     pub fn set_send(&mut self, id: TrackId, to: TrackId, level_db: Option<f32>) -> Result<(), EditError> {
         self.can_send(id, to)?;
         let level_db = level_db.map(validate_volume).transpose()?;
+        let before = self.track(id)?.sends.clone();
         let sends = &mut self.track_mut(id)?.sends;
         sends.retain(|send| send.to != to);
         if let Some(level_db) = level_db {
             sends.push(Send { to, level_db });
+            if let Err(error) = self.no_loop(format!("sending {id} to {to}")) {
+                self.track_mut(id)?.sends = before;
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -1439,6 +1467,7 @@ impl Project {
                 params: BTreeMap::new(),
                 state: None,
                 preset: None,
+                sidechain: None,
             },
         );
         Ok(id)
@@ -1482,6 +1511,105 @@ impl Project {
             .ok_or(EditError::DeviceNotFound(id))
     }
 
+    fn devices_mut(&mut self) -> impl Iterator<Item = &mut Device> {
+        self.tracks.iter_mut().flat_map(|t| t.devices.iter_mut()).chain(self.master.devices.iter_mut())
+    }
+
+    // ---- routing -------------------------------------------------------
+
+    /// Has a device listen to `track` in place of its own input (see
+    /// [`Device::sidechain`]), or to its own input again with `None`.
+    ///
+    /// The track is heard as it leaves its devices, so it has to be played
+    /// before the track the device is on: a device cannot listen to its
+    /// own track, to the group its track plays through or to a return its
+    /// track sends to, nor to anything else that would have two tracks
+    /// each waiting for the other. Whether the device does anything with a
+    /// key is not the model's to know; the session refuses one that does
+    /// not.
+    pub fn set_sidechain(&mut self, id: DeviceId, track: Option<TrackId>) -> Result<(), EditError> {
+        let chain = self.device_chain(id)?;
+        if let Some(track) = track {
+            self.track(track)?;
+            if chain == ChainRef::Track(track) {
+                return invalid(format!(
+                    "{id} is on {track} itself: without a sidechain it already listens to what comes into it"
+                ));
+            }
+        }
+        let before = std::mem::replace(&mut self.device_mut(id)?.sidechain, track);
+        if let Some(track) = track
+            && let Err(error) = self.no_loop(format!("having {id} listen to {track}"))
+        {
+            self.device_mut(id)?.sidechain = before;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// The tracks that must have been played before `track` can be: the
+    /// members of a group, the tracks that send to a return (by a send set
+    /// by hand or by one that is its envelope, switched on or not), and the
+    /// tracks its devices listen to. In the order of the track list,
+    /// without repeats.
+    pub fn feeds(&self, track: TrackId) -> Vec<TrackId> {
+        let Ok(node) = self.track(track) else { return Vec::new() };
+        let keys: Vec<TrackId> = node.devices.iter().filter_map(|device| device.sidechain).collect();
+        let sends_by_envelope = |from: TrackId| {
+            let moved = AutomationTarget::Send { track: from, to: track };
+            self.automation.iter().any(|lane| lane.target == moved)
+        };
+        self.tracks
+            .iter()
+            .filter(|other| {
+                other.id != track
+                    && (other.group == Some(track)
+                        || other.sends.iter().any(|send| send.to == track)
+                        || sends_by_envelope(other.id)
+                        || keys.contains(&other.id))
+            })
+            .map(|other| other.id)
+            .collect()
+    }
+
+    /// The order to play the tracks in, so that each comes after every
+    /// track that [feeds](Self::feeds) it; `None` if there is no such
+    /// order, because two tracks each wait for the other.
+    ///
+    /// Of the tracks that could come next, a normal track goes before a
+    /// group and a group before a return, and otherwise the one higher in
+    /// the track list: with nothing listening to anything this is all the
+    /// normal tracks, then the groups, then the returns.
+    pub fn playing_order(&self) -> Option<Vec<TrackId>> {
+        let stage = |kind: TrackKind| match kind {
+            TrackKind::Normal => 0,
+            TrackKind::Group => 1,
+            TrackKind::Return => 2,
+        };
+        let mut waiting: Vec<(u8, TrackId, Vec<TrackId>)> =
+            self.tracks.iter().map(|track| (stage(track.kind), track.id, self.feeds(track.id))).collect();
+        // Stable, so tracks of one kind stay in the order of the list.
+        waiting.sort_by_key(|(stage, _, _)| *stage);
+        let mut order = Vec::with_capacity(waiting.len());
+        while !waiting.is_empty() {
+            let ready = waiting.iter().position(|(_, _, feeds)| feeds.iter().all(|feed| order.contains(feed)))?;
+            order.push(waiting.remove(ready).1);
+        }
+        Some(order)
+    }
+
+    /// An error that says `doing` would make a loop, if the tracks can no
+    /// longer be put in an order to play them in.
+    fn no_loop(&self, doing: String) -> Result<(), EditError> {
+        match self.playing_order() {
+            Some(_) => Ok(()),
+            None => invalid(format!(
+                "{doing} would make a loop: each of the two would have to be played before the other. A device can \
+                 listen to any track that does not itself play through, send to or listen to the track it is on"
+            )),
+        }
+    }
+
     // ---- automation ----------------------------------------------------
 
     /// Replaces the envelope for `target`. An empty list removes the lane.
@@ -1515,9 +1643,18 @@ impl Project {
         // A lane that is switched off stays off when its points are edited.
         let enabled = existing.is_none_or(|lane| lane.enabled);
         let travel = existing.map_or_else(|| target.travel().unwrap_or_default(), |lane| lane.travel);
+        let new = existing.is_none();
         self.automation.retain(|lane| lane.target != target);
         if !points.is_empty() {
-            self.automation.push(AutomationLane { target, points, travel, enabled });
+            self.automation.push(AutomationLane { target: target.clone(), points, travel, enabled });
+            // A send that an envelope opens is a send: its return has to be
+            // played after the track, like any other it is sent to.
+            if let (true, AutomationTarget::Send { track, to }) = (new, &target)
+                && let Err(error) = self.no_loop(format!("sending {track} to {to}"))
+            {
+                self.automation.retain(|lane| lane.target != target);
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -1593,9 +1730,17 @@ impl Project {
                 project.format_version
             ));
         }
-        // What an older file leaves unsaid has been read as it was meant
-        // then (a lane with no travel is straight in its units). From here
-        // on the project is this version's, and is saved as such.
+        // A file of an older format says less than it means: what it leaves
+        // unsaid is written into it here, once, so that it sounds as it did.
+        if project.format_version < 2 {
+            let devices = project.tracks.iter_mut().flat_map(|track| track.devices.iter_mut());
+            for device in devices.chain(project.master.devices.iter_mut()) {
+                crate::formats::keep_format_1(&device.uri, &mut device.params);
+            }
+        }
+        // (An automation lane of a file before format 3 says nothing of
+        // how its lines travel and has been read as it was meant then:
+        // straight in its units. There is nothing to write into it.)
         project.format_version = FORMAT_VERSION;
         Ok(project)
     }
@@ -1738,6 +1883,20 @@ mod tests {
         project.set_send(lead, echo, None).unwrap();
         assert_eq!(lane(&project, &throw).points, points, "removing the send by hand leaves the envelope");
 
+        // A send that is an envelope is a send to whoever orders the tracks:
+        // the lead cannot listen to the return it feeds, nor be made to feed
+        // a return it listens to.
+        let squeeze = project.add_device(ChainRef::Track(lead), "builtin:compressor", "Duck", None).unwrap();
+        let loop_of = |error: EditError| error.to_string().contains("would make a loop");
+        assert!(project.set_sidechain(squeeze, Some(echo)).is_err_and(loop_of), "it sends there by its envelope");
+        assert!(project.feeds(echo).contains(&lead) && project.feeds(hall).contains(&bus));
+        project.set_sidechain(squeeze, Some(hall)).unwrap();
+        let before = project.clone();
+        let to_hall = AutomationTarget::Send { track: lead, to: hall };
+        assert!(project.set_automation(to_hall, points.clone()).is_err_and(loop_of));
+        assert_eq!(project, before, "and what is refused changes nothing");
+        project.remove_device(squeeze).unwrap();
+
         // An envelope goes with the return it feeds, and with its track.
         project.remove_track(echo).unwrap();
         assert!(
@@ -1812,8 +1971,15 @@ mod tests {
 
     #[test]
     fn a_file_saved_before_lines_followed_their_controls_plays_as_it_did() {
-        // A project as version 1 wrote it: a fade and a sweep, neither lane
-        // saying how its lines travel, because there was one way only.
+        for format in [1, 2] {
+            an_older_file_plays_as_it_did(format);
+        }
+    }
+
+    fn an_older_file_plays_as_it_did(format: u32) {
+        // A project as a build before format 3 wrote it: a fade and a
+        // sweep, neither lane saying how its lines travel, because there
+        // was one way only.
         let old = r#"{
             "format_version": 1,
             "name": "before",
@@ -1836,7 +2002,8 @@ mod tests {
             ],
             "next_id": 3
         }"#;
-        let mut project = Project::from_json(old).expect("a version 1 file opens");
+        let old = &old.replace("\"format_version\": 1", &format!("\"format_version\": {format}"));
+        let mut project = Project::from_json(old).expect("a file of an older format opens");
         let volume = AutomationTarget::TrackVolume { track: TrackId(1) };
         let cutoff = AutomationTarget::DeviceParam { device: DeviceId(2), param: "cutoff".into() };
         // Straight in decibels and in hertz, exactly as it was played then.
@@ -1864,7 +2031,8 @@ mod tests {
         assert_eq!(lane(&project, &AutomationTarget::MasterVolume).travel, Travel::FADER);
 
         // And a file from a later version than this build is refused in words.
-        let later = old.replace("\"format_version\": 1", &format!("\"format_version\": {}", FORMAT_VERSION + 1));
+        let later = old
+            .replace(&format!("\"format_version\": {format}"), &format!("\"format_version\": {}", FORMAT_VERSION + 1));
         let refusal = Project::from_json(&later).unwrap_err().to_string();
         assert!(refusal.contains("newer version") && refusal.contains(&format!("up to {FORMAT_VERSION}")), "{refusal}");
     }
@@ -1967,6 +2135,100 @@ mod tests {
         project.remove_device(synth).unwrap();
         assert!(project.automation.is_empty(), "lanes are removed with their device");
         assert!(project.set_automation(target, vec![]).is_err());
+    }
+
+    #[test]
+    fn a_device_listens_to_a_track_that_can_be_played_before_its_own() {
+        let mut project = Project::new("t");
+        let (kick, bass) = (project.add_track("Kick"), project.add_track("Bass"));
+        let drums = project.add_track_of_kind("Drums", TrackKind::Group);
+        let room = project.add_track_of_kind("Room", TrackKind::Return);
+        let squeeze = project.add_device(ChainRef::Track(bass), "builtin:compressor", "Duck", None).unwrap();
+        let glue = project.add_device(ChainRef::Master, "builtin:compressor", "Glue", None).unwrap();
+        let order = |project: &Project| project.playing_order().unwrap();
+
+        // Nothing listens to anything: normal tracks, groups, returns.
+        project.set_track_group(kick, Some(drums)).unwrap();
+        project.set_send(kick, room, Some(-12.0)).unwrap();
+        assert_eq!(order(&project), [kick, bass, drums, room]);
+        assert_eq!(project.feeds(drums), [kick]);
+        assert!(!project.to_json().contains("sidechain"), "not worth a line in the file while there is none");
+
+        // The bass listens to the kick, which is before it anyway; then to
+        // the drum group, which now has to come first; then to the return.
+        project.set_sidechain(squeeze, Some(kick)).unwrap();
+        assert_eq!(
+            (project.device(squeeze).unwrap().sidechain, order(&project)),
+            (Some(kick), vec![kick, bass, drums, room])
+        );
+        project.set_sidechain(squeeze, Some(drums)).unwrap();
+        assert_eq!(order(&project), [kick, drums, bass, room]);
+        assert_eq!(project.feeds(bass), [drums]);
+        project.set_sidechain(squeeze, Some(room)).unwrap();
+        assert_eq!(order(&project), [kick, drums, room, bass]);
+        // The master is played last and may listen to any track.
+        project.set_sidechain(glue, Some(bass)).unwrap();
+        // It is saved, and copied with its track.
+        assert_eq!(Project::from_json(&project.to_json()).unwrap(), project);
+        let copy = project.duplicate_track(bass).unwrap();
+        assert_eq!(project.track(copy).unwrap().devices[0].sidechain, Some(room));
+
+        // What would have two tracks wait for each other is refused, by
+        // whichever edit comes second, and leaves things as they were.
+        let before = project.clone();
+        let refused = |result: Result<(), EditError>| result.unwrap_err().to_string();
+        assert!(refused(project.set_sidechain(squeeze, Some(bass))).contains("itself"));
+        assert!(refused(project.set_send(bass, room, Some(0.0))).contains("loop"), "the bass listens to that return");
+        project.set_sidechain(squeeze, Some(drums)).unwrap();
+        assert!(refused(project.set_track_group(bass, Some(drums))).contains("loop"));
+        let on_kick = project.add_device(ChainRef::Track(kick), "builtin:compressor", "Kick", None).unwrap();
+        assert!(
+            refused(project.set_sidechain(on_kick, Some(bass))).contains("loop"),
+            "the kick plays through the drums"
+        );
+        assert!(project.set_sidechain(squeeze, Some(TrackId(999))).is_err());
+        assert!(project.set_sidechain(DeviceId(999), Some(kick)).is_err());
+        project.remove_device(on_kick).unwrap();
+        project.set_sidechain(squeeze, Some(room)).unwrap();
+        // (One id was spent on the device that came and went.)
+        assert_eq!(project.tracks, before.tracks);
+
+        // A track that is deleted is listened to by nothing; its own
+        // devices go with it.
+        project.remove_track(room).unwrap();
+        assert_eq!(project.device(squeeze).unwrap().sidechain, None);
+        project.set_sidechain(glue, None).unwrap();
+        assert_eq!(project.device(glue).unwrap().sidechain, None);
+    }
+
+    #[test]
+    fn a_file_of_format_1_is_read_as_what_it_meant() {
+        let mut project = Project::new("old");
+        let track = project.add_track("A");
+        let reverb = project.add_device(ChainRef::Track(track), "builtin:reverb", "Reverb", None).unwrap();
+        let delay = project.add_device(ChainRef::Master, "builtin:delay", "Delay", None).unwrap();
+        let eq = project.add_device(ChainRef::Master, "builtin:eq", "EQ", None).unwrap();
+        project.device_mut(reverb).unwrap().params.insert("decay".into(), 0.7);
+        // As a build before format 2 wrote it.
+        let this_format = format!("\"format_version\": {FORMAT_VERSION}");
+        let old = project.to_json().replace(&this_format, "\"format_version\": 1");
+        assert_ne!(old, project.to_json());
+
+        let read = Project::from_json(&old).unwrap();
+        assert_eq!(read.format_version, FORMAT_VERSION);
+        let params = |id: DeviceId| read.device(id).unwrap().params.clone();
+        assert_eq!(params(reverb).get("legacy"), Some(&1.0));
+        assert_eq!(params(reverb).get("high_cut"), Some(&20_000.0));
+        assert_eq!((params(reverb).get("decay"), params(reverb).len()), (Some(&0.7), 3));
+        assert_eq!(params(delay).get("legacy"), Some(&1.0), "on the master as on a track");
+        assert!(params(eq).is_empty(), "a device that sounds as it did is left alone");
+        // Saved again it is a file of this format, and reads back the same.
+        assert_eq!(Project::from_json(&read.to_json()).unwrap(), read);
+        // A file of this format is taken at its word: a new reverb stays new.
+        assert!(Project::from_json(&project.to_json()).unwrap().device(delay).unwrap().params.is_empty());
+        // And one from a later build is refused in words.
+        let later = project.to_json().replace(&this_format, "\"format_version\": 99");
+        assert!(Project::from_json(&later).unwrap_err().to_string().contains("newer version"));
     }
 
     #[test]

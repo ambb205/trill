@@ -37,6 +37,14 @@ pub enum Icon {
     /// Recording, and a track that will be recorded: the round dot every
     /// recorder has used for it. The one round thing in the kit.
     Record,
+    /// The stage: a frame with the playhead standing in it.
+    Stage,
+    /// Holds what is playing where it is.
+    Pause,
+    /// To the step before: a bar and an arrowhead pointing at it.
+    StepBack,
+    /// To the next step.
+    StepForward,
 }
 
 impl Icon {
@@ -62,6 +70,10 @@ impl Icon {
             Icon::Keyboard => "Computer keyboard",
             Icon::GoTo => "Go to",
             Icon::Record => "Record",
+            Icon::Stage => "Stage",
+            Icon::Pause => "Pause",
+            Icon::StepBack => "Step back",
+            Icon::StepForward => "Step forward",
         }
     }
 }
@@ -77,6 +89,20 @@ pub fn paint_icon(painter: &Painter, center: Pos2, icon: Icon, color: Color32) {
         }
         Icon::Stop => {
             painter.rect_filled(Rect::from_min_size(center - vec2(4.0, 4.0), vec2(9.0, 9.0)), 0.0, color);
+        }
+        Icon::Pause => {
+            for left in [-4.0, 2.0] {
+                painter.rect_filled(Rect::from_min_size(center + vec2(left, -4.0), vec2(3.0, 9.0)), 0.0, color);
+            }
+        }
+        Icon::StepBack | Icon::StepForward => {
+            // Mirror images: the bar is where the arrowhead points.
+            let way = if icon == Icon::StepBack { -1.0 } else { 1.0 };
+            let bar = center.x + way * 4.0 - if way < 0.0 { 0.0 } else { 1.0 };
+            painter.rect_filled(Rect::from_min_size(pos2(bar - 0.5, center.y - 4.0), vec2(2.0, 9.0)), 0.0, color);
+            let head =
+                vec![center + vec2(-way * 4.0, -4.5), center + vec2(way * 2.0, 0.5), center + vec2(-way * 4.0, 5.5)];
+            painter.add(Shape::convex_polygon(head, color, Stroke::NONE));
         }
         Icon::Loop => {
             // A track with an arrowhead where it turns back.
@@ -194,6 +220,12 @@ pub fn paint_icon(painter: &Painter, center: Pos2, icon: Icon, color: Color32) {
         Icon::Record => {
             painter.circle_filled(center + vec2(0.5, 0.5), 4.5, color);
         }
+        Icon::Stage => {
+            // A picture's frame, and the playhead a third of the way in.
+            let frame = Rect::from_min_size(center + vec2(-7.0, -4.0), vec2(15.0, 9.0));
+            paint::frame(painter, frame, color);
+            paint::vline(painter, frame.left() + 5.0, Rangef::new(frame.top() - 2.0, frame.bottom() + 2.0), color);
+        }
     }
 }
 
@@ -252,6 +284,10 @@ mod tests {
             Icon::Keyboard,
             Icon::GoTo,
             Icon::Record,
+            Icon::Stage,
+            Icon::Pause,
+            Icon::StepBack,
+            Icon::StepForward,
         ];
         crate::testing::with_ui(|ui, theme| {
             for icon in all {
