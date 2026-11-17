@@ -1105,9 +1105,24 @@ impl Journal {
                 _ => break,
             }
         }
-        let Some((base, base_states)) = base else {
+        let Some((mut base, base_states)) = base else {
             return Err(Broken("the journal does not say what song it began with".into()));
         };
+        // What a build of an older format kept is read as what it meant
+        // then, like a project file of that format: the song the story
+        // begins with, and every device and envelope a step kept, by the
+        // format the song was of when the step was made.
+        let mut format = base.format_version;
+        if format <= crate::project::FORMAT_VERSION {
+            let all = base.tracks.iter().flat_map(|track| &track.devices).chain(&base.master.devices);
+            let mut types: BTreeMap<DeviceId, String> = all.map(|device| (device.id, device.uri.clone())).collect();
+            crate::formats::keep_project(&mut base);
+            for entry in entries.iter_mut() {
+                if let What::Step(step) = &mut entry.what {
+                    step.change.keep_format(&mut format, &mut types);
+                }
+            }
+        }
         // A journal that was handed on without its conversation has gaps
         // in its numbers; here they are closed.
         let first = entries.front().map_or(dropped.entries + 1, |entry| entry.seq);
@@ -1541,6 +1556,94 @@ mod tests {
         assert_eq!(read.len(), journal.len() - 1);
         assert_eq!(read.head().unwrap(), song);
         assert!(read.entries().zip(read.first_seq()..).all(|(entry, seq)| entry.seq == seq));
+    }
+
+    #[test]
+    fn a_journal_from_before_a_format_changed_is_read_as_what_it_meant() {
+        use crate::project::{AutomationPoint, AutomationTarget, FORMAT_VERSION};
+        use crate::travel::Travel;
+        // A session as a build of format 2, and one of format 3, kept it:
+        // a synth, whose volume has moved 21 dB down the scale since, and
+        // devices whose sound has changed since. The second has an
+        // envelope that travels along the fader of the day.
+        for (format, travel) in [(2, Travel::Linear), (3, Travel::Fader { floor: -48.0 })] {
+            let mut song = Project::new("Song");
+            let track = song.add_track("Lead");
+            let synth = song.add_device(ChainRef::Track(track), "builtin:polysynth", "Poly Synth", None).unwrap();
+            song.device_mut(synth).unwrap().params.insert("volume".into(), 8.0);
+            let mut journal = Journal::begin(&song, 0);
+            let volume = AutomationTarget::DeviceParam { device: synth, param: "volume".into() };
+            let points = vec![AutomationPoint::new(0.0, 6.0), AutomationPoint::new(4.0, -48.0)];
+            let mut sampler = None;
+            step(&mut journal, &mut song, Who::Person, |song| {
+                sampler = song.add_device(ChainRef::Track(track), "builtin:sampler", "Sampler", None).ok();
+            });
+            step(&mut journal, &mut song, Who::Person, |song| {
+                song.device_mut(synth).unwrap().params.insert("volume".into(), 5.0);
+            });
+            step(&mut journal, &mut song, Who::Person, |song| {
+                song.write_automation(volume.clone(), points.clone(), travel).unwrap();
+            });
+            step(&mut journal, &mut song, Who::Person, |song| song.set_tempo(96.0).unwrap());
+            step(&mut journal, &mut song, Who::Person, |song| {
+                song.add_device(ChainRef::Master, "builtin:saturator", "Saturator", None).unwrap();
+            });
+            assert_eq!(journal.len(), 5);
+
+            // The text that build wrote, and its file of the song at every
+            // moment: the format's number is all that tells them from ours.
+            let ours = format!("\"format_version\":{FORMAT_VERSION}");
+            let text = journal.to_text(true);
+            assert!(text.matches(&ours).count() >= 2, "the first song and the step that set the tempo: {text}");
+            let old = text.replace(&ours, &format!("\"format_version\":{format}"));
+            let file_then = |song: &Project| {
+                let ours = format!("\"format_version\": {FORMAT_VERSION}");
+                song.to_json().replace(&ours, &format!("\"format_version\": {format}"))
+            };
+
+            // Read now, the journal leads through the songs that opening
+            // those files gives: every device with the sound it had, the
+            // envelope the curve it played.
+            let read = Journal::from_text(&old).unwrap();
+            assert_eq!(labels(&read), labels(&journal));
+            let with = States::With(read.blobs());
+            for moment in 0..=journal.len() {
+                let then = journal.song_after(moment, States::With(journal.blobs())).unwrap();
+                let opened = Project::from_json(&file_then(&then)).unwrap();
+                assert_eq!(read.song_after(moment, with).unwrap(), opened, "format {format}, after {moment} steps");
+            }
+            let head = read.head().unwrap();
+            assert_eq!(head.format_version, FORMAT_VERSION);
+            assert_eq!(head.device(synth).unwrap().params.get("volume"), Some(&-16.0));
+            assert_eq!(head.device(sampler.unwrap()).unwrap().params.get("legacy"), Some(&1.0));
+            let lane = head.automation.iter().find(|lane| lane.target == volume).unwrap();
+            assert_eq!(lane.points.iter().map(|point| point.value).collect::<Vec<_>>(), [-15.0, -69.0]);
+            let was = travel.between(6.0, -48.0, 0.5);
+            assert!((lane.value_at(2.0) - (was - 21.0)).abs() < 1e-9, "the same curve, 21 dB down the scale");
+
+            // Taken up for the song as its file opens, it has nothing to
+            // add: the two were read by one rule.
+            let opened = Project::from_json(&file_then(&song)).unwrap();
+            let resumed = read.resume(&opened, 9_000);
+            assert_eq!(resumed.len(), journal.len(), "{:?}", labels(&resumed));
+
+            // A journal that a build of this format had already taken up
+            // for such a song, before journals were read this way, says so
+            // in a step of its own: what differed between the song as the
+            // journal had it and the song as its file opened. That step
+            // carries the song's settings, so it says which format wrote
+            // it; it is in this format's terms and is left as it is.
+            let mut as_it_was_read = journal.head().unwrap();
+            as_it_was_read.format_version = format;
+            let mut taken_up = Journal::begin(&as_it_was_read, 0);
+            taken_up.record(9_000, Who::Person, &as_it_was_read, &opened, None);
+            let said = taken_up.to_text(true);
+            let entry = said.lines().last().unwrap().replacen("\"seq\":1", "\"seq\":6", 1);
+            let longer = Journal::from_text(&format!("{old}{entry}\n")).unwrap();
+            assert_eq!(longer.len(), journal.len() + 1);
+            assert_eq!(longer.head().unwrap(), opened);
+            assert_eq!(longer.song_after(journal.len(), States::With(longer.blobs())).unwrap(), opened);
+        }
     }
 
     #[test]

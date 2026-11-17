@@ -7,6 +7,7 @@
 //! Audio and MIDI panel.
 
 use super::audio_settings;
+use super::missing;
 use super::shortcuts::{self, Command};
 use super::state::{AudioSummary, Cx};
 use eframe::egui::{self, Align2, Color32, Painter, Rect, Sense, Ui, pos2};
@@ -63,6 +64,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
         let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         row.status(theme.info, &format!("Filming {name} \u{00B7} {how_far}"));
     }
+    // Files the song names that are not on disk: one line for all of
+    // them, which opens the list.
+    let missing_item = row.missing(ui);
     let problems = problems(row.cx);
     let items_end = row.problems(ui, &problems);
 
@@ -80,6 +84,15 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     cx.hint(&response, about);
     if response.clicked() {
         audio_settings::open(cx);
+    }
+    if let Some(response) = missing_item {
+        cx.hint(
+            &response,
+            "Files this song plays are not on disk \u{00B7} click to see them, what was found, and relink",
+        );
+        if response.clicked() {
+            missing::open(cx);
+        }
     }
 
     let hint = if cx.state.hint.text().is_empty() { IDLE_HINT } else { cx.state.hint.text() };
@@ -120,6 +133,24 @@ impl Row<'_, '_> {
         self.x += text::paint(self.painter, room, Align2::LEFT_CENTER, style, value, theme.ink_dim) + GAP;
     }
 
+    /// What the song is missing, in the warning color: a button that
+    /// opens the list. `None` when nothing is missing.
+    fn missing(&mut self, ui: &Ui) -> Option<egui::Response> {
+        let words = missing::status_words(&self.cx.sounds.missing.found)?;
+        let theme = self.cx.theme;
+        let start = self.x;
+        self.x = paint::dot(self.painter, pos2(self.x, self.bar.center().y), theme.metric.dot, theme.warn) + 5.0;
+        self.x += text::paint(self.painter, self.rest(), Align2::LEFT_CENTER, theme.text.micro, &words, theme.warn);
+        let item = Rect::from_min_max(pos2(start - 4.0, self.bar.top()), pos2(self.x + 4.0, self.bar.bottom()));
+        self.x += GAP;
+        let response = ui.interact(item, ui.scope_id().with("missing-files"), Sense::click());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Missing files: {words}")));
+        if response.hovered() {
+            self.painter.rect_filled(item, 0.0, theme.hover);
+        }
+        Some(response)
+    }
+
     /// How many things need attention, in the warning color; hovering lists
     /// them. Returns the x where the items end.
     fn problems(&mut self, ui: &Ui, problems: &[String]) -> f32 {
@@ -149,7 +180,9 @@ fn problems(cx: &Cx) -> Vec<String> {
     if let Some(warning) = &cx.audio.info.warning {
         problems.push(warning.clone());
     }
-    problems.extend(cx.snap.problems.iter().cloned());
+    // A file that is not on disk is said by the item beside this one,
+    // once for the song, and not here again for each clip that names it.
+    problems.extend(cx.sounds.missing.found.other_problems(cx.snap.problems.clone()));
     if cx.live.audio_faults > 0 {
         problems.push(format!(
             "A device crashed {} time(s) while processing audio; those moments were silenced.",

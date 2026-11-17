@@ -168,7 +168,9 @@ fn a_drum_rack_plays_its_pads_and_reports_the_missing_ones() {
     // Kick on beats 0 and 2, snare on 1 and 3, a hat on 1.5.
     let hits = [note(36, 0.0, 0.1), note(38, 1.0, 0.1), note(42, 1.5, 0.1), note(36, 2.0, 0.1), note(38, 3.0, 0.1)];
     let (track, rack) = instrument(&mut session, "builtin:drumrack", &hits);
-    session.set_device_params(rack, &[("pad38_level".into(), 0.5)]).unwrap();
+    // Every hit as its file is, whatever its velocity.
+    let plain = [("volume".into(), 0.0), ("velocity_sens".into(), 0.0), ("pad38_level".into(), 0.5)];
+    session.set_device_params(rack, &plain).unwrap();
     session.begin_gesture();
     session.set_pad_file(rack, 36, Some(&kick)).unwrap();
     session.set_pad_file(rack, 38, Some(&snare)).unwrap();

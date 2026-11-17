@@ -646,6 +646,15 @@ fn track_reply(session: &Session, id: TrackId, profile: &InstrumentProfile) -> V
         }
         None => out["instrument"] = json!(null),
     }
+    if profile.bend_range.is_none()
+        && let Some(range) = session.instrument_bend_range(id)
+    {
+        // The instrument's own setting, which the track follows while it says nothing itself.
+        out["pitch_wheel"] = json!(format!(
+            "bends {range} semitone(s) each way: the instrument's `bend_range` parameter, which bends written for \
+             this track follow (set that parameter to change it)"
+        ));
+    }
     if drums {
         // The whole map, the kit's own names first: what a lane or a note may be called.
         let map: Map<String, Value> = profile.drum_map().into_iter().map(|(name, key)| (name, json!(key))).collect();

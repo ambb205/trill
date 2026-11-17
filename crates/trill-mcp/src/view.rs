@@ -512,9 +512,16 @@ pub fn project_json(session: &Session, include_notes: bool) -> Value {
     if let Some(note) = loading_note(session) {
         out["loading"] = json!(note);
     }
+    // Files that are not on disk are said once, with what to do about
+    // them, in place of a line for every clip and pad that names one.
+    let missing = trill_runtime::files_missing_in(session);
     let problems: Vec<String> = session.problems().iter().map(ToString::to_string).collect();
+    let problems = crate::files::without_missing(problems, &missing);
     if !problems.is_empty() {
         out["problems"] = json!(problems);
+    }
+    if let Some(brief) = crate::files::brief(&missing) {
+        out["missing_files"] = brief;
     }
     // Warped clips play in time but repitched until their audio is ready.
     if session.preparing() > 0 {

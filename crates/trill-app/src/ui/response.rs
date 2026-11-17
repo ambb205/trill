@@ -155,6 +155,8 @@ pub fn saturate(shape: usize, x: f64) -> f64 {
     match shape {
         0 => x.tanh(),
         1 => x.clamp(-1.0, 1.0),
+        // A quarter of a sine up to the ceiling, and the ceiling from there.
+        3 => (x.clamp(-1.0, 1.0) * std::f64::consts::FRAC_PI_2).sin(),
         // Asymmetric: the positive half saturates sooner than the negative.
         _ if x >= 0.0 => x.tanh(),
         _ => (x * 0.7).tanh() / 0.7,
@@ -352,7 +354,9 @@ mod tests {
         assert_eq!(saturate(1, 3.0), 1.0);
         assert_eq!(saturate(1, -0.25), -0.25);
         assert!(saturate(2, -1.0).abs() > saturate(2, 1.0).abs(), "the tube shape is asymmetric");
-        for shape in 0..3 {
+        assert!(close(saturate(3, 0.5), std::f64::consts::FRAC_1_SQRT_2, 1e-12), "a quarter of a sine");
+        assert_eq!((saturate(3, 1.0), saturate(3, 2.5), saturate(3, -4.0)), (1.0, 1.0, -1.0));
+        for shape in 0..4 {
             assert_eq!(saturate(shape, 0.0), 0.0);
         }
         assert!(close(pump_gain(0.7, 2.0, 0.0), 0.3, 1e-12), "ducked by the depth on the beat");

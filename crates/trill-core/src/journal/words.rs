@@ -90,6 +90,11 @@ fn clip_change(was: &Clip, now: &Clip) -> String {
         format!("Resized the clip {clip}")
     } else if was.controllers() != now.controllers() {
         format!("Shaped a controller of {clip}")
+    } else if let (Some(played), Some(plays)) = (was.audio(), now.audio())
+        && played.path != plays.path
+    {
+        // The file it plays, by its name: where it is is nobody's story.
+        format!("Had the clip {clip} play {}", quoted(crate::files::file_name(&plays.path)))
     } else {
         format!("Changed the clip {clip}")
     }
@@ -403,6 +408,14 @@ mod tests {
             "Moved the clip \u{201C}Hook\u{201D} to \u{201C}Bass\u{201D}"
         );
         assert_eq!(words(p, |p| p.clip_mut(hook).unwrap().muted = true), "Muted the clip \u{201C}Hook\u{201D}");
+        let mut with_audio = project.clone();
+        let content = crate::project::AudioContent::new("A/fx/riser.wav");
+        let riser = with_audio.add_audio_clip(bass, "Riser", 32.0, 4.0, content).unwrap();
+        let relink = crate::Relink { place: crate::FilePlace::Clip(riser), path: r"B\fx\Riser 2.wav".into() };
+        assert_eq!(
+            words(&with_audio, |p| p.relink(std::slice::from_ref(&relink), &crate::files::NoDeviceFiles).unwrap()),
+            "Had the clip \u{201C}Riser\u{201D} play \u{201C}Riser 2.wav\u{201D}"
+        );
         assert_eq!(
             words(p, |p| p.clip_mut(hook).unwrap().add_notes(&[note_at(0.0), note_at(1.0), note_at(2.0)]).unwrap()),
             "Added 3 notes to \u{201C}Hook\u{201D}"

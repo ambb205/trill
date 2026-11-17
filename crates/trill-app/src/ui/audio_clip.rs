@@ -435,17 +435,64 @@ fn missing(ui: &mut Ui, cx: &mut Cx, clip: &Clip, audio: &AudioContent, reason: 
     };
     text::paint(&painter, line(-34.0), Align2::CENTER_CENTER, theme.text.caps, "This clip is silent", theme.warn);
     let quiet = trill_noir::TextStyle { size: 12.0, ..theme.text.body };
-    text::paint(&painter, line(-14.0), Align2::CENTER_CENTER, quiet, reason, theme.ink_dim);
-    let button = Rect::from_center_size(pos2(view.center().x, middle + 22.0), vec2(150.0, theme.metric.control));
-    if view.height() > 90.0 {
-        super::widgets::place(ui, button, "locate", egui::Layout::top_down(egui::Align::Center), |ui| {
-            let response = trill_noir::button(ui, theme, "Locate the file\u{2026}", trill_noir::Variant::Primary);
-            cx.hint(&response, "Choose where the file is now; the clip keeps its place, length and settings");
-            if response.clicked() {
-                cx.sounds.relink_dialog(clip.id, Path::new(&audio.path).parent().map(Path::to_path_buf));
-            }
-        });
+    // What was found for its file, if the file is one of the song's
+    // missing ones and something was: said in place of the bare reason.
+    let found = cx.sounds.missing.found.clone();
+    let file = found.files.iter().find(|file| file.path == audio.path);
+    let candidate = file.and_then(|file| file.found());
+    match candidate {
+        Some(candidate) => {
+            let says = format!(
+                "The file is not on disk. {} {}",
+                match candidate.confidence {
+                    trill_runtime::Confidence::Sure => "It was found in",
+                    trill_runtime::Confidence::Likely => "It is likely in",
+                    trill_runtime::Confidence::Unsure => "A file of its name is in",
+                },
+                trill_core::files::folder_of(&candidate.path)
+            );
+            text::paint_name(&painter, line(-14.0), Align2::CENTER_CENTER, quiet, &says, theme.ink_dim);
+        }
+        None => {
+            text::paint(&painter, line(-14.0), Align2::CENTER_CENTER, quiet, reason, theme.ink_dim);
+        }
     }
+    if view.height() <= 90.0 {
+        return;
+    }
+    // The buttons, side by side in the middle: what was found, locating
+    // the file by hand, and the list of everything that is missing.
+    let use_found = candidate.map(|_| "Use it");
+    let others = found.files.len() > 1;
+    let labels = [use_found, Some("Locate the file\u{2026}"), others.then_some("All missing files\u{2026}")];
+    let gap = theme.metric.gap;
+    let widths: Vec<f32> = labels.iter().flatten().map(|label| trill_noir::button_width(ui, theme, label)).collect();
+    let total = widths.iter().sum::<f32>() + gap * widths.len().saturating_sub(1) as f32;
+    let row = Rect::from_center_size(pos2(view.center().x, middle + 22.0), vec2(total + 2.0, theme.metric.control));
+    let layout = egui::Layout::left_to_right(egui::Align::Center);
+    super::widgets::place(ui, row, "locate", layout, |ui| {
+        ui.spacing_mut().item_spacing = vec2(gap, 0.0);
+        if let (Some(label), Some(candidate), Some(file)) = (use_found, candidate, file) {
+            let response = trill_noir::button(ui, theme, label, trill_noir::Variant::Primary);
+            cx.hint(&response, format!("{}: {}", candidate.path, candidate.why));
+            if response.clicked() {
+                cx.sounds.relink_file(file.path.clone(), candidate.path.clone().into());
+            }
+        }
+        let variant = if use_found.is_some() { trill_noir::Variant::Default } else { trill_noir::Variant::Primary };
+        let response = trill_noir::button(ui, theme, "Locate the file\u{2026}", variant);
+        cx.hint(&response, "Choose where the file is now; the clip keeps its place, length and settings");
+        if response.clicked() {
+            cx.sounds.relink_dialog(clip.id, Path::new(&audio.path).parent().map(Path::to_path_buf));
+        }
+        if others {
+            let response = trill_noir::button(ui, theme, "All missing files\u{2026}", trill_noir::Variant::Default);
+            cx.hint(&response, "The list of every file this song plays that is not on disk, and what was found");
+            if response.clicked() {
+                super::missing::open(cx);
+            }
+        }
+    });
 }
 
 /// The stretch of the file, in seconds, the clip plays at `tempo`.

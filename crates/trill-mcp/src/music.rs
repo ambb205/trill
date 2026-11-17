@@ -699,7 +699,8 @@ fn write(
         }
         bars => bars.map(|bars| bars as usize),
     };
-    let profile = session.project().track(destination.track).map(|track| track.profile.clone()).unwrap_or_default();
+    // With how far its instrument's wheel bends, where the track says nothing of it.
+    let profile = session.profile_of(destination.track);
     let mut part = build(&Setting { signature, tempo: session.project().tempo, bars, profile: profile.clone() })?;
     if part.notes.len() > MAX_NOTES {
         return Err(format!("that would write {} notes; write fewer bars or a slower rate", part.notes.len()));

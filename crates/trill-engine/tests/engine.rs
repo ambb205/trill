@@ -828,7 +828,7 @@ fn live_parameter_changes_are_heard() {
     let loud = level(&meter);
     assert!(loud > 0.05, "expected signal, got {loud}");
 
-    session.set_device_params(synth, &[("volume".into(), -40.0)]).unwrap();
+    session.set_device_params(synth, &[("volume".into(), -61.0)]).unwrap();
     let quiet = level(&meter);
     assert!(quiet < loud * 0.05, "volume change not heard: {loud} -> {quiet}");
 

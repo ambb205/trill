@@ -33,7 +33,9 @@
 //! parameters, [`sample_panels`] draws what the sampler and the drum rack
 //! play, and [`displays`] draws the devices' small curves from the math in
 //! [`response`]. [`editors`] opens the windows plugins bring with them,
-//! and [`recovery`] offers back the work a crash left unsaved.
+//! and [`recovery`] offers back the work a crash left unsaved. [`missing`]
+//! lists the files the song names that are not on disk, with what was
+//! found for each, and relinks them.
 //! [`making_of`] plays the session of the song again from its journal, and
 //! [`stage`] shows the song filmed as it plays, in place of all of these.
 //! [`files`] runs dialogs, imports and exports off the UI
@@ -64,6 +66,7 @@ mod files;
 mod filming;
 mod keyboard;
 mod making_of;
+mod missing;
 mod mixer;
 mod piano_roll;
 mod recording;
@@ -156,6 +159,8 @@ pub struct UiOptions {
     pub show_settings: bool,
     /// Open with the film panel up.
     pub show_film: bool,
+    /// Open with the list of missing files up.
+    pub show_missing: bool,
     /// Start a take on the armed tracks as soon as the window opens.
     pub record: bool,
     /// Open on the stage.
@@ -190,6 +195,7 @@ impl Default for UiOptions {
             keyboard: KeyboardOptions::default(),
             show_settings: false,
             show_film: false,
+            show_missing: false,
             record: false,
             stage: false,
             making_of: None,

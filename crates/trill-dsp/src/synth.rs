@@ -1,10 +1,11 @@
 //! Poly Synth: a 16-voice subtractive synthesizer with two oscillators,
-//! unison, phase-modulation FM, a multimode filter and two envelopes.
+//! unison, phase-modulation FM, a multimode filter, two envelopes and a
+//! pitch envelope.
 
 use crate::define_params;
 use crate::level::ChannelLevel;
 use crate::params::{ParamValues, PresetDef, boolean, choice, float, int};
-use crate::util::{Rng, db_to_gain, midi_to_hz, pan_gains};
+use crate::util::{Rng, SILENT_DB, level_gain, midi_to_hz, pan_gains};
 use crate::voice::{EnvShape, Envelope, FILTER_MODES, FilterMode, Stage, VoiceFilter, resonance_to_q};
 use std::f32::consts::TAU;
 use trill_core::device::{
@@ -16,8 +17,26 @@ const MAX_UNISON: usize = 7;
 const MAX_HELD: usize = 16;
 /// Samples between control-rate updates (pitch, filter cutoff, LFO).
 const CONTROL_BLOCK: usize = 16;
-/// Headroom so that chords do not clip at the default volume.
-const VOICE_GAIN: f32 = 0.22;
+/// The level of one voice at a volume of 0 dB and full velocity: 21 dB
+/// over what it was before format 4 (0.22, with a default volume of 0 dB:
+/// the same sound, 21 dB down the scale). At the default volume a voice
+/// peaks 13 dB under full scale, which is the room a chord needs; and at
+/// the same volume setting, envelope and velocity a sine is as loud as the
+/// one of the synth it was measured against (Ableton Live's Operator, on
+/// the bench's second song: within 0.2 dB at velocities 112 and 127).
+const VOICE_GAIN: f32 = 2.468_44;
+/// The level of the noise at a noise level of 1, against the peak of an
+/// oscillator: 13 dB under it, which is where white noise through the
+/// band-pass was measured to be in the same synth (within 0.1 dB over
+/// seven sections of the song). Before format 4 it was the oscillator's
+/// own peak.
+const NOISE_GAIN: f32 = 0.223_87;
+/// Frames between two readings of a voice's pitch envelope, counted from
+/// the start of its note: a third of a millisecond at 48 kHz.
+const PITCH_STEP: u32 = 16;
+/// The natural logarithm of a thousand: an envelope that has fallen by
+/// 60 dB has this many time constants behind it.
+const SIXTY_DB: f32 = 6.907_755;
 /// The vibrato the mod wheel adds at the top of its travel, in semitones,
 /// at the LFO's rate.
 const MOD_WHEEL_VIBRATO: f32 = 0.5;
@@ -33,7 +52,14 @@ define_params!(P, PARAMS, [
     FmAmount => float("fm_amount", "FM Amount (osc 2 modulates osc 1)", 0.0, 1.0, 0.0, ""),
     FmEnv => float("fm_env", "FM Follows Filter Envelope", 0.0, 1.0, 0.0, ""),
     SubLevel => float("sub_level", "Sub Oscillator Level", 0.0, 1.0, 0.0, ""),
-    NoiseLevel => float("noise_level", "Noise Level", 0.0, 1.0, 0.0, ""),
+    NoiseLevel => float(
+        "noise_level",
+        "Noise Level (white noise; at 1 it peaks 13 dB under an oscillator)",
+        0.0,
+        1.0,
+        0.0,
+        ""
+    ),
     Unison => int("unison", "Unison Voices", 1, MAX_UNISON as i32, 1, ""),
     UnisonDetune => float("unison_detune", "Unison Detune", 0.0, 100.0, 20.0, "cents"),
     UnisonSpread => float("unison_spread", "Unison Stereo Spread", 0.0, 1.0, 0.7, ""),
@@ -56,12 +82,68 @@ define_params!(P, PARAMS, [
     Glide => float("glide", "Glide Time (mono mode)", 0.0, 2.0, 0.0, "s"),
     Mono => boolean("mono", "Mono (legato)", false),
     VelocitySens => float("velocity_sens", "Velocity Sensitivity", 0.0, 1.0, 0.6, ""),
-    Volume => float("volume", "Volume", -48.0, 12.0, 0.0, "dB"),
+    Volume => float(
+        "volume",
+        "Volume (silent at -70; at 0 one voice at full velocity is 8 dB over full scale, so chords need the room \
+         the default leaves)",
+        SILENT_DB as f64,
+        6.0,
+        -21.0,
+        "dB"
+    ),
+    PitchEnv => float(
+        "pitch_env",
+        "Pitch Envelope (where every note starts, from its own pitch; it falls there as the amp envelope decays, \
+         fast at first: half of the way in a tenth of the pitch envelope time. 12 over 0.03 s is the knock of an 808)",
+        -48.0,
+        48.0,
+        0.0,
+        "st"
+    ),
+    PitchDecay => float(
+        "pitch_decay",
+        "Pitch Envelope Time (to a thousandth of the way from the note)",
+        0.001,
+        5.0,
+        0.05,
+        "s"
+    ),
+    BendRange => float(
+        "bend_range",
+        "Pitch Wheel Range (how far the wheel bends, each way; the track's instrument profile takes it from here)",
+        0.0,
+        48.0,
+        PITCH_BEND_SEMITONES as f64,
+        "st"
+    ),
+    OscLevel => float(
+        "osc_level",
+        "Oscillator Level (of oscillators 1 and 2 together; 0 turns them off and leaves the sub and the noise)",
+        0.0,
+        1.0,
+        1.0,
+        ""
+    ),
+    NoiseWidth => float(
+        "noise_width",
+        "Noise Stereo Width (0 = the same on both sides, 1 = a noise of its own on each: as wide as noise gets)",
+        0.0,
+        1.0,
+        0.0,
+        ""
+    ),
+    Legacy => boolean(
+        "legacy",
+        "Legacy (the noise of songs saved before format 4: 13 dB louder, as high as an oscillator)",
+        false
+    ),
 ]);
 
 pub const DESCRIPTION: &str = "16-voice subtractive synth: two oscillators (sine/triangle/saw/square) with \
-unison and FM, sub oscillator, noise, multimode resonant filter with its own envelope, LFO, mono/glide. \
-Covers pads, basses, leads, plucks, keys and bells. Start from a preset.";
+unison and FM, sub oscillator, noise, multimode resonant filter with its own envelope, a pitch envelope, LFO, \
+mono/glide. Covers pads, basses, leads, plucks, keys and bells: start from a preset. A sine with `pitch_env` 12 and \
+`pitch_decay` 0.03 is an 808; `osc_level` 0 with `noise_level` 1 is noise alone (wide with `noise_width` 1) for \
+risers and splashes through the filter. `bend_range` sets how far the pitch wheel reaches.";
 
 pub const PRESETS: &[PresetDef] = &[
     PresetDef { name: "init", description: "Plain sawtooth, filter open", params: &[] },
@@ -107,7 +189,7 @@ pub const PRESETS: &[PresetDef] = &[
             ("lfo_pitch", 0.08),
             ("velocity_sens", 0.4),
             ("key_track", 0.3),
-            ("volume", -3.0),
+            ("volume", -24.0),
         ],
     },
     PresetDef {
@@ -149,7 +231,7 @@ pub const PRESETS: &[PresetDef] = &[
             ("glide", 0.03),
             ("velocity_sens", 0.4),
             ("osc2_detune", 6.0),
-            ("volume", 8.0),
+            ("volume", -13.0),
         ],
     },
     PresetDef {
@@ -165,7 +247,7 @@ pub const PRESETS: &[PresetDef] = &[
             ("mono", 1.0),
             ("glide", 0.04),
             ("velocity_sens", 0.2),
-            ("volume", 5.0),
+            ("volume", -16.0),
         ],
     },
     PresetDef {
@@ -186,7 +268,7 @@ pub const PRESETS: &[PresetDef] = &[
             ("filter_release", 0.1),
             ("mono", 1.0),
             ("glide", 0.06),
-            ("volume", 2.0),
+            ("volume", -19.0),
         ],
     },
     PresetDef {
@@ -210,7 +292,7 @@ pub const PRESETS: &[PresetDef] = &[
             ("filter_sustain", 0.0),
             ("filter_release", 0.35),
             ("key_track", 0.5),
-            ("volume", 6.0),
+            ("volume", -15.0),
         ],
     },
     PresetDef {
@@ -233,7 +315,7 @@ pub const PRESETS: &[PresetDef] = &[
             ("glide", 0.05),
             ("lfo_rate", 5.5),
             ("lfo_pitch", 0.12),
-            ("volume", 4.0),
+            ("volume", -17.0),
         ],
     },
     PresetDef {
@@ -250,7 +332,7 @@ pub const PRESETS: &[PresetDef] = &[
             ("unison", 3.0),
             ("unison_detune", 4.0),
             ("unison_spread", 0.2),
-            ("volume", 1.0),
+            ("volume", -20.0),
             ("attack", 0.002),
             ("decay", 3.5),
             ("sustain", 0.2),
@@ -319,7 +401,7 @@ pub const PRESETS: &[PresetDef] = &[
             ("velocity_sens", 0.0),
             ("lfo_rate", 6.5),
             ("lfo_pitch", 0.05),
-            ("volume", -4.0),
+            ("volume", -25.0),
         ],
     },
     PresetDef {
@@ -363,7 +445,7 @@ pub const PRESETS: &[PresetDef] = &[
             ("filter_release", 0.6),
             ("key_track", 0.6),
             ("velocity_sens", 0.8),
-            ("volume", 3.0),
+            ("volume", -18.0),
         ],
     },
 ];
@@ -380,6 +462,16 @@ struct Derived {
     fm_env: f32,
     sub: f32,
     noise: f32,
+    /// What the right side takes of the noise the left side has, and of a
+    /// noise of its own: 1 and 0 for the same noise on both.
+    noise_same: f32,
+    noise_own: f32,
+    /// Where a note starts, in semitones from its pitch, and how many
+    /// frames it takes to get there.
+    pitch_env: f32,
+    pitch_frames: f32,
+    /// How far the pitch wheel bends, in semitones each way.
+    bend_range: f32,
     unison: usize,
     detune: [f32; MAX_UNISON],
     pan_l: [f32; MAX_UNISON],
@@ -411,6 +503,8 @@ struct Voice {
     target: f32,
     velocity_gain: f32,
     age: u64,
+    /// Frames since the note started, for the pitch envelope.
+    pitch_age: u32,
     amp: Envelope,
     filt: Envelope,
     phase1: [f32; MAX_UNISON],
@@ -429,6 +523,7 @@ impl Voice {
             target: 60.0,
             velocity_gain: 0.0,
             age: 0,
+            pitch_age: 0,
             amp: Envelope::idle(),
             filt: Envelope::idle(),
             phase1: [0.0; MAX_UNISON],
@@ -443,6 +538,22 @@ impl Voice {
         self.held = false;
         self.amp = Envelope::idle();
         self.filt = Envelope::idle();
+    }
+
+    /// How far the pitch envelope has the note from its pitch, in
+    /// semitones, and for how many more frames that holds: read every
+    /// [`PITCH_STEP`] frames of the note's own age, so that where a buffer
+    /// or an event divides the frames makes no difference to it.
+    fn pitch_envelope(&self, d: &Derived) -> (f32, usize) {
+        let age = self.pitch_age as f32;
+        if d.pitch_env == 0.0 || age >= d.pitch_frames {
+            return (0.0, usize::MAX);
+        }
+        // As the other envelopes decay: by 60 dB over the time, and then
+        // it is there.
+        let read = self.pitch_age - self.pitch_age % PITCH_STEP;
+        let left = (-SIXTY_DB * read as f32 / d.pitch_frames).exp();
+        (d.pitch_env * left, (PITCH_STEP - self.pitch_age % PITCH_STEP) as usize)
     }
 
     /// `lfo` is the LFO's value for the stretch, `bend` what the wheels add
@@ -460,10 +571,6 @@ impl Voice {
         let len = out_l.len();
         self.note = self.target + (self.note - self.target) * d.glide_keep.powi(len as i32);
 
-        let inc1 = midi_to_hz(self.note + lfo * d.lfo_pitch + bend) / sample_rate;
-        let inc2 = inc1 * d.osc2_ratio;
-        let sub_inc = inc1 * 0.5;
-
         let env = self.filt.level;
         let octaves = d.filter_env * env + d.lfo_cutoff * lfo + d.key_track * (self.note - 60.0) / 12.0;
         let cutoff = d.cutoff * 2f32.powf(octaves);
@@ -471,50 +578,67 @@ impl Voice {
         let fm = d.fm * (1.0 - d.fm_env + d.fm_env * env);
         let gain = self.velocity_gain * d.gain;
         let use_osc1 = d.mix1 > 0.0;
-        let use_osc2 = d.mix2 > 0.0 || fm > 0.0;
+        // The second oscillator sounds, or bends the first: with neither it
+        // only keeps its place.
+        let use_osc2 = d.mix2 > 0.0 || (fm > 0.0 && use_osc1);
+        let wide = d.noise_own > 0.0;
 
-        for i in 0..len {
-            let amp = self.amp.tick(&d.amp);
-            self.filt.tick(&d.filt);
+        let mut i = 0;
+        while i < len {
+            // The stretch the pitch envelope stands still for.
+            let (fall, holds) = self.pitch_envelope(d);
+            let end = len.min(i.saturating_add(holds));
+            self.pitch_age = self.pitch_age.saturating_add((end - i) as u32);
+            let inc1 = midi_to_hz(self.note + lfo * d.lfo_pitch + bend + fall) / sample_rate;
+            let inc2 = inc1 * d.osc2_ratio;
+            let sub_inc = inc1 * 0.5;
 
-            let mut l = 0.0;
-            let mut r = 0.0;
-            for u in 0..d.unison {
-                let step1 = inc1 * d.detune[u];
-                let step2 = inc2 * d.detune[u];
-                let o2 = if use_osc2 { oscillator(d.wave2, self.phase2[u], step2) } else { 0.0 };
-                let o1 = if use_osc1 {
-                    let phase = self.phase1[u] + fm * o2;
-                    oscillator(d.wave1, phase - phase.floor(), step1)
-                } else {
-                    0.0
-                };
-                let sample = o1 * d.mix1 + o2 * d.mix2;
-                l += sample * d.pan_l[u];
-                r += sample * d.pan_r[u];
-                self.phase1[u] += step1;
-                self.phase1[u] -= self.phase1[u].floor();
-                self.phase2[u] += step2;
-                self.phase2[u] -= self.phase2[u].floor();
+            for i in i..end {
+                let amp = self.amp.tick(&d.amp);
+                self.filt.tick(&d.filt);
+
+                let mut l = 0.0;
+                let mut r = 0.0;
+                for u in 0..d.unison {
+                    let step1 = inc1 * d.detune[u];
+                    let step2 = inc2 * d.detune[u];
+                    let o2 = if use_osc2 { oscillator(d.wave2, self.phase2[u], step2) } else { 0.0 };
+                    let o1 = if use_osc1 {
+                        let phase = self.phase1[u] + fm * o2;
+                        oscillator(d.wave1, phase - phase.floor(), step1)
+                    } else {
+                        0.0
+                    };
+                    let sample = o1 * d.mix1 + o2 * d.mix2;
+                    l += sample * d.pan_l[u];
+                    r += sample * d.pan_r[u];
+                    self.phase1[u] += step1;
+                    self.phase1[u] -= self.phase1[u].floor();
+                    self.phase2[u] += step2;
+                    self.phase2[u] -= self.phase2[u].floor();
+                }
+                if d.sub > 0.0 {
+                    let sub = (self.sub_phase * TAU).sin() * d.sub;
+                    l += sub;
+                    r += sub;
+                    self.sub_phase += sub_inc;
+                    self.sub_phase -= self.sub_phase.floor();
+                }
+                if d.noise > 0.0 {
+                    let noise = rng.bipolar() * d.noise;
+                    l += noise;
+                    // A noise of its own on the right, as much as the width
+                    // asks for, at the same level whatever the width.
+                    r += if wide { noise * d.noise_same + rng.bipolar() * d.noise * d.noise_own } else { noise };
+                }
+
+                let (l, r) = self.filter.tick(d.filter_type, l, r);
+
+                let level = amp * gain * levels[i];
+                out_l[i] += l * level;
+                out_r[i] += r * level;
             }
-            if d.sub > 0.0 {
-                let sub = (self.sub_phase * TAU).sin() * d.sub;
-                l += sub;
-                r += sub;
-                self.sub_phase += sub_inc;
-                self.sub_phase -= self.sub_phase.floor();
-            }
-            if d.noise > 0.0 {
-                let noise = rng.bipolar() * d.noise;
-                l += noise;
-                r += noise;
-            }
-
-            let (l, r) = self.filter.tick(d.filter_type, l, r);
-
-            let level = amp * gain * levels[i];
-            out_l[i] += l * level;
-            out_r[i] += r * level;
+            i = end;
         }
 
         if self.amp.stage == Stage::Idle {
@@ -563,8 +687,8 @@ pub struct PolySynth {
     held: [u8; MAX_HELD],
     held_len: usize,
     pedal: Pedal,
-    /// The pitch wheel, in semitones.
-    bend: f32,
+    /// The pitch wheel, -1..=1.
+    wheel: f32,
     /// The mod wheel, 0..=1: vibrato on top of what the LFO is set to.
     mod_wheel: f32,
     /// Channel volume and expression.
@@ -590,7 +714,7 @@ impl PolySynth {
             held: [0; MAX_HELD],
             held_len: 0,
             pedal: Pedal::default(),
-            bend: 0.0,
+            wheel: 0.0,
             mod_wheel: 0.0,
             level: ChannelLevel::new(),
             lfo: 0.0,
@@ -606,13 +730,19 @@ impl PolySynth {
         d.wave2 = p.index(P::Osc2Wave as usize);
         d.osc2_ratio = 2f32.powf((p.get(P::Osc2Semitones as usize) + p.get(P::Osc2Detune as usize) / 100.0) / 12.0);
         let mix = p.get(P::OscMix as usize);
-        d.mix1 = 1.0 - mix;
-        d.mix2 = mix;
+        let oscillators = p.get(P::OscLevel as usize);
+        d.mix1 = (1.0 - mix) * oscillators;
+        d.mix2 = mix * oscillators;
         // Up to ~9.4 radians of phase modulation.
         d.fm = p.get(P::FmAmount as usize) * 1.5;
         d.fm_env = p.get(P::FmEnv as usize);
         d.sub = p.get(P::SubLevel as usize);
-        d.noise = p.get(P::NoiseLevel as usize);
+        d.noise = p.get(P::NoiseLevel as usize) * if p.on(P::Legacy as usize) { 1.0 } else { NOISE_GAIN };
+        let width = p.get(P::NoiseWidth as usize) * std::f32::consts::FRAC_PI_2;
+        (d.noise_same, d.noise_own) = (width.cos(), width.sin());
+        d.pitch_env = p.get(P::PitchEnv as usize);
+        d.pitch_frames = (p.get(P::PitchDecay as usize) * sr).max(1.0);
+        d.bend_range = p.get(P::BendRange as usize);
 
         let unison = p.index(P::Unison as usize).clamp(1, MAX_UNISON);
         d.unison = unison;
@@ -653,7 +783,7 @@ impl PolySynth {
         d.glide_keep = if glide < 0.001 { 0.0 } else { (-3.0 / (glide * sr)).exp() };
         d.mono = p.on(P::Mono as usize);
         d.velocity_sens = p.get(P::VelocitySens as usize);
-        d.gain = db_to_gain(p.get(P::Volume as usize)) * VOICE_GAIN;
+        d.gain = level_gain(p.get(P::Volume as usize)) * VOICE_GAIN;
         self.params.changed = false;
     }
 
@@ -700,6 +830,7 @@ impl PolySynth {
         if !legato {
             voice.amp.stage = Stage::Attack;
             voice.filt.stage = Stage::Attack;
+            voice.pitch_age = 0;
         }
     }
 
@@ -792,7 +923,7 @@ impl PolySynth {
             EventKind::NoteOff { pitch } => self.note_off(pitch),
             EventKind::AllNotesOff => self.all_notes_off(),
             EventKind::PitchBend { value } => {
-                self.bend = if value.is_finite() { value.clamp(-1.0, 1.0) * PITCH_BEND_SEMITONES } else { 0.0 };
+                self.wheel = if value.is_finite() { value.clamp(-1.0, 1.0) } else { 0.0 };
             }
             EventKind::Control { controller: CONTROLLER_MOD_WHEEL, value } => {
                 self.mod_wheel = if value.is_finite() { value.clamp(0.0, 1.0) } else { 0.0 };
@@ -824,7 +955,7 @@ impl PolySynth {
             let len = (left.len() - pos).min(self.lfo_frames);
             self.lfo_frames -= len;
             let lfo = self.lfo;
-            let bend = self.bend + lfo * self.mod_wheel * MOD_WHEEL_VIBRATO;
+            let bend = self.wheel * self.derived.bend_range + lfo * self.mod_wheel * MOD_WHEEL_VIBRATO;
             let mut levels = [1.0f32; CONTROL_BLOCK];
             self.level.fill(&mut levels[..len], sample_rate);
             for voice in self.voices.iter_mut().filter(|v| v.active) {
