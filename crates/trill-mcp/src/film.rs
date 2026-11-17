@@ -477,6 +477,32 @@ mod tests {
     }
 
     #[test]
+    fn a_film_given_no_place_goes_where_films_go_and_the_assistants_into_its_working_folder() {
+        use trill_runtime::{Runtime, RuntimeOptions};
+        let folder = tempfile::tempdir().unwrap();
+        let work = folder.path().join("work");
+        let runtime = std::sync::Arc::new(Runtime::start(RuntimeOptions::hermetic()).unwrap());
+        let usual = || PathBuf::from("somewhere").join("else").join("Song-17.mp4");
+        let place = |server: &TrillServer, asked: Option<&str>| {
+            server.write_path_or(&runtime.session.lock(), asked, "a film", &["mp4"], "films", usual)
+        };
+        // A client trusted as the user is: where it says, or where films go.
+        let trusted = TrillServer::new(runtime.clone());
+        assert_eq!(place(&trusted, None), Ok(usual()));
+        assert_eq!(place(&trusted, Some("D:/films/night.mp4")), Ok(PathBuf::from("D:/films/night.mp4")));
+        // The assistant: under the same name, in `films` in its working folder.
+        let guarded = TrillServer::guarded(runtime.clone(), work.clone());
+        let kept = place(&guarded, None).unwrap();
+        assert_eq!(kept.file_name().and_then(|name| name.to_str()), Some("Song-17.mp4"));
+        let films = kept.parent().unwrap();
+        assert_eq!(films.file_name().and_then(|name| name.to_str()), Some("films"));
+        assert_eq!(films.parent().unwrap().canonicalize().unwrap(), work.canonicalize().unwrap());
+        // And where it does say, only there.
+        let refusal = place(&guarded, Some("D:/films/night.mp4")).unwrap_err();
+        assert!(refusal.contains("a film can only be written inside"), "{refusal}");
+    }
+
+    #[test]
     fn a_size_is_a_name_or_two_even_sides() {
         assert_eq!(size_of(None).unwrap(), Format::HD);
         assert_eq!(size_of(Some("2160p")).unwrap(), Format::UHD);
