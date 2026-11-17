@@ -34,7 +34,7 @@ use trill_fetch::{ListStatus, PartState, PartStatus, said};
 use trill_noir::{Chip, TextStyle, Theme, Variant, paint, prose, text};
 use trill_runtime::Runtime;
 use trill_study::models::real::Provider;
-use trill_study::setup::{Found, MODELS, Machine, Timed, provider_name};
+use trill_study::setup::{Found, Machine, Timed, provider_name};
 
 const WIDTH: f32 = 700.0;
 /// Height of a part in a list, and of a row of the machine's.
@@ -345,16 +345,7 @@ fn choose(ctx: &egui::Context, cx: &mut Cx, provider: Provider) {
 fn kept_in(runtime: &Runtime, what: Kept, folder: PathBuf) -> Result<String, String> {
     match what {
         Kept::Studies => runtime.keep_studies_in(Some(folder)),
-        Kept::List(list) if list == MODELS => runtime.keep_study_parts_in(Some(folder)),
-        // What another part of the program lists is moved by whoever listed
-        // it: from here it is kept there from now on.
-        Kept::List(list) => {
-            runtime.fetches()?.set_folder(&list, folder.clone())?;
-            Ok(format!(
-                "What is fetched from now on is kept in {}. What was fetched before is where it was.",
-                folder.display()
-            ))
-        }
+        Kept::List(list) => runtime.keep_list_in(&list, Some(folder)),
     }
 }
 

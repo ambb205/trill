@@ -494,6 +494,18 @@ impl Fetches {
         Ok(())
     }
 
+    /// Tells the list `id`, whose parts were kept in `from` and were moved
+    /// to where it keeps them now, of each part that is here: removed from
+    /// where it was, arrived where it is.
+    pub fn moved(&self, id: &str, from: &Path) {
+        let Some(list) = self.lists.lock().iter().find(|list| list.id == id).cloned() else { return };
+        let Some(hook) = &list.changed else { return };
+        for part in list.parts.iter().filter(|part| self.ready(&part.id)) {
+            hook(Change::Removed, part, &from.join(&part.id));
+            hook(Change::Arrived, part, &list.folder.join(&part.id));
+        }
+    }
+
     /// The part `id` with its folder and its list's hook, or a sentence
     /// that names the parts there are.
     fn find(&self, id: &str) -> Result<(Part, PathBuf, Option<Hook>), String> {
@@ -1105,8 +1117,19 @@ mod tests {
         assert!(engine.add(list("more", vec![outside])).unwrap_err().contains("is not a path below the part's folder"));
 
         // A second list is kept where its owner says, and moved when the user chooses.
-        engine.add(list("more", vec![named("two")])).unwrap();
+        let heard: Arc<Mutex<Vec<(Change, PathBuf)>>> = Arc::default();
+        let hears = heard.clone();
+        let hook: Hook = Arc::new(move |change, _, folder| hears.lock().push((change, folder.to_owned())));
+        engine.add(List { changed: Some(hook), ..list("more", vec![named("two")]) }).unwrap();
         assert_eq!(engine.list_ids(), ["models", "more"]);
+        // A part that is here and whose list is kept elsewhere: its owner hears where it went.
+        engine.fetch_now("two", &quiet(), &mut |_, _| {}).unwrap();
+        let (was, now) = (folder.path().join("instruments"), folder.path().join("moved"));
+        std::fs::rename(&was, &now).unwrap();
+        engine.set_folder("more", now.clone()).unwrap();
+        engine.moved("more", &was);
+        assert_eq!(heard.lock()[1..], [(Change::Removed, was.join("two")), (Change::Arrived, now.join("two"))]);
+        engine.remove("two").unwrap();
         let chosen = folder.path().join("chosen");
         engine.set_folder("more", chosen.clone()).unwrap();
         assert_eq!(engine.folder_of("more"), Some(chosen.clone()));

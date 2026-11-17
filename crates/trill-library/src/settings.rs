@@ -10,6 +10,7 @@
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -36,6 +37,10 @@ pub struct Settings {
     pub midi: MidiSettings,
     pub journal: JournalSettings,
     pub studies: StudySettings,
+    /// Where what was fetched is kept, by the name of its list (`models`,
+    /// `instruments`), where that is not the program's own place for it.
+    #[serde(serialize_with = "paths::serialize_map")]
+    pub fetched: BTreeMap<String, PathBuf>,
     pub ui: UiSettings,
 }
 
@@ -95,16 +100,13 @@ impl Default for JournalSettings {
     }
 }
 
-/// Where studies of recordings are kept, and what was fetched to make
-/// them. `None` is the program's own data folder ([`data_dir`]).
+/// Where studies of recordings are kept. `None` is the program's own
+/// data folder ([`data_dir`]).
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct StudySettings {
     /// The folder studies are kept in, one folder each: a few hundred
     /// megabytes for a song, most of it its stems.
     pub folder: Option<PathBuf>,
-    /// The folder the models and what runs them are fetched into: some
-    /// gigabytes.
-    pub parts: Option<PathBuf>,
 }
 
 /// Interface preferences.
@@ -265,8 +267,8 @@ impl Reader {
         }
         if let Some(studies) = self.section(document, "studies") {
             self.value(studies, "studies.folder", &mut settings.studies.folder);
-            self.value(studies, "studies.parts", &mut settings.studies.parts);
         }
+        self.value(document, "fetched", &mut settings.fetched);
         if let Some(ui) = self.section(document, "ui") {
             self.value(ui, "ui.theme", &mut settings.ui.theme);
             self.value(ui, "ui.browser_width", &mut settings.ui.browser_width);
@@ -323,6 +325,14 @@ mod paths {
 
     pub fn serialize<S: Serializer>(paths: &[PathBuf], serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_seq(paths.iter().map(|path| path.to_string_lossy()))
+    }
+
+    /// A map of names to paths, each path as [`serialize`] writes one.
+    pub fn serialize_map<S: Serializer>(
+        paths: &std::collections::BTreeMap<String, PathBuf>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(paths.iter().map(|(name, path)| (name, path.to_string_lossy())))
     }
 }
 
@@ -427,7 +437,8 @@ mod tests {
             },
             midi: MidiSettings { disabled_inputs: vec!["Loopback".into()] },
             journal: JournalSettings { keep: false },
-            studies: StudySettings { folder: Some("/big disk/studies".into()), parts: None },
+            studies: StudySettings { folder: Some("/big disk/studies".into()) },
+            fetched: [("models".to_owned(), PathBuf::from("/big disk/models"))].into_iter().collect(),
             ui: UiSettings { theme: "noir".into(), browser_width: 312.5, window_size: Some([1600.0, 900.0]) },
         }
     }

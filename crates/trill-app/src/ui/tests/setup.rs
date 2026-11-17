@@ -177,7 +177,7 @@ fn the_machines_tab_says_what_runs_the_models_which_programs_were_found_and_wher
     harness.settle_setup();
     harness.click_label("Studies");
     harness.wait_for_label(&format!("Kept in {}", parts.display()));
-    assert_eq!(harness.runtime.settings().studies.parts, Some(parts));
+    assert_eq!(harness.runtime.settings().fetched.get("models"), Some(&parts));
 }
 
 #[test]

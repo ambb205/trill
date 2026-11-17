@@ -21,6 +21,8 @@
 //! studies: one is a folder on disk.
 
 use crate::{Runtime, Storage};
+use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use trill_fetch::{Curl, Fetcher, Fetches, Nothing, Part};
@@ -58,9 +60,11 @@ pub struct Studying {
 pub(crate) struct Studies {
     fetches: Arc<Fetches>,
     desk: Desk,
-    /// Where studies and parts are kept when the settings do not say.
+    /// Where studies are kept when the settings do not say.
     default_studies: PathBuf,
-    default_parts: PathBuf,
+    /// Where the parts of each list are kept when the settings do not
+    /// say: the place its owner gave it.
+    defaults: Mutex<HashMap<String, PathBuf>>,
 }
 
 impl Studies {
@@ -79,7 +83,7 @@ impl Studies {
         };
         let (default_studies, default_parts) = (data.join(STUDIES_FOLDER), data.join(MODELS_FOLDER));
         let fetches = Arc::new(Fetches::new(studying.fetcher.unwrap_or_else(|| Arc::new(Nothing))));
-        let mut list = setup::list(settings.studies.parts.clone().unwrap_or_else(|| default_parts.clone()));
+        let mut list = setup::list(settings.fetched.get(MODELS).cloned().unwrap_or_else(|| default_parts.clone()));
         if let Some(parts) = studying.parts {
             list.parts = parts;
         }
@@ -93,7 +97,8 @@ impl Studies {
             program: studying.program,
             free: studying.free,
         });
-        Some(Self { fetches, desk, default_studies, default_parts })
+        let defaults = Mutex::new([(MODELS.to_owned(), default_parts)].into_iter().collect());
+        Some(Self { fetches, desk, default_studies, defaults })
     }
 }
 
@@ -189,41 +194,71 @@ impl Runtime {
         })
     }
 
-    /// Keeps the parts studies are made with in `folder` from now on
-    /// (`None`: the program's own data folder), moves what was fetched
-    /// across, and says what was done. Slow across disks.
-    pub fn keep_study_parts_in(&self, folder: Option<PathBuf>) -> Result<String, String> {
+    /// Adds a list of things to fetch to the ones both front ends show
+    /// and fetch from: for whoever has some (the models of studies are
+    /// there already). `list.folder` is where its parts are kept unless
+    /// the user chose another place, which the settings remember.
+    pub fn add_fetch_list(&self, mut list: trill_fetch::List) -> Result<(), String> {
         let studies = self.studying.as_ref().ok_or_else(|| NOT_KEPT.to_owned())?;
-        let from = studies.fetches.folder_of(MODELS).unwrap_or_default();
-        let to = folder.clone().unwrap_or_else(|| studies.default_parts.clone());
-        if from == to {
-            return Ok(format!("The parts are kept in {} already", to.display()));
+        studies.defaults.lock().insert(list.id.clone(), list.folder.clone());
+        if let Some(chosen) = self.settings().fetched.get(&list.id) {
+            list.folder = chosen.clone();
         }
-        if studies.desk.busy() {
+        studies.fetches.add(list)
+    }
+
+    /// Keeps the parts of the list `id` in `folder` from now on (`None`:
+    /// the place its owner gave it), moves what was fetched across, tells
+    /// its owner of each part that moved, and says what was done. Slow
+    /// across disks: not for the thread that draws.
+    pub fn keep_list_in(&self, id: &str, folder: Option<PathBuf>) -> Result<String, String> {
+        let studies = self.studying.as_ref().ok_or_else(|| NOT_KEPT.to_owned())?;
+        let Some(from) = studies.fetches.folder_of(id) else {
+            return Err(format!("there is no list '{id}'. Lists: {}", studies.fetches.list_ids().join(", ")));
+        };
+        let own = studies.defaults.lock().get(id).cloned().unwrap_or_else(|| from.clone());
+        let to = folder.clone().unwrap_or(own);
+        if from == to {
+            return Ok(format!("They are kept in {} already", to.display()));
+        }
+        if id == MODELS && studies.desk.busy() {
             return Err("a study is running: stop it, or wait for it, before its parts are kept elsewhere".to_owned());
         }
-        // Refused while one of them is being fetched; what is moved is whole.
-        studies.fetches.set_folder(MODELS, to.clone())?;
         let mut names: Vec<String> = studies
             .fetches
             .status()
             .into_iter()
-            .filter(|list| list.id == MODELS)
+            .filter(|list| list.id == id)
             .flat_map(|list| list.parts)
             .map(|status| status.part.id)
             .collect();
-        names.push("machine.json".to_owned());
+        if id == MODELS {
+            // What the timed test found is kept beside the parts it was run on.
+            names.push("machine.json".to_owned());
+        }
+        // Refused while one of them is being fetched; what is moved is whole.
+        studies.fetches.set_folder(id, to.clone())?;
         let moved = match move_folders(&from, &to, &names) {
             Ok(moved) => moved,
             Err(why) => {
-                let _ = studies.fetches.set_folder(MODELS, from);
+                let _ = studies.fetches.set_folder(id, from);
                 return Err(why);
             }
         };
-        self.update_settings(|settings| settings.studies.parts = folder).map_err(|error| error.to_string())?;
+        studies.fetches.moved(id, &from);
+        self.update_settings(|settings| {
+            match folder {
+                Some(folder) => settings.fetched.insert(id.to_owned(), folder),
+                None => settings.fetched.remove(id),
+            };
+        })
+        .map_err(|error| error.to_string())?;
         Ok(match moved {
-            0 => format!("The parts are kept in {} from now on", to.display()),
-            _ => format!("The parts are kept in {} from now on; what was fetched was moved there", to.display()),
+            0 => format!("What is fetched is kept in {} from now on", to.display()),
+            _ => format!(
+                "What is fetched is kept in {} from now on; what was fetched before was moved there",
+                to.display()
+            ),
         })
     }
 
@@ -302,8 +337,10 @@ mod tests {
         assert!(elsewhere.join("studies").join(&study.id).join("study.json").is_file());
         assert!(!config.join("studies").join(&study.id).exists());
         assert_eq!(desk.list().len(), 1);
-        let said = runtime.keep_study_parts_in(Some(elsewhere.join("models"))).unwrap();
-        assert!(said.ends_with("what was fetched was moved there"), "{said}");
+        let said = runtime.keep_list_in(MODELS, Some(elsewhere.join("models"))).unwrap();
+        assert!(said.ends_with("what was fetched before was moved there"), "{said}");
+        assert_eq!(runtime.settings().fetched.get(MODELS), Some(&elsewhere.join("models")));
+        assert_eq!(runtime.keep_list_in("pianos", None).unwrap_err(), "there is no list 'pianos'. Lists: models");
         assert!(elsewhere.join("models").join("beats").join("beat_this.onnx").is_file());
         assert!(
             elsewhere.join("models").join("machine.json").is_file() && !config.join("models").join("beats").exists()
