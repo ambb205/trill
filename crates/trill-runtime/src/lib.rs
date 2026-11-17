@@ -33,8 +33,9 @@
 //! [`Runtime::preview`], [`Runtime::add_sound`] and
 //! [`Runtime::add_sound_on_new_track`]; and, for a song whose files are not
 //! where it says, [`Runtime::missing_files`], [`Runtime::relink`] and
-//! [`Runtime::move_library_folder`]. A front end that grew its own version
-//! of these would drift from the other.
+//! [`Runtime::move_library_folder`]; and, for what is in a sound (its beats,
+//! key, chords, parts, loops and notes), [`Runtime::hear`]. A front end
+//! that grew its own version of these would drift from the other.
 //!
 //! ```no_run
 //! use trill_runtime::{Runtime, RuntimeOptions};
@@ -49,6 +50,7 @@
 
 mod housekeeping;
 pub mod jobs;
+mod listening;
 pub mod midi;
 mod missing;
 mod recovery;
@@ -56,6 +58,7 @@ mod settings;
 mod sounds;
 
 pub use jobs::{Jobs, Program};
+pub use listening::{LONGEST_SECONDS, ListenError};
 pub use midi::MidiInputInfo;
 pub use missing::{Candidate, Confidence, FoundFolder, Look, Missing, MissingFile, MissingFolder, files_missing_in};
 pub use recovery::SafetyCopy;
@@ -180,6 +183,8 @@ pub struct Runtime {
     /// The sound library. Changes to its folders, favorites and recently
     /// used files are saved with the settings without further ado.
     pub library: Arc<Library>,
+    /// What was heard in the last few audio files that were listened to.
+    listening: listening::Listening,
     plugins: Option<PluginHost>,
     settings: Arc<Mutex<SettingsFile>>,
     copies: Arc<Mutex<SafetyCopies>>,
@@ -298,7 +303,18 @@ impl Runtime {
         let copies = Arc::new(Mutex::new(copies));
         let settings = Arc::new(Mutex::new(settings));
         let housekeeper = Housekeeper::start(session.clone(), library.clone(), settings.clone(), copies.clone())?;
-        Ok(Self { _housekeeper: housekeeper, midi, session, media, library, plugins, settings, copies, audio_host })
+        Ok(Self {
+            _housekeeper: housekeeper,
+            midi,
+            session,
+            media,
+            library,
+            listening: listening::Listening::default(),
+            plugins,
+            settings,
+            copies,
+            audio_host,
+        })
     }
 
     // ---- the audio device ----------------------------------------------

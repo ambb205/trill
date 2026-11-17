@@ -29,7 +29,7 @@ Development builds are optimized (see `[profile.dev]`), because unoptimized audi
 
 ### Building and testing
 
-`cargo test --workspace` runs about 2,330 tests in a few minutes. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 2,380 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -48,6 +48,7 @@ cargo test -p trill-app a_modelled_saxophone -- --include-ignored --nocapture   
 cargo test -p trill-mcp --test wavetable against_the_installed -- --ignored --nocapture    # a sawtooth on the wavetable synth beside Serum 2's and Surge XT's as they come: what of each is not on a harmonic, its pitch and its level (a measurement)
 cargo test -p trill-dsp --lib share_of_a_core -- --ignored --nocapture    # what the wavetable synth costs, from one voice to thirty-two notes of sixteen copies (a measurement; run it alone)
 cargo test -p trill-media -- --include-ignored      # decoding audio files found in this machine's usual folders
+TRILL_MAGPIE_PROJECTS=<...>/data/projects cargo test -p trill-listen --test magpie -- --ignored --nocapture --test-threads 1    # what Trill hears in recordings that Magpie took apart, against what Magpie found in them (the owner's Magpie project and its saved projects; minutes)
 TRILL_TEST_PLUGIN_WINDOWS=1 cargo test -p trill-plugins --test editor_windows -- --test-threads=1   # opens windows
 TRILL_TEST_CLAUDE=1 cargo test -p trill-assistant --test real_cli    # talks to an installed, signed-in Claude Code
 TRILL_TEST_CLAUDE=1 cargo test -p trill-app live_ -- --test-threads=1    # ...through the assistant's panel (seven messages)
@@ -414,6 +415,28 @@ found is written down in one call.
 tags, tempo, key and length (all read from file and folder names). Audio clips play WAV, AIFF, FLAC, MP3 and Ogg
 Vorbis at any sample rate, and can be warped to follow the project tempo: `beats` keeps drum hits sharp, `tonal`
 keeps sustained sound smooth, `repitch` plays faster or slower like a record; warped clips can be transposed.
+
+**Listening to a recording.** Trill says what is in an audio file, with no model and nothing changed: the
+**beat grid** (every beat and bar line, each beat moved onto the hit it belongs to, and the tempo), how far the
+recording sits from A = 440, its **key** with the runners-up, a **chord** for each stretch of beats, its **parts**
+lettered so that parts that return share a letter (`A B A B C B`), the **loops** worth having ranked by how well
+they come back round, the cleanest **single hits** of each kind of drum and a bass note for each pitch, the drum
+**groove**, and the **notes** of a bass line and of a melody. Any of the last four is written as **MIDI on the
+recording's own beats**, so it stays in time where the recording's tempo wanders: into a file, or into the song on
+a new track. When the tracker has the beat wrong it is reread: half or double the tempo, the bar one beat later,
+or so many beats to a bar; everything else follows.
+
+- It works on one file and better on one instrument. A drum loop's groove, a bass line's notes and a voice's
+  melody are right; of a whole mix the groove is a sketch (the bass plays in the kick's band), and bass and melody
+  are what was loudest in their registers. Chords and parts are estimates: a map, not a transcription. Without a
+  model the start of the bar is the least sure thing in an answer.
+- Over MCP today (`listen`, `transcribe`); the window does not show it yet.
+- The method is the one the owner's Magpie project proved, translated from its Python (`crates/trill-listen`). On
+  five recordings Magpie had taken apart, over its own beat grids, Trill finds the same parts, 313 of its 316
+  loops to the bar, 187 of its 189 one-shots, its groove and every bass and vocal note; chords are the same 52 to
+  84 % of the time (11 % on one recording whose chords Magpie has in another key), read from a chroma of Trill's
+  own. Taking a recording apart into stems, beats from a model, and lyrics with a time for every word are not
+  built yet: they need models.
 
 **Files that moved**: a song names its audio files by their paths, and a folder of samples that is moved or
 renamed leaves it with clips and pads that play nothing. Trill says so in one place (a line in the status bar and
@@ -794,6 +817,7 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Presets | `search_presets` (one search across the presets of every installed instrument and the saved ones), `save_preset` (keeps a device's sound under a name) |
 | Clips | `create_clip`, `create_audio_clip`, `update_clip`, `split_clip`, `duplicate_clip`, `delete_clip` |
 | Sounds | `search_sounds`, `library` (its folders, and `move_folder` for one that went elsewhere), `preview_sound`, `set_sample` |
+| Listening | `listen` (what is in an audio file of the library, of the user's or of a clip: tempo and bars, key, tuning, and on request its chords, parts, loops, single hits, groove, bass and melody in the recording's own bars, paged; corrections to its beat grid), `transcribe` (its bass line, melody, groove or chords as MIDI on its own beats: into a file, or into the song on a new track in one undo step) |
 | Wavetables | `describe_wavetable` (the tables of `builtin:wavetable` that ship, any of them or a recipe of your own shown frame by frame in numbers; changes nothing), `set_wavetable` (gives an oscillator a table that ships, one made from a recipe, or one read from an audio file; names the macros) |
 | Missing files | `missing_files` (what the song names that is not on disk, where it is used, and what was found with how sure it is), `relink_files` (what is sure, or more on request, or a folder or files named by hand: one undo step) |
 | Notes | `get_notes`, `add_notes`, `set_notes`, `remove_notes`, `transform_notes` |
@@ -887,6 +911,8 @@ crates/
   trill-media     Audio file decoding and caching, waveform overviews, sample-rate conversion, WAV writing.
   trill-engine    Realtime engine, offline renderer, analysis, and the Session.
   trill-library   The sound library (scanning, indexing, searching sample folders) and the settings file.
+  trill-listen    What is heard in a recording without a model: beats and bars, tuning, key and chords, parts,
+                  loops, single hits, notes, and MIDI of them.
   trill-plugins   Plugin hosting: scanning and preset discovery in a child process, the plugin main thread, CLAP
                   and VST3, and the readers of the presets some makers keep in files of their own.
   trill-runtime   What both programs share, built once: session, media cache, library, settings, housekeeping,
@@ -943,6 +969,9 @@ General MIDI, not from what the plugin says is on its keys; over MCP every tool 
 notes drawn by hand in the window (the tools write them; a note that is drawn is a plain key), kits of drum
 plugins other than Superior Drummer 3 (none of the others on the machine says what is on its keys in a state
 Trill reads),
+taking a recording apart into stems, its beats from a model and its lyrics with a time for every word (what
+is heard today is heard without a model, in one sound), a place in the window for what was heard in a recording
+(over MCP only), taking a recording from a link,
 for the wavetable synth: presets tuned by ear (they are matched in level by measurement, and its bank is a
 first sixteen), effects inside it or a preset that brings effects with it (a sound that wants a chorus or a
 reverb is given the device), making a table or naming a macro in the window (over MCP; the window chooses among

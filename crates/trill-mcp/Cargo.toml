@@ -15,6 +15,7 @@ trill-core.workspace = true
 trill-dsp.workspace = true
 trill-engine.workspace = true
 trill-library.workspace = true
+trill-listen.workspace = true
 trill-plugins.workspace = true
 trill-runtime.workspace = true
 trill-stage.workspace = true

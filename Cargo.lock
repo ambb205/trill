@@ -4682,6 +4682,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "trill-listen"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "trill-core",
+ "trill-dsp",
+ "trill-media",
+]
+
+[[package]]
 name = "trill-mcp"
 version = "0.1.0"
 dependencies = [
@@ -4698,6 +4709,7 @@ dependencies = [
  "trill-dsp",
  "trill-engine",
  "trill-library",
+ "trill-listen",
  "trill-media",
  "trill-plugins",
  "trill-runtime",
@@ -4760,6 +4772,7 @@ dependencies = [
  "trill-dsp",
  "trill-engine",
  "trill-library",
+ "trill-listen",
  "trill-media",
  "trill-plugins",
 ]
