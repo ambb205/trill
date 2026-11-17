@@ -242,9 +242,7 @@ pub(crate) fn played(
     };
     if let (Some((low, high)), true) = (articulated.default_range, articulated.fitted > 0) {
         remarks.push(format!(
-            "{} note(s) without a `how` were outside the velocities {low}-{high} that play this instrument's \
-             ordinary note; they were moved to the nearest of those. Say how such a note is to be played if \
-             softer or harder was meant.",
+            "{} note(s) played the ordinary way (a note that is slid or hammered into is one too) were outside              the velocities {low}-{high} that play it; they were moved to the nearest of those. Say how such a note              is to be played if softer or harder was meant.",
             articulated.fitted
         ));
     }
@@ -748,12 +746,49 @@ fn track_reply(session: &Session, id: TrackId, profile: &InstrumentProfile) -> V
         ));
     }
     if drums {
-        // The whole map, the kit's own names first: what a lane or a note may be called.
-        let map: Map<String, Value> = profile.drum_map().into_iter().map(|(name, key)| (name, json!(key))).collect();
+        // The whole map, the kit's own names first: what a lane or a note may be called. Where the
+        // instrument says what its kit has on its keys, it is that kit's, read now.
+        let whole = session.profile_of(id);
+        let map: Map<String, Value> = whole.drum_map().into_iter().map(|(name, key)| (name, json!(key))).collect();
         out["drum_map"] = Value::Object(map);
+        if whole.whole {
+            let lacking: Vec<&str> =
+                USUAL_DRUMS.iter().copied().filter(|name| matches!(whole.find_drum(name), Drum::Lacking(_))).collect();
+            out["kit"] = json!({
+                "read_from": "the plugin's own state, now: it is the kit that is loaded, and changes with it",
+                "what": whole.notes,
+                "has_no": lacking,
+                "note": "These names are the whole kit: a drum that is not in `drum_map` is not played by any key, \
+                         and the writing tools leave it out and say so rather than hit another drum. General \
+                         MIDI's keys do not hold here.",
+            });
+        }
     }
     out
 }
+
+/// The drums a song is usually written with: which of them a kit has not
+/// got is worth saying before a part is written for it.
+const USUAL_DRUMS: [&str; 18] = [
+    "kick",
+    "snare",
+    "rimshot",
+    "rim",
+    "clap",
+    "closed_hat",
+    "pedal_hat",
+    "open_hat",
+    "high_tom",
+    "mid_tom",
+    "low_tom",
+    "floor_tom",
+    "crash",
+    "crash2",
+    "china",
+    "splash",
+    "ride",
+    "ride_bell",
+];
 
 fn write(session: &mut Session, request: &SetInstrumentProfileRequest) -> Reply {
     let id = TrackId(request.track);

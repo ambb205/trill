@@ -98,6 +98,16 @@ fn ample_switches(open: u8, open_hit: (u8, u8)) -> Vec<Articulation> {
     ]
 }
 
+/// On the three guitars a natural harmonic rings an octave above the key
+/// that plays it (measured: E3 held with the harmonic key is heard as E4),
+/// and on the two metal ones a pinch harmonic two octaves above.
+fn harmonics_an_octave_up(mut articulations: Vec<Articulation>) -> Vec<Articulation> {
+    for articulation in articulations.iter_mut().filter(|articulation| articulation.name == "harmonic") {
+        articulation.sounds = 12;
+    }
+    articulations
+}
+
 /// The noises above the range of the three guitars.
 fn guitar_noises() -> std::collections::BTreeMap<String, u8> {
     sounds(&[("scratch", 89), ("slap", 90), ("muting", 91), ("chk", 92), ("scrape", 101)])
@@ -106,7 +116,7 @@ fn guitar_noises() -> std::collections::BTreeMap<String, u8> {
 /// A PRS Custom 24 with humbuckers. Every velocity up to 126 plays an open
 /// note.
 fn ample_guitar_pf() -> InstrumentProfile {
-    let mut articulations = ample_switches(24, (1, 126));
+    let mut articulations = harmonics_an_octave_up(ample_switches(24, (1, 126)));
     articulations.extend([Articulation::key("tap", 22), Articulation::key("pinch_harmonic", 23)]);
     InstrumentProfile {
         sounds: guitar_noises(),
@@ -121,10 +131,10 @@ fn ample_guitar_pf() -> InstrumentProfile {
 /// it is played: under 64 the string is muted.
 fn ample_metal_eclipse() -> InstrumentProfile {
     let open = 24;
-    let mut articulations = ample_switches(open, (64, 126));
+    let mut articulations = harmonics_an_octave_up(ample_switches(open, (64, 126)));
     articulations.extend([
         Articulation::key("tap", 30),
-        Articulation::key("pinch_harmonic", 31),
+        Articulation::key("pinch_harmonic", 31).sounding(24),
         Articulation::key("muted", open).hit(32, 63),
         Articulation::key("choked", open).hit(16, 31),
         Articulation::key("dead", open).hit(1, 15),
@@ -145,10 +155,10 @@ fn ample_metal_eclipse() -> InstrumentProfile {
 /// bass's notes, with its switches an octave lower than the others'.
 fn ample_metal_hellrazer() -> InstrumentProfile {
     let open = 12;
-    let mut articulations = ample_switches(open, (64, 126));
+    let mut articulations = harmonics_an_octave_up(ample_switches(open, (64, 126)));
     articulations.extend([
         Articulation::key("tap", 18),
-        Articulation::key("pinch_harmonic", 19),
+        Articulation::key("pinch_harmonic", 19).sounding(24),
         Articulation::key("muted", open).hit(32, 63),
         Articulation::key("dead", open).hit(1, 31),
     ]);
@@ -269,6 +279,13 @@ mod tests {
             (Some(12), Some(14), Some(19))
         );
         assert_eq!(key(RAY5, "tap"), None, "the bass has no tapping");
+        // A harmonic is heard above its key, where that was measured.
+        let heard = |uri: &str, name: &str| entry(uri).unwrap().1.articulation(name).map(|a| a.sounds);
+        for uri in [PF, ECLIPSE, HELLRAZER] {
+            assert_eq!(heard(uri, "harmonic"), Some(12));
+        }
+        assert_eq!((heard(ECLIPSE, "pinch_harmonic"), heard(HELLRAZER, "pinch_harmonic")), (Some(24), Some(24)));
+        assert_eq!((heard(PF, "pinch_harmonic"), heard(PF, "palm_mute")), (Some(0), Some(0)));
         // Soft notes are muted on the metal instruments, not on the PRS.
         let hit = |uri: &str, name: &str| entry(uri).unwrap().1.articulation(name).and_then(|a| a.velocity);
         assert_eq!((hit(PF, "open"), hit(PF, "muted")), (Some((1, 126)), None));

@@ -1256,7 +1256,8 @@ impl TrillServer {
             about["known"] = json!(crate::instruments::probe_note(&session, &job.devices[0].uri, on_track));
             // What the keys are called: by the track, or by what is known of an instrument not in the song.
             let kit: Option<InstrumentProfile> = match on_track {
-                Some(track) => session.project().track(track).ok().map(|track| track.profile.clone()),
+                // With the names of the kit that is loaded, where the instrument says which that is.
+                Some(track) => Some(session.profile_of(track)),
                 None => session.instruments().of(&job.devices[0].uri).map(|known| known.profile),
             };
             about["through"] = match job.devices.len() {

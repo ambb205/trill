@@ -2005,6 +2005,9 @@ struct LeftOut {
     /// Whether some notes were read at another octave than they are
     /// written at, because that is where they sound.
     moved: bool,
+    /// How many notes were read away from their keys because of how they
+    /// are played: a harmonic rings above the key that plays it.
+    heard_elsewhere: usize,
 }
 
 impl LeftOut {
@@ -2012,6 +2015,17 @@ impl LeftOut {
     /// describes, at the pitch they sound at. The rest is counted.
     fn music(&mut self, profile: &InstrumentProfile, played: Vec<Note>) -> Vec<Note> {
         let mut music = Vec::with_capacity(played.len());
+        // How far from its key each note is heard, by the keyswitch it is played under.
+        let mut away: BTreeMap<(u8, u64), i8> = BTreeMap::new();
+        if profile.articulations.iter().any(|articulation| articulation.sounds != 0) {
+            for asked in read_back(profile, &played) {
+                let heard =
+                    asked.how.as_deref().and_then(|name| profile.articulation(name)).map_or(0, |how| how.sounds);
+                if heard != 0 {
+                    away.insert((asked.note.pitch, asked.note.start.to_bits()), heard);
+                }
+            }
+        }
         for note in played.into_iter().filter(|note| note.end() > self.from && note.start < self.to) {
             if profile.is_keyswitch(note.pitch) {
                 self.keyswitches += 1;
@@ -2021,7 +2035,10 @@ impl LeftOut {
                 self.outside_range += 1;
             } else {
                 self.moved |= profile.sounds_octaves != 0;
-                music.push(Note { pitch: profile.sounding(note.pitch), ..note });
+                let heard = away.get(&(note.pitch, note.start.to_bits())).copied().unwrap_or(0);
+                self.heard_elsewhere += usize::from(heard != 0);
+                let pitch = (i32::from(profile.sounding(note.pitch)) + i32::from(heard)).clamp(0, 127) as u8;
+                music.push(Note { pitch, ..note });
             }
         }
         music
@@ -2039,6 +2056,15 @@ impl LeftOut {
         }
         if self.moved {
             out.insert("read_at".into(), json!("the octave the instrument sounds at, not the keys in the clip"));
+        }
+        if self.heard_elsewhere > 0 {
+            out.insert(
+                "read_as_heard".into(),
+                json!(format!(
+                    "{} note(s) are played a way that sounds away from the key (a harmonic): read at the pitch heard",
+                    self.heard_elsewhere
+                )),
+            );
         }
         (!out.is_empty()).then_some(Value::Object(out))
     }
@@ -2101,7 +2127,8 @@ fn analyze(session: &Session, request: &AnalyzeMusicRequest) -> Reply {
             let track = project.clip_track(id).map_err(|error| explain(project, error))?;
             let profile = &project.track(track).map_err(|error| explain(project, error))?.profile;
             let notes = if session.plays_drums(track) {
-                drum_kit = Some(profile.clone());
+                // By the names of the kit that is loaded, where the instrument says which that is.
+                drum_kit = Some(session.profile_of(track));
                 found.timeline_notes()
             } else {
                 left_out.music(profile, found.timeline_notes())
@@ -2114,7 +2141,7 @@ fn analyze(session: &Session, request: &AnalyzeMusicRequest) -> Reply {
             let played: Vec<Note> =
                 found.clips.iter().filter(|clip| !clip.muted).flat_map(|clip| clip.timeline_notes()).collect();
             let notes = if session.plays_drums(id) {
-                drum_kit = Some(found.profile.clone());
+                drum_kit = Some(session.profile_of(id));
                 played
             } else {
                 left_out.music(&found.profile, played)

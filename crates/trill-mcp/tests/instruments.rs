@@ -29,12 +29,71 @@ const ECLIPSE: &str = "vst3:ABCDEF019182FAEB41707364416D6574";
 const SUPERIOR: &str = "vst3:565354534433617375706572696F7220";
 /// A drum plugin nothing is known about, except that it says it is one.
 const KIT: &str = "vst3:D0000000000000000000000000000001";
+/// A drum plugin whose state says what its kit has on its keys, as
+/// Superior Drummer's does: see [`kit_said`].
+const SAYS: &str = "vst3:D0000000000000000000000000000002";
 /// Two instruments nothing is known about at all.
 const SAMPLER: &str = "vst3:C0000000000000000000000000000001";
 const LEAD: &str = "builtin:polysynth";
 
-const PLUGINS: [(&str, &str); 4] =
-    [(ECLIPSE, "Ample Metal Eclipse"), (SUPERIOR, "Superior Drummer 3"), (KIT, "Kit"), (SAMPLER, "Sampled Bass")];
+const PLUGINS: [(&str, &str); 5] = [
+    (ECLIPSE, "Ample Metal Eclipse"),
+    (SUPERIOR, "Superior Drummer 3"),
+    (KIT, "Kit"),
+    (SAYS, "Kit That Says"),
+    (SAMPLER, "Sampled Bass"),
+];
+
+/// Which kit the plugin that says has loaded: the test that uses it
+/// changes it, as a user does in the plugin's own window.
+static LOADED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// What the kit that is loaded has on its keys. The first has its china
+/// in the last cymbal's place and two toms; the second has the china
+/// where the first hangs a crash, one tom, and neither splash nor ride.
+fn kit_said() -> Vec<trill_core::KeySound> {
+    let sound = |key: u8, place: &str, instrument: &str, stroke: &str| trill_core::KeySound {
+        key,
+        place: place.into(),
+        instrument: instrument.into(),
+        stroke: stroke.into(),
+    };
+    let mut kit = vec![
+        sound(36, "Kick", "22\" Maple", "Open"),
+        sound(38, "Snare", "14\" Brass", "Center"),
+        sound(40, "Snare", "14\" Brass", "Rimshot"),
+        sound(42, "Hi-Hat", "14\" Hats", "Closed Tip"),
+        sound(46, "Hi-Hat", "14\" Hats", "Open Edge 2"),
+        sound(48, "Racktom 1", "12\" Tom", "Center"),
+    ];
+    if LOADED.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        kit.extend([
+            sound(43, "Floortom 1", "16\" Tom", "Center"),
+            sound(86, "Cymbal 1", "17\" Crash", "Crash"),
+            sound(55, "Cymbal 3", "10\" Splash", "Crash"),
+            sound(51, "Ride", "20\" Ride", "Bow Tip"),
+            sound(53, "Ride", "20\" Ride", "Bell Shank"),
+            sound(52, "Cymbal 5", "20\" China", "Crash"),
+            sound(54, "Cymbal 5", "20\" China", "Mute Hit"),
+        ]);
+    } else {
+        kit.extend([sound(86, "Cymbal 1", "20\" China", "Crash"), sound(52, "Cymbal 5", "18\" Crash", "Crash")]);
+    }
+    kit
+}
+
+/// The off-audio half of the plugin that says what is on its keys.
+struct Says;
+
+impl trill_core::device::DeviceController for Says {
+    fn save_state(&mut self) -> Option<Vec<u8>> {
+        None
+    }
+
+    fn key_sounds(&mut self) -> Option<Vec<trill_core::KeySound>> {
+        Some(kit_said())
+    }
+}
 
 struct Plugins;
 
@@ -67,13 +126,15 @@ impl DeviceFactory for Plugins {
         if !PLUGINS.iter().any(|(uri, _)| *uri == device.uri) {
             return Err(DeviceError::Unknown(device.uri.clone()));
         }
-        Ok(DeviceInstance { processor: Box::new(Silent), params: Vec::new(), controller: None })
+        let controller: Option<Box<dyn trill_core::device::DeviceController>> =
+            (device.uri == SAYS).then(|| Box::new(Says) as Box<dyn trill_core::device::DeviceController>);
+        Ok(DeviceInstance { processor: Box::new(Silent), params: Vec::new(), controller })
     }
 
-    /// As a plugin's own categories say it: this one calls itself a drum
-    /// instrument, the others say nothing.
+    /// As a plugin's own categories say it: these call themselves drum
+    /// instruments, the others say nothing.
     fn plays_drums(&self, uri: &str) -> bool {
-        uri == KIT
+        uri == KIT || uri == SAYS
     }
 }
 
@@ -343,6 +404,246 @@ async fn a_drum_plugin_is_written_for_and_read_as_drums() {
     assert_eq!(song["scope"], "song (Keys)");
     assert_eq!(strings(&song["chords"]), ["1: Am", "2: F", "3: C", "4: G"]);
     assert!(song.get("outside_key").is_none() && song.get("left_out").is_none(), "{song}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drum_name_lands_on_that_drum_in_the_kit_that_is_loaded_and_a_drum_it_has_not_got_is_left_out() {
+    use std::sync::atomic::Ordering;
+    LOADED.store(0, Ordering::SeqCst);
+    let fixture = connect().await;
+    let client = &fixture.client;
+    ok(client, "create_track", json!({ "name": "Keys", "instrument": LEAD })).await;
+    let kit = track(client, "Drums", SAYS).await;
+
+    // What the kit says is on its keys is the track's drum map: nothing of it is in the song.
+    let said = ok(client, "get_instrument_profile", json!({ "track": kit })).await;
+    assert_eq!(said["profile"], json!({}), "the track itself says nothing: {said}");
+    assert_eq!(said["plays"], "drums");
+    let map = &said["drum_map"];
+    assert_eq!(
+        (&map["china"], &map["cymbal_5"], &map["crash"], &map["splash"]),
+        (&json!(52), &json!(52), &json!(86), &json!(55))
+    );
+    assert_eq!(
+        (&map["high_tom"], &map["floor_tom"], &map["ride"], &map["ride_bell"]),
+        (&json!(48), &json!(43), &json!(51), &json!(53))
+    );
+    assert!(map.get("cowbell").is_none() && map.get("clap").is_none(), "no drums but the kit's: {map}");
+    assert_eq!(strings(&said["kit"]["has_no"]), ["rim", "clap", "pedal_hat", "crash2"]);
+    assert!(said["kit"]["what"].as_str().unwrap().contains("china (cymbal_5): 20\" China"), "{said}");
+    assert!(said["kit"]["read_from"].as_str().unwrap().contains("the plugin's own state"), "{said}");
+
+    // Written by name: each drum on the key this kit has it on.
+    let lanes = json!({ "kick": "x...x...", "china": "x.......", "splash": "....x...", "ride_bell": "..x...x." });
+    let beat = ok(client, "write_drums", json!({ "track": kit, "lanes": lanes })).await;
+    assert!(beat.get("warnings").is_none(), "{beat}");
+    let keys: Vec<u64> = notes_of(client, &beat["clip_id"]).await.iter().map(|note| note.0).collect();
+    assert_eq!(keys, [36, 52, 53, 36, 55, 53]);
+
+    // The other kit is loaded, in the plugin's own window: the same names, its keys.
+    LOADED.store(1, Ordering::SeqCst);
+    let said = ok(client, "get_instrument_profile", json!({ "track": kit })).await;
+    assert_eq!((&said["drum_map"]["china"], &said["drum_map"]["crash"]), (&json!(86), &json!(52)), "{said}");
+    assert_eq!(strings(&said["kit"]["has_no"]), ["rim", "clap", "pedal_hat", "crash2", "splash", "ride", "ride_bell"]);
+    let again = ok(client, "write_drums", json!({ "track": kit, "start": 8, "lanes": lanes })).await;
+    let keys: Vec<u64> = notes_of(client, &again["clip_id"]).await.iter().map(|note| note.0).collect();
+    assert_eq!(keys, [36, 86, 36], "the china where this kit hangs it; nothing for the splash or the ride's bell");
+    assert_eq!(strings(&again["left_out"]), ["ride_bell", "splash"]);
+    let warning = joined(&again, "warnings");
+    assert!(
+        warning.contains("The kit on this track has no ride_bell, splash: nothing was written for them")
+            && warning.contains("Its drums: ")
+            && warning.contains("china"),
+        "{warning}"
+    );
+    // A groove of the library loses the lanes this kit cannot play, and says which; the fill's crash is the kit's.
+    let groove =
+        ok(client, "write_drums", json!({ "track": kit, "start": 16, "groove": "jazz_swing", "bars": 2 })).await;
+    assert!(joined(&groove, "warnings").contains("has no ride"), "{groove}");
+    let keys: Vec<u64> = notes_of(client, &groove["clip_id"]).await.iter().map(|note| note.0).collect();
+    assert!(!keys.contains(&51) && !keys.contains(&44), "nothing on the keys General MIDI has them on: {keys:?}");
+    // Nothing but drums it has not got: that is refused, with what it has.
+    let error = call(client, "write_drums", json!({ "track": kit, "lanes": { "cowbell": "x...", "clap": "..x." } }))
+        .await
+        .unwrap_err();
+    assert!(error.contains("the kit on this track has no clap, cowbell") && error.contains("Its drums: "), "{error}");
+
+    // A raw note by name goes by the kit too, and General MIDI's key for a drum it lacks is not offered.
+    let added = ok(
+        client,
+        "add_notes",
+        json!({ "clip": again["clip_id"], "notes": [["china", 2, 0.25], ["tom_high", 3, 0.25]] }),
+    )
+    .await;
+    assert_eq!(added["added"], 2);
+    assert!(notes_of(client, &again["clip_id"]).await.contains(&(86, 2.0, 100)));
+    let error = call(client, "add_notes", json!({ "clip": again["clip_id"], "notes": [["cowbell", 0, 0.25]] })).await;
+    let error = error.unwrap_err();
+    assert!(
+        error.contains("'cowbell' is not a note name")
+            && error.contains("a drum of this track's kit, which has no other"),
+        "{error}"
+    );
+
+    // Read back by this kit's names: the hits written for the other kit's china are a crash here.
+    let read = ok(client, "analyze_music", json!({ "track": kit, "end": 8 })).await;
+    assert_eq!(
+        read["drums"],
+        json!({ "crash": 1, "kick": 2, "E3": 0 })
+            .as_object()
+            .map(|_| json!({ "crash": 1, "kick": 2, "F3": 2, "G3": 1 }))
+            .unwrap(),
+        "{read}"
+    );
+    assert!(read["note"].as_str().unwrap().contains("no drum name for (F3, G3)"), "{read}");
+    LOADED.store(0, Ordering::SeqCst);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_note_says_how_it_is_played_and_the_clips_keyswitches_are_written_for_all_its_notes() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let guitar = track(client, "Rhythm", ECLIPSE).await;
+
+    // A riff note by note, each saying how it is played: chords that ring, chugs between them
+    // muted by how hard they are hit, a palm-muted pair, a hammered run, a scrape by its name.
+    let riff = json!([
+        ["E2", 0, 0.5, 110], ["B2", 0, 0.5, 110],
+        ["E2", 1, 0.25, 100, "muted"], ["E2", 1.25, 0.25, 127, "muted"],
+        ["G2", 2, 0.5, 110],
+        ["E2", 3, 0.25, 90, "palm_mute"], ["E2", 3.25, 0.25, "palm_mute"],
+        ["A3", 4, 0.25, 100], ["B3", 4.25, 0.25, 100, "hammer"], ["A3", 4.5, 0.25, 100, "hammer"],
+        { "pitch": "scrape", "start": 5, "length": 0.5, "velocity": 30 },
+        { "pitch": "E3", "start": 6, "length": 1, "velocity": 20, "how": "slide" }
+    ]);
+    let clip = ok(client, "create_clip", json!({ "track": guitar, "start": 0, "length": 8, "notes": riff })).await;
+    assert_eq!(clip["note_count"], 12);
+    assert_eq!(clip["keyswitches"], json!({ "hammer": 1, "open": 2, "palm_mute": 1, "slide": 1 }), "{clip}");
+    // A note that is slid into is an ordinary note: too soft to ring, it is raised, and that is said.
+    assert!(joined(&clip, "notes").contains("1 note(s) played the ordinary way"), "{clip}");
+    let notes = notes_of(client, &clip["clip_id"]).await;
+    let switches: Vec<(u64, f64)> = notes.iter().filter(|note| note.0 < 36).map(|note| (note.0, note.1)).collect();
+    assert_eq!(
+        switches,
+        [(24, 0.0), (26, 2.97), (24, 3.97), (29, 3.985), (27, 5.97)],
+        "open for the first chord, palm mute and back, the hammer before its run, the slide before its note"
+    );
+    let hit = |beat: f64| notes.iter().find(|note| note.0 >= 36 && (note.1 - beat).abs() < 1e-6).unwrap().2;
+    assert_eq!((hit(1.0), hit(1.25)), (56, 63), "muted is how hard the note is hit: inside 32-63");
+    assert_eq!((hit(3.0), hit(3.25)), (90, 100), "a palm mute keeps its velocity");
+    assert_eq!(hit(6.0), 64, "a slide is an open note: raised to where it rings");
+    assert!(notes.contains(&(101, 5.0, 30)), "the scrape is left as it is: {notes:?}");
+
+    // More notes, in a second call, among the first: the chords keep their open switch.
+    let added = ok(
+        client,
+        "add_notes",
+        json!({ "clip": clip["clip_id"], "notes": [["E2", 0.5, 0.25, 100, "palm_mute"], ["E2", 2.5, 0.25, 100, "palm_mute"]] }),
+    )
+    .await;
+    assert_eq!((added["added"].as_u64(), added["note_count"].as_u64()), (Some(2), Some(21)), "{added}");
+    // What these two notes took: their own switch twice (one of them stands in for the one the
+    // old palm mutes had), and the muted notes after the first now need their key pressed again.
+    assert_eq!(added["keyswitches"], json!({ "muted": 1, "palm_mute": 1 }), "{added}");
+    let notes = notes_of(client, &clip["clip_id"]).await;
+    let early: Vec<(u64, f64)> =
+        notes.iter().filter(|note| note.0 < 36 && note.1 < 3.5).map(|note| (note.0, note.1)).collect();
+    assert_eq!(
+        early,
+        [(24, 0.0), (26, 0.47), (24, 0.97), (26, 2.47)],
+        "after the first palm mute the muted notes are given their key again; the palm mute at 3 follows the one at 2.5"
+    );
+    // Read back, every note is played as it was asked for.
+    let read = ok(client, "analyze_music", json!({ "clip": clip["clip_id"] })).await;
+    assert_eq!(read["left_out"], json!({ "keyswitches": 7, "noises": 1 }), "{read}");
+
+    // The musical tools write into the same clip the same way: palm-muted chords over its second bar,
+    // which follow the palm mutes before them and need no switch of their own.
+    let chords = ok(
+        client,
+        "write_chords",
+        json!({ "clip": clip["clip_id"], "offset": 4, "progression": "E5", "low": "E2", "high": "E4", "inversion": 0,
+                "rhythm": "x...x...", "articulation": "palm_mute" }),
+    )
+    .await;
+    assert!(chords.get("keyswitches").is_none() && chords.get("warnings").is_none(), "{chords}");
+    let notes = notes_of(client, &clip["clip_id"]).await;
+    let late: Vec<(u64, f64)> =
+        notes.iter().filter(|note| note.0 < 36 && note.1 >= 3.5).map(|note| (note.0, note.1)).collect();
+    assert_eq!(late, [], "the hammered run and the slide went with the bar they were in, and their switches with them");
+    assert!(!notes.iter().any(|note| note.0 == 101), "so did the scrape: {notes:?}");
+    // Open chords in their place: now the switch is needed, once.
+    let open = ok(
+        client,
+        "write_chords",
+        json!({ "clip": clip["clip_id"], "offset": 4, "progression": "E5", "low": "E2", "high": "E4", "inversion": 0,
+                "rhythm": "x...x..." }),
+    )
+    .await;
+    assert_eq!(open["keyswitches"], json!({ "open": 1 }), "{open}");
+
+    // set_notes writes the clip anew, with its switches.
+    let set =
+        ok(client, "set_notes", json!({ "clip": clip["clip_id"], "notes": [["E3", 0, 1, "harmonic"], ["E3", 2, 1]] }))
+            .await;
+    assert_eq!(
+        (set["note_count"].as_u64(), &set["keyswitches"]),
+        (Some(2), &json!({ "harmonic": 1, "open": 1 })),
+        "{set}"
+    );
+    assert_eq!(
+        notes_of(client, &clip["clip_id"]).await,
+        [(25, 0.0, 100), (52, 0.03, 100), (24, 1.97, 100), (52, 2.0, 100)],
+        "in the note tools a pitch is the key that is played"
+    );
+    // The musical tools write what is heard: a harmonic's key is an octave under the note asked for.
+    let line = ok(client, "write_melody", json!({ "track": guitar, "start": 8, "phrase": "E4:2!harmonic E4:2" })).await;
+    assert!(
+        joined(&line, "notes").contains("1 note(s) played as 'harmonic' sound 12 semitones above their keys"),
+        "{line}"
+    );
+    let keys: Vec<u64> = notes_of(client, &line["clip_id"]).await.iter().map(|note| note.0).collect();
+    assert_eq!(keys, [25, 52, 24, 64]);
+    let read = ok(client, "analyze_music", json!({ "clip": line["clip_id"] })).await;
+    assert_eq!(read["pitch_range"], "E4-E4", "both are heard as E4: {read}");
+    assert!(read["left_out"]["read_as_heard"].as_str().unwrap().starts_with("1 note(s)"), "{read}");
+
+    // Keyswitches placed by hand are left alone, and it is said.
+    let raw = ok(
+        client,
+        "create_clip",
+        json!({ "track": guitar, "start": 16, "length": 4, "notes": [[26, 0.5, 0.1], ["E2", 1, 0.5]] }),
+    )
+    .await;
+    assert!(raw.get("keyswitches").is_none(), "notes that say nothing go in as they are: {raw}");
+    let more = ok(client, "add_notes", json!({ "clip": raw["clip_id"], "notes": [["E2", 2, 0.5, "muted"]] })).await;
+    assert!(joined(&more, "notes").contains("keyswitches that were placed by hand"), "{more}");
+    assert_eq!(
+        notes_of(client, &raw["clip_id"]).await.iter().map(|note| (note.0, note.1)).collect::<Vec<_>>(),
+        [(26, 0.5), (40, 1.0), (24, 1.97), (40, 2.0)]
+    );
+
+    // What cannot be: an articulation it has not got, a drum track, an instrument without any.
+    let error = call(client, "add_notes", json!({ "clip": clip["clip_id"], "notes": [["E2", 0, 1, "tremolo"]] })).await;
+    assert!(error.unwrap_err().contains("'tremolo' is not an articulation of this instrument; it has open, harmonic"));
+    let kit = track(client, "Drums", KIT).await;
+    let error = call(
+        client,
+        "create_clip",
+        json!({ "track": kit, "start": 0, "length": 4, "notes": [["kick", 0, 1, "muted"]] }),
+    )
+    .await;
+    assert!(error.unwrap_err().contains("is a drum track, whose notes are drums by name"));
+    let keys = track(client, "Keys", LEAD).await;
+    let error = call(
+        client,
+        "create_clip",
+        json!({ "track": keys, "start": 0, "length": 4, "notes": [["C4", 0, 1, "muted"]] }),
+    )
+    .await;
+    assert!(error.unwrap_err().contains("has no articulations to ask for by name"));
+    let error = call(client, "play_notes", json!({ "track": keys, "notes": [["C4", 0, 1, 100, "muted"]] })).await;
+    assert!(error.unwrap_err().contains("a note says how it is played only where it is written into a clip"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
