@@ -7,8 +7,9 @@
 //! A block is made a track at a time, in the order the graph has them:
 //! each track begins from what was fed to it ([`begin`]), is told where
 //! its controllers are ([`say_controllers`]), plays its notes and audio
-//! through its devices ([`play`]), is brought to where its fader has it
-//! ([`fade`]) and is added to where it goes ([`mix`]). While a song plays
+//! through its devices ([`play`]: [`gather`], [`through`], [`answer`]), is
+//! brought to where its fader has it ([`fade`]) and is added to where it
+//! goes ([`mix`]). While a song plays
 //! one thread does all of that, track after track. A render may hand the
 //! tracks that do not feed one another to several threads at once
 //! ([`crate::spread`]): the same steps, on the same numbers, added up in
@@ -498,6 +499,12 @@ impl Processor {
         self.spread.as_ref().map_or(1, |spread| spread.threads())
     }
 
+    /// How long this thread has waited for the others a render was spread
+    /// over, its own share of the work done: nothing where it has none.
+    pub fn waited_for_threads(&self) -> std::time::Duration {
+        self.spread.as_ref().map_or(std::time::Duration::ZERO, |spread| spread.waited())
+    }
+
     /// Renders `left.len()` frames. The slices must have equal length.
     pub fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
         let _denormals = DenormalGuard::new();
@@ -743,7 +750,8 @@ impl Processor {
         if let Some(tap) = &mut master.tap {
             tap.push(mix_left, mix_right);
         }
-        run_chain(&mut master.chain, &info, param_beat, &[], mix_left, mix_right, keys);
+        move_params(&mut master.chain, param_beat);
+        run_devices(&mut master.chain.devices, &info, &[], mix_left, mix_right, keys);
 
         let (volume, volume_db) = (&master.volume_automation, master.volume_db);
         let level = |beat: f64| {
@@ -869,6 +877,17 @@ pub(crate) fn say_controllers(track: &mut TrackNode, common: &Common, room: &mut
 /// not in order of time. A device that listens to another track is handed
 /// what `keys` holds of it.
 pub(crate) fn play(track: &mut TrackNode, common: &Common, room: &mut Room, unordered: bool, keys: &[Bus]) {
+    gather(track, common, room, unordered);
+    let devices = track.chain.devices.len();
+    through(track, common, room, keys, 0..devices);
+    answer(track, common, room);
+}
+
+/// What a track's devices are given in the block, into `room`: its notes
+/// after what it has been told so far, all of it in order of time, and
+/// its audio; and their parameters are put where their envelopes have
+/// them. The first part of [`play`].
+pub(crate) fn gather(track: &mut TrackNode, common: &Common, room: &mut Room, unordered: bool) {
     let ControlBlock { playing, start_beat, end_beat, anchor_beat, elapsed, beats_per_frame, frames, .. } =
         common.controls;
     let Room { left, right, events, sorted, .. } = room;
@@ -893,22 +912,50 @@ pub(crate) fn play(track: &mut TrackNode, common: &Common, room: &mut Room, unor
         sort_by_offset(&mut events[..before_notes]);
         merge_by_offset(events, before_notes, sorted);
     }
+    move_params(&mut track.chain, common.param_beat);
+}
 
+/// Runs some of a track's devices over what `room` holds: those at the
+/// places `devices` of its chain. The whole chain in one go, or a first
+/// part and then the rest, comes to the same. A render that keeps what
+/// goes into the track's effects hears it where it goes by: ahead of the
+/// first effect, in whichever part that one is run.
+pub(crate) fn through(
+    track: &mut TrackNode,
+    common: &Common,
+    room: &mut Room,
+    keys: &[Bus],
+    devices: std::ops::Range<usize>,
+) {
+    let frames = common.controls.frames;
+    let Room { left, right, events, .. } = room;
+    let (left, right) = (&mut left[..frames], &mut right[..frames]);
+    let all = &mut track.chain.devices;
+    let (from, to) = (devices.start.min(all.len()), devices.end.min(all.len()));
+    let count = all.len();
+    let part = &mut all[from..to.max(from)];
     match &mut track.source {
-        None => run_chain(&mut track.chain, common.info, common.param_beat, events, left, right, keys),
-        // A render that keeps what goes into the track's effects:
-        // the chain is run in two parts, and heard between them.
-        Some((sources, tap)) => {
-            move_params(&mut track.chain, common.param_beat);
-            let devices = &mut track.chain.devices;
-            let sources = (*sources).min(devices.len());
-            let (source, effects) = devices.split_at_mut(sources);
+        Some((sources, tap)) if from <= *sources && *sources < to => {
+            let (source, effects) = part.split_at_mut(*sources - from);
             run_devices(source, common.info, events, left, right, keys);
             tap.push(left, right);
             run_devices(effects, common.info, events, left, right, keys);
         }
+        // Nothing comes after the instrument: it is heard as the last
+        // device has run.
+        Some((sources, tap)) if *sources >= count && to == count => {
+            run_devices(part, common.info, events, left, right, keys);
+            tap.push(left, right);
+        }
+        _ => run_devices(part, common.info, events, left, right, keys),
     }
-    listen_for_an_answer(track, left, right);
+}
+
+/// Notices whether a track's devices have answered the notes they were
+/// given, once they have all run: the last part of [`play`].
+pub(crate) fn answer(track: &mut TrackNode, common: &Common, room: &mut Room) {
+    let frames = common.controls.frames;
+    listen_for_an_answer(track, &room.left[..frames], &room.right[..frames]);
 }
 
 /// Brings what a track has played to where its fader, its pan, and mute
@@ -1328,21 +1375,6 @@ fn add_scaled_by(source: &[f32], destination: &mut [f32], gains: &[f32]) {
     for ((out, sample), gain) in destination.iter_mut().zip(source).zip(gains) {
         *out += sample * gain;
     }
-}
-
-/// Runs the devices of a chain over one block, in order, with their
-/// parameters where their envelopes have them at `param_beat`.
-fn run_chain(
-    chain: &mut Chain,
-    info: &ProcessInfo,
-    param_beat: f64,
-    events: &[Event],
-    left: &mut [f32],
-    right: &mut [f32],
-    keys: &[Bus],
-) {
-    move_params(chain, param_beat);
-    run_devices(&mut chain.devices, info, events, left, right, keys);
 }
 
 /// Sets the parameters of a chain's devices to where their automation has

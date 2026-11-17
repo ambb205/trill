@@ -94,9 +94,10 @@ pub struct Loading {
     /// The instruments the factory hands out keep one thing between them,
     /// as the instances of some plugins do: a count of the notes any of
     /// them has sounded, by which the next note of any of them is given
-    /// its level. They say that they are to be run in turn
-    /// ([`Beside::InTurn`]), and the factory notices when two of them are
-    /// run at once all the same ([`ScriptedFactory::overlapped`]).
+    /// its level. They say that they are to be run in turn, and so does
+    /// the amplifier ([`Beside::InTurn`]); the factory notices when two of
+    /// the instruments are run at once all the same
+    /// ([`ScriptedFactory::overlapped`]).
     pub shares: bool,
     /// Its devices say that they are not to be run beside anything
     /// ([`Beside::Nothing`]).
@@ -258,7 +259,7 @@ impl DeviceFactory for ScriptedFactory {
     fn beside(&self, uri: &str) -> Beside {
         match uri {
             BASS | DRUMS | AMP if self.loading.alone => Beside::Nothing,
-            BASS | DRUMS if self.loading.shares => Beside::InTurn("scripted instruments".to_string()),
+            BASS | DRUMS | AMP if self.loading.shares => Beside::InTurn("scripted devices".to_string()),
             _ => Beside::Anything,
         }
     }

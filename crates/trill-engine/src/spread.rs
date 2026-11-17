@@ -23,7 +23,10 @@
 //!   say). Unless a module is known to keep nothing of the kind, its
 //!   instances are never run at once, and always in the order of the song
 //!   ([`Beside::InTurn`]): what the module has seen when a block ends is
-//!   what it would have seen on one thread.
+//!   what it would have seen on one thread. Only those devices take
+//!   turns. What comes after the last of them on a track (an amplifier
+//!   behind a sampled guitar, which costs ten times what the guitar does)
+//!   is run beside the others as soon as its track has had its turn.
 //!
 //! **What is made when.** A track can be made once everything that feeds
 //! it has been added up: the members of a group before the group, the
@@ -41,7 +44,7 @@
 
 use crate::crew::Crew;
 use crate::graph::{Bus, Graph, TrackNode};
-use crate::processor::{Common, DenormalGuard, Room, begin, fade, mix, play, say_controllers};
+use crate::processor::{Common, DenormalGuard, Room, answer, begin, fade, gather, mix, say_controllers, through};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use trill_core::device::{Beside, DeviceFactory};
@@ -157,10 +160,20 @@ pub(crate) fn plan(tracks: &[TrackNode]) -> Vec<Step> {
     steps
 }
 
+/// How many of a track's devices, from the first, are run while the track
+/// has its turn: up to the last one that takes turns with the devices of
+/// other tracks. None where no device of it does.
+fn turn_of(track: &TrackNode) -> usize {
+    let taking = |slot: &crate::graph::DeviceSlot| slot.turn.is_some() && slot.enabled && slot.processor.is_some();
+    track.chain.devices.iter().rposition(taking).map_or(0, |last| last + 1)
+}
+
 /// What a render keeps to make its blocks on more than one thread.
 pub(crate) struct Spread {
     crew: Crew,
     steps: Vec<Step>,
+    /// For every track, by its place in the graph: see [`turn_of`].
+    turns: Vec<usize>,
     /// Room for the block of every track, by its place in the graph.
     rooms: Vec<Room>,
     /// Where a track that is listened to leaves what it sounded like ahead
@@ -173,8 +186,15 @@ impl Spread {
     /// threads; nothing if one thread is all it can use.
     pub fn new(graph: &Graph, threads: usize) -> Option<Self> {
         let steps = plan(&graph.tracks);
-        let widest = steps.iter().map(|step| if let Step::Make(lists) = step { lists.len() } else { 0 }).max();
-        let threads = threads.min(widest.unwrap_or(0));
+        let turns: Vec<usize> = graph.tracks.iter().map(turn_of).collect();
+        // The most there is to do at once: the lists of a round, or the
+        // tracks of one that go on beside each other after their turns.
+        let rest = |at: &usize| turns[*at] > 0 && turns[*at] < graph.tracks[*at].chain.devices.len();
+        let widest = steps.iter().map(|step| match step {
+            Step::Make(lists) => lists.len().max(lists.iter().flatten().filter(|at| rest(at)).count()),
+            Step::Add(_) => 0,
+        });
+        let threads = threads.min(widest.max().unwrap_or(0));
         if threads < 2 {
             return None;
         }
@@ -186,6 +206,7 @@ impl Spread {
         Some(Self {
             crew,
             steps,
+            turns,
             rooms: graph.tracks.iter().map(|_| Room::new()).collect(),
             keys: graph.tracks.iter().map(|track| track.key_out.map(|_| Bus::new())).collect(),
         })
@@ -194,6 +215,12 @@ impl Spread {
     /// How many threads make a block, the one that asks among them.
     pub fn threads(&self) -> usize {
         self.crew.len() + 1
+    }
+
+    /// How long the thread that asks has waited for the others so far,
+    /// its own share of a round done.
+    pub fn waited(&self) -> std::time::Duration {
+        self.crew.waited()
     }
 
     /// Makes one block of `tracks`, as one thread would have: the buses
@@ -208,7 +235,18 @@ impl Spread {
         mix_right: &mut [f32],
     ) {
         let frames = common.frames();
-        let Spread { crew, steps, rooms, keys: kept } = self;
+        let Spread { crew, steps, turns, rooms, keys: kept } = self;
+        // What is left of a track's block once its devices have all run.
+        let finish = |track: &mut TrackNode, room: &mut Room, kept: &mut Option<Bus>| {
+            answer(track, common, room);
+            // What the devices that listen to this track hear of it: as
+            // it leaves its own devices.
+            if let Some(kept) = kept {
+                kept.left[..frames].copy_from_slice(&room.left[..frames]);
+                kept.right[..frames].copy_from_slice(&room.right[..frames]);
+            }
+            fade(track, common, room);
+        };
         for step in steps.iter() {
             let lists = match step {
                 Step::Add(at) => {
@@ -220,8 +258,9 @@ impl Spread {
             {
                 // Each list takes its tracks, with their rooms, and
                 // whichever thread comes first takes the next list.
+                let places = tracks.iter_mut().zip(rooms.iter_mut()).zip(kept.iter_mut()).zip(turns.iter());
                 let mut places: Vec<_> =
-                    tracks.iter_mut().zip(rooms.iter_mut()).zip(kept.iter_mut()).map(Some).collect();
+                    places.map(|(((track, room), kept), turn)| Some((track, room, kept, *turn))).collect();
                 let lists: Vec<_> = lists
                     .iter()
                     .map(|list| Mutex::new(list.iter().filter_map(|at| places[*at].take()).collect::<Vec<_>>()))
@@ -230,21 +269,48 @@ impl Spread {
                 let (buses, keys) = (&*buses, &*keys);
                 let work = || {
                     while let Some(list) = lists.get(next.fetch_add(1, Ordering::Relaxed)) {
-                        for ((track, room), kept) in list.lock().iter_mut() {
+                        for (track, room, kept, turn) in list.lock().iter_mut() {
                             begin(track, common, buses, room);
                             let moved = say_controllers(track, common, room);
-                            play(track, common, room, moved, keys);
-                            // What the devices that listen to this track
-                            // hear of it: as it leaves its own devices.
-                            if let Some(kept) = kept {
-                                kept.left[..frames].copy_from_slice(&room.left[..frames]);
-                                kept.right[..frames].copy_from_slice(&room.right[..frames]);
+                            gather(track, common, room, moved);
+                            // The devices that take turns with those of
+                            // the list's other tracks, and with them what
+                            // comes before them; all of them where none
+                            // does, or nothing comes after.
+                            let devices = track.chain.devices.len();
+                            let turn = if *turn == 0 { devices } else { (*turn).min(devices) };
+                            through(track, common, room, keys, 0..turn);
+                            if turn == devices {
+                                finish(track, room, kept);
                             }
-                            fade(track, common, room);
                         }
                     }
                 };
                 crew.all(lists.len() - 1, &work);
+
+                // What comes after a track's turn is nobody's but its own:
+                // those go on beside each other.
+                let after = |(track, _, _, turn): &(&mut TrackNode, &mut Room, &mut Option<Bus>, usize)| {
+                    *turn > 0 && *turn < track.chain.devices.len()
+                };
+                let rest: Vec<_> = lists
+                    .into_iter()
+                    .flat_map(|list| list.into_inner())
+                    .filter(after)
+                    .map(|place| Mutex::new(Some(place)))
+                    .collect();
+                if !rest.is_empty() {
+                    let next = AtomicUsize::new(0);
+                    let work = || {
+                        while let Some(place) = rest.get(next.fetch_add(1, Ordering::Relaxed)) {
+                            let Some((track, room, kept, turn)) = place.lock().take() else { continue };
+                            let devices = track.chain.devices.len();
+                            through(track, common, room, keys, turn..devices);
+                            finish(track, room, kept);
+                        }
+                    };
+                    crew.all(rest.len() - 1, &work);
+                }
             }
             // Nobody listened to these while they were made: whoever
             // does is made in a later round.

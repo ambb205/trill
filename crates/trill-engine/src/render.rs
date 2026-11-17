@@ -543,7 +543,14 @@ fn render_from(
         graph.master.tap = Some(listener(Some(stems.begin(StemKind::Premaster, None, sample_rate)?)));
     }
     let made = begun.elapsed();
-    let waited = ready::wake(&mut graph, project, (&plugins, factory), (start, end), sample_rate, options.patience);
+    // How many threads make it: as many as it was given and can use,
+    // unless a device of it is not to be run beside anything. The plugins
+    // are rehearsed on them too.
+    let alone = spread::company(&mut graph, project, factory, options.trusting);
+    let given = options.threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from)).max(1);
+    let threads = if alone.is_empty() { given } else { 1 };
+    let patience = (options.patience, threads);
+    let waited = ready::wake(&mut graph, project, (&plugins, factory), (start, end), sample_rate, patience);
     let woke = begun.elapsed();
     let name_of = |track: Option<TrackId>| match track {
         Some(track) => project.track(track).map(|track| track.name.clone()).unwrap_or_default(),
@@ -583,9 +590,7 @@ fn render_from(
         return Err(RenderError::NotAnswered(missing));
     }
 
-    // How many threads make it: as many as it was given and can use,
-    // unless a device of it is not to be run beside anything.
-    let alone: Vec<Alone> = spread::company(&mut graph, project, factory, options.trusting)
+    let alone: Vec<Alone> = alone
         .into_iter()
         .map(|device| {
             let track = project.tracks.iter().find(|track| track.devices.iter().any(|on| on.id == device));
@@ -597,10 +602,9 @@ fn render_from(
             }
         })
         .collect();
-    let given = options.threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from));
     let mut processor = Processor::new(sample_rate);
     drop(processor.swap_graph(graph));
-    let threads = if alone.is_empty() { processor.spread_over(given.max(1)) } else { 1 };
+    let threads = if alone.is_empty() { processor.spread_over(given) } else { 1 };
     // Only where it made a difference is it worth saying.
     let alone = if given > 1 { alone } else { Vec::new() };
     processor.seek(start);
@@ -671,6 +675,7 @@ fn render_from(
 
     // The graph comes back from the processor with what its devices and
     // its taps have counted.
+    let waited_for_threads = processor.waited_for_threads();
     let mut graph = processor.swap_graph(Box::new(Graph::empty()));
     let mut stems = Vec::new();
     for track in &project.tracks {
@@ -742,11 +747,12 @@ fn render_from(
     drop(graph);
     log::info!(
         "a render of {:.1} s of audio on {threads} thread(s): its devices were made in {:.1} s, waited for {:.1} s, \
-         played in {:.1} s and let go of in {:.1} s",
+         played in {:.1} s (of which {:.1} s waiting for its threads) and let go of in {:.1} s",
         total_frames as f64 / sample_rate,
         made.as_secs_f64(),
         (woke - made).as_secs_f64(),
         (played - woke).as_secs_f64(),
+        waited_for_threads.as_secs_f64(),
         (begun.elapsed() - played).as_secs_f64()
     );
 

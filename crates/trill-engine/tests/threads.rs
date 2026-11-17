@@ -209,18 +209,42 @@ fn instruments_that_keep_something_between_them_are_run_in_turn_and_in_the_order
     // Every scripted instrument of this factory counts the notes that any
     // of them has sounded, and a note's level is what the count says: what
     // comes out depends on the order they are run in, block by block.
-    let project = song();
+    //
+    // Only the devices that take turns wait for each other. What comes
+    // after the last of them on a track is run beside the other tracks,
+    // and the track's block is made in two parts: here with the part that
+    // takes turns ending at the instrument (the second bass, before its
+    // EQ), after it (the bass, whose amplifier takes turns too, before its
+    // compressor), with nothing after it (the drums), and on a track whose
+    // instrument is built in and whose amplifier takes turns (the bell).
+    // What goes into each track's effects is written to a file where it
+    // goes by, which is in the one part or the other.
+    let mut project = song();
+    let track = |name: &str| project.tracks.iter().find(|track| track.name == name).unwrap().id;
+    let (bell, second) = (track("Bell"), track("Second bass"));
+    device(&mut project, ChainRef::Track(bell), AMP, &[]);
+    device(&mut project, ChainRef::Track(second), "builtin:eq", &[]);
+    let folder = tempfile::tempdir().unwrap();
+    let with_stems = |threads: Option<usize>, name: &str| RenderOptions {
+        stems: Some(Stems::all(folder.path().join(name))),
+        ..options(threads)
+    };
     let sharing = Loading { shares: true, ..Loading::default() };
     let scripted = ScriptedFactory::loading(sharing);
-    let one = render(&project, &scripted, &options(Some(1)));
+    let one = render(&project, &scripted, &with_stems(Some(1), "one"));
     assert!(!scripted.overlapped());
 
     let scripted = ScriptedFactory::loading(sharing);
-    let many = render(&project, &scripted, &options(None));
+    let many = render(&project, &scripted, &with_stems(None, "many"));
     assert!(many.left == one.left && many.right == one.right, "the order of one thread was kept");
     assert!(!scripted.overlapped(), "and no two of them were run at once");
     if processors() > 1 {
         assert!(many.measured.threads > 1, "though the rest of the song was made beside them");
+    }
+    assert_eq!(many.measured.stems.len(), one.measured.stems.len());
+    for (stem, single) in many.measured.stems.iter().zip(&one.measured.stems) {
+        let (written, expected) = (std::fs::read(&stem.path).unwrap(), std::fs::read(&single.path).unwrap());
+        assert!(written == expected, "{} is other samples than {}", stem.path, single.path);
     }
 
     // What that is worth: taken on trust, the same instruments are run at
@@ -236,6 +260,32 @@ fn instruments_that_keep_something_between_them_are_run_in_turn_and_in_the_order
         });
         assert!(caught, "instruments that were trusted were never run at once");
     }
+}
+
+#[test]
+fn the_plugins_of_a_song_are_rehearsed_at_once_and_begin_the_render_where_one_thread_leaves_them() {
+    // Instruments with five recordings of each key, and amplifiers whose
+    // level goes up and down with every frame they are run: what the song
+    // sounds like says how often the wait before it played each note, and
+    // how much it ran each amplifier.
+    let project = song();
+    let telling = Loading { takes: 5, free: true, ..Loading::default() };
+    let plain = render(&project, &ScriptedFactory::new(), &options(Some(1)));
+    let one = render(&project, &ScriptedFactory::loading(telling), &options(Some(1)));
+    assert!(one.left != plain.left, "the takes and the amplifiers are heard");
+    // Nothing is known of them yet on several threads either, and then
+    // they are known.
+    for round in 0..2 {
+        let many = render(&project, &ScriptedFactory::loading(telling), &options(None));
+        assert!(many.left == one.left && many.right == one.right, "round {round}");
+    }
+    // A key of the basses that arrives a second after the rest is waited
+    // for on its thread while the others are done with theirs.
+    let late = Loading { late: Some((45, std::time::Duration::from_millis(1000))), ..telling };
+    let begun = std::time::Instant::now();
+    let many = render(&project, &ScriptedFactory::loading(late), &options(None));
+    assert!(begun.elapsed() >= std::time::Duration::from_millis(1000));
+    assert!(many.left == one.left && many.right == one.right, "after a wait of {:?}", begun.elapsed());
 }
 
 #[test]

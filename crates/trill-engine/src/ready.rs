@@ -130,6 +130,16 @@
 //! loading, is not held to it for longer than a moment. It is rehearsed
 //! just as often.
 //!
+//! **The plugins of a song are rehearsed at once.** Rehearsing is work:
+//! every note of every instrument is played through its plugins three
+//! times and more, and a song of seventeen plugins waited over a minute on
+//! one thread for what was mostly that. So a render that may use several
+//! threads rehearses on them, with the same care as it plays: plugins
+//! that may keep something between them (the instances of one plugin,
+//! unless it is known to keep nothing) are tried one after the other and
+//! in the order of the song, and the others beside them. How often each
+//! note sounds does not depend on it.
+//!
 //! **While it plays, nothing waits.** A plugin in the song that is heard
 //! live is not rehearsed: nobody is to hear notes that are not in the
 //! song. What can be said of it is that it was just made or given
@@ -145,9 +155,11 @@
 //! through a reset, and an effect that passes sound before it is ready to
 //! pass it rightly.
 
+use crate::crew::Crew;
 use crate::graph::Graph;
 use parking_lot::Mutex;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use trill_core::device::{DeviceCategory, DeviceFactory, DeviceProcessor, Event, EventKind, ProcessInfo};
 use trill_core::{ControllerKind, Device, DeviceId, Project, TimeSignature, TrackId};
@@ -889,6 +901,10 @@ pub(crate) struct Wait<'a> {
     /// The plugins alone, whatever they are asked: for what is known of
     /// their keys.
     pub devices: u64,
+    /// What the plugins take turns over with those of other waits: see
+    /// [`crate::graph::DeviceSlot::turn`]. Waits that share a number here
+    /// are never tried at once.
+    turns: Vec<u32>,
     /// For an instrument: what came out each time a note sounded, note by
     /// note, [`SOUNDINGS`] times each at the most.
     sounded: Vec<Vec<Answer>>,
@@ -929,6 +945,7 @@ impl<'a> Wait<'a> {
             opening,
             signature,
             devices,
+            turns: Vec::new(),
             sounded: Vec::new(),
             missed: Vec::new(),
             tries: 0,
@@ -941,6 +958,13 @@ impl<'a> Wait<'a> {
             found: false,
             silent: Vec::new(),
         }
+    }
+
+    /// Says what the plugins of this wait take turns over with those of
+    /// others.
+    pub fn taking_turns(mut self, turns: Vec<u32>) -> Self {
+        self.turns = turns;
+        self
     }
 
     /// One try. `loading` is whether the program showed signs of loading
@@ -1173,24 +1197,28 @@ fn tell(begun: Instant, first: &Vitals, loading: bool, waits: &[Wait]) {
 /// behind with other work), or after [`LOADING_LIMIT`] whatever stirs.
 /// Waits that are known not to be answered get [`KNOWN_SILENT`] at most;
 /// how each went is remembered.
-pub(crate) fn wait_for(waits: &mut [Wait], patience: Duration, held_up: &dyn Fn() -> bool) {
+pub(crate) fn wait_for(waits: &mut [Wait], patience: Duration, held_up: &(dyn Fn() -> bool + Sync), threads: usize) {
     let begun = Instant::now();
     let silent: Vec<u64> = KNOWN_NOT_TO_ANSWER.lock().clone();
     let ready: Vec<(u64, Vec<Answer>)> = KNOWN_READY.lock().clone();
     let keys: Vec<(u64, Keys)> = KNOWN_KEYS.lock().clone();
     let mut signs = Signs::following(UNLOADED_UNDER_A_WAIT);
     let first = Vitals::now().unwrap_or_default();
-    for wait in waits.iter_mut() {
+    let crew = crew_for(waits, threads);
+    each(waits, crew.as_ref(), &|wait| {
         wait.stand.hear_noise();
         wait.stirred = Instant::now();
-    }
+    });
     loop {
         let loading = signs.seen();
         // A plugin that cannot have its turn is not one that does nothing.
         let waiting_its_turn = held_up();
         tell(begun, &first, loading, waits);
-        let mut pending = false;
-        for wait in waits.iter_mut().filter(|wait| wait.outcome.is_none()) {
+        let pending = AtomicBool::new(false);
+        each(waits, crew.as_ref(), &|wait| {
+            if wait.outcome.is_some() {
+                return;
+            }
             let patience = if wait.opening.signal { patience.min(EFFECT_PATIENCE) } else { patience };
             let patience = if silent.contains(&wait.signature) { patience.min(KNOWN_SILENT) } else { patience };
             let known = Known {
@@ -1198,7 +1226,7 @@ pub(crate) fn wait_for(waits: &mut [Wait], patience: Duration, held_up: &dyn Fn(
                 keys: keys.iter().find(|(devices, _)| *devices == wait.devices).map(|(_, keys)| keys),
             };
             if wait.attempt(begun, loading, known, patience / 2) {
-                continue;
+                return;
             }
             if waiting_its_turn {
                 wait.stirred = Instant::now();
@@ -1210,17 +1238,18 @@ pub(crate) fn wait_for(waits: &mut [Wait], patience: Duration, held_up: &dyn Fn(
             if wait.stirred.elapsed() >= patience || begun.elapsed() >= LOADING_LIMIT {
                 wait.outcome = Some((begun.elapsed(), wait.answered()));
             } else {
-                pending = true;
+                pending.store(true, Ordering::Relaxed);
             }
-        }
-        if !pending {
+        });
+        if !pending.load(Ordering::Relaxed) {
             break;
         }
         std::thread::sleep(BETWEEN_TRIES);
     }
+    each(waits, crew.as_ref(), &|wait| wait.stand.settle());
+    drop(crew);
     let (mut silent, mut ready, mut keys) = (KNOWN_NOT_TO_ANSWER.lock(), KNOWN_READY.lock(), KNOWN_KEYS.lock());
     for wait in waits.iter_mut() {
-        wait.stand.settle();
         silent.retain(|signature| *signature != wait.signature);
         ready.retain(|(signature, _)| *signature != wait.signature);
         match wait.outcome().1 {
@@ -1252,6 +1281,51 @@ pub(crate) fn wait_for(waits: &mut [Wait], patience: Duration, held_up: &dyn Fn(
     ready.drain(..surplus);
     let surplus = keys.len().saturating_sub(REMEMBERED);
     keys.drain(..surplus);
+}
+
+/// The threads to try `waits` on, and which of them each list of waits
+/// that take turns holds, by their places: nothing where one thread is
+/// all there is to use, or all it was given.
+fn crew_for(waits: &[Wait], threads: usize) -> Option<(Crew, Vec<Vec<usize>>)> {
+    let mut lists: Vec<(Vec<usize>, Vec<u32>)> = Vec::new();
+    for (at, wait) in waits.iter().enumerate() {
+        let mut joined = (vec![at], wait.turns.clone());
+        let mut apart = Vec::new();
+        for list in lists.drain(..) {
+            if list.1.iter().any(|turn| joined.1.contains(turn)) {
+                joined.0.extend(list.0);
+                joined.1.extend(list.1);
+            } else {
+                apart.push(list);
+            }
+        }
+        joined.0.sort_unstable();
+        apart.push(joined);
+        lists = apart;
+    }
+    lists.sort_by_key(|list| list.0[0]);
+    let threads = threads.min(lists.len());
+    if threads < 2 {
+        return None;
+    }
+    let crew = Crew::new(threads - 1, || ());
+    (crew.len() > 0).then(|| (crew, lists.into_iter().map(|list| list.0).collect()))
+}
+
+/// Does `work` to every wait: one after the other, or, given threads,
+/// each list of waits at once with the others and in its own order.
+fn each<'a>(waits: &mut [Wait<'a>], crew: Option<&(Crew, Vec<Vec<usize>>)>, work: &(dyn Fn(&mut Wait<'a>) + Sync)) {
+    let Some((crew, lists)) = crew else { return waits.iter_mut().for_each(work) };
+    let mut places: Vec<Option<&mut Wait<'a>>> = waits.iter_mut().map(Some).collect();
+    let lists: Vec<Mutex<Vec<&mut Wait<'a>>>> =
+        lists.iter().map(|list| Mutex::new(list.iter().filter_map(|at| places[*at].take()).collect())).collect();
+    let next = AtomicUsize::new(0);
+    let all = || {
+        while let Some(list) = lists.get(next.fetch_add(1, Ordering::Relaxed)) {
+            list.lock().iter_mut().for_each(|wait| work(wait));
+        }
+    };
+    crew.all(lists.len() - 1, &all);
 }
 
 fn hash_devices<'a>(devices: impl Iterator<Item = &'a Device>, hasher: &mut impl Hasher) {
@@ -1331,7 +1405,7 @@ pub(crate) fn wake(
     (plugins, factory): (&Plugins, &dyn DeviceFactory),
     (from, to): (f64, f64),
     sample_rate: f64,
-    patience: Duration,
+    (patience, threads): (Duration, usize),
 ) -> Vec<Waited> {
     let tempo = graph.tempo;
     let mut waits = Vec::new();
@@ -1388,13 +1462,16 @@ pub(crate) fn wake(
             .filter(|device| Plugins::is_plugin(&device.uri) && !rehearsed.iter().any(|other| other.id == device.id))
             .collect();
         let (mut with_notes, mut with_noise) = (Vec::new(), Vec::new());
+        let (mut note_turns, mut noise_turns) = (Vec::new(), Vec::new());
         for slot in node.chain.devices.iter_mut() {
-            let id = slot.id;
+            let (id, turn) = (slot.id, slot.turn);
             let Some(processor) = slot.processor.as_mut() else { continue };
             if rehearsed.iter().any(|device| device.id == id) {
                 with_notes.push(processor);
+                note_turns.extend(turn);
             } else if effects.iter().any(|device| device.id == id) {
                 with_noise.push(processor);
+                noise_turns.extend(turn);
             }
         }
         // (A plugin that could not be created is a problem of its own,
@@ -1403,14 +1480,16 @@ pub(crate) fn wake(
             let opening = Opening { notes, signal: false };
             let signature = signature(rehearsed.iter().copied(), &opening);
             let devices = device_signature(rehearsed.iter().copied());
-            waits.push(Wait::new(Stand::new(with_notes, sample_rate, tempo), opening, signature, devices));
+            let stand = Stand::new(with_notes, sample_rate, tempo);
+            waits.push(Wait::new(stand, opening, signature, devices).taking_turns(note_turns));
             who.push((Some(node.id), instrument.id, false));
         }
         if let (Some(first), true) = (effects.first(), with_noise.len() == effects.len()) {
             let opening = Opening { notes: Vec::new(), signal: true };
             let signature = signature(effects.iter().copied(), &opening);
             let devices = device_signature(effects.iter().copied());
-            waits.push(Wait::new(Stand::new(with_noise, sample_rate, tempo), opening, signature, devices));
+            let stand = Stand::new(with_noise, sample_rate, tempo);
+            waits.push(Wait::new(stand, opening, signature, devices).taking_turns(noise_turns));
             who.push((Some(node.id), first.id, true));
         }
     }
@@ -1418,18 +1497,21 @@ pub(crate) fn wake(
     let effects: Vec<&Device> =
         project.master.devices.iter().filter(|device| device.enabled && Plugins::is_plugin(&device.uri)).collect();
     let slots = graph.master.chain.devices.iter_mut().filter(|slot| effects.iter().any(|device| device.id == slot.id));
-    let processors: Vec<_> = slots.filter_map(|slot| slot.processor.as_mut()).collect();
+    let slots: Vec<_> = slots.filter(|slot| slot.processor.is_some()).collect();
+    let master_turns: Vec<u32> = slots.iter().filter_map(|slot| slot.turn).collect();
+    let processors: Vec<_> = slots.into_iter().filter_map(|slot| slot.processor.as_mut()).collect();
     if let (Some(first), true) = (effects.first(), processors.len() == effects.len()) {
         let opening = Opening { notes: Vec::new(), signal: true };
         let signature = signature(effects.iter().copied(), &opening);
         let devices = device_signature(effects.iter().copied());
-        waits.push(Wait::new(Stand::new(processors, sample_rate, tempo), opening, signature, devices));
+        let stand = Stand::new(processors, sample_rate, tempo);
+        waits.push(Wait::new(stand, opening, signature, devices).taking_turns(master_turns));
         who.push((None, first.id, true));
     }
     if waits.is_empty() {
         return Vec::new();
     }
-    wait_for(&mut waits, patience, &|| factory.busy());
+    wait_for(&mut waits, patience, &|| factory.busy(), threads);
     waits
         .iter()
         .zip(who)

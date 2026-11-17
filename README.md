@@ -379,7 +379,10 @@ that quick and true:
   instances of one plugin share its module, and some modules keep things for all their instances: run at
   once, the instruments of Ample Sound give other samples than run one after the other. So the instances
   of one plugin are run in turn and in the order of the song, beside everything else, unless the plugin
-  was measured to give the same samples either way (`trill-plugins/src/beside.rs` lists those, and
+  was measured to give the same samples either way. Only those devices take turns: what comes after them
+  on a track (the amplifier behind a sampled guitar, which costs many times what the guitar does) goes on
+  beside the other tracks as soon as its track has had its turn. (`trill-plugins/src/beside.rs` lists
+  what was measured, and
   `cargo run -p trill-plugins --example beside` measures an installed plugin, or all of them, each in a
   process of its own). A plugin that is listed as one not to run beside anything leaves the render on one
   thread, and the reply says which it was.

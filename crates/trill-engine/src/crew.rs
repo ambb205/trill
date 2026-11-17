@@ -13,6 +13,7 @@
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 /// Threads that work on what [`Crew::all`] is given, beside the caller.
 pub(crate) struct Crew {
@@ -40,6 +41,9 @@ struct State {
     /// One of them panicked over it.
     panicked: bool,
     quit: bool,
+    /// How long callers have waited, their own share done, for threads
+    /// that had taken work up and not finished it.
+    waited: Duration,
 }
 
 /// What every thread of the crew is to run. The pointer is to something on
@@ -58,7 +62,15 @@ impl Crew {
     /// same sound as the caller's.
     pub fn new<Kept: 'static>(threads: usize, settle: fn() -> Kept) -> Self {
         let shared = Arc::new(Shared {
-            state: Mutex::new(State { task: None, round: 0, places: 0, at_work: 0, panicked: false, quit: false }),
+            state: Mutex::new(State {
+                task: None,
+                round: 0,
+                places: 0,
+                at_work: 0,
+                panicked: false,
+                quit: false,
+                waited: Duration::ZERO,
+            }),
             work: Condvar::new(),
             done: Condvar::new(),
         });
@@ -80,6 +92,13 @@ impl Crew {
     /// How many threads there are beside the caller's.
     pub fn len(&self) -> usize {
         self.threads.len()
+    }
+
+    /// How long callers of [`Crew::all`] have waited so far, their own
+    /// share done, for the crew to finish its own: what a machine that is
+    /// busy with other things costs a render that is spread over it.
+    pub fn waited(&self) -> Duration {
+        self.shared.state.lock().waited
     }
 
     /// Runs `work` on the caller's thread and on up to `helpers` threads
@@ -125,8 +144,12 @@ impl Drop for Over<'_> {
     fn drop(&mut self) {
         let mut state = self.0.state.lock();
         state.places = 0;
-        while state.at_work > 0 {
-            self.0.done.wait(&mut state);
+        if state.at_work > 0 {
+            let since = Instant::now();
+            while state.at_work > 0 {
+                self.0.done.wait(&mut state);
+            }
+            state.waited += since.elapsed();
         }
         state.task = None;
     }
