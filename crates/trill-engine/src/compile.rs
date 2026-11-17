@@ -162,8 +162,17 @@ impl Compiler<'_> {
         // The stretched copies this graph has given a stand-in for.
         let mut held = HashSet::new();
 
+        // A render makes and plays only what is heard, and what feeds it:
+        // a track that is muted, or left out by a solo, would be made,
+        // waited for and run only to be thrown away. What is played keeps
+        // every track running, so that it is there the moment it is
+        // unmuted.
+        let needed = (self.purpose == Purpose::Rendering).then(|| routing.needed(project));
         let mut tracks = Vec::with_capacity(project.tracks.len());
         for track in &project.tracks {
+            if needed.as_ref().is_some_and(|needed| !needed.contains(&track.id)) {
+                continue;
+            }
             let mut notes = Vec::new();
             let mut audio = Vec::new();
             for clip in track.clips.iter().filter(|clip| !clip.muted) {
@@ -242,6 +251,7 @@ impl Compiler<'_> {
                     .filter_map(|send| Some((routing.bus(send.to)?, db_to_gain(send.level_db))))
                     .collect(),
                 tap: None,
+                source: None,
             });
         }
         // Every node must run before the bus it feeds is read.
@@ -254,6 +264,7 @@ impl Compiler<'_> {
             meter: self.meters.master.clone(),
             gain: 1.0,
             primed: false,
+            tap: None,
         };
 
         let live_devices: HashSet<DeviceId> = project.devices().map(|device| device.id).collect();
@@ -455,6 +466,47 @@ impl Routing {
             TrackKind::Normal => track.group.is_some_and(|group| project.track(group).is_ok_and(|group| group.solo)),
         }
     }
+
+    /// The tracks a render has to make and play: the ones that are heard
+    /// for their own sake, and the groups and returns their sound goes on
+    /// through. With nothing soloed that is every track that is not muted.
+    /// With a solo it is the soloed tracks, the members of a soloed group,
+    /// and of the groups and returns that are open only so that those are
+    /// heard through them, the ones something needed feeds.
+    fn needed(&self, project: &Project) -> HashSet<TrackId> {
+        let audible: HashSet<TrackId> =
+            project.tracks.iter().filter(|track| self.audible(project, track)).map(|track| track.id).collect();
+        let own = |track: &Track| !self.any_solo || track.solo || track.kind == TrackKind::Normal;
+        let mut needed: HashSet<TrackId> = project
+            .tracks
+            .iter()
+            .filter(|track| audible.contains(&track.id) && own(track))
+            .map(|track| track.id)
+            .collect();
+        let feeds = feeds(project);
+        loop {
+            let fed = feeds.iter().filter(|(from, to)| needed.contains(from) && audible.contains(to));
+            let more: Vec<TrackId> = fed.map(|(_, to)| *to).filter(|to| !needed.contains(to)).collect();
+            if more.is_empty() {
+                break;
+            }
+            needed.extend(more);
+        }
+        needed
+    }
+}
+
+/// Whose sound goes into whom: a member into its group, a track into each
+/// return it sends to. (Whatever else comes to feed a track, a device that
+/// listens to another track say, belongs here, and in [`Routing::needed`]
+/// if it is to be made though it is not heard itself.)
+fn feeds(project: &Project) -> Vec<(TrackId, TrackId)> {
+    let mut feeds = Vec::new();
+    for track in &project.tracks {
+        feeds.extend(track.group.map(|group| (track.id, group)));
+        feeds.extend(track.sends.iter().map(|send| (track.id, send.to)));
+    }
+    feeds
 }
 
 fn lane_points(

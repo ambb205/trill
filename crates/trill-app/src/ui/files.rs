@@ -477,6 +477,7 @@ mod tests {
             sections: Vec::new(),
             dynamics: Vec::new(),
             waited: Vec::new(),
+            stems: Vec::new(),
             problems,
         }
     }

@@ -13,21 +13,34 @@
 //! and what every built-in compressor and limiter took off. All of it is
 //! taken as the audio goes by; no track's audio is kept, and the mix's is
 //! kept only when it is asked for ([`RenderJob::measure`] keeps none).
+//!
+//! **Only what is heard is made.** A track that is muted, or left out by a
+//! solo or by [`RenderOptions::only_tracks`], is not compiled into the
+//! graph at all: its devices are not created, its plugins not waited for.
+//! Hearing one track of a song costs what that track costs.
+//!
+//! **Stems.** The same pass can write parts of the song to files of their
+//! own ([`RenderOptions::stems`]): every track as it leaves its fader,
+//! what goes into each track's effects, every group, every return, and the
+//! mix as it reaches the master's devices. Each is taken where it goes by
+//! and written a block at a time, so one render stands for as many as the
+//! song has tracks and none of them is held in memory. A track's stem is
+//! what a render of a project holding that track alone gives.
 
 use crate::analysis::{Analyzer, AudioStats, Spectrum};
 use crate::compile::{Compiler, DeviceBank, Meters, Problem};
-use crate::graph::{Chain, Graph, MAX_BLOCK};
+use crate::graph::{Chain, Graph, MAX_BLOCK, Tap, TrackNode};
 use crate::processor::Processor;
 use crate::ready::{self, Waited};
 use crate::sources::AudioSources;
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use trill_core::audio::AudioBuffer;
 use trill_core::device::{DeviceFactory, Purpose};
-use trill_core::{DeviceId, Project, TrackId};
-use trill_media::{MediaError, WavFormat, write_wav};
+use trill_core::{DeviceId, Project, Track, TrackId, TrackKind};
+use trill_media::{MediaError, WavFormat, WavWriter, write_wav};
 
 /// Output below this level counts as silence when trimming the tail.
 const SILENCE: f32 = 1e-5;
@@ -52,6 +65,114 @@ pub struct RenderOptions {
     /// before the render starts without waiting further. See
     /// [`crate::ready`].
     pub patience: Duration,
+    /// Parts of the song to write to files of their own as the render
+    /// goes. `None` writes none.
+    pub stems: Option<Stems>,
+}
+
+/// Which parts of the song a render writes to files of their own, beside
+/// whatever becomes of the mix. Each is a 32-bit float WAV file as long as
+/// the render, so that a part which goes over full scale before the
+/// master brings it down is kept as it is. Only what the render plays has
+/// a file: a track that is muted has none.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Stems {
+    /// The folder the files go in. It is made if it is not there; files
+    /// of the same names are replaced.
+    pub folder: PathBuf,
+    /// Every track that has clips, as it leaves its fader and pan: what
+    /// it adds to the mix or to its group, without what its sends add to
+    /// the returns. What a project holding that track alone renders to.
+    pub tracks: bool,
+    /// What goes into the effects of every such track: its instrument
+    /// alone (or its audio), before any effect, the fader and the pan.
+    pub instruments: bool,
+    /// Every group as it leaves its fader: its members through its own
+    /// devices.
+    pub groups: bool,
+    /// Every return as it leaves its fader, fed by every track's send.
+    pub returns: bool,
+    /// The mix as it reaches the master's devices: every track outside a
+    /// group, every group and every return, added up.
+    pub premaster: bool,
+}
+
+impl Stems {
+    /// Every kind of stem, into `folder`.
+    pub fn all(folder: impl Into<PathBuf>) -> Self {
+        Self { folder: folder.into(), tracks: true, instruments: true, groups: true, returns: true, premaster: true }
+    }
+
+    /// The stem a track has as it leaves its fader, if it is to have one.
+    fn kind_of(&self, track: &Track) -> Option<StemKind> {
+        match track.kind {
+            TrackKind::Normal => (self.tracks && plays(track)).then_some(StemKind::Track),
+            TrackKind::Group => self.groups.then_some(StemKind::Group),
+            TrackKind::Return => self.returns.then_some(StemKind::Return),
+        }
+    }
+
+    /// Begins the file of one stem: `track 12 Drums.wav`, `premaster.wav`.
+    fn begin(&self, what: StemKind, track: Option<&Track>, sample_rate: f64) -> Result<WavWriter, RenderError> {
+        let name = match track {
+            Some(track) => {
+                // What a file may be called everywhere, and not too long.
+                let kept = |c: char| if c.is_alphanumeric() || " -_".contains(c) { c } else { '_' };
+                let name: String = track.name.chars().map(kept).take(48).collect();
+                format!("{} {} {}", what.word(), track.id.0, name.trim())
+            }
+            None => what.word().to_string(),
+        };
+        Ok(WavWriter::create(&self.folder.join(format!("{}.wav", name.trim())), sample_rate, WavFormat::Float32)?)
+    }
+}
+
+/// Whether a track has anything of its own to play.
+fn plays(track: &Track) -> bool {
+    track.clips.iter().any(|clip| !clip.muted)
+}
+
+/// What a stem is of.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StemKind {
+    /// A track as it leaves its fader and pan.
+    Track,
+    /// What goes into a track's effects.
+    Instrument,
+    /// A group as it leaves its fader.
+    Group,
+    /// A return as it leaves its fader.
+    Return,
+    /// The mix as it reaches the master's devices.
+    Premaster,
+}
+
+impl StemKind {
+    fn word(self) -> &'static str {
+        match self {
+            Self::Track => "track",
+            Self::Instrument => "instrument",
+            Self::Group => "group",
+            Self::Return => "return",
+            Self::Premaster => "premaster",
+        }
+    }
+}
+
+/// A file a render wrote beside the mix, and what is in it, measured as
+/// the mix is.
+#[derive(Clone, Debug, Serialize)]
+pub struct Stem {
+    pub path: String,
+    pub what: StemKind,
+    /// The track it is of; `None` for the mix before the master.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub track: Option<TrackId>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(flatten)]
+    pub stats: AudioStats,
 }
 
 impl Default for RenderOptions {
@@ -64,6 +185,7 @@ impl Default for RenderOptions {
             only_tracks: None,
             sections: Vec::new(),
             patience: Duration::from_secs(10),
+            stems: None,
         }
     }
 }
@@ -108,6 +230,9 @@ pub struct Measured {
     /// The plugins that were waited for before the render started, where
     /// the wait is worth knowing about: it took a while, or was in vain.
     pub waited: Vec<WaitedFor>,
+    /// The files that were written beside the mix, in the order of the
+    /// song's tracks.
+    pub stems: Vec<Stem>,
 }
 
 /// One track as it leaves its fader: what it adds to the mix or to its
@@ -186,12 +311,15 @@ pub struct RenderReport {
     pub dynamics: Vec<DynamicsLevel>,
     /// See [`Measured::waited`].
     pub waited: Vec<WaitedFor>,
+    /// See [`Measured::stems`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stems: Vec<Stem>,
     pub problems: Vec<String>,
 }
 
 impl RenderReport {
     fn new(path: Option<&Path>, sample_rate: u32, measured: Measured, problems: &[Problem]) -> Self {
-        let Measured { stats, tracks, sections, dynamics, waited } = measured;
+        let Measured { stats, tracks, sections, dynamics, waited, stems } = measured;
         Self {
             path: path.map(|path| path.display().to_string()),
             sample_rate,
@@ -200,6 +328,7 @@ impl RenderReport {
             sections,
             dynamics,
             waited,
+            stems,
             problems: problems.iter().map(ToString::to_string).collect(),
         }
     }
@@ -296,10 +425,39 @@ fn render_from(
     .compile(project, false);
 
     let plugins = ready::Plugins::of(factory);
-    let waited = ready::wake(&mut graph, project, &plugins, (start, end), sample_rate, options.patience);
-    for track in &mut graph.tracks {
-        track.tap = Some(Box::new(Analyzer::new(options.sample_rate)));
+    // What listens to the render: every track as it leaves its fader, and
+    // whatever is to be a file of its own. The files are begun before the
+    // plugins are waited for, so that a folder that cannot be written to
+    // is found out at once.
+    let stems = options.stems.as_ref();
+    let listener = |file: Option<WavWriter>| {
+        let analyzer = Analyzer::new(options.sample_rate);
+        let analyzer = if file.is_some() { analyzer.with_true_peak() } else { analyzer };
+        Box::new(Tap { analyzer, file })
+    };
+    for node in &mut graph.tracks {
+        let track = project.track(node.id).ok();
+        let file = match (track, stems) {
+            (Some(track), Some(stems)) => match stems.kind_of(track) {
+                Some(kind) => Some(stems.begin(kind, Some(track), sample_rate)?),
+                None => None,
+            },
+            _ => None,
+        };
+        node.tap = Some(listener(file));
+        if let (Some(track), Some(stems)) = (track, stems)
+            && stems.instruments
+            && track.kind == TrackKind::Normal
+            && plays(track)
+        {
+            let file = stems.begin(StemKind::Instrument, Some(track), sample_rate)?;
+            node.source = Some((source_devices(track, node, &plugins), listener(Some(file))));
+        }
     }
+    if let Some(stems) = stems.filter(|stems| stems.premaster) {
+        graph.master.tap = Some(listener(Some(stems.begin(StemKind::Premaster, None, sample_rate)?)));
+    }
+    let waited = ready::wake(&mut graph, project, &plugins, (start, end), sample_rate, options.patience);
 
     let mut processor = Processor::new(sample_rate);
     drop(processor.swap_graph(graph));
@@ -352,23 +510,41 @@ fn render_from(
     left.truncate(rendered);
     right.truncate(rendered);
     mix.push(&left[kept_frames..], &right[kept_frames..]);
+    // How long the render is: every stem is cut to it.
+    let total_frames = (body_frames + rendered - kept_frames) as u64;
     if !keep {
         (left, right) = (Vec::new(), Vec::new());
     }
 
+    // A track that was not played (it is muted, or left out by a solo) put
+    // out nothing.
     let track_peaks = project
         .tracks
         .iter()
-        .filter_map(|track| meters.tracks.get(&track.id).map(|meter| (track.id, meter)))
-        .map(|(id, meter)| {
-            let (l, r) = meter.peek();
-            (id, l.max(r))
+        .map(|track| {
+            let (l, r) = meters.tracks.get(&track.id).map_or((0.0, 0.0), |meter| meter.peek());
+            (track.id, l.max(r))
         })
         .collect();
 
     // The graph comes back from the processor with what its devices and
     // its taps have counted.
     let mut graph = processor.swap_graph(Box::new(Graph::empty()));
+    let mut stems = Vec::new();
+    for track in &project.tracks {
+        let Some(node) = graph.tracks.iter_mut().find(|node| node.id == track.id) else { continue };
+        let kind = match track.kind {
+            TrackKind::Normal => StemKind::Track,
+            TrackKind::Group => StemKind::Group,
+            TrackKind::Return => StemKind::Return,
+        };
+        let taps = [(kind, node.tap.as_mut()), (StemKind::Instrument, node.source.as_mut().map(|(_, tap)| tap))];
+        for (what, tap) in taps {
+            stems.extend(tap.and_then(|tap| finished(what, Some(track), tap, total_frames)).transpose()?);
+        }
+    }
+    let premaster = graph.master.tap.as_mut();
+    stems.extend(premaster.and_then(|tap| finished(StemKind::Premaster, None, tap, total_frames)).transpose()?);
     let frame_of = |beat: f64| ((beat - start).max(0.0) * seconds_per_beat * sample_rate).round() as usize;
     let spans: Vec<(usize, usize)> =
         options.sections.iter().map(|section| (frame_of(section.start_beat), frame_of(section.end_beat))).collect();
@@ -377,6 +553,7 @@ fn render_from(
         let Some(tap) = graph.tracks.iter().find(|node| node.id == track.id).and_then(|node| node.tap.as_ref()) else {
             continue;
         };
+        let tap = &tap.analyzer;
         let stats = tap.stats();
         tracks.push(TrackLevel {
             track: track.id,
@@ -430,13 +607,37 @@ fn render_from(
         })
         .collect();
 
-    let measured = Measured { stats: mix.stats(), tracks, sections, dynamics, waited };
+    let measured = Measured { stats: mix.stats(), tracks, sections, dynamics, waited, stems };
     Ok(Rendered { sample_rate: options.sample_rate, left, right, track_peaks, problems, measured })
 }
 
 /// A wait shorter than this is not reported: the plugin was as good as
 /// ready.
 const WORTH_SAYING_SECONDS: f64 = 1.0;
+
+/// How many of a track's devices, from the first, make what goes into its
+/// effects: up to and with its instrument. None for a track that plays
+/// audio and has no instrument.
+fn source_devices(track: &Track, node: &TrackNode, plugins: &ready::Plugins) -> usize {
+    let is_instrument = |uri: &str| trill_dsp::is_instrument(uri).unwrap_or_else(|| plugins.is_instrument(uri));
+    let instrument = track.devices.iter().find(|device| device.enabled && is_instrument(&device.uri));
+    let at = instrument.and_then(|instrument| node.chain.devices.iter().position(|slot| slot.id == instrument.id));
+    at.map_or(0, |at| at + 1)
+}
+
+/// Ends the file a tap wrote, if it wrote one, at `frames` frames, and
+/// says what is in it.
+fn finished(what: StemKind, track: Option<&Track>, tap: &mut Tap, frames: u64) -> Option<Result<Stem, RenderError>> {
+    let file = tap.file.take()?;
+    let path = file.path().display().to_string();
+    Some(file.finish(Some(frames)).map_err(RenderError::from).map(|_| Stem {
+        path,
+        what,
+        track: track.map(|track| track.id),
+        name: track.map(|track| track.name.clone()).unwrap_or_default(),
+        stats: tap.analyzer.stats(),
+    }))
+}
 
 /// Asks every device of `chain` what it took off, and writes down the
 /// answers of those that take anything off at all.
