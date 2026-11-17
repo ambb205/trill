@@ -333,6 +333,10 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
                 Some("track_volume") => format!("the volume of {}", target_call.track("track").unwrap_or_default()),
                 Some("track_pan") => format!("the pan of {}", target_call.track("track").unwrap_or_default()),
                 Some("master_volume") => "the master volume".to_owned(),
+                Some("send") => {
+                    let from = target_call.track("track").unwrap_or_default();
+                    format!("the send of {from} to {}", target_call.track("to").unwrap_or_default())
+                }
                 Some("device_param") => {
                     let param = target_call.text("param").unwrap_or("a parameter");
                     format!("{param} of {}", target_call.device("device").unwrap_or_default())
@@ -477,6 +481,7 @@ fn target_of(target: &Value) -> Option<AutomationTarget> {
         "track_volume" => Some(AutomationTarget::TrackVolume { track: TrackId(id("track")?) }),
         "track_pan" => Some(AutomationTarget::TrackPan { track: TrackId(id("track")?) }),
         "master_volume" => Some(AutomationTarget::MasterVolume),
+        "send" => Some(AutomationTarget::Send { track: TrackId(id("track")?), to: TrackId(id("to")?) }),
         "device_param" => Some(AutomationTarget::DeviceParam {
             device: DeviceId(id("device")?),
             param: target.get("param")?.as_str()?.to_owned(),
@@ -855,6 +860,14 @@ mod tests {
                 json!({ "point_count": 2 })
             ),
             Some(Place::Lane { target: AutomationTarget::TrackVolume { track: TrackId(4) } })
+        );
+        assert_eq!(
+            of(
+                "set_automation",
+                json!({ "target": { "type": "send", "track": 4, "to": 9 } }),
+                json!({ "point_count": 5 })
+            ),
+            Some(Place::Lane { target: AutomationTarget::Send { track: TrackId(4), to: TrackId(9) } })
         );
         assert_eq!(
             of(

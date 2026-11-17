@@ -68,7 +68,14 @@ impl Frame {
     }
 
     fn map(&self, kind: ControllerKind) -> LaneMap {
-        LaneMap { rect: self.curve_rect(), left: self.grid_left, time: self.time, scale: Scale::Controller(kind) }
+        LaneMap {
+            rect: self.curve_rect(),
+            left: self.grid_left,
+            time: self.time,
+            scale: Scale::Controller(kind),
+            // A controller's curve is straight in its own steps.
+            lines: trill_core::Travel::Linear,
+        }
     }
 
     fn snapped(&self, beat: Beats, free: bool) -> Beats {
@@ -339,7 +346,7 @@ fn write_steps(cx: &mut Cx, clip: ClipId, kind: ControllerKind, cells: (Beats, B
     cx.edit(|project| {
         let clip = project.clip_mut(clip)?;
         let now = clip.controller(kind).map(|curve| curve.points.clone()).unwrap_or_default();
-        clip.set_controller(kind, envelopes::drawn(&now, cells.0, cells.1, grid, value))
+        clip.set_controller(kind, envelopes::drawn(&now, trill_core::Travel::Linear, cells.0, cells.1, grid, value))
     });
 }
 
@@ -760,7 +767,7 @@ mod tests {
         assert_eq!((expression.position(0.0), expression.position(1.0)), (0.0, 1.0));
         assert_eq!(expression.value(0.5), 64.0 / 127.0, "one of the 128 steps");
         assert_eq!(expression.format(100.0 / 127.0), "100");
-        assert!(!expression.stepped() && expression.linear());
+        assert!(!expression.stepped() && expression.straight(trill_core::Travel::Linear));
 
         let wheel = Scale::Controller(ControllerKind::PitchBend);
         assert_eq!((wheel.position(-1.0), wheel.position(0.0), wheel.position(1.0)), (0.0, 0.5, 1.0));

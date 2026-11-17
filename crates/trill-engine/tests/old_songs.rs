@@ -7,7 +7,9 @@
 //! file). It is opened as any file is and rendered, and the render is held
 //! to numbers that the last build with the old effects (commit 724556d)
 //! wrote down from the same file: the level of each side, and sixteen
-//! samples of each from the first to the tail.
+//! samples of each from the first to the tail. Further down are the files
+//! of format 2 and of format 3, each with the numbers of the last build
+//! that wrote that format.
 //!
 //! The numbers are never to be written down again from a newer build: that
 //! would make the test agree with whatever the effects have become.
@@ -20,8 +22,9 @@ use std::sync::Arc;
 use trill_core::audio::AudioBuffer;
 use trill_core::controllers::ControllerKind;
 use trill_core::device::DeviceFactory;
-use trill_core::project::{AudioContent, AutomationPoint, FORMAT_VERSION};
-use trill_core::{ChainRef, Note, Project};
+use trill_core::project::{AudioContent, AutomationPoint, AutomationTarget, FORMAT_VERSION};
+use trill_core::travel::Travel;
+use trill_core::{ChainRef, DeviceId, Note, Project, TrackId};
 use trill_dsp::{BuiltinFactory, Builtins, drumrack, sampler};
 use trill_engine::render::{RenderOptions, render};
 use trill_media::{MediaCache, WavFormat};
@@ -772,4 +775,132 @@ fn a_song_of_format_2_renders_to_the_samples_it_rendered_to_before() {
         assert!(expected[0] > 0.0, "{uri} with {params:?} was not silent");
         assert_as_it_was(&print, expected, &format!("{uri} with {params:?}"));
     }
+}
+
+// ---- Format 3 --------------------------------------------------------------
+//
+// And for a file of format 3, the first whose envelopes say how their lines
+// travel and the last with the devices as they were before format 4. The
+// build that wrote that format (commit f2a63be) wrote these numbers down.
+// Here the two things an older file is read by meet: the devices keep the
+// sound they had, and an envelope on a parameter whose scale has moved
+// since keeps the curve it played.
+
+/// A track with `devices` on it, each set to what its file sets.
+fn track(project: &mut Project, name: &str, devices: &[(&str, &[(&str, f64)])]) -> (TrackId, Vec<DeviceId>) {
+    let track = project.add_track(name);
+    let ids = devices
+        .iter()
+        .map(|(uri, params)| {
+            let id = project.add_device(ChainRef::Track(track), *uri, *uri, None).unwrap();
+            let params: BTreeMap<String, f64> = params.iter().map(|(id, value)| (id.to_string(), *value)).collect();
+            project.device_mut(id).unwrap().params = params;
+            id
+        })
+        .collect();
+    (track, ids)
+}
+
+fn empty() -> Project {
+    let mut project = Project::new("old");
+    project.master.devices.clear();
+    project.set_tempo(120.0).unwrap();
+    project
+}
+
+/// A sampler beside a poly synth through a saturator, each playing
+/// [`played`].
+fn band(hit: &str) -> Project {
+    let mut project = empty();
+    let (hits, devices) = track(&mut project, "Hits", &[("builtin:sampler", &[])]);
+    project.device_mut(devices[0]).unwrap().state = Some(sampler::State::new(hit).to_bytes());
+    let synth: &[(&str, f64)] = &[("osc1_wave", 0.0), ("noise_level", 0.3), ("volume", -3.0)];
+    let (bass, _) =
+        track(&mut project, "Bass", &[("builtin:polysynth", synth), ("builtin:saturator", &[("drive", 12.0)])]);
+    for part in [hits, bass] {
+        let clip = project.add_midi_clip(part, "clip", 0.0, 4.0).unwrap();
+        let clip = project.clip_mut(clip).unwrap();
+        clip.add_notes(&played()).unwrap();
+        clip.set_controller(ControllerKind::PitchBend, wheel()).unwrap();
+    }
+    project
+}
+
+/// A held note on a poly synth whose volume an envelope moves along the
+/// travel `volume`, through a utility whose gain one fades along `gain`:
+/// down to the bottom of the volume's range of the day and up over the
+/// top of today's, and out to where a gain was 70 dB down.
+fn faded(volume: Travel, gain: Travel) -> Project {
+    let mut project = empty();
+    let synth: &[(&str, f64)] = &[("osc1_wave", 0.0), ("sustain", 1.0), ("release", 0.05), ("velocity_sens", 0.0)];
+    let (lead, devices) = track(&mut project, "Lead", &[("builtin:polysynth", synth), ("builtin:utility", &[])]);
+    let clip = project.add_midi_clip(lead, "clip", 0.0, 4.0).unwrap();
+    project.clip_mut(clip).unwrap().add_notes(&[Note { pitch: 57, start: 0.0, length: 4.0, velocity: 100 }]).unwrap();
+    let points =
+        |points: &[(f64, f64)]| points.iter().map(|(beat, value)| AutomationPoint::new(*beat, *value)).collect();
+    let target = |device: DeviceId, param: &str| AutomationTarget::DeviceParam { device, param: param.to_string() };
+    let line = points(&[(0.0, 0.0), (1.5, -30.0), (2.5, -48.0), (3.0, 6.0), (4.0, -12.0)]);
+    project.write_automation(target(devices[0], "volume"), line, volume).unwrap();
+    let line = points(&[(0.0, 0.0), (3.5, 0.0), (4.0, -70.0)]);
+    project.write_automation(target(devices[1], "gain"), line, gain).unwrap();
+    project
+}
+
+/// `project` as a build of format 3 saved it.
+fn of_format_3(project: &Project) -> String {
+    let file = project.to_json();
+    let now = format!("\"format_version\": {FORMAT_VERSION}");
+    assert!(file.contains(&now), "{file}");
+    file.replace(&now, "\"format_version\": 3")
+}
+
+/// What the three songs of format 3 rendered to: the band, the fade along
+/// the faders of the day, and the same fade straight in decibels.
+#[rustfmt::skip]
+const THIRD: [Print; 3] = [
+    [
+        1.6985302e-1, 1.6874328e-1, -1.1886214e-1, -1.3600193e-1, -4.793711e-1, -4.905671e-1,
+        -2.6985344e-2, -2.6868496e-2, 2.1439037e-1, 2.1353227e-1, -1.710221e-1, -1.7296411e-1,
+        1.3515893e-1, 1.3864301e-1, 2.4152678e-2, 2.4152664e-2, 2.8187498e-1, 2.6589084e-1,
+        3.2488525e-1, 2.5339276e-1, -1.4277056e-1, -1.4273293e-1, -3.633645e-2, -3.6436614e-2,
+        -7.6887677e-3, -7.6887677e-3, 8.434271e-5, 8.434271e-5, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0,
+    ],
+    [
+        9.604933e-2, 9.604933e-2, -8.7527804e-2, -8.7527804e-2, -9.750474e-2, -9.750474e-2,
+        2.4662694e-2, 2.4662694e-2, 1.85178e-2, 1.85178e-2, -3.5000711e-3, -3.5000711e-3,
+        -3.6042812e-3, -3.6042812e-3, 1.3156374e-3, 1.3156374e-3, 2.5477238e-2, 2.5477238e-2,
+        -2.534566e-1, -2.534566e-1, -1.5738381e-1, -1.5738381e-1, 4.9167653e-3, 4.9167653e-3,
+        0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0,
+    ],
+    [
+        8.626552e-2, 8.626552e-2, -8.555548e-2, -8.555548e-2, -7.558947e-2, -7.558947e-2,
+        1.684298e-2, 1.684298e-2, 1.3125865e-2, 1.3125865e-2, -3.37307e-3, -3.37307e-3,
+        -2.493017e-3, -2.493017e-3, 7.8553386e-4, 7.8553386e-4, 5.5886456e-3, 5.5886456e-3,
+        -2.5007606e-1, -2.5007606e-1, -1.4293873e-1, -1.4293873e-1, 8.286766e-4, 8.286766e-4,
+        0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0,
+    ],
+];
+
+#[test]
+fn a_song_of_format_3_renders_to_the_samples_it_rendered_to_before() {
+    let folder = folder();
+    let (_, hit) = files(&folder);
+    let factory = Builtins::with_loader(Arc::new(MediaCache::default()));
+    // How that build had an envelope on these two parameters travel: along
+    // a fader down to the lowest value each had then.
+    let (volume, gain) = (Travel::Fader { floor: -48.0 }, Travel::Fader { floor: -70.0 });
+    let songs = [
+        ("a sampler beside a synth through a saturator", band(&hit)),
+        ("an envelope on a synth's volume, along its fader", faded(volume, gain)),
+        ("the same envelope, straight in decibels", faded(Travel::Linear, Travel::Linear)),
+    ];
+    for ((what, song), expected) in songs.iter().zip(&THIRD) {
+        assert_as_it_was(&print_with(&of_format_3(song), &factory), expected, what);
+    }
+    // The two fades are not the same curve, so each holds its own line:
+    // a moved envelope that bent would be off by decibels, not by a bit.
+    assert!((THIRD[1][0] / THIRD[2][0] - 1.0).abs() > 0.1);
 }

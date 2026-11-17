@@ -10,6 +10,7 @@
 use std::path::Path;
 use std::sync::Arc;
 use trill_core::device::{CompositeFactory, DeviceFactory};
+use trill_core::project::{AutomationPoint, AutomationTarget, Segment};
 use trill_core::{ChainRef, DeviceId, Note, Project, TrackId, TrackKind};
 use trill_dsp::BuiltinFactory;
 use trill_engine::render::{RenderJob, RenderOptions, Rendered, StemKind, Stems};
@@ -443,6 +444,90 @@ fn a_soloed_return_is_heard_as_every_track_feeds_it_and_a_soloed_track_with_its_
     let silent = RenderJob { project: muted, factory: factory(&scripted), audio: AudioSources::default() };
     let silent = silent.render(&RenderOptions { max_tail_seconds: 0.5, ..options() }).unwrap();
     assert_eq!(peak(&silent.left), 0.0);
+}
+
+#[test]
+fn a_return_fed_by_sends_that_move_is_heard_alone_as_it_is_in_the_whole_song() {
+    // The keys' send to the echo is its envelope alone: thrown open for
+    // one note, and no send set by hand. The bass sends by hand, and an
+    // envelope moves that send. The pad's send is an envelope someone
+    // switched off: it sends nothing. The drums send nothing at all.
+    let mut project = Project::new("throws");
+    let echo = project.add_track_of_kind("Echo", TrackKind::Return);
+    device(&mut project, ChainRef::Track(echo), "builtin:delay", &[("mix", 1.0)]);
+    project.track_mut(echo).unwrap().volume_db = -2.0;
+    let keys = part(&mut project, "Keys", "builtin:polysynth", &[note(60, 0.0, 2.0), note(64, 2.0, 2.0)]);
+    let bass = part(&mut project, "Bass", BASS, &[note(40, 0.0, 1.0), note(43, 1.0, 3.0)]);
+    let pad = part(&mut project, "Pad", "builtin:polysynth", &[note(48, 0.0, 4.0)]);
+    let drums = part(&mut project, "Drums", DRUMS, &[note(36, 0.0, 0.25), note(38, 1.0, 0.25)]);
+    let point = AutomationPoint::new;
+    let held = |beat: f64, value: f64| AutomationPoint { beat, value, shape: Segment::Hold };
+    let send = |track: TrackId| AutomationTarget::Send { track, to: echo };
+    let throw = vec![point(0.0, -70.0), point(1.75, -70.0), point(2.0, -3.0), held(3.0, -3.0), point(3.0, -70.0)];
+    project.set_automation(send(keys), throw).unwrap();
+    project.set_send(bass, echo, Some(-12.0)).unwrap();
+    project.set_automation(send(bass), vec![point(0.0, -30.0), point(4.0, -6.0)]).unwrap();
+    project.set_automation(send(pad), vec![point(0.0, 0.0)]).unwrap();
+    project.set_automation_enabled(&send(pad), false).unwrap();
+    assert!(project.track(keys).unwrap().sends.is_empty() && project.track(pad).unwrap().sends.is_empty());
+
+    // The song as it is, with every part of it in a file.
+    let scripted = ScriptedFactory::new();
+    let folder = tempfile::tempdir().unwrap();
+    let all = RenderOptions { stems: Some(Stems::all(folder.path())), ..options() };
+    let whole = render(&project, &scripted, &all);
+    let stem = |what: StemKind, track: TrackId| {
+        let stem = whole.measured.stems.iter().find(|stem| stem.what == what && stem.track == Some(track)).unwrap();
+        read(&stem.path)
+    };
+    let in_echo = stem(StemKind::Return, echo);
+    assert!(peak(&in_echo.0) > 0.005, "the echo has what was sent to it: {}", peak(&in_echo.0));
+
+    // The echo heard alone, with `tracks`, is the echo's part of the whole
+    // song: every send that reaches it, moving as it moves there, and no
+    // track itself. The drums and the pad, which send nothing, are not
+    // even made.
+    let fresh = ScriptedFactory::new();
+    let alone = render(&project, &fresh, &RenderOptions { only_tracks: Some(vec![echo]), ..options() });
+    let off = apart("the echo alone", &in_echo, (&alone.left, &alone.right));
+    assert!(off < 1e-6, "{off} from the echo's part of the whole song");
+    let made: Vec<String> = fresh.made().into_iter().map(|(uri, _)| uri).collect();
+    assert_eq!(made, [BASS], "the drums feed nothing that is heard");
+    let rows: Vec<TrackId> = alone.measured.tracks.iter().map(|level| level.track).collect();
+    assert_eq!(rows, [echo], "and no track is heard itself");
+    // Soloed in the song, it is the same.
+    let mut soloed = project.clone();
+    soloed.track_mut(echo).unwrap().solo = true;
+    let heard = render(&soloed, &scripted, &options());
+    assert!(apart("the echo soloed", &in_echo, (&heard.left, &heard.right)) < 1e-6);
+
+    // And the envelopes are what is heard in it: without the keys' throw
+    // there is less in the echo, and with the pad's envelope switched on
+    // there is more.
+    let differs = |other: &Rendered| {
+        in_echo.0.iter().zip(&other.left).fold(0.0f32, |most, (a, b)| most.max((a - b).abs())) > 1e-3
+    };
+    let mut without = project.clone();
+    without.set_automation(send(keys), Vec::new()).unwrap();
+    let less = render(&without, &scripted, &RenderOptions { only_tracks: Some(vec![echo]), ..options() });
+    assert!(differs(&less), "the throw is in the echo");
+    let mut with_pad = project.clone();
+    with_pad.set_automation_enabled(&send(pad), true).unwrap();
+    let more = render(&with_pad, &scripted, &RenderOptions { only_tracks: Some(vec![echo]), ..options() });
+    assert!(differs(&more), "and the pad would be, with its envelope on");
+
+    // The keys soloed are heard with the echo, which stays open for a
+    // soloed track and then holds the keys' throw and nothing of the bass:
+    // what the song without the other tracks renders to.
+    let mut soloed = project.clone();
+    soloed.track_mut(keys).unwrap().solo = true;
+    let heard = render(&soloed, &scripted, &options());
+    let mut only_keys = project.clone();
+    for other in [bass, pad, drums] {
+        only_keys.remove_track(other).unwrap();
+    }
+    let expected = render(&only_keys, &scripted, &options());
+    assert!(apart("the keys soloed", &(heard.left, heard.right), (&expected.left, &expected.right)) < 1e-6);
 }
 
 #[test]

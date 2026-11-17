@@ -468,8 +468,8 @@ mod tests {
     /// it can be told.
     #[test]
     fn what_a_song_of_an_older_format_is_given_are_parameters_of_these_devices() {
-        use trill_core::formats::{FORMAT_1, FORMAT_2, LEGACY, MOVED_2};
-        for (uri, values) in FORMAT_1.iter().chain(FORMAT_2) {
+        use trill_core::formats::{FORMAT_1, FORMAT_3, LEGACY, MOVED_3};
+        for (uri, values) in FORMAT_1.iter().chain(FORMAT_3) {
             let builtin = find(uri).unwrap_or_else(|| panic!("{uri} is not a built-in device"));
             assert!(
                 values.iter().any(|(id, value)| *id == LEGACY && *value == 1.0),
@@ -487,13 +487,13 @@ mod tests {
         // only one of the two things.
         for builtin in BUILTINS {
             let uri = format!("{BUILTIN_SCHEME}:{}", builtin.key);
-            let listed = FORMAT_1.iter().chain(FORMAT_2).filter(|(device, _)| *device == uri).count();
+            let listed = FORMAT_1.iter().chain(FORMAT_3).filter(|(device, _)| *device == uri).count();
             assert_eq!(usize::from(builtin.params.iter().any(|def| def.id == LEGACY)), listed, "{}", builtin.key);
         }
         // A parameter that moved is one of its device's, as is the one that
         // came with the move; what it was and what that is now are both
         // values it takes, and what it was unsaid is now its default.
-        for moved in MOVED_2 {
+        for moved in MOVED_3 {
             let builtin = find(moved.uri).unwrap_or_else(|| panic!("{} is not a built-in device", moved.uri));
             let def = |id: &str| builtin.params.iter().find(|def| def.id == id).unwrap_or_else(|| panic!("no {id}"));
             assert_eq!(def(moved.param).default, moved.unsaid + moved.by, "{}", moved.param);

@@ -29,7 +29,7 @@ Development builds are optimized (see `[profile.dev]`), because unoptimized audi
 
 ### Building and testing
 
-`cargo test --workspace` runs about 1,930 tests in a few minutes. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 2,040 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -304,9 +304,42 @@ Vorbis at any sample rate, and can be warped to follow the project tempo: `beats
 keeps sustained sound smooth, `repitch` plays faster or slower like a record; warped clips can be transposed.
 
 **Engine**: sample-accurate MIDI and audio clips, clip looping, non-destructive trimming and splitting, audio
-fades, automation of track and master volume, pan and any device parameter with straight, held or curved
-segments, MIDI controllers in clips (see below), group tracks and return tracks with sends, a metronome, sample-exact transport looping, mute/solo, undo/redo, offline rendering that is bit-identical to
+fades, automation of track and master volume, pan, sends and any device parameter with straight, held or curved
+segments (see below), MIDI controllers in clips (see below), group tracks and return tracks with sends, a metronome, sample-exact transport looping, mute/solo, undo/redo, offline rendering that is bit-identical to
 playback, and render analysis (see below).
+
+**A line of automation follows its control.** Between two points of an envelope the value moves as if a hand
+moved the control at an even speed, which is not the same as so many decibels or hertz a beat:
+
+| What is moved | How a line travels | Half way from → to |
+|---|---|---|
+| A volume, a send, a gain or an instrument's volume (a level that reaches silence) | as a fader does: even in the square of the decibels above its floor | 0 dB → −60 dB: **−20 dB**; +6 dB → −60 dB: −15.8 dB; −40 dB → −6 dB: −20 dB |
+| A frequency or a time (a range of a hundred times its lowest value or more) | by ratio: every octave takes the same time | 300 Hz → 9 kHz: **1,643 Hz** |
+| Pan, mix and other amounts, an EQ's gain, a threshold, a plugin's parameters | evenly in the value | −12 → +12: 0 |
+
+So two points are a fade or a sweep. Straight in decibels, a fade from 0 dB to −60 dB is at −30 dB half way and as
+good as over; straight in hertz, a sweep from 300 Hz to 9 kHz is at 4,650 Hz and spends its time in the top
+octaves. The law is one piece of code (`trill-core/src/travel.rs`): the window's faders and knobs are laid out by
+it, so such a line is a straight line in its lane, and the engine plays it. `shape` on a point bends a line
+further, and an envelope can be told to go straight in its units instead (`travel` in `set_automation`; the
+lane's menu in the window).
+
+*A song saved before this plays as it did.* An envelope keeps what its lines are straight along, and a project
+file written before envelopes did (format version 1 or 2) says nothing: its envelopes are straight in their units, as
+they were played then, and stay so when their points are edited. They become a fader's or a knob's only when
+they are written anew over MCP, or by the lane's menu. A file saved now is format version 3, which an earlier
+build refuses to open instead of playing its fades as other curves.
+
+*A send can be automated* like a volume: its envelope is the send, at the bottom of which nothing is sent, with or
+without a level set by hand. A send opened for single notes (a delay throw) needs no return of its own.
+
+*Envelopes are played to the frame.* A fader, a pan, a send and the master's volume are read from their envelopes
+every 32 frames of the song and move in a straight line between two readings; a device's parameter is moved
+every 256. Both are counted from where the song last started or jumped, not from the start of a buffer, so the
+same song is the same samples at any buffer size and in a render. What no envelope accounts for (a fader moved
+by hand, a mute, the song jumping to where an envelope is at another level) is let go of evenly over ten
+milliseconds. (The built-in filter still reads its cutoff every sixteen frames of the block it is handed: with a
+swept cutoff it is the same samples only at buffer sizes that are a multiple of sixteen.)
 
 **Hearing without ears.** Whoever cannot listen (a script, an assistant) measures instead, and three things make
 that quick and true:
@@ -350,8 +383,9 @@ that quick and true:
 - *A return can be heard alone.* Soloing a return, in the window or by naming it in `tracks`, gives the return
   as the whole song feeds it: every track's send still reaches it, a group's too, while the tracks themselves
   and the other returns are not heard. (Soloing a track or a group keeps the returns open, so that it is heard
-  with its reverb.) Each of these opens and closes over one block of audio, so a solo changed while the song
-  plays makes no click.
+  with its reverb.) Each of these opens and closes over ten milliseconds, whatever the buffer size, so a solo
+  changed while the song plays makes no click; a send that an envelope is moving goes on moving meanwhile, and
+  what is heard is the two multiplied.
 - *A render runs at the rate it is asked for.* `measure` and `render` take `sample_rate`; left out, they run at
   the engine's rate, which is 48 kHz when there is no audio device. The reply says which it was.
 - *One render writes every stem.* Asked to, a render writes parts of the song to files of their own as it
@@ -410,7 +444,11 @@ the lane on a controller).
 
 An automated control is not locked: drag it and it is yours. Its envelope is switched off, not lost, the mark in
 the control's corner turns into an outline, and a click on that mark (or on the switch of its lane) hands the
-control back to the envelope. And when the program did not live to save a project, the window that opens next
+control back to the envelope. That holds for a volume, a pan, a device's parameter and a send alike: a send's bar
+in a track's header and in the mixer shows where its envelope has it, and a track's lanes offer its send to each
+return beside its volume and pan. A lane of thousands of points (a compressor worked out elsewhere and drawn in)
+is painted by its width: where points crowd, the line alone is drawn, and their squares come back as the view is
+zoomed in. And when the program did not live to save a project, the window that opens next
 offers it back: recover it, discard it, or decide later (`File`, `Recover unsaved work`).
 
 The browser's **Sounds** tab is the sample library: add folders, search as you type, filter by one-shot or loop,
@@ -491,7 +529,11 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Playing live | `play_notes`, `midi_inputs`, `audio` (device, sample rate, buffer size, latency) |
 
 Time is in beats. Pitches are MIDI numbers, note names (`"F#3"`) or drum names (`"kick"`). Notes can be written
-compactly as `[pitch, start, length, velocity]`. Errors say what to do next: an unknown id comes back with the ids
+compactly as `[pitch, start, length, velocity]`. `set_automation` takes a track's volume or pan, the master's
+volume, a device's parameter or a send (`{"type": "send", "track": 3, "to": 9}`), says in its description how a
+line travels for each, and answers with what the envelope's lines are straight along. `get_automation` lists a
+thousand points a reply and reads on by target, by a stretch of beats or by offset: a song may hold tens of
+thousands. Errors say what to do next: an unknown id comes back with the ids
 that exist, a bad note with its index and the reason.
 
 Presets are part of the device tools, for plugins as for built-in devices: `describe_device` and `get_device` list
