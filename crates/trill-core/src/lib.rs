@@ -18,6 +18,7 @@ pub mod presets;
 pub mod project;
 pub mod time;
 mod time_ops;
+pub mod travel;
 
 pub use controllers::{ControllerCurve, ControllerKind, ControllerLane};
 pub use ids::{ClipId, DeviceId, TrackId};
@@ -28,3 +29,4 @@ pub use project::{
 };
 pub use time::{Beats, TimeSignature};
 pub use time_ops::{PasteMode, TimeExcerpt};
+pub use travel::Travel;

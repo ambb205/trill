@@ -381,3 +381,107 @@ fn frame_cost_of_a_large_sound_library() {
         direct.len()
     );
 }
+
+/// One lane of 7,332 points over 456 beats, as a compressor drawn on paper
+/// leaves it: what a frame of it costs with the whole song in view, where
+/// there are six points to the pixel, zoomed in, and while one of its
+/// points is dragged.
+#[test]
+#[ignore = "a measurement, not an assertion"]
+fn frame_cost_of_a_lane_of_thousands_of_points() {
+    let count = 7_332;
+    let beats = 456.0;
+    let mut target = None;
+    let mut harness = Harness::new(UiOptions { show_automation: true, ..Default::default() }, |session| {
+        session
+            .edit(|project| {
+                let track = project.add_track("Pad");
+                project.add_midi_clip(track, "Clip", 0.0, beats)?;
+                let volume = AutomationTarget::TrackVolume { track };
+                let points = (0..count).map(|index| {
+                    let beat = index as f64 * beats / count as f64;
+                    AutomationPoint::new(beat, -12.0 * (-(beat.fract()) * 6.0).exp())
+                });
+                project.set_automation(volume.clone(), points.collect())?;
+                target = Some(volume);
+                Ok(())
+            })
+            .unwrap();
+    });
+    let target = target.unwrap();
+    assert_eq!(harness.app.state().arrangement.lanes.len(), 1);
+    harness.idle(5);
+    let (frame, tessellation) = frame_cost(&mut harness, 120);
+    eprintln!(
+        "{count} points in one lane, a few bars in view: {frame:.2} ms per frame, of which {tessellation:.2} ms tessellation"
+    );
+
+    harness.key(Modifiers::SHIFT, Key::Z);
+    harness.idle(40);
+    let (frame, tessellation) = frame_cost(&mut harness, 120);
+    eprintln!("the whole song in view: {frame:.2} ms per frame, of which {tessellation:.2} ms tessellation");
+
+    // The same view with the lane folded away, for what the lane adds.
+    harness.app.state_mut().arrangement.lanes.clear();
+    harness.idle(5);
+    let (frame, tessellation) = frame_cost(&mut harness, 120);
+    eprintln!("the same without the lane: {frame:.2} ms per frame, of which {tessellation:.2} ms tessellation");
+    let owner = crate::ui::state::lane_owner(&harness.project(), &target).unwrap();
+    harness.app.state_mut().arrangement.open_lane(owner, target.clone());
+    harness.idle(5);
+
+    // A point dragged: every frame the lane is written again, the graph
+    // compiled and the snapshot taken.
+    let top = crate::ui::arrangement::TRACK_HEIGHT;
+    let lane_height = crate::ui::state::ArrangementState::DEFAULT_LANE_HEIGHT;
+    let point = harness.project().automation[0].points[count / 2];
+    let height = crate::ui::units::db_to_fader(point.value as f32);
+    let at = |harness: &Harness, up: f32| {
+        let y = top + lane_height - 6.0 - (height + up) * (lane_height - 12.0);
+        harness.lanes_at(point.beat, y)
+    };
+    let started = Instant::now();
+    harness.drag_start(Modifiers::ALT, at(&harness, 0.0), at(&harness, 0.02));
+    for step in 0..40 {
+        harness.move_to(at(&harness, 0.02 + step as f32 * 0.005));
+    }
+    let dragging = started.elapsed() / 50;
+    harness.drag_end(at(&harness, 0.3));
+    let moved = harness.project().automation[0].points[count / 2];
+    assert_ne!(moved.value, point.value, "the drag took hold of the point");
+    eprintln!(
+        "dragging one of them: {:.2} ms per frame, edit and new snapshot included",
+        dragging.as_secs_f64() * 1000.0
+    );
+
+    // All of them selected, shown so, and dragged as one.
+    harness.key(Modifiers::COMMAND, Key::A);
+    harness.idle(2);
+    assert_eq!(harness.app.state().arrangement.points.as_ref().map(|chosen| chosen.points.len()), Some(count));
+    let (frame, tessellation) = frame_cost(&mut harness, 120);
+    eprintln!("all of them selected: {frame:.2} ms per frame, of which {tessellation:.2} ms tessellation");
+    let grabbed = harness.project().automation[0].points[count / 2];
+    let height = crate::ui::units::db_to_fader(grabbed.value as f32);
+    let at = |harness: &Harness, up: f32| {
+        let y = top + lane_height - 6.0 - (height + up) * (lane_height - 12.0);
+        harness.lanes_at(grabbed.beat, y)
+    };
+    let started = Instant::now();
+    harness.drag_start(Modifiers::ALT, at(&harness, 0.0), at(&harness, -0.02));
+    for step in 0..40 {
+        harness.move_to(at(&harness, -0.02 - step as f32 * 0.005));
+    }
+    let dragging = started.elapsed() / 50;
+    harness.drag_end(at(&harness, -0.25));
+    let lowered = harness.project().automation[0].points.clone();
+    assert!(lowered.iter().step_by(61).zip(moved_from(&harness, count)).all(|(now, was)| now.value < was));
+    eprintln!("dragging all of them: {:.2} ms per frame", dragging.as_secs_f64() * 1000.0);
+}
+
+/// What every sixty-first point of the lane was worth before it was moved.
+fn moved_from(_: &Harness, count: usize) -> impl Iterator<Item = f64> {
+    (0..count).step_by(61).map(move |index| {
+        let beat = index as f64 * 456.0 / count as f64;
+        -12.0 * (-(beat.fract()) * 6.0).exp() + 1e-9
+    })
+}

@@ -9,7 +9,10 @@
 //! what was played and where, and letting go of it all. And so must
 //! playing the controllers clips hold: reading their curves every few
 //! frames, putting every one of them back where the loop starts, giving
-//! way to a controller moved by hand and taking it back.
+//! way to a controller moved by hand and taking it back. And so must
+//! playing envelopes: reading lanes of thousands of points for a fader, a
+//! pan, a send and a device's parameter, gliding to where they are, and
+//! picking up where a send had got to in the graph that takes over.
 //!
 //! And so must routing: a compressor that listens to another track is
 //! handed that track's audio block by block, whatever order that puts the
@@ -191,6 +194,85 @@ fn playing_audio_clips_and_swapping_graphs_never_touches_the_allocator() {
     });
     assert!(level > 0.3);
     assert_eq!(calls, 0, "{calls} allocator calls while handing over from a stand-in");
+    assert_eq!(retired.len(), 3);
+}
+
+#[test]
+fn playing_envelopes_never_touches_the_allocator() {
+    use trill_core::project::{AutomationPoint, AutomationTarget, Segment};
+    use trill_core::{ChainRef, TrackKind};
+
+    let folder = folder();
+    let tone = write_wav(&file(&folder, "tone.wav"), SR, &sine(440.0, SR, 4.0, 0.5));
+    let (mut project, track) = audio_project(120.0);
+    add_clip(&mut project, track, &tone, 0.0, 8.0);
+    let utility = project.add_device(ChainRef::Track(track), "builtin:utility", "Utility", None).unwrap();
+    let echo = project.add_track_of_kind("Echo", TrackKind::Return);
+    let hall = project.add_track_of_kind("Hall", TrackKind::Return);
+    project.add_device(ChainRef::Track(echo), "builtin:delay", "Delay", None).unwrap();
+    project.set_send(track, hall, Some(-12.0)).unwrap();
+    // A lane as a compressor drawn on paper leaves it: thousands of
+    // points, a dip on every beat. And lines, steps and bends on the rest.
+    let dips: Vec<AutomationPoint> = (0..7_332)
+        .map(|index| index as f64 * 8.0 / 7_332.0)
+        .map(|beat| AutomationPoint::new(beat, -12.0 * (-(beat.fract()) * 6.0).exp()))
+        .collect();
+    let point = AutomationPoint::new;
+    let held = |beat: f64, value: f64| AutomationPoint { beat, value, shape: Segment::Hold };
+    let bent = AutomationPoint { beat: 1.25, value: -3.0, shape: Segment::Curve(-0.6) };
+    let throw = AutomationTarget::Send { track, to: echo };
+    project.set_automation(AutomationTarget::TrackVolume { track }, dips.clone()).unwrap();
+    project.set_automation(AutomationTarget::TrackPan { track }, vec![point(0.0, -1.0), point(8.0, 1.0)]).unwrap();
+    project.set_automation(throw.clone(), vec![held(0.0, -70.0), point(1.0, -70.0), bent, held(3.0, -70.0)]).unwrap();
+    project
+        .set_automation(AutomationTarget::Send { track, to: hall }, vec![point(0.0, -30.0), point(8.0, 0.0)])
+        .unwrap();
+    project
+        .set_automation(AutomationTarget::MasterVolume, vec![point(0.0, -6.0), point(4.0, 0.0), held(6.0, -3.0)])
+        .unwrap();
+    let gain = AutomationTarget::DeviceParam { device: utility, param: "gain".into() };
+    project.write_automation(gain, dips, trill_core::Travel::Fader { floor: -70.0 }).unwrap();
+    // Round a loop, so that every envelope jumps and is glided to.
+    project.set_loop(true, 0.5, 3.5).unwrap();
+
+    let mut controller = Controller {
+        bank: DeviceBank::default(),
+        meters: Meters::default(),
+        stand_ins: StandIns::default(),
+        audio: AudioSources::default(),
+    };
+    let mut processor = Processor::new(SR);
+    let (mut left, mut right) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+    let mut retired = Vec::with_capacity(8);
+    retired.push(processor.swap_graph(controller.compile_prepared(&project)));
+    processor.play();
+    // Once without watching, to fault in pages.
+    play(&mut processor, &mut left, &mut right, 4_096);
+
+    // What an edit arrives as while the song plays: the throw's envelope is
+    // switched off (the send is the hand's), a send is taken away, another
+    // is opened by hand.
+    project.set_automation_enabled(&throw, false).unwrap();
+    project.set_send(track, echo, Some(-6.0)).unwrap();
+    let held_by_hand = controller.compile_prepared(&project);
+    project.set_send(track, hall, None).unwrap();
+    project.set_automation_enabled(&throw, true).unwrap();
+    let handed_back = controller.compile_prepared(&project);
+    let mut next = [Some(held_by_hand), Some(handed_back)];
+    let mut level = 0.0;
+    let calls = allocator_calls(|| {
+        level = play(&mut processor, &mut left, &mut right, 5 * SR as usize);
+        retired.push(processor.swap_graph(next[0].take().expect("a graph to swap in")));
+        play(&mut processor, &mut left, &mut right, 2 * SR as usize);
+        retired.push(processor.swap_graph(next[1].take().expect("a graph to swap in")));
+        play(&mut processor, &mut left, &mut right, 2 * SR as usize);
+        processor.seek(2.25);
+        play(&mut processor, &mut left, &mut right, 4_096);
+        processor.stop();
+        play(&mut processor, &mut left, &mut right, 2_048);
+    });
+    assert!(level > 0.05, "the clip should be sounding: {level}");
+    assert_eq!(calls, 0, "{calls} allocator calls while playing envelopes");
     assert_eq!(retired.len(), 3);
 }
 

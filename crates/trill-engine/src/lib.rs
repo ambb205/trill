@@ -10,6 +10,7 @@ pub mod analysis;
 mod clock;
 pub mod compile;
 pub mod engine;
+mod glide;
 pub mod graph;
 pub mod host;
 pub mod instruments;
