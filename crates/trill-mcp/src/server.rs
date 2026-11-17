@@ -812,11 +812,17 @@ impl TrillServer {
         let mut session = self.session.lock();
         let reply = (|| {
             // Validate before touching anything, so a bad value changes nothing.
-            let resolved = match &request.params {
-                Some(params) => resolve_params(&session, id, params)?,
-                None => Vec::new(),
-            };
             let settings = crate::sounds::settings_asked(request.settings.as_ref())?;
+            let resolved = match &request.params {
+                Some(params) => resolve_params(&session, id, params),
+                None => Ok(Vec::new()),
+            };
+            if (resolved.is_err() || !settings.is_empty())
+                && let Some(sorted) = misplaced(&session, id, request.params.as_ref(), &settings)
+            {
+                return Err(sorted);
+            }
+            let resolved = resolved?;
             session.begin_gesture();
             let mut loaded = None;
             let result: Result<(), String> = (|| {
@@ -2139,7 +2145,9 @@ impl TrillServer {
         finish(reply)
     }
 
-    /// Start an empty project, replacing the current one. Unsaved changes are lost.
+    /// Start a project with no tracks, replacing the current one. Unsaved changes are lost. Its master chain is not
+    /// empty: it starts with a limiter that keeps the output from clipping, listed in the reply under `master`.
+    /// Leave it for a song you mix here; delete it first when you bring a master chain of your own.
     #[tool(annotations(title = "New project", destructive_hint = true))]
     fn new_project(&self, Parameters(request): Parameters<NewProjectRequest>) -> CallToolResult {
         let mut session = self.session.lock();
@@ -2389,6 +2397,59 @@ fn shown_values(session: &Session, device: DeviceId, set: &[(String, f64)]) -> O
     let shown: serde_json::Map<String, Value> =
         found.iter().zip(texts).map(|((index, _), text)| (states[*index].info.name.clone(), json!(text))).collect();
     Some(Value::Object(shown))
+}
+
+/// A sentence for names given on the wrong side of a plugin that has both
+/// parameters and settings in its saved state: all of them at once, each
+/// setting with the value it has. One refused call then sorts every name
+/// of a patch, where it would take a `get_device` for each to learn which
+/// side it is on.
+fn misplaced(
+    session: &Session,
+    device: DeviceId,
+    params: Option<&BTreeMap<String, Value>>,
+    settings: &[(String, String)],
+) -> Option<String> {
+    let infos: Vec<_> = session.device_params(device).ok()?.into_iter().map(|state| state.info).collect();
+    let in_state = session.device_settings(device).unwrap_or_default();
+    let setting = |name: &str| in_state.iter().find(|(known, _)| known.eq_ignore_ascii_case(name));
+    let are_settings: Vec<String> = params
+        .into_iter()
+        .flatten()
+        .filter(|(key, _)| find_param_index(&infos, key).is_err())
+        .filter_map(|(key, _)| setting(key))
+        .map(|(name, value)| format!("'{name}' (reads {value} now)"))
+        .collect();
+    let are_params: Vec<String> = settings
+        .iter()
+        .filter(|(name, _)| setting(name).is_none())
+        .filter_map(|(name, _)| infos.iter().find(|info| info.name.eq_ignore_ascii_case(name)))
+        .map(|info| format!("'{}'", info.name))
+        .collect();
+    let mut said = Vec::new();
+    match are_settings.as_slice() {
+        [] => {}
+        [one] => said.push(format!(
+            "{one} is not a parameter of this device but a setting in its saved state: give it under `settings`, \
+             written in the form its value has now"
+        )),
+        several => said.push(format!(
+            "{} are not parameters of this device but settings in its saved state: give them under `settings`, \
+             each written in the form its value has now",
+            several.join(", ")
+        )),
+    }
+    match are_params.as_slice() {
+        [] => {}
+        [one] => said.push(format!(
+            "{one} is a parameter of this device, not a setting in its saved state: give it under `params`"
+        )),
+        several => said.push(format!(
+            "{} are parameters of this device, not settings in its saved state: give them under `params`",
+            several.join(", ")
+        )),
+    }
+    (!said.is_empty()).then(|| format!("{}. Nothing was changed", said.join(". ")))
 }
 
 fn resolve_params(
