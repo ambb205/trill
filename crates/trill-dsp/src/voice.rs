@@ -1,7 +1,30 @@
 //! The per-voice building blocks shared by the polyphonic instruments: the
 //! ADSR envelope and the stereo multimode filter.
 
-use crate::util::{Svf, decay_coef};
+use crate::util::{Svf, db_to_gain, decay_coef};
+
+/// How far one step of velocity (of 127) moves the level of a sample
+/// player at full sensitivity, in dB.
+pub const VELOCITY_DB_PER_STEP: f32 = 0.4;
+/// The velocity a sample player plays at its volume, whatever its
+/// sensitivity: harder is louder than that, softer is quieter.
+pub const VELOCITY_CENTRE: f32 = 75.0;
+
+/// The description of a sample player's velocity sensitivity, which says
+/// the law to whoever sets it.
+pub const VELOCITY_SENS_NAME: &str = "Velocity Sensitivity (0 = every hit at the volume; 1 = 0.4 dB a step of \
+velocity, up from the volume above velocity 75 and down below it, so a hard hit is louder than the volume says: \
++10 dB at 100, +21 dB at 127, -12 dB at 45; 0.5 is half of that in dB)";
+
+/// The gain of a note of `velocity` (0..=1) on a sample player whose
+/// sensitivity is `sens`: [`VELOCITY_DB_PER_STEP`] times the sensitivity
+/// for every step from [`VELOCITY_CENTRE`], so that the same change of
+/// velocity is the same change in dB wherever on the keyboard's travel it
+/// is, and a hit can be louder than the volume as well as quieter.
+#[inline]
+pub fn velocity_gain(sens: f32, velocity: f32) -> f32 {
+    db_to_gain(sens * VELOCITY_DB_PER_STEP * (velocity * 127.0 - VELOCITY_CENTRE))
+}
 
 #[derive(Copy, Clone, PartialEq)]
 pub enum Stage {
@@ -188,6 +211,7 @@ impl FadeOut {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::gain_to_db;
 
     #[test]
     fn fade_out_reaches_silence_in_the_given_time_and_only_speeds_up() {
@@ -215,5 +239,25 @@ mod tests {
         envelope.release();
         let release = (0..48_000).take_while(|_| envelope.tick(&shape) > 0.0).count();
         assert!(envelope.stage == Stage::Idle && release < 4_000);
+    }
+
+    #[test]
+    fn velocity_moves_the_level_evenly_in_decibels_about_velocity_75() {
+        let db = |sens: f32, velocity: u8| gain_to_db(velocity_gain(sens, f32::from(velocity) / 127.0));
+        // The five velocities and the two sensitivities a hi-hat and a clap
+        // were measured at in the program this law is shared with.
+        for (velocity, at_80) in [(46, -9.3), (60, -4.8), (75, 0.0), (100, 8.0), (110, 11.2)] {
+            assert!((db(0.8, velocity) - at_80).abs() < 0.05, "velocity {velocity}: {}", db(0.8, velocity));
+        }
+        assert!((db(0.35, 108) - 4.62).abs() < 0.01 && (db(0.35, 118) - 6.02).abs() < 0.01);
+        // A step is the same anywhere, and scales with the sensitivity.
+        for sens in [0.25f32, 0.5, 1.0] {
+            for velocity in [1u8, 30, 74, 75, 126] {
+                let step = db(sens, velocity + 1) - db(sens, velocity);
+                assert!((step - 0.4 * sens).abs() < 1e-3, "{sens} at {velocity}: {step}");
+            }
+        }
+        assert_eq!(velocity_gain(0.0, 0.1), 1.0, "no sensitivity: every hit at the volume");
+        assert!((velocity_gain(1.0, 75.0 / 127.0) - 1.0).abs() < 1e-6);
     }
 }

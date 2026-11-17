@@ -15,7 +15,8 @@
 //! patterns that name every field of the model's structs, so that a field
 //! added to the model does not compile here until it has been given a place.
 
-use crate::project::{ClipContent, Master, MidiContent};
+use crate::formats;
+use crate::project::{ClipContent, FORMAT_VERSION, Master, MidiContent};
 use crate::{
     AutomationLane, AutomationTarget, ChainRef, Clip, ClipId, Device, DeviceId, Marker, Note, Project, Track, TrackId,
 };
@@ -549,6 +550,46 @@ impl Change {
 
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
+    }
+
+    /// Makes what the change kept of devices and envelopes say in this
+    /// build what it meant in the build that made it (see
+    /// [`formats`]), as a project file of an older format is made to when
+    /// it is opened: a journal that was begun before a device changed then
+    /// leads to the song as it sounded.
+    ///
+    /// `format` is the song's format where the change begins, and where it
+    /// ends afterwards. One build makes all of a change, and a change that
+    /// carries the song's own settings says which format that build wrote:
+    /// the step that takes a journal up again under a newer build is such
+    /// a one, and is already in that build's terms. `types` is the type of
+    /// every device met so far, which an envelope is read by.
+    pub(super) fn keep_format(&mut self, format: &mut u32, types: &mut BTreeMap<DeviceId, String>) {
+        let says = self.ops.iter().find_map(|op| match op {
+            Op::Song(song) => Some(song.format_version),
+            _ => None,
+        });
+        *format = says.unwrap_or(*format);
+        for op in &mut self.ops {
+            match op {
+                Op::Device { device, .. } => {
+                    types.insert(device.id, device.uri.clone());
+                    formats::keep_device(*format, device);
+                }
+                // The songs a journal rebuilds are this build's.
+                Op::Song(song) if song.format_version < FORMAT_VERSION => song.format_version = FORMAT_VERSION,
+                _ => {}
+            }
+        }
+        // An envelope, once every device of the change is known.
+        for op in &mut self.ops {
+            if let Op::Lane(lane) = op
+                && let AutomationTarget::DeviceParam { device, .. } = &lane.target
+                && let Some(uri) = types.get(device)
+            {
+                formats::keep_lane(*format, uri, lane);
+            }
+        }
     }
 
     /// Its parts, in the order they are applied.

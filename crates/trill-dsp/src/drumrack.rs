@@ -39,11 +39,11 @@
 
 use crate::level::ChannelLevel;
 use crate::loading::{SampleRef, SampleSource, StateError, decode, encode};
-use crate::params::{ParamDef, ParamValues, float, int};
+use crate::params::{ParamDef, ParamValues, boolean, float, int};
 use crate::playhead::{LoopSpec, Playhead};
 use crate::sample::Sample;
-use crate::util::{db_to_gain, decay_coef, pan_gains};
-use crate::voice::FadeOut;
+use crate::util::{SILENT_DB, decay_coef, level_gain, pan_gains};
+use crate::voice::{FadeOut, VELOCITY_SENS_NAME, velocity_gain};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
@@ -199,6 +199,9 @@ const CHOKE: usize = 5;
 const GLOBAL_PARAMS: usize = 2;
 const VOLUME: usize = 0;
 const VELOCITY_SENS: usize = 1;
+/// A parameter of the whole rack that came later, after the pads', so that
+/// theirs keep the places they had.
+const LEGACY: usize = GLOBAL_PARAMS + PAD_COUNT * PAD_PARAMS;
 
 /// The longest decay; at this setting the envelope is off and the sample
 /// plays at its own length.
@@ -210,8 +213,12 @@ const CHOKE_GROUPS: i32 = 8;
 macro_rules! rack_params {
     ($( ($note:literal, $name:literal, $choke:literal) ),* $(,)?) => {
         pub const PARAMS: &[ParamDef] = &[
-            float("volume", "Volume", -48.0, 12.0, 0.0, "dB"),
-            float("velocity_sens", "Velocity Sensitivity", 0.0, 1.0, 1.0, ""),
+            float(
+                "volume",
+                "Volume (of a hit at velocity 75 on a pad at level 1: the file as it was recorded at 0; silent at -70)",
+                SILENT_DB as f64, 12.0, -8.0, "dB",
+            ),
+            float("velocity_sens", VELOCITY_SENS_NAME, 0.0, 1.0, 0.5, ""),
             $(
                 float(
                     concat!("pad", stringify!($note), "_level"),
@@ -244,6 +251,12 @@ macro_rules! rack_params {
                     0, CHOKE_GROUPS, $choke, "",
                 ),
             )*
+            boolean(
+                "legacy",
+                "Legacy (the velocity law of songs saved before format 4: sensitivity only ever turns a hit down \
+                 from the volume)",
+                false,
+            ),
         ];
 
         /// The General MIDI name of each pad's note, for labelling pads.
@@ -271,7 +284,9 @@ rack_params![
 ];
 
 pub const DESCRIPTION: &str = "Drum sampler: 16 pads on MIDI notes 36-51, each playing its own audio file as a \
-one-shot (note length is ignored, velocity sets loudness). Pads follow the General MIDI drum map, like \
+one-shot (note length is ignored, velocity sets loudness: `volume` is the level of a hit at velocity 75, and \
+`velocity_sens` how far harder and softer hits move from it in dB, so a hard hit is louder than the volume). Pads \
+follow the General MIDI drum map, like \
 builtin:drumkit: 36 kick, 37 rim, 38 snare, 39 clap, 40 snare 2, 41/43 low toms, 42 closed hat, 44 pedal hat, \
 45/47 mid toms, 46 open hat, 48/50 high toms, 49 crash, 51 ride - but any sound can go on any pad. Each pad has \
 level, pan, tune, start point, decay and a choke group (by default the hats 42/44/46 cut each other), as \
@@ -358,6 +373,8 @@ pub struct DrumRack {
     pads: [PadSettings; PAD_COUNT],
     volume: f32,
     velocity_sens: f32,
+    /// The velocity law of songs saved before format 4.
+    legacy: bool,
     sample_rate: f64,
     voices: [Voice; VOICES],
     clock: u64,
@@ -380,6 +397,7 @@ impl DrumRack {
             pads: [PadSettings::default(); PAD_COUNT],
             volume: 1.0,
             velocity_sens: 1.0,
+            legacy: false,
             sample_rate: 48_000.0,
             voices: [Voice::idle(); VOICES],
             clock: 0,
@@ -389,8 +407,9 @@ impl DrumRack {
 
     fn refresh(&mut self) {
         let p = &self.params;
-        self.volume = db_to_gain(p.get(VOLUME));
+        self.volume = level_gain(p.get(VOLUME));
         self.velocity_sens = p.get(VELOCITY_SENS);
+        self.legacy = p.on(LEGACY);
         for (index, (pad, sample)) in self.pads.iter_mut().zip(&self.samples).enumerate() {
             let base = GLOBAL_PARAMS + index * PAD_PARAMS;
             pad.level = p.get(base + LEVEL);
@@ -441,8 +460,12 @@ impl DrumRack {
             pad: index,
             head: Some(Playhead::new(sample, pad.start * frames, frames, false, pad.rate, self.sample_rate)),
             envelope: 1.0,
-            // The same loudness curve as the synthesized kit.
-            velocity_gain: 1.0 - sens + sens * velocity * velocity.sqrt(),
+            velocity_gain: if self.legacy {
+                // The loudness curve of the synthesized kit.
+                1.0 - sens + sens * velocity * velocity.sqrt()
+            } else {
+                velocity_gain(sens, velocity)
+            },
             age: self.clock,
             fade: FadeOut::idle(),
         };
@@ -529,6 +552,7 @@ impl DeviceProcessor for DrumRack {
 mod tests {
     use super::*;
     use crate::testing::*;
+    use crate::util::db_to_gain;
     use trill_core::audio::AudioBuffer;
 
     const SR: f64 = 48_000.0;
@@ -544,10 +568,12 @@ mod tests {
         rack(samples, params)
     }
 
+    /// A rack that plays every hit as its file is, whatever the velocity,
+    /// but for what `params` say.
     fn rack(samples: Vec<Option<Arc<Sample>>>, params: &[(&str, f64)]) -> DrumRack {
         let mut device = DrumRack::new(samples);
         device.prepare(SR, 512);
-        for (id, value) in params {
+        for (id, value) in [("volume", 0.0), ("velocity_sens", 0.0)].iter().chain(params) {
             let index = PARAMS.iter().position(|def| def.id == *id).unwrap_or_else(|| panic!("no parameter '{id}'"));
             device.set_param(index, *value);
         }
@@ -558,7 +584,8 @@ mod tests {
 
     #[test]
     fn the_parameter_table_has_a_block_per_pad_with_stable_ids() {
-        assert_eq!(PARAMS.len(), GLOBAL_PARAMS + PAD_COUNT * PAD_PARAMS);
+        assert_eq!(PARAMS.len(), GLOBAL_PARAMS + PAD_COUNT * PAD_PARAMS + 1);
+        assert_eq!(PARAMS[LEGACY].id, "legacy");
         assert_eq!(PARAMS[VOLUME].id, "volume");
         assert_eq!(PARAMS[VELOCITY_SENS].id, "velocity_sens");
         for (pad, note) in PAD_NOTES.enumerate() {
@@ -632,10 +659,38 @@ mod tests {
         let (left, _) = run(&mut device, SR, 256, 12_000, &events);
         assert!((left[9_000] - 0.10).abs() < 1e-4, "the hit rings on after the key and the transport stop");
 
-        let mut device = constant_rack(9_600, &[]);
+        // What a hit of a velocity plays at, against one at velocity 75.
+        let level = |params: &[(&str, f64)], velocity: u8| {
+            let hit = |velocity: u8| {
+                let mut device = constant_rack(9_600, params);
+                let hit = EventKind::NoteOn { pitch: 36, velocity: f32::from(velocity) / 127.0 };
+                run(&mut device, SR, 256, 2_000, &[(0, hit)]).0[500]
+            };
+            20.0 * (hit(velocity) / hit(75)).log10()
+        };
+        // Half of 0.4 dB a step where nothing is said: a ghost note 9 dB
+        // under a hit at 75, an accent 10 dB over it.
+        assert_eq!((PARAMS[VELOCITY_SENS].default, PARAMS[VOLUME].default), (0.5, -8.0));
+        let half = [("velocity_sens", 0.5)];
+        for (velocity, wanted) in [(30, -9.0), (46, -5.8), (75, 0.0), (100, 5.0), (127, 10.4)] {
+            assert!((level(&half, velocity) - wanted).abs() < 0.02, "velocity {velocity}: {}", level(&half, velocity));
+        }
+        assert!((level(&[("velocity_sens", 1.0)], 100) - 10.0).abs() < 0.02);
+        assert!(level(&[("velocity_sens", 0.0)], 20).abs() < 0.01, "no sensitivity: every hit at the volume");
+        // At velocity 75 and the volume at 0 a pad plays its file as it is.
+        let mut device = constant_rack(9_600, &half);
+        let (plain, _) =
+            run(&mut device, SR, 256, 2_000, &[(0, EventKind::NoteOn { pitch: 36, velocity: 75.0 / 127.0 })]);
+        assert!((plain[500] - 0.10).abs() < 1e-5, "{}", plain[500]);
+        let mut device = constant_rack(9_600, &[("volume", -70.0)]);
+        assert_eq!(peak(&run(&mut device, SR, 256, 2_000, &[(0, HIT(36))]).0), 0.0, "the lowest volume is silence");
+
+        // A song saved before keeps its law: velocity 0.25 at 0.25^1.5.
+        let old = [("legacy", 1.0), ("volume", 0.0), ("velocity_sens", 1.0)];
+        let mut device = constant_rack(9_600, &old);
         let (soft, _) = run(&mut device, SR, 256, 2_000, &[(0, EventKind::NoteOn { pitch: 36, velocity: 0.25 })]);
         assert!((soft[500] - 0.10 * 0.125).abs() < 1e-4, "velocity 0.25 plays at 0.25^1.5: {}", soft[500]);
-        let mut device = constant_rack(9_600, &[("velocity_sens", 0.0)]);
+        let mut device = constant_rack(9_600, &[("legacy", 1.0), ("volume", 0.0), ("velocity_sens", 0.0)]);
         let (flat, _) = run(&mut device, SR, 256, 2_000, &[(0, EventKind::NoteOn { pitch: 36, velocity: 0.25 })]);
         assert!((flat[500] - 0.10).abs() < 1e-4);
     }

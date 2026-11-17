@@ -37,8 +37,10 @@ use crate::loading::{SampleRef, SampleSource, StateError, decode, encode};
 use crate::params::{ParamValues, PresetDef, boolean, choice, float, int};
 use crate::playhead::{LoopMode, LoopSpec, Playhead};
 use crate::sample::Sample;
-use crate::util::{db_to_gain, pan_gains};
-use crate::voice::{EnvShape, Envelope, FadeOut, FilterMode, Stage, VoiceFilter, resonance_to_q};
+use crate::util::{SILENT_DB, level_gain, pan_gains};
+use crate::voice::{
+    EnvShape, Envelope, FadeOut, FilterMode, Stage, VELOCITY_SENS_NAME, VoiceFilter, resonance_to_q, velocity_gain,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -156,24 +158,47 @@ define_params!(P, PARAMS, [
     FilterDecay => float("filter_decay", "Filter Decay", 0.005, 20.0, 0.5, "s"),
     FilterSustain => float("filter_sustain", "Filter Sustain", 0.0, 1.0, 0.5, ""),
     FilterRelease => float("filter_release", "Filter Release", 0.005, 20.0, 0.3, "s"),
-    VelocitySens => float("velocity_sens", "Velocity Sensitivity", 0.0, 1.0, 0.6, ""),
+    VelocitySens => float("velocity_sens", VELOCITY_SENS_NAME, 0.0, 1.0, 0.35, ""),
     Voices => int("voices", "Voices", 1, MAX_VOICES as i32, 16, ""),
-    Volume => float("volume", "Volume", -48.0, 12.0, -6.0, "dB"),
+    Volume => float(
+        "volume",
+        "Volume (of a note at velocity 75: the file as it was recorded at 0; silent at -70)",
+        SILENT_DB as f64,
+        12.0,
+        -12.0,
+        "dB"
+    ),
     Pan => float("pan", "Pan", -1.0, 1.0, 0.0, ""),
+    BendRange => float(
+        "bend_range",
+        "Pitch Wheel Range (how far the wheel bends, each way; the track's instrument profile takes it from here)",
+        0.0,
+        48.0,
+        PITCH_BEND_SEMITONES as f64,
+        "st"
+    ),
+    Legacy => boolean(
+        "legacy",
+        "Legacy (the velocity law of songs saved before format 4: sensitivity only ever turns a hit down from the \
+         volume, by the square of its velocity)",
+        false
+    ),
 ]);
 
 pub const DESCRIPTION: &str = "Plays one audio file across the keyboard: the root note plays it as recorded and \
 other keys repitch it, with up to 32 voices. Start/end points, forward and ping-pong loops with crossfade, reverse, \
 one-shot or gated playback, amp ADSR, multimode filter with envelope. For melodic one-shots, sustained instruments \
-(set a loop), vocal chops and textures; for a kit of drum hits use builtin:drumrack. The audio file is not a \
-parameter: it is the device's sample, stored in the device state. Without one the sampler is silent.";
+(set a loop), vocal chops and textures; for a kit of drum hits use builtin:drumrack. `volume` is the level of a note \
+at velocity 75 and `velocity_sens` how far harder and softer notes move from it, in dB: a hard hit is louder than \
+the volume, so leave it room. The audio file is not a parameter: it is the device's sample, stored in the device \
+state. Without one the sampler is silent.";
 
 pub const PRESETS: &[PresetDef] = &[
     PresetDef { name: "default", description: "Plays the whole file while the key is held", params: &[] },
     PresetDef {
         name: "one_shot",
         description: "Each key plays the file to its end: hits, stabs, chops",
-        params: &[("one_shot", 1.0), ("release", 0.02), ("velocity_sens", 0.8)],
+        params: &[("one_shot", 1.0), ("release", 0.02), ("velocity_sens", 0.5)],
     },
     PresetDef {
         name: "sustained",
@@ -198,7 +223,7 @@ pub const PRESETS: &[PresetDef] = &[
             ("release", 2.0),
             ("filter_type", 2.0),
             ("cutoff", 3000.0),
-            ("velocity_sens", 0.2),
+            ("velocity_sens", 0.1),
         ],
     },
     PresetDef {
@@ -232,9 +257,13 @@ struct Derived {
     filter_env: f32,
     key_track: f32,
     velocity_sens: f32,
+    /// The velocity law of songs saved before format 4.
+    legacy: bool,
     gain_left: f32,
     gain_right: f32,
     voices: usize,
+    /// How far the pitch wheel bends, in semitones each way.
+    bend_range: f32,
 }
 
 #[derive(Clone)]
@@ -337,8 +366,8 @@ pub struct Sampler {
     voices: Vec<Voice>,
     clock: u64,
     pedal: Pedal,
-    /// The pitch wheel, as a ratio of frequencies.
-    bend: f64,
+    /// The pitch wheel, -1..=1.
+    wheel: f32,
     /// Channel volume and expression.
     level: ChannelLevel,
 }
@@ -355,7 +384,7 @@ impl Sampler {
             voices: vec![Voice::new(); MAX_VOICES + SPARE_VOICES],
             clock: 0,
             pedal: Pedal::default(),
-            bend: 1.0,
+            wheel: 0.0,
             level: ChannelLevel::new(),
         }
     }
@@ -407,7 +436,9 @@ impl Sampler {
         d.filter_env = p.get(P::FilterEnv as usize);
         d.key_track = p.get(P::KeyTrack as usize);
         d.velocity_sens = p.get(P::VelocitySens as usize);
-        let gain = db_to_gain(p.get(P::Volume as usize));
+        d.legacy = p.on(P::Legacy as usize);
+        d.bend_range = p.get(P::BendRange as usize);
+        let gain = level_gain(p.get(P::Volume as usize));
         let (pan_left, pan_right) = pan_gains(p.get(P::Pan as usize));
         d.gain_left = gain * pan_left;
         d.gain_right = gain * pan_right;
@@ -441,7 +472,11 @@ impl Sampler {
             held: !d.one_shot,
             pitch,
             pitch_ratio,
-            velocity_gain: 1.0 - sens + sens * velocity * velocity,
+            velocity_gain: if d.legacy {
+                1.0 - sens + sens * velocity * velocity
+            } else {
+                velocity_gain(sens, velocity)
+            },
             age: self.clock,
             amp: if d.instant_attack { opened } else { attacking },
             filt: if d.instant_filter_attack { opened } else { attacking },
@@ -476,8 +511,7 @@ impl Sampler {
                 self.voices.iter_mut().filter(|voice| voice.active).for_each(Voice::release);
             }
             EventKind::PitchBend { value } => {
-                let semitones = if value.is_finite() { value.clamp(-1.0, 1.0) * PITCH_BEND_SEMITONES } else { 0.0 };
-                self.bend = 2f64.powf(f64::from(semitones) / 12.0);
+                self.wheel = if value.is_finite() { value.clamp(-1.0, 1.0) } else { 0.0 };
             }
             EventKind::Control { controller, value } => {
                 if let Some(down) = kind.sustain() {
@@ -497,6 +531,8 @@ impl Sampler {
     fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
         let Some(sample) = self.sample.as_deref() else { return };
         let sample_rate = self.sample_rate as f32;
+        // The pitch wheel, as a ratio of frequencies.
+        let bend = 2f64.powf(f64::from(self.wheel * self.derived.bend_range) / 12.0);
         let mut pos = 0;
         while pos < left.len() {
             let len = (left.len() - pos).min(CONTROL_BLOCK);
@@ -505,7 +541,7 @@ impl Sampler {
             for voice in self.voices.iter_mut().filter(|voice| voice.active) {
                 voice.render(
                     &self.derived,
-                    (sample, self.bend, &levels[..len]),
+                    (sample, bend, &levels[..len]),
                     sample_rate,
                     &mut left[pos..pos + len],
                     &mut right[pos..pos + len],
@@ -587,6 +623,7 @@ impl DeviceProcessor for Sampler {
 mod tests {
     use super::*;
     use crate::testing::*;
+    use crate::util::db_to_gain;
     use crate::voice::FILTER_MODES;
     use trill_core::audio::AudioBuffer;
 
@@ -870,10 +907,58 @@ mod tests {
         let (left, _) = run(&mut slow, SR, 256, 9_600, &[(0, ON(60))]);
         assert!(left[0].abs() < 0.01 && (left[2_400] - 0.25).abs() < 0.01 && (left[9_000] - 0.5).abs() < 0.01);
 
+        let soft = EventKind::NoteOn { pitch: 60, velocity: 46.0 / 127.0 };
         let mut device = sampler(vec![0.5; 48_000], &[("volume", -6.0), ("velocity_sens", 1.0), ("pan", 1.0)]);
-        let (left, right) = run(&mut device, SR, 256, 1_000, &[(0, EventKind::NoteOn { pitch: 60, velocity: 0.5 })]);
-        let want = 0.5 * db_to_gain(-6.0) * 0.25 * std::f32::consts::SQRT_2;
+        let (left, right) = run(&mut device, SR, 256, 1_000, &[(0, soft)]);
+        // 0.4 dB for each of the 29 steps under velocity 75.
+        let want = 0.5 * db_to_gain(-6.0 - 11.6) * std::f32::consts::SQRT_2;
         assert!(peak(&left) < 1e-6 && (right[500] - want).abs() < 1e-4, "{} vs {want}", right[500]);
+    }
+
+    #[test]
+    fn a_hard_hit_is_louder_than_the_volume_and_a_soft_one_quieter_by_the_same_law() {
+        // What the file is played at, in dB against the file itself.
+        let level = |params: &[(&str, f64)], velocity: u8| {
+            let mut device = sampler(vec![0.25; 4_800], params);
+            let hit = EventKind::NoteOn { pitch: 60, velocity: f32::from(velocity) / 127.0 };
+            let (left, _) = run(&mut device, SR, 256, 1_000, &[(0, hit)]);
+            20.0 * (left[500] / 0.25).log10()
+        };
+        // A hi-hat's sensitivity and volume, at the velocities its rolls are
+        // written with: 0.32 dB a step, from the volume at velocity 75.
+        let hat = [("velocity_sens", 0.8), ("volume", -12.0)];
+        for (velocity, wanted) in [(46, -21.28), (60, -16.8), (75, -12.0), (100, -4.0), (110, -0.8)] {
+            assert!((level(&hat, velocity) - wanted).abs() < 0.02, "velocity {velocity}: {} dB", level(&hat, velocity));
+        }
+        assert!((level(&hat, 100) - level(&hat, 46) - 17.28).abs() < 0.02, "a roll swells 17 dB");
+        // With no sensitivity every hit is at the volume; the lowest volume is silence.
+        assert!((level(&[("velocity_sens", 0.0), ("volume", -12.0)], 20) + 12.0).abs() < 0.01);
+        assert_eq!(level(&[("volume", -70.0)], 127), f32::NEG_INFINITY);
+        assert!((level(&[("velocity_sens", 0.0), ("volume", -69.0)], 100) + 69.0).abs() < 0.01);
+
+        // A song saved before keeps its law: never above the volume, and
+        // a roll that swells 7 dB.
+        let old = [("velocity_sens", 0.8), ("volume", -12.0), ("legacy", 1.0)];
+        let was = |velocity: f32| -12.0 + 20.0 * (0.2 + 0.8 * (velocity / 127.0).powi(2)).log10();
+        for velocity in [46u8, 75, 100, 127] {
+            let wanted = was(f32::from(velocity));
+            assert!((level(&old, velocity) - wanted).abs() < 0.02, "velocity {velocity}: {}", level(&old, velocity));
+        }
+        assert!((level(&old, 127) + 12.0).abs() < 0.01 && (level(&old, 100) - level(&old, 46) - 7.2).abs() < 0.1);
+    }
+
+    #[test]
+    fn the_pitch_wheel_bends_as_far_as_it_is_set_to() {
+        let pitch = |params: &[(&'static str, f64)], wheel: f32| {
+            let mut device = sampler(sine(440.0, SR, 48_000), &with(PLAIN, params));
+            let events = [(0, EventKind::PitchBend { value: wheel }), (0, ON(60))];
+            let (left, _) = run(&mut device, SR, 256, 24_000, &events);
+            12.0 * (zero_crossing_hz(&left[2_400..], SR) / 440.0).log2()
+        };
+        assert!((pitch(&[], 1.0) - 2.0).abs() < 0.01, "two semitones where nothing is said: {}", pitch(&[], 1.0));
+        assert!((pitch(&[("bend_range", 12.0)], -1.0) + 12.0).abs() < 0.01);
+        assert!((pitch(&[("bend_range", 12.0)], 0.5) - 6.0).abs() < 0.01);
+        assert!(pitch(&[("bend_range", 0.0)], 1.0).abs() < 0.01, "a wheel that bends nothing");
     }
 
     #[test]

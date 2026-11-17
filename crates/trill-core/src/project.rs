@@ -24,13 +24,19 @@ pub const MAX_VOLUME_DB: f32 = 6.0;
 ///
 /// * 1: the first.
 /// * 2: the reverb returns some 10 dB less and filters what goes into it,
-///   and the ping-pong delay feeds back once a pair of repeats. A device of
-///   a format-1 file keeps the sound it had: see [`crate::formats`].
+///   and the ping-pong delay feeds back once a pair of repeats.
 /// * 3: an automation lane says how its lines travel between points
 ///   ([`AutomationLane::travel`]), and a send can be automated. A file of
 ///   an earlier format says neither; its lanes are straight in their
 ///   units, as they were played when it was saved.
-pub const FORMAT_VERSION: u32 = 3;
+/// * 4: the sampler and the drum rack follow velocity by a law in decibels
+///   that plays a hard hit louder than the volume, the saturator no longer
+///   turns its level down as its drive rises, the lowest value of a level
+///   is silence, and the poly synth's volume is 21 dB up.
+///
+/// A device of an older file keeps the sound it had, and an envelope the
+/// curve it played: see [`crate::formats`].
+pub const FORMAT_VERSION: u32 = 4;
 /// The furthest an audio clip can be transposed, in semitones either way.
 pub const MAX_TRANSPOSE: f64 = 24.0;
 /// Shortest loop a clip repeats, so a tiny loop length cannot explode into
@@ -1731,17 +1737,10 @@ impl Project {
             ));
         }
         // A file of an older format says less than it means: what it leaves
-        // unsaid is written into it here, once, so that it sounds as it did.
-        if project.format_version < 2 {
-            let devices = project.tracks.iter_mut().flat_map(|track| track.devices.iter_mut());
-            for device in devices.chain(project.master.devices.iter_mut()) {
-                crate::formats::keep_format_1(&device.uri, &mut device.params);
-            }
-        }
-        // (An automation lane of a file before format 3 says nothing of
-        // how its lines travel and has been read as it was meant then:
-        // straight in its units. There is nothing to write into it.)
-        project.format_version = FORMAT_VERSION;
+        // unsaid is written into it here, once, so that it sounds as it did,
+        // and a value whose scale has moved since is moved, in the device
+        // and in the envelopes that drive it.
+        crate::formats::keep_project(&mut project);
         Ok(project)
     }
 }
@@ -2229,6 +2228,86 @@ mod tests {
         // And one from a later build is refused in words.
         let later = project.to_json().replace(&this_format, "\"format_version\": 99");
         assert!(Project::from_json(&later).unwrap_err().to_string().contains("newer version"));
+    }
+
+    #[test]
+    fn a_file_from_before_its_devices_changed_is_read_as_what_it_meant() {
+        // A file of format 2 has envelopes that are straight in their
+        // units, one of format 3 envelopes that follow their controls: the
+        // faders of the day, silent at the bottom of the ranges of the day.
+        let then = |floor: f64| Travel::Fader { floor };
+        an_older_file_keeps_its_devices(2, [Travel::Linear; 4]);
+        an_older_file_keeps_its_devices(3, [then(-48.0), then(-48.0), then(-70.0), Travel::FADER]);
+    }
+
+    /// `travels`: of the envelopes on the synth's volume, the sampler's
+    /// volume, the utility's gain and the track's fader, as the file has
+    /// them.
+    fn an_older_file_keeps_its_devices(format: u32, travels: [Travel; 4]) {
+        let mut project = Project::new("old");
+        let track = project.add_track("A");
+        let synth = project.add_device(ChainRef::Track(track), "builtin:polysynth", "Synth", None).unwrap();
+        let plain = project.add_device(ChainRef::Track(track), "builtin:polysynth", "Synth 2", None).unwrap();
+        let sampler = project.add_device(ChainRef::Track(track), "builtin:sampler", "Sampler", None).unwrap();
+        let fade = project.add_device(ChainRef::Master, "builtin:utility", "Fade", None).unwrap();
+        let reverb = project.add_device(ChainRef::Master, "builtin:reverb", "Reverb", None).unwrap();
+        project.device_mut(synth).unwrap().params.insert("volume".into(), 8.0);
+        let volume = |device: DeviceId| AutomationTarget::DeviceParam { device, param: "volume".into() };
+        let cutoff = AutomationTarget::DeviceParam { device: synth, param: "cutoff".into() };
+        let gain = AutomationTarget::DeviceParam { device: fade, param: "gain".into() };
+        let fader = AutomationTarget::TrackVolume { track };
+        let points = |from: f64, to: f64| vec![AutomationPoint::new(0.0, from), AutomationPoint::new(4.0, to)];
+        project.write_automation(volume(synth), points(-48.0, 8.0), travels[0]).unwrap();
+        project.write_automation(volume(sampler), points(-48.0, 8.0), travels[1]).unwrap();
+        project.write_automation(cutoff.clone(), points(200.0, 8000.0), Travel::Linear).unwrap();
+        project.write_automation(gain.clone(), points(0.0, -70.0), travels[2]).unwrap();
+        project.write_automation(fader.clone(), points(0.0, -70.0), travels[3]).unwrap();
+        // As a build of that format wrote it.
+        let this_format = format!("\"format_version\": {FORMAT_VERSION}");
+        let old = project.to_json().replace(&this_format, &format!("\"format_version\": {format}"));
+        assert_ne!(old, project.to_json());
+
+        let read = Project::from_json(&old).unwrap();
+        assert_eq!(read.format_version, FORMAT_VERSION);
+        let params = |id: DeviceId| read.device(id).unwrap().params.clone();
+        let line = |target: &AutomationTarget| -> (Vec<f64>, Travel) {
+            let lane = lane(&read, target);
+            (lane.points.iter().map(|point| point.value).collect(), lane.travel)
+        };
+        // The synth's volume is the same sound under another number,
+        // wherever the file has it; nothing else of it has moved.
+        let synth_at = |volume: f64| BTreeMap::from([("legacy".to_string(), 1.0), ("volume".to_string(), volume)]);
+        assert_eq!((params(synth), params(plain)), (synth_at(-13.0), synth_at(-21.0)));
+        assert_eq!(line(&cutoff), (vec![200.0, 8000.0], Travel::Linear));
+        // Its envelope is the same line, 21 dB down that scale: the points,
+        // and with them the level a fader's travel is measured from. Half
+        // way it is where it was, less the 21 dB.
+        let moved = match travels[0] {
+            Travel::Fader { floor } => Travel::Fader { floor: floor - 21.0 },
+            other => other,
+        };
+        assert_eq!(line(&volume(synth)), (vec![-69.0, -13.0], moved));
+        let was = travels[0].between(-48.0, 8.0, 0.5);
+        assert!((lane(&read, &volume(synth)).value_at(2.0) - (was - 21.0)).abs() < 1e-9);
+        // The sampler keeps its law and the defaults of the day; its own
+        // volume means what it did, and its envelope is as it was.
+        assert_eq!(params(sampler).get("legacy"), Some(&1.0));
+        assert_eq!((params(sampler).get("velocity_sens"), params(sampler).get("volume")), (Some(&0.6), Some(&-6.0)));
+        assert_eq!(line(&volume(sampler)), (vec![-48.0, 8.0], travels[1]));
+        // A fade that went down to 70 dB under goes there still, the way
+        // it went.
+        assert_eq!(params(fade), BTreeMap::from([("legacy".to_string(), 1.0)]));
+        assert_eq!(line(&gain), (vec![0.0, -70.0], travels[2]));
+        assert_eq!(line(&fader), (vec![0.0, -70.0], travels[3]));
+        // What changed in format 2 is as the file has it.
+        assert!(params(reverb).is_empty());
+        // Saved again it is a file of this format, and reads back the same.
+        assert_eq!(Project::from_json(&read.to_json()).unwrap(), read);
+        // And a file of format 1 is given all of it at once.
+        let oldest = old.replace(&format!("\"format_version\": {format}"), "\"format_version\": 1");
+        let oldest = Project::from_json(&oldest).unwrap();
+        assert_eq!(oldest.device(synth).unwrap().params.get("volume"), Some(&-13.0));
+        assert_eq!(oldest.device(reverb).unwrap().params.get("legacy"), Some(&1.0));
     }
 
     #[test]

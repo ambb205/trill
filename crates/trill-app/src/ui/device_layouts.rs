@@ -113,6 +113,11 @@ pub const WIDE: f32 = 156.0;
 const EQ_WIDTH: f32 = 204.0;
 /// A filter column whose type chips include "Off".
 const FILTER_WITH_OFF: f32 = 178.0;
+/// The saturator's column: room for its four curves in a row, and for its
+/// name over them.
+const FOUR_CURVES: f32 = 186.0;
+/// The pitch shifter's column: room for its name.
+const SHIFTER_WIDTH: f32 = 224.0;
 
 const fn p(id: &'static str, label: &'static str) -> Row {
     Row::Param { id, label, format: Format::Auto }
@@ -156,8 +161,22 @@ pub static LAYOUTS: &[Layout] = &[
                             p("fm_env", "FM Env"),
                         ],
                     ),
-                    section("Mix", &[p("osc_mix", "Osc 1 / 2"), p("sub_level", "Sub"), p("noise_level", "Noise")]),
+                    section("Pitch", &[p("pitch_env", "Envelope"), p("pitch_decay", "Time"), p("bend_range", "Wheel")]),
                 ],
+            },
+            Column {
+                width: NARROW,
+                sections: &[section(
+                    "Mix",
+                    &[
+                        p("osc_level", "Osc 1 + 2"),
+                        p("osc_mix", "Osc 1 / 2"),
+                        p("sub_level", "Sub"),
+                        p("noise_level", "Noise"),
+                        p("noise_width", "Noise Width"),
+                        Row::Toggles(&[("legacy", "Legacy")]),
+                    ],
+                )],
             },
             Column {
                 width: WIDE,
@@ -295,6 +314,7 @@ pub static LAYOUTS: &[Layout] = &[
                         p("fine", "Fine"),
                         p("start", "Start"),
                         p("end", "End"),
+                        p("bend_range", "Wheel"),
                         Row::Toggles(&[("reverse", "Reverse"), ("one_shot", "One-Shot")]),
                     ],
                 )],
@@ -319,6 +339,7 @@ pub static LAYOUTS: &[Layout] = &[
                             p("voices", "Voices"),
                             p("volume", "Volume"),
                             p("pan", "Pan"),
+                            Row::Toggles(&[("legacy", "Legacy")]),
                         ],
                     ),
                 ],
@@ -560,14 +581,14 @@ pub static LAYOUTS: &[Layout] = &[
     Layout {
         uri: "builtin:saturator",
         columns: &[Column {
-            width: WIDE,
+            width: FOUR_CURVES,
             sections: &[
                 shown(
                     "Drive",
                     Display::Saturator,
-                    &[Row::Choice { id: "shape", labels: &["Soft", "Hard", "Tube"] }, p("drive", "Drive")],
+                    &[Row::Choice { id: "shape", labels: &["Soft", "Hard", "Tube", "Sine"] }, p("drive", "Drive")],
                 ),
-                section("Output", &[p("output", "Output"), p("mix", "Mix")]),
+                section("Output", &[p("output", "Output"), p("mix", "Mix"), Row::Toggles(&[("legacy", "Legacy")])]),
             ],
         }],
     },
@@ -576,8 +597,29 @@ pub static LAYOUTS: &[Layout] = &[
         columns: &[Column {
             width: NARROW,
             sections: &[
-                section("Gain", &[p("gain", "Gain")]),
+                section("Gain", &[p("gain", "Gain"), Row::Toggles(&[("legacy", "Legacy")])]),
                 section("Stereo", &[p("pan", "Pan"), p("width", "Width"), Row::Toggles(&[("mono", "Mono")])]),
+            ],
+        }],
+    },
+    Layout {
+        uri: "builtin:shifter",
+        columns: &[Column {
+            width: SHIFTER_WIDTH,
+            sections: &[
+                section(
+                    "Pitch",
+                    &[
+                        Row::Picks {
+                            id: "pitch",
+                            picks: &[("-24", -24.0), ("-12", -12.0), ("0", 0.0), ("+12", 12.0), ("+24", 24.0)],
+                        },
+                        p("pitch", "Pitch"),
+                        p("fine", "Fine"),
+                        p("window", "Window"),
+                    ],
+                ),
+                section("Output", &[p("mix", "Mix")]),
             ],
         }],
     },

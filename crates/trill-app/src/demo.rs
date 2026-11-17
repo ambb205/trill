@@ -60,7 +60,8 @@ fn build(session: &mut Session) -> Result<ClipId, SessionError> {
     clip(session, drums, "Beat", 4.0 * BAR, 12.0 * BAR, Some(2.0 * BAR), beat())?;
 
     let bass = track(session, "Bass", "builtin:polysynth", "bass", -4.0, 0.0)?;
-    effect(session, bass, "builtin:saturator", &[("drive", 9.0), ("mix", 0.6)])?;
+    // The output takes off what the drive adds below the curve's bend.
+    effect(session, bass, "builtin:saturator", &[("drive", 9.0), ("output", -4.5), ("mix", 0.6)])?;
     clip(session, bass, "Bassline", 4.0 * BAR, 4.0 * BAR, None, bassline())?;
     clip(session, bass, "Bassline", 8.0 * BAR, 8.0 * BAR, Some(PROGRESSION), bassline())?;
 

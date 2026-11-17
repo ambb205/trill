@@ -7,6 +7,17 @@ pub fn db_to_gain(db: f32) -> f32 {
     10f32.powf(db * 0.05)
 }
 
+/// The lowest value of a level in dB. It stands for silence, as the bottom
+/// of a mixer's fader does: a fade written down to it ends in nothing.
+pub const SILENT_DB: f32 = -70.0;
+
+/// The gain of a level in dB that reaches down to silence: nothing at
+/// [`SILENT_DB`] or under.
+#[inline]
+pub fn level_gain(db: f32) -> f32 {
+    if db > SILENT_DB { db_to_gain(db) } else { 0.0 }
+}
+
 #[inline]
 pub fn gain_to_db(gain: f32) -> f32 {
     20.0 * gain.max(1e-9).log10()
@@ -107,6 +118,50 @@ impl Smooth {
     #[inline]
     pub fn next(&mut self, target: f32) -> f32 {
         self.value += (target - self.value) * self.coef;
+        self.value
+    }
+}
+
+/// A gain that goes to where it is set in a straight line, over a number
+/// of frames that does not depend on how the frames are handed over: the
+/// same moves at the same frames make the same samples whatever the size of
+/// the blocks, in playback and in a render. It arrives exactly.
+#[derive(Copy, Clone)]
+pub struct Ramp {
+    value: f32,
+    target: f32,
+    step: f32,
+    left: u32,
+}
+
+impl Ramp {
+    pub const fn new(value: f32) -> Self {
+        Self { value, target: value, step: 0.0, left: 0 }
+    }
+
+    /// Puts the gain at `value`, now.
+    pub fn snap(&mut self, value: f32) {
+        *self = Self::new(value);
+    }
+
+    /// Sets off for `target`, to be there in `frames` frames. Asked again
+    /// for where it is already going, it goes on as it was.
+    #[inline]
+    pub fn aim(&mut self, target: f32, frames: u32) {
+        if target != self.target {
+            self.target = target;
+            self.left = frames.max(1);
+            self.step = (target - self.value) / self.left as f32;
+        }
+    }
+
+    /// The gain for the next frame.
+    #[inline]
+    pub fn tick(&mut self) -> f32 {
+        if self.left > 0 {
+            self.left -= 1;
+            self.value = if self.left == 0 { self.target } else { self.value + self.step };
+        }
         self.value
     }
 }
