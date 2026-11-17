@@ -50,6 +50,16 @@ pub enum Row {
     /// choose among the tracks there are. Only for a device that takes a
     /// key; it is no parameter.
     Sidechain,
+    /// A parameter with more choices than fit side by side, behind a menu.
+    Menu { id: &'static str, label: &'static str },
+    /// A display among the rows, so that a page can have one of its own.
+    Shown(Display),
+    /// One slot of a modulation matrix on one line: what it reads, what it
+    /// moves, and by how much.
+    Slot { source: &'static str, dest: &'static str, amount: &'static str },
+    /// A macro: a bar under the name the device's sound gives it. `index`
+    /// is which macro, from 0.
+    Macro { id: &'static str, index: usize },
 }
 
 pub struct Page {
@@ -92,6 +102,14 @@ pub enum Display {
     Pump,
     /// Two cycles of the tremolo's level, the left side and the right.
     Tremolo,
+    /// The wave an oscillator of the wavetable synth reads at its position
+    /// in its table. `oscillator` is which, from 0.
+    Table { oscillator: usize },
+    /// Two cycles of an LFO of the wavetable synth.
+    Lfo { shape: &'static str, phase: &'static str, depth: &'static str },
+    /// The response of a filter of the wavetable synth, of whichever of
+    /// its kinds it is.
+    TableFilter { kind: &'static str, cutoff: &'static str, resonance: &'static str },
 }
 
 /// A filter type, as the display needs it.
@@ -118,6 +136,12 @@ const FILTER_WITH_OFF: f32 = 178.0;
 const FOUR_CURVES: f32 = 186.0;
 /// The pitch shifter's column: room for its name.
 const SHIFTER_WIDTH: f32 = 224.0;
+/// A column of the wavetable synth's matrix: a slot's source, destination
+/// and amount on one line.
+pub const SLOT_WIDTH: f32 = 316.0;
+/// The wavetable synth's oscillator column: room for a table's name beside
+/// its label.
+const TABLE_WIDTH: f32 = 176.0;
 
 const fn p(id: &'static str, label: &'static str) -> Row {
     Row::Param { id, label, format: Format::Auto }
@@ -131,6 +155,10 @@ const fn key(id: &'static str, label: &'static str) -> Row {
     Row::Param { id, label, format: Format::NoteName }
 }
 
+const fn menu(id: &'static str, label: &'static str) -> Row {
+    Row::Menu { id, label }
+}
+
 const fn section(title: &'static str, rows: &'static [Row]) -> Section {
     Section { title, display: None, rows }
 }
@@ -139,7 +167,13 @@ const fn shown(title: &'static str, display: Display, rows: &'static [Row]) -> S
     Section { title, display: Some(display), rows }
 }
 
+const fn slot(source: &'static str, dest: &'static str, amount: &'static str) -> Row {
+    Row::Slot { source, dest, amount }
+}
+
 const WAVES: &[&str] = &["Sin", "Tri", "Saw", "Sqr"];
+/// How the wavetable synth bends a cycle.
+const WARPS: &[&str] = &["Off", "Sync", "Bend", "Sqz"];
 /// How steep a cut of the equalizer is, per octave.
 const SLOPES: &[&str] = &["12 dB", "24 dB", "48 dB"];
 
@@ -245,6 +279,310 @@ pub static LAYOUTS: &[Layout] = &[
                         ],
                     ),
                     section("Output", &[p("volume", "Volume")]),
+                ],
+            },
+        ],
+    },
+    Layout {
+        uri: "builtin:wavetable",
+        columns: &[
+            Column {
+                width: TABLE_WIDTH,
+                sections: &[section(
+                    "Oscillators",
+                    &[Row::Pages(&[
+                        Page {
+                            label: "Osc 1",
+                            rows: &[
+                                Row::Shown(Display::Table { oscillator: 0 }),
+                                menu("osc1_table", "Table"),
+                                p("osc1_position", "Position"),
+                                p("osc1_level", "Level"),
+                                p("osc1_pan", "Pan"),
+                                p("osc1_octave", "Octave"),
+                                p("osc1_semitones", "Pitch"),
+                                p("osc1_fine", "Fine"),
+                            ],
+                        },
+                        Page {
+                            label: "Osc 2",
+                            rows: &[
+                                Row::Shown(Display::Table { oscillator: 1 }),
+                                menu("osc2_table", "Table"),
+                                p("osc2_position", "Position"),
+                                p("osc2_level", "Level"),
+                                p("osc2_pan", "Pan"),
+                                p("osc2_octave", "Octave"),
+                                p("osc2_semitones", "Pitch"),
+                                p("osc2_fine", "Fine"),
+                            ],
+                        },
+                    ])],
+                )],
+            },
+            Column {
+                width: FILTER_WITH_OFF,
+                sections: &[section(
+                    "Shape",
+                    &[Row::Pages(&[
+                        Page {
+                            label: "Osc 1",
+                            rows: &[
+                                Row::Choice { id: "osc1_warp", labels: WARPS },
+                                p("osc1_warp_amount", "Warp"),
+                                p("osc1_fm", "FM by Osc 2"),
+                                p("osc1_unison", "Unison"),
+                                p("osc1_detune", "Detune"),
+                                p("osc1_blend", "Blend"),
+                                p("osc1_spread", "Spread"),
+                                p("osc1_phase", "Phase"),
+                                p("osc1_phase_random", "Random"),
+                            ],
+                        },
+                        Page {
+                            label: "Osc 2",
+                            rows: &[
+                                Row::Choice { id: "osc2_warp", labels: WARPS },
+                                p("osc2_warp_amount", "Warp"),
+                                p("osc2_unison", "Unison"),
+                                p("osc2_detune", "Detune"),
+                                p("osc2_blend", "Blend"),
+                                p("osc2_spread", "Spread"),
+                                p("osc2_phase", "Phase"),
+                                p("osc2_phase_random", "Random"),
+                            ],
+                        },
+                    ])],
+                )],
+            },
+            Column {
+                width: NARROW,
+                sections: &[
+                    section(
+                        "Sub",
+                        &[
+                            Row::Choice { id: "sub_shape", labels: WAVES },
+                            p("sub_octave", "Octave"),
+                            p("sub_level", "Level"),
+                            Row::Toggles(&[("sub_direct", "Past Filters")]),
+                        ],
+                    ),
+                    section(
+                        "Noise",
+                        &[p("noise_level", "Level"), p("noise_color", "Color"), p("noise_width", "Width")],
+                    ),
+                ],
+            },
+            Column {
+                width: FILTER_WITH_OFF,
+                sections: &[section(
+                    "Filters",
+                    &[
+                        Row::Pages(&[
+                            Page {
+                                label: "Filter 1",
+                                rows: &[
+                                    Row::Shown(Display::TableFilter {
+                                        kind: "filter1_type",
+                                        cutoff: "filter1_cutoff",
+                                        resonance: "filter1_resonance",
+                                    }),
+                                    menu("filter1_type", "Type"),
+                                    p("filter1_cutoff", "Cutoff"),
+                                    p("filter1_resonance", "Reso"),
+                                    p("filter1_drive", "Drive"),
+                                    p("filter1_key_track", "Key Track"),
+                                ],
+                            },
+                            Page {
+                                label: "Filter 2",
+                                rows: &[
+                                    Row::Shown(Display::TableFilter {
+                                        kind: "filter2_type",
+                                        cutoff: "filter2_cutoff",
+                                        resonance: "filter2_resonance",
+                                    }),
+                                    menu("filter2_type", "Type"),
+                                    p("filter2_cutoff", "Cutoff"),
+                                    p("filter2_resonance", "Reso"),
+                                    p("filter2_drive", "Drive"),
+                                    p("filter2_key_track", "Key Track"),
+                                ],
+                            },
+                        ]),
+                        Row::Choice { id: "filter_routing", labels: &["Serial", "Parallel", "Split"] },
+                        p("filter_balance", "Balance"),
+                    ],
+                )],
+            },
+            Column {
+                width: WIDE,
+                sections: &[
+                    section(
+                        "Envelopes",
+                        &[Row::Pages(&[
+                            Page {
+                                label: "Level",
+                                rows: &[
+                                    Row::Shown(Display::Envelope {
+                                        attack: "env1_attack",
+                                        decay: "env1_decay",
+                                        sustain: "env1_sustain",
+                                        release: "env1_release",
+                                    }),
+                                    p("env1_attack", "Attack"),
+                                    p("env1_decay", "Decay"),
+                                    p("env1_sustain", "Sustain"),
+                                    p("env1_release", "Release"),
+                                ],
+                            },
+                            Page {
+                                label: "Env 2",
+                                rows: &[
+                                    Row::Shown(Display::Envelope {
+                                        attack: "env2_attack",
+                                        decay: "env2_decay",
+                                        sustain: "env2_sustain",
+                                        release: "env2_release",
+                                    }),
+                                    p("env2_attack", "Attack"),
+                                    p("env2_decay", "Decay"),
+                                    p("env2_sustain", "Sustain"),
+                                    p("env2_release", "Release"),
+                                ],
+                            },
+                            Page {
+                                label: "Env 3",
+                                rows: &[
+                                    Row::Shown(Display::Envelope {
+                                        attack: "env3_attack",
+                                        decay: "env3_decay",
+                                        sustain: "env3_sustain",
+                                        release: "env3_release",
+                                    }),
+                                    p("env3_attack", "Attack"),
+                                    p("env3_decay", "Decay"),
+                                    p("env3_sustain", "Sustain"),
+                                    p("env3_release", "Release"),
+                                ],
+                            },
+                        ])],
+                    ),
+                    section("Output", &[p("velocity_sens", "Velocity"), p("volume", "Volume")]),
+                ],
+            },
+            Column {
+                width: WIDE,
+                sections: &[section(
+                    "LFOs",
+                    &[Row::Pages(&[
+                        Page {
+                            label: "LFO 1",
+                            rows: &[
+                                Row::Shown(Display::Lfo {
+                                    shape: "lfo1_shape",
+                                    phase: "lfo1_phase",
+                                    depth: "lfo1_depth",
+                                }),
+                                menu("lfo1_shape", "Shape"),
+                                p("lfo1_rate", "Rate"),
+                                menu("lfo1_sync", "Sync"),
+                                p("lfo1_fade", "Fade In"),
+                                p("lfo1_depth", "Depth"),
+                                p("lfo1_phase", "Phase"),
+                                Row::Toggles(&[("lfo1_retrigger", "Retrigger")]),
+                            ],
+                        },
+                        Page {
+                            label: "LFO 2",
+                            rows: &[
+                                Row::Shown(Display::Lfo {
+                                    shape: "lfo2_shape",
+                                    phase: "lfo2_phase",
+                                    depth: "lfo2_depth",
+                                }),
+                                menu("lfo2_shape", "Shape"),
+                                p("lfo2_rate", "Rate"),
+                                menu("lfo2_sync", "Sync"),
+                                p("lfo2_fade", "Fade In"),
+                                p("lfo2_depth", "Depth"),
+                                p("lfo2_phase", "Phase"),
+                                Row::Toggles(&[("lfo2_retrigger", "Retrigger")]),
+                            ],
+                        },
+                        Page {
+                            label: "LFO 3",
+                            rows: &[
+                                Row::Shown(Display::Lfo {
+                                    shape: "lfo3_shape",
+                                    phase: "lfo3_phase",
+                                    depth: "lfo3_depth",
+                                }),
+                                menu("lfo3_shape", "Shape"),
+                                p("lfo3_rate", "Rate"),
+                                menu("lfo3_sync", "Sync"),
+                                p("lfo3_fade", "Fade In"),
+                                p("lfo3_depth", "Depth"),
+                                p("lfo3_phase", "Phase"),
+                                Row::Toggles(&[("lfo3_retrigger", "Retrigger")]),
+                            ],
+                        },
+                    ])],
+                )],
+            },
+            Column {
+                width: SLOT_WIDTH,
+                sections: &[section(
+                    "Matrix",
+                    &[
+                        slot("mod1_source", "mod1_dest", "mod1_amount"),
+                        slot("mod2_source", "mod2_dest", "mod2_amount"),
+                        slot("mod3_source", "mod3_dest", "mod3_amount"),
+                        slot("mod4_source", "mod4_dest", "mod4_amount"),
+                        slot("mod5_source", "mod5_dest", "mod5_amount"),
+                        slot("mod6_source", "mod6_dest", "mod6_amount"),
+                        slot("mod7_source", "mod7_dest", "mod7_amount"),
+                        slot("mod8_source", "mod8_dest", "mod8_amount"),
+                    ],
+                )],
+            },
+            Column {
+                width: SLOT_WIDTH,
+                sections: &[section(
+                    "Matrix, slots 9 to 16",
+                    &[
+                        slot("mod9_source", "mod9_dest", "mod9_amount"),
+                        slot("mod10_source", "mod10_dest", "mod10_amount"),
+                        slot("mod11_source", "mod11_dest", "mod11_amount"),
+                        slot("mod12_source", "mod12_dest", "mod12_amount"),
+                        slot("mod13_source", "mod13_dest", "mod13_amount"),
+                        slot("mod14_source", "mod14_dest", "mod14_amount"),
+                        slot("mod15_source", "mod15_dest", "mod15_amount"),
+                        slot("mod16_source", "mod16_dest", "mod16_amount"),
+                    ],
+                )],
+            },
+            Column {
+                width: NARROW,
+                sections: &[
+                    section(
+                        "Macros",
+                        &[
+                            Row::Macro { id: "macro1", index: 0 },
+                            Row::Macro { id: "macro2", index: 1 },
+                            Row::Macro { id: "macro3", index: 2 },
+                            Row::Macro { id: "macro4", index: 3 },
+                        ],
+                    ),
+                    section(
+                        "Voice",
+                        &[
+                            Row::Choice { id: "mode", labels: &["Poly", "Mono", "Legato"] },
+                            p("voices", "Voices"),
+                            p("glide", "Glide"),
+                            p("bend_range", "Wheel"),
+                        ],
+                    ),
                 ],
             },
         ],
@@ -644,7 +982,9 @@ impl Row {
             Row::Param { id, .. } | Row::Choice { id, .. } | Row::Picks { id, .. } => vec![id],
             Row::Toggles(toggles) => toggles.iter().map(|(id, _)| *id).collect(),
             Row::Pages(pages) => pages.iter().flat_map(|page| page.rows).flat_map(Row::param_ids).collect(),
-            Row::Sidechain => Vec::new(),
+            Row::Sidechain | Row::Shown(_) => Vec::new(),
+            Row::Menu { id, .. } | Row::Macro { id, .. } => vec![id],
+            Row::Slot { source, dest, amount } => vec![source, dest, amount],
         }
     }
 }
@@ -713,7 +1053,29 @@ mod tests {
             Display::Saturator => vec!["shape", "drive"],
             Display::Pump => vec!["depth", "curve"],
             Display::Tremolo => vec!["depth", "shape", "spread"],
+            Display::Table { oscillator } => {
+                vec![["osc1_table", "osc2_table"][oscillator], ["osc1_position", "osc2_position"][oscillator]]
+            }
+            Display::Lfo { shape, phase, depth } => vec![shape, phase, depth],
+            Display::TableFilter { kind, cutoff, resonance } => vec![kind, cutoff, resonance],
         }
+    }
+
+    /// Every display of a layout: a section's own, and the ones among its
+    /// rows and their pages.
+    fn displays(layout: &Layout) -> Vec<Display> {
+        let mut found: Vec<Display> =
+            layout.columns.iter().flat_map(|column| column.sections).filter_map(|section| section.display).collect();
+        let mut rows: Vec<&Row> =
+            layout.columns.iter().flat_map(|column| column.sections).flat_map(|section| section.rows).collect();
+        while let Some(row) = rows.pop() {
+            match row {
+                Row::Shown(display) => found.push(*display),
+                Row::Pages(pages) => rows.extend(pages.iter().flat_map(|page| page.rows)),
+                _ => {}
+            }
+        }
+        found
     }
 
     /// The built-in devices that have a layout, each with it.
@@ -734,7 +1096,8 @@ mod tests {
         }
         // The devices a new project starts from are all laid out; a device
         // that is not falls back to the generic layout.
-        for uri in ["builtin:polysynth", "builtin:drumkit", "builtin:limiter", "builtin:eq", "builtin:reverb"] {
+        let laid_out = ["builtin:polysynth", "builtin:wavetable", "builtin:drumkit", "builtin:limiter", "builtin:eq"];
+        for uri in laid_out.into_iter().chain(["builtin:reverb"]) {
             assert!(layout_for(uri).is_some(), "{uri} has no layout");
         }
         assert!(layout_for("clap:com.example.synth").is_none());
@@ -807,7 +1170,19 @@ mod tests {
                         }
                     }
                     Row::Pages(pages) => rows.extend(pages.iter().flat_map(|page| page.rows)),
-                    Row::Sidechain => {}
+                    Row::Sidechain | Row::Shown(_) => {}
+                    Row::Menu { id, label } => {
+                        assert!(!label.is_empty(), "{}: '{id}' needs a label", descriptor.uri);
+                        assert!(matches!(kind(id), ParamKind::Enum(_)), "{}: '{id}' is no choice", descriptor.uri);
+                    }
+                    Row::Slot { source, dest, amount } => {
+                        assert!(matches!(kind(source), ParamKind::Enum(_)) && matches!(kind(dest), ParamKind::Enum(_)));
+                        assert_eq!(*kind(amount), ParamKind::Float, "{}: '{amount}'", descriptor.uri);
+                    }
+                    Row::Macro { id, index } => {
+                        assert_eq!(*kind(id), ParamKind::Float, "{}: '{id}'", descriptor.uri);
+                        assert!(*index < 4);
+                    }
                 }
             }
         }
@@ -831,9 +1206,7 @@ mod tests {
     #[test]
     fn displays_read_parameters_that_exist() {
         for (descriptor, layout) in laid_out() {
-            let displays =
-                layout.columns.iter().flat_map(|column| column.sections).filter_map(|section| section.display);
-            for display in displays {
+            for display in displays(layout) {
                 for id in display_param_ids(display) {
                     assert!(
                         descriptor.params.iter().any(|param| param.id == id),

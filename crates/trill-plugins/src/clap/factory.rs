@@ -219,6 +219,22 @@ impl ClapFactory {
     }
 }
 
+impl ClapFactory {
+    /// What is known of the installed plugin `uri`: `None` for a plugin of
+    /// another format or one that is not installed, and while plugins
+    /// have not been looked for.
+    pub fn known(&self, uri: &str) -> Option<scan::Known> {
+        let (CLAP_SCHEME, plugin_id) = split_uri(uri)? else { return None };
+        self.shared.installed.known(plugin_id)
+    }
+
+    /// Takes the CLAP plugins among `plugins` to be what is installed,
+    /// without looking: no file is scanned.
+    pub fn know(&self, plugins: &[scan::Known]) {
+        self.shared.installed.know(plugins);
+    }
+}
+
 impl DeviceFactory for ClapFactory {
     fn descriptors(&self) -> Vec<DeviceDescriptor> {
         self.shared.installed.catalog().descriptors.clone()
@@ -232,6 +248,11 @@ impl DeviceFactory for ClapFactory {
     /// format waits for its turn on it.
     fn busy(&self) -> bool {
         self.shared.main.behind()
+    }
+
+    /// The plugin's file.
+    fn module(&self, uri: &str) -> Option<PathBuf> {
+        self.known(uri).map(|known| known.path)
     }
 
     /// In turn with the other instances of its module, unless more is

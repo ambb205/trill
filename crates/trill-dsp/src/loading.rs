@@ -103,6 +103,9 @@ impl SampleStore {
 pub(crate) struct SampleSource<'a> {
     pub loader: Option<&'a dyn AudioLoader>,
     pub store: Option<&'a SampleStore>,
+    /// Where the tables made for wavetable synths are kept, so that the
+    /// same table is made once.
+    pub tables: Option<&'a crate::wavetable::TableStore>,
 }
 
 impl SampleSource<'_> {
@@ -172,7 +175,7 @@ mod tests {
         let loader = MemoryLoader::default();
         loader.insert("a.wav", vec![0.5; 2_000], 48_000.0);
         let store = SampleStore::default();
-        let source = SampleSource { loader: Some(&loader), store: Some(&store) };
+        let source = SampleSource { loader: Some(&loader), store: Some(&store), tables: None };
 
         let first = source.load("a.wav").unwrap().unwrap();
         let second = source.load("a.wav").unwrap().unwrap();
@@ -193,7 +196,7 @@ mod tests {
 
     #[test]
     fn loading_without_a_loader_is_an_error_that_says_what_to_do() {
-        let source = SampleSource { loader: None, store: None };
+        let source = SampleSource { loader: None, store: None, tables: None };
         let error = source.load("a.wav").err().unwrap();
         assert!(error.contains("a.wav") && error.contains("Builtins::with_loader"), "{error}");
     }

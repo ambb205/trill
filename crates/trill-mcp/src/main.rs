@@ -85,8 +85,10 @@ fn parse_args() -> anyhow::Result<Option<Options>> {
 }
 
 fn main() -> anyhow::Result<()> {
-    // Plugin files are scanned in a child process of this same executable.
+    // Plugin files are scanned in a child process of this same executable,
+    // and songs with plugins are rendered, measured and probed in one.
     trill_plugins::scan::run_as_scanner_if_requested();
+    trill_runtime::jobs::run_as_job_if_requested();
 
     let Some(options) = parse_args()? else {
         println!("{USAGE}");
@@ -103,6 +105,7 @@ fn main() -> anyhow::Result<()> {
         plugins: options.plugins.then_some(Scanner::CurrentExecutable),
         storage: options.storage,
     })?;
+    runtime.do_jobs_as_usual();
     {
         let mut session = runtime.session.lock();
         let audio = session.audio_info().clone();

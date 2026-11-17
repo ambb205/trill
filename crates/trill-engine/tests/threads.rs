@@ -115,7 +115,8 @@ fn factory(scripted: &ScriptedFactory) -> Arc<dyn DeviceFactory> {
 }
 
 fn render(project: &Project, scripted: &ScriptedFactory, options: &RenderOptions) -> Rendered {
-    let job = RenderJob { project: project.clone(), factory: factory(scripted), audio: AudioSources::default() };
+    let job =
+        RenderJob { project: project.clone(), factory: factory(scripted), audio: AudioSources::default(), apart: None };
     job.render(options).unwrap()
 }
 

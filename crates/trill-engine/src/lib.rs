@@ -7,6 +7,7 @@
 //! * [`Engine`] owns the audio thread and the lock-free queues to it.
 
 pub mod analysis;
+pub mod apart;
 mod clock;
 pub mod compile;
 mod crew;
@@ -38,7 +39,7 @@ pub use host::{AudioConfig, AudioDevice, AudioDevices, AudioHost};
 pub use instruments::InstrumentKnowledge;
 pub use live::LiveSender;
 pub use processor::Processor;
-pub use render::{RenderError, RenderJob, RenderOptions, RenderReport, Rendered};
+pub use render::{RenderError, RenderJob, RenderOptions, RenderReport, Rendered, Watch};
 pub use saved::{Saved, SavedPresets};
 pub use session::{
     MAX_COUNT_IN_BARS, ParamState, ProbeTarget, RecordState, RecordStatus, SampleFile, Session, SessionError,

@@ -122,6 +122,8 @@ async fn tools_are_listed_with_schemas() {
         "library",
         "preview_sound",
         "set_sample",
+        "describe_wavetable",
+        "set_wavetable",
         "missing_files",
         "relink_files",
         "listen",
