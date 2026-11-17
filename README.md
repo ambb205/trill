@@ -29,7 +29,7 @@ Development builds are optimized (see `[profile.dev]`), because unoptimized audi
 
 ### Building and testing
 
-`cargo test --workspace` runs about 2,480 tests in a few minutes. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 2,570 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -51,6 +51,7 @@ cargo test -p trill-mcp --test hearing a_guitar_through_its_amplifier -- --inclu
 cargo test -p trill-dsp --lib share_of_a_core -- --ignored --nocapture    # what the wavetable synth costs, from one voice to thirty-two notes of sixteen copies (a measurement; run it alone)
 cargo test -p trill-media -- --include-ignored      # decoding audio files found in this machine's usual folders
 TRILL_MAGPIE_PROJECTS=<...>/data/projects cargo test -p trill-listen --test magpie -- --ignored --nocapture --test-threads 1    # what Trill hears in recordings that Magpie took apart, against what Magpie found in them (the owner's Magpie project and its saved projects; minutes)
+TRILL_MAGPIE_PROJECTS=<...>/data/projects TRILL_STUDY_PARTS=<the fetched parts> TRILL_STUDY_ON=nvidia cargo test -p trill-study --test magpie -- --ignored --nocapture --test-threads 1    # those recordings studied with the real models (stems, beats, words and their times) against what Magpie found; needs the parts File, Setup fetches, and runs a graphics card for a minute a recording (processor, card, card2 or nvidia)
 TRILL_TEST_PLUGIN_WINDOWS=1 cargo test -p trill-plugins --test editor_windows -- --test-threads=1   # opens windows
 TRILL_TEST_CLAUDE=1 cargo test -p trill-assistant --test real_cli    # talks to an installed, signed-in Claude Code
 TRILL_TEST_CLAUDE=1 cargo test -p trill-app live_ -- --test-threads=1    # ...through the assistant's panel (seven messages)
@@ -507,13 +508,72 @@ or so many beats to a bar; everything else follows.
   melody are right; of a whole mix the groove is a sketch (the bass plays in the kick's band), and bass and melody
   are what was loudest in their registers. Chords and parts are estimates: a map, not a transcription. Without a
   model the start of the bar is the least sure thing in an answer.
-- Over MCP today (`listen`, `transcribe`); the window does not show it yet.
+- Over MCP today (`listen`, `transcribe`); the window does not show it yet. Of a whole mix, a *study* (below)
+  hears the same things in its stems, where they are right.
 - The method is the one the owner's Magpie project proved, translated from its Python (`crates/trill-listen`). On
   five recordings Magpie had taken apart, over its own beat grids, Trill finds the same parts, 313 of its 316
   loops to the bar, 187 of its 189 one-shots, its groove and every bass and vocal note; chords are the same 52 to
   84 % of the time (11 % on one recording whose chords Magpie has in another key), read from a chroma of Trill's
-  own. Taking a recording apart into stems, beats from a model, and lyrics with a time for every word are not
-  built yet: they need models.
+  own.
+
+**Studying a recording.** Trill takes a recording apart with models that run on your own machine, and keeps what
+it found as a *study*: the **stems** (vocals, drums, bass and the rest, which add up to the recording), the
+**beats and bar lines** as a model hears them, the **words** that are sung, in sung lines, with a time and a note
+for every word, and then everything listening finds (key, chords, parts, loops, single hits, the groove, the bass
+line, the melody), heard in the stems, where it is right of a whole mix too. A study is made once and kept:
+reading it again runs nothing. A stem is an audio file like any other, and goes on a track.
+
+- **The models are not part of Trill, and Trill hosts none of them.** File, Setup lists each part there is (the
+  runtime, what drives a graphics card, each model) with its size, its licence in the words of its source and
+  where it comes from, and fetches a part when you press the button under those: with the system's own `curl`,
+  from where its makers publish it, into a file that is kept only if its checksum is the one Trill was made for.
+  A fetch can be stopped and is gone on with from where it was. Nothing is fetched unasked, by a test or for a
+  picture, and the assistant in the window cannot fetch at all. The stem model's licence is unclear, in its
+  author's own words, and the panel says so before you fetch it. Everything a study uses is 3.1 GB for a
+  graphics card and 2.6 GB for a processor; the four models of the best stems are 643 MB more.
+- **What runs the models is measured, not assumed.** A timed test splits the same half minute of noise on the
+  processor and on every graphics card, each in a process of its own, and takes the fastest that gave the same
+  stems. On the machine this was written on (a Ryzen 7 7800X3D, an RTX 4080 SUPER and the processor's own
+  graphics) a minute of music is split in 19 s by the processor, in 7 s by the 4080 through the part that drives
+  a card of any make, in 3 s through NVIDIA's own libraries (an optional part of a gigabyte, under NVIDIA's
+  licence), and in 69 s by the integrated card, which is therefore not used though it is there. Until the test
+  has run, a study runs on the processor.
+- **A study runs in a process of its own**, as a render of a song with plugins does: a model's runtime that
+  faults costs a sentence that names the stage, and every stage that had finished is kept; a study the machine
+  has not the memory for is refused before it starts, and one that takes more than it was given is ended. It can
+  be stopped at any moment and is taken up at the stage it was in. A song of four minutes and a half took 30 to
+  37 s in all on the 4080 through NVIDIA's libraries (5.5 GB of memory at the most), 50 s through the part for
+  any card (6.1 GB) and 142 s on the processor alone (3.1 GB). On the integrated card the same study took
+  eleven minutes. A recording of fifteen minutes, the longest that is studied, took 101 s and 8.7 GB through
+  NVIDIA's libraries, 152 s and 7.3 GB through the part for any card, and eight and a half minutes and 7.0 GB
+  on the processor. A run says beforehand what it will need, by what runs the models and by how long the
+  recording is, and that is what it is refused or ended by.
+- **Where the words are written down is where a model hears a voice.** A transcriber makes words of whatever it
+  is handed, and a vocal stem is not silent where nobody sings. So a small model that tells a voice from
+  everything else cuts the stem first (as Magpie's transcriber does), and a word with nothing sung under it is
+  left out. Without that cut, on two of four recordings the transcriber wrote down twice the words that are
+  there, one phrase thirty times over.
+- **Against what Magpie found** in the five recordings it took apart, on this machine. *Stems:* as near to the
+  ones Magpie kept as Magpie's own second run is (its model shifts the recording by a random amount, so two of
+  its runs differ): 27 dB for the vocals of one recording where Magpie against itself has 26 to 27, 19 for the
+  drums where it has 18, 24 for the bass (22 to 23) and 21 for the rest (20 to 21). *Beats:* on the two
+  recordings Magpie tracked with the same model, the same beats and bar lines (0.998 and 1.000 of them, where
+  listening without a model has 0.81 and 0.96 of the beats and 0.63 and 0.92 of the bar lines). *Words:* Magpie
+  uses a larger transcriber; on the recording both hear best, 276 of its 285 words are the same and begin
+  about 20 ms from where Magpie has them at the median, nine in ten within a fifth of a second; on the three
+  others 83, 86 and 68 % of its words are the same, and the last of them, which is sung in two languages, came
+  out with 326 words on one run and 359 on the next. Neither writes a word for a recording nobody sings in.
+- **A recording behind a link** is fetched by a program you installed (`yt-dlp`, which needs `ffmpeg`), found
+  when it is wanted and never shipped, into the study's own folder. It is yours to say what you may study: the
+  tool says so once, and the assistant in the window is not handed links at all.
+- **A study is a folder** in Trill's own data folder, which File, Setup moves to a disk with more room, as it
+  does what was fetched: about 60 MB for a minute of music, nearly all of it the four stems, which are kept as
+  24-bit WAV. They are not packed: the one small FLAC encoder there is in Rust made 24-bit stems larger than
+  they were. Every answer about a study and the Setup panel say what the studies take.
+- Over MCP today (`study`, `setup`, and `listen` or `transcribe` with a `study`). In the window there is Setup;
+  a study's own view (its stems as lanes under the recording's bars, with its parts, chords and words along
+  them) is not built yet, and a study keeps what that view will draw: the outline of each stem, the grid, the
+  parts, the chords and the words with their times.
 
 **Files that moved**: a song names its audio files by their paths, and a folder of samples that is moved or
 renamed leaves it with clips and pads that play nothing. Trill says so in one place (a line in the status bar and
@@ -926,7 +986,8 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Presets | `search_presets` (one search across the presets of every installed instrument and the saved ones), `save_preset` (keeps a device's sound under a name), `save_sound` (keeps a track's instrument and the effects after it as one sound, which is then a preset of the instrument) |
 | Clips | `create_clip`, `create_audio_clip`, `update_clip`, `split_clip`, `duplicate_clip`, `delete_clip` |
 | Sounds | `search_sounds` (sounds, or with `kind: "instrument"` the sampled instruments, each with what it is), `library` (its folders, and `move_folder` for one that went elsewhere), `preview_sound`, `set_sample` |
-| Listening | `listen` (what is in an audio file of the library, of the user's or of a clip: tempo and bars, key, tuning, and on request its chords, parts, loops, single hits, groove, bass and melody in the recording's own bars, paged; corrections to its beat grid), `transcribe` (its bass line, melody, groove or chords as MIDI on its own beats: into a file, or into the song on a new track in one undo step) |
+| Studying | `study` (takes a recording apart with models on this machine and keeps it: start with a file, a clip or, for a client of the user's own, a link; report with the stage it is at; stop; take up again; list; delete), `setup` (every part there is to fetch with its size, licence and source, which are here, fetch, stop and remove one, what runs the models and the test that times it, the programs that were found; the assistant in the window reads it and fetches nothing) |
+| Listening | `listen` (what is in an audio file of the library, of the user's or of a clip, or what a `study` found in a recording's stems, with the words line by line and each word's bar and beat, or of one `stem` of it: tempo and bars, key, tuning, and on request its chords, parts, loops, single hits, groove, bass and melody in the recording's own bars, paged; corrections to its beat grid), `transcribe` (its bass line, melody, groove or chords as MIDI on its own beats: into a file, or into the song on a new track in one undo step) |
 | Wavetables | `describe_wavetable` (the tables of `builtin:wavetable` that ship, any of them or a recipe of your own shown frame by frame in numbers; changes nothing), `set_wavetable` (gives an oscillator a table that ships, one made from a recipe, or one read from an audio file; names the macros) |
 | Missing files | `missing_files` (what the song names that is not on disk, where it is used, and what was found with how sure it is), `relink_files` (what is sure, or more on request, or a folder or files named by hand: one undo step) |
 | Notes | `get_notes`, `add_notes`, `set_notes`, `remove_notes`, `transform_notes` |
@@ -1020,8 +1081,12 @@ crates/
   trill-media     Audio file decoding and caching, waveform overviews, sample-rate conversion, WAV writing.
   trill-engine    Realtime engine, offline renderer, analysis, and the Session.
   trill-library   The sound library (scanning, indexing, searching sample folders) and the settings file.
+  trill-fetch     What is fetched when the user asks: parts that others publish, pinned by checksum, brought by the
+                  system's own curl, in lists that any crate hands it.
   trill-listen    What is heard in a recording without a model: beats and bars, tuning, key and chords, parts,
                   loops, single hits, notes, and MIDI of them.
+  trill-study     A recording taken apart: its stems, beats and words found by models (ONNX Runtime, loaded when
+                  a study runs and never linked) in a process of its own, the study that is kept, and the setup.
   trill-plugins   Plugin hosting: scanning and preset discovery in a child process, the plugin main thread, CLAP
                   and VST3, and the readers of the presets some makers keep in files of their own.
   trill-runtime   What both programs share, built once: session, media cache, library, settings, housekeeping,
@@ -1084,9 +1149,12 @@ the parts of SFZ named above as not done, formats other than SFZ, a drum kit's m
 (a kit that brings several is played as its file mixes them), taking the instrument out of a device in the window
 (another takes its place, or the device is removed), and the time to a first note from a disk that has not
 read the files before,
-taking a recording apart into stems, its beats from a model and its lyrics with a time for every word (what
-is heard today is heard without a model, in one sound), a place in the window for what was heard in a recording
-(over MCP only), taking a recording from a link,
+a place in the window for a study of a recording (over MCP only: its stems as lanes under the recording's
+bars with its parts, chords and words, auditioning and dragging what it found into the song, a reference to
+compare a mix with, and its beat grid as the song's tempo map), giving a link in the window (over MCP, to a
+client of the user's own), a study's models on anything but Windows (the models' own files are the same; the
+runtime and what drives a card are pinned for Windows alone), a transcriber as large as Magpie's, the six-stem
+model,
 for the wavetable synth: presets tuned by ear (they are matched in level by measurement, and its bank is a
 first sixteen), effects inside it (a preset that wants them brings them as devices), making a table or naming a macro in the window (over MCP; the window chooses among
 the tables there are and shows the one that is played), a formant filter, moving the unison's detune or an

@@ -12,7 +12,7 @@ this file is the map, so that a task needs only the files it touches.
 ```sh
 cargo run -p trill-app -- --demo                    # the window, on a built-in song
 cargo run -p trill-mcp -- --no-audio --scratch      # no window: MCP on stdio, nothing read or kept
-cargo test --workspace                              # about 2,480 tests, a few minutes once built
+cargo test --workspace                              # about 2,570 tests, a few minutes once built
 cargo test -p trill-engine --test playing           # one integration test file
 cargo test -p trill-app a_take_is_counted_in        # tests whose name contains this (the app's are in its binary)
 cargo test -p trill-core time_ops -- --nocapture
@@ -218,8 +218,10 @@ on the samples.
   samples at `signal::RATE` and of nothing else: it reads no file, keeps nothing, and hears the same audio the
   same on every machine (the FFT is `trill_dsp::fft`). Times are seconds of the recording; bars and beats come
   from its `Grid`, and whatever follows from the grid (chords, parts, loops) is worked out again when the grid is
-  corrected. Both front ends ask `Runtime::hear`, which decodes through the media cache and keeps what was heard:
-  never on the thread that draws. Its tests build their own audio; `tests/magpie.rs` (opt-in) holds it to what
+  corrected. Its analyses do not wait for one another and are heard on threads of their own; of a recording over
+  six minutes a group of them at a time (`AT_ONCE_SECONDS`), because each holds the recording several times over
+  while it listens: the same answer either way. Both front ends ask `Runtime::hear`, which decodes through the
+  media cache and keeps what was heard: never on the thread that draws. Its tests build their own audio; `tests/magpie.rs` (opt-in) holds it to what
   Magpie found in the recordings it took apart, and its numbers are in `README.md`: run it after touching the
   crate, on the machine that has them. What is heard in one sound must say so where a mix makes it unsure (the
   `listen` tool's `heard_as`).

@@ -18,7 +18,7 @@ fn base(models: &Which) -> u64 {
     let megabytes: u64 = match models {
         Which::Scripted(_) => 1024,
         Which::Real(setup) => match setup.provider {
-            Provider::Processor => 2560,
+            Provider::Processor => 3328,
             Provider::Nvidia => 5632,
             Provider::AnyCard { .. } => 6400,
         },
