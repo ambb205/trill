@@ -1804,6 +1804,10 @@ impl TrillServer {
     /// "copy" copies a stretch to another place in one step: every track or some, with the clips' notes and
     /// controller curves and the tracks' automation, either making room there or over what is there. Use it
     /// to bring a chorus back later in the song instead of duplicating its clips one by one.
+    /// Where the tempo or the time signature changes inside the song, time that is deleted, duplicated or
+    /// inserted takes its changes along (opened-up time has the tempo and the meter the song arrived with),
+    /// and a copy is played at the tempo, and counted in the bars, of where it lands; the reply then gives
+    /// the tempo map as it is now.
     #[tool(annotations(title = "Edit time"))]
     fn edit_time(&self, Parameters(request): Parameters<EditTimeRequest>) -> CallToolResult {
         enum Change {
@@ -1840,6 +1844,7 @@ impl TrillServer {
         let reply = change.and_then(|change| {
             edit(&mut session, |project| {
                 let before = project.length_beats();
+                let changing = !project.tempo_changes.is_empty() || !project.meter_changes.is_empty();
                 let mut copied = None;
                 match change {
                     Change::Delete(end) => project.delete_time(request.start, end)?,
@@ -1876,6 +1881,11 @@ impl TrillServer {
                 });
                 if let Some(copied) = copied {
                     out["copied"] = copied;
+                }
+                // Time that is cut out, repeated or opened up takes its changes of tempo and of time
+                // signature along; a copy leaves those of where it lands. Either way, where they are now.
+                if changing || !project.tempo_changes.is_empty() || !project.meter_changes.is_empty() {
+                    out["tempo_map"] = tempo_map_json(project);
                 }
                 Ok(out)
             })

@@ -322,6 +322,11 @@ async fn the_writing_tools_lay_each_bar_in_the_time_signature_it_has() {
     // 4/4 at 120 throughout, and bar 3 holds what bar 5 held.
     let cut = ok(client, "edit_time", json!({ "action": "delete", "start": 8, "end": 15 })).await;
     assert_eq!(cut["length_beats"], 32.0, "{cut}");
+    assert_eq!(
+        cut["tempo_map"]["tempo"].as_array().unwrap().len(),
+        1,
+        "the reply says what became of the tempo: {cut}"
+    );
     let map = ok(client, "get_tempo_map", json!({})).await;
     assert_eq!(
         (map["tempo"].as_array().unwrap().len(), map["time_signature"].as_array().unwrap().len()),
