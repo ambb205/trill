@@ -614,7 +614,8 @@ that quick and true:
   - *A plugin that crashes costs a sentence, not the program*: at what stage it happened, which plugin where
     that can be told (the device that was being made, or the one whose file the fault was in), that the song is
     untouched, and what to do next. The window says it where it says that an export failed, the tools as the
-    call's error, and the film export in place of its film.
+    call's error, and the film export in place of its film. A film that is stopped while its sound is being
+    rendered stops the render there and then.
   - *The same song is the same samples.* An instrument that draws its recordings at random begins at the same
     place in every process that has just started: the four instruments of Ample Sound, as they come, rendered
     to the same samples to the bit each time (in a program that rendered for itself, beside the song's own
@@ -642,6 +643,30 @@ that quick and true:
   anew every time it is made, which recording a cymbal plays when it is struck again while it still rings
   (`trill-plugins/src/repeats.rs` has what was measured and what was ruled out, and
   `cargo run -p trill-plugins --example takes` makes one part of a song again with one thing changed).
+- *A song begins in its middle as it would have it there.* What a part set before the place where the song
+  starts is in force there, for what an instrument is told: its controllers, wheel and pedals (said afresh at
+  every start, jump and turn of the loop), and the keyswitch it chose. The key that stays chosen is pressed
+  again, and after it one that was pressed for a note which has not begun; a key the part is still holding is
+  held to where the part lets go of it. Some instruments take such a key only if it comes before its note
+  (Ample Sound's), so a render begins to play 0.06 beats ahead of its start where one is chosen and keeps
+  nothing of them, and a song that plays presses the key when it is put somewhere while it stands still, not
+  again with the first note; a loop that comes round to the way of playing it ends in presses nothing. Put
+  back before its part chose anything, a song presses the key its track calls the default.
+  - *Notes that are already sounding there.* A song that plays does not begin them: a sampler's long recording
+    begun in its middle would be the wrong sound, and whoever plays can start a bar earlier. A render does
+    what they need: it begins to play where the earliest of them began (32 beats before its start at the
+    most) and keeps and measures nothing until its start, so that a pad is in its sustain, a sampler is where
+    in its recording the song has it, and what rings over from those notes is there. A note that began
+    earlier still is left out, and the reply says so.
+  - *A stretch rendered alone lies on the frames it has in the whole song.* A render starts on a frame of the
+    song as it is counted from its beginning. For an instrument that does the same thing whenever it is
+    told the same, a stretch alone is then that stretch of a render of the whole song, to the sample. On the
+    installed guitars of Ample Sound, with a palm mute chosen before the stretch and their recordings in turn
+    (`repeatable`), it leaves -85 to -96 dB of the song's, whatever the part played before. Their bass goes
+    through its recordings and strokes by a count of every note it is played, four to a round: its stretch
+    is the song's (-134 dB) where it has played as many notes by then in both renders, counted in fours, and
+    the same notes on other recordings where it has not. What only rings over from notes that ended before
+    the start is not in a stretch, and envelopes are read on a grid that begins where the render does.
 - *A render makes only what is heard.* A track that is muted, or left out by a solo or by `tracks`, is not put
   into the render at all: its devices are not created and its plugins are not waited for. Hearing one track of
   a song with many plugins costs what that track costs. (What plays live keeps every track running, so that a

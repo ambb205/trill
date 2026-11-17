@@ -188,7 +188,10 @@ on the samples.
   remembered of plugins (`ready::Memory`) and what the factory knows of them (`scan::Known`). A new field on
   `Measured` needs `#[serde(default)]`. `TRILL_JOBS=here` does every job in the program, for telling the two
   apart; `trill-runtime/tests/jobs.rs` holds the two to the same samples and takes a process down at every
-  stage.
+  stage. A crate that builds no program which could do its jobs has its own test program do them
+  (`Program::ThisTest`, `Setup::by_test`: started again to run the one test that serves), as the window's and
+  the stage's tests do. A film renders its sound through `trill_stage::export::sound`, which stops the render
+  when the film is stopped.
 - **A render is not a quick look.** It creates every device afresh and waits for plugins to be ready
   (`ready.rs`), as a probe does: until every note asked for sounds, heard one at a time and each exactly three
   times, so that an instrument whose takes go round begins every render at the same take. The wait counts what
@@ -209,6 +212,18 @@ on the samples.
   comes to feed a track is one more line in `spread::plan`. What a plugin may be run beside is the factory's to
   say (`DeviceFactory::beside`): its instances in turn unless it was measured (`trill-plugins/src/beside.rs`). It is refused, with nothing written, when a
   plugin instrument never answered its notes (`RenderError::NotAnswered`).
+- **Starting anywhere is starting where the song has the instrument.** What a part told its instrument before
+  the place a song starts at is told again there: controllers by their lanes (`collect_controllers`), and the
+  keyswitch that is chosen (`graph::chosen_at`, `chase_switches` in `processor.rs`; a track's switches are
+  compiled from its profile, `graph::switches_of`). The song remembers which key the instrument is on
+  (`TrackState::latched`) and does not press it again, so that a key pressed while the song stood still is
+  not pressed with the first note: some instruments take one only ahead of its note. A render cannot have
+  stood still, so it begins to play ahead of its start (`SWITCH_AHEAD_BEATS`, and `lead_in` in `render.rs`
+  for the notes that are sounding at the start, `LEAD_IN_BEATS` back at the most) and keeps and measures
+  nothing until its start (`Tap::unheard`). A song that plays does not begin a note that is already
+  sounding. A render starts on a frame of the song as counted from beat 0, so that a stretch alone lies on
+  the frames it has in the whole song. `tests/chase.rs` holds all of it; whatever else a part comes to set
+  and leave set has to be said again at a start in the same place.
 - **A line of automation follows its control, and positions are read from the song.** A lane keeps what its
   lines are straight along (`AutomationLane::travel`; `Travel::of_param` says it for a device's parameter); a lane
   that says nothing is straight in its units, which is every lane of a file saved before (format version 1 or 2), and
