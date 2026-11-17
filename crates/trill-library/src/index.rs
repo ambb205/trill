@@ -321,6 +321,17 @@ impl Index {
 
     /// Copies the root `root` and everything beneath it into `builder`.
     pub(crate) fn copy_root(&self, root: FolderId, builder: &mut IndexBuilder) -> Result<(), OutOfOrder> {
+        self.copy_root_to(root, builder, &Path::to_path_buf)
+    }
+
+    /// Copies the root `root` and everything beneath it into `builder`,
+    /// each folder and file at the path `place` gives for it.
+    fn copy_root_to(
+        &self,
+        root: FolderId,
+        builder: &mut IndexBuilder,
+        place: &dyn Fn(&Path) -> PathBuf,
+    ) -> Result<(), OutOfOrder> {
         // Folders are stored in tree order, so a root's tree runs up to the
         // next root.
         let start = root.0 as usize;
@@ -334,12 +345,37 @@ impl Index {
                 }
                 None => None,
             };
-            copied.push(builder.folder(folder.path.clone(), parent)?);
+            copied.push(builder.folder(place(&folder.path), parent)?);
             for entry in &self.entries[folder.files()] {
-                builder.file(entry.clone())?;
+                builder.file(Entry { path: place(&entry.path), ..entry.clone() })?;
             }
         }
         Ok(())
+    }
+
+    /// A copy of this index in which the root at `from`, with everything
+    /// known beneath it, is at `to`: the folder was moved. What was read
+    /// from its files stays known, so the scan that follows opens none of
+    /// them again. If `to` is a root already, the one at `from` is dropped.
+    pub(crate) fn with_root_at(&self, from: &Path, to: &Path) -> Index {
+        let path_of = |root: &FolderId| self.folder(*root).map(Folder::path);
+        let there_already = self.roots.iter().any(|root| path_of(root) == Some(to));
+        let parts = from.components().count();
+        let place = |path: &Path| to.join(path.components().skip(parts).collect::<PathBuf>());
+        let mut builder = IndexBuilder::with_capacity(self.len());
+        for root in &self.roots {
+            let copied = match path_of(root) == Some(from) {
+                true if there_already => continue,
+                true => self.copy_root_to(*root, &mut builder, &place),
+                false => self.copy_root(*root, &mut builder),
+            };
+            if copied.is_err() {
+                // Unreachable for an index this module built; an empty
+                // index is rebuilt by the next scan.
+                return Index::default();
+            }
+        }
+        builder.finish()
     }
 
     /// A copy of this index holding only the roots `keep` accepts.

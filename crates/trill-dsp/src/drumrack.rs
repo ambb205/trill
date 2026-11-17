@@ -157,6 +157,24 @@ pub(crate) fn sample_refs(state: Option<&[u8]>) -> Result<Vec<SampleRef>, StateE
     Ok(state.pads.into_iter().map(|pad| SampleRef { slot: format!("pad {}", pad.note), path: pad.path }).collect())
 }
 
+/// The stored state with the files of the pads named in `slots` (`pad 36`)
+/// replaced by the ones given; the other pads, and whatever else the
+/// document holds of each pad, as they are.
+pub(crate) fn relinked(state: Option<&[u8]>, slots: &[(String, String)]) -> Result<Vec<u8>, StateError> {
+    let mut state = State::from_device_state(state)?;
+    for (slot, path) in slots {
+        let note = slot.strip_prefix("pad ").and_then(|note| note.parse::<u8>().ok());
+        // A document written by hand may name a pad twice: both entries
+        // are the pad's.
+        let mut pads = state.pads.iter_mut().filter(|pad| Some(pad.note) == note).peekable();
+        if pads.peek().is_none() {
+            return Err(StateError::Invalid(format!("the drum rack has no file in '{slot}'")));
+        }
+        pads.for_each(|pad| pad.path = path.clone());
+    }
+    Ok(state.to_bytes())
+}
+
 /// Creates a drum rack from a stored state, loading its files.
 pub(crate) fn create(state: Option<&[u8]>, source: &SampleSource) -> Result<Box<dyn DeviceProcessor>, String> {
     let mut samples = vec![None; PAD_COUNT];

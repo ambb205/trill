@@ -11,13 +11,18 @@
 //! Shift` and the project into `<DIR>/night-shift.trill`. The project
 //! names its files by the path given, so it opens from wherever that path
 //! leads to them: for the screenshots, the repository root.
+//!
+//! A second project, `<DIR>/night-shift-moved.trill`, is the same song as
+//! it would be had the pack been moved since: it names every file in
+//! `<DIR>/Sample Packs/Night Shift`, where there is nothing. That is what
+//! the pictures of the missing-files list are made from.
 
 use std::f64::consts::TAU;
 use std::path::{Path, PathBuf};
 use trill_core::audio::AudioBuffer;
 use trill_core::project::{AudioContent, WarpMode};
-use trill_core::{ChainRef, Note, Project};
-use trill_dsp::{drumrack, sampler};
+use trill_core::{ChainRef, FolderMove, Note, Project, Relink};
+use trill_dsp::{SampleFiles, drumrack, sampler};
 use trill_media::{WavFormat, write_wav};
 
 const RATE: f64 = 44_100.0;
@@ -358,5 +363,18 @@ fn main() -> anyhow::Result<()> {
     let file = Path::new(&folder).join("night-shift.trill");
     std::fs::write(&file, project.to_json())?;
     println!("wrote the pack to {} and the project to {}", pack.root.display(), file.display());
+
+    // The same song as if the pack had been moved since it was saved:
+    // every file it names is in a folder where there is nothing.
+    let went = FolderMove::new(format!("{named}/Night Shift"), format!("{named}/Sample Packs/Night Shift"));
+    let relinks: Vec<Relink> = project
+        .files(&SampleFiles)
+        .into_iter()
+        .filter_map(|file| Some(Relink { place: file.place, path: went.apply(&file.path)? }))
+        .collect();
+    project.relink(&relinks, &SampleFiles)?;
+    let moved = Path::new(&folder).join("night-shift-moved.trill");
+    std::fs::write(&moved, project.to_json())?;
+    println!("and the song with its pack moved to {}", moved.display());
     Ok(())
 }

@@ -31,8 +31,10 @@
 //! On top of those sit the operations that need more than one of them and
 //! that every front end must do the same way: [`Runtime::sound_facts`],
 //! [`Runtime::preview`], [`Runtime::add_sound`] and
-//! [`Runtime::add_sound_on_new_track`]. A front end that grew its own
-//! version of these would drift from the other.
+//! [`Runtime::add_sound_on_new_track`]; and, for a song whose files are not
+//! where it says, [`Runtime::missing_files`], [`Runtime::relink`] and
+//! [`Runtime::move_library_folder`]. A front end that grew its own version
+//! of these would drift from the other.
 //!
 //! ```no_run
 //! use trill_runtime::{Runtime, RuntimeOptions};
@@ -47,11 +49,13 @@
 
 mod housekeeping;
 pub mod midi;
+mod missing;
 mod recovery;
 mod settings;
 mod sounds;
 
 pub use midi::MidiInputInfo;
+pub use missing::{Candidate, Confidence, FoundFolder, Look, Missing, MissingFile, MissingFolder, files_missing_in};
 pub use recovery::SafetyCopy;
 pub use settings::Storage;
 pub use sounds::{AddedSound, NewSoundTrack, SoundClip, SoundError, SoundFacts};

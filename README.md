@@ -288,6 +288,33 @@ tags, tempo, key and length (all read from file and folder names). Audio clips p
 Vorbis at any sample rate, and can be warped to follow the project tempo: `beats` keeps drum hits sharp, `tonal`
 keeps sustained sound smooth, `repitch` plays faster or slower like a record; warped clips can be transposed.
 
+**Files that moved**: a song names its audio files by their paths, and a folder of samples that is moved or
+renamed leaves it with clips and pads that play nothing. Trill says so in one place (a line in the status bar and
+the list it opens, `missing_files` in `get_project`, and first in the notes of a `measure` or a `render`, which
+is then the song without those files and not a quieter mix), and looks for the files itself:
+
+- *Where the folder went, then by name.* If one file that was at `A\x\y.wav` turns up at `B\x\y.wav`, everything
+  else that was under `A` is looked for under `B`. Where a folder went is read from any file found by its name in
+  the sound library, from a folder of the same name near where the missing one was, from a folder of the library
+  that is itself missing and turns up with its files in it, and from what you point at.
+- *A file of the same name can be another file.* Each thing found says how sure it is, and why: `sure` only where
+  it is where the file's folder went or has the size and length the song wrote down, `likely` for the only file of
+  that name with nothing against it, `unsure` when there are several, when it is not what the song knew, or when
+  it is shorter than a clip plays. Only what is sure is taken by the one action; the rest is offered, and taken a
+  file at a time.
+- *Relinking is one edit*, one undo step however many clips and pads it touches (`Project::relink`,
+  `relink_files`): each clip goes on playing the stretch of its file it played, each pad keeps its settings.
+- *The library's own folders.* One that is gone is marked in the browser and listed (`library` status,
+  `missing_folders`) in place of being silently stale; saying where it went (`move_folder`) keeps the favorites
+  and the recently used files with their files and reads nothing again, and it goes along with the song's files
+  when the same move explains both.
+- *A song that travels.* A project file also says where each of its files is from the song's own folder, and
+  what the file was (size, length, sample rate), in a `files` table beside the song. When a song is opened, **the
+  file beside the song wins**: one that is found where the table leads from the folder the song is in now, and
+  that is the file the song knew, is the one it plays; otherwise the path stands as it is. So a folder holding a
+  song and its samples can be moved or sent whole. The table is an addition to the file, not a new format: a
+  build that does not know it reads the song as before, and a file without one means what it always meant.
+
 **Engine**: sample-accurate MIDI and audio clips, clip looping, non-destructive trimming and splitting, audio
 fades, automation of track and master volume, pan, sends and any device parameter with straight, held or curved
 segments (see below), MIDI controllers in clips (see below), group tracks and return tracks with sends, a metronome, sample-exact transport looping, mute/solo, undo/redo, offline rendering that is bit-identical to
@@ -445,6 +472,14 @@ transposition. The sampler shows its sample and the drum rack its sixteen pads.
 
 ![The sound browser, waveforms on audio clips and an audio clip in the Clip tab](docs/images/sounds-browser.png)
 
+**When a song opens with files missing**, the clips and pads that lost their file are marked, the status bar
+says how many files are missing and how many were found, and a click on that line (or `File`, `Missing files`)
+opens the list: each file with where it is used and what was found for it. `Relink` takes everything that was
+found for sure, as one undo step; `Use` takes a file that is only likely, one at a time; `Locate` points at a
+file by hand and `Look in a folder` at a folder to search, and what either says about where a folder went finds
+the rest. A folder of the sound library that is gone is listed there too (and marked in the browser), and is
+pointed at its new place along with the song's files.
+
 **Arm a track and record.** A track with an instrument has an arm button in its header and on its mixer strip,
 lit while it is armed. The armed tracks are what every keyboard plays and what a take records; arming one disarms
 the rest, and `Ctrl`-click keeps them. `F9`, or the record button in the transport, starts a take after the
@@ -502,7 +537,8 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Devices | `list_devices`, `describe_device`, `add_device`, `get_device`, `update_device`, `delete_device`, `show_device_editor` |
 | Presets | `search_presets` (one search across the presets of every installed instrument and the saved ones), `save_preset` (keeps a device's sound under a name) |
 | Clips | `create_clip`, `create_audio_clip`, `update_clip`, `split_clip`, `duplicate_clip`, `delete_clip` |
-| Sounds | `search_sounds`, `library`, `preview_sound`, `set_sample` |
+| Sounds | `search_sounds`, `library` (its folders, and `move_folder` for one that went elsewhere), `preview_sound`, `set_sample` |
+| Missing files | `missing_files` (what the song names that is not on disk, where it is used, and what was found with how sure it is), `relink_files` (what is sure, or more on request, or a folder or files named by hand: one undo step) |
 | Notes | `get_notes`, `add_notes`, `set_notes`, `remove_notes`, `transform_notes` |
 | Controllers | `get_controllers`, `set_controllers`, `shape_dynamics` (gives a line its dynamics from its notes, as an expression curve) |
 | Music | `write_chords`, `write_drums`, `write_arpeggio`, `write_bass`, `write_melody`, `analyze_music`, `music_reference` |
@@ -623,6 +659,11 @@ plugin editors on Linux and macOS,
 a film of a making-of (the replay gives the song as it was at any moment and where the action is; nothing
 renders it to video yet), hearing a making-of (it is silent: the song as it was is shown, not played),
 finding a song's journal again after its file was moved or renamed (it is kept by where the file is),
+"collect all and save" (copying every file a song plays into a folder beside it; the song already says where
+its files are from its own folder and plays the ones beside it, so what is missing is the copying, a rule for
+two files of one name, and an edit that points the song at the copies),
+finding files a plugin keeps in its own state (only audio clips and the built-in sampler and drum rack name
+theirs to Trill),
 session (clip-launching) view, audio recording (MIDI is recorded; audio is not), polyphonic aftertouch and MPE
 (per-note expression; clips hold one curve per controller for the whole channel), ASIO, warp markers, plugin
 delay compensation, multi-core rendering. Only Windows has been run so far.

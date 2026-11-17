@@ -328,6 +328,7 @@ impl TrillServer {
             + Self::hearing_router()
             + Self::instrument_router()
             + Self::story_router()
+            + Self::files_router()
     }
 
     /// The names of the tools the server offers.
@@ -387,6 +388,25 @@ impl TrillServer {
         out["favorites"] = json!(library.favorites().len());
         if let Some(problem) = library.index_problem() {
             out["index_problem"] = json!(problem);
+        }
+        // A folder that is not where the library has it: what was known
+        // of its files is still listed, and that must not pass for all
+        // being well.
+        let missing = library.missing_roots();
+        if !missing.is_empty() {
+            out["missing_folders"] = missing
+                .iter()
+                .map(|folder| {
+                    json!({
+                        "folder": folder.path.display().to_string(),
+                        "files_known": folder.files,
+                        "why": folder.reason,
+                    })
+                })
+                .collect();
+            out["hint"] = json!(
+                "A folder of the library is not where it was (moved, renamed, or on a drive that is not there).                  Its files are still listed and cannot be played. missing_files says where it seems to be;                  `move_folder` with `path` and `to` says where it went, and keeps the favorites with their files."
+            );
         }
         if library.roots().is_empty() {
             out["hint"] = json!(
@@ -1812,6 +1832,31 @@ impl TrillServer {
                 )),
                 Err(error) => Err(error),
             },
+            LibraryAction::MoveFolder => {
+                let from = folder_argument(request.path.as_deref(), "move_folder");
+                let to = match request.to.as_deref().map(str::trim).filter(|to| !to.is_empty()) {
+                    Some(to) => Ok(std::path::absolute(to).unwrap_or_else(|_| PathBuf::from(to))),
+                    None => Err("move_folder needs `to`: where the folder is now".to_owned()),
+                };
+                match (from, to) {
+                    (Ok(from), Ok(to)) => match library.move_root(&from, &to) {
+                        Ok(moved) => {
+                            self.wait_for_scan(request.wait_seconds).await;
+                            let mut out = self.library_status();
+                            out["moved"] = json!({
+                                "from": from.display().to_string(),
+                                "to": to.display().to_string(),
+                                "files_known": moved.files,
+                                "favorites": moved.favorites,
+                                "recent": moved.recent,
+                            });
+                            Ok(out)
+                        }
+                        Err(error) => Err(error),
+                    },
+                    (Err(error), _) | (_, Err(error)) => Err(error),
+                }
+            }
             LibraryAction::Rescan => {
                 library.rescan();
                 self.wait_for_scan(request.wait_seconds).await;
@@ -2868,8 +2913,9 @@ impl ServerHandler for TrillServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
                 crate::sounds::INSTRUCTIONS,
+                crate::files::INSTRUCTIONS,
                 crate::music::INSTRUCTIONS,
                 crate::instruments::INSTRUCTIONS,
                 crate::hearing::INSTRUCTIONS,
