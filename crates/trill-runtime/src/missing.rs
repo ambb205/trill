@@ -193,6 +193,26 @@ impl Missing {
         self.files.iter().flat_map(|file| &file.uses).any(|used| used.place == *place)
     }
 
+    /// The session's problems, as it words them, without the lines that
+    /// are each about one place whose file is not there: a front end says
+    /// those once, as what is missing, and not again for every clip and
+    /// pad. (`clip 7: ...`, and `device 9: pad 36: ...` for a sample.)
+    pub fn other_problems(&self, problems: Vec<String>) -> Vec<String> {
+        if self.files.is_empty() {
+            return problems;
+        }
+        let said: Vec<String> = self
+            .files
+            .iter()
+            .flat_map(|file| &file.uses)
+            .map(|used| match &used.place {
+                FilePlace::Clip(clip) => format!("{clip}: "),
+                FilePlace::Sample { device, slot } => format!("{device}: {slot}: "),
+            })
+            .collect();
+        problems.into_iter().filter(|problem| !said.iter().any(|said| problem.starts_with(said))).collect()
+    }
+
     /// What is missing on the tracks `only` of `project`, and nothing
     /// else: for whoever hears only those.
     pub fn on_tracks(&self, only: &[TrackId], project: &Project) -> Missing {

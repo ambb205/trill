@@ -173,23 +173,10 @@ pub(crate) fn heard_without(missing: &Missing) -> Option<String> {
     })
 }
 
-/// How the session's problems begin for `place`: `clip 7: `, and
-/// `device 9: pad 36: ` for a sample.
-fn said_of(place: &FilePlace) -> String {
-    match place {
-        FilePlace::Clip(clip) => format!("{clip}: "),
-        FilePlace::Sample { device, slot } => format!("{device}: {slot}: "),
-    }
-}
-
 /// `problems` without the lines that are each about one place whose file
 /// is missing: those are said once, by [`brief`].
 pub(crate) fn without_missing(problems: Vec<String>, missing: &Missing) -> Vec<String> {
-    if missing.files.is_empty() {
-        return problems;
-    }
-    let said: Vec<String> = missing.files.iter().flat_map(|file| &file.uses).map(|used| said_of(&used.place)).collect();
-    problems.into_iter().filter(|problem| !said.iter().any(|said| problem.starts_with(said))).collect()
+    missing.other_problems(problems)
 }
 
 fn use_json(used: &FileUse, track: &str) -> Value {

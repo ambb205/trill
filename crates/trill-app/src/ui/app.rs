@@ -8,6 +8,7 @@ use super::editors::{self, Editors};
 use super::files::{self, Confirm, Jobs};
 use super::keyboard::{self, Keyboard};
 use super::making_of::{self, MakingOf};
+use super::missing;
 use super::recovery::{self, Recovery};
 use super::shortcuts::{self, Command};
 use super::snapshot::{Live, Snapshot};
@@ -402,6 +403,11 @@ impl TrillApp {
             match report {
                 Report::Info(text) => self.state.toasts.info(text),
                 Report::Error(text) => self.state.toasts.error(text),
+                Report::Success(text) => self.state.toasts.success(text),
+                Report::Notice(text) => {
+                    self.state.toasts.lasting(super::toast::ToastKind::Info, text, Duration::from_secs(12));
+                }
+                Report::LibraryMoved(from, to) => self.state.browser.sounds.folder_moved(&from, &to),
                 Report::FolderAdded(folder) => {
                     let name = folder
                         .file_name()
@@ -488,7 +494,7 @@ impl TrillApp {
     /// takes the keyboard; the shortcut reference lets only its own key
     /// through, which closes it.
     fn read_commands(&self, ctx: &egui::Context) -> Vec<Command> {
-        if self.jobs.confirm.is_some() || self.recovery.is_open() {
+        if self.jobs.confirm.is_some() || self.recovery.is_open() || self.sounds.missing.open {
             return Vec::new();
         }
         let state = &self.state;
@@ -654,6 +660,9 @@ impl TrillApp {
         self.settings.poll();
         self.take_reports();
         self.sync(ctx);
+        // The files the song names that are not on disk: looked for by a
+        // worker whenever what could change the answer has changed.
+        self.sounds.watch_missing(&self.snapshot);
         if replaced {
             // The window's state was reset for a project that a helper
             // thread opened. The snapshot may have caught up with that
@@ -824,12 +833,16 @@ impl TrillApp {
         let commands = self.read_commands(&ctx);
         let open_editor = self.options.open_editor.take();
         let open_settings = std::mem::take(&mut self.options.show_settings);
+        let open_missing = std::mem::take(&mut self.options.show_missing);
         let mut cx = self.cx();
         for command in commands {
             run_command(&ctx, &mut cx, command);
         }
         if open_settings {
             audio_settings::open(&mut cx);
+        }
+        if open_missing {
+            missing::open(&mut cx);
         }
         if let Some(name) = open_editor {
             editors::open_named(&mut cx, &name);
@@ -906,6 +919,7 @@ impl TrillApp {
         dragging::end(&ctx, &mut cx);
         files::confirm_modal(&ctx, &mut cx);
         recovery::modal(&ctx, &mut cx);
+        missing::modal(&ctx, &mut cx);
         audio_settings::modal(&ctx, &mut cx);
         shortcuts::window(&ctx, &mut cx);
         // Clear of the assistant's panel: its Send and Stop are in that corner.
