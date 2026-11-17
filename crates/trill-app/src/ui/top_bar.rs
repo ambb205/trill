@@ -182,6 +182,10 @@ fn file_menu(ui: &mut Ui, cx: &mut Cx) {
     if item(ui, "Export WAV\u{2026}", Command::ExportWav, idle) {
         files::export_wav(ui.ctx(), cx);
     }
+    // The song, and every track, group and return beside it, in one pass.
+    if MenuItem::new("Export WAV and stems\u{2026}").enabled(idle).show(ui, theme).clicked() {
+        files::export_stems(ui.ctx(), cx);
+    }
     // How the song was made, as a file to hand on: by name, and without
     // the conversation unless that is what is asked for.
     trill_noir::menu_separator(ui, theme);

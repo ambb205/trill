@@ -13,7 +13,7 @@ use trill_core::device::{CompositeFactory, DeviceFactory, Purpose};
 use trill_core::{ChainRef, Note, Project, TrackId};
 use trill_dsp::BuiltinFactory;
 use trill_engine::probe::{Heard, ProbeNote, ProbeOptions};
-use trill_engine::render::{RenderOptions, Section, render};
+use trill_engine::render::{RenderOptions, Section, Stems, render};
 use trill_engine::scripted::{AMP, BASS, DRUMS, Loading, MUTE_KEY, ScriptedFactory};
 use trill_engine::{AudioBackend, ProbeTarget, Session};
 
@@ -214,16 +214,33 @@ fn built_in_devices_are_not_touched_by_the_wait_and_render_as_they_always_did() 
     assert!(peak(&plain.left) > 0.01);
     assert!(scripted.made().is_empty());
 
+    // In a song with the plugin, the synth's own part of the render (its
+    // stem) is those samples: the plugin was waited for, the synth was not
+    // touched.
     let mut both = Project::new("both");
     let synth = track_with(&mut both, "Synth", "builtin:polysynth", &synth_notes);
     track_with(&mut both, "Drums", DRUMS, &[note(36, 0.0, 0.25)]);
-    let only = RenderOptions { only_tracks: Some(vec![synth]), ..options() };
-    let heard = render(&both, factory(&scripted).as_ref(), &only).unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let stems = Stems { folder: folder.path().to_path_buf(), tracks: true, ..Stems::default() };
+    let with_stems = RenderOptions { stems: Some(stems), ..options() };
+    let heard = render(&both, factory(&scripted).as_ref(), &with_stems).unwrap();
     assert_eq!(scripted.made().len(), 1, "the plugin was made, and waited for");
-    assert!(heard.left == plain.left && heard.right == plain.right, "sample for sample");
+    assert!(heard.measured.waited.is_empty() || heard.measured.waited[0].answered);
+    let part = heard.measured.stems.iter().find(|stem| stem.track == Some(synth)).unwrap();
+    let part = trill_media::decode(std::path::Path::new(&part.path)).unwrap();
+    let shared = plain.left.len().min(part.left.len());
+    assert!(shared > SR as usize / 2);
+    assert!(part.left[..shared] == plain.left[..shared] && part.right[..shared] == plain.right[..shared]);
+
+    // Heard alone in that song, the synth is those samples too, and the
+    // plugin is not even made: nothing is waited for that is not heard.
+    let only = RenderOptions { only_tracks: Some(vec![synth]), ..options() };
+    let alone_in_it = render(&both, factory(&scripted).as_ref(), &only).unwrap();
+    assert_eq!(scripted.made().len(), 1, "no second plugin");
+    assert!(alone_in_it.left == plain.left && alone_in_it.right == plain.right, "sample for sample");
 
     // And the same render twice is the same render.
-    let again = render(&both, factory(&scripted).as_ref(), &only).unwrap();
+    let again = render(&both, factory(&scripted).as_ref(), &with_stems).unwrap();
     assert!(again.left == heard.left);
 }
 

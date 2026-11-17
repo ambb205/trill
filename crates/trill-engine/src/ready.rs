@@ -1084,7 +1084,7 @@ impl Plugins {
         !uri.starts_with("builtin:")
     }
 
-    fn is_instrument(&self, uri: &str) -> bool {
+    pub fn is_instrument(&self, uri: &str) -> bool {
         self.instruments.iter().any(|instrument| instrument == uri)
     }
 }
