@@ -33,6 +33,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use trill_runtime::Runtime;
 
@@ -96,6 +97,24 @@ impl Drop for HttpServer {
     }
 }
 
+/// How long a session may go without a message before it is forgotten.
+///
+/// The library counts a session as idle while one of its own calls is
+/// still running: a tool that is at work sends nothing, and the comments
+/// that keep its reply's stream open do not count. Its own limit is five
+/// minutes, which a render of a long song with many plugins outlasts: the
+/// reply was then never sent, and every later call on the session was
+/// refused as unknown. So the limit is set beyond any call, and is only
+/// what clears away the sessions of clients that left without saying so.
+const SESSION_IDLE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The keeper of one endpoint's sessions.
+fn sessions() -> Arc<LocalSessionManager> {
+    let mut sessions = LocalSessionManager::default();
+    sessions.session_config.keep_alive = Some(SESSION_IDLE);
+    Arc::new(sessions)
+}
+
 /// Starts the MCP server on `address` (use port 0 for any free port) on its
 /// own thread and returns once it is listening.
 ///
@@ -148,10 +167,10 @@ pub fn serve_http_with(runtime: Arc<Runtime>, address: SocketAddr, options: Http
             };
             let full = runtime.clone();
             let service: StreamableHttpService<TrillServer, LocalSessionManager> =
-                StreamableHttpService::new(move || Ok(TrillServer::new(full.clone())), Default::default(), config());
+                StreamableHttpService::new(move || Ok(TrillServer::new(full.clone())), sessions(), config());
             let assistant: StreamableHttpService<TrillServer, LocalSessionManager> = StreamableHttpService::new(
                 move || Ok(TrillServer::guarded(runtime.clone(), assistant_folder.clone())),
-                Default::default(),
+                sessions(),
                 config(),
             );
             let router = axum::Router::new().nest_service(HTTP_PATH, service).nest_service(ASSISTANT_PATH, assistant);
