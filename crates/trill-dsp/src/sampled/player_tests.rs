@@ -642,3 +642,72 @@ fn the_device_says_what_it_has_loaded() {
     assert!(kinds.contains(&ControllerKind::MOD_WHEEL) && kinds.contains(&ControllerKind::SUSTAIN));
     assert!(controller.key_sounds().is_none());
 }
+
+#[test]
+fn a_controller_is_read_along_the_curve_the_instrument_names_for_it() {
+    // What a piano's file does with its knobs: the level along the square
+    // of controller 7, the place between the sides from -1 to 1 along
+    // controller 10 (so that the middle is the middle), how much the
+    // velocity decides taken away by a third controller, and a curve of
+    // the instrument's own that is all or nothing.
+    let sfz = "<control> set_cc7=100 set_hdcc10=0.5 set_hdcc99=0.73 set_cc80=0\n\
+               <global> amplitude_oncc7=100 amplitude_curvecc7=4 pan_oncc10=100 pan_curvecc10=1\n\
+               amp_veltrack_oncc99=-100 amp_veltrack_curvecc99=2 volume_oncc80=-12 volume_curvecc80=9\n\
+               <region> sample=dc.wav\n<curve> curve_index=9 v000=0 v001=1 v127=1";
+    let files = [("dc.wav", level(48_000, 0.5))];
+    let heard = |events: &[(usize, EventKind)]| {
+        let mut player = rendered(sfz, &files);
+        let (left, right) = play_from(&mut player, 0, 256, 9_600, events);
+        (left[4_800] / 0.5, right[4_800] / 0.5)
+    };
+    // As the file starts it: the level at (100/127)^2, in the middle, and 73 % of it the velocity's.
+    let knob = (100.0f32 / 127.0).powi(2);
+    let by_velocity = |velocity: f32, track: f32| 1.0 - track + track * (velocity / 127.0).powi(2);
+    let (left, right) = heard(&[(0, on(60, 64))]);
+    assert!((left - knob * by_velocity(64.0, 0.73)).abs() < 2e-3 && (left - right).abs() < 1e-6, "{left} {right}");
+    // The level knob at its top, the pan knob at its right, the velocity deciding everything.
+    let events = [(0, control(7, 1.0)), (0, control(10, 1.0)), (0, control(99, 1.0)), (0, on(60, 64))];
+    let (left, right) = heard(&events);
+    assert!(left.abs() < 1e-6 && (right - by_velocity(64.0, 1.0) * std::f32::consts::SQRT_2).abs() < 2e-3, "{left} {right}");
+    // The instrument's own curve: nothing at the very bottom, all of the twelve decibels from the first step up.
+    let quiet = heard(&[(0, control(80, 1.0 / 127.0)), (0, on(60, 127))]).0;
+    let full = heard(&[(0, on(60, 127))]).0;
+    assert!((20.0 * (quiet / full).log10() + 12.0).abs() < 0.05, "{quiet} against {full}");
+}
+
+#[test]
+fn a_group_has_only_so_many_voices_and_the_pedal_is_the_controller_the_instrument_says() {
+    // A bowed string that plays one note at a time: the note before gives way.
+    let sfz = "<global> amp_veltrack=0 pitch_keytrack=0 group=1 polyphony=1 ampeg_release=0.01\n\
+               <region> sample=low.wav lokey=40 hikey=59\n<region> sample=high.wav lokey=60 hikey=80";
+    let files = [("low.wav", level(96_000, 0.2)), ("high.wav", level(96_000, 0.4))];
+    let mut player = rendered(sfz, &files);
+    let heard = play(&mut player, 256, 20_000, &[(0, on(50, 100)), (4_800, on(62, 100)), (9_600, on(45, 100))]);
+    assert!((heard[4_000] - 0.2).abs() < 1e-6 && (heard[9_000] - 0.4).abs() < 1e-6 && (heard[14_000] - 0.2).abs() < 1e-6);
+    assert!(largest_step(&heard[4_800..5_200]) < 0.05, "it gives way quickly, not at once");
+
+    // An instrument whose pedal is another controller than the usual one; and levels above the region that add up.
+    let sfz = "<global> amp_veltrack=0 sustain_cc=67 ampeg_release=0.01 global_volume=-6\n\
+               <master> master_volume=-6 <group> group_volume=-6 <region> sample=low.wav volume=6";
+    let mut player = rendered(sfz, &files);
+    let events = [(0, control(67, 1.0)), (0, on(50, 100)), (2_400, off(50)), (9_600, control(67, 0.0))];
+    let heard = play(&mut player, 256, 14_000, &events);
+    let wanted = 0.2 * 10f32.powf(-12.0 / 20.0);
+    assert!((heard[1_000] - wanted).abs() < 1e-5 && (heard[9_000] - wanted).abs() < 1e-5, "{}", heard[9_000]);
+    assert_eq!(peak(&heard[11_000..]), 0.0);
+    let mut player = rendered(sfz, &files);
+    let heard = play(&mut player, 256, 9_000, &[(0, control(64, 1.0)), (0, on(50, 100)), (2_400, off(50))]);
+    assert_eq!(peak(&heard[4_000..]), 0.0, "the usual pedal is not this instrument's");
+}
+
+#[test]
+fn a_region_that_no_key_plays_is_left_out_and_said() {
+    let sfz = "<region> sample=note.wav lokey=40 hikey=80\n<region> sample=pedal.wav key=-1 on_locc64=126 on_hicc64=127\n\
+               <region> sample=pedal.wav lokey=-1 hikey=-1\n<region> sample=pedal.wav on_locc64=1 lokey=0 hikey=127";
+    let (_, source) = made(sfz, &[("note.wav", level(100, 0.1)), ("pedal.wav", level(100, 0.9))], Purpose::Rendering);
+    let loaded = source.load(Some(&State::new(FILE).to_bytes())).unwrap().unwrap();
+    assert_eq!(loaded.instrument.regions.len(), 1);
+    assert_eq!(loaded.summary.range, Some((40, 80)));
+    let sentence = loaded.unsupported().unwrap();
+    assert!(sentence.contains("sounds that moving a controller sets off (the noise of a pedal) (on_hicc64, on_locc64)"), "{sentence}");
+}

@@ -135,6 +135,12 @@ pub enum Moved {
     Vibrato,
     /// How deep the tremolo is, in dB at the top.
     Tremolo,
+    /// How much of a note's level its velocity decides, in percent at
+    /// the top: read when the note begins.
+    Dynamics,
+    /// How much of a stereo recording's width is kept, in percent at the
+    /// top.
+    Width,
 }
 
 /// A controller that moves something of a region.
@@ -143,6 +149,39 @@ pub struct Control {
     pub controller: u8,
     pub moved: Moved,
     pub depth: f32,
+    /// Which of [`Instrument::curves`] the controller's position is read
+    /// along; 0 is the straight line from nothing to all of `depth`.
+    pub curve: u16,
+}
+
+/// The curves every instrument has, by their numbers: straight up, from
+/// -1 to 1, straight down, from 1 to -1, the square, and the two halves
+/// of an equal-power crossfade.
+pub const BUILT_IN_CURVES: usize = 7;
+
+/// The curves an instrument starts with ([`BUILT_IN_CURVES`]).
+pub fn built_in_curves() -> Vec<[f32; 128]> {
+    let shapes: [fn(f32) -> f32; BUILT_IN_CURVES] = [
+        |x| x,
+        |x| 2.0 * x - 1.0,
+        |x| 1.0 - x,
+        |x| 1.0 - 2.0 * x,
+        |x| x * x,
+        |x| x.sqrt(),
+        |x| (1.0 - x).sqrt(),
+    ];
+    shapes.iter().map(|shape| std::array::from_fn(|step| shape(step as f32 / 127.0))).collect()
+}
+
+/// Where `position` (0..=1) of a controller lies along the curve `curve`
+/// of `curves`. A curve there is none of is the straight line.
+#[inline]
+pub fn along(curves: &[[f32; 128]], curve: u16, position: f32) -> f32 {
+    let position = position.clamp(0.0, 1.0);
+    let Some(table) = curves.get(usize::from(curve)).filter(|_| curve != 0) else { return position };
+    let at = position * 127.0;
+    let below = (at as usize).min(126);
+    table[below] + (table[below + 1] - table[below]) * (at - below as f32)
 }
 
 /// Which part of an envelope a controller or the velocity lengthens.
@@ -168,9 +207,10 @@ pub struct Envelope {
     pub sustain: f32,
     pub release: f32,
     /// What a full velocity adds to a stage (seconds, or level for the
-    /// sustain), and what a controller at the top of its travel adds.
+    /// sustain), and what a controller at the top of its travel adds,
+    /// along which curve.
     pub by_velocity: Vec<(Stage, f32)>,
-    pub by_controller: Vec<(Stage, u8, f32)>,
+    pub by_controller: Vec<(Stage, u8, f32, u16)>,
 }
 
 impl Default for Envelope {
@@ -191,8 +231,9 @@ impl Default for Envelope {
 
 impl Envelope {
     /// The length or level of `stage` for a note of `velocity` (0..=1)
-    /// with the controllers where `controller` says they are (0..=1).
-    pub fn stage(&self, stage: Stage, velocity: f32, controller: impl Fn(u8) -> f32) -> f32 {
+    /// with the controllers where `controller` says they are (0..=1),
+    /// each along the curve that is asked for.
+    pub fn stage(&self, stage: Stage, velocity: f32, controller: impl Fn(u8, u16) -> f32) -> f32 {
         let base = match stage {
             Stage::Delay => self.delay,
             Stage::Attack => self.attack,
@@ -206,8 +247,8 @@ impl Envelope {
         let by_controller: f32 = self
             .by_controller
             .iter()
-            .filter(|(which, _, _)| *which == stage)
-            .map(|(_, number, amount)| amount * controller(*number))
+            .filter(|(which, _, _, _)| *which == stage)
+            .map(|(_, number, amount, curve)| amount * controller(*number, *curve))
             .sum();
         let value = base + by_velocity + by_controller;
         if stage == Stage::Sustain { value.clamp(0.0, 1.0) } else { value.max(0.0) }
@@ -343,8 +384,10 @@ pub struct Region {
     pub group: u32,
     pub off_by: Option<u32>,
     pub off_mode: OffMode,
-    /// The most voices one key may have sounding in this region's group.
+    /// The most voices one key may have sounding in this region's group,
+    /// and the most its group may have at all.
     pub note_polyphony: Option<u16>,
+    pub polyphony: Option<u16>,
 
     /// Frames into the recording it starts at, and how many more at
     /// random.
@@ -409,6 +452,7 @@ impl Default for Region {
             off_by: None,
             off_mode: OffMode::Fast,
             note_polyphony: None,
+            polyphony: None,
             offset: 0,
             offset_random: 0,
             end: None,
@@ -442,11 +486,17 @@ impl Region {
     /// The gain the velocity gives a note of this region, before any
     /// crossfade: the square of the velocity where it decides everything.
     pub fn velocity_gain(&self, velocity: f32) -> f32 {
+        self.velocity_gain_tracking(velocity, self.level_by_velocity)
+    }
+
+    /// [`velocity_gain`](Self::velocity_gain), where the velocity decides
+    /// `track` of the level: what the region says, moved by a controller.
+    pub fn velocity_gain_tracking(&self, velocity: f32, track: f32) -> f32 {
         let curve = match &self.velocity_curve {
             Some(curve) => curve[(velocity * 127.0).round().clamp(0.0, 127.0) as usize],
             None => velocity * velocity,
         };
-        let track = self.level_by_velocity;
+        let track = track.clamp(-1.0, 1.0);
         if track >= 0.0 { 1.0 - track + track * curve } else { 1.0 + track * curve }
     }
 }
@@ -491,8 +541,13 @@ pub struct Instrument {
     pub controller_labels: BTreeMap<u8, String>,
     /// Where it wants controllers to be before any is moved, 0..=1.
     pub controller_starts: Vec<(u8, f32)>,
-    /// Whether the sustain pedal holds its notes.
+    /// Whether the sustain pedal holds its notes, and which controller
+    /// the pedal is (64 unless the instrument says otherwise).
     pub pedal: bool,
+    pub pedal_controller: u8,
+    /// The curves controllers are read along: [`BUILT_IN_CURVES`] that
+    /// every instrument has, and then the instrument's own.
+    pub curves: Vec<[f32; 128]>,
     pub unsupported: Vec<Unsupported>,
     /// What is wrong with its file short of its not being read: a part of
     /// it that is missing, a line that makes no sense.
@@ -570,7 +625,7 @@ impl Instrument {
             used.extend(region.when.iter().map(|(controller, _, _)| *controller));
             used.extend(region.controls.iter().map(|control| control.controller));
             used.extend(region.fade_controllers.iter().map(|(controller, _)| *controller));
-            used.extend(region.envelope.by_controller.iter().map(|(_, controller, _)| *controller));
+            used.extend(region.envelope.by_controller.iter().map(|(_, controller, _, _)| *controller));
         }
         used.sort_unstable();
         used.dedup();
@@ -740,11 +795,11 @@ mod tests {
             release: 0.5,
             sustain: 0.8,
             by_velocity: vec![(Stage::Attack, -0.08), (Stage::Sustain, 0.5)],
-            by_controller: vec![(Stage::Release, 72, 2.0)],
+            by_controller: vec![(Stage::Release, 72, 2.0, 0)],
             ..Envelope::default()
         };
         let at = |stage, velocity, wheel: f32| {
-            envelope.stage(stage, velocity, |number| if number == 72 { wheel } else { 0.0 })
+            envelope.stage(stage, velocity, |number, _| if number == 72 { wheel } else { 0.0 })
         };
         assert!((at(Stage::Attack, 1.0, 0.0) - 0.02).abs() < 1e-6);
         assert_eq!(at(Stage::Attack, 0.0, 0.0), 0.1);
@@ -777,6 +832,23 @@ mod tests {
     }
 
     #[test]
+    fn a_controller_is_read_along_a_curve() {
+        let mut curves = built_in_curves();
+        assert_eq!(curves.len(), BUILT_IN_CURVES);
+        let at = |curve: u16, position: f32| along(&curves, curve, position);
+        assert_eq!((at(0, 0.25), at(0, 2.0), at(0, -1.0)), (0.25, 1.0, 0.0));
+        assert!((at(1, 0.5)).abs() < 1e-6 && at(1, 0.0) == -1.0 && at(1, 1.0) == 1.0, "from -1 to 1");
+        assert!((at(2, 0.25) - 0.75).abs() < 1e-6 && (at(3, 0.25) - 0.5).abs() < 1e-6);
+        assert!((at(4, 0.5) - 0.25).abs() < 1e-3 && (at(5, 0.25) - 0.5).abs() < 2e-3 && (at(6, 0.75) - 0.5).abs() < 2e-3);
+        assert_eq!(at(99, 0.3), 0.3, "a curve there is none of is the straight line");
+        // An instrument's own: a step.
+        let mut step = [1.0f32; 128];
+        step[0] = 0.0;
+        curves.push(step);
+        assert_eq!((along(&curves, 7, 0.0), along(&curves, 7, 0.5)), (0.0, 1.0));
+    }
+
+    #[test]
     fn a_summary_says_what_an_instrument_is() {
         let summary = piano().summary();
         assert_eq!((summary.regions, summary.recordings), (11, 11));
@@ -803,7 +875,7 @@ mod tests {
         guitar.regions.push(Region {
             recording: Some(0),
             loop_mode: Some(LoopMode::Sustain),
-            controls: vec![Control { controller: 1, moved: Moved::Vibrato, depth: 30.0 }],
+            controls: vec![Control { controller: 1, moved: Moved::Vibrato, depth: 30.0, curve: 0 }],
             bend_up: 1200.0,
             ..Region::default()
         });

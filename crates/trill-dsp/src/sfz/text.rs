@@ -65,7 +65,11 @@ fn file(
                 match (words.next(), words.next()) {
                     (Some(name), Some(value)) if name.starts_with('$') => {
                         defines.insert(name[1..].to_string(), filled(value, defines));
-                        let used = after.find(value).map_or(after.len(), |at| at + value.len());
+                        // Past the name and then the value: the value may
+                        // be a part of the name too (`$TUNE10 0`).
+                        let past_name = after.find(name).map_or(0, |at| at + name.len());
+                        let used =
+                            after[past_name..].find(value).map_or(after.len(), |at| past_name + at + value.len());
                         rest = after[used..].trim_start();
                     }
                     _ => {
@@ -282,8 +286,9 @@ mod tests {
     #[test]
     fn defined_names_are_filled_in_by_the_longest_that_fits() {
         let text = one(
-            "#define $KEY 36\n#define $KEY2 38 #define $DIR Drums\n<region> key=$KEY sample=$DIR/kick_$KEY.wav\n<region> key=$KEY2 locc$KEY=1 sample=$NOPE.wav",
+            "#define $KEY 36\n#define $KEY2 38 #define $DIR Drums\n#define $T10 0\n#define $T01 0\n<region> key=$KEY sample=$DIR/kick_$KEY.wav\n<region> key=$KEY2 locc$KEY=1 sample=$NOPE.wav",
         );
+        assert!(text.problems.is_empty(), "a value that is part of its name is still the value: {:?}", text.problems);
         assert_eq!(
             pairs(&text),
             [

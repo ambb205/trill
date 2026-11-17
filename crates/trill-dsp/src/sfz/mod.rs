@@ -18,13 +18,15 @@
 //!   `release`, `release_key`, `first`, `legato`), `rt_decay`, `sw_lokey`,
 //!   `sw_hikey`, `sw_last`, `sw_lolast`, `sw_hilast`, `sw_default`,
 //!   `sw_label`, `sw_down`, `sw_up`, `sw_previous`, `group`, `off_by`,
-//!   `off_mode`, `off_time`, `note_polyphony`, `sustain_sw`.
+//!   `off_mode`, `off_time`, `polyphony`, `note_polyphony`, `sustain_sw`,
+//!   `sustain_cc`.
 //! * Its pitch: `tune`, `transpose`, `pitch_keytrack`, `pitch_veltrack`,
 //!   `pitch_random`, `bend_up`, `bend_down`, `tune_onccN`.
-//! * Its level and place: `volume`, `amplitude`, `pan`, `width`,
+//! * Its level and place: `volume` (and `global_volume`, `master_volume`,
+//!   `group_volume`, which add up), `amplitude`, `pan`, `width`,
 //!   `amp_veltrack`, `amp_velcurve_N`, `amp_keytrack`, `amp_keycenter`,
 //!   `amp_random`, `volume_onccN` (`gain_ccN`), `amplitude_onccN`,
-//!   `pan_onccN`, and the crossfades `xfin_`/`xfout_` over `lokey`/`hikey`,
+//!   `pan_onccN`, `width_onccN`, `amp_veltrack_onccN`, and the crossfades `xfin_`/`xfout_` over `lokey`/`hikey`,
 //!   `lovel`/`hivel` and `loccN`/`hiccN` with `xf_keycurve`, `xf_velcurve`,
 //!   `xf_cccurve`.
 //! * How it is played through: `offset`, `offset_random`, `end`, `delay`,
@@ -40,6 +42,14 @@
 //! * Vibrato and tremolo: `pitchlfo_freq`, `pitchlfo_depth`,
 //!   `pitchlfo_delay`, `pitchlfo_fade`, `pitchlfo_depth_onccN`, and the
 //!   same of `amplfo_`.
+//! * The curves controllers are read along: `…_curveccN` on everything a
+//!   controller moves here, with the seven curves every player has and
+//!   the instrument's own (`<curve>` with `curve_index` and `vNNN`).
+//!
+//! Controllers are the 128 of MIDI. The ones a maker's player makes up
+//! beyond those (how fast a key came up, a random number) are not here.
+//! A region that only a controller sets off (`on_loccN`) or that no key
+//! plays (`key=-1`) is left out, and said.
 //!
 //! Everything else is counted, by name, with what a listener misses for
 //! it ([`crate::sampled::Unsupported`]): the instrument still plays.
@@ -47,8 +57,8 @@
 mod text;
 
 use crate::sampled::model::{
-    Control, Envelope, Fade, FadeCurve, FilterKind, Instrument, LoopMode, Moved, OffMode, Region, Stage, Trigger,
-    Unsupported,
+    BUILT_IN_CURVES, Control, Envelope, Fade, FadeCurve, FilterKind, Instrument, LoopMode, Moved, OffMode, Region,
+    Stage, Trigger, Unsupported, built_in_curves,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -70,6 +80,8 @@ pub fn read(path: &Path, source: &dyn Fn(&Path) -> Result<String, String>) -> Re
     let mut reader = Reader::default();
     reader.instrument.name = path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
     reader.instrument.pedal = true;
+    reader.instrument.pedal_controller = 64;
+    reader.instrument.curves = built_in_curves();
     reader.instrument.problems = text.problems;
     for token in text.tokens {
         match token {
@@ -78,9 +90,31 @@ pub fn read(path: &Path, source: &dyn Fn(&Path) -> Result<String, String>) -> Re
         }
     }
     reader.finish_region();
-    let Reader { mut instrument, unsupported, labels, .. } = reader;
+    reader.finish_curve();
+    let Reader { mut instrument, unsupported, labels, curves, .. } = reader;
     if instrument.regions.is_empty() {
         return Err("it has no regions that play a recording".to_string());
+    }
+    // The instrument's own curves come after the ones every player has;
+    // what asked for one by its number in the file is told where it is.
+    let mut places: BTreeMap<u16, u16> = BTreeMap::new();
+    for (number, table) in curves {
+        if usize::from(number) >= BUILT_IN_CURVES {
+            places.insert(number, instrument.curves.len() as u16);
+            instrument.curves.push(table);
+        }
+    }
+    let placed = |curve: &mut u16| {
+        if usize::from(*curve) >= BUILT_IN_CURVES {
+            *curve = places.get(curve).copied().unwrap_or(0);
+        }
+    };
+    for region in &mut instrument.regions {
+        region.controls.iter_mut().for_each(|control| placed(&mut control.curve));
+        region.envelope.by_controller.iter_mut().for_each(|(_, _, _, curve)| placed(curve));
+        if let Some((envelope, _)) = region.filter.as_mut().and_then(|filter| filter.envelope.as_mut()) {
+            envelope.by_controller.iter_mut().for_each(|(_, _, _, curve)| placed(curve));
+        }
     }
     // What a switch chooses is said beside the regions it chooses.
     for (key, label) in labels {
@@ -109,6 +143,8 @@ enum Level {
     Master,
     Group,
     Region,
+    /// A curve of the instrument's own.
+    Curve,
     /// A header this reader does nothing with.
     Other,
 }
@@ -131,11 +167,39 @@ struct Reader {
     /// What each switch chooses.
     labels: BTreeMap<u8, String>,
     recordings: BTreeMap<String, u32>,
+    /// The instrument's own curves, by their numbers in the file, and the
+    /// one that is being read: its number and its points.
+    curves: BTreeMap<u16, [f32; 128]>,
+    curve: Option<(Option<u16>, Vec<(u8, f32)>)>,
 }
 
 impl Reader {
+    /// Keeps the curve that was being read: a straight line from each of
+    /// its points to the next, from 0 at the bottom to 1 at the top where
+    /// it does not say.
+    fn finish_curve(&mut self) {
+        let Some((Some(number), mut points)) = self.curve.take() else { return };
+        if !points.iter().any(|(at, _)| *at == 0) {
+            points.push((0, 0.0));
+        }
+        if !points.iter().any(|(at, _)| *at == 127) {
+            points.push((127, 1.0));
+        }
+        points.sort_by_key(|(at, _)| *at);
+        let mut table = [0.0f32; 128];
+        for pair in points.windows(2) {
+            let ((from, low), (to, high)) = (pair[0], pair[1]);
+            for at in from..=to {
+                let share = if to > from { f32::from(at - from) / f32::from(to - from) } else { 0.0 };
+                table[usize::from(at)] = low + (high - low) * share;
+            }
+        }
+        self.curves.insert(number, table);
+    }
+
     fn header(&mut self, name: &str) {
         self.finish_region();
+        self.finish_curve();
         self.level = match name {
             "control" => Level::Control,
             "global" => {
@@ -157,6 +221,10 @@ impl Reader {
                 self.region = Some(Vec::new());
                 Level::Region
             }
+            "curve" => {
+                self.curve = Some((None, Vec::new()));
+                Level::Curve
+            }
             other => {
                 *self.unsupported.entry(format!("<{other}>")).or_default() += 1;
                 Level::Other
@@ -173,6 +241,14 @@ impl Reader {
             Level::Region => self.region.get_or_insert_default().push((name, value)),
             // Pairs before any header belong to every region.
             Level::None => self.global.push((name, value)),
+            Level::Curve => {
+                let Some((number, points)) = &mut self.curve else { return };
+                match (name.as_str(), name.strip_prefix('v').and_then(|at| at.parse::<u8>().ok())) {
+                    ("curve_index", _) => *number = number_of(&value).map(|index| index.max(0.0) as u16),
+                    (_, Some(at)) if at <= 127 => points.push((at, number_of(&value).unwrap_or(0.0))),
+                    _ => {}
+                }
+            }
             Level::Other => {}
         }
     }
@@ -233,9 +309,28 @@ impl Reader {
 
     /// Puts a finished region among the instrument's, if it plays.
     fn keep(&mut self, building: Building) {
-        let Building { mut region, sample, label, curve, disabled, filter_envelope, filter_depth, tune, transpose } =
-            building;
+        let Building {
+            mut region,
+            sample,
+            label,
+            curve,
+            disabled,
+            filter_envelope,
+            filter_depth,
+            tune,
+            transpose,
+            volumes,
+            curves,
+        } = building;
         region.tune = tune + 100.0 * transpose;
+        region.volume += volumes.iter().sum::<f32>();
+        // What a controller moves is read along the curve that was named
+        // for it, wherever in the file that was.
+        for control in &mut region.controls {
+            let named = curves.iter().rev().find(|(moved, controller, _)| (*moved, *controller) == (Some(control.moved), control.controller));
+            control.curve = named.map_or(0, |(_, _, curve)| *curve);
+        }
+
         if let (Some(label), Some((key, _))) = (label, region.switched.last) {
             self.labels.entry(key).or_insert(label);
         }
@@ -293,6 +388,8 @@ impl Reader {
         let whole = |value: f32| value.max(0.0).round() as u32;
         match name {
             "sample" => building.sample = Some(value.to_string()),
+            // A key under the keyboard is no key: nothing plays it.
+            "lokey" | "hikey" if number.is_some_and(|key| key < 0.0) => building.disabled = true,
             "lokey" => region.keys.0 = key.unwrap_or(0),
             "hikey" => region.keys.1 = key.unwrap_or(127),
             "key" => match key {
@@ -350,7 +447,9 @@ impl Reader {
             }
             "off_time" | "offtime" => region.off_mode = OffMode::Time(amount.max(0.0)),
             "note_polyphony" => region.note_polyphony = Some(whole(amount).clamp(1, 64) as u16),
+            "polyphony" => region.polyphony = Some(whole(amount).clamp(1, 256) as u16),
             "sustain_sw" => self.instrument.pedal = !value.trim().eq_ignore_ascii_case("off"),
+            "sustain_cc" if (0.0..=127.0).contains(&amount) => self.instrument.pedal_controller = amount as u8,
 
             "tune" | "pitch" => building.tune = amount,
             "transpose" => building.transpose = amount,
@@ -361,6 +460,11 @@ impl Reader {
             "bend_down" | "benddown" => region.bend_down = amount,
 
             "volume" | "gain" => region.volume = amount,
+            // The levels above a region each have a volume of their own,
+            // and they add up.
+            "global_volume" => building.volumes[0] = amount,
+            "master_volume" => building.volumes[1] = amount,
+            "group_volume" => building.volumes[2] = amount,
             "amplitude" => region.amplitude = (amount / 100.0).max(0.0),
             "pan" => region.pan = (amount / 100.0).clamp(-1.0, 1.0),
             "width" => region.width = (amount / 100.0).clamp(-1.0, 1.0),
@@ -443,8 +547,16 @@ impl Reader {
             // which output, how carefully to interpolate, names for a
             // maker's own editor.
             "lochan" | "hichan" | "output" | "sample_quality" | "region_label" | "group_label" | "master_label"
-            | "global_label" | "script" | "md5" => {}
+            | "global_label" | "script" | "md5" | "ampeg_dynamic" | "off_shape" => {}
             _ if name.starts_with("hint_") => {}
+            // Every controller is smoothed here, the same for all.
+            _ if name.contains("_smoothcc") || name.contains("_stepcc") => {}
+            // A region that a controller sets off, not a key: it is left
+            // out, since nothing here would set it off, and said.
+            _ if name.starts_with("on_locc") || name.starts_with("on_hicc") => {
+                building.disabled = true;
+                return false;
+            }
             _ => return self.numbered(building, name, amount, value),
         }
         true
@@ -461,6 +573,26 @@ impl Reader {
         }
         let (stem, number) = split_number(name);
         let Some(number) = number else { return false };
+        // Which curve a controller is read along, for something it moves.
+        if let Some(moved) = stem.strip_suffix("_curvecc") {
+            let moved = match moved {
+                "volume" | "gain" => Moved::Volume,
+                "amplitude" => Moved::Amplitude,
+                "pan" => Moved::Pan,
+                "tune" | "pitch" => Moved::Tune,
+                "cutoff" => Moved::Cutoff,
+                "pitchlfo_depth" => Moved::Vibrato,
+                "amplfo_depth" => Moved::Tremolo,
+                "amp_veltrack" => Moved::Dynamics,
+                "width" => Moved::Width,
+                _ => return false,
+            };
+            if number > 127 {
+                return false;
+            }
+            building.curves.push((Some(moved), number as u8, amount.max(0.0) as u16));
+            return true;
+        }
         let region = &mut building.region;
         if stem == "amp_velcurve_" {
             if number <= 127 {
@@ -526,6 +658,8 @@ impl Reader {
             "cutoff_oncc" => Moved::Cutoff,
             "pitchlfo_depth_oncc" => Moved::Vibrato,
             "amplfo_depth_oncc" => Moved::Tremolo,
+            "amp_veltrack_oncc" => Moved::Dynamics,
+            "width_oncc" => Moved::Width,
             _ => return false,
         };
         let _ = value;
@@ -536,7 +670,7 @@ impl Reader {
             _ => {}
         }
         region.controls.retain(|control| !(control.controller == controller && control.moved == moved));
-        region.controls.push(Control { controller, moved, depth: amount });
+        region.controls.push(Control { controller, moved, depth: amount, curve: 0 });
         true
     }
 }
@@ -556,6 +690,11 @@ struct Building {
     transpose: f32,
     filter_envelope: Envelope,
     filter_depth: f32,
+    /// The volumes of the levels above it: global, master, group.
+    volumes: [f32; 3],
+    /// The curves named for what controllers move: what, which
+    /// controller, which curve.
+    curves: Vec<(Option<Moved>, u8, u16)>,
 }
 
 /// One pair of an envelope: `attack`, `vel2attack`, `attack_oncc72`.
@@ -594,12 +733,33 @@ fn envelope_pair(envelope: &mut Envelope, rest: &str, amount: f32) -> bool {
         return true;
     }
     let (stem, number) = split_number(rest);
+    // The curve a controller is read along for a stage it lengthens.
+    if let (Some(stage), Some(controller)) = (stem.strip_suffix("_curvecc").and_then(stage_of), number) {
+        let found = envelope.by_controller.iter_mut().find(|(which, number, _, _)| *which == stage && u32::from(*number) == controller);
+        return match found {
+            Some(entry) => {
+                entry.3 = amount.max(0.0) as u16;
+                true
+            }
+            // Said before the amount it belongs to: kept with nothing to move yet.
+            None if controller <= 127 => {
+                envelope.by_controller.push((stage, controller as u8, 0.0, amount.max(0.0) as u16));
+                true
+            }
+            None => false,
+        };
+    }
     let word = stem.strip_suffix("_oncc").or_else(|| stem.strip_suffix("cc"));
     match (word.and_then(stage_of), number) {
         (Some(stage), Some(controller)) if controller <= 127 => {
             let controller = controller as u8;
-            envelope.by_controller.retain(|(which, number, _)| !(*which == stage && *number == controller));
-            envelope.by_controller.push((stage, controller, scaled(stage)));
+            let curve = envelope
+                .by_controller
+                .iter()
+                .find(|(which, number, _, _)| *which == stage && *number == controller)
+                .map_or(0, |(_, _, _, curve)| *curve);
+            envelope.by_controller.retain(|(which, number, _, _)| !(*which == stage && *number == controller));
+            envelope.by_controller.push((stage, controller, scaled(stage), curve));
             true
         }
         _ => false,
@@ -714,6 +874,11 @@ fn velocity_curve(points: &[(u8, f32)]) -> Box<[f32; 128]> {
 fn missed(name: &str) -> &'static str {
     let name = name.trim_start_matches('<');
     let starts = |words: &[&str]| words.iter().any(|word| name.starts_with(word));
+    let (stem, number) = split_number(name);
+    if stem.ends_with("cc") && number.is_some_and(|number| number > 127) {
+        return "what its maker's player makes up as controllers beyond the 128 of MIDI (how fast a key came up, a \
+                number at random)";
+    }
     if starts(&["effect", "reverb", "chorus", "fx", "apan", "comp_", "gate_", "disto", "strings_"]) {
         "effects of its own (a reverb, a chorus)"
     } else if starts(&["eq"]) {
@@ -728,14 +893,14 @@ fn missed(name: &str) -> &'static str {
         "controller curves of its own (a controller acts along a straight line)"
     } else if starts(&["direction", "count", "loop_count", "sync", "delay_", "offset_", "loop_", "sample_fade"]) {
         "ways of playing a recording through (backwards, a number of times, in time with the song)"
-    } else if starts(&["sostenuto", "sustain_", "polyphony", "note_selfmask", "rt_dead"]) {
-        "its rules for pedals and for how many voices sound at once"
+    } else if starts(&["sostenuto", "sustain_", "note_selfmask", "rt_dead"]) {
+        "its rules for pedals and for which of a key's voices give way"
     } else if starts(&["lobend", "hibend", "lochanaft", "hichanaft", "lopolyaft", "hipolyaft", "lobpm", "hibpm"])
         || starts(&["lotimer", "hitimer", "sw_vel", "lohdcc", "hihdcc", "loprog", "hiprog", "pitch_keycenter"])
     {
         "conditions on which recording sounds (the pitch wheel, the pressure, the tempo, a file's own root note)"
-    } else if name.contains("_smoothcc") || name.contains("_stepcc") || starts(&["bend_step", "bend_smooth"]) {
-        "how smoothly or in what steps a controller moves things"
+    } else if starts(&["bend_step", "bend_smooth"]) {
+        "how smoothly or in what steps the pitch wheel moves"
     } else {
         "settings this player does not know"
     }
@@ -839,8 +1004,8 @@ mod tests {
         assert_eq!(loud.fade_controllers, [(1, Fade { in_low: 40.0, in_high: 90.0, out_low: 127.0, out_high: 127.0 })]);
         assert_eq!((soft.controller_curve, loud.controller_curve), (FadeCurve::Power, FadeCurve::Gain));
         assert_eq!(soft.vibrato, Some(Wobble { rate: 5.0, ..Wobble::default() }));
-        assert_eq!(soft.controls, [Control { controller: 1, moved: Moved::Vibrato, depth: 30.0 }]);
-        assert_eq!(loud.envelope.by_controller, [(Stage::Attack, 73, 2.0)]);
+        assert_eq!(soft.controls, [Control { controller: 1, moved: Moved::Vibrato, depth: 30.0, curve: 0 }]);
+        assert_eq!(loud.envelope.by_controller, [(Stage::Attack, 73, 2.0, 0)]);
         assert_eq!(loud.envelope.by_velocity, [(Stage::Attack, -0.1)]);
         assert_eq!((first.turn, first.random), ((2, 1), (0.0, 0.5)));
         assert_eq!((second.turn, second.random), ((2, 2), (0.5, 1.0)));
@@ -858,8 +1023,8 @@ mod tests {
     fn what_this_player_does_not_do_is_counted_by_name_and_the_rest_still_reads() {
         let kit = read_text(
             "<control> hint_ram_based=1 set_cc300=1\n<global> eq1_gain=3 eq1_freq=80 lfo01_freq=4 lfo01_pitch=10\n\
-             <effect> type=reverb\n<curve> curve_index=7 v000=0\n\
-             <group> key=36 loop_mode=one_shot off_by=2 group=1 off_mode=time off_time=0.2 polyphony=4\n\
+             <effect> type=reverb\n<midi> x=1\n\
+             <group> key=36 loop_mode=one_shot off_by=2 group=1 off_mode=time off_time=0.2 cutoff2=500\n\
              <region> sample=kick.wav on_locc64=1 cutoff=900 fil_type=lpf_2p fil_veltrack=1200 fileg_depth=2400 fileg_decay=0.1\n\
              <region> sample=*sine key=40\n<region> sample=*silence key=41 group=2\n\
              <region> sample=snare.wav key=38 direction=reverse trigger=whenever gain_cc7=-6 amplitude_cc11=100",
@@ -871,8 +1036,8 @@ mod tests {
             ("eq1_freq", 4),
             ("lfo01_freq", 4),
             ("<effect>", 1),
-            ("<curve>", 1),
-            ("polyphony", 4),
+            ("<midi>", 1),
+            ("cutoff2", 4),
             ("on_locc64", 1),
             ("sample=*sine", 1),
             ("direction", 1),
@@ -886,7 +1051,14 @@ mod tests {
         assert!(effects.miss.contains("effects of its own"));
         assert!(kit.unsupported.iter().find(|un| un.name == "eq1_gain").unwrap().miss.contains("equalisers"));
         // And what it does do is all there.
-        let [kick, silence, snare] = kit.regions.as_slice() else { panic!("{}", kit.regions.len()) };
+        // A region that a controller would set off is left out: nothing here sets it off.
+        let [silence, snare] = kit.regions.as_slice() else { panic!("{}", kit.regions.len()) };
+        let kick = read_text(
+            "<group> key=36 off_by=2 group=1 off_mode=time off_time=0.2\n\
+             <region> sample=kick.wav cutoff=900 fil_type=lpf_2p fil_veltrack=1200 fileg_depth=2400 fileg_decay=0.1",
+        )
+        .unwrap();
+        let kick = &kick.regions[0];
         assert_eq!((kick.keys, kick.off_by, kick.group, kick.off_mode), ((36, 36), Some(2), 1, OffMode::Time(0.2)));
         let filter = kick.filter.as_ref().unwrap();
         assert_eq!((filter.kind, filter.cutoff, filter.by_velocity), (FilterKind::LowPass2, 900.0, 1_200.0));
@@ -894,8 +1066,8 @@ mod tests {
         assert_eq!((envelope.decay, *depth), (0.1, 2_400.0));
         assert_eq!((silence.recording, silence.group), (None, 2));
         assert_eq!(snare.controls.len(), 2);
-        assert_eq!(snare.controls[0], Control { controller: 7, moved: Moved::Volume, depth: -6.0 });
-        assert_eq!(snare.controls[1], Control { controller: 11, moved: Moved::Amplitude, depth: 100.0 });
+        assert_eq!(snare.controls[0], Control { controller: 7, moved: Moved::Volume, depth: -6.0, curve: 0 });
+        assert_eq!(snare.controls[1], Control { controller: 11, moved: Moved::Amplitude, depth: 100.0, curve: 0 });
         assert!(kit.summary().drums);
 
         assert_eq!(read_text("<group> lokey=1").unwrap_err(), "it has no regions that play a recording");

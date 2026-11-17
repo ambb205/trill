@@ -36,7 +36,7 @@
 //! needs ([`trill_core::device::Purpose::Rendering`]).
 
 use super::loaded::Loaded;
-use super::model::{FilterKind, LoopMode, Moved, OffMode, Region, Stage, Trigger};
+use super::model::{FilterKind, LoopMode, Moved, OffMode, Region, Stage, Trigger, along};
 use super::pool::{Audio, Pool};
 use super::read::{Kernel, kernel_for, read, read_mapped};
 use crate::define_params;
@@ -189,7 +189,7 @@ impl Shape {
     fn of(
         envelope: &super::model::Envelope,
         velocity: f32,
-        controller: impl Fn(u8) -> f32 + Copy,
+        controller: impl Fn(u8, u16) -> f32 + Copy,
         sample_rate: f32,
         floor: f32,
     ) -> Self {
@@ -379,6 +379,8 @@ struct Voice {
     wait: u32,
     /// The level of the note itself.
     gain: f32,
+    /// How much of a stereo recording's width is kept.
+    width: f32,
     left_gain: f32,
     right_gain: f32,
     left_step: f32,
@@ -419,6 +421,7 @@ impl Voice {
             ratio: 0.0,
             wait: 0,
             gain: 0.0,
+            width: 1.0,
             left_gain: 0.0,
             right_gain: 0.0,
             left_step: 0.0,
@@ -521,6 +524,7 @@ impl Voice {
     fn place(&mut self, moment: &Moment) {
         let region = &moment.loaded.instrument.regions[self.region as usize];
         let sample_rate = moment.sample_rate;
+        let curves = &moment.loaded.instrument.curves;
         let controller = |number: u8| moment.controllers[usize::from(number)];
 
         // The pitch: the wheel, controllers, vibrato.
@@ -530,8 +534,9 @@ impl Voice {
         };
         let mut cents = if moment.wheel >= 0.0 { moment.wheel * up } else { -moment.wheel * down };
         let (mut vibrato, mut tremolo, mut volume, mut share, mut pan, mut cutoff) = (0.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+        let mut width = region.width;
         for control in &region.controls {
-            let position = controller(control.controller);
+            let position = along(curves, control.curve, controller(control.controller));
             match control.moved {
                 Moved::Volume => volume += control.depth * position,
                 Moved::Amplitude => share *= control.depth / 100.0 * position,
@@ -540,6 +545,9 @@ impl Voice {
                 Moved::Cutoff => cutoff += control.depth * position,
                 Moved::Vibrato => vibrato += control.depth * position,
                 Moved::Tremolo => tremolo += control.depth * position,
+                Moved::Width => width += control.depth / 100.0 * position,
+                // Read once, when the note began.
+                Moved::Dynamics => {}
             }
         }
         let wave = |wobble: &super::model::Wobble, seconds: f32| {
@@ -601,6 +609,7 @@ impl Voice {
         if let Some(wobble) = &region.tremolo {
             gain *= db_to_gain((wobble.depth + tremolo) * wave(wobble, self.seconds));
         }
+        self.width = width.clamp(-1.0, 1.0);
         let (pan_left, pan_right) = pan_gains((region.pan + pan).clamp(-1.0, 1.0));
         let (left, right) = (gain * pan_left * moment.derived.gain_left, gain * pan_right * moment.derived.gain_right);
         if self.fresh {
@@ -621,13 +630,13 @@ impl Voice {
 
     /// Adds the voice's next frames to the output. `levels` is the level
     /// of the whole instrument at each of them.
-    fn render(&mut self, region: &Region, levels: &[f32], left: &mut [f32], right: &mut [f32]) {
+    fn render(&mut self, levels: &[f32], left: &mut [f32], right: &mut [f32]) {
         // Taken out while it is read, and put back: nothing is counted.
         let Some(audio) = self.audio.take() else {
             self.stop();
             return;
         };
-        let width = if audio.is_mono() { 1.0 } else { region.width };
+        let width = if audio.is_mono() { 1.0 } else { self.width };
         for ((left, right), level) in left.iter_mut().zip(right.iter_mut()).zip(levels) {
             if self.wait > 0 {
                 self.wait -= 1;
@@ -847,6 +856,26 @@ impl Player {
                 }
             }
         }
+        if let Some(most) = region.polyphony {
+            // Its group has only so many voices: the oldest gives way.
+            let same = |voice: &&mut Voice| {
+                voice.playing()
+                    && voice.age != self.clock
+                    && loaded.instrument.regions[voice.region as usize].group == region.group
+            };
+            while self.voices.iter_mut().filter(same).count() >= usize::from(most) {
+                let Some(voice) = self.voices.iter_mut().filter(same).min_by_key(|voice| voice.age) else { break };
+                match loaded.instrument.regions[voice.region as usize].off_mode {
+                    OffMode::Fast => voice.fade.start(FAST_OFF_SECONDS, sample_rate),
+                    OffMode::Time(seconds) => voice.fade.start(seconds.max(0.001), sample_rate),
+                    // By its own release, and out of the count from now.
+                    OffMode::Normal => {
+                        voice.let_go();
+                        voice.fade.start(region.envelope.release.max(SHORTEST_RELEASE) * 4.0, sample_rate);
+                    }
+                }
+            }
+        }
         if let Some(most) = region.note_polyphony {
             let same = |voice: &&mut Voice| {
                 voice.playing()
@@ -918,15 +947,25 @@ impl Player {
         let level = region.volume
             + region.level_by_key * (f32::from(key) - f32::from(region.level_centre))
             + region.level_random * (chance(own, 3) * 2.0 - 1.0);
-        let by_velocity = region.velocity_gain(velocity).max(0.0).powf(self.derived.dynamics);
+        let put = self.put;
+        let curves = &loaded.instrument.curves;
+        let controller = |number: u8, curve: u16| along(curves, curve, put[usize::from(number)]);
+        // How much the velocity decides: what the region says, moved by
+        // the controllers the instrument has for that.
+        let track = region
+            .controls
+            .iter()
+            .filter(|control| control.moved == Moved::Dynamics)
+            .fold(region.level_by_velocity, |track, control| {
+                track + control.depth / 100.0 * controller(control.controller, control.curve)
+            });
+        let by_velocity = region.velocity_gain_tracking(velocity, track).max(0.0).powf(self.derived.dynamics);
         let gain = gain
             * db_to_gain(level)
             * region.amplitude
             * by_velocity
             * region.fade_keys.gain(f32::from(key), region.key_curve)
             * region.fade_velocities.gain(velocity * 127.0, region.velocity_fade_curve);
-        let put = self.put;
-        let controller = |number: u8| put[usize::from(number)];
         let delay = region.delay + region.delay_random * chance(own, 4);
         let tone = region.filter.as_ref().map(|filter| {
             let (envelope, depth) = match &filter.envelope {
@@ -977,6 +1016,7 @@ impl Player {
             ratio: 0.0,
             wait: (delay * sample_rate).round().max(0.0) as u32,
             gain,
+            width: region.width,
             left_gain: 0.0,
             right_gain: 0.0,
             left_step: 0.0,
@@ -1081,8 +1121,8 @@ impl Player {
                 if !sounding {
                     self.controllers[usize::from(number)] = self.put[usize::from(number)];
                 }
-                if let Some(down) = kind.sustain() {
-                    for key in self.pedal.set(down) {
+                if number == loaded.instrument.pedal_controller {
+                    for key in self.pedal.set(value >= 0.5) {
                         if loaded.instrument.pedal && !self.is_down(key) {
                             self.end_note(loaded, key, place);
                         }
@@ -1133,8 +1173,7 @@ impl Player {
             if at_point || voice.fresh {
                 voice.place(&moment);
             }
-            let region = &loaded.instrument.regions[voice.region as usize];
-            voice.render(region, &levels[..left.len()], left, right);
+            voice.render(&levels[..left.len()], left, right);
         }
     }
 }
