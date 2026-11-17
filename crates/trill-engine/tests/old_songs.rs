@@ -8,7 +8,7 @@
 //! to numbers that the last build with the old effects (commit 724556d)
 //! wrote down from the same file: the level of each side, and sixteen
 //! samples of each from the first to the tail. Further down are the files
-//! of formats 2, 3 and 5, each with the numbers of the last build that
+//! of formats 2, 3, 5 and 6, each with the numbers of the last build that
 //! wrote that format.
 //!
 //! The numbers are never to be written down again from a newer build: that
@@ -891,7 +891,7 @@ fn a_song_of_format_3_renders_to_the_samples_it_rendered_to_before() {
     let factory = Builtins::with_loader(Arc::new(MediaCache::default()));
     // How that build had an envelope on these two parameters travel: along
     // a fader down to the lowest value each had then.
-    let (volume, gain) = (Travel::Fader { floor: -48.0 }, Travel::Fader { floor: -70.0 });
+    let (volume, gain) = (Travel::Square { floor: -48.0 }, Travel::Square { floor: -70.0 });
     let songs = [
         ("a sampler beside a synth through a saturator", band(&hit)),
         ("an envelope on a synth's volume, along its fader", faded(volume, gain)),
@@ -908,8 +908,8 @@ fn a_song_of_format_3_renders_to_the_samples_it_rendered_to_before() {
 // ---- Format 5 --------------------------------------------------------------
 //
 // And for a file of format 5, the last with the reverb, the echo, the
-// compressor, the pitch shifter and the synth's volume as they were before
-// format 6. The build that wrote that format (commit 9cd3a13) wrote these
+// compressor and the synth's volume as they were before format 7, and a
+// fader's travel as it was before format 6. The build that wrote that format (commit 9cd3a13) wrote these
 // numbers down.
 
 /// The source through one device, as a file sets it.
@@ -988,8 +988,9 @@ fn swelled(travel: Travel) -> Project {
     project
 }
 
-/// The songs of format 5, by what each holds to.
-fn fifth(source: &str, hit: &str) -> Vec<(&'static str, Project)> {
+/// The songs of formats 5 and 6, by what each holds to. `fader` is how a
+/// fader travels in the format: the one thing that differs between the two.
+fn fifth(source: &str, hit: &str, fader: Travel) -> Vec<(&'static str, Project)> {
     let reverb = |params: &[(&str, f64)]| through_device(source, "builtin:reverb", params);
     let delay = |params: &[(&str, f64)]| through_device(source, "builtin:delay", params);
     let compressor = |params: &[(&str, f64)]| through_device(source, "builtin:compressor", params);
@@ -1094,7 +1095,7 @@ fn fifth(source: &str, hit: &str) -> Vec<(&'static str, Project)> {
             shifter(&[("pitch", 7.0), ("mix", 0.5), ("window", 30.0)]),
         ),
         ("a chord drawn two octaves down", dived()),
-        ("a synth's volume drawn along its fader", swelled(Travel::Fader { floor: -70.0 })),
+        ("a synth's volume drawn along its fader", swelled(fader)),
         ("the same, straight in decibels", swelled(Travel::Linear)),
         ("a synth with noise beside a sampler", noisy),
     ]
@@ -1281,9 +1282,204 @@ fn a_song_of_format_5_renders_to_the_samples_it_rendered_to_before() {
     let folder = folder();
     let (source, hit) = files(&folder);
     let factory = Builtins::with_loader(Arc::new(MediaCache::default()));
-    let songs = fifth(&source, &hit);
+    let songs = fifth(&source, &hit, Travel::Square { floor: -70.0 });
     assert_eq!(songs.len(), FIFTH.len());
     for ((what, song), expected) in songs.iter().zip(&FIFTH) {
         assert_as_it_was(&print_with(&of_format(song, 5), &factory), expected, what);
+    }
+}
+
+// ---- Format 6 --------------------------------------------------------------
+//
+// The same songs as a file of format 6 has them: the devices are those of
+// format 5, and a fader travels as it does now. The last build that wrote
+// that format (commit dcf02d7) wrote these numbers down. Only the song with
+// a fader in it differs from format 5's.
+
+/// What they rendered to, in the order [`fifth`] has them.
+#[rustfmt::skip]
+const SIXTH: [Print; 19] = [
+    // a reverb as it comes
+    [
+        1.2487576e-1, 9.369102e-2, -1.456095e-1, 1.21230915e-1, 1.7791017e-3, 6.290332e-3,
+        -3.2727312e-2, 3.1598184e-2, 3.07179e-1, 1.643636e-1, -4.2753652e-1, -2.334231e-1,
+        7.8526735e-2, -3.688707e-2, 5.67325e-3, 8.0995545e-2, 7.262894e-2, -3.096625e-3,
+        5.4949272e-2, -2.538193e-2, -3.1592753e-2, 5.0532427e-2, -2.7412546e-4, -1.2921012e-2,
+        -7.0782253e-3, 2.4641426e-3, -1.5184189e-4, -4.8893704e-3, -5.477147e-4, 2.2243133e-3,
+        -6.264941e-4, 2.0950544e-3, 1.006974e-3, -1.923849e-3,
+    ],
+    // a room
+    [
+        2.4334118e-2, 2.2823792e-2, 0e0, 0e0, 3.8653612e-3, 1.7410713e-3,
+        -1.5469053e-3, 1.2879454e-3, -1.4219998e-2, -5.0088543e-2, 1.5747076e-2, 3.6362145e-2,
+        2.7272122e-2, 4.0347584e-2, -4.5453224e-2, -1.7540518e-2, 4.320483e-2, 8.153635e-3,
+        -2.2935841e-2, 5.397584e-3, 7.010493e-3, -3.3080778e-3, 1.102937e-3, 8.0599326e-5,
+        1.4697916e-4, -1.2698163e-4, -3.043005e-6, -1.4876715e-6, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0,
+    ],
+    // a hall
+    [
+        4.875937e-2, 9.963664e-2, 0e0, 0e0, -4.136988e-2, -3.667916e-2,
+        1.7562764e-2, -8.731279e-3, -1.9222887e-2, 3.6308557e-2, 1.324427e-1, -2.4928527e-1,
+        -9.4876274e-2, -5.3555388e-2, -9.286055e-2, 3.3603054e-1, -5.958629e-2, -6.987414e-2,
+        1.20702155e-1, -1.4695668e-1, -4.375379e-2, 8.186348e-2, -4.2718865e-2, -2.3151228e-2,
+        -6.4993943e-3, 4.7408197e-2, 2.363555e-3, -3.1020546e-2, 4.54875e-3, 3.2328398e-3,
+        -5.545939e-3, 7.486666e-3, 2.4277794e-3, -3.0151915e-4,
+    ],
+    // a long reverb, narrow and moving
+    [
+        1.2056145e-1, 8.48255e-2, -1.456095e-1, 1.21230915e-1, 2.460106e-3, -9.6708415e-3,
+        -6.945077e-3, 3.3209678e-2, 2.9053664e-1, 1.7112944e-1, -4.3750528e-1, -1.4579266e-1,
+        1.3500205e-1, -1.0284962e-1, 1.6448554e-3, -2.6242923e-2, 4.722578e-2, 1.2475668e-2,
+        1.1245453e-2, 1.1726048e-2, 2.8606184e-2, 4.3278743e-2, -1.8398337e-2, -1.1615794e-2,
+        4.5432555e-3, -1.31293675e-2, 4.358775e-3, 1.3571087e-2, -9.3285255e-3, 8.301351e-3,
+        2.6618512e-3, 1.3360055e-3, -2.5163714e-3, -1.772475e-3,
+    ],
+    // an echo as it comes
+    [
+        1.4570792e-1, 1.1214071e-1, -1.456095e-1, 1.21230915e-1, 1.674405e-2, -6.842109e-3,
+        1.7801391e-2, 2.7405798e-2, 2.8344643e-1, 1.948557e-1, -4.3045008e-1, -9.802877e-3,
+        2.1118666e-1, -1.475191e-1, -7.1441114e-2, 1.2859178e-3, 5.6714635e-2, 1.717864e-1,
+        -6.0462367e-2, -2.6330566e-2, -6.735341e-2, -4.370422e-2, 1.5825983e-2, -7.0299976e-2,
+        -2.8567782e-3, -6.408724e-2, 2.1759478e-2, 1.8018998e-2, -1.6791916e-2, -2.2467042e-3,
+        6.7808665e-3, 6.325043e-2, 4.107638e-3, -2.9024934e-2,
+    ],
+    // a ping-pong echo
+    [
+        1.0087546e-1, 1.0076511e-1, 0e0, 0e0, 0e0, 0e0,
+        5.080104e-2, 0e0, -2.2122292e-2, 0e0, 4.35132e-3, 2.8532293e-1,
+        5.9825327e-2, 1.884898e-2, -4.8845347e-2, 2.6328812e-4, -4.1742586e-2, 5.3244557e-2,
+        -1.1408874e-1, 5.4309364e-2, -2.0378521e-1, -4.1813243e-2, 3.9707635e-2, -9.088155e-2,
+        2.5824027e-3, -1.24404825e-1, 9.833225e-2, 2.928074e-2, -1.7216463e-2, 5.6621167e-3,
+        -5.7372036e-3, 1.5286472e-1, 5.878913e-3, -7.6903865e-2,
+    ],
+    // an echo on each side
+    [
+        1.5919738e-1, 1.3976902e-1, -1.456095e-1, 1.21230915e-1, 1.5433486e-1, 1.8699533e-1,
+        1.8080574e-1, 1.6049175e-1, 3.438541e-1, 1.8546793e-1, -3.030382e-1, -8.104991e-2,
+        -4.188658e-2, -4.211251e-2, 1.8861089e-2, -3.4384567e-2, 2.329443e-1, 2.2779317e-1,
+        -1.1394604e-1, -1.14264615e-1, -2.7986309e-2, -2.9556645e-2, -6.727503e-3, -7.5632087e-3,
+        -3.9899573e-2, -3.981835e-2, 1.7635012e-2, 1.7749967e-2, -1.902259e-2, -1.9047385e-2,
+        1.0601035e-2, 1.0564922e-2, -7.2452063e-3, -7.2448673e-3,
+    ],
+    // a compressor with automatic makeup
+    [
+        2.3961799e-1, 1.8811439e-1, -1.5910019e-1, 1.3246293e-1, 5.456176e-2, -2.2295533e-2,
+        -8.977923e-2, 1.0565223e-1, 4.1217068e-1, 2.7478045e-1, -4.682053e-1, -1.7023948e-1,
+        1.9842929e-1, -2.3284045e-1, -2.5047285e-3, 2.9507193e-3, 1.5294619e-1, 1.5294619e-1,
+        0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0,
+    ],
+    // another, lower and faster
+    [
+        1.9709028e-1, 1.5387945e-1, -1.19082026e-1, 9.914479e-2, 5.7467587e-2, -2.3482937e-2,
+        -7.5651474e-2, 8.902668e-2, 3.413982e-1, 2.2759883e-1, -3.912589e-1, -1.4226176e-1,
+        1.6957752e-1, -1.9898528e-1, -2.0256713e-3, 2.3863616e-3, 1.23679176e-1, 1.23679176e-1,
+        0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0,
+    ],
+    // a bus compressor that lets go by itself
+    [
+        1.6178074e-1, 1.2498948e-1, -1.3764171e-1, 1.14597134e-1, 1.5192597e-2, -6.20814e-3,
+        -2.3317095e-2, 2.7439566e-2, 2.9196745e-1, 1.9464497e-1, -3.8516408e-1, -1.4004569e-1,
+        1.292293e-1, -1.5163997e-1, -1.5741943e-3, 1.8544947e-3, 9.6466094e-2, 9.6466094e-2,
+        0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0,
+    ],
+    // a compressor set by hand
+    [
+        1.4660458e-1, 1.1473271e-1, -9.575175e-2, 7.9720564e-2, 3.0474385e-2, -1.2452725e-2,
+        -6.1835658e-2, 7.276822e-2, 2.5386465e-1, 1.6924311e-1, -2.8054407e-1, -1.0200585e-1,
+        1.2162312e-1, -1.4271472e-1, -1.5002475e-3, 1.7673811e-3, 9.304271e-2, 9.304271e-2,
+        0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0,
+    ],
+    // a track compressor that lets go by itself
+    [
+        8.216123e-2, 6.40649e-2, -7.436335e-2, 6.191311e-2, 1.0142031e-2, -4.1443305e-3,
+        -1.7805979e-2, 2.0954082e-2, 1.4927135e-1, 9.9514246e-2, -1.6812478e-1, -6.113018e-2,
+        6.0597867e-2, -7.110661e-2, -8.125975e-4, 9.572883e-4, 5.1136784e-2, 5.1136784e-2,
+        0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0,
+    ],
+    // a chord ducked under hits it listens to
+    [
+        6.8212725e-2, 6.8212725e-2, 2.900361e-3, 2.900361e-3, 4.2729266e-2, 4.2729266e-2,
+        -7.324805e-2, -7.324805e-2, -2.593644e-2, -2.593644e-2, -9.748129e-2, -9.748129e-2,
+        7.331698e-2, 7.331698e-2, -6.461617e-2, -6.461617e-2, 1.1391542e-2, 1.1391542e-2,
+        -1.954452e-2, -1.954452e-2, 2.9850613e-2, 2.9850613e-2, -2.9783769e-2, -2.9783769e-2,
+        1.5667204e-2, 1.5667204e-2, -2.5295343e-5, -2.5295343e-5, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0,
+    ],
+    // a pitch shifter an octave down
+    [
+        1.6927509e-1, 1.3017713e-1, -7.451034e-2, 1.0141225e-2, 2.5031518e-2, 1.5094188e-2,
+        -1.744198e-2, -2.2853993e-2, 2.9647836e-1, -2.6884312e-2, -2.0339018e-1, 2.4176697e-1,
+        -2.0891027e-1, -2.1367122e-1, 3.0365622e-1, 2.8604412e-1, 9.654566e-2, 9.654566e-2,
+        -5.2132476e-2, -5.2132476e-2, 0e0, 0e0, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0,
+    ],
+    // a pitch shifter a fifth up, half mixed, on a short window
+    [
+        1.7021798e-1, 1.311826e-1, -1.336291e-1, 6.5630324e-2, 4.5281835e-2, 2.0122994e-2,
+        3.2330353e-2, 3.0804513e-2, 3.7973857e-1, 2.6996067e-1, -1.5563667e-1, 6.478372e-2,
+        9.844776e-2, -1.07088424e-1, -1.5014377e-1, -1.5046038e-1, 2.0908614e-1, 2.0908614e-1,
+        2.4601221e-2, 2.4601221e-2, 0e0, 0e0, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0,
+    ],
+    // a chord drawn two octaves down
+    [
+        1.7751977e-1, 1.7751977e-1, 1.7407482e-2, 1.7407482e-2, 2.1309443e-1, 2.1309443e-1,
+        -2.7073213e-1, -2.7073213e-1, -7.51098e-2, -7.51098e-2, -2.1937032e-1, -2.1937032e-1,
+        3.160464e-1, 3.160464e-1, 3.0047205e-1, 3.0047205e-1, -7.200999e-2, -7.200999e-2,
+        1.7763774e-1, 1.7763774e-1, -3.689953e-2, -3.689953e-2, 4.2411852e-1, 4.2411852e-1,
+        -5.083904e-2, -5.083904e-2, 3.8393846e-6, 3.8393846e-6, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0,
+    ],
+    // a synth's volume drawn along its fader
+    [
+        4.9563053e-1, 4.9563053e-1, -3.352368e-2, -3.352368e-2, -5.725974e-1, -5.725974e-1,
+        6.3338554e-1, 6.3338554e-1, 4.774138e-1, 4.774138e-1, 2.6706013e-1, 2.6706013e-1,
+        -3.571712e-1, -3.571712e-1, 2.5555616e-2, 2.5555616e-2, -2.5693777e-3, -2.5693777e-3,
+        3.5468154e-3, 3.5468154e-3, -5.0702256e-1, -5.0702256e-1, 1.3728515e0, 1.3728515e0,
+        -1.751596e-1, -1.751596e-1, -4.424045e-4, -4.424045e-4, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0,
+    ],
+    // the same, straight in decibels
+    [
+        4.6010333e-1, 4.6010333e-1, -3.140862e-2, -3.140862e-2, -3.9684606e-1, -3.9684606e-1,
+        5.5372727e-1, 5.5372727e-1, 4.095224e-1, 4.095224e-1, 1.6110153e-1, 1.6110153e-1,
+        -1.7157228e-1, -1.7157228e-1, 1.6580578e-2, 1.6580578e-2, -2.0030793e-3, -2.0030793e-3,
+        1.2937448e-3, 1.2937448e-3, -2.4718796e-1, -2.4718796e-1, 1.3728515e0, 1.3728515e0,
+        -1.751596e-1, -1.751596e-1, -4.424045e-4, -4.424045e-4, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0,
+    ],
+    // a synth with noise beside a sampler
+    [
+        1.4931674e-1, 1.4838864e-1, -4.865037e-1, -4.8887795e-1, -8.656947e-2, -8.653714e-2,
+        -2.0470463e-1, -1.964998e-1, -3.2341212e-1, -3.1657124e-1, 1.0486033e-2, 1.3006385e-2,
+        -1.270334e-1, -1.001932e-1, 4.349604e-2, 4.8563015e-2, 7.919125e-2, 8.004441e-2,
+        5.246479e-1, 4.5712695e-1, 1.462861e-1, 1.5325543e-1, -5.8479402e-2, -6.7085385e-2,
+        1.1545108e-3, 1.7212626e-3, -3.716823e-5, -4.0281524e-5, 0e0, 0e0,
+        0e0, 0e0, 0e0, 0e0,
+    ],
+];
+
+#[test]
+fn a_song_of_format_6_renders_to_the_samples_it_rendered_to_before() {
+    let folder = folder();
+    let (source, hit) = files(&folder);
+    let factory = Builtins::with_loader(Arc::new(MediaCache::default()));
+    let songs = fifth(&source, &hit, Travel::Fader { knee: -17.8 });
+    assert_eq!(songs.len(), SIXTH.len());
+    for ((what, song), expected) in songs.iter().zip(&SIXTH) {
+        assert_as_it_was(&print_with(&of_format(song, 6), &factory), expected, what);
     }
 }

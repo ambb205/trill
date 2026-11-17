@@ -231,7 +231,7 @@ fn playing_envelopes_never_touches_the_allocator() {
         .set_automation(AutomationTarget::MasterVolume, vec![point(0.0, -6.0), point(4.0, 0.0), held(6.0, -3.0)])
         .unwrap();
     let gain = AutomationTarget::DeviceParam { device: utility, param: "gain".into() };
-    project.write_automation(gain, dips, trill_core::Travel::Fader { floor: -70.0 }).unwrap();
+    project.write_automation(gain, dips, trill_core::Travel::GAIN).unwrap();
     // Round a loop, so that every envelope jumps and is glided to.
     project.set_loop(true, 0.5, 3.5).unwrap();
 

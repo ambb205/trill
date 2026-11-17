@@ -55,6 +55,7 @@ mod preset_tests;
 mod presets;
 mod probe;
 mod processor;
+mod quirks;
 #[cfg(test)]
 pub(crate) mod scripted;
 pub(crate) mod state;

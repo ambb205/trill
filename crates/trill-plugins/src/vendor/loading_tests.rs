@@ -47,6 +47,7 @@ impl Rig {
                 shared_data: vec![dir.path().join("data")],
                 programs: vec![dir.path().join("programs")],
             },
+            patient_teardown: true,
         };
         // The module's file is named as an Ample instrument's is, which is
         // what its folder of presets is found by.

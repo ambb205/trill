@@ -75,6 +75,11 @@ pub struct Vst3Config {
     /// Where vendors keep presets in formats of their own, for the
     /// plugins whose vendor's format is read ([`VendorPlaces`]).
     pub vendor_places: VendorPlaces,
+    /// Whether a plugin that is known to take the process down when it
+    /// is destroyed too soon after it was made is kept until it is old
+    /// enough, once it is let go of. On, but for measuring what the
+    /// plugin does without it (`tests/lifetimes.rs`).
+    pub patient_teardown: bool,
 }
 
 impl Default for Vst3Config {
@@ -88,6 +93,7 @@ impl Default for Vst3Config {
             scan_timeout: Duration::from_secs(20),
             preset_paths: super::standard_preset_paths(),
             vendor_places: VendorPlaces::system(),
+            patient_teardown: true,
         }
     }
 }
@@ -137,6 +143,8 @@ struct Shared {
     scanner: Scanner,
     /// What the preset files that were asked for by their paths hold.
     files: file::Readings,
+    /// See [`Vst3Config::patient_teardown`].
+    patient: bool,
 }
 
 impl Vst3Factory {
@@ -149,11 +157,12 @@ impl Vst3Factory {
         let folders = std::mem::take(&mut config.preset_paths);
         let places = std::mem::take(&mut config.vendor_places);
         let scanner = config.scanner.clone();
+        let patient = config.patient_teardown;
         let settings: Settings = config.into();
         let presets = PresetStore::new(&PRESETS, settings.preset_settings(folders, places), main.clone());
         let installed = Inventory::new(&FORMAT, settings, main.clone());
         let files = file::Readings::default();
-        Ok(Self { shared: Arc::new(Shared { main, installed, presets, scanner, files }) })
+        Ok(Self { shared: Arc::new(Shared { main, installed, presets, scanner, files, patient }) })
     }
 
     /// The preset that the file at `file` holds for `plugin`: see
@@ -237,6 +246,7 @@ impl Vst3Factory {
             scan_timeout: Duration::from_secs(5),
             preset_paths: Vec::new(),
             vendor_places: VendorPlaces::default(),
+            patient_teardown: true,
         };
         Self::with_modules_in(config, modules)
     }
@@ -320,8 +330,8 @@ impl DeviceFactory for Vst3Factory {
             installed.name.clone(),
             installed.instrument,
             created,
-            sample_rate,
-            max_block,
+            (sample_rate, max_block),
+            self.shared.patient,
         )
         .map_err(failed)?;
         Ok(DeviceInstance { processor: Box::new(processor), params, controller: Some(Box::new(controller)) })
@@ -396,7 +406,7 @@ fn instantiate(main: &MainThread<PluginThread>, request: CreateRequest, timeout:
         main,
         timeout,
         move |thread| thread.vst3.create(request),
-        |thread, created: Created| thread.vst3.destroy(created.id, Some(created.audio)),
+        |thread, created: Created| thread.vst3.destroy(created.id, Some(created.audio), true),
     )
 }
 
@@ -418,6 +428,7 @@ mod tests {
             scan_timeout: Duration::from_secs(5),
             preset_paths: Vec::new(),
             vendor_places: VendorPlaces::default(),
+            patient_teardown: true,
         })
         .unwrap()
     }
@@ -537,7 +548,8 @@ mod tests {
         assert!(error.contains("too long"), "{error}");
         // A patient caller, queued behind the slow job, gets its instance.
         let created = instantiate(main, request(), Duration::from_secs(30)).unwrap_or_else(|error| panic!("{error}"));
-        main.call(Duration::from_secs(30), move |thread| thread.vst3.destroy(created.id, Some(created.audio))).unwrap();
+        let destroy = move |thread: &mut PluginThread| thread.vst3.destroy(created.id, Some(created.audio), true);
+        main.call(Duration::from_secs(30), destroy).unwrap();
 
         // Both instances existed, and both are gone again. The first one
         // was never seen by anyone but the plugin thread.

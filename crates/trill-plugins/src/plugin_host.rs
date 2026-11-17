@@ -96,6 +96,7 @@ mod tests {
             scan_timeout: Duration::from_secs(5),
             preset_paths: Vec::new(),
             vendor_places: crate::VendorPlaces::default(),
+            patient_teardown: true,
         };
         PluginHost::with_configs(clap, vst3).unwrap()
     }

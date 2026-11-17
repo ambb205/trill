@@ -128,9 +128,9 @@ pub fn kept_value(format: u32, uri: &str, param: &str, value: f64) -> f64 {
 pub fn kept_travel(format: u32, uri: &str, param: &str, travel: Travel) -> Travel {
     if format < CHANGED_IN
         && let Some(moved) = moved(uri).find(|moved| moved.param == param)
-        && let Travel::Fader { floor } = travel
+        && let Travel::Square { floor } = travel
     {
-        return Travel::Fader { floor: floor + moved.by };
+        return Travel::Square { floor: floor + moved.by };
     }
     travel
 }
@@ -282,9 +282,9 @@ mod tests {
         // An envelope on the synth's volume as a file of format 3 has it:
         // along a fader that was silent at the bottom of the range of the
         // day, -48 dB.
-        let then = Travel::Fader { floor: -48.0 };
+        let then = Travel::Square { floor: -48.0 };
         let now = kept_travel(3, "builtin:polysynth", "volume", then);
-        assert_eq!(now, Travel::Fader { floor: -69.0 });
+        assert_eq!(now, Travel::Square { floor: -69.0 });
         let moved = |value: f64| kept_value(3, "builtin:polysynth", "volume", value);
         for (from, to) in [(0.0, -48.0), (6.0, -30.0), (-48.0, 12.0), (-12.0, -12.0)] {
             for step in 0..=16 {
