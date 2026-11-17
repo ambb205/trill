@@ -86,6 +86,13 @@ mod gain {
                 left[i] = (mid + side) * self.left.next(gain_l);
                 right[i] = (mid - side) * self.right.next(gain_r);
             }
+            // A gain on its way to nothing gets there: 120 dB down it is
+            // let go of, and what follows is silence itself.
+            for (smooth, gain) in [(&mut self.left, gain_l), (&mut self.right, gain_r)] {
+                if gain == 0.0 && smooth.next(0.0).abs() < 1e-6 {
+                    smooth.snap(0.0);
+                }
+            }
         }
 
         fn reset(&mut self) {

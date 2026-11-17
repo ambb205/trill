@@ -12,8 +12,10 @@
 //! second of where it would land, it looks for the place where the sound
 //! is most like what the other reader is playing at that moment, so that
 //! the two are in step while they overlap. For a single note that means
-//! the jumps are whole periods and nothing cancels; for a chord it is the
-//! best there is.
+//! the jumps are whole periods and nothing cancels. For a chord it is the
+//! best there is, and how good that is is kept: two readers that are not
+//! alike do not add up to one where they cross, and are turned up by what
+//! is missing, so that the sound stays as loud as it was.
 
 use crate::define_params;
 use crate::params::{ParamValues, float};
@@ -149,12 +151,17 @@ pub struct Shifter {
     phase: f32,
     /// How far behind its window each reader landed, in frames.
     offsets: [f32; 2],
+    /// How alike the two readers were found to be where one last landed:
+    /// 1 for the same wave, 0 for nothing in common.
+    alike: f32,
     semitones: Smooth,
     dry: Smooth,
     wet: Smooth,
     /// False until the first block: that one starts where the pitch and
     /// the mix are set.
     started: bool,
+    /// Whether the readers were moving at the frame before.
+    shifting: bool,
     /// The pitch as a ratio of frequencies, and what is left of the frames
     /// it stands for.
     ratio: f32,
@@ -177,10 +184,12 @@ impl Shifter {
             both: Memory::new(),
             phase: 0.5,
             offsets: [0.0; 2],
+            alike: 1.0,
             semitones: Smooth::new(0.0),
             dry: Smooth::new(0.0),
             wet: Smooth::new(1.0),
             started: false,
+            shifting: false,
             ratio: 1.0,
             ratio_frames: 0,
             filters: Default::default(),
@@ -232,6 +241,7 @@ impl Shifter {
         // In silence there is nothing to be in step with.
         if loud < 1e-9 {
             self.offsets[index] = 0.0;
+            self.alike = 1.0;
             return;
         }
         let alike = |offset: usize| {
@@ -259,6 +269,7 @@ impl Shifter {
             }
         }
         self.offsets[index] = best.1 as f32;
+        self.alike = (best.0 / loud.sqrt()).clamp(0.0, 1.0);
     }
 }
 
@@ -329,6 +340,16 @@ impl DeviceProcessor for Shifter {
             // behind by the difference; a faster one catches up.
             let shifting = (self.ratio - 1.0).abs() > AT_REST;
             let was = self.phase;
+            if shifting && !self.shifting {
+                // Setting off from rest, where one reader plays alone: the
+                // other is put in step with it before it is heard.
+                for (index, phase) in self.phases().into_iter().enumerate() {
+                    if !(1e-4..=1.0 - 1e-4).contains(&phase) {
+                        self.land(index, phase.round(), window);
+                    }
+                }
+            }
+            self.shifting = shifting;
             if shifting {
                 let phase = was + (1.0 - self.ratio) / window;
                 // A reader that comes to the end of its window jumps to
@@ -360,14 +381,20 @@ impl DeviceProcessor for Shifter {
             let wet = if wet < 1e-6 { 0.0 } else { wet };
             let (mut out_left, mut out_right) = (0.0, 0.0);
             if wet > 0.0 {
-                for (phase, offset) in self.phases().into_iter().zip(self.offsets) {
-                    // A raised cosine over the window: nothing at its ends,
-                    // where the reader jumps.
-                    let gain = 0.5 - 0.5 * (TAU * phase).cos();
+                // A raised cosine over each window: nothing at its ends,
+                // where the reader jumps, and the two add up to one.
+                let phases = self.phases();
+                let gains = phases.map(|phase| 0.5 - 0.5 * (TAU * phase).cos());
+                // Which is as loud as either alone if they are the same
+                // wave. As far as they are not, their sum is quieter where
+                // they cross, by this much.
+                let together = gains[0] * gains[0] + gains[1] * gains[1] + 2.0 * self.alike * gains[0] * gains[1];
+                let level = if together > 1e-6 { together.sqrt().recip() } else { 1.0 };
+                for ((phase, gain), offset) in phases.into_iter().zip(gains).zip(self.offsets) {
                     if gain > 0.0 {
                         let delay = GUARD + phase * window + offset;
-                        out_left += gain * self.left.read(delay);
-                        out_right += gain * self.right.read(delay);
+                        out_left += gain * level * self.left.read(delay);
+                        out_right += gain * level * self.right.read(delay);
                     }
                 }
             }
@@ -384,7 +411,9 @@ impl DeviceProcessor for Shifter {
             filter.reset();
         }
         self.phase = 0.5;
+        self.shifting = false;
         self.offsets = [0.0; 2];
+        self.alike = 1.0;
         self.ratio_frames = 0;
     }
 }
@@ -445,6 +474,20 @@ mod tests {
                 let (most, least) = steadiness(heard, stretch, 0.5 * std::f32::consts::FRAC_1_SQRT_2);
                 assert!(most < 1.0 && least > -1.5, "{hz} Hz by {semitones}: between {least} and {most} dB");
             }
+        }
+    }
+
+    #[test]
+    fn a_chord_keeps_its_level_though_its_notes_cannot_all_be_put_in_step() {
+        // Three notes with no period in common that a reader could jump by.
+        let chord: Vec<f32> = [233.1, 311.1, 392.0, 587.3]
+            .iter()
+            .map(|hz| tone(*hz, 3.0, 0.2))
+            .fold(vec![0.0f32; (3.0 * SR) as usize], |sum, note| sum.iter().zip(note).map(|(a, b)| a + b).collect());
+        for semitones in [-24.0, -12.0, -7.0, 5.0, 12.0] {
+            let (out, _) = through(&mut shifter(&[("pitch", semitones)]), &chord, &chord);
+            let level = 20.0 * (rms(&out[24_000..]) / rms(&chord)).log10();
+            assert!(level.abs() < 0.6, "by {semitones}: {level} dB");
         }
     }
 
