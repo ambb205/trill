@@ -327,13 +327,15 @@ fn read_part(track: &Track, drums: bool, away: Beats, empty_too: bool) -> Option
 /// An envelope is read at most this many times, however long it is.
 const ENVELOPE_READINGS: usize = 1600;
 
-/// What the song automates of `track`: its volume, its pan and the
-/// parameters of its devices, each as a line from its lowest to its
-/// highest. Envelopes that are switched off, and ones that never move,
+/// What the song automates of `track`: its volume, its pan, what it sends
+/// to a return and the parameters of its devices, each as a line from its
+/// lowest to its highest. Envelopes that are switched off, and ones that never move,
 /// are left out.
 fn envelopes_of(project: &Project, track: &Track) -> Vec<Envelope> {
     let own = |target: &AutomationTarget| match target {
-        AutomationTarget::TrackVolume { track: id } | AutomationTarget::TrackPan { track: id } => *id == track.id,
+        AutomationTarget::TrackVolume { track: id }
+        | AutomationTarget::TrackPan { track: id }
+        | AutomationTarget::Send { track: id, .. } => *id == track.id,
         AutomationTarget::DeviceParam { device, .. } => track.devices.iter().any(|own| own.id == *device),
         AutomationTarget::MasterVolume => false,
     };
@@ -601,6 +603,14 @@ mod tests {
         // Switched off, it is not shown.
         project.set_automation_enabled(&volume, false).unwrap();
         assert!(Score::read(&project).part(track).unwrap().envelopes.is_empty());
+        // What a part sends to a return is its own line too, and not the return's.
+        let echo = project.add_track_of_kind("Echo", trill_core::TrackKind::Return);
+        let throw = vec![AutomationPoint::new(8.0, -60.0), AutomationPoint::new(12.0, -6.0)];
+        project.set_automation(AutomationTarget::Send { track: other, to: echo }, throw).unwrap();
+        let score = Score::read(&project);
+        let [sent] = score.part(other).unwrap().envelopes.as_slice() else { panic!("the send's envelope") };
+        assert_eq!((sent.at(8.0), sent.at(12.0)), (0.0, 1.0));
+        assert!(score.part(track).unwrap().envelopes.is_empty());
     }
 
     #[test]
