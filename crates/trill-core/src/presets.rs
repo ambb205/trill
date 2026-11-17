@@ -59,6 +59,12 @@ pub struct SavedPreset {
     /// sample player's files.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::project::state_base64")]
     pub state: Option<Vec<u8>>,
+    /// The project format of the build that saved it
+    /// ([`FORMAT_VERSION`](crate::project::FORMAT_VERSION)), which is what
+    /// its values are read by. A preset saved before format 7 does not
+    /// say, and is read by what it holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<u32>,
 }
 
 impl SavedPreset {
@@ -92,7 +98,8 @@ impl SavedPreset {
         // when it was saved: one from before a device was changed is made
         // to sound as it did.
         let mut preset = preset;
-        crate::formats::keep_complete(&preset.uri, &mut preset.params);
+        crate::formats::keep_complete(preset.format, &preset.uri, &mut preset.params);
+        preset.format = Some(crate::project::FORMAT_VERSION);
         Ok(preset)
     }
 
@@ -513,6 +520,7 @@ mod tests {
             tags: vec!["lead".into()],
             params: [("101".to_string(), 0.25)].into(),
             state: Some(vec![0, 255, 7]),
+            format: Some(crate::project::FORMAT_VERSION),
         };
         let info = saved.info();
         assert_eq!((info.path().as_str(), info.tags.as_slice()), ("Saved/Lead Tone", &["lead".to_string()][..]));
@@ -532,6 +540,22 @@ mod tests {
         let written = serde_json::to_string(&plain).unwrap();
         assert_eq!(written, r#"{"uri":"builtin:reverb","name":"Hall","params":{}}"#);
         assert_eq!(serde_json::from_str::<SavedPreset>(r#"{"uri":"builtin:reverb","name":"Hall"}"#).unwrap(), plain);
+
+        // A preset of a built-in device is read by the format it was saved
+        // in: one that does not say was saved before format 7, when a
+        // reverb with its legacy switch off was the reverb of formats 2 to
+        // 6; one that says 7 means the reverb as it is.
+        let hall = |format: &str| {
+            let text =
+                format!(r#"{{"uri":"builtin:reverb","name":"Hall","params":{{"decay":3.0,"legacy":0.0}}{format}}}"#);
+            SavedPreset::from_json(&text).unwrap()
+        };
+        assert_eq!(hall("").params.get("legacy"), Some(&2.0));
+        assert_eq!(hall(r#","format":6"#).params.get("legacy"), Some(&2.0));
+        assert_eq!(hall(r#","format":7"#).params.get("legacy"), Some(&0.0));
+        // Read once, it is of this format, and stays what it was made.
+        let again = SavedPreset::from_json(&hall("").to_json()).unwrap();
+        assert_eq!((again.format, again.params.get("legacy")), (Some(crate::project::FORMAT_VERSION), Some(&2.0)));
     }
 
     #[test]

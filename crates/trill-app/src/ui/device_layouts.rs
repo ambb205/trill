@@ -174,7 +174,7 @@ pub static LAYOUTS: &[Layout] = &[
                         p("sub_level", "Sub"),
                         p("noise_level", "Noise"),
                         p("noise_width", "Noise Width"),
-                        Row::Toggles(&[("legacy", "Legacy")]),
+                        Row::Choice { id: "legacy", labels: &["Now", "1-3", "4-6"] },
                     ],
                 )],
             },
@@ -415,7 +415,8 @@ pub static LAYOUTS: &[Layout] = &[
                 width: NARROW,
                 sections: &[
                     section("Filter", &[p("low_cut", "Low Cut"), p("high_cut", "High Cut")]),
-                    section("Output", &[p("mix", "Mix"), Row::Toggles(&[("legacy", "Legacy")])]),
+                    section("Output", &[p("mix", "Mix")]),
+                    section("As In Format", &[Row::Choice { id: "legacy", labels: &["Now", "1", "2-6"] }]),
                 ],
             },
         ],
@@ -434,7 +435,8 @@ pub static LAYOUTS: &[Layout] = &[
                 width: NARROW,
                 sections: &[
                     section("Input", &[p("low_cut", "Low Cut"), p("high_cut", "High Cut")]),
-                    section("Output", &[p("width", "Width"), p("mix", "Mix"), Row::Toggles(&[("legacy", "Legacy")])]),
+                    section("Output", &[p("width", "Width"), p("mix", "Mix")]),
+                    section("As In Format", &[Row::Choice { id: "legacy", labels: &["Now", "1", "2-6"] }]),
                 ],
             },
         ],
@@ -501,7 +503,12 @@ pub static LAYOUTS: &[Layout] = &[
                     section("Sidechain", &[Row::Sidechain, p("key_low_cut", "Low Cut"), p("key_high_cut", "High Cut")]),
                     section(
                         "Output",
-                        &[p("makeup", "Makeup"), Row::Toggles(&[("auto_makeup", "Auto Makeup")]), p("mix", "Mix")],
+                        &[
+                            p("makeup", "Makeup"),
+                            Row::Toggles(&[("auto_makeup", "Auto Makeup")]),
+                            p("mix", "Mix"),
+                            Row::Toggles(&[("legacy", "Legacy")]),
+                        ],
                     ),
                 ],
             },
