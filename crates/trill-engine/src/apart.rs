@@ -93,6 +93,11 @@ use trill_core::{Device, DeviceId, Project, TrackId};
 /// Set in the environment of a process that is started to do jobs for
 /// another: a program that can be one looks for it first thing.
 pub const JOB_ENV: &str = "TRILL_JOB";
+/// The variable that has such a process say more than a program does, in
+/// the log of the program that started it: `debug`, or `trace` for every
+/// try of every wait for a plugin ([`crate::ready`]), which is how to
+/// find out what an instrument was asked before a render began.
+pub const LOG_ENV: &str = "TRILL_JOB_LOG";
 /// What every line of the process's own begins with.
 const MARK: &str = "@trill-job@";
 /// What the process says first; a program that says anything else is not
@@ -392,7 +397,10 @@ impl Apart {
 
         // Where the samples come back, and what there is to clear away if
         // the process does not live to finish.
-        let number = self.inner.jobs.load(Ordering::Relaxed);
+        // (Named by this process and a number no other render of it has:
+        // a program may do jobs for several sessions at once.)
+        static HANDED_BACK: AtomicU64 = AtomicU64::new(0);
+        let number = HANDED_BACK.fetch_add(1, Ordering::Relaxed);
         let samples = std::env::temp_dir().join("trill-jobs").join(format!("{}-{number}.wav", std::process::id()));
         let keep = match mix {
             Mix::Nothing => Keep::Nothing,

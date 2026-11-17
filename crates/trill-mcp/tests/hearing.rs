@@ -980,9 +980,9 @@ async fn connect_with_plugins(uri: &str) -> Option<(Fixture, tempfile::TempDir)>
     connect_with_plugins_keeping(uri, false).await
 }
 
-/// [`connect_with_plugins`], whose renders and measurements are all done
-/// by one process when `one_process` says so, as its probes are: what a
-/// program was that rendered for itself, but for the song's own devices.
+/// [`connect_with_plugins`], whose renders, measurements and probes are
+/// all done by one process when `one_process` says so: what a program was
+/// that rendered for itself, but for the song's own devices.
 async fn connect_with_plugins_keeping(uri: &str, one_process: bool) -> Option<(Fixture, tempfile::TempDir)> {
     let host = installed(uri)?;
     let folder = tempfile::tempdir().unwrap();
@@ -996,8 +996,8 @@ async fn connect_with_plugins_keeping(uri: &str, one_process: bool) -> Option<(F
     let runtime = Arc::new(Runtime::start_custom(options, parts).unwrap());
     // As the programs do it: what makes and lets go of plugins is done in
     // a process of its own, which here is the server's own program.
-    let jobs =
-        Jobs { plugins: Some(host), keep_for_probes: true, keep_for_renders: one_process, ..Jobs::by(job_program()) };
+    let (keep_for_probes, keep_for_renders) = (one_process, one_process);
+    let jobs = Jobs { plugins: Some(host), keep_for_probes, keep_for_renders, ..Jobs::by(job_program()) };
     runtime.do_jobs_apart(jobs).unwrap();
     Some((serve(runtime).await, folder))
 }

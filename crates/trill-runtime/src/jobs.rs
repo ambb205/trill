@@ -69,24 +69,34 @@ pub struct Jobs {
 
 /// The variable that says where a program does its jobs, for finding out
 /// what a process of its own costs or does: `here` (in the program's own
-/// process, as before there was another), `fresh` (a process that has
-/// just started for every job, probes too), `kept` (renders too are done
-/// by the process that is kept). Anything else, and nothing, is the
-/// usual: see [`Jobs::usual`].
+/// process, as before there was another), `kept` (one process that is
+/// kept from one job to the next, for renders and probes alike),
+/// `kept-probes` (renders in a process each, probes in one that is kept).
+/// Anything else, and nothing, is the usual: see [`Jobs::usual`].
 pub const JOBS_ENV: &str = "TRILL_JOBS";
 
 impl Jobs {
     /// How a program does its jobs unless its environment says otherwise
-    /// ([`JOBS_ENV`]): a render and a measurement each in a process that
-    /// has just started, probes in one that is kept between them. `None`
-    /// where the environment says to do them here.
+    /// ([`JOBS_ENV`]): a render, a measurement and a probe each in a
+    /// process that has just started. `None` where the environment says
+    /// to do them here.
+    ///
+    /// Probes too, because a process that is kept between them was
+    /// measured to save nothing (November 2026, the second probe of an
+    /// instrument, kept against just started: a sampled bass 1.7 and
+    /// 1.8 s, a drum sampler 3.6 and 3.6 s, a synthesizer 0.5 and 0.7 s:
+    /// the instrument is made anew either way, and that is what takes the
+    /// time), while it goes on holding what its plugins leave behind (0.4
+    /// GB after nine probes), takes its plugins down when it is done with
+    /// them, which is where plugins fault, and does not begin an
+    /// instrument that draws at random at the same place twice.
     pub fn usual(program: Program) -> Option<Self> {
         let asked = std::env::var(JOBS_ENV).unwrap_or_default();
         match asked.trim() {
             "here" => None,
-            "fresh" => Some(Self::by(program)),
             "kept" => Some(Self { keep_for_probes: true, keep_for_renders: true, ..Self::by(program) }),
-            _ => Some(Self { keep_for_probes: true, ..Self::by(program) }),
+            "kept-probes" => Some(Self { keep_for_probes: true, ..Self::by(program) }),
+            _ => Some(Self::by(program)),
         }
     }
 

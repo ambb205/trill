@@ -479,3 +479,23 @@ fn a_program_that_cannot_be_started_is_said_and_the_song_is_as_it_was() {
     assert!(rendered(&runtime, &plain()).is_ok());
     let _ = Arc::new(runtime);
 }
+
+#[test]
+fn two_sessions_of_one_program_that_render_at_once_each_get_their_own_samples() {
+    // Two songs in one program, as a window and a server beside it have:
+    // one with its bass, one without.
+    let (whole, without) = (apart(Loading::default()), apart(Loading::default()));
+    song(&whole);
+    let (bass, _) = song(&without);
+    without.session.lock().edit(|project| project.track_mut(bass).map(|track| track.mute = true)).unwrap();
+    let (first, second) = (rendered(&whole, &plain()).unwrap(), rendered(&without, &plain()).unwrap());
+    assert!(first.left != second.left, "the two songs are one");
+    // Rendered at the same moment, again and again, each comes back as
+    // itself: what one process hands back is never taken for the other's.
+    std::thread::scope(|scope| {
+        let one = scope.spawn(|| (0..4).map(|_| rendered(&whole, &plain()).unwrap().left).collect::<Vec<_>>());
+        let other = scope.spawn(|| (0..4).map(|_| rendered(&without, &plain()).unwrap().left).collect::<Vec<_>>());
+        assert!(one.join().unwrap().iter().all(|left| *left == first.left), "the whole song came back as another");
+        assert!(other.join().unwrap().iter().all(|left| *left == second.left), "the song without its bass did");
+    });
+}

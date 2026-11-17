@@ -47,7 +47,7 @@ struct Log;
 
 impl log::Log for Log {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= log::Level::Info
+        metadata.level() <= log::max_level()
     }
 
     fn log(&self, record: &log::Record) {
@@ -82,7 +82,14 @@ pub fn serve(make: &Make) -> ! {
     SERVING.store(true, Ordering::Relaxed);
     fault::watch();
     if log::set_logger(&Log).is_ok() {
-        log::set_max_level(log::LevelFilter::Info);
+        // What it says is what a program says; with [`super::LOG_ENV`]
+        // set to `trace`, every try of every wait as well.
+        let asked = std::env::var(super::LOG_ENV).unwrap_or_default();
+        log::set_max_level(match asked.trim() {
+            "trace" => log::LevelFilter::Trace,
+            "debug" => log::LevelFilter::Debug,
+            _ => log::LevelFilter::Info,
+        });
     }
     say(&Said::Hello(VERSION));
     let mut line = String::new();
