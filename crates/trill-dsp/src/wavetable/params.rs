@@ -356,6 +356,15 @@ mod table {
             -21.0,
             "dB"
         ),
+        MonoBelow => float(
+            "mono_below",
+            "Mono Below (everything under this frequency is the same on both sides, which a bass wants so that it \
+             sits in the middle and is whole on one speaker; the width above it is left alone. 0 = off)",
+            0.0,
+            500.0,
+            0.0,
+            "Hz"
+        ),
     ]);
 }
 
@@ -390,7 +399,7 @@ mod tests {
             assert_eq!(id(of(P::Mod1Amount, slot, 3)), format!("mod{number}_amount"));
         }
         assert_eq!(id(P::Volume as usize), "volume");
-        assert_eq!(PARAMS.len(), P::Volume as usize + 1);
+        assert_eq!(PARAMS.len(), P::MonoBelow as usize + 1);
     }
 
     #[test]

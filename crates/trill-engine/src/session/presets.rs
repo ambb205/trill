@@ -27,7 +27,7 @@
 
 use super::{Session, SessionError};
 use crate::ready::Plugins;
-use crate::saved::{Saved, SavedPresets};
+use crate::saved::{Change, Saved, SavedPresets};
 use std::sync::Arc;
 use trill_core::device::PresetLoadError;
 use trill_core::presets::{
@@ -195,6 +195,40 @@ impl Session {
             Ok(())
         })?;
         // The list of this type's presets is another one now.
+        self.revision += 1;
+        Ok(saved)
+    }
+
+    /// Gives a saved preset or sound of the device type `uri` another
+    /// name, description or tags ([`Change`]). The devices of the open
+    /// song that are on it, or came with it, go on being on it under its
+    /// new name: that is one undo step, and the preset itself keeps its
+    /// new name when the step is undone (it is renamed back by renaming
+    /// it back).
+    pub fn change_saved_preset(&mut self, uri: &str, name: &str, change: &Change) -> Result<Saved, SessionError> {
+        let before: Option<PresetRef> = self
+            .saved
+            .list(uri)
+            .into_iter()
+            .find(|info| info.name.eq_ignore_ascii_case(name.trim()))
+            .map(|info| info.reference());
+        let saved = self.saved.change(uri, name, change).map_err(SessionError::Device)?;
+        let now = saved.info.reference();
+        if let Some(before) = before.filter(|before| *before != now) {
+            let brought = PresetRef::brought_by(&before);
+            self.edit_scoped(super::Scope::ParamsOnly, |project| {
+                let ids: Vec<DeviceId> = project.devices().map(|device| device.id).collect();
+                for id in ids {
+                    let device = project.device_mut(id)?;
+                    if device.uri == uri && device.preset.as_ref() == Some(&before) {
+                        device.preset = Some(now.clone());
+                    } else if device.preset.as_ref() == Some(&brought) {
+                        device.preset = Some(PresetRef::brought_by(&now));
+                    }
+                }
+                Ok(())
+            })?;
+        }
         self.revision += 1;
         Ok(saved)
     }

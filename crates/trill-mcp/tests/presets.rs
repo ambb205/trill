@@ -602,14 +602,20 @@ async fn a_sound_is_found_across_every_instrument_there_is() {
     // what create_track takes.
     let found = ok(client, "search_presets", json!({ "query": "warm pad" })).await;
     let listed = devices(&found);
-    assert_eq!(listed[..2], [format!("{SYNTH}: Warm Pad"), format!("{SYNTH}: Warm Pad")], "{found}");
+    // Three are called that: the wavetable synth's own, and the plugin's two.
+    let mut named = listed[..3].to_vec();
+    named.sort();
+    let wanted =
+        ["builtin:wavetable: Warm Pad".to_string(), format!("{SYNTH}: Warm Pad"), format!("{SYNTH}: Warm Pad")];
+    assert_eq!(named, wanted, "{found}");
     assert!(listed.contains(&format!("{POLYSYNTH}: warm_pad")), "{found}");
-    assert!(found["searched"].as_str().unwrap().starts_with("30"), "thousands were looked through: {found}");
+    let searched: usize = found["searched"].as_str().unwrap().split(' ').next().unwrap().parse().unwrap();
+    assert!(searched > 3000, "thousands were looked through: {found}");
     // The synth lists none in its other format, and is not said to be
     // without presets for that: it has three thousand.
     assert!(found.get("without_presets").is_none(), "{found}");
     assert!(found.get("still_reading").is_none(), "{found}");
-    let first = &found["items"][0];
+    let first = found["items"].as_array().unwrap().iter().find(|item| item["device"] == SYNTH).unwrap();
     let made =
         ok(client, "create_track", json!({ "name": "Pad", "instrument": first["device"], "preset": first["id"] }))
             .await;
@@ -863,6 +869,78 @@ async fn the_instructions_say_when_a_sound_is_worth_saving_and_what_giving_one_r
     let tool = tools.iter().find(|tool| tool.name == "save_sound").expect("there is a save_sound tool");
     let schema = serde_json::to_string(&tool.input_schema).unwrap();
     assert!(schema.contains("Djent Rhythm") && schema.contains("every effect after it"), "{schema}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_was_saved_is_renamed_described_and_deleted_by_a_tool() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let keys =
+        ok(client, "create_track", json!({ "name": "Keys", "instrument": POLYSYNTH, "preset": "warm_pad" })).await;
+    let (track, synth) = (keys["track_id"].as_u64().unwrap(), keys["instrument_device_id"].as_u64().unwrap());
+    let reverb =
+        ok(client, "add_device", json!({ "track": track, "uri": "builtin:reverb" })).await["device_id"].clone();
+    let saved = ok(client, "save_sound", json!({ "track": track, "name": "Warm Hall" })).await;
+    let file = std::path::PathBuf::from(saved["file"].as_str().unwrap());
+
+    // Another name, and what it says of itself: everything it holds stays.
+    let change = json!({
+        "device": POLYSYNTH, "preset": "warm hall", "name": "Soft Hall",
+        "description": "a pad in a long hall", "tags": ["pad", "soft"],
+    });
+    let edited = ok(client, "edit_preset", change).await;
+    assert_eq!((edited["saved"].as_str(), edited["device"].as_str()), (Some("Saved/Soft Hall"), Some(POLYSYNTH)));
+    assert_eq!(
+        (edited["description"].as_str(), &edited["tags"]),
+        (Some("a pad in a long hall"), &json!(["pad", "soft"]))
+    );
+    assert!(edited["note"].as_str().unwrap().contains("under that name"), "{edited}");
+    assert!(!file.exists(), "nothing is left under the old name");
+    let found = ok(client, "search_presets", json!({ "query": "soft hall" })).await;
+    let item = &found["items"][0];
+    assert_eq!((item["preset"].as_str(), &item["with"]), (Some("Soft Hall"), &json!(["Reverb"])));
+    assert_eq!(ok(client, "search_presets", json!({ "query": "long hall" })).await["items"][0]["preset"], "Soft Hall");
+    // The song's devices are on it under its new name.
+    assert_eq!(ok(client, "get_device", json!({ "device": synth })).await["preset"], "Soft Hall");
+    assert_eq!(ok(client, "get_device", json!({ "device": reverb })).await["from_sound"], "Soft Hall");
+    // Its words alone, with its name as it is.
+    let tagged =
+        ok(client, "edit_preset", json!({ "device": POLYSYNTH, "preset": "Soft Hall", "tags": ["lush"] })).await;
+    assert_eq!((tagged["saved"].as_str(), &tagged["tags"]), (Some("Saved/Soft Hall"), &json!(["lush"])));
+    assert!(tagged.get("note").is_none() && tagged["description"] == "a pad in a long hall", "{tagged}");
+
+    // What cannot be changed says why, with what there is.
+    let nothing = json!({ "device": POLYSYNTH, "preset": "Soft Hall" });
+    assert!(call(client, "edit_preset", nothing).await.unwrap_err().contains("give `name`, `description` or `tags`"));
+    let gone = json!({ "device": POLYSYNTH, "preset": "Warm Hall", "name": "x" });
+    let error = call(client, "edit_preset", gone).await.unwrap_err();
+    assert!(error.contains("no saved preset 'Warm Hall'") && error.contains("Saved for it: Soft Hall"), "{error}");
+    // One the device type brings is not anyone's to rename.
+    let own = json!({ "device": POLYSYNTH, "preset": "warm_pad", "name": "Mine" });
+    assert!(call(client, "edit_preset", own).await.unwrap_err().contains("no saved preset 'warm_pad'"));
+    ok(client, "save_preset", json!({ "device": synth, "name": "Other" })).await;
+    let taken = json!({ "device": POLYSYNTH, "preset": "Other", "name": "soft hall" });
+    assert!(call(client, "edit_preset", taken).await.unwrap_err().contains("called 'soft hall' already"));
+
+    // The assistant in the window cannot delete: nobody is asked there.
+    let assistant = fixture.assistant().await;
+    let delete = json!({ "device": POLYSYNTH, "preset": "Soft Hall" });
+    let refused = call(&assistant, "delete_preset", delete.clone()).await.unwrap_err();
+    assert!(refused.contains("cannot be deleted") && refused.contains("from the window"), "{refused}");
+    assert_eq!(ok(client, "search_presets", json!({ "query": "soft hall" })).await["matching"], 1);
+    // A client whose user is asked can, and the tool says that it is for good.
+    let tools = client.list_all_tools().await.unwrap();
+    let tool = tools.iter().find(|tool| tool.name == "delete_preset").unwrap();
+    assert_eq!(tool.annotations.as_ref().and_then(|notes| notes.destructive_hint), Some(true));
+    let deleted = ok(client, "delete_preset", delete.clone()).await;
+    assert_eq!(deleted["deleted"], "Soft Hall");
+    // What is found now is what is merely soft, or in a hall.
+    let left = ok(client, "search_presets", json!({ "query": "soft hall" })).await;
+    assert!(left["items"].as_array().unwrap().iter().all(|item| item["preset"] != "Soft Hall"), "{left}");
+    // The track keeps the devices it was given.
+    assert_eq!(chain_of(client, track).await, ["Poly Synth", "Reverb"]);
+    let error = call(client, "delete_preset", delete).await.unwrap_err();
+    assert!(error.contains("no saved preset 'Soft Hall'") && error.contains("Saved for it: Other"), "{error}");
 }
 
 // ---- against an installed plugin -------------------------------------------

@@ -1061,45 +1061,153 @@ fn loudest(left: &[f32], right: &[f32]) -> (f32, f32) {
     (10.0 * loudest.max(1e-12).log10(), db(peak(left).max(peak(right))))
 }
 
-/// How loud a patch is playing its phrase at a velocity of 100.
-fn loudness(patch: &patches::Patch) -> (f32, f32) {
-    let one_at_a_time = patch.params.iter().any(|(id, value)| *id == "mode" && *value != patches::Value::C("poly"));
-    let (notes, seconds) = phrase(patch.category, one_at_a_time);
-    let hit = |pitch: u8| EventKind::NoteOn { pitch, velocity: 100.0 / 127.0 };
-    let events: Vec<(usize, EventKind)> = notes.iter().map(|note| (0, hit(*note))).collect();
-    let (left, right) = play(&mut self::patch(patch.name), 256, (seconds * SR) as usize, &events);
-    loudest(&left, &right)
+/// A key struck as a player strikes one: at a velocity of 100.
+const STRUCK: fn(u8) -> EventKind = |pitch| EventKind::NoteOn { pitch, velocity: 100.0 / 127.0 };
+
+/// The level of the loudest `seconds` of `left` and `right`, in dBFS.
+fn loudest_of(left: &[f32], right: &[f32], seconds: f64) -> f32 {
+    let window = ((seconds * SR) as usize).min(left.len());
+    let power: Vec<f32> = left.iter().zip(right).map(|(l, r)| 0.5 * (l * l + r * r)).collect();
+    let loudest = (0..=power.len() - window)
+        .step_by((window / 4).max(1))
+        .map(|start| power[start..start + window].iter().sum::<f32>() / window as f32)
+        .fold(0.0f32, f32::max);
+    10.0 * loudest.max(1e-12).log10()
 }
 
-/// What every patch is matched to, in dBFS over its loudest 400 ms: where
-/// the poly synth's presets lie by the same measure (most of them between
-/// -17 and -14). And the room a patch leaves over its phrase: one that
-/// would have less at that level (a pluck, whose start is far over its
-/// ring) is turned down until it has it.
-const PATCH_LEVEL: f32 = -16.5;
-const PATCH_ROOM: f32 = -4.0;
-const PATCH_TOLERANCE: f32 = 1.0;
+/// How long a patch takes to be at its level after a key goes down, in
+/// frames: its attack and a little, and for one that keeps time with the
+/// song as long as a bar of it.
+fn settled(patch: &patches::Patch) -> usize {
+    let attack = patch.value("env1_attack").unwrap_or(0.005);
+    let synced = (1..=3).any(|lfo| patch.value(&format!("lfo{lfo}_sync")).is_some_and(|sync| sync != 0.0));
+    let seconds = if synced { 2.0 } else { (attack * 1.5 + 0.3).min(3.0) };
+    (seconds * SR) as usize
+}
+
+/// How the levels of the sounds of the bank are held is in
+/// `trill-engine/tests/bank.rs`, which plays each through its effects.
+#[test]
+fn every_key_of_a_patchs_range_sounds_and_none_is_out_of_line_with_its_neighbours() {
+    let mut wrong = Vec::new();
+    for patch in patches::all().skip(1) {
+        let (low, high) = patch.range;
+        let frames = settled(patch);
+        let levels: Vec<f32> = (low..=high)
+            .map(|key| {
+                let (left, right) = play(&mut self::patch(patch.name), 256, frames, &[(0, STRUCK(key))]);
+                assert!(left.iter().chain(&right).all(|sample| sample.is_finite()), "{} at {key}", patch.name);
+                assert!(peak(&left).max(peak(&right)) < 2.0, "{} at {key}: {}", patch.name, peak(&left));
+                loudest_of(&left, &right, 0.05)
+            })
+            .collect();
+        let loudest = levels.iter().copied().fold(f32::MIN, f32::max);
+        for (index, level) in levels.iter().enumerate() {
+            let key = patches::key_name(low + index as u8);
+            if *level < -60.0 || *level < loudest - 24.0 {
+                wrong.push(format!("{}: {key} is at {level:.1} dBFS, its loudest key at {loudest:.1}", patch.name));
+            }
+            if index > 0 && (level - levels[index - 1]).abs() > 7.0 {
+                wrong.push(format!(
+                    "{}: {key} is {:+.1} dB from the key under it",
+                    patch.name,
+                    level - levels[index - 1]
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
 
 #[test]
-fn the_patches_are_as_loud_as_one_another_and_leave_room() {
-    println!("patch            category   loudest 400 ms    peak        volume to match");
+fn every_macro_moves_its_sound_from_end_to_end_without_a_gap_a_click_or_a_jump() {
     let mut wrong = Vec::new();
-    for patch in patches::PATCHES.iter().skip(1) {
-        let (level, peak) = loudness(patch);
-        // To the level, or as near it as leaves the room.
-        let wanted = (PATCH_LEVEL - level).min(PATCH_ROOM - peak);
-        let volume = patch.values().iter().find(|(id, _)| id == "volume").map_or(-21.0, |(_, value)| *value);
-        println!(
-            "{:<16} {:<8}   {level:>7.1} dBFS   {peak:>6.1} dBFS   {:>6.1}",
-            patch.name,
-            patch.category,
-            volume + f64::from(wanted)
-        );
-        if wanted.abs() > PATCH_TOLERANCE {
-            wrong.push(format!(
-                "{} is at {level:.1} dBFS, peak {peak:.1}: its volume wants {wanted:+.1} dB",
-                patch.name
-            ));
+    for patch in patches::all().skip(1) {
+        let (low, high) = patch.range;
+        let key = low + (high - low) / 2;
+        let frames = settled(patch);
+        // As long standing still as moved: a sound that changes by itself
+        // as it goes (a riser, wind) is compared with itself at the same
+        // moments.
+        let moving = frames + 72_000;
+        // A sound that rings out is struck again and again while its
+        // macro is moved; one that holds is held.
+        let rings_out = patch.value("env1_sustain").unwrap_or(0.8) < 0.2;
+        let strikes = |frames: usize| -> Vec<(usize, EventKind)> {
+            let every = if rings_out { 12_000 } else { frames + 1 };
+            (0..frames).step_by(every).map(|at| (at, STRUCK(key))).collect()
+        };
+        for (which, name) in patch.macros.iter().enumerate().filter(|(_, name)| !name.is_empty()) {
+            let id = ["macro1", "macro2", "macro3", "macro4"][which];
+            let index = PARAMS.iter().position(|def| def.id == id).unwrap();
+            // Where it stands still, at six places from end to end.
+            let stood: Vec<(f32, f32)> = (0..=5)
+                .map(|step| {
+                    let mut synth = self::patch(patch.name);
+                    synth.set_param(index, f64::from(step) / 5.0);
+                    let (left, right) = play(&mut synth, 256, moving, &strikes(moving));
+                    assert!(left.iter().chain(&right).all(|sample| sample.is_finite()), "{}: {name}", patch.name);
+                    let step = largest_step(&left[frames..]).max(largest_step(&right[frames..]));
+                    (loudest_of(&left[..frames], &right[..frames], 0.05), step)
+                })
+                .collect();
+            let loudest = stood.iter().map(|(level, _)| *level).fold(f32::MIN, f32::max);
+            for (step, (level, _)) in stood.iter().enumerate() {
+                if *level < -60.0 || *level < loudest - 30.0 {
+                    wrong.push(format!(
+                        "{}: with {name} at {} it is all but silent ({level:.1} dBFS)",
+                        patch.name,
+                        step as f32 / 5.0
+                    ));
+                }
+                if step > 0 && (level - stood[step - 1].0).abs() > 8.0 {
+                    wrong.push(format!(
+                        "{}: {name} from {} to {} is a jump of {:+.1} dB",
+                        patch.name,
+                        (step - 1) as f32 / 5.0,
+                        step as f32 / 5.0,
+                        level - stood[step - 1].0
+                    ));
+                }
+            }
+            // Moved from end to end over a second and a half while the
+            // sound plays: no step larger than the sound itself makes
+            // where the macro stands still.
+            let mut synth = self::patch(patch.name);
+            let events = strikes(moving);
+            let (mut left, mut right) = (vec![0.0f32; moving], vec![0.0f32; moving]);
+            let mut start = 0;
+            while start < moving {
+                let end = (start + 64).min(moving);
+                let along = (start.saturating_sub(frames) as f64 / 72_000.0).min(1.0);
+                synth.set_param(index, along);
+                let info = ProcessInfo {
+                    sample_rate: SR,
+                    tempo: 120.0,
+                    time_signature: Default::default(),
+                    playing: true,
+                    position_beats: start as f64 * 120.0 / (60.0 * SR),
+                    song: SongTime::default(),
+                    loop_range: None,
+                }
+                .steady();
+                let block: Vec<Event> = events
+                    .iter()
+                    .filter(|(frame, _)| (start..end).contains(frame))
+                    .map(|(frame, kind)| Event { offset: (frame - start) as u32, kind: *kind })
+                    .collect();
+                synth.process(&info, &block, &mut left[start..end], &mut right[start..end]);
+                start = end;
+            }
+            let usual = stood.iter().map(|(_, step)| *step).fold(0.0f32, f32::max);
+            let moved = largest_step(&left[frames..]).max(largest_step(&right[frames..]));
+            if moved > usual * 2.0 + 0.002 {
+                wrong.push(format!(
+                    "{}: moving {name} makes a step of {moved:.4}, {:.1} times the largest it makes standing still",
+                    patch.name,
+                    moved / usual.max(1e-9)
+                ));
+            }
         }
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
@@ -1107,42 +1215,48 @@ fn the_patches_are_as_loud_as_one_another_and_leave_room() {
 
 #[test]
 fn every_patch_sounds_ends_and_answers_its_macros() {
-    for patch in patches::PATCHES {
+    for patch in patches::all() {
         let mut synth = self::patch(patch.name);
-        let (left, right) = play(&mut synth, 256, 48_000, &[(0, ON(57)), (3, ON(64))]);
+        // A second, or as long as a slow sound takes to arrive.
+        let arrive = settled(patch).max(48_000);
+        let (left, right) = play(&mut synth, 256, arrive, &[(0, ON(57)), (3, ON(64))]);
         assert!(left.iter().chain(&right).all(|sample| sample.is_finite()), "{}", patch.name);
-        assert!(rms(&left[..24_000]) > 0.003, "{} is silent", patch.name);
+        assert!(rms(&left[arrive - 24_000..]).max(rms(&left[..24_000])) > 0.003, "{} is silent", patch.name);
         assert!(peak(&left) < 1.5, "{} is too loud: {}", patch.name, peak(&left));
         // Let go of, it ends within its release, and the longest is a pad's.
         let (tail, _) = play_from(&mut synth, 256, 30 * 48_000, &[(0, OFF(57)), (0, OFF(64))], 2.0);
         assert_eq!(peak(&tail[tail.len() - 4_800..]), 0.0, "{} never ends", patch.name);
         // Every macro it names changes the sound.
-        let plain = play(&mut self::patch(patch.name), 256, 24_000, &[(0, ON(57))]).0;
+        let plain = play(&mut self::patch(patch.name), 256, arrive, &[(0, ON(57))]).0;
         for (which, name) in patch.macros.iter().enumerate().filter(|(_, name)| !name.is_empty()) {
             let mut moved = self::patch(patch.name);
             set(&mut moved, &[(["macro1", "macro2", "macro3", "macro4"][which], 1.0)]);
-            let heard = play(&mut moved, 256, 24_000, &[(0, ON(57))]).0;
+            let heard = play(&mut moved, 256, arrive, &[(0, ON(57))]).0;
             let apart = plain.iter().zip(&heard).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
-            assert!(apart > 0.002, "{}: {name} changes nothing ({apart})", patch.name);
+            // By a hundredth of what the sound itself reaches, at the least.
+            let least = 0.01 * peak(&plain).max(peak(&heard));
+            assert!(apart > least, "{}: {name} changes nothing ({apart} of {least})", patch.name);
         }
     }
 }
 
 #[test]
-fn every_patch_is_a_sound_and_eleven_bring_effects_that_there_are() {
+fn every_patch_is_a_sound_and_what_it_brings_is_an_effect_that_there_is() {
     use trill_core::device::DeviceFactory;
     let devices = crate::BuiltinFactory.descriptors();
     let own = devices.iter().find(|descriptor| descriptor.uri == URI).unwrap();
     let mut with_effects = 0;
-    for patch in patches::PATCHES {
+    for patch in patches::all() {
         // The descriptor says what the table does: a model and the window
         // read it there.
         let listed = own.presets.iter().find(|preset| preset.name == patch.name).unwrap();
         let after = listed.after.as_deref().unwrap_or_else(|| panic!("{} is no sound", patch.name));
         assert_eq!(after, patch.after());
-        let dry = matches!(patch.category, "" | "Bass");
-        assert_eq!(after.is_empty(), dry, "{}: a bass is dry, and everything else is not", patch.name);
         with_effects += usize::from(!after.is_empty());
+        // A bass says where its bottom is: in the middle.
+        if patch.category == "Bass" {
+            assert_eq!(patch.value("mono_below"), Some(150.0), "{}", patch.name);
+        }
         for device in after {
             // An effect that is built in, called what it is called, with
             // values its parameters take, and switched on.
@@ -1157,7 +1271,7 @@ fn every_patch_is_a_sound_and_eleven_bring_effects_that_there_are() {
             }
         }
     }
-    assert_eq!(with_effects, 11);
+    assert!(with_effects >= 11, "{with_effects} sounds bring effects");
 }
 
 /// Not a test: how loud the poly synth's presets are by the same measure,

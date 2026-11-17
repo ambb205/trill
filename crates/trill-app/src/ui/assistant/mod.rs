@@ -1142,6 +1142,8 @@ impl Assistant {
             || state.preset_drag.is_some()
             || state.renaming_track.is_some()
             || state.naming_preset.is_some()
+            || state.preset_form.is_some()
+            || state.deleting_preset.is_some()
             || state.renaming_clip.is_some()
             || state.renaming_clip_inline.is_some()
             || view.renaming_marker.is_some()

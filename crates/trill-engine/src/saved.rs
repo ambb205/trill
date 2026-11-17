@@ -76,6 +76,14 @@ pub struct Saved {
     pub file: Option<PathBuf>,
 }
 
+/// What to change about a saved preset: each part that is `Some`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Change {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub tags: Option<Vec<String>>,
+}
+
 /// A saved preset that is a sound, as a browser lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SavedSound {
@@ -267,6 +275,47 @@ impl SavedPresets {
             }
         }
         Ok(preset)
+    }
+
+    /// Gives the preset the device type `uri` has saved under `name`
+    /// another name, description or tags, whichever of them `change` has,
+    /// and leaves the rest of it as it is: its devices and their states.
+    /// A new name that another saved preset of the type has is refused
+    /// (one that differs from its own in case alone is a new name for it).
+    pub fn change(&self, uri: &str, name: &str, change: &Change) -> Result<Saved, String> {
+        let found = {
+            let inner = self.inner.lock();
+            let same = |entry: &&Entry| entry.preset.uri == uri && same_name(&entry.preset.name, name.trim());
+            inner.entries.iter().find(same).map(|entry| entry.info.clone())
+        };
+        let Some(info) = found else {
+            return Err(format!("there is no saved preset '{}' of '{uri}'", name.trim()));
+        };
+        let mut preset = self.load(uri, &info)?.ok_or_else(|| format!("'{}' is no saved preset", info.name))?;
+        let old = preset.name.clone();
+        if let Some(wanted) = &change.name {
+            let wanted = SavedPreset::checked_name(wanted)?;
+            let taken = self.list(uri).iter().any(|other| same_name(&other.name, &wanted));
+            if taken && !same_name(&wanted, &old) {
+                return Err(format!(
+                    "'{uri}' has a saved preset called '{wanted}' already; delete that one first, or choose another name"
+                ));
+            }
+            preset.name = wanted;
+        }
+        if let Some(description) = &change.description {
+            preset.description = description.trim().to_string();
+        }
+        if let Some(tags) = &change.tags {
+            preset.tags = tags.iter().map(|tag| tag.trim().to_string()).filter(|tag| !tag.is_empty()).collect();
+        }
+        let renamed = !same_name(&preset.name, &old);
+        // Under its new name first: there is no moment without it.
+        let saved = self.save(preset)?;
+        if renamed {
+            self.delete(uri, &old);
+        }
+        Ok(Saved { replaced: false, ..saved })
     }
 
     /// Removes the preset the device type `uri` has saved under `name`,
@@ -784,6 +833,57 @@ mod tests {
         assert_eq!(memory.load("vst3:GUITAR", &saved.info).unwrap().unwrap(), tone("Tone"));
         let long = SavedPreset { after: Some(vec![Default::default(); MAX_AFTER + 1]), ..tone("Long") };
         assert!(memory.save(long).unwrap_err().contains("at most"));
+    }
+
+    #[test]
+    fn a_saved_preset_is_renamed_and_described_with_everything_it_holds() {
+        let folder = tempfile::tempdir().unwrap();
+        let store = SavedPresets::default();
+        store.open(folder.path().to_path_buf());
+        let first = store.save(tone("Tone")).unwrap();
+        let old_file = first.file.clone().unwrap();
+        store.save(preset("vst3:GUITAR", "Clean", None)).unwrap();
+
+        // Another name: the same sound, state for state, under it; and
+        // nothing left under the old one, on disk or in the list.
+        let rename = Change { name: Some("  Djent Rhythm ".into()), ..Change::default() };
+        let renamed = store.change("vst3:GUITAR", "tone", &rename).unwrap();
+        assert_eq!(renamed.info.path(), "Saved/Djent Rhythm");
+        assert_eq!(names(&store.list("vst3:GUITAR")), ["Clean", "Djent Rhythm"]);
+        let whole = store.load("vst3:GUITAR", &renamed.info).unwrap().unwrap();
+        assert_eq!(whole, SavedPreset { name: "Djent Rhythm".into(), ..tone("Tone") });
+        assert!(!old_file.exists() && !state_file(&old_file).exists() && !state_file_after(&old_file, 0).exists());
+        let new_file = renamed.file.clone().unwrap();
+        assert_eq!(std::fs::read(state_file_after(&new_file, 0)).unwrap(), [7, 7]);
+
+        // What it says of itself, with its name and its devices as they are.
+        let said = Change {
+            description: Some(" tight and dry ".into()),
+            tags: Some(vec!["guitar".into(), " ".into(), "rhythm".into()]),
+            ..Change::default()
+        };
+        let described = store.change("vst3:GUITAR", "Djent Rhythm", &said).unwrap();
+        assert_eq!((described.info.description.as_str(), described.info.tags.len()), ("tight and dry", 2));
+        assert_eq!(store.load("vst3:GUITAR", &described.info).unwrap().unwrap().after, tone("Tone").after);
+        assert_eq!(store.sounds()[0].info.description, "tight and dry");
+        // Its case alone is a new name for it, and no clash with itself.
+        let cased = Change { name: Some("DJENT rhythm".into()), ..Change::default() };
+        assert_eq!(store.change("vst3:GUITAR", "Djent Rhythm", &cased).unwrap().info.name, "DJENT rhythm");
+        assert_eq!(names(&store.list("vst3:GUITAR")), ["Clean", "DJENT rhythm"]);
+        let again = SavedPresets::default();
+        again.open(folder.path().to_path_buf());
+        assert_eq!(names(&again.list("vst3:GUITAR")), ["Clean", "DJENT rhythm"]);
+
+        // A name that is taken, a name that will not do, and a preset
+        // there is none of: each is said, and nothing is changed.
+        let taken = Change { name: Some("clean".into()), ..Change::default() };
+        assert!(store.change("vst3:GUITAR", "DJENT rhythm", &taken).unwrap_err().contains("called 'clean' already"));
+        let bad = Change { name: Some("a/b".into()), ..Change::default() };
+        assert!(store.change("vst3:GUITAR", "DJENT rhythm", &bad).unwrap_err().contains("cannot have '/'"));
+        assert!(
+            store.change("vst3:GUITAR", "Gone", &Change::default()).unwrap_err().contains("no saved preset 'Gone'")
+        );
+        assert_eq!(names(&store.list("vst3:GUITAR")), ["Clean", "DJENT rhythm"]);
     }
 
     #[test]
