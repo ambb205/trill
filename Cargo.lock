@@ -4613,6 +4613,7 @@ dependencies = [
  "trill-noir",
  "trill-plugins",
  "trill-runtime",
+ "trill-stage",
  "winresource",
 ]
 
@@ -4758,6 +4759,23 @@ dependencies = [
  "trill-library",
  "trill-media",
  "trill-plugins",
+]
+
+[[package]]
+name = "trill-stage"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "egui",
+ "egui-wgpu",
+ "hound",
+ "image",
+ "log",
+ "parking_lot",
+ "pollster",
+ "tempfile",
+ "trill-core",
+ "trill-noir",
 ]
 
 [[package]]
