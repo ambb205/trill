@@ -143,6 +143,19 @@ shot wavetable "$here/projects/wavetable.trill" --select "Sync Lead" --tab devic
 shot wavetable-whole "$here/projects/wavetable.trill" --select "Sync Lead" --tab devices --size 2560x900
 shot graphite-wavetable "$here/projects/wavetable.trill" --select "Sync Lead" --tab devices --size 1600x900 --theme graphite
 
+# A sound of more than one device: a track on one that was saved (a synth
+# and its hall), with the browser listing it among the sounds; and a track
+# on one the wavetable synth brings, wide enough for its chorus and reverb.
+# The song and the profile folder that holds the saved sound are made here,
+# under target, when a picture needs them.
+kept=target/sound-pictures
+if making instrument-sound instrument-sound-whole graphite-instrument-sound; then
+    cargo run -p trill-app --example wavetable_listen -- --sound-pictures "$kept"
+fi
+shot instrument-sound "$kept/sound.trill" --profile "$kept/profile" --select "Warm Hall" --tab devices --size 1600x900
+shot instrument-sound-whole "$kept/sound.trill" --profile "$kept/profile" --select "Glass Pad" --tab devices --size 2560x900
+shot graphite-instrument-sound "$kept/sound.trill" --profile "$kept/profile" --select "Warm Hall" --tab devices --size 1600x900 --theme graphite
+
 # Sounds: the library in the browser with a sound chosen, and an audio clip
 # open in the Clip tab; a search beside the drum rack's pads; the sampler
 # with its file; a clip whose file is gone, in a browser with no folders

@@ -148,18 +148,33 @@ fn brought_by(cx: &Cx, device: &Device, preset: &PresetInfo) -> String {
     }
 }
 
-/// What a device's preset menu shows for the preset it is on: one of its
-/// type's own if its values are that preset's, the saved preset it was
-/// given, or for a plugin the preset it was last given.
+/// What a device's preset menu shows for the preset it is on: the saved
+/// preset it was given, one of its type's own if its values are that
+/// preset's, or for a plugin the preset it was last given. An effect that
+/// came with a sound is on no preset of its own: the sound is its
+/// instrument's, and is named there.
 fn shown_preset<'a>(cx: &Cx<'a>, device: &'a Device, descriptor: Option<&'a DeviceDescriptor>) -> Option<&'a str> {
+    let given = device.preset.as_ref().filter(|preset| preset.bringer().is_none());
+    let given = given.map(|preset| preset.name.as_str());
+    // A saved preset was given by name, and says so whatever its values
+    // are: a sound saved from a device on one of its type's own presets
+    // has that preset's values.
+    if current_saved(cx, device).is_some() {
+        return given;
+    }
     let own = descriptor.and_then(|descriptor| current_preset(device, descriptor));
-    let given = device.preset.as_ref().map(|preset| preset.name.as_str());
     let built_in = descriptor.is_some_and(|descriptor| !descriptor.presets.is_empty());
-    own.or(match current_saved(cx, device) {
-        Some(_) => given,
-        // A built-in device's own presets are told by its values alone.
-        None => given.filter(|_| !built_in),
-    })
+    // A built-in device's own presets are told by its values alone.
+    own.or(given.filter(|_| !built_in))
+}
+
+/// The preset of its type's own that a device is on, for marking it in a
+/// list: none while it is on a saved one.
+pub fn current_own<'a>(cx: &Cx<'_>, device: &Device, descriptor: &'a DeviceDescriptor) -> Option<&'a str> {
+    match current_saved(cx, device) {
+        Some(_) => None,
+        None => current_preset(device, descriptor),
+    }
 }
 
 /// Adds a device where it belongs in `chain`, as one undo step.
@@ -358,13 +373,24 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
         // were saved, and saving the sound it has now.
         let own = descriptor.map(|descriptor| descriptor.presets.as_slice()).unwrap_or_default();
         let saved = saved_presets(cx, device);
-        let current = descriptor.and_then(|descriptor| current_preset(device, descriptor));
+        let current = descriptor.and_then(|descriptor| current_own(cx, device, descriptor));
         let current_saved = current_saved(cx, device);
         let shown = shown_preset(cx, device, descriptor).unwrap_or("Preset");
         let width = trill_noir::dropdown_width(ui, theme, shown).min(104.0);
         let rect = Rect::from_min_size(pos2(name_right - width, header.center().y - 8.0), vec2(width, 16.0));
         let response = trill_noir::dropdown(ui, theme, rect, id.with("preset"), "", shown, !device.enabled);
-        cx.hint(&response, "Presets of this device, saving its sound as one, and loading one from a file");
+        let about = "Presets of this device, saving its sound as one, and loading one from a file";
+        match device.preset.as_ref().filter(|preset| preset.bringer().is_some()) {
+            // An effect a sound brought: it goes when the next one comes.
+            Some(sound) => cx.hint(
+                &response,
+                format!(
+                    "Came with the sound {}, and goes when the track is given another \u{00B7} {about}",
+                    sound.name
+                ),
+            ),
+            None => cx.hint(&response, about),
+        }
         let (mut chosen, mut save, mut load, mut save_sound) = (None, false, false, false);
         // The track whose sound begins at this device, if one does: its
         // instrument, or its first device where it has none.

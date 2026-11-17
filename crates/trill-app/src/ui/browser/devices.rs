@@ -298,7 +298,7 @@ fn preset_list(ui: &mut Ui, cx: &mut Cx) {
     }
 
     section(ui, cx, &format!("Presets \u{00B7} {}", descriptor.name));
-    let current = devices::current_preset(device, descriptor);
+    let current = devices::current_own(cx, device, descriptor);
     for preset in presets {
         let response = row(ui, cx, &preset.name, "", current == Some(preset.name.as_str()));
         cx.hint(
