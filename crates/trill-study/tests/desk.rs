@@ -137,7 +137,7 @@ fn a_study_the_machine_has_no_room_for_or_that_lacks_its_parts_is_refused_before
     let cramped = desk_with(root.path(), Some(script()), Programs::default(), Some(|| Some(1 << 30)));
     let refused = cramped.start(song(root.path()), StudyOptions::default(), None).unwrap_err();
     assert!(
-        refused.starts_with("there is not the memory free to study this now: a recording of its length takes about 5.")
+        refused.starts_with("there is not the memory free to study this now: a recording of its length takes about 1.")
             && refused.contains("and 1.0 GB are free. Nothing was begun"),
         "{refused}"
     );

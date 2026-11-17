@@ -102,8 +102,8 @@ impl Shared {
         Studies::new(self.turns.lock().root.clone())
     }
 
-    /// The memory a run of `study` is taken to need, and the most it may take.
-    fn needs(study: &Study) -> (u64, u64) {
+    /// The memory a run of `study` by `models` is taken to need, and the most it may take.
+    fn needs(study: &Study, models: &crate::models::Which) -> (u64, u64) {
         let known = if study.seconds > 0.0 {
             Some(study.seconds)
         } else if let Source::File { path } = &study.source {
@@ -112,8 +112,8 @@ impl Shared {
             None
         };
         match known {
-            Some(seconds) => (room::need(seconds), room::need(seconds)),
-            None => (room::need(UNKNOWN_SECONDS), room::need(LONGEST_SECONDS)),
+            Some(seconds) => (room::need(seconds, models), room::need(seconds, models)),
+            None => (room::need(UNKNOWN_SECONDS, models), room::need(LONGEST_SECONDS, models)),
         }
     }
 
@@ -123,7 +123,7 @@ impl Shared {
             return Err("this program was not started as one that can study: nothing is studied from here".to_owned());
         }
         let models = self.setup.models_for(&study.options)?;
-        let (need, limit) = Self::needs(study);
+        let (need, limit) = Self::needs(study, &models);
         if let Some(free) = (self.free)().filter(|&free| free < need) {
             return Err(format!(
                 "there is not the memory free to study this now: a recording of its length takes about {}, and {} are free. Nothing was begun: close something, and run the study again",

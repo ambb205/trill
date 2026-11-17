@@ -26,10 +26,21 @@ use trill_listen::signal::resample;
 const MODEL_RATE: f64 = 16_000.0;
 /// Words are placed in runs of about this long, cut at pauses where there are any.
 const WINDOW_SECONDS: f64 = 16.0;
-/// How many of its neighbours' words a window is given either side.
+/// A run is cut where it has become this long, pause or none.
+const LONGEST_RUN: f64 = 20.0;
+/// How many of its neighbours' words a window is given either side, where
+/// they lie within [`CONTEXT_SECONDS`] of it: a neighbour across a long
+/// rest would bring the rest with it.
 const CONTEXT_WORDS: usize = 3;
-/// The longest stretch of audio the model is handed at once, in seconds.
-const LONGEST_SECONDS: f64 = 60.0;
+const CONTEXT_SECONDS: f64 = 3.0;
+/// The longest stretch of audio the model is handed at once, in seconds:
+/// what it holds while it listens grows by the square of this.
+const LONGEST_SECONDS: f64 = 28.0;
+/// The model is handed audio in whole steps of this many seconds. A
+/// runtime keeps what it took for every length it was ever handed, and a
+/// song is a hundred windows: of seven lengths it holds seven, where of a
+/// hundred lengths it was measured to hold gigabytes.
+const STEP_SECONDS: f64 = 4.0;
 
 /// The likeliest path of `tokens` through `emission` (frames by
 /// vocabulary, logs of likelihoods), with the model's blank between: the
@@ -90,7 +101,7 @@ fn windows(words: &[Word]) -> Vec<(usize, usize)> {
     for index in 1..words.len() {
         let length = words[index].end - words[first].start;
         let gap = words[index].start - words[index - 1].end;
-        if (length > WINDOW_SECONDS && gap > 0.3) || length > WINDOW_SECONDS * 1.6 || index - first >= 60 {
+        if (length > WINDOW_SECONDS && gap > 0.3) || length > LONGEST_RUN || index - first >= 60 {
             found.push((first, index));
             first = index;
         }
@@ -154,15 +165,37 @@ pub fn place(
     let runs = windows(words);
     for (done, &(first, last)) in runs.iter().enumerate() {
         progress(done as f32 / runs.len() as f32);
-        let (begin, finish) = (first.saturating_sub(CONTEXT_WORDS), (last + CONTEXT_WORDS).min(words.len()));
+        // The neighbours that are near enough, either side.
+        let own_start = words[first].start;
+        let own_end = words[first..last].iter().map(|word| word.end).fold(own_start, f64::max);
+        let (mut begin, mut finish) = (first, last);
+        for _ in 0..CONTEXT_WORDS {
+            if begin > 0 && own_start - words[begin - 1].end <= CONTEXT_SECONDS {
+                begin -= 1;
+            }
+            if finish < words.len() && words[finish].start - own_end <= CONTEXT_SECONDS {
+                finish += 1;
+            }
+        }
         let start = (words[begin..finish].iter().map(|word| word.start).fold(f64::INFINITY, f64::min) - 0.6).max(0.0);
         let end = (words[begin..finish].iter().map(|word| word.end).fold(0.0f64, f64::max) + 0.8)
             .min(duration)
             .min(start + LONGEST_SECONDS);
-        let (from, to) = ((start * MODEL_RATE) as usize, ((end * MODEL_RATE) as usize).min(speech.len()));
-        if to < from + (MODEL_RATE as usize) / 4 {
+        let from = (start * MODEL_RATE) as usize;
+        let wanted = ((end * MODEL_RATE) as usize).min(speech.len()).saturating_sub(from);
+        if wanted < (MODEL_RATE as usize) / 4 {
             continue;
         }
+        // A whole number of steps: more of the vocal than the window asked for, after it or, at the
+        // recording's end, before it. The wildcards at either end take what is not the window's own.
+        let step = (STEP_SECONDS * MODEL_RATE) as usize;
+        let length = wanted.div_ceil(step) * step;
+        let (from, to) = match (from + length <= speech.len(), speech.len() >= length) {
+            (true, _) => (from, from + length),
+            (false, true) => (speech.len() - length, speech.len()),
+            (false, false) => (0, speech.len()),
+        };
+        let start = from as f64 / MODEL_RATE;
         // Zero mean and unit deviation, as the model was trained to hear.
         let samples = &speech[from..to];
         let mean = samples.iter().map(|&v| f64::from(v)).sum::<f64>() / samples.len() as f64;

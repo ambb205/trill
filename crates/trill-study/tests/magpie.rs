@@ -155,14 +155,16 @@ fn a_study_finds_what_magpie_found_in_the_recordings_it_took_apart() {
         let options =
             StudyOptions { stems: if best { StemChoice::Best } else { StemChoice::Fast }, ..StudyOptions::default() };
         let (study, _) = studies.create(&name, Source::File { path: source }, options).unwrap();
+        let models = Which::Real(Setup { parts: parts.clone(), provider });
+        let given = room::need(seconds, &models);
         let order = Order::Study {
             folder: study.path.clone(),
-            models: Which::Real(Setup { parts: parts.clone(), provider }),
+            models,
             programs: Programs { ffmpeg: link::find_program("ffmpeg"), fetcher: None },
         };
         let began = Instant::now();
         let mut job = Job::start(&program, &order).unwrap();
-        let (outcome, held) = attend(&mut job, Some(room::need(seconds)), &AtomicBool::new(false), &mut |_| {});
+        let (outcome, held) = attend(&mut job, Some(given), &AtomicBool::new(false), &mut |_| {});
         assert_eq!(outcome, Outcome::Done, "{name}");
         let done = study.study().unwrap();
         println!(
@@ -172,7 +174,7 @@ fn a_study_finds_what_magpie_found_in_the_recordings_it_took_apart() {
             began.elapsed().as_secs_f64(),
             done.device.as_deref().unwrap_or("?"),
             room::said(held.peak),
-            room::said(room::need(seconds)),
+            room::said(given),
         );
         let stages: Vec<String> = done
             .stages
@@ -260,7 +262,7 @@ fn a_study_finds_what_magpie_found_in_the_recordings_it_took_apart() {
                 theirs.len()
             );
         }
-        assert!(held.peak <= room::need(seconds), "{name}: {} held", room::said(held.peak));
+        assert!(held.peak <= given, "{name}: {} held", room::said(held.peak));
     }
     println!(
         "of Magpie's {their_words} words in all, a study has {shared_words} ({:.0} %)",

@@ -138,15 +138,19 @@ fn read(folder: &StudyFolder, programs: &Programs) -> Result<Sound, String> {
     Ok(Sound::of(&buffer))
 }
 
-fn write_stem(folder: &StudyFolder, stem: &Stem) -> Result<(), String> {
+fn write_stem(folder: &StudyFolder, stem: &mut Stem) -> Result<(), String> {
     let path = folder.stem(&stem.name);
     let said = |error: String| format!("{}: {error}", path.display());
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| said(error.to_string()))?;
     }
     let partial = partial_of(&path);
-    let buffer = AudioBuffer { sample_rate: RATE, left: stem.sound.left.clone(), right: stem.sound.right.clone() };
-    trill_media::write_wav(&partial, &buffer, WavFormat::Int24).map_err(|error| said(error.to_string()))?;
+    // Lent to the writer and taken back: a stem of a long recording is not held twice to be written.
+    let sound = std::mem::take(&mut stem.sound);
+    let buffer = AudioBuffer { sample_rate: RATE, left: sound.left, right: sound.right };
+    let written = trill_media::write_wav(&partial, &buffer, WavFormat::Int24);
+    stem.sound = Sound { left: buffer.left, right: buffer.right };
+    written.map_err(|error| said(error.to_string()))?;
     std::fs::rename(&partial, &path).map_err(|error| said(error.to_string()))
 }
 
@@ -213,7 +217,7 @@ pub fn run(
     }
     stage(folder, Stage::Read, said, |_| {
         let (sound, note) = match &stems {
-            Some(stems) => (Recording::of_stems(stems.clone()).mix, "already done"),
+            Some(stems) => (Recording::mix_of(stems), "already done"),
             None => (read(folder, programs)?, ""),
         };
         let mut study = folder.study()?;
@@ -236,24 +240,25 @@ pub fn run(
         // What the model leaves unassigned goes into `other`, so that the
         // stems add up to the recording: mute nothing and it is the mix.
         let frames = mix.frames();
-        let mut rest = (mix.left.clone(), mix.right.clone());
         for stem in &mut found {
             stem.sound.left.resize(frames, 0.0);
             stem.sound.right.resize(frames, 0.0);
+        }
+        if let Some(other) = found.iter().position(|stem| stem.name == "other") {
             for index in 0..frames {
-                rest.0[index] -= stem.sound.left[index];
-                rest.1[index] -= stem.sound.right[index];
+                let (mut left, mut right) = (mix.left[index], mix.right[index]);
+                for stem in &found {
+                    left -= stem.sound.left[index];
+                    right -= stem.sound.right[index];
+                }
+                found[other].sound.left[index] += left;
+                found[other].sound.right[index] += right;
             }
         }
-        if let Some(other) = found.iter_mut().find(|stem| stem.name == "other") {
-            for index in 0..frames {
-                other.sound.left[index] += rest.0[index];
-                other.sound.right[index] += rest.1[index];
-            }
-        }
-        for (index, stem) in found.iter().enumerate() {
+        let count = found.len();
+        for (index, stem) in found.iter_mut().enumerate() {
             write_stem(folder, stem)?;
-            said(Event::Progress(0.9 + 0.1 * (index + 1) as f32 / found.len() as f32));
+            said(Event::Progress(0.9 + 0.1 * (index + 1) as f32 / count as f32));
         }
         folder.write_outlines(&found)?;
         let mut study = folder.study()?;
@@ -264,7 +269,7 @@ pub fn run(
         let _ = std::fs::remove_file(folder.path.join(CONVERTED));
         Ok(Some(String::new()))
     })?;
-    let stems = stems.expect("the stage before did not fail");
+    let mut stems = stems.expect("the stage before did not fail");
 
     stage(folder, Stage::Beats, said, |said| {
         if folder.beats().is_some() {
@@ -280,11 +285,12 @@ pub fn run(
     // far better there than in a mix, and the stem is silent wherever
     // nobody sings, which keeps it from inventing lines over the band.
     let vocal: Option<Vec<f32>> = stems.iter().find(|stem| stem.name == "vocals").map(|stem| stem.sound.mono());
-    let singing = vocal.as_deref().filter(|vocal| {
+    let sings = vocal.as_deref().is_some_and(|vocal| {
         options.words
             && vocal.len() as f64 >= RATE
             && vocal.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs())) >= 0.003
     });
+    let singing = vocal.as_deref().filter(|_| sings);
     stage(folder, Stage::Words, said, |said| {
         let Some(vocal) = singing else { return Ok(None) };
         if folder.transcript().is_some() {
@@ -337,6 +343,9 @@ pub fn run(
         Ok(Some(note))
     })?;
 
+    // What is listened to is the stems: the mix and the vocal by itself were for the models.
+    drop(vocal);
+    drop(mix);
     stage(folder, Stage::Listen, said, |said| {
         if folder.heard().is_some() {
             return Ok(Some("already done".to_owned()));
@@ -347,7 +356,7 @@ pub fn run(
             folder.write_outlines(&stems)?;
         }
         let options = Options { beats: folder.beats(), corrections: folder.study()?.corrections };
-        let heard = trill_listen::hear(&Recording::of_stems(stems.clone()), &options);
+        let heard = trill_listen::hear(&Recording::of_stems(std::mem::take(&mut stems)), &options);
         if let Some(mut lyrics) = folder.lyrics().filter(|lyrics| !lyrics.lines.is_empty()) {
             lyrics::pitch_words(&mut lyrics, &heard.melody);
             folder.write_lyrics(&lyrics)?;

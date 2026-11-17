@@ -6,21 +6,36 @@
 //! says beforehand what it needs ([`need`]), is refused when the machine
 //! has not got it, and is ended when it takes more.
 
+use crate::models::Which;
+use crate::models::real::Provider;
 use std::time::Duration;
 
-/// What a run is taken to need whatever it studies: the models, their
-/// runtime and the program itself, as measured (see the crate's README
-/// numbers) with room to spare.
-const BASE: u64 = 5 << 30;
-/// And for each minute of the recording: its stems, the copies the
-/// analyses make of them, and the transforms.
-const PER_MINUTE: u64 = 400 << 20;
+/// What the models, their runtime and the program hold whatever is
+/// studied, by what runs them. Each is what was measured, with a quarter
+/// to spare: the part that drives a card of any make holds more than
+/// NVIDIA's own libraries do, and a processor far less than either.
+fn base(models: &Which) -> u64 {
+    let megabytes: u64 = match models {
+        Which::Scripted(_) => 1024,
+        Which::Real(setup) => match setup.provider {
+            Provider::Processor => 2560,
+            Provider::Nvidia => 5632,
+            Provider::AnyCard { .. } => 6400,
+        },
+    };
+    megabytes << 20
+}
+
+/// And for each minute of the recording: its stems, the signals that are
+/// listened to in them, and the transforms.
+const PER_MINUTE: u64 = 350 << 20;
 /// How often a running process is asked what it holds.
 pub const LOOK_EVERY: Duration = Duration::from_millis(500);
 
-/// The memory a run over a recording `seconds` long says it needs, in bytes.
-pub fn need(seconds: f64) -> u64 {
-    BASE + (seconds.max(0.0) / 60.0 * PER_MINUTE as f64) as u64
+/// The memory a run by `models` over a recording `seconds` long says it
+/// needs, in bytes.
+pub fn need(seconds: f64, models: &Which) -> u64 {
+    base(models) + (seconds.max(0.0) / 60.0 * PER_MINUTE as f64) as u64
 }
 
 /// The memory that is free to be used at once, in bytes. `None` where
@@ -85,8 +100,17 @@ mod tests {
 
     #[test]
     fn a_longer_recording_needs_more_and_bytes_are_said_as_people_say_them() {
-        assert!(need(900.0) > need(240.0));
-        assert_eq!(need(0.0), BASE);
+        let scripted = Which::Scripted(crate::models::scripted::Script::default());
+        let on = |provider| Which::Real(crate::models::real::Setup { parts: "parts".into(), provider });
+        assert!(need(900.0, &scripted) > need(240.0, &scripted));
+        assert_eq!(need(0.0, &scripted), 1 << 30);
+        // A card needs more than the processor, and the part for any card the most.
+        let (processor, nvidia, any) = (
+            need(240.0, &on(Provider::Processor)),
+            need(240.0, &on(Provider::Nvidia)),
+            need(240.0, &on(Provider::AnyCard { adapter: 0 })),
+        );
+        assert!(processor < nvidia && nvidia < any, "{processor} {nvidia} {any}");
         assert_eq!(said(3 << 30), "3.0 GB");
         assert_eq!(said(512 << 20), "512 MB");
     }

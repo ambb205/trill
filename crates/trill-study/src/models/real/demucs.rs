@@ -217,16 +217,14 @@ pub fn separate(
     if length == 0 {
         return Err("there is nothing to split".to_owned());
     }
-    // The whole recording to zero mean and unit deviation of its two channels as one.
-    let mono: Vec<f64> = (0..length).map(|i| 0.5 * (f64::from(mix.left[i]) + f64::from(mix.right[i]))).collect();
-    let mean = mono.iter().sum::<f64>() / length as f64;
+    // The whole recording to zero mean and unit deviation of its two channels as one: worked
+    // out as it is read, and applied to each chunk as it is cut, so that no copy of it is made.
+    let both = |index: usize| 0.5 * (f64::from(mix.left[index]) + f64::from(mix.right[index]));
+    let mean = (0..length).map(both).sum::<f64>() / length as f64;
     let deviation =
-        (mono.iter().map(|value| (value - mean) * (value - mean)).sum::<f64>() / (length as f64 - 1.0).max(1.0)).sqrt()
+        ((0..length).map(|index| (both(index) - mean).powi(2)).sum::<f64>() / (length as f64 - 1.0).max(1.0)).sqrt()
             + 1e-8;
-    let scaled = |channel: &[f32]| -> Vec<f32> {
-        channel[..length].iter().map(|&v| ((f64::from(v) - mean) / deviation) as f32).collect()
-    };
-    let (left, right) = (scaled(&mix.left), scaled(&mix.right));
+    let scaled = |sample: f32| ((f64::from(sample) - mean) / deviation) as f32;
 
     let stride = ((1.0 - OVERLAP) * SEGMENT as f64) as usize;
     let half = SEGMENT / 2;
@@ -245,10 +243,11 @@ pub fn separate(
             // A short last chunk is centered in real audio and padded with silence.
             let start = offset as isize - ((SEGMENT - own) / 2) as isize;
             let mut piece = [vec![0.0f32; SEGMENT], vec![0.0f32; SEGMENT]];
-            for (slots, source) in piece.iter_mut().zip([&left, &right]) {
+            for (slots, source) in piece.iter_mut().zip([&mix.left, &mix.right]) {
                 for (index, slot) in slots.iter_mut().enumerate() {
-                    if let Some(&sample) = usize::try_from(start + index as isize).ok().and_then(|at| source.get(at)) {
-                        *slot = sample;
+                    let at = usize::try_from(start + index as isize).ok().filter(|&at| at < length);
+                    if let Some(&sample) = at.and_then(|at| source.get(at)) {
+                        *slot = scaled(sample);
                     }
                 }
             }
@@ -272,17 +271,16 @@ pub fn separate(
             progress((pass * chunks + number + 1) as f32 / (graphs * chunks) as f32);
         }
     }
-    let back = |channel: &[f32]| -> Vec<f32> {
-        channel.iter().zip(&total).map(|(&v, &w)| (f64::from(v / w) * deviation + mean) as f32).collect()
-    };
-    let mut stems: Vec<Stem> = out
-        .iter()
-        .zip(SOURCES)
-        .map(|(stem, name)| Stem {
-            name: name.to_owned(),
-            sound: Sound { left: back(&stem[0]), right: back(&stem[1]) },
-        })
-        .collect();
+    // Back to the recording's own level, where each stem lies: no second copy of them is made.
+    let mut stems: Vec<Stem> = Vec::with_capacity(SOURCES.len());
+    for ([mut left, mut right], name) in out.into_iter().zip(SOURCES) {
+        for channel in [&mut left, &mut right] {
+            for (value, &weight) in channel.iter_mut().zip(&total) {
+                *value = (f64::from(*value / weight) * deviation + mean) as f32;
+            }
+        }
+        stems.push(Stem { name: name.to_owned(), sound: Sound { left, right } });
+    }
     stems.sort_by_key(|stem| ORDER.iter().position(|name| *name == stem.name));
     Ok(stems)
 }
