@@ -8,11 +8,15 @@
 
 use crate::voice::Voiced;
 use trill_core::project::automation_value;
-use trill_core::{AutomationTarget, Beats, ClipId, Note, Project, Role, TimeSignature, Track, TrackId, TrackKind};
+use trill_core::{
+    AutomationTarget, Bar, Beats, ClipId, MeterMap, Note, Project, Role, TempoMap, TimeSignature, Track, TrackId,
+    TrackKind,
+};
 
 /// The built-in devices whose notes are drums.
 const DRUM_DEVICES: [&str; 2] = ["builtin:drumkit", "builtin:drumrack"];
-/// A part is taken to be away once it has been silent for this many bars.
+/// A part is taken to be away once it has been silent for this many bars
+/// of the song's first time signature.
 const AWAY_AFTER_BARS: f64 = 2.0;
 /// Sections found without markers are at least this many bars long, and are
 /// cut in pieces of this many where nothing changes for longer.
@@ -146,12 +150,147 @@ pub struct Hits {
     pub crashes: Vec<Hit>,
 }
 
+/// How a song's beats become time: its tempo, and every change of it.
+///
+/// A song of one tempo is worked out as it always was, to the bit, so that
+/// a picture of it is the picture it was before a tempo could change.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Time {
+    first: f64,
+    map: TempoMap,
+}
+
+impl Time {
+    /// The time of `project`.
+    pub fn of(project: &Project) -> Self {
+        Self { first: project.tempo, map: project.tempo_map() }
+    }
+
+    /// One tempo throughout.
+    pub fn constant(tempo: f64) -> Self {
+        Self { first: tempo, map: TempoMap::constant(tempo) }
+    }
+
+    /// Seconds from the start of the song to `beat`.
+    pub fn seconds(&self, beat: Beats) -> f64 {
+        if self.map.is_constant() { beat * 60.0 / self.first } else { self.map.seconds_at(beat) }
+    }
+
+    /// The beat the song is at `seconds` in.
+    pub fn beat_at(&self, seconds: f64) -> Beats {
+        if self.map.is_constant() { seconds * self.first / 60.0 } else { self.map.beat_at_seconds(seconds) }
+    }
+
+    /// Seconds from `from` to `to`; negative if `to` is the earlier.
+    pub fn between(&self, from: Beats, to: Beats) -> f64 {
+        if self.map.is_constant() { (to - from) * 60.0 / self.first } else { self.map.seconds_between(from, to) }
+    }
+
+    /// Seconds that `length` beats last from `from` on.
+    pub fn over(&self, from: Beats, length: Beats) -> f64 {
+        if self.map.is_constant() { length * 60.0 / self.first } else { self.map.seconds_over(from, length) }
+    }
+
+    /// The beat the song was at `seconds` before `beat`.
+    pub fn before(&self, beat: Beats, seconds: f64) -> Beats {
+        if self.map.is_constant() {
+            beat - seconds * self.first / 60.0
+        } else {
+            self.map.beat_at_seconds(self.map.seconds_at(beat) - seconds)
+        }
+    }
+
+    /// The tempo at `beat`, in beats per minute: while it glides, where
+    /// the glide has it.
+    pub fn tempo_at(&self, beat: Beats) -> f64 {
+        self.map.tempo_at(beat)
+    }
+
+    /// Whether the song has one tempo throughout.
+    pub fn is_constant(&self) -> bool {
+        self.map.is_constant()
+    }
+}
+
+/// A place where the song's tempo or its time signature changes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Change {
+    pub beat: Beats,
+    /// The time signature that takes over here.
+    pub signature: Option<TimeSignature>,
+    /// The tempo that takes over here.
+    pub tempo: Option<f64>,
+    /// Where the song begins to glide to that tempo, if it glides to it
+    /// and does not jump.
+    pub glides_from: Option<Beats>,
+}
+
+impl Change {
+    /// What is said of it, as the window's ruler says it: a time
+    /// signature, a tempo, an arrow before a tempo the song glides to, with
+    /// a dot between: "7/8 · 140 BPM".
+    pub fn said(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        parts.extend(self.signature.map(|signature| format!("{}/{}", signature.numerator, signature.denominator)));
+        let arrow = if self.glides_from.is_some() { "\u{2192}" } else { "" };
+        parts.extend(self.tempo.map(|tempo| format!("{arrow}{} BPM", tempo_said(tempo))));
+        parts.join(" \u{00B7} ")
+    }
+}
+
+/// `"156"`, `"127.5"`: a tempo without the decimals it does not have.
+pub fn tempo_said(tempo: f64) -> String {
+    let text = format!("{tempo:.2}");
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// Every place where the tempo or the time signature of `project` changes,
+/// in order; what changes at one beat is one change.
+fn changes_of(project: &Project) -> Vec<Change> {
+    let mut changes: Vec<Change> = Vec::new();
+    let mut at = |beat: Beats| -> usize {
+        match changes.iter().position(|change| (change.beat - beat).abs() < 1e-6) {
+            Some(index) => index,
+            None => {
+                changes.push(Change { beat, signature: None, tempo: None, glides_from: None });
+                changes.len() - 1
+            }
+        }
+    };
+    let mut marks: Vec<(usize, Option<TimeSignature>, Option<(f64, Option<Beats>)>)> = Vec::new();
+    for change in &project.meter_changes {
+        marks.push((at(change.beat), Some(change.signature), None));
+    }
+    let mut before = 0.0;
+    for change in &project.tempo_changes {
+        marks.push((at(change.beat), None, Some((change.tempo, change.ramp.then_some(before)))));
+        before = change.beat;
+    }
+    for (index, signature, tempo) in marks {
+        if let Some(signature) = signature {
+            changes[index].signature = Some(signature);
+        }
+        if let Some((tempo, glides_from)) = tempo {
+            (changes[index].tempo, changes[index].glides_from) = (Some(tempo), glides_from);
+        }
+    }
+    changes.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+    changes
+}
+
 /// A song as the stage reads it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Score {
     pub name: String,
+    /// The tempo and the time signature the song begins with. What they
+    /// are at a beat is asked of [`Score::time`] and [`Score::bars`].
     pub tempo: f64,
     pub signature: TimeSignature,
+    /// How its beats become time, and how they become bars.
+    pub time: Time,
+    pub bars: MeterMap,
+    /// Where the tempo or the time signature changes, in order.
+    pub changes: Vec<Change>,
     /// Where the last clip ends, taken up to the bar line.
     pub length: Beats,
     /// The whole song, in order, without gaps.
@@ -183,8 +322,11 @@ impl Score {
     }
 
     fn reading(project: &Project, drum_instrument: impl Fn(&Track) -> bool, every_track: bool) -> Self {
+        let bars = project.meter_map();
+        // A song is at least a bar long, and ends on a bar line.
+        let length = bars.bar_line_at_or_after(project.length_beats()).max(bars.bar(0).end());
+        // For how long a gap is: a length, not a place in the song.
         let bar = project.time_signature.beats_per_bar();
-        let length = (project.length_beats() / bar).ceil().max(1.0) * bar;
         let mut hits = Hits::default();
         let mut parts = Vec::new();
         for track in project.tracks.iter().filter(|track| track.kind == TrackKind::Normal) {
@@ -205,12 +347,15 @@ impl Score {
         }
         let sections = match project.markers.is_empty() {
             false => marked_sections(project, length),
-            true => found_sections(&parts, length, bar),
+            true => found_sections(&parts, length, &bars),
         };
         Self {
             name: project.name.clone(),
             tempo: project.tempo,
             signature: project.time_signature,
+            time: Time::of(project),
+            bars,
+            changes: changes_of(project),
             length,
             sections,
             parts,
@@ -231,12 +376,12 @@ impl Score {
 
     /// Seconds from the start of the song to `beat`.
     pub fn seconds(&self, beat: Beats) -> f64 {
-        beat * 60.0 / self.tempo
+        self.time.seconds(beat)
     }
 
     /// The beat the song is at `seconds` in.
     pub fn beat_at(&self, seconds: f64) -> Beats {
-        seconds * self.tempo / 60.0
+        self.time.beat_at(seconds)
     }
 
     /// How long the song is, in seconds.
@@ -244,8 +389,32 @@ impl Score {
         self.seconds(self.length)
     }
 
-    pub fn bar(&self) -> Beats {
-        self.signature.beats_per_bar()
+    /// How long a whole bar is in the time signature the song has at
+    /// `beat`, in beats.
+    pub fn bar_length(&self, beat: Beats) -> Beats {
+        self.bars.signature_at(beat).beats_per_bar()
+    }
+
+    /// The number of the bar `beat` is in, from 1.
+    pub fn bar_number(&self, beat: Beats) -> u32 {
+        self.bars.bar_at(beat).number()
+    }
+
+    /// How many bars the song has.
+    pub fn bar_count(&self) -> u32 {
+        self.bars.bar_at((self.length - 1e-6).max(0.0)).number()
+    }
+
+    /// The bar line nearest to `beat`; half way between two, the later.
+    pub fn bar_line_near(&self, beat: Beats) -> Beats {
+        let bar = self.bars.bar_at(beat);
+        if beat - bar.start < bar.end() - beat { bar.start } else { bar.end() }
+    }
+
+    /// The change of tempo or time signature that the song last came to
+    /// at or before `beat`.
+    pub fn change_before(&self, beat: Beats) -> Option<&Change> {
+        self.changes.iter().rev().find(|change| change.beat <= beat + 1e-9)
     }
 
     /// Which section `beat` is in: the first before the song, the last
@@ -425,11 +594,13 @@ fn marked_sections(project: &Project, length: Beats) -> Vec<Section> {
 
 /// Sections for a song without markers: a new one wherever a part comes in
 /// or drops out, on the bar, none shorter than four bars or longer than
-/// eight.
-fn found_sections(parts: &[Part], length: Beats, bar: Beats) -> Vec<Section> {
-    let bars = (length / bar).round().max(1.0) as usize;
+/// eight; and one wherever the time signature changes, which is a place
+/// the song itself marks.
+fn found_sections(parts: &[Part], length: Beats, meter: &MeterMap) -> Vec<Section> {
+    let all: Vec<Bar> = meter.bars_between(0.0, length).collect();
+    let bars = all.len().max(1);
     let present = |index: usize| -> Vec<bool> {
-        let (from, to) = (index as f64 * bar, (index + 1) as f64 * bar);
+        let (from, to) = all.get(index).map_or((0.0, length), |bar| (bar.start, bar.end()));
         parts.iter().map(|part| part.spans.iter().any(|(start, end)| *start < to && *end > from)).collect()
     };
     let (shortest, longest) = (FOUND_SECTION_BARS.0 as usize, FOUND_SECTION_BARS.1 as usize);
@@ -438,18 +609,20 @@ fn found_sections(parts: &[Part], length: Beats, bar: Beats) -> Vec<Section> {
     for index in 1..bars {
         let now = present(index);
         let since = index - starts.last().copied().unwrap_or(0);
-        if (now != before && since >= shortest && bars - index >= shortest) || since >= longest {
+        let meter_changes = all[index].signature != all[index - 1].signature;
+        if (now != before && since >= shortest && bars - index >= shortest) || since >= longest || meter_changes {
             starts.push(index);
         }
         before = now;
     }
+    let start_of = |index: usize| all.get(index).map_or(0.0, |bar| bar.start);
     starts
         .iter()
         .enumerate()
         .map(|(index, start)| Section {
             name: String::new(),
-            start: *start as f64 * bar,
-            end: starts.get(index + 1).map_or(length, |next| *next as f64 * bar),
+            start: start_of(*start),
+            end: starts.get(index + 1).map_or(length, |next| start_of(*next)),
         })
         .collect()
 }
@@ -640,5 +813,70 @@ mod tests {
         assert_eq!(score.seconds(5.0), 2.0);
         assert_eq!(score.beat_at(2.0), 5.0);
         assert_eq!(score.duration(), 3.2);
+        assert!(score.time.is_constant() && score.changes.is_empty());
+        assert_eq!((score.bar_count(), score.bar_number(7.9), score.bar_length(3.0)), (2, 2, 4.0));
+    }
+
+    /// The song the tempo work proves itself on: two bars of 4/4 at 120,
+    /// two of 7/8 at 140, and back for two.
+    fn changing() -> Project {
+        let mut project = Project::new("changing");
+        project.set_tempo(120.0).unwrap();
+        track_with(&mut project, "A", 0.0, 23.0, &[note(60, 0.0, 1.0)]);
+        project.set_time_signature_at(8.0, 7, 8).unwrap();
+        project.set_tempo_at(8.0, 140.0, false).unwrap();
+        project.set_time_signature_at(15.0, 4, 4).unwrap();
+        project.set_tempo_at(15.0, 120.0, false).unwrap();
+        project
+    }
+
+    #[test]
+    fn a_song_that_changes_tempo_and_meter_is_timed_and_counted_through_its_changes() {
+        let score = Score::read(&changing());
+        // Eight beats at 120 are four seconds; the seven at 140 are three.
+        assert_eq!((score.seconds(8.0), score.seconds(15.0), score.seconds(23.0)), (4.0, 7.0, 11.0));
+        assert_eq!((score.beat_at(4.0), score.beat_at(7.0)), (8.0, 15.0));
+        assert!((score.beat_at(5.5) - 11.5).abs() < 1e-9, "a second and a half into the 7/8, at 140");
+        assert_eq!(score.duration(), 11.0);
+        // A length of time lasts what the tempo under it says, across a change.
+        assert!((score.time.between(7.0, 9.0) - (0.5 + 60.0 / 140.0)).abs() < 1e-12);
+        assert!((score.time.before(9.0, 0.5 + 60.0 / 140.0) - 7.0).abs() < 1e-9);
+        assert_eq!(
+            (score.time.tempo_at(7.99), score.time.tempo_at(8.0), score.time.tempo_at(15.0)),
+            (120.0, 140.0, 120.0)
+        );
+        // Bars: two of four beats, two of three and a half, two of four.
+        assert_eq!(score.length, 23.0);
+        assert_eq!(score.bar_count(), 6);
+        assert_eq!([0.0, 7.9, 8.0, 11.4, 11.5, 15.0, 22.0].map(|beat| score.bar_number(beat)), [1, 2, 3, 3, 4, 5, 6]);
+        assert_eq!((score.bar_length(0.0), score.bar_length(9.0), score.bar_length(15.0)), (4.0, 3.5, 4.0));
+        assert_eq!((score.bar_line_near(9.5), score.bar_line_near(10.0)), (8.0, 11.5));
+        // The changes, as they are said.
+        let said: Vec<(Beats, String)> = score.changes.iter().map(|change| (change.beat, change.said())).collect();
+        assert_eq!(said, [(8.0, "7/8 \u{00B7} 140 BPM".to_owned()), (15.0, "4/4 \u{00B7} 120 BPM".to_owned())]);
+        assert_eq!(score.change_before(7.9), None);
+        assert_eq!(score.change_before(8.0).map(|change| change.beat), Some(8.0));
+        assert_eq!(score.change_before(20.0).map(|change| change.beat), Some(15.0));
+        // Without markers, a section begins where the time signature does.
+        let starts: Vec<Beats> = score.sections.iter().map(|section| section.start).collect();
+        assert_eq!(starts, [0.0, 8.0, 15.0]);
+    }
+
+    #[test]
+    fn a_tempo_the_song_glides_to_is_said_with_an_arrow_and_timed_along_the_glide() {
+        let mut project = Project::new("gliding");
+        project.set_tempo(120.0).unwrap();
+        track_with(&mut project, "A", 0.0, 16.0, &[note(60, 0.0, 1.0)]);
+        project.set_tempo_at(4.0, 120.0, false).unwrap();
+        project.set_tempo_at(8.0, 60.0, true).unwrap();
+        let score = Score::read(&project);
+        let glide = score.changes.last().unwrap();
+        assert_eq!((glide.said().as_str(), glide.glides_from), ("\u{2192}60 BPM", Some(4.0)));
+        assert_eq!((score.time.tempo_at(4.0), score.time.tempo_at(6.0), score.time.tempo_at(8.0)), (120.0, 90.0, 60.0));
+        // Slower all the way: the four beats of the glide take longer than at
+        // 120 and less long than at 60.
+        let glided = score.time.between(4.0, 8.0);
+        assert!(glided > 2.0 && glided < 4.0, "{glided}");
+        assert!((score.beat_at(score.seconds(6.5)) - 6.5).abs() < 1e-9);
     }
 }

@@ -80,9 +80,9 @@ impl Look {
     /// beat the music is at, as the film of a song being made.
     pub fn struck(score: &Score, beat: Beats, heard: &Heard, cut: f32, frame: u32) -> Self {
         let hits = &score.hits;
-        let kick = light::strike(&hits.kicks, beat, score.tempo, light::KICK_FALL);
-        let snare = light::strike(&hits.snares, beat, score.tempo, light::SNARE_FALL);
-        let crash = light::strike(&hits.crashes, beat, score.tempo, light::CRASH_FALL);
+        let kick = light::strike(&hits.kicks, beat, &score.time, light::KICK_FALL);
+        let snare = light::strike(&hits.snares, beat, &score.time, light::SNARE_FALL);
+        let crash = light::strike(&hits.crashes, beat, &score.time, light::CRASH_FALL);
         Self {
             light: 1.5 + 1.1 * heard.punch + 0.6 * kick,
             glow: 0.5 + 0.55 * heard.level + 0.5 * crash,
