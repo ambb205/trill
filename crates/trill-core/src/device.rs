@@ -794,6 +794,13 @@ pub struct Repeating {
     /// What that costs the sound, in a few words that finish "it is
     /// rendered with ...".
     pub costs: String,
+    /// The device begins its draws at the same place in every process
+    /// that has just started, and what it draws depends on nothing but
+    /// what it and its like were played there: the same song, rendered in
+    /// two such processes, is the same samples all the same. Measured,
+    /// not assumed. (A change to the song still moves every draw after
+    /// it, which is what [`Repeating`] is for.)
+    pub begins_alike: bool,
 }
 
 pub trait DeviceFactory: Send + Sync {

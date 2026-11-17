@@ -59,11 +59,12 @@ hearing one track of a long song costs what that track costs. Naming a return th
 every track's send feeds it; naming a group gives the group with its members.
 Both run at the engine's sample rate unless `sample_rate` asks for another (without an audio device the engine \
 runs at 48000 Hz, whatever the song's files are at), and their replies state the rate they ran at.
-A song's plugins are copied for these three in a process of their own, so that a plugin that crashes there \
-costs the call an error that says which plugin and what to do, and the song that is open is untouched: call \
-again, or mute the track to hear the rest.
-Some sampled instruments draw at random which recording of a note they play: two renders of one song then \
-differ, and the reply says so. To compare a render before a change with one after it, make both with \
+probe, measure and render make their copies of a song's plugins in a process of their own. A plugin that \
+crashes there costs the call an error that names the plugin, where that can be told, and says what to do; \
+the song that is open is untouched. Call again, or mute the track to hear the rest.
+Some sampled instruments draw at random which recording of a note they play, and the reply says when a song \
+has one. A change anywhere in what such an instrument plays then changes how every later note of it sounds, so \
+a render before a change and one after it differ in more than the change. To compare the two, make both with \
 `repeatable: true`, which takes the chance out of the render's own copies and leaves the song as it is.
 Both use several of the machine's processors (half of them, eight at the most): tracks that do not feed one \
 another are made at once, and what comes out is the samples one processor would have made, sooner. The reply's \
@@ -536,14 +537,27 @@ fn draws_notes(draws: &[trill_engine::render::Draws]) -> Vec<String> {
         ));
     }
     if let Some(first) = free.first() {
+        let one = free.len() == 1;
+        // Made in a process that had just started, where these begin their
+        // draws at the same place, the song is these samples every time;
+        // made anywhere else, it is not.
+        let what_follows = match free.iter().all(|draws| draws.again) {
+            true => format!(
+                "Rendered like this, in a process of its own, the same song comes out the same every time; but a \
+                 change to what {} or to another track of the same instrument moves every draw after it, so a \
+                 render before a change and one after it differ in more than the change",
+                if one { "it plays" } else { "one of them plays" }
+            ),
+            false => "so the next render of this song will not be these samples".to_string(),
+        };
         notes.push(format!(
-            "{} draw{} at random what {} as {} set, so the next render of this song will not be these samples. \
-             To compare two renders, make both with `repeatable: true`: the render's own copies are given {}, and \
-             the song is left as it is.",
+            "{} draw{} at random what {} as {} set{} {what_follows}. To compare two renders, make both with \
+             `repeatable: true`: the render's own copies are given {}, and the song is left as it is.",
             named(&free),
-            if free.len() == 1 { "s" } else { "" },
-            if free.len() == 1 { "it plays" } else { "they play" },
-            if free.len() == 1 { "it is" } else { "they are" },
+            if one { "s" } else { "" },
+            if one { "it plays" } else { "they play" },
+            if one { "it is" } else { "they are" },
+            if free.iter().all(|draws| draws.again) { "." } else { "," },
             first.costs
         ));
     }
@@ -1437,7 +1451,10 @@ impl TrillServer {
         }
         if probed.lent {
             notes.push(format!(
-                "This instrument listens to the track '{}' and plays what it hears there. A probe plays it by                  itself, so it was given noise to listen to while each note was held: which notes sound is the                  instrument's, and how loud and how bright they are here is not what they will be in the song.                  `measure` with `tracks` hears it in the song.",
+                "This instrument listens to the track '{}' and plays what it hears there. A probe plays it by \
+                 itself, so it was given noise to listen to while each note was held: which notes sound is the \
+                 instrument's, and how loud and how bright they are here is not what they will be in the song. \
+                 `measure` with `tracks` hears it in the song.",
                 out["listens_to"].as_str().unwrap_or_default()
             ));
         }

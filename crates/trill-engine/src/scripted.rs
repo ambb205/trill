@@ -153,6 +153,10 @@ pub struct Loading {
     pub listens: bool,
 }
 
+/// What the state of a bass ends in that was told to take its notes in
+/// turn.
+const IN_TURN: &str = "\u{1}in turn";
+
 /// How many notes the basses that draw at random have drawn for, in this
 /// program.
 static DRAWS: AtomicU32 = AtomicU32::new(0);
@@ -267,7 +271,13 @@ impl DeviceFactory for ScriptedFactory {
         let patch = Arc::new(Patch::default());
         // The sound a saved state stands for: the preset it was saved with.
         if let Some(saved) = device.state.as_deref().and_then(|state| std::str::from_utf8(state).ok()) {
+            // And whether it was told to take its notes in turn.
+            let (saved, in_turn) = match saved.strip_suffix(IN_TURN) {
+                Some(name) => (name, true),
+                None => (saved, false),
+            };
             patch.load(saved);
+            patch.in_turn.store(in_turn, Ordering::Relaxed);
         }
         let samples = Arc::new(Mutex::new(Vec::new()));
         if self.loading.grows {
@@ -321,6 +331,7 @@ impl DeviceFactory for ScriptedFactory {
             settings: vec![("takes".into(), "in turn".into())],
             params: Vec::new(),
             costs: "every note as loud as the last".into(),
+            begins_alike: true,
         })
     }
 
@@ -411,7 +422,11 @@ struct Controller {
 
 impl DeviceController for Controller {
     fn save_state(&mut self) -> Option<Vec<u8>> {
-        Some(self.patch.name.lock().clone().into_bytes())
+        let mut state = self.patch.name.lock().clone();
+        if self.patch.in_turn.load(Ordering::Relaxed) {
+            state.push_str(IN_TURN);
+        }
+        Some(state.into_bytes())
     }
 
     fn settings(&mut self) -> Option<Vec<(String, String)>> {

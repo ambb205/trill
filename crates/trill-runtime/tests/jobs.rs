@@ -416,6 +416,7 @@ fn an_instrument_that_draws_at_random_is_the_same_samples_in_every_process_that_
     // processes: it was rendered as it is.
     let [draws] = &first.measured.draws[..] else { panic!("{:?}", first.measured.draws) };
     assert_eq!((draws.track_name.as_str(), draws.device_name.as_str(), draws.held), ("Bass", "Bass", false));
+    assert!(draws.again, "and it says that the song is these samples again, rendered so");
 
     // One process that renders the song twice has drawn on by the second
     // time: other samples, as in a program that renders for itself.
@@ -424,6 +425,7 @@ fn an_instrument_that_draws_at_random_is_the_same_samples_in_every_process_that_
     assert_eq!(jobs_done(&runtime), (2, 1), "one process for the two");
     assert!(third.left == first.left, "its first is what any process begins with");
     assert!(fourth.left != third.left, "it drew the same twice");
+    assert!(!third.measured.draws[0].again && !fourth.measured.draws[0].again, "which it does not promise");
 
     // A render that is to be repeatable takes the chance out of its own
     // copy of the bass, in whatever process: the same samples from the one

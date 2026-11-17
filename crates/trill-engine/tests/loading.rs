@@ -527,6 +527,7 @@ fn an_instrument_that_draws_at_random_is_other_samples_every_time_and_the_same_i
     let [draws] = &first.measured.draws[..] else { panic!("{:?}", first.measured.draws) };
     assert_eq!((draws.track_name.as_str(), draws.device_name.as_str(), draws.held), ("Part", "Instrument", false));
     assert_eq!((draws.costs.as_str(), &draws.failed), ("every note as loud as the last", &None));
+    assert!(!draws.again, "this program has made other things, and will again");
 
     // Asked to be one that can be compared, the render's own copy of the
     // bass is told to take its notes in turn: the same samples every time,

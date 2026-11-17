@@ -396,9 +396,10 @@ pub struct Measured {
     /// they are not to be run beside anything.
     pub alone: Vec<Alone>,
     /// The devices of the render that are known not to do the same thing
-    /// twice as they come, each with whether it was made to for this
-    /// render ([`RenderOptions::repeatable`]). While one of them was not,
-    /// the next render of the same song is other samples.
+    /// twice and are not set in the song so that they do, each with
+    /// whether it was made to for this render
+    /// ([`RenderOptions::repeatable`]). While one of them was not, the
+    /// render cannot be compared with another to the sample.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub draws: Vec<Draws>,
 }
@@ -414,6 +415,13 @@ pub struct Draws {
     pub device_name: String,
     /// Whether the render's copy of it was made to repeat itself.
     pub held: bool,
+    /// It was not, and the same song rendered again as this was is these
+    /// samples all the same: the device begins its draws at the same place
+    /// in every process that has just started
+    /// ([`trill_core::device::Repeating::begins_alike`]), and this render
+    /// was made in one. A change to the song moves every draw after it.
+    #[serde(default)]
+    pub again: bool,
     /// What that costs its sound, in a few words.
     pub costs: String,
     /// Why it could not be made to, where that was asked and it was not.
@@ -629,6 +637,15 @@ pub fn render(
     render_from(project, factory, &AudioSources::default(), options, true)
 }
 
+/// Whether a device's setting stands where it is wanted: as numbers where
+/// both are numbers ("1" and "1.0"), as written otherwise.
+fn same_value(now: &str, wanted: &str) -> bool {
+    match (now.trim().parse::<f64>(), wanted.trim().parse::<f64>()) {
+        (Ok(now), Ok(wanted)) => (now - wanted).abs() < 1e-9,
+        _ => now.trim() == wanted.trim(),
+    }
+}
+
 /// `project` with only `tracks` to be heard: each of them soloed and
 /// unmuted, and no other track soloed.
 fn hearing_only(project: &Project, tracks: &[TrackId]) -> Project {
@@ -727,11 +744,37 @@ fn render_from(
     for (track, id) in made_devices {
         let Ok(device) = project.device(id) else { continue };
         let Some(how) = factory.repeating(&device.uri) else { continue };
+        let meta = bank.devices.get(&id);
+        let controller = meta.and_then(|meta| meta.controller.as_ref());
+        let index_of = |name: &str| meta.and_then(|meta| meta.params.iter().position(|param| param.name == name));
+        // One that the song already has so draws nothing, and nothing is
+        // to be said of it: the device is asked what it is set to.
+        let (settings, values) = match controller {
+            Some(controller) => {
+                let mut controller = controller.lock();
+                (controller.settings(), controller.param_values())
+            }
+            None => (None, None),
+        };
+        let set = how.settings.iter().all(|(name, wanted)| {
+            let now = settings.as_ref().and_then(|now| now.iter().find(|(is, _)| is == name));
+            now.is_some_and(|(_, value)| same_value(value, wanted))
+        });
+        let quiet = how.params.iter().all(|(name, wanted)| match (index_of(name), &values) {
+            // It has no such parameter: nothing to turn off.
+            (None, _) => true,
+            (Some(index), Some(values)) => values.get(index).is_some_and(|now| (now - wanted).abs() < 1e-6),
+            // It does not say where its parameters stand: its settings
+            // are taken at their word, where it has any.
+            (Some(_), None) => !how.settings.is_empty(),
+        });
+        if set && quiet {
+            continue;
+        }
         let mut failed = None;
         if options.repeatable {
-            let meta = bank.devices.get(&id);
             if !how.settings.is_empty() {
-                failed = match meta.and_then(|meta| meta.controller.as_ref()) {
+                failed = match controller {
                     Some(controller) => {
                         controller.lock().set_settings(&how.settings).err().map(|error| error.to_string())
                     }
@@ -739,8 +782,7 @@ fn render_from(
                 };
             }
             for (name, value) in &how.params {
-                let index = meta.and_then(|meta| meta.params.iter().position(|param| param.name == *name));
-                if let (Some(index), Some(processor)) = (index, graph.processor_mut(id)) {
+                if let (Some(index), Some(processor)) = (index_of(name), graph.processor_mut(id)) {
                     processor.set_param(index, *value);
                 }
             }
@@ -754,6 +796,7 @@ fn render_from(
             device: id,
             device_name: device.name.clone(),
             held: options.repeatable && failed.is_none(),
+            again: how.begins_alike && crate::apart::leaves_devices() && !options.repeatable,
             costs: how.costs,
             failed,
         });
