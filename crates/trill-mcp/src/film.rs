@@ -19,7 +19,7 @@ use rmcp::model::CallToolResult;
 use rmcp::{tool, tool_router};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-use trill_core::{Beats, Project, TrackId};
+use trill_core::{Beats, MeterMap, Project, TrackId};
 use trill_engine::Session;
 use trill_stage::director::{Direction, Entry, Kind, Plan};
 use trill_stage::export::{Exported, FilmRequest as SongRequest, SongFilm};
@@ -139,7 +139,7 @@ fn stretch_of(score: &Score, request: &FilmPlanRequest) -> Result<(Beats, Option
         return Err(format!(
             "the stretch {from}..{to} beats is not in the song, which is {} beats ({} bars) long",
             score.length,
-            score.length / score.bar()
+            score.bar_count()
         ));
     }
     Ok((from, request.end))
@@ -147,8 +147,9 @@ fn stretch_of(score: &Score, request: &FilmPlanRequest) -> Result<(Beats, Option
 
 /// What was asked of the director, as the director takes it.
 fn directions_of(project: &Project, score: &Score, asked: &[FilmDirection]) -> Result<Vec<Direction>, String> {
-    let bar = score.bar();
-    let bars = score.length / bar;
+    // Bars are the song's own: through a change of time signature they
+    // are counted as the song counts them.
+    let bars = f64::from(score.bar_count());
     let mut directions = Vec::with_capacity(asked.len());
     for (index, direction) in asked.iter().enumerate() {
         let place = format!("direct[{index}]");
@@ -162,7 +163,7 @@ fn directions_of(project: &Project, score: &Score, asked: &[FilmDirection]) -> R
                         "{place}: bars {first} to {last} are not in the song, which has bars 1 to {bars}"
                     ));
                 }
-                ((first - 1.0) * bar, (last.floor() * bar).min(score.length))
+                (score.bars.beat_of_bars(first - 1.0), score.bars.bar_start(last.floor() as u32).min(score.length))
             }
             (None, None) => return Err(format!("{place} names no stretch: give `section` or `from_bar`")),
         };
@@ -186,7 +187,7 @@ fn directions_of(project: &Project, score: &Score, asked: &[FilmDirection]) -> R
         });
         let entry = direction.enter.map(|entry| match entry {
             FilmEntry::Cut => Entry::Cut,
-            FilmEntry::Move => Entry::Move(bar),
+            FilmEntry::Move => Entry::Move(score.bar_length(from)),
         });
         if kind.is_none() && rolls.is_empty() && entry.is_none() {
             return Err(format!("{place} asks for nothing: give `shot`, `parts` or `enter`"));
@@ -202,17 +203,18 @@ fn parts_listed(score: &Score) -> String {
     parts.join(", ")
 }
 
-/// A span of beats as bars counted from 1: "5-12", or "5" for one bar.
-fn bars_text(from: Beats, to: Beats, bar: Beats) -> String {
-    let (first, last) =
-        ((from / bar).floor() as i64 + 1, ((to / bar).ceil() as i64).max((from / bar).floor() as i64 + 1));
+/// A span of beats as bars counted from 1, as the song counts them:
+/// "5-12", or "5" for one bar.
+fn bars_text(from: Beats, to: Beats, bars: &MeterMap) -> String {
+    let first = bars.bar_at(from).number();
+    let last = bars.bar_at((to - 1e-6).max(from)).number().max(first);
     if first == last { first.to_string() } else { format!("{first}-{last}") }
 }
 
 /// The plan of a film of the song, as a reply: its takes within the
 /// stretch, each with where it is, how it is framed and how it is entered.
 fn plan_json(score: &Score, plan: &Plan, from: Beats, to: Beats) -> Value {
-    let bar = score.bar();
+    let bar = &score.bars;
     let takes: Vec<Value> = plan
         .takes
         .iter()
@@ -222,7 +224,7 @@ fn plan_json(score: &Score, plan: &Plan, from: Beats, to: Beats) -> Value {
                 take.shot.rolls.iter().filter_map(|track| score.part(*track)).map(|part| part.name.as_str()).collect();
             let mut out = json!({
                 "bars": bars_text(take.start.max(from), take.end.min(to), bar),
-                "at_seconds": tenths(score.seconds(take.start.max(from) - from)),
+                "at_seconds": tenths(score.time.between(from, take.start.max(from))),
                 "shot": shot_word(take.shot.kind).to_lowercase(),
                 "enter": match take.entry {
                     Entry::Cut => "cut",
@@ -239,21 +241,40 @@ fn plan_json(score: &Score, plan: &Plan, from: Beats, to: Beats) -> Value {
             out
         })
         .collect();
-    json!({
+    // Where the tempo or the time signature changes in the stretch: the
+    // picture says so as it arrives, and the bars and seconds here are
+    // counted through it.
+    let changes: Vec<Value> = score
+        .changes
+        .iter()
+        .filter(|change| change.beat > from - 1e-9 && change.beat < to)
+        .map(|change| {
+            json!({
+                "bar": score.bar_number(change.beat),
+                "at_seconds": tenths(score.time.between(from, change.beat)),
+                "to": change.said(),
+            })
+        })
+        .collect();
+    let mut out = json!({
         "of": "song",
         "bars": bars_text(from, to, bar),
-        "seconds": tenths(score.seconds(to - from)),
+        "seconds": tenths(score.time.between(from, to)),
         "takes": takes,
         "parts": score.parts.iter().map(|part| json!({ "track": part.track.0, "name": part.name })).collect::<Vec<_>>(),
         "direct": "a list of {section | from_bar, to_bar} with shot (wide, close, ensemble, song), parts (track \
                    ids) and enter (cut, move) changes these takes; what is left out stays as it is here",
-    })
+    });
+    if !changes.is_empty() {
+        out["tempo_and_meter"] = json!(changes);
+    }
+    out
 }
 
 /// The plan of a film of how the song was made.
 fn making_json(making: &Making, project: &Project) -> Value {
     let name_of = |track: TrackId| project.track(track).map(|track| track.name.clone()).unwrap_or_default();
-    let bar = project.time_signature.beats_per_bar();
+    let bar = &project.meter_map();
     let shots: Vec<Value> = making
         .shots()
         .iter()
@@ -595,6 +616,55 @@ mod tests {
         let part = plan_json(&score, &plan, 32.0, 64.0);
         assert_eq!(part["takes"].as_array().unwrap().len(), 1);
         assert_eq!((part["takes"][0]["at_seconds"].as_f64(), part["bars"].as_str()), (Some(0.0), Some("9-16")));
-        assert_eq!((bars_text(0.0, 4.0, 4.0), bars_text(8.0, 9.0, 4.0)), ("1".to_string(), "3".to_string()));
+        let four = MeterMap::constant(trill_core::TimeSignature::default());
+        assert_eq!((bars_text(0.0, 4.0, &four), bars_text(8.0, 9.0, &four)), ("1".to_string(), "3".to_string()));
+        assert!(reply.get("tempo_and_meter").is_none(), "a song that changes neither says nothing of it");
+    }
+
+    #[test]
+    fn a_plan_counts_bars_and_seconds_through_a_change_of_tempo_and_meter_and_says_where_it_is() {
+        // Two bars of 4/4 at 120, two of 7/8 at 140, two of 4/4 at 120.
+        let mut project = Project::new("Changing");
+        let bass = project.add_track("Bass");
+        let clip = project.add_midi_clip(bass, "bass", 0.0, 23.0).unwrap();
+        let notes: Vec<Note> =
+            (0..46).map(|n| Note { pitch: 36, start: f64::from(n) * 0.5, length: 0.4, velocity: 100 }).collect();
+        project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
+        project.set_time_signature_at(8.0, 7, 8).unwrap();
+        project.set_tempo_at(8.0, 140.0, false).unwrap();
+        project.set_time_signature_at(15.0, 4, 4).unwrap();
+        project.set_tempo_at(15.0, 120.0, false).unwrap();
+        let score = Score::read(&project);
+        let reply = plan_json(&score, &Plan::direct(&score), 0.0, score.length);
+        assert_eq!((reply["bars"].as_str(), reply["seconds"].as_f64()), (Some("1-6"), Some(11.0)));
+        assert_eq!(
+            reply["tempo_and_meter"],
+            json!([
+                { "bar": 3, "at_seconds": 4.0, "to": "7/8 \u{00B7} 140 BPM" },
+                { "bar": 5, "at_seconds": 7.0, "to": "4/4 \u{00B7} 120 BPM" },
+            ])
+        );
+        // Bars asked for are the song's: bar 3 is where the 7/8 begins, and
+        // bars 3 to 4 are its seven beats.
+        let direct = |direction: FilmDirection| directions_of(&project, &score, &[direction]).unwrap().remove(0);
+        let seven = direct(FilmDirection {
+            from_bar: Some(3.0),
+            to_bar: Some(4.0),
+            shot: Some(FilmShot::Wide),
+            ..Default::default()
+        });
+        assert_eq!((seven.from, seven.to), (8.0, 15.0));
+        let last = direct(FilmDirection { from_bar: Some(6.0), shot: Some(FilmShot::Close), ..Default::default() });
+        assert_eq!((last.from, last.to), (19.0, 23.0));
+        let beyond = directions_of(
+            &project,
+            &score,
+            &[FilmDirection { from_bar: Some(7.0), shot: Some(FilmShot::Wide), ..Default::default() }],
+        );
+        assert!(beyond.unwrap_err().contains("bars 1 to 6"));
+        // Of the 7/8 alone: its two bars, three seconds, the change at its start.
+        let part = plan_json(&score, &Plan::direct(&score), 8.0, 15.0);
+        assert_eq!((part["bars"].as_str(), part["seconds"].as_f64()), (Some("3-4"), Some(3.0)));
+        assert_eq!(part["tempo_and_meter"][0]["at_seconds"], 0.0);
     }
 }

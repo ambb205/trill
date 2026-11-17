@@ -164,11 +164,12 @@ impl Reading {
 impl Plan {
     /// Directs `score`.
     pub fn direct(score: &Score) -> Self {
-        let bar = score.bar();
         let Reading { activity, fullness, tunes } = Reading::of(score);
 
         let mut takes: Vec<Take> = Vec::new();
         for (index, section) in score.sections.iter().enumerate() {
+            // A frame is so many bars across: of the bars the section has.
+            let bar = score.bar_length(section.start);
             let shot = shot_for(score, section, &activity[index], fullness[index], &tunes[index], bar);
             let entry = match takes.last() {
                 None => Entry::Cut,
@@ -185,7 +186,7 @@ impl Plan {
             let usual = usual_length(&score.sections);
             let halves = section.length() >= 2.0 * usual && section.length() >= 8.0 * bar;
             if halves {
-                let middle = section.start + (section.length() / 2.0 / bar).round() * bar;
+                let middle = score.bar_line_near(section.start + section.length() / 2.0);
                 let second = other_shot(score, &shot, section, &activity[index], bar);
                 takes.push(Take { start: section.start, end: middle, section: index, shot, entry });
                 takes.push(Take {
@@ -199,7 +200,7 @@ impl Plan {
                 takes.push(Take { start: section.start, end: section.end, section: index, shot, entry });
             }
         }
-        open_and_close(score, &mut takes, bar);
+        open_and_close(score, &mut takes);
         Self { takes }
     }
 
@@ -208,7 +209,6 @@ impl Plan {
     /// it. With none this is [`Plan::direct`].
     pub fn directed(score: &Score, directions: &[Direction]) -> Self {
         let mut plan = Self::direct(score);
-        let bar = score.bar();
         for direction in directions {
             let (from, to) = (direction.from.clamp(0.0, score.length), direction.to.clamp(0.0, score.length));
             if to <= from || plan.takes.is_empty() {
@@ -229,7 +229,7 @@ impl Plan {
                 let first = plan.takes.partition_point(|take| take.start < from);
                 let last = plan.takes.partition_point(|take| take.start < to);
                 let section = score.section_at(from);
-                let shot = shot_of(score, kind, &rolls, from, to, bar);
+                let shot = shot_of(score, kind, &rolls, from, to, score.bar_length(from));
                 let take = Take { start: from, end: to, section, shot, entry: Entry::Cut };
                 plan.takes.splice(first..last, [take]);
                 // How it is come to and left, unless that is said: by a
@@ -519,9 +519,10 @@ fn other_shot(score: &Score, first: &Shot, section: &Section, activity: &[Activi
 /// Opens the song on the whole of itself and closes it there: the first
 /// bars of the first take and the last of the last become takes of their
 /// own, which the camera moves out of and into.
-fn open_and_close(score: &Score, takes: &mut Vec<Take>, bar: Beats) {
+fn open_and_close(score: &Score, takes: &mut Vec<Take>) {
     let whole = Shot { kind: Kind::Overview, rolls: Vec::new(), window: (score.length, score.length), roll_share: 0.0 };
-    let span = OPENING_BARS * bar;
+    // Of the bars the song begins with, and of the ones it ends with.
+    let span = OPENING_BARS * score.bar_length(0.0);
     // Only where the song is long enough for the overview to be one.
     if score.length < 6.0 * span {
         return;
@@ -540,6 +541,7 @@ fn open_and_close(score: &Score, takes: &mut Vec<Take>, bar: Beats) {
         first.entry = Entry::Move(span);
         takes.insert(0, opening);
     }
+    let span = OPENING_BARS * score.bar_length((score.length - 1e-6).max(0.0));
     if let Some(last) = takes.last_mut().filter(|take| take.end - take.start > span) {
         let closing = Take {
             start: last.end - span,

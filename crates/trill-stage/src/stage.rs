@@ -80,9 +80,9 @@ impl Look {
     /// beat the music is at, as the film of a song being made.
     pub fn struck(score: &Score, beat: Beats, heard: &Heard, cut: f32, frame: u32) -> Self {
         let hits = &score.hits;
-        let kick = light::strike(&hits.kicks, beat, score.tempo, light::KICK_FALL);
-        let snare = light::strike(&hits.snares, beat, score.tempo, light::SNARE_FALL);
-        let crash = light::strike(&hits.crashes, beat, score.tempo, light::CRASH_FALL);
+        let kick = light::strike(&hits.kicks, beat, &score.time, light::KICK_FALL);
+        let snare = light::strike(&hits.snares, beat, &score.time, light::SNARE_FALL);
+        let crash = light::strike(&hits.crashes, beat, &score.time, light::CRASH_FALL);
         Self {
             light: 1.5 + 1.1 * heard.punch + 0.6 * kick,
             glow: 0.5 + 0.55 * heard.level + 0.5 * crash,
@@ -321,6 +321,74 @@ mod tests {
         let lit = look(40.0, &loud);
         assert!(lit.exposure > on.exposure && lit.glow > on.glow && lit.light > on.light);
         assert_eq!(lit.punch, on.punch);
+    }
+
+    /// Where the kicks of [`changing`] are, in beats.
+    const KICKS: [f64; 7] = [0.0, 4.0, 8.0, 11.5, 15.0, 19.0, 22.0];
+
+    /// The shape of the song the tempo work proves itself on: two bars of
+    /// 4/4 at 120, two of 7/8 at 140 and two of 4/4 at 120 again, with a
+    /// kick on every bar line and one more before the end.
+    fn changing() -> Song {
+        let mut project = Project::new("Changing");
+        let drums = project.add_track("Drums");
+        let clip = project.add_midi_clip(drums, "beat", 0.0, 23.0).unwrap();
+        let kicks: Vec<Note> =
+            KICKS.iter().map(|beat| Note { pitch: 36, start: *beat, length: 0.25, velocity: 127 }).collect();
+        project.clip_mut(clip).unwrap().add_notes(&kicks).unwrap();
+        let profile = trill_core::InstrumentProfile { role: Some(Role::Drums), ..Default::default() };
+        project.set_track_profile(drums, profile).unwrap();
+        project.set_time_signature_at(8.0, 7, 8).unwrap();
+        project.set_tempo_at(8.0, 140.0, false).unwrap();
+        project.set_time_signature_at(15.0, 4, 4).unwrap();
+        project.set_tempo_at(15.0, 120.0, false).unwrap();
+        Song::of(&project)
+    }
+
+    #[test]
+    fn a_hit_strikes_the_frame_the_tempo_map_says_it_sounds_on_through_a_change_of_tempo_and_meter() {
+        let song = changing();
+        let quiet = Heard::silence();
+        // A film at sixty frames a second: frame n is the song n sixtieths
+        // of a second in, wherever its tempo has taken it by then.
+        let punch = |frame: u32| {
+            let beat = song.score.beat_at(f64::from(frame) / 60.0);
+            Look::of(&song, &song.camera(beat, Format::HD), &quiet, frame).punch
+        };
+        // Eight beats at 120 are four seconds, the seven at 140 three more.
+        let sounds = [0.0, 2.0, 4.0, 5.5, 7.0, 9.0, 10.5];
+        let full = KICK_PUNCH * song.score.hits.kicks[0].hard;
+        assert!(full > 0.0 && song.score.hits.kicks.len() == KICKS.len());
+        for (beat, seconds) in KICKS.iter().zip(sounds) {
+            assert!(
+                (song.score.seconds(*beat) - seconds).abs() < 1e-9,
+                "the kick at beat {beat} sounds at {seconds} s"
+            );
+            let frame = (seconds * 60.0).round() as u32;
+            assert!(punch(frame) > 0.99 * full, "the kick at beat {beat} strikes frame {frame}: {}", punch(frame));
+            assert!(frame == 0 || punch(frame - 1) < 0.01 * full, "and not the frame before it");
+            assert!(punch(frame + 3) < 0.7 * full, "and is falling three frames on");
+        }
+        // Had the picture gone on at 120 through the changes, the last two
+        // kicks would have struck half a second late. Nothing strikes there.
+        for late in [9.5f64, 11.0] {
+            assert!(punch((late * 60.0) as u32) < 0.01 * full, "nothing strikes at {late} s");
+        }
+        // And the film is as long as the song lasts: eleven seconds, not
+        // the eleven and a half its beats would take at 120.
+        assert_eq!(song.score.duration(), 11.0);
+    }
+
+    #[test]
+    fn where_the_song_is_reads_in_the_bars_and_the_tempo_it_has_there() {
+        let song = changing();
+        // The bar and the beat a moment is at, counted through the changes.
+        let at = |seconds: f64| song.score.beat_at(seconds);
+        assert_eq!([0.0, 3.99, 4.0, 5.5, 6.99, 7.0].map(|s| song.score.bar_number(at(s))), [1, 2, 3, 4, 4, 5]);
+        assert_eq!((song.score.time.tempo_at(at(3.99)), song.score.time.tempo_at(at(4.0))), (120.0, 140.0));
+        // The camera moves through the beats faster where the song does.
+        let across = |seconds: f64| at(seconds + 1.0) - at(seconds);
+        assert!((across(1.0) - 2.0).abs() < 1e-9 && (across(5.0) - 140.0 / 60.0).abs() < 1e-9);
     }
 
     #[test]
