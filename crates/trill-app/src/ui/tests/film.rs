@@ -201,6 +201,12 @@ fn a_film_is_made_from_the_window_while_it_says_how_far_it_is_and_one_can_be_sto
     harness.wait_until("the film to stop", |harness| harness.app.filming().making().is_none());
     let said = harness.app.state().toasts.texts().last().map(|text| (*text).to_owned()).unwrap();
     assert!(said.starts_with("The film was stopped at frame"), "{said}");
-    assert!(!path.exists() && !path.with_extension("sound.wav").exists(), "nothing of it was kept");
+    let kept: Vec<String> = std::fs::read_dir(folder.path())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("stopped"))
+        .collect();
+    assert!(kept.is_empty(), "nothing of it was kept, but there is {kept:?}");
     assert_eq!(harness.project(), song, "and a film edits nothing");
 }

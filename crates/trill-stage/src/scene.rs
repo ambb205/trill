@@ -26,10 +26,10 @@
 use crate::camera::{Camera, Roll};
 use crate::director::Kind;
 use crate::light;
-use crate::score::{Part, Score};
+use crate::score::{Change, Part, Score};
 use crate::sound::Heard;
 use egui::{Align2, Color32, Mesh, Painter, Rangef, Rect, Shape, Stroke, Vec2, pos2, vec2};
-use trill_core::{Beats, ClipId, Note, TimeSignature, TrackId};
+use trill_core::{Beats, ClipId, MeterMap, Note, TrackId};
 use trill_noir::{TextStyle, Theme, fade, mark, paint, text};
 
 /// The three layers a moment is painted into.
@@ -333,9 +333,9 @@ fn part_level(moment: &Moment<'_>, part: &Part) -> f32 {
     if let Some(level) = moment.heard.track(part.track) {
         return level;
     }
-    let (beat, tempo) = (moment.camera.beat, moment.score.tempo);
-    let tail = light::GLOW_TAIL * tempo / 60.0;
-    part.notes_between(beat - tail, beat + 1e-9).map(|note| light::glow(note, beat, tempo)).fold(0.0, f32::max)
+    let (beat, time) = (moment.camera.beat, &moment.score.time);
+    let oldest = time.before(beat, light::GLOW_TAIL);
+    part.notes_between(oldest, beat + 1e-9).map(|note| light::glow(note, beat, time)).fold(0.0, f32::max)
 }
 
 /// How brightly a note of `part` shows at this moment, and whether the
@@ -345,22 +345,23 @@ fn note_light(moment: &Moment<'_>, part: &Part, note: &Note) -> (f32, bool) {
     if let Some(story) = moment.story {
         return (story.note_glow(part.track, note.pitch, note.start), false);
     }
-    let (beat, tempo) = (moment.camera.beat, moment.score.tempo);
-    let tail = light::GLOW_TAIL * tempo / 60.0;
-    let glow = if note.start <= beat && beat < note.end() + tail { light::glow(note, beat, tempo) } else { 0.0 };
+    let (beat, time) = (moment.camera.beat, &moment.score.time);
+    let sounding = note.start <= beat && time.between(note.end(), beat) < light::GLOW_TAIL;
+    let glow = if sounding { light::glow(note, beat, time) } else { 0.0 };
     (glow, note.end() <= beat)
 }
 
-/// `"25. 1. 1"`: bar, beat and sixteenth, as the window's transport reads.
-fn position_text(beat: Beats, signature: TimeSignature) -> String {
+/// `"25. 1. 1"`: bar, beat and sixteenth, as the window's transport reads:
+/// the bar as the song counts it there, the beat in the time signature it
+/// is in.
+fn position_text(beat: Beats, bars: &MeterMap) -> String {
     let beat = beat.max(0.0) + 1e-9;
-    let per_bar = signature.beats_per_bar();
-    let unit = 4.0 / signature.denominator as f64;
-    let bar = (beat / per_bar).floor();
-    let in_bar = beat - bar * per_bar;
+    let bar = bars.bar_at(beat);
+    let unit = 4.0 / bar.signature.denominator as f64;
+    let in_bar = beat - bar.start;
     let count = (in_bar / unit).floor();
     let sixteenth = ((in_bar - count * unit) / 0.25).floor();
-    format!("{}. {}. {}", bar as u32 + 1, count as u32 + 1, sixteenth as u32 + 1)
+    format!("{}. {}. {}", bar.number(), count as u32 + 1, sixteenth as u32 + 1)
 }
 
 /// `"1:07.4"`.
@@ -371,8 +372,28 @@ fn clock_text(seconds: f64) -> String {
 
 /// `"156"`, `"127.5"`: a tempo without the decimals it does not have.
 fn tempo_text(tempo: f64) -> String {
-    let text = format!("{tempo:.2}");
-    text.trim_end_matches('0').trim_end_matches('.').to_string()
+    crate::score::tempo_said(tempo)
+}
+
+/// Seconds a tempo or a time signature that has just arrived stays lit
+/// where the song's position is read.
+const CHANGE_LIT: f64 = 1.6;
+
+/// How lit the readout of the tempo (`tempo`) or of the time signature is
+/// at `beat`, 0..=1: all of it as a change of it arrives and while the
+/// tempo glides, falling away after. A song that changes neither is never
+/// lit there.
+fn change_lit(score: &Score, beat: Beats, tempo: bool) -> f32 {
+    let concerns = |change: &&Change| if tempo { change.tempo.is_some() } else { change.signature.is_some() };
+    if tempo
+        && score.changes.iter().any(|change| change.glides_from.is_some_and(|from| from <= beat && beat < change.beat))
+    {
+        return 1.0;
+    }
+    match score.changes.iter().rev().filter(concerns).find(|change| change.beat <= beat + 1e-9) {
+        Some(change) => (-score.time.between(change.beat, beat).max(0.0) / CHANGE_LIT).exp() as f32,
+        None => 0.0,
+    }
 }
 
 /// A name as a label: a drum's `closed_hat_edge` reads `closed hat edge`.
@@ -383,41 +404,39 @@ fn words(name: &str) -> String {
 /// Vertical lines of the time grid in `rect`: bars, and beats and
 /// sixteenths where there is room for them.
 fn grid_lines(painter: &Painter, score: &Score, axis: &Axis, rect: Rect, colors: [Color32; 3], finest: f32) {
-    let bar = score.bar();
-    let per_bar = axis.per_beat() * bar as f32;
+    let from = axis.origin.max(0.0);
+    let to = axis.end().min(score.length) + 1e-9;
+    let per_bar = axis.per_beat() * score.bar_length(from) as f32;
     // Bars, thinned out where they would crowd: every fourth, sixteenth…
-    let mut every = 1.0;
+    let mut every = 1u32;
     while per_bar * (every as f32) < 7.0 {
-        every *= 4.0;
+        every *= 4;
     }
+    // Beats and sixteenths, where there is room: counted from each bar
+    // line, since a bar of 7/8 does not end on a beat of the bar before.
     let step = if axis.per_beat() / 4.0 >= finest {
-        0.25
+        Some(0.25)
     } else if axis.per_beat() >= finest {
-        1.0
+        Some(1.0)
     } else {
-        bar * every
+        None
     };
-    let first = (axis.origin.max(0.0) / step).floor();
-    let mut index = first;
-    loop {
-        let beat = index * step;
-        if beat > axis.end().min(score.length) + 1e-9 {
-            break;
-        }
-        index += 1.0;
+    let line = |beat: Beats, color: Color32| {
         let x = axis.x(beat);
-        if x < rect.left() - 1.0 || x > rect.right() + 1.0 {
-            continue;
+        if x >= rect.left() - 1.0 && x <= rect.right() + 1.0 {
+            paint::vline(painter, x, rect.y_range(), color);
         }
-        let on_bar = (beat / bar).fract().abs() < 1e-9;
-        let on_beat = beat.fract().abs() < 1e-9;
-        let color = match (on_bar, on_beat) {
-            (true, _) if (beat / bar / every).fract().abs() < 1e-9 => colors[0],
-            (true, _) => continue,
-            (false, true) => colors[1],
-            (false, false) => colors[2],
-        };
-        paint::vline(painter, x, rect.y_range(), color);
+    };
+    for bar in score.bars.bars_between(from, to) {
+        if bar.index % every == 0 {
+            line(bar.start, colors[0]);
+        }
+        let Some(step) = step else { continue };
+        let mut within = step;
+        while within < bar.length - 1e-9 && bar.start + within <= to {
+            line(bar.start + within, if within.fract().abs() < 1e-9 { colors[1] } else { colors[2] });
+            within += step;
+        }
     }
 }
 
@@ -537,7 +556,7 @@ fn lane(
         }
         if playing {
             let x = axis.x(beat).min(title.right());
-            let reach = (axis.per_beat() * moment.score.bar() as f32 * STRIP_LIT_BARS).max(40.0);
+            let reach = (axis.per_beat() * moment.score.bar_length(beat) as f32 * STRIP_LIT_BARS).max(40.0);
             let from = (x - reach).max(title.left());
             let most = (1.0 - (x - from) / reach).clamp(0.0, 1.0);
             let lit = 0.6 + 0.4 * lift;
@@ -635,7 +654,7 @@ fn waves(
     lit: &mut Mesh,
 ) {
     let (beat, playing) = (moment.camera.beat, moment.story.is_none());
-    let seconds_per_beat = 60.0 / moment.score.tempo;
+    let time = &moment.score.time;
     let hair = paint::hair(painter);
     let column = 1.0 / painter.pixels_per_point();
     let per_beat = f64::from(axis.per_beat());
@@ -649,12 +668,12 @@ fn waves(
         while x < right {
             let from = axis.origin + f64::from(x - axis.left) / per_beat;
             let to = from + f64::from(column) / per_beat;
-            let (low, high) = voiced.between(from, to);
+            let (low, high) = voiced.between(from, to, time);
             // Never thinner than a hairline: silence is a line.
             let top = (middle - high.clamp(-1.0, 1.0) * half).min(middle - hair / 2.0);
             let bottom = (middle - low.clamp(-1.0, 1.0) * half).max(top + hair);
             let bar = Rect::from_min_max(pos2(x, top), pos2(x + column, bottom));
-            let since = (beat - from) * seconds_per_beat;
+            let since = time.between(from, beat);
             let glow = if playing && since >= 0.0 { (-since / WAVE_FALL).exp() as f32 } else { 0.0 };
             let ink = if glow > 0.02 {
                 toward(color, Color32::WHITE, glow * 0.7)
@@ -746,11 +765,10 @@ fn sounding(moment: &Moment<'_>, part: &Part) -> Sounding {
         }
         return Sounding { pitches, latest: newest.map(|(pitch, _)| pitch) };
     }
-    let (beat, tempo) = (moment.camera.beat, moment.score.tempo);
-    let tail = light::GLOW_TAIL * tempo / 60.0;
+    let (beat, time) = (moment.camera.beat, &moment.score.time);
     let mut latest: Option<Note> = None;
-    for note in part.notes_between(beat - tail, beat + 1e-9) {
-        let glow = light::glow(note, beat, tempo);
+    for note in part.notes_between(time.before(beat, light::GLOW_TAIL), beat + 1e-9) {
+        let glow = light::glow(note, beat, time);
         if glow <= 0.01 {
             continue;
         }
@@ -1031,30 +1049,63 @@ fn ruler(canvas: &Canvas<'_>, moment: &Moment<'_>, layout: &Layout, axis: &Axis)
             text::paint(&clipped, room, Align2::LEFT_CENTER, style, &section.name, ink);
         }
     }
-    // Bars, on the lower: numbered as often as there is room.
-    let bar = score.bar();
-    let per_bar = axis.per_beat() * bar as f32;
-    let mut every = 1.0f64;
+    // Bars, on the lower: numbered as often as there is room, and always
+    // where the tempo or the time signature changes, which is said beside
+    // the number as the window's ruler says it.
+    let from = axis.origin.max(0.0);
+    let per_bar = axis.per_beat() * score.bar_length(from) as f32;
+    let mut every = 1u32;
     while per_bar * (every as f32) < 46.0 {
-        every *= 2.0;
+        every *= 2;
     }
     let numbers = TextStyle { tracking: 0.4, ..theme.text.micro };
-    let mut index = (axis.origin.max(0.0) / bar / every).floor();
-    loop {
-        let beat = index * every * bar;
-        if beat >= score.length || beat > axis.end() {
-            break;
+    let in_force =
+        if moment.story.is_some() { None } else { score.change_before(camera.beat).map(|change| change.beat) };
+    let said_at = |beat: Beats| score.changes.iter().find(|change| (change.beat - beat).abs() < 1e-6);
+    // Where a tempo is glided to, the stretch of the glide along the foot.
+    for change in &score.changes {
+        if let Some(glide) = change.glides_from.filter(|glide| *glide < axis.end() && change.beat > from) {
+            let stretch = Rangef::new(axis.x(glide).max(time.left()), axis.x(change.beat).min(time.right()));
+            paint::hline_above(&clipped, stretch, rect.bottom() - 2.0, theme.ink_faint);
         }
-        index += 1.0;
-        let x = axis.x(beat);
-        if x < time.left() - 40.0 {
+    }
+    // The numbers a change's words run over are left out.
+    let mut taken = f32::NEG_INFINITY;
+    for bar in score.bars.bars_between(from, score.length.min(axis.end() + 1e-9)) {
+        let change = said_at(bar.start);
+        if bar.index % every != 0 && change.is_none() {
+            continue;
+        }
+        let x = axis.x(bar.start);
+        if x < time.left() - 200.0 {
             continue;
         }
         paint::vline(&clipped, x, Rangef::new(split, rect.bottom()), theme.grid);
+        if x + 8.0 < taken && change.is_none() {
+            continue;
+        }
         // Clear of the playhead's head when it stands on the bar line.
         let room = Rect::from_min_max(pos2(x + 8.0, split), pos2(x + 64.0, rect.bottom()));
-        let number = format!("{}", (beat / bar).round() as u64 + 1);
-        text::paint(&clipped, room, Align2::LEFT_CENTER, numbers, &number, theme.ink_faint);
+        let number = format!("{}", bar.number());
+        let used = text::paint(&clipped, room, Align2::LEFT_CENTER, numbers, &number, theme.ink_faint);
+        if let Some(change) = change {
+            let ink = if in_force == Some(change.beat) { theme.ink } else { theme.ink_dim };
+            let room = Rect::from_min_max(pos2(x + 8.0 + used + 7.0, split), pos2(time.right(), rect.bottom()));
+            let said = text::paint(&clipped, room, Align2::LEFT_CENTER, numbers, &change.said(), ink);
+            taken = room.left() + said + 10.0;
+        }
+    }
+    // A tempo that changes inside a bar is said where it does.
+    for change in score.changes.iter().filter(|change| change.beat > from - 1e-9 && change.beat <= axis.end()) {
+        let on_a_bar_line = (score.bars.bar_at(change.beat).start - change.beat).abs() < 1e-6;
+        if on_a_bar_line {
+            continue;
+        }
+        let x = axis.x(change.beat);
+        let ink = if in_force == Some(change.beat) { theme.ink } else { theme.ink_dim };
+        paint::vline(&clipped, x, Rangef::new(split + 5.0, rect.bottom()), theme.grid);
+        let room = Rect::from_min_max(pos2(x + 6.0, split), pos2(time.right(), rect.bottom()));
+        text::paint(&clipped, room, Align2::LEFT_CENTER, numbers, &change.said(), ink);
     }
 }
 
@@ -1135,13 +1186,29 @@ fn top_strip(canvas: &Canvas<'_>, moment: &Moment<'_>, layout: &Layout) {
         text::paint(base, cell(right, 220.0), Align2::RIGHT_CENTER, theme.text.readout, story.count, theme.ink);
         return;
     }
-    let tempo = format!("{} BPM", tempo_text(score.tempo));
-    right -=
-        text::paint(base, cell(right, 120.0), Align2::RIGHT_CENTER, theme.text.label, &tempo, theme.ink_faint) + 18.0;
+    // The tempo the song has now: where a glide has it, in whole beats a
+    // minute while it moves. It is lit as it changes.
+    let now = score.time.tempo_at(camera.beat.max(0.0));
+    let gliding = score
+        .changes
+        .iter()
+        .any(|change| change.glides_from.is_some_and(|from| from <= camera.beat && camera.beat < change.beat));
+    let tempo = if gliding { format!("{now:.0} BPM") } else { format!("{} BPM", tempo_text(now)) };
+    let lit = |amount: f32| toward(theme.ink_faint, theme.ink, amount);
+    let ink = lit(change_lit(score, camera.beat, true));
+    right -= text::paint(base, cell(right, 120.0), Align2::RIGHT_CENTER, theme.text.label, &tempo, ink) + 18.0;
+    // The time signature, for a song that changes it: one that keeps the
+    // one it began in does not need telling which.
+    if !score.bars.is_constant() {
+        let signature = score.bars.signature_at(camera.beat.max(0.0));
+        let meter = format!("{}/{}", signature.numerator, signature.denominator);
+        let ink = lit(change_lit(score, camera.beat, false));
+        right -= text::paint(base, cell(right, 60.0), Align2::RIGHT_CENTER, theme.text.label, &meter, ink) + 18.0;
+    }
     let clock = clock_text(score.seconds(camera.beat));
     text::paint(base, cell(right, 64.0), Align2::RIGHT_CENTER, theme.text.value, &clock, theme.ink_dim);
     right -= 64.0 + 14.0;
-    let position = position_text(camera.beat, score.signature);
+    let position = position_text(camera.beat, &score.bars);
     text::paint(base, cell(right, 90.0), Align2::RIGHT_CENTER, theme.text.readout, &position, theme.ink);
 }
 
@@ -1200,10 +1267,16 @@ fn song_line(canvas: &Canvas<'_>, moment: &Moment<'_>, layout: &Layout) {
     let base = canvas.base.with_clip_rect(rect.expand(4.0));
     let y = paint::snap(&base, rect.bottom() - 7.0);
     let style = theme.text.micro;
-    let names =
-        score.sections.iter().map(|section| (section.end - section.start, text::width(&base, style, &section.name)));
-    let line = SongLine::of(rect.x_range(), score.length, camera.beat, names);
-    let x_of = |beat: Beats| line.x(beat);
+    // The song lies along the line by its time, so that the head crosses it
+    // evenly through a change of tempo. A song of one tempo lies along it
+    // by its beats, which is the same thing.
+    let place = |beat: Beats| if score.time.is_constant() { beat } else { score.seconds(beat) };
+    let names = score
+        .sections
+        .iter()
+        .map(|section| (place(section.end) - place(section.start), text::width(&base, style, &section.name)));
+    let line = SongLine::of(rect.x_range(), place(score.length), place(camera.beat), names);
+    let x_of = |beat: Beats| line.x(place(beat));
     let head = x_of(camera.beat);
     let hair = paint::hair(&base);
     paint::hline(&base, rect.x_range(), y, theme.hairline);
@@ -1266,22 +1339,40 @@ fn title(canvas: &Canvas<'_>, moment: &Moment<'_>, layout: &Layout, axis: &Axis)
     let (score, camera) = (moment.score, moment.camera);
     let index = score.section_at(camera.beat);
     let Some(section) = score.sections.get(index) else { return };
-    let (name, sub) = match index {
-        0 => (score.name.clone(), format!("{} bars at {} BPM", score.length / score.bar(), tempo_text(score.tempo))),
-        _ => (section.name.clone(), format!("Bar {}", (section.start / score.bar()).round() as u64 + 1)),
+    let (mut name, mut sub) = match index {
+        0 => {
+            let at = if score.time.is_constant() { "at" } else { "from" };
+            (score.name.clone(), format!("{} bars {at} {} BPM", score.bar_count(), tempo_text(score.tempo)))
+        }
+        _ => (section.name.clone(), format!("Bar {}", score.bar_number(section.start))),
     };
+    // A tempo or a time signature that arrives is said as a section is:
+    // with the section's name where it begins one, and by itself where it
+    // does not, from the beat it arrives on (or the song begins to glide
+    // to it).
+    let mut from = section.start;
+    let arrives = |change: &Change| change.glides_from.filter(|_| change.signature.is_none()).unwrap_or(change.beat);
+    let arrived = score.changes.iter().rev().find(|change| arrives(change) <= camera.beat + 1e-9);
+    if let Some(change) = arrived.filter(|change| arrives(change) >= section.start - 1e-6) {
+        if (arrives(change) - section.start).abs() < 1e-6 && !name.is_empty() {
+            sub = format!("{sub} \u{00B7} {}", change.said());
+        } else {
+            from = arrives(change);
+            (name, sub) = (change.said(), format!("Bar {}", score.bar_number(from)));
+        }
+    }
     if name.is_empty() {
         return;
     }
-    let lasts = (TITLE_BARS * score.bar()).min(section.length());
-    let since = camera.beat - section.start;
+    let lasts = (TITLE_BARS * score.bar_length(from)).min(section.end - from);
+    let since = camera.beat - from;
     if !(0.0..lasts).contains(&since) {
         return;
     }
     // Up at once, on the beat; away over the last of its time.
     let shown = ((lasts - since) / (lasts * 0.35)).clamp(0.0, 1.0) as f32;
     let shown = shown * shown * (3.0 - 2.0 * shown);
-    let arriving = (-(since * 60.0 / score.tempo) / 0.25).exp() as f32;
+    let arriving = (-score.time.between(from, camera.beat) / 0.25).exp() as f32;
     big_title(canvas, layout, axis, &name, &sub, shown, arriving);
 }
 
@@ -1580,11 +1671,22 @@ mod tests {
 
     #[test]
     fn positions_read_as_the_transport_does() {
-        let four = TimeSignature::default();
-        assert_eq!(position_text(0.0, four), "1. 1. 1");
-        assert_eq!(position_text(96.0, four), "25. 1. 1");
-        assert_eq!(position_text(97.75, four), "25. 2. 4");
-        assert_eq!(position_text(3.0, TimeSignature::new(6, 8).unwrap()), "2. 1. 1");
+        use trill_core::TimeSignature;
+        let four = MeterMap::constant(TimeSignature::default());
+        assert_eq!(position_text(0.0, &four), "1. 1. 1");
+        assert_eq!(position_text(96.0, &four), "25. 1. 1");
+        assert_eq!(position_text(97.75, &four), "25. 2. 4");
+        assert_eq!(position_text(3.0, &MeterMap::constant(TimeSignature::new(6, 8).unwrap())), "2. 1. 1");
+        // Through a change: two bars of 4/4, then 7/8, counted in eighths.
+        let seven = trill_core::MeterChange { beat: 8.0, signature: TimeSignature::new(7, 8).unwrap() };
+        let back = trill_core::MeterChange { beat: 15.0, signature: TimeSignature::new(4, 4).unwrap() };
+        let changing = MeterMap::new(TimeSignature::new(4, 4).unwrap(), &[seven, back]);
+        assert_eq!(position_text(7.75, &changing), "2. 4. 4");
+        assert_eq!(position_text(8.0, &changing), "3. 1. 1");
+        assert_eq!(position_text(11.0, &changing), "3. 7. 1", "the seventh eighth of the bar");
+        assert_eq!(position_text(11.5, &changing), "4. 1. 1");
+        assert_eq!(position_text(15.0, &changing), "5. 1. 1");
+        assert_eq!(position_text(20.0, &changing), "6. 2. 1");
         assert_eq!(clock_text(0.0), "0:00.0");
         assert_eq!(clock_text(67.46), "1:07.4");
     }

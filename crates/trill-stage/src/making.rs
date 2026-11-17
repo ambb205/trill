@@ -597,7 +597,7 @@ impl MakingFilm {
 
         let seconds = making.length();
         let filmed = filmer.film_of(&mut making, 0.0, seconds, &request.shoot, audio.as_ref(), &request.path, progress);
-        let _ = std::fs::remove_file(&wav);
+        crate::film::remove(&wav);
         let filmed = filmed?;
         notes.extend(filmed.note);
         Ok(Exported {
