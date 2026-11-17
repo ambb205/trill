@@ -91,6 +91,15 @@ pub(crate) mod kind {
     /// a window, and asks for that size from inside `attached`, while it
     /// goes on reporting the old one until it is told the new.
     pub(crate) const ASKS_WHEN_ATTACHED: u8 = 13;
+    /// [`MONO_GAIN`] that goes on setting itself up behind the scenes for
+    /// [`SETTING_UP`](super::SETTING_UP) after it is made, as a plugin
+    /// that reads its sounds on threads of its own does, and does not
+    /// look whether it is still wanted when that work is done: a host
+    /// that takes it down before then has it complain
+    /// ([`taken_down_under_its_work`](super::taken_down_under_its_work)).
+    /// The host is told to leave such a plugin alone for a while
+    /// ([`super::super::quirks`]).
+    pub(crate) const SETS_UP_BEHIND: u8 = 14;
 
     /// Plugins that keep whatever state they are handed and give it back,
     /// under the class ids of plugins whose vendors keep presets in files
@@ -105,7 +114,7 @@ pub(crate) mod kind {
     pub(crate) const KEEPS_ARCHETYPE: u8 = 23;
     pub(crate) const KEEPERS: [u8; 4] = [KEEPS_SERUM, KEEPS_AMPLE, KEEPS_SUPERIOR, KEEPS_ARCHETYPE];
 
-    pub(crate) const ALL: [u8; 14] = [
+    pub(crate) const ALL: [u8; 15] = [
         IMPULSE,
         MONO_GAIN,
         STEREO_GAIN,
@@ -120,7 +129,39 @@ pub(crate) mod kind {
         FIXED_EDITOR,
         FAILS_ATTACH,
         ASKS_WHEN_ATTACHED,
+        SETS_UP_BEHIND,
     ];
+}
+
+/// How long a [`kind::SETS_UP_BEHIND`] plugin goes on working after it is
+/// made.
+pub(crate) const SETTING_UP: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Whether `class` is a plugin that sets itself up behind the scenes.
+pub(crate) fn sets_itself_up_behind(class: ClassId) -> bool {
+    class == class_id(kind::SETS_UP_BEHIND, false)
+}
+
+/// The instances whose work behind the scenes ended after they had been
+/// taken down: in a real plugin, work done on an object that is gone.
+static TAKEN_DOWN_UNDER_WORK: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// Whether the instance with this serial was taken down while it was
+/// still setting itself up.
+pub(crate) fn taken_down_under_its_work(serial: u64) -> bool {
+    TAKEN_DOWN_UNDER_WORK.lock().unwrap().contains(&serial)
+}
+
+/// Starts the work a [`kind::SETS_UP_BEHIND`] plugin does on a thread of
+/// its own once it is made. When the work is done it turns to the
+/// instance without asking whether there still is one.
+fn set_up_behind(serial: u64) {
+    std::thread::spawn(move || {
+        std::thread::sleep(SETTING_UP);
+        if lifecycle(serial).contains(&"terminate") {
+            TAKEN_DOWN_UNDER_WORK.lock().unwrap().push(serial);
+        }
+    });
 }
 
 /// Whether the plugin's edit controller makes a view.
@@ -963,6 +1004,9 @@ impl<const ROLE: u8> Object<ROLE> {
             INSTANCES.lock().unwrap().push((serial, kind));
         }
         object.log("create");
+        if ROLE != CONTROLLER && kind == kind::SETS_UP_BEHIND {
+            set_up_behind(serial);
+        }
         object
     }
 

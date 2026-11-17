@@ -63,6 +63,9 @@ pub(crate) struct Vst3Processor {
     continuous_samples: i64,
     /// The plugin was set up for offline processing (a render).
     offline: bool,
+    /// Whether the plugin is given the time it is known to need before it
+    /// is taken down ([`super::quirks`]).
+    patient: bool,
 }
 
 impl Vst3Processor {
@@ -76,11 +79,12 @@ impl Vst3Processor {
         name: String,
         instrument: bool,
         created: Created,
-        sample_rate: f64,
-        max_block: usize,
+        (sample_rate, max_block): (f64, usize),
+        patient: bool,
     ) -> Result<Self, String> {
         let max_block = max_block.max(1);
         let mut processor = Self {
+            patient,
             offline: created.offline,
             audio: Some(created.audio),
             active: true,
@@ -315,13 +319,16 @@ impl Drop for Vst3Processor {
     ///
     /// This waits for the teardown, so that once a device is dropped its
     /// plugin is really gone, and a DAW shutting down does not exit in the
-    /// middle of it. The plugin main thread outlives the factory for as
-    /// long as any processor holds a handle to it, so this cannot be left
-    /// waiting on a thread that has already stopped.
+    /// middle of it. (A plugin that has to be left alone for a while
+    /// first is gone a little later, on the plugin main thread; see
+    /// `Vst3Thread::destroy`.) The plugin main thread outlives the factory
+    /// for as long as any processor holds a handle to it, so this cannot
+    /// be left waiting on a thread that has already stopped.
     fn drop(&mut self) {
         self.stop();
-        let (instance, audio) = (self.instance, self.audio.take());
-        if let Err(error) = self.main.call(TEARDOWN_TIMEOUT, move |thread| thread.vst3.destroy(instance, audio)) {
+        let (instance, audio, patient) = (self.instance, self.audio.take(), self.patient);
+        let destroy = move |thread: &mut PluginThread| thread.vst3.destroy(instance, audio, patient);
+        if let Err(error) = self.main.call(TEARDOWN_TIMEOUT, destroy) {
             log::warn!("[{}] was not torn down cleanly: {error}", self.name);
         }
     }
