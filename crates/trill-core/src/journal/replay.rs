@@ -454,13 +454,20 @@ pub struct Cursor {
     arrived: Vec<Arrived>,
     /// Moves on whenever the song a frame shows is another.
     version: u64,
+    /// The song as it was after so many entries, kept every few hundred as
+    /// they are passed: looking back begins from the nearest, not from the
+    /// beginning.
+    kept: Vec<(usize, Project)>,
 }
+
+/// How many entries lie between two songs a cursor keeps to look back from.
+const KEPT_EVERY: usize = 256;
 
 impl Cursor {
     /// A cursor at the beginning of `replay`.
     pub fn new(replay: &Replay) -> Self {
         let song = replay.journal.base(States::Without).unwrap_or_else(|_| Project::new("Untitled"));
-        Self { applied: 0, song, arriving: Vec::new(), staged: None, arrived: Vec::new(), version: 0 }
+        Self { applied: 0, song, arriving: Vec::new(), staged: None, arrived: Vec::new(), version: 0, kept: Vec::new() }
     }
 
     /// Makes `song` the song after `count` entries.
@@ -471,9 +478,17 @@ impl Cursor {
             return;
         }
         if count < self.applied {
-            let version = self.version;
-            *self = Self::new(replay);
-            self.version = version;
+            // Back to the nearest song that was kept, or to the beginning.
+            match self.kept.iter().rev().find(|(applied, _)| *applied <= count) {
+                Some((applied, song)) => {
+                    self.applied = *applied;
+                    self.song.clone_from(song);
+                }
+                None => {
+                    self.applied = 0;
+                    self.song = replay.journal.base(States::Without).unwrap_or_else(|_| Project::new("Untitled"));
+                }
+            }
         }
         self.version += 1;
         self.staged = None;
@@ -488,6 +503,10 @@ impl Cursor {
             }
             if let Some(added) = added {
                 self.arriving = arriving(&step.change, &added, &self.song);
+            }
+            let passed = index + 1;
+            if passed % KEPT_EVERY == 0 && self.kept.last().is_none_or(|(applied, _)| *applied < passed) {
+                self.kept.push((passed, self.song.clone()));
             }
         }
         self.applied = count;
@@ -708,6 +727,29 @@ mod tests {
         assert!(seen.windows(2).all(|pair| (pair[0].0 == pair[1].0) == (pair[0].1 == pair[1].1)), "{seen:?}");
         let versions: HashSet<u64> = seen.iter().map(|(version, _)| *version).collect();
         assert_eq!(versions.len(), 18, "the song before, and one more for each thing that arrives");
+    }
+
+    #[test]
+    fn looking_back_in_a_long_session_shows_the_song_as_it_was() {
+        let mut song = Project::new("Song");
+        let mut journal = Journal::begin(&song, 0);
+        let mut track = TrackId(0);
+        step(&mut journal, &mut song, 0, |p| track = p.add_track("Keys"));
+        let mut songs = vec![song.clone()];
+        for index in 1..1_000u64 {
+            step(&mut journal, &mut song, index * SECOND, |p| p.set_track_volume(track, -(index as f32) / 100.0));
+            songs.push(song.clone());
+        }
+        let replay = Replay::new(journal);
+        let moments = replay.moments().to_vec();
+        let mut cursor = Cursor::new(&replay);
+        // Forward to the end, then back and forth across the songs it kept
+        // on the way: every look is the song as it was there.
+        for index in [999, 3, 255, 256, 257, 700, 511, 512, 0, 998, 600] {
+            let frame = replay.frame(moments[index].starts, &mut cursor);
+            assert_eq!(frame.song, &songs[index], "at entry {index}");
+        }
+        assert_eq!(cursor.kept.len(), 3, "a song kept for every {KEPT_EVERY} entries passed");
     }
 
     #[test]

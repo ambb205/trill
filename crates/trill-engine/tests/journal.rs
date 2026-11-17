@@ -461,6 +461,60 @@ fn a_take_is_one_step_and_the_journals_clock_can_be_set() {
     assert_eq!(times, [1_000, 1_000, 1_000, 61_000]);
 }
 
+#[test]
+fn what_a_plugin_came_to_on_its_own_is_kept_without_being_a_step_of_the_story() {
+    use trill_core::journal::replay::Replay;
+    use trill_engine::scripted::{BASS, ScriptedFactory};
+    // A plugin keeps its own state, which the project holds only once it
+    // has been asked for: when the song is saved, or copied for safety.
+    let mut session =
+        Session::new(Arc::new(ScriptedFactory::new()), AudioBackend::Null { sample_rate: 48_000 }).unwrap();
+    let track = session.edit(|p| Ok(p.add_track("Bass"))).unwrap();
+    let bass = session.add_device(ChainRef::Track(track), BASS, None, None).unwrap();
+    assert_eq!(session.project().device(bass).unwrap().state, None);
+    let told = lines(&session);
+    assert_eq!(told.len(), 2);
+
+    let _ = session.snapshot_json();
+    assert!(session.project().device(bass).unwrap().state.is_some(), "the plugin was asked for its state");
+    // The journal has it, so that it still leads to the song; and it is
+    // nobody's step.
+    assert_in_step(&session);
+    assert_eq!(lines(&session), told);
+    assert_eq!(journal(&session).entries().filter(|entry| entry.is_aside()).count(), 1);
+    assert_eq!(journal(&session).steps(), 2);
+    // Asked again with nothing changed, nothing is entered.
+    let entries = journal(&session).len();
+    let _ = session.snapshot_json();
+    assert_eq!(journal(&session).len(), entries);
+
+    // A preset the plugin loads itself is a step; the state it comes to
+    // is kept again when it is next asked for, in passing.
+    session.apply_preset(bass, "Octave up").unwrap();
+    assert_eq!(lines(&session).len(), 3);
+    assert_in_step(&session);
+    let _ = session.snapshot_json();
+    assert_in_step(&session);
+    assert_eq!(lines(&session).len(), 3);
+    // Taken back and brought back, the story still leads to the song.
+    assert!(session.undo());
+    assert_in_step(&session);
+    let _ = session.snapshot_json();
+    assert!(session.redo());
+    let _ = session.snapshot_json();
+    assert_in_step(&session);
+
+    // Played again, an aside takes no time and is not a step to go to.
+    let replay = Replay::new(journal(&session).clone());
+    assert!(replay.broken().is_none());
+    for moment in replay.moments() {
+        let entry = replay.entry(moment);
+        assert_eq!(entry.is_aside(), moment.lasts == 0.0, "{}", entry.line());
+    }
+    let first_aside = replay.moments().iter().position(|moment| replay.entry(moment).is_aside()).unwrap();
+    assert_ne!(replay.step_from(first_aside, false), Some(first_aside));
+}
+
 /// A song the size of a finished one: forty tracks, each with three
 /// devices and ten clips of fifty notes, and a megabyte of plugin state
 /// on every fourth track.

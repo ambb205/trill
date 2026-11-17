@@ -70,7 +70,7 @@ const STORY_LIMITS: std::ops::RangeInclusive<f32> = 280.0..=520.0;
 
 /// What is on show: a journal being read, a replay, or why there is none.
 enum Stage {
-    Reading(Receiver<Result<Journal, String>>),
+    Reading(Receiver<Result<Replay, String>>),
     Watching(Box<Watching>),
     Nothing(String),
 }
@@ -173,9 +173,21 @@ pub fn hue(theme: &Theme, author: &Author) -> egui::Color32 {
     }
 }
 
+/// Lays a journal out to be watched, or says why there is nothing in it
+/// to watch. Done on a helper thread: a long session is thousands of steps.
+fn laid_out(journal: Journal) -> Result<Replay, String> {
+    if journal.entries().all(Entry::is_aside) {
+        return Err(
+            "Nothing has happened in this song since its journal began. Make something, and come back.".to_owned()
+        );
+    }
+    Ok(Replay::new(journal))
+}
+
 impl MakingOf {
     /// Opens the making-of of the song `session` has open. Its journal is
-    /// copied on a helper thread; the replay shows once it is there.
+    /// copied and laid out on a helper thread; the replay shows once it is
+    /// there.
     pub fn open(ctx: &egui::Context, session: &SharedSession, factory: Arc<dyn DeviceFactory>, start: Start) -> Self {
         let (sender, journal) = channel();
         let (session, waker) = (session.clone(), ctx.clone());
@@ -185,7 +197,7 @@ impl MakingOf {
             let journal = copied.ok_or_else(|| {
                 "No journal is kept, so there is nothing to play again. Keep one from the View menu.".to_owned()
             });
-            if sender.send(journal).is_ok() {
+            if sender.send(journal.and_then(laid_out)).is_ok() {
                 waker.request_repaint();
             }
         });
@@ -201,25 +213,21 @@ impl MakingOf {
         std::thread::spawn(move || {
             let read = std::fs::read_to_string(&file).map_err(|error| format!("{}: {error}", file.display()));
             let journal = read.and_then(|text| Journal::from_text(&text).map_err(|error| error.to_string()));
-            if sender.send(journal).is_ok() {
+            if sender.send(journal.and_then(laid_out)).is_ok() {
                 waker.request_repaint();
             }
         });
         Self { stage: Stage::Reading(journal), title, factory, start: Start::default() }
     }
 
-    /// The part of a frame that needs no window: takes in the journal when
-    /// it has been read, and moves the replay on by the time that passed.
+    /// The part of a frame that needs no window: takes in the replay when
+    /// it has been laid out, and moves it on by the time that passed.
     pub fn tick(&mut self, ctx: &egui::Context, descriptors: &[DeviceDescriptor]) {
         if let Stage::Reading(journal) = &self.stage
             && let Ok(read) = journal.try_recv()
         {
             self.stage = match read {
-                Ok(journal) if journal.entries().all(Entry::is_aside) => Stage::Nothing(
-                    "Nothing has happened in this song since its journal began. Make something, and come back."
-                        .to_owned(),
-                ),
-                Ok(journal) => Stage::Watching(Box::new(Watching::new(journal, self.start))),
+                Ok(replay) => Stage::Watching(Box::new(Watching::new(replay, self.start))),
                 Err(reason) => Stage::Nothing(reason),
             };
         }
@@ -273,8 +281,7 @@ impl MakingOf {
 }
 
 impl Watching {
-    fn new(journal: Journal, start: Start) -> Self {
-        let replay = Replay::new(journal);
+    fn new(replay: Replay, start: Start) -> Self {
         let cursor = Cursor::new(&replay);
         // What the views are handed in place of the session: empty, silent,
         // and nobody else's. It starts no audio device.
@@ -561,17 +568,14 @@ pub fn bar(ui: &mut Ui, theme: &Theme, making_of: &mut MakingOf) -> bool {
     let position = boxed(bar, x, 118.0);
     paint::frame(&painter, position, theme.hairline);
     let inner = position.shrink2(vec2(8.0, 0.0));
-    let now = clock(watching.time() / 1.0);
+    let now = clock(watching.time());
     text::paint(&painter, inner, Align2::LEFT_CENTER, theme.text.readout, &now, theme.ink);
     let whole = clock(watching.replay().length());
     text::paint(&painter, inner, Align2::RIGHT_CENTER, theme.text.value, &whole, theme.ink_faint);
     let response = ui.interact(position, id.with("position"), Sense::hover());
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("Replay at {now} of {whole}")));
     if response.hovered() {
-        hint = Some(
-            "Where the replay is, and how long it is at this speed\u{2019}s 1\u{00D7}: the waiting is cut out"
-                .to_owned(),
-        );
+        hint = Some("Where the replay is, of how long it is at 1\u{00D7} \u{00B7} the waiting is cut out".to_owned());
     }
     x = position.right() + 8.0;
 

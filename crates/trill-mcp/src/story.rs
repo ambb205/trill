@@ -9,19 +9,18 @@
 //!   out to hand on, deleting it.
 //!
 //! The journal is the engine's (`trill_core::journal`, kept by the
-//! session). What is here is the arguments, replies short enough to read,
-//! and what the assistant in the window is not allowed: it works beside the
+//! session). What is here is replies short enough to read, and what the
+//! assistant in the window is not allowed: it works beside the
 //! user, on what it reads, and must not be talked into deleting the record
 //! of what it did, switching it off, or writing the conversation out to a
 //! file.
 
+use crate::requests::{GetJournalRequest, GetSongAtRequest, JournalAction, JournalBy, JournalRequest, JournalShow};
 use crate::server::{Reply, TrillServer, finish};
 use crate::view::{device_json, lane_json, round, track_json};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
-use rmcp::schemars::{self, JsonSchema};
 use rmcp::{tool, tool_router};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use trill_core::Project;
 use trill_core::journal::{Author, Entry, Journal, Place, PlanState, Reversal, States, What};
@@ -49,85 +48,6 @@ const DEFAULT_ENTRIES: usize = 40;
 const MAX_ENTRIES: usize = 200;
 /// How much of what was said a listing shows.
 const SAID_CHARS: usize = 400;
-
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum JournalShow {
-    /// Only the steps: what changed the song.
-    #[default]
-    Steps,
-    /// Everything: also what was said in the window's conversation with the assistant, the assistant's plan, and
-    /// the calls that changed nothing (reading, measuring, probing), with what they heard.
-    All,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum JournalBy {
-    /// The user, at the window.
-    Person,
-    /// The assistant in the window.
-    Assistant,
-    /// Programs working through this server, like you.
-    Client,
-}
-
-#[derive(Debug, Default, Deserialize, JsonSchema)]
-pub struct GetJournalRequest {
-    /// List what came after this step number: a `step` from an earlier reply, or `more.after` to read the next
-    /// page. Omit to start where the story begins.
-    pub after: Option<u64>,
-    /// How many entries to return (default 40, at most 200).
-    pub limit: Option<usize>,
-    /// Instead of reading from `after`: the latest this many entries, for "what happened last".
-    pub last: Option<usize>,
-    /// "steps" (default) lists what changed the song; "all" also what was said and what was only looked at.
-    #[serde(default)]
-    pub show: JournalShow,
-    /// Only entries whose words contain this, whatever the case: "chorus", "reverb", "tempo".
-    pub search: Option<String>,
-    /// Only entries made by "person" (the user at the window), "assistant" (the assistant in the window) or
-    /// "client" (programs like you).
-    pub by: Option<JournalBy>,
-}
-
-#[derive(Debug, Default, Deserialize, JsonSchema)]
-pub struct GetSongAtRequest {
-    /// The step to show the song after: a `step` from get_journal. 0, or leaving it out, is the song as it was
-    /// when the story begins.
-    pub step: Option<u64>,
-    /// Include every note of every clip. Leave off unless you need them.
-    #[serde(default)]
-    pub include_notes: bool,
-}
-
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum JournalAction {
-    /// Whether a journal is kept, how many steps it has and how large it is.
-    #[default]
-    Status,
-    /// Keep a journal from now on (the default).
-    Keep,
-    /// Stop keeping one. What was written stays until it is deleted.
-    Stop,
-    /// Write the story out to `path` as a .trillstory file that can be handed to someone else and watched there.
-    Export,
-    /// Delete the journal of the open song for good. The story begins again from the song as it is.
-    Delete,
-}
-
-#[derive(Debug, Default, Deserialize, JsonSchema)]
-pub struct JournalRequest {
-    #[serde(default)]
-    pub action: JournalAction,
-    /// With "export": where to write the file.
-    pub path: Option<String>,
-    /// With "export": include what was said between the user and the assistant, and the assistant's plan.
-    /// Default false: only how the song was made. Ask the user before turning this on.
-    #[serde(default)]
-    pub conversation: bool,
-}
 
 /// Days since 1970 as a date: the civil calendar, worked out by hand so
 /// that a date needs no library.

@@ -119,8 +119,7 @@ pub fn show(ui: &mut Ui, theme: &Theme, watching: &mut Watching) {
         };
         let mark = Rect::from_min_max(pos2(left, middle - up), pos2(left + width, middle + down));
         painter.rect_filled(mark, 0.0, color);
-        if let Some(away) = moment.away.filter(|_| left > line.left() + 2.0) {
-            let _ = away;
+        if moment.away.is_some() && left > line.left() + 2.0 {
             // Someone went away here: a break in the line.
             painter.rect_filled(
                 Rect::from_min_max(pos2(left - 4.0, middle - 1.0), pos2(left - 1.0, middle + 2.0)),
