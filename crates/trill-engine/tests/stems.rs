@@ -247,11 +247,11 @@ fn the_stems_of_one_render_are_what_separate_renders_of_each_part_give() {
     // And it is what the tracks outside a group, the groups and the
     // returns add up to.
     let (_, lead) = stem(StemKind::Track, Some(synth));
-    let sum = |channel: fn(&(Vec<f32>, Vec<f32>)) -> &Vec<f32>| -> Vec<f32> {
-        let parts = [channel(&lead), channel(&group), channel(&returns)];
+    let sum = |parts: [&Vec<f32>; 3]| -> Vec<f32> {
         (0..parts[0].len()).map(|frame| parts.iter().map(|part| part[frame]).sum()).collect()
     };
-    let off = apart("the sum of the stems", &premaster, (&sum(|audio| &audio.0), &sum(|audio| &audio.1)));
+    let (left, right) = (sum([&lead.0, &group.0, &returns.0]), sum([&lead.1, &group.1, &returns.1]));
+    let off = apart("the sum of the stems", &premaster, (&left, &right));
     assert!(off < 1e-5, "{off}");
 
     // Writing stems changes nothing about the mix, and costs no devices.

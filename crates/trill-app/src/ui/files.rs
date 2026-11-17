@@ -33,7 +33,7 @@ enum Event {
     Saved(Result<PathBuf, String>),
     /// The export dialog was answered and rendering has begun.
     ExportStarted(PathBuf),
-    Exported(Result<RenderReport, String>),
+    Exported(Result<Box<RenderReport>, String>),
     /// The name of the MIDI file read and how many tracks it became.
     MidiImported(Result<(String, usize), String>),
     MidiExported(Result<PathBuf, String>),
@@ -251,7 +251,7 @@ fn export(ctx: &egui::Context, cx: &mut Cx, stems: bool) {
         };
         let path = with_extension(file.path(), "wav");
         report(Event::ExportStarted(path.clone()));
-        report(Event::Exported(render(&session, &path, stems)));
+        report(Event::Exported(render(&session, &path, stems).map(Box::new)));
     });
 }
 
