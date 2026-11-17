@@ -223,6 +223,21 @@ pub(crate) fn settings(format: Format, state: &PluginState) -> Option<Vec<(Strin
     }
 }
 
+/// What the keys of a plugin of `format` play, as `state` says it: for the
+/// formats whose state names what is on its keys (a drum sampler's kit).
+/// `None` for the others, and for a state the format's reader does not
+/// know. What a maker's library calls its drums is read in `places`.
+pub(crate) fn key_sounds(
+    format: Format,
+    state: &PluginState,
+    places: &VendorPlaces,
+) -> Option<Vec<trill_core::KeySound>> {
+    match format {
+        Format::Superior3 => superior::key_sounds(state, places),
+        Format::Serum2 | Format::Ample | Format::Archetype => None,
+    }
+}
+
 /// `current` with `values` in place of the values of the settings they
 /// name: see [`settings`]. An error says which name is no setting.
 pub(crate) fn with_settings(
