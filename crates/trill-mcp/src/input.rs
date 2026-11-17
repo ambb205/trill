@@ -29,12 +29,16 @@ impl JsonSchema for NoteInput {
 
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
         json_schema!({
-            "description": "A note. Either an object {pitch, start, length, velocity?} or, to save space in long \
-                lists, an array [pitch, start, length, velocity?]. `pitch` is a MIDI number (60 = C4 = middle C), a \
-                note name (\"C4\", \"F#3\", \"Bb2\") or, for drum kits, a drum name (\"kick\", \"snare\", \"clap\", \
-                \"closed_hat\", \"open_hat\", \"low_tom\", \"mid_tom\", \"high_tom\", \"crash\", \"ride\", \"rim\", \
-                \"cowbell\", \"shaker\", \"tambourine\", \"claves\"). `start` and `length` are in beats (quarter \
-                notes); `start` is measured from the beginning of the clip. `velocity` is 1-127 (default 100).",
+            "description": "A note. Either an object {pitch, start, length, velocity?, how?} or, to save space in \
+                long lists, an array [pitch, start, length, velocity?, how?]. `pitch` is a MIDI number (60 = C4 = \
+                middle C), a note name (\"C4\", \"F#3\", \"Bb2\") or a name the track gives a key: on a drum track \
+                a drum of its kit (\"kick\", \"snare\", \"closed_hat\", \"china\"; get_instrument_profile lists \
+                them), on a guitar or bass one of its noises (\"chk\", \"scrape\"). `start` and `length` are in \
+                beats (quarter notes); `start` is measured from the beginning of the clip. `velocity` is 1-127 \
+                (default 100). `how` is how the instrument plays the note, by the name of one of the track's \
+                articulations (\"palm_mute\", \"muted\", \"hammer\", \"slide\", \"harmonic\"; get_project lists \
+                them): the keyswitch is pressed for you just before the note, and the velocity is fitted where \
+                velocity decides. Never place a keyswitch as a note yourself.",
             "anyOf": [
                 {
                     "type": "object",
@@ -42,7 +46,8 @@ impl JsonSchema for NoteInput {
                         "pitch": { "type": ["integer", "string"] },
                         "start": { "type": "number", "minimum": 0 },
                         "length": { "type": "number", "exclusiveMinimum": 0 },
-                        "velocity": { "type": "integer", "minimum": 1, "maximum": 127 }
+                        "velocity": { "type": "integer", "minimum": 1, "maximum": 127 },
+                        "how": { "type": "string" }
                     },
                     "required": ["pitch", "start", "length"]
                 },
@@ -50,7 +55,7 @@ impl JsonSchema for NoteInput {
                     "type": "array",
                     "items": { "type": ["number", "string"] },
                     "minItems": 3,
-                    "maxItems": 4
+                    "maxItems": 5
                 }
             ]
         })
@@ -173,9 +178,20 @@ fn velocity(value: Option<&Value>) -> Result<u8, String> {
     Ok(v.round() as u8)
 }
 
-fn parse_note(value: &Value, named: &dyn Fn(&str) -> Option<u8>, expected: &str) -> Result<Note, String> {
+/// A note with how it is to be played, if it says: the name of one of its
+/// track's articulations.
+fn parse_note(
+    value: &Value,
+    named: &dyn Fn(&str) -> Option<u8>,
+    expected: &str,
+) -> Result<(Note, Option<String>), String> {
     let parse_pitch_value = |value: &Value| parse_pitch_with(value, named, expected);
-    let (pitch, start, length, velocity) = match value {
+    let said = |value: Option<&Value>| match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(how)) if !how.trim().is_empty() => Ok(Some(how.trim().to_string())),
+        Some(other) => Err(format!("`how` must be the name of an articulation, got {other}")),
+    };
+    let (pitch, start, length, velocity, how) = match value {
         Value::Object(fields) => {
             let field = |name: &str| fields.get(name).ok_or_else(|| format!("missing '{name}'"));
             (
@@ -183,19 +199,29 @@ fn parse_note(value: &Value, named: &dyn Fn(&str) -> Option<u8>, expected: &str)
                 number(field("start")?, "start")?,
                 number(field("length")?, "length")?,
                 velocity(fields.get("velocity"))?,
+                said(fields.get("how").or_else(|| fields.get("articulation")))?,
             )
         }
-        Value::Array(items) if (3..=4).contains(&items.len()) => (
-            parse_pitch_value(&items[0])?,
-            number(&items[1], "start")?,
-            number(&items[2], "length")?,
-            velocity(items.get(3))?,
-        ),
+        Value::Array(items) if (3..=5).contains(&items.len()) => {
+            // The fourth item is a velocity, or already how the note is played.
+            let (hit, how) = match (items.get(3), items.get(4)) {
+                (Some(Value::String(_)), None) => (None, items.get(3)),
+                (hit, how) => (hit, how),
+            };
+            (
+                parse_pitch_value(&items[0])?,
+                number(&items[1], "start")?,
+                number(&items[2], "length")?,
+                velocity(hit)?,
+                said(how)?,
+            )
+        }
         _ => {
-            return Err("expected {pitch, start, length, velocity?} or [pitch, start, length, velocity?]".to_string());
+            return Err("expected {pitch, start, length, velocity?, how?} or [pitch, start, length, velocity?, how?]"
+                .to_string());
         }
     };
-    Ok(Note { pitch, start, length, velocity })
+    Ok((Note { pitch, start, length, velocity }, how))
 }
 
 pub fn parse_notes(notes: &[NoteInput]) -> Result<Vec<Note>, String> {
@@ -209,11 +235,29 @@ pub fn parse_notes_with(
     named: &dyn Fn(&str) -> Option<u8>,
     expected: &str,
 ) -> Result<Vec<Note>, String> {
-    notes
+    let (notes, how) = parse_played(notes, named, expected)?;
+    match how.iter().position(Option::is_some) {
+        Some(index) => Err(format!(
+            "notes[{index}]: a note says how it is played only where it is written into a clip (create_clip, \
+             add_notes, set_notes)"
+        )),
+        None => Ok(notes),
+    }
+}
+
+/// [`parse_notes_with`], for notes that may say how they are played: the
+/// notes, and in step with them the articulation each asks for.
+pub fn parse_played(
+    notes: &[NoteInput],
+    named: &dyn Fn(&str) -> Option<u8>,
+    expected: &str,
+) -> Result<(Vec<Note>, Vec<Option<String>>), String> {
+    let parsed: Result<Vec<(Note, Option<String>)>, String> = notes
         .iter()
         .enumerate()
         .map(|(index, note)| parse_note(&note.0, named, expected).map_err(|e| format!("notes[{index}]: {e}")))
-        .collect()
+        .collect();
+    Ok(parsed?.into_iter().unzip())
 }
 
 /// `unsaid` is the shape of a point that does not give one.

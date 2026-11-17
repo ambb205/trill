@@ -45,8 +45,10 @@ sound. The first search reads each plugin's presets, in the background; the repl
 - Presets are the way to a good sound: the makers' own, by people who can hear. Trill lists a plugin's presets \
 whichever way the plugin keeps them, the files of its maker's own format included (drum kits, guitar tones, \
 amplifier presets, synth patches), so give every plugin instrument and amplifier a preset before touching a \
-parameter, and say in a sentence which you chose. Then probe it once (see below): a preset's name does not say \
-what its notes sound like or which keys it answers to.
+parameter, and say in a sentence which you chose. Then read get_instrument_profile on its track: for the \
+instruments Trill knows it says which keys the preset answers to (a drum kit's drums by name, read from the kit \
+that was just loaded; a guitar's articulations). Probe only an instrument it knows nothing of: a preset's name \
+does not say what its notes sound like.
 - A reply's `note` after a preset says what to know about it: that a drum sampler or a sampled guitar reads its \
 samples for seconds, up to a minute, silent until it has (probe, measure and render wait for that), or that the \
 preset switched a setting on that changes how a part is played.

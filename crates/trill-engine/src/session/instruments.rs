@@ -4,6 +4,7 @@
 
 use super::Session;
 use crate::instruments::InstrumentKnowledge;
+use crate::instruments::kit::{self, KitMap};
 use std::sync::Arc;
 use trill_core::device::{BEND_RANGE_PARAM, DeviceCategory, DeviceDescriptor, PITCH_BEND_SEMITONES};
 use trill_core::{ChainRef, Device, InstrumentProfile, Project, Role, TrackId, TrackKind};
@@ -61,12 +62,32 @@ impl Session {
         (range > 0.0).then_some(range)
     }
 
+    /// The drums of the kit a track's instrument has loaded, by name,
+    /// where the instrument says what is on its keys: a drum plugin whose
+    /// state names the drum in each place and the keys that strike it. The
+    /// plugin is asked now, so this is the kit it has whichever way it
+    /// came by it (a preset, its own window, a song that was opened).
+    /// `None` for an instrument that does not say, which is nearly all,
+    /// and for a track that does not play drums.
+    pub fn kit_of(&self, track: TrackId) -> Option<KitMap> {
+        if !self.plays_drums(track) {
+            return None;
+        }
+        let device = self.instrument_of(track)?;
+        let controller = self.bank.devices.get(&device.id)?.controller.as_ref()?;
+        let sounds = controller.lock().key_sounds()?;
+        (!sounds.is_empty()).then(|| kit::drum_map(&sounds))
+    }
+
     /// What is known about the instrument a track plays through, for
-    /// whoever writes for it: what the track says ([`Track::profile`]),
-    /// and where it says nothing of the pitch wheel, how far the
-    /// instrument's own setting has it bend
-    /// ([`instrument_bend_range`](Self::instrument_bend_range)). The
-    /// default for a track that is not there.
+    /// whoever writes for it: what the track says ([`Track::profile`]);
+    /// where it says nothing of the pitch wheel, how far the instrument's
+    /// own setting has it bend
+    /// ([`instrument_bend_range`](Self::instrument_bend_range)); and on a
+    /// drum track whose instrument says what its kit has on its keys, the
+    /// kit's drums by name in place of any other map
+    /// ([`kit_of`](Self::kit_of)). The default for a track that is not
+    /// there.
     ///
     /// [`Track::profile`]: trill_core::Track::profile
     pub fn profile_of(&self, track: TrackId) -> InstrumentProfile {
@@ -76,6 +97,13 @@ impl Session {
             // Two semitones is what a profile that says nothing means.
             profile.bend_range =
                 self.instrument_bend_range(track).filter(|range| *range != f64::from(PITCH_BEND_SEMITONES));
+        }
+        if let Some(kit) = self.kit_of(track) {
+            let shipped = self
+                .instrument_of(track)
+                .and_then(|device| InstrumentKnowledge::built_in(&device.uri))
+                .map(|known| known.profile);
+            profile = kit.under(profile, shipped.as_ref());
         }
         profile
     }
