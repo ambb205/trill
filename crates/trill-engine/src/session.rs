@@ -31,6 +31,9 @@ mod presets;
 mod probing;
 mod story;
 mod take;
+mod wavetable;
+
+pub use wavetable::{TableReport, factory_tables};
 
 pub use controllers::SilentInstrument;
 pub use files::file_facts;
@@ -616,6 +619,11 @@ impl Session {
             } else if let (Some(info), Some(values)) = (&preset, &values) {
                 device.params.extend(values.iter().cloned());
                 device.preset = Some(info.reference());
+                // A preset with a state of its own brings it: a wavetable
+                // synth's tables, and what its macros are called.
+                if let Some(state) = preset_state(&descriptor, info) {
+                    device.state = Some(state);
+                }
             }
             if let Some((track, profile)) = profile {
                 project.set_track_profile(track, profile)?;
@@ -1150,6 +1158,12 @@ fn readable<S>(id: DeviceId, state: Result<S, StateError>) -> Result<Option<S>, 
 /// values `descriptor` carries.
 fn preset_values(descriptor: &DeviceDescriptor, preset: &PresetInfo) -> Option<Vec<(String, f64)>> {
     descriptor.presets.iter().find(|candidate| candidate.name == preset.id).map(|found| found.params.clone())
+}
+
+/// The state a preset of `descriptor` gives the device, if it is one of
+/// the descriptor's own and has one.
+fn preset_state(descriptor: &DeviceDescriptor, preset: &PresetInfo) -> Option<Vec<u8>> {
+    descriptor.presets.iter().find(|candidate| candidate.name == preset.id).and_then(|found| found.state.clone())
 }
 
 fn io_error(path: &Path, error: std::io::Error) -> SessionError {

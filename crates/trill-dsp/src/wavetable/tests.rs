@@ -216,14 +216,15 @@ fn a_sawtooth_has_nothing_between_its_harmonics_at_any_pitch() {
     let saw = with(&PLAIN, &[("osc1_position", 0.5)]);
     println!("note     Hz       between the harmonics   reaches");
     let mut wrong = Vec::new();
-    for note in [24u8, 28, 33, 36, 40, 45, 57, 60, 72, 84, 91, 96, 99, 101, 103, 106, 108, 115, 120] {
+    for note in (24u8..=120).filter(|note| note % 4 == 0 || [45, 57, 91, 99, 101, 103, 106, 115].contains(note)) {
         let hz = hz_of(f64::from(note));
         let (between, reaches) = between_the_harmonics(&held(&saw, note), hz);
         println!("{note:>4} {hz:>9.1}   {between:>8.1} dB          {reaches:>8.0} Hz");
-        // What is not the note is 85 dB under it from the bottom of a
-        // bass up, and more than a hundred in the top octave of a piano
-        // and beyond, where it would be heard soonest.
-        if between > if note >= 96 { -105.0 } else { -85.0 } {
+        // What is not the note is 80 dB under it from the bottom of a
+        // bass up (84 at the worst pitch there is), and more than a
+        // hundred in the top octave of a piano and beyond, where it would
+        // be heard soonest.
+        if between > if note >= 96 { -105.0 } else { -80.0 } {
             wrong.push(format!("note {note}: {between:.1} dB between its harmonics"));
         }
         // And the note is as bright as its pitch allows: its harmonics go

@@ -32,6 +32,16 @@ pub trait AudioLoader: Send + Sync {
     /// Returns the decoded file, or a message saying why it could not be
     /// read. Loading the same path twice should return the same buffer.
     fn load(&self, path: &str) -> Result<Arc<AudioBuffer>, String>;
+
+    /// The file at the rate it was recorded at, sample for sample, where
+    /// [`load`](Self::load) converts what it loads to the rate it is played
+    /// at: for whoever reads the samples as what they are (the cycles of a
+    /// wavetable file, which are so many samples each) and does not play
+    /// them. A loader that converts nothing needs no implementation of its
+    /// own.
+    fn load_as_recorded(&self, path: &str) -> Result<Arc<AudioBuffer>, String> {
+        self.load(path)
+    }
 }
 
 #[cfg(test)]

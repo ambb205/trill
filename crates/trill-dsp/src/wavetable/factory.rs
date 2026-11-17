@@ -443,7 +443,7 @@ mod tests {
         // All of them together, in memory for as long as the program runs.
         let megabytes = made.bytes() as f64 / (1024.0 * 1024.0);
         println!("{} tables, {frames} frames, {megabytes:.1} MB", TABLES.len());
-        assert!(megabytes < 44.0, "{megabytes:.1} MB");
+        assert!(megabytes < 46.0, "{megabytes:.1} MB");
     }
 
     #[test]

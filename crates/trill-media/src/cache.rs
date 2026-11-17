@@ -319,6 +319,10 @@ impl AudioLoader for MediaCache {
         };
         loaded.map_err(|error| error.to_string())
     }
+
+    fn load_as_recorded(&self, path: &str) -> Result<Arc<AudioBuffer>, String> {
+        self.audio(Path::new(path)).map_err(|error| error.to_string())
+    }
 }
 
 /// What the cache holds for a key, for the current version of its file.

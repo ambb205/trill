@@ -63,18 +63,19 @@ use crate::util::level_gain;
 use crate::voice::EnvShape;
 use factory::Tables;
 use params::{ENV_PARAMS, FILTER_PARAMS, LFO_PARAMS, MAX_UNISON, MAX_VOICES, OSC_PARAMS, P, PARAMS, SLOTS, of};
-use recipe::{FileSpec, Recipe};
+use recipe::{FileSpec, Reading, Recipe};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, Weak};
 use table::Table;
 use trill_core::Device;
-use trill_core::audio::AudioBuffer;
+use trill_core::audio::{AudioBuffer, AudioLoader};
 use trill_core::controllers::CONTROLLER_BREATH;
 use trill_core::device::{CONTROLLER_MOD_WHEEL, DeviceProcessor, DeviceWarning, Event, EventKind, Pedal, ProcessInfo};
 use voice::{FilterKind, OscSetting, SlotList, TICK, Voice, Warp, dest, lfo_shape, source};
 
-pub use params::PARAMS as WAVETABLE_PARAMS;
+/// The device's URI.
+pub const URI: &str = "builtin:wavetable";
 
 /// The state format this build writes, and the newest it reads.
 pub const STATE_VERSION: u32 = 1;
@@ -881,6 +882,33 @@ impl TableSource {
             TableSource::File(spec) => spec.check(),
         }
     }
+
+    /// The file the table is read from, if it is read from one.
+    pub fn file(&self) -> Option<&str> {
+        match self {
+            TableSource::File(spec) => Some(&spec.file),
+            TableSource::Recipe(_) => None,
+        }
+    }
+
+    /// The table this describes, and for one from a file how the file was
+    /// read; or why there is none, in a sentence. Not for the audio
+    /// thread: a table of a few hundred frames takes a moment.
+    pub fn make(&self, loader: Option<&dyn AudioLoader>) -> Result<(Table, Option<Reading>), String> {
+        self.check()?;
+        match self {
+            TableSource::Recipe(recipe) => Ok((Table::new(self.name(), &recipe.harmonics()), None)),
+            TableSource::File(spec) => {
+                let loader = loader.ok_or_else(|| format!("there is nothing to read '{}' with", spec.file))?;
+                // As it was recorded: its cycles are so many samples each.
+                let audio = loader
+                    .load_as_recorded(&spec.file)
+                    .map_err(|reason| format!("cannot load '{}': {reason}", spec.file))?;
+                let (frames, reading) = spec.harmonics(&audio).map_err(|reason| format!("'{}' {reason}", spec.file))?;
+                Ok((Table::new(self.name(), &frames), Some(reading)))
+            }
+        }
+    }
 }
 
 /// The synth's state document. See the module documentation.
@@ -1037,7 +1065,7 @@ fn make_table(table: &TableSource, source: &SampleSource) -> Result<(Option<Arc<
                     spec.file
                 )
             })?;
-            let audio = match loader.load(&spec.file) {
+            let audio = match loader.load_as_recorded(&spec.file) {
                 Ok(audio) => audio,
                 Err(reason) => return Ok((None, Some(format!("cannot load '{}': {reason}", spec.file)))),
             };

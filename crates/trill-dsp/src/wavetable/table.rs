@@ -11,9 +11,11 @@
 //! 48 kHz).
 //!
 //! A cycle is stored at least eight times longer than its highest
-//! harmonic needs, and read between its samples with four points, so that
-//! what the reading adds lies far under the note, and what it takes off
-//! the highest harmonics is less than a tenth of a dB.
+//! harmonic needs (sixteen times where it has few harmonics, each of
+//! which is then a larger share of the note), and read between its
+//! samples with four points, so that what the reading adds lies far under
+//! the note (84 dB under a sawtooth at the worst pitch) and what it takes
+//! off the highest harmonics is less than a tenth of a dB.
 //!
 //! Everything here is made off the audio thread. Reading allocates
 //! nothing.
@@ -177,9 +179,10 @@ fn harmonics_of(index: usize) -> usize {
 }
 
 /// How long a cycle of `harmonics` harmonics is stored: eight times as
-/// many samples as harmonics, where that fits.
+/// many samples as harmonics, and sixteen where the harmonics are few.
 fn cycle_of(harmonics: usize) -> usize {
-    (harmonics * 8).next_power_of_two().clamp(SHORTEST, LONGEST)
+    let times = if harmonics <= 64 { 16 } else { 8 };
+    (harmonics * times).next_power_of_two().clamp(SHORTEST, LONGEST)
 }
 
 impl Table {
@@ -441,7 +444,7 @@ mod tests {
     #[test]
     fn a_table_takes_the_memory_it_is_said_to() {
         let table = Table::new("t", &vec![saw(); 4]);
-        // Some 110 kB a frame.
-        assert!((95_000..120_000).contains(&(table.bytes() / 4)), "{} bytes a frame", table.bytes() / 4);
+        // Some 120 kB a frame.
+        assert!((105_000..130_000).contains(&(table.bytes() / 4)), "{} bytes a frame", table.bytes() / 4);
     }
 }
