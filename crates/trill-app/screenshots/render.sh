@@ -166,7 +166,7 @@ shot graphite-assistant-markdown "$song" --select Lead --assistant-scene markdow
 # in the piano roll; the middle of the session, the plan partly ticked off;
 # its end, with the whole story told; the smallest window; and the other
 # theme. Nothing is read or kept: the session is made in the run itself.
-shot making-of-writing --making-of-scene --making-of-at 0.19
+shot making-of-writing --making-of-scene --making-of-at 0.166
 shot making-of-middle --making-of-scene --making-of-at 0.62
 shot making-of-end --making-of-scene --making-of-at 1
 shot min-window-making-of --making-of-scene --making-of-at 0.62 --size 1060x640
