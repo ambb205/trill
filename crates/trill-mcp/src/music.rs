@@ -1751,7 +1751,7 @@ impl TrillServer {
                 ));
             }
             let own_bars =
-                (1..).find(|bars| bar_start(*bars) >= lead_in + phrase.length - EPSILON).expect("bars go on") as usize;
+                (1..).find(|bars| bar_start(*bars) >= lead_in + phrase.length - EPSILON).expect("bars go on");
             let bars = setting.bars.unwrap_or(own_bars);
             // The phrase where it falls in the clip, repeated to fill more bars or cut to fit fewer.
             let total = bar_start(bars);
