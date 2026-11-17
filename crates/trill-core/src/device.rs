@@ -778,13 +778,18 @@ impl Beside {
     }
 }
 
-/// What makes a device do the same thing twice that does not as it comes:
-/// a sampled instrument that draws at random which recording of a note it
-/// plays, say. It is what a render is given to its own copy of the device
-/// when it is asked to be one that can be compared with another
-/// ([`DeviceFactory::repeating`]).
+/// What is known of a device that does not do the same thing twice as it
+/// comes (a sampled instrument that draws at random which recording of a
+/// note it plays, say), and what makes it: that is what a render gives its
+/// own copy of the device when it is asked to be one that can be compared
+/// with another ([`DeviceFactory::repeating`]). Where nothing is known
+/// that makes it (no setting and no parameter is named), a render can
+/// only say so.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Repeating {
+    /// What it does, in words that go on from its name: "draws at random
+    /// which recording of a note it plays".
+    pub what: String,
     /// Settings of the device's saved state to give these values, by name
     /// ([`DeviceController::set_settings`]).
     pub settings: Vec<(String, String)>,
@@ -792,7 +797,7 @@ pub struct Repeating {
     /// name the device has no parameter of is passed over.
     pub params: Vec<(String, f64)>,
     /// What that costs the sound, in a few words that finish "it is
-    /// rendered with ...".
+    /// rendered with ...". Empty where nothing is known that stops it.
     pub costs: String,
     /// The device begins its draws at the same place in every process
     /// that has just started, and what it draws depends on nothing but
@@ -801,6 +806,13 @@ pub struct Repeating {
     /// not assumed. (A change to the song still moves every draw after
     /// it, which is what [`Repeating`] is for.)
     pub begins_alike: bool,
+}
+
+impl Repeating {
+    /// Whether anything is known that makes the device repeat itself.
+    pub fn can_be_stopped(&self) -> bool {
+        !self.settings.is_empty() || !self.params.is_empty()
+    }
 }
 
 pub trait DeviceFactory: Send + Sync {

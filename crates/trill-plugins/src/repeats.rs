@@ -18,18 +18,45 @@
 //!   is the same samples (the same opt-in test, each render in a process
 //!   of its own), and in one process it is not.
 //!
-//! Superior Drummer 3 does not repeat either (it chooses its hits for
-//! itself), and no setting was found that stops it: it is not here.
+//! - Superior Drummer 3 chooses for itself which recording a cymbal plays
+//!   when it is struck again while its last hit still rings (0.375 s
+//!   after, in what was measured), and it chooses anew every time it is
+//!   made: one song's drums come out in one of two ways on a quiet
+//!   machine, and in others on a busy one. What the two leave of one
+//!   another is -26 dB of the drums of a whole song, all of it in the
+//!   stretches where a cymbal is struck in quick succession; a hit by
+//!   itself is the same recording every time, and so is the level, to
+//!   0.01 dB. Nothing a host does decides it, and nothing was found that
+//!   stops it. What was ruled out, each by making the same part again and
+//!   again with one thing changed (`cargo run -p trill-plugins --example
+//!   takes`): what the wait before a render asks of it (the same every
+//!   time: each key at the first try, three times, none in silence), how
+//!   long that wait goes on after it has answered, whether notes fall on
+//!   one frame or 2048 apart, how fast it is played (as fast as it goes,
+//!   or no faster than one, two or four times the song), the threads, and
+//!   the rest of the song (the drums alone do it). With nothing asked of
+//!   it at all before the song, it does it too.
 
 use trill_core::device::Repeating;
 
 /// Ample Sound's instruments, by the beginning of their class ids.
 const AMPLE: &str = "vst3:ABCDEF019182FAEB41707364";
+/// Superior Drummer 3.
+const SUPERIOR_DRUMMER: &str = "vst3:565354534433617375706572696F7220";
 
 /// What makes the plugin `uri` repeat itself, where that is known.
 pub(crate) fn of(uri: &str) -> Option<Repeating> {
+    if uri.eq_ignore_ascii_case(SUPERIOR_DRUMMER) {
+        return Some(Repeating {
+            what: "chooses for itself, anew every time it is made, which recording a cymbal plays when it is struck \
+                   again while it still rings"
+                .into(),
+            ..Repeating::default()
+        });
+    }
     let ample = uri.get(..AMPLE.len()).is_some_and(|start| start.eq_ignore_ascii_case(AMPLE));
     ample.then(|| Repeating {
+        what: "draws at random which recording of a note it plays".into(),
         settings: vec![("Cycle Mode Switch".into(), "1".into()), ("M-Fret Sound".into(), "0".into())],
         params: vec![("M-Buzz Toggle".into(), 0.0)],
         costs: "its recordings taken in turn and not at random, and without the noise of the fretting hand".into(),
@@ -49,6 +76,9 @@ mod tests {
         // Not an amplifier of another maker whose ids begin alike, nor a synthesizer.
         assert_eq!(of("vst3:ABCDEF019182FAEB4E4453504E544858"), None);
         assert_eq!(of("vst3:56534558667350736572756D20320000"), None);
+        // The drum sampler is known for what it does, and for nothing that stops it.
+        let drums = of("vst3:565354534433617375706572696F7220").expect("Superior Drummer 3");
+        assert!(!drums.can_be_stopped() && drums.costs.is_empty() && !drums.begins_alike && bass.can_be_stopped());
         assert_eq!(of("clap:org.surge-synth-team.surge-xt"), None);
     }
 }

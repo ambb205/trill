@@ -568,6 +568,18 @@ async fn a_song_whose_instrument_draws_at_random_says_so_and_is_the_same_twice_w
     assert!(note.contains("the same song comes out the same every time; but a change to what it plays"), "{note}");
     assert!(note.contains("make both with `repeatable: true`") && !note.contains("will not be these"), "{note}");
 
+    // Drums that nothing is known to stop are named, and left as they are
+    // whatever was asked.
+    let fixture = connect(ScriptedFactory::loading(Loading { unruly: true, ..Loading::default() })).await;
+    two_part_song(&fixture.client).await;
+    let note = said(&ok(&fixture.client, "measure", json!({ "repeatable": true })).await);
+    assert!(
+        note.contains("Scripted Drums on 'Drums' chooses for itself how loud each hit is. Two renders of"),
+        "{note}"
+    );
+    assert!(note.contains("nothing is known that stops it: `repeatable` leaves it as it is"), "{note}");
+    assert!(note.contains("go by that track's levels") && !note.contains("Made repeatable"), "{note}");
+
     // Nothing is said of a song whose instruments repeat themselves.
     let fixture = connect(ScriptedFactory::new()).await;
     two_part_song(&fixture.client).await;

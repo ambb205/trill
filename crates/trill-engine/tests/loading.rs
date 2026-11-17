@@ -543,3 +543,19 @@ fn an_instrument_that_draws_at_random_is_other_samples_every_time_and_the_same_i
     let fifth = render(&part, &scripted, &as_it_is).unwrap();
     assert!(fifth.left != third.left && !fifth.measured.draws[0].held);
 }
+
+#[test]
+fn an_instrument_that_nothing_is_known_to_stop_is_named_and_left_as_it_is() {
+    let _alone = ONE_AT_A_TIME.lock();
+    // Drums that choose for themselves how loud each hit is, and have no
+    // setting that stops them: all that is known of them is that.
+    let part = song(DRUMS, &[(36, 0.0), (38, 0.5), (36, 1.0), (42, 1.5), (38, 2.0), (36, 2.5)]);
+    let scripted = ScriptedFactory::loading(Loading { unruly: true, ..Loading::default() });
+    let asked = RenderOptions { sample_rate: SR, max_tail_seconds: 0.5, repeatable: true, ..RenderOptions::default() };
+    let (first, second) = (render(&part, &scripted, &asked).unwrap(), render(&part, &scripted, &asked).unwrap());
+    assert!(first.left != second.left, "they chose the same twice");
+    // Asked to be repeatable, the render says what it could not hold.
+    let [draws] = &first.measured.draws[..] else { panic!("{:?}", first.measured.draws) };
+    assert_eq!(draws.what, "chooses for itself how loud each hit is");
+    assert!(!draws.held && !draws.again && draws.costs.is_empty() && draws.failed.is_none(), "{draws:?}");
+}

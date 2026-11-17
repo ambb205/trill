@@ -526,8 +526,18 @@ fn draws_notes(draws: &[trill_engine::render::Draws]) -> Vec<String> {
         names.join(", ")
     };
     let mut notes = Vec::new();
+    let stoppable = |draws: &&trill_engine::render::Draws| !draws.costs.is_empty();
     let held: Vec<_> = draws.iter().filter(|draws| draws.held).collect();
-    let free: Vec<_> = draws.iter().filter(|draws| !draws.held && draws.failed.is_none()).collect();
+    let free: Vec<_> = draws.iter().filter(stoppable).filter(|draws| !draws.held && draws.failed.is_none()).collect();
+    // What nothing is known to stop is said by itself, whatever was asked.
+    for draws in draws.iter().filter(|draws| !stoppable(draws)) {
+        notes.push(format!(
+            "{} on '{}' {}. Two renders of this song may differ there, and nothing is known that stops it: \
+             `repeatable` leaves it as it is. To compare two renders, go by that track's levels, or leave it out of \
+             what you compare (`tracks`).",
+            draws.device_name, draws.track_name, draws.what
+        ));
+    }
     if let Some(first) = held.first() {
         notes.push(format!(
             "Made repeatable: {} rendered with {}. The song itself is unchanged; this is the same samples every \

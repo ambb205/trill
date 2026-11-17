@@ -413,6 +413,9 @@ pub struct Draws {
     pub track_name: String,
     pub device: DeviceId,
     pub device_name: String,
+    /// What it does, in words that go on from its name.
+    #[serde(default)]
+    pub what: String,
     /// Whether the render's copy of it was made to repeat itself.
     pub held: bool,
     /// It was not, and the same song rendered again as this was is these
@@ -422,7 +425,8 @@ pub struct Draws {
     /// was made in one. A change to the song moves every draw after it.
     #[serde(default)]
     pub again: bool,
-    /// What that costs its sound, in a few words.
+    /// What that costs its sound, in a few words; empty where nothing is
+    /// known that makes it repeat itself, and it never is.
     pub costs: String,
     /// Why it could not be made to, where that was asked and it was not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -768,11 +772,12 @@ fn render_from(
             // are taken at their word, where it has any.
             (Some(_), None) => !how.settings.is_empty(),
         });
-        if set && quiet {
+        let stoppable = how.can_be_stopped();
+        if stoppable && set && quiet {
             continue;
         }
         let mut failed = None;
-        if options.repeatable {
+        if options.repeatable && stoppable {
             if !how.settings.is_empty() {
                 failed = match controller {
                     Some(controller) => {
@@ -795,7 +800,8 @@ fn render_from(
             },
             device: id,
             device_name: device.name.clone(),
-            held: options.repeatable && failed.is_none(),
+            what: how.what,
+            held: options.repeatable && stoppable && failed.is_none(),
             again: how.begins_alike && crate::apart::leaves_devices() && !options.repeatable,
             costs: how.costs,
             failed,

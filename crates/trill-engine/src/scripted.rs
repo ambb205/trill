@@ -147,6 +147,10 @@ pub struct Loading {
     /// setting `takes`, which is `at random` as it comes, stops it when
     /// it is given `in turn` ([`DeviceFactory::repeating`] says so).
     pub random: bool,
+    /// The drums draw how loud each hit is from the same stream, and have
+    /// no setting that stops it: what is known of them
+    /// ([`DeviceFactory::repeating`]) names none.
+    pub unruly: bool,
     /// The bass only plays what it listens to: it says it takes a key,
     /// and what its notes come to is as loud as the key it is handed,
     /// which is nothing where it is handed none. A vocoder is like this.
@@ -303,7 +307,7 @@ impl DeviceFactory for ScriptedFactory {
             shared: self.loading.shares.then(|| self.shared.clone()),
             dies,
             blocks: 0,
-            random: self.loading.random && kind == Kind::Bass,
+            random: (self.loading.random && kind == Kind::Bass) || (self.loading.unruly && kind == Kind::Drums),
             listens: self.loading.listens && kind == Kind::Bass,
             onset: self.loading.onset,
             patch: patch.clone(),
@@ -327,7 +331,15 @@ impl DeviceFactory for ScriptedFactory {
     }
 
     fn repeating(&self, uri: &str) -> Option<trill_core::device::Repeating> {
+        if uri == DRUMS && self.loading.unruly {
+            // Known for what it does, and for nothing that stops it.
+            return Some(trill_core::device::Repeating {
+                what: "chooses for itself how loud each hit is".into(),
+                ..Default::default()
+            });
+        }
         (uri == BASS && self.loading.random).then(|| trill_core::device::Repeating {
+            what: "draws at random how loud each note is".into(),
             settings: vec![("takes".into(), "in turn".into())],
             params: Vec::new(),
             costs: "every note as loud as the last".into(),
