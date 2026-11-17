@@ -27,11 +27,11 @@ use trill_core::{ClipId, ControllerKind, InstrumentProfile, MeterMap, Note, Time
 use trill_dsp::BuiltinFactory;
 use trill_engine::Session;
 use trill_theory::arpeggio::{ArpOrder, Arpeggio, ORDERS};
-use trill_theory::articulation::{articulate, unknown};
+use trill_theory::articulation::{Asked, articulate_asked, is_our_writing, keys_for, read_back, unknown};
 use trill_theory::bass::{BassLine, BassStyle, bass_line};
 use trill_theory::chord::QUALITIES;
 use trill_theory::drums::{FillPlan, arrange, drum_names};
-use trill_theory::melody::{ORNAMENTS, Phrase, Tone};
+use trill_theory::melody::{ORNAMENTS, Phrase, PhraseBar, Tone};
 use trill_theory::ornament::{Playing, perform};
 use trill_theory::phrasing::{self, Phrasing};
 use trill_theory::progression::{Comping, Progression, RHYTHMS, Rhythm, StrumDirection, comp};
@@ -679,6 +679,10 @@ struct Setting {
     bars: Option<usize>,
     /// What the track knows about its instrument.
     profile: InstrumentProfile,
+    /// The song's bars from where the part begins, in order: more of them
+    /// than a part can be long. They are all bars of `signature` unless
+    /// the song's time signature changes under the part.
+    song_bars: Vec<WrittenBar>,
 }
 
 /// How long before the stretch being written a keyswitch of an earlier
@@ -710,14 +714,31 @@ fn write(
     };
     // With how far its instrument's wheel bends, where the track says nothing of it.
     let profile = session.profile_of(destination.track);
-    let mut part = build(&Setting { signature, tempo, bars, profile: profile.clone() })?;
+    let song_bars = written_bars(&meter, destination.origin, MAX_BARS as usize + 2);
+    let mut part = build(&Setting { signature, tempo, bars, profile: profile.clone(), song_bars })?;
     // The bars it is written into are the song's from there on. Where
     // they are not all the first one's, each is laid in its own meter.
     let places = written_bars(&meter, destination.origin, part.bars);
     let even = places.iter().all(|bar| bar.signature == signature && (bar.length - bar_length).abs() < EPSILON);
-    if !even {
+    if !even && part.line {
+        // A line was counted through the song's own bars as it was read.
+        let said = meters_said(&places);
+        part.remarks.push(format!(
+            "The time signature changes under these bars ({}): the line was counted through the song's own bars, \
+             each as long as it is there.",
+            said.join("; ")
+        ));
+        part.summary.insert("time_signatures".into(), json!(said));
+    } else if !even {
         lay_in_bars(&mut part, &places, signature, |signature| {
-            build(&Setting { signature, tempo, bars: Some(places.len()), profile: profile.clone() })
+            let bar = WrittenBar { start: 0.0, length: signature.beats_per_bar(), signature };
+            build(&Setting {
+                signature,
+                tempo,
+                bars: Some(places.len()),
+                profile: profile.clone(),
+                song_bars: vec![bar],
+            })
         })?;
     }
     if part.notes.len() > MAX_NOTES {
@@ -782,16 +803,72 @@ fn write(
         Humanize { timing, velocity, seed: feel.seed.unwrap_or(1) as u64 }.apply(&mut part.notes);
     }
 
+    let written = match even {
+        true => part.bars as f64 * bar_length,
+        false => places.iter().map(|bar| bar.length).sum(),
+    };
+    let replace = target.mode.unwrap_or_default() == WriteMode::Replace;
+
     // The instrument's keyswitches, pressed where they belong, and the
     // velocities that play what was asked for.
-    let music = part.notes.clone();
+    let mut music = part.notes.clone();
     let offset = destination.offset;
     let mut presses: BTreeMap<String, usize> = BTreeMap::new();
+    // Every note the clip is to hold, where its presses were written anew.
+    let mut whole_clip: Option<Vec<Note>> = None;
     if pitched && !profile.articulations.is_empty() {
         let how = |index: usize| part.how.get(index).cloned().flatten();
-        let asked: Vec<(Note, Option<String>)> =
-            part.notes.iter().enumerate().map(|(index, note)| (*note, how(index))).collect();
-        let articulated = articulate(&profile, &asked, offset).map_err(theory)?;
+        let mut asked: Vec<Asked> =
+            part.notes.iter().enumerate().map(|(index, note)| Asked::new(*note, how(index))).collect();
+        // What is asked for is what is heard: a harmonic's key is under its note.
+        for (name, (semitones, count)) in keys_for(&profile, &mut asked).map_err(theory)? {
+            part.remarks.push(format!(
+                "{count} note(s) played as '{name}' sound {semitones} semitones above their keys on this instrument, \
+                 so their keys were written that far under the pitches asked for."
+            ));
+        }
+        music = asked.iter().map(|asked| asked.note).collect();
+        // The instrument is in one state at a time: where the clip already
+        // has notes, its presses are written again for all of them, so
+        // that these notes leave the others played as they were.
+        let held: Vec<Note> = destination
+            .clip
+            .and_then(|id| session.project().clip(id).ok())
+            .and_then(|clip| clip.midi().map(|midi| midi.notes.clone()))
+            .unwrap_or_default();
+        let ours = !held.is_empty() && is_our_writing(&profile, &held);
+        let articulated = if ours {
+            let inside = |note: &Note| note.start >= offset - EPSILON && note.start < offset + written - EPSILON;
+            let mut all = read_back(&profile, &held);
+            if replace {
+                all.retain(|asked| !inside(&asked.note));
+            }
+            // What the notes that stay took by themselves, so as to say what these added.
+            let kept = articulate_asked(&profile, &all, 0.0).map_err(theory)?.presses;
+            all.extend(asked.iter().map(|asked| Asked {
+                note: Note { start: (asked.note.start + offset).max(0.0), ..asked.note },
+                ..asked.clone()
+            }));
+            let mut articulated = articulate_asked(&profile, &all, 0.0).map_err(theory)?;
+            for (name, count) in &mut articulated.presses {
+                *count = count.saturating_sub(kept.get(name).copied().unwrap_or(0));
+            }
+            articulated.presses.retain(|_, count| *count > 0);
+            whole_clip = Some(articulated.notes.clone());
+            articulated
+        } else {
+            if !held.is_empty() && held.iter().any(|note| profile.is_keyswitch(note.pitch)) {
+                part.warnings.push(
+                    "This clip holds keyswitches that were placed by hand, another way than these tools place them. \
+                     They were left as they are, and these notes were given switches of their own: check how the \
+                     notes after them are played (analyze_music reads it), or write the clip again with these tools."
+                        .to_string(),
+                );
+            }
+            let articulated = articulate_asked(&profile, &asked, offset).map_err(theory)?;
+            part.notes = articulated.notes.clone();
+            articulated
+        };
         if let (Some((low, high)), true) = (articulated.default_range, articulated.fitted > 0) {
             part.remarks.push(format!(
                 "{} note(s) were outside the velocities {low}-{high} that play this instrument's ordinary note \
@@ -802,15 +879,10 @@ fn write(
             ));
         }
         presses = articulated.presses;
-        part.notes = articulated.notes;
     } else if let Some(name) = part.how.iter().flatten().next() {
         return Err(theory(unknown(&profile, name)));
     }
 
-    let written = match even {
-        true => part.bars as f64 * bar_length,
-        false => places.iter().map(|bar| bar.length).sum(),
-    };
     for note in &mut part.notes {
         note.start = (note.start + offset).max(0.0);
     }
@@ -821,7 +893,6 @@ fn write(
         Some(length) => length,
         None => written,
     };
-    let replace = target.mode.unwrap_or_default() == WriteMode::Replace;
     let name = target.name.clone().unwrap_or_else(|| default_name.to_string());
     let (track, notes) = (destination.track, &part.notes);
     // The wheel's course within the stretch that was written.
@@ -835,15 +906,20 @@ fn write(
     let clip = edit(session, |project| match destination.clip {
         Some(id) => {
             let clip = project.clip_mut(id)?;
-            if replace {
-                let inside = |note: &Note| note.start >= offset - EPSILON && note.start < offset + written - EPSILON;
-                // With them go the keyswitches an earlier write pressed just before the stretch.
-                let leading = |note: &Note| {
-                    profile.is_keyswitch(note.pitch) && note.start >= offset - SWITCH_REACH && note.start < offset
-                };
-                clip.remove_notes(|note| inside(note) || leading(note))?;
+            if let Some(all) = &whole_clip {
+                clip.set_notes(all.clone())?;
+            } else {
+                if replace {
+                    let inside =
+                        |note: &Note| note.start >= offset - EPSILON && note.start < offset + written - EPSILON;
+                    // With them go the keyswitches an earlier write pressed just before the stretch.
+                    let leading = |note: &Note| {
+                        profile.is_keyswitch(note.pitch) && note.start >= offset - SWITCH_REACH && note.start < offset
+                    };
+                    clip.remove_notes(|note| inside(note) || leading(note))?;
+                }
+                clip.add_notes(notes)?;
             }
-            clip.add_notes(notes)?;
             if let Some(wheel) = &wheel {
                 let kind = ControllerKind::PitchBend;
                 let existing = clip.controller(kind).map(|curve| curve.points.clone()).unwrap_or_default();
@@ -974,6 +1050,30 @@ fn written_bars(meter: &MeterMap, origin: f64, count: usize) -> Vec<WrittenBar> 
     bars
 }
 
+/// Which bars of `places` are in which time signature, counted from where
+/// the part begins.
+fn meters_of(places: &[WrittenBar]) -> Vec<(TimeSignature, Vec<usize>)> {
+    let mut meters: Vec<(TimeSignature, Vec<usize>)> = Vec::new();
+    for (index, bar) in places.iter().enumerate() {
+        match meters.iter_mut().find(|(signature, _)| *signature == bar.signature) {
+            Some((_, bars)) => bars.push(index + 1),
+            None => meters.push((bar.signature, vec![index + 1])),
+        }
+    }
+    meters
+}
+
+/// [`meters_of`] in words: "4/4 in bar(s) 1, 2; 7/8 in bar(s) 3".
+fn meters_said(places: &[WrittenBar]) -> Vec<String> {
+    meters_of(places)
+        .iter()
+        .map(|(signature, bars)| {
+            let bars: Vec<String> = bars.iter().map(usize::to_string).collect();
+            format!("{} in bar(s) {}", said_signature(*signature), bars.join(", "))
+        })
+        .collect()
+}
+
 /// Lays `part`, built in bars of `first`, into `places`: bars that are not
 /// all alike. What a part holds in bar N is what it would hold there in a
 /// song that was in that bar's time signature throughout, so the part is
@@ -985,31 +1085,8 @@ fn lay_in_bars(
     first: TimeSignature,
     build: impl Fn(TimeSignature) -> Result<Part, String>,
 ) -> Result<(), String> {
-    // Which bars are in which time signature, said as the song counts
-    // them from where the part begins.
-    let mut meters: Vec<(TimeSignature, Vec<usize>)> = Vec::new();
-    for (index, bar) in places.iter().enumerate() {
-        match meters.iter_mut().find(|(signature, _)| *signature == bar.signature) {
-            Some((_, bars)) => bars.push(index + 1),
-            None => meters.push((bar.signature, vec![index + 1])),
-        }
-    }
-    let said: Vec<String> = meters
-        .iter()
-        .map(|(signature, bars)| {
-            let bars: Vec<String> = bars.iter().map(usize::to_string).collect();
-            format!("{} in bar(s) {}", said_signature(*signature), bars.join(", "))
-        })
-        .collect();
-    if part.line {
-        return Err(format!(
-            "these {} bars cross a change of time signature ({}), and a line is counted through in one: write the \
-             bars of each time signature in a call of their own, each starting at its own `start` (get_tempo_map \
-             gives the beat each bar starts at)",
-            places.len(),
-            said.join("; ")
-        ));
-    }
+    let meters = meters_of(places);
+    let said = meters_said(places);
 
     // The part as it is in each of the other time signatures.
     let mut others: Vec<(TimeSignature, Part)> = Vec::new();
@@ -1589,13 +1666,29 @@ impl TrillServer {
             if !(-1..=9).contains(&octave) {
                 return Err(format!("`octave` {octave} is outside -1..=9"));
             }
-            let phrase = Phrase::parse(&request.phrase, key.as_ref(), octave, setting.signature).map_err(theory)?;
+            // The bars the line is counted through are the song's from where it begins.
+            let through: Vec<PhraseBar> = setting
+                .song_bars
+                .iter()
+                .map(|bar| PhraseBar { length: bar.length, signature: bar.signature })
+                .collect();
+            let phrase = Phrase::parse_through(&request.phrase, key.as_ref(), octave, &through).map_err(theory)?;
             let gate = within(request.gate, 0.95, 0.05..=2.0, "gate")?;
-            let bar_length = setting.signature.beats_per_bar();
             let mut remarks = Vec::new();
+            // Where each of those bars begins, in beats from the first.
+            let starts: Vec<f64> = setting.song_bars.iter().map(|bar| bar.start).collect();
+            let bar_start = |index: usize| {
+                let last = starts.len() - 1;
+                starts[index.min(last)] + index.saturating_sub(last) as f64 * through[last].length
+            };
+            let said_at = |beat: f64| {
+                let (start, _) = PhraseBar::at(&through, beat);
+                let bar = starts.iter().position(|at| (at - start).abs() < EPSILON).unwrap_or(starts.len() - 1);
+                format!("{}.{}", bar + 1, round(beat - start + 1.0))
+            };
 
             // A pickup belongs before a bar line: start it late in the first bar.
-            let lead_in = if phrase.pickup > 0.0 { bar_length - phrase.pickup } else { 0.0 };
+            let lead_in = if phrase.pickup > 0.0 { through[0].length - phrase.pickup } else { 0.0 };
             if lead_in > 0.0 {
                 remarks.push(format!(
                     "The phrase opens with a pickup of {} beat(s); it was placed at the end of bar 1 so that its bar \
@@ -1603,15 +1696,30 @@ impl TrillServer {
                     round(phrase.pickup)
                 ));
             }
-            let own_bars = (((lead_in + phrase.length) / bar_length) - EPSILON).ceil().max(1.0) as usize;
+            let own_bars =
+                (1..).find(|bars| bar_start(*bars) >= lead_in + phrase.length - EPSILON).expect("bars go on") as usize;
             let bars = setting.bars.unwrap_or(own_bars);
             // The phrase where it falls in the clip, repeated to fill more bars or cut to fit fewer.
-            let period = own_bars as f64 * bar_length;
-            let total = bars as f64 * bar_length;
+            let total = bar_start(bars);
             let mut tones: Vec<Tone> = Vec::new();
             let mut repeat = 0;
-            while (repeat as f64) * period < total - EPSILON {
-                let later = lead_in + repeat as f64 * period;
+            while repeat * own_bars < bars {
+                // A repeat is laid in the bars after the last, which have to be bars like its own.
+                let from = repeat * own_bars;
+                let alike = (0..own_bars.min(bars - from)).all(|bar| {
+                    let (own, there) =
+                        (bar_start(bar + 1) - bar_start(bar), bar_start(from + bar + 1) - bar_start(from + bar));
+                    (own - there).abs() < EPSILON
+                });
+                if !alike {
+                    return Err(format!(
+                        "the phrase is {own_bars} bar(s) long and was asked to fill {bars}, but the bars it would \
+                         repeat into from bar {} are not as long as the ones it was written through (the time \
+                         signature changes there): write those bars as a phrase of their own",
+                        from + 1
+                    ));
+                }
+                let later = lead_in + bar_start(from);
                 tones.extend(
                     phrase
                         .tones
@@ -1626,6 +1734,7 @@ impl TrillServer {
                 gate,
                 dynamics: dynamics(request.velocity, request.accent, (90, 8))?,
                 signature: setting.signature,
+                bars: &through,
                 tempo: setting.tempo,
                 profile: &setting.profile,
                 articulation: request.articulation.as_deref(),
@@ -1642,7 +1751,7 @@ impl TrillServer {
                     .iter()
                     .zip(&spelled)
                     .filter(|(tone, _)| !key.contains(tone.pitch))
-                    .map(|(_, (start, name))| format!("{name} at {}", bar_beat(*start, bar_length)))
+                    .map(|(_, (start, name))| format!("{name} at {}", said_at(*start)))
                     .collect();
                 if !outside.is_empty() {
                     let shown = outside.iter().take(6).cloned().collect::<Vec<_>>().join(", ");
@@ -1656,7 +1765,7 @@ impl TrillServer {
             }
             let by_bar: Vec<String> = (0..own_bars.min(16))
                 .map(|bar| {
-                    let (from, to) = (bar as f64 * bar_length, (bar + 1) as f64 * bar_length);
+                    let (from, to) = (bar_start(bar), bar_start(bar + 1));
                     let names: Vec<&str> = spelled
                         .iter()
                         .filter(|(start, _)| *start >= from - EPSILON && *start < to - EPSILON)

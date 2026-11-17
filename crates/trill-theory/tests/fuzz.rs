@@ -429,6 +429,7 @@ fn play(phrase: &Phrase, text: &str, signature: TimeSignature, rng: &mut Rng) ->
         gate: rng.unit() * 1.2,
         dynamics: Default::default(),
         signature,
+        bars: &[],
         tempo: 40.0 + rng.unit() * 200.0,
         profile: &profile,
         articulation: [None, None, Some("palm_mute"), Some("nothing it has")][rng.below(4)],
