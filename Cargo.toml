@@ -18,6 +18,7 @@ trill-listen = { path = "crates/trill-listen" }
 trill-plugins = { path = "crates/trill-plugins" }
 trill-runtime = { path = "crates/trill-runtime" }
 trill-stage = { path = "crates/trill-stage" }
+trill-study = { path = "crates/trill-study" }
 trill-theory = { path = "crates/trill-theory" }
 trill-mcp = { path = "crates/trill-mcp" }
 trill-media = { path = "crates/trill-media" }
