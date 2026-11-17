@@ -7,6 +7,17 @@ pub fn db_to_gain(db: f32) -> f32 {
     10f32.powf(db * 0.05)
 }
 
+/// The lowest value of a level in dB. It stands for silence, as the bottom
+/// of a mixer's fader does: a fade written down to it ends in nothing.
+pub const SILENT_DB: f32 = -70.0;
+
+/// The gain of a level in dB that reaches down to silence: nothing at
+/// [`SILENT_DB`] or under.
+#[inline]
+pub fn level_gain(db: f32) -> f32 {
+    if db > SILENT_DB { db_to_gain(db) } else { 0.0 }
+}
+
 #[inline]
 pub fn gain_to_db(gain: f32) -> f32 {
     20.0 * gain.max(1e-9).log10()

@@ -85,7 +85,7 @@ impl SavedPreset {
         // when it was saved: one from before a device was changed is made
         // to sound as it did.
         let mut preset = preset;
-        crate::formats::keep_complete_format_1(&preset.uri, &mut preset.params);
+        crate::formats::keep_complete(&preset.uri, &mut preset.params);
         Ok(preset)
     }
 
