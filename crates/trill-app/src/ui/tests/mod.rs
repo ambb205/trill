@@ -1278,8 +1278,8 @@ fn a_device_can_be_bypassed_and_removed_from_its_panel() {
     let (mut harness, device) = with_reverb();
     let panel = harness.first_panel();
     let header_y = panel.y + devices::PANEL_HEADER / 2.0;
-    // The reverb's single column makes the narrowest panel there is.
-    let panel_right = panel.x + 150.0 + 2.0 * devices::BODY_PADDING;
+    // The reverb's panel: two columns and the gap between them.
+    let panel_right = panel.x + 2.0 * 150.0 + devices::COLUMN_GAP + 2.0 * devices::BODY_PADDING;
 
     harness.click(pos2(panel.x + 10.0, header_y));
     assert!(!harness.project().device(device).unwrap().enabled, "the dot bypasses");

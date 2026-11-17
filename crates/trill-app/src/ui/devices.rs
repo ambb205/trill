@@ -29,7 +29,7 @@ pub(super) const PANEL_HEADER: f32 = 22.0;
 pub(super) const BODY_PADDING: f32 = 8.0;
 pub(super) const BODY_TOP: f32 = 6.0;
 const BODY_BOTTOM: f32 = 8.0;
-const COLUMN_GAP: f32 = 12.0;
+pub(super) const COLUMN_GAP: f32 = 12.0;
 /// Height of a section heading, its rule included.
 pub(super) const SECTION_HEADER: f32 = 16.0;
 /// Extra space above a section that is not the first of its column.
