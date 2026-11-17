@@ -234,6 +234,16 @@ impl DeviceFactory for ClapFactory {
         self.shared.main.behind()
     }
 
+    /// In turn with the other instances of its module, unless more is
+    /// known of the plugin: see [`crate::beside`].
+    fn beside(&self, uri: &str) -> trill_core::device::Beside {
+        let Some((CLAP_SCHEME, plugin_id)) = split_uri(uri) else { return trill_core::device::Beside::Anything };
+        match self.shared.installed.catalog().find(plugin_id) {
+            Ok(installed) => crate::beside::of(uri, &installed.path),
+            Err(_) => trill_core::device::Beside::Anything,
+        }
+    }
+
     fn create_for(
         &self,
         device: &Device,

@@ -60,10 +60,13 @@
 //! # }
 //! ```
 
+mod beside;
 pub mod clap;
 mod editor;
 mod edits;
 mod exclusive;
+#[cfg(test)]
+mod key_tests;
 mod main_thread;
 mod notes;
 mod param_text;
@@ -74,6 +77,9 @@ pub mod scan;
 mod signal;
 #[cfg(test)]
 mod test_support;
+mod transport;
+#[cfg(test)]
+mod transport_tests;
 mod vendor;
 pub mod vst3;
 

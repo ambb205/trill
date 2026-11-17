@@ -395,3 +395,55 @@ fn a_level_drawn_down_to_its_lowest_value_ends_in_silence() {
     let quiet = Played::new("builtin:sampler", &[("volume", -70.0)], Some(state), &[note(60, 0.0, 1.0, 127)], 2.0);
     assert_eq!(peak(&quiet.render().left), 0.0);
 }
+
+#[test]
+fn a_synths_volume_moves_in_a_line_where_it_moved_in_steps() {
+    // A held sine whose volume an envelope raises by 24 dB over two beats,
+    // against the same sine left alone: what is left is the gain.
+    let sine = [("osc1_wave", 0.0), ("osc_mix", 0.0), ("sustain", 1.0), ("attack", 0.001), ("unison", 1.0)];
+    let held = [note(57, 0.0, 4.0, 100)];
+    let rendered = |legacy: f64, moved: bool| {
+        let mut params = sine.to_vec();
+        params.extend([("volume", -6.0), ("legacy", legacy)]);
+        let mut played = Played::synth(&params, &held, 4.0);
+        if moved {
+            played.automate("volume", &[(0.0, -30.0), (1.0, -30.0), (3.0, -6.0), (4.0, -6.0)]);
+        }
+        played.render().left
+    };
+    let still = rendered(0.0, false);
+    let peak = still[beats(1.0..3.0)].iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    // The largest change of the gain from one frame to the next, as a
+    // share of the gain, where the sine is far enough from zero to tell.
+    let largest_step = |out: &[f32]| {
+        let mut largest = 0.0f64;
+        for frame in beats(1.1..2.9) {
+            if still[frame].abs() > 0.5 * peak && still[frame + 1].abs() > 0.5 * peak {
+                let (here, next) = (f64::from(out[frame] / still[frame]), f64::from(out[frame + 1] / still[frame + 1]));
+                largest = largest.max((next / here - 1.0).abs());
+            }
+        }
+        largest
+    };
+    let (now, then) = (rendered(0.0, true), rendered(2.0, true));
+    let (line, steps) = (largest_step(&now), largest_step(&then));
+    println!(
+        "the gain's largest step from one frame to the next: {:.4} %, before format 7 {:.2} %",
+        line * 100.0,
+        steps * 100.0
+    );
+    // Under an envelope a parameter is told its value every 256 frames. The
+    // volume goes from one to the next in a line, as the Utility's gain
+    // does; in a song saved before format 7 it jumps there, a step of a
+    // percent or two of the level 172 times a second.
+    assert!(line < 0.0005, "{line}");
+    assert!(steps > 0.005, "{steps}");
+    // Both are the same fade: one stretch apart at most.
+    for beat in [1.5, 2.0, 2.5] {
+        let window = beats(beat - 0.05..beat + 0.05);
+        let apart = db(f64::from(rms(&now[window.clone()])) / f64::from(rms(&then[window])));
+        assert!(apart.abs() < 0.1, "at beat {beat} the two are {apart:.3} dB apart");
+    }
+    // A volume that stands still is the same samples either way.
+    assert!(rendered(0.0, false) == rendered(2.0, false));
+}

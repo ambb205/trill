@@ -199,6 +199,7 @@ fn watch_one(options: &Options, factory: &Vst3Factory, preset: Option<&PresetInf
         time_signature: TimeSignature::default(),
         playing: false,
         position_beats: 0.0,
+        song: Default::default(),
         loop_range: None,
     };
     let (mut left, mut right) = (vec![0f32; BLOCK], vec![0f32; BLOCK]);

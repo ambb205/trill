@@ -156,6 +156,7 @@ pub struct AddDeviceRequest {
     /// bass to the kick, the compressor goes on the bass and `sidechain` is the kick's track. The track is heard
     /// as it leaves its devices, ahead of its fader and mute, so a muted track still serves as a key. Only for
     /// a device that takes a key: builtin:compressor.
+    /// A plugin that has a sidechain input takes one too (get_device says `sidechain_hint` for a device that can).
     pub sidechain: Option<u64>,
 }
 

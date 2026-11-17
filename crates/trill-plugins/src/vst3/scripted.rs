@@ -1053,6 +1053,8 @@ struct Object<const ROLE: u8> {
     /// Lifecycle steps of a controller that does not know its serial yet.
     unlogged: Mutex<Vec<&'static str>>,
     stereo: AtomicBool,
+    /// Whether the host has switched the side-chain input on.
+    key_on: AtomicBool,
     sample_rate: AtomicU64,
     blocks: AtomicU32,
     activations: AtomicU32,
@@ -1087,6 +1089,7 @@ impl<const ROLE: u8> Object<ROLE> {
             handler: Mutex::new(None),
             unlogged: Mutex::new(Vec::new()),
             stereo: AtomicBool::new(false),
+            key_on: AtomicBool::new(false),
             sample_rate: AtomicU64::new(0),
             blocks: AtomicU32::new(0),
             activations: AtomicU32::new(0),
@@ -1330,6 +1333,9 @@ impl<const ROLE: u8> IComponentTrait for Object<ROLE> {
     unsafe fn activateBus(&self, media: MediaType, direction: BusDirection, index: int32, state: TBool) -> tresult {
         self.on_main_thread();
         observe(self.serial(), |seen| seen.activated.push((media, direction, index, state != 0)));
+        if media == kAudio as MediaType && direction == kInput as BusDirection && index == 1 {
+            self.key_on.store(state != 0, Ordering::Relaxed);
+        }
         kResultOk
     }
 
@@ -1468,6 +1474,25 @@ impl<const ROLE: u8> IAudioProcessorTrait for Object<ROLE> {
                 seen.context = data.processContext.as_ref().copied();
                 note_thread(&mut seen.audio_threads);
             });
+            if let Some(context) = data.processContext.as_ref() {
+                use crate::transport::written::{self, Block, Format};
+                use vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_ as flags;
+                let has = |flag| context.state & flag as u32 != 0;
+                written::down(Format::Vst3, serial, || Block {
+                    frames,
+                    playing: has(flags::kPlaying),
+                    tempo: context.tempo,
+                    signature: (context.timeSigNumerator as u32, context.timeSigDenominator as u32),
+                    beats: context.projectTimeMusic,
+                    seconds: context.projectTimeSamples as f64 / context.sampleRate,
+                    samples: Some(context.projectTimeSamples),
+                    bar_start: context.barPositionMusic,
+                    bar: None,
+                    looping: has(flags::kCycleActive).then_some((context.cycleStartMusic, context.cycleEndMusic)),
+                    loop_seconds: None,
+                    steady: context.continousTimeSamples,
+                });
+            }
             if self.kind == kind::FAILS_PROCESS && blocks >= 3 {
                 return kInternalError;
             }
@@ -1561,6 +1586,15 @@ impl<const ROLE: u8> IAudioProcessorTrait for Object<ROLE> {
                     (std::slice::from_raw_parts_mut(out, frames), std::slice::from_raw_parts(input, frames));
                 for (out, input) in out.iter_mut().zip(input) {
                     *out = input * gain;
+                }
+                // A side-chain that is switched on is listened to: what
+                // is in it is added to what goes out, so that it can be
+                // seen there. One that is not is not looked at.
+                let key = inputs.get(1).filter(|_| self.key_on.load(Ordering::Relaxed));
+                if let Some(key) = key.and_then(|bus| channel(bus, 0)) {
+                    for (out, key) in out.iter_mut().zip(std::slice::from_raw_parts(key, frames)) {
+                        *out += key;
+                    }
                 }
             }
             // A plugin that does not care whether a bus was switched on.

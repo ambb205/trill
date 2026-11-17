@@ -96,10 +96,13 @@ pub(crate) mod kind {
     /// [`PRESETS`] in a file of its own that brings a second provider,
     /// which fails to start.
     pub(crate) const BROKEN_PRESETS: u8 = 16;
+    /// [`MONO_GAIN`] with a second input, mono, which it listens to: what
+    /// is in it is added to what goes out, so that it can be seen there.
+    pub(crate) const KEYED: u8 = 17;
 
     /// Every kind without an editor that instantiates without delay.
-    pub(crate) const ALL: [u8; 8] =
-        [IMPULSE, MONO_GAIN, MIDI_IMPULSE, BARE, FAILS_INIT, FAILS_ACTIVATE, FAILS_START, FAILS_PROCESS];
+    pub(crate) const ALL: [u8; 9] =
+        [IMPULSE, MONO_GAIN, MIDI_IMPULSE, BARE, FAILS_INIT, FAILS_ACTIVATE, FAILS_START, FAILS_PROCESS, KEYED];
     /// Every kind with an editor.
     pub(crate) const EDITORS: [u8; 5] =
         [EDITOR, FIXED_EDITOR, FAILS_EDITOR_CREATE, FAILS_EDITOR_ATTACH, FLOATING_EDITOR];
@@ -124,6 +127,7 @@ pub(crate) fn id(kind: u8) -> &'static str {
         kind::PRESETS => "test.presets",
         kind::LATE_PRESETS => "test.late-presets",
         kind::BROKEN_PRESETS => "test.broken-presets",
+        kind::KEYED => "test.keyed",
         _ => "test.slow-init",
     }
 }
@@ -141,7 +145,8 @@ fn is_instrument(kind: u8) -> bool {
 }
 
 fn has_input(kind: u8) -> bool {
-    matches!(kind, kind::MONO_GAIN | kind::FAILS_START | kind::FAILS_PROCESS | kind::SLOW_INIT) || has_editor(kind)
+    matches!(kind, kind::MONO_GAIN | kind::FAILS_START | kind::FAILS_PROCESS | kind::SLOW_INIT | kind::KEYED)
+        || has_editor(kind)
 }
 
 /// The entry of the scripted plugin of `kind`, as a plugin file would
@@ -167,6 +172,7 @@ pub(crate) fn entry(kind: u8) -> &'static EntryDescriptor {
     // second provider is broken.
     static PRESETS: EntryDescriptor = clack_entry!(presets::PresetsEntry<false>);
     static BROKEN_PRESETS: EntryDescriptor = clack_entry!(presets::PresetsEntry<true>);
+    static KEYED: EntryDescriptor = clack_entry!(SinglePluginEntry<Scripted<{ kind::KEYED }>>);
     match kind {
         kind::IMPULSE => &IMPULSE,
         kind::MONO_GAIN => &MONO_GAIN,
@@ -183,6 +189,7 @@ pub(crate) fn entry(kind: u8) -> &'static EntryDescriptor {
         kind::FLOATING_EDITOR => &FLOATING_EDITOR,
         kind::PRESETS | kind::LATE_PRESETS => &PRESETS,
         kind::BROKEN_PRESETS => &BROKEN_PRESETS,
+        kind::KEYED => &KEYED,
         _ => &SLOW_INIT,
     }
 }
@@ -762,16 +769,28 @@ impl<const KIND: u8> PluginStateImpl for MainThread<'_, KIND> {
 
 impl<const KIND: u8> PluginAudioPortsImpl for MainThread<'_, KIND> {
     fn count(&self, is_input: bool) -> u32 {
-        if is_input { has_input(KIND).into() } else { 1 }
+        match is_input {
+            true => u32::from(has_input(KIND)) + u32::from(KIND == kind::KEYED),
+            false => 1,
+        }
     }
 
-    fn get(&self, index: u32, _is_input: bool, writer: &mut AudioPortInfoWriter) {
+    fn get(&self, index: u32, is_input: bool, writer: &mut AudioPortInfoWriter) {
         if index == 0 {
             writer.set(&AudioPortInfo {
                 id: ClapId::new(0),
                 name: b"main",
                 channel_count: 1,
                 flags: AudioPortFlags::IS_MAIN,
+                port_type: Some(AudioPortType::MONO),
+                in_place_pair: None,
+            });
+        } else if index == 1 && is_input && KIND == kind::KEYED {
+            writer.set(&AudioPortInfo {
+                id: ClapId::new(1),
+                name: b"key",
+                channel_count: 1,
+                flags: AudioPortFlags::empty(),
                 port_type: Some(AudioPortType::MONO),
                 in_place_pair: None,
             });
@@ -807,6 +826,8 @@ pub(crate) struct Processor<'a, const KIND: u8> {
     host: HostAudioProcessorHandle<'a>,
     /// A copy of the input, so the output can be written while reading it.
     input: Vec<f32>,
+    /// What is in the second input, of a plugin that has one.
+    key: Vec<f32>,
     blocks: u32,
 }
 
@@ -827,7 +848,8 @@ impl<'a, const KIND: u8> PluginAudioProcessor<'a, Shared<'a>, MainThread<'a, KIN
         if shared.get(CUTOFF_1) == UNSETTLED {
             shared.set(CUTOFF_1, SETTLED_CUTOFF);
         }
-        Ok(Self { shared, host, input: vec![0.0; configuration.max_frames_count as usize], blocks: 0 })
+        let silence = vec![0.0; configuration.max_frames_count as usize];
+        Ok(Self { shared, host, input: silence.clone(), key: silence, blocks: 0 })
     }
 
     fn deactivate(self, _main_thread: &MainThread<'a, KIND>) {
@@ -871,6 +893,23 @@ impl<'a, const KIND: u8> PluginAudioProcessor<'a, Shared<'a>, MainThread<'a, KIN
             shared.set(SEEN_BEATS, transport.song_pos_beats.to_float());
             shared.set(SEEN_SECONDS, transport.song_pos_seconds.to_float());
             shared.set(SEEN_PLAYING, f64::from(transport.flags.contains(TransportFlags::IS_PLAYING)));
+            use crate::transport::written::{self, Block, Format};
+            let looping = transport.flags.contains(TransportFlags::IS_LOOP_ACTIVE);
+            written::down(Format::Clap, shared.serial, || Block {
+                frames,
+                playing: transport.flags.contains(TransportFlags::IS_PLAYING),
+                tempo: transport.tempo,
+                signature: (transport.time_signature_numerator.into(), transport.time_signature_denominator.into()),
+                beats: transport.song_pos_beats.to_float(),
+                seconds: transport.song_pos_seconds.to_float(),
+                samples: None,
+                bar_start: transport.bar_start.to_float(),
+                bar: u32::try_from(transport.bar_number).ok(),
+                looping: looping.then(|| (transport.loop_start_beats.to_float(), transport.loop_end_beats.to_float())),
+                loop_seconds: looping
+                    .then(|| (transport.loop_start_seconds.to_float(), transport.loop_end_seconds.to_float())),
+                steady: process.steady_time.map_or(-1, |time| time as i64),
+            });
         }
         if self.blocks == 1 {
             self.host.request_callback();
@@ -883,6 +922,13 @@ impl<'a, const KIND: u8> PluginAudioProcessor<'a, Shared<'a>, MainThread<'a, KIN
         {
             self.input[..frames].copy_from_slice(channel);
         }
+        self.key[..frames].fill(0.0);
+        if let Some(key) = audio.input_port(1)
+            && let Ok(channels) = key.channels()
+            && let Some(channel) = channels.into_f32().and_then(|channels| channels.channel(0))
+        {
+            self.key[..frames].copy_from_slice(channel);
+        }
         let Some(mut output) = audio.output_port(0) else { return Ok(ProcessStatus::Continue) };
         let Some(mut channels) = output.channels()?.into_f32() else { return Ok(ProcessStatus::Continue) };
         let Some(out) = channels.channel_mut(0) else { return Ok(ProcessStatus::Continue) };
@@ -890,8 +936,8 @@ impl<'a, const KIND: u8> PluginAudioProcessor<'a, Shared<'a>, MainThread<'a, KIN
         if has_input(KIND) {
             shared.apply(events.input);
             let gain = shared.get(GAIN) as f32;
-            for (out, input) in out.iter_mut().zip(&self.input) {
-                *out = input * gain;
+            for ((out, input), key) in out.iter_mut().zip(&self.input).zip(&self.key) {
+                *out = input * gain + key;
             }
             return Ok(ProcessStatus::Continue);
         }

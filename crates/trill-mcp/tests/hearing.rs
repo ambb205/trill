@@ -353,6 +353,64 @@ async fn a_compressor_is_given_another_track_to_listen_to() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn measure_and_render_use_the_machine_and_what_they_give_is_what_one_processor_gives() {
+    let fixture = connect(ScriptedFactory::new()).await;
+    let client = &fixture.client;
+    two_part_song(client).await;
+    let all = ok(client, "measure", json!({})).await;
+    let one = ok(client, "measure", json!({ "threads": 1 })).await;
+    assert_eq!(one["threads"], 1, "{one}");
+    if trill_engine::render::usual_threads() > 1 {
+        assert_eq!(all["threads"], 2, "the bass and the drums at once: {all}");
+    }
+    for said in ["loudness_lufs", "peak_db", "true_peak_db", "duration_seconds", "tracks", "gain_reduction"] {
+        assert_eq!(all[said], one[said], "{said}");
+    }
+    // What is said of the sound is the same too. How long the plugins were
+    // waited for is the machine's doing, not the render's: on a busy one
+    // the first measurement says it and the second, which knows them, not.
+    let said_of_the_sound = |reply: &Value| -> Vec<String> {
+        strings(&reply["notes"]).into_iter().filter(|n| !n.starts_with("Waited ")).collect()
+    };
+    assert_eq!(said_of_the_sound(&all), said_of_the_sound(&one), "notes");
+
+    // And the same files, the mix and every part of it.
+    let folder = tempfile::tempdir().unwrap();
+    let path = |name: &str| folder.path().join(name).display().to_string();
+    let all = ok(client, "render", json!({ "path": path("all.wav"), "stems": ["all"] })).await;
+    let one = ok(client, "render", json!({ "path": path("one.wav"), "stems": ["all"], "threads": 1 })).await;
+    assert!(std::fs::read(path("all.wav")).unwrap() == std::fs::read(path("one.wav")).unwrap());
+    let stems = |report: &Value| -> Vec<String> {
+        report["stems"].as_array().unwrap().iter().map(|stem| stem["file"].as_str().unwrap().to_string()).collect()
+    };
+    assert!(stems(&all).len() >= 4, "{all}");
+    for (made, single) in stems(&all).iter().zip(stems(&one)) {
+        assert!(std::fs::read(made).unwrap() == std::fs::read(&single).unwrap(), "{made} is not {single}");
+    }
+
+    // No processors is not a number of them.
+    let refused = call(client, "measure", json!({ "threads": 0 })).await.unwrap_err();
+    assert!(refused.contains("leave it out"), "{refused}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_that_is_not_run_beside_others_keeps_a_measure_on_one_processor_and_the_reply_says_so() {
+    let alone = trill_engine::scripted::Loading { alone: true, ..Default::default() };
+    let fixture = connect(ScriptedFactory::loading(alone)).await;
+    let client = &fixture.client;
+    two_part_song(client).await;
+    let report = ok(client, "measure", json!({})).await;
+    assert_eq!(report["threads"], 1, "{report}");
+    let said: Vec<String> =
+        strings(&report["notes"]).into_iter().filter(|note| note.contains("one processor")).collect();
+    assert_eq!(said.len(), 1, "{report}");
+    assert!(said[0].contains("on 'Bass'") && said[0].contains("more like it"), "{}", said[0]);
+    // Asked for one, there is nothing to explain.
+    let asked = ok(client, "measure", json!({ "threads": 1 })).await;
+    assert!(!strings(&asked["notes"]).iter().any(|note| note.contains("one processor")), "{asked}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn measuring_checks_a_mix_without_writing_a_file() {
     let fixture = connect(ScriptedFactory::new()).await;
     let client = &fixture.client;
@@ -688,7 +746,7 @@ async fn the_tools_and_the_instructions_say_how_to_hear() {
     }
     let (measure, schema) = described("measure");
     assert!(measure.contains("WITHOUT writing a file"), "{measure}");
-    for word in ["tracks", "sections", "bars", "detail"] {
+    for word in ["tracks", "sections", "bars", "detail", "threads"] {
         assert!(schema.contains(word), "{word}: {schema}");
     }
     // The tool that writes a file says which one to use for checking.
@@ -704,6 +762,7 @@ async fn the_tools_and_the_instructions_say_how_to_hear() {
         "gain reduction",
         "never to check your work",
         "mark it `loading`",
+        "several of the machine's processors",
     ];
     for word in words {
         assert!(instructions.contains(word), "the instructions should say '{word}'");
@@ -1039,4 +1098,245 @@ async fn a_note_on_the_first_sample_comes_through_an_amplifier_that_takes_a_mome
     assert!(notes[0] > -60.0, "the first note comes through: {notes:?}");
     assert!((notes[0] - notes[1]).abs() < 3.0, "as loud as the same note later: {notes:?}");
     assert!((opening[0] - opening[1]).abs() < 6.0, "from its beginning: {opening:?}");
+}
+
+/// What is left when one render is taken from another, against the first:
+/// far down means the same samples.
+fn null_db(one: &[f32], other: &[f32]) -> f64 {
+    let frames = one.len().min(other.len());
+    let (mut left, mut whole) = (0.0f64, 1e-30f64);
+    for frame in 0..frames {
+        left += f64::from(one[frame] - other[frame]).powi(2);
+        whole += f64::from(one[frame]).powi(2);
+    }
+    10.0 * (left.max(1e-30) / whole).log10()
+}
+
+/// The sampled instruments of Ample Sound, as VST3 plugins: three guitars
+/// and the bass. Each keeps several recordings of a note and plays
+/// another one every time the note sounds.
+const AMPLE: [(&str, &str); 4] = [
+    ("Ample Metal R", AMPLE_BASS),
+    ("Ample Metal Eclipse", "vst3:ABCDEF019182FAEB41707364416D6574"),
+    ("Ample Metal Hellrazer", "vst3:ABCDEF019182FAEB41707364416D6872"),
+    ("Ample Guitar PF", "vst3:ABCDEF019182FAEB4170736441677066"),
+];
+
+/// Renders `track` alone `times` times, with a probe of it and a measure
+/// of the whole song in between (other instances of the plugin, played
+/// other notes), and returns what is left of each later render when it is
+/// taken from the first, in dB.
+async fn rendered_again(client: &Client, folder: &Path, name: &str, track: u64, times: usize) -> Vec<f64> {
+    let mut renders: Vec<Vec<f32>> = Vec::new();
+    for index in 0..times {
+        let wav = folder.join(format!("{name}-{index}.wav"));
+        let begun = Instant::now();
+        let arguments = json!({ "path": wav.display().to_string(), "tracks": [track], "start": 0, "end": 8, "max_tail_seconds": 2 });
+        let report = ok(client, "render", arguments).await;
+        let audio = trill_media::decode(&wav).unwrap();
+        eprintln!(
+            "  {name}, render {index} in {:.1?}: {:.2} LUFS. {}",
+            begun.elapsed(),
+            report["loudness_lufs"].as_f64().unwrap_or(f64::NAN),
+            strings(&report["notes"]).into_iter().filter(|note| note.contains("Waited")).collect::<String>()
+        );
+        renders.push(audio.left);
+        std::fs::remove_file(&wav).unwrap();
+        // Between two renders, other instances of the plugin play: a probe
+        // of other keys, and the song measured.
+        match index {
+            0 => drop(ok(client, "probe", json!({ "track": track, "notes": [47, 50, 54] })).await),
+            1 => drop(ok(client, "measure", json!({ "start": 2, "end": 6 })).await),
+            _ => {}
+        }
+    }
+    renders[1..].iter().map(|render| null_db(&renders[0], render)).collect()
+}
+
+/// With the installed instruments of Ample Sound, set to take their
+/// recordings in turn: sixteen notes on two pitches, rendered four times
+/// with other things played in between, come out as the same samples each
+/// time, because the wait before a render sounds every note it rehearses
+/// the same number of times, whatever it waited for and for how long.
+///
+/// **What this cannot hold, and so reports instead of asserting:** a patch
+/// that draws at random from a stream which every instance of the plugin
+/// in the program shares. These instruments do as they come: the guitars
+/// draw every take that way (their `Cycle Mode Switch` is 0), the bass the
+/// noise of the hand moving between two frets (`M-Fret Sound`), and its
+/// preset "Stingray" a fret buzz on top. Every such draw on any instance
+/// moves the stream, nothing a host does puts it back while an instance
+/// lives (and the song's own always does), and only a program that has
+/// just started begins it at the same place. Two renders of such a patch
+/// in one program differ, and the test says by how much.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Ample Sound's instruments (VST3) installed; run with `cargo test -p trill-mcp --test hearing the_same_song_rendered_again -- --include-ignored --nocapture`"]
+async fn the_same_song_rendered_again_is_the_same_samples_where_takes_go_round_and_is_not_where_they_are_drawn_at_random()
+ {
+    let notes: Vec<Value> =
+        (0..16).map(|index| json!([if index % 2 == 0 { 45 } else { 52 }, f64::from(index) * 0.5, 0.45, 104])).collect();
+    let (mut held, mut not_held) = (Vec::new(), Vec::new());
+    for (name, uri) in AMPLE {
+        // A program of plugins for each instrument.
+        let Some((fixture, folder)) = connect_with_plugins(uri).await else { continue };
+        let client = &fixture.client;
+        ok(client, "set_project", json!({ "tempo": 156 })).await;
+        let part = |name: String, preset: Option<&'static str>| async move {
+            let mut arguments = json!({ "name": name, "instrument": uri });
+            if let Some(preset) = preset {
+                arguments["preset"] = json!(preset);
+            }
+            let made = ok(client, "create_track", arguments).await;
+            (made["track_id"].as_u64().unwrap(), made["instrument_device_id"].as_u64().unwrap())
+        };
+
+        // Its takes in turn, and no noise that is drawn at random.
+        let (round, device) = part(format!("{name} in turn"), None).await;
+        let in_turn = json!({ "Cycle Mode Switch": 1, "M-Fret Sound": 0 });
+        ok(client, "update_device", json!({ "device": device, "settings": in_turn })).await;
+        clip(client, round, 0.0, 8.0, json!(notes)).await;
+        // And as it comes, beside it in the same song.
+        let (random, _) = part(format!("{name} as it comes"), None).await;
+        clip(client, random, 0.0, 8.0, json!(notes)).await;
+
+        let nulls = rendered_again(client, folder.path(), &format!("{name}, its takes in turn"), round, 4).await;
+        eprintln!("{name}, its takes in turn: taken from the first render, the others leave {nulls:.1?} dB");
+        assert!(nulls.iter().all(|null| *null < -60.0), "{name}: the same samples every time: {nulls:?}");
+        held.push(name);
+
+        let mut cases = vec![("as it comes".to_string(), random)];
+        if uri == AMPLE_BASS {
+            let (buzz, _) = part("Stingray".to_string(), Some("Stingray")).await;
+            clip(client, buzz, 0.0, 8.0, json!(notes)).await;
+            cases.push(("with its preset Stingray".to_string(), buzz));
+        }
+        for (what, track) in cases {
+            let nulls = rendered_again(client, folder.path(), &format!("{name} {what}"), track, 3).await;
+            not_held.push(format!("{name} {what} {nulls:.1?} dB"));
+        }
+    }
+    eprintln!("HELD, the same samples every time with the takes in turn: {held:?}");
+    eprintln!(
+        "NOT HELD, and not asserted: patches that draw at random from a stream every instance in the program shares. \
+         Taken from their first render, later renders in the same program leave: {}. Only a program that has just \
+         started repeats these.",
+        not_held.join("; ")
+    );
+}
+
+/// Serum 2, a synthesizer, as a VST3 plugin.
+const SERUM: &str = "vst3:56534558667350736572756D20320000";
+
+/// With the plugins the owner's songs are made of: a song of two
+/// amplifiers behind built-in synths, two sampled basses set to take their
+/// recordings in turn, two synthesizers, a drum kit and a reverb on a
+/// return is rendered on one processor, on one again, and on several,
+/// each time with every part written to a file of its own. Every part
+/// that is the same samples the two times one processor made it (its
+/// plugins do the same thing twice) is those samples again on several.
+/// The test says which parts those are and how long each render took, and
+/// fails if fewer than six of them are.
+///
+/// The drum kit is in the song and is not held to this: Superior Drummer
+/// 3 chooses its hits for itself, two renders of it on one processor are
+/// the same samples some of the time and not most of it, and so two that
+/// agree say nothing about a third. What it and the sums it is part of
+/// come to is said, and not asserted.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Archetype Tim Henson X, Ample Metal R, Serum 2 and Superior Drummer 3 (VST3) installed; run with `cargo test -p trill-mcp --test hearing a_song_of_installed_plugins -- --include-ignored --nocapture`"]
+async fn a_song_of_installed_plugins_is_the_same_samples_on_one_processor_and_on_several() {
+    let Some((fixture, folder)) = connect_with_plugins(AMPLIFIER).await else { return };
+    if [AMPLE_BASS, SERUM, SD3].into_iter().any(|uri| installed(uri).is_none()) {
+        return;
+    }
+    let client = &fixture.client;
+    ok(client, "set_project", json!({ "tempo": 132 })).await;
+    let room =
+        ok(client, "create_track", json!({ "name": "Room", "kind": "return" })).await["track_id"].as_u64().unwrap();
+    ok(client, "add_device", json!({ "track": room, "uri": "builtin:reverb" })).await;
+    let line = |pitches: [u8; 4]| -> Value {
+        (0..32).map(|step| json!([pitches[step % 4], step as f64 * 0.5, 0.4, 100])).collect()
+    };
+    // Two amplifiers, each behind a built-in synth.
+    for (name, pitches) in [("Amp low", [40, 47, 52, 47]), ("Amp high", [64, 59, 67, 71])] {
+        let part = track(client, name, "builtin:polysynth").await;
+        ok(client, "add_device", json!({ "track": part, "uri": AMPLIFIER })).await;
+        clip(client, part, 0.0, 16.0, line(pitches)).await;
+        ok(client, "update_track", json!({ "track": part, "send": { "to": room, "level_db": -12 } })).await;
+    }
+    // Two basses of one maker, which are run in turn, with their takes in
+    // turn too.
+    for (name, pitches) in [("Bass", [45, 45, 52, 50]), ("Bass above", [57, 64, 62, 57])] {
+        let made = ok(client, "create_track", json!({ "name": name, "instrument": AMPLE_BASS })).await;
+        let (part, device) = (made["track_id"].as_u64().unwrap(), made["instrument_device_id"].as_u64().unwrap());
+        let in_turn = json!({ "Cycle Mode Switch": 1, "M-Fret Sound": 0 });
+        ok(client, "update_device", json!({ "device": device, "settings": in_turn })).await;
+        clip(client, part, 0.0, 16.0, line(pitches)).await;
+    }
+    for (name, pitches) in [("Synth", [60, 67, 72, 67]), ("Synth above", [76, 79, 84, 79])] {
+        let part = track(client, name, SERUM).await;
+        clip(client, part, 0.0, 16.0, line(pitches)).await;
+        ok(client, "update_track", json!({ "track": part, "send": { "to": room, "level_db": -9 } })).await;
+    }
+    let drums = track(client, "Drums", SD3).await;
+    clip(client, drums, 0.0, 16.0, line([36, 42, 38, 42])).await;
+
+    let mut renders: Vec<(Value, f64)> = Vec::new();
+    for (name, threads) in [("one", json!(1)), ("one again", json!(1)), ("several", Value::Null)] {
+        let wav = folder.path().join(format!("{name}.wav"));
+        let mut arguments = json!({ "path": wav.display().to_string(), "stems": ["all"], "max_tail_seconds": 2 });
+        if !threads.is_null() {
+            arguments["threads"] = threads;
+        }
+        let begun = Instant::now();
+        let report = ok(client, "render", arguments).await;
+        let took = begun.elapsed().as_secs_f64();
+        eprintln!(
+            "{name}: {} thread(s), {took:.1} s for {} s of audio; {}",
+            report["threads"],
+            report["duration_seconds"],
+            strings(&report["notes"]).into_iter().filter(|note| note.contains("processor")).collect::<String>()
+        );
+        renders.push((report, took));
+    }
+    assert_eq!(renders[0].0["threads"], 1);
+    assert!(renders[2].0["threads"].as_u64().unwrap() > 1, "{}", renders[2].0);
+    let files = |report: &Value| -> Vec<(String, String)> {
+        let name =
+            |stem: &Value| format!("{} {}", stem["what"].as_str().unwrap_or(""), stem["name"].as_str().unwrap_or(""));
+        let stems = report["stems"].as_array().unwrap().iter();
+        let mut files: Vec<_> = stems.map(|stem| (name(stem), stem["file"].as_str().unwrap().to_string())).collect();
+        files.push(("the mix".to_string(), report["path"].as_str().unwrap().to_string()));
+        files
+    };
+    let (one, again, all) = (files(&renders[0].0), files(&renders[1].0), files(&renders[2].0));
+    let (mut held, mut not_judged, mut drums) = (Vec::new(), Vec::new(), Vec::new());
+    for ((part, one), ((_, again), (_, all))) in one.iter().zip(again.iter().zip(&all)) {
+        let read = |path: &String| trill_media::decode(Path::new(path)).unwrap().left;
+        let (one, again, all) = (read(one), read(again), read(all));
+        let with_drums = part.contains("Drums") || part.starts_with("premaster") || part == "the mix";
+        if with_drums {
+            drums.push(format!(
+                "{part}: {:.0} dB left the second time on one processor, {:.0} dB on several",
+                null_db(&one, &again),
+                null_db(&one, &all)
+            ));
+        } else if one == again {
+            assert!(all == one, "{part}: other samples on several processors ({:.0} dB left)", null_db(&one, &all));
+            held.push(part.clone());
+        } else {
+            not_judged.push(format!(
+                "{part} ({:.0} dB left the second time on one processor, {:.0} dB on all)",
+                null_db(&one, &again),
+                null_db(&one, &all)
+            ));
+        }
+    }
+    eprintln!("the same samples on one processor and on several: {held:?}");
+    eprintln!("not the same samples twice even on one processor, so not judged: {not_judged:?}");
+    eprintln!(
+        "the drum kit, which chooses its hits for itself, and the sums it is in (far down is the same): {drums:?}"
+    );
+    eprintln!("one processor {:.1} s and {:.1} s, several {:.1} s", renders[0].1, renders[1].1, renders[2].1);
+    assert!(held.len() >= 6, "too few parts repeat themselves for this to say anything: {held:?}");
 }

@@ -275,14 +275,103 @@ fn what_never_answered_is_not_waited_for_as_long_again_and_what_was_ready_is_rea
     let again = refused(&patient);
     assert!(again < Duration::from_millis(2000), "known not to answer: {again:?} after {first:?}");
 
-    // One that answers is held to its answers for a while the first time,
-    // and for less when it answers the same way the next.
-    let ready = ScriptedFactory::new();
-    let (first, out) = timed(&line(), &ready, &options);
-    assert!(peak(&out.left) > 0.1 && first >= Duration::from_millis(250), "{first:?}");
-    let (again, same) = timed(&line(), &ready, &options);
-    assert!(again < first, "{again:?} after {first:?}");
+    // One that answers is held to its answers for a while the first time
+    // (half as long as it took to answer at all), and for less when it
+    // answers the same way the next.
+    let slow = ScriptedFactory::loading(Loading { first: Duration::from_secs(1), ..Loading::default() });
+    let (first, out) = timed(&line(), &slow, &options);
+    assert!(peak(&out.left) > 0.1 && first >= Duration::from_millis(1500), "{first:?}");
+    let (again, same) = timed(&line(), &slow, &options);
+    assert!(again >= Duration::from_secs(1) && again < first, "{again:?} after {first:?}");
     assert!(same.left == out.left);
+}
+
+#[test]
+fn an_instrument_whose_takes_go_round_begins_every_render_at_the_same_take_however_it_was_waited_for() {
+    let _alone = ONE_AT_A_TIME.lock();
+    // A bass with five recordings of each key, each quieter than the one
+    // before: where it is in that round is not something a reset puts
+    // back, so what a render begins with says how often the wait before
+    // it played each note.
+    let part = song(BASS, &[(40, 0.0), (43, 0.5), (40, 1.0), (45, 1.5), (43, 2.0), (40, 2.5)]);
+    let options = RenderOptions { sample_rate: SR, max_tail_seconds: 0.5, ..RenderOptions::default() };
+    let takes = Loading { takes: 5, ..Loading::default() };
+    let one_recording = render(&part, &ScriptedFactory::new(), &options).unwrap();
+
+    // The first time, nothing is known of it, and it is held to its
+    // answers for a quarter of a second.
+    let scripted = ScriptedFactory::loading(takes);
+    let (first, new) = timed(&part, &scripted, &options);
+    // Every rehearsed note has sounded three times: the song opens on the
+    // fourth recording of its first note, a quarter quieter than the first.
+    let opening = 0..(0.2 * f64::from(SR)) as usize;
+    let (heard, written) = (peak(&new.left[opening.clone()]), peak(&one_recording.left[opening.clone()]));
+    assert!((heard / written - 0.75).abs() < 1e-3, "{heard} of {written}");
+
+    // The next time it is known to be ready, and is not held for as long:
+    // it has played its notes exactly as often.
+    let (again, known) = timed(&part, &scripted, &options);
+    assert!(known.left == new.left, "the same samples ({again:?} after {first:?})");
+
+    // And one that is slow to load, whose last key arrives long after the
+    // others (which are asked nothing more meanwhile), and whose host was
+    // behind when it was made: the same samples again.
+    let slow = Loading {
+        first: Duration::from_millis(300),
+        late: Some((45, Duration::from_millis(1100))),
+        held_up: Duration::from_millis(200),
+        ..takes
+    };
+    let (took, loaded) = timed(&part, &ScriptedFactory::loading(slow), &options);
+    assert!(took >= Duration::from_millis(1300), "{took:?}");
+    assert!(loaded.left == new.left, "the same samples after a wait of {took:?}");
+    assert!(loaded.measured.waited.iter().all(|waited| waited.answered && waited.silent.is_empty()));
+}
+
+#[test]
+fn an_effect_is_run_the_same_amount_before_every_render_however_long_its_instrument_took_to_load() {
+    let _alone = ONE_AT_A_TIME.lock();
+    // An amplifier whose level goes up and down from the moment it is
+    // made, with every frame it is run: what it makes of the song says how
+    // much it was run before, and a reset does not put that back. One
+    // stands behind a bass, which is rehearsed on its notes, and one
+    // behind a built-in synth, where it is tried with noise.
+    let mut project = song(BASS, &[(40, 0.0), (43, 0.5), (45, 1.0), (62, 1.5), (40, 2.0), (43, 2.5)]);
+    let bass = project.tracks[0].id;
+    project.add_device(ChainRef::Track(bass), AMP, "Amp", None).unwrap();
+    let lead = project.add_track("Lead");
+    project.add_device(ChainRef::Track(lead), "builtin:polysynth", "Synth", None).unwrap();
+    project.add_device(ChainRef::Track(lead), AMP, "Amp", None).unwrap();
+    let clip = project.add_midi_clip(lead, "clip", 0.0, 8.0).unwrap();
+    let notes = [Note { pitch: 60, start: 0.0, length: 3.0, velocity: 100 }];
+    project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
+    let options = RenderOptions { sample_rate: SR, max_tail_seconds: 0.5, ..RenderOptions::default() };
+    let render = |loading: Loading| {
+        let job = RenderJob {
+            project: project.clone(),
+            factory: factory(&ScriptedFactory::loading(loading)),
+            audio: trill_engine::sources::AudioSources::default(),
+        };
+        let begun = Instant::now();
+        (job.render(&options).unwrap(), begun.elapsed())
+    };
+    let free = Loading { free: true, ..Loading::default() };
+    let (steady, _) = render(Loading::default());
+
+    // Nothing is known of them the first time, and they are held to
+    // their answers for longer than the next, when they are known.
+    let (new, first) = render(free);
+    assert!(new.left != steady.left, "the amplifiers are heard to move");
+    let (known, again) = render(free);
+    assert!(known.left == new.left, "the same samples ({again:?} after {first:?})");
+
+    // A bass that arrives piece by piece over more than a second is asked
+    // for the notes it does not have yet try after try, and all that
+    // while the amplifier behind it is given nothing.
+    let slow = Loading { upper: Duration::from_millis(700), late: Some((45, Duration::from_millis(1100))), ..free };
+    let (loaded, took) = render(slow);
+    assert!(took >= Duration::from_millis(1100), "{took:?}");
+    assert!(loaded.left == new.left, "the same samples after a wait of {took:?}");
 }
 
 #[test]

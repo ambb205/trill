@@ -131,6 +131,7 @@ fn info() -> ProcessInfo {
         time_signature: TimeSignature::default(),
         playing: true,
         position_beats: 0.0,
+        song: Default::default(),
         loop_range: None,
     }
 }

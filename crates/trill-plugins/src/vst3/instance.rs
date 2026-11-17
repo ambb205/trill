@@ -73,6 +73,9 @@ pub(crate) struct CreateRequest {
     /// The plugin is made for a render, not to be played: it is set up
     /// for offline processing.
     pub offline: bool,
+    /// The audio input bus that is switched on beside the first, for a
+    /// device that listens to another track: its key input.
+    pub key_bus: Option<usize>,
 }
 
 /// The VST3 process mode of a plugin that is rendered (`offline`) or played.
@@ -329,7 +332,7 @@ impl Instance {
     /// A plugin is free to refuse (one that is mono stays mono), so the
     /// result is whatever it says afterwards. Only the main buses are
     /// switched on; side-chains and further outputs stay off.
-    fn negotiate_buses(&mut self) -> BusLayout {
+    fn negotiate_buses(&mut self, key_bus: Option<usize>) -> BusLayout {
         let (audio, input, output) = (kAudio as MediaType, kInput as BusDirection, kOutput as BusDirection);
         let mut arrangements = [input, output].map(|direction| {
             (0..self.bus_count(audio, direction))
@@ -369,7 +372,13 @@ impl Instance {
                         // A bus the plugin fails to describe still has its
                         // place in `process`; it gets no channels.
                         let described = self.component.getBusInfo(audio, direction, index, &mut info) == kResultOk;
-                        self.component.activateBus(audio, direction, index, u8::from(index == 0));
+                        // The first bus each way, and the input a key goes
+                        // into when the device is to listen to one. No
+                        // other: a plugin may take a side-chain that is
+                        // switched on to be the one it listens to, and
+                        // would then be listening to nothing.
+                        let key = direction == input && key_bus == Some(index as usize);
+                        self.component.activateBus(audio, direction, index, u8::from(index == 0 || key));
                         if described { info.channelCount.clamp(0, MAX_CHANNELS) as u32 } else { 0 }
                     }
                 })
@@ -614,7 +623,7 @@ impl Vst3Thread {
         instance.attach_controller(module, &self.host);
         instance.restore(request.state.as_deref())?;
 
-        let buses = instance.negotiate_buses();
+        let buses = instance.negotiate_buses(request.key_bus);
         let takes_notes = instance.enable_notes();
         instance.setup(request.sample_rate, request.max_block)?;
 

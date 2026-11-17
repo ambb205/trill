@@ -33,12 +33,12 @@
 
 use parking_lot::Mutex;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use trill_core::Device;
 use trill_core::device::{
-    DeviceCategory, DeviceController, DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance, DeviceProcessor,
-    Event, EventKind, PresetLoadError, ProcessInfo, Purpose,
+    Beside, DeviceCategory, DeviceController, DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance,
+    DeviceProcessor, Event, EventKind, PresetLoadError, ProcessInfo, Purpose,
 };
 use trill_core::presets::{PresetInfo, PresetList};
 
@@ -85,6 +85,40 @@ pub struct Loading {
     /// go of. The instrument does not have its turn before: everything
     /// else it takes its time over begins after this.
     pub held_up: Duration,
+    /// How many recordings it has of each key, if more than one: every
+    /// time a key sounds it plays the next of them, each a little quieter
+    /// than the one before, and then the first again. It begins with the
+    /// first when it is made, and a reset does not take it back there: a
+    /// sampled instrument's takes, going round.
+    pub takes: u32,
+    /// The instruments the factory hands out keep one thing between them,
+    /// as the instances of some plugins do: a count of the notes any of
+    /// them has sounded, by which the next note of any of them is given
+    /// its level. They say that they are to be run in turn, and so does
+    /// the amplifier ([`Beside::InTurn`]); the factory notices when two of
+    /// the instruments are run at once all the same
+    /// ([`ScriptedFactory::overlapped`]).
+    pub shares: bool,
+    /// Its devices say that they are not to be run beside anything
+    /// ([`Beside::Nothing`]).
+    pub alone: bool,
+    /// The amplifier's level goes up and down slowly from the moment it
+    /// is made, with every frame it is run and whatever it is given: what
+    /// it makes of a note depends on how much it was run before, and a
+    /// reset does not put that back. (An amplifier plugin was measured
+    /// that is like this.)
+    pub free: bool,
+}
+
+/// What the instruments of a factory keep between them: see
+/// [`Loading::shares`].
+#[derive(Default)]
+struct Shared {
+    /// How many notes any of them has sounded.
+    notes: AtomicU32,
+    /// One of them is being run; and two of them were run at once.
+    inside: AtomicBool,
+    overlapped: AtomicBool,
 }
 
 /// Makes the scripted instruments, and writes down what each was made for.
@@ -94,6 +128,7 @@ pub struct ScriptedFactory {
     made: Arc<Mutex<Vec<(String, Purpose)>>>,
     /// Until when the host is behind with other work.
     behind_until: Arc<Mutex<Option<Instant>>>,
+    shared: Arc<Shared>,
 }
 
 impl ScriptedFactory {
@@ -111,6 +146,12 @@ impl ScriptedFactory {
     /// in order.
     pub fn made(&self) -> Vec<(String, Purpose)> {
         self.made.lock().clone()
+    }
+
+    /// Whether two instruments that keep something between them
+    /// ([`Loading::shares`]) were ever run at the same time.
+    pub fn overlapped(&self) -> bool {
+        self.shared.overlapped.load(Ordering::Relaxed)
     }
 
     fn preset(id: &str, name: &str, description: &str) -> PresetInfo {
@@ -168,7 +209,8 @@ impl DeviceFactory for ScriptedFactory {
         }
         if kind == Kind::Amp {
             let ready = (!self.loading.never).then(|| born + self.loading.first);
-            return Ok(DeviceInstance { processor: Box::new(Amp { ready }), params: Vec::new(), controller: None });
+            let amp = Amp { ready, free: self.loading.free, frames: 0 };
+            return Ok(DeviceInstance { processor: Box::new(amp), params: Vec::new(), controller: None });
         }
         let patch = Arc::new(Patch::default());
         // The sound a saved state stands for: the preset it was saved with.
@@ -194,6 +236,9 @@ impl DeviceFactory for ScriptedFactory {
             late: self.loading.late.map(|(key, after)| (key, born + after)),
             fickle: self.loading.fickle,
             presses: 0,
+            takes: self.loading.takes,
+            sounded: [0; 128],
+            shared: self.loading.shares.then(|| self.shared.clone()),
             onset: self.loading.onset,
             patch: patch.clone(),
             voices: [Voice::default(); VOICES],
@@ -209,6 +254,14 @@ impl DeviceFactory for ScriptedFactory {
 
     fn busy(&self) -> bool {
         self.behind_until.lock().is_some_and(|until| Instant::now() < until)
+    }
+
+    fn beside(&self, uri: &str) -> Beside {
+        match uri {
+            BASS | DRUMS | AMP if self.loading.alone => Beside::Nothing,
+            BASS | DRUMS | AMP if self.loading.shares => Beside::InTurn("scripted devices".to_string()),
+            _ => Beside::Anything,
+        }
     }
 
     fn presets(&self, uri: &str) -> Option<PresetList> {
@@ -307,6 +360,10 @@ enum Kind {
 struct Amp {
     /// When it begins to pass sound; `None` for one that never does.
     ready: Option<Instant>,
+    /// Its level goes up and down with the frames it has been run, which
+    /// are counted here: see [`Loading::free`].
+    free: bool,
+    frames: u64,
 }
 
 impl DeviceProcessor for Amp {
@@ -316,7 +373,16 @@ impl DeviceProcessor for Amp {
 
     fn process(&mut self, _info: &ProcessInfo, _events: &[Event], left: &mut [f32], right: &mut [f32]) {
         let gain = if self.ready.is_some_and(|ready| Instant::now() >= ready) { 0.5 } else { 0.0 };
-        left.iter_mut().chain(right.iter_mut()).for_each(|sample| *sample *= gain);
+        if !self.free {
+            left.iter_mut().chain(right.iter_mut()).for_each(|sample| *sample *= gain);
+            return;
+        }
+        // Once round in a little under half a second, a fifth up and down.
+        for (left, right) in left.iter_mut().zip(right.iter_mut()) {
+            let swing = 1.0 + 0.2 * (self.frames as f64 * std::f64::consts::TAU / 20_011.0).sin() as f32;
+            (*left, *right) = (*left * gain * swing, *right * gain * swing);
+            self.frames += 1;
+        }
     }
 
     fn reset(&mut self) {}
@@ -370,6 +436,12 @@ struct Instrument {
     /// A key that sounds every other time, and how often it was pressed.
     fickle: Option<u8>,
     presses: u32,
+    /// How many recordings it has of each key, and how often each key has
+    /// sounded since the instrument was made.
+    takes: u32,
+    sounded: [u32; 128],
+    /// What it keeps with the factory's other instruments, if anything.
+    shared: Option<Arc<Shared>>,
     /// How long after a key goes down its sound begins.
     onset: Duration,
     patch: Arc<Patch>,
@@ -435,6 +507,18 @@ impl Instrument {
                 voice.step = std::f64::consts::TAU * hz / self.sample_rate;
                 (voice.held_decay, voice.released_decay) = (self.halving(rings), self.halving(rings));
             }
+        }
+        // What every instrument of the factory counts together says how
+        // loud this note is.
+        if let Some(shared) = &self.shared {
+            voice.level *= 1.0 - (shared.notes.fetch_add(1, Ordering::Relaxed) % 5) as f32 / 10.0;
+        }
+        // The next of the key's recordings: each is a twelfth quieter than
+        // the one before.
+        if self.takes > 1 {
+            let key = &mut self.sounded[usize::from(pitch.min(127))];
+            voice.level *= 1.0 - (*key % self.takes) as f32 / 12.0;
+            *key += 1;
         }
         let free = self.voices.iter().position(|voice| !voice.active).unwrap_or(0);
         self.voices[free] = voice;
@@ -512,6 +596,16 @@ impl DeviceProcessor for Instrument {
     fn set_param(&mut self, _index: usize, _value: f64) {}
 
     fn process(&mut self, _info: &ProcessInfo, events: &[Event], left: &mut [f32], right: &mut [f32]) {
+        // Instruments that keep something between them notice when two of
+        // them are run at once, and take long enough over a block for that
+        // to show.
+        let shared = self.shared.clone();
+        if let Some(shared) = &shared {
+            if shared.inside.swap(true, Ordering::SeqCst) {
+                shared.overlapped.store(true, Ordering::Relaxed);
+            }
+            (0..2_000).for_each(|_| std::hint::spin_loop());
+        }
         let frames = left.len().min(right.len());
         let mut done = 0;
         for event in events {
@@ -521,6 +615,9 @@ impl DeviceProcessor for Instrument {
             self.handle(event.kind);
         }
         self.render(&mut left[done..frames], &mut right[done..frames]);
+        if let Some(shared) = &shared {
+            shared.inside.store(false, Ordering::SeqCst);
+        }
     }
 
     fn reset(&mut self) {

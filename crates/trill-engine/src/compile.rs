@@ -64,6 +64,11 @@ pub struct DeviceMeta {
     /// Whether the device can listen to a key: a track other than its own
     /// ([`trill_core::Device::sidechain`]).
     pub takes_key: bool,
+    /// For a device that is made for a key or for none
+    /// ([`trill_core::device::DeviceProcessor::key_is_set_when_made`]):
+    /// which it was made for. When the model then has it the other way,
+    /// the device is created again.
+    pub made_keyed: Option<bool>,
 }
 
 /// The devices that exist in the running graph.
@@ -343,6 +348,7 @@ impl Compiler<'_> {
         let running = self.bank.devices.get(&device.id).is_some_and(|meta| {
             meta.uri == device.uri
                 && meta.applied_state == device.state
+                && meta.made_keyed.is_none_or(|keyed| keyed == device.sidechain.is_some())
                 // A device that came up short is looked at again on every
                 // compile. If what is wrong with it has changed (a missing
                 // sample is back), it is created afresh to pick that up.
@@ -367,6 +373,7 @@ impl Compiler<'_> {
                             error: None,
                             warnings: self.factory.warnings(device),
                             takes_key: instance.processor.takes_key(),
+                            made_keyed: instance.processor.key_is_set_when_made().then_some(device.sidechain.is_some()),
                         },
                     );
                     Some(instance.processor)
@@ -383,6 +390,7 @@ impl Compiler<'_> {
                             error: Some(error.to_string()),
                             warnings: Vec::new(),
                             takes_key: false,
+                            made_keyed: None,
                         },
                     );
                     None
@@ -404,7 +412,7 @@ impl Compiler<'_> {
         // that is played before it.
         let listens = self.bank.devices.get(&device.id).is_some_and(|meta| meta.takes_key);
         let key = device.sidechain.filter(|_| listens).and_then(|track| keys.iter().position(|key| *key == track));
-        DeviceSlot { id: device.id, processor, enabled: device.enabled, key }
+        DeviceSlot { id: device.id, processor, enabled: device.enabled, key, turn: None }
     }
 }
 

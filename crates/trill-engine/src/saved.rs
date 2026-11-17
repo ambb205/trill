@@ -314,7 +314,10 @@ fn write(folder: &Path, preset: &SavedPreset) -> Result<PathBuf, String> {
             Err(error) => return Err(format!("cannot remove '{}': {error}", state.display())),
         },
     }
-    let text = SavedPreset { state: None, ..preset.clone() }.to_json();
+    // What is written says the format it is written in: a preset made
+    // here without one is of this build.
+    let format = preset.format.or(Some(trill_core::project::FORMAT_VERSION));
+    let text = SavedPreset { state: None, format, ..preset.clone() }.to_json();
     replace(&file, text.as_bytes())?;
     Ok(file)
 }
@@ -445,6 +448,10 @@ impl DeviceFactory for WithSaved {
         self.inner.busy()
     }
 
+    fn beside(&self, uri: &str) -> trill_core::device::Beside {
+        self.inner.beside(uri)
+    }
+
     fn warnings(&self, device: &Device) -> Vec<DeviceWarning> {
         self.inner.warnings(device)
     }
@@ -495,6 +502,7 @@ mod tests {
             name: name.into(),
             params: [("gain".to_string(), 0.5)].into(),
             state: state.map(<[u8]>::to_vec),
+            format: Some(trill_core::project::FORMAT_VERSION),
             ..SavedPreset::default()
         }
     }

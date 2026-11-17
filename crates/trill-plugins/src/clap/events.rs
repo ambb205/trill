@@ -375,24 +375,19 @@ impl OutputEventBuffer for ParamOutput<'_> {
 }
 
 /// The transport as of `frame_offset` frames into the block `info`
-/// describes.
+/// describes: what [`crate::transport`] says a plugin is told.
 pub(crate) fn transport(info: &ProcessInfo, frame_offset: usize) -> TransportEvent {
-    let tempo = if info.tempo.is_finite() && info.tempo > 0.0 { info.tempo } else { 120.0 };
-    let mut beats = if info.position_beats.is_finite() { info.position_beats } else { 0.0 };
-    let mut flags =
-        TransportFlags::HAS_TEMPO | TransportFlags::HAS_BEATS_TIMELINE | TransportFlags::HAS_SECONDS_TIMELINE;
+    let info = crate::transport::told(info, frame_offset);
+    let mut flags = TransportFlags::HAS_TEMPO
+        | TransportFlags::HAS_BEATS_TIMELINE
+        | TransportFlags::HAS_SECONDS_TIMELINE
+        | TransportFlags::HAS_TIME_SIGNATURE;
     if info.playing {
         flags |= TransportFlags::IS_PLAYING;
-        // The song only advances within the block while it is playing.
-        if info.sample_rate > 0.0 {
-            beats += frame_offset as f64 * tempo / (60.0 * info.sample_rate);
-        }
     }
     let signature = info.time_signature;
-    let beats_per_bar = signature.beats_per_bar();
-    let bar = (beats / beats_per_bar).floor();
-    flags |= TransportFlags::HAS_TIME_SIGNATURE;
     let (loop_start, loop_end) = info.loop_range.unwrap_or((0.0, 0.0));
+    let (loop_start_seconds, loop_end_seconds) = info.song.loop_seconds.unwrap_or((0.0, 0.0));
     if info.loop_range.is_some() {
         flags |= TransportFlags::IS_LOOP_ACTIVE;
     }
@@ -400,21 +395,18 @@ pub(crate) fn transport(info: &ProcessInfo, frame_offset: usize) -> TransportEve
     TransportEvent {
         header: EventHeader::new_core(0, EventFlags::empty()),
         flags,
-        song_pos_beats: BeatTime::from_float(beats),
-        // Worked out from the tempo of this block alone, which is the song's
-        // time in a song of one tempo. Where the tempo changes inside a
-        // song the engine tells each block its own tempo, and this is then
-        // not the time the song took to get here: `ProcessInfo` does not
-        // carry that yet (nor where the bar began, below).
-        song_pos_seconds: SecondsTime::from_float(beats * 60.0 / tempo),
-        tempo,
+        song_pos_beats: BeatTime::from_float(info.position_beats),
+        song_pos_seconds: SecondsTime::from_float(info.song.seconds),
+        tempo: info.tempo,
+        // The song moves evenly through a block; a tempo that glides is
+        // told step by step.
         tempo_inc: 0.0,
         loop_start_beats: BeatTime::from_float(loop_start),
         loop_end_beats: BeatTime::from_float(loop_end),
-        loop_start_seconds: SecondsTime::from_float(loop_start * 60.0 / tempo),
-        loop_end_seconds: SecondsTime::from_float(loop_end * 60.0 / tempo),
-        bar_start: BeatTime::from_float(bar * beats_per_bar),
-        bar_number: bar as i32,
+        loop_start_seconds: SecondsTime::from_float(loop_start_seconds),
+        loop_end_seconds: SecondsTime::from_float(loop_end_seconds),
+        bar_start: BeatTime::from_float(info.song.bar_start),
+        bar_number: i32::try_from(info.song.bar).unwrap_or(i32::MAX),
         time_signature_numerator: signature.numerator as u16,
         time_signature_denominator: signature.denominator as u16,
     }
@@ -431,8 +423,10 @@ mod tests {
             time_signature: Default::default(),
             playing,
             position_beats,
+            song: Default::default(),
             loop_range: None,
         }
+        .steady()
     }
 
     #[test]
@@ -763,7 +757,8 @@ mod tests {
             time_signature: trill_core::TimeSignature::new(6, 8).unwrap(),
             loop_range: Some((3.0, 9.0)),
             ..info(true, 9.5)
-        };
+        }
+        .steady();
         let looping = transport(&waltz, 12_000);
         assert_eq!((looping.time_signature_numerator, looping.time_signature_denominator), (6, 8));
         assert_eq!((looping.bar_number, looping.bar_start.to_float()), (3, 9.0));
@@ -784,6 +779,7 @@ mod tests {
             time_signature: Default::default(),
             playing: true,
             position_beats: f64::INFINITY,
+            song: Default::default(),
             loop_range: None,
         };
         let event = transport(&broken, 100);

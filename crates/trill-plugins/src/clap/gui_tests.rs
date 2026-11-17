@@ -90,6 +90,7 @@ fn block(instance: &mut DeviceInstance, fill: f32) -> Vec<f32> {
         time_signature: Default::default(),
         playing: true,
         position_beats: 0.0,
+        song: Default::default(),
         loop_range: None,
     };
     let (mut left, mut right) = (vec![fill; BLOCK], vec![fill; BLOCK]);

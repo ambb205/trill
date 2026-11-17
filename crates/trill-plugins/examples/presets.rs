@@ -106,6 +106,7 @@ fn play(instance: &mut DeviceInstance) -> Heard {
         time_signature: TimeSignature::default(),
         playing: false,
         position_beats: 0.0,
+        song: Default::default(),
         loop_range: None,
     };
     let blocks = (NOTE_SECONDS * SAMPLE_RATE / BLOCK as f64) as usize;
@@ -143,6 +144,7 @@ fn idle(instance: &mut DeviceInstance, duration: Duration) {
         time_signature: TimeSignature::default(),
         playing: false,
         position_beats: 0.0,
+        song: Default::default(),
         loop_range: None,
     };
     let (mut left, mut right) = (vec![0f32; BLOCK], vec![0f32; BLOCK]);

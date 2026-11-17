@@ -60,6 +60,9 @@ hearing one track of a long song costs what that track costs. Naming a return th
 every track's send feeds it; naming a group gives the group with its members.
 Both run at the engine's sample rate unless `sample_rate` asks for another (without an audio device the engine \
 runs at 48000 Hz, whatever the song's files are at), and their replies state the rate they ran at.
+Both use several of the machine's processors (half of them, eight at the most): tracks that do not feed one \
+another are made at once, and what comes out is the samples one processor would have made, sooner. The reply's \
+`threads` says how many it was; `threads` in the call asks for another number.
 A plugin that plays samples (a drum kit, a sampled guitar) reads them after it is made or given another kit or \
 preset, for seconds or as much as a minute, and until a drum has arrived its key is silent. probe, measure and \
 render wait for that on a copy of their own, so what they report is the whole instrument; if notes stayed \
@@ -122,6 +125,11 @@ pub struct MeasureRequest {
     pub detail: bool,
     /// Longest reverb/delay tail to keep after the end, in seconds (default 10; trimmed when silent sooner).
     pub max_tail_seconds: Option<f64>,
+    /// How many of the machine's processors make it at the most. Leave it out: half of them are used (eight
+    /// at the most), tracks that do not feed one another are made at once, and the samples are the ones a
+    /// single processor makes. 1 makes it a track at a time: to compare the time, or to leave the machine to
+    /// other work. The reply's `threads` says how many it was.
+    pub threads: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -494,6 +502,21 @@ fn observations(report: &RenderReport, project: &Project) -> Vec<String> {
     notes
 }
 
+/// What to say of a render that was made on one thread because of the
+/// devices in it that are not run beside any other.
+fn alone_note(alone: &[trill_engine::render::Alone]) -> Option<String> {
+    let first = alone.first()?;
+    let more = match alone.len() - 1 {
+        0 => String::new(),
+        more => format!(" (and {more} more like it)"),
+    };
+    Some(format!(
+        "This was made on one processor, a track at a time, because {} on '{}'{more} is not run beside other \
+         devices: it took as long as the song takes without the others.",
+        first.device_name, first.track_name
+    ))
+}
+
 /// What to say of a plugin that was waited for and answered: how long it
 /// took, and which of its notes stayed silent, if any did.
 fn waited_note(waited: &WaitedFor) -> String {
@@ -571,6 +594,7 @@ fn report_json(
         out["path"] = json!(path);
     }
     out["sample_rate"] = json!(report.sample_rate);
+    out["threads"] = json!(report.threads);
     out["tracks"] = report
         .tracks
         .iter()
@@ -658,6 +682,7 @@ fn report_json(
         out["missing_files"] = brief;
     }
     all.append(&mut observations(report, project));
+    all.extend(alone_note(&report.alone));
     all.append(&mut notes);
     out["notes"] = json!(all);
     out
@@ -1443,8 +1468,14 @@ impl TrillServer {
                     )));
                 }
             };
+            if request.threads == Some(0) {
+                return finish(Err("threads 0 is no number of processors to render on: give 1 for a track at a \
+                                   time, more to hold it to that many, or leave it out for all the machine has"
+                    .to_string()));
+            }
             let (start, end) = (start, request.end);
             let options = RenderOptions {
+                threads: request.threads,
                 sample_rate,
                 start_beat: start,
                 end_beat: request.end,

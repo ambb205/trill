@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use trill_core::Device;
-use trill_core::device::{DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance, Purpose, split_uri};
+use trill_core::device::{Beside, DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance, Purpose, split_uri};
 use trill_core::presets::{PresetInfo, PresetList};
 
 /// The VST3 sub-category that marks a plugin as an instrument.
@@ -288,6 +288,18 @@ impl DeviceFactory for Vst3Factory {
         self.shared.main.behind()
     }
 
+    /// In turn with the other instances of its module, unless more is
+    /// known of the plugin: see [`crate::beside`].
+    fn beside(&self, uri: &str) -> Beside {
+        let Some((VST3_SCHEME, class)) = split_uri(uri) else { return Beside::Anything };
+        let catalog = self.shared.installed.catalog();
+        let class = ClassId::parse(class).map(|class| class.to_string());
+        match class.and_then(|class| catalog.find(&class).ok()) {
+            Some(installed) => crate::beside::of(uri, &installed.path),
+            None => Beside::Anything,
+        }
+    }
+
     fn create_for(
         &self,
         device: &Device,
@@ -320,7 +332,12 @@ impl DeviceFactory for Vst3Factory {
             sample_rate,
             max_block: u32::try_from(max_block).unwrap_or(u32::MAX),
             offline: purpose == Purpose::Rendering,
+            // Where the key would go, for a device that is to listen to
+            // one. Whether the plugin has such an input is found when its
+            // buses are read.
+            key_bus: device.sidechain.map(|_| usize::from(!installed.instrument)),
         };
+        let keyed = request.key_bus.is_some();
 
         let created = instantiate(main, request, CREATE_TIMEOUT).map_err(failed)?;
 
@@ -334,7 +351,7 @@ impl DeviceFactory for Vst3Factory {
             installed.instrument,
             created,
             (sample_rate, max_block),
-            self.shared.patient,
+            (self.shared.patient, keyed),
         )
         .map_err(failed)?;
         Ok(DeviceInstance { processor: Box::new(processor), params, controller: Some(Box::new(controller)) })
@@ -543,6 +560,7 @@ mod tests {
             sample_rate: 48_000.0,
             max_block: 64,
             offline: false,
+            key_bus: None,
         };
         let main = &factory.shared.main;
         let before = scripted::instances(kind::SLOW_INIT).len();

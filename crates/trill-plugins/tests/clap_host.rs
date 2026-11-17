@@ -92,8 +92,10 @@ fn info(block: usize) -> ProcessInfo {
         time_signature: Default::default(),
         playing: true,
         position_beats: (block * BLOCK) as f64 / SR * 2.0,
+        song: Default::default(),
         loop_range: None,
     }
+    .steady()
 }
 
 /// Runs `blocks` blocks. `input` fills each block before processing and
@@ -561,6 +563,7 @@ fn a_plugin_can_be_prepared_again_for_another_sample_rate() {
             time_signature: Default::default(),
             playing: true,
             position_beats: 0.0,
+            song: Default::default(),
             loop_range: None,
         };
         let (mut left, mut right) = (vec![0.0f32; 256], vec![0.0f32; 256]);

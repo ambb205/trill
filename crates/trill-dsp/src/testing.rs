@@ -40,6 +40,7 @@ pub fn info(sample_rate: f64) -> ProcessInfo {
         time_signature: Default::default(),
         playing: true,
         position_beats: 0.0,
+        song: Default::default(),
         loop_range: None,
     }
 }
