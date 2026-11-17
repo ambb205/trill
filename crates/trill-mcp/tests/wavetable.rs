@@ -351,3 +351,116 @@ async fn a_table_from_a_file_is_one_of_the_songs_files() {
     assert!(got["wavetable"]["osc1_table"]["file"].as_str().unwrap().contains("Wavetables"), "{got}");
     assert!(fixture.runtime.session.lock().problems().is_empty());
 }
+
+// ---- against the synths installed on this machine --------------------------
+
+/// Serum 2, as a VST3 plugin, and Surge XT, as a CLAP plugin: the two
+/// wavetable synths this one is measured against. Measurements only:
+/// each plays the sound it has when it is made, which for both is a
+/// sawtooth, and nothing of theirs is read or kept.
+const SERUM: &str = "vst3:56534558667350736572756D20320000";
+const SURGE: &str = "clap:org.surge-synth-team.surge-xt";
+
+/// The plugins installed on this machine, found with caches of the test's
+/// own; `None` if `uri` is not among them.
+fn installed(uri: &str) -> Option<trill_plugins::PluginHost> {
+    use trill_core::device::DeviceFactory;
+    use trill_plugins::{ClapConfig, PluginHost, Scanner, Vst3Config};
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("mcp-wavetable");
+    let clap =
+        ClapConfig { cache_path: Some(scratch.join("clap.json")), scanner: Scanner::Auto, ..ClapConfig::default() };
+    let vst3 = Vst3Config {
+        cache_path: Some(scratch.join("vst3.json")),
+        scanner: Scanner::Auto,
+        preset_paths: vec![scratch.join("vst3 presets")],
+        ..Vst3Config::default()
+    };
+    let host = PluginHost::with_configs(clap, vst3).unwrap();
+    let found = host.clap().descriptors().into_iter().chain(host.vst3().descriptors()).any(|found| found.uri == uri);
+    if !found {
+        eprintln!("skipping: {uri} is not installed on this machine");
+    }
+    found.then_some(host)
+}
+
+/// What of a steady note at about `hz` lies between its harmonics, against
+/// what lies on them, in dB, with the pitch the note is found to have and
+/// its peak: the pitch is looked for within a quarter tone of `hz`, since
+/// a synth need not be in tune to a hundredth of a cent, and a harmonic
+/// is given a twentieth of a semitone either side to lie in, since some
+/// let their oscillators drift.
+fn off_the_note(samples: &[f32], hz: f64) -> (f64, f64, f64) {
+    let size = 1 << 16;
+    let mut plan = trill_dsp::fft::RealFft::new(size);
+    let windowed: Vec<f32> = samples[..size]
+        .iter()
+        .enumerate()
+        .map(|(n, sample)| {
+            let turn = std::f64::consts::TAU * n as f64 / size as f64;
+            let window =
+                0.358_75 - 0.488_29 * turn.cos() + 0.141_28 * (2.0 * turn).cos() - 0.011_68 * (3.0 * turn).cos();
+            (f64::from(*sample) * window * window) as f32
+        })
+        .collect();
+    let (mut re, mut im) = (vec![0.0f32; size / 2 + 1], vec![0.0f32; size / 2 + 1]);
+    plan.forward(&windowed, &mut re, &mut im);
+    let power: Vec<f64> = re.iter().zip(&im).map(|(re, im)| f64::from(*re).powi(2) + f64::from(*im).powi(2)).collect();
+    let bin_hz = 48_000.0 / size as f64;
+    // The fundamental: the strongest bin within a quarter tone, and the
+    // weight of the bins around it for where between bins it lies.
+    let (low, high) = ((hz * 0.971 / bin_hz) as usize, (hz * 1.03 / bin_hz) as usize + 1);
+    let strongest = (low..=high).max_by(|a, b| power[*a].total_cmp(&power[*b])).unwrap_or(low);
+    let around = strongest.saturating_sub(8)..strongest + 9;
+    let weight: f64 = around.clone().map(|bin| power[bin]).sum();
+    let found = around.map(|bin| bin as f64 * power[bin]).sum::<f64>() / weight.max(1e-30) * bin_hz;
+    let (mut on, mut off) = (0.0f64, 0.0f64);
+    for (bin, power) in power.iter().enumerate().skip(16) {
+        let at = bin as f64 * bin_hz;
+        let harmonic = (at / found).round().max(1.0);
+        let room = (16.0 * bin_hz).max(harmonic * found * 0.003);
+        if (at - harmonic * found).abs() <= room {
+            on += power;
+        } else {
+            off += power;
+        }
+    }
+    let peak = samples[..size].iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    (10.0 * (off.max(1e-30) / on.max(1e-30)).log10(), found, 20.0 * f64::from(peak.max(1e-9)).log10())
+}
+
+/// Not a test of Trill: the table the report quotes. The same held note on
+/// this synth and on the two installed ones, each as it is when it is
+/// made (a sawtooth, on all three), rendered by Trill at 48 kHz.
+#[test]
+#[ignore = "needs Serum 2 (VST3) and Surge XT (CLAP) installed; run with `cargo test -p trill-mcp --test wavetable against_the_installed -- --ignored --nocapture`"]
+fn a_sawtooth_against_the_installed_synths() {
+    use trill_core::device::{CompositeFactory, DeviceFactory};
+    let Some(host) = installed(SERUM).filter(|_| installed(SURGE).is_some()) else { return };
+    let mut factories: Vec<Box<dyn DeviceFactory>> = vec![Box::new(trill_dsp::BuiltinFactory)];
+    factories.extend(host.factories());
+    let factory = CompositeFactory::new(factories);
+    println!("note     Hz    synth                 between the harmonics   pitch found    peak");
+    for pitch in [40u8, 52, 64, 76, 88, 100, 108] {
+        let hz = 440.0 * 2f64.powf((f64::from(pitch) - 69.0) / 12.0);
+        for (name, uri) in [("Trill's wavetable", "builtin:wavetable"), ("Serum 2", SERUM), ("Surge XT", SURGE)] {
+            let mut project = trill_core::Project::new("reference");
+            project.master.devices.clear();
+            let track = project.add_track("Saw");
+            let device = project.add_device(trill_core::ChainRef::Track(track), uri, name, None).unwrap();
+            if uri == "builtin:wavetable" {
+                // As loud whatever the velocity, and held at full level.
+                let model = project.device_mut(device).unwrap();
+                model.params.insert("env1_sustain".into(), 1.0);
+            }
+            let clip = project.add_midi_clip(track, "note", 0.0, 8.0).unwrap();
+            let note = trill_core::Note { pitch, start: 0.0, length: 7.5, velocity: 100 };
+            project.clip_mut(clip).unwrap().add_notes(&[note]).unwrap();
+            let options = trill_engine::RenderOptions { sample_rate: 48_000, ..trill_engine::RenderOptions::default() };
+            let out = trill_engine::render::render(&project, &factory, &options).unwrap();
+            // A second into the note, when whatever a synth does at the
+            // start of one is over.
+            let (between, found, peak) = off_the_note(&out.left[48_000..], hz);
+            println!("{pitch:>4} {hz:>8.1}  {name:<20} {between:>9.1} dB       {found:>9.2} Hz   {peak:>6.1} dBFS");
+        }
+    }
+}
