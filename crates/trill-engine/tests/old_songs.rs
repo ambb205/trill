@@ -536,10 +536,12 @@ fn later_file(plays: Plays, uri: &str, params: &[(&str, f64)], source: &str, hit
     file.replace(&now, "\"format_version\": 2")
 }
 
-/// What is on the track, the device, what the file set on it, and what it
-/// rendered to.
+/// A case of format 2: what is on the track, the device, what the file set
+/// on it, and what it rendered to.
+type Later = (Plays, &'static str, &'static [(&'static str, f64)], Print);
+
 #[rustfmt::skip]
-const LATER: &[(Plays, &str, &[(&str, f64)], Print)] = &[
+const LATER: &[Later] = &[
     (
         Plays::Synth,
         "builtin:polysynth",

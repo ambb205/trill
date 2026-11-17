@@ -269,6 +269,7 @@ the curve holds it, so trim with `output`.";
     mod tests {
         use super::*;
         use crate::testing::*;
+        use std::f32::consts::FRAC_1_SQRT_2;
 
         fn saturated(params: &[(&str, f64)], input: &[f32]) -> Vec<f32> {
             let mut device = Saturator::new();
@@ -311,7 +312,7 @@ the curve holds it, so trim with `output`.";
         fn the_sine_curve_is_clean_under_the_ceiling_and_flat_above_it() {
             // Exactly a quarter of a sine wave: level where it meets the ceiling.
             for (input, wanted) in
-                [(0.0f32, 0.0f32), (0.5, 0.70711), (1.0, 1.0), (-1.0, -1.0), (1.7, 1.0), (-3.0, -1.0)]
+                [(0.0f32, 0.0f32), (0.5, FRAC_1_SQRT_2), (1.0, 1.0), (-1.0, -1.0), (1.7, 1.0), (-3.0, -1.0)]
             {
                 let out = saturated(&[("shape", 3.0), ("drive", 0.0)], &[input]);
                 assert!((out[0] - wanted).abs() < 1e-4, "{input} -> {}", out[0]);
