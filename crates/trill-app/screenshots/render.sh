@@ -72,9 +72,11 @@ sounds=$here/sounds
 pack="$sounds/Night Shift"
 night=$sounds/night-shift.trill
 moved=$sounds/night-shift-moved.trill
+keys=$sounds/night-keys.trill
 if making sounds-browser sounds-drum-rack sounds-sampler sounds-missing-file min-window-sounds \
     graphite-sounds-browser graphite-sounds-drum-rack missing-files missing-files-status \
-    missing-library-folder min-window-missing-files graphite-missing-files; then
+    missing-library-folder min-window-missing-files graphite-missing-files \
+    sampled-instrument sampled-kit min-window-sampled-instrument graphite-sampled-instrument; then
     cargo run -p trill-app --example sound_fixtures -- "$sounds"
 fi
 
@@ -147,6 +149,18 @@ shot sounds-missing-file "$night" --browse sounds --select "Lost Take"
 shot min-window-sounds "$night" --browse sounds --library "$pack" --sound "Bass Loop 120bpm Am" --select "Bass Loop"     --size 1060x640
 shot graphite-sounds-browser "$night" --browse sounds --library "$pack" --sound "Drum Loop Steady 120bpm"     --select "Pad Loop" --theme graphite
 shot graphite-sounds-drum-rack "$night" --browse sounds --library "$pack" --search kick --select Beat --tab devices     --theme graphite
+
+# A sampled instrument: the keys of the pack in their panel (the map of the
+# recordings over the keys and over how hard they are struck, the keys
+# that choose a way of playing lit, the sound for a key coming up standing
+# back) with the instruments of the library listed among the devices; its
+# drum kit; the smallest window; the other theme.
+shot sampled-instrument "$keys" --browse devices --library "$pack" --select "Glass line" --tab devices
+shot sampled-kit "$keys" --browse devices --library "$pack" --select "Tape beat" --tab devices
+shot min-window-sampled-instrument "$keys" --browse devices --library "$pack" --select "Glass line" --tab devices \
+    --size 1060x640
+shot graphite-sampled-instrument "$keys" --browse devices --library "$pack" --select "Glass line" --tab devices \
+    --theme graphite
 
 # Missing files: the same song after its pack was moved. The line in the
 # status bar and the clips marked, with the library pointed at where the

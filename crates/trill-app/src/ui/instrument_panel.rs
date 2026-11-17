@@ -141,10 +141,11 @@ pub(super) fn instrument(ui: &mut Ui, cx: &mut Cx, body: &Body, column: Rect, pa
     let map = KeyMap { boxes: &shown.boxes, range, marks: &shown.switches, accent };
     trill_noir::key_map(&painter, theme, map_rect, &map);
     let response = ui.interact(map_rect, id.with("map"), Sense::hover());
-    let described = shown.said.as_ref().map(|said| format!("{} · {}", amount_words(said), playing_words(said)));
+    // How much there is of it, and where and how it plays.
+    let described = shown.said.as_ref().map(|said| (amount_words(said), playing_words(said)));
     response.widget_info(|| {
         let label = match (&shown.said, &described) {
-            (Some(said), Some(described)) => format!("Instrument {}: {described}", said.name),
+            (Some(said), Some((amount, playing))) => format!("Instrument {}: {amount}, {playing}", said.name),
             _ => "No instrument".to_string(),
         };
         WidgetInfo::labeled(Role::Image, true, label)
@@ -177,9 +178,7 @@ pub(super) fn instrument(ui: &mut Ui, cx: &mut Cx, body: &Body, column: Rect, pa
 
     // How much there is of it, where it plays, and how it is doing.
     let line = |top: f32| Rect::from_min_size(pos2(column.left(), top), vec2(column.width(), LINE));
-    if let (Some(said), Some(described)) = (&shown.said, &described) {
-        let (amount, playing) = described.split_once(" · ").unwrap_or((described, ""));
-        let _ = said;
+    if let Some((amount, playing)) = &described {
         text::paint(&painter, line(top), Align2::LEFT_CENTER, theme.text.micro, amount, theme.ink_dim);
         text::paint_name(&painter, line(top + LINE), Align2::LEFT_CENTER, theme.text.micro, playing, theme.ink_faint);
     }

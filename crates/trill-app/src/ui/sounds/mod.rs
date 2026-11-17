@@ -340,6 +340,7 @@ impl Sounds {
             || !self.pending.is_empty()
             || self.preview.loading.is_some()
             || self.missing.looking
+            || self.instruments.in_flight
             || self.runtime.library.scan_status().is_scanning()
     }
 

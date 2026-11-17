@@ -196,9 +196,12 @@ fn sampled_instruments(ui: &mut Ui, cx: &mut Cx, chain: ChainRef, target: &str, 
     section(ui, cx, "Sampled instruments");
     // The one the selected device plays, if it plays one.
     let playing = cx.state.selected_device.and_then(|device| cx.snap.instruments.get(&device));
-    let playing = playing.and_then(|shown| shown.said.as_ref()).map(|said| said.file.clone());
+    // (Spelled as the library spells its files: a song may name the
+    // instrument from where the program was started.)
+    let playing = playing.and_then(|shown| shown.said.as_ref()).map(|said| std::path::PathBuf::from(&said.file));
+    let playing = playing.map(|file| std::path::absolute(&file).unwrap_or(file));
     for instrument in found {
-        let selected = playing.as_deref().is_some_and(|file| std::path::Path::new(file) == instrument.path);
+        let selected = playing.as_deref() == Some(instrument.path.as_path());
         let response = row_sensing(ui, cx, &instrument.name, &instrument.size, selected, Sense::click_and_drag());
         let action = match chain {
             ChainRef::Master => format!("Double-click for a new track that plays {}", instrument.name),
