@@ -113,7 +113,8 @@ bend, vibrato on the mod wheel). measure names any track that had notes and made
 pitch shifter...), update_device for parameters, set_automation for movement such as filter sweeps, fades and a \
 send opened for one note (a delay throw), update_track for the mix. describe_device says what each parameter does \
 and in what unit. Two points are enough for a fade or a sweep: the line between them follows the control's travel \
-(a fader for a level, pitch for a frequency), so it does not need to be laid out in small steps.
+(a fader or a gain as Ableton Live's move for a level, pitch for a frequency), so it does not need to be laid out \
+in small steps.
 5. measure reports loudness, true peak, spectral balance, every track's level and loudness, each section's \
 loudness and what the compressors and limiters took off, without writing a file. You cannot hear, so read those \
 numbers and adjust, as often as it takes.
@@ -212,7 +213,11 @@ pub(crate) type Reply = Result<Value, String>;
 fn resolve_target(session: &Session, input: &TargetInput) -> Result<(AutomationTarget, f64, f64, Travel), String> {
     let project = session.project();
     let need = |value: Option<u64>, what: &str| value.ok_or_else(|| format!("this target needs `{what}`"));
-    let volume = |target: AutomationTarget| (target, f64::MIN, MAX_VOLUME_DB as f64, Travel::FADER);
+    let volume = |target: AutomationTarget| {
+        // A send is a fader too, with its knee where a send's is.
+        let travel = target.travel().unwrap_or(Travel::FADER);
+        (target, f64::MIN, MAX_VOLUME_DB as f64, travel)
+    };
     let found = |track: TrackId| project.track(track).map_err(|error| explain(project, error));
     Ok(match input.kind {
         TargetKind::TrackVolume => {
@@ -1682,9 +1687,14 @@ impl TrillServer {
     ///
     /// A line between two points is straight along the control's travel, as if a hand moved the control at an
     /// even speed. It is not straight in the value's units:
-    /// - a volume, a send, a gain or an instrument's volume travels like a fader ("fader"): from 0 dB to -60 dB
-    ///   it is at -9 dB after a quarter of the time, -20 dB half way and -34 dB after three quarters, so a fade
-    ///   is heard all the way down and a fade-in is not sudden;
+    /// - a level that ends in silence travels as the same control does in Ableton Live, so a fade is heard all
+    ///   the way down and a fade-in is not sudden. A track's or the master's volume, a send and an
+    ///   instrument's volume move like a fader ("fader"): even in dB through the top 24 dB of the travel, and
+    ///   below that ever faster, a stretch that would have been y dB taking y + y*y/8. From 0 dB to -60 dB a
+    ///   volume is at -8 dB after a quarter of the time, -16 dB half way and -30 dB after three quarters; a
+    ///   send, whose top is 0 dB, at -9, -19 and -30 dB. A Utility's `gain` moves like a gain ("gain"): even in
+    ///   dB down to -17.5 dB, and below that the gain itself falls as the square of what is left of the
+    ///   travel: -8 dB, -17 dB half way and -27 dB;
     /// - a frequency or a time travels by ratio ("log"): a sweep from 300 Hz to 9 kHz is at 1.6 kHz half way,
     ///   every octave taking the same time;
     /// - everything else evenly ("linear"): pan, mix and other amounts, an EQ's gain, a threshold, and every
@@ -1692,8 +1702,10 @@ impl TrillServer {
     ///
     /// So two points are a fade or a sweep; there is no need to lay a line out in short pieces. `shape` on a
     /// point bends its line further, and `travel` "linear" asks for lines straight in the units. An envelope
-    /// that was in a project file saved before lines followed their controls is "linear", and stays so until
-    /// its points are written again. The reply says which travel the envelope has.
+    /// that was in a project file saved before lines followed their controls is "linear", and one of a level
+    /// saved before levels travelled as Live's do is "square" (even in the square of the dB above silence:
+    /// -20 dB half way from 0 to -60); each stays so until its points are written again or `travel` is set
+    /// to "control". The reply says which travel the envelope has.
     #[tool(annotations(title = "Set automation"))]
     fn set_automation(&self, Parameters(request): Parameters<SetAutomationRequest>) -> CallToolResult {
         let mut session = self.session.lock();
@@ -1753,7 +1765,8 @@ impl TrillServer {
     }
 
     /// The automation envelopes of the project: what each moves, how many points it has, what its lines are
-    /// straight along ("fader", "log" or "linear", see set_automation), and its points as [beat, value, shape?].
+    /// straight along ("fader", "gain", "log", "linear" or, in an older song, "square": see set_automation),
+    /// and its points as [beat, value, shape?].
     /// A song can hold tens of thousands of points, so one reply lists at most `limit` of them (1000 unless
     /// told otherwise): the envelopes that did not fit are listed without points, and one that fits in part
     /// says `next_offset`. Ask for one `target`, a stretch of beats (`start`, `end`), or the next part

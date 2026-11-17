@@ -1566,7 +1566,7 @@ mod tests {
         // a synth, whose volume has moved 21 dB down the scale since, and
         // devices whose sound has changed since. The second has an
         // envelope that travels along the fader of the day.
-        for (format, travel) in [(2, Travel::Linear), (3, Travel::Fader { floor: -48.0 })] {
+        for (format, travel) in [(2, Travel::Linear), (3, Travel::Square { floor: -48.0 })] {
             let mut song = Project::new("Song");
             let track = song.add_track("Lead");
             let synth = song.add_device(ChainRef::Track(track), "builtin:polysynth", "Poly Synth", None).unwrap();

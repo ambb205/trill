@@ -180,7 +180,7 @@ async fn tools_are_listed_with_schemas() {
     // Automation: what can be moved, how a line travels, and how to read a long envelope.
     let automation = tools.iter().find(|tool| tool.name == "set_automation").unwrap();
     let described = automation.description.clone().unwrap_or_default();
-    for word in ["send", "fader", "-20 dB half way", "1.6 kHz", "by ratio", "throw"] {
+    for word in ["send", "fader", "-16 dB half way", "\"gain\"", "Ableton Live", "1.6 kHz", "by ratio", "throw"] {
         assert!(described.contains(word), "set_automation should say '{word}': {described}");
     }
     assert!(schema_of("set_automation").contains("\"send\"") && schema_of("set_automation").contains("travel"));
@@ -1397,14 +1397,14 @@ async fn a_line_follows_the_travel_of_its_control_and_an_old_file_plays_as_it_di
     let cutoff = json!({ "type": "device_param", "device": filter, "param": "cutoff" });
     assert_eq!(write(cutoff.clone(), json!([[0, 20000], [16, 20000]])).await, "log");
     let gain = json!({ "type": "device_param", "device": utility, "param": "gain" });
-    assert_eq!(write(gain, json!([[0, 0], [16, 0]])).await, "fader");
+    assert_eq!(write(gain, json!([[0, 0], [16, 0]])).await, "gain");
     let boost = json!({ "type": "device_param", "device": eq, "param": "mid1_gain" });
     assert_eq!(write(boost, json!([[0, 0], [16, 0]])).await, "linear");
 
-    // A fade along the fader is at -20 dB half way...
+    // A fade along the fader is at -16.3 dB half way, as Live's is...
     let full = peak_of(client, lead, 0.0, 0.2).await.expect("the lead sounds");
     let half_way = peak_of(client, lead, 8.0, 8.1).await.expect("the fade is still heard half way");
-    assert!((half_way - (full - 20.0)).abs() < 0.6, "{half_way} for {full}");
+    assert!((half_way - (full - 16.3)).abs() < 0.6, "{half_way} for {full}");
     // ...and straight in decibels, when that is asked for, at -30 dB.
     let straight = ok(client, "set_automation", json!({ "target": volume, "travel": "linear" })).await;
     assert_eq!((straight["travel"].as_str(), straight["point_count"].as_u64()), (Some("linear"), Some(2)));
@@ -1443,6 +1443,32 @@ async fn a_line_follows_the_travel_of_its_control_and_an_old_file_plays_as_it_di
     // And one whose travel is set back to its control's follows it again.
     let again = ok(client, "set_automation", json!({ "target": cutoff, "travel": "control" })).await;
     assert_eq!(again["travel"], "log");
+
+    // A file as formats 3 to 5 saved it calls the law of its day a fader,
+    // with the level it was measured from. It opens, its lane says which
+    // law that is, and its fade is the one it had: -20 dB half way.
+    ok(client, "save_project", json!({ "path": path.display().to_string() })).await;
+    let mut saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    saved["format_version"] = json!(5);
+    let mut faders = 0;
+    for lane in saved["automation"].as_array_mut().unwrap() {
+        if lane["travel"].get("fader").is_some() {
+            lane["travel"] = json!({ "fader": { "floor": -70.0 } });
+            faders += 1;
+        }
+    }
+    assert_eq!(faders, 1, "the track's fader, the one lane written since the older file was read: {saved}");
+    std::fs::write(&path, serde_json::to_string_pretty(&saved).unwrap()).unwrap();
+    ok(client, "load_project", json!({ "path": path.display().to_string() })).await;
+    let lanes = ok(client, "get_automation", json!({ "target": volume })).await;
+    assert_eq!(lanes["automation"][0]["travel"], "square", "{lanes}");
+    let as_it_was = peak_of(client, lead, 8.0, 8.1).await.expect("heard");
+    assert!((as_it_was - (full - 20.0)).abs() < 0.6, "{as_it_was} for {full}");
+    // Set to follow its control, it falls as a fader does now.
+    let follows = ok(client, "set_automation", json!({ "target": volume, "travel": "control" })).await;
+    assert_eq!(follows["travel"], "fader");
+    let now = peak_of(client, lead, 8.0, 8.1).await.expect("heard");
+    assert!((now - (full - 16.3)).abs() < 0.6, "{now} for {full}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

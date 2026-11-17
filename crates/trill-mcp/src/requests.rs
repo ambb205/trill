@@ -451,9 +451,10 @@ pub struct SetAutomationRequest {
     /// says otherwise.
     pub enabled: Option<bool>,
     /// What the lines are straight along. Omit it (or "control") for the control's own travel, which is what a
-    /// fade or a sweep means: a volume or a send moves as a fader does, a frequency or a time by ratio, an
-    /// amount evenly. "linear" makes them straight in the value's units instead (a fade then loses the same
-    /// number of dB every beat and is all but silent half way down). The reply says which the envelope has.
+    /// fade or a sweep means: a volume or a send moves as a fader does and a Utility's gain as a gain does (both
+    /// as in Ableton Live), a frequency or a time by ratio, an amount evenly. "linear" makes them straight in
+    /// the value's units instead (a fade then loses the same number of dB every beat and is all but silent
+    /// half way down). The reply says which the envelope has.
     pub travel: Option<TravelInput>,
 }
 

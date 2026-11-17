@@ -891,7 +891,7 @@ fn a_song_of_format_3_renders_to_the_samples_it_rendered_to_before() {
     let factory = Builtins::with_loader(Arc::new(MediaCache::default()));
     // How that build had an envelope on these two parameters travel: along
     // a fader down to the lowest value each had then.
-    let (volume, gain) = (Travel::Fader { floor: -48.0 }, Travel::Fader { floor: -70.0 });
+    let (volume, gain) = (Travel::Square { floor: -48.0 }, Travel::Square { floor: -70.0 });
     let songs = [
         ("a sampler beside a synth through a saturator", band(&hit)),
         ("an envelope on a synth's volume, along its fader", faded(volume, gain)),

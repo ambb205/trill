@@ -25,9 +25,10 @@ use trill_noir::{Automation, BarOutput, MenuItem, paint};
 /// straight lines in its lane.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Scale {
-    /// Decibels on the fader scale: a volume, or a send, whose bottom is
-    /// shut.
+    /// Decibels on the fader scale: a volume, whose bottom is silence.
     Volume,
+    /// Decibels on the scale of a send's bar, whose bottom is shut.
+    Send,
     /// -1 (left) to 1 (right).
     Pan,
     Param(ParamInfo),
@@ -41,9 +42,8 @@ impl Scale {
     /// does not describe (its device failed to load, or is not covered yet).
     pub fn of(snapshot: &Snapshot, target: &AutomationTarget) -> Option<Self> {
         Some(match target {
-            AutomationTarget::TrackVolume { .. } | AutomationTarget::MasterVolume | AutomationTarget::Send { .. } => {
-                Scale::Volume
-            }
+            AutomationTarget::TrackVolume { .. } | AutomationTarget::MasterVolume => Scale::Volume,
+            AutomationTarget::Send { .. } => Scale::Send,
             AutomationTarget::TrackPan { .. } => Scale::Pan,
             AutomationTarget::DeviceParam { device, param } => {
                 Scale::Param(snapshot.param(*device, param)?.info.clone())
@@ -55,6 +55,7 @@ impl Scale {
     pub fn position(&self, value: f64) -> f32 {
         match self {
             Scale::Volume => units::db_to_fader(value as f32),
+            Scale::Send => units::db_to_send(value as f32),
             Scale::Pan => ((value as f32 + 1.0) / 2.0).clamp(0.0, 1.0),
             Scale::Param(info) => ParamScale::of(info).normalize(info, value) as f32,
             Scale::Controller(kind) => {
@@ -70,6 +71,7 @@ impl Scale {
         match self {
             // Tenths of a decibel: finer is not audible, and it reads cleanly.
             Scale::Volume => (units::fader_to_db(position) as f64 * 10.0).round() / 10.0,
+            Scale::Send => (units::send_to_db(position) as f64 * 10.0).round() / 10.0,
             Scale::Pan => {
                 let pan = ((position.clamp(0.0, 1.0) * 2.0 - 1.0) as f64 * 100.0).round() / 100.0;
                 // A small dead zone makes center easy to find again.
@@ -90,7 +92,7 @@ impl Scale {
 
     pub fn format(&self, value: f64) -> String {
         match self {
-            Scale::Volume => units::format_db(value as f32),
+            Scale::Volume | Scale::Send => units::format_db(value as f32),
             Scale::Pan => units::format_pan(value as f32),
             Scale::Param(info) => units::format_param(info, value),
             Scale::Controller(kind) if kind.is_switch() => if value >= 0.5 { "Down" } else { "Up" }.to_owned(),
@@ -104,6 +106,7 @@ impl Scale {
     pub fn default_position(&self) -> f32 {
         match self {
             Scale::Volume => units::db_to_fader(0.0),
+            Scale::Send => units::db_to_send(0.0),
             Scale::Pan => 0.5,
             Scale::Param(info) => self.position(info.default),
             Scale::Controller(kind) => self.position(kind.rest().unwrap_or(0.0)),
@@ -125,6 +128,7 @@ impl Scale {
     pub fn travel(&self) -> Travel {
         match self {
             Scale::Volume => Travel::FADER,
+            Scale::Send => Travel::SEND,
             Scale::Pan | Scale::Controller(_) => Travel::Linear,
             Scale::Param(info) => ParamScale::of(info).0,
         }
@@ -133,7 +137,8 @@ impl Scale {
     /// True when a line of an envelope that travels along `lines` is a
     /// straight line on this scale: when the envelope follows its control.
     /// One from a file saved before envelopes did is straight in its units,
-    /// and on a fader's or a frequency's scale that is a curve.
+    /// and on a fader's or a frequency's scale that is a curve; so is one
+    /// that a file saved along the fader of its day.
     pub fn straight(&self, lines: Travel) -> bool {
         self.travel() == lines
     }
@@ -143,14 +148,15 @@ impl Scale {
     /// the units.
     pub fn travel_words(&self) -> Option<(&'static str, String)> {
         let unit = match self {
-            Scale::Volume => "dB",
+            Scale::Volume | Scale::Send => "dB",
             Scale::Param(info) if !info.unit.trim().is_empty() => info.unit.trim(),
             _ => "its units",
         };
         match self.travel() {
-            Travel::Linear => None,
+            // No control travels by the law of older songs.
+            Travel::Linear | Travel::Square { .. } => None,
             Travel::Fader { .. } => Some(("Lines follow the fader", format!("Lines straight in {unit}"))),
-            Travel::Log => Some(("Lines follow the knob", format!("Lines straight in {unit}"))),
+            Travel::Gain { .. } | Travel::Log => Some(("Lines follow the knob", format!("Lines straight in {unit}"))),
         }
     }
 }
@@ -497,6 +503,14 @@ mod tests {
         // fader, and a curve there when it is straight in decibels.
         assert!(Scale::Volume.straight(Travel::FADER) && !Scale::Volume.straight(Travel::Linear));
         assert_eq!(Scale::Volume.travel_words(), Some(("Lines follow the fader", "Lines straight in dB".to_owned())));
+        // The fader of an older song is neither: its lines are a curve here.
+        assert!(!Scale::Volume.straight(Travel::Square { floor: -70.0 }));
+        // A send's lane is its bar: the same law with its knee 6 dB lower.
+        assert_eq!(Scale::Send.position(0.0), units::db_to_send(0.0));
+        assert_eq!(Scale::Send.value(units::db_to_send(-12.0)), -12.0);
+        assert_eq!((Scale::Send.position(-70.0), Scale::Send.format(-70.0).as_str()), (0.0, "\u{2212}\u{221E} dB"));
+        assert!(Scale::Send.straight(Travel::SEND) && !Scale::Send.straight(Travel::FADER));
+        assert_eq!(Scale::Send.travel_words(), Some(("Lines follow the fader", "Lines straight in dB".to_owned())));
 
         assert_eq!(Scale::Pan.position(-1.0), 0.0);
         assert_eq!(Scale::Pan.position(0.5), 0.75);
@@ -570,9 +584,9 @@ mod tests {
         let throw = AutomationTarget::Send { track, to: echo };
         assert_eq!((&found[2].target, &found[2].device), (&throw, &None));
         assert_eq!(names(&snapshot, &throw), ("Send to Echo".to_owned(), None));
-        assert_eq!(Scale::of(&snapshot, &throw), Some(Scale::Volume));
+        assert_eq!(Scale::of(&snapshot, &throw), Some(Scale::Send));
         assert_eq!(resting_value(&snapshot, &throw), Some(MIN_VOLUME_DB as f64), "no send by hand is none");
-        assert_eq!(lines(&snapshot, &throw), (Travel::FADER, Travel::FADER));
+        assert_eq!(lines(&snapshot, &throw), (Travel::SEND, Travel::SEND));
         // A return sends nowhere.
         let of_return: Vec<String> =
             choices(&snapshot, LaneOwner::Track(hall)).into_iter().map(|choice| choice.name).collect();

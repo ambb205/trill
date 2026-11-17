@@ -152,8 +152,11 @@ on the samples.
 - **A line of automation follows its control, and positions are read from the song.** A lane keeps what its
   lines are straight along (`AutomationLane::travel`; `Travel::of_param` says it for a device's parameter); a lane
   that says nothing is straight in its units, which is every lane of a file saved before (format version 1 or 2), and
-  must go on playing exactly so. Whoever writes a new lane says how it travels (`Project::write_automation`);
-  `set_automation` keeps what a lane has. On the audio thread an envelope is read on a grid of the song's own
+  must go on playing exactly so. A level travels as the same control does in Ableton Live (`Travel::Fader` for a
+  volume or a send, `Travel::Gain` for a gain: fitted to what Live shows, and `trill-engine/tests/automation.rs`
+  holds renders to those numbers); a lane that a file of formats 3 to 5 saved along the fader of its day is
+  `Travel::Square`, read so by its words, and plays as it did. Whoever writes a new lane says how it travels
+  (`Project::write_automation`); `set_automation` keeps what a lane has. On the audio thread an envelope is read on a grid of the song's own
   frames (`glide.rs`, `PARAM_STEP`), never once per buffer: the same song is the same samples at any buffer size.
   What mute and solo open and shut (a track's sound, its way to its output, a send) is a `Gate` that multiplies
   the level, over a fixed number of frames: never a ramp across a buffer. Everything there turns a position in
