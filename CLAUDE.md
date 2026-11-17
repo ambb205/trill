@@ -124,6 +124,11 @@ on the samples.
   are played in `Project::playing_order`, each after the tracks that feed it (`Project::feeds`: a group's
   members, a return's senders, a device's key), and the edits refuse a loop. Whatever decides which tracks a
   render makes has to ask `feeds`.
+  A device says whether it can listen (`DeviceProcessor::takes_key`) and is then handed the key with its block
+  (`process_keyed`). A hosted plugin listens through the input after an effect's own, or an instrument's first
+  (`trill-plugins/src/signal.rs`, `key_port`). VST3 has the host switch that input on, which a plugin may take
+  to mean "listen to this": it is on only for a device that listens, and such a device is made again when that
+  changes (`key_is_set_when_made`; `trill-plugins/src/key_tests.rs` holds both formats).
 - **Something that names a file:** a song's files are its audio clips' and what its devices say theirs are
   (`DeviceFiles`; `trill_dsp::SampleFiles` for the sampler and the drum rack). A device that keeps a path in its
   state and does not say so there is not listed as missing, not looked for and not relinked. The project file's

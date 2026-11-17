@@ -183,9 +183,10 @@ fn generic_rows(body_height: f32, bar: f32, gap: f32) -> usize {
 }
 
 /// How many columns `count` parameters need at `rows` per column, with one
-/// slot taken by the filter box when there is one.
-fn generic_columns(count: usize, rows: usize) -> usize {
-    let slots = count + usize::from(count > FILTER_ABOVE);
+/// slot taken by the filter box when there is one, and one by the track
+/// the device listens to when it `listens`.
+fn generic_columns(count: usize, rows: usize, listens: bool) -> usize {
+    let slots = count + usize::from(count > FILTER_ABOVE) + usize::from(listens);
     slots.div_ceil(rows.max(1)).max(1)
 }
 
@@ -204,7 +205,8 @@ fn panel_width(cx: &Cx, device: &Device, panel_height: f32) -> f32 {
         (None, Some(Ok(params))) => {
             let metric = cx.theme.metric;
             let body = panel_height - PANEL_HEADER - BODY_TOP - BODY_BOTTOM;
-            let columns = generic_columns(params.len(), generic_rows(body, metric.bar, metric.gap)) as f32;
+            let rows = generic_rows(body, metric.bar, metric.gap);
+            let columns = generic_columns(params.len(), rows, cx.snap.can_listen(device.id)) as f32;
             columns * GENERIC_COLUMN + (columns - 1.0) * COLUMN_GAP + 2.0 * BODY_PADDING
         }
         (None, Some(Err(_))) => FAILED_PANEL_WIDTH,
@@ -714,7 +716,9 @@ fn toggle_chip(ui: &Ui, cx: &mut Cx, body: &Body, param: &ParamState, label: &st
 // ---- the generic layout ----------------------------------------------------
 
 /// Parameters in declared order, flowing down columns: bars for numbers, a
-/// chip for a switch, a dropdown for a choice.
+/// chip for a switch, a dropdown for a choice. Ahead of them the track the
+/// device listens to, for one that can listen (a plugin that has an input
+/// for it), and the filter box of one with many parameters.
 fn generic_body(ui: &mut Ui, cx: &mut Cx, body: &Body, area: Rect) {
     let theme = cx.theme;
     let (bar, gap) = (theme.metric.bar, theme.metric.gap);
@@ -726,15 +730,19 @@ fn generic_body(ui: &mut Ui, cx: &mut Cx, body: &Body, area: Rect) {
     };
 
     let mut next = 0;
+    if cx.snap.can_listen(body.device.id) {
+        sidechain_row(ui, cx, body, slot(next));
+        next += 1;
+    }
     let mut query = String::new();
     if body.params.len() > FILTER_ABOVE {
         let memory = body.id.with("filter");
         query = ui.data(|data| data.get_temp(memory)).unwrap_or_default();
         let hint = format!("Filter {} parameters", body.params.len());
-        let response = trill_noir::text_field(ui, theme, slot(0), memory, &mut query, &hint);
+        let response = trill_noir::text_field(ui, theme, slot(next), memory, &mut query, &hint);
         cx.hint(&response, "Type part of a parameter\u{2019}s name to show only the matches");
         ui.data_mut(|data| data.insert_temp(memory, query.clone()));
-        next = 1;
+        next += 1;
     }
     let query = query.trim().to_lowercase();
 
@@ -815,12 +823,17 @@ mod tests {
         assert_eq!(generic_rows(249.0, 18.0, 3.0), 12, "a twelfth bar needs 249");
         assert_eq!(generic_rows(5.0, 18.0, 3.0), 1, "a body too short for a row still has one");
 
-        assert_eq!(generic_columns(0, 11), 1, "an empty panel still has a body");
-        assert_eq!(generic_columns(11, 11), 1);
-        assert_eq!(generic_columns(12, 11), 2);
-        assert_eq!(generic_columns(40, 11), 4);
-        assert_eq!(generic_columns(44, 11), 5, "above forty the filter box takes the first slot");
-        assert_eq!(generic_columns(5, 0), 5);
+        assert_eq!(generic_columns(0, 11, false), 1, "an empty panel still has a body");
+        assert_eq!(generic_columns(11, 11, false), 1);
+        assert_eq!(generic_columns(12, 11, false), 2);
+        assert_eq!(generic_columns(40, 11, false), 4);
+        assert_eq!(generic_columns(44, 11, false), 5, "above forty the filter box takes the first slot");
+        assert_eq!(generic_columns(5, 0, false), 5);
+        // The track a device listens to takes a slot too.
+        assert_eq!(generic_columns(10, 11, true), 1);
+        assert_eq!(generic_columns(11, 11, true), 2);
+        assert_eq!(generic_columns(0, 11, true), 1);
+        assert_eq!(generic_columns(43, 11, true), 5, "with the filter box, two slots");
     }
 
     #[test]

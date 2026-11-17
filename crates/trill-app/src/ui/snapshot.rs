@@ -55,6 +55,10 @@ pub struct Snapshot {
     /// The devices that bring a window of their own (plugins do, built-in
     /// devices do not), in ascending order.
     pub editors: Vec<DeviceId>,
+    /// The devices that can listen to another track in place of their own
+    /// input (a compressor, a plugin with an input for it), in ascending
+    /// order.
+    pub listeners: Vec<DeviceId>,
     /// The presets that were saved for the device types `params` covers,
     /// by device URI; a type without any is not in it.
     pub saved_presets: HashMap<String, Vec<PresetInfo>>,
@@ -129,9 +133,11 @@ impl Snapshot {
         // Asked of every device, shown or not: the mixer lists them all.
         // For a built-in device it is a failed lookup and no more.
         let chains = project.tracks.iter().map(|track| &track.devices).chain([&project.master.devices]);
-        let mut editors: Vec<DeviceId> =
-            chains.flatten().map(|device| device.id).filter(|id| session.device_has_editor(*id)).collect();
+        let devices: Vec<DeviceId> = chains.flatten().map(|device| device.id).collect();
+        let mut editors: Vec<DeviceId> = devices.iter().copied().filter(|id| session.device_has_editor(*id)).collect();
         editors.sort_unstable();
+        let mut listeners: Vec<DeviceId> = devices.iter().copied().filter(|id| session.device_takes_key(*id)).collect();
+        listeners.sort_unstable();
         let controller_support =
             project.tracks.iter().map(|track| (track.id, session.controller_support(track.id))).collect();
         let ids = || project.tracks.iter().map(|track| track.id);
@@ -162,6 +168,7 @@ impl Snapshot {
             params_tracks: shown.iter().map(|track| track.id).collect(),
             params,
             editors,
+            listeners,
             clip_notes: RefCell::default(),
             track_meters,
             master_meter: session.master_meter(),
@@ -226,6 +233,7 @@ impl Snapshot {
             params_tracks,
             params,
             editors: Vec::new(),
+            listeners: Vec::new(),
             clip_notes: RefCell::default(),
             track_meters: Vec::new(),
             master_meter: Arc::default(),
@@ -290,6 +298,11 @@ impl Snapshot {
     /// Whether `device` brings a window of its own to open.
     pub fn has_editor(&self, device: DeviceId) -> bool {
         self.editors.binary_search(&device).is_ok()
+    }
+
+    /// Whether `device` can be given another track to listen to.
+    pub fn can_listen(&self, device: DeviceId) -> bool {
+        self.listeners.binary_search(&device).is_ok()
     }
 
     /// The description of a device's parameter, when the snapshot covers
