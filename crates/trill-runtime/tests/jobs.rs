@@ -499,3 +499,62 @@ fn two_sessions_of_one_program_that_render_at_once_each_get_their_own_samples() 
         assert!(other.join().unwrap().iter().all(|left| *left == second.left), "the song without its bass did");
     });
 }
+
+/// A song with a recording that follows its tempo beside a plugin: the
+/// process that renders it reads and stretches the file itself, and what
+/// it makes is what the program makes. Prints what each took; with
+/// `TRILL_WARPED_SECONDS` in the environment the recording is that long
+/// (eight seconds otherwise), for finding out what a long one costs.
+#[test]
+fn a_recording_that_follows_the_tempo_is_read_and_stretched_by_the_process_that_renders_it() {
+    use trill_core::project::{AudioContent, WarpMode};
+    let seconds: f64 = std::env::var("TRILL_WARPED_SECONDS").ok().and_then(|text| text.parse().ok()).unwrap_or(8.0);
+    let folder = tempfile::tempdir().unwrap();
+    let file = folder.path().join("recorded at 100.wav");
+    // A tone that rises and a click on every beat of 100 to the minute.
+    let rate = f64::from(SR);
+    let samples: Vec<f32> = (0..(seconds * rate) as usize)
+        .map(|frame| {
+            let time = frame as f64 / rate;
+            let tone = (std::f64::consts::TAU * (220.0 + 20.0 * time) * time).sin() * 0.3;
+            let click = if (time % 0.6) < 0.002 { 0.6 } else { 0.0 };
+            (tone + click) as f32
+        })
+        .collect();
+    let buffer = trill_core::audio::AudioBuffer { sample_rate: rate, left: samples.clone(), right: samples };
+    trill_media::write_wav(&file, &buffer, trill_media::WavFormat::Float32).unwrap();
+
+    let runtime = apart(Loading::default());
+    runtime
+        .session
+        .lock()
+        .edit(|project| {
+            project.set_tempo(132.0)?;
+            part(project, "Bass", BASS, &[40, 43, 45, 47]);
+            let recorded = project.add_track("Recorded");
+            let beats = seconds / 0.6;
+            let content = AudioContent::new(file.display().to_string());
+            let clip = project.add_audio_clip(recorded, "take", 0.0, beats, content)?;
+            project.set_clip_warp(clip, WarpMode::Tonal, Some(100.0), 0.0)
+        })
+        .unwrap();
+    let timed = |runtime: &Runtime| {
+        let begun = Instant::now();
+        (rendered(runtime, &plain()).unwrap(), begun.elapsed())
+    };
+    runtime.do_jobs_here();
+    let (here, first_here) = timed(&runtime);
+    let (_, again_here) = timed(&runtime);
+    runtime.do_jobs_apart(Jobs { scripted: Some(Loading::default()), ..Jobs::by(program()) }).unwrap();
+    let (there, first_there) = timed(&runtime);
+    let (again, again_there) = timed(&runtime);
+    eprintln!(
+        "{seconds} s of recording, stretched: rendered here in {first_here:.2?} and again in {again_here:.2?}; in a \
+         process of its own in {first_there:.2?} and again in {again_there:.2?}"
+    );
+    assert!(here.left.iter().any(|sample| sample.abs() > 0.05), "the song sounds");
+    assert!(there.left == here.left && there.right == here.right, "the process stretched it otherwise");
+    assert!(again.left == here.left);
+    assert!(here.problems.is_empty() && there.problems.is_empty(), "{:?} {:?}", here.problems, there.problems);
+    assert_eq!(jobs_done(&runtime), (2, 2));
+}

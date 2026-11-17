@@ -542,10 +542,12 @@ impl Apart {
     /// the song's plugins the job makes.
     fn room_for(&self, what: &str, share: f64) -> Result<(), String> {
         let Some(room) = (self.inner.setup.room)() else { return Ok(()) };
-        // A process of its own holds the plugins it makes once more: about
-        // as much as this one holds for them now.
+        // A process of its own holds the plugins it makes once more: what
+        // this one holds for them now and an eighth over, since it has
+        // their code and what they share to itself (measured: a song that
+        // held 8.0 GB open took 8.6 GB there, one of 2.9 GB took 3.2 GB).
         let holds = ready::Vitals::now().map_or(0, |vitals| vitals.asked);
-        let needs = ((holds as f64 * share) as u64).max(LEAST_FREE);
+        let needs = ((holds as f64 * share * 1.125) as u64).max(LEAST_FREE);
         let gigabytes = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
         if room.free >= needs && room.can_take >= needs {
             return Ok(());
