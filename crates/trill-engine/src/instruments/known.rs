@@ -20,26 +20,24 @@ const AMPLE: &str = "Keyswitches sit under the range and sound nothing: press on
                      another is pressed; slide slides up into the next note from below, once; hammer and glide join \
                      notes that overlap (hammer-ons and pull-offs, or a slide along the string from the note before) \
                      and must be pressed before the first of them. The writing tools do all of that when a note is \
-                     asked for by the articulation's name. The keys above the range play noises, not notes. \
-                     Measured on the plugin: a hammer-on up to seven semitones above the note before sounds wherever \
-                     it was tried; a pull-off down is safe to four semitones and silent beyond five, and now and \
-                     then silent closer too, where the instrument has put the upper note on an open string (it \
-                     picks strings itself): write the lower note picked where it must sound. A hammered or pulled \
-                     note is some 6 dB quieter than a picked one. A harmonic rings an octave above its key and a \
-                     pinch harmonic two, at every key and however hard it is hit (the writing tools write the key \
-                     under the pitch asked for). How loud one is against a picked note is the preset's doing: a \
-                     pinch harmonic is as loud on most and some 15 dB quieter on some, and the bass's harmonic is \
-                     some 13 dB quieter. The pitch wheel bends two semitones each way. This depends on \
-                     the plugin's parameter \"Auto Legato\", its automatic legato. At 1, where the guitars start \
-                     and where nearly every preset of the maker's leaves it, a note that begins while a \
-                     neighbouring one still rings (up to four keys above it) is hammered on without the hammer key \
-                     as well, which spoils a picked chord and makes a fast run over neighbouring keys sound wrong; \
-                     at 2 the bass joins such notes another way. Set it to 0 so that only the keys join notes: \
-                     update_device with params {\"Auto Legato\": \"0\"}, and again after giving the device a \
-                     preset, which brings its own value. As it comes, two renders of it are not the same \
-                     samples: it draws at random which recording of a note it plays (the guitars) and the noise \
-                     of the hand moving between frets. Where renders must repeat, have it take them in turn: \
-                     update_device with settings {\"Cycle Mode Switch\": 1, \"M-Fret Sound\": 0}, after any preset.";
+                     asked for by the articulation's name. The keys above the range play noises, not notes. Measured on \
+                     the plugin: a hammer-on sounds up to seven semitones above the note before; a pull-off is safe \
+                     down to four semitones, silent beyond five, and now and then silent closer too, where the upper \
+                     note was put on an open string (the instrument picks strings itself): where the lower note must \
+                     sound, pick it. A joined note is some 6 dB quieter than a picked one. A harmonic rings an octave \
+                     above its key and a pinch harmonic two, at every key and however hard it is hit (the writing tools \
+                     write the key under the pitch asked for); some presets play a pinch harmonic some 15 dB quieter \
+                     than a picked note, and the bass's harmonic is some 13 dB quieter. The pitch wheel bends two \
+                     semitones each way. The plugin's parameter \"Auto Legato\", its automatic legato, changes this. At \
+                     1, where the guitars start and nearly every preset of the maker's leaves it, a note that begins \
+                     while a neighbouring one still rings (up to four keys above it) is hammered on without the hammer \
+                     key, which spoils a picked chord and a fast run over neighbouring keys; at 2 the bass joins such \
+                     notes another way. Set it to 0 so that only the keys join notes: update_device with params \
+                     {\"Auto Legato\": \"0\"}, again after any preset, which brings its own value. As it comes, two \
+                     renders of it are not the same samples: it draws at random which recording of a note it plays (the guitars) \
+                     and the noise of the hand moving between frets. Where renders must repeat, have it take them in \
+                     turn: update_device with settings {\"Cycle Mode Switch\": 1, \"M-Fret Sound\": 0}, after any \
+                     preset.";
 
 /// What the instruments modelled by Audio Modeling have in common.
 const SWAM: &str = "A physical model, not recordings: it is silent until it is given expression (controller 11), \
