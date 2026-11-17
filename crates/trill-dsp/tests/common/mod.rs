@@ -202,6 +202,28 @@ impl MemoryLoader {
     }
 }
 
+/// Files that describe instruments, in memory instead of on a disk.
+#[derive(Default)]
+pub struct MemoryTexts {
+    files: std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, String>>,
+}
+
+impl MemoryTexts {
+    pub fn insert(&self, path: &str, text: &str) {
+        self.files.lock().unwrap().insert(path.into(), text.to_string());
+    }
+}
+
+impl trill_dsp::sampled::Texts for MemoryTexts {
+    fn read(&self, path: &std::path::Path) -> Result<String, String> {
+        self.files.lock().unwrap().get(path).cloned().ok_or_else(|| "there is no such file".to_string())
+    }
+
+    fn stamp(&self, path: &std::path::Path) -> Option<u64> {
+        self.files.lock().unwrap().get(path).map(|text| text.len() as u64)
+    }
+}
+
 impl trill_core::audio::AudioLoader for MemoryLoader {
     fn load(&self, path: &str) -> Result<std::sync::Arc<trill_core::audio::AudioBuffer>, String> {
         self.loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

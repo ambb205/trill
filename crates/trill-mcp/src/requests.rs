@@ -144,7 +144,8 @@ pub struct AddDeviceRequest {
     /// (.SerumPreset, an Ample instrument's preset, an Archetype's), a file a CLAP plugin loads itself, or a
     /// .trillpreset that save_preset wrote. For a file that holds several presets, name one after a '#':
     /// "C:\\Kits\\s3presetconf#Black Metal". A file that is another plugin's, or damaged, is an error that
-    /// says so and adds nothing.
+    /// says so and adds nothing. For builtin:sampled the preset is the instrument: the whole path of its .sfz
+    /// file ("D:\\Instruments\\Small Grand\\Small Grand.sfz").
     pub preset: Option<String>,
     /// Parameter values to set on top of the preset, by parameter id or name: numbers in the parameter's units,
     /// true/false for switches, or the choice name for enums (e.g. {"cutoff": 800, "filter_type": "lowpass24"}).
@@ -716,8 +717,14 @@ pub struct SearchSoundsRequest {
     /// Tonal: 808, bass, lead, pad, pluck, keys, guitar, synth, strings, brass, bell, chord, arp, stab, vocal.
     /// Effects: fx, riser, impact, atmosphere, foley. Form: loop, one-shot, fill.
     pub tags: Option<Vec<String>>,
-    /// "audio" (default), "midi", "project", "preset" or "any".
+    /// "audio" (default), "midi", "project", "preset", "instrument" or "any". An instrument is a sampled
+    /// instrument's file (.sfz): each comes with what it is, and its path is what `preset` takes for
+    /// builtin:sampled.
     pub kind: Option<String>,
+    /// Also list the recordings that are the notes of sampled instruments (hundreds of files a piano), which a
+    /// search for sounds otherwise leaves out.
+    #[serde(default)]
+    pub include_recordings: bool,
     /// Only sounds whose tempo is known and at least this many BPM.
     pub tempo_min: Option<f32>,
     /// Only sounds whose tempo is known and at most this many BPM.

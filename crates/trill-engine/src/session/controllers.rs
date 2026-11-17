@@ -125,13 +125,16 @@ impl Session {
     /// without an instrument. Cheap enough to ask whenever a view is drawn.
     pub fn controller_support(&self, track: TrackId) -> ControllerSupport {
         let Some(device) = self.instrument_device(track) else { return ControllerSupport::Unknown };
-        match trill_dsp::controller_support(&device.uri) {
-            ControllerSupport::Unknown => {
-                let meta = self.bank.devices.get(&device.id);
-                let controller = meta.and_then(|meta| meta.controller.as_ref());
-                controller.map_or(ControllerSupport::Unknown, |controller| controller.lock().controller_support())
-            }
-            known => known,
+        let meta = self.bank.devices.get(&device.id);
+        let controller = meta.and_then(|meta| meta.controller.as_ref());
+        let own = controller.map_or(ControllerSupport::Unknown, |controller| controller.lock().controller_support());
+        match (trill_dsp::controller_support(&device.uri), own) {
+            // A built-in instrument that says what it listens to itself
+            // knows better than its type: a sampled instrument listens to
+            // what the instrument it has loaded does.
+            (ControllerSupport::Listed(_), ControllerSupport::Listed(kinds)) => ControllerSupport::Listed(kinds),
+            (ControllerSupport::Unknown, own) => own,
+            (known, _) => known,
         }
     }
 

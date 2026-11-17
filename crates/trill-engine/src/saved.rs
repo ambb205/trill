@@ -492,6 +492,10 @@ impl DeviceFactory for WithSaved {
     fn preset_file_type(&self, file: &Path) -> Option<String> {
         self.inner.preset_file_type(file)
     }
+
+    fn preset_state(&self, uri: &str, file: &Path) -> Option<Result<(PresetInfo, Vec<u8>), String>> {
+        self.inner.preset_state(uri, file)
+    }
 }
 
 #[cfg(test)]

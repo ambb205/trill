@@ -29,7 +29,7 @@ Development builds are optimized (see `[profile.dev]`), because unoptimized audi
 
 ### Building and testing
 
-`cargo test --workspace` runs about 2,380 tests in a few minutes. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 2,460 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -58,6 +58,7 @@ cargo test -p trill-engine --test journal what_recording_a_step_costs -- --ignor
 cargo test -p trill-stage --test drawn -- --ignored    # what the graphics card makes of the stage, and a film as a file (a graphics card; two of them ffmpeg)
 cargo test -p trill-mcp --test mcp a_film_is_made -- --ignored --nocapture    # a film of a song and of its making over MCP, kept in the assistant's working folder (a graphics card)
 cargo test -p trill-app a_film_is_made_from_the_window -- --ignored --nocapture    # a film from the window's panel, watched as it is made, and one stopped (a graphics card)
+cargo test -p trill-dsp --test real_sfz -- --ignored --nocapture    # the SFZ reader on the files a synth installed here keeps: their text only, counted (TRILL_SFZ_FOLDER names another folder)
 ```
 
 Run the first two after touching plugin hosting or audio decoding, and the last two after touching the audio
@@ -221,6 +222,7 @@ window, a song that plays through the built-in devices is filmed by
 | `builtin:drumkit` | Synthesized drum machine on the General MIDI map, with 808, 909, tight, trap and lo-fi kits. Each drum is shaped after measurements of recorded ones: where its energy sits and how long it rings. |
 | `builtin:sampler` | Plays one audio file across the keyboard: loops with crossfade, reverse, one-shot, amp and filter envelopes, a pitch wheel whose range can be set. |
 | `builtin:drumrack` | Sixteen pads on the General MIDI drum notes, each playing its own audio file, with level, pan, tune, decay and choke groups. |
+| `builtin:sampled` | Plays a sampled instrument: a piano, a bass, a string section, a drum kit made of recordings, as an SFZ file describes it. Layers of loudness that fade into one another, several recordings of a note taken in turn or at random, loops, release sounds, the pedal, ways of playing chosen by a key and asked for by name. Its recordings stay on the disk until they are played. It comes with no sounds: it plays the instruments you have. |
 
 The wavetable synth is built to be shaped by someone who cannot hear it, which is what an assistant is. Every
 part of it is a parameter whose name says what it does and in what unit; nothing is routed that the matrix does
@@ -238,6 +240,52 @@ notes of sixteen a quarter of one. It has no
 effects inside: the chorus, the delay and the reverb are devices to put after it. Its presets are matched in
 level by measurement and have not been tuned by ear yet. In the window its panel draws the wave an oscillator
 reads at its position, the envelopes and the LFOs, and lists the matrix slot by slot.
+
+The sampled instrument plays instruments that are made of recordings, hundreds or thousands of them, and that
+a text file describes: which recording sounds for which keys and how hard they are struck, and what is done to
+it. The file format it reads is SFZ, which most free and open sampled instruments are published in; the reader
+is apart from the player, so another format is another reader. An `.sfz` file is a preset of the device: give
+its path as `preset` to `create_track`, `add_device` or `update_device`, drop it on a track, or pick it in the
+browser, where the library lists an instrument as one thing that says what it is (its range, its layers, its
+size, its ways of playing) and keeps its recordings out of searches for sounds. What the instrument says of
+itself is what its track goes by: its range, whether its keys are drums (and which drum is on which, read from
+the kit's own labels and the names of its recordings), and the ways of playing a key chooses, which a note asks
+for by name. Nothing of that is kept in the song.
+
+It does what instruments in that format most often ask for (the list is at the top of
+`trill-dsp/src/sfz/mod.rs`): keys and velocities with a root and a tuning, levels that add up through the file's
+headers, includes and definitions, recordings taken in turn and at random, loops with a crossfade (and the loop
+a WAV file carries), an envelope and a filter for each region, vibrato and tremolo, release sounds, the pedal,
+groups that silence one another, layers that fade into one another by velocity, by key and by a controller,
+controllers read along the instrument's own curves, and keyswitches. What a file asks for that it does not do
+is not passed over: loading the instrument says so in a sentence, naming each thing and what a listener
+misses for it ("It asks for 1 thing this player does not do, so it will not sound quite as in its maker's
+player. Not heard: equalisers of its own (eq1_gain). Everything else plays."), and the instrument plays. Of 1,001 SFZ files of freely published instruments it was tried on, 832
+were instruments (the rest are parts that others include), and 746 of those asked for nothing it does not do.
+Not done: the equalizer and effect sections, the second generation of LFOs and envelopes (`lfoN_`, `egN_`), a
+second filter, regions that a controller sets off, the controllers a maker's player makes up beyond MIDI's 128,
+sostenuto.
+
+A song is the same samples on every render, at any buffer size and on any number of threads: recordings taken
+in turn count from where playing began, and one taken at random is drawn from the key and the note's place in
+the song. Measured, and held in tests on instruments the tests write themselves: every key within a hundredth
+of a cent of its pitch (the worst of 39 keys was 0.00007 cents off); what a bright recording folds into the
+band when it is played above its pitch lies 79 dB or more under what belongs, up to two octaves up; no click at
+a loop, a release, a voice taken for another note or the crossing from one layer to the next; 128 voices, the
+most it plays, take 41 % of one core.
+
+It holds the start of every recording in memory (a third of a second) and reads the rest of one when it is
+played, on threads of its own, keeping what it has read within 2 GB and letting go of what was played longest
+ago. The audio thread never reads a file and never waits for one. On a concert grand of 637 recordings that is
+1.9 GB on the disk as WAV files, every note could begin 0.13 seconds after loading when the system had read the
+files lately, and 0.9 seconds when it had not for an hour of other work, with 94 MB held; the rest of a note's
+recording arrived in 13 milliseconds for most and 55 at the worst, well inside the third of a second that was
+there already. (As FLAC files, 712 MB, the same piano: 0.13 and 1.1 seconds. A disk that has never read the
+files, after a restart, has not been measured.) Whole, it would be 2.6 GB in memory and six to seven seconds of
+reading. Played before the start of its recording is read, a note is
+silent; one whose start runs out before the rest arrives is faded out in five milliseconds; both are counted,
+and `get_device` says how many. A render never has either: it reads what it plays and waits. An instrument may
+name 16,384 recordings; one that names more is refused in a sentence.
 
 The two sample players follow velocity by one law, in decibels: the volume is the level of a note at velocity 75,
 and the sensitivity moves harder and softer notes from it by 0.4 dB a step at full (half of that at 0.5), so a
@@ -748,6 +796,13 @@ sampler or onto a drum rack pad; files dragged in from the file manager land the
 waveform, and the Clip tab shows an audio clip's file with its gain, offset, fades, warp mode, source tempo and
 transposition. The sampler shows its sample and the drum rack its sixteen pads.
 
+A sampled instrument of the library is one row among the devices, with its size. Drag it onto a track and it is
+what the track plays through, below the tracks for a track of its own, or double-click it; an `.sfz` file dragged
+in from the file manager lands the same way. Its panel shows where its recordings lie over the keys and over how
+hard they are struck, the keys that choose a way of playing, how much there is of it, and while it loads how far
+the reading is. A sampler and a pad turn an instrument away, and the instrument's panel a single sound, each
+with the reason in the status bar.
+
 ![The sound browser, waveforms on audio clips and an audio clip in the Clip tab](docs/images/sounds-browser.png)
 
 **When a song opens with files missing**, the clips and pads that lost their file are marked, the status bar
@@ -816,7 +871,7 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Devices | `list_devices`, `describe_device`, `add_device`, `get_device`, `update_device`, `delete_device`, `show_device_editor` |
 | Presets | `search_presets` (one search across the presets of every installed instrument and the saved ones), `save_preset` (keeps a device's sound under a name) |
 | Clips | `create_clip`, `create_audio_clip`, `update_clip`, `split_clip`, `duplicate_clip`, `delete_clip` |
-| Sounds | `search_sounds`, `library` (its folders, and `move_folder` for one that went elsewhere), `preview_sound`, `set_sample` |
+| Sounds | `search_sounds` (sounds, or with `kind: "instrument"` the sampled instruments, each with what it is), `library` (its folders, and `move_folder` for one that went elsewhere), `preview_sound`, `set_sample` |
 | Listening | `listen` (what is in an audio file of the library, of the user's or of a clip: tempo and bars, key, tuning, and on request its chords, parts, loops, single hits, groove, bass and melody in the recording's own bars, paged; corrections to its beat grid), `transcribe` (its bass line, melody, groove or chords as MIDI on its own beats: into a file, or into the song on a new track in one undo step) |
 | Wavetables | `describe_wavetable` (the tables of `builtin:wavetable` that ship, any of them or a recipe of your own shown frame by frame in numbers; changes nothing), `set_wavetable` (gives an oscillator a table that ships, one made from a recipe, or one read from an audio file; names the macros) |
 | Missing files | `missing_files` (what the song names that is not on disk, where it is used, and what was found with how sure it is), `relink_files` (what is sure, or more on request, or a folder or files named by hand: one undo step) |
@@ -969,6 +1024,12 @@ General MIDI, not from what the plugin says is on its keys; over MCP every tool 
 notes drawn by hand in the window (the tools write them; a note that is drawn is a plain key), kits of drum
 plugins other than Superior Drummer 3 (none of the others on the machine says what is on its keys in a state
 Trill reads),
+for the sampled instrument: sounds of its own (it comes with none, and no way to fetch any; which freely
+licensed instruments could be offered as a download is a list that was made and is the owner's to decide on),
+the parts of SFZ named above as not done, formats other than SFZ, a drum kit's microphones as separate levels
+(a kit that brings several is played as its file mixes them), taking the instrument out of a device in the window
+(another takes its place, or the device is removed), and the time to a first note from a disk that has not
+read the files before,
 taking a recording apart into stems, its beats from a model and its lyrics with a time for every word (what
 is heard today is heard without a model, in one sound), a place in the window for what was heard in a recording
 (over MCP only), taking a recording from a link,

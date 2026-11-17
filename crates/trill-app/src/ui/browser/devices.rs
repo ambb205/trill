@@ -3,10 +3,15 @@
 //!
 //! Double-clicking a device adds it to the chain the Devices tab shows.
 //! Clicking a preset applies it to the selected device.
+//!
+//! The library's sampled instruments are listed with the instruments: one
+//! row for each, whatever number of recordings it is made of. One is
+//! dragged onto a track, or double-clicked, as a device is.
 
 use super::{EDGE, ROW, SEARCH_BLOCK, SEARCH_HEIGHT};
+use crate::ui::sounds::{DropTarget, InstrumentRow};
 use crate::ui::state::Cx;
-use crate::ui::{arrangement, devices, widgets};
+use crate::ui::{arrangement, devices, dragging, widgets};
 use eframe::egui::{self, Align2, Rect, Role, Sense, Ui, WidgetInfo, pos2, vec2};
 use trill_core::ChainRef;
 use trill_core::device::{BUILTIN_SCHEME, DeviceCategory, DeviceDescriptor, split_uri};
@@ -102,8 +107,13 @@ fn section(ui: &mut Ui, cx: &Cx, title: &str) {
 
 /// One row of a list. `selected` marks the current choice.
 fn row(ui: &mut Ui, cx: &Cx, name: &str, badge: &str, selected: bool) -> egui::Response {
+    row_sensing(ui, cx, name, badge, selected, Sense::click())
+}
+
+/// A row that can be dragged out of the list as well.
+fn row_sensing(ui: &mut Ui, cx: &Cx, name: &str, badge: &str, selected: bool, sense: Sense) -> egui::Response {
     let theme = cx.theme;
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), sense);
     response.widget_info(|| WidgetInfo::selected(Role::Button, true, selected, name));
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
@@ -169,6 +179,53 @@ fn device_lists(ui: &mut Ui, cx: &mut Cx) {
                 response.on_hover_text(&descriptor.description);
             }
         }
+        if which == Shelf::Instruments {
+            sampled_instruments(ui, cx, chain, &target, &query);
+        }
+    }
+}
+
+/// The library's sampled instruments, under the instruments: each a row
+/// that is dragged to a track or double-clicked.
+fn sampled_instruments(ui: &mut Ui, cx: &mut Cx, chain: ChainRef, target: &str, query: &str) {
+    let all = cx.sounds.instruments();
+    let found: Vec<&InstrumentRow> = all.iter().filter(|row| matches(&row.name, query)).collect();
+    if found.is_empty() {
+        return;
+    }
+    section(ui, cx, "Sampled instruments");
+    // The one the selected device plays, if it plays one.
+    let playing = cx.state.selected_device.and_then(|device| cx.snap.instruments.get(&device));
+    // (Spelled as the library spells its files: a song may name the
+    // instrument from where the program was started.)
+    let playing = playing.and_then(|shown| shown.said.as_ref()).map(|said| std::path::PathBuf::from(&said.file));
+    let playing = playing.map(|file| std::path::absolute(&file).unwrap_or(file));
+    for instrument in found {
+        let selected = playing.as_deref() == Some(instrument.path.as_path());
+        let response = row_sensing(ui, cx, &instrument.name, &instrument.size, selected, Sense::click_and_drag());
+        let action = match chain {
+            ChainRef::Master => format!("Double-click for a new track that plays {}", instrument.name),
+            ChainRef::Track(_) => format!("Double-click to make {} the instrument of {target}", instrument.name),
+        };
+        cx.hint(&response, format!("{} \u{00B7} {action} \u{00B7} or drag it to a track", instrument.about));
+        if response.drag_started() {
+            dragging::start(cx, vec![instrument.path.clone()], None, None, trill_library::Tags::EMPTY);
+        }
+        if widgets::activated(ui, &response) {
+            let place = match chain {
+                ChainRef::Track(track) => DropTarget::TrackInstrument { track },
+                ChainRef::Master => {
+                    DropTarget::NewInstrument { color: dragging::new_track_colors(cx, 1).first().copied() }
+                }
+            };
+            cx.sounds.drop_files(vec![instrument.path.clone()], place, instrument.name.clone(), 0.0);
+        }
+        response.on_hover_ui(|ui| {
+            ui.set_max_width(420.0);
+            ui.label(egui::RichText::new(&instrument.name).color(cx.theme.ink));
+            ui.label(egui::RichText::new(&instrument.about).color(cx.theme.ink_dim));
+            ui.label(egui::RichText::new(instrument.path.display().to_string()).color(cx.theme.ink_faint));
+        });
     }
 }
 

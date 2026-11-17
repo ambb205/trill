@@ -1,9 +1,12 @@
 //! The sound library and the program's settings.
 //!
 //! Point a [`Library`] at folders of samples and it indexes them in the
-//! background: every audio file, MIDI file, project and preset, with what
-//! its header says (length, sample rate, channels) and what its name and
-//! folders say (tempo, key, and [tags](Tag) such as kick, pad or loop).
+//! background: every audio file, MIDI file, project, preset and sampled
+//! instrument, with what its header says (length, sample rate, channels)
+//! and what its name and folders say (tempo, key, and [tags](Tag) such as
+//! kick, pad or loop). A sampled instrument is one entry that says what it
+//! is ([`InstrumentFacts`]); its recordings, hundreds of files that are
+//! notes of it, are listed and stay out of searches for sounds.
 //! The index can then be [searched](Library::search) as fast as someone
 //! types, and browsed as the folder tree it came from through
 //! [`Library::index`].
@@ -47,7 +50,7 @@ mod settings;
 mod store;
 mod tags;
 
-pub use entry::{AudioFacts, Entry, EntryKind};
+pub use entry::{AudioFacts, Entry, EntryKind, InstrumentFacts};
 pub use index::{EntryId, Folder, FolderId, Index};
 pub use infer::{Inferred, infer};
 pub use key::Key;

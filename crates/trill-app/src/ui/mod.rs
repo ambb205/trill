@@ -64,6 +64,7 @@ mod dragging;
 mod editors;
 mod files;
 mod filming;
+mod instrument_panel;
 mod keyboard;
 mod making_of;
 mod missing;

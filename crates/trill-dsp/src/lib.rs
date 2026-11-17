@@ -5,7 +5,9 @@
 //! Most built-in devices are described entirely by their parameters. The
 //! sample players ([`sampler`], [`drumrack`]) also need audio files: which
 //! ones is stored in the device's state (see [`loading`]), and the files
-//! themselves come from an [`AudioLoader`] given to [`Builtins`].
+//! themselves come from an [`AudioLoader`] given to [`Builtins`]. The
+//! sampled instrument ([`sampled`]) plays a whole instrument that was
+//! recorded note by note, which a file of its own describes ([`sfz`]).
 
 pub mod drumrack;
 pub mod drums;
@@ -17,7 +19,9 @@ pub mod params;
 pub mod playhead;
 pub mod resample;
 pub mod sample;
+pub mod sampled;
 pub mod sampler;
+pub mod sfz;
 pub mod stretch;
 pub mod synth;
 pub mod util;
@@ -37,7 +41,7 @@ use std::sync::Arc;
 use trill_core::audio::AudioLoader;
 use trill_core::device::{
     BUILTIN_SCHEME, DeviceCategory, DeviceController, DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance,
-    DeviceProcessor, DeviceWarning, split_uri,
+    DeviceProcessor, DeviceWarning, Purpose, split_uri,
 };
 use trill_core::{Device, DeviceFiles};
 use wavetable::TableStore;
@@ -65,17 +69,20 @@ enum Create {
     /// From a state document that holds more than files: the same, and it
     /// says for itself what is wrong with it.
     Stateful { create: CreateSampled, references: ListSamples, relink: RelinkSamples, warnings: OwnWarnings },
+    /// From its state document, which names an instrument's file: the
+    /// sampled instrument, whose recordings that file names.
+    Instrument { references: ListSamples, relink: RelinkSamples },
 }
 
 impl Create {
-    /// How a device with a state document is made, lists its files and
-    /// has them replaced.
-    fn stateful(self) -> Option<(CreateSampled, ListSamples, RelinkSamples)> {
+    /// How a device whose state names files lists them and has them
+    /// replaced.
+    fn files(self) -> Option<(ListSamples, RelinkSamples)> {
         match self {
             Create::Plain(_) => None,
-            Create::Sampled { create, references, relink } | Create::Stateful { create, references, relink, .. } => {
-                Some((create, references, relink))
-            }
+            Create::Sampled { references, relink, .. }
+            | Create::Stateful { references, relink, .. }
+            | Create::Instrument { references, relink } => Some((references, relink)),
         }
     }
 }
@@ -177,6 +184,16 @@ static BUILTINS: &[Builtin] = &[
             warnings: wavetable::warnings,
         },
     },
+    Builtin {
+        key: "sampled",
+        name: "Sampled Instrument",
+        category: DeviceCategory::Instrument,
+        description: sampled::DESCRIPTION,
+        params: sampled::PARAMS,
+        presets: &[],
+        patches: None,
+        create: Create::Instrument { references: sampled::loaded::sample_refs, relink: sampled::loaded::relinked },
+    },
     effect("reverb", "Reverb", reverb::DESCRIPTION, reverb::PARAMS, || Box::new(reverb::Reverb::new())),
     effect("delay", "Delay", delay::DESCRIPTION, delay::PARAMS, || Box::new(delay::Delay::new())),
     effect("eq", "EQ", eq::DESCRIPTION, eq::PARAMS, || Box::new(eq::Eq::new())),
@@ -231,19 +248,26 @@ fn presets(uri: &str) -> Option<trill_core::presets::PresetList> {
     Some(trill_core::presets::PresetList::ready(presets))
 }
 
-fn create(
-    device: &Device,
-    sample_rate: f64,
-    max_block: usize,
-    source: &SampleSource,
-) -> Result<DeviceInstance, DeviceError> {
+/// What a device being made is made from.
+struct Making<'a> {
+    samples: SampleSource<'a>,
+    instruments: Option<&'a sampled::Source>,
+    purpose: Purpose,
+}
+
+fn create(device: &Device, sample_rate: f64, max_block: usize, making: &Making) -> Result<DeviceInstance, DeviceError> {
     let builtin = find(&device.uri).ok_or_else(|| DeviceError::Unknown(device.uri.clone()))?;
+    let failed = |reason: String| DeviceError::LoadFailed { uri: device.uri.clone(), reason };
     let (mut processor, controller) = match builtin.create {
         Create::Plain(create) => (create(), None),
         Create::Sampled { create, .. } | Create::Stateful { create, .. } => {
-            let processor = create(device.state.as_deref(), source)
-                .map_err(|reason| DeviceError::LoadFailed { uri: device.uri.clone(), reason })?;
+            let processor = create(device.state.as_deref(), &making.samples).map_err(failed)?;
             let controller: Box<dyn DeviceController> = Box::new(SampleController { state: device.state.clone() });
+            (processor, Some(controller))
+        }
+        Create::Instrument { .. } => {
+            let (processor, controller) =
+                sampled::make(device.state.as_deref(), making.instruments, making.purpose).map_err(failed)?;
             (processor, Some(controller))
         }
     };
@@ -268,12 +292,62 @@ pub struct Builtins {
     loader: Option<Arc<dyn AudioLoader>>,
     samples: SampleStore,
     tables: TableStore,
+    /// The sampled instruments: their recordings, and the ones loaded.
+    instruments: Option<sampled::Source>,
 }
 
 impl Builtins {
     /// A factory whose sample players load their files with `loader`.
     pub fn with_loader(loader: Arc<dyn AudioLoader>) -> Self {
-        Self { loader: Some(loader), samples: SampleStore::default(), tables: TableStore::default() }
+        Self::made(loader.clone(), sampled::Source::new(loader))
+    }
+
+    /// [`Self::with_loader`], with the files that describe sampled
+    /// instruments taken from `texts` instead of from the disk.
+    pub fn with_sources(loader: Arc<dyn AudioLoader>, texts: Box<dyn sampled::Texts>) -> Self {
+        Self::made(loader.clone(), sampled::Source::with_texts(loader, texts))
+    }
+
+    fn made(loader: Arc<dyn AudioLoader>, instruments: sampled::Source) -> Self {
+        Self {
+            loader: Some(loader),
+            samples: SampleStore::default(),
+            tables: TableStore::default(),
+            instruments: Some(instruments),
+        }
+    }
+
+    /// Where the sampled instruments of this factory come from: for
+    /// reading one without a device, and for what their recordings hold
+    /// of memory.
+    pub fn instruments(&self) -> Option<&sampled::Source> {
+        self.instruments.as_ref()
+    }
+
+    /// The instrument in the file at `file` as a preset of the sampled
+    /// instrument, with the state a device is made from to play it. The
+    /// file is read: what the preset says of itself is what the
+    /// instrument is.
+    fn instrument_preset(&self, file: &std::path::Path) -> Result<(trill_core::presets::PresetInfo, Vec<u8>), String> {
+        let Some(instruments) = &self.instruments else {
+            return Err(
+                "this device factory was created without an audio loader (use trill_dsp::Builtins::with_loader)"
+                    .to_string(),
+            );
+        };
+        let path = file.to_string_lossy().into_owned();
+        let state = sampled::State::new(path.clone()).to_bytes();
+        let Some(loaded) = instruments.load(Some(&state))? else {
+            return Err("it names no instrument".to_string());
+        };
+        let info = trill_core::presets::PresetInfo {
+            id: trill_core::presets::short_id(&path),
+            name: loaded.summary.name.clone(),
+            description: loaded.about(),
+            locator: path,
+            ..Default::default()
+        };
+        Ok((info, state))
     }
 
     /// What is wrong with the samples of `device`, as messages for the
@@ -293,14 +367,33 @@ impl DeviceFactory for Builtins {
     }
 
     fn create(&self, device: &Device, sample_rate: f64, max_block: usize) -> Result<DeviceInstance, DeviceError> {
-        create(device, sample_rate, max_block, &self.source())
+        self.create_for(device, sample_rate, max_block, Purpose::Playing)
+    }
+
+    /// A sampled instrument is told what it is made for: one that is
+    /// rendered waits for its recordings, one that plays does not.
+    fn create_for(
+        &self,
+        device: &Device,
+        sample_rate: f64,
+        max_block: usize,
+        purpose: Purpose,
+    ) -> Result<DeviceInstance, DeviceError> {
+        let making = Making { samples: self.source(), instruments: self.instruments.as_ref(), purpose };
+        create(device, sample_rate, max_block, &making)
     }
 
     /// The sample players' missing and unreadable files (see
-    /// [`sample_warnings`]), and what a device with more in its state
-    /// than files says is wrong with it.
+    /// [`sample_warnings`]), what a device with more in its state than
+    /// files says is wrong with it, and what is wrong with a sampled
+    /// instrument that it plays in spite of: recordings that are missing,
+    /// an instrument's file that cannot be read.
     fn warnings(&self, device: &Device) -> Vec<DeviceWarning> {
         match (find(&device.uri).map(|builtin| builtin.create), &self.loader) {
+            (Some(Create::Instrument { .. }), _) => match &self.instruments {
+                Some(instruments) => instruments.warnings(device.state.as_deref()),
+                None => Vec::new(),
+            },
             (Some(Create::Stateful { warnings, .. }), _) => warnings(device, &self.source()),
             (_, Some(loader)) => sample_warnings(device, loader.as_ref()),
             (_, None) => Vec::new(),
@@ -313,6 +406,33 @@ impl DeviceFactory for Builtins {
 
     fn plays_drums(&self, uri: &str) -> bool {
         plays_drums(uri)
+    }
+
+    /// An instrument's file is a preset of the sampled instrument; no
+    /// other built-in device takes a file.
+    fn preset_file(
+        &self,
+        uri: &str,
+        file: &std::path::Path,
+        _within: Option<&str>,
+    ) -> Option<Result<trill_core::presets::PresetInfo, String>> {
+        let builtin = find(uri)?;
+        Some(match builtin.create {
+            Create::Instrument { .. } => self.instrument_preset(file).map(|(info, _)| info),
+            _ => Err(format!("{} takes no preset files; its presets are asked for by name", builtin.name)),
+        })
+    }
+
+    fn preset_file_type(&self, file: &std::path::Path) -> Option<String> {
+        sfz::is_sfz(file).then(|| sampled::URI.to_string())
+    }
+
+    fn preset_state(
+        &self,
+        uri: &str,
+        file: &std::path::Path,
+    ) -> Option<Result<(trill_core::presets::PresetInfo, Vec<u8>), String>> {
+        matches!(find(uri)?.create, Create::Instrument { .. }).then(|| self.instrument_preset(file))
     }
 }
 
@@ -329,7 +449,8 @@ impl DeviceFactory for BuiltinFactory {
     }
 
     fn create(&self, device: &Device, sample_rate: f64, max_block: usize) -> Result<DeviceInstance, DeviceError> {
-        create(device, sample_rate, max_block, &SampleSource { loader: None, store: None, tables: None })
+        let samples = SampleSource { loader: None, store: None, tables: None };
+        create(device, sample_rate, max_block, &Making { samples, instruments: None, purpose: Purpose::Playing })
     }
 
     fn presets(&self, uri: &str) -> Option<trill_core::presets::PresetList> {
@@ -351,8 +472,8 @@ fn plays_drums(uri: &str) -> bool {
 /// readable state. For collecting a project's files, or finding the devices
 /// that use one.
 pub fn sample_refs(device: &Device) -> Vec<SampleRef> {
-    match find(&device.uri).and_then(|builtin| builtin.create.stateful()) {
-        Some((_, references, _)) => references(device.state.as_deref()).unwrap_or_default(),
+    match find(&device.uri).and_then(|builtin| builtin.create.files()) {
+        Some((references, _)) => references(device.state.as_deref()).unwrap_or_default(),
         None => Vec::new(),
     }
 }
@@ -370,8 +491,8 @@ impl DeviceFiles for SampleFiles {
     }
 
     fn relinked(&self, device: &Device, slots: &[(String, String)]) -> Result<Vec<u8>, String> {
-        match find(&device.uri).and_then(|builtin| builtin.create.stateful()) {
-            Some((_, _, relink)) => relink(device.state.as_deref(), slots)
+        match find(&device.uri).and_then(|builtin| builtin.create.files()) {
+            Some((_, relink)) => relink(device.state.as_deref(), slots)
                 .map_err(|error| format!("{} ({}): {error}", device.id, device.name)),
             None => Err(format!("{} ({}) plays no files", device.id, device.name)),
         }
@@ -450,7 +571,8 @@ mod tests {
     }
 
     /// A device model for `builtin:<key>`. The sample players get a state
-    /// that puts `tone.wav` on the sampler and on every pad of the rack.
+    /// that puts `tone.wav` on the sampler and on every pad of the rack,
+    /// and the sampled instrument one that names `tone.sfz`.
     fn model(key: &str, params: &[(&str, f64)]) -> Device {
         let mut project = Project::new("t");
         let id = project.add_device(ChainRef::Master, format!("builtin:{key}"), key, None).unwrap();
@@ -463,13 +585,15 @@ mod tests {
             "drumrack" => {
                 Some(drumrack::State::with_pads(drumrack::PAD_NOTES.map(|note| (note, "tone.wav"))).unwrap().to_bytes())
             }
+            "sampled" => Some(sampled::State::new("tone.sfz").to_bytes()),
             _ => None,
         };
         device.clone()
     }
 
     /// A factory whose loader knows one file, `tone.wav`: a decaying 220 Hz
-    /// tone half a second long.
+    /// tone half a second long. And one instrument, `tone.sfz`, which plays
+    /// it on every key.
     fn factory() -> Builtins {
         let loader = MemoryLoader::default();
         let tone = testing::sine(220.0, SR, 24_000);
@@ -478,11 +602,23 @@ mod tests {
             tone.iter().enumerate().map(|(i, s)| s * 0.5 * (-(i as f32) / 6_000.0).exp()).collect(),
             SR,
         );
-        Builtins::with_loader(Arc::new(loader))
+        let texts = testing::MemoryTexts::default();
+        texts.insert("tone.sfz", "<region> sample=tone.wav");
+        Builtins::with_sources(Arc::new(loader), Box::new(texts))
+    }
+
+    /// A device of `factory`, once it has read what it plays.
+    fn ready(factory: &Builtins, device: &Device) -> DeviceInstance {
+        let instance = factory.create(device, SR, BLOCK).unwrap();
+        let reading = || instance.controller.as_ref().and_then(|controller| controller.reading());
+        while reading().is_some_and(|reading| reading.is_loading()) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        instance
     }
 
     fn make(key: &str, params: &[(&str, f64)]) -> Box<dyn DeviceProcessor> {
-        factory().create(&model(key, params), SR, BLOCK).unwrap().processor
+        ready(&factory(), &model(key, params)).processor
     }
 
     /// Runs `blocks` blocks. `input` fills each block before processing and
@@ -848,8 +984,8 @@ mod tests {
             let device = Device { state: None, ..model(builtin.key, &[]) };
             let instance = BuiltinFactory.create(&device, SR, BLOCK).unwrap_or_else(|e| panic!("{}: {e}", builtin.key));
             assert_eq!(instance.params.len(), builtin.params.len());
-            let sampled = builtin.create.stateful().is_some();
-            assert_eq!(instance.controller.is_some(), sampled, "{}", builtin.key);
+            let plays_files = !matches!(builtin.create, Create::Plain(_));
+            assert_eq!(instance.controller.is_some(), plays_files, "{}", builtin.key);
         }
         // An empty sampler is silent, not broken.
         let empty = Device { state: Some(sampler::State::default().to_bytes()), ..model("sampler", &[]) };
@@ -860,13 +996,13 @@ mod tests {
 
     #[test]
     fn the_unit_factory_says_how_to_load_samples() {
-        for key in ["sampler", "drumrack"] {
+        for key in ["sampler", "drumrack", "sampled"] {
             let Err(error) = BuiltinFactory.create(&model(key, &[]), SR, BLOCK) else {
                 panic!("{key}: created a device that needs a file without a loader")
             };
             let DeviceError::LoadFailed { uri, reason } = &error else { panic!("{key}: {error}") };
             assert_eq!(uri, &format!("builtin:{key}"));
-            assert!(reason.contains("tone.wav") && reason.contains("Builtins::with_loader"), "{reason}");
+            assert!(reason.contains("tone.") && reason.contains("Builtins::with_loader"), "{reason}");
             // The same goes for a `Builtins` that was given no loader.
             assert!(matches!(
                 Builtins::default().create(&model(key, &[]), SR, BLOCK),

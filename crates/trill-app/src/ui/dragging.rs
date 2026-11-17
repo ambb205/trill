@@ -20,7 +20,7 @@
 
 use super::state::{Cx, DragSource, SoundDrag, SystemDrop};
 use super::{colors, timeline};
-use crate::ui::sounds::{DropTarget, file_stem};
+use crate::ui::sounds::{DropTarget, file_stem, is_instrument};
 use eframe::egui::{self, Align2, CursorIcon, Event, Id, LayerId, Order, Pos2, Rect, vec2};
 use std::path::PathBuf;
 use trill_core::TrackKind;
@@ -56,14 +56,18 @@ pub fn begin(ctx: &egui::Context, cx: &mut Cx) {
             input.events.iter().any(|event| matches!(event, Event::PointerMoved(_) | Event::PointerButton { .. }));
         (hovered, dropped, reported, input.pointer.latest_pos())
     });
+    // Sounds, or an instrument: one, since a track plays through one.
     let audio = |paths: Vec<PathBuf>| -> Vec<PathBuf> {
-        paths.into_iter().filter(|path| trill_media::is_audio_file(path)).collect()
+        match paths.iter().find(|path| is_instrument(path)) {
+            Some(instrument) => vec![instrument.clone()],
+            None => paths.into_iter().filter(|path| trill_media::is_audio_file(path)).collect(),
+        }
     };
 
     if !dropped.is_empty() {
         let files = audio(dropped);
         if files.is_empty() {
-            cx.state.toasts.info("Nothing in what was dropped is an audio file Trill reads");
+            cx.state.toasts.info("Nothing in what was dropped is an audio file or an instrument Trill reads");
             cx.state.sound_drag = None;
         } else {
             cx.state.sound_drag = Some(system_drag(files.clone()));
@@ -97,6 +101,7 @@ pub fn begin(ctx: &egui::Context, cx: &mut Cx) {
     // been looked at, which a worker does once the ghost asks for it.
     if drag.source == DragSource::System
         && drag.seconds.is_none()
+        && !drag.is_instrument()
         && let Some(wave) = drag.paths.first().and_then(|path| cx.sounds.wave(&path.to_string_lossy()).ready().cloned())
     {
         drag.seconds = Some(wave.seconds());
@@ -154,8 +159,12 @@ pub fn end(ctx: &egui::Context, cx: &mut Cx) {
             }
             cx.state.system_drop = None;
             cx.state.sound_drag = None;
-            let target = drag.target.clone().unwrap_or_else(|| fallback_target(cx, drag.paths.len()));
-            land(cx, drag, target);
+            let fallback = || fallback_target(cx, drag.paths.len()).for_drag(drag.is_instrument()).ok();
+            match drag.target.clone().or_else(fallback) {
+                Some(target) => land(cx, drag, target),
+                // Let go over something that cannot take it.
+                None => cx.state.toasts.info(drag.refusal.unwrap_or("That cannot be dropped there")),
+            }
         }
     }
 }
@@ -218,7 +227,20 @@ fn hint(cx: &mut Cx, drag: &SoundDrag) {
         (Some(DropTarget::Rack { device: id }), _) => {
             format!("Drop to put {} on the pad of {} it belongs on", drag.label, device(*id))
         }
+        (Some(DropTarget::Instrument { device: id }), _) => {
+            format!("Drop to make {} what {} plays", drag.label, device(*id))
+        }
+        (Some(DropTarget::TrackInstrument { track }), _) => {
+            format!("Drop to make {} the instrument of {}", drag.label, name(*track))
+        }
+        (Some(DropTarget::NewInstrument { .. }), _) => {
+            format!("Drop for a new track that plays {}", drag.label)
+        }
         (None, Some(refusal)) => refusal.to_owned(),
+        (None, None) if drag.is_instrument() => {
+            "Drag onto a track, below the tracks for a new one, or onto a Sampled Instrument \u{00B7} Esc cancels"
+                .to_owned()
+        }
         (None, None) => {
             "Drag onto a track, below the tracks for a new one, or onto a sampler or a pad \u{00B7} Esc cancels"
                 .to_owned()

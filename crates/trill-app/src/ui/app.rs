@@ -328,6 +328,9 @@ impl TrillApp {
                 // picture: how long ago a device was made is not part of
                 // what the window looks like.)
                 self.live.loading = if self.options.screenshot.is_some() { Vec::new() } else { session.loading() };
+                // How far the sampled instruments on show are with reading
+                // their recordings. (Not in a picture, for the same reason.)
+                self.live.update_reading(&self.snapshot, &session, self.options.screenshot.is_none());
                 // The session's chores (a take written into the project, a
                 // lost audio device replaced) are the runtime's
                 // housekeeping thread's to do: looking for another device
@@ -449,6 +452,14 @@ impl TrillApp {
                     self.state.focus = FocusArea::Arrangement;
                 }
                 Report::Dropped(Dropped::Sample { device, .. }) => self.state.selected_device = Some(device),
+                Report::Dropped(Dropped::Instrument { device, track, .. }) => {
+                    // The track it is on now, with the device that plays
+                    // it: the Devices tab then shows what was dropped.
+                    if let Some(track) = track {
+                        self.state.select_track(track);
+                    }
+                    self.state.selected_device = Some(device);
+                }
                 Report::Dropped(Dropped::Pads { device, notes }) => {
                     self.state.selected_device = Some(device);
                     if let Some(note) = notes.last() {

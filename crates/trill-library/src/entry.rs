@@ -16,6 +16,10 @@ pub enum EntryKind {
     Project,
     /// A plugin preset.
     Preset,
+    /// A sampled instrument: the file that says which of a folder of
+    /// recordings plays for which keys ([`trill_dsp::sfz`]). What the
+    /// file says of the instrument is [`Entry::instrument`].
+    Instrument,
 }
 
 /// Extensions (lower case) of the kinds that are not audio. Audio is
@@ -32,6 +36,7 @@ const EXTENSIONS: &[(&str, EntryKind)] = &[
     // A plugin maker's own format: Serum 2's patches, which are sold in
     // packs and kept with the samples.
     ("serumpreset", EntryKind::Preset),
+    ("sfz", EntryKind::Instrument),
 ];
 
 /// What the extension of a preset of one of Ample Sound's instruments
@@ -39,7 +44,8 @@ const EXTENSIONS: &[(&str, EntryKind)] = &[
 const INSTRUMENT_STATE: &str = "state";
 
 impl EntryKind {
-    pub const ALL: [EntryKind; 4] = [EntryKind::Audio, EntryKind::Midi, EntryKind::Project, EntryKind::Preset];
+    pub const ALL: [EntryKind; 5] =
+        [EntryKind::Audio, EntryKind::Midi, EntryKind::Project, EntryKind::Preset, EntryKind::Instrument];
 
     /// The kind of the file at `path`, or `None` if the library does not
     /// list files like it. Looks at the name only.
@@ -65,6 +71,7 @@ impl EntryKind {
             EntryKind::Midi => "midi",
             EntryKind::Project => "project",
             EntryKind::Preset => "preset",
+            EntryKind::Instrument => "instrument",
         }
     }
 
@@ -95,6 +102,30 @@ impl AudioFacts {
     }
 }
 
+/// What a sampled instrument's file says of the instrument: what it is,
+/// for a list to show without opening it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InstrumentFacts {
+    /// How many recordings its file names, and in how many regions.
+    pub recordings: u32,
+    pub regions: u32,
+    /// How many of those recordings are files of the library, and what
+    /// they take on the disk together.
+    pub found: u32,
+    pub bytes: u64,
+    /// The lowest and highest key that plays a note.
+    pub range: Option<(u8, u8)>,
+    /// The most layers of loudness a key has, and the most recordings of
+    /// one note at one loudness.
+    pub layers: u16,
+    pub takes: u16,
+    /// Its keys are drums, not pitches.
+    pub drums: bool,
+    /// The ways of playing it switches between by a key, as its file
+    /// calls them.
+    pub ways: Vec<String>,
+}
+
 /// One file of the library and everything known about it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
@@ -120,6 +151,13 @@ pub struct Entry {
     pub key: Option<Key>,
     /// What kind of sound it is, read from names and length.
     pub tags: Tags,
+    /// For an instrument whose file could be read: what it is.
+    pub instrument: Option<Box<InstrumentFacts>>,
+    /// The file is a recording of an instrument of the library: a part of
+    /// that instrument, not a sound to be found on its own. It is listed,
+    /// so that the library shows what is on disk, and left out of searches
+    /// unless they ask for it.
+    pub of_instrument: bool,
 }
 
 impl Entry {
@@ -160,6 +198,7 @@ mod tests {
         assert_eq!(EntryKind::of(Path::new("riff.MID")), Some(EntryKind::Midi));
         assert_eq!(EntryKind::of(Path::new("song.trill")), Some(EntryKind::Project));
         assert_eq!(EntryKind::of(Path::new("Lead.vstpreset")), Some(EntryKind::Preset));
+        assert_eq!(EntryKind::of(Path::new("Small Grand.SFZ")), Some(EntryKind::Instrument));
         // Presets in formats of the plugins' makers.
         assert_eq!(EntryKind::of(Path::new("OMEGA SAW.SerumPreset")), Some(EntryKind::Preset));
         assert_eq!(EntryKind::of(Path::new("9 String Metal.amhstate")), Some(EntryKind::Preset));

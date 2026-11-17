@@ -296,6 +296,20 @@ impl Session {
             }
             return Ok((saved.info(), Some(saved)));
         }
+        // A file that a device's state names (an instrument's) is given
+        // to the device as that state, like a preset that was saved.
+        if let Some(read) = self.factory.preset_state(uri, &asked.path) {
+            let (info, state) = read.map_err(refused)?;
+            let saved = SavedPreset {
+                uri: uri.to_string(),
+                name: info.name.clone(),
+                description: info.description.clone(),
+                state: Some(state),
+                format: Some(trill_core::project::FORMAT_VERSION),
+                ..SavedPreset::default()
+            };
+            return Ok((info, Some(saved)));
+        }
         match self.factory.preset_file(uri, &asked.path, asked.within.as_deref()) {
             Some(Ok(info)) => Ok((info, None)),
             Some(Err(reason)) => Err(refused(reason)),

@@ -12,7 +12,7 @@ use super::automation::{self, Hold};
 use super::device_layouts::{self, Display, Format, Layout, Row};
 use super::state::{Cx, TextEditState};
 use super::units::{self, ParamScale};
-use super::{colors, displays, editors, sample_panels, wavetable_panel, widgets};
+use super::{colors, displays, editors, instrument_panel, sample_panels, wavetable_panel, widgets};
 use eframe::egui::{self, Align2, Color32, FontId, Id, Rect, Role, Sense, Ui, WidgetInfo, pos2, vec2};
 use trill_core::device::{DeviceCategory, DeviceDescriptor, ParamKind};
 use trill_core::presets::PresetInfo;
@@ -201,6 +201,9 @@ fn panel_width(cx: &Cx, device: &Device, panel_height: f32) -> f32 {
         (Some(layout), _) if device.uri == sample_panels::SAMPLER => {
             layout_width(layout) + sample_panels::SAMPLE_COLUMN + COLUMN_GAP
         }
+        (Some(layout), _) if device.uri == instrument_panel::SAMPLED => {
+            layout_width(layout) + instrument_panel::INSTRUMENT_COLUMN + COLUMN_GAP
+        }
         (Some(layout), _) => layout_width(layout),
         (None, Some(Ok(params))) => {
             let metric = cx.theme.metric;
@@ -270,6 +273,12 @@ fn panel(ui: &mut Ui, cx: &mut Cx, device: &Device, rect: Rect, accent: Color32)
                     // The file it plays, then its parameters.
                     let (sample, rest) = body.split_left_right_at_x(body.left() + sample_panels::SAMPLE_COLUMN);
                     sample_panels::sampler_sample(ui, cx, &body_of, sample, rect);
+                    laid_out_body(ui, cx, &body_of, layout, rest.with_min_x(rest.left() + COLUMN_GAP));
+                }
+                Some(layout) if device.uri == instrument_panel::SAMPLED => {
+                    // The instrument it plays, then its parameters.
+                    let (shown, rest) = body.split_left_right_at_x(body.left() + instrument_panel::INSTRUMENT_COLUMN);
+                    instrument_panel::instrument(ui, cx, &body_of, shown, rect);
                     laid_out_body(ui, cx, &body_of, layout, rest.with_min_x(rest.left() + COLUMN_GAP));
                 }
                 Some(layout) => laid_out_body(ui, cx, &body_of, layout, body),
