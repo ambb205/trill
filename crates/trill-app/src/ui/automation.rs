@@ -14,16 +14,19 @@ use super::state::{Cx, LaneOwner, lane_owner};
 use super::units::{self, ParamScale};
 use eframe::egui::{self, Rect, Ui};
 use trill_core::device::{ParamInfo, ParamKind};
-use trill_core::project::automation_value;
-use trill_core::{AutomationTarget, ControllerKind};
+use trill_core::project::MIN_VOLUME_DB;
+use trill_core::{AutomationPoint, AutomationTarget, ControllerKind, TrackKind, Travel};
 use trill_noir::{Automation, BarOutput, MenuItem, paint};
 
 /// How an envelope's values map onto the height of its lane, and how they
 /// read. The same mappings as the controls they automate, so a point half
-/// way up the lane is where the fader would be half way up.
+/// way up the lane is where the fader would be half way up. And since an
+/// envelope's lines are straight along the travel of its control, they are
+/// straight lines in its lane.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Scale {
-    /// Decibels on the fader scale.
+    /// Decibels on the fader scale: a volume, or a send, whose bottom is
+    /// shut.
     Volume,
     /// -1 (left) to 1 (right).
     Pan,
@@ -38,7 +41,9 @@ impl Scale {
     /// does not describe (its device failed to load, or is not covered yet).
     pub fn of(snapshot: &Snapshot, target: &AutomationTarget) -> Option<Self> {
         Some(match target {
-            AutomationTarget::TrackVolume { .. } | AutomationTarget::MasterVolume => Scale::Volume,
+            AutomationTarget::TrackVolume { .. } | AutomationTarget::MasterVolume | AutomationTarget::Send { .. } => {
+                Scale::Volume
+            }
             AutomationTarget::TrackPan { .. } => Scale::Pan,
             AutomationTarget::DeviceParam { device, param } => {
                 Scale::Param(snapshot.param(*device, param)?.info.clone())
@@ -115,15 +120,69 @@ impl Scale {
         }
     }
 
-    /// True when equal distances in the lane are equal differences in
-    /// value, so a straight envelope segment is a straight line.
-    pub fn linear(&self) -> bool {
+    /// The travel of the control the scale is laid out by: what a new
+    /// envelope's lines are straight along.
+    pub fn travel(&self) -> Travel {
         match self {
-            Scale::Volume => false,
-            Scale::Pan | Scale::Controller(_) => true,
-            Scale::Param(info) => ParamScale::of(info) == ParamScale::Linear,
+            Scale::Volume => Travel::FADER,
+            Scale::Pan | Scale::Controller(_) => Travel::Linear,
+            Scale::Param(info) => ParamScale::of(info).0,
         }
     }
+
+    /// True when a line of an envelope that travels along `lines` is a
+    /// straight line on this scale: when the envelope follows its control.
+    /// One from a file saved before envelopes did is straight in its units,
+    /// and on a fader's or a frequency's scale that is a curve.
+    pub fn straight(&self, lines: Travel) -> bool {
+        self.travel() == lines
+    }
+
+    /// What the two ways an envelope's lines can go are called in a menu,
+    /// if they differ on this scale: along the control, and straight in
+    /// the units.
+    pub fn travel_words(&self) -> Option<(&'static str, String)> {
+        let unit = match self {
+            Scale::Volume => "dB",
+            Scale::Param(info) if !info.unit.trim().is_empty() => info.unit.trim(),
+            _ => "its units",
+        };
+        match self.travel() {
+            Travel::Linear => None,
+            Travel::Fader { .. } => Some(("Lines follow the fader", format!("Lines straight in {unit}"))),
+            Travel::Log => Some(("Lines follow the knob", format!("Lines straight in {unit}"))),
+        }
+    }
+}
+
+/// What the lines of `target`'s envelope are straight along: as its lane
+/// has it, or, where nothing is written yet, as its control travels, which
+/// is what the first point written will make of it. And the travel of the
+/// control itself.
+pub fn lines(snapshot: &Snapshot, target: &AutomationTarget) -> (Travel, Travel) {
+    let control = Scale::of(snapshot, target).map(|scale| scale.travel()).unwrap_or_default();
+    (snapshot.lane(target).map_or(control, |lane| lane.travel), control)
+}
+
+/// Rewrites the envelope of `target` as one edit against the envelope as it
+/// is right now: `change` is given its points and what its lines are
+/// straight along, and returns the points it is to have. An envelope that
+/// is there keeps its travel; a new one follows its control.
+pub fn rewrite(
+    cx: &mut Cx,
+    target: &AutomationTarget,
+    change: impl FnOnce(&[AutomationPoint], Travel) -> Vec<AutomationPoint>,
+) -> bool {
+    let (_, control) = lines(cx.snap, target);
+    let target = target.clone();
+    cx.edit(|project| match project.automation.iter().find(|lane| lane.target == target) {
+        Some(lane) => {
+            let next = change(&lane.points, lane.travel);
+            project.set_automation(target, next)
+        }
+        None => project.write_automation(target, change(&[], control), control),
+    })
+    .is_some()
 }
 
 /// The value `target` has while no envelope drives it.
@@ -133,6 +192,11 @@ pub fn resting_value(snapshot: &Snapshot, target: &AutomationTarget) -> Option<f
         AutomationTarget::TrackPan { track } => snapshot.track(*track).map(|track| track.pan as f64),
         AutomationTarget::MasterVolume => Some(snapshot.project.master.volume_db as f64),
         AutomationTarget::DeviceParam { device, param } => snapshot.param(*device, param).map(|state| state.value),
+        // A track that has no send to the return sends it nothing.
+        AutomationTarget::Send { track, to } => snapshot.track(*track).map(|track| {
+            let set = track.sends.iter().find(|send| send.to == *to);
+            set.map_or(MIN_VOLUME_DB, |send| send.level_db) as f64
+        }),
     }
 }
 
@@ -146,7 +210,15 @@ pub fn names(snapshot: &Snapshot, target: &AutomationTarget) -> (String, Option<
             let described = snapshot.param(*device, param).map(|state| units::short_param_name(&state.info.name));
             (described.unwrap_or(param).to_owned(), device_name)
         }
+        AutomationTarget::Send { to, .. } => {
+            (send_name(snapshot.track(*to).map_or("a return", |track| track.name.as_str())), None)
+        }
     }
+}
+
+/// What a send to the return called `name` is called.
+pub fn send_name(name: &str) -> String {
+    format!("Send to {name}")
 }
 
 /// One thing a lane of `owner` can show.
@@ -158,17 +230,22 @@ pub struct Choice {
     pub device: Option<String>,
 }
 
-/// Everything that can be automated on `owner`: volume and pan, then every
-/// parameter of its devices in chain order.
+/// Everything that can be automated on `owner`: volume and pan, a send to
+/// each return, then every parameter of its devices in chain order.
 pub fn choices(snapshot: &Snapshot, owner: LaneOwner) -> Vec<Choice> {
     let mixer = |target: AutomationTarget, name: &str| Choice { target, name: name.to_owned(), device: None };
     let (mut found, devices) = match owner {
         LaneOwner::Track(track) => {
             let devices = snapshot.track(track).map(|track| track.devices.as_slice()).unwrap_or_default();
-            let own = vec![
+            let mut own = vec![
                 mixer(AutomationTarget::TrackVolume { track }, "Volume"),
                 mixer(AutomationTarget::TrackPan { track }, "Pan"),
             ];
+            // A return has nowhere to send to.
+            if snapshot.track(track).is_some_and(|track| track.kind != TrackKind::Return) {
+                let returns = snapshot.project.tracks.iter().filter(|other| other.kind == TrackKind::Return);
+                own.extend(returns.map(|to| mixer(AutomationTarget::Send { track, to: to.id }, &send_name(&to.name))));
+            }
             (own, devices)
         }
         LaneOwner::Master => {
@@ -293,7 +370,7 @@ impl Hold {
     pub fn of(cx: &Cx, target: &AutomationTarget) -> Self {
         match cx.snap.lane(target) {
             None => Hold::Free,
-            Some(lane) if lane.enabled => Hold::Driven(automation_value(&lane.points, cx.live.position)),
+            Some(lane) if lane.enabled => Hold::Driven(lane.value_at(cx.live.position)),
             Some(_) => Hold::Held,
         }
     }
@@ -415,7 +492,11 @@ mod tests {
         assert_eq!(Scale::Volume.value(units::db_to_fader(-12.0)), -12.0);
         assert_eq!(Scale::Volume.value(0.3333), (units::fader_to_db(0.3333) as f64 * 10.0).round() / 10.0);
         assert_eq!(Scale::Volume.format(-6.0), "\u{2212}6.0 dB");
-        assert!(!Scale::Volume.linear() && !Scale::Volume.stepped());
+        assert!(!Scale::Volume.stepped());
+        // A fader's envelope is straight in its lane when it follows the
+        // fader, and a curve there when it is straight in decibels.
+        assert!(Scale::Volume.straight(Travel::FADER) && !Scale::Volume.straight(Travel::Linear));
+        assert_eq!(Scale::Volume.travel_words(), Some(("Lines follow the fader", "Lines straight in dB".to_owned())));
 
         assert_eq!(Scale::Pan.position(-1.0), 0.0);
         assert_eq!(Scale::Pan.position(0.5), 0.75);
@@ -423,7 +504,8 @@ mod tests {
         assert_eq!(Scale::Pan.value(0.505), 0.0, "close to the middle is the middle");
         assert_eq!(Scale::Pan.format(-0.5), "L50");
         assert_eq!(Scale::Pan.default_position(), 0.5);
-        assert!(Scale::Pan.linear());
+        assert!(Scale::Pan.straight(Travel::Linear));
+        assert_eq!(Scale::Pan.travel_words(), None, "there is one way only for a pan to go");
     }
 
     #[test]
@@ -442,7 +524,8 @@ mod tests {
         assert!((middle - (info.min * info.max).sqrt()).abs() < 1.0, "{middle}");
         assert!((scale.position(middle) - 0.5).abs() < 1e-4);
         assert!(scale.format(1000.0).contains("kHz"));
-        assert!(!scale.linear() && !scale.stepped());
+        assert!(scale.straight(Travel::Log) && !scale.straight(Travel::Linear) && !scale.stepped());
+        assert_eq!(scale.travel_words(), Some(("Lines follow the knob", "Lines straight in Hz".to_owned())));
         assert_eq!(scale.default_position(), scale.position(info.default));
         assert!(Scale::of(&snapshot, &wave).unwrap().stepped(), "a choice moves in steps");
 
@@ -472,6 +555,28 @@ mod tests {
         assert!(devices.starts_with(&["Poly Synth"]) && devices.ends_with(&["Delay"]), "in chain order");
         assert_eq!(devices.len(), found.len() - 2);
         assert!(found.iter().any(|choice| choice.name == "Filter Cutoff"));
+
+        // With returns in the song, a send to each is among the mixer's own.
+        let (echo, hall) = session
+            .edit(|project| {
+                let echo = project.add_track_of_kind("Echo", TrackKind::Return);
+                Ok((echo, project.add_track_of_kind("Hall", TrackKind::Return)))
+            })
+            .unwrap();
+        let snapshot = Snapshot::capture(&session, &[track]);
+        let found = choices(&snapshot, LaneOwner::Track(track));
+        let listed: Vec<&str> = found[..4].iter().map(|choice| choice.name.as_str()).collect();
+        assert_eq!(listed, ["Volume", "Pan", "Send to Echo", "Send to Hall"]);
+        let throw = AutomationTarget::Send { track, to: echo };
+        assert_eq!((&found[2].target, &found[2].device), (&throw, &None));
+        assert_eq!(names(&snapshot, &throw), ("Send to Echo".to_owned(), None));
+        assert_eq!(Scale::of(&snapshot, &throw), Some(Scale::Volume));
+        assert_eq!(resting_value(&snapshot, &throw), Some(MIN_VOLUME_DB as f64), "no send by hand is none");
+        assert_eq!(lines(&snapshot, &throw), (Travel::FADER, Travel::FADER));
+        // A return sends nowhere.
+        let of_return: Vec<String> =
+            choices(&snapshot, LaneOwner::Track(hall)).into_iter().map(|choice| choice.name).collect();
+        assert_eq!(of_return, ["Volume", "Pan"]);
 
         let master = choices(&snapshot, LaneOwner::Master);
         assert_eq!(master[0].target, AutomationTarget::MasterVolume);

@@ -3,8 +3,8 @@
 //! plugins and audio files.
 
 use crate::graph::{
-    AudioRegion, Bus, Chain, DeviceSlot, Graph, MAX_BLOCK, MasterNode, Meter, NoteEvent, ParamAutomation, RegionAudio,
-    TrackNode, TrackState,
+    AudioRegion, Bus, Chain, DeviceSlot, Envelope, Graph, MAX_BLOCK, MasterNode, Meter, NoteEvent, ParamAutomation,
+    RegionAudio, SendNode, TrackNode, TrackState,
 };
 use crate::ready::{LoadWatch, Plugins};
 use crate::sources::AudioSources;
@@ -233,11 +233,11 @@ impl Compiler<'_> {
                 volume_db: track.volume_db,
                 pan: track.pan,
                 audible: routing.audible(project, track),
-                volume_automation: lane_points(
+                volume_automation: envelope(
                     project,
                     |target| matches!(target, AutomationTarget::TrackVolume { track: id } if *id == track.id),
                 ),
-                pan_automation: lane_points(
+                pan_automation: envelope(
                     project,
                     |target| matches!(target, AutomationTarget::TrackPan { track: id } if *id == track.id),
                 ),
@@ -245,11 +245,7 @@ impl Compiler<'_> {
                 state: TrackState::default(),
                 input_bus: routing.bus(track.id),
                 output_bus: track.group.and_then(|group| routing.bus(group)),
-                sends: track
-                    .sends
-                    .iter()
-                    .filter_map(|send| Some((routing.bus(send.to)?, db_to_gain(send.level_db))))
-                    .collect(),
+                sends: sends(project, track, &routing),
                 tap: None,
                 source: None,
             });
@@ -260,10 +256,9 @@ impl Compiler<'_> {
         let master = MasterNode {
             chain: self.chain(&project.master.devices, project, &mut problems),
             volume_db: project.master.volume_db,
-            volume_automation: lane_points(project, |target| matches!(target, AutomationTarget::MasterVolume)),
+            volume_automation: envelope(project, |target| matches!(target, AutomationTarget::MasterVolume)),
             meter: self.meters.master.clone(),
-            gain: 1.0,
-            primed: false,
+            fader: Default::default(),
             tap: None,
         };
 
@@ -280,7 +275,10 @@ impl Compiler<'_> {
         }
 
         let region = project.loop_region;
+        let moves_params =
+            !master.chain.automation.is_empty() || tracks.iter().any(|track| !track.chain.automation.is_empty());
         let graph = Graph {
+            moves_params,
             tracks,
             buses: (0..routing.bus_count()).map(|_| Bus::new()).collect(),
             master,
@@ -300,7 +298,7 @@ impl Compiler<'_> {
             let Some(slot) = devices.iter().position(|d| d.id == *device) else { continue };
             let Some(meta) = self.bank.devices.get(device) else { continue };
             if let Some(index) = meta.params.iter().position(|info| info.id == *param) {
-                automation.push(ParamAutomation { slot, param: index, points: lane.points.clone(), last: f64::NAN });
+                automation.push(ParamAutomation { slot, param: index, envelope: Envelope::of(lane), last: f64::NAN });
             }
         }
         Chain { devices: slots, automation }
@@ -497,24 +495,51 @@ impl Routing {
 }
 
 /// Whose sound goes into whom: a member into its group, a track into each
-/// return it sends to. (Whatever else comes to feed a track, a device that
-/// listens to another track say, belongs here, and in [`Routing::needed`]
-/// if it is to be made though it is not heard itself.)
+/// return it sends to, by a send set by hand or by one an envelope moves.
+/// (Whatever else comes to feed a track, a device that listens to another
+/// track say, belongs here, and in [`Routing::needed`] if it is to be made
+/// though it is not heard itself.)
 fn feeds(project: &Project) -> Vec<(TrackId, TrackId)> {
     let mut feeds = Vec::new();
     for track in &project.tracks {
         feeds.extend(track.group.map(|group| (track.id, group)));
         feeds.extend(track.sends.iter().map(|send| (track.id, send.to)));
     }
+    feeds.extend(project.automation.iter().filter(|lane| lane.enabled).filter_map(|lane| match lane.target {
+        AutomationTarget::Send { track, to } => Some((track, to)),
+        _ => None,
+    }));
     feeds
 }
 
-fn lane_points(
-    project: &Project,
-    matches: impl Fn(&AutomationTarget) -> bool,
-) -> Option<Vec<trill_core::AutomationPoint>> {
+/// The envelope that moves what `matches` picks out, if it has one.
+fn envelope(project: &Project, matches: impl Fn(&AutomationTarget) -> bool) -> Option<Envelope> {
     // A lane that is switched off is no lane to the engine.
-    project.automation.iter().find(|lane| lane.enabled && matches(&lane.target)).map(|lane| lane.points.clone())
+    project.automation.iter().find(|lane| lane.enabled && matches(&lane.target)).map(Envelope::of)
+}
+
+/// What `track` sends to the returns: the sends set by hand, each moved by
+/// its envelope if it has one, and the sends that are an envelope alone.
+fn sends(project: &Project, track: &Track, routing: &Routing) -> Vec<SendNode> {
+    let node = |to: TrackId, gain: f32, automation: Option<Envelope>| {
+        Some(SendNode { bus: routing.bus(to)?, to, gain, automation, glide: Default::default() })
+    };
+    let moved = |to: TrackId| {
+        envelope(
+            project,
+            |target| matches!(target, AutomationTarget::Send { track: from, to: at } if *from == track.id && *at == to),
+        )
+    };
+    let by_hand = track.sends.iter().filter_map(|send| node(send.to, db_to_gain(send.level_db), moved(send.to)));
+    let by_envelope = project.automation.iter().filter(|lane| lane.enabled).filter_map(|lane| match lane.target {
+        AutomationTarget::Send { track: from, to }
+            if from == track.id && !track.sends.iter().any(|send| send.to == to) =>
+        {
+            node(to, 0.0, Some(Envelope::of(lane)))
+        }
+        _ => None,
+    });
+    by_hand.chain(by_envelope).collect()
 }
 
 /// A clip's notes as the engine plays them: absolute positions, with the

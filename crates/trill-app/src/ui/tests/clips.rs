@@ -486,9 +486,12 @@ fn empty_time_is_inserted_where_the_selection_starts() {
     assert_eq!(project.markers[0].beat, 16.0, "markers after it move too");
     assert_eq!((project.loop_region.start, project.loop_region.end), (0.0, 18.0));
     // The envelope holds its value through the new time and then carries on.
-    let points = &project.automation.iter().find(|lane| lane.target == volume).unwrap().points;
-    let value = |beat: f64| trill_core::project::automation_value(points, beat);
-    assert_eq!((value(9.0), value(10.0), value(11.9), value(13.0), value(14.0)), (-9.0, -10.0, -10.0, -11.0, -12.0));
+    let lane = project.automation.iter().find(|lane| lane.target == volume).unwrap();
+    let ramp = |beat: f64| trill_core::Travel::FADER.between(-8.0, -12.0, (beat - 8.0) / 4.0);
+    for (beat, was_at) in [(9.0, 9.0), (10.0, 10.0), (11.9, 10.0), (13.0, 11.0), (14.0, 12.0)] {
+        let (now, was) = (lane.value_at(beat), ramp(was_at));
+        assert!((now - was).abs() < 1e-9, "at {beat} it is {now}; before, at {was_at}, it was {was}");
+    }
     assert_eq!(harness.undo_depth(), before + 1, "all of it is one undo step");
     let selection = harness.app.state().arrangement.time_selection.clone().unwrap();
     assert_eq!((selection.start, selection.end), (10.0, 12.0), "the selection stays, over the room that was made");

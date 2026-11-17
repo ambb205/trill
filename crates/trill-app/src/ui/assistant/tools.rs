@@ -320,6 +320,10 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
                 Some("track_volume") => format!("the volume of {}", target_call.track("track").unwrap_or_default()),
                 Some("track_pan") => format!("the pan of {}", target_call.track("track").unwrap_or_default()),
                 Some("master_volume") => "the master volume".to_owned(),
+                Some("send") => {
+                    let from = target_call.track("track").unwrap_or_default();
+                    format!("the send of {from} to {}", target_call.track("to").unwrap_or_default())
+                }
                 Some("device_param") => {
                     let param = target_call.text("param").unwrap_or("a parameter");
                     format!("{param} of {}", target_call.device("device").unwrap_or_default())
@@ -534,6 +538,10 @@ mod tests {
         assert_eq!(
             did("set_automation", json!({ "target": { "type": "track_volume", "track": track } }), p),
             "Automated the volume of \u{201C}Bass\u{201D}"
+        );
+        assert_eq!(
+            did("set_automation", json!({ "target": { "type": "send", "track": track, "to": track } }), p),
+            "Automated the send of \u{201C}Bass\u{201D} to \u{201C}Bass\u{201D}"
         );
         assert_eq!(did("history", json!({ "action": "undo", "steps": 3 }), p), "Undid 3 steps");
         assert_eq!(

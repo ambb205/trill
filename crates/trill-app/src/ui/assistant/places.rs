@@ -144,6 +144,7 @@ fn target_of(target: &Value) -> Option<AutomationTarget> {
         "track_volume" => Some(AutomationTarget::TrackVolume { track: TrackId(id("track")?) }),
         "track_pan" => Some(AutomationTarget::TrackPan { track: TrackId(id("track")?) }),
         "master_volume" => Some(AutomationTarget::MasterVolume),
+        "send" => Some(AutomationTarget::Send { track: TrackId(id("track")?), to: TrackId(id("to")?) }),
         "device_param" => Some(AutomationTarget::DeviceParam {
             device: DeviceId(id("device")?),
             param: target.get("param")?.as_str()?.to_owned(),

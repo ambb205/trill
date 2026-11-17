@@ -919,6 +919,11 @@ pub fn lane_owner(project: &Project, target: &AutomationTarget) -> Option<LaneOw
             ChainRef::Master => Some(LaneOwner::Master),
         },
         AutomationTarget::MasterVolume => Some(LaneOwner::Master),
+        // A send is the sending track's, and is gone with its return.
+        AutomationTarget::Send { track, to } => {
+            project.track(*to).ok()?;
+            project.track(*track).ok().map(|track| LaneOwner::Track(track.id))
+        }
     }
 }
 
