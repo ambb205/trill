@@ -62,7 +62,7 @@ const CLIP_STRIP: f32 = 14.0;
 const STRIP_AWAY: f32 = 0.42;
 const STRIP_LIT_BARS: f32 = 1.5;
 /// How much darker the lanes are when the piano rolls have the stage.
-const LANES_VEIL: f32 = 0.5;
+const LANES_VEIL: f32 = 0.62;
 /// Height of a roll's title bar, and the gap between two rolls.
 const ROLL_TITLE: f32 = 18.0;
 const ROLL_GAP: f32 = 6.0;

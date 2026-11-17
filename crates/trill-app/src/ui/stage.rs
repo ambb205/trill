@@ -70,34 +70,43 @@ impl Clock {
     }
 }
 
-/// How long the stage's part of a frame took, for the figures a smoke run
-/// prints.
+/// What the stage cost while the song played, for the figures a smoke run
+/// prints. Frames made while the song stands still are not counted: the
+/// window then paints only when something changes.
 #[derive(Debug, Default)]
 struct Costs {
+    /// Frames that followed another while the song played, and the time
+    /// they covered.
     frames: u32,
+    played: Duration,
+    /// What the stage's part of those frames took, the longest of them,
+    /// and how much of it was handing the picture to the graphics card.
     spent: Duration,
     worst: Duration,
-    first: Option<Instant>,
-    last: Option<Instant>,
+    card: Duration,
     /// Frames that came more than a frame and a half of a sixty-a-second
     /// display after the one before, and the longest wait for one.
     late: u32,
     longest: Duration,
+    /// When the frame before this one began, if the song played then.
+    last: Option<Instant>,
 }
 
 impl Costs {
-    fn add(&mut self, started: Instant) {
-        let took = started.elapsed();
-        self.frames += 1;
-        self.spent += took;
-        self.worst = self.worst.max(took);
-        self.first.get_or_insert(started);
+    fn add(&mut self, started: Instant, playing: bool, card: Duration) {
+        if !playing {
+            self.last = None;
+            return;
+        }
         if let Some(last) = self.last {
-            let waited = started.duration_since(last);
+            let (took, waited) = (started.elapsed(), started.duration_since(last));
+            self.frames += 1;
+            self.played += waited;
+            self.spent += took;
+            self.worst = self.worst.max(took);
+            self.card += card;
             self.longest = self.longest.max(waited);
-            if waited > Duration::from_millis(25) {
-                self.late += 1;
-            }
+            self.late += u32::from(waited > Duration::from_millis(25));
         }
         self.last = Some(started);
     }
@@ -228,11 +237,14 @@ impl StageView {
             self.drawing = Drawing::Ready(Box::new(renderer));
         }
 
+        let mut card = Duration::ZERO;
         match (&mut self.drawing, gpu) {
             (Drawing::Ready(renderer), Some(gpu)) => {
                 let look = Look::of(song, &camera, &heard, self.frames);
                 let picture = self.stage.paint(song, &camera, &heard, format, 1, look);
+                let painted = Instant::now();
                 renderer.draw(&picture);
+                card = painted.elapsed();
                 if let (Some(view), Some(size)) = (renderer.finished(), renderer.finished_size()) {
                     let texture = show_texture(gpu, &mut self.shown, view, size);
                     let whole = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
@@ -251,7 +263,7 @@ impl StageView {
         if live.playing || live.meters_moving() {
             ctx.request_repaint();
         }
-        self.costs.add(started);
+        self.costs.add(started, live.playing, card);
     }
 
     /// The words that say how to leave, for a moment after the stage is
@@ -293,22 +305,24 @@ impl StageView {
         self.clock = Clock::default();
     }
 
-    /// What the stage cost while it was last open, for a smoke run to say.
+    /// What the stage cost while it was last open and the song played, for
+    /// a smoke run to say.
     pub fn report(&self) -> Option<String> {
         let costs = &self.costs;
-        let (first, last) = (costs.first?, costs.last?);
-        let over = last.duration_since(first).as_secs_f64();
-        if costs.frames < 2 || over <= 0.0 {
+        if costs.frames == 0 || costs.played.is_zero() {
             return None;
         }
+        let each = |total: Duration| total.as_secs_f64() * 1000.0 / costs.frames as f64;
         Some(format!(
-            "stage: {} frames, {:.1} a second, {} of them late (the longest wait {:.1} ms); its part of a \
-             frame {:.2} ms on average, {:.2} ms at worst; {}",
+            "stage: {} frames while the song played, {:.1} a second, {} of them late (the longest wait {:.1} ms); \
+             its part of a frame {:.2} ms on average ({:.2} ms of it handing the picture to the graphics card), \
+             {:.2} ms at worst; {}",
             costs.frames,
-            (costs.frames - 1) as f64 / over,
+            costs.frames as f64 / costs.played.as_secs_f64(),
             costs.late,
             costs.longest.as_secs_f64() * 1000.0,
-            costs.spent.as_secs_f64() * 1000.0 / costs.frames as f64,
+            each(costs.spent),
+            each(costs.card),
             costs.worst.as_secs_f64() * 1000.0,
             match &self.drawing {
                 Drawing::Ready(renderer) => format!("drawn on {}", renderer.gpu().name),

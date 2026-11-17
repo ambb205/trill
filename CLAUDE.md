@@ -20,11 +20,14 @@ cargo clippy --workspace --all-targets              # must be clean
 cargo fmt --all -- --check                          # rustfmt.toml: 120 columns
 sh scripts/warm-worktree.sh                         # first thing in a new git worktree: reuses built libraries
 sh crates/trill-app/screenshots/render.sh <word>    # pictures of the window, into target/screenshots
+cargo run -p trill-stage --example film -- SONG.trill --still 42 out.png   # a picture of the stage (see the example)
 ```
 
 - The default test run needs nothing installed and reads nothing of the user's. Tests that need this machine
-  (installed plugins, audio devices, MIDI ports, a signed-in Claude Code) are `#[ignore]`d with the command that
-  runs them; `README.md`, "Building and testing", lists them. Run the plugin ones after touching `trill-plugins`.
+  (installed plugins, audio devices, MIDI ports, a signed-in Claude Code, a graphics card, ffmpeg) are `#[ignore]`d
+  with the command that runs them; `README.md`, "Building and testing", lists them. Run the plugin ones after
+  touching `trill-plugins`, and `cargo test -p trill-stage --test drawn -- --ignored` after touching `trill-stage`'s
+  `gpu/` or `film.rs`.
 - A few tests hold a wall-clock budget and can fail on a machine that is busy with other builds
   (`trill-library` `scale::a_hundred_thousand_files…`, `trill-engine` `session_transport_runs_in_real_time`, `trill-mcp`
   `an_agent_arms_a_track_plays_it_and_records_a_take`, the real-plugin tests). If one is the only failure, run it alone before concluding anything.
@@ -65,7 +68,8 @@ on the samples.
 | `trill-runtime` | `Runtime`: the session, media cache, library, settings, MIDI input ports, safety copies of unsaved work and the housekeeping thread, built once. Both programs start from it. |
 | `trill-mcp` | The MCP server and the windowless `trill-mcp` binary. `requests.rs` (tool arguments), `server.rs`, `music.rs` and `sounds.rs` (the tools), `hearing.rs` (`probe`, `measure` and `render`, with their arguments and replies), `instruments.rs` (what a track's notes mean, read and set, and the warnings that come of it), `view.rs` (replies), `guard.rs` (limits on the in-app assistant's endpoint). |
 | `trill-assistant` | The back end of the in-app assistant: runs the user's own Claude Code CLI, one process per message, confined to Trill's tools. |
-| `trill-noir` | The egui widget kit and theme ("Instrument Noir"): Bars, Chips, Faders, text, icons, tokens. |
+| `trill-noir` | The egui widget kit and theme ("Instrument Noir"): Bars, Chips, Faders, text, icons, tokens, the mark. |
+| `trill-stage` | The stage: the song's own interface, filmed. A frame is a function of the song, what was measured of its sound, a time and the shot, and of nothing else. `score.rs` (what it reads of a project: sections, each part's notes, the drum hits), `director.rs` (the takes: which shot each stretch gets, from the song alone), `camera.rs` (where the camera is at a beat), `light.rs` (what lights when, from the notes), `sound.rs` (what was measured of the audio, which sets the mood), `scene.rs` (the painting, with the kit, in three layers: the interface, what emits light, how far out of focus each part is), `gpu/` (the passes over those layers, on wgpu: bloom, focus blur, exposure from several moments, the finish), `stage.rs` (a song and a time in, a picture out), `film.rs` (frames handed to ffmpeg with the audio). |
 | `trill-app` | The window (binary `trill`), all under `src/ui/`. |
 
 ### The window
@@ -82,7 +86,8 @@ on the samples.
   velocities and controller curves under them), `devices.rs` with
   `device_layouts.rs`, `mixer.rs`, `browser/` and `sounds/`, `audio_clip.rs`, `sample_panels.rs`, `recording.rs`,
   `audio_settings.rs`, `keyboard/` (the computer keyboard as a MIDI keyboard), `assistant/` (the chat panel),
-  `recovery.rs`, `files.rs`.
+  `recovery.rs`, `files.rs`, `stage.rs` (F11: the stage in place of the panes. It is drawn by `trill-stage`'s passes
+  on the window's graphics device into a texture; the window's own renderer only shows that texture).
 - `tests/` drives the real app headlessly: `Harness::new(options, |session| …)` opens it on a hermetic `Runtime`,
   simulated input goes in, and assertions read the session and the widgets' accessibility labels.
 

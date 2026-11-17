@@ -527,6 +527,24 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_color_is_shown_in_the_hue_that_stands_for_it() {
+        let (noir, graphite) = (Theme::noir(), Theme::graphite());
+        let stored = |color: Color32| (color.r() as u32) << 16 | (color.g() as u32) << 8 | color.b() as u32;
+        for (index, legacy) in POSITIONAL.into_iter().enumerate() {
+            // What a project hands out goes by its place, in any theme.
+            assert_eq!(noir.stored_hue(legacy), noir.tracks[index], "the {index}th default color");
+            assert_eq!(graphite.stored_hue(legacy), graphite.tracks[index]);
+            // A hue of the palette is itself, and its place in another.
+            assert_eq!(noir.stored_hue(stored(noir.tracks[index])), noir.tracks[index]);
+            assert_eq!(graphite.stored_hue(stored(noir.tracks[index])), graphite.tracks[index]);
+        }
+        // Anything else takes the nearest hue; only the low three bytes count.
+        assert_eq!(noir.stored_hue(0x00FF40), noir.tracks[3]);
+        assert_eq!(noir.stored_hue(0xFF00FF40), noir.tracks[3]);
+        assert_eq!(noir.stored_hue(0x777777), noir.tracks[6], "grays take the neutral hue");
+    }
+
+    #[test]
     fn contrast_and_compositing_reference_points() {
         assert!((contrast_ratio(Color32::WHITE, Color32::BLACK) - 21.0).abs() < 0.01);
         assert!((contrast_ratio(rgb(0x101013), rgb(0x101013)) - 1.0).abs() < 1e-6);
