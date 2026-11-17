@@ -767,7 +767,7 @@ fn a_track_volume_drag_is_one_undo_step() {
     // there, and dragging carries it along.
     harness.drag(harness.volume_bar(0, 0.84), harness.volume_bar(0, 0.4));
     let volume = harness.project().track(first).unwrap().volume_db;
-    assert!((-23.0..-21.0).contains(&volume), "40% of the way up the fader scale: {volume}");
+    assert!((-19.0..-17.0).contains(&volume), "40% of the way up the fader scale: {volume}");
     assert_eq!(harness.undo_depth(), before + 1, "press and drag are one step");
 
     harness.double_click(harness.volume_bar(0, 0.4));
@@ -1284,7 +1284,7 @@ fn the_master_volume_bar_is_one_undo_step() {
     let at = |fraction: f32| pos2(right - arrangement::MASTER_VOLUME_WIDTH * (1.0 - fraction), y);
     harness.drag(at(0.8), at(0.5));
     let volume = harness.project().master.volume_db;
-    assert!((-17.5..-15.0).contains(&volume), "halfway up the fader scale: {volume}");
+    assert!((-15.0..-13.0).contains(&volume), "halfway up the fader scale: {volume}");
     assert_eq!(harness.undo_depth(), before + 1);
 }
 

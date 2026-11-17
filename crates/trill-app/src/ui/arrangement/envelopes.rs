@@ -925,6 +925,11 @@ pub(super) fn menu(ui: &mut Ui, cx: &mut Cx, subject: &MenuSubject) {
                 cx.edit(|project| project.set_automation_travel(&target, travel));
             }
         }
+        // An envelope of an older song may go neither way: along the
+        // fader of its day, which it keeps until one of the two is chosen.
+        if lines != control && lines != Travel::Linear {
+            MenuItem::new("Lines as the song saved them").checked(true).enabled(false).show(ui, theme);
+        }
         trill_noir::menu_separator(ui, theme);
     }
     let on = cx.snap.lane(target).map(|lane| lane.enabled);
@@ -1175,7 +1180,7 @@ mod tests {
         assert_eq!(path.len(), 3, "the lane's left edge, the two points, and no samples between: {path:?}");
         let middle = fader.y(fader.worth(&fade, 8.0));
         assert!((middle - (fader.y(0.0) + fader.y(-60.0)) / 2.0).abs() < 0.01, "{middle}");
-        assert!((fader.worth(&fade, 8.0) + 20.0).abs() < 1e-9);
+        assert!((fader.worth(&fade, 8.0) + 16.302).abs() < 1e-3, "where a fader of Live's is half way");
         // The line is grabbed where it is drawn, and a point added on it
         // sits on it.
         let on_line = pos2(fader.x(8.0), middle);
@@ -1396,7 +1401,7 @@ mod tests {
         // Along a fader, the pencil's step leaves the fade before it as it was.
         let fade = [point(0.0, 0.0), point(16.0, -60.0)];
         let stepped = super::drawn(&fade, Travel::FADER, 8.0, 8.0, 1.0, -6.0);
-        assert!((stepped[1].value + 20.0).abs() < 1e-9, "the fade arrives at beat 8 where it was: {stepped:?}");
+        assert!((stepped[1].value + 16.302).abs() < 1e-3, "the fade arrives at beat 8 where it was: {stepped:?}");
         assert_eq!((stepped[2].value, stepped[2].shape), (-6.0, Segment::Hold));
         let before = envelope_value(&fade, Travel::FADER, 9.0);
         assert!((stepped[3].value - before).abs() < 1e-9, "and goes on from where it would have been");

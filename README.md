@@ -37,6 +37,7 @@ asked for:
 cargo test -p trill-plugins -- --include-ignored    # against the CLAP and VST3 plugins installed here (minutes)
 cargo test -p trill-mcp --test presets -- --include-ignored --nocapture    # an assistant's pass over Surge XT's presets, an amplifier's, a kit, a guitar tone and a patch of their makers', and a bought preset found among the samples
 cargo test -p trill-plugins --test sounds -- --include-ignored --nocapture --test-threads 1    # what installed plugins say of their parameters, channels and presets
+cargo test -p trill-plugins --test lifetimes -- --include-ignored --nocapture    # plugin instances made and dropped beside one that stays, an attempt to a process: counts the crashes, and says where each was and what the machine had of memory; half an hour, and no attempt is started on a machine short of memory
 cargo test -p trill-plugins --test vendor -- --include-ignored --nocapture --test-threads 1    # the makers' own presets of Serum 2, the Ample guitars, Superior Drummer 3 and the Archetypes: listed, loaded by name and by a file's path, and heard to differ
 cargo test -p trill-mcp --test controllers -- --include-ignored --nocapture    # a SWAM saxophone and Surge XT played from the controller curves of clips
 cargo test -p trill-mcp --test hearing -- --include-ignored --nocapture    # renders and probes of Superior Drummer 3, a SWAM saxophone and an Ample bass
@@ -256,7 +257,8 @@ their `legacy` switched on, and so have the sample players (the velocity law the
 turned down as the drive rises), the utility (a lowest gain that is 70 dB down and not silence, smoothed over a
 hundredth of a second) and the synth (its noise) of formats 1 to 3. The synth volumes of those formats are also
 written 21 dB down the scale, where they mean what they did, and so is an envelope on one: its points, and the
-level its line's travel is measured from where it follows a fader, so that it plays the curve it played. A journal
+level its line's travel is measured from where it follows the fader of those formats, so that it plays the curve
+it played. A journal
 kept before such a change is read by the same rule, so the making-of plays the song as it sounded.
 `trill-engine/tests/old_songs.rs` holds a file of each format to the samples the build that wrote it rendered.
 
@@ -400,7 +402,8 @@ moved the control at an even speed, which is not the same as so many decibels or
 
 | What is moved | How a line travels | Half way from → to |
 |---|---|---|
-| A volume, a send, a gain or an instrument's volume (a level that reaches silence) | as a fader does: even in the square of the decibels above its floor | 0 dB → −60 dB: **−20 dB**; +6 dB → −60 dB: −15.8 dB; −40 dB → −6 dB: −20 dB |
+| A track's or the master's volume, a send, an instrument's volume | as a fader of Ableton Live's does: even in decibels through the top 24 dB of its travel, and ever faster below (a stretch that would have been y dB takes y + y²/8), to silence at the bottom | 0 dB → −60 dB: **−16.3 dB** (a send: −18.6 dB); +6 dB → −60 dB: −13.3 dB |
+| A gain that reaches silence (a Utility's) | as a gain of Live's does: even in decibels down to −17.5 dB, and below that the gain itself falls as the square of what is left of the travel | 0 dB → −60 dB: **−16.7 dB** |
 | A frequency or a time (a range of a hundred times its lowest value or more) | by ratio: every octave takes the same time | 300 Hz → 9 kHz: **1,643 Hz** |
 | Pan, mix and other amounts, an EQ's gain, a threshold, a plugin's parameters | evenly in the value | −12 → +12: 0 |
 
@@ -411,11 +414,35 @@ it, so such a line is a straight line in its lane, and the engine plays it. `sha
 further, and an envelope can be told to go straight in its units instead (`travel` in `set_automation`; the
 lane's menu in the window).
 
+*A level travels as the same control does in Ableton Live*, so that a fade of two points is the fade it would be
+there. The two laws are fitted to what Live shows at 257 places along a Utility's gain, a mixer's send and
+Operator's volume: the gain's is within 0.1 dB of Live's along a line, the send's within 0.01 dB, and a volume's
+within the whole decibel Live shows one to. From 0 dB to −60 dB, a quarter, a half and three quarters of the way:
+
+| | Trill | Live shows |
+|---|---|---|
+| A Utility's gain | −8.4, −16.7, −27.4 dB | −8.4, −16.8, −27.5 dB |
+| A send | −9.3, −18.6, −30.1 dB | −9.3, −18.6, −30.1 dB |
+| A track's or an instrument's volume | −8.2, −16.3, −30.0 dB | −8, −16, −30 dB (Operator's) |
+
+A send's fader and a volume's are the same law, with its knee 23.8 dB under the top of the control (0 dB for a
+send in Live, +6 dB for a volume); a gain's is another, and in Live's own figures the two are 2.6 dB apart three
+quarters of the way down such a fade and 5 dB apart near its end, which is why they are two. A volume's fader in the window is laid out by it too: 0 dB at 85% of its travel, as on
+Live's, −12 dB at 55% and −48 dB at 10%. `trill-engine/tests/automation.rs` renders three fades of two points
+and holds every beat of them to what Live shows.
+
 *A song saved before this plays as it did.* An envelope keeps what its lines are straight along, and a project
 file written before envelopes did (format version 1 or 2) says nothing: its envelopes are straight in their units, as
 they were played then, and stay so when their points are edited. They become a fader's or a knob's only when
 they are written anew over MCP, or by the lane's menu. A file saved since is format version 3 or later, which an
 earlier build refuses to open instead of playing its fades as other curves.
+
+A file of format 3, 4 or 5 holds levels that follow the fader of its day: even in the square of the decibels above
+silence, which is at −20 dB half way from 0 dB to −60 dB and from there as much as 7 dB under Live's. Such an
+envelope is read as that law, which is kept under the name "square", and plays as it did, to the sample; the
+lane's menu says that its lines are as the song saved them. It becomes a fader's of now when it is written anew
+over MCP or told to follow its control (`travel` "control"; "Lines follow the fader" in the lane's menu). A file
+saved now is format version 6.
 
 *A send can be automated* like a volume: its envelope is the send, at the bottom of which nothing is sent, with or
 without a level set by hand. A send opened for single notes (a delay throw) needs no return of its own.
@@ -453,8 +480,8 @@ sounds within a frame of where the map has its beat, whatever the buffer size, a
 (`trill-engine/tests/tempo.rs`). A song of one tempo is one stretch, and every number in it is what it was: such
 a song renders to the samples it rendered to before.
 
-*An older file is one tempo and one meter.* A file saved now is format version 5. One saved before says nothing
-of changes and has none; nothing is written into it.
+*An older file is one tempo and one meter.* Changes are saved since format version 5. A file saved before says
+nothing of them and has none; nothing is written into it.
 
 In the window the foot of the ruler says where the tempo or the time signature changes, beside the bar's number
 ("7/8 · 140 BPM", an arrow before a tempo the song glides to). A double-click types another value, a drag moves
@@ -775,7 +802,10 @@ Working: everything listed above, with tests.
 
 Not yet: running plugins out of process (only scanning and the reading of presets are isolated today, so a plugin
 that crashes while playing or while it loads a preset still takes the app with it; the safety copy is what saves
-the work), a preset browser for plugins in the window (the session lists, searches and loads them, and so does
+the work. One such crash is known and worked around: Neural DSP's Archetypes take the process down when an
+instance is taken down before a message the plugin posted to itself has reached it while another instance is
+alive, which probes and renders of a song that uses one did; an instance that is let go of is now kept, and taken
+down only when the plugin thread has delivered what was waiting and the plugin has had fifteen seconds of it), a preset browser for plugins in the window (the session lists, searches and loads them, and so does
 MCP; the device panel shows built-in and saved presets only), asking a CLAP plugin for a stereo layout when its
 default is mono (a VST3 plugin is asked), a hosted plugin's sidechain input (the built-in compressor has one),
 plugin editors on Linux and macOS,

@@ -202,6 +202,101 @@ fn the_tempo_and_the_time_signature_change_along_the_ruler_and_are_edited_there(
 }
 
 #[test]
+fn the_top_bar_shows_and_sets_the_tempo_and_the_time_signature_the_song_has_where_it_is() {
+    let (mut harness, ..) = with_two_tracks(UiOptions::default());
+    // A song that begins in 4/4 at 120, is in 6/8 at 140 from bar 3 (bars
+    // of three beats: 8, 11, 14, 17, 20, 23), and slows from bar 5 to 100
+    // by bar 7.
+    harness
+        .session
+        .lock()
+        .edit(|project| {
+            project.set_time_signature_at(8.0, 6, 8)?;
+            project.set_tempo_at(8.0, 140.0, false)?;
+            project.set_tempo_at(14.0, 140.0, false)?;
+            project.set_tempo_at(20.0, 100.0, true)
+        })
+        .unwrap();
+    harness.idle(2);
+    let go_to = |harness: &mut Harness, beat: f64| {
+        harness.click(harness.ruler(beat, false));
+        harness.wait_for("the playhead to go there", |session| session.transport().position_beats == beat);
+        harness.idle(3);
+    };
+    // The item of the time signature's menu that is ticked.
+    let ticked = |harness: &mut Harness| {
+        harness.click_label("Time signature");
+        harness.idle(3);
+        let ticked: Vec<&str> =
+            ["4 / 4", "3 / 4", "6 / 8", "7 / 8"].into_iter().filter(|item| harness.is_on(item)).collect();
+        // A second click on the field shuts its menu, and chooses nothing.
+        let field = harness.labeled("Time signature");
+        harness.click(field);
+        harness.idle(3);
+        assert!(!harness.is_on_screen("12 / 8"), "the menu is shut again");
+        ticked
+    };
+    let type_tempo = |harness: &mut Harness, tempo: &str| {
+        harness.double_click_label("Tempo");
+        harness.idle(2);
+        harness.key(Modifiers::COMMAND, Key::A);
+        harness.type_text(tempo);
+        harness.key(Modifiers::NONE, Key::Enter);
+        harness.idle(2);
+    };
+    let before = harness.undo_depth();
+
+    // At the start: what the song begins with.
+    assert_eq!(harness.shown("Tempo"), 120.0);
+    assert_eq!(ticked(&mut harness), ["4 / 4"]);
+
+    // In bar 4 the fields show the tempo and the time signature that took
+    // over at bar 3, and what is set there is that change: the song still
+    // begins as it did.
+    go_to(&mut harness, 11.0);
+    assert_eq!(harness.shown("Tempo"), 140.0);
+    assert_eq!(ticked(&mut harness), ["6 / 8"]);
+    type_tempo(&mut harness, "150");
+    assert_eq!(tempos(&harness), [(8.0, 150.0, false), (14.0, 140.0, false), (20.0, 100.0, true)]);
+    assert_eq!((harness.project().tempo, harness.shown("Tempo")), (120.0, 150.0));
+    let field = harness.labeled("Tempo");
+    harness.drag(field, field - vec2(0.0, 40.0));
+    assert_eq!(tempos(&harness)[0], (8.0, 160.0, false), "a quarter of a BPM per pixel, upward");
+    assert_eq!(harness.undo_depth(), before + 2, "typing is a step, and a drag is one");
+    harness.click_label("Time signature");
+    harness.click_label("3 / 4");
+    harness.idle(2);
+    assert_eq!(signatures(&harness), [(8.0, 3, 4)]);
+    let begins = harness.project().time_signature;
+    assert_eq!((begins.numerator, begins.denominator), (4, 4));
+    assert_eq!(ticked(&mut harness), ["3 / 4"]);
+    assert_eq!(harness.undo_depth(), before + 3);
+
+    // While the song slows, the field shows the tempo it has got to, and
+    // what is typed is the tempo it is on its way to.
+    go_to(&mut harness, 17.0);
+    let gliding = harness.shown("Tempo");
+    assert_eq!(gliding, harness.project().tempo_map().tempo_at(17.0));
+    assert!(gliding > 100.0 && gliding < 140.0, "{gliding}");
+    type_tempo(&mut harness, "90");
+    assert_eq!(tempos(&harness), [(8.0, 160.0, false), (14.0, 140.0, false), (20.0, 90.0, true)]);
+
+    // Once it has arrived, that tempo is the one the song has, and the one
+    // that is set: not the tempo of some change before the glide.
+    go_to(&mut harness, 23.0);
+    assert_eq!(harness.shown("Tempo"), 90.0);
+    type_tempo(&mut harness, "96");
+    assert_eq!(tempos(&harness), [(8.0, 160.0, false), (14.0, 140.0, false), (20.0, 96.0, true)]);
+    assert_eq!(harness.shown("Tempo"), 96.0);
+
+    // Back at the start, it is the tempo the song begins at again.
+    go_to(&mut harness, 0.0);
+    type_tempo(&mut harness, "110");
+    assert_eq!((harness.project().tempo, tempos(&harness).len()), (110.0, 3));
+    assert_eq!(harness.undo_depth(), before + 6);
+}
+
+#[test]
 fn the_metronome_is_switched_by_its_button_and_by_k() {
     let (mut harness, ..) = with_two_tracks(UiOptions::default());
     assert!(!harness.session.lock().metronome());
