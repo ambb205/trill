@@ -65,7 +65,12 @@ pub fn number_field(ui: &mut Ui, theme: &Theme, rect: Rect, id: Id, field: &Numb
 
     let response = ui.interact(rect, id, Sense::click_and_drag()).on_hover_cursor(CursorIcon::ResizeVertical);
     let enabled = ui.is_enabled();
-    response.widget_info(|| WidgetInfo::labeled(Role::SpinButton, enabled, field.name));
+    response.widget_info(|| {
+        // The number it holds is said with its name.
+        let mut info = WidgetInfo::labeled(Role::SpinButton, enabled, field.name);
+        info.value = Some(field.value);
+        info
+    });
 
     // A drag is measured from where it started, so the result does not
     // depend on how many frames it took.
