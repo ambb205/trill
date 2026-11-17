@@ -607,7 +607,7 @@ that quick and true:
     asked for (files are written under other names and given theirs when they are whole).
   - *It costs seconds.* A song of eight plugins was measured in 45.5 s in a process of its own and in 42.3 s in
     the program; the song of seventeen was rendered with every instrument's stem in 116 to 121 s and in 131 s.
-    The two processes together hold a ninth to a quarter more at their fullest than the program alone did (6.0
+    The two processes together hold a seventh to a fifth more at their fullest than the program alone did (6.0
     GB against 5.0 GB; 16.6 GB against 14.5 GB).
   A song without plugins is rendered where it is (nothing in it can fault, and it is the same samples either
   way), and decoded audio is not handed over: the process reads and stretches a song's files itself.
