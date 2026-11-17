@@ -93,9 +93,11 @@ pub(crate) mod kind {
     pub(crate) const ASKS_WHEN_ATTACHED: u8 = 13;
     /// [`MONO_GAIN`] that goes on setting itself up behind the scenes for
     /// [`SETTING_UP`](super::SETTING_UP) after it is made, as a plugin
-    /// that reads its sounds on threads of its own does, and does not
-    /// look whether it is still wanted when that work is done: a host
-    /// that takes it down before then has it complain
+    /// that reads its sounds on threads of its own does. When that work
+    /// is done it says so to the plugin's main thread, in a message to a
+    /// window of its own there, and what handles the message does not
+    /// look whether the instance is still wanted: a host that has taken
+    /// it down by the time the message is delivered has it complain
     /// ([`taken_down_under_its_work`](super::taken_down_under_its_work)).
     /// The host is told to leave such a plugin alone for a while
     /// ([`super::super::quirks`]).
@@ -142,26 +144,116 @@ pub(crate) fn sets_itself_up_behind(class: ClassId) -> bool {
     class == class_id(kind::SETS_UP_BEHIND, false)
 }
 
-/// The instances whose work behind the scenes ended after they had been
-/// taken down: in a real plugin, work done on an object that is gone.
+/// The instances that were told of the end of their work behind the
+/// scenes after they had been taken down: in a real plugin, work done on
+/// an object that is gone.
 static TAKEN_DOWN_UNDER_WORK: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 
-/// Whether the instance with this serial was taken down while it was
-/// still setting itself up.
+/// Whether the instance with this serial was taken down before it had
+/// heard from the work it did to set itself up.
 pub(crate) fn taken_down_under_its_work(serial: u64) -> bool {
     TAKEN_DOWN_UNDER_WORK.lock().unwrap().contains(&serial)
 }
 
 /// Starts the work a [`kind::SETS_UP_BEHIND`] plugin does on a thread of
-/// its own once it is made. When the work is done it turns to the
-/// instance without asking whether there still is one.
+/// its own once it is made, on the plugin's main thread. When the work is
+/// done it tells that thread, as a plugin framework does: in a message to
+/// a window of its own there, which is delivered when the thread next
+/// serves its windows. (Where there are no windows, the work turns to the
+/// instance itself.)
 fn set_up_behind(serial: u64) {
+    #[cfg(windows)]
+    let tell = {
+        let window = behind::window();
+        move || behind::post(window, serial)
+    };
+    #[cfg(not(windows))]
+    let tell = move || work_done(serial);
     std::thread::spawn(move || {
         std::thread::sleep(SETTING_UP);
-        if lifecycle(serial).contains(&"terminate") {
-            TAKEN_DOWN_UNDER_WORK.lock().unwrap().push(serial);
-        }
+        tell();
     });
+}
+
+/// What an instance's work behind the scenes comes to, when it is done:
+/// it turns to the instance without asking whether there still is one.
+fn work_done(serial: u64) {
+    if lifecycle(serial).contains(&"terminate") {
+        TAKEN_DOWN_UNDER_WORK.lock().unwrap().push(serial);
+    }
+}
+
+/// The window a [`kind::SETS_UP_BEHIND`] plugin has on its main thread,
+/// which its work behind the scenes posts to.
+#[cfg(windows)]
+mod behind {
+    use std::cell::Cell;
+    use std::ptr::{null, null_mut};
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, HWND_MESSAGE, PostMessageW, RegisterClassExW, WM_APP, WNDCLASSEXW,
+    };
+
+    /// "The work of the instance whose serial comes with this is done."
+    const DONE: u32 = WM_APP + 0x51;
+
+    thread_local! {
+        /// The calling thread's window, once it has one.
+        static WINDOW: Cell<isize> = const { Cell::new(0) };
+    }
+
+    unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if message == DONE {
+            super::work_done(wparam as u64);
+            return 0;
+        }
+        // SAFETY: the arguments are passed on as they were given.
+        unsafe { DefWindowProcW(window, message, wparam, lparam) }
+    }
+
+    /// The calling thread's window for these messages, made on first use.
+    /// It goes with the thread, as every window does.
+    pub(super) fn window() -> isize {
+        if WINDOW.get() != 0 {
+            return WINDOW.get();
+        }
+        static CLASS: OnceLock<Vec<u16>> = OnceLock::new();
+        let class = CLASS.get_or_init(|| {
+            let name: Vec<u16> = "TrillScriptedPluginSetsUpBehind\0".encode_utf16().collect();
+            // SAFETY: the class is all zeroes but for what is set, its
+            // name is NUL-terminated and kept for the life of the process,
+            // and its procedure is the one above.
+            unsafe {
+                let class = WNDCLASSEXW {
+                    cbSize: size_of::<WNDCLASSEXW>() as u32,
+                    lpfnWndProc: Some(procedure),
+                    hInstance: GetModuleHandleW(null()),
+                    lpszClassName: name.as_ptr(),
+                    ..std::mem::zeroed()
+                };
+                RegisterClassExW(&class);
+            }
+            name
+        });
+        // SAFETY: the class is registered and its name NUL-terminated; a
+        // window that could not be made is null, and posting to that
+        // fails without harm.
+        let window = unsafe {
+            let module = GetModuleHandleW(null());
+            CreateWindowExW(0, class.as_ptr(), null(), 0, 0, 0, 0, 0, HWND_MESSAGE, null_mut(), module, null())
+        };
+        WINDOW.set(window as isize);
+        window as isize
+    }
+
+    /// Says to the thread of `window`, from any thread, that the work of
+    /// the instance `serial` is done.
+    pub(super) fn post(window: isize, serial: u64) {
+        // SAFETY: posting to a window, alive or not, is sound.
+        unsafe { PostMessageW(window as HWND, DONE, serial as WPARAM, 0) };
+    }
 }
 
 /// Whether the plugin's edit controller makes a view.

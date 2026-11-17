@@ -30,8 +30,23 @@
 //!
 //! `TRILL_LIFETIMES_ATTEMPTS` says how many attempts each part makes (4
 //! unless said). Nothing of the user's is read or written, and no window
-//! opens. The machine's load changes how often the plugin fails; note it
-//! beside the counts.
+//! opens.
+//!
+//! How often the plugin fails hangs on how busy the machine is: taken
+//! down at once it ended 3 attempts of 4 with every processor in use, and
+//! none of 8 an hour later at 39%. So an attempt keeps half the machine's
+//! processors busy itself while it runs (`TRILL_LIFETIMES_BUSY` says how
+//! many threads, 0 for none), and the test says how busy the machine was
+//! and what it had of memory beside every count.
+//!
+//! An attempt loads a plugin many times over in one process, and a
+//! machine that runs out of memory stops for everyone. So every attempt
+//! has a number of instances that is fixed by how it is written, none is
+//! started on a machine that is short of memory ([`room`]), and one that
+//! comes to more memory than it may stops ([`OWN_AT_MOST`]). Never make
+//! instances for as long as a clock says: the first form of the attempt
+//! that keeps the plugin thread busy did, had eighty of them on a machine
+//! that had become quick, and the machine had to be restarted.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -39,11 +54,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use trill_core::device::{CompositeFactory, DeviceFactory, DeviceInstance, Event, EventKind, ProcessInfo};
 use trill_core::presets::{PresetList, PresetStatus};
-use trill_core::{ChainRef, DeviceId, Project, TimeSignature, TrackId};
+use trill_core::{ChainRef, DeviceId, Note, Project, TimeSignature, TrackId};
 use trill_dsp::BuiltinFactory;
 use trill_engine::probe::{ProbeNote, ProbeOptions};
 use trill_engine::session::ProbeTarget;
-use trill_engine::{AudioBackend, Session};
+use trill_engine::{AudioBackend, RenderOptions, Session};
 use trill_plugins::{Scanner, Vst3Config, Vst3Factory};
 
 /// Set in the process that makes one attempt: which kind, and whether the
@@ -51,11 +66,29 @@ use trill_plugins::{Scanner, Vst3Config, Vst3Factory};
 const ATTEMPT: &str = "TRILL_LIFETIMES_ATTEMPT";
 /// How many attempts each part of the test makes.
 const ATTEMPTS: &str = "TRILL_LIFETIMES_ATTEMPTS";
+/// How many threads an attempt keeps busy while it runs.
+const BUSY: &str = "TRILL_LIFETIMES_BUSY";
 /// What an attempt prints before each thing it does, so that the last one
 /// printed says where a process that died had got to.
 const STEP: &str = "STEP ";
 /// How many instances an attempt makes beside the one that stays.
 const COPIES: usize = 12;
+/// How long an attempt keeps the plugin thread busy where it does: longer
+/// than the host keeps an instance of the amplifier that it was told to
+/// let go of.
+const KEPT_BUSY: Duration = Duration::from_secs(20);
+/// How many instances an attempt has reading their state without a break,
+/// which is what keeps the plugin thread busy.
+const READERS: usize = 3;
+/// How many instances are weighed.
+const WEIGHED: usize = 4;
+/// What an attempt says what the process has of memory with.
+const WEIGHT: &str = "WEIGHT ";
+/// How much memory of its own an attempt may come to. No attempt has more
+/// than a few dozen instances at a time, by how it is written; this is for
+/// the day one of them is written wrongly, or a plugin does not give back
+/// what it took.
+const OWN_AT_MOST: u64 = 6 << 30;
 
 /// What the class ids of Neural DSP's plugins begin with.
 const NEURAL: &str = "vst3:ABCDEF019182FAEB4E445350";
@@ -79,8 +112,29 @@ fn vst3(patient: bool) -> Vst3Factory {
     Vst3Factory::new(config).expect("the plugin main thread starts")
 }
 
+fn megabytes(bytes: u64) -> u64 {
+    bytes >> 20
+}
+
+/// Says what the attempt is about to do and what the process has of
+/// memory, and ends an attempt that has more than it may.
 fn step(what: &str) {
-    eprintln!("{STEP}{what}");
+    let own = machine::own();
+    eprintln!("{STEP}{what} [{} MB]", megabytes(own));
+    assert!(own <= OWN_AT_MOST, "the attempt has {} MB, more than it may: it stops here", megabytes(own));
+}
+
+/// Whether the machine has room for an attempt, and what it has, in
+/// words. An attempt loads a plugin many times over, and a machine that
+/// runs out of memory stops for everyone: with less than a quarter of its
+/// memory free, or more committed than 1.4 times its memory (on the 63 GB
+/// this was written on: 16 GB and 88 GB), none is started.
+fn room() -> (bool, String) {
+    let Some(memory) = machine::memory() else { return (true, "memory unknown".to_string()) };
+    let gigabytes = |bytes: u64| bytes as f64 / f64::from(1u32 << 30);
+    let enough = memory.free >= memory.physical / 4 && memory.committed <= memory.physical / 10 * 14;
+    let has = format!("{:.0} GB free, {:.0} GB committed", gigabytes(memory.free), gigabytes(memory.committed));
+    (enough, has)
 }
 
 fn listed(factory: &dyn DeviceFactory, uri: &str) -> PresetList {
@@ -176,6 +230,115 @@ fn song(factory: &Vst3Factory, amplifier: &str) {
     step("done");
 }
 
+/// The attempt that keeps the plugin thread busy, which is what a render
+/// of a song does when it makes its instruments from several threads at
+/// once. A few instances have their state read without a break, each from
+/// a thread of its own, for longer than the host keeps an instance it was
+/// told to let go of: their reading queues up on the plugin thread, which
+/// serves no window until it stops. Meanwhile one more instance is made
+/// and let go of. What the plugin posts to itself for that one waits until
+/// the thread is free, and its time passes on the clock before then. A
+/// host that takes it down when its time has passed, on its way from one
+/// reading to the next, has the plugin's messages for it delivered
+/// afterwards; so has one that takes it down at once.
+///
+/// It has as many instances as it has rounds and readers, and one that
+/// stays.
+fn crowd(factory: &Vst3Factory, amplifier: &str) {
+    step("the one that stays");
+    let mut stays = make(factory, amplifier, None);
+    run(&mut stays, 8);
+    let state = stays.controller.as_mut().and_then(|controller| controller.save_state());
+    step("those that keep the plugin thread busy");
+    let mut readers: Vec<DeviceInstance> = (0..READERS).map(|_| make(factory, amplifier, state.clone())).collect();
+    for round in 0..2 {
+        step(&format!("the plugin thread kept busy, and one made and let go meanwhile, {round}"));
+        let until = Instant::now() + KEPT_BUSY;
+        std::thread::scope(|scope| {
+            for reader in &mut readers {
+                scope.spawn(move || {
+                    let controller = reader.controller.as_mut().expect("the amplifier has a controller");
+                    while Instant::now() < until {
+                        controller.save_state();
+                    }
+                });
+            }
+            // Once the reading is under way: the making is then one job
+            // among theirs, with no window served before it or after.
+            std::thread::sleep(Duration::from_millis(500));
+            let mut other = make(factory, amplifier, state.clone());
+            run(&mut other, 40);
+            drop(other);
+        });
+        run(&mut stays, 8);
+    }
+    step("all, let go");
+    drop(readers);
+    drop(stays);
+    step("done");
+}
+
+/// What an instance of the amplifier weighs, and whether the memory comes
+/// back: a few are made one by one and let go of together, twice over, and
+/// the attempt says what the process had of memory at each point. A second
+/// round that ends well above the first is memory that was not given
+/// back, by the plugin or by the host.
+fn weigh(factory: &Vst3Factory, amplifier: &str) {
+    let weight = |what: &str| eprintln!("{WEIGHT}{what}: {} MB", megabytes(machine::own()));
+    weight("before any");
+    for round in 1..=2 {
+        let mut held = Vec::new();
+        for number in 1..=WEIGHED {
+            step(&format!("round {round}, made, {number}"));
+            let mut instance = make(factory, amplifier, None);
+            run(&mut instance, 8);
+            held.push(instance);
+            weight(&format!("round {round}, {number} made"));
+        }
+        step(&format!("round {round}, let go"));
+        drop(held);
+        // The host keeps them for a while, and then they are gone.
+        std::thread::sleep(KEPT_BUSY);
+        weight(&format!("round {round}, all let go, {} s later", KEPT_BUSY.as_secs()));
+    }
+    step("done");
+}
+
+/// The attempt that is what a render does: the amplifier is on three
+/// tracks of a song, each behind a synth with a few notes, and the song
+/// is rendered a few times over. A render makes all three instances
+/// afresh and lets them go, one after the other and a few seconds old,
+/// when it is done. (The rendering work saw this shape end the process in
+/// 6 runs of 6 before the host kept such instances.)
+fn rendered(factory: &Vst3Factory, amplifier: &str) {
+    let devices = CompositeFactory::new(vec![Box::new(BuiltinFactory), Box::new(factory.clone())]);
+    let mut session = Session::new(Arc::new(devices), AudioBackend::Null { sample_rate: 48_000 }).unwrap();
+    for name in ["Left", "Right", "Lead"] {
+        let track = session
+            .edit(|project| {
+                let track = project.add_track(name);
+                let clip = project.add_midi_clip(track, "riff", 0.0, 8.0)?;
+                let notes: Vec<Note> = [(0.0, 52), (2.0, 55), (4.0, 59)]
+                    .map(|(start, pitch)| Note { pitch, start, length: 1.5, velocity: 100 })
+                    .into();
+                project.clip_mut(clip)?.add_notes(&notes)?;
+                Ok(track)
+            })
+            .unwrap();
+        session.add_device(ChainRef::Track(track), "builtin:polysynth", Some("pluck"), None).unwrap();
+        session.add_device(ChainRef::Track(track), amplifier, None, None).unwrap();
+    }
+    let options = RenderOptions { end_beat: Some(8.0), max_tail_seconds: 0.5, ..RenderOptions::default() };
+    for round in 0..COPIES / 2 {
+        step(&format!("the song, rendered, {round}"));
+        let out = session.render_job().render(&options).unwrap_or_else(|error| panic!("{error}"));
+        assert!(out.left.iter().any(|sample| sample.abs() > 1e-4), "the render has sound in it");
+    }
+    step("the song, let go");
+    drop(session);
+    step("done");
+}
+
 /// One attempt, in a process of its own: see the module documentation.
 /// Without [`ATTEMPT`] it does nothing, so that running every test of the
 /// file runs each attempt once, where it is counted.
@@ -184,6 +347,8 @@ fn song(factory: &Vst3Factory, amplifier: &str) {
 fn one_attempt() {
     let Ok(asked) = std::env::var(ATTEMPT) else { return };
     let (kind, patient) = asked.split_once(':').expect("a kind of attempt and whether the host is patient");
+    let (enough, has) = room();
+    assert!(enough, "the machine is short of memory ({has}): the attempt is not made");
     fault::report_to_stderr();
     let factory = vst3(patient == "patient");
     let installed = factory.descriptors();
@@ -191,9 +356,159 @@ fn one_attempt() {
         step("no Neural DSP plugin is installed; done");
         return;
     };
+    // The plugin fails when the machine is busy: what it does behind the
+    // scenes then takes longer than the instance lives. So that the count
+    // does not hang on what else the machine happens to be doing, the
+    // attempt keeps some of its processors busy itself.
+    let busy = Busy::new();
     match kind {
         "copies" => copies(&factory, &amplifier.uri),
+        "crowd" => crowd(&factory, &amplifier.uri),
+        "weigh" => weigh(&factory, &amplifier.uri),
+        "render" => rendered(&factory, &amplifier.uri),
         _ => song(&factory, &amplifier.uri),
+    }
+    drop(busy);
+}
+
+/// Threads that do nothing but take processor time, for as long as this
+/// is kept: half as many as the machine has processors, or as many as
+/// [`BUSY`] says.
+struct Busy {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl Busy {
+    fn new() -> Self {
+        let processors = std::thread::available_parallelism().map_or(4, usize::from);
+        let count = std::env::var(BUSY).ok().and_then(|value| value.parse().ok()).unwrap_or(processors / 2);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let spin = |stop: Arc<std::sync::atomic::AtomicBool>| {
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::hint::spin_loop();
+                }
+            })
+        };
+        Self { threads: (0..count).map(|_| spin(stop.clone())).collect(), stop }
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for thread in self.threads.drain(..) {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// What the machine has of memory and how busy it is, and what this
+/// process has taken.
+#[cfg(windows)]
+mod machine {
+    use std::ffi::c_void;
+
+    /// In bytes.
+    pub struct Memory {
+        pub physical: u64,
+        pub free: u64,
+        /// What all processes together have been promised.
+        pub committed: u64,
+    }
+
+    #[repr(C)]
+    struct Status {
+        size: u32,
+        load: u32,
+        physical: u64,
+        free_physical: u64,
+        commit_limit: u64,
+        commit_left: u64,
+        addresses: u64,
+        free_addresses: u64,
+        extended: u64,
+    }
+
+    #[repr(C)]
+    struct Counters {
+        size: u32,
+        faults: u32,
+        peak_working_set: usize,
+        working_set: usize,
+        peak_paged_pool: usize,
+        paged_pool: usize,
+        peak_nonpaged_pool: usize,
+        nonpaged_pool: usize,
+        committed: usize,
+        peak_committed: usize,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalMemoryStatusEx(status: *mut Status) -> i32;
+        fn GetCurrentProcess() -> *mut c_void;
+        fn K32GetProcessMemoryInfo(process: *mut c_void, counters: *mut Counters, size: u32) -> i32;
+        fn GetSystemTimes(idle: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
+    }
+
+    pub fn memory() -> Option<Memory> {
+        // SAFETY: the system fills a local whose size it is told.
+        let status = unsafe {
+            let mut status: Status = std::mem::zeroed();
+            status.size = size_of::<Status>() as u32;
+            if GlobalMemoryStatusEx(&mut status) == 0 {
+                return None;
+            }
+            status
+        };
+        Some(Memory {
+            physical: status.physical,
+            free: status.free_physical,
+            committed: status.commit_limit.saturating_sub(status.commit_left),
+        })
+    }
+
+    /// What this process has been promised of memory, in bytes.
+    pub fn own() -> u64 {
+        // SAFETY: as above, about the calling process.
+        unsafe {
+            let mut counters: Counters = std::mem::zeroed();
+            counters.size = size_of::<Counters>() as u32;
+            match K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.size) {
+                0 => 0,
+                _ => counters.committed as u64,
+            }
+        }
+    }
+
+    /// How long the machine's processors have been idle, and how long they
+    /// have been running at all, since it started, in units of 100 ns.
+    pub fn times() -> (u64, u64) {
+        let (mut idle, mut kernel, mut user) = (0, 0, 0);
+        // SAFETY: fills three locals. The kernel's time has the idle time
+        // in it.
+        unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) };
+        (idle, kernel + user)
+    }
+}
+
+#[cfg(not(windows))]
+mod machine {
+    pub struct Memory {
+        pub physical: u64,
+        pub free: u64,
+        pub committed: u64,
+    }
+    pub fn memory() -> Option<Memory> {
+        None
+    }
+    pub fn own() -> u64 {
+        0
+    }
+    pub fn times() -> (u64, u64) {
+        (0, 0)
     }
 }
 
@@ -367,6 +682,8 @@ enum Outcome {
 /// Makes one attempt of `kind` in a process of its own, and says what
 /// the process said of a fault.
 fn attempt(kind: &str, patient: bool) -> (Outcome, Duration) {
+    let (enough, has) = room();
+    assert!(enough, "the machine is short of memory ({has}): no attempt is started");
     let started = Instant::now();
     let output = Command::new(std::env::current_exe().expect("this test binary"))
         .args(["one_attempt", "--exact", "--include-ignored", "--nocapture", "--test-threads", "1"])
@@ -374,6 +691,9 @@ fn attempt(kind: &str, patient: bool) -> (Outcome, Duration) {
         .output()
         .expect("the test binary starts again");
     let said = String::from_utf8_lossy(&output.stderr);
+    for weight in said.lines().filter_map(|line| line.strip_prefix(WEIGHT)) {
+        eprintln!("{weight}");
+    }
     let fault: Vec<&str> =
         said.lines().filter(|line| line.starts_with(fault::MARK) || line.contains("panicked at")).collect();
     if !fault.is_empty() {
@@ -398,9 +718,18 @@ fn attempt(kind: &str, patient: bool) -> (Outcome, Duration) {
 fn count(kind: &str, patient: bool, attempts: usize) -> usize {
     let mut lost = 0;
     for number in 1..=attempts {
+        let before = machine::times();
         let (outcome, took) = attempt(kind, patient);
+        let after = machine::times();
         let how = if patient { "patient" } else { "at once" };
-        eprintln!("{kind}, {how}, attempt {number} of {attempts}: {outcome:?} ({:.0} s)", took.as_secs_f64());
+        // The machine's load is part of the count: say it beside it.
+        let running = (after.1 - before.1).max(1) as f64;
+        let load = 100.0 * (1.0 - (after.0 - before.0) as f64 / running);
+        let (_, has) = room();
+        eprintln!(
+            "{kind}, {how}, attempt {number} of {attempts}: {outcome:?} ({:.0} s; the machine {load:.0}% busy, {has})",
+            took.as_secs_f64()
+        );
         lost += usize::from(outcome != Outcome::Survived);
     }
     lost
@@ -424,5 +753,6 @@ fn a_process_that_makes_and_lets_go_of_plugin_instances_goes_on_hosting() {
     // And with the host as it is.
     let copies = count("copies", true, attempts);
     let song = count("song", true, attempts);
-    assert_eq!((copies, song), (0, 0), "attempts that did not get to the end, of {attempts} each");
+    let render = count("render", true, attempts);
+    assert_eq!((copies, song, render), (0, 0, 0), "attempts that did not get to the end, of {attempts} each");
 }

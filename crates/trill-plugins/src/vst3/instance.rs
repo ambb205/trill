@@ -22,7 +22,7 @@ use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use vst3::Steinberg::Vst::BusDirections_::{kInput, kOutput};
 use vst3::Steinberg::Vst::MediaTypes_::{kAudio, kEvent};
 use vst3::Steinberg::Vst::ProcessModes_::{kOffline, kRealtime};
@@ -139,7 +139,9 @@ pub(super) struct Instance {
     /// Set up for offline processing: see [`CreateRequest::offline`].
     offline: bool,
     /// When it was made, or last handed a state: what a plugin may go on
-    /// working at behind the scenes for a while ([`quirks`]).
+    /// working at behind the scenes for a while ([`quirks`]). Moved on by
+    /// the time the plugin thread has since been kept from its windows,
+    /// which the plugin has not had ([`Vst3Thread::served`]).
     settled: Instant,
     processor: ComPtr<IAudioProcessor>,
     /// Declared last: the component is the plugin, and is released after
@@ -493,10 +495,10 @@ impl Drop for Instance {
 pub(crate) struct Vst3Thread {
     /// Declared first: instances must be gone before their modules are.
     pub(super) instances: HashMap<InstanceId, Instance>,
-    /// Instances that were let go of before they were old enough to be
-    /// taken down ([`quirks`]), each with when it will be. They are as
-    /// they were when they were let go of: active, and no longer
-    /// processed.
+    /// Instances that were let go of and are of a plugin that is taken
+    /// down with care ([`quirks`]), each with when it may be, in the order
+    /// they were let go of. They are as they were then: active, and no
+    /// longer processed. [`served`](ThreadState::served) takes them down.
     leaving: Vec<(Instant, Instance)>,
     /// Modules stay loaded once used: reloading one for every instance is
     /// slow, and plugins are rarely tested against repeated unloading.
@@ -525,17 +527,35 @@ impl ThreadState for Vst3Thread {
     /// reports what plugins left in their flags, and looks after their
     /// editors.
     fn idle(&mut self, nested: bool) {
-        // Taking a plugin down waits for a call that is not inside an
-        // event loop of someone else's, like everything that takes
-        // something away from one.
-        if !nested && !self.leaving.is_empty() {
-            let now = Instant::now();
-            self.leaving.retain(|(due, _)| *due > now);
-        }
         for instance in self.instances.values_mut() {
             instance.sync_controller();
             instance.report();
             instance.service_editor(nested);
+        }
+    }
+
+    /// Takes down an instance that was being kept and has had its time:
+    /// one to a call, so that the thread's windows are served again
+    /// before the next.
+    ///
+    /// This is the only place such an instance is taken down in. Here the
+    /// thread has just delivered what was waiting for its windows, so what
+    /// the plugin had posted to itself for the instance has reached it
+    /// while the instance was there; taken down on the way out of a job
+    /// instead, it would be gone when the messages that waited through
+    /// the job are delivered. And the time jobs kept the thread counts
+    /// towards no instance's age: a plugin that is waiting to hear from
+    /// its own work has not had it.
+    fn served(&mut self, away: Duration) {
+        for instance in self.instances.values_mut() {
+            instance.settled += away;
+        }
+        for (due, _) in &mut self.leaving {
+            *due += away;
+        }
+        let now = Instant::now();
+        if let Some(place) = self.leaving.iter().position(|(due, _)| *due <= now) {
+            drop(self.leaving.remove(place));
         }
     }
 }
@@ -639,20 +659,21 @@ impl Vst3Thread {
     /// interface its audio half held, which must have stopped processing.
     ///
     /// An instance of a plugin that is known not to survive being taken
-    /// down while it is young ([`quirks`]) is kept until it is old
-    /// enough, unless `patient` is false: nothing uses it any more, and
-    /// it goes when its time has come, or with the thread. Its editor
+    /// down while it is young ([`quirks`]) is not taken down here, unless
+    /// `patient` is false. Nothing uses it any more, and it goes when it
+    /// is old enough and the thread has served its windows
+    /// ([`served`](ThreadState::served)), or with the thread. Its editor
     /// goes now.
     pub(crate) fn destroy(&mut self, id: InstanceId, audio: Option<ComPtr<IAudioProcessor>>, patient: bool) {
         // The audio half's reference goes first, so that the last one is
         // released by the instance, after the plugin is terminated.
         drop(audio);
         let Some(mut instance) = self.instances.remove(&id) else { return };
-        let due = instance.settled + quirks::patience(instance.class);
-        if patient && due > Instant::now() {
+        let patience = quirks::patience(instance.class);
+        if patient && !patience.is_zero() {
             instance.close_editor();
-            log::debug!("[{}] is kept a little longer before it is taken down", instance.name);
-            self.leaving.push((due, instance));
+            log::debug!("[{}] is kept until the plugin thread has had time for it", instance.name);
+            self.leaving.push((instance.settled + patience, instance));
         }
     }
 

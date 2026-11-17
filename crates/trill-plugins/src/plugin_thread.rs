@@ -32,6 +32,11 @@ impl ThreadState for PluginThread {
         self.clap.idle(nested);
         self.vst3.idle(nested);
     }
+
+    fn served(&mut self, away: Duration) {
+        self.clap.served(away);
+        self.vst3.served(away);
+    }
 }
 
 /// Every factory in the process drives its plugins from the same thread.
