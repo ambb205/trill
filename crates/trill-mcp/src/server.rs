@@ -136,7 +136,7 @@ Musical guidance
 clears what is under the corner without thinning what is over it); leave headroom on the master.
 - Compressor: on a single track the \"peak\" detector (the default) with attack 1-10 ms; on a group or the master \
 set detector \"bus\", which is the one that works with a slow attack on a full mix (threshold about 10 dB under \
-the peaks, ratio 2, attack 10-30 ms, auto_release on: about 2 dB off). auto_makeup adds a known amount of gain, \
+the peaks, ratio 2, knee 18, attack 10-30 ms, auto_release on: about 2 dB off). auto_makeup adds a known amount of gain, \
 0.72 x -threshold x (1 - 1/ratio) dB. measure says what each compressor took off.
 - To make room for the kick, put a compressor on the bass (or the pads) and give it the kick's track as \
 `sidechain`: it then turns its own track down whenever the kick sounds. The kick's track may be muted.

@@ -39,14 +39,14 @@ define_params!(P, PARAMS, [
         "key_low_cut",
         "Key Low Cut (filters what the detector hears, not the sound; 20 = off)",
         20.0,
-        2000.0,
+        20000.0,
         20.0,
         "Hz"
     ),
     KeyHighCut => float(
         "key_high_cut",
-        "Key High Cut (filters what the detector hears, not the sound; 20000 = off)",
-        200.0,
+        "Key High Cut (filters what the detector hears, not the sound; 20000 = off; 90 hears a kick and not the kit)",
+        20.0,
         20000.0,
         20000.0,
         "Hz"
@@ -57,7 +57,8 @@ pub const DESCRIPTION: &str = "Stereo-linked compressor with two detectors. \"pe
 it hears: the usual track compressor (vocals, bass, guitars: attack 1-10 ms, release 80-200 ms); with a slow attack \
 it only catches what stays loud, so on a full mix it does little. \"bus\" holds the peaks for as long as `release` \
 and builds the reduction over `attack`, so a slow attack still works on the body of a mix: use it on a group or \
-the master (threshold about 10 dB under the peaks, ratio 2, attack 10-30 ms, `auto_release` on: about 2 dB off). \
+the master (threshold about 10 dB under the peaks, ratio 2, `knee` 18, attack 10-30 ms, `auto_release` on: about \
+2 dB off; the wide knee is what lets it work on the quiet passages too, as a console's bus compressor does). \
 `auto_makeup` adds 0.72 x -threshold x (1 - 1/ratio) dB (threshold -24 at ratio 4: +13 dB; Ableton Live's Makeup \
 comes to the same), so a track comes out louder the less of it is over the threshold; `makeup` comes on top. What \
 it hears is its own input, \
@@ -73,7 +74,9 @@ pub const AUTO_MAKEUP: f32 = 0.72;
 
 /// Automatic release: how fast the reduction comes back after a single hit,
 /// and how slowly the level it comes back to follows the music, up and
-/// down.
+/// down. Fitted to what Ableton Live's Glue Compressor on Auto did to two
+/// songs, section by section; anything from half to twice each of these
+/// fits them nearly as well.
 const AUTO_FAST_SECONDS: f32 = 0.3;
 const AUTO_SLOW_UP_SECONDS: f32 = 2.0;
 const AUTO_SLOW_DOWN_SECONDS: f32 = 8.0;

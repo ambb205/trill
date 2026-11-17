@@ -936,3 +936,132 @@ fn a_key_comes_from_any_track_that_can_be_played_first() {
     assert_eq!(song.project.device(compressor).unwrap().sidechain, None);
     song.render(0.0);
 }
+
+/// What the compressor of the textbook takes off, in dB, at every frame of
+/// a key: the louder side's level, frame by frame, through a second-order
+/// Butterworth low-pass at `key_high_cut` Hz; what is over the threshold
+/// cut by the ratio, with a soft knee; the cut coming on over the attack
+/// and going over the release, each a one-pole time. Worked out here in
+/// its own arithmetic, with nothing of the device's in it: it is what the
+/// bench drew by hand where Trill had no sidechain, and found Live's
+/// compressor to follow within 1 dB from 20 ms after a kick on.
+fn on_paper(
+    key: &[f32],
+    threshold: f64,
+    ratio: f64,
+    knee: f64,
+    attack: f64,
+    release: f64,
+    key_high_cut: f64,
+) -> Vec<f64> {
+    // The low-pass, by the bilinear transform.
+    let k = (PI * key_high_cut / SR).tan();
+    let norm = 1.0 / (1.0 + 2f64.sqrt() * k + k * k);
+    let (b0, b1, b2) = (k * k * norm, 2.0 * k * k * norm, k * k * norm);
+    let (a1, a2) = (2.0 * (k * k - 1.0) * norm, (1.0 - 2f64.sqrt() * k + k * k) * norm);
+    let (mut x1, mut x2, mut y1, mut y2) = (0.0, 0.0, 0.0, 0.0);
+    let (up, down) = ((-1.0 / (attack * SR)).exp(), (-1.0 / (release * SR)).exp());
+    let slope = 1.0 - 1.0 / ratio;
+    let mut cut = 0.0f64;
+    key.iter()
+        .map(|sample| {
+            let x = f64::from(*sample);
+            let y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+            (x2, x1, y2, y1) = (x1, x, y1, y);
+            let over = 20.0 * (y.abs() + 1e-9).log10() - threshold;
+            let asked = if over <= -knee / 2.0 {
+                0.0
+            } else if over >= knee / 2.0 {
+                over * slope
+            } else {
+                slope * (over + knee / 2.0).powi(2) / (2.0 * knee)
+            };
+            cut = asked + (cut - asked) * if asked > cut { up } else { down };
+            cut
+        })
+        .collect()
+}
+
+#[test]
+fn a_pad_is_ducked_under_a_kick_as_the_bench_measured_lives_to_do() {
+    // The pad of the bench's second song: a compressor that listens to the
+    // drums through a low-pass at 90 Hz, so that it hears the kick alone.
+    let (threshold, ratio, knee, attack, release, lows) = (-34.0, 4.0, 6.0, 0.001, 0.180, 90.0);
+    let seconds = 4.0;
+    let pad = tones(&[220.0], 0.25, seconds);
+    // A kick every half second: a low thump that falls in pitch and dies
+    // away over a tenth of a second. A hi-hat between the kicks, as loud,
+    // which the low-pass keeps from the compressor.
+    let mut drums = vec![0.0f32; (seconds * SR) as usize];
+    for beat in 0..8 {
+        let start = (beat as f64 * 0.5 * SR) as usize;
+        for n in 0..(0.4 * SR) as usize {
+            let t = n as f64 / SR;
+            let phase = TAU * (48.0 * t + 1.2 * (1.0 - (-t / 0.02).exp()));
+            drums[start + n] += (0.55 * (-t / 0.09).exp() * phase.sin()) as f32;
+        }
+        for (n, sample) in drums[start + 12_000..start + 13_440].iter_mut().enumerate() {
+            *sample += (0.5 * (TAU * 9000.0 * n as f64 / SR).sin()) as f32;
+        }
+    }
+    let mut song = Song::new();
+    let (kit, _) = song.track("Drums", &drums, &drums, &[]);
+    let duck: &[(&str, f64)] = &[
+        ("threshold", threshold),
+        ("ratio", ratio),
+        ("knee", knee),
+        ("attack", attack * 1000.0),
+        ("release", release * 1000.0),
+        ("key_high_cut", lows),
+    ];
+    let (bass, devices) = song.track("Pad", &pad, &pad, &[("builtin:compressor", duck)]);
+    song.project.set_sidechain(devices[0], Some(kit)).unwrap();
+    let out = song.render_with(only(bass));
+    let expected = on_paper(&drums, threshold, ratio, knee, attack, release, lows);
+
+    // What is taken off at a moment, by the device (what went in over what
+    // came out) and on paper: both read at the frames within 2 ms where
+    // the pad's wave is far from zero, and the middle one of them taken.
+    let middle_of = |at: f64, read: &dyn Fn(usize) -> f64| {
+        let middle = (at * SR) as usize;
+        let mut values: Vec<f64> = (middle - 96..middle + 96).filter(|n| pad[*n].abs() > 0.12).map(read).collect();
+        values.sort_by(f64::total_cmp);
+        values[values.len() / 2]
+    };
+    let taken = |at: f64| middle_of(at, &|n| -db(f64::from(out.left[n]) / f64::from(pad[n])));
+    let asked = |at: f64| middle_of(at, &|n| expected[n]);
+    // The moments the bench read Live's compressor at, after a kick, and
+    // what it read on its own pad and kick (other audio than this, so the
+    // numbers are beside these and not the same): Live's device, and the
+    // compressor on paper run on Live's recording of the drums.
+    let moments = [-20.0, 0.0, 6.0, 10.0, 20.0, 40.0, 70.0, 100.0, 150.0, 200.0, 300.0];
+    let lives = [-11.9, -10.5, -11.4, -14.0, -20.6, -19.9, -17.2, -15.5, -12.4, -10.9, -6.5];
+    let papers = [-11.9, -10.7, -10.4, -11.6, -19.6, -19.4, -17.6, -16.1, -13.1, -10.2, -5.8];
+    println!("ms after the kick    this device    on paper    (Live's, on its own song)   (on paper there)");
+    let mut deepest = (0.0, 0.0);
+    for (index, ms) in moments.iter().enumerate() {
+        // The average over the kicks from the third on, once the pattern
+        // has settled; on paper, at the same frames.
+        let kicks: Vec<f64> = (2..7).map(|beat| beat as f64 * 0.5 + ms / 1000.0).collect();
+        let device = -kicks.iter().map(|at| taken(*at)).sum::<f64>() / kicks.len() as f64;
+        let paper = -kicks.iter().map(|at| asked(*at)).sum::<f64>() / kicks.len() as f64;
+        println!(
+            "  {ms:>6}            {device:>7.1} dB   {paper:>7.1} dB        {:>7.1} dB            {:>7.1} dB",
+            lives[index], papers[index]
+        );
+        // The bench found Live's within 1 dB of the paper from 20 ms on;
+        // the device is the paper, to a few tenths at every moment.
+        assert!((device - paper).abs() < 0.3, "{ms} ms after the kick: {device:.2} dB, on paper {paper:.2} dB");
+        if device < deepest.1 {
+            deepest = (*ms, device);
+        }
+    }
+    // As in Live's: deepest some 20 to 40 ms after the kick, most of the
+    // way back 300 ms after it, and still down when the next kick comes.
+    assert!((20.0..=40.0).contains(&deepest.0) && deepest.1 < -15.0, "deepest {deepest:?}");
+    let back = -taken(1.5 + 0.3);
+    assert!(back > deepest.1 + 10.0 && back < -1.0, "300 ms on: {back:.1} dB, from {:.1} dB", deepest.1);
+    // The hat, which is as loud as the kick, is not heard by it: between
+    // the kicks nothing is taken off again.
+    assert!(taken(1.5 + 0.27) < taken(1.5 + 0.2), "the hat at 250 ms does not duck the pad");
+}
