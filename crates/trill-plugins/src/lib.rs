@@ -73,6 +73,7 @@ mod param_text;
 mod plugin_host;
 mod plugin_thread;
 mod presets;
+mod repeats;
 pub mod scan;
 mod signal;
 #[cfg(test)]
@@ -86,6 +87,6 @@ pub mod vst3;
 pub use clap::{CLAP_SCHEME, ClapConfig, ClapFactory};
 pub use plugin_host::PluginHost;
 pub use presets::file::file_of as preset_file_of;
-pub use scan::{PluginRecord, ScanFailure, ScanMode, Scanner};
+pub use scan::{Known, PluginRecord, ScanFailure, ScanMode, Scanner};
 pub use vendor::{VendorPlaces, describe_state, split_state};
 pub use vst3::{VST3_SCHEME, Vst3Config, Vst3Factory};

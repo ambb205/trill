@@ -403,13 +403,11 @@ fn layers_fade_into_one_another_by_how_hard_a_key_is_struck_and_by_a_controller(
 
 #[test]
 fn a_key_that_switches_chooses_how_the_notes_after_it_are_played_and_sounds_nothing() {
-    let sfz = format!(
-        "<global> amp_veltrack=0 sw_lokey=24 sw_hikey=25 sw_default=24 lokey=36 hikey=96 pitch_keytrack=0\n\
+    let sfz = "<global> amp_veltrack=0 sw_lokey=24 sw_hikey=25 sw_default=24 lokey=36 hikey=96 pitch_keytrack=0\n\
          <region> sample=open.wav sw_last=24 sw_label=Open\n<region> sample=muted.wav sw_last=25 sw_label=Muted\n\
-         <region> sample=slide.wav sw_down=25 lokey=97 hikey=97"
-    );
+         <region> sample=slide.wav sw_down=25 lokey=97 hikey=97";
     let files = [("open.wav", level(2_000, 0.1)), ("muted.wav", level(2_000, 0.2)), ("slide.wav", level(2_000, 0.4))];
-    let mut player = rendered(&sfz, &files);
+    let mut player = rendered(sfz, &files);
     let events = [
         (0, on(60, 100)),
         (4_000, on(25, 100)),

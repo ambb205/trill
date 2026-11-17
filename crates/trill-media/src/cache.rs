@@ -320,6 +320,10 @@ impl AudioLoader for MediaCache {
         loaded.map_err(|error| error.to_string())
     }
 
+    fn load_as_recorded(&self, path: &str) -> Result<Arc<AudioBuffer>, String> {
+        self.audio(Path::new(path)).map_err(|error| error.to_string())
+    }
+
     /// The file itself, read as far as it is asked: nothing of it is kept
     /// here, and it is at its own sample rate.
     fn open(&self, path: &str) -> Result<Box<dyn trill_core::audio::AudioStream>, String> {

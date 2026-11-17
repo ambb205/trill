@@ -105,6 +105,7 @@ impl PresetDef {
             name: self.name.to_string(),
             description: self.description.to_string(),
             params: self.params.iter().map(|(id, value)| (id.to_string(), *value)).collect(),
+            ..Preset::default()
         }
     }
 }
@@ -156,7 +157,7 @@ macro_rules! define_params {
     ($index:ident, $table:ident, [ $( $variant:ident => $def:expr ),* $(,)? ]) => {
         #[derive(Copy, Clone)]
         #[repr(usize)]
-        enum $index { $($variant),* }
+        pub(crate) enum $index { $($variant),* }
 
         pub const $table: &[$crate::params::ParamDef] = &[ $($def),* ];
     };

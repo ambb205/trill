@@ -84,6 +84,7 @@ mod timeline;
 mod toast;
 mod top_bar;
 mod units;
+mod wavetable_panel;
 mod widgets;
 mod work;
 

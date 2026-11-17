@@ -121,7 +121,7 @@ fn an_instrument_of_the_library_is_one_row_that_a_track_takes_and_its_panel_show
     assert!(harness.is_on_screen("Small Piano") && harness.is_on_screen("Reed Organ"));
     let sounds = harness.runtime.library.search(&Query { kind: Some(EntryKind::Audio), ..Query::default() });
     let paths: Vec<PathBuf> = sounds.entries().map(|entry| entry.path.clone()).collect();
-    assert_eq!(paths, [shelf.clap.clone()], "the instruments' recordings are left out");
+    assert_eq!(paths, std::slice::from_ref(&shelf.clap), "the instruments' recordings are left out");
 
     // Carried over a track's header it is offered as the track's instrument.
     let undo = harness.undo_depth();

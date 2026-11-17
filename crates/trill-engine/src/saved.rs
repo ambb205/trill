@@ -452,6 +452,14 @@ impl DeviceFactory for WithSaved {
         self.inner.beside(uri)
     }
 
+    fn module(&self, uri: &str) -> Option<std::path::PathBuf> {
+        self.inner.module(uri)
+    }
+
+    fn repeating(&self, uri: &str) -> Option<trill_core::device::Repeating> {
+        self.inner.repeating(uri)
+    }
+
     fn warnings(&self, device: &Device) -> Vec<DeviceWarning> {
         self.inner.warnings(device)
     }

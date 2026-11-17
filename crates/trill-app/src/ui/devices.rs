@@ -12,7 +12,7 @@ use super::automation::{self, Hold};
 use super::device_layouts::{self, Display, Format, Layout, Row};
 use super::state::{Cx, TextEditState};
 use super::units::{self, ParamScale};
-use super::{colors, displays, editors, instrument_panel, sample_panels, widgets};
+use super::{colors, displays, editors, instrument_panel, sample_panels, wavetable_panel, widgets};
 use eframe::egui::{self, Align2, Color32, FontId, Id, Rect, Role, Sense, Ui, WidgetInfo, pos2, vec2};
 use trill_core::device::{DeviceCategory, DeviceDescriptor, ParamKind};
 use trill_core::presets::PresetInfo;
@@ -219,6 +219,7 @@ fn panel_width(cx: &Cx, device: &Device, panel_height: f32) -> f32 {
 }
 
 /// What the controls of one device share.
+#[derive(Copy, Clone)]
 pub(super) struct Body<'a> {
     pub device: &'a Device,
     pub params: &'a [ParamState],
@@ -467,6 +468,7 @@ fn rows_height(rows: &[Row], bar: f32, gap: f32) -> f32 {
                 let longest = pages.iter().map(|page| rows_height(page.rows, bar, gap)).fold(0.0, f32::max);
                 bar + gap + longest
             }
+            Row::Shown(_) => DISPLAY_HEIGHT,
             _ => bar,
         })
         .sum();
@@ -500,8 +502,7 @@ fn laid_out_body(ui: &mut Ui, cx: &mut Cx, body: &Body, layout: &Layout, area: R
                     _ => DISPLAY_HEIGHT,
                 };
                 let rect = Rect::from_min_size(pos2(left, top), vec2(column.width, height));
-                let accent = if body.dimmed { trill_noir::fade(body.accent, theme.disabled) } else { body.accent };
-                displays::paint(&painter, theme, rect, display, accent, &|id| body.value(id));
+                show_display(ui, cx, body, display, rect);
                 top = rect.bottom() + gap;
             }
             top = rows(ui, cx, body, section.rows, left, top, column.width);
@@ -509,6 +510,57 @@ fn laid_out_body(ui: &mut Ui, cx: &mut Cx, body: &Body, layout: &Layout, area: R
         left += column.width + COLUMN_GAP;
     }
 }
+
+/// Paints a display of the body's device into `rect`.
+fn show_display(ui: &Ui, cx: &mut Cx, body: &Body, display: Display, rect: Rect) {
+    match display {
+        // The wave is the table's, which is more than parameters say.
+        Display::Table { oscillator } => wavetable_panel::table(ui, cx, body, rect, oscillator),
+        display => {
+            let accent = if body.dimmed { trill_noir::fade(body.accent, cx.theme.disabled) } else { body.accent };
+            displays::paint(ui.painter(), cx.theme, rect, display, accent, &|id| body.value(id));
+        }
+    }
+}
+
+/// A parameter that is one of many things, as a chip that opens the list
+/// of them. Like a Bar it shows what its envelope says while one drives
+/// it, and choosing takes hold of it.
+fn choice_menu(ui: &Ui, cx: &mut Cx, body: &Body, param: &ParamState, label: &str, rect: Rect) {
+    let theme = cx.theme;
+    let info = &param.info;
+    let ParamKind::Enum(choices) = &info.kind else { return };
+    let id = body.id.with(("param", &info.id));
+    let target = param_target(body, param);
+    let hold = Hold::of(cx, &target);
+    let value = hold.driven().unwrap_or(param.value);
+    let current = value.round().max(0.0) as usize;
+    let shown = units::format_param(info, value);
+    let response = trill_noir::dropdown(ui, theme, rect, id, label, &shown, body.dimmed);
+    cx.hint(&response, hold.hint(&info.name, "click to choose"));
+    let mut chosen = None;
+    egui::Popup::menu(&response).gap(1.0).show(|ui| {
+        ui.set_min_width(rect.width());
+        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+            for (index, choice) in choices.iter().enumerate() {
+                if MenuItem::new(choice).checked(index == current).show(ui, theme).clicked() {
+                    chosen = Some(index as f64);
+                }
+            }
+        });
+    });
+    if let Some(value) = chosen {
+        automation::take_hold(cx, &target, hold);
+        set_param(cx, body.device.id, param, value);
+    }
+    let name = if label.is_empty() { units::short_param_name(&info.name) } else { label };
+    automation::mark(ui, cx, &target, hold, rect, id, name);
+}
+
+/// How a slot of a matrix divides its line: what it reads, what it moves,
+/// and the bar for how much.
+const SLOT_SOURCE: f32 = 96.0;
+const SLOT_DEST: f32 = 130.0;
 
 /// Places `rows` downward from `top`. Returns where the next row would go.
 fn rows(ui: &mut Ui, cx: &mut Cx, body: &Body, rows: &[Row], left: f32, mut top: f32, width: f32) -> f32 {
@@ -548,8 +600,42 @@ fn rows(ui: &mut Ui, cx: &mut Cx, body: &Body, rows: &[Row], left: f32, mut top:
                 }
             }
             Row::Sidechain => sidechain_row(ui, cx, body, rect),
+            Row::Menu { id, label } => {
+                if let Some(param) = body.param(id) {
+                    choice_menu(ui, cx, body, param, label, rect);
+                }
+            }
+            Row::Shown(display) => {
+                let rect = rect.with_max_y(rect.top() + DISPLAY_HEIGHT);
+                show_display(ui, cx, body, *display, rect);
+                top += DISPLAY_HEIGHT - bar;
+            }
+            Row::Slot { source, dest, amount } => {
+                let from = rect.with_max_x(rect.left() + SLOT_SOURCE);
+                let to = Rect::from_min_size(pos2(from.right() + gap, top), vec2(SLOT_DEST, bar));
+                let by = rect.with_min_x(to.right() + gap);
+                if let (Some(source), Some(dest), Some(amount)) =
+                    (body.param(source), body.param(dest), body.param(amount))
+                {
+                    choice_menu(ui, cx, body, source, "", from);
+                    choice_menu(ui, cx, body, dest, "", to);
+                    // A slot that reads nothing or moves nothing does
+                    // nothing: its amount steps back.
+                    let idle = source.value < 0.5 || dest.value < 0.5;
+                    let quiet = Body { dimmed: body.dimmed || idle, ..*body };
+                    param_bar(ui, cx, &quiet, amount, "", Format::Auto, by);
+                }
+            }
+            Row::Macro { id, index } => {
+                if let Some(param) = body.param(id) {
+                    let name = wavetable_panel::macro_name(body.device, *index);
+                    param_bar(ui, cx, body, param, &name, Format::Auto, rect);
+                }
+            }
             Row::Pages(pages) => {
-                let memory = body.id.with("page");
+                // Each row of pages of a device keeps its own page.
+                let first = pages.first().and_then(|page| page.rows.iter().flat_map(Row::param_ids).next());
+                let memory = body.id.with(("page", first));
                 // Opens on the first band that has been moved, so the page
                 // shown is the one doing something.
                 let moved = |page: &device_layouts::Page| {
@@ -790,29 +876,7 @@ fn generic_body(ui: &mut Ui, cx: &mut Cx, body: &Body, area: Rect) {
                     choice_chips(ui, cx, body, param, &labels, None, origin, width + 1.0, id);
                     continue;
                 }
-                let target = param_target(body, param);
-                let hold = Hold::of(cx, &target);
-                let value = hold.driven().unwrap_or(param.value);
-                let current = value.round().max(0.0) as usize;
-                let shown = units::format_param(info, value);
-                let response = trill_noir::dropdown(ui, theme, rect, id, label, &shown, body.dimmed);
-                cx.hint(&response, hold.hint(&info.name, "click to choose"));
-                let mut chosen = None;
-                egui::Popup::menu(&response).gap(1.0).show(|ui| {
-                    ui.set_min_width(rect.width());
-                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                        for (index, choice) in choices.iter().enumerate() {
-                            if MenuItem::new(choice).checked(index == current).show(ui, theme).clicked() {
-                                chosen = Some(index as f64);
-                            }
-                        }
-                    });
-                });
-                if let Some(value) = chosen {
-                    automation::take_hold(cx, &target, hold);
-                    set_param(cx, body.device.id, param, value);
-                }
-                automation::mark(ui, cx, &target, hold, rect, id, label);
+                choice_menu(ui, cx, body, param, label, rect);
             }
         }
     }
@@ -877,14 +941,23 @@ mod tests {
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             for layout in device_layouts::LAYOUTS {
                 for column in layout.columns {
-                    let rows = column.sections.iter().flat_map(|section| section.rows);
+                    // The rows of a column, those of its pages among them.
+                    let mut rows: Vec<&Row> = column.sections.iter().flat_map(|section| section.rows).collect();
+                    let mut next = 0;
+                    while next < rows.len() {
+                        if let Row::Pages(pages) = rows[next] {
+                            rows.extend(pages.iter().flat_map(|page| page.rows));
+                        }
+                        next += 1;
+                    }
                     for row in rows {
                         let labels: Vec<&str> = match row {
                             Row::Choice { labels, .. } => labels.to_vec(),
                             Row::Picks { picks, .. } => picks.iter().map(|(label, _)| *label).collect(),
                             Row::Pages(pages) => pages.iter().map(|page| page.label).collect(),
                             Row::Toggles(toggles) => toggles.iter().map(|(_, label)| *label).collect(),
-                            Row::Param { .. } | Row::Sidechain => continue,
+                            Row::Param { .. } | Row::Sidechain | Row::Menu { .. } | Row::Shown(_) => continue,
+                            Row::Slot { .. } | Row::Macro { .. } => continue,
                         };
                         let width = trill_noir::chip_row_width(ui, &theme, &labels);
                         assert!(width <= column.width, "{}: {labels:?} need {width} of {}", layout.uri, column.width);

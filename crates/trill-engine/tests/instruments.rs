@@ -834,3 +834,321 @@ fn a_hundred_and_twenty_eight_voices_of_a_sampled_instrument_cost_less_than_the_
     );
     assert!(share < 1.0, "128 voices took {took:.2} s to play {seconds:.1} s");
 }
+
+// ---- the wavetable synth -------------------------------------------------
+
+/// A wavetable synth that plays one wave, starting and stopping at once,
+/// every note at the same phase and as loud whatever its velocity.
+const WAVE: [(&str, f64); 5] = [
+    ("osc1_phase_random", 0.0),
+    ("env1_attack", 0.001),
+    ("env1_sustain", 1.0),
+    ("env1_release", 0.01),
+    ("velocity_sens", 0.0),
+];
+
+fn wavetable(more: &[(&str, f64)], notes: &[Note], length: f64) -> Played {
+    let params: Vec<(&str, f64)> = WAVE.iter().chain(more).copied().collect();
+    Played::new("builtin:wavetable", &params, None, notes, length)
+}
+
+/// What a preset of the wavetable synth sets, and the state it brings.
+fn wavetable_preset(name: &str) -> (BTreeMap<String, f64>, Option<Vec<u8>>) {
+    use trill_core::device::DeviceFactory;
+    let descriptors = trill_dsp::BuiltinFactory.descriptors();
+    let synth = descriptors.iter().find(|descriptor| descriptor.uri == "builtin:wavetable").unwrap();
+    let preset = synth.presets.iter().find(|preset| preset.name == name).unwrap_or_else(|| panic!("no '{name}'"));
+    (preset.params.iter().cloned().collect(), preset.state.clone())
+}
+
+/// The power in each bin of the first 65536 of `samples`, under a window
+/// with next to nothing in its skirts: a tone is spread over sixteen bins
+/// either side, and what is a hundred dB under it can be told from it.
+fn fine_spectrum(samples: &[f32]) -> Vec<f64> {
+    let size = 1 << 16;
+    let mut plan = trill_dsp::fft::RealFft::new(size);
+    let windowed: Vec<f32> = samples[..size]
+        .iter()
+        .enumerate()
+        .map(|(n, sample)| {
+            let turn = std::f64::consts::TAU * n as f64 / size as f64;
+            let window =
+                0.358_75 - 0.488_29 * turn.cos() + 0.141_28 * (2.0 * turn).cos() - 0.011_68 * (3.0 * turn).cos();
+            (f64::from(*sample) * window * window) as f32
+        })
+        .collect();
+    let (mut re, mut im) = (vec![0.0f32; size / 2 + 1], vec![0.0f32; size / 2 + 1]);
+    plan.forward(&windowed, &mut re, &mut im);
+    re.iter().zip(&im).map(|(re, im)| f64::from(*re).powi(2) + f64::from(*im).powi(2)).collect()
+}
+
+/// What of a steady note at `hz` lies between its harmonics, against what
+/// lies on them, in dB.
+fn between_the_harmonics(samples: &[f32], hz: f64) -> f64 {
+    let power = fine_spectrum(samples);
+    let bin_hz = SR / (1 << 16) as f64;
+    let (mut on, mut off) = (0.0f64, 0.0f64);
+    for (bin, power) in power.iter().enumerate().skip(16) {
+        let at = bin as f64 * bin_hz;
+        let harmonic = (at / hz).round().max(1.0);
+        if (at - harmonic * hz).abs() <= 16.0 * bin_hz {
+            on += power;
+        } else {
+            off += power;
+        }
+    }
+    10.0 * (off.max(1e-30) / on.max(1e-30)).log10()
+}
+
+#[test]
+fn a_wavetable_note_is_as_loud_as_the_poly_synths_at_the_same_volume() {
+    // The same sine, at the same volume and velocity, on both synths.
+    let held = [note(57, 0.0, 2.0, 127)];
+    println!("volume   the poly synth   the wavetable synth   (peak of a sine, dBFS)");
+    for volume in [-21.0, -10.0, 0.0] {
+        let sine = [("osc1_wave", 0.0), ("sustain", 1.0), ("velocity_sens", 0.0), ("volume", volume)];
+        let poly = Played::synth(&sine, &held, 3.0);
+        let table = wavetable(&[("osc1_position", 0.0), ("volume", volume)], &held, 3.0);
+        let level = |played: &Played| db(f64::from(peak(&played.render().left[beats(0.5..2.0)])));
+        let (poly, table) = (level(&poly), level(&table));
+        println!("{volume:>6}      {poly:>+7.2}            {table:>+7.2}");
+        assert!((poly - table).abs() < 0.05, "at {volume} dB: {table} dBFS against the poly synth's {poly}");
+    }
+    // At the default volume a voice peaks 13 dB under full scale: the room
+    // a chord needs.
+    let default = wavetable(&[("osc1_position", 0.0)], &held, 3.0);
+    let level = db(f64::from(peak(&default.render().left[beats(0.5..2.0)])));
+    assert!((level + 13.15).abs() < 0.05, "{level} dBFS");
+    // A sawtooth is made to reach full level as the sine is: the peak
+    // beside its edge is at the sine's peak, and its ramp 1.4 dB under.
+    let saw = wavetable(&[("osc1_position", 0.5)], &held, 3.0);
+    let level = db(f64::from(peak(&saw.render().left[beats(0.5..2.0)])));
+    assert!((level + 13.15).abs() < 0.3, "{level} dBFS");
+    // And velocity moves it by the poly synth's law.
+    let soft = |uri: &str, params: &[(&str, f64)]| {
+        let played = Played::new(uri, params, None, &[note(57, 0.0, 2.0, 64)], 3.0);
+        db(f64::from(peak(&played.render().left[beats(0.5..2.0)])))
+    };
+    let poly = soft("builtin:polysynth", &[("osc1_wave", 0.0), ("sustain", 1.0), ("velocity_sens", 0.6)]);
+    let table = soft("builtin:wavetable", &[("osc1_position", 0.0), ("env1_sustain", 1.0), ("velocity_sens", 0.6)]);
+    assert!((poly - table).abs() < 0.05, "{table} against {poly}");
+}
+
+#[test]
+fn a_wavetable_sawtooth_is_clean_in_a_render_from_the_bottom_of_a_bass_to_the_top_of_a_piano() {
+    println!("note     Hz     what is not the note   (a sawtooth, rendered at 48 kHz)");
+    for pitch in [28u8, 40, 52, 64, 76, 88, 96, 100, 104, 108] {
+        let hz = 440.0 * 2f64.powf((f64::from(pitch) - 69.0) / 12.0);
+        let played = wavetable(&[("osc1_position", 0.5)], &[note(pitch, 0.0, 4.0, 100)], 4.0);
+        let out = played.render();
+        let between = between_the_harmonics(&out.left[4_800..], hz);
+        println!("{pitch:>4} {hz:>8.1}      {between:>7.1} dB");
+        // In the top octave of a piano, where what does not belong to a
+        // note is heard soonest, it is more than a hundred dB under it;
+        // nowhere is it less than 80.
+        let limit = if pitch >= 96 { -105.0 } else { -80.0 };
+        assert!(between < limit, "note {pitch}: {between:.1} dB");
+    }
+}
+
+/// A song for four wavetable synths that do everything at once: a bass
+/// that wobbles in time with the song, chords of detuned stacks, an
+/// arpeggio, a pad that drifts; with parameters of each drawn over the
+/// song (a macro, a cutoff, a position, an amount of the matrix, and
+/// which table an oscillator plays).
+fn wavetable_song() -> Project {
+    let mut project = Project::new("wavetable");
+    project.master.devices.clear();
+    project.set_tempo(126.0).unwrap();
+    let mut part = |name: &str, preset: &str, notes: &[Note]| {
+        let track = project.add_track(name);
+        let device = project.add_device(ChainRef::Track(track), "builtin:wavetable", name, None).unwrap();
+        let (params, state) = wavetable_preset(preset);
+        project.device_mut(device).unwrap().params = params;
+        project.device_mut(device).unwrap().state = state;
+        let clip = project.add_midi_clip(track, "clip", 0.0, 8.0).unwrap();
+        project.clip_mut(clip).unwrap().add_notes(notes).unwrap();
+        device
+    };
+    let bass: Vec<Note> = (0..8).map(|beat| note([36, 36, 43, 39][beat % 4], beat as f64, 0.9, 100)).collect();
+    let growl = part("Bass", "Growl Bass", &bass);
+    let chords: Vec<Note> = (0..4)
+        .flat_map(|bar| [60u8, 63, 67, 70].map(move |pitch| note(pitch + [0, 5, 3, 7][bar], bar as f64 * 2.0, 1.7, 90)))
+        .collect();
+    let saws = part("Chords", "Anthem Saws", &chords);
+    let arp: Vec<Note> =
+        (0..32).map(|step| note(72 + [0, 3, 7, 10, 12, 7][step % 6], step as f64 * 0.25, 0.2, 80)).collect();
+    let pluck = part("Arp", "Glass Pluck", &arp);
+    let pad = part("Pad", "Glass Pad", &[note(48, 0.0, 8.0, 80), note(55, 0.0, 8.0, 80), note(63, 2.0, 6.0, 70)]);
+
+    let mut draw = |device: DeviceId, param: &str, points: &[(f64, f64)]| {
+        let target = AutomationTarget::DeviceParam { device, param: param.to_string() };
+        let points = points.iter().map(|(beat, value)| AutomationPoint::new(*beat, *value)).collect();
+        project.set_automation(target, points).unwrap();
+    };
+    draw(growl, "macro1", &[(0.0, 0.0), (4.0, 1.0), (8.0, 0.2)]);
+    draw(growl, "filter1_cutoff", &[(0.0, 300.0), (6.0, 4000.0), (8.0, 500.0)]);
+    draw(saws, "osc1_position", &[(0.0, 0.5), (3.0, 0.9), (8.0, 0.3)]);
+    draw(saws, "mod1_amount", &[(0.0, 0.0), (8.0, 0.4)]);
+    // Another table half way through, while its notes sound.
+    draw(pluck, "osc1_table", &[(0.0, 11.0), (3.9, 11.0), (4.0, 9.0), (8.0, 9.0)]);
+    draw(pad, "volume", &[(0.0, -40.0), (2.0, -24.0), (8.0, -30.0)]);
+    project
+}
+
+/// Plays `project` from the top for `frames` frames in buffers of `block`
+/// frames, as the session plays one.
+fn played_live(project: &Project, block: usize, frames: usize, looping: bool) -> (Vec<f32>, Vec<f32>) {
+    use trill_engine::compile::{Compiler, DeviceBank, Meters};
+    use trill_engine::{AudioSources, Processor};
+    let (mut bank, mut meters, audio) = (DeviceBank::default(), Meters::default(), AudioSources::default());
+    let (graph, problems) = Compiler {
+        factory: &trill_dsp::BuiltinFactory,
+        bank: &mut bank,
+        meters: &mut meters,
+        audio: &audio,
+        stand_ins: None,
+        sample_rate: SR,
+        purpose: trill_core::device::Purpose::Playing,
+    }
+    .compile(project, looping);
+    assert!(problems.is_empty(), "{problems:?}");
+    let mut processor = Processor::new(SR);
+    drop(processor.swap_graph(graph));
+    processor.play();
+    let (mut left, mut right) = (vec![0.0f32; frames], vec![0.0f32; frames]);
+    for (l, r) in left.chunks_mut(block).zip(right.chunks_mut(block)) {
+        processor.process(l, r);
+    }
+    (left, right)
+}
+
+#[test]
+fn a_wavetable_song_is_the_same_samples_at_any_buffer_size_on_any_number_of_threads_and_every_time() {
+    let mut project = wavetable_song();
+    // Eight beats at 126.
+    let frames = (8.0 * 60.0 / 126.0 * SR) as usize;
+    // Straight through: whatever the buffers, the same; and a render is
+    // what was played, on one thread or on four, the first time and the
+    // second.
+    let reference = played_live(&project, 512, frames, false);
+    assert!(rms(&reference.0) > 0.02 && reference.0 != reference.1);
+    for block in [480, 441, 64, 37, 4096] {
+        let other = played_live(&project, block, frames, false);
+        assert!(other == reference, "buffers of {block} frames made other samples");
+    }
+    assert!(played_live(&project, 1, frames / 8, false).0[..] == reference.0[..frames / 8], "a frame at a time");
+    let rendered = |threads: usize| {
+        let options = RenderOptions {
+            sample_rate: SR as u32,
+            max_tail_seconds: 0.5,
+            threads: Some(threads),
+            ..RenderOptions::default()
+        };
+        render(&project, &trill_dsp::BuiltinFactory, &options).unwrap()
+    };
+    let one = rendered(1);
+    assert!(one.left[..frames] == reference.0[..], "the render differs from what was played, on the left");
+    assert!(one.right[..frames] == reference.1[..], "the render differs from what was played, on the right");
+    let four = rendered(4);
+    assert!(four.left == one.left && four.right == one.right, "four threads made other samples than one");
+    let again = rendered(4);
+    assert!(again.left == one.left && again.right == one.right, "the second render is not the first");
+    // The table that changed under the arpeggio did not click: the largest
+    // step around the change is no larger than the part makes elsewhere.
+    let arp = project.tracks[2].id;
+    let alone = RenderOptions { sample_rate: SR as u32, only_tracks: Some(vec![arp]), ..RenderOptions::default() };
+    let out = render(&project, &trill_dsp::BuiltinFactory, &alone).unwrap();
+    let change = (4.0 * 60.0 / 126.0 * SR) as usize;
+    let around = largest_step(&out.left[change - 2_000..change + 2_000]);
+    let elsewhere = largest_step(&out.left[change - 40_000..change - 4_000]);
+    assert!(around <= elsewhere * 1.1, "a step of {around} at the change of table, where {elsewhere} is usual");
+
+    // Round a loop the envelopes and the LFO that keeps time jump with the
+    // song, and it is still the same at any buffer size.
+    project.set_loop(true, 1.0, 5.5).unwrap();
+    let looped = played_live(&project, 512, frames, true);
+    for block in [480, 441, 37] {
+        assert!(played_live(&project, block, frames, true) == looped, "looping, buffers of {block} frames");
+    }
+}
+
+#[test]
+fn a_wavetable_synth_is_given_tables_of_its_own_and_names_for_its_macros_through_the_session() {
+    use trill_dsp::wavetable::TableSource;
+    use trill_dsp::wavetable::recipe::{FileSpec, Frame, Recipe, Shape};
+    let folder = folder();
+    let media = Arc::new(MediaCache::default());
+    let factory = Arc::new(Builtins::with_loader(media.clone()));
+    let mut session = Session::with_media(factory, media, AudioBackend::Null { sample_rate: SR as u32 }).unwrap();
+    let track = session.edit(|project| Ok(project.add_track("Lead"))).unwrap();
+    let synth = session.add_device(ChainRef::Track(track), "builtin:wavetable", Some("Sync Lead"), None).unwrap();
+
+    // A preset brings its macros' names with it, and what it sets.
+    assert_eq!(session.wavetable_state(synth).unwrap().macro_name(0), "Rip");
+    assert_eq!(session.project().device(synth).unwrap().params.get("osc1_table"), Some(&6.0));
+    let report = session.wavetable_table(synth, 1).unwrap();
+    assert_eq!((report.name.as_str(), report.own, report.frames.len()), ("Sync Sweep", false, 32));
+    assert!(report.about.unwrap().contains("sync"));
+
+    // A table of its own from a recipe: one undo step, and the oscillator
+    // plays it.
+    let pulse = |width: f64| Frame { width: Some(width), ..Frame::of(Shape::Pulse) };
+    let recipe = Recipe::new("Thin Reed", 12, vec![pulse(0.5), pulse(0.05)]);
+    let before = session.undo_step();
+    let report = session.set_wavetable(synth, 1, TableSource::Recipe(recipe)).unwrap();
+    assert_eq!((report.name.as_str(), report.own, report.frames.len()), ("Thin Reed", true, 12));
+    assert!(report.frames[11].centre > report.frames[0].centre, "thinner is brighter");
+    assert_eq!(session.project().device(synth).unwrap().params.get("osc1_table"), Some(&0.0));
+    assert_eq!(session.wavetable_table(synth, 1).unwrap().name, "Thin Reed");
+    assert!(session.problems().is_empty(), "{:?}", session.problems());
+    session.undo();
+    assert_eq!(session.undo_step(), before, "one step");
+    assert_eq!(session.wavetable_table(synth, 1).unwrap().name, "Sync Sweep");
+    session.redo();
+
+    // One from a file of single cycles; the file is one of the song's.
+    let cycles: Vec<f32> = (0..4 * 2048)
+        .map(|n| ((n / 2048 + 1) as f32 * std::f32::consts::TAU * (n % 2048) as f32 / 2048.0).sin() * 0.5)
+        .collect();
+    let path = write_wav(&file(&folder, "cycles.wav"), 44_100.0, &cycles);
+    let spec = FileSpec { file: path.clone(), ..FileSpec::default() };
+    let report = session.set_wavetable(synth, 2, TableSource::File(spec)).unwrap();
+    assert_eq!((report.name.as_str(), report.frames.len()), ("cycles", 4));
+    assert_eq!(report.frames[2].highest, 3, "the third cycle is the third harmonic");
+    let files = session.files();
+    assert!(files.iter().any(|file| file.path == path && file.place.to_string().contains("osc2 table")), "{files:?}");
+
+    // What is no table changes nothing and says why.
+    let revision = session.revision();
+    let wrong = Recipe::new("", 1, vec![Frame { width: Some(0.3), ..Frame::of(Shape::Saw) }]);
+    let error = session.set_wavetable(synth, 1, TableSource::Recipe(wrong)).unwrap_err().to_string();
+    assert!(error.contains("`width`") && error.contains("keeps the table it had"), "{error}");
+    let gone = FileSpec { file: file(&folder, "gone.wav").display().to_string(), ..FileSpec::default() };
+    let error = session.set_wavetable(synth, 1, TableSource::File(gone)).unwrap_err().to_string();
+    assert!(error.contains("gone.wav"), "{error}");
+    assert!(session.set_wavetable(synth, 3, TableSource::Recipe(Recipe::default())).is_err());
+    assert_eq!(session.revision(), revision);
+
+    // Back to one that ships, by its name; the one of its own is kept.
+    assert_eq!(session.choose_wavetable(synth, 1, "acid").unwrap().name, "Acid");
+    assert!(session.wavetable_state(synth).unwrap().table(0).is_some());
+    let error = session.choose_wavetable(synth, 1, "Nope").unwrap_err().to_string();
+    assert!(error.contains("Basic Shapes") && error.contains("Strings"), "{error}");
+
+    // The macros are named, and a name is taken away again.
+    let names = session.name_macros(synth, &[(2, "Wobble".into()), (4, " Air ".into())]).unwrap();
+    assert_eq!(names, ["Rip", "Wobble", "Bright", "Air"].map(String::from));
+    assert_eq!(session.name_macros(synth, &[(4, String::new())]).unwrap()[3], "Macro 4");
+    assert!(session.name_macros(synth, &[(5, "x".into())]).is_err());
+    // Another preset brings its own names and takes the tables away.
+    session.load_preset(synth, "Glass Pad").unwrap();
+    let state = session.wavetable_state(synth).unwrap();
+    assert_eq!((state.macro_name(0), state.table(0).is_none()), ("Shimmer".to_string(), true));
+    session.undo();
+    assert_eq!(session.wavetable_state(synth).unwrap().macro_name(1), "Wobble");
+
+    // A device that is not one says so.
+    let poly = session.add_device(ChainRef::Track(track), "builtin:polysynth", None, None).unwrap();
+    assert!(session.wavetable_state(poly).unwrap_err().to_string().contains("not a wavetable synth"));
+}

@@ -53,6 +53,24 @@
 //! when a render begins is then a matter of what it was asked and how it
 //! answered, and not of how long it took to load.
 //!
+//! **A key that switches is pressed, not heard.** On an instrument with
+//! articulations some keys choose how the notes after them are played and
+//! sound nothing themselves, and the track says which
+//! ([`trill_core::InstrumentProfile::is_keyswitch`]). They are not asked
+//! as notes: one would be held to answering for half the caller's
+//! patience and then said to have made no sound, and pressed by itself it
+//! would leave every note after it in the rehearsal on that way of
+//! playing. A note is rehearsed under the switch the part plays it with
+//! (pressed just before it, let go with it), and a pitch that the part
+//! plays under two switches is two notes, with recordings of their own:
+//! each sounds three times. A switch that is for the next note only is
+//! pressed with that note and no other. A note the part plays before it
+//! has chosen anything is rehearsed on the way of playing the track calls
+//! its default, where a key chooses that, and the instrument is left on
+//! it when the rehearsal is over, so that the song begins as it would
+//! have with nothing rehearsed; a part that chooses before its first note
+//! leaves nothing to restore.
+//!
 //! **Each note is heard alone.** A drum that has not been loaded sounds
 //! exactly like a key that plays nothing, and under the ringing of the
 //! drum before it, it sounds like nothing at all: a tom that is there
@@ -95,6 +113,15 @@
 //! does not run out meanwhile ([`DeviceFactory::busy`]). And the memory a
 //! song gives back as it goes does not hide what a kit takes as it comes:
 //! the mark that growth is measured against comes down with it.
+//!
+//! **An instrument that listens is lent something to listen to.** A
+//! device may listen to another track of the song (a vocoder to a voice,
+//! a synthesizer on a patch that plays what it is fed), and a rehearsal
+//! plays one track by itself: such an instrument would answer no note,
+//! and the render would be refused for want of it. So while a note is
+//! tried, every device of the track that listens is handed noise in the
+//! place of the track it listens to, the same noise each time, and
+//! silence between notes.
 //!
 //! **Effects wait too.** An amplifier or a reverb that is a plugin may
 //! pass no sound for a moment after it is made. Behind a plugin
@@ -161,7 +188,7 @@ use parking_lot::Mutex;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use trill_core::device::{DeviceCategory, DeviceFactory, DeviceProcessor, Event, EventKind, ProcessInfo};
+use trill_core::device::{DeviceCategory, DeviceFactory, DeviceProcessor, Event, EventKind, KeyInput, ProcessInfo};
 use trill_core::{ControllerKind, Device, DeviceId, Project, TimeSignature, TrackId};
 
 /// The most notes of a track that are rehearsed: the different pitches it
@@ -205,6 +232,9 @@ const SIGNAL_LEVEL: f32 = 0.25;
 const SIGNAL_STRETCHES: usize = 3;
 /// How long a rehearsal waits between tries.
 const BETWEEN_TRIES: Duration = Duration::from_millis(100);
+/// Where the noise begins that a device which listens to another track is
+/// lent while it is tried.
+const KEY_SEED: u32 = 0x9E37_79B9;
 /// How many times each rehearsed note is to sound, and an effect to pass a
 /// burst of noise, before it is not asked again: see the module
 /// documentation.
@@ -541,6 +571,10 @@ pub(crate) struct Opening {
     pub notes: Vec<OpeningNote>,
     /// For effects, which take no notes: a burst of noise to pass.
     pub signal: bool,
+    /// The key the instrument is left on when the rehearsal is over: the
+    /// one that chooses the way of playing the song begins in, where the
+    /// rehearsal chose others and the song says nothing of it itself.
+    pub left_on: Option<OpeningNote>,
 }
 
 impl Opening {
@@ -564,6 +598,16 @@ pub(crate) struct Stand<'a> {
     /// played, so that what comes after it is run; and whether it ever has.
     engaged: bool,
     ever_engaged: bool,
+    /// Which of the devices listen to another track of the song, where
+    /// any does. Here there is no other track: while a note is tried they
+    /// are lent noise to listen to ([`Stand::lending`]), or an instrument
+    /// that only plays what it hears would never be heard to answer.
+    listening: Vec<bool>,
+    /// Whether the key is being lent, the noise it is made of, and where
+    /// that noise has got to.
+    lent: bool,
+    key: Vec<f32>,
+    key_seed: u32,
     info: ProcessInfo,
     left: Vec<f32>,
     right: Vec<f32>,
@@ -587,11 +631,28 @@ impl<'a> Stand<'a> {
             sources: 0,
             engaged: false,
             ever_engaged: false,
+            listening: Vec::new(),
+            lent: false,
+            key: vec![0.0; BLOCK],
+            key_seed: KEY_SEED,
             info,
             left: vec![0.0; BLOCK],
             right: vec![0.0; BLOCK],
             noise: 0.0,
         }
+    }
+
+    /// Says which of the devices listen to another track: one flag for
+    /// each, in their order.
+    pub fn listening(mut self, listening: Vec<bool>) -> Self {
+        self.listening = listening;
+        self
+    }
+
+    /// Lends the devices that listen a key from now on, or takes it away:
+    /// the same noise from its beginning every time it is lent.
+    pub fn lend(&mut self, lent: bool) {
+        (self.lent, self.key_seed) = (lent && self.listening.contains(&true), KEY_SEED);
     }
 
     /// From here on the first device is an instrument that is rehearsed,
@@ -645,17 +706,38 @@ impl<'a> Stand<'a> {
             let (left, right) = (&mut self.left[..count], &mut self.right[..count]);
             feed(left, right);
             let events = if done == 0 { events } else { &[] };
-            let (sources, effects) = self.devices.split_at_mut(self.sources);
-            for device in sources.iter_mut() {
-                device.process(&self.info, events, left, right);
+            // What the devices that listen are lent for this block.
+            let key = &mut self.key[..count];
+            if self.lent {
+                for sample in key.iter_mut() {
+                    self.key_seed ^= self.key_seed << 13;
+                    self.key_seed ^= self.key_seed >> 17;
+                    self.key_seed ^= self.key_seed << 5;
+                    *sample = ((self.key_seed >> 8) as f32 / 8_388_608.0 - 1.0) * SIGNAL_LEVEL;
+                }
             }
-            if !sources.is_empty() && !self.engaged {
+            let (info, lent, listening) = (&self.info, self.lent, &self.listening);
+            // A device that listens is handed the key; any other is run
+            // as it always is.
+            let run =
+                |index: usize, device: &mut Box<dyn DeviceProcessor>, left: &mut [f32], right: &mut [f32]| match lent
+                    && listening.get(index).copied().unwrap_or(false)
+                {
+                    true => device.process_keyed(info, events, left, right, KeyInput { left: key, right: key }),
+                    false => device.process(info, events, left, right),
+                };
+            let (sources, effects) = self.devices.split_at_mut(self.sources);
+            let sourced = sources.len();
+            for (index, device) in sources.iter_mut().enumerate() {
+                run(index, device, left, right);
+            }
+            if sourced > 0 && !self.engaged {
                 self.engaged = left.iter().chain(right.iter()).any(|sample| sample.abs() > ANSWER);
                 self.ever_engaged |= self.engaged;
             }
-            if sources.is_empty() || self.engaged {
-                for device in effects.iter_mut() {
-                    device.process(&self.info, events, left, right);
+            if sourced == 0 || self.engaged {
+                for (index, device) in effects.iter_mut().enumerate() {
+                    run(sourced + index, device, left, right);
                 }
             }
             done += count;
@@ -778,6 +860,9 @@ impl<'a> Stand<'a> {
             // What comes after the instrument waits for it to sound, note
             // by note.
             self.engaged = false;
+            // An instrument that listens to another track is lent
+            // something to listen to for as long as the note is down.
+            self.lend(true);
             // A key held with the note goes down a moment ahead of it and
             // comes up with it.
             for key in with.drain(..) {
@@ -799,6 +884,7 @@ impl<'a> Stand<'a> {
             answers.push(Some(answer));
             events.clear();
             events.extend(down.drain(..).map(|pitch| Event { offset: 0, kind: EventKind::NoteOff { pitch } }));
+            self.lend(false);
             self.hush(&events);
             events.clear();
         }
@@ -818,6 +904,16 @@ impl<'a> Stand<'a> {
         while self.run(&[], block) > quiet && waited < HUSH_SECONDS {
             waited += block;
         }
+    }
+
+    /// Presses a key that chooses how notes are played and lets go of it:
+    /// the instrument is left on that.
+    pub fn choose(&mut self, key: &OpeningNote) {
+        let block = self.block_seconds();
+        let mut events: Vec<Event> = key.controllers.iter().map(|kind| Event { offset: 0, kind: *kind }).collect();
+        events.push(Event { offset: 0, kind: EventKind::NoteOn { pitch: key.pitch, velocity: key.velocity } });
+        self.run(&events, block);
+        self.run(&[Event { offset: 0, kind: EventKind::NoteOff { pitch: key.pitch } }], block);
     }
 
     /// Lets go of every note, silences the devices, leaves what still
@@ -858,10 +954,68 @@ impl<'a> Stand<'a> {
     }
 }
 
+/// What is remembered of plugins from one wait to the next, as it goes to
+/// a process that waits for this one and comes back from it: without it,
+/// such a process would wait out every key that plays nothing, and every
+/// instrument that never answers, each time anew.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Memory {
+    silent: Vec<u64>,
+    ready: Vec<(u64, Vec<Answer>)>,
+    keys: Vec<(u64, Vec<Option<bool>>)>,
+}
+
+/// What is remembered now.
+pub(crate) fn remembered() -> Memory {
+    Memory {
+        silent: KNOWN_NOT_TO_ANSWER.lock().clone(),
+        ready: KNOWN_READY.lock().clone(),
+        keys: KNOWN_KEYS.lock().iter().map(|(devices, keys)| (*devices, keys.to_vec())).collect(),
+    }
+}
+
+/// Takes up what another process remembers. What it has found ready is
+/// no longer known not to answer here, what it found not to answer is no
+/// longer known as ready, and what it knows of a key takes the place of
+/// what was known of that key. Key by key, not plugin by plugin: two jobs
+/// may run at once, each began from what was known when it started, and
+/// what the first found of a key the second never tried must still be
+/// known when the second comes back.
+pub(crate) fn remember(memory: Memory) {
+    let (mut silent, mut ready, mut keys) = (KNOWN_NOT_TO_ANSWER.lock(), KNOWN_READY.lock(), KNOWN_KEYS.lock());
+    for (signature, answers) in memory.ready {
+        silent.retain(|known| *known != signature);
+        ready.retain(|(known, _)| *known != signature);
+        ready.push((signature, answers));
+    }
+    for signature in memory.silent {
+        if !ready.iter().any(|(known, _)| *known == signature) && !silent.contains(&signature) {
+            silent.push(signature);
+        }
+    }
+    for (devices, theirs) in memory.keys {
+        let Ok(theirs) = Keys::try_from(theirs) else { continue };
+        let at = keys.iter().position(|(other, _)| *other == devices);
+        let mut known = at.map_or([None; 128], |at| keys.remove(at).1);
+        for (here, there) in known.iter_mut().zip(theirs) {
+            if there.is_some() {
+                *here = there;
+            }
+        }
+        keys.push((devices, known));
+    }
+    let surplus = silent.len().saturating_sub(REMEMBERED);
+    silent.drain(..surplus);
+    let surplus = ready.len().saturating_sub(REMEMBERED);
+    ready.drain(..surplus);
+    let surplus = keys.len().saturating_sub(REMEMBERED);
+    keys.drain(..surplus);
+}
+
 /// What came out of a plugin over a short stretch: its highest sample, by
 /// which it is known to have answered at all, and its energy, by which
 /// one answer is compared with the next.
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Answer {
     peak: f32,
     energy: f64,
@@ -1247,7 +1401,12 @@ pub(crate) fn wait_for(waits: &mut [Wait], patience: Duration, held_up: &(dyn Fn
         }
         std::thread::sleep(BETWEEN_TRIES);
     }
-    each(waits, crew.as_ref(), &|wait| wait.stand.settle());
+    each(waits, crew.as_ref(), &|wait| {
+        if let Some(key) = &wait.opening.left_on {
+            wait.stand.choose(key);
+        }
+        wait.stand.settle();
+    });
     drop(crew);
     let (mut silent, mut ready, mut keys) = (KNOWN_NOT_TO_ANSWER.lock(), KNOWN_READY.lock(), KNOWN_KEYS.lock());
     for wait in waits.iter_mut() {
@@ -1355,6 +1514,7 @@ pub(crate) fn signature<'a>(devices: impl Iterator<Item = &'a Device>, opening: 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     hash_devices(devices, &mut hasher);
     opening.signal.hash(&mut hasher);
+    opening.left_on.as_ref().map(|key| key.pitch).hash(&mut hasher);
     for note in &opening.notes {
         (note.pitch, note.velocity.to_bits(), note.switch).hash(&mut hasher);
         for kind in &note.controllers {
@@ -1424,12 +1584,41 @@ pub(crate) fn wake(
             .filter(|instrument| plugins.is_instrument(&instrument.uri));
         let mut notes: Vec<OpeningNote> = Vec::new();
         let opening_notes = node.notes.iter().filter(|note| note.start >= from - 1e-9 && note.start < to);
+        // The keys the track knows for switches choose how the notes after
+        // them are played and sound nothing themselves. They are not
+        // rehearsed as notes; each note is rehearsed under the switch the
+        // part plays it with: the one that stays chosen where the part has
+        // got to, or one that is for the next note only.
+        let articulation = |pitch: u8| track.profile.articulations.iter().find(|way| way.key == Some(pitch));
+        let (mut stays, mut once): (Option<OpeningNote>, Option<OpeningNote>) = (None, None);
+        // Which notes are rehearsed: a pitch under each switch it is first
+        // played with, which are other recordings.
+        let mut rehearsing: Vec<(Option<u8>, u8)> = Vec::new();
+        // The way a note is played when nothing is said, where the track
+        // says which key chooses it: what the instrument is taken to be on
+        // as it is made.
+        let unsaid = track.profile.articulations.iter().find(|way| way.default && way.key.is_some());
+        let unsaid = unsaid.and_then(|way| way.key).map(|pitch| OpeningNote {
+            pitch,
+            velocity: 100.0 / 127.0,
+            controllers: Vec::new(),
+            switch: true,
+        });
+        // Whether the part begins on what nothing was said of, and whether
+        // a switch that stays is pressed at all.
+        let (mut begins_unsaid, mut stayed) = (false, false);
         for note in opening_notes.filter(|_| instrument.is_some()) {
-            if notes.len() == OPENING_NOTES {
-                break;
-            }
-            if notes.iter().any(|known| known.pitch == note.pitch) {
-                continue;
+            let switches = articulation(note.pitch).map(|way| way.lasts);
+            if switches.is_none() {
+                if rehearsing.len() == OPENING_NOTES {
+                    break;
+                }
+                let under = once.as_ref().or(stays.as_ref()).map(|key| key.pitch);
+                if rehearsing.contains(&(under, note.pitch)) {
+                    // It is played again, and what was for one note is over.
+                    once = None;
+                    continue;
+                }
             }
             let controllers = node
                 .controllers
@@ -1446,8 +1635,32 @@ pub(crate) fn wake(
                 })
                 .collect();
             let velocity = f32::from(note.velocity.clamp(1, 127)) / 127.0;
-            notes.push(OpeningNote { pitch: note.pitch, velocity, controllers, switch: false });
+            match switches {
+                Some(trill_core::Lasts::Stays) => {
+                    stays = Some(OpeningNote { pitch: note.pitch, velocity, controllers, switch: true });
+                    (once, stayed) = (None, true);
+                }
+                Some(_) => once = Some(OpeningNote { pitch: note.pitch, velocity, controllers, switch: true }),
+                None => {
+                    let under = once.take().or_else(|| stays.clone());
+                    begins_unsaid |= rehearsing.is_empty() && stays.is_none();
+                    rehearsing.push((under.as_ref().map(|key| key.pitch), note.pitch));
+                    // A note nothing was said of is one on the way the
+                    // instrument plays unasked: by then another may be
+                    // chosen, here as in the part.
+                    notes.extend(under.or_else(|| unsaid.clone().filter(|_| stays.is_none())));
+                    notes.push(OpeningNote { pitch: note.pitch, velocity, controllers, switch: false });
+                }
+            }
         }
+        // Without a switch that stays, nothing is chosen that the
+        // instrument would not be on anyway: it is asked as it always was.
+        if !stayed {
+            notes.retain(|note| !note.switch || Some(note.pitch) != unsaid.as_ref().map(|key| key.pitch));
+        }
+        // What the instrument is left on: where the part begins on what
+        // nothing was said of, that, if a rehearsal chose anything else.
+        let left_on = unsaid.filter(|_| begins_unsaid && stayed);
         // The instrument and the plugins after it are what a note goes
         // through before it is heard, the built-in devices left out. With
         // no notes to play, there is nothing to rehearse them with.
@@ -1465,11 +1678,14 @@ pub(crate) fn wake(
             .collect();
         let (mut with_notes, mut with_noise) = (Vec::new(), Vec::new());
         let (mut note_turns, mut noise_turns) = (Vec::new(), Vec::new());
+        // Which of the rehearsed devices listen to another track.
+        let mut listening = Vec::new();
         for slot in node.chain.devices.iter_mut() {
-            let (id, turn) = (slot.id, slot.turn);
+            let (id, turn, listens) = (slot.id, slot.turn, slot.key.is_some());
             let Some(processor) = slot.processor.as_mut() else { continue };
             if rehearsed.iter().any(|device| device.id == id) {
                 with_notes.push(processor);
+                listening.push(listens);
                 note_turns.extend(turn);
             } else if effects.iter().any(|device| device.id == id) {
                 with_noise.push(processor);
@@ -1479,15 +1695,15 @@ pub(crate) fn wake(
         // (A plugin that could not be created is a problem of its own,
         // and what is left of its chain is not rehearsed without it.)
         if let (Some(instrument), true) = (instrument, !rehearsed.is_empty() && with_notes.len() == rehearsed.len()) {
-            let opening = Opening { notes, signal: false };
+            let opening = Opening { notes, signal: false, left_on };
             let signature = signature(rehearsed.iter().copied(), &opening);
             let devices = device_signature(rehearsed.iter().copied());
-            let stand = Stand::new(with_notes, sample_rate, tempo);
+            let stand = Stand::new(with_notes, sample_rate, tempo).listening(listening);
             waits.push(Wait::new(stand, opening, signature, devices).taking_turns(note_turns));
             who.push((Some(node.id), instrument.id, false));
         }
         if let (Some(first), true) = (effects.first(), with_noise.len() == effects.len()) {
-            let opening = Opening { notes: Vec::new(), signal: true };
+            let opening = Opening { notes: Vec::new(), signal: true, left_on: None };
             let signature = signature(effects.iter().copied(), &opening);
             let devices = device_signature(effects.iter().copied());
             let stand = Stand::new(with_noise, sample_rate, tempo);
@@ -1503,7 +1719,7 @@ pub(crate) fn wake(
     let master_turns: Vec<u32> = slots.iter().filter_map(|slot| slot.turn).collect();
     let processors: Vec<_> = slots.into_iter().filter_map(|slot| slot.processor.as_mut()).collect();
     if let (Some(first), true) = (effects.first(), processors.len() == effects.len()) {
-        let opening = Opening { notes: Vec::new(), signal: true };
+        let opening = Opening { notes: Vec::new(), signal: true, left_on: None };
         let signature = signature(effects.iter().copied(), &opening);
         let devices = device_signature(effects.iter().copied());
         let stand = Stand::new(processors, sample_rate, tempo);
@@ -1559,5 +1775,28 @@ mod tests {
         watch.began(DeviceId(8));
         watch.gone(DeviceId(8));
         assert!(watch.loading().is_empty() && watch.loading_now().is_empty());
+    }
+
+    #[test]
+    fn what_two_processes_learned_of_one_plugin_at_the_same_time_is_all_kept() {
+        // Two jobs on the same plugin began from the same knowledge. The
+        // first comes back having found a key that plays nothing; the
+        // second, which never tried that key, comes back after it.
+        let plugin = 0x7e57_ab1e_0000_0001; // no plugin has this signature
+        let learned = |keys: &[(usize, bool)]| {
+            let mut known = vec![None; 128];
+            for (key, sounds) in keys {
+                known[*key] = Some(*sounds);
+            }
+            Memory { keys: vec![(plugin, known)], ..Memory::default() }
+        };
+        remember(learned(&[(20, false), (41, true)]));
+        remember(learned(&[(44, true)]));
+        let of = |memory: Memory| memory.keys.into_iter().find(|(devices, _)| *devices == plugin).unwrap().1;
+        let known = of(remembered());
+        assert_eq!((known[20], known[41], known[44], known[45]), (Some(false), Some(true), Some(true), None));
+        // What a later one found of a key takes the place of what was known.
+        remember(learned(&[(20, true)]));
+        assert_eq!(of(remembered())[20], Some(true));
     }
 }

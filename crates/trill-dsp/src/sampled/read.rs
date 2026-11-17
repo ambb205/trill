@@ -322,7 +322,7 @@ pub(crate) mod tests {
         assert_eq!(half(1.059_463), 24, "a semitone up");
         assert_eq!(half(2.0), 40, "an octave up");
         assert_eq!((half(4.0), half(100.0)), (MAX_HALF, MAX_HALF));
-        assert!(GUARD >= MAX_HALF, "the guard has to cover the widest reach");
+        const { assert!(GUARD >= MAX_HALF, "the guard has to cover the widest reach") };
         for kernel in kernels() {
             assert_eq!(kernel.half % 4, 0);
         }

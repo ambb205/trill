@@ -60,6 +60,13 @@ hearing one track of a long song costs what that track costs. Naming a return th
 every track's send feeds it; naming a group gives the group with its members.
 Both run at the engine's sample rate unless `sample_rate` asks for another (without an audio device the engine \
 runs at 48000 Hz, whatever the song's files are at), and their replies state the rate they ran at.
+probe, measure and render make their copies of a song's plugins in a process of their own. A plugin that \
+crashes there costs the call an error that names the plugin, where that can be told, and says what to do; \
+the song that is open is untouched. Call again, or mute the track to hear the rest.
+Some sampled instruments draw at random which recording of a note they play, and the reply says when a song \
+has one. A change anywhere in what such an instrument plays then changes how every later note of it sounds, so \
+a render before a change and one after it differ in more than the change. To compare the two, make both with \
+`repeatable: true`, which takes the chance out of the render's own copies and leaves the song as it is.
 Both use several of the machine's processors (half of them, eight at the most): tracks that do not feed one \
 another are made at once, and what comes out is the samples one processor would have made, sooner. The reply's \
 `threads` says how many it was; `threads` in the call asks for another number.
@@ -125,6 +132,14 @@ pub struct MeasureRequest {
     pub detail: bool,
     /// Longest reverb/delay tail to keep after the end, in seconds (default 10; trimmed when silent sooner).
     pub max_tail_seconds: Option<f64>,
+    /// Compare two renders with this on in both. Some sampled instruments draw at random which recording of a
+    /// note they play, so two renders of one song differ and the difference hides what you changed (the reply
+    /// says when a song has such instruments). With `repeatable` the render's own copies of them take their
+    /// recordings in turn: the song itself is not changed, two such renders are the same samples, and they
+    /// sound slightly different from the song as it plays (no random takes, no fret noise). Leave off to hear
+    /// the song as it is.
+    #[serde(default)]
+    pub repeatable: bool,
     /// How many of the machine's processors make it at the most. Leave it out: half of them are used (eight
     /// at the most), tracks that do not feed one another are made at once, and the samples are the ones a
     /// single processor makes. 1 makes it a track at a time: to compare the time, or to leave the machine to
@@ -502,6 +517,72 @@ fn observations(report: &RenderReport, project: &Project) -> Vec<String> {
     notes
 }
 
+/// What to say of the instruments of a render that draw at random what
+/// they play: that the next render will differ and how to stop it, or,
+/// where it was stopped, that this is not quite the song as it plays.
+fn draws_notes(draws: &[trill_engine::render::Draws]) -> Vec<String> {
+    let named = |these: &[&trill_engine::render::Draws]| -> String {
+        let names: Vec<String> =
+            these.iter().map(|draws| format!("{} on '{}'", draws.device_name, draws.track_name)).collect();
+        names.join(", ")
+    };
+    let mut notes = Vec::new();
+    let stoppable = |draws: &&trill_engine::render::Draws| !draws.costs.is_empty();
+    let held: Vec<_> = draws.iter().filter(|draws| draws.held).collect();
+    let free: Vec<_> = draws.iter().filter(stoppable).filter(|draws| !draws.held && draws.failed.is_none()).collect();
+    // What nothing is known to stop is said by itself, whatever was asked.
+    for draws in draws.iter().filter(|draws| !stoppable(draws)) {
+        notes.push(format!(
+            "{} on '{}' {}. Two renders of this song may differ there, and nothing is known that stops it: \
+             `repeatable` leaves it as it is. To compare two renders, go by that track's levels, or leave it out of \
+             what you compare (`tracks`).",
+            draws.device_name, draws.track_name, draws.what
+        ));
+    }
+    if let Some(first) = held.first() {
+        notes.push(format!(
+            "Made repeatable: {} rendered with {}. The song itself is unchanged; this is the same samples every \
+             time, and not quite what the song sounds like as it plays.",
+            named(&held),
+            first.costs
+        ));
+    }
+    if let Some(first) = free.first() {
+        let one = free.len() == 1;
+        // Made in a process that had just started, where these begin their
+        // draws at the same place, the song is these samples every time;
+        // made anywhere else, it is not.
+        let what_follows = match free.iter().all(|draws| draws.again) {
+            true => format!(
+                "Rendered like this, in a process of its own, the same song comes out the same every time; but a \
+                 change to what {} or to another track of the same instrument moves every draw after it, so a \
+                 render before a change and one after it differ in more than the change",
+                if one { "it plays" } else { "one of them plays" }
+            ),
+            false => "so the next render of this song will not be these samples".to_string(),
+        };
+        notes.push(format!(
+            "{} draw{} at random what {} as {} set{} {what_follows}. To compare two renders, make both with \
+             `repeatable: true`: the render's own copies are given {}, and the song is left as it is.",
+            named(&free),
+            if one { "s" } else { "" },
+            if one { "it plays" } else { "they play" },
+            if one { "it is" } else { "they are" },
+            if free.iter().all(|draws| draws.again) { "." } else { "," },
+            first.costs
+        ));
+    }
+    for draws in draws.iter().filter(|draws| draws.failed.is_some()) {
+        notes.push(format!(
+            "{} on '{}' could not be made repeatable ({}): it was rendered as it is.",
+            draws.device_name,
+            draws.track_name,
+            draws.failed.as_deref().unwrap_or_default()
+        ));
+    }
+    notes
+}
+
 /// What to say of a render that was made on one thread because of the
 /// devices in it that are not run beside any other.
 fn alone_note(alone: &[trill_engine::render::Alone]) -> Option<String> {
@@ -689,6 +770,7 @@ fn report_json(
     }
     all.append(&mut observations(report, project));
     all.extend(alone_note(&report.alone));
+    all.extend(draws_notes(&report.draws));
     all.append(&mut notes);
     out["notes"] = json!(all);
     out
@@ -1292,6 +1374,11 @@ impl TrillServer {
                 Some(track) => Some(session.profile_of(track)),
                 None => session.instruments().of(&job.devices[0].uri).map(|known| known.profile),
             };
+            // The track the instrument listens to, where it does.
+            let key = job.devices[0].sidechain.and_then(|track| session.project().track(track).ok());
+            if let Some(key) = key {
+                about["listens_to"] = json!(key.name);
+            }
             about["through"] = match job.devices.len() {
                 1 => json!("the instrument alone"),
                 more => json!(format!("the instrument and the {} device(s) after it", more - 1)),
@@ -1379,6 +1466,15 @@ impl TrillServer {
         }
         if probed.waited_seconds >= 1.0 && probed.answered {
             notes.push(format!("Waited {:.1} s for the instrument to be ready.", probed.waited_seconds));
+        }
+        if probed.lent {
+            notes.push(format!(
+                "This instrument listens to the track '{}' and plays what it hears there. A probe plays it by \
+                 itself, so it was given noise to listen to while each note was held: which notes sound is the \
+                 instrument's, and how loud and how bright they are here is not what they will be in the song. \
+                 `measure` with `tracks` hears it in the song.",
+                out["listens_to"].as_str().unwrap_or_default()
+            ));
         }
         let unloaded = |pitch: &u8| heard.iter().any(|note| note.note.pitch == *pitch && !note.sounded);
         if probed.answered && probed.waited_for_silent.iter().any(unloaded) {
@@ -1482,6 +1578,7 @@ impl TrillServer {
             let (start, end) = (start, request.end);
             let options = RenderOptions {
                 threads: request.threads,
+                repeatable: request.repeatable,
                 sample_rate,
                 start_beat: start,
                 end_beat: request.end,

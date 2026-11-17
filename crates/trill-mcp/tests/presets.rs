@@ -632,8 +632,10 @@ async fn a_sound_is_found_across_every_instrument_there_is() {
     assert_ne!(next["items"], narrowed["items"]);
     let effects = ok(client, "search_presets", json!({ "query": "warm pad", "category": "effect" })).await;
     assert!(devices(&effects).iter().all(|found| !found.starts_with(SYNTH)), "{effects}");
+    // The plugin's preset of that name first, then what a built-in synth
+    // has that is described so.
     let any = ok(client, "search_presets", json!({ "query": "glass keys", "category": "any" })).await;
-    assert_eq!(devices(&any), [format!("{SYNTH}: Glass Keys")]);
+    assert_eq!(devices(&any), [format!("{SYNTH}: Glass Keys"), "builtin:wavetable: FM Keys".to_string()]);
 
     // While a plugin's presets are being read, the answer says so and has
     // what is known so far.
@@ -641,7 +643,7 @@ async fn a_sound_is_found_across_every_instrument_there_is() {
     let partial = ok(client, "search_presets", json!({ "query": "glass keys", "wait_seconds": 0 })).await;
     assert_eq!(partial["still_reading"], json!([format!("Big Synth ({SYNTH})")]));
     assert!(partial["status"].as_str().unwrap().contains("search again in a few seconds"), "{partial}");
-    assert_eq!(devices(&partial), [format!("{SYNTH}: Glass Keys")]);
+    assert_eq!(devices(&partial)[0], format!("{SYNTH}: Glass Keys"));
 
     let error = call(client, "search_presets", json!({ "query": " " })).await.unwrap_err();
     assert!(error.contains("give `query`"), "{error}");
@@ -652,12 +654,13 @@ async fn a_sound_is_found_across_every_instrument_there_is() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_instructions_say_to_search_everything_before_settling_for_a_built_in_synth() {
+async fn the_instructions_say_to_search_everything_before_shaping_a_sound_by_hand() {
     let fixture = connect().await;
     let instructions = fixture.client.peer_info().and_then(|info| info.instructions.clone()).unwrap_or_default();
     for said in [
         "search_presets finds a sound by words",
-        "before settling for a built-in synth",
+        "before setting a synth up parameter by parameter",
+        "not yet tuned by ear",
         "save_preset keeps that sound under a name",
         "as the plugin displays it (`text`)",
     ] {

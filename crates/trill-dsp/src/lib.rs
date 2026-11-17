@@ -26,6 +26,7 @@ pub mod stretch;
 pub mod synth;
 pub mod util;
 pub mod voice;
+pub mod wavetable;
 
 #[cfg(test)]
 mod testing;
@@ -43,6 +44,7 @@ use trill_core::device::{
     DeviceProcessor, DeviceWarning, Purpose, split_uri,
 };
 use trill_core::{Device, DeviceFiles};
+use wavetable::TableStore;
 
 /// Makes a sample player from its stored state, loading its files. Fails
 /// only if there is no way to load files at all.
@@ -51,6 +53,11 @@ type CreateSampled = fn(Option<&[u8]>, &SampleSource) -> Result<Box<dyn DevicePr
 type ListSamples = fn(Option<&[u8]>) -> Result<Vec<SampleRef>, StateError>;
 /// The stored state with the files in the given slots replaced.
 type RelinkSamples = fn(Option<&[u8]>, &[(String, String)]) -> Result<Vec<u8>, StateError>;
+/// What is wrong with a device as it would be created, for a device that
+/// has more to say than which of its files cannot be loaded.
+type OwnWarnings = fn(&Device, &SampleSource) -> Vec<DeviceWarning>;
+/// The presets of a device whose presets are more than sets of values.
+type Patches = fn() -> Vec<trill_core::device::Preset>;
 
 /// How a built-in device is made.
 #[derive(Copy, Clone)]
@@ -59,9 +66,25 @@ enum Create {
     Plain(fn() -> Box<dyn DeviceProcessor>),
     /// From its state document, which names the audio files it plays.
     Sampled { create: CreateSampled, references: ListSamples, relink: RelinkSamples },
+    /// From a state document that holds more than files: the same, and it
+    /// says for itself what is wrong with it.
+    Stateful { create: CreateSampled, references: ListSamples, relink: RelinkSamples, warnings: OwnWarnings },
     /// From its state document, which names an instrument's file: the
     /// sampled instrument, whose recordings that file names.
     Instrument { references: ListSamples, relink: RelinkSamples },
+}
+
+impl Create {
+    /// How a device whose state names files lists them and has them
+    /// replaced.
+    fn files(self) -> Option<(ListSamples, RelinkSamples)> {
+        match self {
+            Create::Plain(_) => None,
+            Create::Sampled { references, relink, .. }
+            | Create::Stateful { references, relink, .. }
+            | Create::Instrument { references, relink } => Some((references, relink)),
+        }
+    }
 }
 
 struct Builtin {
@@ -71,7 +94,19 @@ struct Builtin {
     description: &'static str,
     params: &'static [ParamDef],
     presets: &'static [PresetDef],
+    /// The presets of a device that has them as more than `presets`.
+    patches: Option<Patches>,
     create: Create,
+}
+
+impl Builtin {
+    /// The device's presets, whichever way it has them.
+    fn presets(&self) -> Vec<trill_core::device::Preset> {
+        match self.patches {
+            Some(patches) => patches(),
+            None => self.presets.iter().map(PresetDef::preset).collect(),
+        }
+    }
 }
 
 const fn effect(
@@ -82,7 +117,7 @@ const fn effect(
     create: fn() -> Box<dyn DeviceProcessor>,
 ) -> Builtin {
     let category = DeviceCategory::Effect;
-    Builtin { key, name, category, description, params, presets: &[], create: Create::Plain(create) }
+    Builtin { key, name, category, description, params, presets: &[], patches: None, create: Create::Plain(create) }
 }
 
 static BUILTINS: &[Builtin] = &[
@@ -93,6 +128,7 @@ static BUILTINS: &[Builtin] = &[
         description: synth::DESCRIPTION,
         params: synth::PARAMS,
         presets: synth::PRESETS,
+        patches: None,
         create: Create::Plain(|| Box::new(synth::PolySynth::new())),
     },
     Builtin {
@@ -102,6 +138,7 @@ static BUILTINS: &[Builtin] = &[
         description: drums::DESCRIPTION,
         params: drums::PARAMS,
         presets: drums::PRESETS,
+        patches: None,
         create: Create::Plain(|| Box::new(drums::DrumKit::new())),
     },
     Builtin {
@@ -111,6 +148,7 @@ static BUILTINS: &[Builtin] = &[
         description: sampler::DESCRIPTION,
         params: sampler::PARAMS,
         presets: sampler::PRESETS,
+        patches: None,
         create: Create::Sampled {
             create: sampler::create,
             references: sampler::sample_refs,
@@ -124,10 +162,26 @@ static BUILTINS: &[Builtin] = &[
         description: drumrack::DESCRIPTION,
         params: drumrack::PARAMS,
         presets: &[],
+        patches: None,
         create: Create::Sampled {
             create: drumrack::create,
             references: drumrack::sample_refs,
             relink: drumrack::relinked,
+        },
+    },
+    Builtin {
+        key: "wavetable",
+        name: "Wavetable",
+        category: DeviceCategory::Instrument,
+        description: wavetable::DESCRIPTION,
+        params: wavetable::params::PARAMS,
+        presets: &[],
+        patches: Some(wavetable::patches::presets),
+        create: Create::Stateful {
+            create: wavetable::create,
+            references: wavetable::sample_refs,
+            relink: wavetable::relinked,
+            warnings: wavetable::warnings,
         },
     },
     Builtin {
@@ -137,6 +191,7 @@ static BUILTINS: &[Builtin] = &[
         description: sampled::DESCRIPTION,
         params: sampled::PARAMS,
         presets: &[],
+        patches: None,
         create: Create::Instrument { references: sampled::loaded::sample_refs, relink: sampled::loaded::relinked },
     },
     effect("reverb", "Reverb", reverb::DESCRIPTION, reverb::PARAMS, || Box::new(reverb::Reverb::new())),
@@ -175,7 +230,7 @@ fn describe(builtin: &Builtin) -> DeviceDescriptor {
         category: builtin.category,
         description: builtin.description.to_string(),
         params: builtin.params.iter().map(ParamDef::info).collect(),
-        presets: builtin.presets.iter().map(PresetDef::preset).collect(),
+        presets: builtin.presets(),
     }
 }
 
@@ -189,7 +244,7 @@ fn find(uri: &str) -> Option<&'static Builtin> {
 /// The presets of the built-in device `uri`, as a list to browse. Straight
 /// from the device's table: a view may ask for it while it draws.
 fn presets(uri: &str) -> Option<trill_core::presets::PresetList> {
-    let presets: Vec<_> = find(uri)?.presets.iter().map(|preset| preset.preset().info()).collect();
+    let presets: Vec<_> = find(uri)?.presets().iter().map(trill_core::device::Preset::info).collect();
     Some(trill_core::presets::PresetList::ready(presets))
 }
 
@@ -205,7 +260,7 @@ fn create(device: &Device, sample_rate: f64, max_block: usize, making: &Making) 
     let failed = |reason: String| DeviceError::LoadFailed { uri: device.uri.clone(), reason };
     let (mut processor, controller) = match builtin.create {
         Create::Plain(create) => (create(), None),
-        Create::Sampled { create, .. } => {
+        Create::Sampled { create, .. } | Create::Stateful { create, .. } => {
             let processor = create(device.state.as_deref(), &making.samples).map_err(failed)?;
             let controller: Box<dyn DeviceController> = Box::new(SampleController { state: device.state.clone() });
             (processor, Some(controller))
@@ -236,6 +291,7 @@ fn create(device: &Device, sample_rate: f64, max_block: usize, making: &Making) 
 pub struct Builtins {
     loader: Option<Arc<dyn AudioLoader>>,
     samples: SampleStore,
+    tables: TableStore,
     /// The sampled instruments: their recordings, and the ones loaded.
     instruments: Option<sampled::Source>,
 }
@@ -243,15 +299,22 @@ pub struct Builtins {
 impl Builtins {
     /// A factory whose sample players load their files with `loader`.
     pub fn with_loader(loader: Arc<dyn AudioLoader>) -> Self {
-        let instruments = sampled::Source::new(loader.clone());
-        Self { loader: Some(loader), samples: SampleStore::default(), instruments: Some(instruments) }
+        Self::made(loader.clone(), sampled::Source::new(loader))
     }
 
     /// [`Self::with_loader`], with the files that describe sampled
     /// instruments taken from `texts` instead of from the disk.
     pub fn with_sources(loader: Arc<dyn AudioLoader>, texts: Box<dyn sampled::Texts>) -> Self {
-        let instruments = sampled::Source::with_texts(loader.clone(), texts);
-        Self { loader: Some(loader), samples: SampleStore::default(), instruments: Some(instruments) }
+        Self::made(loader.clone(), sampled::Source::with_texts(loader, texts))
+    }
+
+    fn made(loader: Arc<dyn AudioLoader>, instruments: sampled::Source) -> Self {
+        Self {
+            loader: Some(loader),
+            samples: SampleStore::default(),
+            tables: TableStore::default(),
+            instruments: Some(instruments),
+        }
     }
 
     /// Where the sampled instruments of this factory come from: for
@@ -290,10 +353,11 @@ impl Builtins {
     /// What is wrong with the samples of `device`, as messages for the
     /// user; empty when all is well. See [`sample_problems`].
     pub fn sample_problems(&self, device: &Device) -> Vec<String> {
-        match &self.loader {
-            Some(loader) => sample_problems(device, loader.as_ref()),
-            None => Vec::new(),
-        }
+        self.warnings(device).into_iter().map(|warning| warning.message).collect()
+    }
+
+    fn source(&self) -> SampleSource<'_> {
+        SampleSource { loader: self.loader.as_deref(), store: Some(&self.samples), tables: Some(&self.tables) }
     }
 }
 
@@ -315,23 +379,24 @@ impl DeviceFactory for Builtins {
         max_block: usize,
         purpose: Purpose,
     ) -> Result<DeviceInstance, DeviceError> {
-        let samples = SampleSource { loader: self.loader.as_deref(), store: Some(&self.samples) };
-        create(device, sample_rate, max_block, &Making { samples, instruments: self.instruments.as_ref(), purpose })
+        let making = Making { samples: self.source(), instruments: self.instruments.as_ref(), purpose };
+        create(device, sample_rate, max_block, &making)
     }
 
     /// The sample players' missing and unreadable files (see
-    /// [`sample_warnings`]), and what is wrong with a sampled instrument
-    /// that it plays in spite of: recordings that are missing, an
-    /// instrument's file that cannot be read.
+    /// [`sample_warnings`]), what a device with more in its state than
+    /// files says is wrong with it, and what is wrong with a sampled
+    /// instrument that it plays in spite of: recordings that are missing,
+    /// an instrument's file that cannot be read.
     fn warnings(&self, device: &Device) -> Vec<DeviceWarning> {
-        if let (Some(Create::Instrument { .. }), Some(instruments)) =
-            (find(&device.uri).map(|builtin| builtin.create), &self.instruments)
-        {
-            return instruments.warnings(device.state.as_deref());
-        }
-        match &self.loader {
-            Some(loader) => sample_warnings(device, loader.as_ref()),
-            None => Vec::new(),
+        match (find(&device.uri).map(|builtin| builtin.create), &self.loader) {
+            (Some(Create::Instrument { .. }), _) => match &self.instruments {
+                Some(instruments) => instruments.warnings(device.state.as_deref()),
+                None => Vec::new(),
+            },
+            (Some(Create::Stateful { warnings, .. }), _) => warnings(device, &self.source()),
+            (_, Some(loader)) => sample_warnings(device, loader.as_ref()),
+            (_, None) => Vec::new(),
         }
     }
 
@@ -384,7 +449,7 @@ impl DeviceFactory for BuiltinFactory {
     }
 
     fn create(&self, device: &Device, sample_rate: f64, max_block: usize) -> Result<DeviceInstance, DeviceError> {
-        let samples = SampleSource { loader: None, store: None };
+        let samples = SampleSource { loader: None, store: None, tables: None };
         create(device, sample_rate, max_block, &Making { samples, instruments: None, purpose: Purpose::Playing })
     }
 
@@ -407,11 +472,9 @@ fn plays_drums(uri: &str) -> bool {
 /// readable state. For collecting a project's files, or finding the devices
 /// that use one.
 pub fn sample_refs(device: &Device) -> Vec<SampleRef> {
-    match find(&device.uri).map(|builtin| builtin.create) {
-        Some(Create::Sampled { references, .. } | Create::Instrument { references, .. }) => {
-            references(device.state.as_deref()).unwrap_or_default()
-        }
-        _ => Vec::new(),
+    match find(&device.uri).and_then(|builtin| builtin.create.files()) {
+        Some((references, _)) => references(device.state.as_deref()).unwrap_or_default(),
+        None => Vec::new(),
     }
 }
 
@@ -428,12 +491,10 @@ impl DeviceFiles for SampleFiles {
     }
 
     fn relinked(&self, device: &Device, slots: &[(String, String)]) -> Result<Vec<u8>, String> {
-        match find(&device.uri).map(|builtin| builtin.create) {
-            Some(Create::Sampled { relink, .. } | Create::Instrument { relink, .. }) => {
-                relink(device.state.as_deref(), slots)
-                    .map_err(|error| format!("{} ({}): {error}", device.id, device.name))
-            }
-            _ => Err(format!("{} ({}) plays no files", device.id, device.name)),
+        match find(&device.uri).and_then(|builtin| builtin.create.files()) {
+            Some((_, relink)) => relink(device.state.as_deref(), slots)
+                .map_err(|error| format!("{} ({}): {error}", device.id, device.name)),
+            None => Err(format!("{} ({}) plays no files", device.id, device.name)),
         }
     }
 }
@@ -455,8 +516,12 @@ pub fn sample_problems(device: &Device, loader: &dyn AudioLoader) -> Vec<String>
 /// (`sample`, `pad 38`), for callers that show problems beside the slot.
 /// A state that cannot be read at all concerns no slot in particular.
 pub fn sample_warnings(device: &Device, loader: &dyn AudioLoader) -> Vec<DeviceWarning> {
-    let Some(Create::Sampled { references, .. }) = find(&device.uri).map(|builtin| builtin.create) else {
-        return Vec::new();
+    let references = match find(&device.uri).map(|builtin| builtin.create) {
+        Some(Create::Sampled { references, .. }) => references,
+        Some(Create::Stateful { warnings, .. }) => {
+            return warnings(device, &SampleSource { loader: Some(loader), store: None, tables: None });
+        }
+        _ => return Vec::new(),
     };
     let references = match references(device.state.as_deref()) {
         Ok(references) => references,
@@ -600,8 +665,8 @@ mod tests {
     #[test]
     fn preset_values_reference_real_parameters() {
         for builtin in BUILTINS {
-            for preset in builtin.presets {
-                for (id, value) in preset.params {
+            for preset in &builtin.presets() {
+                for (id, value) in &preset.params {
                     let def = builtin
                         .params
                         .iter()

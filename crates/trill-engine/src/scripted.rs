@@ -48,6 +48,9 @@ pub const AMP: &str = "scripted:amp";
 
 /// The key that palm-mutes the bass while it is held: C0.
 pub const MUTE_KEY: u8 = 12;
+/// The key that has a bass whose mute stays ([`Loading::latches`]) play
+/// open again: C#0.
+pub const OPEN_KEY: u8 = 13;
 /// The bass's range, as written.
 pub const BASS_RANGE: std::ops::RangeInclusive<u8> = 28..=67;
 
@@ -55,8 +58,37 @@ const VOICES: usize = 16;
 /// Where the noise of the drums begins, and begins again after a reset.
 const NOISE_SEED: u32 = 0x2545_F491;
 
+/// When a bass that is made for a render takes its process down with it,
+/// as a plugin that faults does: by writing where nothing may be
+/// written. The bass a song plays live never does, and neither do the
+/// drums and the amplifier beside it. For showing what
+/// becomes of a render when a plugin does this: such a render has to be
+/// done in a process of its own ([`crate::apart`]), or whoever asked for
+/// it goes down too.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Dies {
+    /// As it is made.
+    Made,
+    /// At the first note it is tried with before the song is played.
+    Rehearsed,
+    /// In this block of the song, counted from one.
+    Played(u32),
+    /// As it is let go of.
+    LetGo,
+}
+
+/// The fault itself.
+fn die() -> ! {
+    // SAFETY: there is none, on purpose: the address is not one that may
+    // be written to, and the system ends the process for it. Only a test
+    // asks for this, of a process it started for the purpose.
+    unsafe { std::ptr::write_volatile(std::hint::black_box(8usize) as *mut u8, 1) };
+    std::process::abort()
+}
+
 /// When the instruments a factory hands out are ready to play.
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Loading {
     /// How long after it is created an instrument first answers a note.
     pub first: Duration,
@@ -108,7 +140,37 @@ pub struct Loading {
     /// reset does not put that back. (An amplifier plugin was measured
     /// that is like this.)
     pub free: bool,
+    /// A bass that is made for a render takes its process down: see
+    /// [`Dies`].
+    pub dies: Option<Dies>,
+    /// The bass draws how loud each note is at random, from a stream that
+    /// every bass in the program shares and that begins at the same place
+    /// in a program that has just started: as some sampled instruments
+    /// draw which recording they play. Nothing puts the stream back. Its
+    /// setting `takes`, which is `at random` as it comes, stops it when
+    /// it is given `in turn` ([`DeviceFactory::repeating`] says so).
+    pub random: bool,
+    /// The bass's mute stays chosen once [`MUTE_KEY`] was pressed, through
+    /// a reset too, until [`OPEN_KEY`] is: as the keyswitches of a sampled
+    /// guitar do.
+    pub latches: bool,
+    /// The drums draw how loud each hit is from the same stream, and have
+    /// no setting that stops it: what is known of them
+    /// ([`DeviceFactory::repeating`]) names none.
+    pub unruly: bool,
+    /// The bass only plays what it listens to: it says it takes a key,
+    /// and what its notes come to is as loud as the key it is handed,
+    /// which is nothing where it is handed none. A vocoder is like this.
+    pub listens: bool,
 }
+
+/// What the state of a bass ends in that was told to take its notes in
+/// turn.
+const IN_TURN: &str = "\u{1}in turn";
+
+/// How many notes the basses that draw at random have drawn for, in this
+/// program.
+static DRAWS: AtomicU32 = AtomicU32::new(0);
 
 /// What the instruments of a factory keep between them: see
 /// [`Loading::shares`].
@@ -212,10 +274,21 @@ impl DeviceFactory for ScriptedFactory {
             let amp = Amp { ready, free: self.loading.free, frames: 0 };
             return Ok(DeviceInstance { processor: Box::new(amp), params: Vec::new(), controller: None });
         }
+        // Only a bass that is made for a render ever takes its process down.
+        let dies = self.loading.dies.filter(|_| purpose == Purpose::Rendering && kind == Kind::Bass);
+        if dies == Some(Dies::Made) {
+            die();
+        }
         let patch = Arc::new(Patch::default());
         // The sound a saved state stands for: the preset it was saved with.
         if let Some(saved) = device.state.as_deref().and_then(|state| std::str::from_utf8(state).ok()) {
+            // And whether it was told to take its notes in turn.
+            let (saved, in_turn) = match saved.strip_suffix(IN_TURN) {
+                Some(name) => (name, true),
+                None => (saved, false),
+            };
             patch.load(saved);
+            patch.in_turn.store(in_turn, Ordering::Relaxed);
         }
         let samples = Arc::new(Mutex::new(Vec::new()));
         if self.loading.grows {
@@ -237,8 +310,13 @@ impl DeviceFactory for ScriptedFactory {
             fickle: self.loading.fickle,
             presses: 0,
             takes: self.loading.takes,
-            sounded: [0; 128],
+            sounded: [0; 256],
+            latches: self.loading.latches && kind == Kind::Bass,
             shared: self.loading.shares.then(|| self.shared.clone()),
+            dies,
+            blocks: 0,
+            random: (self.loading.random && kind == Kind::Bass) || (self.loading.unruly && kind == Kind::Drums),
+            listens: self.loading.listens && kind == Kind::Bass,
             onset: self.loading.onset,
             patch: patch.clone(),
             voices: [Voice::default(); VOICES],
@@ -248,12 +326,33 @@ impl DeviceFactory for ScriptedFactory {
         Ok(DeviceInstance {
             processor: Box::new(processor),
             params: Vec::new(),
-            controller: Some(Box::new(Controller { patch, changes_after: self.loading.changes_after })),
+            controller: Some(Box::new(Controller {
+                patch,
+                changes_after: self.loading.changes_after,
+                random: self.loading.random && kind == Kind::Bass,
+            })),
         })
     }
 
     fn busy(&self) -> bool {
         self.behind_until.lock().is_some_and(|until| Instant::now() < until)
+    }
+
+    fn repeating(&self, uri: &str) -> Option<trill_core::device::Repeating> {
+        if uri == DRUMS && self.loading.unruly {
+            // Known for what it does, and for nothing that stops it.
+            return Some(trill_core::device::Repeating {
+                what: "chooses for itself how loud each hit is".into(),
+                ..Default::default()
+            });
+        }
+        (uri == BASS && self.loading.random).then(|| trill_core::device::Repeating {
+            what: "draws at random how loud each note is".into(),
+            settings: vec![("takes".into(), "in turn".into())],
+            params: Vec::new(),
+            costs: "every note as loud as the last".into(),
+            begins_alike: true,
+        })
     }
 
     fn beside(&self, uri: &str) -> Beside {
@@ -287,6 +386,9 @@ struct Patch {
     /// A preset that was asked for and is not played yet: from when it
     /// is, and its transposition and level.
     coming: Mutex<Option<(Instant, i32, i32)>>,
+    /// The setting `takes` is `in turn`: a bass that draws at random does
+    /// not.
+    in_turn: AtomicBool,
 }
 
 impl Default for Patch {
@@ -296,6 +398,7 @@ impl Default for Patch {
             level: AtomicI32::new(1000),
             name: Mutex::new(String::new()),
             coming: Mutex::new(None),
+            in_turn: AtomicBool::new(false),
         }
     }
 }
@@ -333,11 +436,40 @@ impl Patch {
 struct Controller {
     patch: Arc<Patch>,
     changes_after: Duration,
+    /// The instrument draws at random, and has a setting that stops it.
+    random: bool,
 }
 
 impl DeviceController for Controller {
     fn save_state(&mut self) -> Option<Vec<u8>> {
-        Some(self.patch.name.lock().clone().into_bytes())
+        let mut state = self.patch.name.lock().clone();
+        if self.patch.in_turn.load(Ordering::Relaxed) {
+            state.push_str(IN_TURN);
+        }
+        Some(state.into_bytes())
+    }
+
+    fn settings(&mut self) -> Option<Vec<(String, String)>> {
+        let takes = if self.patch.in_turn.load(Ordering::Relaxed) { "in turn" } else { "at random" };
+        self.random.then(|| vec![("takes".to_string(), takes.to_string())])
+    }
+
+    fn set_settings(&mut self, values: &[(String, String)]) -> Result<(), PresetLoadError> {
+        if !self.random {
+            return Err(PresetLoadError::Unsupported);
+        }
+        for (name, value) in values {
+            match (name.as_str(), value.as_str()) {
+                ("takes", "in turn") => self.patch.in_turn.store(true, Ordering::Relaxed),
+                ("takes", "at random") => self.patch.in_turn.store(false, Ordering::Relaxed),
+                _ => {
+                    return Err(PresetLoadError::Failed(format!(
+                        "there is no setting '{name}' with a value '{value}'"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn load_preset(&mut self, preset: &PresetInfo) -> Result<(), PresetLoadError> {
@@ -354,6 +486,14 @@ enum Kind {
     Bass,
     Drums,
     Amp,
+}
+
+impl Drop for Instrument {
+    fn drop(&mut self) {
+        if self.dies == Some(Dies::LetGo) {
+            die();
+        }
+    }
 }
 
 /// The amplifier: half of what goes in comes out, once it is ready.
@@ -439,9 +579,20 @@ struct Instrument {
     /// How many recordings it has of each key, and how often each key has
     /// sounded since the instrument was made.
     takes: u32,
-    sounded: [u32; 128],
+    sounded: [u32; 256],
+    /// Its mute stays chosen until it is told to play open: see
+    /// [`Loading::latches`].
+    latches: bool,
     /// What it keeps with the factory's other instruments, if anything.
     shared: Option<Arc<Shared>>,
+    /// When it takes its process down, and how many blocks of the song it
+    /// has played.
+    dies: Option<Dies>,
+    blocks: u32,
+    /// It draws how loud a note is at random, and it only plays what it
+    /// listens to: see [`Loading`].
+    random: bool,
+    listens: bool,
     /// How long after a key goes down its sound begins.
     onset: Duration,
     patch: Arc<Patch>,
@@ -481,6 +632,10 @@ impl Instrument {
                     self.muting = true;
                     return;
                 }
+                if self.latches && pitch == OPEN_KEY {
+                    self.muting = false;
+                    return;
+                }
                 if !BASS_RANGE.contains(&pitch) {
                     return;
                 }
@@ -513,10 +668,16 @@ impl Instrument {
         if let Some(shared) = &self.shared {
             voice.level *= 1.0 - (shared.notes.fetch_add(1, Ordering::Relaxed) % 5) as f32 / 10.0;
         }
+        // A draw from what every such bass in the program draws from.
+        if self.random && !self.patch.in_turn.load(Ordering::Relaxed) {
+            let draw = DRAWS.fetch_add(1, Ordering::Relaxed).wrapping_mul(2_654_435_761) >> 28;
+            voice.level *= 1.0 - (draw % 5) as f32 / 10.0;
+        }
         // The next of the key's recordings: each is a twelfth quieter than
         // the one before.
         if self.takes > 1 {
-            let key = &mut self.sounded[usize::from(pitch.min(127))];
+            // A muted note is another recording than the open one.
+            let key = &mut self.sounded[usize::from(pitch.min(127)) + if self.muting { 128 } else { 0 }];
             voice.level *= 1.0 - (*key % self.takes) as f32 / 12.0;
             *key += 1;
         }
@@ -528,7 +689,7 @@ impl Instrument {
         match kind {
             EventKind::NoteOn { pitch, velocity } => self.note_on(pitch, velocity),
             EventKind::NoteOff { pitch } => {
-                if self.kind == Kind::Bass && pitch == MUTE_KEY {
+                if self.kind == Kind::Bass && pitch == MUTE_KEY && !self.latches {
                     self.muting = false;
                 }
                 for voice in self.voices.iter_mut().filter(|voice| voice.pitch == pitch) {
@@ -536,7 +697,7 @@ impl Instrument {
                 }
             }
             EventKind::AllNotesOff => {
-                self.muting = false;
+                self.muting &= self.latches;
                 self.voices.iter_mut().for_each(|voice| voice.released = true);
             }
             _ => {}
@@ -595,7 +756,51 @@ impl DeviceProcessor for Instrument {
 
     fn set_param(&mut self, _index: usize, _value: f64) {}
 
-    fn process(&mut self, _info: &ProcessInfo, events: &[Event], left: &mut [f32], right: &mut [f32]) {
+    fn takes_key(&self) -> bool {
+        self.listens
+    }
+
+    fn process_keyed(
+        &mut self,
+        info: &ProcessInfo,
+        events: &[Event],
+        left: &mut [f32],
+        right: &mut [f32],
+        key: trill_core::device::KeyInput<'_>,
+    ) {
+        // As loud as what it listens to, up to its own level.
+        let heard = key.left.iter().chain(key.right).fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+        self.play(info, events, left, right);
+        let gain = (heard * 4.0).min(1.0);
+        left.iter_mut().chain(right.iter_mut()).for_each(|sample| *sample *= gain);
+    }
+
+    fn process(&mut self, info: &ProcessInfo, events: &[Event], left: &mut [f32], right: &mut [f32]) {
+        self.play(info, events, left, right);
+        if self.listens {
+            // Handed nothing to listen to, it plays nothing.
+            left.iter_mut().chain(right.iter_mut()).for_each(|sample| *sample = 0.0);
+        }
+    }
+
+    fn reset(&mut self) {
+        self.voices = [Voice::default(); VOICES];
+        // A mute that stays is not something a reset undoes.
+        self.muting &= self.latches;
+        self.noise = NOISE_SEED;
+    }
+}
+
+impl Instrument {
+    /// What its notes come to over one block, added to what is there.
+    fn play(&mut self, info: &ProcessInfo, events: &[Event], left: &mut [f32], right: &mut [f32]) {
+        self.blocks += u32::from(info.playing);
+        let note = events.iter().any(|event| matches!(event.kind, EventKind::NoteOn { .. }));
+        match self.dies {
+            Some(Dies::Rehearsed) if !info.playing && note => die(),
+            Some(Dies::Played(block)) if info.playing && self.blocks >= block => die(),
+            _ => {}
+        }
         // Instruments that keep something between them notice when two of
         // them are run at once, and take long enough over a block for that
         // to show.
@@ -618,11 +823,5 @@ impl DeviceProcessor for Instrument {
         if let Some(shared) = &shared {
             shared.inside.store(false, Ordering::SeqCst);
         }
-    }
-
-    fn reset(&mut self) {
-        self.voices = [Voice::default(); VOICES];
-        self.muting = false;
-        self.noise = NOISE_SEED;
     }
 }

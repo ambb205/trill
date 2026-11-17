@@ -2,7 +2,7 @@
 //! object.
 
 use crate::clap::{ClapConfig, ClapFactory};
-use crate::scan::{ScanFailure, ScanMode, Scanner};
+use crate::scan::{Known, ScanFailure, ScanMode, Scanner};
 use crate::vst3::{Vst3Config, Vst3Factory};
 use trill_core::device::DeviceFactory;
 
@@ -38,6 +38,40 @@ impl PluginHost {
     /// A host with each format configured separately.
     pub fn with_configs(clap: ClapConfig, vst3: Vst3Config) -> std::io::Result<Self> {
         Ok(Self { clap: ClapFactory::new(clap)?, vst3: Vst3Factory::new(vst3)? })
+    }
+
+    /// A host that takes `plugins` to be what is installed and looks for
+    /// no others: nothing is scanned, no cache is read or written, and no
+    /// folder of preset files is looked into. For a process that is told
+    /// which plugins it is to host by one that has looked
+    /// ([`PluginHost::known`]). `patient_teardown` is
+    /// [`Vst3Config::patient_teardown`].
+    pub fn knowing(plugins: &[Known], patient_teardown: bool) -> std::io::Result<Self> {
+        let clap = ClapConfig {
+            search_paths: Vec::new(),
+            scanner: Scanner::InProcess,
+            cache_path: None,
+            ..ClapConfig::default()
+        };
+        let vst3 = Vst3Config {
+            search_paths: Vec::new(),
+            scanner: Scanner::InProcess,
+            cache_path: None,
+            preset_paths: Vec::new(),
+            patient_teardown,
+            ..Vst3Config::default()
+        };
+        let host = Self::with_configs(clap, vst3)?;
+        host.clap.know(plugins);
+        host.vst3.know(plugins);
+        Ok(host)
+    }
+
+    /// What is known of the installed plugin `uri`, of either format, for
+    /// handing to [`PluginHost::knowing`]. `None` for a plugin that is not
+    /// installed, and while plugins have not been looked for.
+    pub fn known(&self, uri: &str) -> Option<Known> {
+        self.clap.known(uri).or_else(|| self.vst3.known(uri))
     }
 
     /// The CLAP side of the host.

@@ -128,6 +128,13 @@ fn model(uri: &str) -> Device {
             Some(drumrack::State::with_pads(drumrack::PAD_NOTES.map(|note| (note, "tone.wav"))).unwrap().to_bytes())
         }
         sampled::URI => Some(sampled::State::new("/i/Busy.sfz").to_bytes()),
+        // A table of its own for each oscillator: one from a recipe, one
+        // read from the file as a recording of a note.
+        "builtin:wavetable" => Some(
+            br#"{ "version": 1, "osc1": { "frames": [ {"shape":"pulse","width":0.5}, {"shape":"fm","ratio":3,"index":4} ] },
+                  "osc2": { "file": "tone.wav", "root": 55, "frames": 8 } }"#
+                .to_vec(),
+        ),
         _ => None,
     };
     device.clone()
@@ -267,11 +274,11 @@ fn the_sampled_instrument_plays_from_what_workers_read_without_the_audio_thread_
     let all_events: Vec<Vec<Event>> = (0..blocks).map(events).collect();
     let input = vec![0.0f32; BLOCK * 2];
     let (mut calls, mut loudest) = (0, 0.0f32);
-    for block in 0..blocks {
+    for (block, events) in all_events.iter().enumerate() {
         let mut left = [0.0f32; BLOCK];
         let mut right = [0.0f32; BLOCK];
         calls += allocator_calls(|| {
-            instance.processor.process(&info(block), &all_events[block], &mut left, &mut right);
+            instance.processor.process(&info(block), events, &mut left, &mut right);
         });
         loudest = loudest.max(common::peak(&left));
         let _ = &input;

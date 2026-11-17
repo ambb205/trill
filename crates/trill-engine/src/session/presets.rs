@@ -116,15 +116,27 @@ impl Session {
             self.load_saved_preset(id, &info, saved)?;
             return Ok(info);
         }
-        let values = self.factory.descriptors().iter().find(|d| d.uri == uri).and_then(|d| preset_values(d, &info));
-        match values {
-            Some(values) => self.edit_scoped(super::Scope::ParamsOnly, |project| {
+        let descriptors = self.factory.descriptors();
+        let descriptor = descriptors.iter().find(|d| d.uri == uri);
+        let values = descriptor.and_then(|d| preset_values(d, &info));
+        let state = descriptor.and_then(|d| super::preset_state(d, &info));
+        match (values, state) {
+            // A preset that brings a state: the device is made again from
+            // it, as it is from a saved preset's.
+            (Some(values), Some(state)) => self.edit(|project| {
+                let device = project.device_mut(id)?;
+                device.params = values.into_iter().collect();
+                device.state = Some(state);
+                device.preset = Some(info.reference());
+                Ok(())
+            })?,
+            (Some(values), None) => self.edit_scoped(super::Scope::ParamsOnly, |project| {
                 let device = project.device_mut(id)?;
                 device.params = values.into_iter().collect();
                 device.preset = Some(info.reference());
                 Ok(())
             })?,
-            None => self.load_plugin_preset(id, &info)?,
+            (None, _) => self.load_plugin_preset(id, &info)?,
         }
         Ok(info)
     }

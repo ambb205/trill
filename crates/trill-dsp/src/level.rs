@@ -113,6 +113,17 @@ pub fn controller_support(uri: &str) -> ControllerSupport {
         "builtin:polysynth" => {
             vec![ControllerKind::MOD_WHEEL, level[0], level[1], ControllerKind::SUSTAIN, ControllerKind::PitchBend]
         }
+        // What it does with the wheel, the breath and the pressure is what
+        // its matrix sends them to.
+        "builtin:wavetable" => vec![
+            ControllerKind::MOD_WHEEL,
+            ControllerKind::BREATH,
+            level[0],
+            level[1],
+            ControllerKind::SUSTAIN,
+            ControllerKind::Pressure,
+            ControllerKind::PitchBend,
+        ],
         // What every sampled instrument follows; the one that is loaded
         // may listen to more, which its device says itself.
         "builtin:sampler" | "builtin:sampled" => {
@@ -196,6 +207,10 @@ mod tests {
         assert_eq!(synth.responds_to(ControllerKind::BREATH), Some(false));
         assert_eq!(controller_support("builtin:sampler").responds_to(ControllerKind::MOD_WHEEL), Some(false));
         assert_eq!(controller_support("builtin:drumkit").responds_to(ControllerKind::EXPRESSION), Some(true));
+        let wavetable = controller_support("builtin:wavetable");
+        assert_eq!(wavetable.responds_to(ControllerKind::Pressure), Some(true));
+        assert_eq!(wavetable.responds_to(ControllerKind::BREATH), Some(true));
+        assert_eq!(wavetable.responds_to(ControllerKind::Controller(74)), Some(false));
         assert_eq!(controller_support("builtin:reverb"), ControllerSupport::Listed(Vec::new()));
         assert_eq!(controller_support("clap:whatever"), ControllerSupport::Unknown);
         assert_eq!(

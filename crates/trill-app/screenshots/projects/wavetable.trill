@@ -1,0 +1,217 @@
+{
+  "format_version": 7,
+  "name": "Wavetable",
+  "tempo": 120.0,
+  "time_signature": {
+    "numerator": 4,
+    "denominator": 4
+  },
+  "loop_region": {
+    "enabled": false,
+    "start": 0.0,
+    "end": 16.0
+  },
+  "tracks": [
+    {
+      "id": 1,
+      "name": "Sync Lead",
+      "color": 15898954,
+      "volume_db": 0.0,
+      "pan": 0.0,
+      "mute": false,
+      "solo": false,
+      "devices": [
+        {
+          "id": 2,
+          "uri": "builtin:wavetable",
+          "name": "Sync Lead",
+          "enabled": true,
+          "params": {
+            "env1_attack": 0.004,
+            "env1_decay": 0.8,
+            "env1_release": 0.18,
+            "env1_sustain": 0.85,
+            "env2_attack": 0.001,
+            "env2_decay": 0.35,
+            "env2_release": 0.2,
+            "env2_sustain": 0.25,
+            "filter1_cutoff": 3500.0,
+            "filter1_key_track": 0.4,
+            "filter1_resonance": 0.1,
+            "filter1_type": 1.0,
+            "glide": 0.05,
+            "lfo1_depth": 0.35,
+            "lfo1_fade": 0.35,
+            "lfo1_rate": 5.6,
+            "mod1_amount": 0.45,
+            "mod1_dest": 5.0,
+            "mod1_source": 2.0,
+            "mod2_amount": 0.3,
+            "mod2_dest": 2.0,
+            "mod2_source": 4.0,
+            "mod3_amount": 0.65,
+            "mod3_dest": 28.0,
+            "mod3_source": 9.0,
+            "mod4_amount": 0.4,
+            "mod4_dest": 5.0,
+            "mod4_source": 13.0,
+            "mod5_amount": 0.6,
+            "mod5_dest": 28.0,
+            "mod5_source": 14.0,
+            "mod6_amount": 0.25,
+            "mod6_dest": 16.0,
+            "mod6_source": 15.0,
+            "mod7_amount": 0.5,
+            "mod7_dest": 11.0,
+            "mod7_source": 16.0,
+            "mode": 2.0,
+            "osc1_detune": 8.0,
+            "osc1_position": 0.25,
+            "osc1_spread": 0.3,
+            "osc1_table": 6.0,
+            "osc1_unison": 2.0,
+            "osc2_fine": 5.0,
+            "osc2_level": 0.3,
+            "osc2_position": 0.35,
+            "osc2_table": 0.0,
+            "velocity_sens": 0.4,
+            "volume": -18.4
+          },
+          "state": "ewogICJ2ZXJzaW9uIjogMSwKICAibWFjcm9zIjogWwogICAgIlJpcCIsCiAgICAiVmlicmF0byIsCiAgICAiQnJpZ2h0IiwKICAgICJCb2R5IgogIF0sCiAgIm9zYzIiOiB7CiAgICAibmFtZSI6ICJUaGluIFJlZWQiLAogICAgInNpemUiOiAzMiwKICAgICJmcmFtZXMiOiBbCiAgICAgIHsKICAgICAgICAic2hhcGUiOiAicHVsc2UiLAogICAgICAgICJ3aWR0aCI6IDAuNQogICAgICB9LAogICAgICB7CiAgICAgICAgInNoYXBlIjogInB1bHNlIiwKICAgICAgICAid2lkdGgiOiAwLjA0LAogICAgICAgICJ0aWx0IjogLTMuMAogICAgICB9CiAgICBdCiAgfQp9"
+        }
+      ],
+      "clips": [
+        {
+          "id": 3,
+          "name": "Sync Lead",
+          "start": 0.0,
+          "length": 16.0,
+          "muted": false,
+          "content": {
+            "type": "midi",
+            "notes": [
+              {
+                "pitch": 64,
+                "start": 0.0,
+                "length": 1.05,
+                "velocity": 105
+              },
+              {
+                "pitch": 67,
+                "start": 1.0,
+                "length": 0.55,
+                "velocity": 95
+              },
+              {
+                "pitch": 69,
+                "start": 1.5,
+                "length": 0.55,
+                "velocity": 95
+              },
+              {
+                "pitch": 71,
+                "start": 2.0,
+                "length": 1.4,
+                "velocity": 110
+              },
+              {
+                "pitch": 74,
+                "start": 3.5,
+                "length": 0.55,
+                "velocity": 100
+              },
+              {
+                "pitch": 76,
+                "start": 4.0,
+                "length": 1.9,
+                "velocity": 115
+              },
+              {
+                "pitch": 74,
+                "start": 6.0,
+                "length": 0.55,
+                "velocity": 95
+              },
+              {
+                "pitch": 71,
+                "start": 6.5,
+                "length": 0.55,
+                "velocity": 95
+              },
+              {
+                "pitch": 69,
+                "start": 7.0,
+                "length": 0.9,
+                "velocity": 100
+              },
+              {
+                "pitch": 67,
+                "start": 8.0,
+                "length": 1.05,
+                "velocity": 100
+              },
+              {
+                "pitch": 69,
+                "start": 9.0,
+                "length": 0.55,
+                "velocity": 95
+              },
+              {
+                "pitch": 71,
+                "start": 9.5,
+                "length": 0.55,
+                "velocity": 100
+              },
+              {
+                "pitch": 76,
+                "start": 10.0,
+                "length": 3.5,
+                "velocity": 115
+              },
+              {
+                "pitch": 79,
+                "start": 14.0,
+                "length": 0.5,
+                "velocity": 105
+              },
+              {
+                "pitch": 76,
+                "start": 14.5,
+                "length": 1.5,
+                "velocity": 110
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "master": {
+    "volume_db": 0.0,
+    "devices": []
+  },
+  "automation": [
+    {
+      "target": {
+        "type": "device_param",
+        "device": 2,
+        "param": "macro1"
+      },
+      "points": [
+        {
+          "beat": 0.0,
+          "value": 0.0
+        },
+        {
+          "beat": 8.0,
+          "value": 0.0
+        },
+        {
+          "beat": 16.0,
+          "value": 0.6
+        }
+      ]
+    }
+  ],
+  "next_id": 4
+}

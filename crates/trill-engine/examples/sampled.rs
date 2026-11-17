@@ -119,8 +119,8 @@ fn survey(folder: &Path) -> Result<(), String> {
     let mut asked: BTreeMap<String, (usize, usize, &'static str)> = BTreeMap::new();
     let mut whole = 0;
     println!(
-        "{:<52} {:>7} {:>6} {:>9} {:>6} {:>5} {:>5}  {}",
-        "instrument", "regions", "files", "range", "layers", "takes", "ways", "not done"
+        "{:<52} {:>7} {:>6} {:>9} {:>6} {:>5} {:>5}  not done",
+        "instrument", "regions", "files", "range", "layers", "takes", "ways"
     );
     for file in &files {
         match trill_dsp::sfz::read(file, &text) {
@@ -358,8 +358,10 @@ fn measure(file: &str) -> Result<(), String> {
             loudest.insert(region.root, index);
         }
     }
-    let (mut cents, mut levels, mut noise): (Vec<(u8, f64)>, Vec<(u8, f64)>, Vec<f64>) =
-        (Vec::new(), Vec::new(), Vec::new());
+    // By key: how far off its pitch a recording is, and its peak.
+    let mut cents: Vec<(u8, f64)> = Vec::new();
+    let mut levels: Vec<(u8, f64)> = Vec::new();
+    let mut noise: Vec<f64> = Vec::new();
     let mut measured = 0;
     for recording in &loaded.recordings {
         let Some(audio) = pool.whole_now(recording) else { continue };

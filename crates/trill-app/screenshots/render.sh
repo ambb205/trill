@@ -137,6 +137,13 @@ shot min-window-mixer --demo --tab mixer --automation --size 1060x640
 shot graphite-min-window --demo --automation --size 1060x640 --theme graphite
 # A drum rack nobody has put a sound on yet.
 shot drum-rack-empty "$rack" --select Kit --tab devices
+# The wavetable synth: its panel from the oscillators to the first slots of
+# its matrix, and the whole of it in a window wide enough to hold it. The
+# song is one preset with a table of its own on the second oscillator,
+# written by `cargo run -p trill-app --example wavetable_listen`.
+shot wavetable "$here/projects/wavetable.trill" --select "Sync Lead" --tab devices --size 1600x900
+shot wavetable-whole "$here/projects/wavetable.trill" --select "Sync Lead" --tab devices --size 2560x900
+shot graphite-wavetable "$here/projects/wavetable.trill" --select "Sync Lead" --tab devices --size 1600x900 --theme graphite
 
 # Sounds: the library in the browser with a sound chosen, and an audio clip
 # open in the Clip tab; a search beside the drum rack's pads; the sampler

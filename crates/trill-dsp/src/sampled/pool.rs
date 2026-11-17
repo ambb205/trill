@@ -669,7 +669,7 @@ mod tests {
     fn the_workers_go_when_the_pool_does() {
         let pool = pool(&[("a.wav", 100)]);
         let recording = pool.recording("a.wav");
-        pool.read_starts(&[recording.clone()]);
+        pool.read_starts(std::slice::from_ref(&recording));
         wait_for("the start", || recording.is_settled());
         let shared = Arc::downgrade(&pool.shared);
         drop(pool);
