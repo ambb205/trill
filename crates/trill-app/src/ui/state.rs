@@ -156,6 +156,13 @@ pub enum ArrangeDrag {
     MoveMarker {
         index: usize,
     },
+    /// Dragging what the tempo and the time signature do at `beat` along
+    /// the ruler. `grab_offset` is how far past it the pointer took hold
+    /// of its words.
+    MoveChange {
+        beat: Beats,
+        grab_offset: Beats,
+    },
     /// Dragging a track header to another place in the list.
     MoveTrack {
         track: TrackId,
@@ -227,6 +234,8 @@ pub struct ArrangementState {
     pub points: Option<PointSelection>,
     pub tool: Tool,
     pub renaming_marker: Option<TextEditState<usize>>,
+    /// The tempo or the time signature being typed on the ruler.
+    pub editing_change: Option<TextEditState<ChangeTarget>>,
     /// What is typed in the lane chooser's search field.
     pub lane_search: String,
     /// A lane to bring into view once the layout knows where it is.
@@ -266,6 +275,7 @@ impl ArrangementState {
             points: None,
             tool: Tool::default(),
             renaming_marker: None,
+            editing_change: None,
             lane_search: String::new(),
             reveal: None,
             show: None,
@@ -632,6 +642,25 @@ impl Hint {
         let changed = next != self.shown;
         self.shown = next;
         changed
+    }
+}
+
+/// What a field on the ruler sets: the tempo or the time signature, at a
+/// position of the song (kept in thousandths of a beat, to tell one such
+/// field from another).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ChangeTarget {
+    pub tempo: bool,
+    pub millibeats: i64,
+}
+
+impl ChangeTarget {
+    pub fn at(beat: Beats, tempo: bool) -> Self {
+        Self { tempo, millibeats: (beat * 1000.0).round() as i64 }
+    }
+
+    pub fn beat(&self) -> Beats {
+        self.millibeats as f64 / 1000.0
     }
 }
 

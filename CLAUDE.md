@@ -12,7 +12,7 @@ this file is the map, so that a task needs only the files it touches.
 ```sh
 cargo run -p trill-app -- --demo                    # the window, on a built-in song
 cargo run -p trill-mcp -- --no-audio --scratch      # no window: MCP on stdio, nothing read or kept
-cargo test --workspace                              # about 2,150 tests, a few minutes once built
+cargo test --workspace                              # about 2,180 tests, a few minutes once built
 cargo test -p trill-engine --test playing           # one integration test file
 cargo test -p trill-app a_take_is_counted_in        # tests whose name contains this (the app's are in its binary)
 cargo test -p trill-core time_ops -- --nocapture
@@ -61,7 +61,7 @@ on the samples.
 
 | Crate | What lives there |
 |---|---|
-| `trill-core` | The model and nothing else: `project.rs` (`Project`, tracks, clips with their notes and controller curves, automation, every edit), `files.rs` (the files a song names: `Project::files`, `Project::relink`, where a folder went read from one file that was found, and the table a project file carries of where its files are from the song's folder and what they were), `travel.rs` (how a control's values lie along its travel, and so how an automation line gets from one point to the next), `time_ops.rs`, `instrument.rs` (what a track knows of its instrument: drums or pitches, drum map, keyswitches, range, octave), `device.rs` (the device API, `EventKind`), `presets.rs`, `midi_file.rs`, `formats.rs` (what a file of an older format meant by what it does not say), and `journal/` (how a song came to be: `mod.rs` the entries and their text, `change.rs` what a step keeps, `place.rs` where it landed, `words.rs` an edit in words, `replay.rs` a session laid out to be watched). No audio or UI dependencies. |
+| `trill-core` | The model and nothing else: `project.rs` (`Project`, tracks, clips with their notes and controller curves, automation, every edit), `files.rs` (the files a song names: `Project::files`, `Project::relink`, where a folder went read from one file that was found, and the table a project file carries of where its files are from the song's folder and what they were), `travel.rs` (how a control's values lie along its travel, and so how an automation line gets from one point to the next), `tempo.rs` (how beats become time and how they become bars: the tempo map and the meter map of a song whose tempo and time signature change), `time_ops.rs`, `instrument.rs` (what a track knows of its instrument: drums or pitches, drum map, keyswitches, range, octave), `device.rs` (the device API, `EventKind`), `presets.rs`, `midi_file.rs`, `formats.rs` (what a file of an older format meant by what it does not say), and `journal/` (how a song came to be: `mod.rs` the entries and their text, `change.rs` what a step keeps, `place.rs` where it landed, `words.rs` an edit in words, `replay.rs` a session laid out to be watched). No audio or UI dependencies. |
 | `trill-dsp` | The built-in devices (`synth`, `drums`, `sampler`, `drumrack`, `effects/`: one file per effect or family, the compressor with its sidechain in `compressor.rs`) and offline time-stretching. `lib.rs` is the registry. |
 | `trill-media` | Decoding audio files, the shared `MediaCache`, waveform peaks, resampling, WAV writing. |
 | `trill-library` | The sample library (scan, index, search, tags from file names) and the settings file. |
@@ -157,8 +157,21 @@ on the samples.
   frames (`glide.rs`, `PARAM_STEP`), never once per buffer: the same song is the same samples at any buffer size.
   What mute and solo open and shut (a track's sound, its way to its output, a send) is a `Gate` that multiplies
   the level, over a fixed number of frames: never a ramp across a buffer. Everything there turns a position in
-  beats into a value and nothing else, so that a tempo that changes inside a song has only the mapping from
-  frames to beats to replace (`Span::beat_at`).
+  beats into a value and nothing else; how frames become beats is the transport's business alone (below).
+- **Beats become time, and bars, through the two maps.** A song's `tempo` and `time_signature` are what it begins
+  with; `tempo_changes` and `meter_changes` are what it does after. Whatever turns a beat into seconds or frames
+  asks `Project::tempo_map`, and whatever counts bars asks `Project::meter_map` (`trill-core/src/tempo.rs`):
+  nothing multiplies by `60 / project.tempo` or divides by `time_signature.beats_per_bar()` for a position in the
+  song. Setting a change moves nothing: beats stay where they are. A song of one tempo and one meter must come
+  out to the bit as it did before there were maps, which is why the maps compute what was always computed in
+  that case, and why `trill-engine/tests/old_songs.rs` and the buffer-size tests hold it. On the audio thread the
+  song moves evenly through a *stretch* (`Processor::begin_stretch`): to the first frame at or past a jump of the
+  tempo, or 256 frames of a glide; a block also ends where the time signature changes, so that a device is told
+  the tempo and the meter it is in. A note belongs to the block its nearest frame is in. Audio at its own speed
+  is anchored in the song's time; audio that follows the tempo is a piece for each tempo it lies under
+  (`compile.rs`, `pieces`). Tools that think in bars write the song's own bars (`trill-mcp/src/music.rs`,
+  `written_bars`), and the window counts through `timeline::Bars`, which a `TimeSignature` and a `MeterMap` both
+  are. `trill-engine/tests/tempo.rs` and `trill-mcp/tests/tempo.rs` are where a change to any of this is proved.
 - **The journal is the session's, and it stays on the machine.** Every change to the project goes through
   `Session::make_step`, which enters it in the journal (`session/story.rs`); a thread that acts for a tool call
   says so (`journal::acting`) and its edits are that call's step. Undo and redo are steps too: nothing leaves the

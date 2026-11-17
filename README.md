@@ -29,7 +29,7 @@ Development builds are optimized (see `[profile.dev]`), because unoptimized audi
 
 ### Building and testing
 
-`cargo test --workspace` runs about 2,150 tests in a few minutes. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 2,180 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -409,8 +409,8 @@ lane's menu in the window).
 *A song saved before this plays as it did.* An envelope keeps what its lines are straight along, and a project
 file written before envelopes did (format version 1 or 2) says nothing: its envelopes are straight in their units, as
 they were played then, and stay so when their points are edited. They become a fader's or a knob's only when
-they are written anew over MCP, or by the lane's menu. A file saved now is format version 3, which an earlier
-build refuses to open instead of playing its fades as other curves.
+they are written anew over MCP, or by the lane's menu. A file saved since is format version 3 or later, which an
+earlier build refuses to open instead of playing its fades as other curves.
 
 *A send can be automated* like a volume: its envelope is the send, at the bottom of which nothing is sent, with or
 without a level set by hand. A send opened for single notes (a delay throw) needs no return of its own.
@@ -422,6 +422,41 @@ same song is the same samples at any buffer size and in a render. What no envelo
 by hand, a mute, the song jumping to where an envelope is at another level) is let go of evenly over ten
 milliseconds. (The built-in filter still reads its cutoff every sixteen frames of the block it is handed: with a
 swept cutoff it is the same samples only at buffer sizes that are a multiple of sixteen.)
+
+**A tempo and a time signature that change inside the song.** A song begins at a tempo and in a time signature,
+and may change either along the way. A change of tempo is a jump at a beat, or a glide that arrives there from
+the change before it (an accelerando, a ritardando); one beat can hold both, a glide that arrives and a tempo
+that takes over (a ritardando, and then the old tempo again). A change of time signature begins a bar where it is
+set. Nothing in the song moves when either is set: positions are beats, and beats stay where they are. What
+changes is how long a beat lasts and which bar it is in, and two maps made from the project answer those two
+questions for everyone (`Project::tempo_map`, `Project::meter_map`, in `trill-core/src/tempo.rs`), in closed form
+through jumps and glides alike.
+
+Everything that is counted in beats follows: notes, controller curves, envelopes, markers and the loop; the
+metronome, which counts the time signature it is in, and the count-in, which is a bar of the meter the take
+starts in at the tempo it has there; a take's clips, which are cut to the song's bars; a render, which is as long
+as the tempo makes it, and its sections by bar. Audio that keeps its own speed is laid along the song's time and
+ignores the tempo; audio that follows the tempo (warp) follows every change of it, as one stretched piece for
+each tempo it lies under, faded across the seams over three milliseconds. A plugin is told the tempo and the time
+signature as they pass, block by block, and a block ends where either changes. A MIDI file is read and written
+with every tempo and time signature in it (a glide goes out as eight jumps to the beat that keep its time), and
+time that is cut out of the song, repeated or opened up takes its changes with it.
+
+*How exact.* The audio thread moves through the song evenly within a stretch of one tempo; a stretch ends at the
+first frame at or past a jump, and a glide is taken in steps of 256 frames, each on the beat at both ends. A note
+sounds within a frame of where the map has its beat, whatever the buffer size, and a render is what was played
+(`trill-engine/tests/tempo.rs`). A song of one tempo is one stretch, and every number in it is what it was: such
+a song renders to the samples it rendered to before.
+
+*An older file is one tempo and one meter.* A file saved now is format version 5. One saved before says nothing
+of changes and has none; nothing is written into it.
+
+In the window the foot of the ruler says where the tempo or the time signature changes, beside the bar's number
+("7/8 · 140 BPM", an arrow before a tempo the song glides to). A double-click types another value, a drag moves
+the change along the song, and the right-click menu sets one where it was clicked, removes one, or makes a tempo
+a glide. The grid, snapping, the bar numbers and the position are counted through the changes, the piano roll
+counts a clip's bars as the song has them under it, and the tempo and the time signature in the top bar are
+those the song has where it is.
 
 **Hearing without ears.** Whoever cannot listen (a script, an assistant) measures instead, and three things make
 that quick and true:
@@ -602,6 +637,7 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Area | Tools |
 |---|---|
 | Project | `get_project`, `set_project`, `new_project`, `save_project`, `load_project`, `recover_project`, `import_midi`, `export_midi`, `history` |
+| Tempo and meter along the song | `set_tempo` (the tempo from a bar on: a jump, or with `ramp` a glide that arrives there), `set_time_signature` (the time signature from a bar on, for so many bars if asked), `get_tempo_map` (both, with the bar, the beat and the second of every change, the bars a change cuts short, and the beat any bar starts at) |
 | How it was made | `get_journal` (the steps of the session, who made each and where it landed, a page at a time; found by their words), `get_song_at` (the song as it was after any step), `journal` (keep one or not, write it out to hand on, delete it) |
 | Tracks | `create_track`, `update_track`, `delete_track` |
 | Devices | `list_devices`, `describe_device`, `add_device`, `get_device`, `update_device`, `delete_device`, `show_device_editor` |
@@ -751,6 +787,16 @@ theirs to Trill),
 session (clip-launching) view, audio recording (MIDI is recorded; audio is not), polyphonic aftertouch and MPE
 (per-note expression; clips hold one curve per controller for the whole channel), ASIO, warp markers, plugin
 delay compensation, multi-core rendering. Only Windows has been run so far.
+
+Where the tempo or the time signature changes inside a song, not yet: a plugin's position in seconds and the
+start of its bar (it is told the tempo, the time signature and the beat of each block; the seconds and the bar
+line it is given are still worked out from those alone, so after a change they are not the song's, and through a
+glide the seconds do not run evenly); the stage and its films, which read one tempo and one meter; a melody
+written across a change of time signature in one call (`write_melody` says to write each side on its own); a
+warped clip under a glide without one stretched copy of its file for every step of the glide, and without the
+three-millisecond fade where two copies meet, which a held tone can show; the length a sound dropped into a
+later section is given, which goes by the tempo the song begins at; and the Clip tab's own picture of a
+recording that keeps its speed, which is drawn at the tempo where the clip starts.
 
 ## Licence
 

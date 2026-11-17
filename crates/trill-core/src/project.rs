@@ -10,6 +10,7 @@ use crate::ids::{ClipId, DeviceId, TrackId};
 use crate::instrument::InstrumentProfile;
 use crate::midi_file::{MidiFile, MidiTrack};
 use crate::presets::PresetRef;
+use crate::tempo::{MeterChange, MeterMap, SAME_BEAT, TempoChange, TempoMap};
 use crate::time::{Beats, TimeSignature};
 use crate::travel::Travel;
 use serde::{Deserialize, Serialize};
@@ -33,10 +34,13 @@ pub const MAX_VOLUME_DB: f32 = 6.0;
 ///   that plays a hard hit louder than the volume, the saturator no longer
 ///   turns its level down as its drive rises, the lowest value of a level
 ///   is silence, and the poly synth's volume is 21 dB up.
+/// * 5: the tempo and the time signature can change inside a song
+///   ([`Project::tempo_changes`], [`Project::meter_changes`]). A file of
+///   an earlier format has one of each, and nothing is written into it.
 ///
 /// A device of an older file keeps the sound it had, and an envelope the
 /// curve it played: see [`crate::formats`].
-pub const FORMAT_VERSION: u32 = 4;
+pub const FORMAT_VERSION: u32 = 5;
 /// The furthest an audio clip can be transposed, in semitones either way.
 pub const MAX_TRANSPOSE: f64 = 24.0;
 /// Shortest loop a clip repeats, so a tiny loop length cannot explode into
@@ -190,10 +194,12 @@ impl WarpMode {
 ///   tempo, so a bar of a loop stays a bar.
 /// * Any other clip plays at the speed it was recorded at and covers
 ///   `60 / project tempo` seconds per beat: how much of the recording fits
-///   under the clip changes with the project tempo.
+///   under the clip changes with the project tempo, and where the tempo
+///   changes under the clip, with the tempo each beat of it has.
 ///
-/// Everything else follows from that one rule. Trimming the left edge by
-/// `b` beats moves `offset_seconds` by `b` times that many seconds, and
+/// Everything else follows from that one rule
+/// ([`AudioContent::seconds_over`]). Trimming the left edge by `b` beats
+/// moves `offset_seconds` by the seconds those beats cover, and
 /// splitting gives the second half the offset the first half would have
 /// reached, so both keep playing exactly what they played. Fades are
 /// lengths on the timeline, in beats, applied to what comes out: warping a
@@ -252,6 +258,33 @@ impl AudioContent {
         self.followed_tempo().map_or(1.0, |source| source / project_tempo)
     }
 
+    /// Seconds of the recording that `length` beats of the timeline cover
+    /// from `from` on, in a song whose tempo is `map`: negative for a
+    /// length that goes back. See the type's documentation.
+    pub fn seconds_over(&self, map: &TempoMap, from: Beats, length: Beats) -> f64 {
+        match self.followed_tempo() {
+            Some(source) => length * (60.0 / source),
+            None => map.seconds_over(from, length),
+        }
+    }
+
+    /// How many beats of the timeline `seconds` of the recording cover
+    /// from `from` on: [`seconds_over`](Self::seconds_over) the other way
+    /// round.
+    pub fn beats_over(&self, map: &TempoMap, from: Beats, seconds: f64) -> Beats {
+        match self.followed_tempo() {
+            Some(source) => seconds / (60.0 / source),
+            None if map.is_constant() => seconds / (60.0 / map.tempo_at(0.0)),
+            None => map.beat_at_seconds(map.seconds_at(from) + seconds) - from,
+        }
+    }
+
+    /// How fast the clip's audio runs against the recording at `beat` of
+    /// the song: [`time_ratio`](Self::time_ratio) at the tempo there.
+    pub fn time_ratio_at(&self, map: &TempoMap, beat: Beats) -> f64 {
+        self.followed_tempo().map_or(1.0, |source| source / map.tempo_at(beat))
+    }
+
     /// The pitch shift that is actually heard, in semitones: `transpose`
     /// in the modes that can shift pitch on its own, zero in the others.
     pub fn pitch_shift(&self) -> f64 {
@@ -286,9 +319,9 @@ pub enum ClipContent {
 
 impl ClipContent {
     /// Moves the point where playback starts `beats` later in the content
-    /// (earlier when negative), as trimming a clip's left edge does. `tempo`
-    /// is the project's.
-    fn advance(&mut self, beats: Beats, tempo: f64) {
+    /// (earlier when negative), as trimming a clip's left edge does. `at` is
+    /// where the clip starts in the song, whose tempo is `map`.
+    fn advance(&mut self, beats: Beats, at: Beats, map: &TempoMap) {
         match self {
             ClipContent::Midi(midi) => {
                 let target = midi.start_offset + beats;
@@ -297,7 +330,9 @@ impl ClipContent {
                     None => target,
                 };
             }
-            ClipContent::Audio(audio) => audio.offset_seconds += beats * audio.seconds_per_beat(tempo),
+            ClipContent::Audio(audio) => {
+                audio.offset_seconds = (audio.offset_seconds + audio.seconds_over(map, at, beats)).max(0.0);
+            }
         }
     }
 }
@@ -813,8 +848,19 @@ pub struct Project {
     #[serde(default = "format_version_default")]
     pub format_version: u32,
     pub name: String,
+    /// The tempo the song begins at, in beats per minute.
     pub tempo: f64,
+    /// The time signature the song begins in.
     pub time_signature: TimeSignature,
+    /// Where the tempo changes after the start: in order of their beats,
+    /// and at one beat at most a glide that arrives there followed by a
+    /// tempo that takes over. Read through [`Project::tempo_map`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tempo_changes: Vec<TempoChange>,
+    /// Where the time signature changes after the start, in order of
+    /// their beats. Read through [`Project::meter_map`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub meter_changes: Vec<MeterChange>,
     pub loop_region: LoopRegion,
     pub tracks: Vec<Track>,
     pub master: Master,
@@ -830,6 +876,34 @@ fn format_version_default() -> u32 {
     FORMAT_VERSION
 }
 
+fn valid_tempo(tempo: f64) -> Result<f64, EditError> {
+    if !tempo.is_finite() || !(MIN_TEMPO..=MAX_TEMPO).contains(&tempo) {
+        return invalid(format!("tempo {tempo} is outside {MIN_TEMPO}..={MAX_TEMPO} BPM"));
+    }
+    Ok(tempo)
+}
+
+fn valid_signature(numerator: u8, denominator: u8) -> Result<TimeSignature, EditError> {
+    match TimeSignature::new(numerator, denominator) {
+        Some(signature) => Ok(signature),
+        None => invalid(format!("unsupported time signature {numerator}/{denominator}: 1 to 32 over 1, 2, 4, 8 or 16")),
+    }
+}
+
+/// Where in the song `what` is set, or why that is nowhere.
+fn valid_position(beat: Beats, what: &str) -> Result<Beats, EditError> {
+    if !beat.is_finite() || beat < 0.0 {
+        return invalid(format!("{what} is set at a position of the song, 0 beats or later, not at {beat}"));
+    }
+    Ok(beat)
+}
+
+/// In order of their beats, and at one beat the glide that arrives before
+/// the tempo that takes over.
+fn sort_tempo_changes(changes: &mut [TempoChange]) {
+    changes.sort_by(|a, b| a.beat.total_cmp(&b.beat).then(b.ramp.cmp(&a.ramp)));
+}
+
 impl Default for Project {
     fn default() -> Self {
         Self::new("Untitled")
@@ -843,6 +917,8 @@ impl Project {
             name: name.into(),
             tempo: 120.0,
             time_signature: TimeSignature::default(),
+            tempo_changes: Vec::new(),
+            meter_changes: Vec::new(),
             loop_region: LoopRegion { enabled: false, start: 0.0, end: 16.0 },
             tracks: Vec::new(),
             master: Master { volume_db: 0.0, devices: Vec::new() },
@@ -860,22 +936,190 @@ impl Project {
 
     // ---- song settings -------------------------------------------------
 
+    /// Sets the tempo the song begins at. Changes further on
+    /// ([`Project::set_tempo_at`]) stay as they are.
     pub fn set_tempo(&mut self, tempo: f64) -> Result<(), EditError> {
-        if !tempo.is_finite() || !(MIN_TEMPO..=MAX_TEMPO).contains(&tempo) {
-            return invalid(format!("tempo {tempo} is outside {MIN_TEMPO}..={MAX_TEMPO} BPM"));
-        }
-        self.tempo = tempo;
+        self.tempo = valid_tempo(tempo)?;
         Ok(())
     }
 
+    /// Sets the time signature the song begins in. Changes further on
+    /// ([`Project::set_time_signature_at`]) stay as they are.
     pub fn set_time_signature(&mut self, numerator: u8, denominator: u8) -> Result<(), EditError> {
-        match TimeSignature::new(numerator, denominator) {
-            Some(signature) => {
-                self.time_signature = signature;
-                Ok(())
+        self.time_signature = valid_signature(numerator, denominator)?;
+        Ok(())
+    }
+
+    /// How beats become time over the song: its first tempo and every
+    /// change after it. Whatever turns a beat into seconds or frames asks
+    /// this, and nothing reads `tempo` for it.
+    pub fn tempo_map(&self) -> TempoMap {
+        TempoMap::new(self.tempo, &self.tempo_changes)
+    }
+
+    /// How beats become bars over the song: its first time signature and
+    /// every change after it. Whatever counts bars asks this.
+    pub fn meter_map(&self) -> MeterMap {
+        MeterMap::new(self.time_signature, &self.meter_changes)
+    }
+
+    /// Sets the tempo at `beat`. Nothing in the song moves: the beats
+    /// from there on last as long as the new tempo says.
+    ///
+    /// Without `ramp` the tempo is `tempo` from `beat` on, and jumps there.
+    /// With it the tempo glides to `tempo` from the change before (or from
+    /// the start of the song), evenly from beat to beat, and arrives at
+    /// `beat`: an accelerando or a ritardando.
+    ///
+    /// One beat can hold both, a glide that arrives and a tempo that takes
+    /// over (a ritardando, and then the old tempo again): setting one
+    /// leaves the other. At the start of the song there is only the tempo
+    /// it begins at.
+    pub fn set_tempo_at(&mut self, beat: Beats, tempo: f64, ramp: bool) -> Result<(), EditError> {
+        let tempo = valid_tempo(tempo)?;
+        let beat = valid_position(beat, "a tempo")?;
+        if beat <= SAME_BEAT {
+            if ramp {
+                return invalid("a tempo that glides has to arrive somewhere after the start of the song");
             }
-            None => invalid(format!("unsupported time signature {numerator}/{denominator}")),
+            self.tempo = tempo;
+            return Ok(());
         }
+        self.tempo_changes.retain(|change| (change.beat - beat).abs() > SAME_BEAT || change.ramp != ramp);
+        self.tempo_changes.push(TempoChange { beat, tempo, ramp });
+        sort_tempo_changes(&mut self.tempo_changes);
+        Ok(())
+    }
+
+    /// Removes what the tempo does at `beat`: the glide that arrives there
+    /// and the tempo that takes over there, whichever there is. The tempo
+    /// before goes on.
+    pub fn remove_tempo_at(&mut self, beat: Beats) -> Result<(), EditError> {
+        let before = self.tempo_changes.len();
+        self.tempo_changes.retain(|change| (change.beat - beat).abs() > SAME_BEAT);
+        if self.tempo_changes.len() == before {
+            let at: Vec<String> = self.tempo_changes.iter().map(|change| change.beat.to_string()).collect();
+            return invalid(match at.is_empty() {
+                true => format!("the tempo does not change at beat {beat}: it does not change anywhere in the song"),
+                false => format!("the tempo does not change at beat {beat}; it changes at beats {}", at.join(", ")),
+            });
+        }
+        Ok(())
+    }
+
+    /// Moves what the tempo does at `from` (the glide that arrives and the
+    /// tempo that takes over, whichever there is) to `to`, in place of
+    /// what the tempo did there.
+    pub fn move_tempo_at(&mut self, from: Beats, to: Beats) -> Result<(), EditError> {
+        if valid_position(to, "a tempo")? <= SAME_BEAT {
+            return invalid("a change of tempo lies after the start of the song, which has the tempo it begins at");
+        }
+        let at = |change: &TempoChange, beat: Beats| (change.beat - beat).abs() <= SAME_BEAT;
+        let moved: Vec<TempoChange> = self
+            .tempo_changes
+            .iter()
+            .filter(|change| at(change, from))
+            .map(|change| TempoChange { beat: to, ..*change })
+            .collect();
+        if moved.is_empty() {
+            // Nothing is there: said as removing it would say it.
+            return self.remove_tempo_at(from);
+        }
+        self.tempo_changes.retain(|change| !at(change, from) && !at(change, to));
+        self.tempo_changes.extend(moved);
+        sort_tempo_changes(&mut self.tempo_changes);
+        Ok(())
+    }
+
+    /// Replaces every change of tempo after the start of the song.
+    pub fn set_tempo_changes(&mut self, mut changes: Vec<TempoChange>) -> Result<(), EditError> {
+        for change in &changes {
+            valid_tempo(change.tempo)?;
+            if valid_position(change.beat, "a tempo")? <= SAME_BEAT {
+                return invalid("a change of tempo lies after the start of the song, which has the tempo it begins at");
+            }
+        }
+        sort_tempo_changes(&mut changes);
+        let twice = |pair: &&[TempoChange]| pair[1].beat - pair[0].beat <= SAME_BEAT && (!pair[0].ramp || pair[1].ramp);
+        if let Some(pair) = changes.windows(2).find(twice) {
+            return invalid(format!(
+                "at beat {} the tempo is set twice: one beat holds at most a glide that arrives and a tempo that \
+                 takes over",
+                pair[0].beat
+            ));
+        }
+        self.tempo_changes = changes;
+        Ok(())
+    }
+
+    /// Sets the time signature from `beat` on. A bar begins there: where
+    /// that is not a bar line, the bar before is cut short. Nothing in the
+    /// song moves, and changes further on stay at their beats, so the bars
+    /// between here and the next change are counted anew
+    /// ([`MeterMap::cut_bars`] says which ones no longer come out whole).
+    pub fn set_time_signature_at(&mut self, beat: Beats, numerator: u8, denominator: u8) -> Result<(), EditError> {
+        let signature = valid_signature(numerator, denominator)?;
+        let beat = valid_position(beat, "a time signature")?;
+        if beat <= SAME_BEAT {
+            self.time_signature = signature;
+            return Ok(());
+        }
+        self.meter_changes.retain(|change| (change.beat - beat).abs() > SAME_BEAT);
+        self.meter_changes.push(MeterChange { beat, signature });
+        self.meter_changes.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+        Ok(())
+    }
+
+    /// Removes the change of time signature at `beat`: the signature
+    /// before goes on, in its own bars.
+    pub fn remove_time_signature_at(&mut self, beat: Beats) -> Result<(), EditError> {
+        let before = self.meter_changes.len();
+        self.meter_changes.retain(|change| (change.beat - beat).abs() > SAME_BEAT);
+        if self.meter_changes.len() == before {
+            let at: Vec<String> = self.meter_changes.iter().map(|change| change.beat.to_string()).collect();
+            return invalid(match at.is_empty() {
+                true => {
+                    format!("the time signature does not change at beat {beat}: it is the same all through the song")
+                }
+                false => {
+                    format!("the time signature does not change at beat {beat}; it changes at beats {}", at.join(", "))
+                }
+            });
+        }
+        Ok(())
+    }
+
+    /// Moves the change of time signature at `from` to `to`, in place of
+    /// one that was there.
+    pub fn move_time_signature_at(&mut self, from: Beats, to: Beats) -> Result<(), EditError> {
+        if valid_position(to, "a time signature")? <= SAME_BEAT {
+            return invalid("a change of time signature lies after the start of the song, which has its own");
+        }
+        let at = |change: &MeterChange, beat: Beats| (change.beat - beat).abs() <= SAME_BEAT;
+        let Some(moved) = self.meter_changes.iter().find(|change| at(change, from)).copied() else {
+            return self.remove_time_signature_at(from);
+        };
+        self.meter_changes.retain(|change| !at(change, from) && !at(change, to));
+        self.meter_changes.push(MeterChange { beat: to, ..moved });
+        self.meter_changes.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+        Ok(())
+    }
+
+    /// Replaces every change of time signature after the start of the
+    /// song.
+    pub fn set_meter_changes(&mut self, mut changes: Vec<MeterChange>) -> Result<(), EditError> {
+        for change in &changes {
+            valid_signature(change.signature.numerator, change.signature.denominator)?;
+            if valid_position(change.beat, "a time signature")? <= SAME_BEAT {
+                return invalid("a change of time signature lies after the start of the song, which has its own");
+            }
+        }
+        changes.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+        if let Some(pair) = changes.windows(2).find(|pair| pair[1].beat - pair[0].beat <= SAME_BEAT) {
+            return invalid(format!("at beat {} the time signature is set twice", pair[0].beat));
+        }
+        self.meter_changes = changes;
+        Ok(())
     }
 
     pub fn set_loop(&mut self, enabled: bool, start: Beats, end: Beats) -> Result<(), EditError> {
@@ -1221,7 +1465,7 @@ impl Project {
     /// the start actually reached, which stops short where an audio file
     /// has nothing earlier to reveal.
     pub fn trim_clip_start(&mut self, id: ClipId, new_start: Beats) -> Result<Beats, EditError> {
-        let tempo = self.tempo;
+        let map = self.tempo_map();
         let track = self.clip_track(id)?;
         let clip = self.clip_mut(id)?;
         let end = clip.end();
@@ -1252,11 +1496,11 @@ impl Project {
             }
             ClipContent::Audio(audio) => {
                 // An audio file has nothing before its first sample.
-                delta = delta.max(-audio.offset_seconds / audio.seconds_per_beat(tempo));
+                delta = delta.max(audio.beats_over(&map, clip.start, -audio.offset_seconds));
                 advance = delta;
             }
         }
-        clip.content.advance(advance, tempo);
+        clip.content.advance(advance, clip.start, &map);
         clip.start += delta;
         clip.length = end - clip.start;
         let start = clip.start;
@@ -1268,7 +1512,7 @@ impl Project {
     /// The original keeps the first part; the new clip, whose id is
     /// returned, plays the rest exactly as before.
     pub fn split_clip(&mut self, id: ClipId, at: Beats) -> Result<ClipId, EditError> {
-        let tempo = self.tempo;
+        let map = self.tempo_map();
         let track = self.clip_track(id)?;
         let clip = self.clip(id)?;
         if !at.is_finite() || at <= clip.start || at >= clip.end() {
@@ -1278,7 +1522,7 @@ impl Project {
         let mut second = clip.clone();
         second.start = at;
         second.length = clip.end() - at;
-        second.content.advance(first_length, tempo);
+        second.content.advance(first_length, clip.start, &map);
         if let ClipContent::Audio(audio) = &mut second.content {
             audio.fade_in = 0.0;
         }
@@ -1346,11 +1590,13 @@ impl Project {
     /// per track of the file that has notes, with its controllers' curves.
     /// Returns the new track and clip ids with whether each is a drum
     /// part, so the caller can give them instruments. The project's tempo
-    /// is left alone.
+    /// and time signature are left alone: [`Project::take_midi_time`] is
+    /// what takes the file's.
     pub fn import_midi(&mut self, file: &MidiFile, at: Beats) -> Result<Vec<ImportedPart>, EditError> {
         if !at.is_finite() || at < 0.0 {
             return invalid(format!("start {at} must be >= 0 beats"));
         }
+        let bars = self.meter_map();
         let bar = self.time_signature.beats_per_bar();
         let mut parts = Vec::new();
         for (index, part) in file.tracks.iter().enumerate().filter(|(_, part)| !part.notes.is_empty()) {
@@ -1359,7 +1605,10 @@ impl Project {
             let last_point = part.controllers.iter().filter_map(|curve| curve.points.last()).map(|point| point.beat);
             let end = part.notes.iter().map(Note::end).chain(last_point).fold(0.0, f64::max);
             // Whole bars, so the clip sits on the grid.
-            let length = ((end / bar).ceil().max(1.0)) * bar;
+            let length = match bars.is_constant() {
+                true => ((end / bar).ceil().max(1.0)) * bar,
+                false => bars.bar_line_at_or_after(at + end).max(bars.bar_at(at).end()) - at,
+            };
             let track = self.add_track(name.clone());
             let clip = self.add_midi_clip(track, name, at, length)?;
             {
@@ -1394,7 +1643,43 @@ impl Project {
                 Some(MidiTrack { name: track.name.clone(), drums, notes, controllers })
             })
             .collect();
-        MidiFile { tempo: Some(self.tempo), time_signature: Some(self.time_signature), tracks }
+        MidiFile {
+            tempo: Some(self.tempo),
+            time_signature: Some(self.time_signature),
+            tempo_changes: self.tempo_changes.clone(),
+            meter_changes: self.meter_changes.clone(),
+            tracks,
+        }
+    }
+
+    /// Gives the song the tempo and the time signature of a MIDI file,
+    /// with every change of them, from `at` on: what the song had before
+    /// `at` stays, and what it had from there on is replaced. A file that
+    /// names no tempo, or no time signature, leaves the song's.
+    pub fn take_midi_time(&mut self, file: &MidiFile, at: Beats) -> Result<(), EditError> {
+        let at = valid_position(at, "a MIDI file's tempo")?;
+        if let Some(tempo) = file.tempo {
+            let mut changes: Vec<TempoChange> =
+                self.tempo_changes.iter().filter(|change| change.beat < at - SAME_BEAT).copied().collect();
+            let moved = file.tempo_changes.iter().map(|change| TempoChange { beat: change.beat + at, ..*change });
+            match at <= SAME_BEAT {
+                true => self.set_tempo(tempo)?,
+                false => changes.push(TempoChange { beat: at, tempo: valid_tempo(tempo)?, ramp: false }),
+            }
+            changes.extend(moved);
+            self.set_tempo_changes(changes)?;
+        }
+        if let Some(signature) = file.time_signature {
+            let mut changes: Vec<MeterChange> =
+                self.meter_changes.iter().filter(|change| change.beat < at - SAME_BEAT).copied().collect();
+            match at <= SAME_BEAT {
+                true => self.time_signature = signature,
+                false => changes.push(MeterChange { beat: at, signature }),
+            }
+            changes.extend(file.meter_changes.iter().map(|change| MeterChange { beat: change.beat + at, ..*change }));
+            self.set_meter_changes(changes)?;
+        }
+        Ok(())
     }
 
     // ---- markers -------------------------------------------------------
@@ -1741,6 +2026,16 @@ impl Project {
         // and a value whose scale has moved since is moved, in the device
         // and in the envelopes that drive it.
         crate::formats::keep_project(&mut project);
+        // (A file before format 5 has the one tempo and the one time signature
+        // it names: there is nothing to write into it.) A map that was
+        // written by hand is put in the order the song reads it in, without
+        // what cannot be played.
+        project
+            .tempo_changes
+            .retain(|change| change.beat.is_finite() && change.beat > SAME_BEAT && valid_tempo(change.tempo).is_ok());
+        sort_tempo_changes(&mut project.tempo_changes);
+        project.meter_changes.retain(|change| change.beat.is_finite() && change.beat > SAME_BEAT);
+        project.meter_changes.sort_by(|a, b| a.beat.total_cmp(&b.beat));
         Ok(project)
     }
 }
@@ -2532,6 +2827,255 @@ mod tests {
         assert_eq!(restored, project, "shapes survive saving");
     }
 
+    fn jump(beat: Beats, tempo: f64) -> TempoChange {
+        TempoChange { beat, tempo, ramp: false }
+    }
+
+    fn glide(beat: Beats, tempo: f64) -> TempoChange {
+        TempoChange { beat, tempo, ramp: true }
+    }
+
+    fn meter(beat: Beats, numerator: u8, denominator: u8) -> MeterChange {
+        MeterChange { beat, signature: TimeSignature::new(numerator, denominator).unwrap() }
+    }
+
+    #[test]
+    fn the_tempo_is_set_where_it_changes_and_nothing_in_the_song_moves() {
+        let mut project = Project::new("t");
+        let track = project.add_track("Keys");
+        let clip = project.add_midi_clip(track, "a", 8.0, 8.0).unwrap();
+        project.add_marker(16.0, "Chorus").unwrap();
+        let before = (project.tracks.clone(), project.markers.clone());
+
+        // 120 to begin with, 140 from beat 8, and from beat 16 a glide
+        // that arrives at 90 at beat 24, where 120 takes over again.
+        project.set_tempo_at(8.0, 140.0, false).unwrap();
+        project.set_tempo_at(24.0, 90.0, true).unwrap();
+        project.set_tempo_at(16.0, 140.0, false).unwrap();
+        project.set_tempo_at(24.0, 120.0, false).unwrap();
+        assert_eq!(project.tempo_changes, [jump(8.0, 140.0), jump(16.0, 140.0), glide(24.0, 90.0), jump(24.0, 120.0)]);
+        assert_eq!((&project.tracks, &project.markers), (&before.0, &before.1), "beats are where they were");
+        assert_eq!(project.clip(clip).unwrap().start, 8.0);
+        let map = project.tempo_map();
+        for (beat, tempo) in [(0.0, 120.0), (7.9, 120.0), (8.0, 140.0), (20.0, 115.0), (24.0, 120.0), (99.0, 120.0)] {
+            assert!((map.tempo_at(beat) - tempo).abs() < 1e-9, "at {beat}: {}", map.tempo_at(beat));
+        }
+        // Eight beats at 120 are four seconds, and eight at 140 are 24/7.
+        assert!((map.seconds_at(16.0) - (4.0 + 8.0 * 60.0 / 140.0)).abs() < 1e-12);
+
+        // Setting one of the two a beat holds leaves the other; setting it
+        // again replaces it. The start of the song has its one tempo.
+        project.set_tempo_at(24.0, 100.0, true).unwrap();
+        project.set_tempo_at(8.0, 150.0, false).unwrap();
+        project.set_tempo_at(0.0, 110.0, false).unwrap();
+        assert_eq!(project.tempo, 110.0);
+        assert_eq!(project.tempo_changes, [jump(8.0, 150.0), jump(16.0, 140.0), glide(24.0, 100.0), jump(24.0, 120.0)]);
+        // Moved, a beat takes what it holds along, in place of what was there.
+        let mut moved = project.clone();
+        moved.move_tempo_at(24.0, 16.0).unwrap();
+        assert_eq!(moved.tempo_changes, [jump(8.0, 150.0), glide(16.0, 100.0), jump(16.0, 120.0)]);
+        assert!(moved.move_tempo_at(12.0, 20.0).is_err() && moved.move_tempo_at(16.0, 0.0).is_err());
+        project.remove_tempo_at(24.0).unwrap();
+        assert_eq!(project.tempo_changes, [jump(8.0, 150.0), jump(16.0, 140.0)]);
+
+        // What cannot be: said in words that name what there is.
+        assert!(project.set_tempo_at(0.0, 100.0, true).is_err(), "a glide to the start comes from nowhere");
+        assert!(project.set_tempo_at(4.0, 5.0, false).is_err() && project.set_tempo_at(-1.0, 100.0, false).is_err());
+        assert!(project.set_tempo_at(f64::NAN, 100.0, false).is_err());
+        let error = project.remove_tempo_at(12.0).unwrap_err().to_string();
+        assert!(error.contains("beats 8, 16"), "{error}");
+        let two = vec![jump(4.0, 100.0), jump(4.0, 110.0)];
+        assert!(project.set_tempo_changes(two).is_err(), "two tempos that take over at one beat");
+        assert!(project.set_tempo_changes(vec![glide(4.0, 100.0), glide(4.0, 110.0)]).is_err(), "nor two glides");
+        project.set_tempo_changes(vec![jump(12.0, 100.0), glide(12.0, 80.0), glide(4.0, 130.0)]).unwrap();
+        assert_eq!(project.tempo_changes, [glide(4.0, 130.0), glide(12.0, 80.0), jump(12.0, 100.0)], "put in order");
+        project.set_tempo_changes(Vec::new()).unwrap();
+        assert!(project.tempo_map().is_constant());
+        let error = project.remove_tempo_at(8.0).unwrap_err().to_string();
+        assert!(error.contains("does not change anywhere"), "{error}");
+    }
+
+    #[test]
+    fn the_time_signature_is_set_where_it_changes_and_bars_are_counted_from_there() {
+        let mut project = Project::new("t");
+        // Two bars of 4/4, two of 7/8, and 4/4 again.
+        project.set_time_signature_at(8.0, 7, 8).unwrap();
+        project.set_time_signature_at(15.0, 4, 4).unwrap();
+        assert_eq!(project.meter_changes, [meter(8.0, 7, 8), meter(15.0, 4, 4)]);
+        let bars = project.meter_map();
+        let starts: Vec<Beats> = (0..6).map(|bar| bars.bar_start(bar)).collect();
+        assert_eq!(starts, [0.0, 4.0, 8.0, 11.5, 15.0, 19.0]);
+        assert_eq!(bars.cut_bars().count(), 0);
+
+        // A third bar of 7/8 asked for where the song goes back to 4/4:
+        // the change at beat 15 stays, so the signature is replaced there.
+        project.set_time_signature_at(15.0, 7, 8).unwrap();
+        project.set_time_signature_at(18.5, 4, 4).unwrap();
+        assert_eq!(project.meter_changes, [meter(8.0, 7, 8), meter(15.0, 7, 8), meter(18.5, 4, 4)]);
+        // A signature set in the middle of what follows cuts a bar short,
+        // and the map says which.
+        project.set_time_signature_at(10.0, 3, 4).unwrap();
+        let cut: Vec<(u32, Beats)> = project.meter_map().cut_bars().map(|bar| (bar.number(), bar.length)).collect();
+        assert_eq!(cut, [(3, 2.0), (5, 2.0)], "the 7/8 bar at 8 has two beats, and so has the 3/4 bar before 15");
+        project.move_time_signature_at(10.0, 11.5).unwrap();
+        assert_eq!(project.meter_changes[1], meter(11.5, 3, 4), "moved to the next bar line of the 7/8");
+        assert!(project.move_time_signature_at(10.0, 12.0).is_err(), "nothing is at beat 10 any more");
+        project.move_time_signature_at(11.5, 10.0).unwrap();
+        project.remove_time_signature_at(10.0).unwrap();
+        assert_eq!(project.meter_map().cut_bars().count(), 0);
+
+        project.set_time_signature_at(0.0, 3, 4).unwrap();
+        assert_eq!(project.time_signature, TimeSignature::new(3, 4).unwrap());
+        assert!(
+            project.set_time_signature_at(4.0, 4, 5).is_err() && project.set_time_signature_at(-4.0, 3, 4).is_err()
+        );
+        let error = project.remove_time_signature_at(4.0).unwrap_err().to_string();
+        assert!(error.contains("beats 8, 15, 18.5"), "{error}");
+        assert!(project.set_meter_changes(vec![meter(8.0, 3, 4), meter(8.0, 5, 4)]).is_err());
+        project.set_meter_changes(vec![meter(12.0, 5, 4), meter(6.0, 6, 8)]).unwrap();
+        assert_eq!(project.meter_changes, [meter(6.0, 6, 8), meter(12.0, 5, 4)]);
+    }
+
+    #[test]
+    fn a_song_with_changes_of_tempo_and_meter_is_saved_and_an_older_file_has_none() {
+        let mut project = Project::new("t");
+        // A song of one tempo is written as it always was.
+        let plain = project.to_json();
+        assert!(!plain.contains("tempo_changes") && !plain.contains("meter_changes"), "{plain}");
+
+        project.set_tempo_at(8.0, 140.0, false).unwrap();
+        project.set_tempo_at(16.0, 100.0, true).unwrap();
+        project.set_time_signature_at(8.0, 7, 8).unwrap();
+        let json = project.to_json();
+        assert!(
+            json.contains("\"ramp\": true") && json.matches("\"ramp\"").count() == 1,
+            "only a glide says so: {json}"
+        );
+        assert_eq!(Project::from_json(&json).unwrap(), project);
+
+        // A file of the format before says nothing of changes and has none.
+        let old = plain.replace(&format!("\"format_version\": {FORMAT_VERSION}"), "\"format_version\": 3");
+        assert_ne!(old, plain);
+        let loaded = Project::from_json(&old).unwrap();
+        assert!(loaded.tempo_map().is_constant() && loaded.meter_map().is_constant());
+        assert_eq!(
+            (loaded.tempo, loaded.time_signature, loaded.format_version),
+            (120.0, TimeSignature::default(), FORMAT_VERSION)
+        );
+
+        // A map written by hand in any order, with what cannot be played,
+        // is read in order and without it.
+        let hand = json.replace(
+            "\"tempo_changes\": [",
+            "\"tempo_changes\": [{ \"beat\": 30.0, \"tempo\": 90.0 }, { \"beat\": 0.0, \"tempo\": 77.0 }, \
+             { \"beat\": 4.0, \"tempo\": 5000.0 },",
+        );
+        let loaded = Project::from_json(&hand).unwrap();
+        assert_eq!(loaded.tempo_changes, [jump(8.0, 140.0), glide(16.0, 100.0), jump(30.0, 90.0)]);
+    }
+
+    #[test]
+    fn a_clip_of_audio_is_trimmed_and_split_at_the_tempo_it_has_where_it_lies() {
+        let mut project = Project::new("t");
+        let track = project.add_track("Audio");
+        // 120 until beat 4, and 60 from there: a beat lasts half a second,
+        // then a whole one.
+        project.set_tempo_at(4.0, 60.0, false).unwrap();
+        let clip = project.add_audio_clip(track, "take", 2.0, 6.0, AudioContent::new("take.wav")).unwrap();
+        let offset = |project: &Project, id: ClipId| match &project.clip(id).unwrap().content {
+            ClipContent::Audio(audio) => audio.offset_seconds,
+            ClipContent::Midi(_) => unreachable!(),
+        };
+        // Split at beat 6: two beats at 120 and two at 60 have gone by.
+        let second = project.split_clip(clip, 6.0).unwrap();
+        assert!((offset(&project, second) - 3.0).abs() < 1e-12, "{}", offset(&project, second));
+        // Its left edge drawn back to beat 3 reveals three seconds less one
+        // beat at 120; drawn back as far as the file goes, it stops at the
+        // file's first sample, which lies where the first clip began.
+        assert_eq!(project.trim_clip_start(second, 3.0).unwrap(), 3.0);
+        assert!((offset(&project, second) - 0.5).abs() < 1e-12, "{}", offset(&project, second));
+        assert!((project.trim_clip_start(second, 0.0).unwrap() - 2.0).abs() < 1e-9);
+        assert_eq!(offset(&project, second), 0.0);
+        // Trimmed forward again across the change.
+        project.trim_clip_start(second, 5.0).unwrap();
+        assert!((offset(&project, second) - 2.0).abs() < 1e-9, "one second at 120, one beat at 60");
+
+        // A clip that follows the tempo counts in the beats of its
+        // recording, whatever the song's tempo does under it.
+        let warped = AudioContent { warp: WarpMode::Beats, source_tempo: Some(100.0), ..AudioContent::new("loop.wav") };
+        let looped = project.add_audio_clip(track, "loop", 10.0, 8.0, warped).unwrap();
+        project.set_tempo_at(12.0, 150.0, false).unwrap();
+        let tail = project.split_clip(looped, 14.0).unwrap();
+        assert!((offset(&project, tail) - 4.0 * 0.6).abs() < 1e-12);
+        let map = project.tempo_map();
+        let audio = |id: ClipId| match &project.clip(id).unwrap().content {
+            ClipContent::Audio(audio) => audio.clone(),
+            ClipContent::Midi(_) => unreachable!(),
+        };
+        assert!((audio(tail).time_ratio_at(&map, 11.0) - 100.0 / 60.0).abs() < 1e-12);
+        assert!((audio(tail).time_ratio_at(&map, 13.0) - 100.0 / 150.0).abs() < 1e-12);
+        assert_eq!(audio(second).time_ratio_at(&map, 13.0), 1.0);
+        assert!((audio(second).beats_over(&map, 2.0, 3.0) - 4.0).abs() < 1e-9, "two beats at 120, two at 60");
+    }
+
+    #[test]
+    fn a_midi_file_brings_its_tempo_and_meter_only_when_asked_and_takes_the_song_s_out_again() {
+        let file = MidiFile {
+            tempo: Some(120.0),
+            time_signature: TimeSignature::new(4, 4),
+            tempo_changes: vec![jump(8.0, 140.0), jump(15.0, 120.0)],
+            meter_changes: vec![meter(8.0, 7, 8), meter(15.0, 4, 4)],
+            tracks: vec![MidiTrack {
+                name: "Lead".into(),
+                drums: false,
+                notes: vec![
+                    Note { pitch: 60, start: 0.0, length: 1.0, velocity: 100 },
+                    Note { pitch: 62, start: 9.0, length: 0.5, velocity: 100 },
+                ],
+                controllers: Vec::new(),
+            }],
+        };
+        // Written and read, it is the same file; taken into a song and
+        // written out of it, it is again.
+        let read = crate::midi_file::parse(&crate::midi_file::write(&file)).unwrap();
+        assert_eq!(read, file);
+        let mut project = Project::new("t");
+        project.set_tempo(96.0).unwrap();
+        let parts = project.import_midi(&read, 0.0).unwrap();
+        assert!(project.tempo_map().is_constant() && project.tempo == 96.0, "importing leaves the song's time alone");
+        assert_eq!(project.clip(parts[0].clip).unwrap().length, 12.0, "three bars of the song's 4/4");
+        project.take_midi_time(&read, 0.0).unwrap();
+        assert_eq!((project.tempo, &project.tempo_changes), (120.0, &file.tempo_changes));
+        assert_eq!((project.time_signature, &project.meter_changes), (TimeSignature::default(), &file.meter_changes));
+        let exported = project.export_midi();
+        assert_eq!((exported.tempo, exported.time_signature), (file.tempo, file.time_signature));
+        assert_eq!((&exported.tempo_changes, &exported.meter_changes), (&file.tempo_changes, &file.meter_changes));
+        assert_eq!(
+            crate::midi_file::parse(&crate::midi_file::write(&exported)).unwrap().tempo_changes,
+            file.tempo_changes
+        );
+
+        // With the song's meter changing, a part ends on a bar line of it.
+        let mut other = Project::new("t");
+        other.take_midi_time(&read, 0.0).unwrap();
+        let parts = other.import_midi(&read, 0.0).unwrap();
+        assert_eq!(other.clip(parts[0].clip).unwrap().length, 11.5, "two bars of 4/4 and one of 7/8");
+
+        // Taken in further on, the file's time begins there, and the
+        // song keeps what it had before.
+        let mut later = Project::new("t");
+        later.set_tempo(100.0).unwrap();
+        later.set_tempo_at(4.0, 110.0, false).unwrap();
+        later.set_tempo_at(40.0, 66.0, false).unwrap();
+        later.take_midi_time(&read, 16.0).unwrap();
+        assert_eq!(later.tempo_changes, [jump(4.0, 110.0), jump(16.0, 120.0), jump(24.0, 140.0), jump(31.0, 120.0)]);
+        assert_eq!(later.meter_changes, [meter(16.0, 4, 4), meter(24.0, 7, 8), meter(31.0, 4, 4)]);
+        // A file that names neither leaves the song as it is.
+        let before = later.clone();
+        later.take_midi_time(&MidiFile::default(), 0.0).unwrap();
+        assert_eq!(later, before);
+    }
+
     #[test]
     fn midi_files_import_as_tracks_and_export_what_sounds() {
         let mut project = Project::new("t");
@@ -2539,6 +3083,8 @@ mod tests {
         let file = MidiFile {
             tempo: Some(140.0),
             time_signature: None,
+            tempo_changes: Vec::new(),
+            meter_changes: Vec::new(),
             tracks: vec![
                 MidiTrack {
                     name: "Lead".into(),

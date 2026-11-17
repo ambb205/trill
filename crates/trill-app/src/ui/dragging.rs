@@ -198,7 +198,8 @@ pub fn new_track_colors(cx: &Cx, count: usize) -> Vec<u32> {
 /// Says in the status bar where the drag would land.
 fn hint(cx: &mut Cx, drag: &SoundDrag) {
     let project = &cx.snap.project;
-    let at = |beat: f64| timeline::format_position(beat, project.time_signature);
+    let bars = project.meter_map();
+    let at = |beat: f64| timeline::format_position(beat, &bars);
     let name = |track| cx.snap.track(track).map_or("the track", |track| track.name.as_str());
     let device = |id| project.device(id).map_or("the device", |device| device.name.as_str());
     let text = match (&drag.target, drag.refusal) {

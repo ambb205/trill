@@ -9,7 +9,7 @@ use trill_core::device::{DeviceCategory, DeviceDescriptor, ParamInfo, ParamKind}
 use trill_core::pitch::pitch_name;
 use trill_core::presets::{CATEGORY_SEPARATOR, PresetInfo, PresetList, PresetQuery, PresetStatus};
 use trill_core::project::{AutomationLane, AutomationPoint, AutomationTarget, Clip, ClipContent, Segment, WarpMode};
-use trill_core::{Device, Note, Project, Track, TrackKind};
+use trill_core::{Device, MeterMap, Note, Project, TimeSignature, Track, TrackKind};
 use trill_engine::{AudioConfig, AudioDevice, RecordState, TakeClip};
 use trill_engine::{ParamState, SampleFile, Session};
 use trill_library::{Entry, ScanStatus};
@@ -67,13 +67,13 @@ pub fn controller_json(curve: &ControllerCurve, include_points: bool) -> Value {
     out
 }
 
-pub fn clip_json(clip: &Clip, beats_per_bar: f64, include_notes: bool) -> Value {
+pub fn clip_json(clip: &Clip, bars: &MeterMap, include_notes: bool) -> Value {
     let mut out = json!({
         "id": clip.id,
         "name": clip.name,
         "start": round(clip.start),
         "length": round(clip.length),
-        "start_bar": round(clip.start / beats_per_bar + 1.0),
+        "start_bar": round(bars.bars_at(clip.start) + 1.0),
     });
     let fields = out.as_object_mut().expect("object literal");
     if clip.muted {
@@ -250,8 +250,8 @@ pub fn loading_note(session: &Session) -> Option<String> {
     })
 }
 
-pub fn track_json(track: &Track, beats_per_bar: f64, include_notes: bool) -> Value {
-    let mut out = track_fields(track, beats_per_bar, include_notes);
+pub fn track_json(track: &Track, bars: &MeterMap, include_notes: bool) -> Value {
+    let mut out = track_fields(track, bars, include_notes);
     match track.kind {
         TrackKind::Normal => {}
         TrackKind::Group => out["kind"] = json!("group"),
@@ -266,7 +266,7 @@ pub fn track_json(track: &Track, beats_per_bar: f64, include_notes: bool) -> Val
     out
 }
 
-fn track_fields(track: &Track, beats_per_bar: f64, include_notes: bool) -> Value {
+fn track_fields(track: &Track, bars: &MeterMap, include_notes: bool) -> Value {
     json!({
         "id": track.id,
         "name": track.name,
@@ -275,7 +275,7 @@ fn track_fields(track: &Track, beats_per_bar: f64, include_notes: bool) -> Value
         "mute": track.mute,
         "solo": track.solo,
         "devices": track.devices.iter().map(device_json).collect::<Vec<_>>(),
-        "clips": track.clips.iter().map(|clip| clip_json(clip, beats_per_bar, include_notes)).collect::<Vec<_>>(),
+        "clips": track.clips.iter().map(|clip| clip_json(clip, bars, include_notes)).collect::<Vec<_>>(),
     })
 }
 
@@ -346,21 +346,106 @@ pub fn sends_json(project: &Project, track: &Track) -> Option<Value> {
     (!sends.is_empty()).then(|| json!(sends))
 }
 
-/// Song position as `bar.beat`, both 1-based, e.g. beat 5.5 in 4/4 → "2.2.5".
-pub fn bar_beat(beat: f64, beats_per_bar: f64) -> String {
-    let bar = (beat / beats_per_bar).floor();
-    let within = beat - bar * beats_per_bar;
-    format!("{}.{}", bar as i64 + 1, round(within + 1.0))
+/// Song position as `bar.beat`, both 1-based, in a song whose bars are
+/// `bars`: beat 5.5 in 4/4 is "2.2.5". The bar is the song's own, through
+/// every change of time signature, and the beat is counted in it.
+pub fn bar_beat_at(bars: &MeterMap, beat: f64) -> String {
+    let bar = bars.bar_at(beat);
+    format!("{}.{}", bar.number(), round(beat.max(0.0) - bar.start + 1.0))
+}
+
+fn signature_text(signature: TimeSignature) -> String {
+    format!("{}/{}", signature.numerator, signature.denominator)
+}
+
+/// The tempo and the time signature along the song: what it begins with
+/// and every change after, each with the bar and the beat it lies at and
+/// the second the song reaches it.
+pub fn tempo_map_json(project: &Project) -> Value {
+    let (tempo, bars) = (project.tempo_map(), project.meter_map());
+    let mut tempos = vec![json!({ "bar": 1, "beat": 0.0, "seconds": 0.0, "bpm": project.tempo })];
+    for change in &project.tempo_changes {
+        let bar = bars.bar_at(change.beat);
+        let mut entry = json!({
+            "bar": bar.number(),
+            "beat": round(change.beat),
+            "seconds": round(tempo.seconds_at(change.beat)),
+            "bpm": change.tempo,
+        });
+        let within = change.beat - bar.start;
+        if within > 1e-6 {
+            entry["beat_in_bar"] = json!(round(within + 1.0));
+        }
+        if change.ramp {
+            entry["ramp"] = json!(true);
+        }
+        tempos.push(entry);
+    }
+    let signatures: Vec<Value> = bars
+        .sections()
+        .map(|bar| {
+            json!({
+                "bar": bar.number(),
+                "beat": round(bar.start),
+                "seconds": round(tempo.seconds_at(bar.start)),
+                "time_signature": signature_text(bar.signature),
+                "beats_per_bar": bar.signature.beats_per_bar(),
+            })
+        })
+        .collect();
+    let mut out = json!({ "tempo": tempos, "time_signature": signatures });
+    let cut: Vec<String> = bars
+        .cut_bars()
+        .map(|bar| {
+            format!(
+                "bar {} ({}) is {} beat(s) long instead of {}: the next time signature begins at beat {}",
+                bar.number(),
+                signature_text(bar.signature),
+                round(bar.length),
+                bar.signature.beats_per_bar(),
+                round(bar.end())
+            )
+        })
+        .collect();
+    if !cut.is_empty() {
+        out["cut_bars"] = json!(cut);
+    }
+    out
+}
+
+/// What [`tempo_map_json`] says, as the fields a view of the whole song
+/// adds when its tempo or its time signature changes on the way.
+fn add_changes(project: &Project, out: &mut Value) {
+    if project.tempo_changes.is_empty() && project.meter_changes.is_empty() {
+        return;
+    }
+    let map = tempo_map_json(project);
+    if !project.tempo_changes.is_empty() {
+        out["tempo_changes"] = map["tempo"].clone();
+    }
+    if !project.meter_changes.is_empty() {
+        out["time_signature_changes"] = map["time_signature"].clone();
+    }
+    if let Some(cut) = map.get("cut_bars") {
+        out["cut_bars"] = cut.clone();
+    }
 }
 
 pub fn transport_json(session: &Session) -> Value {
     let status = session.transport();
-    let beats_per_bar = session.project().time_signature.beats_per_bar();
+    let project = session.project();
+    let bars = project.meter_map();
     let mut out = json!({
         "playing": status.playing,
         "position_beats": round(status.position_beats),
-        "position_bar_beat": bar_beat(status.position_beats, beats_per_bar),
+        "position_bar_beat": bar_beat_at(&bars, status.position_beats),
     });
+    if !project.tempo_changes.is_empty() {
+        out["tempo_here"] = json!(round(project.tempo_map().tempo_at(status.position_beats)));
+    }
+    if !project.meter_changes.is_empty() {
+        out["time_signature_here"] = json!(signature_text(bars.signature_at(status.position_beats)));
+    }
     if session.metronome() {
         out["metronome"] = json!(true);
     }
@@ -461,7 +546,12 @@ pub fn midi_input_json(input: &MidiInputInfo) -> Value {
 pub fn project_json(session: &Session, include_notes: bool) -> Value {
     let project: &Project = session.project();
     let beats_per_bar = project.time_signature.beats_per_bar();
+    let bars = &project.meter_map();
     let length = project.length_beats();
+    let seconds = match project.tempo_changes.is_empty() {
+        true => length * 60.0 / project.tempo,
+        false => project.tempo_map().seconds_at(length),
+    };
     let info = session.audio_info();
     let mut out = json!({
         "name": project.name,
@@ -469,8 +559,8 @@ pub fn project_json(session: &Session, include_notes: bool) -> Value {
         "time_signature": format!("{}/{}", project.time_signature.numerator, project.time_signature.denominator),
         "beats_per_bar": beats_per_bar,
         "length_beats": round(length),
-        "length_bars": round(length / beats_per_bar),
-        "length_seconds": round(length * 60.0 / project.tempo),
+        "length_bars": round(bars.bars_at(length)),
+        "length_seconds": round(seconds),
         "loop": {
             "enabled": project.loop_region.enabled,
             "start": project.loop_region.start,
@@ -481,7 +571,7 @@ pub fn project_json(session: &Session, include_notes: bool) -> Value {
             .tracks
             .iter()
             .map(|track| {
-                let mut out = track_json(track, beats_per_bar, include_notes);
+                let mut out = track_json(track, bars, include_notes);
                 if let Some(sends) = sends_json(project, track) {
                     out["sends"] = sends;
                 }
@@ -502,11 +592,12 @@ pub fn project_json(session: &Session, include_notes: bool) -> Value {
         "file": session.path().map(|p| p.display().to_string()),
         "unsaved_changes": session.is_modified(),
     });
+    add_changes(project, &mut out);
     if !project.markers.is_empty() {
         out["markers"] = project
             .markers
             .iter()
-            .map(|marker| json!({ "beat": round(marker.beat), "bar": round(marker.beat / beats_per_bar + 1.0), "name": marker.name }))
+            .map(|marker| json!({ "beat": round(marker.beat), "bar": round(bars.bars_at(marker.beat) + 1.0), "name": marker.name }))
             .collect();
     }
     if let Some(note) = loading_note(session) {
@@ -858,8 +949,18 @@ mod tests {
 
     #[test]
     fn bar_beat_is_one_based() {
-        assert_eq!(bar_beat(0.0, 4.0), "1.1");
-        assert_eq!(bar_beat(5.5, 4.0), "2.2.5");
-        assert_eq!(bar_beat(3.0, 3.0), "2.1");
+        let in_meter =
+            |numerator: u8, denominator: u8| MeterMap::constant(TimeSignature::new(numerator, denominator).unwrap());
+        assert_eq!(bar_beat_at(&in_meter(4, 4), 0.0), "1.1");
+        assert_eq!(bar_beat_at(&in_meter(4, 4), 5.5), "2.2.5");
+        assert_eq!(bar_beat_at(&in_meter(3, 4), 3.0), "2.1");
+        // Counted through a change: two bars of 4/4, then 7/8.
+        let mut song = Project::new("t");
+        song.set_time_signature_at(8.0, 7, 8).unwrap();
+        let bars = song.meter_map();
+        assert_eq!(
+            (bar_beat_at(&bars, 8.0), bar_beat_at(&bars, 12.5), bar_beat_at(&bars, 15.0)),
+            ("3.1".into(), "4.2".into(), "5.1".into())
+        );
     }
 }

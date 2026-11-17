@@ -792,6 +792,8 @@ mod tests {
         MidiFile {
             tempo: Some(100.0),
             time_signature: None,
+            tempo_changes: Vec::new(),
+            meter_changes: Vec::new(),
             tracks: vec![
                 trill_core::midi_file::MidiTrack {
                     name: "Lead".into(),

@@ -2,14 +2,20 @@
 //! region, which is dragged by its ends and body and drawn anew by dragging
 //! where it is not. Under it the markers. At the foot the bar numbers,
 //! where a click moves the edit cursor and a drag selects time.
+//!
+//! Where the tempo or the time signature changes, the foot says so beside
+//! the bar's number: "7/8", "140 BPM", an arrow before a tempo the song
+//! glides to. Such a change is typed over with a double-click, dragged
+//! along the song, and set, removed or made a glide from the right-click
+//! menu of the foot.
 
 use super::{Geometry, LABEL_MIN_PIXELS, ops};
 use crate::ui::shortcuts::{self, Command};
-use crate::ui::state::{ArrangeDrag, Cx, FocusArea, TextEditState, TimeSelection};
+use crate::ui::state::{ArrangeDrag, ChangeTarget, Cx, FocusArea, TextEditState, TimeSelection};
 use crate::ui::{timeline, widgets};
 use eframe::egui::{Align2, CursorIcon, PointerButton, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, pos2, vec2};
 use trill_core::project::LoopRegion;
-use trill_core::{Beats, Marker};
+use trill_core::{Beats, Marker, Project, TimeSignature};
 use trill_noir::{MenuItem, paint, text};
 
 /// The top strip, where the loop bar is grabbed. The bar itself is drawn
@@ -28,6 +34,81 @@ const LOOP_GRIP: f32 = 8.0;
 const LOOP_END_GRAB: f32 = 6.0;
 /// Width of a marker's flag, and of the space kept after its name.
 const MARKER_FLAG: f32 = 7.0;
+
+/// What the tempo and the time signature do at one position of the song.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(in crate::ui) struct Change {
+    pub beat: Beats,
+    pub signature: Option<TimeSignature>,
+    /// The tempo the song glides to, arriving here.
+    pub glide: Option<f64>,
+    /// The tempo that takes over here.
+    pub tempo: Option<f64>,
+}
+
+impl Change {
+    /// What the foot of the ruler says of it: a time signature, a tempo
+    /// the song glides to behind an arrow, a tempo, with a dot between.
+    pub fn said(&self) -> String {
+        let bpm = |tempo: f64| format!("{}", (tempo * 100.0).round() / 100.0);
+        let mut parts: Vec<String> = Vec::new();
+        parts.extend(self.signature.map(|signature| format!("{}/{}", signature.numerator, signature.denominator)));
+        parts.extend(self.glide.map(|tempo| format!("\u{2192}{}", bpm(tempo))));
+        parts.extend(self.tempo.map(bpm));
+        let unit = if self.glide.is_some() || self.tempo.is_some() { " BPM" } else { "" };
+        format!("{}{unit}", parts.join(" \u{00B7} "))
+    }
+}
+
+/// Every place where the song's tempo or time signature changes, in order.
+pub(in crate::ui) fn changes(project: &Project) -> Vec<Change> {
+    let mut changes: Vec<Change> = Vec::new();
+    // The one at `beat`, made if there is none yet.
+    fn at(changes: &mut Vec<Change>, beat: Beats) -> &mut Change {
+        let index = match changes.iter().position(|change| (change.beat - beat).abs() < 1e-6) {
+            Some(index) => index,
+            None => {
+                changes.push(Change { beat, signature: None, glide: None, tempo: None });
+                changes.len() - 1
+            }
+        };
+        &mut changes[index]
+    }
+    for change in &project.meter_changes {
+        at(&mut changes, change.beat).signature = Some(change.signature);
+    }
+    for change in &project.tempo_changes {
+        let there = at(&mut changes, change.beat);
+        match change.ramp {
+            true => there.glide = Some(change.tempo),
+            false => there.tempo = Some(change.tempo),
+        }
+    }
+    changes.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+    changes
+}
+
+/// Where the foot of the ruler says `change`: from its bar line on, the
+/// bar's number and then what changes. Returns the whole of it and where
+/// what changes begins.
+fn change_rect(ui: &Ui, cx: &Cx, geometry: &Geometry, change: &Change) -> (Rect, f32) {
+    let style = trill_noir::TextStyle { tracking: 0.4, ..cx.theme.text.micro };
+    let number = text::width(ui.painter(), style, &timeline::format_bar_beat(change.beat, &geometry.meter));
+    let said = text::width(ui.painter(), style, &change.said());
+    let left = geometry.x(change.beat).round() + 1.0;
+    let top = geometry.ruler.bottom() - TIME_STRIP + 1.0;
+    let rect = Rect::from_min_size(pos2(left, top), vec2(3.0 + number + 6.0 + said + 5.0, TIME_STRIP - 2.0));
+    (rect, left + 3.0 + number + 6.0)
+}
+
+/// The change whose words at the foot of the ruler are at `position`.
+fn change_at(ui: &Ui, cx: &Cx, geometry: &Geometry, position: Pos2) -> Option<Change> {
+    if strip_at(geometry, position.y) != Strip::Time {
+        return None;
+    }
+    let found = changes(&cx.snap.project).into_iter().rev();
+    found.into_iter().find(|change| change_rect(ui, cx, geometry, change).0.contains(position))
+}
 
 /// Which strip of the ruler a position is in.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -104,6 +185,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry) {
     interact(ui, cx, geometry, &response);
     marker_menu(ui, cx, geometry, &response);
     rename_field(ui, cx, geometry);
+    change_field(ui, cx, geometry);
 }
 
 fn interact(ui: &Ui, cx: &mut Cx, geometry: &Geometry, response: &Response) {
@@ -127,7 +209,12 @@ fn interact(ui: &Ui, cx: &mut Cx, geometry: &Geometry, response: &Response) {
                 "Click to go to this marker \u{00B7} drag to move it \u{00B7} double-click to rename \u{00B7} right-click for more"
             }
             (Strip::Markers, _) => "Double-click to add a marker \u{00B7} M adds one at the edit cursor",
-            (Strip::Time, _) => "Click to move the edit cursor \u{00B7} drag to select time \u{00B7} Ctrl+scroll zooms",
+            (Strip::Time, _) if change_at(ui, cx, geometry, pointer).is_some() => {
+                "Double-click to type another \u{00B7} drag to move it \u{00B7} right-click to remove it or make the tempo glide"
+            }
+            (Strip::Time, _) => {
+                "Click to move the edit cursor \u{00B7} drag to select time \u{00B7} right-click to set the tempo or the time signature here"
+            }
         };
         cx.state.hint.set(hint);
     }
@@ -136,11 +223,15 @@ fn interact(ui: &Ui, cx: &mut Cx, geometry: &Geometry, response: &Response) {
         let beat = geometry.snap(geometry.beat(pointer.x), free);
         let on_marker = marker_at(ui, cx, geometry, pointer);
         let strip = strip_at(geometry, pointer.y);
+        let on_change = change_at(ui, cx, geometry, pointer);
         if widgets::double_clicked(response) && strip == Strip::Markers {
             match on_marker {
                 Some(index) => start_rename(cx, index),
                 None => ops::add_marker_at(cx, beat),
             }
+        } else if let (true, Some(change)) = (widgets::double_clicked(response), on_change) {
+            // The tempo, if the tempo changes there; else the time signature.
+            start_change(cx, change.beat, change.tempo.is_some() || change.glide.is_some());
         } else if response.clicked() {
             cx.state.focus = FocusArea::Arrangement;
             match on_marker.and_then(|index| cx.snap.project.markers.get(index)) {
@@ -168,7 +259,10 @@ fn interact(ui: &Ui, cx: &mut Cx, geometry: &Geometry, response: &Response) {
                 Some(index) => ArrangeDrag::MoveMarker { index },
                 None => ArrangeDrag::RulerSelect { anchor: beat },
             },
-            (Strip::Time, _) => ArrangeDrag::RulerSelect { anchor: beat },
+            (Strip::Time, _) => match change_at(ui, cx, geometry, press) {
+                Some(change) => ArrangeDrag::MoveChange { beat: change.beat, grab_offset: beat - change.beat },
+                None => ArrangeDrag::RulerSelect { anchor: beat },
+            },
         };
         if !matches!(drag, ArrangeDrag::RulerSelect { .. }) {
             cx.begin_gesture();
@@ -201,6 +295,28 @@ fn interact(ui: &Ui, cx: &mut Cx, geometry: &Geometry, response: &Response) {
                 // Passing another marker changes its place in the list.
                 if moved && let Some(index) = cx.edit(|project| project.move_marker(index, beat)) {
                     cx.state.arrangement.drag = Some(ArrangeDrag::MoveMarker { index });
+                }
+            }
+            Some(ArrangeDrag::MoveChange { beat: from, grab_offset }) => {
+                ui.set_cursor_icon(CursorIcon::Grabbing);
+                let beat = geometry.snap(geometry.beat(pointer.x) - grab_offset, free);
+                // What the tempo does there and what the time signature
+                // does there go together, as they are shown together.
+                if beat > 1e-6 && (beat - from).abs() >= 1e-9 {
+                    let there = changes(&cx.snap.project).into_iter().find(|change| (change.beat - from).abs() < 1e-6);
+                    let moved = cx.edit(|project| {
+                        let Some(change) = there else { return Ok(false) };
+                        if change.tempo.is_some() || change.glide.is_some() {
+                            project.move_tempo_at(from, beat)?;
+                        }
+                        if change.signature.is_some() {
+                            project.move_time_signature_at(from, beat)?;
+                        }
+                        Ok(true)
+                    });
+                    if moved == Some(true) {
+                        cx.state.arrangement.drag = Some(ArrangeDrag::MoveChange { beat, grab_offset });
+                    }
                 }
             }
             Some(ArrangeDrag::RulerSelect { anchor }) => {
@@ -236,18 +352,138 @@ fn start_rename(cx: &mut Cx, index: usize) {
     }
 }
 
-/// Right-click menu of the marker strip.
+/// Opens the field that types the tempo (`tempo`) or the time signature
+/// at `beat`.
+fn start_change(cx: &mut Cx, beat: Beats, tempo: bool) {
+    let target = ChangeTarget::at(beat, tempo);
+    cx.state.arrangement.editing_change = Some(TextEditState { target, text: change_text(cx, target), focused: false });
+}
+
+/// What the song has where `target` points, as it is typed: "140", "7/8".
+/// Where nothing changes there yet, what is in force there.
+fn change_text(cx: &Cx, target: ChangeTarget) -> String {
+    let project = &cx.snap.project;
+    let beat = target.beat();
+    if target.tempo {
+        let tempo = (project.tempo_map().tempo_at(beat) * 100.0).round() / 100.0;
+        format!("{tempo}")
+    } else {
+        let signature = project.meter_map().signature_at(beat);
+        format!("{}/{}", signature.numerator, signature.denominator)
+    }
+}
+
+/// The field at the foot of the ruler while a tempo or a time signature is
+/// being typed there.
+fn change_field(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry) {
+    let Some(target) = cx.state.arrangement.editing_change.as_ref().map(|edit| edit.target) else { return };
+    let ruler = geometry.ruler;
+    let beat = target.beat();
+    let left = (geometry.x(beat).round() + 1.0).clamp(ruler.left(), (ruler.right() - 70.0).max(ruler.left()));
+    let field = Rect::from_min_size(pos2(left, ruler.bottom() - TIME_STRIP - 2.0), vec2(70.0, 20.0));
+    // Typed over what is there: so that the same number typed again is
+    // still an answer, the field starts from nothing to compare with.
+    let edit = &mut cx.state.arrangement.editing_change;
+    let Some(typed) = widgets::name_field(ui, cx.theme, field, target, "", edit) else { return };
+    let typed = typed.trim().to_ascii_lowercase();
+    if target.tempo {
+        let number = typed.trim_end_matches("bpm").trim().replace(',', ".");
+        match number.parse::<f64>() {
+            Ok(tempo) => {
+                // A glide that arrives there stays a glide, to its new tempo.
+                let glides = changes(&cx.snap.project).iter().any(|change| {
+                    (change.beat - beat).abs() < 1e-6 && change.glide.is_some() && change.tempo.is_none()
+                });
+                cx.edit(|project| project.set_tempo_at(beat, tempo, glides));
+            }
+            Err(_) => cx
+                .state
+                .toasts
+                .error(format!("\u{201C}{typed}\u{201D} is not a tempo: type beats per minute, such as 140")),
+        }
+    } else {
+        let parts = typed
+            .split_once('/')
+            .and_then(|(beats, note)| Some((beats.trim().parse().ok()?, note.trim().parse().ok()?)));
+        match parts {
+            Some((beats, note)) => {
+                cx.edit(|project| project.set_time_signature_at(beat, beats, note));
+            }
+            None => {
+                cx.state.toasts.error(format!("\u{201C}{typed}\u{201D} is not a time signature: type one such as 7/8"))
+            }
+        }
+    }
+}
+
+/// What a right-click on the ruler was on.
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct Subject {
+    marker: Option<usize>,
+    beat: Beats,
+    /// At the foot of the ruler, where the tempo and the time signature are set.
+    foot: bool,
+    change: Option<Change>,
+}
+
+/// Right-click menu of the ruler: the markers', and at its foot the
+/// tempo's and the time signature's.
 fn marker_menu(ui: &Ui, cx: &mut Cx, geometry: &Geometry, response: &Response) {
     let theme = cx.theme;
     if response.secondary_clicked()
         && let Some(pointer) = response.interact_pointer_pos()
     {
-        let subject = (marker_at(ui, cx, geometry, pointer), geometry.snap(geometry.beat(pointer.x), false));
+        let change = change_at(ui, cx, geometry, pointer);
+        let subject = Subject {
+            marker: marker_at(ui, cx, geometry, pointer),
+            // What changes there is spoken of where it is, not where the grid is.
+            beat: change.map_or(geometry.snap(geometry.beat(pointer.x), false), |change| change.beat),
+            foot: strip_at(geometry, pointer.y) == Strip::Time,
+            change,
+        };
         ui.data_mut(|data| data.insert_temp(response.id, subject));
     }
-    let Some((marker, beat)) = ui.data(|data| data.get_temp::<(Option<usize>, Beats)>(response.id)) else { return };
+    let Some(Subject { marker, beat, foot, change }) = ui.data(|data| data.get_temp::<Subject>(response.id)) else {
+        return;
+    };
     response.context_menu(|ui| {
         ui.set_min_width(190.0);
+        if foot {
+            let place = timeline::format_bar_beat(beat, &geometry.meter);
+            if MenuItem::new(&format!("Set the tempo at {place}\u{2026}")).show(ui, theme).clicked() {
+                start_change(cx, beat, true);
+            }
+            if MenuItem::new(&format!("Set the time signature at {place}\u{2026}")).show(ui, theme).clicked() {
+                start_change(cx, beat, false);
+            }
+            if let Some(change) = change {
+                trill_noir::menu_separator(ui, theme);
+                if let Some(tempo) = change.glide.or(change.tempo) {
+                    let glides = change.glide.is_some();
+                    if MenuItem::new("Glide to this tempo").checked(glides).show(ui, theme).clicked() {
+                        cx.edit(|project| {
+                            project.remove_tempo_at(beat)?;
+                            project.set_tempo_at(beat, tempo, !glides)
+                        });
+                    }
+                    if MenuItem::new("Remove the change of tempo").show(ui, theme).clicked() {
+                        cx.edit(|project| project.remove_tempo_at(beat));
+                    }
+                }
+                if change.signature.is_some()
+                    && MenuItem::new("Remove the change of time signature").show(ui, theme).clicked()
+                {
+                    cx.edit(|project| project.remove_time_signature_at(beat));
+                }
+            }
+            trill_noir::menu_separator(ui, theme);
+            let selected = cx.state.arrangement.time_selection.is_some();
+            let keys = shortcuts::keys(Command::LoopSelection);
+            if MenuItem::new("Loop the selection").shortcut(&keys).enabled(selected).show(ui, theme).clicked() {
+                ops::loop_selection(cx);
+            }
+            return;
+        }
         match marker.filter(|index| *index < cx.snap.project.markers.len()) {
             Some(index) => {
                 if MenuItem::new("Rename marker").show(ui, theme).clicked() {
@@ -305,27 +541,64 @@ fn paint(ui: &Ui, cx: &Cx, geometry: &Geometry) {
     }
 
     let signature = geometry.signature;
+    let bars = &geometry.meter;
     let (first_beat, last_beat) = geometry.time.visible(ruler.width());
     // Ticks continue the lanes' grid up through the time strip, bars and
     // coarser only; numbers are spaced for legibility, independently of
     // the grid.
     let tick_step = geometry.grid.max(geometry.beats_per_bar);
-    timeline::for_each_grid_line(first_beat, last_beat, signature, tick_step, |beat, _| {
+    timeline::for_each_grid_line(first_beat, last_beat, bars, tick_step, |beat, _| {
         paint::vline(&painter, geometry.x(beat).round(), time_top..=ruler.bottom(), theme.grid);
     });
+    // Where the tempo or the time signature changes, the bar's number
+    // and what changes are said together, and no other number is put
+    // under them.
+    let editing = cx.state.arrangement.editing_change.as_ref().map(|edit| edit.target.beat());
+    let changing: Vec<(Change, Rect, f32)> = changes(&cx.snap.project)
+        .into_iter()
+        .filter(|change| change.beat <= last_beat)
+        .map(|change| {
+            let (rect, said_at) = change_rect(ui, cx, geometry, &change);
+            (change, rect, said_at)
+        })
+        .filter(|(_, rect, _)| rect.right() >= ruler.left())
+        .collect();
     let label_step = timeline::grid_step(geometry.time.pixels_per_beat, signature, LABEL_MIN_PIXELS).max(tick_step);
     let style = trill_noir::TextStyle { tracking: 0.4, ..theme.text.micro };
-    timeline::for_each_grid_line(first_beat, last_beat, signature, label_step, |beat, _| {
-        let room = Rect::from_min_max(pos2(geometry.x(beat).round() + 4.0, time_top + 1.0), ruler.max);
+    timeline::for_each_grid_line(first_beat, last_beat, bars, label_step, |beat, _| {
+        let x = geometry.x(beat).round();
+        if changing.iter().any(|(_, rect, _)| x + 34.0 > rect.left() && x < rect.right()) {
+            return;
+        }
+        let room = Rect::from_min_max(pos2(x + 4.0, time_top + 1.0), ruler.max);
         text::paint(
             &painter,
             room,
             Align2::LEFT_CENTER,
             style,
-            &timeline::format_bar_beat(beat, signature),
+            &timeline::format_bar_beat(beat, bars),
             theme.ink_faint,
         );
     });
+    for (index, (change, rect, said_at)) in changing.iter().enumerate() {
+        let x = geometry.x(change.beat).round();
+        paint::vline(&painter, x, time_top..=ruler.bottom(), theme.signal);
+        // Zoomed far out, one change's words give way where the next begin.
+        let room = changing.get(index + 1).map_or(ruler.right(), |(_, next, _)| next.left() - 4.0);
+        let painter = painter.with_clip_rect(Rect::from_min_max(pos2(x, time_top), pos2(room.max(x), ruler.bottom())));
+        let number = Rect::from_min_max(pos2(x + 4.0, time_top + 1.0), ruler.max);
+        let place = timeline::format_bar_beat(change.beat, bars);
+        text::paint(&painter, number, Align2::LEFT_CENTER, style, &place, theme.ink_faint);
+        if editing.is_none_or(|editing| (editing - change.beat).abs() > 1e-6) {
+            let said = Rect::from_min_max(pos2(*said_at, time_top + 1.0), ruler.max);
+            text::paint(&painter, said, Align2::LEFT_CENTER, style, &change.said(), theme.ink);
+        }
+        // Said to a screen reader, and to a test, as it is shown.
+        let response =
+            ui.interact(*rect, ui.scope_id().with(("change", ChangeTarget::at(change.beat, true))), Sense::hover());
+        let label = format!("At bar {place}: {}", change.said());
+        response.widget_info(|| eframe::egui::WidgetInfo::labeled(eframe::egui::Role::Label, true, &label));
+    }
 
     // Markers: a flag on a short staff, and the name beside it.
     let renaming = view.renaming_marker.as_ref().map(|edit| edit.target);
@@ -373,7 +646,7 @@ mod tests {
         let mut view = UiState::new(DetailTab::Clip).arrangement;
         view.time = TimeView { origin: 4.0, pixels_per_beat: 20.0 };
         let area = Rect::from_min_size(pos2(0.0, 100.0), vec2(1000.0, 400.0));
-        Geometry::new(area, &view, Rows::build(&project.tracks, &view), project.time_signature)
+        Geometry::new(area, &view, Rows::build(&project.tracks, &view), project.meter_map())
     }
 
     #[test]

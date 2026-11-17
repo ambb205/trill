@@ -12,8 +12,8 @@ use crate::requests::*;
 use crate::view::{
     ParamDetail, ParamSpan, PresetSearch, audio_device_json, audio_json, clip_json, controller_json, descriptor_json,
     descriptor_summary_json, device_json, lane_json, midi_input_json, param_state_json, plugin_param_json,
-    presets_json, project_json, round, samples_json, scan_json, sound_json, take_json, target_json, track_json,
-    transport_json, warp_name,
+    presets_json, project_json, round, samples_json, scan_json, sound_json, take_json, target_json, tempo_map_json,
+    track_json, transport_json, warp_name,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -85,7 +85,8 @@ This server controls Trill, a digital audio workstation. You compose, arrange an
 user hears and sees every change live.
 
 Conventions
-- Time is in beats (quarter notes), starting at 0. In 4/4, bar N starts at beat (N-1)*4.
+- Time is in beats (quarter notes), starting at 0. In 4/4, bar N starts at beat (N-1)*4. A beat is a quarter \
+note in every time signature: a bar of 7/8 is 3.5 beats, a bar of 6/8 is 3.
 - Pitch is a MIDI number (60 = C4 = middle C), a note name (\"C4\", \"F#3\", \"Bb2\") or, on drum kits, a drum \
 name (\"kick\", \"snare\", \"closed_hat\", \"open_hat\", \"clap\", ...). Velocity is 1-127.
 - Every track, clip and device has an integer id, returned when it is created and listed by get_project.
@@ -170,7 +171,33 @@ follow it, so set it before writing a wide bend or a dive as a pitch_bend curve.
 section, double a chorus, make room for a bridge).
 - Reusing a section: edit_time \"copy\" copies a stretch of time to another place on every track (or some), \
 with automation and controller curves, in one call. Do not duplicate a chorus clip by clip.
-- Every edit can be reversed with history (undo/redo).";
+- Every edit can be reversed with history (undo/redo).
+
+A tempo or a time signature that changes inside the song
+- set_project gives the tempo and the time signature the song begins with. set_tempo and set_time_signature \
+change them from a bar on: `set_time_signature {bar: 9, time_signature: \"7/8\", bars: 4}` makes bars 9 to 12 \
+bars of 7/8 and goes back to what was there before; `set_tempo {bar: 9, bpm: 140}` plays from bar 9 at 140. \
+`ramp: true` makes the tempo glide to that bar from the change before it (a ritardando into a bar, an \
+accelerando out of one). Nothing in the song moves when either is set: positions are beats, and beats stay \
+where they are. What changes is how long a beat lasts and which bar it is in.
+- Bars are counted through the changes. Set them from the start of the song towards its end, time signatures \
+before the music that goes into their bars. A time signature begins a bar where it is set, so setting one in \
+the middle of what follows can cut the bar before the next change short: the reply names such bars \
+(`cut_bars`), and get_tempo_map shows the whole map, with the beat and the second each change lies at.
+- Positions you give stay in beats. get_tempo_map `bars: [9, 13]` answers with the beat each of those bars \
+starts at; within one time signature, bar N starts at that signature's first `beat` plus (N minus its first \
+`bar`) times its `beats_per_bar`.
+- The writing tools write the song's own bars from `start` on, each in the time signature it has there: a \
+progression's fourth chord fills the fourth bar written, whether that is four beats long or three and a half. \
+write_melody is counted through in one time signature: write a line that crosses a change in two calls. A named \
+groove or fill is written in a meter of its own (music_reference \"grooves\"); in a bar of another meter its \
+steps keep their length, the groove is cut off or begins again to fill the bar, and a fill ends with the bar. \
+Lanes you give divide each bar evenly, so write a bar of 7/8 as 7 or 14 steps.
+- Envelopes, controller curves, markers and the loop are in beats and follow the changes. An audio clip that \
+follows the tempo (warp) follows every change of it; one that does not keeps its own speed. A plugin is told \
+the tempo and the time signature as they pass.
+- The metronome and the count-in click the time signature they are in. measure and render take sections by \
+`bars` of the song as it is counted now.";
 
 /// The points of envelopes one get_automation reply lists when it is not
 /// told how many, and the most it can be asked for.
@@ -594,7 +621,9 @@ impl TrillServer {
         finish(Ok(out))
     }
 
-    /// Change song-wide settings: name, tempo, time signature, loop region, master volume.
+    /// Change song-wide settings: name, tempo, time signature, loop region, master volume. The tempo and the
+    /// time signature are those the song begins with; set_tempo and set_time_signature change them from a
+    /// later bar on.
     #[tool(annotations(title = "Set project settings"))]
     fn set_project(&self, Parameters(request): Parameters<SetProjectRequest>) -> CallToolResult {
         let mut session = self.session.lock();
@@ -619,14 +648,207 @@ impl TrillServer {
                 Ok(())
             })?;
             let project = session.project();
-            Ok(json!({
+            let mut out = json!({
                 "name": project.name,
                 "tempo": project.tempo,
                 "time_signature": format!("{}/{}", project.time_signature.numerator, project.time_signature.denominator),
                 "beats_per_bar": project.time_signature.beats_per_bar(),
                 "loop": { "enabled": project.loop_region.enabled, "start": project.loop_region.start, "end": project.loop_region.end },
                 "master_volume_db": project.master.volume_db,
-            }))
+            });
+            if !project.tempo_changes.is_empty() || !project.meter_changes.is_empty() {
+                out["note"] = json!(
+                    "These are the tempo and the time signature the song begins with; it changes them further on \
+                     (get_tempo_map)."
+                );
+            }
+            Ok(out)
+        })();
+        finish(reply)
+    }
+
+    /// Set the tempo from a bar of the song on, so that the tempo changes inside the song: a jump, or with
+    /// `ramp` a glide that arrives there (accelerando, ritardando). Nothing moves: every beat stays where it
+    /// is and lasts as long as the tempo it is under says. Bar 1 is the tempo the song begins at. Replies
+    /// with the whole tempo map, each change with its bar, beat and second.
+    #[tool(annotations(title = "Set tempo at a bar"))]
+    fn set_tempo(&self, Parameters(request): Parameters<SetTempoRequest>) -> CallToolResult {
+        let mut session = self.session.lock();
+        let reply = (|| {
+            let bar = request.bar.unwrap_or(1);
+            let within = request.beat.unwrap_or(1.0);
+            if bar == 0 {
+                return Err("bars are counted from 1".to_string());
+            }
+            if !within.is_finite() || within < 1.0 {
+                return Err(format!("`beat` {within} is counted from 1 within the bar: 1 is the bar line"));
+            }
+            let found = session.project().meter_map().bar(bar - 1);
+            if within - 1.0 >= found.length - 1e-9 {
+                return Err(format!(
+                    "bar {bar} is {} beats long ({}/{}), so its beats run from 1 to under {}: `beat` {within} is in \
+                     a later bar",
+                    round(found.length),
+                    found.signature.numerator,
+                    found.signature.denominator,
+                    round(found.length + 1.0)
+                ));
+            }
+            let beat = found.start + within - 1.0;
+            let remove = request.remove.unwrap_or(false);
+            let ramp = request.ramp.unwrap_or(false);
+            let bpm = match (request.bpm, remove) {
+                (Some(bpm), false) => bpm,
+                (None, false) => return Err("give `bpm`, the tempo in beats per minute".to_string()),
+                (_, true) => 0.0,
+            };
+            if remove && !session.project().tempo_changes.iter().any(|change| (change.beat - beat).abs() < 1e-6) {
+                let map = tempo_map_json(session.project());
+                let at: Vec<String> = map["tempo"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .skip(1)
+                    .map(|change| match change.get("beat_in_bar") {
+                        Some(within) => format!("bar {} beat {within}", change["bar"]),
+                        None => format!("bar {}", change["bar"]),
+                    })
+                    .collect();
+                return Err(match (at.is_empty(), beat < 1e-6) {
+                    (_, true) => "bar 1 holds the tempo the song begins at, which is set and not removed".to_string(),
+                    (true, _) => "the tempo does not change anywhere in the song, so there is nothing to remove".into(),
+                    (false, _) => format!("the tempo does not change there; it changes at {}", at.join(", ")),
+                });
+            }
+            edit(&mut session, |project| match remove {
+                true => project.remove_tempo_at(beat),
+                false => project.set_tempo_at(beat, bpm, ramp),
+            })?;
+            let mut out = tempo_map_json(session.project());
+            out["at_beat"] = json!(round(beat));
+            Ok(out)
+        })();
+        finish(reply)
+    }
+
+    /// Set the time signature from a bar of the song on, so that the meter changes inside the song. A bar
+    /// begins there. Nothing moves: every beat stays where it is, and the bars from there to the next change
+    /// are counted in the new time signature. With `bars`, it is in force for that many bars and the time
+    /// signature before it comes back. Replies with the whole map, and names any bar that a change now cuts
+    /// short.
+    #[tool(annotations(title = "Set time signature at a bar"))]
+    fn set_time_signature(&self, Parameters(request): Parameters<SetTimeSignatureRequest>) -> CallToolResult {
+        let mut session = self.session.lock();
+        let reply = (|| {
+            let bar = request.bar.unwrap_or(1);
+            if bar == 0 {
+                return Err("bars are counted from 1".to_string());
+            }
+            let bars = session.project().meter_map();
+            let found = bars.bar(bar - 1);
+            let beat = found.start;
+            if request.remove.unwrap_or(false) {
+                if !session.project().meter_changes.iter().any(|change| (change.beat - beat).abs() < 1e-6) {
+                    let at: Vec<String> =
+                        bars.sections().skip(1).map(|section| format!("bar {}", section.number())).collect();
+                    return Err(match (at.is_empty(), bar == 1) {
+                        (_, true) => "bar 1 holds the time signature the song begins in, which is set and not \
+                                      removed"
+                            .to_string(),
+                        (true, _) => "the time signature does not change anywhere in the song".to_string(),
+                        (false, _) => {
+                            format!("the time signature does not change at bar {bar}; it changes at {}", at.join(", "))
+                        }
+                    });
+                }
+                edit(&mut session, |project| project.remove_time_signature_at(beat))?;
+                let mut out = tempo_map_json(session.project());
+                out["at_beat"] = json!(round(beat));
+                return Ok(out);
+            }
+            let Some(text) = request.time_signature.as_deref() else {
+                return Err("give `time_signature`, for example \"7/8\"".to_string());
+            };
+            let (numerator, denominator) = parse_time_signature(text)?;
+            let Some(signature) = trill_core::TimeSignature::new(numerator, denominator) else {
+                return Err(format!("unsupported time signature {text}: 1 to 32 over 1, 2, 4, 8 or 16"));
+            };
+            // For so many bars: where they end, the one that was here takes over again.
+            let back = match request.bars {
+                Some(0) => return Err("`bars` is how many bars the time signature lasts: at least 1".to_string()),
+                Some(count) => {
+                    let end = beat + f64::from(count) * signature.beats_per_bar();
+                    let inside = session
+                        .project()
+                        .meter_changes
+                        .iter()
+                        .find(|change| change.beat > beat + 1e-6 && change.beat < end - 1e-6);
+                    if let Some(inside) = inside {
+                        return Err(format!(
+                            "{count} bar(s) of {text} from bar {bar} would run to beat {}, past the change of time \
+                             signature at bar {} (beat {}): give fewer `bars`, or remove that change first",
+                            round(end),
+                            bars.bar_at(inside.beat).number(),
+                            round(inside.beat)
+                        ));
+                    }
+                    let already = session.project().meter_changes.iter().any(|change| (change.beat - end).abs() < 1e-6);
+                    (!already && found.signature != signature).then_some((end, found.signature))
+                }
+                None => None,
+            };
+            edit(&mut session, |project| {
+                project.set_time_signature_at(beat, numerator, denominator)?;
+                if let Some((end, before)) = back {
+                    project.set_time_signature_at(end, before.numerator, before.denominator)?;
+                }
+                Ok(())
+            })?;
+            let mut out = tempo_map_json(session.project());
+            out["at_beat"] = json!(round(beat));
+            if let Some((end, _)) = back {
+                out["until_beat"] = json!(round(end));
+            }
+            Ok(out)
+        })();
+        finish(reply)
+    }
+
+    /// The tempo and the time signature along the song: what it begins with and every change, each with its
+    /// bar, the beat it lies at and the second the song reaches it. With `bars`, where those bars start. Use it
+    /// to turn a bar number into the beat a clip or an edit needs, in a song whose time signature changes.
+    #[tool(annotations(title = "Get tempo map", read_only_hint = true))]
+    fn get_tempo_map(&self, Parameters(request): Parameters<GetTempoMapRequest>) -> CallToolResult {
+        let session = self.session.lock();
+        let reply = (|| {
+            let project = session.project();
+            let mut out = tempo_map_json(project);
+            let (tempo, bars) = (project.tempo_map(), project.meter_map());
+            let length = project.length_beats();
+            out["length_beats"] = json!(round(length));
+            out["length_bars"] = json!(round(bars.bars_at(length)));
+            out["length_seconds"] = json!(round(tempo.seconds_at(length)));
+            if let Some(asked) = &request.bars {
+                if asked.len() > 256 || asked.contains(&0) {
+                    return Err("`bars` takes up to 256 bar numbers, counted from 1".to_string());
+                }
+                let found: Vec<Value> = asked
+                    .iter()
+                    .map(|number| {
+                        let bar = bars.bar(number - 1);
+                        json!({
+                            "bar": number,
+                            "beat": round(bar.start),
+                            "beats": round(bar.length),
+                            "seconds": round(tempo.seconds_at(bar.start)),
+                            "time_signature": format!("{}/{}", bar.signature.numerator, bar.signature.denominator),
+                            "bpm": round(tempo.tempo_at(bar.start)),
+                        })
+                    })
+                    .collect();
+                out["bars"] = json!(found);
+            }
+            Ok(out)
         })();
         finish(reply)
     }
@@ -713,8 +935,8 @@ impl TrillServer {
             if let Some(solo) = request.solo {
                 track.solo = solo;
             }
-            let mut out = track_json(track, 4.0, false);
-            // The clips are not what was asked about.
+            // The clips are not what was asked about, so neither are their bars.
+            let mut out = track_json(track, &trill_core::MeterMap::constant(Default::default()), false);
             if let Some(fields) = out.as_object_mut() {
                 fields.remove("clips");
             }
@@ -1215,8 +1437,8 @@ impl TrillServer {
                 Ok(())
             })?;
             let project = session.project();
-            let beats_per_bar = project.time_signature.beats_per_bar();
-            let mut out = clip_json(project.clip(id).map_err(|e| e.to_string())?, beats_per_bar, false);
+            let bars = project.meter_map();
+            let mut out = clip_json(project.clip(id).map_err(|e| e.to_string())?, &bars, false);
             out["track"] = json!(project.clip_track(id).map_err(|e| e.to_string())?);
             add_range_warning(&mut out, &session, id);
             add_audio_notes(&mut out, &self.runtime, &session, id);
@@ -1278,7 +1500,7 @@ impl TrillServer {
         let project = session.project();
         let reply = project
             .clip(ClipId(request.clip))
-            .map(|clip| clip_json(clip, project.time_signature.beats_per_bar(), true))
+            .map(|clip| clip_json(clip, &project.meter_map(), true))
             .map_err(|error| explain(project, error));
         finish(reply)
     }
@@ -1611,6 +1833,10 @@ impl TrillServer {
     /// "copy" copies a stretch to another place in one step: every track or some, with the clips' notes and
     /// controller curves and the tracks' automation, either making room there or over what is there. Use it
     /// to bring a chorus back later in the song instead of duplicating its clips one by one.
+    /// Where the tempo or the time signature changes inside the song, time that is deleted, duplicated or
+    /// inserted takes its changes along (opened-up time has the tempo and the meter the song arrived with),
+    /// and a copy is played at the tempo, and counted in the bars, of where it lands; the reply then gives
+    /// the tempo map as it is now.
     #[tool(annotations(title = "Edit time"))]
     fn edit_time(&self, Parameters(request): Parameters<EditTimeRequest>) -> CallToolResult {
         enum Change {
@@ -1647,6 +1873,7 @@ impl TrillServer {
         let reply = change.and_then(|change| {
             edit(&mut session, |project| {
                 let before = project.length_beats();
+                let changing = !project.tempo_changes.is_empty() || !project.meter_changes.is_empty();
                 let mut copied = None;
                 match change {
                     Change::Delete(end) => project.delete_time(request.start, end)?,
@@ -1683,6 +1910,11 @@ impl TrillServer {
                 });
                 if let Some(copied) = copied {
                     out["copied"] = copied;
+                }
+                // Time that is cut out, repeated or opened up takes its changes of tempo and of time
+                // signature along; a copy leaves those of where it lands. Either way, where they are now.
+                if changing || !project.tempo_changes.is_empty() || !project.meter_changes.is_empty() {
+                    out["tempo_map"] = tempo_map_json(project);
                 }
                 Ok(out)
             })
@@ -2230,7 +2462,9 @@ impl TrillServer {
                             update_track `armed`."
                     .to_string());
             }
-            let seconds_per_beat = 60.0 / session.project().tempo;
+            // Played now, at the tempo the song has where it stands.
+            let here = session.transport().position_beats;
+            let seconds_per_beat = 60.0 / session.project().tempo_map().tempo_at(here);
             let mut events: Vec<(f64, bool, u8, u8)> = Vec::with_capacity(notes.len() * 2);
             for note in &notes {
                 events.push((note.start * seconds_per_beat, true, note.pitch, note.velocity));
@@ -2308,12 +2542,13 @@ impl TrillServer {
             let result: Result<Vec<Value>, String> = (|| {
                 let parts = edit(&mut session, |project| {
                     if use_tempo {
-                        if let Some(tempo) = file.tempo {
-                            project.set_tempo(tempo.clamp(MIN_TEMPO, MAX_TEMPO))?;
+                        // Every tempo and time signature of the file, from where it is put.
+                        let mut timed = file.clone();
+                        timed.tempo = timed.tempo.map(|tempo| tempo.clamp(MIN_TEMPO, MAX_TEMPO));
+                        for change in &mut timed.tempo_changes {
+                            change.tempo = change.tempo.clamp(MIN_TEMPO, MAX_TEMPO);
                         }
-                        if let Some(signature) = file.time_signature {
-                            project.set_time_signature(signature.numerator, signature.denominator)?;
-                        }
+                        project.take_midi_time(&timed, request.at.unwrap_or(0.0))?;
                     }
                     project.import_midi(&file, request.at.unwrap_or(0.0))
                 })?;
@@ -2343,7 +2578,21 @@ impl TrillServer {
             })();
             session.end_gesture();
             let parts = result?;
-            Ok(json!({ "tracks": parts, "file_tempo": file.tempo, "tempo": session.project().tempo }))
+            let mut out = json!({ "tracks": parts, "file_tempo": file.tempo, "tempo": session.project().tempo });
+            let changes = file.tempo_changes.len() + file.meter_changes.len();
+            if changes > 0 {
+                out["file_changes"] = json!(format!(
+                    "the file changes its tempo {} time(s) and its time signature {} time(s); {}",
+                    file.tempo_changes.len(),
+                    file.meter_changes.len(),
+                    if use_tempo {
+                        "the song has them now (get_tempo_map)"
+                    } else {
+                        "the song kept its own (`use_tempo`: true takes the file's)"
+                    }
+                ));
+            }
+            Ok(out)
         })();
         finish(reply)
     }
@@ -2813,7 +3062,8 @@ fn add_audio_notes(out: &mut Value, runtime: &Runtime, session: &Session, clip: 
         ));
     }
     if let Ok(facts) = runtime.sound_facts(Path::new(&audio.path)) {
-        let audio_beats = (facts.seconds - audio.offset_seconds).max(0.0) / audio.seconds_per_beat(project.tempo);
+        let left = (facts.seconds - audio.offset_seconds).max(0.0);
+        let audio_beats = audio.beats_over(&project.tempo_map(), clip.start, left);
         out["audio_beats"] = json!(round(audio_beats));
         if clip.length > audio_beats + 1e-3 {
             notes.push(format!(

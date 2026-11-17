@@ -543,8 +543,16 @@ fn render_from(
     processor.seek(start);
     processor.play();
 
+    // How many frames into the render a beat of the song falls: through
+    // whatever the tempo does on the way, and for one tempo as it was
+    // always worked out.
+    let tempo_map = project.tempo_map();
     let seconds_per_beat = 60.0 / project.tempo;
-    let body_frames = ((end - start) * seconds_per_beat * sample_rate).round() as usize;
+    let frames_to = |beat: f64| match tempo_map.is_constant() {
+        true => (beat - start).max(0.0) * seconds_per_beat * sample_rate,
+        false => tempo_map.frames_between(start, beat.max(start), sample_rate),
+    };
+    let body_frames = frames_to(end).round() as usize;
     let tail_frames = (options.max_tail_seconds.max(0.0) * sample_rate) as usize;
     let mut mix = Analyzer::new(options.sample_rate).with_true_peak();
 
@@ -624,7 +632,7 @@ fn render_from(
     }
     let premaster = graph.master.tap.as_mut();
     stems.extend(premaster.and_then(|tap| finished(StemKind::Premaster, None, tap, total_frames)).transpose()?);
-    let frame_of = |beat: f64| ((beat - start).max(0.0) * seconds_per_beat * sample_rate).round() as usize;
+    let frame_of = |beat: f64| frames_to(beat).round() as usize;
     let spans: Vec<(usize, usize)> =
         options.sections.iter().map(|section| (frame_of(section.start_beat), frame_of(section.end_beat))).collect();
     let mut tracks = Vec::with_capacity(project.tracks.len());

@@ -25,12 +25,17 @@ const SILENT: f32 = 1e-4;
 /// Where the song is during a block, for placing metronome clicks.
 #[derive(Copy, Clone)]
 pub(crate) struct Beats {
+    /// The block's first frame, in beats from where the time signature
+    /// it is in took over: its bars are counted from there.
     pub start: f64,
     pub per_frame: f64,
     /// Length of one count of the time signature in quarter notes (0.5 in
     /// 6/8) and how many of them make a bar.
     pub count: f64,
     pub counts_per_bar: u32,
+    /// Where the next time signature takes over, counted as `start` is;
+    /// infinite if none does. A bar begins there whatever the count is at.
+    pub until: f64,
 }
 
 struct Audition {
@@ -146,23 +151,32 @@ impl Monitor {
 
     fn mix_clicks(&mut self, left: &mut [f32], right: &mut [f32], beats: Beats) {
         let frames = left.len();
-        // The first count at or after the start of the block. The small bias
-        // keeps a count that lands exactly on the block start from slipping
-        // into the previous block through rounding.
-        let mut index = (beats.start / beats.count - 1e-9).ceil().max(0.0) as u64;
+        // A count sounds at the frame nearest to it, and belongs to the
+        // block that frame is in: the first one here is the first that is
+        // no more than half a frame before the block. The small bias keeps
+        // a count that lands exactly there from slipping into the previous
+        // block through rounding.
+        let mut index = ((beats.start - 0.5 * beats.per_frame) / beats.count - 1e-9).ceil().max(0.0) as u64;
         let mut from = 0;
         loop {
-            let offset = ((index as f64 * beats.count - beats.start) / beats.per_frame).round();
+            // A count that would fall where the next time signature has
+            // taken over is that signature's first: the bar begins there.
+            let count = index as f64 * beats.count;
+            let (at, first) = if count >= beats.until - 1e-9 { (beats.until, true) } else { (count, false) };
+            let offset = ((at - beats.start) / beats.per_frame).round();
             if offset >= frames as f64 {
                 break;
             }
             let offset = (offset.max(0.0) as usize).max(from);
             self.ring_click(left, right, from..offset);
-            let accent = beats.counts_per_bar > 0 && index.is_multiple_of(beats.counts_per_bar as u64);
+            let accent = first || (beats.counts_per_bar > 0 && index.is_multiple_of(beats.counts_per_bar as u64));
             self.click_phase = 0.0;
             self.click_step = if accent { ACCENT_HZ } else { CLICK_HZ } / self.sample_rate as f32;
             self.click_level = if accent { ACCENT_LEVEL } else { CLICK_LEVEL };
             from = offset;
+            if first {
+                break;
+            }
             index += 1;
         }
         self.ring_click(left, right, from..frames);
@@ -280,6 +294,7 @@ mod tests {
             per_frame: 120.0 / (60.0 * SR),
             count,
             counts_per_bar,
+            until: f64::INFINITY,
         };
 
         // 4/4 at 120 BPM: a click every 24000 frames, the first accented.

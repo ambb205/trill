@@ -415,8 +415,12 @@ impl Session {
         // What an earlier take left unread is not this one's.
         while self.engine.next_captured().is_some() {}
 
-        let signature = self.project.time_signature;
-        let bar = signature.beats_per_bar();
+        // The take is counted in, and its clips are cut to bars, in the
+        // meter the song has where it starts, at the tempo it has there.
+        let position = self.engine.position();
+        let meter = self.project.meter_map();
+        let bar = meter.signature_at(position).beats_per_bar();
+        let tempo = self.project.tempo_map().tempo_at(position);
         let region = self.project.loop_region;
         let loop_region = region.enabled.then_some((region.start, region.end));
         self.playing.takes = self.playing.takes.wrapping_add(1);
@@ -426,7 +430,7 @@ impl Session {
         // written down while it is played.
         self.begin_run("Recorded a take");
         self.playing.take =
-            Some(ActiveTake { take: Take::new(id, &tracks, loop_region, bar, self.project.tempo), group });
+            Some(ActiveTake { take: Take::new(id, &tracks, loop_region, bar, tempo).in_bars(meter), group });
         self.playing.last_take.clear();
         self.engine.send(Message::Record {
             take: id,
@@ -494,9 +498,10 @@ impl Session {
         }
     }
 
-    /// The output latency in beats at the project's tempo.
+    /// The output latency in beats, at the tempo the song has where it is.
     fn latency_beats(&self) -> f64 {
-        self.output_latency_ms() / 1000.0 * self.project.tempo / 60.0
+        let tempo = self.project.tempo_map().tempo_at(self.engine.position());
+        self.output_latency_ms() / 1000.0 * tempo / 60.0
     }
 
     fn read_take(&mut self) {
