@@ -51,6 +51,39 @@ fn held_automation() -> anyhow::Result<Project> {
     Ok(project)
 }
 
+/// The example song with a return for an echo, and sends that move: the
+/// keys' is thrown open three times, the bells' has an envelope that
+/// someone took hold of, and the keys fade out at the end, as a fader does.
+fn thrown_sends() -> anyhow::Result<Project> {
+    let text =
+        std::fs::read_to_string(SONG).with_context(|| format!("cannot read {SONG} (run from the repository root)"))?;
+    let mut project = Project::from_json(&text)?;
+    let track = |project: &Project, name: &str| {
+        project.tracks.iter().find(|track| track.name.starts_with(name)).map(|track| track.id)
+    };
+    let (Some(keys), Some(bells)) = (track(&project, "Keys"), track(&project, "Bells")) else {
+        anyhow::bail!("the song has no Keys or no Bells");
+    };
+    let echo = project.add_track_of_kind("Echo", trill_core::TrackKind::Return);
+    project.add_device(trill_core::ChainRef::Track(echo), "builtin:delay", "Delay", None)?;
+    let point = AutomationPoint::new;
+    let shut = trill_core::project::MIN_VOLUME_DB as f64;
+    let mut throw = vec![point(0.0, shut)];
+    for at in [28.0, 60.0, 76.0] {
+        throw.extend([point(at - 1.0, shut), point(at, -4.0), point(at + 3.0, -4.0), point(at + 4.0, shut)]);
+    }
+    project.set_automation(AutomationTarget::Send { track: keys, to: echo }, throw)?;
+    // A fade of two points: a straight line in a fader's lane.
+    let fade = vec![point(0.0, -3.5), point(80.0, -3.5), point(112.0, shut)];
+    project.set_automation(AutomationTarget::TrackVolume { track: keys }, fade)?;
+    // The bells' send swells through the song, and was set by hand since.
+    let swell = AutomationTarget::Send { track: bells, to: echo };
+    project.set_automation(swell.clone(), vec![point(16.0, shut), point(48.0, -9.0), point(96.0, -20.0)])?;
+    project.set_automation_enabled(&swell, false)?;
+    project.set_send(bells, echo, Some(-14.0))?;
+    Ok(project)
+}
+
 /// A program that keeps what it keeps under `profile`, makes a project
 /// with `work`, and stops without saving it or saying goodbye.
 fn lose(profile: &Path, work: impl FnOnce(&mut Session) -> anyhow::Result<()>) -> anyhow::Result<()> {
@@ -92,6 +125,7 @@ fn main() -> anyhow::Result<()> {
     let folder = Path::new(&folder);
     std::fs::create_dir_all(folder)?;
     std::fs::write(folder.join("held-automation.trill"), held_automation()?.to_json())?;
+    std::fs::write(folder.join("thrown-sends.trill"), thrown_sends()?.to_json())?;
 
     // Start over: only the files a safety copy is made of are removed.
     let profile = folder.join("lost-work");

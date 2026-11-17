@@ -208,8 +208,9 @@ shot graphite-audio-settings "$song" --select Lead --settings --audio-scene stud
 fixtures=$here/fixtures
 lost=$fixtures/lost-work
 held=$fixtures/held-automation.trill
+thrown=$fixtures/thrown-sends.trill
 if making recovery-offer graphite-recovery-offer min-window-recovery-offer held-automation held-automation-mixer \
-    graphite-held-automation; then
+    graphite-held-automation thrown-sends graphite-thrown-sends; then
     cargo run -p trill-app --example window_fixtures -- "$fixtures"
 fi
 
@@ -223,3 +224,11 @@ shot min-window-recovery-offer --profile "$lost" --size 1060x640
 shot held-automation "$held" --select "Pad chords" --tab devices --automation
 shot held-automation-mixer "$held" --select "Pad chords" --tab mixer --automation
 shot graphite-held-automation "$held" --select "Pad chords" --tab devices --automation --theme graphite
+
+# Sends that move: a send thrown open for single notes and one that was
+# taken hold of, in a track's lanes and on the send bars of the headers and
+# of the mixer; a fade that follows the fader, which is a straight line in
+# its lane, beside the song's own filter sweeps, which were saved straight
+# in hertz and are drawn as the curves they are.
+shot thrown-sends "$thrown" --select "Keys arp" --tab mixer --automation
+shot graphite-thrown-sends "$thrown" --select "Keys arp" --tab mixer --automation --theme graphite
