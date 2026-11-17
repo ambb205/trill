@@ -43,8 +43,8 @@ pub(crate) mod superior;
 mod xfer;
 mod xml;
 
-pub use child::VENDOR_PRESET_ARGUMENT;
-pub(crate) use child::run_builder;
+pub use child::{VENDOR_FILE_ARGUMENT, VENDOR_PRESET_ARGUMENT};
+pub(crate) use child::{run_builder, run_lister};
 pub use look::{describe_state, split_state};
 pub use places::VendorPlaces;
 
@@ -57,6 +57,7 @@ pub(crate) use crate::vst3::state::PluginState as States;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::Path;
+use trill_core::presets::PresetInfo;
 
 /// The largest preset file read whole. Presets are kilobytes; the largest
 /// file of presets seen is fifteen megabytes.
@@ -94,6 +95,29 @@ impl Format {
     /// builds all its plugins alike, by the vendor's name.
     pub(crate) fn of(plugin: &PluginRef) -> Option<Self> {
         Self::of_class(&plugin.id)
+    }
+
+    /// The extension the preset files of `plugin`, a plugin of this
+    /// format, have: in lower case and without the dot. `None` where the
+    /// files' names do not tell them from other files (an Archetype's are
+    /// called `.xml`, a drum library's file of presets has no extension).
+    pub(crate) fn extension(self, plugin: &PluginRef) -> Option<String> {
+        match self {
+            Format::Serum2 => Some(serum::EXTENSION.to_string()),
+            Format::Ample => ample::extension(plugin),
+            Format::Superior3 | Format::Archetype => None,
+        }
+    }
+
+    /// What a preset file of this format is called, for a sentence about
+    /// a file that is none.
+    pub(crate) fn file_kind(self) -> &'static str {
+        match self {
+            Format::Serum2 => "a .SerumPreset file",
+            Format::Ample => "a preset file of the instrument's own",
+            Format::Superior3 => "a file of Superior Drummer presets",
+            Format::Archetype => "a preset file of the Archetype's own",
+        }
     }
 
     /// [`of`](Self::of), for a plugin known by its id alone.
@@ -138,6 +162,23 @@ pub(crate) fn list(plugin: &PluginRef, places: &VendorPlaces, sink: &mut dyn Sin
         Some(Format::Superior3) => superior::list(plugin, places, sink),
         Some(Format::Archetype) => archetype::list(plugin, places, sink),
         None => {}
+    }
+}
+
+/// The presets in the file at `file`, taken as a preset file of `format`,
+/// wherever it lies: one for most formats, and for a format that keeps
+/// many presets to a file all of them. They are as [`list`] has them, but
+/// for what only a file's place among the vendor's folders says.
+///
+/// An error is the end of a sentence about the file: why it is not a
+/// preset file of the format. Whether it is a preset of the right plugin
+/// of the format's shows when it is loaded ([`build`]).
+pub(crate) fn file_presets(format: Format, file: &Path) -> Result<Vec<PresetInfo>, String> {
+    match format {
+        Format::Serum2 => serum::file_preset(file).map(|preset| vec![preset]),
+        Format::Ample => ample::file_preset(file).map(|preset| vec![preset]),
+        Format::Superior3 => superior::file_presets(file),
+        Format::Archetype => archetype::file_preset(file).map(|preset| vec![preset]),
     }
 }
 
@@ -227,10 +268,16 @@ fn read_start(file: &Path, room: usize) -> std::io::Result<Vec<u8>> {
 
 /// A file, whole, if it is no larger than a file of presets can be.
 fn read_whole(file: &Path) -> Result<Vec<u8>, String> {
-    let cannot = |error: std::io::Error| format!("'{}' cannot be read: {error}", file.display());
+    read_bounded(file).map_err(|reason| format!("'{}' {reason}", file.display()))
+}
+
+/// [`read_whole`], with an error that is what to say of the file after
+/// naming it: "cannot be read", "is too large".
+pub(crate) fn read_bounded(file: &Path) -> Result<Vec<u8>, String> {
+    let cannot = |error: std::io::Error| format!("cannot be read: {error}");
     let size = std::fs::metadata(file).map_err(cannot)?.len();
     if size > MAX_FILE {
-        return Err(format!("'{}' is too large to be a preset ({} MB)", file.display(), size / (1024 * 1024)));
+        return Err(format!("is too large to be a preset ({} MB)", size / (1024 * 1024)));
     }
     let mut bytes = Vec::new();
     std::fs::File::open(file).map_err(cannot)?.take(MAX_FILE).read_to_end(&mut bytes).map_err(cannot)?;

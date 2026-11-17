@@ -10,9 +10,16 @@
 //!
 //! How a preset is *loaded* is the device's business: see
 //! [`DeviceController::load_preset`](crate::device::DeviceController::load_preset).
+//!
+//! A preset need not be one of the listed ones. People keep presets they
+//! bought or were sent wherever they keep their sounds, so a preset may
+//! also be asked for as the path of its file ([`PresetFile`]); what kind
+//! of file a device type takes is the type's business
+//! ([`DeviceFactory::preset_file`](crate::device::DeviceFactory::preset_file)).
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// What separates the parts of a [`PresetInfo::category`].
@@ -397,6 +404,55 @@ fn filed_under(category: &str, wanted: &[String]) -> bool {
         .any(|window| window.iter().zip(wanted).all(|(part, wanted)| part.contains(wanted.as_str())))
 }
 
+/// What separates the path of a file that holds several presets from the
+/// one that is meant: `C:\Kits\presets#Black Metal`.
+pub const WITHIN_FILE: char = '#';
+
+/// A preset asked for as a file rather than by its name: the file, and for
+/// a file that holds several presets which of them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PresetFile {
+    pub path: PathBuf,
+    /// The preset in the file that is meant: its name, its category and
+    /// name, or its id, as [`PresetList::find`] takes them.
+    pub within: Option<String>,
+}
+
+impl PresetFile {
+    /// `wanted`, what was asked for as a preset, as a file; `None` if it
+    /// is a preset's name or id.
+    ///
+    /// A file is asked for by its whole path, from the drive or the root
+    /// down: that is what tells it from a name, which may have slashes of
+    /// its own (`Pads/Warm`). A path may be followed by [`WITHIN_FILE`] and
+    /// the preset that is meant. Since a `#` may be part of a path too,
+    /// the file is the longest stretch before one that is a file on the
+    /// disk; a path that leads to no file is taken whole, and whoever goes
+    /// on to read it says that there is none.
+    pub fn asked(wanted: &str) -> Option<Self> {
+        let wanted = wanted.trim();
+        if !Path::new(wanted).is_absolute() {
+            return None;
+        }
+        let whole = Self { path: PathBuf::from(wanted), within: None };
+        if !wanted.contains(WITHIN_FILE) || whole.path.is_file() {
+            return Some(whole);
+        }
+        let split = wanted.rmatch_indices(WITHIN_FILE).find_map(|(at, _)| {
+            let (path, within) = (Path::new(&wanted[..at]), wanted[at + 1..].trim());
+            let found = !within.is_empty() && path.is_file();
+            found.then(|| Self { path: path.to_path_buf(), within: Some(within.to_string()) })
+        });
+        Some(split.unwrap_or(whole))
+    }
+
+    /// The name to show for a file's preset where the file itself gives
+    /// none: the file's name without its extension.
+    pub fn name_of(path: &Path) -> String {
+        path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default()
+    }
+}
+
 /// A short id for something that is found by `locator`: the same for the
 /// same locator every time, and for practical purposes different for
 /// different ones. Ten digits of a 64-bit FNV-1a hash.
@@ -625,5 +681,68 @@ mod tests {
             PresetRef { id: ready.presets[0].id.clone(), name: "Warm Pad".into() }
         );
         assert_eq!(PresetList::default().status, PresetStatus::Ready);
+    }
+}
+
+#[cfg(test)]
+mod file_tests {
+    use super::*;
+
+    /// A folder of the test's own in the temporary folder, gone with it.
+    struct Folder(PathBuf);
+
+    impl Folder {
+        fn new(name: &str) -> Self {
+            let folder = std::env::temp_dir().join(format!("trill-core-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&folder).unwrap();
+            Self(folder)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_whole_path_is_a_file_and_anything_else_is_a_name() {
+        let folder = Folder::new("preset-path");
+        let file = folder.path().join("Lead #1.vstpreset");
+        std::fs::write(&file, b"x").unwrap();
+        let text = file.to_string_lossy().into_owned();
+
+        assert_eq!(PresetFile::asked(&text), Some(PresetFile { path: file.clone(), within: None }));
+        assert_eq!(PresetFile::asked(&format!("  {text} ")).map(|asked| asked.path), Some(file.clone()));
+        // Names, with a category in front or without, and ids.
+        for name in ["Warm Pad", "Factory/Pads/Warm Pad", "Saved/My Glass", "3ba773e32c", "Lead.vstpreset", ""] {
+            assert_eq!(PresetFile::asked(name), None, "{name}");
+        }
+        // A path that leads nowhere is still a path: the answer to it is
+        // that there is no such file, not that there is no such preset.
+        let gone = folder.path().join("Gone.vstpreset");
+        assert_eq!(PresetFile::asked(&gone.to_string_lossy()).map(|asked| asked.path), Some(gone));
+        assert_eq!(PresetFile::name_of(&file), "Lead #1");
+    }
+
+    #[test]
+    fn a_preset_in_a_file_of_several_is_named_after_the_path() {
+        let folder = Folder::new("preset-within");
+        let kits = folder.path().join("#1 Kits").join("presets");
+        std::fs::create_dir_all(kits.parent().unwrap()).unwrap();
+        std::fs::write(&kits, b"x").unwrap();
+        let text = kits.to_string_lossy().into_owned();
+
+        let asked = PresetFile::asked(&format!("{text}#Metal/Kit #2")).unwrap();
+        assert_eq!(asked, PresetFile { path: kits.clone(), within: Some("Metal/Kit #2".into()) });
+        // A `#` with nothing after it, and one in the path of a file that
+        // is not there, name nothing.
+        assert_eq!(PresetFile::asked(&format!("{text}#")).unwrap().within, None);
+        let gone = format!("{}#Kit", folder.path().join("gone").display());
+        assert_eq!(PresetFile::asked(&gone), Some(PresetFile { path: PathBuf::from(&gone), within: None }));
     }
 }

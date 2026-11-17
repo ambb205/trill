@@ -14,7 +14,7 @@ use crate::vst3::scripted::{self, kind};
 use crate::vst3::state::{self, PluginState};
 use crate::vst3::{Vst3Config, Vst3Factory};
 use crate::{Scanner, VST3_SCHEME};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use trill_core::device::{CompositeFactory, DeviceFactory, DeviceInstance, PresetLoadError};
@@ -369,4 +369,278 @@ fn a_setting_no_parameter_reaches_is_set_in_the_running_plugin_as_an_undo_step()
     assert!(session.device_settings(synth).unwrap().is_empty());
     let error = session.set_device_settings(synth, &[("x".to_string(), "1".to_string())]).unwrap_err().to_string();
     assert!(error.contains("this plugin's state has no settings that are set by name"), "{error}");
+}
+
+// ---- a preset file that lies where nothing is listed from -----------------
+
+/// What the plugin of `kind` makes of the file at `file`.
+fn file_preset(rig: &Rig, kind: u8, file: &Path, within: Option<&str>) -> Result<PresetInfo, String> {
+    rig.factory.preset_file(&scripted::uri(kind), file, within).expect("a plugin of this factory")
+}
+
+#[test]
+fn a_makers_preset_file_is_a_preset_by_its_path_wherever_it_lies() {
+    let rig = Rig::new();
+    // Presets someone bought, kept with their samples.
+    let bought = |name: &str, bytes: &[u8]| rig.dir.file(&format!("samples/Pack #1/{name}"), bytes);
+    let saw = bought("OMEGA SAW.SerumPreset", &serum::preset_file("Omega Saw", "Somebody", 4.0, &[]));
+    let tune = rig.dir.path().join("tune");
+    let crunch = ample::document("Crunch", "4.0.0", "AMHBg", &tune, &[("M-Master Vol", "0.4")]);
+    let tone = bought("Crunch.amhstate", crunch.as_bytes());
+    let kits = bought(
+        "kits",
+        &superior::presets_file(&[("Ayotte Default", "Clean Kits", "Kick2"), ("Death Metal", "Metal", "Kick62")]),
+    );
+    let lead = bought("Lead.xml", &archetype::preset_file("Lead", "0", &[("gateThreshold", "-62.5")]));
+    // None of them is among the presets a plugin lists.
+    for kind in kind::KEEPERS {
+        assert!(rig.presets(kind).is_empty());
+    }
+
+    // A synth's patch: what the file says of itself, and the sound.
+    let preset = file_preset(&rig, kind::KEEPS_SERUM, &saw, None).unwrap();
+    assert_eq!((preset.name.as_str(), preset.author.as_str(), preset.id.len()), ("Omega Saw", "Somebody", 10));
+    assert_eq!(preset.tags, ["pad", "preview"]);
+    let mut synth = rig.create(kind::KEEPS_SERUM, None);
+    load(&mut synth, &preset).unwrap();
+    assert_eq!(serum::shown(&state_of(&mut synth), "presetName").as_deref(), Some("Omega Saw"));
+
+    // A guitar's tone, laid over what the running plugin has.
+    let preset = file_preset(&rig, kind::KEEPS_AMPLE, &tone, None).unwrap();
+    assert_eq!((preset.name.as_str(), preset.category.as_str()), ("Crunch", "Metal"));
+    let mut guitar = rig.create(kind::KEEPS_AMPLE, None);
+    load(&mut guitar, &preset).unwrap();
+    assert_eq!(ample::shown(&state_of(&mut guitar), "M-Master Vol").as_deref(), Some("0.4"));
+
+    // A file of kits holds several: one is named after the path.
+    let error = file_preset(&rig, kind::KEEPS_SUPERIOR, &kits, None).unwrap_err();
+    assert_eq!(
+        error,
+        format!(
+            "it holds 2 presets (Clean Kits/Ayotte Default, Metal/Death Metal): say which with '{}#<name>'",
+            kits.display()
+        )
+    );
+    let preset = file_preset(&rig, kind::KEEPS_SUPERIOR, &kits, Some("death metal")).unwrap();
+    assert_eq!(preset.path(), "Metal/Death Metal");
+    let mut drums = rig.create(kind::KEEPS_SUPERIOR, Some(&superior::state("Kick1")));
+    load(&mut drums, &preset).unwrap();
+    assert_eq!(superior::shown(&state_of(&mut drums), "drum 0").as_deref(), Some("drum \"Kick62\" \"Felt\" 1"));
+    assert!(note(&mut drums).unwrap().contains("reads the kit's samples in the background"));
+    let error = file_preset(&rig, kind::KEEPS_SUPERIOR, &kits, Some("Jazz")).unwrap_err();
+    assert_eq!(error, "it holds no preset 'Jazz' among its 2 (Clean Kits/Ayotte Default, Metal/Death Metal)");
+
+    // An amplifier's preset.
+    let preset = file_preset(&rig, kind::KEEPS_ARCHETYPE, &lead, None).unwrap();
+    assert_eq!(preset.name, "Lead");
+    let mut amplifier = rig.create(kind::KEEPS_ARCHETYPE, Some(&archetype::state(&[("gateThreshold", "-80")])));
+    load(&mut amplifier, &preset).unwrap();
+    let state = state_of(&mut amplifier);
+    assert_eq!(archetype::shown(&state, "appModel/subModels/parameters@gateThreshold").as_deref(), Some("-62.5"));
+
+    // A file that is where presets are listed from is the preset the
+    // list has, with what the list says of it.
+    let listed = rig.dir.file(
+        &format!("{SERUM}/Factory/Pad/PD - Warm Room.SerumPreset"),
+        &serum::preset_file("PD - Warm Room", "Level 8", 4.0, &[]),
+    );
+    rig.factory.refresh_presets(&scripted::uri(kind::KEEPS_SERUM));
+    let by_name = rig.preset(kind::KEEPS_SERUM, "PD - Warm Room");
+    assert_eq!(file_preset(&rig, kind::KEEPS_SERUM, &listed, None).unwrap(), by_name);
+    assert_eq!(by_name.category, "Factory/Pad");
+
+    // Which plugin a file is for is told by its name, where the name says.
+    let uri = |kind: u8| Some(scripted::uri(kind));
+    assert_eq!(rig.factory.preset_file_type(&saw), uri(kind::KEEPS_SERUM));
+    assert_eq!(rig.factory.preset_file_type(&tone), uri(kind::KEEPS_AMPLE));
+    assert_eq!((rig.factory.preset_file_type(&kits), rig.factory.preset_file_type(&lead)), (None, None));
+    assert_eq!(rig.factory.preset_file_type(&rig.dir.path().join("samples/Kick.wav")), None);
+}
+
+#[test]
+fn a_file_that_is_not_the_plugins_preset_says_what_it_is_instead() {
+    let rig = Rig::new();
+    let file = |name: &str, bytes: &[u8]| rig.dir.file(&format!("samples/{name}"), bytes);
+    let tune = rig.dir.path().join("tune");
+    let tone = file(
+        "Crunch.amhstate",
+        ample::document("Crunch", "4.0.0", "AMHBg", &tune, &[("M-Master Vol", "0.4")]).as_bytes(),
+    );
+    let effect = xfer::pack(
+        serde_json::json!({ "fileType": "SerumPreset", "product": "Serum2FX" }).as_object().cloned().unwrap(),
+        &[],
+    );
+    let effect = file("Wide.SerumPreset", &effect);
+    let short = file("Short.SerumPreset", &serum::preset_file("Short", "", 5.0, &[])[..30]);
+    let refused = |kind: u8, file: &Path| file_preset(&rig, kind, file, None).unwrap_err();
+    let synth = "Keeper 20";
+
+    // Another maker's file, with what this plugin does take.
+    assert_eq!(
+        refused(kind::KEEPS_SERUM, &tone),
+        format!("it is not one of Xfer's files. {synth} takes a .SerumPreset file or a .vstpreset file")
+    );
+    // Its own maker's, of another product, and one that is cut short.
+    assert_eq!(
+        refused(kind::KEEPS_SERUM, &effect),
+        "it is not a Serum 2 preset (it says it is a SerumPreset of Serum2FX)"
+    );
+    assert_eq!(refused(kind::KEEPS_SERUM, &short), "it is cut short");
+    // What is no file.
+    assert_eq!(refused(kind::KEEPS_SERUM, &rig.dir.path().join("samples/Gone.SerumPreset")), "there is no such file");
+    assert_eq!(refused(kind::KEEPS_SERUM, &rig.dir.path().join("samples")), "it is a folder, not a file");
+    // The other makers' readers say what they miss.
+    assert_eq!(
+        refused(kind::KEEPS_AMPLE, &effect),
+        "it is not one of Ample Sound's documents of settings. Keeper 21 takes a preset file of the instrument's \
+         own or a .vstpreset file"
+    );
+    assert!(refused(kind::KEEPS_SUPERIOR, &effect).starts_with("it holds no presets of Superior Drummer's. "));
+    assert!(refused(kind::KEEPS_ARCHETYPE, &tone).starts_with("it is not a preset of one of Neural DSP's Archetypes"));
+
+    // A plugin of another format is not this factory's to answer for.
+    assert!(rig.factory.preset_file("clap:com.example.synth", &tone, None).is_none());
+    assert_eq!(
+        rig.factory.preset_file("vst3:00000000000000000000000000000001", &tone, None),
+        Some(Err("the plugin is not installed".to_string()))
+    );
+
+    // A preset of an instrument that is not the one it is given to shows
+    // when it is loaded, and the plugin is as it was.
+    let mut guitar = rig.create(kind::KEEPS_AMPLE, None);
+    let before = state_of(&mut guitar);
+    let bass = file(
+        "Slap.amhstate",
+        ample::document("Slap", "4.0.0", "ABJ", &tune, &[("M-Master Vol", "0.4")])
+            .replace("AMG_STATE", "AEB_STATE")
+            .as_bytes(),
+    );
+    let preset = file_preset(&rig, kind::KEEPS_AMPLE, &bass, None).unwrap();
+    let error = load(&mut guitar, &preset).unwrap_err();
+    assert!(
+        matches!(&error, PresetLoadError::Failed(said) if said.ends_with("it is a preset of another instrument (its settings are 'AEB_STATE')")),
+        "{error}"
+    );
+    assert_eq!(state_of(&mut guitar), before);
+}
+
+#[test]
+fn a_vst3_preset_file_is_any_plugins_and_is_seen_to_arrive() {
+    let rig = Rig::new();
+    let tune = rig.dir.path().join("tune");
+    let state_with =
+        |settings: &[(&str, &str)]| ample::state(&ample::document("Default", "4.1.0", "AMHBg", &tune, settings));
+    let file = |name: &str, kind: u8, state: &PluginState| {
+        rig.dir.file(&format!("samples/{name}.vstpreset"), &state::encode(class(kind), state))
+    };
+    let started = state_with(&[("M-Master Vol", "0.9"), ("Amp", "Lead 800")]);
+    let quiet = state_with(&[("M-Master Vol", "0.2"), ("Amp", "Clean")]);
+    let live = file("From Live", kind::KEEPS_AMPLE, &quiet);
+
+    // The state another host saved, as the file it saved it in.
+    let preset = file_preset(&rig, kind::KEEPS_AMPLE, &live, None).unwrap();
+    assert_eq!((preset.name.as_str(), preset.id.len()), ("From Live", 10));
+    let mut guitar = rig.create(kind::KEEPS_AMPLE, Some(&started));
+    load(&mut guitar, &preset).unwrap();
+    assert_eq!(state_of(&mut guitar), quiet, "setting for setting");
+    assert_eq!(note(&mut guitar), None);
+    // Given again, there is nothing to arrive and nothing to say.
+    load(&mut guitar, &preset).unwrap();
+    assert_eq!(note(&mut guitar), None);
+
+    // A plugin that says yes to a file and is as it was: whoever asked
+    // is told that it was not seen to change.
+    let ignored = file("Ignored", kind::KEEPS_AMPLE, &state_with(&[("Amp", "ignore-this")]));
+    load(&mut guitar, &file_preset(&rig, kind::KEEPS_AMPLE, &ignored, None).unwrap()).unwrap();
+    assert_eq!(state_of(&mut guitar), quiet);
+    assert!(
+        note(&mut guitar)
+            .unwrap()
+            .starts_with("The plugin took the file without complaint, but its state was the same")
+    );
+    assert_eq!(note(&mut guitar), None, "said once");
+    // One it turns down.
+    let refused = file("Refused", kind::KEEPS_AMPLE, &state_with(&[("Amp", "refuse-this")]));
+    let error = load(&mut guitar, &file_preset(&rig, kind::KEEPS_AMPLE, &refused, None).unwrap()).unwrap_err();
+    assert!(
+        matches!(&error, PresetLoadError::Failed(said) if said.starts_with("the plugin rejected its preset")),
+        "{error}"
+    );
+    assert_eq!(state_of(&mut guitar), quiet);
+
+    // Another plugin's file names the plugin; what is no preset file says so.
+    let theirs = file("Theirs", kind::KEEPS_ARCHETYPE, &quiet);
+    assert_eq!(
+        file_preset(&rig, kind::KEEPS_AMPLE, &theirs, None).unwrap_err(),
+        "it is a preset of Archetype Test X, not of Keeper 21"
+    );
+    let nobodys = rig.dir.file(
+        "samples/Nobody.vstpreset",
+        &state::encode(ClassId::parse("00000000000000000000000000000001").unwrap(), &quiet),
+    );
+    assert_eq!(
+        file_preset(&rig, kind::KEEPS_AMPLE, &nobodys, None).unwrap_err(),
+        "it is a preset of another plugin (class 00000000000000000000000000000001), not of Keeper 21"
+    );
+    let text = rig.dir.file("samples/Text.vstpreset", b"not a preset file at all");
+    assert_eq!(
+        file_preset(&rig, kind::KEEPS_AMPLE, &text, None).unwrap_err(),
+        "it is not a VST3 preset file (it does not begin as one does)"
+    );
+    // Whose a file is, is in its first bytes.
+    assert_eq!(rig.factory.preset_file_type(&live), Some(scripted::uri(kind::KEEPS_AMPLE)));
+    assert_eq!(rig.factory.preset_file_type(&theirs), Some(scripted::uri(kind::KEEPS_ARCHETYPE)));
+    assert_eq!((rig.factory.preset_file_type(&nobodys), rig.factory.preset_file_type(&text)), (None, None));
+}
+
+#[test]
+fn a_session_gives_a_device_a_preset_file_as_one_undo_step() {
+    let rig = Rig::new();
+    let tune = rig.dir.path().join("tune");
+    let document = |name: &str, settings: &[(&str, &str)]| ample::document(name, "4.0.0", "AMHBg", &tune, settings);
+    let quiet = rig.dir.file("samples/Quiet.amhstate", document("Quiet", &[("M-Master Vol", "0.3")]).as_bytes());
+    let refused = rig.dir.file("samples/Refused.amhstate", document("Refused", &[("Amp", "refuse-this")]).as_bytes());
+    let (quiet, refused) = (quiet.to_string_lossy().into_owned(), refused.to_string_lossy().into_owned());
+    let uri = scripted::uri(kind::KEEPS_AMPLE);
+    let factory = CompositeFactory::new(vec![Box::new(rig.factory.clone())]);
+    let mut session = Session::new(Arc::new(factory), AudioBackend::Null { sample_rate: 48_000 }).unwrap();
+    let device = session.add_device(ChainRef::Master, &uri, None, None).unwrap();
+    let volume = |session: &mut Session, device| {
+        session.snapshot_json();
+        let blob = session.project().device(device).unwrap().state.clone().unwrap();
+        ample::shown(&state::decode(&blob).unwrap().1, "M-Master Vol").unwrap()
+    };
+    assert_eq!(volume(&mut session, device), "0.9");
+
+    // By its path, through the door a name goes through.
+    let loaded = session.load_preset(device, &quiet).unwrap();
+    assert_eq!((loaded.path().as_str(), volume(&mut session, device).as_str()), ("Metal/Quiet", "0.3"));
+    assert_eq!(session.device_preset(device).map(|preset| preset.name.as_str()), Some("Quiet"));
+    assert!(session.undo());
+    assert_eq!((volume(&mut session, device), session.device_preset(device)), ("0.9".to_string(), None));
+    assert!(session.redo());
+    assert_eq!(volume(&mut session, device), "0.3");
+
+    // One the plugin will not take, and a file that is no preset of it:
+    // a sentence that names the file, and the sound the device had.
+    let step = session.undo_step();
+    let error = session.load_preset(device, &refused).unwrap_err().to_string();
+    assert!(
+        error.contains("did not load the preset 'Refused'") && error.contains("the plugin rejected the preset's state"),
+        "{error}"
+    );
+    let wav = rig.dir.file("samples/Kick.wav", b"RIFF").to_string_lossy().into_owned();
+    let error = session.load_preset(device, &wav).unwrap_err().to_string();
+    assert!(
+        error.starts_with(&format!("'{wav}' cannot be given to '{uri}' as a preset: it is not one of Ample")),
+        "{error}"
+    );
+    assert_eq!((volume(&mut session, device).as_str(), session.undo_step()), ("0.3", step));
+
+    // A device is added with one, or not at all.
+    let second = session.add_device(ChainRef::Master, &uri, Some(&quiet), None).unwrap();
+    assert_eq!(volume(&mut session, second), "0.3");
+    let devices = session.project().devices().count();
+    assert!(session.add_device(ChainRef::Master, &uri, Some(&refused), None).is_err());
+    assert_eq!(session.project().devices().count(), devices);
 }

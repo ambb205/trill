@@ -1,4 +1,5 @@
-//! Building a preset's state in the scanner process.
+//! Reading a vendor's preset file in the scanner process: saying which
+//! presets a file holds, and building a preset's state.
 //!
 //! Loading a vendor's preset means reading a file Trill did not write, in
 //! a format worked out from the outside, and making a state of it. That is
@@ -14,8 +15,19 @@
 //! prints one line of JSON, an [`Outcome`], and whatever else is on its
 //! standard output is not its own. Without a scanner executable the state
 //! is built here after all, behind a guard against panics.
+//!
+//! A file that lies outside the vendor's folders, and so is not among the
+//! presets that are listed, is asked which presets it holds the same way:
+//!
+//! ```text
+//! trill-plugin-scan --vendor-file <format> <preset file>
+//! ```
+//!
+//! which prints what reading a plugin's presets prints
+//! ([`Line`](crate::presets::Line)).
 
 use super::{Built, Format, Mark};
+use crate::presets::{Line, identify};
 use crate::scan::Scanner;
 use crate::scan::child::{self, Finished};
 use crate::vst3::class_id::ClassId;
@@ -25,14 +37,21 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use trill_core::presets::PresetInfo;
 
 /// The first argument of the scanner executable when it is to build the
 /// state of a vendor's preset.
 pub const VENDOR_PRESET_ARGUMENT: &str = "--vendor-preset";
 
+/// The first argument of the scanner executable when it is to say which
+/// presets a vendor's file holds.
+pub const VENDOR_FILE_ARGUMENT: &str = "--vendor-file";
+
 /// How long building one state may take. The largest file of presets
 /// there is takes a fraction of a second to read.
 const BUILD_TIMEOUT: Duration = Duration::from_secs(60);
+/// How many presets go into one line of what the listing process prints.
+const BATCH: usize = 64;
 
 /// What the building process says of how it went.
 #[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +122,73 @@ pub(crate) fn build(
     let bytes = std::fs::read(&then).map_err(|error| format!("the preset's state was not built: {error}"))?;
     let (_, state) = state::decode(&bytes).map_err(|reason| format!("the preset's state was not built: {reason}"))?;
     Ok(Built { state, marks: outcome.marks, note: outcome.note })
+}
+
+/// The presets in the file at `file`, read as a preset file of `format`:
+/// in a scanner process if `scanner` names one, and otherwise here. Each
+/// has the id it would be listed with. An error is the end of a sentence
+/// about the file; see [`super::file_presets`].
+pub(crate) fn file_presets(scanner: &Scanner, format: Format, file: &Path) -> Result<Vec<PresetInfo>, String> {
+    let Some(scanner) = scanner.resolve() else {
+        let read = std::panic::catch_unwind(|| super::file_presets(format, file));
+        return read.unwrap_or_else(|_| Err("reading it failed".to_string())).map(identify);
+    };
+    let arguments: [&OsStr; 3] = [OsStr::new(VENDOR_FILE_ARGUMENT), OsStr::new(format.tag()), file.as_os_str()];
+    listed(&child::run_process(&scanner, &arguments, BUILD_TIMEOUT, None)?)
+}
+
+/// What a listing process printed, as the presets it found or the reason
+/// it found none.
+fn listed(finished: &Finished) -> Result<Vec<PresetInfo>, String> {
+    let said = String::from_utf8_lossy(&finished.stdout);
+    let (mut presets, mut ended) = (Vec::new(), None);
+    for line in said.lines().filter_map(|line| serde_json::from_str::<Line>(line.trim()).ok()) {
+        presets.extend(line.presets);
+        match line.failed {
+            Some(reason) => ended = Some(Err(reason)),
+            None if line.done => ended = Some(Ok(())),
+            None => {}
+        }
+    }
+    match (ended, finished.status) {
+        (Some(Ok(())), _) => Ok(identify(presets)),
+        (Some(Err(reason)), _) => Err(reason),
+        (None, None) => Err("reading it took too long".to_string()),
+        (None, Some(status)) => Err(format!("reading it failed ({})", child::explain_exit(status, &finished.stderr))),
+    }
+}
+
+/// The scanner executable's work when it was started to say which presets
+/// a file holds: `arguments` are what follows [`VENDOR_FILE_ARGUMENT`].
+/// Returns the exit code.
+pub(crate) fn run_lister(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> u8 {
+    let (Some(format), Some(file), None) = (arguments.next(), arguments.next(), arguments.next()) else {
+        eprintln!("usage: {} {VENDOR_FILE_ARGUMENT} <format> <preset file>", crate::scan::SCANNER_NAME);
+        return 2;
+    };
+    let print = |line: &Line| {
+        if let Ok(json) = serde_json::to_string(line) {
+            println!("{json}");
+        }
+    };
+    let format = format.to_string_lossy();
+    let read = match Format::parse(&format) {
+        Some(format) => super::file_presets(format, Path::new(&file)),
+        None => Err(format!("'{format}' is not a preset format")),
+    };
+    match read {
+        Ok(presets) => {
+            for batch in presets.chunks(BATCH) {
+                print(&Line { presets: batch.to_vec(), ..Line::default() });
+            }
+            print(&Line { done: true, ..Line::default() });
+            0
+        }
+        Err(reason) => {
+            print(&Line { failed: Some(reason), ..Line::default() });
+            1
+        }
+    }
 }
 
 /// What a building process left behind, as its outcome or the reason

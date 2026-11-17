@@ -14,6 +14,7 @@ use crate::presets::{PresetInfo, PresetList};
 use crate::project::Device;
 use crate::time::TimeSignature;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::time::Duration;
 
 /// URI scheme of the devices that ship with the DAW, e.g. `builtin:polysynth`.
@@ -714,6 +715,37 @@ pub trait DeviceFactory: Send + Sync {
         let _ = uri;
         false
     }
+
+    /// The preset in the file at `file`, as a preset of the device type
+    /// `uri`: what a device of that type is then told to load
+    /// ([`DeviceController::load_preset`]). For a preset that is not
+    /// among the type's listed ones because its file lies somewhere else.
+    /// `within` says which preset is meant in a file that holds several.
+    /// `None` if the type is not one of this factory's.
+    ///
+    /// An error is the end of a sentence about the file: the type takes
+    /// no preset files, the file is another device's, there is no such
+    /// file. The file is read only as far as it takes to say whose preset
+    /// it is and what it is called, and none of a plugin's code runs;
+    /// loading it reads the rest. It may still take as long as starting a
+    /// process does: for a caller that may wait.
+    fn preset_file(&self, uri: &str, file: &Path, within: Option<&str>) -> Option<Result<PresetInfo, String>> {
+        let _ = (file, within);
+        let descriptor = self.descriptors().into_iter().find(|descriptor| descriptor.uri == uri)?;
+        Some(Err(format!("{} takes no preset files; its presets are asked for by name", descriptor.name)))
+    }
+
+    /// The device type the preset file at `file` is for, by its URI, if
+    /// that is one of this factory's and can be told without running
+    /// anything: by the file's name, and where the name does not say, by
+    /// its first bytes. This is for listing the preset files of a folder
+    /// with the devices they belong to, so it costs little enough to be
+    /// asked of hundreds of files. `None` does not mean that no device
+    /// takes the file ([`preset_file`](Self::preset_file) says that).
+    fn preset_file_type(&self, file: &Path) -> Option<String> {
+        let _ = file;
+        None
+    }
 }
 
 /// A shared factory is a factory, so one instance can serve several owners.
@@ -758,6 +790,14 @@ impl<T: DeviceFactory + ?Sized> DeviceFactory for std::sync::Arc<T> {
 
     fn plays_drums(&self, uri: &str) -> bool {
         (**self).plays_drums(uri)
+    }
+
+    fn preset_file(&self, uri: &str, file: &Path, within: Option<&str>) -> Option<Result<PresetInfo, String>> {
+        (**self).preset_file(uri, file, within)
+    }
+
+    fn preset_file_type(&self, file: &Path) -> Option<String> {
+        (**self).preset_file_type(file)
     }
 }
 
@@ -826,6 +866,14 @@ impl DeviceFactory for CompositeFactory {
 
     fn plays_drums(&self, uri: &str) -> bool {
         self.factories.iter().any(|factory| factory.plays_drums(uri))
+    }
+
+    fn preset_file(&self, uri: &str, file: &Path, within: Option<&str>) -> Option<Result<PresetInfo, String>> {
+        self.factories.iter().find_map(|factory| factory.preset_file(uri, file, within))
+    }
+
+    fn preset_file_type(&self, file: &Path) -> Option<String> {
+        self.factories.iter().find_map(|factory| factory.preset_file_type(file))
     }
 }
 

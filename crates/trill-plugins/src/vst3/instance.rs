@@ -705,17 +705,16 @@ impl Vst3Thread {
         instance.restore(Some(&blob)).map_err(|reason| reason.replace("its saved state", "the preset's state"))
     }
 
-    /// Has an instance take on the states in the preset file at `path`,
-    /// as it plays.
-    pub(crate) fn load_preset_file(&mut self, id: InstanceId, path: &Path) -> Result<(), String> {
-        let bytes = std::fs::read(path).map_err(|error| format!("cannot read '{}': {error}", path.display()))?;
-        if bytes.is_empty() {
-            return Err(format!("'{}' is empty", path.display()));
+    /// Has an instance take on the states in `preset`, the bytes of a
+    /// preset file, as it plays.
+    pub(crate) fn load_preset_file(&mut self, id: InstanceId, preset: &[u8]) -> Result<(), String> {
+        if preset.is_empty() {
+            return Err("the preset file is empty".to_string());
         }
         let instance = self.instances.get_mut(&id).ok_or("the plugin instance no longer exists")?;
         // A preset file is a saved state by another name, and is handed
         // to the plugin the same way.
-        instance.restore(Some(&bytes)).map_err(|reason| reason.replace("saved state", "preset"))
+        instance.restore(Some(preset)).map_err(|reason| reason.replace("saved state", "preset"))
     }
 
     /// Has an instance switch to program `index` of the `steps + 1` its

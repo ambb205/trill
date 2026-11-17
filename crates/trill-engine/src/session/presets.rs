@@ -18,13 +18,19 @@
 //! Nothing is read back from the plugin right after it was told to load.
 //! A plugin may finish loading a moment later, on threads of its own, and
 //! what it would say in between is the sound it had.
+//!
+//! A preset is asked for by its name or id, among the ones its device type
+//! lists, or by the path of its file, for one that lies where nothing is
+//! listed from: a preset that was bought and is kept with the samples, one
+//! that was sent. Either way it comes to a [`PresetInfo`] and goes through
+//! the same door from there.
 
 use super::{Session, SessionError, preset_values};
 use crate::ready::Plugins;
 use crate::saved::{Saved, SavedPresets};
 use std::sync::Arc;
 use trill_core::device::PresetLoadError;
-use trill_core::presets::{PresetInfo, PresetList, PresetLookup, PresetRef, PresetStatus, SavedPreset};
+use trill_core::presets::{PresetFile, PresetInfo, PresetList, PresetLookup, PresetRef, PresetStatus, SavedPreset};
 use trill_core::{DeviceId, EditError};
 
 /// The most presets an error names, as what there is or what is near:
@@ -80,6 +86,14 @@ impl Session {
     /// name, or its name with as much of its category in front as tells
     /// it apart (`Pads/Warm`).
     ///
+    /// Or it is the whole path of a preset file, for a preset that is not
+    /// listed because of where it lies ([`PresetFile`]): a file of the
+    /// kind the device type's presets are kept in (a plugin's `.vstpreset`,
+    /// its maker's own format where that is read), or a preset that was
+    /// saved from a device of this type (`.trillpreset`). A file that is
+    /// another device's, damaged, or not there is an error that says so,
+    /// and the device is as it was.
+    ///
     /// One undo step, and the song keeps playing. For a built-in device
     /// every parameter returns to its default and the preset's values are
     /// applied. A plugin loads the preset itself, as its own browser
@@ -97,8 +111,8 @@ impl Session {
     /// a plugin that does not answer at all.
     pub fn load_preset(&mut self, id: DeviceId, preset: &str) -> Result<PresetInfo, SessionError> {
         let uri = self.project.device(id)?.uri.clone();
-        let info = self.find_preset(&uri, preset)?;
-        if let Some(saved) = self.saved_preset(&uri, &info)? {
+        let (info, saved) = self.wanted_preset(&uri, preset)?;
+        if let Some(saved) = saved {
             self.load_saved_preset(id, &info, saved)?;
             return Ok(info);
         }
@@ -242,6 +256,39 @@ impl Session {
             )));
         }
         Ok(())
+    }
+
+    /// What `wanted` asks for of the device type `uri`: one of the type's
+    /// listed presets, by its name or id, or the preset in a file, by the
+    /// file's path. With it comes the saved preset it stands for, if it is
+    /// one. An error says what there is instead, or what is wrong with the
+    /// file.
+    pub(super) fn wanted_preset(
+        &self,
+        uri: &str,
+        wanted: &str,
+    ) -> Result<(PresetInfo, Option<SavedPreset>), SessionError> {
+        let Some(asked) = PresetFile::asked(wanted) else {
+            let info = self.find_preset(uri, wanted)?;
+            let saved = self.saved_preset(uri, &info)?;
+            return Ok((info, saved));
+        };
+        let refused = |reason: String| {
+            SessionError::Device(format!("'{}' cannot be given to '{uri}' as a preset: {reason}", asked.path.display()))
+        };
+        if SavedPresets::is_preset_file(&asked.path) {
+            let saved = SavedPresets::read_file(&asked.path).map_err(refused)?;
+            if saved.uri != uri {
+                let whose = if saved.device.is_empty() { "another device" } else { saved.device.as_str() };
+                return Err(refused(format!("it is a preset of {whose} ({})", saved.uri)));
+            }
+            return Ok((saved.info(), Some(saved)));
+        }
+        match self.factory.preset_file(uri, &asked.path, asked.within.as_deref()) {
+            Some(Ok(info)) => Ok((info, None)),
+            Some(Err(reason)) => Err(refused(reason)),
+            None => Err(SessionError::Device(format!("unknown device '{uri}'"))),
+        }
     }
 
     /// The preset of the device type `uri` that `wanted` asks for, or an
@@ -441,6 +488,7 @@ mod tests {
     use crate::engine::AudioBackend;
     use parking_lot::Mutex;
     use std::collections::HashMap;
+    use std::path::Path;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use trill_core::device::{
@@ -664,6 +712,25 @@ mod tests {
             if uri == URI {
                 self.0.lock().refreshed += 1;
             }
+        }
+
+        /// A preset file of this plugin's is a line of text: the word
+        /// "patch" and the patch. One with several lines holds several.
+        fn preset_file(&self, uri: &str, file: &Path, within: Option<&str>) -> Option<Result<PresetInfo, String>> {
+            if uri != URI {
+                return None;
+            }
+            let Ok(text) = std::fs::read_to_string(file) else { return Some(Err("there is no such file".into())) };
+            let patches: Vec<&str> = text.lines().filter_map(|line| line.strip_prefix("patch ")).collect();
+            Some(match (patches.as_slice(), within) {
+                ([], _) => Err("it is not a preset of Synth".to_string()),
+                ([patch], None) => Ok(preset(&PresetFile::name_of(file), "", patch)),
+                (_, None) => Err(format!("it holds {} presets", patches.len())),
+                (patches, Some(within)) => match patches.iter().find(|patch| **patch == within) {
+                    Some(patch) => Ok(preset(patch, "", patch)),
+                    None => Err(format!("it holds no preset '{within}'")),
+                },
+            })
         }
     }
 
@@ -1188,5 +1255,135 @@ mod tests {
         assert_eq!(later.presets(URI).presets[0], saved.info);
         let device = later.add_device(ChainRef::Master, URI, Some("Low End"), None).unwrap();
         assert_eq!((later_plugins.patch(device), later_plugins.plugin(device).tweaks), ("deep bass".into(), 1));
+    }
+
+    /// A file of the test's own, in a folder that goes with it.
+    fn file(folder: &tempfile::TempDir, name: &str, text: &str) -> String {
+        let path = folder.path().join(name);
+        std::fs::write(&path, text).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn a_plugin_is_given_a_preset_from_a_file_by_the_files_path() {
+        let folder = tempfile::tempdir().unwrap();
+        let bought = file(&folder, "Bought Lead.patch", "patch bought lead\n");
+        let (mut session, plugins) = session();
+        let device = session.add_device(ChainRef::Master, URI, Some("Glass"), None).unwrap();
+        session.set_device_params(device, &[("drive".into(), 0.9)]).unwrap();
+        plugins.tweak(device);
+        let step = session.undo_step();
+
+        // The file is no preset the plugin lists: it lies somewhere else.
+        // Its path goes through the door a name goes through.
+        let loaded = session.load_preset(device, &bought).unwrap();
+        assert_eq!(loaded.name, "Bought Lead");
+        assert_eq!((plugins.patch(device), plugins.created()), ("bought lead".to_string(), 1));
+        assert_eq!(session.device_preset(device).unwrap().name, "Bought Lead");
+        assert!(model(&session, device).params.is_empty(), "the preset replaces what was set by hand");
+        assert_ne!(session.undo_step(), step);
+        // One step: undone, the plugin is on the preset it was on, with
+        // what was done to it; redone, on the file's.
+        assert!(session.undo());
+        assert_eq!((plugins.patch(device), plugins.plugin(device).tweaks), ("glass".to_string(), 1));
+        assert_eq!(session.device_preset(device).unwrap().name, "Glass");
+        assert_eq!(session.undo_step(), step);
+        assert!(session.redo());
+        assert_eq!(plugins.patch(device), "bought lead");
+
+        // A device starts from a file as it starts from a name: one step
+        // for the device and its preset.
+        let before = session.project().clone();
+        let second = session.add_device(ChainRef::Master, URI, Some(&format!("  {bought} ")), None).unwrap();
+        assert_eq!(plugins.patch(second), "bought lead");
+        assert_eq!(session.device_preset(second).unwrap().name, "Bought Lead");
+        assert!(session.undo());
+        assert_eq!(session.project(), &before);
+
+        // One of the presets of a file that holds several.
+        let bank = file(&folder, "Bank #2.patch", "patch one\npatch two\n");
+        let error = message(session.load_preset(device, &bank).unwrap_err());
+        assert!(error.ends_with("as a preset: it holds 2 presets"), "{error}");
+        assert_eq!(session.load_preset(device, &format!("{bank}#two")).unwrap().name, "two");
+        assert_eq!(plugins.patch(device), "two");
+    }
+
+    #[test]
+    fn a_file_that_is_no_preset_of_the_device_leaves_it_as_it_was_and_says_why() {
+        let folder = tempfile::tempdir().unwrap();
+        let other = file(&folder, "Other.patch", "a preset of something else");
+        let gone = folder.path().join("Gone.patch").to_string_lossy().into_owned();
+        let (mut session, plugins) = session();
+        let device = session.add_device(ChainRef::Master, URI, Some("Glass"), None).unwrap();
+        let synth = session.add_device(ChainRef::Master, SYNTH, Some("warm_pad"), None).unwrap();
+        let (step, project) = (session.undo_step(), session.project().clone());
+
+        for (path, reason) in [(&other, "it is not a preset of Synth"), (&gone, "there is no such file")] {
+            let error = message(session.load_preset(device, path).unwrap_err());
+            assert_eq!(error, format!("'{path}' cannot be given to '{URI}' as a preset: {reason}"));
+            // Nor is a device added that was to start from it.
+            let error = message(session.add_device(ChainRef::Master, URI, Some(path), None).unwrap_err());
+            assert!(error.ends_with(reason), "{error}");
+        }
+        // A device whose presets are not files says how they are asked for.
+        let error = message(session.load_preset(synth, &other).unwrap_err());
+        assert!(
+            error.ends_with("as a preset: Poly Synth takes no preset files; its presets are asked for by name"),
+            "{error}"
+        );
+        // A name is still a name, with slashes or without.
+        let error = message(session.load_preset(device, "Bought/Other.patch").unwrap_err());
+        assert!(error.contains("has no preset 'Bought/Other.patch'"), "{error}");
+
+        assert_eq!((session.undo_step(), session.project()), (step, &project), "none of it was an edit");
+        assert_eq!((plugins.patch(device), plugins.created()), ("glass".to_string(), 1));
+    }
+
+    #[test]
+    fn a_saved_presets_file_is_a_preset_wherever_it_lies() {
+        // Someone saved two sounds, of a plugin and of a built-in synth.
+        let theirs = tempfile::tempdir().unwrap();
+        let (mut session, plugins) = session();
+        session.saved_presets().open(theirs.path().to_path_buf());
+        let device = session.add_device(ChainRef::Master, URI, Some("Deep Bass"), None).unwrap();
+        plugins.tweak(device);
+        session.set_device_params(device, &[("drive".into(), 0.9)]).unwrap();
+        let low = session.save_preset(device, "Low End", "", &[]).unwrap().file.unwrap();
+        let synth = session.add_device(ChainRef::Master, SYNTH, Some("warm_pad"), None).unwrap();
+        session.set_device_params(synth, &[("cutoff".into(), 432.0)]).unwrap();
+        let values = |session: &Session, id| -> Vec<f64> {
+            session.device_params(id).unwrap().iter().map(|state| state.value).collect()
+        };
+        let sound = values(&session, synth);
+        let dark = session.save_preset(synth, "Dark Pad", "", &[]).unwrap().file.unwrap();
+        let (low, dark) = (low.to_string_lossy().into_owned(), dark.to_string_lossy().into_owned());
+
+        // Sent to someone else, the files are given to their devices by
+        // their paths, and are not made presets of theirs.
+        let (mut later, later_plugins) = self::session();
+        let device = later.add_device(ChainRef::Master, URI, Some(&low), None).unwrap();
+        assert_eq!((later_plugins.patch(device), later_plugins.plugin(device).tweaks), ("deep bass".into(), 1));
+        assert_eq!(model(&later, device).params.get("drive"), Some(&0.9));
+        assert_eq!(later.device_preset(device).unwrap().name, "Low End");
+        let synth = later.add_device(ChainRef::Master, SYNTH, Some("sub_bass"), None).unwrap();
+        let step = later.undo_step();
+        assert_eq!(later.load_preset(synth, &dark).unwrap().path(), "Saved/Dark Pad");
+        assert_eq!(values(&later, synth), sound);
+        assert!(later.undo());
+        assert_eq!((later.undo_step(), later.device_preset(synth).unwrap().name.as_str()), (step, "sub_bass"));
+        assert!(later.saved_presets().is_empty(), "nothing was saved here");
+        assert_eq!(later.presets(URI).len(), presets().len());
+
+        // Another device's preset, and a file that is not one.
+        let error = message(later.load_preset(synth, &low).unwrap_err());
+        assert!(error.ends_with(&format!("as a preset: it is a preset of Synth ({URI})")), "{error}");
+        let scratch = tempfile::tempdir().unwrap();
+        let damaged = file(&scratch, "Damaged.trillpreset", "{ not json");
+        let error = message(later.load_preset(device, &damaged).unwrap_err());
+        assert!(error.contains("as a preset: it is not a saved preset ("), "{error}");
+        let gone = scratch.path().join("Gone.TrillPreset").to_string_lossy().into_owned();
+        let error = message(later.load_preset(device, &gone).unwrap_err());
+        assert!(error.ends_with("as a preset: there is no such file"), "{error}");
+        assert_eq!(later_plugins.patch(device), "deep bass");
     }
 }

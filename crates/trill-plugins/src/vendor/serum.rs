@@ -12,14 +12,16 @@ use crate::presets::store::PluginRef;
 use crate::presets::{DESCRIPTION_LIMIT, Locator, NAME_LIMIT, Sink, TAG_LIMIT, Watch, tidy, walk};
 use crate::vst3::state::PluginState;
 use serde_json::{Map, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use trill_core::presets::PresetInfo;
 
 /// Serum 2's processor class.
 pub(crate) const CLASS: &str = "56534558667350736572756D20320000";
 const PRODUCT: &str = "Serum2";
 const FILE_TYPE: &str = "SerumPreset";
-const EXTENSION: &str = "serumpreset";
+pub(crate) const EXTENSION: &str = "serumpreset";
+/// The most of a file's own words about itself that a refusal repeats.
+const SAID_LIMIT: usize = 40;
 /// The two halves of the plugin, as its states name them.
 const HALVES: [&str; 2] = ["processor", "controller"];
 /// What a state's header shows of the preset it came from.
@@ -40,32 +42,54 @@ pub(crate) fn list(_plugin: &PluginRef, places: &VendorPlaces, sink: &mut dyn Si
         sink.watch(Watch { path: folder.clone(), extensions: extensions.clone() });
         let mut batch = Vec::new();
         for file in walk::files(&folder, &extensions) {
-            let Ok(start) = read_start(&file, xfer::header_room()) else { continue };
-            let Ok((header, _)) = xfer::header(&start) else { continue };
-            if xfer::field(&header, "product") != PRODUCT || xfer::field(&header, "fileType") != FILE_TYPE {
-                continue;
-            }
-            let stem = file.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
-            let named = tidy(xfer::field(&header, NAME_FIELD), NAME_LIMIT);
-            let tags = header.get("tags").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
-            batch.push(PresetInfo {
-                name: if named.is_empty() { tidy(&stem, NAME_LIMIT) } else { named },
-                category: walk::category_below(&folder, &file),
-                author: tidy(xfer::field(&header, "presetAuthor"), NAME_LIMIT),
-                tags: tags
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(|tag| tidy(tag, NAME_LIMIT).to_lowercase())
-                    .filter(|tag| !tag.is_empty())
-                    .take(TAG_LIMIT)
-                    .collect(),
-                description: tidy(xfer::field(&header, "presetDescription"), DESCRIPTION_LIMIT),
-                locator: Locator::Vendor { format: super::Format::Serum2, path: file, key: None }.to_text(),
-                ..PresetInfo::default()
-            });
+            let Ok(mut preset) = file_preset(&file) else { continue };
+            preset.category = walk::category_below(&folder, &file);
+            batch.push(preset);
         }
         sink.presets(batch);
     }
+}
+
+/// The preset in the file at `file`, wherever that lies, by what the
+/// file's header says of it: its name, who made it, what they say of it,
+/// and its tags. An error says why the file is not a preset of Serum 2's,
+/// as the end of a sentence about it.
+pub(crate) fn file_preset(file: &Path) -> Result<PresetInfo, String> {
+    let start = read_start(file, xfer::header_room()).map_err(|error| format!("it cannot be read ({error})"))?;
+    let (header, _) = xfer::header(&start)?;
+    let (product, kind) = (xfer::field(&header, "product"), xfer::field(&header, "fileType"));
+    if product != PRODUCT || kind != FILE_TYPE {
+        return Err(not_ours(kind, product));
+    }
+    let stem = file.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
+    let named = tidy(xfer::field(&header, NAME_FIELD), NAME_LIMIT);
+    let tags = header.get("tags").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+    Ok(PresetInfo {
+        name: if named.is_empty() { tidy(&stem, NAME_LIMIT) } else { named },
+        author: tidy(xfer::field(&header, "presetAuthor"), NAME_LIMIT),
+        tags: tags
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|tag| tidy(tag, NAME_LIMIT).to_lowercase())
+            .filter(|tag| !tag.is_empty())
+            .take(TAG_LIMIT)
+            .collect(),
+        description: tidy(xfer::field(&header, "presetDescription"), DESCRIPTION_LIMIT),
+        locator: Locator::Vendor { format: super::Format::Serum2, path: file.to_path_buf(), key: None }.to_text(),
+        ..PresetInfo::default()
+    })
+}
+
+/// What is said of one of Xfer's files that is something else than a
+/// preset of Serum 2: what the file calls itself, in a few words of its
+/// own.
+fn not_ours(kind: &str, product: &str) -> String {
+    let (kind, product) = (tidy(kind, SAID_LIMIT), tidy(product, SAID_LIMIT));
+    format!(
+        "it is not a Serum 2 preset (it says it is a {} of {})",
+        if kind.is_empty() { "file" } else { &kind },
+        if product.is_empty() { "an unnamed product" } else { &product }
+    )
 }
 
 /// The version of its settings a container says it holds.
@@ -80,11 +104,7 @@ pub(crate) fn build(file: &[u8], current: &PluginState) -> Result<Built, String>
     let preset = xfer::unpack(file)?;
     let (product, kind) = (xfer::field(&preset.header, "product"), xfer::field(&preset.header, "fileType"));
     if product != PRODUCT || kind != FILE_TYPE {
-        return Err(format!(
-            "it is not a Serum 2 preset (it says it is a {} of {})",
-            if kind.is_empty() { "file" } else { kind },
-            if product.is_empty() { "an unnamed product" } else { product }
-        ));
+        return Err(not_ours(kind, product));
     }
     // A plugin reads patches older than itself, not newer ones.
     let installed = xfer::header(&current.component).ok().and_then(|(header, _)| version(&header));

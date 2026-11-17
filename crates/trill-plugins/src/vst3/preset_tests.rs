@@ -281,7 +281,7 @@ fn a_preset_that_does_not_load_says_why() {
     assert!(reason.starts_with("the preset is damaged"), "{reason}");
     let gone =
         PresetInfo { locator: Locator::Vst3File { path: folder.join("gone") }.to_text(), ..PresetInfo::default() };
-    assert!(failure(load(&mut instance, &gone)).starts_with("cannot read '"));
+    assert!(failure(load(&mut instance, &gone)).contains("gone' cannot be read: "));
     // A state the plugin itself turns down.
     let foreign = state::encode(class(kind::IMPULSE), &PluginState { component: b"junk".to_vec(), controller: vec![] });
     let reason = failure(load(&mut instance, &file("junk", &foreign)));
@@ -380,4 +380,53 @@ fn the_session_lists_loads_undoes_and_saves_programs_and_preset_files() {
     session.new_project();
     session.load(&path).unwrap();
     assert_eq!((rendered(&mut session), preset_name(&session, device).as_deref()), (0.25, Some("Quiet")));
+}
+
+// ---- a preset file that lies anywhere --------------------------------------
+
+#[test]
+fn a_preset_file_outside_the_preset_folders_is_loaded_by_its_path() {
+    let rig = Rig::new();
+    rig.preset_file("user", kind::IMPULSE, "Mine.vstpreset", 0.4);
+    let bought = rig.dir.file("samples/Pack/Bought Lead.vstpreset", &preset_bytes(kind::IMPULSE, 0.3));
+    let theirs = rig.dir.file("samples/Pack/Theirs.vstpreset", &preset_bytes(kind::MONO_GAIN, 0.1));
+    let patch = rig.dir.file("samples/Pack/Patch.fxp", b"CcnK");
+    let uri = scripted::uri(kind::IMPULSE);
+    let of = |file: &std::path::Path| rig.factory.preset_file(&uri, file, None).expect("a plugin of this factory");
+    assert!(matches!(rig.listed(kind::IMPULSE).find("Bought Lead"), PresetLookup::Missing { .. }));
+
+    // The file is not listed, and is a preset all the same.
+    let lead = of(&bought).unwrap();
+    assert_eq!((lead.name.as_str(), lead.category.as_str(), lead.id.len()), ("Bought Lead", "", 10));
+    let mut instance = rig.create(kind::IMPULSE);
+    load(&mut instance, &lead).unwrap();
+    assert_eq!((gain(&mut instance), impulse(&mut instance)), (0.3, 0.6));
+    assert_eq!(instance.controller.as_mut().unwrap().take_preset_note(), None);
+    // A listed file's path is the listed preset.
+    let mine = rig.folder("user", kind::IMPULSE).join("Mine.vstpreset");
+    assert_eq!(&of(&mine).unwrap(), preset(&rig.listed(kind::IMPULSE), "Mine"));
+
+    // Another plugin's file, and a kind of file this plugin has no use for.
+    let (this, other) = (plugin_name(&rig, kind::IMPULSE), plugin_name(&rig, kind::MONO_GAIN));
+    assert_eq!(of(&theirs).unwrap_err(), format!("it is a preset of {other}, not of {this}"));
+    assert_eq!(of(&patch).unwrap_err(), format!("{this} is given presets from .vstpreset files, and this is not one"));
+    assert_eq!(rig.factory.preset_file_type(&bought), Some(uri.clone()));
+    assert_eq!(rig.factory.preset_file_type(&patch), None);
+
+    // Through a session: one undo step, like a preset by name.
+    let (mut session, track) = session(&rig);
+    let device = session.add_device(ChainRef::Track(track), &uri, None, None).unwrap();
+    let step = session.undo_step();
+    let loaded = session.load_preset(device, &bought.to_string_lossy()).unwrap();
+    assert_eq!(loaded.name, "Bought Lead");
+    assert_eq!(session.device_preset(device).map(|preset| preset.name.as_str()), Some("Bought Lead"));
+    assert!(session.undo());
+    assert_eq!((session.undo_step(), session.device_preset(device)), (step, None));
+    let error = session.load_preset(device, &theirs.to_string_lossy()).unwrap_err().to_string();
+    assert!(error.ends_with(&format!("as a preset: it is a preset of {other}, not of {this}")), "{error}");
+}
+
+fn plugin_name(rig: &Rig, kind: u8) -> String {
+    let uri = scripted::uri(kind);
+    rig.factory.descriptors().into_iter().find(|descriptor| descriptor.uri == uri).unwrap().name
 }
