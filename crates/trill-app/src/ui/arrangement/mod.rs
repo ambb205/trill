@@ -255,6 +255,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
         let welcome = Rect::from_min_max(area.min, pos2(area.right(), geometry.master.top()));
         empty::show(ui, cx, welcome);
         empty::sound_drop(ui, cx, welcome);
+        empty::preset_drop(ui, cx, welcome);
         master::show(ui, cx, &geometry);
         return;
     }

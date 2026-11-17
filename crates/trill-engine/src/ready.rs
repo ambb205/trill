@@ -1590,7 +1590,18 @@ pub(crate) fn wake(
         // part plays it with: the one that stays chosen where the part has
         // got to, or one that is for the next note only.
         let articulation = |pitch: u8| track.profile.articulations.iter().find(|way| way.key == Some(pitch));
-        let (mut stays, mut once): (Option<OpeningNote>, Option<OpeningNote>) = (None, None);
+        // What the part chose before the render begins is chosen where it
+        // begins: the song presses it again there, and so does this.
+        let [chosen, pending] = crate::graph::chosen_at(&node.switches, from).map(|switch| {
+            switch.map(|switch| OpeningNote {
+                pitch: switch.pitch,
+                velocity: f32::from(switch.velocity.clamp(1, 127)) / 127.0,
+                controllers: Vec::new(),
+                switch: true,
+            })
+        });
+        let stayed_before = chosen.is_some();
+        let (mut stays, mut once): (Option<OpeningNote>, Option<OpeningNote>) = (chosen, pending);
         // Which notes are rehearsed: a pitch under each switch it is first
         // played with, which are other recordings.
         let mut rehearsing: Vec<(Option<u8>, u8)> = Vec::new();
@@ -1606,7 +1617,7 @@ pub(crate) fn wake(
         });
         // Whether the part begins on what nothing was said of, and whether
         // a switch that stays is pressed at all.
-        let (mut begins_unsaid, mut stayed) = (false, false);
+        let (mut begins_unsaid, mut stayed) = (false, stayed_before);
         for note in opening_notes.filter(|_| instrument.is_some()) {
             let switches = articulation(note.pitch).map(|way| way.lasts);
             if switches.is_none() {

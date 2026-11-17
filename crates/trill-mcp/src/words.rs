@@ -279,6 +279,11 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
             let name = call.text("name").map(quoted).unwrap_or_default();
             about("Saving", "Saved", format!("the sound of {device} as the preset {name}").trim_end())
         }
+        "save_sound" => {
+            let track = call.track("track").unwrap_or_else(|| "a track".to_owned());
+            let name = call.text("name").map(quoted).unwrap_or_default();
+            about("Saving", "Saved", format!("the sound of {track} as {name}").trim_end_matches(" as ").trim_end())
+        }
         "show_device_editor" => {
             let device = call.device("device").unwrap_or_else(|| "a device".to_owned());
             match call.input.get("open").and_then(Value::as_bool) {
@@ -633,7 +638,7 @@ pub fn of_call(tool: &str, input: &Value, answer: &str) -> Option<Place> {
     let answered = |key: &str| answer.get(key).and_then(Value::as_u64);
     match tool {
         "create_track" => answered("track_id").map(Place::track),
-        "update_track" | "set_instrument_profile" => given("track").map(Place::track),
+        "update_track" | "set_instrument_profile" | "save_sound" => given("track").map(Place::track),
 
         "add_device" => answered("device_id").map(Place::device),
         "update_device" | "set_sample" | "set_wavetable" | "show_device_editor" | "save_preset" => {
@@ -955,6 +960,12 @@ mod tests {
             did("update_device", json!({ "device": device, "enabled": false }), p),
             "Bypassed \u{201C}Poly Synth\u{201D}"
         );
+        // A track's sound, kept as one thing.
+        assert_eq!(
+            did("save_sound", json!({ "track": track, "name": "Dub Bass" }), p),
+            "Saved the sound of \u{201C}Bass\u{201D} as \u{201C}Dub Bass\u{201D}"
+        );
+        assert_eq!(did("save_sound", json!({ "track": track }), p), "Saved the sound of \u{201C}Bass\u{201D}");
         assert_eq!(
             did("create_clip", json!({ "track": track, "start": 0, "length": 8, "name": "Chorus" }), p),
             "Added the clip \u{201C}Chorus\u{201D} to \u{201C}Bass\u{201D}"
@@ -1197,6 +1208,7 @@ mod tests {
         // What was changed is named in the arguments.
         assert_eq!(of("update_track", json!({ "track": 4, "volume_db": -6 }), json!({})), Some(Place::track(4)));
         assert_eq!(of("update_device", json!({ "device": 5, "params": {} }), json!({})), Some(Place::device(5)));
+        assert_eq!(of("save_sound", json!({ "track": 4, "name": "Tone" }), json!({})), Some(Place::track(4)));
         assert_eq!(of("set_sample", json!({ "device": 5, "path": "k.wav" }), json!({})), Some(Place::device(5)));
         assert_eq!(of("set_wavetable", json!({ "device": 5, "table": "Acid" }), json!({})), Some(Place::device(5)));
         assert_eq!(of("describe_wavetable", json!({ "device": 5 }), json!({})), None);

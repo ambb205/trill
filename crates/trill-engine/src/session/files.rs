@@ -19,10 +19,38 @@
 use super::{Session, SessionError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use trill_core::files::{self, FileTable, FileUse, KnownFile, Relink};
+use trill_core::files::{self, FilePlace, FileTable, FileUse, KnownFile, Relink};
 use trill_core::journal::words::quoted;
-use trill_core::{EditError, Project};
+use trill_core::{Device, DeviceFiles, DeviceId, EditError, Project};
 use trill_dsp::SampleFiles;
+use trill_dsp::sampled::loaded::INSTRUMENT_SLOT;
+
+/// What the devices of the open song say of files: the built-in sample
+/// players by their saved states ([`SampleFiles`]), and with them the files
+/// a device looked for and did not find that its state does not name
+/// itself: the recordings a sampled instrument's file names. Those are in
+/// the instrument's file, not in the song, for as long as they are where
+/// that says; one that is missing is the song's to find, and giving it
+/// another place writes that into the device's state.
+pub(super) struct SongFiles {
+    missing: BTreeMap<DeviceId, Vec<(String, String)>>,
+}
+
+impl DeviceFiles for SongFiles {
+    fn files(&self, device: &Device) -> Vec<(String, String)> {
+        let mut files = SampleFiles.files(device);
+        for (slot, path) in self.missing.get(&device.id).into_iter().flatten() {
+            if !files.iter().any(|(known, _)| known == slot) {
+                files.push((slot.clone(), path.clone()));
+            }
+        }
+        files
+    }
+
+    fn relinked(&self, device: &Device, slots: &[(String, String)]) -> Result<Vec<u8>, String> {
+        SampleFiles.relinked(device, slots)
+    }
+}
 
 /// What the file at `path` is, as far as its size and its header say:
 /// `None` if there is no file there. `before`, what was known of it,
@@ -92,11 +120,26 @@ fn take_files_beside(project: &mut Project, table: &mut FileTable, folder: &str)
 }
 
 impl Session {
-    /// Every place the song names a file: its audio clips, and the samples
-    /// of its sampler and drum racks. Whether the files are there is for
-    /// the caller to find out.
+    /// What the devices of the song say of files: see [`SongFiles`].
+    pub(super) fn song_files(&self) -> SongFiles {
+        let mut missing = BTreeMap::new();
+        for (id, meta) in &self.bank.devices {
+            let Some(controller) = &meta.controller else { continue };
+            let files = controller.lock().missing_files();
+            if !files.is_empty() {
+                missing.insert(*id, files);
+            }
+        }
+        SongFiles { missing }
+    }
+
+    /// Every place the song names a file: its audio clips, the samples of
+    /// its sampler and drum racks, the files of its sampled instruments,
+    /// and the recordings of those that are not where the instrument's
+    /// file says. Whether the files are there is for the caller to find
+    /// out.
     pub fn files(&self) -> Vec<FileUse> {
-        self.project.files(&SampleFiles)
+        self.project.files(&self.song_files())
     }
 
     /// What was written down about the song's files when it was last saved
@@ -121,16 +164,31 @@ impl Session {
     pub fn relink(&mut self, relinks: &[Relink]) -> Result<usize, SessionError> {
         // Tried on a copy first: what is wrong with the request is said
         // before any file is opened for it.
+        let devices = self.song_files();
         let before = self.files();
         let mut trial = self.project.clone();
-        if trial.relink(relinks, &SampleFiles)? == 0 {
+        if trial.relink(relinks, &devices)? == 0 {
             return Ok(0);
         }
-        let after = trial.files(&SampleFiles);
+        // A recording that was missing is in the device's state once it is
+        // given a place, so the places are the same before and after.
+        let after = trial.files(&devices);
         drop(trial);
         let moved: Vec<(&FileUse, &FileUse)> =
-            before.iter().zip(&after).filter(|(was, is)| was.path != is.path).collect();
-        let news: BTreeSet<&str> = moved.iter().map(|(_, is)| is.path.as_str()).collect();
+            before.iter().zip(&after).filter(|(was, is)| was.place == is.place && was.path != is.path).collect();
+        let mut news: BTreeSet<&str> = BTreeSet::new();
+        for (_, is) in &moved {
+            // An instrument's own file is text, and is read when the
+            // device is made from it; that it is there is all that is
+            // asked of it here.
+            if matches!(&is.place, FilePlace::Sample { slot, .. } if slot == INSTRUMENT_SLOT) {
+                if !Path::new(&is.path).is_file() {
+                    return Err(SessionError::Io(format!("there is no file '{}'; nothing was relinked", is.path)));
+                }
+            } else {
+                news.insert(is.path.as_str());
+            }
+        }
         for path in &news {
             if let Err(error) = self.audio.media().audio(Path::new(path)) {
                 return Err(SessionError::Io(format!("{error}; nothing was relinked")));
@@ -144,7 +202,7 @@ impl Session {
             (count, places) => format!("Relinked {count} files in {} places", places.len()),
         };
         let pairs: Vec<(String, String)> = moved.iter().map(|(was, is)| (was.path.clone(), is.path.clone())).collect();
-        let changed = self.named(&label, |session| session.edit(|project| project.relink(relinks, &SampleFiles)))?;
+        let changed = self.named(&label, |session| session.edit(|project| project.relink(relinks, &devices)))?;
         // What was known of each file is known of it where it is now.
         for (was, is) in &pairs {
             self.files.found_at(was, is);
@@ -160,6 +218,8 @@ impl Session {
         let folder = song.and_then(folder_of_song);
         let mut seen = BTreeSet::new();
         let mut table = Vec::new();
+        // The files the song itself names: a recording that an
+        // instrument's file names is found from that file.
         for file in self.project.files(&SampleFiles) {
             if !seen.insert(file.path.clone()) {
                 continue;

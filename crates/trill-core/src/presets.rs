@@ -17,6 +17,8 @@
 //! of file a device type takes is the type's business
 //! ([`DeviceFactory::preset_file`](crate::device::DeviceFactory::preset_file)).
 
+use crate::ids::DeviceId;
+use crate::project::{Device, EditError, Project};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -65,6 +67,91 @@ pub struct SavedPreset {
     /// say, and is read by what it holds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<u32>,
+    /// The devices that come after it, for a preset that is a *sound*: an
+    /// instrument and the effects behind it, kept as one thing. In the
+    /// order the signal goes through them; empty for a sound that is its
+    /// first device alone and says so. `None` for a preset of one device,
+    /// which says nothing of what comes after it. See [`SoundDevice`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<Vec<SoundDevice>>,
+}
+
+/// One of the devices a sound brings after its first: an effect as it was
+/// when the sound was saved, with everything a project would keep of it.
+///
+/// # What a sound is, and what it is not
+///
+/// A sound is a preset of its first device (the instrument, on a track
+/// that has one) that says what follows: [`SavedPreset::after`] for one
+/// that was saved, [`Preset::after`](crate::device::Preset::after) for one
+/// a built-in device brings. It is listed, searched and asked for as that
+/// device type's preset, and given to a device or a new track like any
+/// other; the effects are made with it ([`Project::bring_after`]).
+///
+/// It holds each device's type, parameter values, state and whether it is
+/// switched on. It does not hold what places a sound in one song:
+///
+/// * the track a device listens to ([`Device::sidechain`]): that is a
+///   track of one song, by an id that means nothing in another;
+/// * sends, the fader, the pan, mute and solo, the group: the mix, which
+///   is made anew for every song the sound is put in;
+/// * automation: that is a stretch of one song's time;
+/// * what the track's notes mean (its profile): known by the instrument's
+///   type, and for a kit read from the instrument itself.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SoundDevice {
+    /// The device type.
+    pub uri: String,
+    /// What that type is called, for the sentence that says a machine has
+    /// not got it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub device: String,
+    /// Off for an effect that was bypassed: it is there to be switched on.
+    #[serde(default = "switched_on", skip_serializing_if = "is_switched_on")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub params: BTreeMap<String, f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::project::state_base64")]
+    pub state: Option<Vec<u8>>,
+}
+
+fn switched_on() -> bool {
+    true
+}
+
+fn is_switched_on(enabled: &bool) -> bool {
+    *enabled
+}
+
+impl Default for SoundDevice {
+    fn default() -> Self {
+        Self { uri: String::new(), device: String::new(), enabled: true, params: BTreeMap::new(), state: None }
+    }
+}
+
+impl SoundDevice {
+    /// A device of the type `uri`, called `device`, with these parameter
+    /// values and everything else as the type comes.
+    pub fn new(uri: &str, device: &str, params: &[(&str, f64)]) -> Self {
+        Self {
+            uri: uri.to_string(),
+            device: device.to_string(),
+            params: params.iter().map(|(id, value)| ((*id).to_string(), *value)).collect(),
+            ..Self::default()
+        }
+    }
+
+    /// What to call the device: its type's name, or its URI where the
+    /// sound does not say.
+    pub fn called(&self) -> &str {
+        if self.device.trim().is_empty() { &self.uri } else { &self.device }
+    }
+}
+
+/// The names of the devices a sound brings after its first, for saying in
+/// a few words what it is made of.
+pub fn names_after(after: &[SoundDevice]) -> Vec<String> {
+    after.iter().map(|device| device.called().to_string()).collect()
 }
 
 impl SavedPreset {
@@ -99,8 +186,21 @@ impl SavedPreset {
         // to sound as it did.
         let mut preset = preset;
         crate::formats::keep_complete(preset.format, &preset.uri, &mut preset.params);
+        // And so is every device a sound brings after its first.
+        for (index, device) in preset.after.iter_mut().flatten().enumerate() {
+            if device.uri.is_empty() {
+                return Err(format!("the device in place {} after its first does not say which it is", index + 1));
+            }
+            crate::formats::keep_complete(preset.format, &device.uri, &mut device.params);
+        }
         preset.format = Some(crate::project::FORMAT_VERSION);
         Ok(preset)
+    }
+
+    /// Whether the preset is a sound: one that says what comes after its
+    /// device, if only that nothing does.
+    pub fn is_sound(&self) -> bool {
+        self.after.is_some()
     }
 
     /// The name `preset` was saved under, if it is a saved preset and not
@@ -176,6 +276,78 @@ impl PresetInfo {
 pub struct PresetRef {
     pub id: String,
     pub name: String,
+}
+
+/// What the id of a reference begins with on a device that a sound
+/// brought: no preset of the device's own type has such an id.
+const BROUGHT: &str = "sound|";
+
+impl PresetRef {
+    /// The reference an effect carries that the sound `sound` brought: it
+    /// started from that sound, and goes when its track is given another.
+    pub fn brought_by(sound: &PresetRef) -> Self {
+        Self { id: format!("{BROUGHT}{}", sound.id), name: sound.name.clone() }
+    }
+
+    /// The id of the sound that brought the device this is the reference
+    /// of; `None` for a device that was put on its chain otherwise, or
+    /// given a preset of its own since.
+    pub fn bringer(&self) -> Option<&str> {
+        self.id.strip_prefix(BROUGHT)
+    }
+}
+
+/// What [`Project::bring_after`] did to a chain.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Brought {
+    /// The devices that were made, in the order they are in.
+    pub made: Vec<DeviceId>,
+    /// The devices an earlier sound had brought, which went.
+    pub removed: Vec<Device>,
+}
+
+impl Project {
+    /// Makes what follows the device `first` on its chain the effects of
+    /// the sound it was just given: `after`, directly behind it, in their
+    /// order, each marked as brought by `sound` ([`PresetRef::brought_by`]).
+    ///
+    /// What it replaces: the devices behind `first` that an earlier sound
+    /// brought, whichever sound that was, and their automation with them.
+    /// A device that was put on the chain otherwise, or was given a preset
+    /// of its own since it came, is not a sound's and stays, behind the
+    /// new ones. Nothing in front of `first` is touched.
+    ///
+    /// The devices are made with what the sound holds and with nothing
+    /// else: none of them listens to another track.
+    pub fn bring_after(
+        &mut self,
+        first: DeviceId,
+        sound: &PresetRef,
+        after: &[SoundDevice],
+    ) -> Result<Brought, EditError> {
+        let chain = self.device_chain(first)?;
+        let devices = self.chain(chain)?;
+        let at = devices.iter().position(|device| device.id == first).ok_or(EditError::DeviceNotFound(first))?;
+        let going: Vec<DeviceId> = devices[at + 1..]
+            .iter()
+            .filter(|device| device.preset.as_ref().is_some_and(|preset| preset.bringer().is_some()))
+            .map(|device| device.id)
+            .collect();
+        let mut brought = Brought::default();
+        for id in going {
+            brought.removed.push(self.remove_device(id)?);
+        }
+        for (place, device) in after.iter().enumerate() {
+            let id = self.add_device(chain, device.uri.clone(), device.called(), Some(at + 1 + place))?;
+            let made = self.device_mut(id)?;
+            made.enabled = device.enabled;
+            made.params = device.params.clone();
+            made.state = device.state.clone();
+            made.preset = Some(PresetRef::brought_by(sound));
+            brought.made.push(id);
+        }
+        Ok(brought)
+    }
 }
 
 /// How much of a device type's presets is known.
@@ -521,6 +693,7 @@ mod tests {
             params: [("101".to_string(), 0.25)].into(),
             state: Some(vec![0, 255, 7]),
             format: Some(crate::project::FORMAT_VERSION),
+            after: None,
         };
         let info = saved.info();
         assert_eq!((info.path().as_str(), info.tags.as_slice()), ("Saved/Lead Tone", &["lead".to_string()][..]));
@@ -773,5 +946,147 @@ mod file_tests {
         assert_eq!(PresetFile::asked(&format!("{text}#")).unwrap().within, None);
         let gone = format!("{}#Kit", folder.path().join("gone").display());
         assert_eq!(PresetFile::asked(&gone), Some(PresetFile { path: PathBuf::from(&gone), within: None }));
+    }
+}
+
+#[cfg(test)]
+mod sound_tests {
+    use super::*;
+    use crate::project::{AutomationTarget, ChainRef};
+
+    const SYNTH: &str = "builtin:polysynth";
+    const CHORUS: &str = "builtin:chorus";
+    const REVERB: &str = "builtin:reverb";
+    const DELAY: &str = "builtin:delay";
+    const EQ: &str = "builtin:eq";
+
+    fn sound(name: &str) -> PresetRef {
+        PresetRef { id: name.to_lowercase(), name: name.to_string() }
+    }
+
+    /// The chain of the first track, as the types of its devices.
+    fn chain(project: &Project) -> Vec<&str> {
+        project.tracks[0].devices.iter().map(|device| device.uri.as_str()).collect()
+    }
+
+    #[test]
+    fn a_sound_is_a_preset_that_says_what_follows_its_device() {
+        let amp = SoundDevice {
+            uri: "vst3:AMP".into(),
+            device: "Amp".into(),
+            enabled: false,
+            params: [("7".to_string(), 0.5)].into(),
+            state: Some(vec![1, 2, 3]),
+        };
+        let tone = SavedPreset {
+            uri: "vst3:GUITAR".into(),
+            device: "Guitar".into(),
+            name: "Tone".into(),
+            state: Some(vec![9]),
+            after: Some(vec![amp.clone(), SoundDevice::new(REVERB, "Reverb", &[("decay", 1.5)])]),
+            ..SavedPreset::default()
+        };
+        assert!(tone.is_sound());
+        let read = SavedPreset::from_json(&tone.to_json()).unwrap();
+        let after = read.after.as_deref().unwrap();
+        // The plugin as it was, its state as text and still bypassed; the
+        // reverb switched on, which is not written down.
+        assert_eq!(after[0], amp);
+        assert!(tone.to_json().contains(r#""enabled": false"#) && tone.to_json().matches("enabled").count() == 1);
+        assert_eq!((after[1].uri.as_str(), after[1].enabled, after[1].params.get("decay")), (REVERB, true, Some(&1.5)));
+        assert_eq!(names_after(after), ["Amp", "Reverb"]);
+        assert_eq!(SoundDevice { device: " ".into(), ..amp.clone() }.called(), "vst3:AMP");
+
+        // A sound that is dry says so, which a preset of one device does
+        // not: the two are told apart when they are read back.
+        let dry = SavedPreset { after: Some(Vec::new()), ..tone.clone() };
+        assert_eq!(SavedPreset::from_json(&dry.to_json()).unwrap().after, Some(Vec::new()));
+        let alone = SavedPreset { after: None, ..tone.clone() };
+        assert!(!alone.to_json().contains("after") && !SavedPreset::from_json(&alone.to_json()).unwrap().is_sound());
+
+        // Every device of a sound is read by the format the sound was
+        // saved in, as a preset of one device is: a reverb from before
+        // format 7 is the reverb of its day.
+        let old = r#"{"uri":"builtin:polysynth","name":"Old","after":[
+            {"uri":"builtin:reverb","params":{"decay":3.0,"legacy":0.0}}]}"#;
+        let read = SavedPreset::from_json(old).unwrap();
+        assert_eq!(read.after.unwrap()[0].params.get("legacy"), Some(&2.0));
+        let new = old.replace(r#""name":"Old""#, r#""name":"New","format":7"#);
+        assert_eq!(SavedPreset::from_json(&new).unwrap().after.unwrap()[0].params.get("legacy"), Some(&0.0));
+        // A device that does not say which it is makes no sound.
+        let nameless = r#"{"uri":"builtin:polysynth","name":"X","after":[{"uri":""}]}"#;
+        assert!(SavedPreset::from_json(nameless).unwrap_err().contains("place 1"));
+    }
+
+    #[test]
+    fn a_sounds_effects_go_behind_its_device_and_replace_what_a_sound_brought() {
+        let mut project = Project::new("Song");
+        let track = project.add_track("Keys");
+        let on = ChainRef::Track(track);
+        let gate = project.add_device(on, "builtin:autofilter", "Auto Filter", None).unwrap();
+        let synth = project.add_device(on, SYNTH, "Poly Synth", None).unwrap();
+        let eq = project.add_device(on, EQ, "EQ", None).unwrap();
+
+        let pad = sound("Pad");
+        let after = [
+            SoundDevice { enabled: false, ..SoundDevice::new(CHORUS, "Chorus", &[("mix", 0.4)]) },
+            SoundDevice { state: Some(vec![5]), ..SoundDevice::new(REVERB, "Reverb", &[("decay", 4.0)]) },
+        ];
+        let brought = project.bring_after(synth, &pad, &after).unwrap();
+        assert_eq!(chain(&project), ["builtin:autofilter", SYNTH, CHORUS, REVERB, EQ], "behind it, in their order");
+        assert!(brought.removed.is_empty());
+        let [chorus, reverb] = brought.made[..] else { panic!("{brought:?}") };
+        let made = project.device(chorus).unwrap();
+        assert_eq!((made.name.as_str(), made.enabled, made.params.get("mix")), ("Chorus", false, Some(&0.4)));
+        assert_eq!(made.preset.as_ref().unwrap().bringer(), Some("pad"));
+        assert_eq!(made.preset.as_ref().unwrap().name, "Pad", "what it started from, by name");
+        let made = project.device(reverb).unwrap();
+        assert_eq!((made.state.as_deref(), made.sidechain), (Some(&[5u8][..]), None));
+        // The devices that were there are nobody's sound.
+        assert!(project.device(eq).unwrap().preset.is_none() && project.device(gate).unwrap().preset.is_none());
+
+        // The reverb is given a preset of its own, and its mix an envelope
+        // as the chorus's has one.
+        project.device_mut(reverb).unwrap().preset = Some(PresetRef { id: "hall".into(), name: "hall".into() });
+        for device in [chorus, reverb] {
+            let target = AutomationTarget::DeviceParam { device, param: "mix".into() };
+            project.set_automation(target, vec![crate::project::AutomationPoint::new(0.0, 0.2)]).unwrap();
+        }
+        assert_eq!(project.automation.len(), 2);
+
+        // Another sound: what the first one brought goes, with its
+        // envelope; the reverb is the user's by now and stays, behind the
+        // new effect, as the EQ does.
+        let pluck = sound("Pluck");
+        let brought = project.bring_after(synth, &pluck, &[SoundDevice::new(DELAY, "", &[])]).unwrap();
+        assert_eq!(chain(&project), ["builtin:autofilter", SYNTH, DELAY, REVERB, EQ]);
+        assert_eq!(brought.removed.iter().map(|device| device.id).collect::<Vec<_>>(), [chorus]);
+        assert_eq!(project.automation.len(), 1, "the envelope of the chorus went with it");
+        let delay = project.device(brought.made[0]).unwrap();
+        assert_eq!((delay.name.as_str(), delay.preset.as_ref().unwrap().bringer()), (DELAY, Some("pluck")));
+
+        // A sound that is dry takes away what a sound brought and adds
+        // nothing; given twice, it changes nothing the second time.
+        let dry = project.bring_after(synth, &sound("Bass"), &[]).unwrap();
+        assert_eq!((dry.made.len(), dry.removed.len()), (0, 1));
+        assert_eq!(chain(&project), ["builtin:autofilter", SYNTH, REVERB, EQ]);
+        let before = project.clone();
+        assert_eq!(project.bring_after(synth, &sound("Bass"), &[]).unwrap(), Brought::default());
+        assert_eq!(project, before);
+
+        // A device that is not there is an error, and nothing is changed.
+        assert!(project.bring_after(DeviceId(9_999), &pad, &after).is_err());
+        assert_eq!(project, before);
+    }
+
+    #[test]
+    fn a_reference_says_whether_a_sound_brought_its_device() {
+        let pad = sound("Pad");
+        let brought = PresetRef::brought_by(&pad);
+        assert_eq!((brought.bringer(), brought.name.as_str()), (Some("pad"), "Pad"));
+        assert_eq!(pad.bringer(), None);
+        // No preset a device type lists has such an id: a saved one's is
+        // ten hexadecimal digits, a built-in one's its name.
+        assert_ne!(brought.id, SavedPreset { name: "Pad".into(), ..SavedPreset::default() }.info().id);
     }
 }

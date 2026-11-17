@@ -167,10 +167,42 @@ pub fn sound_json(entry: &Entry, favorite: bool) -> Value {
     if !entry.tags.is_empty() {
         fields.insert("tags".into(), entry.tags.iter().map(|tag| tag.label()).collect());
     }
+    if let Some(facts) = entry.instrument.as_deref() {
+        fields.insert("instrument".into(), json!(instrument_line(facts)));
+    }
+    if entry.of_instrument {
+        fields.insert("of_instrument".into(), json!(true));
+    }
     if favorite {
         fields.insert("favorite".into(), json!(true));
     }
     out
+}
+
+/// What a sampled instrument of the library is, in a line: its size, its
+/// range, its layers and takes, its ways of playing.
+pub fn instrument_line(facts: &trill_library::InstrumentFacts) -> String {
+    let megabytes = facts.bytes as f64 / (1024.0 * 1024.0);
+    let size = if megabytes >= 1024.0 { format!("{:.1} GB", megabytes / 1024.0) } else { format!("{megabytes:.0} MB") };
+    let mut line = format!("{} recordings ({size})", facts.recordings);
+    if facts.found < facts.recordings {
+        line.push_str(&format!(", {} of them not in the library", facts.recordings - facts.found));
+    }
+    if let Some((low, high)) = facts.range {
+        let name = trill_core::pitch::pitch_name;
+        let what = if facts.drums { "drums on keys" } else { "range" };
+        line.push_str(&format!(", {what} {}..{}", name(low), name(high)));
+    }
+    if facts.layers > 1 {
+        line.push_str(&format!(", {} layers of loudness", facts.layers));
+    }
+    if facts.takes > 1 {
+        line.push_str(&format!(", {} takes of a note", facts.takes));
+    }
+    if !facts.ways.is_empty() {
+        line.push_str(&format!(", ways of playing: {}", facts.ways.join(", ")));
+    }
+    line
 }
 
 /// Whether the library is scanning and how far it has got.
@@ -738,7 +770,14 @@ pub fn descriptor_summary_json(descriptor: &DeviceDescriptor) -> Value {
         out["presets"] = descriptor
             .presets
             .iter()
-            .map(|preset| json!({ "name": preset.name, "description": preset.description }))
+            .map(|preset| {
+                let mut out = json!({ "name": preset.name, "description": preset.description });
+                // A sound: the effects it brings behind the device.
+                if let Some(after) = preset.after.as_deref().filter(|after| !after.is_empty()) {
+                    out["with"] = json!(trill_core::presets::names_after(after));
+                }
+                out
+            })
             .collect();
     }
     out
@@ -786,7 +825,19 @@ fn preset_json(preset: &PresetInfo) -> Value {
 /// One page of a device's presets, with what it takes to get at the
 /// rest: how many there are, how many match, and where the next page
 /// starts. A list of thousands costs a reply no more than a list of ten.
+#[cfg(test)]
 pub fn presets_json(list: &PresetList, search: &PresetSearch) -> Value {
+    presets_json_with(list, search, &|_| None)
+}
+
+/// [`presets_json`] for a list in which some presets are sounds: `after`
+/// says what a preset brings behind its device, by name, and an item that
+/// brings anything lists it as `with`.
+pub fn presets_json_with(
+    list: &PresetList,
+    search: &PresetSearch,
+    after: &dyn Fn(&PresetInfo) -> Option<Vec<String>>,
+) -> Value {
     let text = search.query.unwrap_or_default();
     let query = PresetQuery { text, category: search.category, offset: search.offset, limit: search.limit };
     let page = list.search(&query);
@@ -811,7 +862,14 @@ pub fn presets_json(list: &PresetList, search: &PresetSearch) -> Value {
     if page.offset > 0 {
         out["offset"] = json!(page.offset);
     }
-    out["items"] = page.presets.iter().map(|preset| preset_json(preset)).collect();
+    let item = |preset: &PresetInfo| {
+        let mut item = preset_json(preset);
+        if let Some(with) = after(preset).filter(|with| !with.is_empty()) {
+            item["with"] = json!(with);
+        }
+        item
+    };
+    out["items"] = page.presets.iter().map(|preset| item(preset)).collect();
     let shown = page.offset + page.presets.len();
     if shown < page.total {
         let narrow = if narrowed { "" } else { "; preset_query (\"warm pad\") or preset_category narrows them down" };

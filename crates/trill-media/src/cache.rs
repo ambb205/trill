@@ -323,6 +323,19 @@ impl AudioLoader for MediaCache {
     fn load_as_recorded(&self, path: &str) -> Result<Arc<AudioBuffer>, String> {
         self.audio(Path::new(path)).map_err(|error| error.to_string())
     }
+
+    /// The file itself, read as far as it is asked: nothing of it is kept
+    /// here, and it is at its own sample rate.
+    fn open(&self, path: &str) -> Result<Box<dyn trill_core::audio::AudioStream>, String> {
+        match crate::open(Path::new(path)) {
+            Ok(file) => Ok(Box::new(file)),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn size(&self, path: &str) -> Option<u64> {
+        std::fs::metadata(path).ok().filter(std::fs::Metadata::is_file).map(|found| found.len())
+    }
 }
 
 /// What the cache holds for a key, for the current version of its file.

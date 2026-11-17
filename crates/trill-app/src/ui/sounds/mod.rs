@@ -23,9 +23,11 @@
 //! [`Runtime::relink`]) and the session's (`set_sampler_file`,
 //! `set_pad_file`): the same ones the MCP server uses.
 
+mod instruments;
 mod missing;
 mod waves;
 
+pub use instruments::{InstrumentRow, is_instrument, size_words};
 pub use missing::{MissingFiles, Relinked, relinked_words};
 pub use waves::{WaveData, WaveState};
 
@@ -58,6 +60,37 @@ pub enum DropTarget {
     /// Onto a drum rack as a whole: each file goes to the pad its name
     /// suggests, or failing that the first empty one.
     Rack { device: DeviceId },
+    /// An instrument's file into a Sampled Instrument: what it plays.
+    Instrument { device: DeviceId },
+    /// An instrument's file onto a track: it becomes what the track plays
+    /// through, in place of the instrument the track has.
+    TrackInstrument { track: TrackId },
+    /// An instrument's file below the tracks: a new track that plays
+    /// through it, in `color`.
+    NewInstrument { color: Option<u32> },
+}
+
+impl DropTarget {
+    /// The place itself for what is being dragged: a sound (`instrument`
+    /// is false) or an instrument's file. An instrument over a track is
+    /// the track's instrument, not a clip on it; where the one cannot go
+    /// that the other can, the answer is why, for the status bar.
+    pub fn for_drag(self, instrument: bool) -> Result<DropTarget, &'static str> {
+        match (self, instrument) {
+            (DropTarget::Lane { track, .. }, true) => Ok(DropTarget::TrackInstrument { track }),
+            (DropTarget::NewTrack { colors, .. }, true) => {
+                Ok(DropTarget::NewInstrument { color: colors.first().copied() })
+            }
+            (DropTarget::Sampler { .. } | DropTarget::Pad { .. } | DropTarget::Rack { .. }, true) => {
+                Err("A sampler and a pad play one sound: an instrument goes onto a track or a Sampled Instrument")
+            }
+            (
+                DropTarget::Instrument { .. } | DropTarget::TrackInstrument { .. } | DropTarget::NewInstrument { .. },
+                false,
+            ) => Err("A Sampled Instrument plays an instrument's file (.sfz), not a single sound"),
+            (target, _) => Ok(target),
+        }
+    }
 }
 
 /// What a drop did, for selecting it and telling the user.
@@ -73,6 +106,13 @@ pub enum Dropped {
     Pads {
         device: DeviceId,
         notes: Vec<u8>,
+    },
+    /// A Sampled Instrument was given the instrument `name`: on `track`,
+    /// where the drop said which or made one.
+    Instrument {
+        device: DeviceId,
+        track: Option<TrackId>,
+        name: String,
     },
 }
 
@@ -99,6 +139,11 @@ pub enum Done {
     },
     /// A file was taken off a sampler or a pad.
     Cleared(Result<(), String>),
+    /// The library's instruments, and the generation they were read at.
+    Instruments {
+        generation: u64,
+        rows: Vec<InstrumentRow>,
+    },
     /// A dialog was answered: with a folder for the library, with a file
     /// for a sampler or a pad, or with where a clip's file is now. `None`
     /// when it was dismissed.
@@ -241,6 +286,8 @@ pub struct Sounds {
     pub preview: Preview,
     pub search: Search,
     pub pending: Vec<PendingDrop>,
+    /// The library's sampled instruments, for the browser's Devices tab.
+    instruments: instruments::Shelf,
     /// The files the song names that are not on disk, and what was found.
     pub missing: MissingFiles,
     next_drop: u64,
@@ -257,6 +304,7 @@ impl Sounds {
             preview: Preview::default(),
             search: Search::default(),
             pending: Vec::new(),
+            instruments: instruments::Shelf::default(),
             missing: MissingFiles::default(),
             next_drop: 0,
             dialog_open: false,
@@ -292,6 +340,7 @@ impl Sounds {
             || !self.pending.is_empty()
             || self.preview.loading.is_some()
             || self.missing.looking
+            || self.instruments.in_flight
             || self.runtime.library.scan_status().is_scanning()
     }
 
@@ -345,6 +394,11 @@ impl Sounds {
                         Ok(dropped) => reports.push(Report::Dropped(dropped)),
                         Err(reason) => reports.push(Report::Error(reason)),
                     }
+                }
+                Done::Instruments { generation, rows } => {
+                    self.instruments.in_flight = false;
+                    self.instruments.generation = Some(generation);
+                    self.instruments.rows = Arc::new(rows);
                 }
                 Done::Cleared(result) | Done::Quiet(result) => {
                     if let Err(reason) = result {
@@ -518,6 +572,22 @@ impl Sounds {
         self.pending.push(PendingDrop { id, target: target.clone(), label, length });
         let runtime = self.runtime.clone();
         self.work.spawn(Priority::Urgent, move || Done::Dropped { id, result: place(&runtime, &paths, &target) });
+    }
+
+    /// The sampled instruments of the library, by name. The list is read
+    /// on a worker whenever the library has changed; until the answer is
+    /// there this is the list as it was (empty, the first time).
+    pub fn instruments(&mut self) -> Arc<Vec<InstrumentRow>> {
+        let generation = self.runtime.library.generation();
+        if self.instruments.generation != Some(generation) && !self.instruments.in_flight {
+            self.instruments.in_flight = true;
+            let runtime = self.runtime.clone();
+            self.work.spawn(Priority::Urgent, move || {
+                let (generation, rows) = instruments::list(&runtime);
+                Done::Instruments { generation, rows }
+            });
+        }
+        self.instruments.rows.clone()
     }
 
     /// Takes the file off a sampler (`note` is `None`) or off a pad.
@@ -716,6 +786,11 @@ pub fn pad_for(tags: Tags, name: &str) -> Option<u8> {
 /// that can fail for one file is done before the project is touched, so a
 /// drop is all of its files or none.
 fn place(runtime: &Runtime, paths: &[PathBuf], target: &DropTarget) -> Result<Dropped, String> {
+    // An instrument is not read as a sound is: the device it goes to
+    // reads it, and says what is wrong with it.
+    if let Some(instrument) = paths.iter().find(|path| is_instrument(path)) {
+        return instruments::place(runtime, instrument, target);
+    }
     let rate = runtime.session.lock().audio_info().sample_rate;
     let mut sounds: Vec<(&PathBuf, SoundFacts)> = Vec::with_capacity(paths.len());
     for path in paths {
@@ -812,6 +887,13 @@ fn place_read(runtime: &Runtime, sounds: &[(&PathBuf, SoundFacts)], target: &Dro
                 chosen.push((path.as_path(), note));
             }
             set_pads(runtime, *device, chosen)
+        }
+        DropTarget::Instrument { .. } | DropTarget::TrackInstrument { .. } | DropTarget::NewInstrument { .. } => {
+            let (path, _) = sounds[0];
+            Err(format!(
+                "{} is a sound, not an instrument: a Sampled Instrument plays an instrument's file (.sfz).",
+                file_name(path)
+            ))
         }
     }
 }

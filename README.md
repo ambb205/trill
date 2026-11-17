@@ -29,7 +29,7 @@ Development builds are optimized (see `[profile.dev]`), because unoptimized audi
 
 ### Building and testing
 
-`cargo test --workspace` runs about 2,380 tests in a few minutes. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 2,480 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -46,6 +46,8 @@ cargo test -p trill-mcp --test hearing -- --include-ignored --nocapture    # ren
 cargo test -p trill-mcp --test instruments -- --include-ignored --nocapture --test-threads 1    # what Trill ships about the Ample guitars and bass and Superior Drummer 3, checked on the plugins themselves: a drum asked for by name and heard on two kits, a slide, a scoop, a harmonic and a bend written by name and heard
 cargo test -p trill-app a_modelled_saxophone -- --include-ignored --nocapture    # the same saxophone typed on the computer keyboard, through the window's own code (no window opens)
 cargo test -p trill-mcp --test wavetable against_the_installed -- --ignored --nocapture    # a sawtooth on the wavetable synth beside Serum 2's and Surge XT's as they come: what of each is not on a harmonic, its pitch and its level (a measurement)
+cargo test -p trill-mcp --test wavetable the_filters_against -- --ignored --nocapture    # the wavetable synth's low-pass filters beside Surge XT's at the same settings: where each is 3 dB down, how high its peak stands, how steeply it falls (a measurement)
+cargo test -p trill-mcp --test hearing a_guitar_through_its_amplifier -- --include-ignored --nocapture    # an Ample guitar through Archetype Tim Henson, saved as one sound in a song and given to a track of another: the same samples in both
 cargo test -p trill-dsp --lib share_of_a_core -- --ignored --nocapture    # what the wavetable synth costs, from one voice to thirty-two notes of sixteen copies (a measurement; run it alone)
 cargo test -p trill-media -- --include-ignored      # decoding audio files found in this machine's usual folders
 TRILL_MAGPIE_PROJECTS=<...>/data/projects cargo test -p trill-listen --test magpie -- --ignored --nocapture --test-threads 1    # what Trill hears in recordings that Magpie took apart, against what Magpie found in them (the owner's Magpie project and its saved projects; minutes)
@@ -58,6 +60,7 @@ cargo test -p trill-engine --test journal what_recording_a_step_costs -- --ignor
 cargo test -p trill-stage --test drawn -- --ignored    # what the graphics card makes of the stage, and a film as a file (a graphics card; two of them ffmpeg)
 cargo test -p trill-mcp --test mcp a_film_is_made -- --ignored --nocapture    # a film of a song and of its making over MCP, kept in the assistant's working folder (a graphics card)
 cargo test -p trill-app a_film_is_made_from_the_window -- --ignored --nocapture    # a film from the window's panel, watched as it is made, and one stopped (a graphics card)
+cargo test -p trill-dsp --test real_sfz -- --ignored --nocapture    # the SFZ reader on the files a synth installed here keeps: their text only, counted (TRILL_SFZ_FOLDER names another folder)
 ```
 
 Run the first two after touching plugin hosting or audio decoding, and the last two after touching the audio
@@ -217,10 +220,11 @@ window, a song that plays through the built-in devices is filmed by
 | Device | |
 |---|---|
 | `builtin:polysynth` | 16-voice subtractive/FM synth: two oscillators that can be turned off, unison, sub, noise (as wide as it is set), multimode filter, two envelopes, a pitch envelope (an 808's knock), LFO, mono/glide, a pitch wheel whose range can be set. 15 presets from pads and basses to FM keys and bells. |
-| `builtin:wavetable` | Wavetable synth, and the instrument to shape a sound with: two oscillators that each read a table of waves at a position that can move (unison to 16, sync, bend and squeeze, FM of one by the other), a sub, noise, two filters (12 and 24 dB low, band, high and notch, two combs; in a row, side by side or one for each oscillator), three envelopes, three LFOs (free or in time with the song), four macros a sound gives names to, and a matrix of sixteen slots that says what moves what. 22 tables ship, made in code; a table can also be made from a recipe or read from an audio file. 16 presets across bass, lead, pad, pluck and keys. |
+| `builtin:wavetable` | Wavetable synth, and the instrument to shape a sound with: two oscillators that each read a table of waves at a position that can move (unison to 16, sync, bend and squeeze, FM of one by the other), a sub, noise, two filters (12 and 24 dB low, band, high and notch, two combs; in a row, side by side or one for each oscillator), three envelopes, three LFOs (free or in time with the song), four macros a sound gives names to, and a matrix of sixteen slots that says what moves what. 22 tables ship, made in code; a table can also be made from a recipe or read from an audio file. 16 presets across bass, lead, pad, pluck and keys, each a sound: all but the basses bring a chorus, a delay or a reverb as devices behind the synth. |
 | `builtin:drumkit` | Synthesized drum machine on the General MIDI map, with 808, 909, tight, trap and lo-fi kits. Each drum is shaped after measurements of recorded ones: where its energy sits and how long it rings. |
 | `builtin:sampler` | Plays one audio file across the keyboard: loops with crossfade, reverse, one-shot, amp and filter envelopes, a pitch wheel whose range can be set. |
 | `builtin:drumrack` | Sixteen pads on the General MIDI drum notes, each playing its own audio file, with level, pan, tune, decay and choke groups. |
+| `builtin:sampled` | Plays a sampled instrument: a piano, a bass, a string section, a drum kit made of recordings, as an SFZ file describes it. Layers of loudness that fade into one another, several recordings of a note taken in turn or at random, loops, release sounds, the pedal, ways of playing chosen by a key and asked for by name. Its recordings stay on the disk until they are played. It comes with no sounds: it plays the instruments you have. |
 
 The wavetable synth is built to be shaped by someone who cannot hear it, which is what an assistant is. Every
 part of it is a parameter whose name says what it does and in what unit; nothing is routed that the matrix does
@@ -235,9 +239,61 @@ drawn from the note. Measured (and held in tests): what is not on a harmonic of 
 at the worst pitch and 110 to 129 dB under it in the top octave of a piano at 48 kHz; a voice is as loud as the
 poly synth's at the same volume; eight notes of eight copies on both oscillators take 4 % of one core, and thirty-two
 notes of sixteen a quarter of one. It has no
-effects inside: the chorus, the delay and the reverb are devices to put after it. Its presets are matched in
-level by measurement and have not been tuned by ear yet. In the window its panel draws the wave an oscillator
+effects inside: a preset that wants an echo or a room is a sound (see Sounds, below) and brings the delay, the
+chorus or the reverb as devices behind the synth, to be seen, changed and taken away like any other. Its presets
+are matched in level by measurement, as the synth alone, and have not been tuned by ear yet. Its low-pass filters
+beside Surge XT's at 1 kHz (a measurement, on demand): without resonance the 12 dB ones are 3 dB down at the same
+place (687 and 688 Hz) and fall 12.0 and 11.2 dB an octave from 2 to 8 kHz, the 24 dB ones 24.7 and 22.3; at half
+the resonance's travel this synth's 12 dB filter peaks 9.9 dB over its passband and Surge's 6.2, the 24 dB ones
+7.2 and 11.3; at nine tenths Surge's is all but ringing by itself (36 dB and more) where this one's stands 19 to
+22 dB. In the window its panel draws the wave an oscillator
 reads at its position, the envelopes and the LFOs, and lists the matrix slot by slot.
+
+The sampled instrument plays instruments that are made of recordings, hundreds or thousands of them, and that
+a text file describes: which recording sounds for which keys and how hard they are struck, and what is done to
+it. The file format it reads is SFZ, which most free and open sampled instruments are published in; the reader
+is apart from the player, so another format is another reader. An `.sfz` file is a preset of the device: give
+its path as `preset` to `create_track`, `add_device` or `update_device`, drop it on a track, or pick it in the
+browser, where the library lists an instrument as one thing that says what it is (its range, its layers, its
+size, its ways of playing) and keeps its recordings out of searches for sounds. What the instrument says of
+itself is what its track goes by: its range, whether its keys are drums (and which drum is on which, read from
+the kit's own labels and the names of its recordings), and the ways of playing a key chooses, which a note asks
+for by name. Nothing of that is kept in the song.
+
+It does what instruments in that format most often ask for (the list is at the top of
+`trill-dsp/src/sfz/mod.rs`): keys and velocities with a root and a tuning, levels that add up through the file's
+headers, includes and definitions, recordings taken in turn and at random, loops with a crossfade (and the loop
+a WAV file carries), an envelope and a filter for each region, vibrato and tremolo, release sounds, the pedal,
+groups that silence one another, layers that fade into one another by velocity, by key and by a controller,
+controllers read along the instrument's own curves, and keyswitches. What a file asks for that it does not do
+is not passed over: loading the instrument says so in a sentence, naming each thing and what a listener
+misses for it ("It asks for 1 thing this player does not do, so it will not sound quite as in its maker's
+player. Not heard: equalisers of its own (eq1_gain). Everything else plays."), and the instrument plays. Of 1,001 SFZ files of freely published instruments it was tried on, 832
+were instruments (the rest are parts that others include), and 746 of those asked for nothing it does not do.
+Not done: the equalizer and effect sections, the second generation of LFOs and envelopes (`lfoN_`, `egN_`), a
+second filter, regions that a controller sets off, the controllers a maker's player makes up beyond MIDI's 128,
+sostenuto.
+
+A song is the same samples on every render, at any buffer size and on any number of threads: recordings taken
+in turn count from where playing began, and one taken at random is drawn from the key and the note's place in
+the song. Measured, and held in tests on instruments the tests write themselves: every key within a hundredth
+of a cent of its pitch (the worst of 39 keys was 0.00007 cents off); what a bright recording folds into the
+band when it is played above its pitch lies 79 dB or more under what belongs, up to two octaves up; no click at
+a loop, a release, a voice taken for another note or the crossing from one layer to the next; 128 voices, the
+most it plays, take 41 % of one core.
+
+It holds the start of every recording in memory (a third of a second) and reads the rest of one when it is
+played, on threads of its own, keeping what it has read within 2 GB and letting go of what was played longest
+ago. The audio thread never reads a file and never waits for one. On a concert grand of 637 recordings that is
+1.9 GB on the disk as WAV files, every note could begin 0.13 seconds after loading when the system had read the
+files lately, and 0.9 seconds when it had not for an hour of other work, with 94 MB held; the rest of a note's
+recording arrived in 13 milliseconds for most and 55 at the worst, well inside the third of a second that was
+there already. (As FLAC files, 712 MB, the same piano: 0.13 and 1.1 seconds. A disk that has never read the
+files, after a restart, has not been measured.) Whole, it would be 2.6 GB in memory and six to seven seconds of
+reading. Played before the start of its recording is read, a note is
+silent; one whose start runs out before the rest arrives is faded out in five milliseconds; both are counted,
+and `get_device` says how many. A render never has either: it reads what it plays and waits. An instrument may
+name 16,384 recordings; one that names more is refused in a sentence.
 
 The two sample players follow velocity by one law, in decibels: the volume is the level of a note at velocity 75,
 and the sensitivity moves harder and softer notes from it by 0.4 dB a step at full (half of that at 0.5), so a
@@ -349,6 +405,27 @@ host nor in files that Trill reads gets presets a host can list: choose a sound 
 "Save preset…" in the preset menu of its panel, or `save_preset` over MCP. A saved
 preset is listed with the device type's own, under "Saved", in every song, and is given to a device like any
 other. They are small files in `saved-presets` beside the settings file, one folder per device type.
+
+**Sounds**: a sound is often more than one device: a guitar and its amplifier, a synth with its chorus and
+reverb. A track's instrument and every effect after it can be kept as one thing, in their order, each with all a
+project keeps of it (a plugin's state, a sample player's files, every parameter): "Save sound…" in the preset
+menu of the track's instrument, or `save_sound` over MCP. A sound is a preset of its instrument that says what
+follows, so it is listed, searched and given like any preset: `create_track`, `add_device` and `update_device`
+take it as `preset`, and `search_presets` says what each brings. A built-in instrument's own preset may be one,
+which is how the wavetable synth's pads come with their chorus and reverb. Giving one makes the instrument and
+its effects in one undo step, and the reply says which devices were made. On a track that has a chain already,
+the device takes the sound on in place; the effects the sound before it had brought go, and the new ones are
+made directly behind the device; an effect that was added otherwise, or was given a preset of its own since,
+stays, behind them. A sound that names a plugin this machine has not got, or one that does not start, is made
+without it, and the reply says which. What a sound does not hold belongs to a song: the fader, the pan, sends
+and groups, automation, and the track a device listens to, which saving says where the track has one. The file
+is its instrument's `.trillpreset` with the state of each device beside it; a preset of one device is what it
+always was. The files a sound's devices name (a sampler's sample, a table read from a file) are the song's files
+once it is on a track: listed when they are missing, and relinked. In the window the browser lists the sounds
+after the built-in devices, each with its instrument and how many effects come with it: a double-click makes one
+the sound of the track that is shown, dragging one onto a track does the same there, and dropped below the tracks
+it gets a track of its own. On the installed plugins, on demand: an Ample guitar through Archetype Tim Henson,
+saved in one song and given to a track of another, renders to the same samples in both.
 
 **Reading a plugin**: a plugin's parameters are numbers from 0 to 1 whose meaning only the plugin knows, so each
 is shown with the text the plugin itself displays for it ("-6.0 dB", "Dynamic 57", "On"), and can be set by that
@@ -637,7 +714,8 @@ that quick and true:
   - *A plugin that crashes costs a sentence, not the program*: at what stage it happened, which plugin where
     that can be told (the device that was being made, or the one whose file the fault was in), that the song is
     untouched, and what to do next. The window says it where it says that an export failed, the tools as the
-    call's error, and the film export in place of its film.
+    call's error, and the film export in place of its film. A film that is stopped while its sound is being
+    rendered stops the render there and then.
   - *The same song is the same samples.* An instrument that draws its recordings at random begins at the same
     place in every process that has just started: the four instruments of Ample Sound, as they come, rendered
     to the same samples to the bit each time (in a program that rendered for itself, beside the song's own
@@ -665,6 +743,30 @@ that quick and true:
   anew every time it is made, which recording a cymbal plays when it is struck again while it still rings
   (`trill-plugins/src/repeats.rs` has what was measured and what was ruled out, and
   `cargo run -p trill-plugins --example takes` makes one part of a song again with one thing changed).
+- *A song begins in its middle as it would have it there.* What a part set before the place where the song
+  starts is in force there, for what an instrument is told: its controllers, wheel and pedals (said afresh at
+  every start, jump and turn of the loop), and the keyswitch it chose. The key that stays chosen is pressed
+  again, and after it one that was pressed for a note which has not begun; a key the part is still holding is
+  held to where the part lets go of it. Some instruments take such a key only if it comes before its note
+  (Ample Sound's), so a render begins to play 0.06 beats ahead of its start where one is chosen and keeps
+  nothing of them, and a song that plays presses the key when it is put somewhere while it stands still, not
+  again with the first note; a loop that comes round to the way of playing it ends in presses nothing. Put
+  back before its part chose anything, a song presses the key its track calls the default.
+  - *Notes that are already sounding there.* A song that plays does not begin them: a sampler's long recording
+    begun in its middle would be the wrong sound, and whoever plays can start a bar earlier. A render does
+    what they need: it begins to play where the earliest of them began (32 beats before its start at the
+    most) and keeps and measures nothing until its start, so that a pad is in its sustain, a sampler is where
+    in its recording the song has it, and what rings over from those notes is there. A note that began
+    earlier still is left out, and the reply says so.
+  - *A stretch rendered alone lies on the frames it has in the whole song.* A render starts on a frame of the
+    song as it is counted from its beginning. For an instrument that does the same thing whenever it is
+    told the same, a stretch alone is then that stretch of a render of the whole song, to the sample. On the
+    installed guitars of Ample Sound, with a palm mute chosen before the stretch and their recordings in turn
+    (`repeatable`), it leaves -85 to -96 dB of the song's, whatever the part played before. Their bass goes
+    through its recordings and strokes by a count of every note it is played, four to a round: its stretch
+    is the song's (-134 dB) where it has played as many notes by then in both renders, counted in fours, and
+    the same notes on other recordings where it has not. What only rings over from notes that ended before
+    the start is not in a stretch, and envelopes are read on a grid that begins where the render does.
 - *A render makes only what is heard.* A track that is muted, or left out by a solo or by `tracks`, is not put
   into the render at all: its devices are not created and its plugins are not waited for. Hearing one track of
   a song with many plugins costs what that track costs. (What plays live keeps every track running, so that a
@@ -748,6 +850,13 @@ sampler or onto a drum rack pad; files dragged in from the file manager land the
 waveform, and the Clip tab shows an audio clip's file with its gain, offset, fades, warp mode, source tempo and
 transposition. The sampler shows its sample and the drum rack its sixteen pads.
 
+A sampled instrument of the library is one row among the devices, with its size. Drag it onto a track and it is
+what the track plays through, below the tracks for a track of its own, or double-click it; an `.sfz` file dragged
+in from the file manager lands the same way. Its panel shows where its recordings lie over the keys and over how
+hard they are struck, the keys that choose a way of playing, how much there is of it, and while it loads how far
+the reading is. A sampler and a pad turn an instrument away, and the instrument's panel a single sound, each
+with the reason in the status bar.
+
 ![The sound browser, waveforms on audio clips and an audio clip in the Clip tab](docs/images/sounds-browser.png)
 
 **When a song opens with files missing**, the clips and pads that lost their file are marked, the status bar
@@ -814,9 +923,9 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | How it was made | `get_journal` (the steps of the session, who made each and where it landed, a page at a time; found by their words), `get_song_at` (the song as it was after any step), `journal` (keep one or not, write it out to hand on, delete it) |
 | Tracks | `create_track`, `update_track`, `delete_track` |
 | Devices | `list_devices`, `describe_device`, `add_device`, `get_device`, `update_device`, `delete_device`, `show_device_editor` |
-| Presets | `search_presets` (one search across the presets of every installed instrument and the saved ones), `save_preset` (keeps a device's sound under a name) |
+| Presets | `search_presets` (one search across the presets of every installed instrument and the saved ones), `save_preset` (keeps a device's sound under a name), `save_sound` (keeps a track's instrument and the effects after it as one sound, which is then a preset of the instrument) |
 | Clips | `create_clip`, `create_audio_clip`, `update_clip`, `split_clip`, `duplicate_clip`, `delete_clip` |
-| Sounds | `search_sounds`, `library` (its folders, and `move_folder` for one that went elsewhere), `preview_sound`, `set_sample` |
+| Sounds | `search_sounds` (sounds, or with `kind: "instrument"` the sampled instruments, each with what it is), `library` (its folders, and `move_folder` for one that went elsewhere), `preview_sound`, `set_sample` |
 | Listening | `listen` (what is in an audio file of the library, of the user's or of a clip: tempo and bars, key, tuning, and on request its chords, parts, loops, single hits, groove, bass and melody in the recording's own bars, paged; corrections to its beat grid), `transcribe` (its bass line, melody, groove or chords as MIDI on its own beats: into a file, or into the song on a new track in one undo step) |
 | Wavetables | `describe_wavetable` (the tables of `builtin:wavetable` that ship, any of them or a recipe of your own shown frame by frame in numbers; changes nothing), `set_wavetable` (gives an oscillator a table that ships, one made from a recipe, or one read from an audio file; names the macros) |
 | Missing files | `missing_files` (what the song names that is not on disk, where it is used, and what was found with how sure it is), `relink_files` (what is sure, or more on request, or a folder or files named by hand: one undo step) |
@@ -969,16 +1078,25 @@ General MIDI, not from what the plugin says is on its keys; over MCP every tool 
 notes drawn by hand in the window (the tools write them; a note that is drawn is a plain key), kits of drum
 plugins other than Superior Drummer 3 (none of the others on the machine says what is on its keys in a state
 Trill reads),
+for the sampled instrument: sounds of its own (it comes with none, and no way to fetch any; which freely
+licensed instruments could be offered as a download is a list that was made and is the owner's to decide on),
+the parts of SFZ named above as not done, formats other than SFZ, a drum kit's microphones as separate levels
+(a kit that brings several is played as its file mixes them), taking the instrument out of a device in the window
+(another takes its place, or the device is removed), and the time to a first note from a disk that has not
+read the files before,
 taking a recording apart into stems, its beats from a model and its lyrics with a time for every word (what
 is heard today is heard without a model, in one sound), a place in the window for what was heard in a recording
 (over MCP only), taking a recording from a link,
 for the wavetable synth: presets tuned by ear (they are matched in level by measurement, and its bank is a
-first sixteen), effects inside it or a preset that brings effects with it (a sound that wants a chorus or a
-reverb is given the device), making a table or naming a macro in the window (over MCP; the window chooses among
+first sixteen), effects inside it (a preset that wants them brings them as devices), making a table or naming a macro in the window (over MCP; the window chooses among
 the tables there are and shows the one that is played), a formant filter, moving the unison's detune or an
 envelope's times from the matrix, and warps free of what a corner in the cycle adds (sync, bend and squeeze leave
 42 to 57 dB under the note what does not belong to it and is heard, two octaves over middle C; FM by a bright
 wave far more),
+for sounds of more than one device: deleting or renaming a saved one from the window (they are files in
+`saved-presets`), a description typed in the window (over MCP a sound has one), what is in front of the
+instrument, a plugin that is not installed kept in the song until it is (the sound is made without it), and
+levels matched through the effects (the wavetable synth's sounds are matched as the synth alone),
 session (clip-launching) view, audio recording (MIDI is recorded; audio is not), polyphonic aftertouch and MPE
 (per-note expression; clips hold one curve per controller for the whole channel), ASIO, warp markers, plugin
 delay compensation, multi-core rendering. Only Windows has been run so far.

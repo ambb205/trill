@@ -10,7 +10,7 @@
 //! Unicode and files that are not what their extension claims are noted
 //! and stepped over; nothing here panics on what it finds.
 
-use crate::entry::{AudioFacts, Entry, EntryKind, display_name};
+use crate::entry::{AudioFacts, Entry, EntryKind, InstrumentFacts, display_name};
 use crate::index::{FolderId, Index, IndexBuilder, OutOfOrder};
 use crate::infer::{FolderReading, NameReading, discount_counting};
 use crate::natural::natural_cmp;
@@ -254,8 +254,76 @@ impl Scan<'_> {
             }
         }
 
+        self.read_instruments(&mut roots);
         self.progress.set_phase(ScanPhase::Indexing);
         self.build(&roots).ok()
+    }
+
+    /// Reads the file of every sampled instrument that was listed: what
+    /// the instrument is goes into its entry, and the recordings it names
+    /// are marked as parts of it, so that they stay out of searches for
+    /// sounds. Read anew by every scan: an instrument's file is text, and
+    /// which files are its recordings is not something a file's own size
+    /// and time would show.
+    fn read_instruments(&self, roots: &mut [Root]) {
+        // Every audio file that was listed, by its path as an instrument
+        // would write it.
+        let mut audio: HashMap<String, (usize, usize, usize)> = HashMap::new();
+        let mut instruments: Vec<(usize, usize, usize)> = Vec::new();
+        for (root_at, root) in roots.iter().enumerate() {
+            let Root::Listed(folders) = root else { continue };
+            for (folder_at, folder) in folders.iter().enumerate() {
+                for (file_at, file) in folder.files.iter().enumerate() {
+                    match file.kind {
+                        EntryKind::Audio => drop(audio.insert(path_key(&file.path), (root_at, folder_at, file_at))),
+                        EntryKind::Instrument => instruments.push((root_at, folder_at, file_at)),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let text = |path: &Path| match std::fs::read(path) {
+            Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+            Err(error) => Err(error.to_string()),
+        };
+        for (root_at, folder_at, file_at) in instruments {
+            if self.cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let Root::Listed(folders) = &roots[root_at] else { continue };
+            let path = folders[folder_at].files[file_at].path.clone();
+            // A file that is no instrument is listed without a word of what it is.
+            let Ok(instrument) = trill_dsp::sfz::read(&path, &text) else { continue };
+            let summary = instrument.summary();
+            let whole = path.to_string_lossy();
+            let folder = trill_core::files::folder_of(&whole);
+            let (mut found, mut bytes) = (0u32, 0u64);
+            for name in &instrument.recordings {
+                let Some(there) = trill_core::files::resolve(folder, name) else { continue };
+                let Some(&(root, folder, file)) = audio.get(&path_key(Path::new(&there))) else { continue };
+                let Root::Listed(folders) = &mut roots[root] else { continue };
+                let recording = &mut folders[folder].files[file];
+                if !recording.of_instrument {
+                    recording.of_instrument = true;
+                }
+                found += 1;
+                bytes += recording.size;
+            }
+            let facts = InstrumentFacts {
+                recordings: instrument.recordings.len() as u32,
+                regions: instrument.regions.len() as u32,
+                found,
+                bytes,
+                range: summary.range,
+                layers: summary.layers.min(usize::from(u16::MAX)) as u16,
+                takes: summary.takes.min(usize::from(u16::MAX)) as u16,
+                drums: summary.drums,
+                ways: summary.switches.into_iter().map(|(_, label)| label).filter(|label| !label.is_empty()).collect(),
+            };
+            if let Root::Listed(folders) = &mut roots[root_at] {
+                folders[folder_at].files[file_at].instrument = Some(Box::new(facts));
+            }
+        }
     }
 
     /// Lists every root, in order.
@@ -445,6 +513,12 @@ impl Scan<'_> {
     }
 }
 
+/// A path as two spellings of it compare: lower case, with one kind of
+/// slash. An instrument's file writes its recordings' names by hand.
+fn path_key(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/").to_lowercase()
+}
+
 /// Files and folders that are not content: anything whose name starts with
 /// a dot (which takes in the `._name` files macOS scatters through archives)
 /// and the [`SKIPPED_FOLDERS`].
@@ -523,6 +597,9 @@ impl<'a> Known<'a> {
             tempo: None,
             key: None,
             tags: crate::tags::Tags::EMPTY,
+            // Read from the instruments' files again by every scan.
+            instrument: None,
+            of_instrument: false,
         }
     }
 }
@@ -656,5 +733,95 @@ mod tests {
             problems.note(|| format!("problem {number}"));
         }
         assert_eq!((problems.notes.len(), problems.omitted), (MAX_PROBLEMS, 25));
+    }
+
+    #[test]
+    fn an_instrument_is_one_entry_that_says_what_it_is_and_its_recordings_stay_out_of_searches() {
+        // A pack as packs are laid out: the instruments' files in one
+        // folder, their recordings in another beside it, and loose sounds.
+        let folder = tempfile::tempdir().unwrap();
+        let root = folder.path().join("Pack");
+        let write = |name: &str, bytes: Vec<u8>| {
+            let path = root.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        };
+        for name in ["Samples/Piano/c3 soft.wav", "Samples/Piano/c3 loud.wav", "Samples/Piano/c5 soft.wav"] {
+            write(name, wav());
+        }
+        write("Samples/Kit/Kick.wav", wav());
+        write("Loose/Kick deep.wav", wav());
+        write("Loose/Piano chord.wav", wav());
+        let piano = "<control> default_path=../Samples/Piano/\n<global> sw_lokey=24 sw_hikey=25\n\
+            <group> sw_last=24 sw_label=Soft lovel=1 hivel=80\n<region> sample=c3 soft.wav lokey=36 hikey=59 pitch_keycenter=48\n\
+            <region> sample=C5 SOFT.WAV lokey=60 hikey=84 pitch_keycenter=72\n\
+            <group> sw_last=25 sw_label=Loud\n<region> sample=c3 loud.wav lokey=36 hikey=59 pitch_keycenter=48\n\
+            <region> sample=gone.wav lokey=60 hikey=84";
+        write("Programs/Small Grand.sfz", piano.as_bytes().to_vec());
+        write(
+            "Programs/Tiny Kit.sfz",
+            br"<global> loop_mode=one_shot <region> key=36 sample=..\Samples\Kit\Kick.wav".to_vec(),
+        );
+        write("Programs/Broken.sfz", b"not an instrument at all".to_vec());
+
+        let roots = [root.clone()];
+        let (previous, cancel, progress) = (Index::default(), AtomicBool::new(false), Progress::default());
+        let scan = Scan { roots: &roots, previous: &previous, cancel: &cancel, progress: &progress };
+        let (index, _) = scan.run(&mut |_| {});
+        let index = index.unwrap();
+        let entry =
+            |name: &str| index.entries().iter().find(|entry| entry.name == name).unwrap_or_else(|| panic!("{name}"));
+
+        // The instrument says what it is.
+        let grand = entry("Small Grand");
+        assert_eq!(grand.kind, EntryKind::Instrument);
+        let facts = grand.instrument.as_deref().expect("its file was read");
+        assert_eq!((facts.recordings, facts.regions, facts.found), (4, 4, 3), "one of its recordings is not there");
+        assert_eq!(facts.bytes, 3 * wav().len() as u64);
+        assert_eq!((facts.range, facts.layers, facts.takes, facts.drums), (Some((36, 84)), 1, 1, false));
+        assert_eq!(facts.ways, ["Soft", "Loud"]);
+        let kit = entry("Tiny Kit").instrument.as_deref().unwrap();
+        assert!(kit.drums && kit.found == 1 && kit.range == Some((36, 36)));
+        assert!(entry("Broken").instrument.is_none(), "a file that is no instrument is listed without a word");
+
+        // Its recordings are its parts, however the file spells their names; loose sounds are not.
+        for part in ["c3 soft", "c3 loud", "c5 soft", "Kick"] {
+            assert!(entry(part).of_instrument, "{part}");
+        }
+        assert!(!entry("Kick deep").of_instrument && !entry("Piano chord").of_instrument);
+
+        // A search for sounds finds sounds, not the notes of an instrument.
+        use crate::Query;
+        let names = |query: &Query| -> Vec<String> {
+            let (found, _) = crate::search::search(&index, query, &[]);
+            let mut names: Vec<String> = found.iter().map(|id| index.entry(*id).unwrap().name.clone()).collect();
+            names.sort();
+            names
+        };
+        let sounds = Query { kind: Some(EntryKind::Audio), ..Query::default() };
+        assert_eq!(names(&sounds), ["Kick deep", "Piano chord"]);
+        assert_eq!(names(&Query { text: "kick".into(), ..sounds.clone() }), ["Kick deep"]);
+        assert_eq!(names(&Query { include_recordings: true, ..sounds }).len(), 6);
+        // And a search for instruments finds the instruments.
+        let instruments = Query { kind: Some(EntryKind::Instrument), ..Query::default() };
+        assert_eq!(names(&instruments), ["Broken", "Small Grand", "Tiny Kit"]);
+        assert_eq!(names(&Query { text: "grand".into(), ..Query::default() }), ["Small Grand"]);
+
+        // All of it is there again when the saved index is read back.
+        let saved = folder.path().join("index.json");
+        crate::store::save(&saved, &index).unwrap();
+        let read = crate::store::load(&saved).unwrap();
+        assert_eq!(read.entries(), index.entries());
+
+        // A scan after the instrument's file has gone lets its recordings be sounds again.
+        std::fs::remove_file(root.join("Programs/Small Grand.sfz")).unwrap();
+        let (cancel, progress) = (AtomicBool::new(false), Progress::default());
+        let again = Scan { roots: &roots, previous: &index, cancel: &cancel, progress: &progress };
+        let (index, summary) = again.run(&mut |_| {});
+        let index = index.unwrap();
+        assert_eq!(summary.headers_read, 0, "nothing is read again for it");
+        let part = index.entries().iter().find(|entry| entry.name == "c3 soft").unwrap();
+        assert!(!part.of_instrument);
+        assert!(index.entries().iter().find(|entry| entry.name == "Kick").unwrap().of_instrument);
     }
 }

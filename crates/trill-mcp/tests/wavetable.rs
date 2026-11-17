@@ -464,3 +464,185 @@ fn a_sawtooth_against_the_installed_synths() {
         }
     }
 }
+
+// ---- the filters, against Surge XT's ------------------------------------------
+
+/// The level of each harmonic of a steady note at about `hz`, from the
+/// first up to `top` Hz: the note's pitch as it is found to be, and the
+/// harmonics' levels in dB.
+fn harmonics_of(samples: &[f32], hz: f64, top: f64) -> (f64, Vec<f64>) {
+    let size = 1 << 17;
+    let mut plan = trill_dsp::fft::RealFft::new(size);
+    let windowed: Vec<f32> = samples[..size]
+        .iter()
+        .enumerate()
+        .map(|(n, sample)| {
+            let turn = std::f64::consts::TAU * n as f64 / size as f64;
+            let window =
+                0.358_75 - 0.488_29 * turn.cos() + 0.141_28 * (2.0 * turn).cos() - 0.011_68 * (3.0 * turn).cos();
+            (f64::from(*sample) * window) as f32
+        })
+        .collect();
+    let (mut re, mut im) = (vec![0.0f32; size / 2 + 1], vec![0.0f32; size / 2 + 1]);
+    plan.forward(&windowed, &mut re, &mut im);
+    let power: Vec<f64> = re.iter().zip(&im).map(|(re, im)| f64::from(*re).powi(2) + f64::from(*im).powi(2)).collect();
+    let bin_hz = 48_000.0 / size as f64;
+    // The pitch from a high harmonic near 1 kHz, where a bin is a small
+    // part of it: the strongest bin within a quarter tone of where the
+    // harmonic should be.
+    let high = (1_000.0 / hz).round();
+    let (low, up) = ((hz * high * 0.985 / bin_hz) as usize, (hz * high * 1.015 / bin_hz) as usize + 1);
+    let strongest = (low..=up).max_by(|a, b| power[*a].total_cmp(&power[*b])).unwrap_or(low);
+    let around = strongest.saturating_sub(4)..strongest + 5;
+    let weight: f64 = around.clone().map(|bin| power[bin]).sum();
+    let found = around.map(|bin| bin as f64 * power[bin]).sum::<f64>() / weight.max(1e-30) * bin_hz / high;
+    let levels = (1..)
+        .map(|harmonic| f64::from(harmonic) * found)
+        .take_while(|at| *at < top)
+        .map(|at| {
+            let centre = (at / bin_hz).round() as usize;
+            let sum: f64 = power[centre.saturating_sub(6)..(centre + 7).min(power.len())].iter().sum();
+            10.0 * sum.max(1e-30).log10()
+        })
+        .collect();
+    (found, levels)
+}
+
+/// What a low-pass filter does, read from the harmonics of a note with
+/// and without it: where it is 3 dB down, how far its peak stands over
+/// the passband and where, and how steeply it falls from two to eight
+/// times its cutoff, in dB an octave.
+fn filter_read(hz: f64, open: &[f64], filtered: &[f64], cutoff: f64) -> (f64, f64, f64, f64) {
+    let response: Vec<(f64, f64)> = open
+        .iter()
+        .zip(filtered)
+        .enumerate()
+        .map(|(index, (open, filtered))| ((index + 1) as f64 * hz, filtered - open))
+        .collect();
+    let mean = |from: f64, to: f64| {
+        let within: Vec<f64> = response.iter().filter(|(at, _)| *at >= from && *at < to).map(|(_, db)| *db).collect();
+        within.iter().sum::<f64>() / within.len().max(1) as f64
+    };
+    let passband = mean(hz, cutoff / 4.0);
+    let (peak_at, peak) = response
+        .iter()
+        .filter(|(at, _)| *at > cutoff / 2.0 && *at < cutoff * 2.0)
+        .fold((0.0, f64::MIN), |best, (at, db)| if *db > best.1 { (*at, *db) } else { best });
+    let down = response.iter().find(|(at, db)| *at > peak_at && *db < passband - 3.0).map_or(f64::NAN, |(at, _)| *at);
+    // A third of an octave around each place, to ride over one harmonic.
+    let near = |at: f64| mean(at / 1.12, at * 1.12);
+    let slope = (near(8.0 * cutoff) - near(2.0 * cutoff)) / 2.0;
+    (down, peak - passband, peak_at, slope)
+}
+
+/// Not a test of Trill: a table. This synth's low-pass filters beside
+/// Surge XT's at the same settings: 12 and 24 dB an octave at 1 kHz, with
+/// the resonance at none, half and nine tenths of its travel. Each plays
+/// a low sawtooth (A0, whose harmonics are 27.5 Hz apart) with its filter
+/// and without, and the filter is read from what it did to the harmonics.
+/// How far a resonance control's travel is from another's is each synth's
+/// own business: the slope is what is the same, or is not. (At nine
+/// tenths Surge XT's filter is all but ringing by itself, and what stands
+/// at its cutoff then is more than a filter's answer to the note.)
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Surge XT (CLAP) installed; run with `cargo test -p trill-mcp --test wavetable the_filters_against -- --ignored --nocapture`"]
+async fn the_filters_against_the_installed_surge_xt() {
+    let Some(host) = installed(SURGE) else { return };
+    let folder = tempfile::tempdir().unwrap();
+    let storage = Storage::At {
+        settings: folder.path().join("config").join("settings.json"),
+        library_index: Some(folder.path().join("cache").join("library-index.json")),
+    };
+    let options = RuntimeOptions { audio: AudioBackend::Null { sample_rate: 48_000 }, plugins: None, storage };
+    let parts = trill_runtime::Parts { devices: host.factories(), ..trill_runtime::Parts::default() };
+    let runtime = Arc::new(Runtime::start_custom(options, parts).unwrap());
+    let server = serve_http(runtime, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let transport =
+        StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(server.url()));
+    let client = &ClientConfig::default().serve(transport).await.unwrap();
+
+    const NOTE: u64 = 21;
+    const CUTOFF: f64 = 1_000.0;
+    let hz = 27.5;
+    ok(client, "set_project", json!({ "tempo": 120 })).await;
+    let master = ok(client, "get_project", json!({})).await;
+    for device in master["master"]["devices"].as_array().into_iter().flatten() {
+        ok(client, "delete_device", json!({ "device": device["id"] })).await;
+    }
+    let mut parts: Vec<(&str, u64, u64)> = Vec::new();
+    for (name, uri) in [("Trill's wavetable", "builtin:wavetable"), ("Surge XT", SURGE)] {
+        let made = ok(client, "create_track", json!({ "name": name, "instrument": uri })).await;
+        let (track, device) = (made["track_id"].as_u64().unwrap(), made["instrument_device_id"].as_u64().unwrap());
+        let notes = json!([[NOTE, 0, 15.5, 100]]);
+        ok(client, "create_clip", json!({ "track": track, "start": 0, "length": 16, "notes": notes })).await;
+        parts.push((name, track, device));
+    }
+    // Held at full level, so that nothing but the filter moves.
+    ok(client, "update_device", json!({ "device": parts[0].2, "params": { "env1_sustain": 1.0 } })).await;
+    let serial = ok(
+        client,
+        "update_device",
+        json!({ "device": parts[1].2, "params": { "A Filter Configuration": "Serial 1" } }),
+    )
+    .await;
+    println!("Surge XT's filters in a row: {}", serial["shown"]);
+
+    let heard = |name: &'static str, track: u64| {
+        let wav = folder.path().join(format!("{name}.wav"));
+        async move {
+            let arguments = json!({ "path": wav.display().to_string(), "tracks": [track], "start": 0, "end": 16, "max_tail_seconds": 0.5 });
+            ok(client, "render", arguments).await;
+            let audio = trill_media::decode(&wav).unwrap();
+            std::fs::remove_file(&wav).unwrap();
+            // Two seconds in, when whatever a synth does at the start of
+            // a note is over.
+            harmonics_of(&audio.left[96_000..], hz, 12_000.0)
+        }
+    };
+
+    // Each synth with its filter off: what the others are read against.
+    let mut open = Vec::new();
+    for (name, track, device) in &parts {
+        let off = match *name {
+            "Surge XT" => json!({ "A Filter 1 Type": "Off" }),
+            _ => json!({ "filter1_type": "off" }),
+        };
+        ok(client, "update_device", json!({ "device": device, "params": off })).await;
+        open.push(heard(name, *track).await);
+        println!(
+            "{name}: A0 found at {:.3} Hz, {} harmonics under 12 kHz",
+            open.last().unwrap().0,
+            open.last().unwrap().1.len()
+        );
+    }
+
+    println!();
+    println!("filter   resonance  synth               3 dB down at   peak over passband   peak at   falls, 2 to 8 kHz");
+    for (slope, ours, theirs) in [("12 dB", "lowpass12", "LP 12 dB"), ("24 dB", "lowpass24", "LP 24 dB")] {
+        for resonance in [0.0, 0.5, 0.9] {
+            for (index, (name, track, device)) in parts.iter().enumerate() {
+                let params = match *name {
+                    "Surge XT" => json!({
+                        "A Filter 1 Type": theirs,
+                        "A Filter 1 Cutoff": format!("{CUTOFF} Hz"),
+                        "A Filter 1 Resonance": format!("{} %", resonance * 100.0),
+                    }),
+                    _ => json!({ "filter1_type": ours, "filter1_cutoff": CUTOFF, "filter1_resonance": resonance }),
+                };
+                ok(client, "update_device", json!({ "device": device, "params": params })).await;
+                let (_, filtered) = heard(name, *track).await;
+                let (down, peak, peak_at, fall) = filter_read(open[index].0, &open[index].1, &filtered, CUTOFF);
+                // Without resonance there is no peak: the filter is only
+                // ever under its passband.
+                let peak = match peak > 0.5 {
+                    true => format!("{peak:>13.1} dB   {peak_at:>7.0} Hz"),
+                    false => format!("{:>16}   {:>10}", "none", ""),
+                };
+                println!(
+                    "{slope:<8} {:>5.0} %    {name:<18} {down:>9.0} Hz   {peak}   {fall:>7.1} dB/oct",
+                    resonance * 100.0
+                );
+            }
+        }
+    }
+}

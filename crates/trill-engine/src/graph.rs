@@ -24,6 +24,88 @@ pub(crate) struct NoteEvent {
     pub velocity: u8,
 }
 
+/// A key of a track's part that chooses how the notes after it are played
+/// and sounds nothing itself (a keyswitch), as the track says it is one:
+/// what a song that starts after it has to press again, or its notes play
+/// in whatever was left chosen.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct Switch {
+    pub start: f64,
+    pub end: f64,
+    pub pitch: u8,
+    pub velocity: u8,
+    /// It stays chosen until another that stays is pressed. One that does
+    /// not is for the note after it.
+    pub stays: bool,
+    /// Where the note it is for begins, for one that does not stay:
+    /// infinity if none follows.
+    pub used_at: f64,
+    /// The place in the track's list of the switch that stays chosen as
+    /// this one is pressed, itself included; `u32::MAX` if none is.
+    pub staying: u32,
+}
+
+/// What [`TrackState::latched`] is while the song has pressed no key that
+/// stays: the instrument is on what it was made on.
+pub(crate) const AS_MADE: u8 = 255;
+/// What it is when the song cannot tell.
+pub(crate) const UNKNOWN: u8 = 254;
+
+/// The pitches of `switches` as a bit each: all of them, and those that
+/// stay chosen.
+pub(crate) fn switch_keys(switches: &[Switch]) -> (u128, u128) {
+    let bit = |switch: &Switch| 1u128 << switch.pitch.min(127);
+    let all = switches.iter().fold(0, |keys, switch| keys | bit(switch));
+    let stay = switches.iter().filter(|switch| switch.stays).fold(0, |keys, switch| keys | bit(switch));
+    (all, stay)
+}
+
+/// The switches among `notes`, which are sorted by start, as `profile`
+/// names the keys: in the same order.
+pub(crate) fn switches_of(notes: &[NoteEvent], profile: &trill_core::InstrumentProfile) -> Vec<Switch> {
+    if !profile.articulations.iter().any(|way| way.key.is_some()) {
+        return Vec::new();
+    }
+    let lasts = |pitch: u8| profile.articulations.iter().find(|way| way.key == Some(pitch)).map(|way| way.lasts);
+    let mut switches: Vec<Switch> = Vec::new();
+    let mut staying = u32::MAX;
+    for (at, note) in notes.iter().enumerate() {
+        let Some(lasts) = lasts(note.pitch) else { continue };
+        let stays = lasts == trill_core::Lasts::Stays;
+        if stays {
+            staying = switches.len() as u32;
+        }
+        // The first note after it that is no switch.
+        let used_at =
+            notes[at..].iter().find(|later| lasts_of(profile, later.pitch).is_none()).map(|later| later.start);
+        switches.push(Switch {
+            start: note.start,
+            end: note.end,
+            pitch: note.pitch,
+            velocity: note.velocity,
+            stays,
+            used_at: used_at.unwrap_or(f64::INFINITY),
+            staying,
+        });
+    }
+    switches
+}
+
+fn lasts_of(profile: &trill_core::InstrumentProfile, pitch: u8) -> Option<trill_core::Lasts> {
+    profile.articulations.iter().find(|way| way.key == Some(pitch)).map(|way| way.lasts)
+}
+
+/// The switches that are chosen where a song is at `beat`, of `switches`
+/// in their order: the one that stays, and after it one that was pressed
+/// for a note which has not begun. What a song that starts there presses.
+pub(crate) fn chosen_at(switches: &[Switch], beat: f64) -> [Option<&Switch>; 2] {
+    let before = switches.partition_point(|switch| switch.start < beat);
+    let Some(last) = before.checked_sub(1).map(|at| &switches[at]) else { return [None, None] };
+    let stays = switches.get(last.staying as usize);
+    let once = Some(last).filter(|switch| !switch.stays && switch.used_at >= beat);
+    [stays, once]
+}
+
 /// Decoded audio, shared between clips that use the same file.
 pub type AudioData = trill_core::audio::AudioBuffer;
 
@@ -236,6 +318,14 @@ pub(crate) struct TrackState {
     /// Set to have the next block tell the instrument everything again: it
     /// is new, or was reset, and knows nothing of what it was told.
     pub resend: bool,
+    /// The key that stays chosen on the instrument, as far as the song
+    /// knows: the last such key it pressed. [`AS_MADE`] before it pressed
+    /// any, [`UNKNOWN`] once a hand pressed one or the instrument may
+    /// have missed what it was told.
+    pub latched: u8,
+    /// Set to have the next block press what is chosen where the song is,
+    /// as a start does.
+    pub rechoose: bool,
     /// Set when the graph changed: a controller the song moved may have
     /// lost its curve.
     pub lanes_changed: bool,
@@ -264,6 +354,8 @@ impl Default for TrackState {
             live: [f32::NAN; CONTROLLER_KINDS],
             sent: [f32::NAN; CONTROLLER_KINDS],
             resend: false,
+            latched: AS_MADE,
+            rechoose: false,
             lanes_changed: false,
             release_routed: false,
             had_notes: false,
@@ -340,6 +432,17 @@ pub(crate) struct TrackNode {
     pub id: TrackId,
     /// Sorted by start.
     pub notes: Vec<NoteEvent>,
+    /// The keys among the notes that choose how the notes after them are
+    /// played: see [`Switch`]. Sorted by start; none on most tracks.
+    pub switches: Vec<Switch>,
+    /// Which pitches of the part are such keys, a bit each, and which of
+    /// them stay chosen.
+    pub switch_keys: u128,
+    pub stay_keys: u128,
+    /// The key that chooses how a note is played when nothing is said, if
+    /// the track says one does: what a song is on before its part has
+    /// chosen anything.
+    pub unsaid_key: Option<u8>,
     /// What each controller the track's clips move is worth over the song.
     pub controllers: Vec<ControllerLane>,
     /// Whether the graph came with a device of this track created anew,
@@ -392,10 +495,19 @@ pub(crate) struct TrackNode {
 pub(crate) struct Tap {
     pub analyzer: crate::analysis::Analyzer,
     pub file: Option<trill_media::WavWriter>,
+    /// How many frames go by before it begins to listen: what a render
+    /// plays ahead of its start and keeps nothing of.
+    pub unheard: u64,
 }
 
 impl Tap {
     pub fn push(&mut self, left: &[f32], right: &[f32]) {
+        let skipped = (self.unheard.min(left.len() as u64)) as usize;
+        self.unheard -= skipped as u64;
+        let (left, right) = (&left[skipped..], &right[skipped.min(right.len())..]);
+        if left.is_empty() {
+            return;
+        }
         self.analyzer.push(left, right);
         if let Some(file) = &mut self.file {
             file.write(left, right);
@@ -507,6 +619,9 @@ impl Graph {
                 }
             }
             if track.fresh_devices {
+                // It is on whatever it was made on, and where the song
+                // stands a key may be chosen.
+                (track.state.latched, track.state.rechoose) = (AS_MADE, true);
                 track.state.resend = true;
             }
         }

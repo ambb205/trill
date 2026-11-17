@@ -275,7 +275,8 @@ impl std::fmt::Display for Crash {
         write!(f, ". Try again; if it happens again, ")?;
         match (self.job, self.devices.is_empty()) {
             ("probe", _) => write!(f, "probe the instrument without the devices after it, or as it comes")?,
-            (_, true) => write!(f, "render the tracks one at a time to find which device it is")?,
+            // (In a window that is soloing a track; for a tool, naming it.)
+            (_, true) => write!(f, "hear the tracks one at a time to find which device it is")?,
             (_, false) => write!(f, "mute that track or take the device out to go on without it")?,
         }
         if self.devices.is_empty() && self.module.is_none() && !self.last_words.is_empty() {
@@ -296,6 +297,10 @@ pub struct Setup {
     /// The program to start: one that calls [`serve`] when it finds
     /// [`JOB_ENV`] in its environment.
     pub program: PathBuf,
+    /// What it is started with: nothing, for a program that finds out
+    /// what it is by its environment. A test's own program is told which
+    /// of its tests is the one that serves ([`Setup::by_test`]).
+    pub arguments: Vec<String>,
     pub recipe: Recipe,
     /// Whether probes share a process that is kept between them. With
     /// `false` each has a process that has just started, as every render
@@ -313,7 +318,18 @@ pub struct Setup {
 impl Setup {
     /// Jobs done by `program`, each in a process that has just started.
     pub fn new(program: PathBuf, recipe: Recipe) -> Self {
-        Self { program, recipe, keep_for_probes: false, keep_for_renders: false, room: Room::now }
+        let arguments = Vec::new();
+        Self { program, arguments, recipe, keep_for_probes: false, keep_for_renders: false, room: Room::now }
+    }
+
+    /// Jobs done by the test program that is running, started again to
+    /// run its test `test` and no other: a test that calls [`serve`] when
+    /// it finds [`JOB_ENV`] in its environment, and does nothing
+    /// otherwise. For the tests of a crate that builds no program which
+    /// could do them.
+    pub fn by_test(test: &str, recipe: Recipe) -> std::io::Result<Self> {
+        let arguments = [test, "--exact", "--nocapture", "--test-threads=1"].map(str::to_string).to_vec();
+        Ok(Self { arguments, ..Self::new(std::env::current_exe()?, recipe) })
     }
 }
 
@@ -570,7 +586,7 @@ impl Apart {
         self.inner.jobs.fetch_add(1, Ordering::Relaxed);
         let start = || {
             self.inner.started.fetch_add(1, Ordering::Relaxed);
-            Worker::start(&self.inner.setup.program)
+            Worker::start(&self.inner.setup.program, &self.inner.setup.arguments)
         };
         if !kept {
             let mut worker = start()?;
@@ -760,9 +776,9 @@ struct Worker {
 impl Worker {
     /// Starts `program` as a process that does jobs and waits for it to
     /// say that it is one.
-    fn start(program: &Path) -> Result<Self, String> {
+    fn start(program: &Path, arguments: &[String]) -> Result<Self, String> {
         let mut command = Command::new(program);
-        command.env(JOB_ENV, "1").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        command.args(arguments).env(JOB_ENV, "1").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         hide_console(&mut command);
         let cannot = |reason: String| {
             format!("the process that renders ('{}') could not be started: {reason}", program.display())

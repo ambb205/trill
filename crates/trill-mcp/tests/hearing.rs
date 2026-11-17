@@ -588,6 +588,32 @@ async fn a_song_whose_instrument_draws_at_random_says_so_and_is_the_same_twice_w
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_stretch_is_measured_with_the_notes_that_are_sounding_where_it_starts_and_says_which_are_not() {
+    let fixture = connect(ScriptedFactory::new()).await;
+    let client = &fixture.client;
+    let bass = track(client, "Bass", BASS).await;
+    // One note held from beat 2 to beat 10, and one from beat 1 to beat 60.
+    clip(client, bass, 0.0, 64.0, json!([[40, 2, 8]])).await;
+    let held = ok(client, "measure", json!({ "start": 4, "end": 8 })).await;
+    assert!(held["peak_db"].as_f64().unwrap() > -30.0, "the note that was sounding is in it: {held}");
+    assert!(!strings(&held["notes"]).join(" ").contains("already sounding"), "{held}");
+    // The same stretch without the note is silent: the stretch itself plays none.
+    let after = ok(client, "measure", json!({ "start": 12, "end": 16 })).await;
+    assert!(after["peak_db"].as_f64().unwrap() < -80.0, "{after}");
+
+    // A note that began longer before than a render goes back for.
+    let drone = track(client, "Drone", BASS).await;
+    clip(client, drone, 0.0, 64.0, json!([[43, 1, 59]])).await;
+    let late = ok(client, "measure", json!({ "start": 48, "end": 52, "tracks": [drone] })).await;
+    let notes = strings(&late["notes"]).join(" | ");
+    assert!(
+        notes.contains("A note on 'Drone' was already sounding where this starts, from more than 32 beats before"),
+        "{notes}"
+    );
+    assert!(notes.contains("it is not in it. Start earlier to hear it."), "{notes}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn measuring_checks_a_mix_without_writing_a_file() {
     let fixture = connect(ScriptedFactory::new()).await;
     let client = &fixture.client;
@@ -1687,4 +1713,253 @@ async fn a_song_of_installed_plugins_is_the_same_samples_on_one_processor_and_on
     );
     eprintln!("one processor {:.1} s and {:.1} s, several {:.1} s", renders[0].1, renders[1].1, renders[2].1);
     assert!(held.len() >= 6, "too few parts repeat themselves for this to say anything: {held:?}");
+}
+
+/// The instrument's stem of a render of `track` from beat `start` to beat
+/// `end`, the left channel: its recordings taken in turn, and no tail.
+async fn stretch_of(client: &Client, folder: &Path, name: &str, track: u64, (start, end): (f64, f64)) -> Vec<f32> {
+    let wav = folder.join(format!("{name}.wav"));
+    let arguments = json!({
+        "path": wav.display().to_string(),
+        "tracks": [track],
+        "start": start,
+        "end": end,
+        "max_tail_seconds": 0,
+        "stems": ["instruments"],
+        "repeatable": true,
+    });
+    let report = ok(client, "render", arguments).await;
+    let stems = report["stems"].as_array().unwrap_or_else(|| panic!("{report}"));
+    let [stem] = &stems[..] else { panic!("one stem was asked for: {report}") };
+    let file = stem["file"].as_str().unwrap().to_string();
+    let audio = trill_media::decode(Path::new(&file)).unwrap();
+    std::fs::remove_file(&wav).unwrap();
+    std::fs::remove_file(&file).unwrap();
+    audio.left
+}
+
+/// A stretch of a song rendered by itself against the same stretch cut
+/// from a render of the whole song, on the installed instruments of Ample
+/// Sound, where the part chose a way of playing before the stretch: palm
+/// mute, at the top, and never again. Their recordings are taken in turn
+/// (`repeatable`), so that nothing is drawn.
+///
+/// **Held:** the stretch alone is played palm-muted, as the song plays it
+/// there: the key is pressed again a moment ahead of where the render
+/// starts. And on the three guitars it is the samples the whole song has
+/// there, to the frame and the recording, whatever the part played
+/// before the stretch: other notes, more or fewer of them, or the
+/// stretch's own. On the bass it is where the bass has played as many
+/// notes by then in the one render as in the other, counted in fours.
+///
+/// **Said, not asserted:** the bass where it has not. It goes through its
+/// recordings and its strokes by a count of every note it is played,
+/// four to a round: with the count two apart, the stretch alone is the
+/// song's four notes on the recordings of the two after them. The wait
+/// before a render plays each note it tries three times, the notes of
+/// the stretch for a stretch and of the song's beginning for the song,
+/// and the song has played the part up to the stretch besides: the two
+/// counts agree only by the part's doing.
+///
+/// What it found (2026-11-17), as what the stretch alone leaves of the
+/// song's: with the counts agreeing -133.9 dB on the bass and -84.8 to
+/// -95.8 dB on the guitars; with them two apart -1.7 dB on the bass and
+/// -86.4 to -95.8 dB on the guitars; with the stretch's notes played
+/// before it -3.7 dB and -88.5 to -95.6 dB. Of the same notes played
+/// open, the stretch alone leaves -0.1 to +4.3 dB: it is muted. (With one
+/// second between the last note before the stretch and its start, a
+/// guitar's stretch left -46.7 dB: what still rang in the song. Five
+/// seconds are left here.)
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Ample Sound's instruments (VST3) installed; run with `cargo test -p trill-mcp --test hearing a_stretch_of_a_song_rendered_alone -- --include-ignored --nocapture`"]
+async fn a_stretch_of_a_song_rendered_alone_is_the_stretch_as_the_whole_song_has_it_on_the_installed_guitars() {
+    // Frames in a beat: 120 to the minute at 48 kHz.
+    const BEAT: usize = 24_000;
+    // Where the stretch begins and ends, in beats: five seconds after the
+    // last note before it, so that nothing rings over.
+    const STRETCH: (f64, f64) = (16.0, 20.0);
+    let mut said = Vec::new();
+    for (name, uri) in AMPLE {
+        let Some((fixture, folder)) = connect_with_plugins(uri).await else { continue };
+        let client = &fixture.client;
+        ok(client, "set_project", json!({ "tempo": 120 })).await;
+        // Where its keys lie: the nine-string's are an octave under the others'.
+        let open: u8 = if name == "Ample Metal Hellrazer" { 12 } else { 24 };
+        let palm_mute = open + 2;
+        let (first, second): ([u8; 2], [u8; 2]) =
+            if uri == AMPLE_BASS { ([40, 43], [45, 47]) } else { ([52, 55], [57, 59]) };
+        let line = |pitches: [u8; 2], from: f64, count: usize| -> Vec<Value> {
+            (0..count).map(|step| json!([pitches[step % 2], from + step as f64, 0.5, 100])).collect()
+        };
+        // The mute at the top, then `before` notes, a rest, and four notes
+        // of `stretch` from where the stretch begins.
+        let muted_part = |before: usize, stretch: [u8; 2]| -> Vec<Value> {
+            let mut notes = vec![json!([palm_mute, 0, 0.01, 100])];
+            notes.extend(line(first, 0.5, before));
+            notes.extend(line(stretch, STRETCH.0, 4));
+            notes
+        };
+
+        // Six notes before the stretch, which plays two others. The wait
+        // of the whole song tries its four notes three times and the song
+        // plays six: eighteen. The wait of the stretch tries its two three
+        // times: six. Twelve apart, three times round.
+        let (even, _) = part(client, uri, format!("{name} muted"), None).await;
+        clip(client, even, 0.0, 24.0, json!(muted_part(6, second))).await;
+        // The same with nothing chosen: what the stretch would be if the
+        // key were not pressed again.
+        let (unsaid, _) = part(client, uri, format!("{name} open"), None).await;
+        let mut notes = line(first, 0.5, 6);
+        notes.extend(line(second, STRETCH.0, 4));
+        clip(client, unsaid, 0.0, 24.0, json!(notes)).await;
+        // And four notes before it: sixteen against six, ten apart.
+        let (odd, _) = part(client, uri, format!("{name} two apart"), None).await;
+        clip(client, odd, 0.0, 24.0, json!(muted_part(4, second))).await;
+
+        let whole = stretch_of(client, folder.path(), "whole", even, (0.0, STRETCH.1)).await;
+        let alone = stretch_of(client, folder.path(), "alone", even, STRETCH).await;
+        let open_alone = stretch_of(client, folder.path(), "open", unsaid, STRETCH).await;
+        let from = (STRETCH.0 as usize) * BEAT;
+        assert_eq!((whole.len(), alone.len()), (from + 4 * BEAT, 4 * BEAT), "{name}");
+        let cut = &whole[from..];
+        let (left, against_open) = (null_db(cut, &alone), null_db(&open_alone, &alone));
+        eprintln!(
+            "{name}: the stretch alone leaves {left:.1} dB of the stretch cut from the whole song; of the same \
+             notes played open it leaves {against_open:.1} dB"
+        );
+        assert!(against_open > -20.0, "{name}: the stretch alone is not palm-muted: {against_open:.1} dB from open");
+        assert!(left < -60.0, "{name}: the stretch alone is not what the whole song has there: {left:.1} dB");
+
+        let whole = stretch_of(client, folder.path(), "whole apart", odd, (0.0, STRETCH.1)).await;
+        let alone = stretch_of(client, folder.path(), "alone apart", odd, STRETCH).await;
+        let apart = null_db(&whole[from..], &alone);
+        // And a stretch that plays the notes the part played before it,
+        // three times each: in the song each is three recordings further
+        // round by then than in the stretch alone.
+        let (again, _) = part(client, uri, format!("{name} again"), None).await;
+        clip(client, again, 0.0, 24.0, json!(muted_part(6, first))).await;
+        let whole = stretch_of(client, folder.path(), "whole again", again, (0.0, STRETCH.1)).await;
+        let alone = stretch_of(client, folder.path(), "alone again", again, STRETCH).await;
+        let played = null_db(&whole[from..], &alone);
+        said.push(format!(
+            "{name} {apart:.1} dB with the count two apart, {played:.1} dB with its notes played before"
+        ));
+        // The guitars are held to it whatever came before.
+        if uri != AMPLE_BASS {
+            assert!(apart < -60.0 && played < -60.0, "{name}: {apart:.1} dB and {played:.1} dB");
+        }
+    }
+    eprintln!("SAID, and not asserted: the stretch alone leaves of the song's: {}.", said.join("; "));
+}
+
+/// One track of the song rendered alone to a file, and read back: its
+/// left channel.
+async fn part_rendered(client: &Client, folder: &Path, name: &str, track: u64) -> Vec<f32> {
+    let wav = folder.join(format!("{name}.wav"));
+    let begun = Instant::now();
+    let arguments =
+        json!({ "path": wav.display().to_string(), "tracks": [track], "start": 0, "end": 8, "max_tail_seconds": 2 });
+    let report = ok(client, "render", arguments).await;
+    let audio = trill_media::decode(&wav).unwrap();
+    eprintln!("  {name} in {:.1?}: {:.2} LUFS", begun.elapsed(), report["loudness_lufs"].as_f64().unwrap_or(f64::NAN));
+    std::fs::remove_file(&wav).unwrap();
+    audio.left
+}
+
+/// A guitar tone is two plugins: the guitar and its amplifier. With the
+/// installed Ample Metal Hellrazer through the installed Archetype Tim
+/// Henson X, each on what was set in it (the guitar's takes in turn, the
+/// amplifier on one of its maker's presets): the track's sound is saved
+/// as one thing, a new song is begun, a track of it is given the sound by
+/// its name, and the same riff is rendered in both. What the second song
+/// plays is what the first did, as nearly as two renders of the first are
+/// the same, which is said; and it is nothing like the guitar without the
+/// amplifier. Nothing of either maker's is kept anywhere but in the
+/// test's own temporary folder.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Ample Metal Hellrazer and Archetype Tim Henson X (VST3) installed; run with `cargo test -p trill-mcp --test hearing a_guitar_through_its_amplifier -- --include-ignored --nocapture`"]
+async fn a_guitar_through_its_amplifier_is_saved_as_a_sound_and_is_the_same_in_another_song() {
+    const GUITAR: &str = "vst3:ABCDEF019182FAEB41707364416D6872";
+    let Some((fixture, folder)) = connect_with_plugins(AMPLIFIER).await else { return };
+    if installed(GUITAR).is_none() {
+        return;
+    }
+    let client = &fixture.client;
+    // Two pitches: a line on one hides what a sampled guitar does with
+    // its takes.
+    let riff: Vec<Value> =
+        (0..16).map(|index| json!([if index % 2 == 0 { 45 } else { 52 }, f64::from(index) * 0.5, 0.45, 104])).collect();
+
+    // The first song.
+    ok(client, "set_project", json!({ "tempo": 156, "name": "First" })).await;
+    let made = ok(client, "create_track", json!({ "name": "Guitar", "instrument": GUITAR })).await;
+    let (track, guitar) = (made["track_id"].as_u64().unwrap(), made["instrument_device_id"].as_u64().unwrap());
+    // Its takes in turn and no noise drawn at random, so that a render of
+    // it can be the same twice (the profile Trill ships of it says so).
+    let in_turn = json!({ "Cycle Mode Switch": 1, "M-Fret Sound": 0 });
+    ok(client, "update_device", json!({ "device": guitar, "settings": in_turn })).await;
+    // The amplifier, on one of its maker's presets where this machine
+    // has it, and as it comes where it has not.
+    let on_preset = json!({ "track": track, "uri": AMPLIFIER, "preset": "80s Arch Lead" });
+    let amp = match call(client, "add_device", on_preset).await {
+        Ok(amp) => amp,
+        Err(why) => {
+            eprintln!("the amplifier as it comes: {why}");
+            ok(client, "add_device", json!({ "track": track, "uri": AMPLIFIER })).await
+        }
+    };
+    eprintln!("the amplifier: {amp}");
+    clip(client, track, 0.0, 8.0, json!(riff)).await;
+    let there = part_rendered(client, folder.path(), "the first song", track).await;
+    let again = part_rendered(client, folder.path(), "the first song again", track).await;
+    let allowed = null_db(&there, &again);
+
+    // Kept as one thing, in the test's own folder.
+    let arguments =
+        json!({ "track": track, "name": "Hellrazer Henson", "description": "a riff tone", "tags": ["guitar"] });
+    let saved = ok(client, "save_sound", arguments).await;
+    eprintln!("saved: {saved}");
+    assert_eq!((saved["saved"].as_str(), saved["instrument"].as_str()), (Some("Saved/Hellrazer Henson"), Some(GUITAR)));
+    let devices = strings(&saved["devices"]);
+    assert_eq!(devices.len(), 2, "{saved}");
+    assert_eq!(Some(devices[1].as_str()), amp["name"].as_str(), "{saved}");
+    let file = std::path::PathBuf::from(saved["file"].as_str().unwrap());
+    assert!(file.starts_with(folder.path()), "kept in the test's own folder: {}", file.display());
+    let found = ok(client, "search_presets", json!({ "query": "hellrazer henson" })).await;
+    assert_eq!(found["items"][0]["with"], json!([devices[1]]), "{found}");
+
+    // Another song: a track is given the sound by its name.
+    ok(client, "new_project", json!({})).await;
+    ok(client, "set_project", json!({ "tempo": 156, "name": "Second" })).await;
+    let arguments = json!({ "name": "Guitar again", "instrument": GUITAR, "preset": "Hellrazer Henson" });
+    let given = ok(client, "create_track", arguments).await;
+    eprintln!("given: {given}");
+    let second = given["track_id"].as_u64().unwrap();
+    assert_eq!(given["preset"], "Hellrazer Henson");
+    assert_eq!(given["sound"]["made"][0]["name"].as_str(), Some(devices[1].as_str()), "{given}");
+    assert!(given["sound"].get("without").is_none(), "{given}");
+    clip(client, second, 0.0, 8.0, json!(riff)).await;
+    let here = part_rendered(client, folder.path(), "the second song", second).await;
+    let same = null_db(&there, &here);
+
+    // Without the amplifier it is another sound altogether.
+    let amp_here = given["sound"]["made"][0]["device_id"].as_u64().unwrap();
+    ok(client, "update_device", json!({ "device": amp_here, "enabled": false })).await;
+    let bare = part_rendered(client, folder.path(), "the second song without its amplifier", second).await;
+    let without = null_db(&here, &bare);
+
+    eprintln!(
+        "taken from the first song's render: the first song again leaves {allowed:.1} dB, the second song {same:.1} dB; \
+         the second song without its amplifier, taken from the second song, leaves {without:.1} dB"
+    );
+    assert!(peak_of(&there) > 0.01 && peak_of(&here) > 0.01, "both sound");
+    assert!(without > -20.0, "the amplifier is heard: {without:.1} dB");
+    // The same within what the plugins allow: as near as the first song is
+    // to itself, and in any case 60 dB under the sound.
+    assert!(same < -60.0 && same <= allowed + 6.0, "the second song {same:.1} dB, the first again {allowed:.1} dB");
+}
+
+/// The highest sample of `audio`.
+fn peak_of(audio: &[f32]) -> f32 {
+    audio.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()))
 }

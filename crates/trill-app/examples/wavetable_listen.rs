@@ -5,23 +5,30 @@
 //! cargo run -p trill-app --example wavetable_listen -- target/wavetable-listening
 //! ```
 //!
-//! Every preset plays a phrase that suits it, alone and as it is (no
-//! effect, no limiter), into a WAV file; the ones that are usually heard
-//! through effects are written a second time through Trill's own chorus,
-//! delay and reverb. Two short pieces use several of them together, mixed
-//! as a song is. `LIST.md` says which file is which.
+//! Every preset plays a phrase that suits it into a WAV file: the synth
+//! alone (no effect, no limiter), and for a preset that is a sound with
+//! effects a second time as it ships, through the chorus, delay or reverb
+//! it brings, which is what a track given the preset plays. Two short
+//! pieces use several of them together, mixed as a song is. `LIST.md` says
+//! which file is which.
 //!
 //! Nobody has heard any of this: whoever wrote the presets and the phrases
 //! cannot. It is the same on every run and on every machine.
 //!
 //! With a second path it also writes the small song the pictures of the
 //! synth's panel are made from (`render.sh wavetable`).
+//!
+//! `wavetable_listen --sound-pictures <DIR>` writes nothing to listen to:
+//! it makes what the pictures of a sound of more than one device are
+//! taken of (`render.sh instrument-sound`), a song and a profile folder
+//! that holds one saved sound.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 use trill_core::audio::AudioBuffer;
 use trill_core::device::DeviceFactory;
+use trill_core::presets::{PresetRef, SoundDevice, names_after};
 use trill_core::project::{AutomationPoint, AutomationTarget};
 use trill_core::{ChainRef, DeviceId, Note, Project, TrackId, TrackKind};
 use trill_dsp::BuiltinFactory;
@@ -41,6 +48,14 @@ fn preset(name: &str) -> (BTreeMap<String, f64>, Option<Vec<u8>>, String, String
     let preset = synth.presets.iter().find(|preset| preset.name == name).unwrap_or_else(|| panic!("no '{name}'"));
     let values = preset.params.iter().cloned().collect();
     (values, preset.state.clone(), preset.category.clone(), preset.description.clone())
+}
+
+/// The effects the synth's preset `name` brings behind it.
+fn brought(name: &str) -> Vec<SoundDevice> {
+    let descriptors = BuiltinFactory.descriptors();
+    let synth = descriptors.iter().find(|descriptor| descriptor.uri == SYNTH).expect("the wavetable synth");
+    let preset = synth.presets.iter().find(|preset| preset.name == name).unwrap_or_else(|| panic!("no '{name}'"));
+    preset.after.clone().unwrap_or_default()
 }
 
 /// Adds a track that plays `notes` on the synth's preset `name`, in a clip
@@ -392,44 +407,28 @@ fn phrase(preset: &str) -> Phrase {
     }
 }
 
-/// The effects a kind of sound is usually heard through.
-fn finish(project: &mut Project, track: TrackId, category: &str) {
-    let chain = ChainRef::Track(track);
-    match category {
-        "Lead" => {
-            effect(project, chain, "builtin:delay", &[("time_beats", 0.75), ("feedback", 0.35), ("mix", 0.18)]);
-            effect(project, chain, "builtin:reverb", &[("decay", 1.8), ("mix", 0.18)]);
-        }
-        "Pad" => {
-            effect(project, chain, "builtin:chorus", &[]);
-            effect(project, chain, "builtin:reverb", &[("decay", 4.0), ("mix", 0.3)]);
-        }
-        "Pluck" => {
-            effect(project, chain, "builtin:delay", &[("time_beats", 0.75), ("feedback", 0.4), ("mix", 0.22)]);
-            effect(project, chain, "builtin:reverb", &[("decay", 2.2), ("mix", 0.2)]);
-        }
-        "Keys" => {
-            effect(project, chain, "builtin:chorus", &[]);
-            effect(project, chain, "builtin:reverb", &[("decay", 1.6), ("mix", 0.16)]);
-        }
-        _ => {}
-    }
+/// Makes the synth `device` the sound its preset `name` is: the effects
+/// the preset brings, behind it, as a track that is given the preset gets
+/// them (`Session::add_device`, which makes the same edit).
+fn as_it_ships(project: &mut Project, device: DeviceId, name: &str) {
+    let after = brought(name);
+    let sound = PresetRef { id: name.to_string(), name: name.to_string() };
+    project.bring_after(device, &sound, &after).expect("the sound's effects");
 }
 
-/// One preset alone on its phrase.
+/// One preset on its phrase: the synth alone, or the sound as it ships.
 fn alone(name: &str, with_effects: bool) -> Project {
     let phrase = phrase(name);
     let mut project = Project::new(name);
     // As it is: nothing after it, the master's limiter included.
     project.master.devices.clear();
     project.set_tempo(phrase.tempo).expect("a tempo");
-    let (track, device) = part(&mut project, name, name, &phrase.notes, phrase.beats);
+    let (_, device) = part(&mut project, name, name, &phrase.notes, phrase.beats);
     for (param, points) in &phrase.drawn {
         draw(&mut project, device, param, points);
     }
     if with_effects {
-        let (.., category, _) = preset(name);
-        finish(&mut project, track, &category);
+        as_it_ships(&mut project, device, name);
     }
     project
 }
@@ -608,11 +607,55 @@ fn for_pictures() -> Project {
     project
 }
 
+/// What the pictures of a sound of more than one device are taken of, in
+/// `folder`: `profile`, which holds one sound that was saved from a track
+/// (a pad of the poly synth in a long hall), and `sound.trill`, a song with
+/// a track on that sound and a track on one the wavetable synth brings.
+/// Made through a session, as the window and a model make them.
+fn sound_pictures(folder: &Path) -> anyhow::Result<()> {
+    use trill_engine::{AudioBackend, Session};
+    let failed = |error: trill_engine::SessionError| anyhow::anyhow!("{error}");
+    let profile = folder.join("profile");
+    if folder.exists() {
+        std::fs::remove_dir_all(folder)?;
+    }
+    std::fs::create_dir_all(&profile)?;
+    let factory = std::sync::Arc::new(BuiltinFactory);
+    let mut session = Session::new(factory, AudioBackend::Null { sample_rate: 48_000 }).map_err(failed)?;
+    session.saved_presets().open(profile.join("saved-presets"));
+
+    let keys = session.edit(|project| Ok(project.add_track("Warm Hall"))).map_err(failed)?;
+    session.add_device(ChainRef::Track(keys), "builtin:polysynth", Some("warm_pad"), None).map_err(failed)?;
+    let hall = session.add_device(ChainRef::Track(keys), "builtin:reverb", None, None).map_err(failed)?;
+    session.set_device_params(hall, &[("decay".into(), 6.0), ("mix".into(), 0.35)]).map_err(failed)?;
+    session.save_sound(keys, "Warm Hall", "A soft pad in a long hall", &["pad".into()]).map_err(failed)?;
+    let pad = session.edit(|project| Ok(project.add_track("Glass Pad"))).map_err(failed)?;
+    session.add_device(ChainRef::Track(pad), SYNTH, Some("Glass Pad"), None).map_err(failed)?;
+    let chords = held(&["Em9", "Cmaj7", "Em9", "Cmaj7"], 4.0, 80);
+    session
+        .edit(|project| {
+            for (track, name) in [(keys, "Warm Hall"), (pad, "Glass Pad")] {
+                let clip = project.add_midi_clip(track, name, 0.0, 16.0)?;
+                project.clip_mut(clip)?.add_notes(&chords)?;
+            }
+            Ok(())
+        })
+        .map_err(failed)?;
+    let song = folder.join("sound.trill");
+    session.save(&song).map_err(failed)?;
+    println!("{}", song.display());
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let mut arguments = std::env::args().skip(1);
     let Some(folder) = arguments.next() else {
-        anyhow::bail!("usage: wavetable_listen <DIR> [<PROJECT.trill> for the pictures]");
+        anyhow::bail!("usage: wavetable_listen <DIR> [<PROJECT.trill> for the pictures], or --sound-pictures <DIR>");
     };
+    if folder == "--sound-pictures" {
+        let Some(folder) = arguments.next() else { anyhow::bail!("--sound-pictures needs a folder") };
+        return sound_pictures(Path::new(&folder));
+    }
     let folder = Path::new(&folder);
     std::fs::create_dir_all(folder)?;
 
@@ -621,8 +664,10 @@ fn main() -> anyhow::Result<()> {
     let mut list = String::from(
         "# The wavetable synth, to listen to\n\n\
          Nobody has heard these files: the presets and the phrases were written by someone who cannot hear, from \
-         how such sounds are made, and the presets were matched in level by measurement. Every file is the synth \
-         alone, with no effect and no limiter after it, unless its name says otherwise.\n\n\
+         how such sounds are made, and the presets were matched in level by measurement. A file is the synth \
+         alone, with no effect and no limiter after it, unless its name says otherwise. A preset that brings \
+         effects is a sound: its second file, \"(with effects)\", is that sound as it ships, which is what a track \
+         plays that is given the preset.\n\n\
          Made by `cargo run -p trill-app --example wavetable_listen -- <this folder>`; the same on every run.\n\n\
          ## Each preset alone\n\n\
          | File | Preset | Kind | What it plays | Seconds | Peak |\n|---|---|---|---|---|---|\n",
@@ -638,16 +683,14 @@ fn main() -> anyhow::Result<()> {
             "| `{file}` | {} | {} | {} at {} BPM | {seconds:.0} | {peak} |",
             preset.name, preset.category, phrase.plays, phrase.tempo
         )?;
-        if preset.category != "Bass" {
+        let after = brought(&preset.name);
+        if !after.is_empty() {
             let file = format!("{stem} (with effects).wav");
             let (seconds, peak) = write(&alone(&preset.name, true), &folder.join(&file))?;
-            let through = match preset.category.as_str() {
-                "Lead" | "Pluck" => "a dotted-eighth delay and a reverb",
-                _ => "a chorus and a reverb",
-            };
+            let through = names_after(&after).join(" and ").to_lowercase();
             writeln!(
                 list,
-                "| `{file}` | {} | {} | the same, through {through} | {seconds:.0} | {peak} |",
+                "| `{file}` | {} | {} | the same as it ships: through its {through} | {seconds:.0} | {peak} |",
                 preset.name, preset.category
             )?;
         }
