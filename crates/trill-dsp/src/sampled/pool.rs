@@ -242,8 +242,10 @@ struct Shared {
     players: AtomicUsize,
     workers: Mutex<usize>,
     /// Notes that were cut short because the rest of their recording had
-    /// not been read by the time its start ran out.
+    /// not been read by the time its start ran out, and notes that did
+    /// not sound because not even the start had been read.
     short: AtomicUsize,
+    unready: AtomicUsize,
     /// The last holder of the pool let go of it: the workers go home.
     stopped: AtomicBool,
 }
@@ -277,6 +279,9 @@ pub struct Held {
     pub budget: usize,
     /// Notes that were cut short for want of the rest of their recording.
     pub short_notes: usize,
+    /// Notes that did not sound because the start of their recording had
+    /// not been read yet: the instrument was still being loaded.
+    pub unready_notes: usize,
 }
 
 impl Pool {
@@ -293,6 +298,7 @@ impl Pool {
             players: AtomicUsize::new(0),
             workers: Mutex::new(0),
             short: AtomicUsize::new(0),
+            unready: AtomicUsize::new(0),
             stopped: AtomicBool::new(false),
         });
         Self { _life: Arc::new(Life { shared: shared.clone() }), shared }
@@ -306,7 +312,8 @@ impl Pool {
     /// plays it.
     pub fn recording(&self, path: &str) -> Arc<Recording> {
         let mut recordings = lock(&self.shared.recordings);
-        if let Some(found) = recordings.get(path).and_then(Weak::upgrade) {
+        // One that could not be read is tried again: its file may be back.
+        if let Some(found) = recordings.get(path).and_then(Weak::upgrade).filter(|found| found.problem().is_none()) {
             return found;
         }
         let recording = Arc::new(Recording {
@@ -383,6 +390,12 @@ impl Pool {
         self.shared.short.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A note did not sound: the start of its recording is not read yet.
+    #[inline]
+    pub fn not_ready(&self) {
+        self.shared.unready.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// A device that plays live, for as long as what this returns is kept:
     /// the workers look often for what it wants.
     pub fn player(&self) -> Player {
@@ -397,6 +410,7 @@ impl Pool {
             whole_bytes: self.shared.held.load(Ordering::Relaxed),
             budget: self.shared.budget.load(Ordering::Relaxed),
             short_notes: self.shared.short.load(Ordering::Relaxed),
+            unready_notes: self.shared.unready.load(Ordering::Relaxed),
         }
     }
 

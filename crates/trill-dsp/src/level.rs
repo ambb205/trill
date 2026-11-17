@@ -113,7 +113,11 @@ pub fn controller_support(uri: &str) -> ControllerSupport {
         "builtin:polysynth" => {
             vec![ControllerKind::MOD_WHEEL, level[0], level[1], ControllerKind::SUSTAIN, ControllerKind::PitchBend]
         }
-        "builtin:sampler" => vec![level[0], level[1], ControllerKind::SUSTAIN, ControllerKind::PitchBend],
+        // What every sampled instrument follows; the one that is loaded
+        // may listen to more, which its device says itself.
+        "builtin:sampler" | "builtin:sampled" => {
+            vec![level[0], level[1], ControllerKind::SUSTAIN, ControllerKind::PitchBend]
+        }
         "builtin:drumkit" | "builtin:drumrack" => level.to_vec(),
         uri if uri.starts_with("builtin:") => Vec::new(),
         _ => return ControllerSupport::Unknown,

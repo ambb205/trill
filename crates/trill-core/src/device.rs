@@ -587,6 +587,33 @@ pub trait DeviceController: Send {
         None
     }
 
+    /// The instrument the device has loaded, where the device plays one
+    /// that is made of recordings and that a file describes: what it is,
+    /// and what a track that plays through it is told of its notes.
+    /// `None` for any other device, and for one with nothing loaded.
+    /// Cheap after the first time: a view may ask whenever it is drawn.
+    fn sampled(&mut self) -> Option<std::sync::Arc<crate::SampledInstrument>> {
+        None
+    }
+
+    /// How far the device is with reading what it plays from the disk,
+    /// where it reads in the background and says so itself: a device that
+    /// plays live is not waited for, and a note whose recording is not
+    /// there yet does not sound. `None` for a device that does not say.
+    /// Cheap, and never waits.
+    fn reading(&self) -> Option<crate::Reading> {
+        None
+    }
+
+    /// The files the device looked for and did not find that its saved
+    /// state does not itself name: the recordings an instrument's file
+    /// names. Each with the slot it is in and where it was looked for.
+    /// Giving such a slot another file ([`crate::DeviceFiles::relinked`])
+    /// writes that into the state.
+    fn missing_files(&mut self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     /// Which MIDI controllers the device does something with, if it can
     /// say. Cheap: a view may ask whenever it is drawn.
     fn controller_support(&self) -> ControllerSupport {

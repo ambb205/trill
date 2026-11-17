@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use trill_core::device::DeviceWarning;
 use trill_core::files::{folder_of, resolve};
-use trill_core::{Articulation, InstrumentProfile, KeySound, Role};
+use trill_core::{Articulation, InstrumentProfile, KeySound, Role, SampledInstrument, SampledRegion};
 
 /// The state format this build writes, and the newest it reads.
 pub const STATE_VERSION: u32 = 1;
@@ -49,6 +49,9 @@ pub const MAX_RECORDINGS: usize = 16_384;
 /// How many of the things an instrument asks for and does not get are
 /// named for each kind of thing.
 const NAMED: usize = 4;
+/// How many of an instrument's missing recordings are looked for again
+/// each time the instrument is asked for.
+const LOOKED_FOR_AGAIN: usize = 16;
 
 /// The state document: which instrument a device plays.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -148,19 +151,6 @@ impl Texts for Disk {
     }
 }
 
-/// One region as a picture of the instrument shows it: the keys and the
-/// velocities it covers.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct RegionBox {
-    pub keys: (u8, u8),
-    pub velocities: (u8, u8),
-    pub root: u8,
-    /// The switch that chooses it, if one does.
-    pub switch: Option<u8>,
-    /// It sounds when a key comes up.
-    pub release: bool,
-}
-
 /// An instrument that was read, with its recordings.
 pub struct Loaded {
     /// The instrument's file.
@@ -202,6 +192,11 @@ impl Instruments {
             known.file == *file
                 && known.overrides == state.recordings
                 && known.texts.iter().all(|(path, stamp)| texts.stamp(path) == *stamp)
+                // A recording that was missing and is back is a reason to
+                // look again; the first few say whether a folder is.
+                && !known.missing.iter().take(LOOKED_FOR_AGAIN).any(|index| {
+                    pool.loader().size(&known.paths[*index as usize]).is_some()
+                })
         });
         if let Some(known) = known {
             return Ok(Some(known));
@@ -416,13 +411,29 @@ impl Loaded {
         Some(sounds)
     }
 
+    /// What the device says of the instrument: see [`SampledInstrument`].
+    pub fn said(&self) -> SampledInstrument {
+        SampledInstrument {
+            name: self.summary.name.clone(),
+            file: self.file.clone(),
+            about: self.about(),
+            unsupported: self.unsupported(),
+            bytes: self.bytes,
+            recordings: self.recordings.len(),
+            layers: self.summary.layers,
+            takes: self.summary.takes,
+            regions: self.boxes(),
+            profile: self.profile(),
+        }
+    }
+
     /// The regions as a picture shows them.
-    pub fn boxes(&self) -> Vec<RegionBox> {
+    pub fn boxes(&self) -> Vec<SampledRegion> {
         self.instrument
             .regions
             .iter()
             .filter(|region| region.recording.is_some())
-            .map(|region| RegionBox {
+            .map(|region| SampledRegion {
                 keys: region.keys,
                 velocities: region.velocities,
                 root: region.root,
