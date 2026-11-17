@@ -13,12 +13,12 @@ use trill_core::project::AudioContent;
 use trill_core::{InstrumentProfile, Note, Project, Role, TrackId};
 use trill_noir::Theme;
 use trill_stage::director::{Entry, Kind, Plan, Shot, Take};
-use trill_stage::film::{Filmer, Progress, Shoot};
+use trill_stage::film::{Filmer, Playing, Progress, Shoot, Subject};
 use trill_stage::gpu::{Gpu, Quality, Renderer};
 use trill_stage::making::Making;
 use trill_stage::scene::Layout;
 use trill_stage::voice::{Wave, voiced};
-use trill_stage::{Format, Heard, Look, Score, Song, Sound, Stage};
+use trill_stage::{Format, Heard, Look, Picture, Score, Song, Sound, Stage};
 
 /// Sixteen bars: a kick on every beat, a line of eighths, two sections.
 fn score() -> (Score, TrackId) {
@@ -465,4 +465,32 @@ fn a_film_that_is_stopped_leaves_nothing_behind() {
     let stopped = filmer.film(&song, &Sound::default(), 0.0, 1.0, &small(), None, &film, &progress).unwrap_err();
     assert!(stopped.contains("stopped at frame 0 of 30"), "{stopped}");
     assert!(!film.exists(), "nothing of it was kept");
+
+    // Stopped part of the way, with frames already handed over: nothing is
+    // kept, and nothing turns up a moment later either. (Where `ffmpeg` is
+    // a launcher for the real one, killing it left the real one to finish
+    // the file after it had been removed. The window's test of a stopped
+    // film, which has sound and full-size frames, is the one that showed it.)
+    struct Stopping<'a> {
+        playing: Playing<'a>,
+        progress: &'a Progress,
+        after: u32,
+    }
+    impl Subject for Stopping<'_> {
+        fn picture(&mut self, stage: &mut Stage, seconds: f64, shoot: &Shoot, seed: u32) -> Picture {
+            self.after = self.after.saturating_sub(1);
+            if self.after == 0 {
+                self.progress.stop();
+            }
+            self.playing.picture(stage, seconds, shoot, seed)
+        }
+    }
+    let (progress, sound) = (Progress::default(), Sound::default());
+    let mut subject = Stopping { playing: Playing { song: &song, sound: &sound }, progress: &progress, after: 40 };
+    let stopped = filmer.film_of(&mut subject, 0.0, 4.0, &small(), None, &film, &progress).unwrap_err();
+    assert!(stopped.contains("stopped at frame") && !stopped.contains("frame 0 of"), "{stopped}");
+    assert!(!film.exists(), "nothing of it was kept");
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert!(!film.exists(), "and nothing of it turned up afterwards");
+    assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0);
 }

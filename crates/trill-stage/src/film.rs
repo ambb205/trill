@@ -30,7 +30,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use trill_noir::Theme;
 
 /// How a film is shot.
@@ -451,16 +451,46 @@ impl Sink {
     fn abandon(self) {
         match self {
             Self::Encoder { mut child, path } => {
+                // With its input closed ffmpeg writes out what it has and
+                // ends by itself. Killing it would be quicker and does not
+                // always reach it: where the `ffmpeg` on the path is a
+                // launcher for the real one (Chocolatey's, Scoop's), the
+                // launcher dies and the real one goes on to finish the file
+                // after it was removed. So it is waited for, and killed
+                // only if it does not go.
                 drop(child.stdin.take());
+                let give_up = Instant::now() + ENCODER_ENDS_WITHIN;
+                while matches!(child.try_wait(), Ok(None)) && Instant::now() < give_up {
+                    std::thread::sleep(Duration::from_millis(15));
+                }
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = std::fs::remove_file(path);
+                remove(&path);
             }
             Self::Folder { folder, .. } => {
                 let _ = std::fs::remove_dir_all(folder);
             }
         }
     }
+}
+
+/// How long an encoder whose film was stopped is given to write out what
+/// it has and go, before it is killed.
+const ENCODER_ENDS_WITHIN: Duration = Duration::from_secs(20);
+
+/// Removes the file at `path`, trying again for a moment where something
+/// still holds it: a program that has only just ended, or one that looks
+/// at every file as it is closed.
+pub(crate) fn remove(path: &Path) {
+    for _ in 0..40 {
+        match std::fs::remove_file(path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            _ => return,
+        }
+    }
+    log::warn!("{} could not be removed", path.display());
 }
 
 /// What ffmpeg wrote of its trouble, once it has ended.

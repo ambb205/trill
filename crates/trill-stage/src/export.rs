@@ -163,7 +163,7 @@ impl SongFilm {
         let mut subject = Playing { song: &song, sound: &sound };
         let filmed =
             filmer.film_of(&mut subject, start, start + seconds, &request.shoot, Some(&audio), &request.path, progress);
-        let _ = std::fs::remove_file(&wav);
+        crate::film::remove(&wav);
         let filmed = filmed?;
         notes.extend(filmed.note);
         Ok(Exported {
