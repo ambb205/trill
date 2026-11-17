@@ -241,15 +241,15 @@ fn journal_json(journal: &Journal, request: &GetJournalRequest) -> Value {
 /// A song without a session behind it: what `get_project` says of the
 /// open one, less what only a running song has.
 fn song_json(project: &Project, include_notes: bool) -> Value {
-    let beats_per_bar = project.time_signature.beats_per_bar();
+    let bars = &project.meter_map();
     let length = project.length_beats();
     let mut out = json!({
         "name": project.name,
         "tempo": project.tempo,
         "time_signature": format!("{}/{}", project.time_signature.numerator, project.time_signature.denominator),
         "length_beats": round(length),
-        "length_bars": round(length / beats_per_bar),
-        "tracks": project.tracks.iter().map(|track| track_json(track, beats_per_bar, include_notes)).collect::<Vec<_>>(),
+        "length_bars": round(bars.bars_at(length)),
+        "tracks": project.tracks.iter().map(|track| track_json(track, bars, include_notes)).collect::<Vec<_>>(),
         "master": {
             "volume_db": project.master.volume_db,
             "devices": project.master.devices.iter().map(device_json).collect::<Vec<_>>(),
@@ -263,7 +263,7 @@ fn song_json(project: &Project, include_notes: bool) -> Value {
         out["markers"] = project
             .markers
             .iter()
-            .map(|marker| json!({ "beat": round(marker.beat), "bar": round(marker.beat / beats_per_bar + 1.0), "name": marker.name }))
+            .map(|marker| json!({ "beat": round(marker.beat), "bar": round(bars.bars_at(marker.beat) + 1.0), "name": marker.name }))
             .collect();
     }
     out

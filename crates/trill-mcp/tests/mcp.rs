@@ -92,6 +92,9 @@ async fn tools_are_listed_with_schemas() {
     for expected in [
         "get_project",
         "set_project",
+        "set_tempo",
+        "set_time_signature",
+        "get_tempo_map",
         "create_track",
         "update_track",
         "delete_track",

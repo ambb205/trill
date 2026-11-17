@@ -401,7 +401,11 @@ pub(crate) fn transport(info: &ProcessInfo, frame_offset: usize) -> TransportEve
         header: EventHeader::new_core(0, EventFlags::empty()),
         flags,
         song_pos_beats: BeatTime::from_float(beats),
-        // The engine's tempo is constant over the whole song.
+        // Worked out from the tempo of this block alone, which is the song's
+        // time in a song of one tempo. Where the tempo changes inside a
+        // song the engine tells each block its own tempo, and this is then
+        // not the time the song took to get here: `ProcessInfo` does not
+        // carry that yet (nor where the bar began, below).
         song_pos_seconds: SecondsTime::from_float(beats * 60.0 / tempo),
         tempo,
         tempo_inc: 0.0,

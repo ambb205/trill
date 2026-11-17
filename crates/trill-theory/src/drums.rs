@@ -140,6 +140,16 @@ impl DrumPattern {
         pattern
     }
 
+    /// The pattern, written for bars of `own` beats, as it is played in
+    /// bars of `bar` beats with its steps as long as they were: see
+    /// [`StepPattern::refit`]. `None` if a lane has steps that a bar of
+    /// `bar` beats is not a whole number of.
+    pub fn refit(&self, own: f64, bar: f64, from_end: bool) -> Option<Self> {
+        let lane = |lane: &Lane| Some(Lane { pattern: lane.pattern.refit(own, bar, from_end)?, ..lane.clone() });
+        let lanes: Option<Vec<Lane>> = self.lanes.iter().map(lane).collect();
+        Some(Self { lanes: lanes?.into_iter().filter(|lane| !lane.pattern.is_silent()).collect() })
+    }
+
     /// Length in bars: that of the longest lane.
     pub fn bars(&self) -> usize {
         self.lanes.iter().map(|lane| lane.pattern.bars()).max().unwrap_or(0)

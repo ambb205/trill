@@ -248,8 +248,9 @@ fixtures=$here/fixtures
 lost=$fixtures/lost-work
 held=$fixtures/held-automation.trill
 thrown=$fixtures/thrown-sends.trill
+changing=$fixtures/changing-time.trill
 if making recovery-offer graphite-recovery-offer min-window-recovery-offer held-automation held-automation-mixer \
-    graphite-held-automation thrown-sends graphite-thrown-sends; then
+    graphite-held-automation thrown-sends graphite-thrown-sends changing-time graphite-changing-time; then
     cargo run -p trill-app --example window_fixtures -- "$fixtures"
 fi
 
@@ -271,3 +272,9 @@ shot graphite-held-automation "$held" --select "Pad chords" --tab devices --auto
 # in hertz and are drawn as the curves they are.
 shot thrown-sends "$thrown" --select "Keys arp" --tab mixer --automation
 shot graphite-thrown-sends "$thrown" --select "Keys arp" --tab mixer --automation --theme graphite
+
+# A tempo and a time signature that change inside the song: said at the
+# foot of the ruler where they change, with the grid and the bar numbers
+# counted through them, and the piano roll in the bars its clip lies under.
+shot changing-time "$changing" --select "Keys arp"
+shot graphite-changing-time "$changing" --select "Keys arp" --theme graphite

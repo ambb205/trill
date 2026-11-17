@@ -8,7 +8,7 @@
 //! them, in the order below, and says how many more there were.
 
 use super::change::{Change, Op, StateChange};
-use crate::{AutomationTarget, ChainRef, Clip, Device, Project, Track};
+use crate::{AutomationTarget, ChainRef, Clip, Device, Project, TimeSignature, Track};
 
 /// A name in the quotation marks names are shown in.
 pub fn quoted(name: &str) -> String {
@@ -124,6 +124,52 @@ fn device_change(was: &Device, now: &Device, state: StateChange, after: &Project
         format!("Changed the sound of {device}")
     } else {
         format!("Changed {device}")
+    }
+}
+
+fn signature(signature: TimeSignature) -> String {
+    format!("{}/{}", signature.numerator, signature.denominator)
+}
+
+/// The one thing of `now` that `was` does not have, and the one thing of
+/// `was` that `now` does not have: what a single edit of a list leaves.
+fn one_changed<T: PartialEq + Copy>(was: &[T], now: &[T]) -> (Option<T>, Option<T>) {
+    let only = |these: &[T], those: &[T]| {
+        let mut left = these.iter().filter(|item| !those.contains(item));
+        left.next().copied().filter(|_| left.next().is_none())
+    };
+    (only(now, was), only(was, now))
+}
+
+/// What a step did to the tempo along the song.
+fn tempo_change(before: &Project, after: &Project) -> String {
+    let (was, now) = (&before.tempo_changes, &after.tempo_changes);
+    let at = |project: &Project, beat: f64| project.meter_map().said(beat);
+    match one_changed(was, now) {
+        (Some(set), _) if now.len() + 1 >= was.len() && now.len() <= was.len() + 1 => match set.ramp {
+            true => format!("Made the tempo glide to {} BPM by {}", set.tempo, at(after, set.beat)),
+            false => format!("Set the tempo to {} BPM at {}", set.tempo, at(after, set.beat)),
+        },
+        (None, Some(gone)) if now.len() + 1 == was.len() => {
+            format!("Removed the change of tempo at {}", at(before, gone.beat))
+        }
+        _ if now.is_empty() => "Removed every change of tempo".to_owned(),
+        _ => "Changed the tempo along the song".to_owned(),
+    }
+}
+
+/// What a step did to the time signature along the song.
+fn meter_change(before: &Project, after: &Project) -> String {
+    let (was, now) = (&before.meter_changes, &after.meter_changes);
+    match one_changed(was, now) {
+        (Some(set), _) if now.len() + 1 >= was.len() && now.len() <= was.len() + 1 => {
+            format!("Set the time signature to {} at {}", signature(set.signature), after.meter_map().said(set.beat))
+        }
+        (None, Some(gone)) if now.len() + 1 == was.len() => {
+            format!("Removed the change of time signature at {}", before.meter_map().said(gone.beat))
+        }
+        _ if now.is_empty() => "Removed every change of time signature".to_owned(),
+        _ => "Changed the time signature along the song".to_owned(),
     }
 }
 
@@ -303,6 +349,8 @@ pub fn describe(before: &Project, after: &Project, change: &Change) -> String {
                     (before.name != after.name, "name"),
                     (before.tempo != after.tempo, "tempo"),
                     (before.time_signature != after.time_signature, "time signature"),
+                    (before.tempo_changes != after.tempo_changes, "tempo along the song"),
+                    (before.meter_changes != after.meter_changes, "time signature along the song"),
                     (before.loop_region != after.loop_region, "loop"),
                     (before.master.volume_db != after.master.volume_db, "master volume"),
                 ] {
@@ -312,6 +360,9 @@ pub fn describe(before: &Project, after: &Project, change: &Change) -> String {
                 }
                 said.push(match changed.as_slice() {
                     ["tempo"] => format!("Set the tempo to {} BPM", after.tempo),
+                    ["time signature"] => format!("Set the time signature to {}", signature(after.time_signature)),
+                    ["tempo along the song"] => tempo_change(before, after),
+                    ["time signature along the song"] => meter_change(before, after),
                     ["name"] => format!("Renamed the project to {}", quoted(&after.name)),
                     [] => "Changed the project".to_owned(),
                     changed => format!("Changed the {}", list(changed)),
@@ -512,6 +563,28 @@ mod tests {
             "Changed the tempo and loop"
         );
         assert_eq!(words(p, |p| p.add_marker(8.0, "Verse").unwrap()), "Added a marker");
+
+        // The tempo and the time signature, at the start and along the song.
+        assert_eq!(words(p, |p| p.set_time_signature(6, 8).unwrap()), "Set the time signature to 6/8");
+        assert_eq!(words(p, |p| p.set_tempo_at(8.0, 140.0, false).unwrap()), "Set the tempo to 140 BPM at bar 3");
+        assert_eq!(
+            words(p, |p| p.set_tempo_at(18.0, 90.0, true).unwrap()),
+            "Made the tempo glide to 90 BPM by bar 5 beat 3"
+        );
+        assert_eq!(words(p, |p| p.set_time_signature_at(8.0, 7, 8).unwrap()), "Set the time signature to 7/8 at bar 3");
+        let mut changing = p.clone();
+        changing.set_tempo_at(8.0, 140.0, false).unwrap();
+        changing.set_tempo_at(16.0, 100.0, true).unwrap();
+        changing.set_time_signature_at(8.0, 7, 8).unwrap();
+        changing.set_time_signature_at(15.0, 4, 4).unwrap();
+        let p = &changing;
+        assert_eq!(words(p, |p| p.set_tempo_at(8.0, 150.0, false).unwrap()), "Set the tempo to 150 BPM at bar 3");
+        assert_eq!(words(p, |p| p.remove_tempo_at(16.0).unwrap()), "Removed the change of tempo at bar 5 beat 2");
+        assert_eq!(
+            words(p, |p| p.remove_time_signature_at(15.0).unwrap()),
+            "Removed the change of time signature at bar 5"
+        );
+        assert_eq!(words(p, |p| p.set_tempo_changes(Vec::new()).unwrap()), "Removed every change of tempo");
 
         // A step that did several things goes by the first of them.
         assert_eq!(
