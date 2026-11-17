@@ -30,4 +30,4 @@ pub use decode::{AUDIO_EXTENSIONS, AudioInfo, decode, is_audio_file, probe};
 pub use error::MediaError;
 pub use peaks::{MinMax, PeakColumn, Peaks, scan_columns};
 pub use resample::{Resampler, resample};
-pub use wav::{WavFormat, write_wav};
+pub use wav::{WavFormat, WavWriter, write_wav};

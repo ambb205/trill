@@ -876,6 +876,7 @@ fn a_track_that_is_listened_to_need_not_be_heard() {
     let window = frames(1.0..2.0);
     let rest: Vec<f32> = out.left[window.clone()].iter().zip(&kick_audio[window]).map(|(a, b)| a - b).collect();
     assert!(rms(&rest) < 1e-4, "{}", rms(&rest));
+    assert_eq!(out.measured.tracks.len(), 1, "the bass is not even made: nothing heard listens to it");
 }
 
 #[test]

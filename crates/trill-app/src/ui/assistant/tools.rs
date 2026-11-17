@@ -371,10 +371,14 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
             Some("panic") => about("Silencing", "Silenced", "everything"),
             _ => about("Checking", "Checked", "the transport"),
         },
-        "render" => match call.text("path") {
-            Some(path) => about("Rendering", "Rendered", &format!("the song to {}", quoted(file_name(path)))),
-            None => about("Rendering", "Rendered", "the song"),
-        },
+        "render" => {
+            // With stems, every track becomes a file of its own as well.
+            let what = if call.has("stems") { "the song and its tracks" } else { "the song" };
+            match call.text("path") {
+                Some(path) => about("Rendering", "Rendered", &format!("{what} to {}", quoted(file_name(path)))),
+                None => about("Rendering", "Rendered", what),
+            }
+        }
         "measure" => match call.has("tracks") {
             true => about("Measuring", "Measured", "some of the tracks"),
             false => about("Measuring", "Measured", "the song"),
@@ -564,6 +568,10 @@ mod tests {
         assert_eq!(did("load_project", json!({ "path": "songs/day.trill" }), p), "Opened \u{201C}day.trill\u{201D}");
         assert_eq!(did("render", json!({ "path": "mix.wav" }), p), "Rendered the song to \u{201C}mix.wav\u{201D}");
         assert_eq!(did("render", json!({}), p), "Rendered the song");
+        assert_eq!(
+            did("render", json!({ "path": "mix.wav", "stems": ["all"] }), p),
+            "Rendered the song and its tracks to \u{201C}mix.wav\u{201D}"
+        );
         assert_eq!(did("measure", json!({}), p), "Measured the song");
         assert_eq!(did("measure", json!({ "tracks": [1] }), p), "Measured some of the tracks");
         assert!(did("probe", json!({ "track": track }), p).starts_with("Tried out the instrument of "));

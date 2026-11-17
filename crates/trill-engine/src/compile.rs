@@ -165,8 +165,17 @@ impl Compiler<'_> {
         // The stretched copies this graph has given a stand-in for.
         let mut held = HashSet::new();
 
+        // A render makes and plays only what is heard, and what feeds it:
+        // a track that is muted, or left out by a solo, would be made,
+        // waited for and run only to be thrown away. What is played keeps
+        // every track running, so that it is there the moment it is
+        // unmuted.
+        let needed = (self.purpose == Purpose::Rendering).then(|| routing.needed(project));
         let mut tracks = Vec::with_capacity(project.tracks.len());
         for track in &project.tracks {
+            if needed.as_ref().is_some_and(|needed| !needed.contains(&track.id)) {
+                continue;
+            }
             let mut notes = Vec::new();
             let mut audio = Vec::new();
             for clip in track.clips.iter().filter(|clip| !clip.muted) {
@@ -247,6 +256,7 @@ impl Compiler<'_> {
                     .collect(),
                 key_out: routing.key(track.id),
                 tap: None,
+                source: None,
             });
         }
         // Every node must run before the bus it feeds is read, and before
@@ -260,6 +270,7 @@ impl Compiler<'_> {
             meter: self.meters.master.clone(),
             gain: 1.0,
             primed: false,
+            tap: None,
         };
 
         let live_devices: HashSet<DeviceId> = project.devices().map(|device| device.id).collect();
@@ -492,6 +503,75 @@ impl Routing {
             TrackKind::Normal => track.group.is_some_and(|group| project.track(group).is_ok_and(|group| group.solo)),
         }
     }
+
+    /// The tracks a render has to make and play: the ones that are heard
+    /// for their own sake, the groups and returns their sound goes on
+    /// through, and the tracks their devices listen to. With nothing
+    /// soloed that is every track that is not muted. With a solo it is the
+    /// soloed tracks, the members of a soloed group, and of the groups and
+    /// returns that are open only so that those are heard through them,
+    /// the ones something needed feeds. A track that is listened to is
+    /// made whether or not it is heard: muted, or left out by a solo.
+    fn needed(&self, project: &Project) -> HashSet<TrackId> {
+        let audible: HashSet<TrackId> =
+            project.tracks.iter().filter(|track| self.audible(project, track)).map(|track| track.id).collect();
+        let own = |track: &Track| !self.any_solo || track.solo || track.kind == TrackKind::Normal;
+        let mut needed: HashSet<TrackId> = project
+            .tracks
+            .iter()
+            .filter(|track| audible.contains(&track.id) && own(track))
+            .map(|track| track.id)
+            .collect();
+        let feeds = feeds(project);
+        loop {
+            let fed = feeds.iter().filter(|(from, to)| needed.contains(from) && audible.contains(to));
+            let more: Vec<TrackId> = fed.map(|(_, to)| *to).filter(|to| !needed.contains(to)).collect();
+            if more.is_empty() {
+                break;
+            }
+            needed.extend(more);
+        }
+
+        // What a track that is made listens to is made too, though nobody
+        // hears it: a compressor ducks to its key whether or not the key is
+        // in the mix. That is the track itself (it is heard ahead of its
+        // fader and its mute), whatever sounds into it if it is a group or
+        // a return, and what the devices of all of those listen to in turn.
+        // The master is always made.
+        let keys_of = |devices: &[Device]| devices.iter().filter_map(|device| device.sidechain).collect::<Vec<_>>();
+        let sounds_into = |from: &Track, to: &Track| match to.kind {
+            TrackKind::Group => {
+                from.group == Some(to.id) && (audible.contains(&from.id) || self.feeds_key(project, from))
+            }
+            TrackKind::Return => audible.contains(&from.id) && from.sends.iter().any(|send| send.to == to.id),
+            TrackKind::Normal => false,
+        };
+        let made = project.tracks.iter().filter(|track| needed.contains(&track.id));
+        let mut listened: Vec<TrackId> = made.flat_map(|track| keys_of(&track.devices)).collect();
+        listened.extend(keys_of(&project.master.devices));
+        while let Some(key) = listened.pop() {
+            let Ok(track) = project.track(key) else { continue };
+            if !needed.insert(key) {
+                continue;
+            }
+            listened.extend(keys_of(&track.devices));
+            listened.extend(project.tracks.iter().filter(|from| sounds_into(from, track)).map(|from| from.id));
+        }
+        needed
+    }
+}
+
+/// Whose sound goes into whom: a member into its group, a track into each
+/// return it sends to. (A device that listens to another track is fed by
+/// it too, the other way round: [`Routing::needed`] follows those from the
+/// tracks that are made to the ones they listen to.)
+fn feeds(project: &Project) -> Vec<(TrackId, TrackId)> {
+    let mut feeds = Vec::new();
+    for track in &project.tracks {
+        feeds.extend(track.group.map(|group| (track.id, group)));
+        feeds.extend(track.sends.iter().map(|send| (track.id, send.to)));
+    }
+    feeds
 }
 
 impl Routing {

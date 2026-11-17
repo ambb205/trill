@@ -5,7 +5,7 @@
 //! exactly what you heard.
 
 use crate::engine::RecordPhase;
-use crate::graph::{AudioData, Bus, Chain, Graph, MAX_BLOCK, RegionAudio, TrackNode, TrackState};
+use crate::graph::{AudioData, Bus, Chain, DeviceSlot, Graph, MAX_BLOCK, RegionAudio, TrackNode, TrackState};
 use crate::live::{Captured, LiveTarget, TrackSet};
 use crate::monitor::{Beats, Monitor};
 use trill_core::controllers::{CONTROLLER_KINDS, ControllerKind};
@@ -705,7 +705,20 @@ impl Processor {
                 merge_by_offset(events, before_notes, sorted);
             }
 
-            run_chain(&mut track.chain, &info, events, left, right, keys);
+            match &mut track.source {
+                None => run_chain(&mut track.chain, &info, events, left, right, keys),
+                // A render that keeps what goes into the track's effects:
+                // the chain is run in two parts, and heard between them.
+                Some((sources, tap)) => {
+                    move_params(&mut track.chain, &info);
+                    let devices = &mut track.chain.devices;
+                    let sources = (*sources).min(devices.len());
+                    let (source, effects) = devices.split_at_mut(sources);
+                    run_devices(source, &info, events, left, right, keys);
+                    tap.push(left, right);
+                    run_devices(effects, &info, events, left, right, keys);
+                }
+            }
             listen_for_an_answer(track, left, right);
             // What the devices that listen to this track hear of it: as it
             // leaves its own devices, whatever its fader and its mute say.
@@ -773,6 +786,9 @@ impl Processor {
             }
         }
 
+        if let Some(tap) = &mut master.tap {
+            tap.push(mix_left, mix_right);
+        }
         run_chain(&mut master.chain, &info, &[], mix_left, mix_right, keys);
 
         let volume = match &master.volume_automation {
@@ -1130,9 +1146,8 @@ fn mix_ramped(source: &[f32], destination: &mut [f32], from: f32, to: f32) -> f3
     peak
 }
 
-/// Runs the devices of a chain over one block, in order. A device that
-/// listens to another track is handed what that track put out in this
-/// block, which `keys` holds: the track was played before this one.
+/// Runs the devices of a chain over one block, in order, with their
+/// parameters where their automation has them.
 fn run_chain(
     chain: &mut Chain,
     info: &ProcessInfo,
@@ -1141,6 +1156,13 @@ fn run_chain(
     right: &mut [f32],
     keys: &[Bus],
 ) {
+    move_params(chain, info);
+    run_devices(&mut chain.devices, info, events, left, right, keys);
+}
+
+/// Sets the parameters of a chain's devices to where their automation has
+/// them now.
+fn move_params(chain: &mut Chain, info: &ProcessInfo) {
     let Chain { devices, automation } = chain;
     for lane in automation.iter_mut() {
         let value = automation_value(&lane.points, info.position_beats);
@@ -1151,6 +1173,19 @@ fn run_chain(
             }
         }
     }
+}
+
+/// Runs devices one after the other over a block. A device that listens to
+/// another track is handed what that track put out in this block, which
+/// `keys` holds: the track was played before this one.
+fn run_devices(
+    devices: &mut [DeviceSlot],
+    info: &ProcessInfo,
+    events: &[Event],
+    left: &mut [f32],
+    right: &mut [f32],
+    keys: &[Bus],
+) {
     for slot in devices.iter_mut() {
         if slot.enabled
             && let Some(processor) = slot.processor.as_mut()
@@ -1416,6 +1451,7 @@ mod tests {
             sends: Vec::new(),
             key_out: None,
             tap: None,
+            source: None,
         }
     }
 
