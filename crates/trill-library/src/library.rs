@@ -3,7 +3,7 @@
 
 use crate::Entry;
 use crate::index::{EntryId, Index};
-use crate::scan::{Progress, Scan, ScanPhase, ScanSummary};
+use crate::scan::{MissingRoot, Progress, Scan, ScanPhase, ScanSummary};
 use crate::search::{Query, search};
 use crate::settings::{LibrarySettings, cache_dir};
 use crate::store;
@@ -86,6 +86,19 @@ impl ScanStatus {
     pub fn is_scanning(&self) -> bool {
         self.phase != ScanPhase::Idle
     }
+}
+
+/// What went along when a folder of the library was said to be somewhere
+/// else ([`Library::move_root`]).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct MovedRoot {
+    /// Files that were known in the folder, and are known where it is now
+    /// without being read again.
+    pub files: usize,
+    /// Favorites that were in the folder, and are favorites where it is.
+    pub favorites: usize,
+    /// Recently used files that were in it.
+    pub recent: usize,
 }
 
 /// The result of a search: the matching entries, best first, together with
@@ -265,6 +278,95 @@ impl Library {
             self.shared.save_index();
         }
         true
+    }
+
+    /// The library's folders that the last scan could not read: moved,
+    /// renamed, or on a drive that is not there. What was known of their
+    /// files is still listed, so that nothing is lost by a drive being
+    /// unplugged; [`Library::move_root`] says where one went.
+    pub fn missing_roots(&self) -> Vec<MissingRoot> {
+        let state = self.shared.state.lock();
+        let missing = state.last_scan.iter().flat_map(|scan| scan.missing.iter());
+        missing.filter(|missing| state.roots.contains(&missing.path)).cloned().collect()
+    }
+
+    /// Says that the library's folder `from` is at `to` now: it was moved
+    /// or renamed. The library covers `to` in its place, and everything
+    /// kept by a file's path goes along: the favorites and the recently
+    /// used files that were in it, and what was read from its files, so
+    /// that the scan this starts opens none of them again.
+    ///
+    /// Nothing on disk is touched. An error says in words why it cannot be
+    /// done, and then nothing has changed: `from` is not a folder of the
+    /// library, or `to` cannot be read.
+    pub fn move_root(&self, from: &Path, to: &Path) -> Result<MovedRoot, String> {
+        let (from, to) = (absolute(from), absolute(to));
+        if let Err(error) = std::fs::read_dir(&to) {
+            return Err(format!("cannot read '{}' ({error}); the library is as it was", to.display()));
+        }
+        let moved = {
+            let mut state = self.shared.state.lock();
+            let Some(position) = state.roots.iter().position(|root| *root == from) else {
+                let known: Vec<String> = state.roots.iter().map(|root| format!("'{}'", root.display())).collect();
+                return Err(format!(
+                    "'{}' is not a folder of the library; its folders are: {}",
+                    from.display(),
+                    if known.is_empty() { "none".to_owned() } else { known.join(", ") }
+                ));
+            };
+            if from == to {
+                return Ok(MovedRoot::default());
+            }
+            state.roots.remove(position);
+            // In the place the old one had, unless another folder of the
+            // library holds it already.
+            let mut rest = state.roots.split_off(position);
+            add_to_roots(&mut state.roots, to.clone());
+            for root in rest.drain(..) {
+                add_to_roots(&mut state.roots, root);
+            }
+
+            let parts = from.components().count();
+            let there =
+                |path: &Path| covers(&from, path).then(|| to.join(path.components().skip(parts).collect::<PathBuf>()));
+            let mut moved = MovedRoot::default();
+            for path in std::mem::take(&mut state.favorites) {
+                state.favorite_set.remove(&path);
+                let now = there(&path);
+                moved.favorites += usize::from(now.is_some());
+                state.set_favorite(&now.unwrap_or(path), true);
+            }
+            let mut recent: Vec<PathBuf> = Vec::with_capacity(state.recent.len());
+            for path in std::mem::take(&mut state.recent) {
+                let now = there(&path);
+                moved.recent += usize::from(now.is_some());
+                let path = now.unwrap_or(path);
+                if !recent.contains(&path) {
+                    recent.push(path);
+                }
+            }
+            state.recent = recent;
+            // The last scan's word that the folder is missing is about a
+            // folder the library no longer has.
+            if let Some(scan) = &mut state.last_scan {
+                scan.missing.retain(|missing| missing.path != from);
+            }
+
+            // As in `remove_root`: built before the index is locked for
+            // writing, and no scan can publish while the state is held.
+            let current = self.shared.index.read().clone();
+            moved.files = current
+                .find_folder(&from)
+                .and_then(|id| current.folder(id))
+                .map_or(0, |folder| folder.all_files().len());
+            let roots = state.roots.clone();
+            let carried = current.with_root_at(&from, &to).retain_roots(|root| roots.iter().any(|known| known == root));
+            *self.shared.index.write() = Arc::new(carried);
+            moved
+        };
+        self.shared.changed();
+        self.rescan();
+        Ok(moved)
     }
 
     // ---- scanning ------------------------------------------------------

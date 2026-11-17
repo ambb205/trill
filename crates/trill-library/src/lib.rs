@@ -51,10 +51,11 @@ pub use entry::{AudioFacts, Entry, EntryKind};
 pub use index::{EntryId, Folder, FolderId, Index};
 pub use infer::{Inferred, infer};
 pub use key::Key;
+pub use library::MovedRoot;
 pub use library::{Library, ScanStatus, SearchResults};
 pub use locations::{SuggestedLocation, suggested_locations};
 pub use natural::natural_cmp;
-pub use scan::{ScanPhase, ScanSummary};
+pub use scan::{MissingRoot, ScanPhase, ScanSummary};
 pub use search::Query;
 pub use settings::{
     AudioSettings, JournalSettings, LibrarySettings, Loaded, MidiSettings, SaveError, Settings, UiSettings, cache_dir,
