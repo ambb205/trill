@@ -339,6 +339,59 @@ pub(crate) fn edit<T>(
     session.edit(change).map_err(|error| explain(session.project(), error))
 }
 
+/// Puts the parts of a MIDI file into the song from `at` beats on, each on
+/// a new track with an instrument (`melodic`, or the drum kit for a drum
+/// part) and one clip: one undo step. With `use_tempo` the song takes the
+/// file's tempo and time signature, and every change of them, from there.
+pub(crate) fn import_parts(
+    session: &mut Session,
+    file: &midi_file::MidiFile,
+    at: f64,
+    use_tempo: bool,
+    melodic: &str,
+) -> Result<Vec<Value>, String> {
+    // One undo step for the whole import.
+    session.begin_gesture();
+    let result: Result<Vec<Value>, String> = (|| {
+        let parts = edit(session, |project| {
+            if use_tempo {
+                // Every tempo and time signature of the file, from where it is put.
+                let mut timed = file.clone();
+                timed.tempo = timed.tempo.map(|tempo| tempo.clamp(MIN_TEMPO, MAX_TEMPO));
+                for change in &mut timed.tempo_changes {
+                    change.tempo = change.tempo.clamp(MIN_TEMPO, MAX_TEMPO);
+                }
+                project.take_midi_time(&timed, at)?;
+            }
+            project.import_midi(file, at)
+        })?;
+        let mut out = Vec::new();
+        for part in parts {
+            let uri = if part.drums { "builtin:drumkit" } else { melodic };
+            let device =
+                session.add_device(ChainRef::Track(part.track), uri, None, None).map_err(|error| error.to_string())?;
+            let project = session.project();
+            let clip = project.clip(part.clip).map_err(|e| e.to_string())?;
+            let mut entry = json!({
+                "track_id": part.track,
+                "name": project.track(part.track).map_err(|e| e.to_string())?.name,
+                "instrument_device_id": device,
+                "clip_id": part.clip,
+                "note_count": clip.notes().len(),
+                "length": round(clip.length),
+                "drums": part.drums,
+            });
+            if !clip.controllers().is_empty() {
+                entry["controllers"] = clip.controllers().iter().map(|curve| curve.controller.key()).collect();
+            }
+            out.push(entry);
+        }
+        Ok(out)
+    })();
+    session.end_gesture();
+    result
+}
+
 fn parse_time_signature(text: &str) -> Result<(u8, u8), String> {
     let invalid = || format!("time signature '{text}' should look like \"4/4\" or \"6/8\"");
     let (numerator, denominator) = text.split_once('/').ok_or_else(invalid)?;
@@ -386,6 +439,7 @@ impl TrillServer {
             + Self::story_router()
             + Self::film_router()
             + Self::files_router()
+            + Self::listening_router()
             + Self::wavetable_router()
     }
 
@@ -2604,47 +2658,7 @@ impl TrillServer {
                 return Err(format!("unknown device '{melodic}'; list_devices shows what is available"));
             }
 
-            // One undo step for the whole import.
-            session.begin_gesture();
-            let result: Result<Vec<Value>, String> = (|| {
-                let parts = edit(&mut session, |project| {
-                    if use_tempo {
-                        // Every tempo and time signature of the file, from where it is put.
-                        let mut timed = file.clone();
-                        timed.tempo = timed.tempo.map(|tempo| tempo.clamp(MIN_TEMPO, MAX_TEMPO));
-                        for change in &mut timed.tempo_changes {
-                            change.tempo = change.tempo.clamp(MIN_TEMPO, MAX_TEMPO);
-                        }
-                        project.take_midi_time(&timed, request.at.unwrap_or(0.0))?;
-                    }
-                    project.import_midi(&file, request.at.unwrap_or(0.0))
-                })?;
-                let mut out = Vec::new();
-                for part in parts {
-                    let uri = if part.drums { "builtin:drumkit" } else { melodic };
-                    let device = session
-                        .add_device(ChainRef::Track(part.track), uri, None, None)
-                        .map_err(|error| error.to_string())?;
-                    let project = session.project();
-                    let clip = project.clip(part.clip).map_err(|e| e.to_string())?;
-                    let mut entry = json!({
-                        "track_id": part.track,
-                        "name": project.track(part.track).map_err(|e| e.to_string())?.name,
-                        "instrument_device_id": device,
-                        "clip_id": part.clip,
-                        "note_count": clip.notes().len(),
-                        "length": round(clip.length),
-                        "drums": part.drums,
-                    });
-                    if !clip.controllers().is_empty() {
-                        entry["controllers"] = clip.controllers().iter().map(|curve| curve.controller.key()).collect();
-                    }
-                    out.push(entry);
-                }
-                Ok(out)
-            })();
-            session.end_gesture();
-            let parts = result?;
+            let parts = import_parts(&mut session, &file, request.at.unwrap_or(0.0), use_tempo, melodic)?;
             let mut out = json!({ "tracks": parts, "file_tempo": file.tempo, "tempo": session.project().tempo });
             let changes = file.tempo_changes.len() + file.meter_changes.len();
             if changes > 0 {
@@ -3283,8 +3297,9 @@ impl ServerHandler for TrillServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
                 crate::sounds::INSTRUCTIONS,
+                crate::listening::INSTRUCTIONS,
                 crate::wavetable::INSTRUCTIONS,
                 crate::files::INSTRUCTIONS,
                 crate::music::INSTRUCTIONS,

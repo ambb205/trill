@@ -1,0 +1,19 @@
+[package]
+name = "trill-listen"
+description = "What can be heard in a recording without a model: its beats and bars, tuning, key and chords, parts, loops, single hits and notes, and MIDI of them"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+trill-core.workspace = true
+# Only its FFT: the same transform on every machine, so that what is heard
+# in a file is the same wherever it is heard.
+trill-dsp.workspace = true
+# Sample-rate conversion to the rates the analyses work at.
+trill-media.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
