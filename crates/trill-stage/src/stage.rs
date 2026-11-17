@@ -46,6 +46,11 @@ impl Song {
         Self::from(Score::read(project))
     }
 
+    /// The word for the shot `camera` is in.
+    pub fn shot_word(&self, camera: &Camera) -> &'static str {
+        self.plan.takes.get(camera.take).map_or("", |take| scene::shot_word(take.shot.kind))
+    }
+
     /// The camera at `beat`, for a picture of `format`.
     pub fn camera(&self, beat: Beats, format: Format) -> Camera {
         Camera::at(&self.score, &self.plan, beat, Layout::axis_ratio(format.points()))
@@ -66,12 +71,18 @@ impl Look {
     /// crash, the flash of a cut. `frame` is the number of the frame, which
     /// the grain is drawn from.
     pub fn of(song: &Song, camera: &Camera, heard: &Heard, frame: u32) -> Self {
-        let (score, beat) = (&song.score, camera.beat);
+        let cut = camera.since_cut.map_or(0.0, |since| (-since / CUT_FALL).exp() as f32);
+        Self::struck(&song.score, camera.beat, heard, cut, frame)
+    }
+
+    /// The look at `beat` of `score` as it is `heard`, with `cut` of the
+    /// flash of a cut (0..=1): for a picture whose camera is not at the
+    /// beat the music is at, as the film of a song being made.
+    pub fn struck(score: &Score, beat: Beats, heard: &Heard, cut: f32, frame: u32) -> Self {
         let hits = &score.hits;
         let kick = light::strike(&hits.kicks, beat, score.tempo, light::KICK_FALL);
         let snare = light::strike(&hits.snares, beat, score.tempo, light::SNARE_FALL);
         let crash = light::strike(&hits.crashes, beat, score.tempo, light::CRASH_FALL);
-        let cut = camera.since_cut.map_or(0.0, |since| (-since / CUT_FALL).exp() as f32);
         Self {
             light: 1.5 + 1.1 * heard.punch + 0.6 * kick,
             glow: 0.5 + 0.55 * heard.level + 0.5 * crash,
@@ -131,7 +142,7 @@ impl Stage {
         self.paint(song, &camera, heard, format, oversample, look)
     }
 
-    /// Paints what `camera` sees, with `look`.
+    /// Paints what `camera` sees of `song` as it plays, with `look`.
     pub fn paint(
         &mut self,
         song: &Song,
@@ -141,6 +152,13 @@ impl Stage {
         oversample: u32,
         look: Look,
     ) -> Picture {
+        let moment = Moment { score: &song.score, camera, heard, shot: song.shot_word(camera), story: None };
+        self.render(&moment, format, oversample, look)
+    }
+
+    /// Paints `moment`, with `look`: of a song as it plays, or of one
+    /// being made.
+    pub fn render(&mut self, moment: &Moment<'_>, format: Format, oversample: u32, look: Look) -> Picture {
         let oversample = oversample.clamp(1, 2);
         let size = format.points();
         let scale = format.pixels_per_point() * oversample as f32;
@@ -163,8 +181,7 @@ impl Stage {
             let ctx = ui.ctx();
             let [base, light, focus] = layers.map(|layer| ctx.layer_painter(layer));
             let canvas = Canvas { base, light, focus, theme };
-            let moment = Moment { score: &song.score, plan: &song.plan, camera, heard };
-            scene::paint(&canvas, &moment, size);
+            scene::paint(&canvas, moment, size);
             // Out of the context before it would mix them into one list.
             for (layer, shapes) in layers.iter().zip(&mut painted) {
                 *shapes = ctx.graphics_mut(|graphics| {

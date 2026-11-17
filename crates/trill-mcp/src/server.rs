@@ -342,6 +342,7 @@ impl TrillServer {
             + Self::hearing_router()
             + Self::instrument_router()
             + Self::story_router()
+            + Self::film_router()
             + Self::files_router()
     }
 
@@ -382,6 +383,34 @@ impl TrillServer {
             (None, _) => Ok(None),
             (Some(requested), None) => Ok(Some(PathBuf::from(requested))),
             (Some(requested), Some(guard)) => guard.write_target(session, requested, kind, endings).map(Some),
+        }
+    }
+
+    /// Where a tool writes `kind` when it was asked to write it at
+    /// `requested`, and when it was given no place: `usual` then, for a
+    /// client that is trusted as the user is. A guarded client's file goes
+    /// under `usual`'s name into `folder` inside its first working folder,
+    /// because the usual place may be anywhere a project file happens to be
+    /// or the system's temporary folder, and what it makes may be large.
+    pub(crate) fn write_path_or(
+        &self,
+        session: &Session,
+        requested: Option<&str>,
+        kind: &str,
+        endings: &[&str],
+        folder: &str,
+        usual: impl FnOnce() -> PathBuf,
+    ) -> Result<PathBuf, String> {
+        if let Some(path) = self.write_path(session, requested, kind, endings)? {
+            return Ok(path);
+        }
+        let usual = usual();
+        match &self.guard {
+            None => Ok(usual),
+            Some(guard) => {
+                let name = usual.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                guard.write_target(session, &format!("{folder}/{name}"), kind, endings)
+            }
         }
     }
 
@@ -2927,13 +2956,14 @@ impl ServerHandler for TrillServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
                 crate::sounds::INSTRUCTIONS,
                 crate::files::INSTRUCTIONS,
                 crate::music::INSTRUCTIONS,
                 crate::instruments::INSTRUCTIONS,
                 crate::hearing::INSTRUCTIONS,
-                crate::story::INSTRUCTIONS
+                crate::story::INSTRUCTIONS,
+                crate::film::INSTRUCTIONS
             ))
     }
 }

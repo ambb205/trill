@@ -11,7 +11,7 @@
 # at them, and leave it there. They are not kept in the repository, because
 # a single new button in the top bar changes every one of them.
 #
-# The exception is the four pictures the README shows, which live in
+# The exception is the five pictures the README shows, which live in
 # docs/images. Refresh those on purpose, when the README should show
 # something new:
 #
@@ -23,7 +23,7 @@
 set -eu
 here=crates/trill-app/screenshots
 out=target/screenshots
-readme="first-light assistant-answered sounds-browser keyboard-playing"
+readme="first-light assistant-answered sounds-browser keyboard-playing stage"
 mode=${1:-}
 only=
 case "$mode" in
@@ -90,6 +90,19 @@ shot() {
     "$bin" "$@" --screenshot "$out/$name.png"
     echo "$out/$name.png"
 }
+
+# The stage is not a picture of the window: it is the song filmed, drawn by
+# trill-stage's own passes at one moment of the song (the verse, where two
+# parts drive it) and lit by the song's own sound, rendered there. The same
+# picture on every machine with a graphics card, which the window needs too.
+if wanted stage; then
+    if [ "$mode" = list ]; then
+        echo stage
+    else
+        cargo run -p trill-stage --example film -- "$song" --own-sound --size 1280x720 --still 24.2 "$out/stage.png"
+        echo "$out/stage.png"
+    fi
+fi
 
 # The song written through MCP.
 shot first-light "$song" --select Lead
@@ -220,6 +233,7 @@ shot graphite-controllers-expression --demo --select Melody --lane expression --
 shot recording-count-in "$song" --select Lead --arm Lead --record
 shot recording-mixer "$song" --select Lead --arm Lead --arm Bass --tab mixer --record
 shot min-window-recording "$song" --select Bass --arm Bass --record --size 1060x640
+shot film-export "$song" --select Lead --film
 shot audio-settings "$song" --select Lead --settings --audio-scene studio
 shot audio-settings-fallback "$song" --select Lead --settings --audio-scene fallback
 shot audio-settings-none --settings --audio-scene none

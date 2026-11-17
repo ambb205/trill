@@ -137,6 +137,8 @@ async fn tools_are_listed_with_schemas() {
         "get_journal",
         "get_song_at",
         "journal",
+        "film_plan",
+        "film",
         "save_project",
         "load_project",
         "new_project",
@@ -2088,4 +2090,151 @@ async fn the_assistant_is_entered_as_itself_and_cannot_do_away_with_the_journal(
     let exported = ok(client, "journal", json!({ "action": "export", "path": "story" })).await;
     assert!(exported["exported"].as_str().unwrap().ends_with("story.trillstory"));
     assert!(work.join("story.trillstory").is_file());
+}
+
+// ---- films -----------------------------------------------------------------------------
+
+/// A song to film: a bass through sixteen bars, a lead in the second
+/// eight, and a marker on each half. Returns the two tracks' ids.
+async fn song_to_film(client: &Client) -> (u64, u64) {
+    let line = |pitch: u64, beats: u64| -> Vec<Value> {
+        (0..beats * 2).map(|n| json!([pitch + n % 5, n as f64 * 0.5, 0.4, 100])).collect()
+    };
+    let bass = ok(client, "create_track", json!({ "name": "Bass", "instrument": "builtin:polysynth" })).await;
+    let bass = bass["track_id"].as_u64().unwrap();
+    ok(client, "create_clip", json!({ "track": bass, "start": 0, "length": 64, "notes": line(36, 64) })).await;
+    let lead = ok(client, "create_track", json!({ "name": "Lead", "instrument": "builtin:polysynth" })).await;
+    let lead = lead["track_id"].as_u64().unwrap();
+    ok(client, "create_clip", json!({ "track": lead, "start": 32, "length": 32, "notes": line(72, 32) })).await;
+    let markers = json!({ "markers": [{ "beat": 0, "name": "Verse" }, { "beat": 32, "name": "Chorus" }] });
+    ok(client, "set_markers", markers).await;
+    (bass, lead)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_film_is_planned_take_by_take_and_directed_before_any_of_it_is_made() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let nothing = call(client, "film_plan", json!({})).await.unwrap_err();
+    assert!(nothing.contains("nothing to film"), "{nothing}");
+    let (bass, lead) = song_to_film(client).await;
+
+    // The director's own plan: the song from its first bar to its last, take by take.
+    let plan = ok(client, "film_plan", json!({})).await;
+    assert_eq!(
+        (plan["of"].as_str(), plan["bars"].as_str(), plan["seconds"].as_f64()),
+        (Some("song"), Some("1-16"), Some(32.0))
+    );
+    let takes = plan["takes"].as_array().unwrap();
+    assert_eq!(takes[0]["at_seconds"], 0.0);
+    for take in takes {
+        let (shot, enter) = (take["shot"].as_str().unwrap(), take["enter"].as_str().unwrap());
+        assert!(["song", "wide", "ensemble", "close"].contains(&shot), "{take}");
+        assert!(["cut", "move", "carries on"].contains(&enter), "{take}");
+    }
+    assert_eq!(plan["parts"], json!([{ "track": bass, "name": "Bass" }, { "track": lead, "name": "Lead" }]));
+
+    // Directed: the chorus held close on the lead and the verse wide, each as asked.
+    let direct = json!([
+        { "section": "chorus", "shot": "close", "parts": [lead] },
+        { "from_bar": 1, "to_bar": 8, "shot": "wide", "enter": "cut" },
+    ]);
+    let directed = ok(client, "film_plan", json!({ "direct": direct })).await;
+    let takes = directed["takes"].as_array().unwrap();
+    assert_eq!(takes.len(), 2, "{directed}");
+    assert_eq!((takes[0]["bars"].as_str(), takes[0]["shot"].as_str()), (Some("1-8"), Some("wide")));
+    assert_eq!((takes[1]["bars"].as_str(), takes[1]["shot"].as_str()), (Some("9-16"), Some("close")));
+    assert_eq!((&takes[1]["parts"], takes[1]["at_seconds"].as_f64()), (&json!(["Lead"]), Some(16.0)));
+    assert_eq!((takes[1]["section"].as_str(), takes[1]["enter"].as_str()), (Some("Chorus"), Some("cut")));
+
+    // Of a stretch, only its takes, timed from where the film begins.
+    let chorus = ok(client, "film_plan", json!({ "section": "Chorus" })).await;
+    assert_eq!((chorus["bars"].as_str(), chorus["seconds"].as_f64()), (Some("9-16"), Some(16.0)));
+    assert_eq!(chorus["takes"][0]["at_seconds"], 0.0);
+
+    // A mistake says what does exist, and `film` says it before it does any work.
+    for tool in ["film_plan", "film"] {
+        let unknown = call(client, tool, json!({ "section": "Bridge" })).await.unwrap_err();
+        assert!(unknown.contains("the song's sections are \"Verse\", \"Chorus\""), "{tool}: {unknown}");
+        let nobody = json!({ "direct": [{ "section": "Verse", "parts": [9999] }] });
+        let nobody = call(client, tool, nobody).await.unwrap_err();
+        assert!(nobody.contains("9999") && nobody.contains(&bass.to_string()), "{tool}: {nobody}");
+        let speed = call(client, tool, json!({ "speed": 4 })).await.unwrap_err();
+        assert!(speed.contains("making_of"), "{tool}: {speed}");
+    }
+    let size = call(client, "film", json!({ "size": "huge" })).await.unwrap_err();
+    assert!(size.contains("'huge'") && size.contains("\"upright\""), "{size}");
+    let rate = call(client, "film", json!({ "rate": 240 })).await.unwrap_err();
+    assert!(rate.contains("24 to 60"), "{rate}");
+
+    // How the song was made is a film too: the five steps above, where each landed.
+    let making = ok(client, "film_plan", json!({ "of": "making_of" })).await;
+    assert_eq!((making["of"].as_str(), making["steps"].as_u64()), (Some("making_of"), Some(5)));
+    let shots = making["first_shots"].as_array().unwrap();
+    assert_eq!(making["shots"].as_u64(), Some(shots.len() as u64));
+    assert!(shots.iter().any(|shot| shot["shot"] == "close" && shot["part"] == "Lead"), "{making}");
+    assert!(making["seconds"].as_f64().unwrap() > making["story_seconds"].as_f64().unwrap(), "{making}");
+    let whole = call(client, "film_plan", json!({ "of": "making_of", "section": "Verse" })).await.unwrap_err();
+    assert!(whole.contains("filmed whole"), "{whole}");
+
+    // Reading a plan changes nothing and is no step of the story.
+    assert_eq!(fixture.session.lock().journal().unwrap().steps(), 5);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_assistant_may_film_only_into_its_working_folders() {
+    let (fixture, _work) = connect_guarded().await;
+    let client = &fixture.client;
+    song_to_film(client).await;
+    let outside = fixture.folder.path().join("elsewhere");
+    std::fs::create_dir_all(&outside).unwrap();
+    let elsewhere = outside.join("song.mp4").display().to_string();
+    for path in [elsewhere.as_str(), "../elsewhere/song.mp4", "films/../../elsewhere/song.mp4"] {
+        let refusal = call(client, "film", json!({ "path": path })).await.unwrap_err();
+        assert!(refusal.contains("a film can only be written inside"), "{path}: {refusal}");
+    }
+    // Nor anything but a film, even in the right place.
+    let refusal = call(client, "film", json!({ "path": "song.exe" })).await.unwrap_err();
+    assert!(refusal.contains("a film is written as a .mp4 file, not .exe"), "{refusal}");
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0, "nothing was written");
+}
+
+/// The real thing: a short film made over the assistant's endpoint with no
+/// place named, which has to land in its working folder.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a graphics card; run with `cargo test -p trill-mcp --test mcp a_film_is_made -- --ignored --nocapture`"]
+async fn a_film_is_made_with_the_songs_own_sound_and_kept_in_the_working_folder() {
+    let (fixture, work) = connect_guarded().await;
+    let client = &fixture.client;
+    song_to_film(client).await;
+    let asked = json!({ "section": "Chorus", "size": "640x360", "rate": 24, "quality": "plain" });
+    let film = ok(client, "film", asked).await;
+    println!("{film}");
+    let path = PathBuf::from(film["path"].as_str().unwrap());
+    let films = work.join("films").canonicalize().unwrap();
+    assert!(path.canonicalize().unwrap().starts_with(&films), "{} is not in {}", path.display(), films.display());
+    assert_eq!((film["size"].as_str(), film["rate"].as_u64()), (Some("640x360"), Some(24)));
+    // The chorus is sixteen seconds, and the film stays for what rings on after it.
+    let (seconds, frames) = (film["seconds"].as_f64().unwrap(), film["frames"].as_f64().unwrap());
+    assert!((16.0..20.0).contains(&seconds), "{film}");
+    assert!((frames - seconds * 24.0).abs() <= 2.0, "{film}");
+    assert!(film["loudness_lufs"].as_f64().unwrap() > -40.0, "the song's own sound was rendered: {film}");
+    match path.is_dir() {
+        // Without ffmpeg: the frames and the sound as files, and a note that says so.
+        true => {
+            assert!(film["notes"].to_string().contains("ffmpeg"), "{film}");
+            assert!(std::fs::read_dir(&path).unwrap().count() as f64 > frames);
+        }
+        false => assert!(std::fs::metadata(&path).unwrap().len() > 50_000, "{film}"),
+    }
+    // The sound it was put together from is not left lying beside it.
+    let beside: Vec<_> = std::fs::read_dir(&films).unwrap().flatten().map(|entry| entry.file_name()).collect();
+    assert_eq!(beside.len(), 1, "{beside:?}");
+
+    // And the making of it, the song under it.
+    let making =
+        ok(client, "film", json!({ "of": "making_of", "size": "640x360", "rate": 24, "quality": "plain" })).await;
+    println!("{making}");
+    assert_eq!(making["of"], "making_of");
+    assert!(making["frames"].as_u64().unwrap() > 100, "{making}");
 }

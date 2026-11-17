@@ -36,14 +36,17 @@
 
 pub mod camera;
 pub mod director;
+pub mod export;
 pub mod film;
 pub mod gpu;
 pub mod light;
+pub mod making;
 mod picture;
 pub mod scene;
 pub mod score;
 pub mod sound;
 mod stage;
+pub mod voice;
 
 pub use camera::Camera;
 pub use director::{Entry, Kind, Plan, Shot, Take};

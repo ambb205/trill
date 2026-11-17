@@ -60,6 +60,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
         let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         row.status(theme.info, &format!("Rendering {name}\u{2026}"));
     }
+    if let Some((path, how_far)) = row.cx.filming.making() {
+        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        row.status(theme.info, &format!("Filming {name} \u{00B7} {how_far}"));
+    }
     // Files the song names that are not on disk: one line for all of
     // them, which opens the list.
     let missing_item = row.missing(ui);

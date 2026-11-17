@@ -245,6 +245,10 @@ pub struct Rendered {
     pub right: Vec<f32>,
     /// Post-fader peak of each track over the whole render, linear.
     pub track_peaks: Vec<(TrackId, f32)>,
+    /// How loud each track that was played was as the render went: after
+    /// its fader, in dB, one number for every tenth of a second
+    /// ([`Analyzer::levels`]). No audio of a track is kept for it.
+    pub track_levels: Vec<(TrackId, Vec<f32>)>,
     pub problems: Vec<Problem>,
     /// What was measured as the render went.
     pub measured: Measured,
@@ -624,11 +628,13 @@ fn render_from(
     let spans: Vec<(usize, usize)> =
         options.sections.iter().map(|section| (frame_of(section.start_beat), frame_of(section.end_beat))).collect();
     let mut tracks = Vec::with_capacity(project.tracks.len());
+    let mut track_levels = Vec::with_capacity(project.tracks.len());
     for track in &project.tracks {
         let Some(tap) = graph.tracks.iter().find(|node| node.id == track.id).and_then(|node| node.tap.as_ref()) else {
             continue;
         };
         let tap = &tap.analyzer;
+        track_levels.push((track.id, tap.levels()));
         let stats = tap.stats();
         tracks.push(TrackLevel {
             track: track.id,
@@ -671,7 +677,7 @@ fn render_from(
         .collect();
 
     let measured = Measured { stats: mix.stats(), tracks, sections, dynamics, waited, stems };
-    Ok(Rendered { sample_rate: options.sample_rate, left, right, track_peaks, problems, measured })
+    Ok(Rendered { sample_rate: options.sample_rate, left, right, track_peaks, track_levels, problems, measured })
 }
 
 /// A wait shorter than this is not reported: the plugin was as good as

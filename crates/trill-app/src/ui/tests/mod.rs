@@ -12,6 +12,7 @@ mod automation;
 mod clips;
 mod controllers;
 mod editors;
+mod film;
 mod keyboard;
 mod keys;
 mod making_of;
@@ -332,6 +333,17 @@ impl Harness {
         while !condition(&self.session.lock()) {
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Runs frames until the window is as `condition` says: for what a
+    /// helper thread has to finish first.
+    fn wait_until(&mut self, what: &str, condition: impl Fn(&Self) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !condition(self) {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(5));
+            self.idle(1);
         }
     }
 
