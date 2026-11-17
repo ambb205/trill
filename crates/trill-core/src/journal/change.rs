@@ -327,18 +327,19 @@ fn track_of(track: &Track) -> Track {
 
 /// Whether two devices are the same but for their state.
 fn same_device(a: &Device, b: &Device) -> bool {
-    let Device { id, uri, name, enabled, params, state: _, preset } = a;
+    let Device { id, uri, name, enabled, params, state: _, preset, sidechain } = a;
     *id == b.id
         && *uri == b.uri
         && *name == b.name
         && *enabled == b.enabled
         && *params == b.params
         && *preset == b.preset
+        && *sidechain == b.sidechain
 }
 
 /// A device without its state.
 fn device_of(device: &Device) -> Device {
-    let Device { id, uri, name, enabled, params, state: _, preset } = device;
+    let Device { id, uri, name, enabled, params, state: _, preset, sidechain } = device;
     Device {
         id: *id,
         uri: uri.clone(),
@@ -347,6 +348,7 @@ fn device_of(device: &Device) -> Device {
         params: params.clone(),
         state: None,
         preset: preset.clone(),
+        sidechain: *sidechain,
     }
 }
 
@@ -900,11 +902,17 @@ mod tests {
         let (project, change) = kept(&project, blobs, |p| p.remove_clip(line).unwrap());
         assert!(matches!(change.ops(), [Op::Clips(orders)] if orders.len() == 1), "{change:?}");
 
-        // Devices: a parameter, a state, bypassed, moved off, removed.
+        // Devices: a parameter, a track to listen to, a state, bypassed,
+        // moved off, removed.
         let (project, change) = kept(&project, blobs, |p| {
             p.device_mut(sampler).unwrap().params.insert("gain".into(), 0.5);
         });
         assert!(matches!(change.ops(), [Op::Device { state: StateChange::Keep, .. }]), "{change:?}");
+        let (project, change) = kept(&project, blobs, |p| p.set_sidechain(sampler, Some(lead)).unwrap());
+        assert!(
+            matches!(change.ops(), [Op::Device { device, state: StateChange::Keep, .. }] if device.sidechain == Some(lead)),
+            "{change:?}"
+        );
         let (project, change) = kept(&project, blobs, |p| p.device_mut(sampler).unwrap().state = Some(vec![9; 4096]));
         assert!(matches!(change.ops(), [Op::Device { state: StateChange::Set(_), .. }]));
         let (project, change) = kept(&project, blobs, |p| p.device_mut(sampler).unwrap().state = None);

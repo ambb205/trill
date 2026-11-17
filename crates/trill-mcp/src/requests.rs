@@ -142,6 +142,11 @@ pub struct AddDeviceRequest {
     pub params: Option<BTreeMap<String, Value>>,
     /// Position in the chain, 0 = first. Omit to append. Signal flows first to last; instruments go first.
     pub index: Option<usize>,
+    /// Id of the track this device listens to in place of its own input: the key of a compressor. To duck a
+    /// bass to the kick, the compressor goes on the bass and `sidechain` is the kick's track. The track is heard
+    /// as it leaves its devices, ahead of its fader and mute, so a muted track still serves as a key. Only for
+    /// a device that takes a key: builtin:compressor.
+    pub sidechain: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -190,6 +195,9 @@ pub struct UpdateDeviceRequest {
     pub settings: Option<BTreeMap<String, Value>>,
     /// false bypasses the device.
     pub enabled: Option<bool>,
+    /// Id of the track this device listens to in place of its own input (see add_device), or 0 to have it
+    /// listen to its own input again.
+    pub sidechain: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

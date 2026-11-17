@@ -4,7 +4,10 @@
 //! for longer than a buffer lasts.
 //!
 //! This test binary replaces the global allocator with one that counts the
-//! calls made by the current thread while a device is being driven.
+//! calls made by the current thread while a device is being driven: every
+//! built-in device, with every parameter swept over its whole range (which
+//! takes each through every slope, shape and detector it has), and with a
+//! key to listen to where it takes one.
 
 mod common;
 
@@ -12,7 +15,7 @@ use common::MemoryLoader;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::Arc;
-use trill_core::device::{DeviceFactory, DeviceInstance, Event, EventKind, ProcessInfo};
+use trill_core::device::{DeviceFactory, DeviceInstance, Event, EventKind, KeyInput, ProcessInfo};
 use trill_core::{ChainRef, Device, Project};
 use trill_dsp::{Builtins, drumrack, sampler};
 
@@ -147,7 +150,14 @@ fn drive(instance: &mut DeviceInstance, blocks: usize, all_events: &[Vec<Event>]
         // Block sizes vary, as they do with some audio drivers.
         let frames = if block % 7 == 3 { 1 + (block * 31) % BLOCK } else { BLOCK };
         let events: &[Event] = if frames == BLOCK { events } else { &[] };
-        instance.processor.process(&info(block), events, &mut left[..frames], &mut right[..frames]);
+        // A device that can listen to another track does so every other
+        // block, as when its sidechain is switched while it plays.
+        if instance.processor.takes_key() && block % 2 == 1 {
+            let key = KeyInput { left: &input[BLOCK..BLOCK + frames], right: &input[..frames] };
+            instance.processor.process_keyed(&info(block), events, &mut left[..frames], &mut right[..frames], key);
+        } else {
+            instance.processor.process(&info(block), events, &mut left[..frames], &mut right[..frames]);
+        }
         assert!(left.iter().chain(&right).all(|sample| sample.is_finite()));
         if block % 97 == 96 {
             instance.processor.reset();

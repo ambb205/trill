@@ -8,6 +8,7 @@
 pub mod audio;
 pub mod controllers;
 pub mod device;
+pub mod formats;
 pub mod ids;
 pub mod instrument;
 pub mod journal;

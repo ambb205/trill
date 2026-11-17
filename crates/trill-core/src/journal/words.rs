@@ -94,11 +94,18 @@ fn clip_change(was: &Clip, now: &Clip) -> String {
     }
 }
 
-/// What differs between two versions of a device.
-fn device_change(was: &Device, now: &Device, state: StateChange) -> String {
+/// What differs between two versions of a device, in the song as it is
+/// `after`.
+fn device_change(was: &Device, now: &Device, state: StateChange, after: &Project) -> String {
     let device = quoted(&now.name);
     if was.enabled != now.enabled {
         format!("{} {device}", if now.enabled { "Switched on" } else { "Bypassed" })
+    } else if was.sidechain != now.sidechain {
+        // The track it listens to in place of what comes into it.
+        match now.sidechain.and_then(|track| after.track(track).ok()) {
+            Some(track) => format!("Had {device} listen to {}", quoted(&track.name)),
+            None => format!("Had {device} listen to its own input"),
+        }
     } else if was.preset != now.preset
         && let Some(preset) = &now.preset
     {
@@ -213,7 +220,7 @@ pub fn describe(before: &Project, after: &Project, change: &Change) -> String {
         let Op::Device { chain, device, state } = op else { continue };
         let Ok(now) = after.device(device.id) else { continue };
         match before.device(device.id) {
-            Ok(was) => said.push(device_change(was, now, *state)),
+            Ok(was) => said.push(device_change(was, now, *state, after)),
             Err(_) if matches!(chain, ChainRef::Track(track) if is_new_track(*track)) => {}
             Err(_) => said.push(format!("Added {} to {}", now.name, owner(*chain, after))),
         }
@@ -413,6 +420,16 @@ mod tests {
         );
         assert_eq!(words(p, |p| p.remove_device(synth).unwrap()), "Removed \u{201C}Poly Synth\u{201D}");
         assert_eq!(words(p, |p| p.device_mut(limiter).unwrap().enabled = false), "Bypassed \u{201C}Limiter\u{201D}");
+        assert_eq!(
+            words(p, |p| p.set_sidechain(limiter, Some(bass)).unwrap()),
+            "Had \u{201C}Limiter\u{201D} listen to \u{201C}Bass\u{201D}"
+        );
+        let mut keyed = p.clone();
+        keyed.set_sidechain(limiter, Some(bass)).unwrap();
+        assert_eq!(
+            words(&keyed, |p| p.set_sidechain(limiter, None).unwrap()),
+            "Had \u{201C}Limiter\u{201D} listen to its own input"
+        );
         assert_eq!(
             words(p, |p| p.device_mut(synth).unwrap().params.insert("cutoff".into(), 900.0)),
             "Adjusted \u{201C}Poly Synth\u{201D}"

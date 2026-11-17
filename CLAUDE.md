@@ -12,7 +12,7 @@ this file is the map, so that a task needs only the files it touches.
 ```sh
 cargo run -p trill-app -- --demo                    # the window, on a built-in song
 cargo run -p trill-mcp -- --no-audio --scratch      # no window: MCP on stdio, nothing read or kept
-cargo test --workspace                              # about 1,900 tests, a few minutes once built
+cargo test --workspace                              # about 1,930 tests, a few minutes once built
 cargo test -p trill-engine --test playing           # one integration test file
 cargo test -p trill-app a_take_is_counted_in        # tests whose name contains this (the app's are in its binary)
 cargo test -p trill-core time_ops -- --nocapture
@@ -56,8 +56,8 @@ on the samples.
 
 | Crate | What lives there |
 |---|---|
-| `trill-core` | The model and nothing else: `project.rs` (`Project`, tracks, clips with their notes and controller curves, automation, every edit), `time_ops.rs`, `instrument.rs` (what a track knows of its instrument: drums or pitches, drum map, keyswitches, range, octave), `device.rs` (the device API, `EventKind`), `presets.rs`, `midi_file.rs`, and `journal/` (how a song came to be: `mod.rs` the entries and their text, `change.rs` what a step keeps, `place.rs` where it landed, `words.rs` an edit in words, `replay.rs` a session laid out to be watched). No audio or UI dependencies. |
-| `trill-dsp` | The built-in devices (`synth`, `drums`, `sampler`, `drumrack`, `effects/`) and offline time-stretching. `lib.rs` is the registry. |
+| `trill-core` | The model and nothing else: `project.rs` (`Project`, tracks, clips with their notes and controller curves, automation, every edit), `time_ops.rs`, `instrument.rs` (what a track knows of its instrument: drums or pitches, drum map, keyswitches, range, octave), `device.rs` (the device API, `EventKind`), `presets.rs`, `midi_file.rs`, `formats.rs` (what a file of an older format meant by what it does not say), and `journal/` (how a song came to be: `mod.rs` the entries and their text, `change.rs` what a step keeps, `place.rs` where it landed, `words.rs` an edit in words, `replay.rs` a session laid out to be watched). No audio or UI dependencies. |
+| `trill-dsp` | The built-in devices (`synth`, `drums`, `sampler`, `drumrack`, `effects/`: one file per effect or family, the compressor with its sidechain in `compressor.rs`) and offline time-stretching. `lib.rs` is the registry. |
 | `trill-media` | Decoding audio files, the shared `MediaCache`, waveform peaks, resampling, WAV writing. |
 | `trill-library` | The sample library (scan, index, search, tags from file names) and the settings file. |
 | `trill-theory` | Music theory as pure functions: chord symbols, progressions, voicings, grooves, bass lines, melody notation with its ornaments (`ornament.rs`: as an instrument's keys or the pitch wheel), keyswitches for articulations (`articulation.rs`), key and chord reading. |
@@ -98,7 +98,17 @@ on the samples.
   made (`trill-mcp/src/words.rs`: `describe`, `of_call`, and `heard` if it listens): the journal enters every
   call under them, the assistant's panel shows them, and a test there fails for a tool that has none.
 - **A built-in device:** a module in `trill-dsp` registered in `lib.rs`, and a layout in
-  `trill-app/src/ui/device_layouts.rs`.
+  `trill-app/src/ui/device_layouts.rs`. Its parameters' names are the schema a model reads: say the unit, and
+  what the ends of the range do.
+- **A change to how a built-in device sounds:** a song saved before must sound as it did. A project file holds
+  only the parameters that were set, so a new parameter defaults to what the device did before, or the device
+  gets a line in `trill-core/src/formats.rs` (what a file of the older format is taken to have said, written into
+  it as it is read) and the file format's number goes up. `trill-engine/tests/old_songs.rs` holds every effect to
+  the samples a format-1 file rendered to; `tests/effects.rs` holds what they do now to numbers.
+- **Routing:** a device may listen to another track (`Device::sidechain`, `Project::set_sidechain`). The tracks
+  are played in `Project::playing_order`, each after the tracks that feed it (`Project::feeds`: a group's
+  members, a return's senders, a device's key), and the edits refuse a loop. Whatever decides which tracks a
+  render makes has to ask `feeds`.
 - **Something that changes the song without being an edit** (a state a plugin came to in its own window):
   enter it in the journal as an aside (`Session::note_device`), or the song the journal leads to drifts from the
   song that is open.
