@@ -21,6 +21,11 @@ impl MemoryLoader {
         let buffer = Arc::new(AudioBuffer { sample_rate, left, right });
         self.files.lock().unwrap().insert(path.to_string(), buffer);
     }
+
+    /// Takes a file away, as if it had been moved or deleted.
+    pub fn remove(&self, path: &str) {
+        self.files.lock().unwrap().remove(path);
+    }
 }
 
 impl AudioLoader for MemoryLoader {

@@ -199,6 +199,8 @@ impl Instruments {
                 && !known.missing.iter().take(LOOKED_FOR_AGAIN).any(|index| {
                     pool.loader().size(&known.paths[*index as usize]).is_some()
                 })
+                // And so is one that was there and is gone.
+                && known.still_there(pool)
         });
         if let Some(known) = known {
             return Ok(Some(known));
@@ -210,6 +212,17 @@ impl Instruments {
 }
 
 impl Loaded {
+    /// Whether the recordings that were there when the instrument was
+    /// read still are, as far as a few of them from all over it say:
+    /// enough to notice a folder that was moved, without asking after
+    /// every file each time a device is made.
+    fn still_there(&self, pool: &Pool) -> bool {
+        let there = |index: &usize| self.missing.binary_search(&(*index as u32)).is_err();
+        let step = (self.paths.len() / LOOKED_FOR_AGAIN).max(1);
+        let asked = (0..self.paths.len()).step_by(step).filter(there).take(LOOKED_FOR_AGAIN);
+        asked.into_iter().all(|index| pool.loader().size(&self.paths[index]).is_some())
+    }
+
     fn read(file: &str, overrides: &BTreeMap<String, String>, pool: &Pool, texts: &dyn Texts) -> Result<Self, String> {
         let path = Path::new(file);
         if !sfz::is_sfz(path) {
@@ -247,7 +260,13 @@ impl Loaded {
         for (index, path) in paths.iter().enumerate() {
             match pool.loader().size(path) {
                 Some(size) => bytes += size,
-                None => missing.push(index as u32),
+                None => {
+                    // What was read of it while it was there is not
+                    // played on: a song is heard as it would be were it
+                    // opened afresh.
+                    pool.forget(path);
+                    missing.push(index as u32);
+                }
             }
         }
         let recordings = paths.iter().map(|path| pool.recording(path)).collect();

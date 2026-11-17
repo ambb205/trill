@@ -657,6 +657,48 @@ fn a_device_with_nothing_loaded_is_silent_and_one_whose_instrument_is_gone_says_
 }
 
 #[test]
+fn a_recording_that_is_gone_when_its_instrument_is_asked_for_again_is_missing_and_not_played_from_memory() {
+    let loader = Arc::new(MemoryLoader::default());
+    loader.insert("/i/a.wav", level(4_000, 0.5), SR);
+    loader.insert("/i/b.wav", level(4_000, 0.25), SR);
+    let texts = MemoryTexts::default();
+    texts.insert(FILE, "<region> sample=a.wav key=60 <region> sample=b.wav key=62");
+    let source = Source::with_texts(loader.clone(), Box::new(texts));
+    let state = State::new(FILE).to_bytes();
+    // The instrument as a device made now gets it, and how loud its two keys are.
+    let heard = || {
+        let loaded = source.load(Some(&state)).unwrap().unwrap();
+        let mut player = Player::new(Some(loaded.clone()), Some(source.pool.clone()), Purpose::Rendering);
+        player.prepare(SR, 512);
+        set(&mut player, "volume", 0.0);
+        let first = peak(&play(&mut player, 256, 2_000, &[(0, on(60, 127))]));
+        player.reset();
+        let second = peak(&play(&mut player, 256, 2_000, &[(0, on(62, 127))]));
+        (loaded, first, second)
+    };
+    let (whole, first, second) = heard();
+    assert!(first > 0.4 && second > 0.2, "{first} {second}");
+    assert!(whole.warnings().is_empty());
+    assert!(Arc::ptr_eq(&whole, &source.load(Some(&state)).unwrap().unwrap()), "one copy while nothing has changed");
+
+    // A recording is moved away while the instrument is loaded: the next device made says so, and
+    // nothing begins with what was read of it while it was there.
+    loader.remove("/i/a.wav");
+    let (without, first, second) = heard();
+    assert!(!Arc::ptr_eq(&whole, &without), "it was looked at again");
+    assert_eq!(first, 0.0, "a song is heard as it would be were it opened afresh");
+    assert!(second > 0.2);
+    let warnings = without.warnings();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].message.contains("a.wav"), "{}", warnings[0].message);
+
+    // And when it is back, that is noticed too.
+    loader.insert("/i/a.wav", level(4_000, 0.5), SR);
+    let (back, first, _) = heard();
+    assert!(first > 0.4 && back.warnings().is_empty());
+}
+
+#[test]
 fn the_device_says_what_it_has_loaded() {
     let sfz = "<global> sw_lokey=24 sw_hikey=25 sw_default=24\n<group> sw_last=24 sw_label=Arco\n\
                <region> sample=a.wav lokey=40 hikey=80 xfin_locc1=0 xfin_hicc1=64\n<group> sw_last=25 sw_label=Pizz\n\

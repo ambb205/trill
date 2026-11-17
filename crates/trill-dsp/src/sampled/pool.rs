@@ -329,6 +329,13 @@ impl Pool {
         recording
     }
 
+    /// Forgets the recording at `path`, so that the next to ask for it
+    /// reads its file again: for a file that is gone, whose sound a voice
+    /// may still be playing out but nothing new is to begin with.
+    pub fn forget(&self, path: &str) {
+        lock(&self.shared.recordings).remove(path);
+    }
+
     /// Has the starts of `recordings` read by the workers, in this order.
     /// Returns at once.
     pub fn read_starts(&self, recordings: &[Arc<Recording>]) {
