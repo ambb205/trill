@@ -976,8 +976,11 @@ pub(crate) fn remembered() -> Memory {
 
 /// Takes up what another process remembers. What it has found ready is
 /// no longer known not to answer here, what it found not to answer is no
-/// longer known as ready, and what it knows of keys takes the place of
-/// what was known of the same plugins.
+/// longer known as ready, and what it knows of a key takes the place of
+/// what was known of that key. Key by key, not plugin by plugin: two jobs
+/// may run at once, each began from what was known when it started, and
+/// what the first found of a key the second never tried must still be
+/// known when the second comes back.
 pub(crate) fn remember(memory: Memory) {
     let (mut silent, mut ready, mut keys) = (KNOWN_NOT_TO_ANSWER.lock(), KNOWN_READY.lock(), KNOWN_KEYS.lock());
     for (signature, answers) in memory.ready {
@@ -990,9 +993,15 @@ pub(crate) fn remember(memory: Memory) {
             silent.push(signature);
         }
     }
-    for (devices, known) in memory.keys {
-        let Ok(known) = Keys::try_from(known) else { continue };
-        keys.retain(|(other, _)| *other != devices);
+    for (devices, theirs) in memory.keys {
+        let Ok(theirs) = Keys::try_from(theirs) else { continue };
+        let at = keys.iter().position(|(other, _)| *other == devices);
+        let mut known = at.map_or([None; 128], |at| keys.remove(at).1);
+        for (here, there) in known.iter_mut().zip(theirs) {
+            if there.is_some() {
+                *here = there;
+            }
+        }
         keys.push((devices, known));
     }
     let surplus = silent.len().saturating_sub(REMEMBERED);
@@ -1766,5 +1775,28 @@ mod tests {
         watch.began(DeviceId(8));
         watch.gone(DeviceId(8));
         assert!(watch.loading().is_empty() && watch.loading_now().is_empty());
+    }
+
+    #[test]
+    fn what_two_processes_learned_of_one_plugin_at_the_same_time_is_all_kept() {
+        // Two jobs on the same plugin began from the same knowledge. The
+        // first comes back having found a key that plays nothing; the
+        // second, which never tried that key, comes back after it.
+        let plugin = 0x7e57_ab1e_0000_0001; // no plugin has this signature
+        let learned = |keys: &[(usize, bool)]| {
+            let mut known = vec![None; 128];
+            for (key, sounds) in keys {
+                known[*key] = Some(*sounds);
+            }
+            Memory { keys: vec![(plugin, known)], ..Memory::default() }
+        };
+        remember(learned(&[(20, false), (41, true)]));
+        remember(learned(&[(44, true)]));
+        let of = |memory: Memory| memory.keys.into_iter().find(|(devices, _)| *devices == plugin).unwrap().1;
+        let known = of(remembered());
+        assert_eq!((known[20], known[41], known[44], known[45]), (Some(false), Some(true), Some(true), None));
+        // What a later one found of a key takes the place of what was known.
+        remember(learned(&[(20, true)]));
+        assert_eq!(of(remembered())[20], Some(true));
     }
 }
