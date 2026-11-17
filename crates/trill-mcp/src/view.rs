@@ -738,7 +738,14 @@ pub fn descriptor_summary_json(descriptor: &DeviceDescriptor) -> Value {
         out["presets"] = descriptor
             .presets
             .iter()
-            .map(|preset| json!({ "name": preset.name, "description": preset.description }))
+            .map(|preset| {
+                let mut out = json!({ "name": preset.name, "description": preset.description });
+                // A sound: the effects it brings behind the device.
+                if let Some(after) = preset.after.as_deref().filter(|after| !after.is_empty()) {
+                    out["with"] = json!(trill_core::presets::names_after(after));
+                }
+                out
+            })
             .collect();
     }
     out
@@ -786,7 +793,19 @@ fn preset_json(preset: &PresetInfo) -> Value {
 /// One page of a device's presets, with what it takes to get at the
 /// rest: how many there are, how many match, and where the next page
 /// starts. A list of thousands costs a reply no more than a list of ten.
+#[cfg(test)]
 pub fn presets_json(list: &PresetList, search: &PresetSearch) -> Value {
+    presets_json_with(list, search, &|_| None)
+}
+
+/// [`presets_json`] for a list in which some presets are sounds: `after`
+/// says what a preset brings behind its device, by name, and an item that
+/// brings anything lists it as `with`.
+pub fn presets_json_with(
+    list: &PresetList,
+    search: &PresetSearch,
+    after: &dyn Fn(&PresetInfo) -> Option<Vec<String>>,
+) -> Value {
     let text = search.query.unwrap_or_default();
     let query = PresetQuery { text, category: search.category, offset: search.offset, limit: search.limit };
     let page = list.search(&query);
@@ -811,7 +830,14 @@ pub fn presets_json(list: &PresetList, search: &PresetSearch) -> Value {
     if page.offset > 0 {
         out["offset"] = json!(page.offset);
     }
-    out["items"] = page.presets.iter().map(|preset| preset_json(preset)).collect();
+    let item = |preset: &PresetInfo| {
+        let mut item = preset_json(preset);
+        if let Some(with) = after(preset).filter(|with| !with.is_empty()) {
+            item["with"] = json!(with);
+        }
+        item
+    };
+    out["items"] = page.presets.iter().map(|preset| item(preset)).collect();
     let shown = page.offset + page.presets.len();
     if shown < page.total {
         let narrow = if narrowed { "" } else { "; preset_query (\"warm pad\") or preset_category narrows them down" };
