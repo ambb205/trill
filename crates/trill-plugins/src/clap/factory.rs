@@ -7,16 +7,17 @@ use super::{CLAP_SCHEME, find_plugin_files, probe, standard_search_paths};
 use crate::main_thread::MainThread;
 use crate::plugin_thread::{self, CREATE_TIMEOUT, PluginThread, plugin_thread};
 use crate::presets::store::{PluginRef, PresetFormat, PresetStore};
+use crate::presets::{Locator, NAME_LIMIT, file, identify, tidy};
 use crate::scan::catalog::{Format, Inventory, Settings};
 use crate::scan::{self, ScanFailure, ScanMode, Scanner};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use trill_core::Device;
 use trill_core::device::{
     ChannelLayout, DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance, Purpose, split_uri,
 };
-use trill_core::presets::PresetList;
+use trill_core::presets::{PresetFile, PresetInfo, PresetList};
 
 /// The CLAP feature that marks a plugin as an instrument.
 const INSTRUMENT_FEATURE: &str = "instrument";
@@ -136,6 +137,44 @@ impl ClapFactory {
         Some(self.shared.installed.preset_source(plugin_id, scan))
     }
 
+    /// The preset that the file at `file` holds for `plugin`: see
+    /// [`DeviceFactory::preset_file`]. A CLAP plugin reads its preset
+    /// files itself, so what is in a file is the plugin's to say when it
+    /// is asked to load it; `within` is the key the plugin tells the
+    /// presets of one file apart by.
+    fn file_preset(&self, plugin: &PluginRef, file: &Path, within: Option<&str>) -> Result<PresetInfo, String> {
+        file::check(file)?;
+        let known = self.shared.presets.known(plugin);
+        let listed = file::listed(known.as_ref(), file);
+        if !listed.is_empty() {
+            return file::choose(listed, within, file);
+        }
+        // The kinds of file the plugin's own presets are in are the kinds
+        // it reads.
+        let mut kinds: Vec<String> = known
+            .iter()
+            .flat_map(|known| known.presets.iter())
+            .filter_map(file::file_of)
+            .filter_map(|path| file::extension(&path))
+            .collect();
+        kinds.sort();
+        kinds.dedup();
+        if !kinds.is_empty() && !file::extension(file).is_some_and(|extension| kinds.contains(&extension)) {
+            let own: Vec<String> = kinds.iter().map(|kind| format!(".{kind}")).collect();
+            return Err(format!(
+                "it is not a kind of file {} keeps presets in (its own are {})",
+                plugin.name,
+                own.join(", ")
+            ));
+        }
+        let preset = PresetInfo {
+            name: tidy(&PresetFile::name_of(file), NAME_LIMIT),
+            locator: Locator::ClapFile { path: file.to_path_buf(), key: within.map(str::to_string) }.to_text(),
+            ..PresetInfo::default()
+        };
+        Ok(identify(vec![preset]).remove(0))
+    }
+
     /// Looks for plugins again. With [`ScanMode::UseCache`] only new and
     /// changed files are scanned, which is how newly installed plugins are
     /// picked up; [`ScanMode::Fresh`] also retries the files that failed.
@@ -187,6 +226,12 @@ impl DeviceFactory for ClapFactory {
 
     fn create(&self, device: &Device, sample_rate: f64, max_block: usize) -> Result<DeviceInstance, DeviceError> {
         self.create_for(device, sample_rate, max_block, Purpose::Playing)
+    }
+
+    /// Whether the plugin main thread is behind: every plugin of every
+    /// format waits for its turn on it.
+    fn busy(&self) -> bool {
+        self.shared.main.behind()
     }
 
     fn create_for(
@@ -280,6 +325,13 @@ impl DeviceFactory for ClapFactory {
             Some((CLAP_SCHEME, plugin_id)) => self.shared.installed.catalog().plays_drums(plugin_id),
             _ => false,
         }
+    }
+
+    fn preset_file(&self, uri: &str, file: &Path, within: Option<&str>) -> Option<Result<PresetInfo, String>> {
+        Some(match self.preset_source(uri, true)? {
+            Ok(plugin) => self.file_preset(&plugin, file, within),
+            Err(_) => Err("the plugin is not installed".to_string()),
+        })
     }
 }
 

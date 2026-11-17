@@ -15,7 +15,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 use trill_core::midi_file::{self, MidiFile};
 use trill_core::project::ImportedPart;
-use trill_core::{Beats, ChainRef};
+use trill_core::{Beats, ChainRef, DeviceId};
 use trill_engine::render::Stems;
 use trill_engine::{RenderOptions, RenderReport, Session, SessionError, SharedSession};
 
@@ -42,6 +42,17 @@ enum Event {
     StoryExported(Result<(PathBuf, bool), String>),
     /// A story written out to a file was chosen, to watch.
     StoryPicked(PathBuf),
+    /// A device was given the preset in a file.
+    PresetLoaded(Result<PresetLoaded, String>),
+}
+
+/// What giving a device a preset file came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PresetLoaded {
+    preset: String,
+    device: String,
+    /// What the device goes on doing with it, where that is worth saying.
+    note: Option<String>,
 }
 
 /// An action that would throw away unsaved changes and waits for the user
@@ -136,6 +147,25 @@ impl Jobs {
                     match result {
                         Ok(path) => state.toasts.success(format!("Exported {}", file_name(&path))),
                         Err(error) => state.toasts.error(format!("Could not export MIDI: {error}")),
+                    }
+                }
+                Event::PresetLoaded(result) => {
+                    self.dialog_open = false;
+                    match result {
+                        Ok(PresetLoaded { preset, device, note }) => {
+                            let loaded = format!("{device} has the preset \u{201C}{preset}\u{201D}");
+                            match note {
+                                // What a sampler reads for a while, or a
+                                // setting the preset switched on.
+                                Some(note) => {
+                                    let lasting = Duration::from_secs(14);
+                                    state.toasts.lasting(ToastKind::Info, format!("{loaded}. {note}"), lasting);
+                                }
+                                None => state.toasts.success(loaded),
+                            }
+                        }
+                        // The session's own sentence: which file, and why not.
+                        Err(error) => state.toasts.error(error),
                     }
                 }
                 Event::StoryExported(result) => {
@@ -328,6 +358,37 @@ pub fn import_midi(ctx: &egui::Context, cx: &mut Cx) {
             None => Event::DialogCancelled,
         });
     });
+}
+
+/// Asks for a preset file and gives it to `device`: for a preset that is
+/// not in the device's menu because of where it lies, such as one that
+/// was bought and is kept with the samples.
+pub fn load_preset_file(ctx: &egui::Context, cx: &mut Cx, device: DeviceId) {
+    if std::mem::replace(&mut cx.jobs.dialog_open, true) {
+        return;
+    }
+    let session = cx.session.clone();
+    // Any file: what a preset's file is called is its maker's choice.
+    let mut dialog = rfd::AsyncFileDialog::new().set_title("Load preset file");
+    if let Some(folder) = cx.snap.path.as_deref().and_then(Path::parent) {
+        dialog = dialog.set_directory(folder);
+    }
+    cx.jobs.spawn(ctx, move |report| {
+        report(match pollster::block_on(dialog.pick_file()) {
+            Some(file) => Event::PresetLoaded(give_preset_file(&session, device, file.path())),
+            None => Event::DialogCancelled,
+        });
+    });
+}
+
+/// Gives `device` the preset in the file at `path`, as one undo step. An
+/// error is the session's sentence about the file, and the device is as
+/// it was.
+fn give_preset_file(session: &SharedSession, device: DeviceId, path: &Path) -> Result<PresetLoaded, String> {
+    let mut session = session.lock();
+    let name = session.project().device(device).map_err(|error| error.to_string())?.name.clone();
+    let preset = session.load_preset(device, &path.to_string_lossy()).map_err(|error| error.to_string())?;
+    Ok(PresetLoaded { preset: preset.name, device: name, note: session.take_preset_note(device) })
 }
 
 /// Reads the MIDI file at `path` and imports it at beat `at`. Returns the
@@ -777,6 +838,44 @@ mod tests {
     }
 
     #[test]
+    fn a_device_is_given_the_preset_in_a_file_as_one_undo_step() {
+        let scratch = Scratch::new("preset-file");
+        let session = shared_session();
+        // A sound someone saved, as the file it was saved in.
+        let (synth, file) = {
+            let mut session = session.lock();
+            session.saved_presets().open(scratch.0.join("saved"));
+            let synth = session.add_device(ChainRef::Master, MELODIC_INSTRUMENT, Some("warm_pad"), None).unwrap();
+            session.set_device_params(synth, &[("cutoff".into(), 432.0)]).unwrap();
+            let file = session.save_preset(synth, "Dark Pad", "", &[]).unwrap().file.unwrap();
+            session.load_preset(synth, "sub_bass").unwrap();
+            (synth, file)
+        };
+        let cutoff = |session: &SharedSession| {
+            let params = session.lock().device_params(synth).unwrap();
+            params.iter().find(|param| param.info.id == "cutoff").unwrap().value
+        };
+        assert_ne!(cutoff(&session), 432.0);
+        let step = session.lock().undo_step();
+
+        let loaded = give_preset_file(&session, synth, &file).unwrap();
+        assert_eq!((loaded.preset.as_str(), loaded.device.as_str(), loaded.note), ("Dark Pad", "Poly Synth", None));
+        assert_eq!(cutoff(&session), 432.0);
+        assert!(session.lock().undo());
+        assert_eq!(session.lock().undo_step(), step);
+        assert_ne!(cutoff(&session), 432.0);
+
+        // A file that is no preset of the device: the sentence, and the
+        // device as it was.
+        let wav = scratch.0.join("Kick.wav");
+        std::fs::write(&wav, b"RIFF").unwrap();
+        let error = give_preset_file(&session, synth, &wav).unwrap_err();
+        assert!(error.contains("Kick.wav") && error.contains("takes no preset files"), "{error}");
+        assert_eq!(session.lock().undo_step(), step);
+        assert!(give_preset_file(&session, DeviceId(9_999), &file).is_err());
+    }
+
+    #[test]
     fn a_midi_file_survives_a_round_trip_through_disk() {
         let scratch = Scratch::new("midi");
         let session = shared_session();
@@ -833,5 +932,24 @@ mod tests {
         jobs.sender.send(Event::MidiExported(Err("read-only folder".into()))).unwrap();
         jobs.poll(&mut state);
         assert_eq!(state.toasts.len(), 4);
+
+        jobs.dialog_open = true;
+        let loaded = PresetLoaded { preset: "Dark Pad".into(), device: "Poly Synth".into(), note: None };
+        jobs.sender.send(Event::PresetLoaded(Ok(loaded.clone()))).unwrap();
+        jobs.poll(&mut state);
+        assert!(!jobs.dialog_open);
+        let with_note = PresetLoaded { note: Some("It reads its samples.".into()), ..loaded };
+        jobs.sender.send(Event::PresetLoaded(Ok(with_note))).unwrap();
+        jobs.sender.send(Event::PresetLoaded(Err("'x.wav' cannot be given".into()))).unwrap();
+        jobs.poll(&mut state);
+        let said = state.toasts.texts();
+        assert_eq!(
+            said[said.len() - 3..],
+            [
+                "Poly Synth has the preset \u{201C}Dark Pad\u{201D}",
+                "Poly Synth has the preset \u{201C}Dark Pad\u{201D}. It reads its samples.",
+                "'x.wav' cannot be given",
+            ]
+        );
     }
 }

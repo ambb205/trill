@@ -20,12 +20,12 @@
 //! minute from a cold disk. Until a drum has arrived its keys play
 //! nothing.
 
-use super::{Built, Mark, VendorPlaces, read_whole};
+use super::{Built, Mark, VendorPlaces};
 use crate::presets::store::PluginRef;
 use crate::presets::{Locator, NAME_LIMIT, Sink, Watch, tidy};
 use crate::vst3::state::PluginState;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use trill_core::presets::PresetInfo;
 
 /// Superior Drummer 3's processor class: `VST` and the four letters of
@@ -155,21 +155,34 @@ pub(crate) fn list(_plugin: &PluginRef, places: &VendorPlaces, sink: &mut dyn Si
         sink.watch(Watch { path: libraries, extensions: vec![String::new()] });
     }
     for file in preset_files(places) {
-        let Ok(bytes) = read_whole(&file) else { continue };
-        let text = latin1(&bytes);
-        let listed = presets(&text).into_iter().enumerate().map(|(index, preset)| PresetInfo {
-            name: tidy(&preset.name, NAME_LIMIT),
-            category: tidy(&preset.menu, NAME_LIMIT),
-            locator: Locator::Vendor {
-                format: super::Format::Superior3,
-                path: file.clone(),
-                key: Some(key_of(index, &preset.name)),
-            }
-            .to_text(),
-            ..PresetInfo::default()
-        });
-        sink.presets(listed.collect());
+        // A library whose file cannot be read has no presets to list.
+        sink.presets(file_presets(&file).unwrap_or_default());
     }
+}
+
+/// The presets in the file of presets at `file`, wherever that lies:
+/// each by its name, under the menu the plugin's own browser has it in.
+/// An error says why the file is not one of Superior Drummer's, as the
+/// end of a sentence about it.
+pub(crate) fn file_presets(file: &Path) -> Result<Vec<PresetInfo>, String> {
+    let bytes = super::read_bounded(file).map_err(|reason| format!("it {reason}"))?;
+    let text = latin1(&bytes);
+    let found = presets(&text);
+    if found.is_empty() {
+        return Err("it holds no presets of Superior Drummer's".to_string());
+    }
+    let listed = found.into_iter().enumerate().map(|(index, preset)| PresetInfo {
+        name: tidy(&preset.name, NAME_LIMIT),
+        category: tidy(&preset.menu, NAME_LIMIT),
+        locator: Locator::Vendor {
+            format: super::Format::Superior3,
+            path: file.to_path_buf(),
+            key: Some(key_of(index, &preset.name)),
+        }
+        .to_text(),
+        ..PresetInfo::default()
+    });
+    Ok(listed.collect())
 }
 
 /// Text from bytes that are one character each, as the plugin writes.

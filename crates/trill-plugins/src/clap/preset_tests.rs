@@ -261,6 +261,80 @@ fn a_plugin_that_takes_a_preset_on_with_its_next_block_is_waited_for_a_moment_an
     assert_eq!(gain(&mut instance), 0.5);
 }
 
+// ---- a preset file that lies anywhere ---------------------------------------
+
+#[test]
+fn a_preset_file_outside_the_plugins_folders_is_loaded_by_its_path() {
+    let factory = factory();
+    let dir = crate::test_support::TestDir::new();
+    let bought = dir.file("samples/Pack/Bought Lead.patch", b"gain=0.125");
+    let bank = dir.file(
+        "samples/Pack/Bought.bank",
+        b"Kick=0.625
+Snare=0.375",
+    );
+    let other = dir.file("samples/Pack/Kick.wav", b"RIFF");
+    let of = |kind: u8, file: &std::path::Path, within: Option<&str>| {
+        factory.preset_file(&uri(kind), file, within).expect("a plugin of this factory")
+    };
+    let list = listed(&factory, kind::PRESETS);
+    assert!(matches!(list.find("Bought Lead"), PresetLookup::Missing { .. }));
+
+    // The file is the plugin's to read: it is told where the file is,
+    // and with a bank which of its presets is meant.
+    let lead = of(kind::PRESETS, &bought, None).unwrap();
+    assert_eq!((lead.name.as_str(), lead.id.len()), ("Bought Lead", 10));
+    assert_eq!(Locator::parse(&lead.locator), Some(Locator::ClapFile { path: bought.clone(), key: None }));
+    let mut instance = create(&factory, kind::PRESETS);
+    load(&mut instance, &lead).unwrap();
+    assert_eq!((gain(&mut instance), impulse(&mut instance)), (0.125, 0.125));
+    let snare = of(kind::PRESETS, &bank, Some("Snare")).unwrap();
+    load(&mut instance, &snare).unwrap();
+    assert_eq!(gain(&mut instance), 0.375);
+
+    // A listed file's path is the listed preset; one of a listed bank's
+    // is asked for as the list has it.
+    let warm = scripted::preset_folder().join("Pads").join("Warm.patch");
+    assert_eq!(&of(kind::PRESETS, &warm, None).unwrap(), preset(&list, "Pads/Warm"));
+    let drums = scripted::preset_folder().join("Drums.bank");
+    assert_eq!(&of(kind::PRESETS, &drums, Some("kick")).unwrap(), preset(&list, "kick"));
+    let error = of(kind::PRESETS, &drums, None).unwrap_err();
+    assert!(error.starts_with("it holds 2 presets (Deep Space/Kick, Deep Space/Snare): say which with '"), "{error}");
+
+    // A kind of file the plugin keeps no presets in, and what is no file.
+    let name = factory.descriptors().into_iter().find(|descriptor| descriptor.uri == uri(kind::PRESETS)).unwrap().name;
+    assert_eq!(
+        of(kind::PRESETS, &other, None).unwrap_err(),
+        format!("it is not a kind of file {name} keeps presets in (its own are .bank, .patch)")
+    );
+    assert_eq!(of(kind::PRESETS, &dir.path().join("Gone.patch"), None).unwrap_err(), "there is no such file");
+    assert!(factory.preset_file("vst3:00000000000000000000000000000001", &bought, None).is_none());
+    assert_eq!(factory.preset_file_type(&bought), None, "whose a file is, only the plugin can say");
+
+    // A file the plugin turns down says so in the plugin's words, and a
+    // plugin that cannot be given presets says that.
+    let rotten = dir.file("samples/Pack/Rotten.patch", b"rotten");
+    let reason = failure(load(&mut instance, &of(kind::PRESETS, &rotten, None).unwrap()));
+    assert_eq!(reason, "the plugin could not load it: the patch is rotten");
+    assert_eq!(gain(&mut instance), 0.375, "it has what it had");
+    let mut plain = create(&factory, kind::IMPULSE);
+    let reason = failure(load(&mut plain, &of(kind::IMPULSE, &bought, None).unwrap()));
+    assert!(reason.contains("no CLAP preset-load extension"), "{reason}");
+
+    // Through a session: one undo step.
+    let (mut session, track) = session(&factory);
+    let device = session.add_device(ChainRef::Track(track), &uri(kind::PRESETS), None, None).unwrap();
+    let step = session.undo_step();
+    assert_eq!(session.load_preset(device, &bought.to_string_lossy()).unwrap().name, "Bought Lead");
+    assert_eq!(live_gain(&mut session, device), 0.125);
+    assert_eq!(preset_name(&session, device).as_deref(), Some("Bought Lead"));
+    assert!(session.undo());
+    assert_eq!((session.undo_step(), preset_name(&session, device)), (step, None));
+    let within = format!("{}#Kick", bank.display());
+    assert_eq!(session.load_preset(device, &within).unwrap().name, "Bought");
+    assert_eq!(live_gain(&mut session, device), 0.625);
+}
+
 // ---- through the session ---------------------------------------------------
 
 /// A session over the built-in devices and the scripted plugins, with a

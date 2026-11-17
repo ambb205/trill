@@ -22,6 +22,19 @@
 //!
 //! Reading is not limited: nothing a tool reads from a file comes back
 //! except as sound, notes or a refusal.
+//!
+//! A preset file is read the same way, from wherever it lies on this
+//! machine's disks. What comes back of it is the sound, the name it goes
+//! by, and where it is no preset a refusal that repeats at most a few
+//! words the file says of itself; a preset is one undo step; and a file
+//! that a plugin chokes on is as much a risk in a project somebody sent,
+//! which carries its plugins' states. Keeping the assistant to some
+//! folders would not change that: the folders it would be kept to are
+//! the very ones strangers' files are in. One thing is different about a
+//! path, though, and is refused: a file on **another machine**
+//! (`\\server\share\...`). Opening one signs the user in to whatever
+//! server the path names, with their credentials, and a path is text that
+//! a stranger can supply.
 
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
@@ -83,6 +96,27 @@ impl Guard {
         ))
     }
 
+    /// Whether a guarded client may have the preset file at `path` read:
+    /// any file on this machine's own disks, and none on another machine.
+    /// See the module documentation for why.
+    pub fn may_read_preset(&self, path: &Path) -> Result<(), String> {
+        // A link is read, not followed: following it is what would reach
+        // the other machine.
+        let leads_away = path.ancestors().any(|step| {
+            let link = std::fs::symlink_metadata(step).is_ok_and(|found| found.file_type().is_symlink());
+            link && std::fs::read_link(step).is_ok_and(|target| on_another_machine(&target))
+        });
+        if on_another_machine(path) || leads_away {
+            return Err(format!(
+                "'{}' is not on one of this machine's own disks. From here a preset file is only read from those: \
+                 opening a file on a network share signs the user in to the machine the path names. The user can \
+                 copy the file to a folder of theirs, or load it from the window.",
+                path.display()
+            ));
+        }
+        Ok(())
+    }
+
     /// Refuses to replace the open project while it has unsaved changes.
     pub fn may_replace_project(&self, session: &Session) -> Result<(), String> {
         if session.is_modified() {
@@ -93,6 +127,26 @@ impl Guard {
             ));
         }
         Ok(())
+    }
+}
+
+/// Whether `path` names a place that is not a disk of this machine: a
+/// share on another one, or a device. A drive letter is this machine's,
+/// whatever the user has mapped it to: that they did themselves.
+fn on_another_machine(path: &Path) -> bool {
+    use std::path::Prefix;
+    // What a link says of where it leads may begin the way the system
+    // itself writes paths.
+    let text = path.to_string_lossy();
+    let plain = text.strip_prefix(r"\??\").unwrap_or(&text);
+    if plain.len() >= 4 && plain[..4].eq_ignore_ascii_case(r"UNC\") {
+        return true;
+    }
+    match Path::new(plain).components().next() {
+        Some(Component::Prefix(prefix)) => !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)),
+        // Two slashes in front are a share's name on every system that
+        // has shares, however its paths are otherwise written.
+        _ => plain.starts_with(r"\\") || plain.starts_with("//"),
     }
 }
 
@@ -155,6 +209,56 @@ pub(crate) fn default_folder() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_preset_file_is_read_from_this_machines_disks_and_no_other() {
+        let guard = Guard { folder: PathBuf::from("work") };
+        let folder = tempfile::tempdir().unwrap();
+        // Wherever it lies on a disk: the working folders are not the limit.
+        let file = folder.path().join("Bought.SerumPreset");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(guard.may_read_preset(&file), Ok(()));
+        assert_eq!(guard.may_read_preset(&folder.path().join("gone").join("Lead.vstpreset")), Ok(()));
+        if cfg!(windows) {
+            assert_eq!(guard.may_read_preset(Path::new(r"D:\Samples\Pack\Lead.vstpreset")), Ok(()));
+            assert_eq!(guard.may_read_preset(Path::new(r"\\?\D:\Samples\Lead.vstpreset")), Ok(()));
+        }
+        // A share on another machine, however it is written.
+        let shares = [
+            r"\\files.example\presets\Lead.vstpreset",
+            "//files.example/presets/Lead.vstpreset",
+            r"\\?\UNC\files.example\presets\Lead.vstpreset",
+            r"\\.\pipe\presets",
+        ];
+        for share in shares {
+            let refusal = guard.may_read_preset(Path::new(share)).unwrap_err();
+            assert!(refusal.starts_with(&format!("'{share}' is not on one of this machine's own disks")), "{refusal}");
+            assert!(refusal.contains("signs the user in"), "{refusal}");
+        }
+        assert!(on_another_machine(Path::new(r"\??\UNC\files.example\presets")));
+        assert!(!on_another_machine(Path::new(r"\??\C:\Samples")) || !cfg!(windows));
+        assert!(!on_another_machine(Path::new("Pack/Lead.vstpreset")));
+    }
+
+    /// A link on this machine's disk that leads to another machine is
+    /// where it leads. Making one needs a privilege Windows does not
+    /// always grant; without it there is nothing to test.
+    #[test]
+    fn a_link_to_another_machine_is_not_followed() {
+        let folder = tempfile::tempdir().unwrap();
+        let link = folder.path().join("shared");
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_dir(r"\\files.example\presets", &link);
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink("//files.example/presets", &link);
+        if let Err(error) = linked {
+            eprintln!("SKIPPED: this machine does not let the test make a link ({error})");
+            return;
+        }
+        let guard = Guard { folder: PathBuf::from("work") };
+        let refusal = guard.may_read_preset(&link.join("Lead.vstpreset")).unwrap_err();
+        assert!(refusal.contains("is not on one of this machine's own disks"), "{refusal}");
+    }
 
     #[test]
     fn dots_are_applied_and_climbing_out_is_refused() {

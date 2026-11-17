@@ -13,7 +13,7 @@ use trill_core::device::{CompositeFactory, DeviceFactory, Purpose};
 use trill_core::{ChainRef, Note, Project, TrackId};
 use trill_dsp::BuiltinFactory;
 use trill_engine::probe::{Heard, ProbeNote, ProbeOptions};
-use trill_engine::render::{RenderOptions, Section, Stems, render};
+use trill_engine::render::{RenderError, RenderOptions, Section, Stems, render};
 use trill_engine::scripted::{AMP, BASS, DRUMS, Loading, MUTE_KEY, ScriptedFactory};
 use trill_engine::{AudioBackend, ProbeTarget, Session};
 
@@ -178,20 +178,24 @@ fn a_long_wait_is_reported_and_a_plugin_that_never_answers_is_given_up_on_and_na
     assert_eq!((waited.track_name.as_str(), waited.device_name.as_str()), ("Drums", "Drums"));
     assert!(peak(&out.left[seconds(0.0..0.1)]) > 0.1);
 
-    // One that never answers: the render goes ahead after the patience it
-    // was given, says which plugin it gave up on, and the next render of
-    // the same thing does not wait that long again.
+    // One that never answers: after the patience it was given the render
+    // stops, before the first sample, and says which plugin it was. What
+    // would have come out is not the song.
     let never = ScriptedFactory::loading(Loading { never: true, ..Loading::default() });
     let patient = RenderOptions { patience: Duration::from_millis(1500), ..options() };
     let begun = Instant::now();
-    let out = render(&snares(), &never, &patient).unwrap();
+    let Err(RenderError::NotAnswered(missing)) = render(&snares(), &never, &patient) else {
+        panic!("a render went on without its only instrument")
+    };
     let first = begun.elapsed();
-    let [waited] = out.measured.waited.as_slice() else { panic!("{:?}", out.measured.waited) };
+    let [waited] = missing.as_slice() else { panic!("{missing:?}") };
     assert!(!waited.answered && waited.seconds >= 1.5, "{waited:?}");
+    assert_eq!((waited.track_name.as_str(), waited.device_name.as_str()), ("Drums", "Drums"));
     assert!(first >= Duration::from_millis(1500));
-    assert_eq!(peak(&out.left), 0.0);
-    let again = render(&snares(), &never, &patient).unwrap();
-    assert!(!again.measured.waited[0].answered);
+    let said = RenderError::NotAnswered(missing).to_string();
+    assert!(said.starts_with("nothing was rendered: Drums on 'Drums' (2 s) never answered the notes"), "{said}");
+    assert!(said.contains("try again") && said.contains("mute the track"), "{said}");
+    assert!(matches!(render(&snares(), &never, &patient), Err(RenderError::NotAnswered(_))), "and again");
 
     // Notes outside the range of the range being rendered are not waited
     // for: a track with nothing to play in it has nothing to be late with.
