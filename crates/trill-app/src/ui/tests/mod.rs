@@ -25,6 +25,7 @@ mod ruler;
 mod sounds;
 mod stage;
 mod tracks;
+mod wavetable;
 
 use super::app::TrillApp;
 use super::state::{BrowserState, BrowserTab};

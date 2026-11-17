@@ -127,6 +127,28 @@ pub fn paint(
             }
             plot.curve(accent, 0.0, |x| level(x as f64 * 2.0));
         }
+        // Drawn by the panel of the device it belongs to, which knows its
+        // tables: here it is an empty well.
+        Display::Table { .. } => plot.horizontals(&[0.5]),
+        Display::Lfo { shape, phase, depth } => {
+            let (shape, start, depth) = (value(shape).round().max(0.0) as usize, value(phase), value(depth));
+            plot.verticals(&[0.5]);
+            plot.horizontals(&[0.5]);
+            // Two cycles from where a note starts it, as deep as it is set.
+            plot.curve(accent, 0.5, |x| {
+                let at = x as f64 * 2.0 + start;
+                (0.5 + 0.42 * depth * response::lfo_level(shape, at)) as f32
+            });
+        }
+        Display::TableFilter { kind, cutoff, resonance } => {
+            let (kind, cutoff, resonance) = (value(kind).round().max(0.0) as usize, value(cutoff), value(resonance));
+            plot.verticals(&decades);
+            plot.horizontals(&[0.5]);
+            plot.curve(accent, 0.0, |x| {
+                let gain = response::table_filter_gain(kind, cutoff, resonance, frequency_at(x));
+                height_of(response::to_db(gain), FILTER_SPAN_DB)
+            });
+        }
         Display::Pump => {
             let (depth, curve) = (value("depth"), value("curve"));
             // Two cycles, so the duck on the beat is seen to repeat.
