@@ -68,6 +68,8 @@ pub struct CreateTrackRequest {
     pub instrument: Option<String>,
     /// Preset of the instrument, e.g. "warm_pad", "bass", "pluck", "keys" for the poly synth. For a plugin: a
     /// preset's name, its category and name ("Pads/Warm Pad"), or its id, as `describe_device` lists them.
+    /// Or the whole path of a preset file that is not among those, such as one the user bought and keeps with
+    /// their samples ("D:\\Packs\\Lead.SerumPreset", a .vstpreset): see add_device `preset`.
     pub preset: Option<String>,
     /// Track volume in dB (default 0, at most 6).
     pub volume_db: Option<f32>,
@@ -134,7 +136,12 @@ pub struct AddDeviceRequest {
     /// Device URI from `list_devices`.
     pub uri: String,
     /// Preset to start from: its name, its category and name ("Pads/Warm Pad"), or its id, as
-    /// `describe_device` lists them.
+    /// `describe_device` lists them. Or the whole path, from the drive down, of a preset file that lies
+    /// anywhere: a .vstpreset for any VST3 plugin, a file of the maker's own format where Trill reads it
+    /// (.SerumPreset, an Ample instrument's preset, an Archetype's), a file a CLAP plugin loads itself, or a
+    /// .trillpreset that save_preset wrote. For a file that holds several presets, name one after a '#':
+    /// "C:\\Kits\\s3presetconf#Black Metal". A file that is another plugin's, or damaged, is an error that
+    /// says so and adds nothing.
     pub preset: Option<String>,
     /// Parameter values to set on top of the preset, by parameter id or name: numbers in the parameter's units,
     /// true/false for switches, or the choice name for enums (e.g. {"cutoff": 800, "filter_type": "lowpass24"}).
@@ -174,7 +181,8 @@ pub struct UpdateDeviceRequest {
     /// Device id.
     pub device: u64,
     /// Preset to switch to: its name, its category and name ("Pads/Warm Pad"), or its id, as `get_device` and
-    /// `describe_device` list them. It replaces the device's sound; `params` are applied on top of it.
+    /// `describe_device` list them; or the whole path of a preset file (see add_device `preset`). It replaces
+    /// the device's sound; `params` are applied on top of it.
     pub preset: Option<String>,
     /// Parameter values by parameter id or name. For a built-in device: numbers in the parameter's units,
     /// true/false for switches, or the choice name for enums. For a plugin: a number is the raw value (0 to 1

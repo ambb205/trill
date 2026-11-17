@@ -216,6 +216,42 @@ fn the_scanner_process_lists_a_vendors_presets_and_builds_the_state_of_one() {
         assert!(!then.exists() && started.elapsed() < Duration::from_secs(20));
     }
     assert_eq!(run(&["--vendor-preset", "serum2"]).0, Some(2), "too few arguments");
+
+    // What one file holds, wherever it lies: for a preset that is asked
+    // for by its path. The same file, bought and kept with the samples.
+    let bought = folder.join("samples").join("Pack").join("Made Here.SerumPreset");
+    std::fs::create_dir_all(bought.parent().unwrap()).unwrap();
+    std::fs::copy(&file, &bought).unwrap();
+    let (code, printed) = run(&["--vendor-file", "serum2", &bought.to_string_lossy()]);
+    let lines: Vec<serde_json::Value> = printed.lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
+    assert_eq!((code, lines.len()), (Some(0), 2), "{printed}");
+    let held = lines[0]["presets"].as_array().unwrap();
+    assert_eq!(held.len(), 1, "{printed}");
+    assert_eq!((held[0]["name"].as_str(), held[0]["author"].as_str()), (Some("PD - Made Here"), Some("Somebody")));
+    assert!(held[0].get("category").is_none_or(|category| category == ""), "its folders say nothing of it: {printed}");
+    let locator = held[0]["locator"].as_str().unwrap();
+    assert!(
+        locator.starts_with(
+            "vendor-serum2
+"
+        ) && locator.contains("Made Here.SerumPreset"),
+        "{printed}"
+    );
+    assert_eq!(lines[1]["done"], true);
+    for (file, format, reason) in [
+        (&garbage, "serum2", "it is not one of Xfer's files"),
+        (&garbage, "ample", "it is not one of Ample Sound's documents of settings"),
+        (&garbage, "superior3", "it holds no presets of Superior Drummer's"),
+        (&garbage, "archetype", "it is not a preset of one of Neural DSP's Archetypes"),
+        (&folder.join("missing.SerumPreset"), "serum2", "it cannot be read"),
+        (&file, "lv2", "'lv2' is not a preset format"),
+    ] {
+        let (code, printed) = run(&["--vendor-file", format, &file.to_string_lossy()]);
+        let said: serde_json::Value = serde_json::from_str(printed.lines().last().unwrap_or_default()).unwrap();
+        assert_eq!(code, Some(1), "{printed}");
+        assert!(said["failed"].as_str().unwrap().starts_with(reason), "{printed}");
+    }
+    assert_eq!(run(&["--vendor-file", "serum2"]).0, Some(2), "too few arguments");
 }
 
 // ---- the installed plugins ------------------------------------------------------

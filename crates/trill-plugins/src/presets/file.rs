@@ -50,8 +50,9 @@ fn folded(path: &Path) -> Vec<String> {
     path.components().map(part).collect()
 }
 
-/// The file a listed preset is in, if it is in one.
-pub(crate) fn file_of(preset: &PresetInfo) -> Option<std::path::PathBuf> {
+/// The file a plugin's preset is in, if it is in one: for telling whether
+/// a preset file found somewhere is one of the presets a plugin lists.
+pub fn file_of(preset: &PresetInfo) -> Option<std::path::PathBuf> {
     match Locator::parse(&preset.locator)? {
         Locator::ClapFile { path, .. } | Locator::Vst3File { path } | Locator::Vendor { path, .. } => Some(path),
         Locator::ClapPlugin { .. } | Locator::Vst3Program { .. } => None,
@@ -218,7 +219,7 @@ mod tests {
         };
         let list = PresetList::ready(vec![pad.clone(), program, kit(0, "Dry"), kit(1, "Roomy")]);
 
-        assert_eq!(listed(Some(&list), &folder.join("Pads").join("Warm Pad.vstpreset")), [pad.clone()]);
+        assert_eq!(listed(Some(&list), &folder.join("Pads").join("Warm Pad.vstpreset")), std::slice::from_ref(&pad));
         // A path is the same path however its separators are written, and
         // on a disk that does not tell the cases apart, in either case.
         if cfg!(windows) {

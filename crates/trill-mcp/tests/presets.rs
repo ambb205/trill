@@ -10,13 +10,14 @@ use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use trill_core::device::{
     DeviceCategory, DeviceController, DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance, DeviceProcessor,
     Event, ParamInfo, ParamKind, PresetLoadError, ProcessInfo,
 };
-use trill_core::presets::{PresetInfo, PresetList, PresetStatus, short_id};
+use trill_core::presets::{PresetFile, PresetInfo, PresetList, PresetStatus, short_id};
 use trill_core::{Device, DeviceId};
 use trill_engine::AudioBackend;
 use trill_mcp::{HttpServer, serve_http};
@@ -127,7 +128,35 @@ impl DeviceFactory for Synths {
         }
         self.presets(uri)
     }
+
+    /// A preset file of the synth's is a line of text that begins as
+    /// [`PATCH_FILE`] does, and then names the patch.
+    fn preset_file(&self, uri: &str, file: &Path, _within: Option<&str>) -> Option<Result<PresetInfo, String>> {
+        if uri != SYNTH && uri != SYNTH_VST3 {
+            return None;
+        }
+        Some(match std::fs::read_to_string(file) {
+            Err(_) => Err("there is no such file".to_string()),
+            Ok(text) => match text.strip_prefix(PATCH_FILE) {
+                Some(patch) => {
+                    let locator = format!("file:{}", patch.trim());
+                    let name = PresetFile::name_of(file);
+                    Ok(PresetInfo { id: short_id(&locator), name, locator, ..PresetInfo::default() })
+                }
+                None => Err("it is not a preset of Big Synth".to_string()),
+            },
+        })
+    }
+
+    fn preset_file_type(&self, file: &Path) -> Option<String> {
+        let named_so = file.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("vstpreset"));
+        let ours = named_so && std::fs::read_to_string(file).is_ok_and(|text| text.starts_with(PATCH_FILE));
+        ours.then(|| SYNTH.to_string())
+    }
 }
+
+/// What a preset file of the stand-in synth begins with.
+const PATCH_FILE: &str = "big-synth patch ";
 
 /// Three thousand presets, as a big synth has them: in banks and folders,
 /// with the same names turning up in more than one.
@@ -161,8 +190,26 @@ fn preset(name: &str, category: &str) -> PresetInfo {
 struct Fixture {
     client: Client,
     synths: Synths,
-    _server: HttpServer,
-    _folder: tempfile::TempDir,
+    server: HttpServer,
+    folder: tempfile::TempDir,
+}
+
+impl Fixture {
+    /// A file of the test's own, in the fixture's folder.
+    fn file(&self, name: &str, text: &str) -> String {
+        let path = self.folder.path().join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// A client on the endpoint the assistant in the window is given.
+    async fn assistant(&self) -> Client {
+        let transport = StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(
+            self.server.assistant_url(),
+        ));
+        ClientConfig::default().serve(transport).await.unwrap()
+    }
 }
 
 async fn connect() -> Fixture {
@@ -176,11 +223,13 @@ async fn connect() -> Fixture {
     synths.0.lock().unwrap().list = PresetList::ready(presets());
     let parts = Parts { devices: vec![Box::new(synths.clone())], ..Parts::default() };
     let runtime = Arc::new(Runtime::start_custom(options, parts).unwrap());
-    let server = serve_http(runtime, "127.0.0.1:0".parse().unwrap()).unwrap();
+    // The assistant's working folder is the fixture's own too.
+    let http = trill_mcp::HttpOptions { assistant_folder: Some(folder.path().join("work")) };
+    let server = trill_mcp::serve_http_with(runtime, "127.0.0.1:0".parse().unwrap(), http).unwrap();
     let transport =
         StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(server.url()));
     let client = ClientConfig::default().serve(transport).await.unwrap();
-    Fixture { client, synths, _server: server, _folder: folder }
+    Fixture { client, synths, server, folder }
 }
 
 async fn call(client: &Client, tool: &'static str, arguments: Value) -> Result<Value, String> {
@@ -435,7 +484,7 @@ async fn a_devices_sound_is_saved_and_given_to_another_like_any_preset() {
     assert_eq!((saved["saved"].as_str(), saved["device"].as_str()), (Some("Saved/Chorus Keys"), Some(SYNTH)));
     assert!(saved.get("replaced").is_none(), "{saved}");
     let file = std::path::PathBuf::from(saved["file"].as_str().unwrap());
-    assert!(file.starts_with(fixture._folder.path().join("config").join("saved-presets")), "{}", file.display());
+    assert!(file.starts_with(fixture.folder.path().join("config").join("saved-presets")), "{}", file.display());
     assert!(file.exists() && file.extension().unwrap() == "trillpreset");
     assert!(saved["use"].as_str().unwrap().contains("`preset: \"Chorus Keys\"`"), "{saved}");
     let got = ok(client, "get_device", json!({ "device": device })).await;
@@ -1012,4 +1061,156 @@ async fn an_assistant_gives_each_plugin_a_preset_of_its_makers_and_probes_it() {
     let probed = ok(client, "probe", arguments.clone()).await;
     said(&format!("probe {arguments}"), &probed);
     assert!(!probed.to_string().contains("\"silent\":true"), "{probed}");
+}
+
+// ---- a preset file, by its path ------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_is_given_a_preset_file_by_its_path() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let bought = fixture.file("samples/Pack/Bought Lead.vstpreset", "big-synth patch bought lead");
+    let other = fixture.file("samples/Pack/Second Lead.vstpreset", "big-synth patch second lead");
+
+    // A track starts from the file as it starts from a preset by name,
+    // and the reply says what was loaded.
+    let arguments = json!({ "name": "Lead", "instrument": SYNTH, "preset": bought });
+    let track = ok(client, "create_track", arguments).await;
+    assert_eq!(track["preset"], "Bought Lead");
+    let device = track["instrument_device_id"].as_u64().unwrap();
+    assert_eq!(fixture.synths.patch(device), "file:bought lead");
+    assert_eq!(ok(client, "get_device", json!({ "device": device })).await["preset"], "Bought Lead");
+    // So does a device that is added, and one that is there is switched
+    // to a file as one undo step.
+    let added = ok(client, "add_device", json!({ "uri": SYNTH, "track": track["track_id"], "preset": other })).await;
+    assert_eq!(added["preset"], "Second Lead");
+    let updated =
+        ok(client, "update_device", json!({ "device": device, "preset": other, "params": { "tone": 0.8 } })).await;
+    assert_eq!((updated["preset"].as_str(), updated["set"]["tone"].as_f64()), (Some("Second Lead"), Some(0.8)));
+    assert_eq!(fixture.synths.patch(device), "file:second lead");
+    ok(client, "history", json!({ "action": "undo" })).await;
+    assert_eq!(fixture.synths.patch(device), "file:bought lead");
+    assert_eq!(ok(client, "get_device", json!({ "device": device })).await["preset"], "Bought Lead");
+
+    // A file that is no preset of the device, and a path that leads to
+    // none: a sentence that names the file, and nothing is added.
+    let wav = fixture.file("samples/Pack/Kick.wav", "RIFF");
+    let gone = fixture.folder.path().join("samples").join("Gone.vstpreset").to_string_lossy().into_owned();
+    let tracks = ok(client, "get_project", json!({})).await["tracks"].as_array().unwrap().len();
+    for (path, reason) in [(&wav, "it is not a preset of Big Synth"), (&gone, "there is no such file")] {
+        let said = format!("'{path}' cannot be given to '{SYNTH}' as a preset: {reason}");
+        let error = call(client, "create_track", json!({ "name": "x", "instrument": SYNTH, "preset": path })).await;
+        let error = error.unwrap_err();
+        assert!(error.starts_with(&said) && error.contains("No track was created"), "{error}");
+        let error = call(client, "add_device", json!({ "uri": SYNTH, "preset": path })).await.unwrap_err();
+        assert!(error.starts_with(&said), "{error}");
+        let error = call(client, "update_device", json!({ "device": device, "preset": path })).await.unwrap_err();
+        assert!(error.starts_with(&said), "{error}");
+    }
+    assert_eq!(ok(client, "get_project", json!({})).await["tracks"].as_array().unwrap().len(), tracks);
+    assert_eq!(fixture.synths.patch(device), "file:bought lead");
+    // A built-in device's presets are not files.
+    let error = call(client, "add_device", json!({ "uri": POLYSYNTH, "preset": bought })).await.unwrap_err();
+    assert!(
+        error.contains("as a preset: Poly Synth takes no preset files; its presets are asked for by name"),
+        "{error}"
+    );
+
+    // The schemas say that a preset may be a file.
+    let tools = client.list_all_tools().await.unwrap();
+    for tool in ["create_track", "add_device", "update_device"] {
+        let schema = tools.iter().find(|listed| listed.name == tool).unwrap();
+        let schema = serde_json::to_string(&schema.input_schema).unwrap();
+        assert!(schema.contains("whole path"), "{tool}: {schema}");
+    }
+    let instructions = client.peer_info().unwrap().instructions.clone().unwrap_or_default();
+    assert!(instructions.contains("`preset` also takes the whole path of a preset file"), "{instructions}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_preset_file_in_the_sample_library_is_found_by_its_name() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    // A pack the user bought, in a folder of their samples: a preset of
+    // the synth, a preset of something that is not installed, and sounds.
+    let saw = fixture.file("samples/BASSPOP MK1/Presets/OMEGA SAW.vstpreset", "big-synth patch omega saw");
+    fixture.file("samples/BASSPOP MK1/Presets/OMEGA KEYS.vstpreset", "a preset of some other synth");
+    fixture.file("samples/BASSPOP MK1/Presets/Warm Pad.vstpreset", "big-synth patch a bought warm pad");
+    fixture.file("samples/BASSPOP MK1/One Shots/Omega Saw Hit.txt", "not a preset");
+    let samples = fixture.folder.path().join("samples").to_string_lossy().into_owned();
+
+    // Nothing of the library's is found before the folder is one of its.
+    let before = ok(client, "search_presets", json!({ "query": "omega saw" })).await;
+    let files =
+        |found: &Value| found["items"].as_array().unwrap().iter().filter(|item| item.get("file").is_some()).count();
+    assert_eq!(files(&before), 0, "{before}");
+    let added = ok(client, "library", json!({ "action": "add_folder", "path": samples })).await;
+    assert_eq!(added["scanning"], false, "{added}");
+    // As a sound of the library it is found by search_sounds, as a preset.
+    let sounds = ok(client, "search_sounds", json!({ "text": "omega saw", "kind": "preset" })).await;
+    assert_eq!(sounds["total"], 1, "{sounds}");
+
+    // Found by its name, with the device it is for, under the folders it
+    // lies in; and what to give `preset` is its path.
+    let found = ok(client, "search_presets", json!({ "query": "omega saw" })).await;
+    assert_eq!(found["matching"], 1, "{found}");
+    let item = &found["items"][0];
+    assert_eq!((item["device"].as_str(), item["preset"].as_str()), (Some(SYNTH), Some("OMEGA SAW")));
+    assert_eq!(item["category"], "Library/BASSPOP MK1/Presets");
+    assert_eq!(Path::new(item["file"].as_str().unwrap()), Path::new(&saw), "the same file, as the library has it");
+    assert!(item.get("id").is_none(), "{item}");
+    assert!(found["files"].as_str().unwrap().contains("give `file` as `preset`"), "{found}");
+    // The devices' own presets are counted as before.
+    assert_eq!(found["searched"], before["searched"], "{found}");
+    // By the pack it came in, too; the other synth's preset is nobody's.
+    let pack = ok(client, "search_presets", json!({ "query": "basspop", "device": "big" })).await;
+    let names: Vec<&str> =
+        pack["items"].as_array().unwrap().iter().filter_map(|item| item["preset"].as_str()).collect();
+    assert_eq!(names, ["OMEGA SAW", "Warm Pad"], "{pack}");
+    // Beside the presets the synth lists, where a name is in both.
+    let warm = ok(client, "search_presets", json!({ "query": "warm pad", "device": "big" })).await;
+    assert_eq!((warm["matching"].as_u64(), files(&warm)), (Some(3), 1), "{warm}");
+    // A search that is kept to effects, or to another device, leaves it out.
+    for arguments in [json!({ "query": "omega", "category": "effect" }), json!({ "query": "omega", "device": "poly" })]
+    {
+        assert_eq!(ok(client, "search_presets", arguments).await["matching"], 0);
+    }
+
+    // And the path goes where a preset goes.
+    let track =
+        ok(client, "create_track", json!({ "name": "Saws", "instrument": SYNTH, "preset": item["file"] })).await;
+    assert_eq!(track["preset"], "OMEGA SAW");
+    assert_eq!(fixture.synths.patch(track["instrument_device_id"].as_u64().unwrap()), "file:omega saw");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_assistant_is_given_preset_files_of_this_machine_and_no_other() {
+    let fixture = connect().await;
+    let assistant = &fixture.assistant().await;
+    // A preset the user names to it, wherever it lies on a disk: outside
+    // the folders it may write into.
+    let bought = fixture.file("downloads/Bought Lead.vstpreset", "big-synth patch bought lead");
+    let track = ok(assistant, "create_track", json!({ "name": "Lead", "instrument": SYNTH, "preset": bought })).await;
+    assert_eq!(track["preset"], "Bought Lead");
+    let device = track["instrument_device_id"].as_u64().unwrap();
+    assert_eq!(fixture.synths.patch(device), "file:bought lead");
+
+    // A file on another machine is not opened: the path alone is refused,
+    // before anything looks at it.
+    let tracks = ok(assistant, "get_project", json!({})).await["tracks"].as_array().unwrap().len();
+    for share in [r"\\files.example\presets\Lead.vstpreset", "//files.example/presets/Lead.vstpreset"] {
+        let refused = format!("'{share}' is not on one of this machine's own disks");
+        let arguments = json!({ "name": "x", "instrument": SYNTH, "preset": share });
+        let error = call(assistant, "create_track", arguments).await.unwrap_err();
+        assert!(error.starts_with(&refused) && error.ends_with("No track was created."), "{error}");
+        let error = call(assistant, "add_device", json!({ "uri": SYNTH, "preset": share })).await.unwrap_err();
+        assert!(error.starts_with(&refused) && error.ends_with("The device was not added."), "{error}");
+        let error = call(assistant, "update_device", json!({ "device": device, "preset": share })).await.unwrap_err();
+        assert!(error.starts_with(&refused) && error.ends_with("The device is as it was."), "{error}");
+    }
+    assert_eq!(ok(assistant, "get_project", json!({})).await["tracks"].as_array().unwrap().len(), tracks);
+    assert_eq!(fixture.synths.patch(device), "file:bought lead");
+    // A name with slashes in it is a name still.
+    let error = call(assistant, "update_device", json!({ "device": device, "preset": "Pads/No Such" })).await;
+    assert!(error.unwrap_err().contains("has no preset 'Pads/No Such'"));
 }
