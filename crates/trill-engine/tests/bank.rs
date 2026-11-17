@@ -110,8 +110,10 @@ fn presets() -> Vec<Preset> {
 fn measure(preset: &Preset) -> Measured {
     let value = |id: &str| preset.params.iter().find(|(set, _)| set == id).map(|(_, value)| *value);
     let one_at_a_time = value("mode").is_some_and(|mode| mode != 0.0);
-    let Playing { tempo, notes, beats, chord, single, held } = playing(&preset.category, one_at_a_time);
-    let (left, right) = rendered(&song(preset, tempo, &notes, beats), 6.0);
+    let Playing { tempo, notes, beats, chord, single, held, ring } = playing(&preset.category, one_at_a_time);
+    // What is played rings out inside the song, as it does for a hosted
+    // instrument that is measured by this rule.
+    let (left, right) = rendered(&song(preset, tempo, &notes, beats + ring), 0.0);
     let phrase = character(&left, &right, f64::from(RATE));
 
     // As full a chord as the kind is given, as hard as it can be struck.
@@ -125,7 +127,7 @@ fn measure(preset: &Preset) -> Measured {
     let chord_peak_db = character(&left, &right, f64::from(RATE)).peak_db;
 
     let one = [Note { pitch: single, start: 0.0, length: held, velocity: 100 }];
-    let (left, right) = rendered(&song(preset, tempo, &one, held), 8.0);
+    let (left, right) = rendered(&song(preset, tempo, &one, held + ring), 0.0);
     let off = (held * 60.0 / tempo * f64::from(RATE)) as usize;
     let note = onset(&left, &right, f64::from(RATE), 0, off.min(left.len()));
     Measured {
@@ -150,6 +152,9 @@ fn bank() -> &'static [Measured] {
 /// that kind.
 struct Reference {
     kind: &'static str,
+    /// How many presets the ranges are of.
+    presets: usize,
+    level_db: (f32, f32),
     centre_hz: (f32, f32),
     low_db: (f32, f32),
     high_db: (f32, f32),
@@ -159,14 +164,100 @@ struct Reference {
 }
 
 /// Serum 2's factory presets by kind, as `trill-mcp/tests/bank.rs`
-/// measured them on this rule (the date and the count are with the
-/// numbers there). Measurements only: no sound of theirs is rebuilt here,
-/// and nothing of them is kept but these ranges.
-const REFERENCE: &[Reference] = &[];
+/// measured them on this rule on 2026-11-17: ninety-one presets, up to ten
+/// of a kind spread evenly through the kind's folders, those that play
+/// recordings or a pattern of their own left out. Measurements only: no
+/// sound of theirs is rebuilt here, and nothing of them is kept but these
+/// ranges.
+///
+/// It has one preset of strings that is not a recording, and files its
+/// string machines among its pads: so strings are held to where its pads
+/// lie, widened by that one.
+#[rustfmt::skip]
+const REFERENCE: &[Reference] = &[
+    Reference { kind: "Bass", presets: 10, level_db: (-21.3, -11.0), centre_hz: (28.0, 284.0), low_db: (-3.5, -0.0), high_db: (-83.1, -19.5), width_db: (-90.0, -2.3), attack_s: (0.000, 0.100), release_s: (0.02, 1.03) },
+    Reference { kind: "Lead", presets: 10, level_db: (-19.0, -14.5), centre_hz: (446.0, 2190.0), low_db: (-88.1, -3.9), high_db: (-30.5, -9.2), width_db: (-90.0, 3.6), attack_s: (0.000, 0.045), release_s: (0.10, 3.54) },
+    Reference { kind: "Pluck", presets: 10, level_db: (-23.2, -11.6), centre_hz: (337.0, 1146.0), low_db: (-41.9, -7.9), high_db: (-45.9, -12.3), width_db: (-14.4, -0.0), attack_s: (0.000, 0.025), release_s: (0.00, 2.98) },
+    Reference { kind: "Pad", presets: 10, level_db: (-24.6, -15.2), centre_hz: (171.0, 763.0), low_db: (-26.7, -1.6), high_db: (-61.4, -15.7), width_db: (-3.4, 0.0), attack_s: (0.020, 1.700), release_s: (1.51, 8.00) },
+    Reference { kind: "Keys", presets: 10, level_db: (-20.6, -12.4), centre_hz: (179.0, 1098.0), low_db: (-9.4, -2.5), high_db: (-90.0, -7.1), width_db: (-90.0, -0.1), attack_s: (0.000, 0.080), release_s: (0.00, 2.23) },
+    Reference { kind: "Bell", presets: 8, level_db: (-25.4, -16.5), centre_hz: (421.0, 2189.0), low_db: (-65.1, -26.0), high_db: (-47.5, -12.6), width_db: (-19.5, 0.6), attack_s: (0.000, 0.060), release_s: (0.00, 3.58) },
+    Reference { kind: "Strings", presets: 11, level_db: (-24.6, -15.2), centre_hz: (171.0, 763.0), low_db: (-26.7, -1.6), high_db: (-61.4, -15.7), width_db: (-5.1, 0.0), attack_s: (0.020, 1.700), release_s: (1.51, 8.00) },
+    Reference { kind: "Brass", presets: 5, level_db: (-23.3, -16.4), centre_hz: (186.0, 484.0), low_db: (-3.9, -1.4), high_db: (-42.6, -11.9), width_db: (-12.1, -0.6), attack_s: (0.000, 0.035), release_s: (0.25, 2.80) },
+    Reference { kind: "Texture", presets: 7, level_db: (-29.8, -12.5), centre_hz: (58.0, 305.0), low_db: (-3.8, -0.1), high_db: (-90.0, -15.8), width_db: (-5.9, 0.1), attack_s: (0.010, 1.995), release_s: (1.82, 7.47) },
+    Reference { kind: "FX", presets: 10, level_db: (-29.8, -11.1), centre_hz: (57.0, 6398.0), low_db: (-63.5, -0.6), high_db: (-42.2, -0.7), width_db: (-17.3, -0.0), attack_s: (0.000, 0.570), release_s: (0.00, 3.82) },
+];
+
+/// A share of a sound's energy that counts as none of it, in dB.
+const NOTHING: f32 = -60.0;
 
 /// The sounds that lie outside what their kind measures there, each with
 /// which number and why it is meant to.
-const OUTSIDE: &[(&str, &str, &str)] = &[];
+const OUTSIDE: &[(&str, &str, &str)] = &[
+    ("Pluck Bass", "release", "it has died away before the key is let go, as a plucked string has"),
+    (
+        "Metal Bass",
+        "centre",
+        "an FM bass whose weight is in its clang, over the note: the brightest bass of the bank on purpose",
+    ),
+    ("Metal Bass", "low", "the same clang: less of it is under 250 Hz than of any bass there"),
+    ("Rumble", "release", "a thump between kicks that is over before the key is let go"),
+    ("Sine Lead", "high", "a sine: there is nothing in it over 4 kHz to have"),
+    ("Tape Lead", "high", "dulled on top as a worn tape is: darker than any lead there on purpose"),
+    ("Glass Pluck", "centre", HEARD),
+    ("Glass Pluck", "high", HEARD),
+    ("Dub Chord", "release", "its echoes are the sound: the delay it brings goes on for bars after the key"),
+    ("Muted Pluck", "width", "dry and in the middle on purpose, as a muted string under a mix is"),
+    ("Glass Pad", "release", HEARD),
+    ("PWM Strings", "release", HEARD),
+    ("Choir", "centre", HEARD),
+    ("Choir", "high", HEARD),
+    ("Choir", "release", HEARD),
+    (
+        "Air Pad",
+        "low",
+        "breath and no body: a band of noise around the keys, with nothing low so that it lies over a song",
+    ),
+    ("Air Pad", "width", "0.4 dB narrower than the narrowest pad there, and as wide as the synth spreads it"),
+    ("Tine Piano", "low", HEARD),
+    ("Clav", "level", "over in a tenth of a second: any louder and a full chord of it at full velocity has no room"),
+    ("Dusty Keys", "low", "dull on top on purpose, which leaves 0.06 dB more of it low than the roundest keys there"),
+    (
+        "Glass Bell",
+        "high",
+        "glass: the brightest bell of the bank by its name, a decibel brighter than the brightest there",
+    ),
+    (
+        "Synth Strings",
+        "release",
+        "held to the pads there for want of strings; it lets go in a second so that it can play a line",
+    ),
+    ("Staccato Strings", "attack", "short bows: it speaks at once, which no pad does"),
+    ("Staccato Strings", "release", "short bows: it ends at once, which no pad does"),
+    ("Synth Brass", "low", HIGHER),
+    ("Soft Horns", "low", HIGHER),
+    ("Brass Stab", "low", HIGHER),
+    ("Soft Horns", "high", "soft and round on purpose: the five there are bright or punchy"),
+    ("Soft Horns", "attack", "it speaks slowly, as a horn played softly does"),
+    ("Brass Stab", "release", "a stab: over when the key is let go"),
+    ("Shimmer", "centre", "a shimmer lies high by its name; the seven soundscapes there are all dark"),
+    ("Shimmer", "low", "a shimmer lies high by its name; the seven soundscapes there are all dark"),
+    ("Wind", "centre", "wind is noise around the key that is held, not a drone under it"),
+    ("Wind", "low", "wind is noise around the key that is held, not a drone under it"),
+    ("Gated Pad", "release", "chopped: what follows the key is three echoes and a short room, not a long tail"),
+    ("Riser", "attack", "it rises for as long as it is held: that is what it is for"),
+    ("Pitch Riser", "attack", "it rises for as long as it is held: that is what it is for"),
+    ("Sweep", "attack", "it opens for half the time it is held and closes again"),
+    ("Impact", "low", "a boom: all but all of it is under 250 Hz, as the one boom there nearly is"),
+    ("Impact", "high", "the same boom: darker by 6 dB than the darkest effect there"),
+    ("Sub Drop", "high", "a sine that falls: there is nothing in it over 4 kHz"),
+    ("Sub Drop", "width", "a sub is in the middle"),
+];
+
+/// Why a sound of the first sixteen is left where it lies: the owner
+/// listened to those and passed them.
+const HEARD: &str = "one of the sixteen the owner heard and passed: left as it was heard";
+/// The three brasses carry less of their weight low than the five there.
+const HIGHER: &str = "voiced where a section plays chords, with nothing an octave under it: all five there carry more                       of their weight low. Unheard: a number to listen for";
 
 fn report(bank: &[Measured]) -> String {
     let mut said = String::from(
@@ -280,13 +371,11 @@ const SHORT_OF_ITS_LEVEL: &[(&str, f32)] = &[
     ("Clav", 3.7),
     ("Dusty Keys", 1.7),
     ("Music Box", 1.5),
-    ("Marimba", 2.7),
+    ("Marimba", 3.6),
     ("Staccato Strings", 2.7),
     ("Brass Stab", 3.2),
     // Chopped every sixteenth: its peaks stand over what 400 ms hold.
     ("Gated Pad", 1.1),
-    // Thirty-two voices beating: the same.
-    ("Swarm", 1.4),
     ("Laser", 3.1),
 ];
 
@@ -309,8 +398,12 @@ fn every_sound_lies_where_its_kind_lies_in_a_synth_known_to_be_good_or_says_why_
     let mut outside: Vec<String> = Vec::new();
     let mut excused: Vec<(&str, &str)> = Vec::new();
     for sound in bank() {
-        let Some(kind) = REFERENCE.iter().find(|kind| kind.kind == sound.kind) else { continue };
-        let numbers: [(&str, f32, (f32, f32)); 6] = [
+        let kind = REFERENCE.iter().find(|kind| kind.kind == sound.kind);
+        let kind = kind.unwrap_or_else(|| panic!("{}: nothing is known of the kind {}", sound.name, sound.kind));
+        // A range is of several: fewer show no range to be held to.
+        assert!(kind.presets >= 5, "{}: {} presets are no range", kind.kind, kind.presets);
+        let numbers: [(&str, f32, (f32, f32)); 7] = [
+            ("level", sound.phrase.level_db, kind.level_db),
             ("centre", sound.phrase.centre_hz, kind.centre_hz),
             ("low", sound.phrase.low_db, kind.low_db),
             ("high", sound.phrase.high_db, kind.high_db),
@@ -319,14 +412,20 @@ fn every_sound_lies_where_its_kind_lies_in_a_synth_known_to_be_good_or_says_why_
             ("release", sound.note.release_s, kind.release_s),
         ];
         for (number, value, (least, most)) in numbers {
+            // A share of the sound that is 60 dB under the whole is nothing,
+            // there and here: none is less than another.
+            let (value, least) = match number {
+                "low" | "high" => (value.max(NOTHING), least.max(NOTHING)),
+                _ => (value, least),
+            };
             if (least..=most).contains(&value) {
                 continue;
             }
             match OUTSIDE.iter().find(|(name, which, _)| *name == sound.name && *which == number) {
                 Some((name, which, _)) => excused.push((name, which)),
                 None => outside.push(format!(
-                    "{} ({}): {number} is {value:.2}, and its kind lies between {least:.2} and {most:.2}",
-                    sound.name, sound.kind
+                    "{} ({}): {number} is {value:.2}, and {} of its kind lie between {least:.2} and {most:.2}",
+                    sound.name, sound.kind, kind.presets
                 )),
             }
         }

@@ -150,7 +150,16 @@ pub struct Playing {
     /// ends.
     pub single: u8,
     pub held: f64,
+    /// How many beats of the song follow the phrase, and the one note,
+    /// for what was played to ring out in: they are part of what is
+    /// measured, and they lie before the song stops, since a hosted
+    /// instrument may be silenced when it does.
+    pub ring: f64,
 }
+
+/// The beats a sound is given to ring out in: eight seconds at the tempo
+/// it is played at.
+const RING: f64 = 16.0;
 
 /// The kinds [`playing`] knows, as a bank files its sounds.
 pub const KINDS: &[&str] = &["Bass", "Lead", "Pluck", "Pad", "Keys", "Bell", "Strings", "Brass", "Texture", "FX"];
@@ -197,7 +206,7 @@ pub fn playing(kind: &str, one_at_a_time: bool) -> Playing {
         _ => (chord(&[48], 0.0, 16.0), 16.0, &[48], 48, 16.0),
     };
     if !one_at_a_time {
-        return Playing { tempo, notes, beats, chord: full.to_vec(), single, held };
+        return Playing { tempo, notes, beats, chord: full.to_vec(), single, held, ring: RING };
     }
     // One note at a time: the top of whatever sounds together.
     let mut alone: Vec<Note> = Vec::new();
@@ -208,7 +217,7 @@ pub fn playing(kind: &str, one_at_a_time: bool) -> Playing {
             None => alone.push(note),
         }
     }
-    Playing { tempo, notes: alone, beats, chord: vec![single], single, held }
+    Playing { tempo, notes: alone, beats, chord: vec![single], single, held, ring: RING }
 }
 
 #[cfg(test)]

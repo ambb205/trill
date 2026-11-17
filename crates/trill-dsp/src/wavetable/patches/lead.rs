@@ -479,7 +479,7 @@ pub(super) const PATCHES: &[Patch] = &[
             ("osc1_detune", N(10.0)),
             ("osc1_spread", N(0.4)),
             ("filter1_type", C("lowpass12")),
-            ("filter1_cutoff", N(4500.0)),
+            ("filter1_cutoff", N(4000.0)),
             ("filter1_drive", N(6.0)),
             ("env1_attack", N(0.003)),
             ("env1_sustain", N(0.85)),
@@ -511,7 +511,7 @@ pub(super) const PATCHES: &[Patch] = &[
             ("mode", C("legato")),
             ("glide", N(0.04)),
             ("velocity_sens", N(0.3)),
-            ("volume", N(-17.7)),
+            ("volume", N(-17.4)),
         ],
     },
 ];
