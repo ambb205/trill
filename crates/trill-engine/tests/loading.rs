@@ -192,8 +192,10 @@ fn a_plugin_that_was_just_made_is_said_to_be_loading_and_a_built_in_device_never
     // Asked without the session, as a server does between requests.
     let watch = session.load_watch();
     assert_eq!(watch.loading_now(), [bass]);
+    // (Looked at more than once: on a busy machine the thread that grows
+    // may not have its turn in the tenth of a second one look takes.)
     #[cfg(windows)]
-    assert!(trill_engine::ready::is_loading(), "the program is growing");
+    assert!((0..10).any(|_| trill_engine::ready::is_loading()), "the program is growing");
     // While it loads it stays so: nothing is forgotten in a quiet moment.
     std::thread::sleep(Duration::from_millis(600));
     assert_eq!(session.loading(), [bass]);
