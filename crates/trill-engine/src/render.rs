@@ -435,7 +435,9 @@ fn render_from(
         let analyzer = if file.is_some() { analyzer.with_true_peak() } else { analyzer };
         Box::new(Tap { analyzer, file })
     };
-    for node in &mut graph.tracks {
+    // A track that is made only for what it sends to a soloed return adds
+    // nothing itself: it has no row and no file.
+    for node in graph.tracks.iter_mut().filter(|node| node.to_output) {
         let track = project.track(node.id).ok();
         let file = match (track, stems) {
             (Some(track), Some(stems)) => match stems.kind_of(track) {

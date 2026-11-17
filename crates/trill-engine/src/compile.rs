@@ -2,6 +2,7 @@
 //! side, never on the audio thread, so it is free to allocate and to load
 //! plugins and audio files.
 
+use crate::graph::SendNode;
 use crate::graph::{
     AudioRegion, Bus, Chain, DeviceSlot, Graph, MAX_BLOCK, MasterNode, Meter, NoteEvent, ParamAutomation, RegionAudio,
     TrackNode, TrackState,
@@ -232,7 +233,8 @@ impl Compiler<'_> {
                 chain,
                 volume_db: track.volume_db,
                 pan: track.pan,
-                audible: routing.audible(project, track),
+                passes: routing.passes(project, track),
+                to_output: routing.to_output(project, track),
                 volume_automation: lane_points(
                     project,
                     |target| matches!(target, AutomationTarget::TrackVolume { track: id } if *id == track.id),
@@ -248,7 +250,11 @@ impl Compiler<'_> {
                 sends: track
                     .sends
                     .iter()
-                    .filter_map(|send| Some((routing.bus(send.to)?, db_to_gain(send.level_db))))
+                    .filter_map(|send| {
+                        let open = routing.send_open(project, track, send.to);
+                        let gain = if open { db_to_gain(send.level_db) } else { 0.0 };
+                        Some(SendNode { bus: routing.bus(send.to)?, gain, last: f32::NAN })
+                    })
                     .collect(),
                 tap: None,
                 source: None,
@@ -417,6 +423,8 @@ struct Routing {
     buses: Vec<TrackId>,
     stages: HashMap<TrackId, u8>,
     any_solo: bool,
+    /// Whether a track that is not a return is soloed.
+    solo_beside_returns: bool,
 }
 
 impl Routing {
@@ -435,7 +443,13 @@ impl Routing {
                 (track.id, stage)
             })
             .collect();
-        Self { buses, stages, any_solo: project.tracks.iter().any(|track| track.solo) }
+        let soloed = |track: &&Track| track.solo;
+        Self {
+            buses,
+            stages,
+            any_solo: project.tracks.iter().any(|track| track.solo),
+            solo_beside_returns: project.tracks.iter().filter(soloed).any(|track| track.kind != TrackKind::Return),
+        }
     }
 
     fn bus(&self, track: TrackId) -> Option<usize> {
@@ -450,10 +464,12 @@ impl Routing {
         self.stages.get(&track).copied().unwrap_or(0)
     }
 
-    /// Mute and solo, resolved. Soloing a track keeps its group open, and
-    /// soloing a group keeps its members; returns stay open so a soloed
-    /// track is heard with its reverb.
-    fn audible(&self, project: &Project, track: &Track) -> bool {
+    /// Mute and solo, resolved: whether a track's own sound is wanted at
+    /// the master. Soloing a track keeps its group open, and soloing a
+    /// group keeps its members. Returns stay open while a track or a group
+    /// is soloed, so that it is heard with its reverb; a soloed return is
+    /// heard without the others.
+    fn heard(&self, project: &Project, track: &Track) -> bool {
         if track.mute {
             return false;
         }
@@ -461,52 +477,91 @@ impl Routing {
             return true;
         }
         match track.kind {
-            TrackKind::Return => true,
+            TrackKind::Return => self.solo_beside_returns,
             TrackKind::Group => project.tracks.iter().any(|member| member.group == Some(track.id) && member.solo),
             TrackKind::Normal => track.group.is_some_and(|group| project.track(group).is_ok_and(|group| group.solo)),
         }
     }
 
-    /// The tracks a render has to make and play: the ones that are heard
-    /// for their own sake, and the groups and returns their sound goes on
-    /// through. With nothing soloed that is every track that is not muted.
-    /// With a solo it is the soloed tracks, the members of a soloed group,
-    /// and of the groups and returns that are open only so that those are
-    /// heard through them, the ones something needed feeds.
+    /// Whether `id` is a return that is soloed: it is then heard as every
+    /// track feeds it, whether or not that track is heard itself. That is
+    /// what soloing a return is for: its sound alone, of the whole song.
+    fn takes_every_send(&self, project: &Project, id: TrackId) -> bool {
+        project.track(id).is_ok_and(|track| track.kind == TrackKind::Return && track.solo && !track.mute)
+    }
+
+    /// Whether a track's send to `to` carries anything: the return takes
+    /// every track's send, or both the track and the return are heard.
+    fn send_open(&self, project: &Project, track: &Track, to: TrackId) -> bool {
+        let both = || self.heard(project, track) && project.track(to).is_ok_and(|to| self.heard(project, to));
+        !track.mute && (self.takes_every_send(project, to) || both())
+    }
+
+    /// Whether a track's sound goes on to its output, the master or its
+    /// group: it is heard, or it is a member of a group that is not heard
+    /// and is there for what it sends to a soloed return.
+    fn to_output(&self, project: &Project, track: &Track) -> bool {
+        if track.mute {
+            return false;
+        }
+        let for_its_sends = |group: &Track| {
+            !self.heard(project, group) && group.sends.iter().any(|send| self.send_open(project, group, send.to))
+        };
+        self.heard(project, track) || track.group.and_then(|group| project.track(group).ok()).is_some_and(for_its_sends)
+    }
+
+    /// Whether a track passes sound at all: on to its output, or into a
+    /// send.
+    fn passes(&self, project: &Project, track: &Track) -> bool {
+        self.to_output(project, track) || track.sends.iter().any(|send| self.send_open(project, track, send.to))
+    }
+
+    /// The tracks a render has to make and play: the ones that are heard,
+    /// and whatever feeds them. With nothing soloed that is every track
+    /// that is not muted. With a solo it is what is heard for its own
+    /// sake, and then, from there back, every track whose sound goes into
+    /// one that is needed: the members of a group, the tracks whose sends
+    /// reach a soloed return. A return that is open only so that what is
+    /// soloed is heard with its reverb is left out when nothing that is
+    /// made sends to it.
     fn needed(&self, project: &Project) -> HashSet<TrackId> {
-        let audible: HashSet<TrackId> =
-            project.tracks.iter().filter(|track| self.audible(project, track)).map(|track| track.id).collect();
-        let own = |track: &Track| !self.any_solo || track.solo || track.kind == TrackKind::Normal;
-        let mut needed: HashSet<TrackId> = project
-            .tracks
-            .iter()
-            .filter(|track| audible.contains(&track.id) && own(track))
-            .map(|track| track.id)
-            .collect();
-        let feeds = feeds(project);
+        let heard = |track: &&Track| self.heard(project, track);
+        let mut needed: HashSet<TrackId> = project.tracks.iter().filter(heard).map(|track| track.id).collect();
+        let feeds = self.feeds(project);
         loop {
-            let fed = feeds.iter().filter(|(from, to)| needed.contains(from) && audible.contains(to));
-            let more: Vec<TrackId> = fed.map(|(_, to)| *to).filter(|to| !needed.contains(to)).collect();
+            let feeding = feeds.iter().filter(|(from, to)| needed.contains(to) && !needed.contains(from));
+            let more: Vec<TrackId> = feeding.map(|(from, _)| *from).collect();
             if more.is_empty() {
                 break;
             }
             needed.extend(more);
         }
+        if self.any_solo {
+            let unfed = |track: &&Track| {
+                let fed = feeds.iter().any(|(from, to)| *to == track.id && needed.contains(from));
+                track.kind == TrackKind::Return && !track.solo && !fed
+            };
+            let idle: Vec<TrackId> = project.tracks.iter().filter(unfed).map(|track| track.id).collect();
+            for idle in idle {
+                needed.remove(&idle);
+            }
+        }
         needed
     }
-}
 
-/// Whose sound goes into whom: a member into its group, a track into each
-/// return it sends to. (Whatever else comes to feed a track, a device that
-/// listens to another track say, belongs here, and in [`Routing::needed`]
-/// if it is to be made though it is not heard itself.)
-fn feeds(project: &Project) -> Vec<(TrackId, TrackId)> {
-    let mut feeds = Vec::new();
-    for track in &project.tracks {
-        feeds.extend(track.group.map(|group| (track.id, group)));
-        feeds.extend(track.sends.iter().map(|send| (track.id, send.to)));
+    /// Whose sound goes into whom, as mute and solo leave it: a member
+    /// into its group, a track into each return its sends reach. Whatever
+    /// else comes to feed a track (a device that listens to another track,
+    /// say) is one more pair here, and [`Routing::needed`] makes it.
+    fn feeds(&self, project: &Project) -> Vec<(TrackId, TrackId)> {
+        let mut feeds = Vec::new();
+        for track in &project.tracks {
+            feeds.extend(track.group.filter(|_| self.to_output(project, track)).map(|group| (track.id, group)));
+            let open = track.sends.iter().filter(|send| self.send_open(project, track, send.to));
+            feeds.extend(open.map(|send| (track.id, send.to)));
+        }
+        feeds
     }
-    feeds
 }
 
 fn lane_points(

@@ -238,6 +238,21 @@ fn the_stems_of_one_render_are_what_separate_renders_of_each_part_give() {
     let off = apart(&listed.path, &returns, (&returned.left, &returned.right));
     assert!(off < 1e-6, "{}: {off} from the return rendered alone", listed.path);
     assert!(peak(&returns.0) > 0.01, "and it is not silence");
+    // Which is what hearing the return by itself gives, and soloing it.
+    let named = RenderOptions { only_tracks: Some(vec![room]), ..options() };
+    let alone = render(&bare_master(&project), &scripted, &named);
+    let off = apart("the return heard alone", &returns, (&alone.left, &alone.right));
+    assert!(off < 1e-6, "{off} from the return's stem");
+    let mut soloed = bare_master(&project);
+    soloed.track_mut(room).unwrap().solo = true;
+    let alone = render(&soloed, &scripted, &options());
+    assert!(apart("the return soloed", &returns, (&alone.left, &alone.right)) < 1e-6);
+    // The group heard by itself, in a song without the return, is its stem.
+    let named = RenderOptions { only_tracks: Some(vec![band]), ..options() };
+    let mut dry = bare_master(&project);
+    dry.remove_track(room).unwrap();
+    let alone = render(&dry, &scripted, &named);
+    assert!(apart("the group heard alone", &group, (&alone.left, &alone.right)) < 1e-6);
 
     // The mix as it reaches the master's devices: the song without them.
     let before = render(&bare_master(&project), &scripted, &options());
@@ -327,6 +342,17 @@ fn a_render_that_hears_one_track_makes_and_waits_for_only_what_that_track_needs(
     let expected = render(&without, &ScriptedFactory::new(), &options());
     assert!(heard.left == expected.left && heard.right == expected.right);
 
+    // The return: the tracks whose sends reach it are made, to feed it,
+    // and are not heard themselves; the drums, which send nothing, are not
+    // made at all.
+    let scripted = ScriptedFactory::loading(loading);
+    let heard = render(&project, &scripted, &RenderOptions { only_tracks: Some(vec![room]), ..options() });
+    let made: Vec<String> = scripted.made().into_iter().map(|(uri, _)| uri).collect();
+    assert_eq!(made, [BASS, AMP]);
+    assert!(peak(&heard.left) > 0.01, "a return heard alone is not silence");
+    let rows: Vec<TrackId> = heard.measured.tracks.iter().map(|level| level.track).collect();
+    assert_eq!(rows, [room], "what feeds it has no row of its own");
+
     // The group: both of its members, and not the synth.
     let scripted = ScriptedFactory::loading(loading);
     let stems = tempfile::tempdir().unwrap();
@@ -339,4 +365,82 @@ fn a_render_that_hears_one_track_makes_and_waits_for_only_what_that_track_needs(
     // And only what is played has a file.
     let files: Vec<Option<TrackId>> = heard.measured.stems.iter().map(|stem| stem.track).collect();
     assert_eq!(files, [Some(room), Some(band), Some(bass), Some(bass), Some(drums), Some(drums), None]);
+}
+
+#[test]
+fn a_soloed_return_is_heard_as_every_track_feeds_it_and_a_soloed_track_with_its_returns() {
+    // Keys send to both returns. The bass is in a group that sends to the
+    // hall, and sends nothing itself. A muted pad sends to the hall too.
+    let mut project = Project::new("solo");
+    let hall = project.add_track_of_kind("Hall", TrackKind::Return);
+    device(&mut project, ChainRef::Track(hall), "builtin:reverb", &[("mix", 1.0)]);
+    let echo = project.add_track_of_kind("Echo", TrackKind::Return);
+    device(&mut project, ChainRef::Track(echo), "builtin:delay", &[("mix", 1.0)]);
+    let low = project.add_track_of_kind("Low", TrackKind::Group);
+    project.set_send(low, hall, Some(-3.0)).unwrap();
+    let keys = part(&mut project, "Keys", "builtin:polysynth", &[note(60, 0.0, 2.0), note(64, 2.0, 2.0)]);
+    project.set_send(keys, hall, Some(-6.0)).unwrap();
+    project.set_send(keys, echo, Some(-9.0)).unwrap();
+    let bass = part(&mut project, "Bass", BASS, &[note(40, 0.0, 1.0), note(43, 1.0, 3.0)]);
+    project.set_track_group(bass, Some(low)).unwrap();
+    let pad = part(&mut project, "Pad", "builtin:polysynth", &[note(48, 0.0, 4.0)]);
+    project.set_send(pad, hall, Some(0.0)).unwrap();
+    project.track_mut(pad).unwrap().mute = true;
+
+    // The song as it is, with every part of it in a file.
+    let scripted = ScriptedFactory::new();
+    let folder = tempfile::tempdir().unwrap();
+    let all = RenderOptions { stems: Some(Stems::all(folder.path())), ..options() };
+    let whole = render(&project, &scripted, &all);
+    let stem = |what: StemKind, track: TrackId| {
+        let stem = whole.measured.stems.iter().find(|stem| stem.what == what && stem.track == Some(track)).unwrap();
+        read(&stem.path)
+    };
+    let (in_hall, in_echo, of_keys) =
+        (stem(StemKind::Return, hall), stem(StemKind::Return, echo), stem(StemKind::Track, keys));
+    assert!(peak(&in_hall.0) > 0.01 && peak(&in_echo.0) > 0.005 && peak(&of_keys.0) > 0.05);
+
+    // The hall soloed is the hall as the whole song feeds it: the keys'
+    // send, and the group's, which carries the bass. No track is heard
+    // itself, and the echo is not heard.
+    let mut soloed = project.clone();
+    soloed.track_mut(hall).unwrap().solo = true;
+    let heard = render(&soloed, &scripted, &options());
+    let off = apart("the hall soloed", &in_hall, (&heard.left, &heard.right));
+    assert!(off < 1e-6, "{off} from the hall's part of the whole song");
+
+    // The keys soloed beside it: the keys, the hall as before, and the
+    // echo, which stays open for a soloed track and has the keys in it.
+    soloed.track_mut(keys).unwrap().solo = true;
+    let heard = render(&soloed, &scripted, &options());
+    let sum = |parts: [&Vec<f32>; 3]| -> Vec<f32> {
+        (0..parts[0].len()).map(|frame| parts.iter().map(|part| part[frame]).sum()).collect()
+    };
+    let expected = (sum([&of_keys.0, &in_hall.0, &in_echo.0]), sum([&of_keys.1, &in_hall.1, &in_echo.1]));
+    let off = apart("the keys and the hall soloed", &expected, (&heard.left, &heard.right));
+    assert!(off < 1e-5, "{off} from the keys, the hall and the echo added up");
+
+    // The keys soloed alone are heard with both returns, as ever, and the
+    // returns then hold the keys only: less than the hall of the song.
+    soloed.track_mut(hall).unwrap().solo = false;
+    let heard = render(&soloed, &scripted, &options());
+    let off = apart("the keys soloed", &expected, (&heard.left, &heard.right));
+    assert!(off > 1e-3, "the bass is no longer in the hall: {off}");
+    let mut without = project.clone();
+    for other in [bass, low, pad] {
+        without.remove_track(other).unwrap();
+    }
+    let expected = render(&without, &scripted, &options());
+    assert!(apart("the keys soloed", &(heard.left, heard.right), (&expected.left, &expected.right)) < 1e-6);
+
+    // A muted return that is soloed is silence, and a return that nothing
+    // sends to is not made for a soloed track.
+    let mut muted = project.clone();
+    for change in [|track: &mut trill_core::Track| track.solo = true, |track: &mut trill_core::Track| track.mute = true]
+    {
+        change(muted.track_mut(hall).unwrap());
+    }
+    let silent = RenderJob { project: muted, factory: factory(&scripted), audio: AudioSources::default() };
+    let silent = silent.render(&RenderOptions { max_tail_seconds: 0.5, ..options() }).unwrap();
+    assert_eq!(peak(&silent.left), 0.0);
 }

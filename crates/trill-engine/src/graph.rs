@@ -149,6 +149,9 @@ pub(crate) struct TrackState {
     pub active_count: usize,
     pub gain_left: f32,
     pub gain_right: f32,
+    /// How much of the faded signal went on to the track's output at the
+    /// end of the last block: all of it, or none.
+    pub out: f32,
     /// False until the first block, so the fader starts at its target
     /// instead of ramping up from silence.
     pub primed: bool,
@@ -191,6 +194,7 @@ impl Default for TrackState {
             active_count: 0,
             gain_left: 0.0,
             gain_right: 0.0,
+            out: 0.0,
             primed: false,
             live_held: 0,
             routed_held: 0,
@@ -282,8 +286,13 @@ pub(crate) struct TrackNode {
     pub chain: Chain,
     pub volume_db: f32,
     pub pan: f32,
-    /// Mute and solo, already resolved.
-    pub audible: bool,
+    /// Mute and solo, already resolved: whether the track passes sound at
+    /// all. One that does not is faded to nothing.
+    pub passes: bool,
+    /// Whether what it passes goes on to its output, the master or its
+    /// group. A track that only feeds a soloed return through a send
+    /// passes sound and does not.
+    pub to_output: bool,
     pub volume_automation: Option<Vec<AutomationPoint>>,
     pub pan_automation: Option<Vec<AutomationPoint>>,
     pub meter: Arc<Meter>,
@@ -293,8 +302,8 @@ pub(crate) struct TrackNode {
     pub input_bus: Option<usize>,
     /// The group bus the faded signal goes to; the master when `None`.
     pub output_bus: Option<usize>,
-    /// Copies of the faded signal for return tracks: bus and linear gain.
-    pub sends: Vec<(usize, f32)>,
+    /// Copies of the faded signal for return tracks.
+    pub sends: Vec<SendNode>,
     /// Listens to the track as it leaves its fader. Only a graph that is
     /// rendered has one; a graph that is played measures nothing.
     pub tap: Option<Box<Tap>>,
@@ -303,6 +312,19 @@ pub(crate) struct TrackNode {
     /// made, before anything else is done to it. Only in a render that
     /// was asked for it.
     pub source: Option<(usize, Box<Tap>)>,
+}
+
+/// A copy of a track's faded signal that goes to a return track.
+pub(crate) struct SendNode {
+    /// The return's bus.
+    pub bus: usize,
+    /// Linear; zero for a send that is closed, because the return is not
+    /// heard, or the track is not and the return does not take every
+    /// track's send.
+    pub gain: f32,
+    /// The gain at the end of the last block, to move on from without a
+    /// step; not a number before the first.
+    pub last: f32,
 }
 
 /// What a render listens with at one point of the graph: it measures what
@@ -403,6 +425,13 @@ impl Graph {
             if let Some(previous) = old.tracks.iter_mut().find(|t| t.id == track.id) {
                 std::mem::swap(&mut track.state, &mut previous.state);
                 track.state.lanes_changed = true;
+                // A send goes on from where it was, so that one which a
+                // solo opens or closes does so without a step.
+                for send in &mut track.sends {
+                    if let Some(before) = previous.sends.iter().find(|before| before.bus == send.bus) {
+                        send.last = before.last;
+                    }
+                }
             }
             if track.fresh_devices {
                 track.state.resend = true;
