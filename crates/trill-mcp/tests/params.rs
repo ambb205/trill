@@ -498,3 +498,52 @@ async fn settings_that_no_parameter_reaches_are_found_and_set_by_name() {
         call(client, "update_device", json!({ "device": reverb, "settings": { "Decay": 1 } })).await.unwrap_err();
     assert!(error.contains("its saved state has no settings that are set by name"), "{error}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn names_given_on_the_wrong_side_are_all_sorted_by_one_refusal() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let device = amp(client).await;
+    let update = |arguments: Value| {
+        let mut arguments = arguments;
+        arguments["device"] = json!(device);
+        call(client, "update_device", arguments)
+    };
+
+    let before = texts(&ok(client, "get_device", json!({ "device": device, "query": "amp type" })).await);
+
+    // The names of a patch, all given as parameters: the two that are
+    // settings of the state are named together, each with its value.
+    let params = json!({ "Amp Type": "Lead", "auto legato": "0", "Library": "Neck" });
+    let error = update(json!({ "params": params })).await.unwrap_err();
+    assert!(
+        error.contains(
+            "'Library' (reads Bridge now), 'Auto Legato' (reads 1 now) are not parameters of this device but \
+             settings in its saved state: give them under `settings`"
+        ),
+        "{error}"
+    );
+    assert!(error.ends_with("Nothing was changed"), "{error}");
+
+    // A parameter given as a setting, beside a setting given as a
+    // parameter: both are said.
+    let error = update(json!({ "params": { "Fret Noise": "0.25" }, "settings": { "Amp Type": 2 } })).await.unwrap_err();
+    assert!(error.contains("'Fret Noise' (reads 0.5 now) is not a parameter of this device but a setting"), "{error}");
+    assert!(error.contains("'Amp Type' is a parameter of this device, not a setting in its saved state"), "{error}");
+
+    // Nothing was changed by either.
+    let got = ok(client, "get_device", json!({ "device": device, "query": "amp type" })).await;
+    assert_eq!(texts(&got), before);
+    let found = ok(client, "get_device", json!({ "device": device, "query": "legato" })).await;
+    assert_eq!(found["settings"], json!([{ "name": "Auto Legato", "value": "1" }]));
+
+    // A name that is on neither side is refused as before.
+    let error = update(json!({ "params": { "Nope": 1 } })).await.unwrap_err();
+    assert!(error.contains("no parameter 'Nope'"), "{error}");
+
+    // Each on its own side, in one call.
+    let both = json!({ "params": { "Amp Type": "Lead" }, "settings": { "Auto Legato": 0, "Library": "Neck" } });
+    let updated = update(both).await.unwrap();
+    assert_eq!(updated["settings"], json!({ "Auto Legato": "0", "Library": "Neck" }));
+    assert_eq!(updated["shown"]["Amp Type"], "Lead");
+}

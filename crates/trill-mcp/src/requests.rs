@@ -184,6 +184,9 @@ pub struct UpdateDeviceRequest {
     /// Settings in a plugin's saved state that it has no parameter for, by the names get_device lists under
     /// `settings` (its `query` finds them): {"Auto Legato": 0}. A value is written as the plugin writes it,
     /// which get_device shows: keep to the form the value has (a switch that reads 1 is off as 0 or as -1).
+    /// When you have the names of a patch and do not know which are parameters and which are settings, give
+    /// them all under `params`: the refusal names every one that is a setting, with its value, and nothing is
+    /// changed.
     pub settings: Option<BTreeMap<String, Value>>,
     /// false bypasses the device.
     pub enabled: Option<bool>,
