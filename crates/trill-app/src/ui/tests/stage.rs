@@ -147,3 +147,42 @@ fn the_stage_is_of_the_song_as_it_is_now() {
     harness.idle(2);
     assert_eq!(on_stage(&harness).as_deref(), Some("Stage: Refrain Untitled"));
 }
+
+#[test]
+fn a_recording_the_song_plays_joins_the_stage_once_it_is_read_and_one_that_is_gone_is_left_out() {
+    let folder = tempfile::tempdir().unwrap();
+    let take = folder.path().join("take.wav");
+    let channel: Vec<f32> = (0..24_000).map(|frame| (frame as f32 * 0.05).sin() * 0.5).collect();
+    let buffer = trill_core::audio::AudioBuffer { sample_rate: 48_000.0, left: channel.clone(), right: channel };
+    trill_media::write_wav(&take, &buffer, trill_media::WavFormat::Int16).unwrap();
+    let path = take.display().to_string();
+    let mut harness = Harness::new(UiOptions { stage: true, ..Default::default() }, |session| {
+        let edit = |project: &mut Project| {
+            let voice = project.add_track("Voice");
+            project.add_audio_clip(voice, "Take", 0.0, 8.0, trill_core::project::AudioContent::new(path.as_str()))?;
+            project.add_audio_clip(
+                voice,
+                "Lost",
+                8.0,
+                8.0,
+                trill_core::project::AudioContent::new("no-such-take.wav"),
+            )?;
+            Ok(())
+        };
+        session.edit(edit).unwrap();
+    });
+    // The stage is up at once, by its clips alone: the file is read behind it.
+    assert!(on_stage(&harness).is_some());
+    harness.wait_until("the recording to be read", |harness| !harness.app.stage().is_reading());
+    assert_eq!(
+        harness.app.stage().recordings(),
+        1,
+        "the take that is there; the lost one is a clip without a waveform"
+    );
+
+    // A song with nothing recorded in it reads nothing.
+    let (mut notes, ..) = with_two_tracks(UiOptions { stage: true, ..Default::default() });
+    notes.idle(2);
+    assert!(!notes.app.stage().is_reading());
+    assert_eq!(notes.app.stage().recordings(), 0);
+}

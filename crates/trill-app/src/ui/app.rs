@@ -1082,6 +1082,11 @@ impl TrillApp {
         filming::export_to(ctx, &mut self.cx(), path);
     }
 
+    #[cfg(test)]
+    pub fn stage(&self) -> &StageView {
+        &self.stage
+    }
+
     /// What the stage last asked of the screen.
     #[cfg(test)]
     pub fn asked_whole_screen(&self) -> Option<bool> {

@@ -154,6 +154,14 @@ fn sampler_of(track: &Track) -> Option<(String, f64)> {
     Some((file.path, device.params.get("root").copied().unwrap_or(60.0)))
 }
 
+/// Whether `project` plays any recording at all: an audio clip, or notes
+/// through the built-in sampler. Reading their outlines is only worth a
+/// thread for a song that does.
+pub fn plays_recordings(project: &Project) -> bool {
+    let heard = project.tracks.iter().filter(|track| track.kind == TrackKind::Normal && !track.mute);
+    heard.into_iter().any(|track| track.clips.iter().any(|clip| clip.audio().is_some()) || sampler_of(track).is_some())
+}
+
 /// The outlines of the files a song plays, read once each.
 #[derive(Default)]
 pub struct Waves {

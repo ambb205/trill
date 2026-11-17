@@ -7,12 +7,17 @@
 //! What is painted, and when, is tested without a card in the crate itself.
 
 use std::path::Path;
+use std::sync::Arc;
+use trill_core::journal::{Author, Journal, Outcome, Who};
+use trill_core::project::AudioContent;
 use trill_core::{InstrumentProfile, Note, Project, Role, TrackId};
 use trill_noir::Theme;
 use trill_stage::director::{Entry, Kind, Plan, Shot, Take};
 use trill_stage::film::{Filmer, Progress, Shoot};
 use trill_stage::gpu::{Gpu, Quality, Renderer};
+use trill_stage::making::Making;
 use trill_stage::scene::Layout;
+use trill_stage::voice::{Wave, voiced};
 use trill_stage::{Format, Heard, Look, Score, Song, Sound, Stage};
 
 /// Sixteen bars: a kick on every beat, a line of eighths, two sections.
@@ -195,6 +200,110 @@ fn a_frame_is_the_same_frame_whenever_it_is_drawn() {
     let next = filmer.frame(&song, &sound, 9.25 + 1.0 / 60.0, &shoot).unwrap().to_vec();
     let differing = first.iter().zip(&next).filter(|(a, b)| a != b).count();
     assert!(differing > first.len() / 8, "{differing} of {} bytes", first.len());
+}
+
+#[test]
+#[ignore = "needs a graphics card: cargo test -p trill-stage --test drawn -- --ignored"]
+fn a_recording_is_drawn_as_its_waveform_and_is_lit_where_the_playhead_has_just_been() {
+    let mut project = Project::new("Sung");
+    let voice = project.add_track("Voice");
+    project.add_audio_clip(voice, "take", 0.0, 64.0, AudioContent::new("take.wav")).unwrap();
+    // The take as it was read: thirty-two seconds of a loud tone.
+    let samples: Vec<f32> = (0..32 * 8000).map(|frame| (frame as f32 * 0.3).sin() * 0.8).collect();
+    let wave = Arc::new(Wave::of(&samples, &samples, 8000.0));
+    let take = |score: Score| {
+        let shot = Shot { kind: Kind::Wide, rolls: Vec::new(), window: (32.0, 32.0), roll_share: 0.0 };
+        let plan = Plan { takes: vec![Take { start: 0.0, end: score.length, section: 0, shot, entry: Entry::Cut }] };
+        Song { score, plan }
+    };
+    let bare = take(Score::read(&project));
+    let sung = take(Score::read(&project).with_voices(voiced(&project, |_| Some(wave.clone()))));
+    let (mut stage, mut renderer) = on_a_card();
+    let without = draw(&mut stage, &mut renderer, &bare, 20.0, Look::plain());
+    let plain = draw(&mut stage, &mut renderer, &sung, 20.0, Look::plain());
+    let lit_up = draw(&mut stage, &mut renderer, &sung, 20.0, lit(1.6, 0.0, 0.0));
+
+    let camera = sung.camera(20.0, Format::HD);
+    let layout = Layout::of(Format::HD.points(), camera.roll_share);
+    let (axis, scale) = (layout.axis(), Format::HD.pixels_per_point());
+    let playhead = ((axis.min + camera.across(camera.beat) as f32 * axis.span()) * scale).round() as u32;
+    let rows = (layout.lanes.top() * scale) as u32..(layout.lanes.bottom() * scale) as u32;
+    let count = |columns: std::ops::Range<u32>, differs: &dyn Fn(u32, u32) -> bool| -> u32 {
+        columns.flat_map(|x| rows.clone().map(move |y| (x, y))).map(|(x, y)| u32::from(differs(x, y))).sum()
+    };
+    // The outline is in the clip: it is not the flat block it is without one.
+    let outlined = count(playhead - 300..playhead + 300, &|x, y| plain.at(x, y) != without.at(x, y));
+    assert!(outlined > 2_000, "{outlined} pixels of waveform around the playhead");
+    // It is lit where the playhead has just been, and not where it has yet to go.
+    let brighter = |x, y| lit_up.light(x, y) > plain.light(x, y);
+    let (behind, ahead) =
+        (count(playhead - 60..playhead - 6, &brighter), count(playhead + 6..playhead + 60, &brighter));
+    assert!(behind > 300 && behind > 8 * ahead, "{behind} pixels lit behind the playhead, {ahead} ahead of it");
+}
+
+/// A session of four steps with what was asked before them and what was
+/// answered after, and the song they come to.
+fn story() -> (Journal, Project) {
+    let mut song = Project::new("Made");
+    let mut journal = Journal::begin(&song, 0);
+    let mut at = 0;
+    let mut step = |journal: &mut Journal, song: &mut Project, label: &str, change: &dyn Fn(&mut Project)| {
+        at += 20_000;
+        let before = song.clone();
+        change(song);
+        let call = journal.begin_call(Author::Assistant, "write", label);
+        journal.record(at, Who::Call(call), &before, song, None);
+        journal.end_call(at, call, Outcome::default());
+    };
+    let line = |pitch: u8| -> Vec<Note> {
+        (0..16)
+            .map(|n| Note { pitch: pitch + (n % 5) as u8, start: f64::from(n) * 0.5, length: 0.4, velocity: 100 })
+            .collect()
+    };
+    journal.say(1_000, Author::Person, "Write me a bass line and a lead.");
+    step(&mut journal, &mut song, "Added the tracks", &|song| {
+        song.add_track("Bass");
+        song.add_track("Lead");
+    });
+    let (bass, lead) = (song.tracks[0].id, song.tracks[1].id);
+    step(&mut journal, &mut song, "Wrote the bass", &|song| {
+        let clip = song.add_midi_clip(bass, "bass", 0.0, 8.0).unwrap();
+        song.clip_mut(clip).unwrap().add_notes(&line(36)).unwrap();
+    });
+    step(&mut journal, &mut song, "Wrote the lead", &|song| {
+        let clip = song.add_midi_clip(lead, "lead", 8.0, 8.0).unwrap();
+        song.clip_mut(clip).unwrap().add_notes(&line(72)).unwrap();
+    });
+    journal.say(70_000, Author::Assistant, "Done: a bass line and a lead after it.");
+    (journal, song)
+}
+
+#[test]
+#[ignore = "needs a graphics card: cargo test -p trill-stage --test drawn -- --ignored"]
+fn the_making_of_a_song_is_the_same_frame_for_the_same_moment_however_it_is_come_to() {
+    let (journal, finished) = story();
+    let mut making = Making::of(journal, &finished, &[], 4.0).unwrap();
+    let (length, shoot) = (making.length(), small());
+    let mut filmer = Filmer::new().unwrap();
+    // The card with what was asked, a step being written, the finished song at the end.
+    let moments = [making.film_time(2.0), making.film_time(41.0), length - 1.0];
+    let frames: Vec<Vec<u8>> =
+        moments.iter().map(|at| filmer.frame_of(&mut making, *at, &shoot).unwrap().to_vec()).collect();
+    assert!(frames[0] != frames[1] && frames[1] != frames[2] && frames[0] != frames[2]);
+    // Back to where it has been: the story is gone through again, to the same picture.
+    for (at, frame) in moments.iter().zip(&frames).rev() {
+        assert!(filmer.frame_of(&mut making, *at, &shoot).unwrap() == frame.as_slice(), "the frame at {at} s differs");
+    }
+    // And from scratch, on another card, straight to the middle.
+    let (journal, finished) = story();
+    let mut other = Making::of(journal, &finished, &[], 4.0).unwrap();
+    assert!(Filmer::new().unwrap().frame_of(&mut other, moments[1], &shoot).unwrap() == frames[1].as_slice());
+    // The words of the story are in the picture: while they are asked, a card over the song.
+    let (journal, finished) = story();
+    let unspoken = Journal::from_text(&journal.to_text(false)).unwrap();
+    let mut unspoken = Making::of(unspoken, &finished, &[], 4.0).unwrap();
+    let bare = filmer.frame_of(&mut unspoken, moments[0], &shoot).unwrap();
+    assert!(bare != frames[0].as_slice(), "what was asked has a place in the frame");
 }
 
 /// Half a second of sound at 8 kHz, as a file.

@@ -25,11 +25,14 @@ use super::snapshot::{Live, MeterState, Snapshot};
 use super::units::METER_FLOOR_DB;
 use eframe::egui::{self, Align2, Color32, Id, LayerId, Order, Rect, Role, Sense, Ui, WidgetInfo, pos2, vec2};
 use eframe::egui_wgpu::{self, wgpu};
-use std::sync::mpsc;
+use parking_lot::Mutex;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
+use trill_core::TrackId;
 use trill_noir::{Theme, fade, text};
 use trill_stage::gpu::{Gpu, Quality, Renderer};
 use trill_stage::scene::{self, Canvas, Moment};
+use trill_stage::voice::{self, Voiced, Waves};
 use trill_stage::{Format, Heard, Look, Score, Song, Stage};
 
 /// How long the words that say how to leave stay up after the stage is
@@ -134,6 +137,10 @@ enum Drawing {
     Ready(Box<Renderer>),
 }
 
+/// What each track plays of recordings, in the state of the song they
+/// were read for.
+type Recordings = (u64, Vec<(TrackId, Vec<Voiced>)>);
+
 pub struct StageView {
     /// The stage's painter, with an egui context and the kit's type of its
     /// own: made the first time the stage is drawn, so that a window that
@@ -144,6 +151,12 @@ pub struct StageView {
     theme: Theme,
     /// The song as the stage films it, and the revision it was read at.
     song: Option<(u64, Song)>,
+    /// The outlines of the recordings the song plays: read once each, on
+    /// a helper thread, and kept from one state of the song to the next.
+    waves: Arc<Mutex<Waves>>,
+    /// The recordings of a state of the song, on their way from that
+    /// thread: the song is drawn by its notes alone until they are here.
+    voices: Option<mpsc::Receiver<Recordings>>,
     drawing: Drawing,
     /// The texture the window shows, and the size it was registered at.
     shown: Option<(egui::TextureId, [u32; 2])>,
@@ -163,6 +176,8 @@ impl StageView {
             stage: None,
             theme: Theme::noir(),
             song: None,
+            waves: Arc::default(),
+            voices: None,
             drawing: Drawing::NotYet,
             shown: None,
             clock: Clock::default(),
@@ -181,8 +196,60 @@ impl StageView {
             // not: which of them are drum instruments.
             let score = Score::of(&snapshot.project, |track| snapshot.has_drum_instrument(track.id));
             self.song = Some((snapshot.revision, Song::from(score)));
+            self.read_recordings(snapshot);
         }
+        self.take_recordings();
         &self.song.as_ref().expect("read just above").1
+    }
+
+    /// Has the recordings the song plays read, for their waveforms: files
+    /// are decoded for that, so on a helper thread. The song is on the
+    /// stage at once, and its waveforms join it.
+    fn read_recordings(&mut self, snapshot: &Snapshot) {
+        self.voices = None;
+        if !voice::plays_recordings(&snapshot.project) {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let (project, revision, waves) = (snapshot.project.clone(), snapshot.revision, self.waves.clone());
+        std::thread::spawn(move || {
+            // One at a time: a second state of the song waits for the
+            // first to have read what both play.
+            let voiced = waves.lock().voiced(&project);
+            // Nobody listens once the song has changed again.
+            let _ = sender.send((revision, voiced));
+        });
+        self.voices = Some(receiver);
+    }
+
+    /// Puts the recordings on the stage once they are read, if the song
+    /// is still the one they were read for.
+    fn take_recordings(&mut self) {
+        let Some(receiver) = &self.voices else { return };
+        match receiver.try_recv() {
+            Ok((revision, voiced)) => {
+                self.voices = None;
+                if let Some((at, song)) = self.song.take() {
+                    let song =
+                        if at == revision { Song { score: song.score.with_voices(voiced), ..song } } else { song };
+                    self.song = Some((at, song));
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => self.voices = None,
+        }
+    }
+
+    /// Whether the song's recordings are still being read.
+    #[cfg(test)]
+    pub fn is_reading(&self) -> bool {
+        self.voices.is_some()
+    }
+
+    /// How many stretches of recordings the stage shows.
+    #[cfg(test)]
+    pub fn recordings(&self) -> usize {
+        self.song.as_ref().map_or(0, |(_, song)| song.score.parts.iter().map(|part| part.voiced.len()).sum())
     }
 
     /// What is heard now, from the meters.
