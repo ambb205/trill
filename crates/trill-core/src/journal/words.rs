@@ -39,6 +39,7 @@ fn automated(target: &AutomationTarget, project: &Project) -> String {
             let device = project.device(*device).map_or_else(|_| "a device".to_owned(), |device| quoted(&device.name));
             format!("{param} of {device}")
         }
+        AutomationTarget::Send { track: id, to } => format!("the send of {} to {}", track(*id), track(*to)),
     }
 }
 
@@ -259,6 +260,11 @@ pub fn describe(before: &Project, after: &Project, change: &Change) -> String {
                 let what = automated(&lane.target, after);
                 let was = before.automation.iter().find(|was| was.target == lane.target);
                 said.push(match was {
+                    // The same points along another travel are another curve.
+                    Some(was) if was.points == lane.points && was.enabled == lane.enabled => match lane.travel {
+                        crate::Travel::Linear => format!("Made the automation of {what} go straight in its units"),
+                        _ => format!("Made the automation of {what} follow its control"),
+                    },
                     Some(was) if was.points == lane.points && lane.enabled => {
                         format!("Switched on the automation of {what}")
                     }
@@ -277,6 +283,9 @@ pub fn describe(before: &Project, after: &Project, change: &Change) -> String {
                             }
                             AutomationTarget::DeviceParam { device, .. } => after.device(*device).is_ok(),
                             AutomationTarget::MasterVolume => true,
+                            AutomationTarget::Send { track, to } => {
+                                after.track(*track).is_ok() && after.track(*to).is_ok()
+                            }
                         }
                 });
                 said.extend(removed.map(|was| format!("Removed the automation of {}", automated(&was.target, before))));
@@ -467,6 +476,31 @@ mod tests {
         assert_eq!(
             words(&automated, |p| p.set_automation_enabled(&volume, false).unwrap()),
             "Switched off the automation of the volume of \u{201C}Lead\u{201D}"
+        );
+        // The same points along another travel are another curve.
+        assert_eq!(
+            words(&automated, |p| p.set_automation_travel(&volume, crate::Travel::Linear).unwrap()),
+            "Made the automation of the volume of \u{201C}Lead\u{201D} go straight in its units"
+        );
+        let mut straight = automated.clone();
+        straight.set_automation_travel(&volume, crate::Travel::Linear).unwrap();
+        assert_eq!(
+            words(&straight, |p| p.set_automation_travel(&volume, crate::Travel::FADER).unwrap()),
+            "Made the automation of the volume of \u{201C}Lead\u{201D} follow its control"
+        );
+        // A send that is opened by its envelope, and the envelope taken away.
+        let mut with_return = project.clone();
+        let echo = with_return.add_track_of_kind("Echo", crate::TrackKind::Return);
+        let throw = AutomationTarget::Send { track: lead, to: echo };
+        assert_eq!(
+            words(&with_return, |p| p.set_automation(throw.clone(), vec![AutomationPoint::new(0.0, -6.0)]).unwrap()),
+            "Automated the send of \u{201C}Lead\u{201D} to \u{201C}Echo\u{201D}"
+        );
+        let mut thrown = with_return.clone();
+        thrown.set_automation(throw.clone(), vec![AutomationPoint::new(0.0, -6.0)]).unwrap();
+        assert_eq!(
+            words(&thrown, |p| p.set_automation(throw.clone(), Vec::new()).unwrap()),
+            "Removed the automation of the send of \u{201C}Lead\u{201D} to \u{201C}Echo\u{201D}"
         );
         assert_eq!(words(p, |p| p.set_tempo(96.0).unwrap()), "Set the tempo to 96 BPM");
         assert_eq!(words(p, |p| p.name = "Night".into()), "Renamed the project to \u{201C}Night\u{201D}");

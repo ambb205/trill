@@ -4,6 +4,7 @@
 //! Numbers are set as the design asks: a real minus sign (U+2212), never a
 //! negative zero, and a space between a value and its unit.
 
+use trill_core::Travel;
 use trill_core::device::{ParamInfo, ParamKind};
 use trill_core::project::{MAX_VOLUME_DB, MIN_VOLUME_DB};
 use trill_noir::format::{fmt_val, fmt_val_signed, typeset};
@@ -20,19 +21,20 @@ pub fn gain_to_db(gain: f32) -> f32 {
 /// Fader travel, 0 (bottom) to 1 (top), for a volume in dB. Also where a
 /// level in dBFS sits on a meter.
 ///
-/// Travel is quadratic in dB, so the range around unity where mixing happens
-/// gets most of the fader and the last stretch drops off quickly: 0 dB sits
-/// at 85%, -12 dB at 58%, -48 dB at 8%.
+/// It is the travel automation follows ([`Travel::FADER`]), so a line
+/// between two points of a volume's envelope is a straight line in its
+/// lane. Travel is quadratic in dB, so the range around unity where mixing
+/// happens gets most of the fader and the last stretch drops off quickly:
+/// 0 dB sits at 85%, -12 dB at 58%, -48 dB at 8%.
 pub fn db_to_fader(db: f32) -> f32 {
-    let span = MAX_VOLUME_DB - MIN_VOLUME_DB;
-    let linear = ((db - MIN_VOLUME_DB) / span).clamp(0.0, 1.0);
-    linear * linear
+    // Not a number is silence, as far as a meter is concerned.
+    let db = if db.is_nan() { MIN_VOLUME_DB } else { db };
+    Travel::FADER.position(db as f64, MIN_VOLUME_DB as f64, MAX_VOLUME_DB as f64) as f32
 }
 
 /// Inverse of [`db_to_fader`].
 pub fn fader_to_db(position: f32) -> f32 {
-    let span = MAX_VOLUME_DB - MIN_VOLUME_DB;
-    MIN_VOLUME_DB + position.clamp(0.0, 1.0).sqrt() * span
+    Travel::FADER.value_at(position as f64, MIN_VOLUME_DB as f64, MAX_VOLUME_DB as f64) as f32
 }
 
 /// `"\u{2212}6.0 dB"`, `"+1.5 dB"`, `"0.0 dB"`, and `"\u{2212}\u{221E} dB"` at the bottom of
@@ -60,45 +62,27 @@ pub fn format_pan(pan: f32) -> String {
     }
 }
 
-/// How a parameter's range maps onto slider travel.
+/// How a parameter's range maps onto slider travel: by the travel of its
+/// control ([`Travel::of_param`]), which is also what a line of its
+/// automation is straight along. A frequency or a time moves by ratio, a
+/// level that reaches silence as a fader does, the rest evenly.
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub enum ParamScale {
-    Linear,
-    /// For ranges spanning orders of magnitude (frequencies, times), where
-    /// equal ratios should feel like equal distances.
-    Logarithmic,
-}
+pub struct ParamScale(pub Travel);
 
 impl ParamScale {
-    /// Picks the scale for a parameter: logarithmic when a positive float
-    /// range spans at least two orders of magnitude.
     pub fn of(info: &ParamInfo) -> Self {
-        let wide = info.min > 0.0 && info.max / info.min >= 100.0;
-        if info.kind == ParamKind::Float && wide { ParamScale::Logarithmic } else { ParamScale::Linear }
+        Self(Travel::of_param(info))
     }
 
     /// Slider position 0..=1 for `value`.
     pub fn normalize(self, info: &ParamInfo, value: f64) -> f64 {
-        let value = value.clamp(info.min, info.max);
-        let span = info.max - info.min;
-        if span <= 0.0 {
-            return 0.0;
-        }
-        match self {
-            ParamScale::Linear => (value - info.min) / span,
-            ParamScale::Logarithmic => (value / info.min).ln() / (info.max / info.min).ln(),
-        }
+        self.0.position(value, info.min, info.max)
     }
 
     /// Parameter value at slider position `position` (0..=1), clamped and,
     /// for integer-like kinds, rounded.
     pub fn denormalize(self, info: &ParamInfo, position: f64) -> f64 {
-        let position = position.clamp(0.0, 1.0);
-        let value = match self {
-            ParamScale::Linear => info.min + position * (info.max - info.min),
-            ParamScale::Logarithmic => info.min * (info.max / info.min).powf(position),
-        };
-        info.clamp(value)
+        info.clamp(self.0.value_at(position, info.min, info.max))
     }
 }
 
@@ -217,7 +201,7 @@ mod tests {
     fn frequency_ranges_are_logarithmic() {
         let cutoff = param(20.0, 20_000.0, "Hz", ParamKind::Float);
         let scale = ParamScale::of(&cutoff);
-        assert_eq!(scale, ParamScale::Logarithmic);
+        assert_eq!(scale, ParamScale(Travel::Log));
         assert_eq!(scale.normalize(&cutoff, 20.0), 0.0);
         assert!((scale.normalize(&cutoff, 20_000.0) - 1.0).abs() < 1e-12);
         // The geometric middle of 20 Hz..20 kHz is about 632 Hz.
@@ -231,18 +215,37 @@ mod tests {
 
     #[test]
     fn other_ranges_are_linear() {
+        let linear = ParamScale(Travel::Linear);
         let mix = param(0.0, 1.0, "", ParamKind::Float);
-        assert_eq!(ParamScale::of(&mix), ParamScale::Linear);
+        assert_eq!(ParamScale::of(&mix), linear);
         let bipolar = param(-8.0, 8.0, "oct", ParamKind::Float);
-        assert_eq!(ParamScale::of(&bipolar), ParamScale::Linear);
-        assert_eq!(ParamScale::Linear.normalize(&bipolar, 0.0), 0.5);
-        assert_eq!(ParamScale::Linear.denormalize(&bipolar, 0.75), 4.0);
+        assert_eq!(ParamScale::of(&bipolar), linear);
+        assert_eq!(linear.normalize(&bipolar, 0.0), 0.5);
+        assert_eq!(linear.denormalize(&bipolar, 0.75), 4.0);
         // Integers are never logarithmic and always land on whole numbers.
         let unison = param(1.0, 7.0, "", ParamKind::Int);
-        assert_eq!(ParamScale::of(&unison), ParamScale::Linear);
-        assert_eq!(ParamScale::Linear.denormalize(&unison, 0.4), 3.0);
+        assert_eq!(ParamScale::of(&unison), linear);
+        assert_eq!(linear.denormalize(&unison, 0.4), 3.0);
         let degenerate = param(1.0, 1.0, "", ParamKind::Float);
-        assert_eq!(ParamScale::Linear.normalize(&degenerate, 1.0), 0.0);
+        assert_eq!(linear.normalize(&degenerate, 1.0), 0.0);
+    }
+
+    #[test]
+    fn a_level_that_reaches_silence_is_laid_out_as_a_fader() {
+        // A gain's knob gives the last decibels above silence little room
+        // and the range where mixing happens most of it, as a fader does.
+        let gain = param(-70.0, 24.0, "dB", ParamKind::Float);
+        let scale = ParamScale::of(&gain);
+        assert_eq!(scale, ParamScale(Travel::Fader { floor: -70.0 }));
+        assert_eq!((scale.normalize(&gain, -70.0), scale.normalize(&gain, 24.0)), (0.0, 1.0));
+        assert!(scale.normalize(&gain, -40.0) < 0.11 && scale.normalize(&gain, 0.0) > 0.5);
+        for value in [-70.0, -30.0, -6.0, 0.0, 12.0, 24.0] {
+            assert!((scale.denormalize(&gain, scale.normalize(&gain, value)) - value).abs() < 1e-9);
+        }
+        // An EQ's gain is a boost or a cut, not a level: even in decibels.
+        let boost = param(-18.0, 18.0, "dB", ParamKind::Float);
+        assert_eq!(ParamScale::of(&boost), ParamScale(Travel::Linear));
+        assert_eq!(ParamScale::of(&boost).normalize(&boost, 0.0), 0.5);
     }
 
     #[test]

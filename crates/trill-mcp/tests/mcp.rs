@@ -172,6 +172,15 @@ async fn tools_are_listed_with_schemas() {
         assert!(instructions.contains(word), "the instructions should mention {word}");
     }
     assert!(schema_of("update_track").contains("armed") && schema_of("transport").contains("count_in_bars"));
+    // Automation: what can be moved, how a line travels, and how to read a long envelope.
+    let automation = tools.iter().find(|tool| tool.name == "set_automation").unwrap();
+    let described = automation.description.clone().unwrap_or_default();
+    for word in ["send", "fader", "-20 dB half way", "1.6 kHz", "by ratio", "throw"] {
+        assert!(described.contains(word), "set_automation should say '{word}': {described}");
+    }
+    assert!(schema_of("set_automation").contains("\"send\"") && schema_of("set_automation").contains("travel"));
+    assert!(schema_of("get_automation").contains("offset") && schema_of("get_automation").contains("limit"));
+    assert!(instructions.contains("throw") && instructions.contains("control's travel"), "{instructions}");
     // And how the song was made: the journal, and the song as it was.
     for word in ["get_journal", "get_song_at", "takes nothing out of the journal", "never in the project file"] {
         assert!(instructions.contains(word), "the instructions should mention {word}");
@@ -1259,6 +1268,248 @@ async fn automation_is_switched_off_and_on_without_losing_it() {
     let error = call(client, "set_automation", json!({ "target": pan, "enabled": false })).await.unwrap_err();
     assert!(error.contains("no automation for that target"), "{error}");
     assert_eq!(ok(client, "set_automation", json!({ "target": target, "points": [] })).await["cleared"], true);
+}
+
+/// A track that plays a steady tone, struck again on every beat for
+/// `beats` beats, and a return for it to send to.
+async fn lead_and_return(client: &Client, beats: usize) -> (u64, u64) {
+    let lead = ok(client, "create_track", json!({ "name": "Lead", "instrument": "builtin:polysynth" })).await;
+    let synth = lead["instrument_device_id"].clone();
+    let lead = lead["track_id"].as_u64().unwrap();
+    // A sine at one level from a millisecond after each note begins.
+    let steady = json!({ "osc1_wave": 0, "attack": 0.001, "sustain": 1, "release": 0.01 });
+    ok(client, "update_device", json!({ "device": synth, "params": steady })).await;
+    let echo =
+        ok(client, "create_track", json!({ "name": "Echo", "kind": "return" })).await["track_id"].as_u64().unwrap();
+    let notes: Vec<Value> = (0..beats).map(|beat| json!([69, beat, 1])).collect();
+    ok(client, "create_clip", json!({ "track": lead, "start": 0, "length": beats, "notes": notes })).await;
+    (lead, echo)
+}
+
+/// The peak of `track` in dB over a stretch of the song that starts on a
+/// beat (a measurement plays the notes that begin in it); `None` where the
+/// track is silent.
+async fn peak_of(client: &Client, track: u64, start: f64, end: f64) -> Option<f64> {
+    let asked = json!({ "start": start, "end": end, "sections": [], "max_tail_seconds": 0 });
+    let report = ok(client, "measure", asked).await;
+    let tracks = report["tracks"].as_array().unwrap();
+    let entry = tracks.iter().find(|entry| entry["track"] == track)?;
+    entry["peak_db"].as_f64().filter(|db| *db > -100.0)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_is_opened_for_one_note_by_its_envelope() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let (lead, echo) = lead_and_return(client, 16).await;
+    assert_eq!(peak_of(client, echo, 0.0, 16.0).await, None, "nothing is sent yet");
+
+    // Shut, opened over two beats, open for two, shut again. No send is
+    // set by hand: the envelope is the send.
+    let throw = json!({ "type": "send", "track": lead, "to": echo });
+    let points = json!([[0, -70], [8, -70], [10, -6], [12, -6], [13, -70]]);
+    let written = ok(client, "set_automation", json!({ "target": throw, "points": points })).await;
+    assert_eq!(
+        (&written["point_count"], &written["enabled"], &written["travel"]),
+        (&json!(5), &json!(true), &json!("fader"))
+    );
+
+    // The song says so where a model reads about the track and its mix.
+    let project = ok(client, "get_project", json!({})).await;
+    assert_eq!(project["tracks"][0]["sends"], json!([{ "to": echo, "automated": true }]), "{project}");
+    assert_eq!(project["automation"][0]["target"], throw);
+    let lanes = ok(client, "get_automation", json!({ "target": throw })).await;
+    assert_eq!(lanes["automation"][0]["travel"], "fader");
+    assert_eq!(lanes["automation"][0]["points"][2], json!([10.0, -6.0]));
+
+    // And it is heard: nothing before the throw, the track 6 dB down
+    // while it is open, nothing after.
+    let level = peak_of(client, lead, 10.0, 11.0).await.expect("the lead sounds");
+    assert_eq!(peak_of(client, echo, 0.0, 7.9).await, None, "shut is silent");
+    let open = peak_of(client, echo, 10.0, 11.0).await.expect("the return is fed while the send is open");
+    assert!((open - (level - 6.0)).abs() < 0.3, "{open} for {level}");
+    assert_eq!(peak_of(client, echo, 14.0, 16.0).await, None, "and shut again");
+    // On the way up it is where a fader would be: about 20 dB down by six
+    // tenths of the way, where a line straight in decibels would be 32 down.
+    let rising = peak_of(client, echo, 9.0, 9.2).await.expect("it is opening");
+    assert!((level - 22.5..level - 19.0).contains(&rising), "{rising} for {level}");
+
+    // A level set by hand lives beside it, and counts once the envelope is off.
+    let by_hand = ok(client, "update_track", json!({ "track": lead, "send": { "to": echo, "level_db": -12 } })).await;
+    assert_eq!(by_hand["sends"], json!([{ "to": echo, "level_db": -12.0, "automated": true }]));
+    ok(client, "set_automation", json!({ "target": throw, "enabled": false })).await;
+    let held = ok(client, "get_project", json!({})).await;
+    assert_eq!(held["tracks"][0]["sends"], json!([{ "to": echo, "level_db": -12.0, "automation_off": true }]));
+    let steady = peak_of(client, echo, 2.0, 3.0).await.expect("the send set by hand is heard");
+    assert!((steady - (level - 12.0)).abs() < 0.3, "{steady} for {level}");
+
+    // What cannot be a send says which tracks could be.
+    let error =
+        call(client, "set_automation", json!({ "target": { "type": "send", "track": lead }, "points": points }))
+            .await
+            .unwrap_err();
+    assert!(error.contains("`to`"), "{error}");
+    let wrong = json!({ "type": "send", "track": lead, "to": lead });
+    let error = call(client, "set_automation", json!({ "target": wrong, "points": points })).await.unwrap_err();
+    assert!(error.contains("not a return track") && error.contains(&format!("{echo} (Echo)")), "{error}");
+    let back = json!({ "type": "send", "track": echo, "to": echo });
+    let error = call(client, "set_automation", json!({ "target": back, "points": points })).await.unwrap_err();
+    assert!(error.contains("returns cannot send to returns"), "{error}");
+    let missing = json!({ "type": "send", "track": 999, "to": echo });
+    let error = call(client, "set_automation", json!({ "target": missing, "points": points })).await.unwrap_err();
+    assert!(error.contains("Existing tracks"), "{error}");
+    let loud = json!({ "target": throw, "points": [[0, 12]] });
+    let error = call(client, "set_automation", loud).await.unwrap_err();
+    assert!(error.contains("at most 6"), "{error}");
+
+    // The envelope goes with the return it feeds, and undo brings both back.
+    ok(client, "delete_track", json!({ "track": echo })).await;
+    assert_eq!(ok(client, "get_automation", json!({})).await["automation"], json!([]));
+    ok(client, "history", json!({ "action": "undo" })).await;
+    assert_eq!(ok(client, "get_automation", json!({})).await["automation"][0]["point_count"], 5);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_line_follows_the_travel_of_its_control_and_an_old_file_plays_as_it_did() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let (lead, _) = lead_and_return(client, 16).await;
+    let filter = ok(client, "add_device", json!({ "track": lead, "uri": "builtin:filter" })).await["device_id"].clone();
+    let utility =
+        ok(client, "add_device", json!({ "track": lead, "uri": "builtin:utility" })).await["device_id"].clone();
+    let eq = ok(client, "add_device", json!({ "track": lead, "uri": "builtin:eq" })).await["device_id"].clone();
+    let travel_of = |reply: Value| reply["travel"].as_str().unwrap().to_string();
+    let write = |target: Value, points: Value| async move {
+        travel_of(ok(client, "set_automation", json!({ "target": target, "points": points })).await)
+    };
+
+    // Each kind of control says how its lines go.
+    let volume = json!({ "type": "track_volume", "track": lead });
+    let fade = json!([[0, 0], [16, -60]]);
+    assert_eq!(write(volume.clone(), fade.clone()).await, "fader");
+    assert_eq!(write(json!({ "type": "master_volume" }), json!([[0, 0], [16, 0]])).await, "fader");
+    assert_eq!(write(json!({ "type": "track_pan", "track": lead }), json!([[0, 0], [16, 0]])).await, "linear");
+    let cutoff = json!({ "type": "device_param", "device": filter, "param": "cutoff" });
+    assert_eq!(write(cutoff.clone(), json!([[0, 20000], [16, 20000]])).await, "log");
+    let gain = json!({ "type": "device_param", "device": utility, "param": "gain" });
+    assert_eq!(write(gain, json!([[0, 0], [16, 0]])).await, "fader");
+    let boost = json!({ "type": "device_param", "device": eq, "param": "mid1_gain" });
+    assert_eq!(write(boost, json!([[0, 0], [16, 0]])).await, "linear");
+
+    // A fade along the fader is at -20 dB half way...
+    let full = peak_of(client, lead, 0.0, 0.2).await.expect("the lead sounds");
+    let half_way = peak_of(client, lead, 8.0, 8.1).await.expect("the fade is still heard half way");
+    assert!((half_way - (full - 20.0)).abs() < 0.6, "{half_way} for {full}");
+    // ...and straight in decibels, when that is asked for, at -30 dB.
+    let straight = ok(client, "set_automation", json!({ "target": volume, "travel": "linear" })).await;
+    assert_eq!((straight["travel"].as_str(), straight["point_count"].as_u64()), (Some("linear"), Some(2)));
+    let in_db = peak_of(client, lead, 8.0, 8.1).await.expect("heard");
+    assert!((in_db - (full - 30.0)).abs() < 0.6, "{in_db} for {full}");
+    let lanes = ok(client, "get_automation", json!({ "target": volume })).await;
+    assert_eq!(
+        (&lanes["automation"][0]["travel"], &lanes["automation"][0]["points"]),
+        (&json!("linear"), &json!([[0.0, 0.0], [16.0, -60.0]]))
+    );
+
+    // A file as an earlier version saved it says nothing of travel: it
+    // opens, and its fade is the one it had.
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("before.trill");
+    ok(client, "save_project", json!({ "path": path.display().to_string() })).await;
+    let mut saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved["format_version"], 3, "this version's file says which it is");
+    let said: Vec<bool> =
+        saved["automation"].as_array().unwrap().iter().map(|lane| lane.get("travel").is_some()).collect();
+    assert_eq!(said, [false, true, false, true, true, false], "a lane straight in its units says nothing");
+    saved["format_version"] = json!(1);
+    for lane in saved["automation"].as_array_mut().unwrap() {
+        lane.as_object_mut().unwrap().remove("travel");
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&saved).unwrap()).unwrap();
+    ok(client, "load_project", json!({ "path": path.display().to_string() })).await;
+    let lanes = ok(client, "get_automation", json!({})).await;
+    let travels: Vec<&str> =
+        lanes["automation"].as_array().unwrap().iter().map(|lane| lane["travel"].as_str().unwrap()).collect();
+    assert_eq!(travels, ["linear"; 6], "every lane of an old file is straight in its units");
+    let then = peak_of(client, lead, 8.0, 8.1).await.expect("heard");
+    assert!((then - in_db).abs() < 0.01, "{then} against {in_db}");
+    // Written again, an envelope is written as it is described now.
+    assert_eq!(write(volume.clone(), fade).await, "fader");
+    // And one whose travel is set back to its control's follows it again.
+    let again = ok(client, "set_automation", json!({ "target": cutoff, "travel": "control" })).await;
+    assert_eq!(again["travel"], "log");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_envelope_of_thousands_of_points_is_written_at_once_and_read_in_parts() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let (lead, echo) = lead_and_return(client, 64).await;
+    let pan = json!({ "type": "track_pan", "track": lead });
+    ok(client, "set_automation", json!({ "target": pan, "points": [[0, -1], [64, 1]] })).await;
+    // As a compressor drawn on paper leaves a lane: 7,332 points.
+    let count = 7_332usize;
+    let points: Vec<Value> = (0..count)
+        .map(|index| {
+            let beat = index as f64 * 64.0 / count as f64;
+            json!([beat, -12.0 * (-(beat.fract()) * 6.0).exp()])
+        })
+        .collect();
+    let duck = json!({ "type": "send", "track": lead, "to": echo });
+    let written = ok(client, "set_automation", json!({ "target": duck, "points": points })).await;
+    assert_eq!(written["point_count"], count);
+
+    // The song's overview counts them and lists none.
+    let project = ok(client, "get_project", json!({})).await;
+    assert_eq!(project["automation"][1]["point_count"], count);
+    assert!(project["automation"][1].get("points").is_none());
+
+    // One reply lists a thousand, says how many there are and how to go on.
+    let first = ok(client, "get_automation", json!({})).await;
+    assert!(first.to_string().len() < 40_000, "a reply of {} characters", first.to_string().len());
+    let lanes = first["automation"].as_array().unwrap();
+    assert_eq!(lanes[0]["points"].as_array().unwrap().len(), 2);
+    assert_eq!(lanes[1]["points"].as_array().unwrap().len(), 998);
+    assert_eq!((&lanes[1]["next_offset"], &lanes[1]["point_count"]), (&json!(998), &json!(count)));
+    assert_eq!((&first["points_listed"], &first["points_in_all"]), (&json!(1000), &json!(count + 2)));
+    assert!(first["note"].as_str().unwrap().contains("next_offset"), "{}", first["note"]);
+
+    // Reading on, part by part, gives every point once and in order.
+    let mut read: Vec<Value> = lanes[1]["points"].as_array().unwrap().clone();
+    let mut offset = 998;
+    loop {
+        let part = ok(client, "get_automation", json!({ "target": duck, "offset": offset, "limit": 5000 })).await;
+        let lane = &part["automation"][0];
+        read.extend(lane["points"].as_array().unwrap().iter().cloned());
+        match lane["next_offset"].as_u64() {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
+    assert_eq!(read.len(), count);
+    assert!(read.windows(2).all(|pair| pair[0][0].as_f64() < pair[1][0].as_f64()));
+    assert_eq!(read[count - 1][0].as_f64(), Some(((count - 1) as f64 * 64.0 / count as f64 * 1e4).round() / 1e4));
+
+    // A stretch of beats of one envelope.
+    let bar = ok(client, "get_automation", json!({ "target": duck, "start": 4, "end": 5 })).await;
+    let points = bar["automation"][0]["points"].as_array().unwrap();
+    assert!((112..=116).contains(&points.len()), "{}", points.len());
+    assert!(points.iter().all(|point| (4.0..5.0).contains(&point[0].as_f64().unwrap())));
+    assert!(bar.get("note").is_none() && bar["automation"][0].get("next_offset").is_none());
+
+    // What cannot be read says why.
+    let error = call(client, "get_automation", json!({ "offset": 10 })).await.unwrap_err();
+    assert!(error.contains("`target`"), "{error}");
+    let nothing = ok(client, "get_automation", json!({ "target": { "type": "master_volume" } })).await;
+    assert_eq!(nothing["automation"], json!([]));
+    assert!(nothing["note"].as_str().unwrap().contains("nothing automates"));
+
+    // And it is saved and opened as it is.
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("many.trill");
+    ok(client, "save_project", json!({ "path": path.display().to_string() })).await;
+    ok(client, "load_project", json!({ "path": path.display().to_string() })).await;
+    assert_eq!(ok(client, "get_project", json!({})).await["automation"][1]["point_count"], count);
 }
 
 /// A server and a client on the assistant's guarded endpoint. Its working

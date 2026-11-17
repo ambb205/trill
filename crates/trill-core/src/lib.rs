@@ -19,6 +19,7 @@ pub mod presets;
 pub mod project;
 pub mod time;
 mod time_ops;
+pub mod travel;
 
 pub use controllers::{ControllerCurve, ControllerKind, ControllerLane};
 pub use files::{DeviceFiles, FilePlace, FileTable, FileUse, FolderMove, KnownFile, Relink};
@@ -30,3 +31,4 @@ pub use project::{
 };
 pub use time::{Beats, TimeSignature};
 pub use time_ops::{PasteMode, TimeExcerpt};
+pub use travel::Travel;

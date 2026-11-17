@@ -863,7 +863,8 @@ mod tests {
         // The song in the file is the song, in the place it always was:
         // whoever reads only the song reads it as before.
         assert_eq!(Project::from_json(&text), Ok(project.clone()));
-        assert!(text.starts_with("{\n  \"format_version\": 2,\n  \"name\": \"Song\""), "{}", &text[..60]);
+        let begins = format!("{{\n  \"format_version\": {},\n  \"name\": \"Song\"", crate::project::FORMAT_VERSION);
+        assert!(text.starts_with(&begins), "{}", &text[..60]);
         assert!(text.contains("\"beside\": \"kick.wav\""));
 
         // Without a table the file is to the letter what it has always been.

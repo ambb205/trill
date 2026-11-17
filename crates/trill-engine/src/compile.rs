@@ -2,10 +2,9 @@
 //! side, never on the audio thread, so it is free to allocate and to load
 //! plugins and audio files.
 
-use crate::graph::SendNode;
 use crate::graph::{
-    AudioRegion, Bus, Chain, DeviceSlot, Graph, MAX_BLOCK, MasterNode, Meter, NoteEvent, ParamAutomation, RegionAudio,
-    TrackNode, TrackState,
+    AudioRegion, Bus, Chain, DeviceSlot, Envelope, Graph, MAX_BLOCK, MasterNode, Meter, NoteEvent, ParamAutomation,
+    RegionAudio, SendNode, TrackNode, TrackState,
 };
 use crate::ready::{LoadWatch, Plugins};
 use crate::sources::AudioSources;
@@ -239,11 +238,11 @@ impl Compiler<'_> {
                 heard: routing.heard(project, track),
                 passes: routing.passes(project, track),
                 to_output: routing.to_output(project, track),
-                volume_automation: lane_points(
+                volume_automation: envelope(
                     project,
                     |target| matches!(target, AutomationTarget::TrackVolume { track: id } if *id == track.id),
                 ),
-                pan_automation: lane_points(
+                pan_automation: envelope(
                     project,
                     |target| matches!(target, AutomationTarget::TrackPan { track: id } if *id == track.id),
                 ),
@@ -251,15 +250,7 @@ impl Compiler<'_> {
                 state: TrackState::default(),
                 input_bus: routing.bus(track.id),
                 output_bus: track.group.and_then(|group| routing.bus(group)),
-                sends: track
-                    .sends
-                    .iter()
-                    .filter_map(|send| {
-                        let open = routing.send_open(project, track, send.to);
-                        let gain = if open { db_to_gain(send.level_db) } else { 0.0 };
-                        Some(SendNode { bus: routing.bus(send.to)?, gain, last: f32::NAN })
-                    })
-                    .collect(),
+                sends: sends(project, track, &routing),
                 key_out: routing.key(track.id),
                 tap: None,
                 source: None,
@@ -272,10 +263,9 @@ impl Compiler<'_> {
         let master = MasterNode {
             chain: self.chain(&project.master.devices, project, &routing.keys, &mut problems),
             volume_db: project.master.volume_db,
-            volume_automation: lane_points(project, |target| matches!(target, AutomationTarget::MasterVolume)),
+            volume_automation: envelope(project, |target| matches!(target, AutomationTarget::MasterVolume)),
             meter: self.meters.master.clone(),
-            gain: 1.0,
-            primed: false,
+            fader: Default::default(),
             tap: None,
         };
 
@@ -292,7 +282,10 @@ impl Compiler<'_> {
         }
 
         let region = project.loop_region;
+        let moves_params =
+            !master.chain.automation.is_empty() || tracks.iter().any(|track| !track.chain.automation.is_empty());
         let graph = Graph {
+            moves_params,
             tracks,
             buses: (0..routing.bus_count()).map(|_| Bus::new()).collect(),
             keys: routing.keys.iter().map(|_| Bus::new()).collect(),
@@ -315,7 +308,7 @@ impl Compiler<'_> {
             let Some(slot) = devices.iter().position(|d| d.id == *device) else { continue };
             let Some(meta) = self.bank.devices.get(device) else { continue };
             if let Some(index) = meta.params.iter().position(|info| info.id == *param) {
-                automation.push(ParamAutomation { slot, param: index, points: lane.points.clone(), last: f64::NAN });
+                automation.push(ParamAutomation { slot, param: index, envelope: Envelope::of(lane), last: f64::NAN });
             }
         }
         Chain { devices: slots, automation }
@@ -550,7 +543,7 @@ impl Routing {
             return false;
         }
         let wanted_unheard = |group: &Track| {
-            let sends = || group.sends.iter().any(|send| self.send_open(project, group, send.to));
+            let sends = || sent_to(project, group).into_iter().any(|to| self.send_open(project, group, to));
             !self.heard(project, group) && (self.key(group.id).is_some() || sends())
         };
         self.heard(project, track)
@@ -560,7 +553,8 @@ impl Routing {
     /// Whether a track passes sound at all: on to its output, or into a
     /// send.
     fn passes(&self, project: &Project, track: &Track) -> bool {
-        self.to_output(project, track) || track.sends.iter().any(|send| self.send_open(project, track, send.to))
+        self.to_output(project, track)
+            || sent_to(project, track).into_iter().any(|to| self.send_open(project, track, to))
     }
 
     /// The tracks a render has to make and play: the ones that are heard,
@@ -601,7 +595,8 @@ impl Routing {
     }
 
     /// Who feeds whom, as mute and solo leave it: a member plays into its
-    /// group, a track into each return its sends reach, and a track is
+    /// group, a track into each return its sends reach (a send set by
+    /// hand, or one that is its envelope: [`sent_to`]), and a track is
     /// listened to by the devices of another. Whatever else comes to feed
     /// a track is one more line here, and [`Routing::needed`] makes it.
     fn feeds(&self, project: &Project) -> Vec<(TrackId, TrackId, Feed)> {
@@ -609,8 +604,8 @@ impl Routing {
         for track in &project.tracks {
             let through = track.group.filter(|_| self.to_output(project, track));
             feeds.extend(through.map(|group| (track.id, group, Feed::Sound)));
-            let open = track.sends.iter().filter(|send| self.send_open(project, track, send.to));
-            feeds.extend(open.map(|send| (track.id, send.to, Feed::Sound)));
+            let open = sent_to(project, track).into_iter().filter(|to| self.send_open(project, track, *to));
+            feeds.extend(open.map(|to| (track.id, to, Feed::Sound)));
             let keys = listened_to(&track.devices).filter(|key| self.key(*key).is_some());
             feeds.extend(keys.map(|key| (key, track.id, Feed::Key)));
         }
@@ -634,12 +629,50 @@ fn listened_to(devices: &[Device]) -> impl Iterator<Item = TrackId> + '_ {
     devices.iter().filter_map(|device| device.sidechain)
 }
 
-fn lane_points(
-    project: &Project,
-    matches: impl Fn(&AutomationTarget) -> bool,
-) -> Option<Vec<trill_core::AutomationPoint>> {
+/// The envelope that moves what `matches` picks out, if it has one.
+fn envelope(project: &Project, matches: impl Fn(&AutomationTarget) -> bool) -> Option<Envelope> {
     // A lane that is switched off is no lane to the engine.
-    project.automation.iter().find(|lane| lane.enabled && matches(&lane.target)).map(|lane| lane.points.clone())
+    project.automation.iter().find(|lane| lane.enabled && matches(&lane.target)).map(Envelope::of)
+}
+
+/// The returns `track` sends to: by a send set by hand, and by one that is
+/// its envelope alone (switched on: off, it sends nothing). Whoever asks
+/// what a track's sends reach asks this.
+fn sent_to(project: &Project, track: &Track) -> Vec<TrackId> {
+    let mut to: Vec<TrackId> = track.sends.iter().map(|send| send.to).collect();
+    for lane in project.automation.iter().filter(|lane| lane.enabled) {
+        if let AutomationTarget::Send { track: from, to: at } = lane.target
+            && from == track.id
+            && !to.contains(&at)
+        {
+            to.push(at);
+        }
+    }
+    to
+}
+
+/// What `track` sends to the returns: each send with the level it was set
+/// to by hand (nothing, for one that is its envelope alone), the envelope
+/// that moves it if it has one, and whether mute and solo leave it open.
+fn sends(project: &Project, track: &Track, routing: &Routing) -> Vec<SendNode> {
+    sent_to(project, track)
+        .into_iter()
+        .filter_map(|to| {
+            let set = track.sends.iter().find(|send| send.to == to);
+            let moved = |target: &AutomationTarget| {
+                matches!(target, AutomationTarget::Send { track: from, to: at } if *from == track.id && *at == to)
+            };
+            Some(SendNode {
+                bus: routing.bus(to)?,
+                to,
+                gain: set.map_or(0.0, |send| db_to_gain(send.level_db)),
+                automation: envelope(project, moved),
+                open: routing.send_open(project, track, to),
+                glide: Default::default(),
+                gate: Default::default(),
+            })
+        })
+        .collect()
 }
 
 /// A clip's notes as the engine plays them: absolute positions, with the
