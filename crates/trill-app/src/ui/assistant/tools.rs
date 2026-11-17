@@ -35,6 +35,22 @@ impl Wording {
 }
 
 /// A name in the quotation marks names are shown in.
+/// What a preset is called in a sentence: one that was asked for by its
+/// name, by that; one that is a file, by the file's name and not the
+/// whole way to it.
+fn preset_words(preset: &str) -> String {
+    match trill_core::presets::PresetFile::asked(preset) {
+        Some(file) => {
+            let name = file.path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+            match file.within {
+                Some(within) => format!("the preset {within} of the file {name}"),
+                None => format!("the preset file {name}"),
+            }
+        }
+        None => format!("the preset {preset}"),
+    }
+}
+
 fn quoted(name: &str) -> String {
     format!("\u{201C}{name}\u{201D}")
 }
@@ -219,7 +235,7 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
         "update_device" => {
             let device = call.device("device").unwrap_or_else(|| "a device".to_owned());
             match (call.text("preset"), call.input.get("enabled").and_then(Value::as_bool), call.has("params")) {
-                (Some(preset), _, _) => about("Setting", "Set", &format!("{device} to the preset {preset}")),
+                (Some(preset), _, _) => about("Setting", "Set", &format!("{device} to {}", preset_words(preset))),
                 (None, Some(true), false) => about("Switching on", "Switched on", &device),
                 (None, Some(false), false) => about("Bypassing", "Bypassed", &device),
                 _ => about("Adjusting", "Adjusted", &device),
@@ -486,6 +502,16 @@ mod tests {
         assert_eq!(
             did("update_device", json!({ "device": device, "preset": "warm_pad" }), p),
             "Set \u{201C}Poly Synth\u{201D} to the preset warm_pad"
+        );
+        // A preset that is a file is called by the file's name.
+        let file = std::env::temp_dir().join("packs").join("OMEGA SAW.SerumPreset").to_string_lossy().into_owned();
+        assert_eq!(
+            did("update_device", json!({ "device": device, "preset": file }), p),
+            "Set \u{201C}Poly Synth\u{201D} to the preset file OMEGA SAW.SerumPreset"
+        );
+        assert_eq!(
+            did("update_device", json!({ "device": device, "preset": "Pads/Warm Pad" }), p),
+            "Set \u{201C}Poly Synth\u{201D} to the preset Pads/Warm Pad"
         );
         assert_eq!(
             did("update_device", json!({ "device": device, "enabled": false }), p),

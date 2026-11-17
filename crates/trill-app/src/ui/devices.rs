@@ -336,8 +336,8 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
         let width = trill_noir::dropdown_width(ui, theme, shown).min(104.0);
         let rect = Rect::from_min_size(pos2(name_right - width, header.center().y - 8.0), vec2(width, 16.0));
         let response = trill_noir::dropdown(ui, theme, rect, id.with("preset"), "", shown, !device.enabled);
-        cx.hint(&response, "Presets of this device, and saving its sound as one");
-        let (mut chosen, mut save) = (None, false);
+        cx.hint(&response, "Presets of this device, saving its sound as one, and loading one from a file");
+        let (mut chosen, mut save, mut load) = (None, false, false);
         egui::Popup::menu(&response).gap(1.0).show(|ui| {
             ui.set_min_width(150.0);
             if !saved.is_empty() {
@@ -363,9 +363,14 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
             }
             let about = "Keep this sound under a name, for every song";
             save = MenuItem::new("Save preset\u{2026}").detail(about).show(ui, theme).clicked();
+            let about = "A preset that lies anywhere: one you bought, or were sent";
+            load = MenuItem::new("Load preset file\u{2026}").detail(about).show(ui, theme).clicked();
         });
         if let Some(preset) = chosen {
             cx.try_session(|session| session.apply_preset(device_id, &preset));
+        }
+        if load {
+            super::files::load_preset_file(&ui.ctx().clone(), cx, device_id);
         }
         if save {
             // The name of the saved preset it is on is the likely one to
