@@ -16,6 +16,7 @@ pub mod midi_file;
 pub mod pitch;
 pub mod presets;
 pub mod project;
+pub mod tempo;
 pub mod time;
 mod time_ops;
 pub mod travel;
@@ -27,6 +28,7 @@ pub use project::{
     AutomationLane, AutomationPoint, AutomationTarget, ChainRef, Clip, Device, EditError, LoopRegion, Marker, Master,
     Note, Project, Segment, Send, Track, TrackKind, WarpMode,
 };
+pub use tempo::{Bar, MeterChange, MeterMap, TempoChange, TempoMap};
 pub use time::{Beats, TimeSignature};
 pub use time_ops::{PasteMode, TimeExcerpt};
 pub use travel::Travel;

@@ -220,6 +220,8 @@ fn same_song(a: &Project, b: &Project) -> bool {
         name,
         tempo,
         time_signature,
+        tempo_changes,
+        meter_changes,
         loop_region,
         tracks: _,
         master,
@@ -232,6 +234,8 @@ fn same_song(a: &Project, b: &Project) -> bool {
         && *name == b.name
         && *tempo == b.tempo
         && *time_signature == b.time_signature
+        && *tempo_changes == b.tempo_changes
+        && *meter_changes == b.meter_changes
         && *loop_region == b.loop_region
         && *volume_db == b.master.volume_db
 }
@@ -243,6 +247,8 @@ fn song_of(project: &Project) -> Project {
         name,
         tempo,
         time_signature,
+        tempo_changes,
+        meter_changes,
         loop_region,
         tracks: _,
         master,
@@ -256,6 +262,8 @@ fn song_of(project: &Project) -> Project {
         name: name.clone(),
         tempo: *tempo,
         time_signature: *time_signature,
+        tempo_changes: tempo_changes.clone(),
+        meter_changes: meter_changes.clone(),
         loop_region: *loop_region,
         tracks: Vec::new(),
         master: Master { volume_db: *volume_db, devices: Vec::new() },
@@ -272,6 +280,8 @@ fn set_song(project: &mut Project, song: &Project) {
         name,
         tempo,
         time_signature,
+        tempo_changes,
+        meter_changes,
         loop_region,
         tracks: _,
         master,
@@ -284,6 +294,8 @@ fn set_song(project: &mut Project, song: &Project) {
     project.name.clone_from(name);
     project.tempo = *tempo;
     project.time_signature = *time_signature;
+    project.tempo_changes.clone_from(tempo_changes);
+    project.meter_changes.clone_from(meter_changes);
     project.loop_region = *loop_region;
     project.master.volume_db = *volume_db;
 }

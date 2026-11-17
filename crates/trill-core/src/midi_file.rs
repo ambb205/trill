@@ -3,7 +3,8 @@
 //!
 //! Only what a song needs is kept: notes with their timing in beats, the
 //! movement of controllers, the pitch wheel and channel pressure, track
-//! names, the first tempo and the first time signature. Program changes
+//! names, and the tempo and the time signature with every change of them.
+//! Program changes
 //! and key pressure are skipped, and so are the controllers that are not
 //! movements but messages: bank select, data entry, the registered and
 //! non-registered parameter numbers, and the fine halves of fourteen-bit
@@ -13,9 +14,15 @@
 //! clip holds it as a curve. Reading thins the events to breakpoints
 //! ([`controllers::thin`]); writing samples the curve at every tick and
 //! writes an event wherever its value, in the file's resolution, changes.
+//!
+//! A file's tempo only jumps. A tempo that glides is written as the jumps
+//! that keep its time: [`GLIDE_STEPS_PER_BEAT`] to a beat, each at the
+//! tempo that makes its stretch last as long as the glide does there. Read
+//! back, it is those jumps.
 
 use crate::controllers::{self, ControllerCurve, ControllerKind, GESTURE_GAP_SECONDS, THIN_TOLERANCE};
 use crate::project::Note;
+use crate::tempo::{MeterChange, MeterMap, SAME_BEAT, TempoChange, TempoMap};
 use crate::time::TimeSignature;
 use std::collections::BTreeMap;
 
@@ -25,6 +32,8 @@ const WRITE_DIVISION: u16 = 480;
 pub(crate) const TICKS_PER_BEAT: f64 = WRITE_DIVISION as f64;
 /// The tempo a file is taken to have until it says otherwise.
 const DEFAULT_TEMPO: f64 = 120.0;
+/// How many jumps a beat of a gliding tempo is written as.
+pub const GLIDE_STEPS_PER_BEAT: u32 = 8;
 /// The General MIDI drum channel (channel 10, counted from zero).
 const DRUM_CHANNEL: u8 = 9;
 
@@ -44,7 +53,20 @@ pub struct MidiFile {
     pub tempo: Option<f64>,
     /// The first time signature in the file.
     pub time_signature: Option<TimeSignature>,
+    /// Where the tempo changes after its first, in beats from the start
+    /// of the file and in their order. A file read has only jumps.
+    pub tempo_changes: Vec<TempoChange>,
+    /// Where the time signature changes after its first, likewise.
+    pub meter_changes: Vec<MeterChange>,
     pub tracks: Vec<MidiTrack>,
+}
+
+/// What a file's tracks say of its time, gathered while they are read:
+/// each tempo and each time signature with the tick it is set at.
+#[derive(Default)]
+struct Conducted {
+    tempos: Vec<(u64, f64)>,
+    signatures: Vec<(u64, TimeSignature)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -139,19 +161,63 @@ pub fn parse(bytes: &[u8]) -> Result<MidiFile, MidiFileError> {
     let ticks_per_beat = division as f64;
 
     let mut file = MidiFile::default();
+    let mut conducted = Conducted::default();
     while !reader.done() {
         let kind = reader.take(4)?;
         let length = reader.u32()? as usize;
         let chunk = reader.take(length)?;
         // Chunks of other kinds are allowed and skipped.
         if kind == b"MTrk" {
-            parse_track(chunk, ticks_per_beat, &mut file)?;
+            parse_track(chunk, ticks_per_beat, &mut file, &mut conducted)?;
         }
     }
+
+    // The first of each is what the file begins with, wherever it stands;
+    // the later ones are its changes, and of two at one moment the later
+    // one counts.
+    conducted.tempos.sort_by_key(|(tick, _)| *tick);
+    file.tempo = conducted.tempos.first().map(|(_, tempo)| *tempo);
+    for (tick, tempo) in conducted.tempos.into_iter().skip(1) {
+        let beat = tick as f64 / ticks_per_beat;
+        match file.tempo_changes.last_mut() {
+            _ if beat <= SAME_BEAT => file.tempo = Some(tempo),
+            Some(last) if beat - last.beat <= SAME_BEAT => last.tempo = tempo,
+            _ => file.tempo_changes.push(TempoChange { beat, tempo, ramp: false }),
+        }
+    }
+    conducted.signatures.sort_by_key(|(tick, _)| *tick);
+    file.time_signature = conducted.signatures.first().map(|(_, signature)| *signature);
+    for (tick, signature) in conducted.signatures.into_iter().skip(1) {
+        let beat = tick as f64 / ticks_per_beat;
+        match file.meter_changes.last_mut() {
+            _ if beat <= SAME_BEAT => file.time_signature = Some(signature),
+            Some(last) if beat - last.beat <= SAME_BEAT => last.signature = signature,
+            _ => file.meter_changes.push(MeterChange { beat, signature }),
+        }
+    }
+    // A change that says what was already so is none: a tempo that is
+    // the tempo, and a signature that is the signature where a bar of it
+    // begins anyway.
+    let mut tempo = file.tempo.unwrap_or(DEFAULT_TEMPO);
+    file.tempo_changes.retain(|change| std::mem::replace(&mut tempo, change.tempo) != change.tempo);
+    let mut said: Vec<MeterChange> = Vec::with_capacity(file.meter_changes.len());
+    for change in std::mem::take(&mut file.meter_changes) {
+        let bars = MeterMap::new(file.time_signature.unwrap_or_default(), &said);
+        let bar = bars.bar_at(change.beat);
+        if bar.signature != change.signature || (change.beat - bar.start).abs() > SAME_BEAT {
+            said.push(change);
+        }
+    }
+    file.meter_changes = said;
     Ok(file)
 }
 
-fn parse_track(chunk: &[u8], ticks_per_beat: f64, file: &mut MidiFile) -> Result<(), MidiFileError> {
+fn parse_track(
+    chunk: &[u8],
+    ticks_per_beat: f64,
+    file: &mut MidiFile,
+    conducted: &mut Conducted,
+) -> Result<(), MidiFileError> {
     let mut reader = Reader { bytes: chunk, at: 0 };
     let mut tick = 0u64;
     let mut status = 0u8;
@@ -189,19 +255,26 @@ fn parse_track(chunk: &[u8], ticks_per_beat: f64, file: &mut MidiFile) -> Result
                 let payload = reader.take(length)?;
                 match kind {
                     0x03 if name.is_empty() => name = String::from_utf8_lossy(payload).trim().to_string(),
-                    0x51 if payload.len() == 3 && file.tempo.is_none() => {
+                    0x51 if payload.len() == 3 => {
                         let micros = u32::from_be_bytes([0, payload[0], payload[1], payload[2]]);
                         if micros > 0 {
                             // The file stores whole microseconds per beat, so 132 BPM
                             // comes back as 132.000132; a thousandth of a BPM is
                             // finer than any tempo a person sets.
-                            file.tempo = Some((60_000_000_000.0 / micros as f64).round() / 1000.0);
+                            let tempo = (60_000_000_000.0 / micros as f64).round() / 1000.0;
+                            file.tempo.get_or_insert(tempo);
+                            conducted.tempos.push((tick, tempo));
                         }
                     }
-                    0x58 if payload.len() >= 2 && file.time_signature.is_none() => {
+                    0x58 if payload.len() >= 2 => {
                         let denominator = 1u32.checked_shl(payload[1] as u32).unwrap_or(0);
-                        file.time_signature =
-                            u8::try_from(denominator).ok().and_then(|d| TimeSignature::new(payload[0], d));
+                        let signature = u8::try_from(denominator).ok().and_then(|d| TimeSignature::new(payload[0], d));
+                        // One this program has no bars for is passed over:
+                        // the signature before it goes on.
+                        if let Some(signature) = signature {
+                            file.time_signature.get_or_insert(signature);
+                            conducted.signatures.push((tick, signature));
+                        }
                     }
                     0x2F => break,
                     _ => {}
@@ -369,9 +442,55 @@ fn write_chunk(out: &mut Vec<u8>, kind: &[u8; 4], body: &[u8]) {
 }
 
 fn meta(body: &mut Vec<u8>, kind: u8, payload: &[u8]) {
-    body.extend_from_slice(&[0x00, 0xFF, kind]);
+    meta_after(body, 0, kind, payload);
+}
+
+/// A meta event `delta` ticks after the event before it.
+fn meta_after(body: &mut Vec<u8>, delta: u64, kind: u8, payload: &[u8]) {
+    write_variable(body, delta.min(0x0FFF_FFFF) as u32);
+    body.extend_from_slice(&[0xFF, kind]);
     write_variable(body, payload.len() as u32);
     body.extend_from_slice(payload);
+}
+
+/// A tempo as a file says it: whole microseconds to the beat.
+fn tempo_bytes(tempo: f64) -> [u8; 3] {
+    let micros = (60_000_000.0 / tempo).round().clamp(1.0, 16_777_215.0) as u32;
+    let bytes = micros.to_be_bytes();
+    [bytes[1], bytes[2], bytes[3]]
+}
+
+/// The jumps that keep the time of a tempo that begins at `first` and has
+/// `changes`: each jump as it is, and each glide as
+/// [`GLIDE_STEPS_PER_BEAT`] jumps to the beat.
+fn tempo_jumps(first: f64, changes: &[TempoChange]) -> Vec<(u64, f64)> {
+    let to_tick = |beat: f64| (beat.max(0.0) * TICKS_PER_BEAT).round() as u64;
+    let map = TempoMap::new(first, changes);
+    let mut jumps = vec![(0u64, first)];
+    let mut from = 0.0;
+    for change in changes {
+        if change.ramp && change.beat > from {
+            let steps = ((change.beat - from) * f64::from(GLIDE_STEPS_PER_BEAT)).ceil().max(1.0) as u32;
+            let edge = |step: u32| from + (change.beat - from) * f64::from(step) / f64::from(steps);
+            for step in 0..steps {
+                // The tempo at which this stretch lasts as long as the
+                // glide does over it.
+                let (start, end) = (edge(step), edge(step + 1));
+                jumps.push((to_tick(start), (end - start) * 60.0 / map.seconds_between(start, end)));
+            }
+        }
+        jumps.push((to_tick(change.beat), change.tempo));
+        from = change.beat;
+    }
+    // Of several at one tick the last is the one a reader keeps.
+    let mut kept: Vec<(u64, f64)> = Vec::with_capacity(jumps.len());
+    for jump in jumps {
+        match kept.last_mut() {
+            Some(last) if last.0 == jump.0 => *last = jump,
+            _ => kept.push(jump),
+        }
+    }
+    kept
 }
 
 /// Writes a format 1 Standard MIDI File: a tempo track, then one track per
@@ -384,21 +503,35 @@ pub fn write(file: &MidiFile) -> Vec<u8> {
     header.extend_from_slice(&WRITE_DIVISION.to_be_bytes());
     write_chunk(&mut out, b"MThd", &header);
 
-    let mut conductor = Vec::new();
+    // The conductor: every time signature and every tempo where it takes
+    // over, a signature before a tempo where they share a tick.
+    let to_tick = |beats: f64| (beats.max(0.0) * WRITE_DIVISION as f64).round() as u64;
+    let signature_bytes = |signature: TimeSignature| {
+        // Twenty-four clocks to the click, eight thirty-seconds to the quarter.
+        [signature.numerator, signature.denominator.trailing_zeros() as u8, 24, 8]
+    };
+    let mut events: Vec<(u64, u8, Vec<u8>)> = Vec::new();
     if let Some(signature) = file.time_signature {
-        let power = signature.denominator.trailing_zeros() as u8;
-        meta(&mut conductor, 0x58, &[signature.numerator, power, 24, 8]);
+        events.push((0, 0x58, signature_bytes(signature).to_vec()));
     }
+    let changes = file.meter_changes.iter();
+    events.extend(changes.map(|change| (to_tick(change.beat), 0x58, signature_bytes(change.signature).to_vec())));
     if let Some(tempo) = file.tempo.filter(|tempo| *tempo > 0.0) {
-        let micros = (60_000_000.0 / tempo).round().clamp(1.0, 16_777_215.0) as u32;
-        meta(&mut conductor, 0x51, &micros.to_be_bytes()[1..]);
+        let jumps = tempo_jumps(tempo, &file.tempo_changes);
+        events.extend(jumps.into_iter().map(|(tick, tempo)| (tick, 0x51, tempo_bytes(tempo).to_vec())));
+    }
+    events.sort_by_key(|(tick, kind, _)| (*tick, std::cmp::Reverse(*kind)));
+    let mut conductor = Vec::new();
+    let mut last = 0u64;
+    for (tick, kind, payload) in events {
+        meta_after(&mut conductor, tick - last, kind, &payload);
+        last = tick;
     }
     meta(&mut conductor, 0x2F, &[]);
     write_chunk(&mut out, b"MTrk", &conductor);
 
     for track in &file.tracks {
         let channel = if track.drums { DRUM_CHANNEL } else { 0 };
-        let to_tick = |beats: f64| (beats.max(0.0) * WRITE_DIVISION as f64).round() as u64;
         // (tick, order within the tick, bytes, how many of them); at one
         // tick, offs go first so a repeated note is released before it is
         // struck again.
@@ -445,6 +578,8 @@ mod tests {
         let file = MidiFile {
             tempo: Some(96.0),
             time_signature: TimeSignature::new(6, 8),
+            tempo_changes: Vec::new(),
+            meter_changes: Vec::new(),
             tracks: vec![
                 MidiTrack {
                     name: "Lead".into(),
@@ -519,6 +654,82 @@ mod tests {
     }
 
     #[test]
+    fn every_tempo_and_time_signature_of_a_file_is_read_and_written() {
+        let jump = |beat: f64, tempo: f64| TempoChange { beat, tempo, ramp: false };
+        let meter = |beat: f64, numerator: u8, denominator: u8| MeterChange {
+            beat,
+            signature: TimeSignature::new(numerator, denominator).unwrap(),
+        };
+        let file = MidiFile {
+            tempo: Some(120.0),
+            time_signature: TimeSignature::new(4, 4),
+            tempo_changes: vec![jump(8.0, 140.0), jump(15.0, 96.5), jump(17.25, 120.0)],
+            meter_changes: vec![meter(8.0, 7, 8), meter(15.0, 3, 4), meter(16.0, 3, 4), meter(19.0, 4, 4)],
+            tracks: vec![MidiTrack { name: "Lead".into(), notes: vec![note(60, 0.0, 1.0, 100)], ..Default::default() }],
+        };
+        let bytes = write(&file);
+        let read = parse(&bytes).unwrap();
+        // The 3/4 said again where a bar of 3/4 would not have begun
+        // (a pickup of one beat) is kept, for a bar begins there.
+        assert_eq!(read, file);
+        assert_eq!(write(&read), bytes, "and it goes out as it came in");
+
+        // A tempo or a signature said again where it changes nothing is
+        // none, and of two at one moment the later counts.
+        let repeated = MidiFile {
+            tempo_changes: vec![
+                jump(4.0, 120.0),
+                jump(8.0, 140.0),
+                jump(12.0, 140.0),
+                jump(15.0, 96.5),
+                jump(17.25, 120.0),
+            ],
+            meter_changes: vec![
+                meter(4.0, 4, 4),
+                meter(8.0, 7, 8),
+                meter(11.5, 7, 8),
+                meter(15.0, 3, 4),
+                meter(16.0, 3, 4),
+                meter(19.0, 4, 4),
+            ],
+            ..file.clone()
+        };
+        assert_eq!(parse(&write(&repeated)).unwrap(), file);
+
+        // A tempo that glides is written as the jumps that keep its time:
+        // eight to the beat, and the song is as long as it was.
+        let gliding = MidiFile {
+            tempo_changes: vec![jump(4.0, 120.0), TempoChange { beat: 8.0, tempo: 180.0, ramp: true }],
+            meter_changes: Vec::new(),
+            ..file.clone()
+        };
+        let read = parse(&write(&gliding)).unwrap();
+        assert_eq!(read.tempo_changes.len(), 4 * GLIDE_STEPS_PER_BEAT as usize + 1, "and the tempo it arrives at");
+        assert!(read.tempo_changes.iter().all(|change| !change.ramp));
+        let (meant, kept) = (TempoMap::new(120.0, &gliding.tempo_changes), TempoMap::new(120.0, &read.tempo_changes));
+        for beat in [4.0, 5.0, 6.5, 8.0, 12.0] {
+            let apart = (meant.seconds_at(beat) - kept.seconds_at(beat)).abs();
+            assert!(apart < 2e-5, "at beat {beat} the file is {apart} s from the glide");
+        }
+        assert!((kept.tempo_at(100.0) - 180.0).abs() < 1e-9);
+
+        // A file whose first tempo comes late begins with it, and a
+        // signature there are no bars for is passed over.
+        let mut conductor = Vec::new();
+        meta_after(&mut conductor, 0, 0x58, &[4, 2, 24, 8]);
+        meta_after(&mut conductor, 960, 0x51, &tempo_bytes(90.0));
+        meta_after(&mut conductor, 960, 0x58, &[5, 5, 24, 8]);
+        meta_after(&mut conductor, 960, 0x51, &tempo_bytes(150.0));
+        meta(&mut conductor, 0x2F, &[]);
+        let mut bytes = Vec::new();
+        write_chunk(&mut bytes, b"MThd", &[0, 1, 0, 1, 1, 0xE0]);
+        write_chunk(&mut bytes, b"MTrk", &conductor);
+        let read = parse(&bytes).unwrap();
+        assert_eq!((read.tempo, &read.tempo_changes[..]), (Some(90.0), &[jump(6.0, 150.0)][..]));
+        assert_eq!((read.time_signature, read.meter_changes.len()), (TimeSignature::new(4, 4), 0));
+    }
+
+    #[test]
     fn bad_files_are_errors_not_panics() {
         assert_eq!(parse(b"RIFF....WAVE"), Err(MidiFileError::NotMidi));
         assert_eq!(parse(b""), Err(MidiFileError::NotMidi));
@@ -573,7 +784,7 @@ mod tests {
                 curve(ControllerKind::PitchBend, &[point(0.0, 0.0), point(1.0, 1.0), step(2.0, -1.0), step(2.5, 0.0)]),
             ],
         };
-        let bytes = write(&MidiFile { tempo: Some(120.0), time_signature: None, tracks: vec![written.clone()] });
+        let bytes = write(&MidiFile { tempo: Some(120.0), tracks: vec![written.clone()], ..MidiFile::default() });
         let file = parse(&bytes).unwrap();
         let read = &file.tracks[0];
         assert_eq!(read.notes, written.notes);
