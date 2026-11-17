@@ -499,7 +499,7 @@ mod tests {
     /// it can be told.
     #[test]
     fn what_a_song_of_an_older_format_is_given_are_parameters_of_these_devices() {
-        use trill_core::formats::{FORMAT_1, FORMAT_3, LEGACY, MOVED_3};
+        use trill_core::formats::{FORMAT_1, FORMAT_3, FORMAT_6, LEGACY, MOVED_3};
         for (uri, values) in FORMAT_1.iter().chain(FORMAT_3) {
             let builtin = find(uri).unwrap_or_else(|| panic!("{uri} is not a built-in device"));
             assert!(
@@ -510,16 +510,27 @@ mod tests {
                 let def = builtin.params.iter().find(|def| def.id == *id).unwrap_or_else(|| panic!("{uri}: no {id}"));
                 assert!((def.min..=def.max).contains(value), "{uri}: {id} = {value}");
             }
-            let legacy = builtin.params.iter().find(|def| def.id == LEGACY).unwrap();
-            assert!(matches!(legacy.kind, params::Kind::Bool) && legacy.default == 0.0, "{uri}: off in a new device");
         }
-        // And no device has such a switch without being in a list: it
-        // would be on in no song. Nor is one in both: its switch could say
-        // only one of the two things.
+        // No device has such a switch without being in a list (it would be
+        // on in no song), and none is in both of the first two: its switch
+        // could say only one of the two things. It says as many things as
+        // the device has had older sounds: one for each list it is in, and
+        // the last list's value is the last of them.
         for builtin in BUILTINS {
             let uri = format!("{BUILTIN_SCHEME}:{}", builtin.key);
-            let listed = FORMAT_1.iter().chain(FORMAT_3).filter(|(device, _)| *device == uri).count();
-            assert_eq!(usize::from(builtin.params.iter().any(|def| def.id == LEGACY)), listed, "{}", builtin.key);
+            let early = FORMAT_1.iter().chain(FORMAT_3).filter(|(device, _)| *device == uri).count();
+            let late = FORMAT_6.iter().find(|(device, _)| *device == uri).map(|(_, value)| *value);
+            let Some(legacy) = builtin.params.iter().find(|def| def.id == LEGACY) else {
+                assert_eq!((early, late), (0, None), "{} is in a list and has no legacy switch", builtin.key);
+                continue;
+            };
+            assert!(early <= 1, "{}", builtin.key);
+            let sounds = early + usize::from(late.is_some());
+            assert_eq!((legacy.min, legacy.max, legacy.default), (0.0, sounds as f64, 0.0), "{}", builtin.key);
+            assert_eq!(matches!(legacy.kind, params::Kind::Bool), sounds == 1, "{}", builtin.key);
+            if let Some(late) = late {
+                assert_eq!(late, sounds as f64, "{}: what a song of format 6 is given", builtin.key);
+            }
         }
         // A parameter that moved is one of its device's, as is the one that
         // came with the move; what it was and what that is now are both

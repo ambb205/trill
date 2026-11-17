@@ -5,7 +5,7 @@
 use crate::define_params;
 use crate::level::ChannelLevel;
 use crate::params::{ParamValues, PresetDef, boolean, choice, float, int};
-use crate::util::{Rng, SILENT_DB, level_gain, midi_to_hz, pan_gains};
+use crate::util::{Ramp, Rng, SILENT_DB, level_gain, midi_to_hz, pan_gains};
 use crate::voice::{EnvShape, Envelope, FILTER_MODES, FilterMode, Stage, VoiceFilter, resonance_to_q};
 use std::f32::consts::TAU;
 use trill_core::device::{
@@ -132,12 +132,23 @@ define_params!(P, PARAMS, [
         0.0,
         ""
     ),
-    Legacy => boolean(
+    Legacy => choice(
         "legacy",
-        "Legacy (the noise of songs saved before format 4: 13 dB louder, as high as an oscillator)",
-        false
+        "Legacy (the synth of older songs. `formats 1-3`: the noise 13 dB louder, as high as an oscillator. \
+         `formats 4-6`, and 1-3 too: a volume that is moved gets there in steps of 256 frames, not along a line)",
+        LEGACY,
+        0
     ),
 ]);
+
+/// What `legacy` can say: the synth as it is, as songs of formats 1 to 3
+/// have it, and as songs of formats 4 to 6 have it.
+const LEGACY: &[&str] = &["off", "formats 1-3", "formats 4-6"];
+const LOUD_NOISE: usize = 1;
+/// How long the volume takes to get to where it is set, in frames: the
+/// stretch an envelope holds a value for, so a volume that is drawn moves
+/// in a line from one of its values to the next.
+const GLIDE_FRAMES: u32 = 256;
 
 pub const DESCRIPTION: &str = "16-voice subtractive synth: two oscillators (sine/triangle/saw/square) with \
 unison and FM, sub oscillator, noise, multimode resonant filter with its own envelope, a pitch envelope, LFO, \
@@ -490,7 +501,13 @@ struct Derived {
     glide_keep: f32,
     mono: bool,
     velocity_sens: f32,
+    /// What a voice is multiplied by besides its velocity: the volume,
+    /// and the level of a voice.
     gain: f32,
+    /// The volume goes to where it is set in a line, frame by frame; in a
+    /// song of formats 1 to 6 it is there at once, which under an
+    /// envelope is a step every 256 frames.
+    glides: bool,
 }
 
 #[derive(Clone)]
@@ -557,12 +574,12 @@ impl Voice {
     }
 
     /// `lfo` is the LFO's value for the stretch, `bend` what the wheels add
-    /// to the pitch, in semitones, and `levels` the channel's level at each
-    /// frame.
+    /// to the pitch, in semitones, `levels` the channel's level at each
+    /// frame and `gains` the synth's own: its volume, and a voice's level.
     fn render(
         &mut self,
         d: &Derived,
-        (lfo, bend, levels): (f32, f32, &[f32]),
+        (lfo, bend, levels, gains): (f32, f32, &[f32], &[f32]),
         sample_rate: f32,
         rng: &mut Rng,
         out_l: &mut [f32],
@@ -576,7 +593,6 @@ impl Voice {
         let cutoff = d.cutoff * 2f32.powf(octaves);
         self.filter.set(cutoff, d.q, sample_rate);
         let fm = d.fm * (1.0 - d.fm_env + d.fm_env * env);
-        let gain = self.velocity_gain * d.gain;
         let use_osc1 = d.mix1 > 0.0;
         // The second oscillator sounds, or bends the first: with neither it
         // only keeps its place.
@@ -634,7 +650,7 @@ impl Voice {
 
                 let (l, r) = self.filter.tick(d.filter_type, l, r);
 
-                let level = amp * gain * levels[i];
+                let level = amp * (self.velocity_gain * gains[i]) * levels[i];
                 out_l[i] += l * level;
                 out_r[i] += r * level;
             }
@@ -693,6 +709,10 @@ pub struct PolySynth {
     mod_wheel: f32,
     /// Channel volume and expression.
     level: ChannelLevel,
+    /// The volume, on its way to where it is set.
+    volume: Ramp,
+    /// The volume has been told where it starts.
+    started: bool,
     /// The LFO's value, worked out once every [`CONTROL_BLOCK`] frames of
     /// the synth's own clock, and how many frames it still stands for:
     /// where a buffer or an event divides the frames makes no difference
@@ -717,6 +737,8 @@ impl PolySynth {
             wheel: 0.0,
             mod_wheel: 0.0,
             level: ChannelLevel::new(),
+            volume: Ramp::new(1.0),
+            started: false,
             lfo: 0.0,
             lfo_frames: 0,
         }
@@ -737,7 +759,8 @@ impl PolySynth {
         d.fm = p.get(P::FmAmount as usize) * 1.5;
         d.fm_env = p.get(P::FmEnv as usize);
         d.sub = p.get(P::SubLevel as usize);
-        d.noise = p.get(P::NoiseLevel as usize) * if p.on(P::Legacy as usize) { 1.0 } else { NOISE_GAIN };
+        let legacy = p.index(P::Legacy as usize);
+        d.noise = p.get(P::NoiseLevel as usize) * if legacy == LOUD_NOISE { 1.0 } else { NOISE_GAIN };
         let width = p.get(P::NoiseWidth as usize) * std::f32::consts::FRAC_PI_2;
         (d.noise_same, d.noise_own) = (width.cos(), width.sin());
         d.pitch_env = p.get(P::PitchEnv as usize);
@@ -783,7 +806,15 @@ impl PolySynth {
         d.glide_keep = if glide < 0.001 { 0.0 } else { (-3.0 / (glide * sr)).exp() };
         d.mono = p.on(P::Mono as usize);
         d.velocity_sens = p.get(P::VelocitySens as usize);
-        d.gain = level_gain(p.get(P::Volume as usize)) * VOICE_GAIN;
+        let volume = level_gain(p.get(P::Volume as usize));
+        d.glides = legacy == 0;
+        d.gain = volume * VOICE_GAIN;
+        // The first block starts where the volume is.
+        if !self.started {
+            self.started = true;
+            self.volume.snap(volume);
+        }
+        self.volume.aim(volume, GLIDE_FRAMES);
         self.params.changed = false;
     }
 
@@ -958,10 +989,16 @@ impl PolySynth {
             let bend = self.wheel * self.derived.bend_range + lfo * self.mod_wheel * MOD_WHEEL_VIBRATO;
             let mut levels = [1.0f32; CONTROL_BLOCK];
             self.level.fill(&mut levels[..len], sample_rate);
+            let mut gains = [self.derived.gain; CONTROL_BLOCK];
+            if self.derived.glides {
+                for gain in &mut gains[..len] {
+                    *gain = self.volume.tick() * VOICE_GAIN;
+                }
+            }
             for voice in self.voices.iter_mut().filter(|v| v.active) {
                 voice.render(
                     &self.derived,
-                    (lfo, bend, &levels[..len]),
+                    (lfo, bend, &levels[..len], &gains[..len]),
                     sample_rate,
                     &mut self.rng,
                     &mut left[pos..pos + len],
@@ -1015,6 +1052,7 @@ impl DeviceProcessor for PolySynth {
         self.held_len = 0;
         self.pedal.clear();
         self.level.settle();
+        self.volume.snap(level_gain(self.params.get(P::Volume as usize)));
         for voice in &mut self.voices {
             voice.kill();
         }

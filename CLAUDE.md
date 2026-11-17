@@ -12,7 +12,7 @@ this file is the map, so that a task needs only the files it touches.
 ```sh
 cargo run -p trill-app -- --demo                    # the window, on a built-in song
 cargo run -p trill-mcp -- --no-audio --scratch      # no window: MCP on stdio, nothing read or kept
-cargo test --workspace                              # about 2,180 tests, a few minutes once built
+cargo test --workspace                              # about 2,200 tests, a few minutes once built
 cargo test -p trill-engine --test playing           # one integration test file
 cargo test -p trill-app a_take_is_counted_in        # tests whose name contains this (the app's are in its binary)
 cargo test -p trill-core time_ops -- --nocapture
@@ -116,6 +116,9 @@ on the samples.
   it as it is read; a parameter whose scale moved is moved there too, with the envelopes that drive it) and the
   file format's number goes up. A journal is read by the same rule (`journal/change.rs`, `Change::keep_format`),
   so add nothing there, but everything goes through `formats::keep_project`, `keep_device` and `keep_lane`.
+  A device that changes a second time keeps both older sounds as states of its one `legacy` parameter (a choice:
+  off, then one state for each, as `formats::FORMAT_6` gives them), and its old code path stays to the letter. A
+  saved preset says the format it was saved in (`SavedPreset::format`) and is read by the same rule.
   `trill-engine/tests/old_songs.rs` holds every device to the samples a file of each older format rendered to:
   add a file of the format you are leaving, recorded on the last build that wrote it and before you change the
   device, and never record one again from a newer build. `tests/effects.rs` and `tests/instruments.rs` hold what

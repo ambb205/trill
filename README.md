@@ -29,7 +29,7 @@ Development builds are optimized (see `[profile.dev]`), because unoptimized audi
 
 ### Building and testing
 
-`cargo test --workspace` runs about 2,180 tests in a few minutes. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 2,200 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -221,10 +221,10 @@ fader, a send and a Utility's gain, is silence at its lowest value (-70 dB), so 
 | Device | |
 |---|---|
 | `builtin:eq` | Six bands: a low cut and a high cut of 12, 24 or 48 dB an octave (Butterworth), two shelves with a Q, two bells. Every band reaches from 20 Hz to 20 kHz. |
-| `builtin:compressor` | Two detectors: `peak` follows every sample, for a single track; `bus` holds the peaks, so that a slow attack still works on a group or the whole mix. Automatic release, automatic makeup (0.72 of what a full-scale signal would lose), parallel mix, and a **sidechain**: any other track as its key, with a low cut and a high cut on what it hears. |
+| `builtin:compressor` | Two detectors: `peak` follows every sample, for a single track; `bus` holds the peaks, so that a slow attack still works on a group or the whole mix. Of a stereo sound the peak detector hears the power of the two sides together. Automatic release, automatic makeup (0.7 of what a full-scale signal would lose, as Ableton Live's), parallel mix, and a **sidechain**: any other track as its key, with a low cut and a high cut on what it hears. |
 | `builtin:limiter` | Look-ahead brickwall limiter. |
-| `builtin:reverb` | Algorithmic reverb with a filter on what goes in (low cut and high cut, 12 dB an octave), damping, pre-delay, modulation and a stereo width. A longer decay returns more. |
-| `builtin:delay` | Tempo-synced echo, stereo or ping-pong: the left and the right repeat of a pair at one level, feeding back once a pair. Filters what comes in and each time round. |
+| `builtin:reverb` | Algorithmic reverb that sounds from its pre-delay on, with a filter on what goes in (low cut and high cut, 12 dB an octave), a damping that shortens and quietens the highs, modulation and a stereo width. A longer decay returns more: 3 to 4 dB for each doubling. |
+| `builtin:delay` | Tempo-synced echo, stereo or ping-pong: the left and the right repeat of a pair at one level, feeding back once a pair. Filters what comes in and each time round, 12 dB an octave, and returns whole what lies between the cuts. |
 | `builtin:filter` | Resonant low-pass, high-pass, band-pass or notch at 12 or 24 dB an octave, with an LFO. |
 | `builtin:chorus` | Stereo chorus with a width. |
 | `builtin:tremolo` | Tremolo and auto-pan: sine, triangle or square, free or in time with the song, the two sides together or taking turns. |
@@ -250,7 +250,10 @@ A song saved before a device was changed keeps the sound it had. The project fil
 opening an older one writes into each device what that format meant: the reverb and the delay of format 1 have
 their `legacy` switched on, and so have the sample players (the velocity law they had), the saturator (its level
 turned down as the drive rises), the utility (a lowest gain that is 70 dB down and not silence, smoothed over a
-hundredth of a second) and the synth (its noise) of formats 1 to 3. The synth volumes of those formats are also
+hundredth of a second) and the synth (its noise) of formats 1 to 3; and the reverb (which began a line's length
+after its pre-delay, as wide as it could be), the delay (cuts of 6 dB an octave), the compressor (a peak detector
+that heard the louder side, and 0.72 for its automatic makeup) and the synth (a volume that moved in steps) of
+formats up to 6 are set to the sound of those. The synth volumes of formats 1 to 3 are also
 written 21 dB down the scale, where they mean what they did, and so is an envelope on one: its points, and the
 level its line's travel is measured from where it follows the fader of those formats, so that it plays the curve
 it played. A journal

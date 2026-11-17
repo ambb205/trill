@@ -483,37 +483,71 @@ fn the_peak_detector_is_the_one_songs_were_made_with() {
 #[test]
 fn automatic_makeup_adds_what_its_description_says() {
     // Far under the threshold nothing is taken off, and what is left is the
-    // makeup: 0.72 of what a full-scale signal would lose.
+    // makeup: 0.7 of what a full-scale signal would lose.
     let signal = tones(&[1000.0], 0.003, 2.0);
     let level = |set: &[(&str, f64)]| {
         let out = mono_through(&signal, &[("builtin:compressor", set)], 0.0);
         rms_db(&out.left[frames(1.0..2.0)]) - rms_db(&signal[frames(1.0..2.0)])
     };
-    // The six compressors of the bench's song, with the makeup that brought
-    // each to the level of Live's stem.
-    let song = [
-        (-24.0, 6.0, 14.5),
-        (-30.0, 4.0, 16.15),
-        (-30.0, 4.0, 16.25),
-        (-24.0, 4.0, 13.4),
-        (-20.0, 3.0, 9.27),
-        (-20.0, 3.0, 9.27),
-    ];
-    println!("threshold  ratio   auto makeup   what fitted Live's stem");
-    for (threshold, ratio, fitted) in song {
-        let expected = 0.72 * -threshold * (1.0 - 1.0 / ratio);
+    // What Ableton Live's Compressor added with Makeup on, read from the
+    // bench's second song where it had let go of a track: two lead guitars
+    // at one setting (to the hundredth of a dB), a rhythm guitar at the other.
+    let song = [(-24.0, 4.0, 12.60), (-30.0, 4.0, 15.69)];
+    println!("threshold  ratio   auto makeup   Live's");
+    for (threshold, ratio, lives) in song {
+        let expected = 0.7 * -threshold * (1.0 - 1.0 / ratio);
         let added = level(&[("threshold", threshold), ("ratio", ratio), ("auto_makeup", 1.0)]);
-        println!("  {threshold:>6}  {ratio:>5}   {added:>8.2} dB   {fitted:>8.2} dB");
+        println!("  {threshold:>6}  {ratio:>5}   {added:>8.2} dB   {lives:>8.2} dB");
         assert!((added - expected).abs() < 0.02, "{threshold} dB at {ratio}: {added:.2} dB, wanted {expected:.2}");
-        assert!(
-            (added - fitted).abs() < 0.5,
-            "within half a dB of what Live's amounts to: {added:.2} against {fitted}"
-        );
+        assert!((added - lives).abs() < 0.1, "{added:.2} dB against Live's {lives}");
     }
     // It comes on top of the makeup that is set, and is nothing when off.
     let both = level(&[("threshold", -24.0), ("ratio", 4.0), ("auto_makeup", 1.0), ("makeup", 2.0)]);
-    assert!((both - (0.72 * 24.0 * 0.75 + 2.0)).abs() < 0.02, "{both}");
+    assert!((both - (0.7 * 24.0 * 0.75 + 2.0)).abs() < 0.02, "{both}");
     assert!(level(&[("threshold", -24.0), ("ratio", 4.0)]).abs() < 0.01);
+    // A song saved before format 7 keeps the 0.72 it was mixed with.
+    let old = level(&[("threshold", -24.0), ("ratio", 4.0), ("auto_makeup", 1.0), ("legacy", 1.0)]);
+    assert!((old - 0.72 * 24.0 * 0.75).abs() < 0.02, "{old}");
+}
+
+#[test]
+fn the_peak_detector_hears_the_power_of_the_two_sides_together() {
+    // A tone on the left side only, and what a compressor makes of it.
+    let signal = tones(&[1000.0], 0.5, 2.0);
+    let steady = frames(1.0..2.0);
+    let squeeze =
+        |legacy: f64| [("threshold", -30.0), ("ratio", 4.0), ("attack", 1.0), ("release", 100.0), ("legacy", legacy)];
+    let left: Effect = ("builtin:utility", &[("pan", -1.0)]);
+    let alone = mono_through(&signal, &[left], 0.0);
+    let one_side = amplitude(&alone.left[steady.clone()], 1000.0);
+    assert!(amplitude(&alone.right[steady.clone()], 1000.0) < one_side * 1e-3);
+    let on_one_side = |legacy: f64| {
+        let out = mono_through(&signal, &[left, ("builtin:compressor", &squeeze(legacy))], 0.0);
+        db(amplitude(&out.left[steady.clone()], 1000.0) / one_side)
+    };
+    // The same tone in the middle, at `level` on each side.
+    let in_the_middle = |level: f64, legacy: f64| {
+        let tone = tones(&[1000.0], level, 2.0);
+        let out = mono_through(&tone, &[("builtin:compressor", &squeeze(legacy))], 0.0);
+        db(amplitude(&out.left[steady.clone()], 1000.0) / level)
+    };
+    // It is turned down as a tone in the middle with the same power is:
+    // one 3 dB lower on each side. Ableton Live's Compressor does so; read
+    // by the louder side, two of the bench's guitars came out half a dB
+    // under Live's, and by this within 0.13 dB.
+    let (now, same_power) = (on_one_side(0.0), in_the_middle(one_side * std::f64::consts::FRAC_1_SQRT_2, 0.0));
+    assert!((now - same_power).abs() < 0.05, "{now:.2} dB on one side, {same_power:.2} dB in the middle");
+    // In a song saved before format 7 it hears the louder side: the tone
+    // as if it were on both.
+    let (then, same_peak) = (on_one_side(1.0), in_the_middle(one_side, 1.0));
+    assert!((then - same_peak).abs() < 0.05, "{then:.2} dB on one side, {same_peak:.2} dB in the middle");
+    assert!(
+        (now - then - 2.26).abs() < 0.15,
+        "3 dB less over the threshold at 4:1: {:.2} dB less taken off",
+        now - then
+    );
+    // In the middle the two are one.
+    assert!((in_the_middle(0.25, 0.0) - in_the_middle(0.25, 1.0)).abs() < 0.01);
 }
 
 #[test]
@@ -577,31 +611,31 @@ fn returned(set: &[(&str, f64)]) -> f64 {
 
 #[test]
 fn a_reverb_returns_what_the_bench_found_lives_to_return() {
-    println!(
-        "at 100 % wet, for the same noise going in     format 1    now    change   (the change that matched Live's)"
-    );
-    let mut changes = Vec::new();
-    for (name, set, fitted) in [("room, decay 0.7 s", ROOM, -15.0), ("hall, decay 2.4 s", HALL, -7.0)] {
-        // As a song of format 1 has it, and as the same settings are asked
-        // for now, with the high cut Live's input filter has.
-        let mut before = set.to_vec();
-        before.extend([("legacy", 1.0), ("high_cut", 20_000.0)]);
-        let mut now = set.to_vec();
-        now.push(("high_cut", 6300.0));
-        let (before, now) = (returned(&before), returned(&now));
-        println!("  {name:<40}  {before:>+6.1} dB  {now:>+6.1} dB  {:>+6.1} dB    {fitted:>+6.1} dB", now - before);
-        changes.push((now - before, fitted, now));
-    }
-    // The bench brought Trill's two reverbs to Live's by turning the room
-    // down 15 dB and the hall 7 dB, each with a filter on what went in.
-    // The same settings now come out within 2 dB of that by themselves.
-    for (change, fitted, _) in &changes {
-        assert!((change - fitted).abs() < 2.0, "the reverb changed by {change:.1} dB, and {fitted} dB matched Live's");
-    }
-    // A longer decay returns more: 6 dB for each doubling, so 10.7 dB from
-    // 0.7 s to 2.4 s, give or take what the two rooms' filters make of it.
-    let (room, hall) = (changes[0].2, changes[1].2);
-    assert!((hall - room - 10.7).abs() < 2.0, "the hall returns {:.1} dB more than the room", hall - room);
+    // The bench's room and hall, with the high cut Live's input filter
+    // has. Of the middle of what its own songs sent in, Live's room
+    // (0.7 s) returned 10.7 dB less and its hall (2.8 s) 3.8 dB less; with
+    // those sends going in, these two came back 0.3 dB under and 0.3 dB
+    // over Live's. Of this noise they return:
+    let with_cut = |set: &[(&str, f64)]| {
+        let mut set = set.to_vec();
+        set.push(("high_cut", 6300.0));
+        returned(&set)
+    };
+    let (room, hall) = (with_cut(&ROOM), with_cut(&HALL));
+    println!("the room returns {room:+.1} dB of what went in, the hall {hall:+.1} dB");
+    assert!((room + 11.4).abs() < 0.7 && (hall + 5.5).abs() < 0.7, "room {room:.2} dB, hall {hall:.2} dB");
+    // As songs saved before had them: of format 1 some 10 dB louder, and
+    // of formats 2 to 6 the room 3.5 dB quieter than now, which is what
+    // the bench found it short of Live's.
+    let as_in = |set: &[(&str, f64)], legacy: f64| {
+        let mut set = set.to_vec();
+        set.extend([("high_cut", 6300.0), ("legacy", legacy)]);
+        returned(&set)
+    };
+    let (first, second) = (as_in(&ROOM, 1.0), as_in(&ROOM, 2.0));
+    println!("the room of format 1 {first:+.1} dB, of formats 2 to 6 {second:+.1} dB");
+    assert!(first - room > 8.0, "format 1: {first:.1} dB");
+    assert!((room - second - 3.5).abs() < 0.7, "formats 2 to 6: {second:.1} dB, now {room:.1} dB");
 }
 
 #[test]
@@ -609,17 +643,66 @@ fn a_reverbs_level_follows_its_decay_and_not_its_size() {
     let set = |decay: f64, size: f64| {
         [("decay", decay), ("size", size), ("mix", 1.0), ("damping", 0.0), ("low_cut", 20.0), ("high_cut", 20_000.0)]
     };
-    // Twice the decay, 6 dB more, up to five seconds.
-    let (short, long) = (returned(&set(1.0, 0.5)), returned(&set(2.0, 0.5)));
-    assert!((long - short - 6.0).abs() < 1.0, "from 1 s to 2 s: {:.1} dB more", long - short);
+    // Twice the decay, 3 to 4 dB more: what a room does by itself and a
+    // little over. (It was 6 dB before format 7, which left a short room
+    // 3.5 dB under Live's when a long hall was right.)
+    let level = |decay: f64| returned(&set(decay, 0.5));
+    let (short, long, longer) = (level(1.0), level(2.0), level(4.0));
+    assert!((long - short - 3.3).abs() < 0.6, "from 1 s to 2 s: {:.1} dB more", long - short);
+    assert!((longer - long - 3.9).abs() < 0.6, "from 2 s to 4 s: {:.1} dB more", longer - long);
     // Any size, the same level, within 2 dB: the smallest room against
     // the largest, and against the one between.
     let (small, large) = (returned(&set(1.0, 0.0)), returned(&set(1.0, 1.0)));
     println!("decay 1 s: size 0 returns {small:+.1} dB, size 0.5 {short:+.1} dB, size 1 {large:+.1} dB");
-    assert!((small - large).abs() < 2.5 && (small - short).abs() < 2.5, "size 0: {small:.1} dB, size 1: {large:.1} dB");
+    assert!((small - large).abs() < 2.0 && (small - short).abs() < 2.0, "size 0: {small:.1} dB, size 1: {large:.1} dB");
     // What the description says a send comes back as.
-    println!("decay 1 s returns {short:+.1} dB of what went in, 2 s {long:+.1} dB");
-    assert!((-13.0..=-9.0).contains(&short) && (-7.5..=-3.5).contains(&long), "{short:.1} {long:.1}");
+    println!("decay 1 s returns {short:+.1} dB of what went in, 2 s {long:+.1} dB, 4 s {longer:+.1} dB");
+    assert!((short + 9.4).abs() < 0.7 && (long + 6.1).abs() < 0.7, "{short:.1} {long:.1}");
+}
+
+#[test]
+fn a_reverb_begins_at_its_pre_delay_and_keeps_its_sides_under_its_middle() {
+    // A click a tenth of a second in, and when the reverb first answers it.
+    let at = SR as usize / 10;
+    let mut click = vec![0.0f32; 2 * SR as usize];
+    click[at] = 1.0;
+    let base = [("decay", 2.0), ("predelay", 20.0), ("mix", 1.0), ("modulation", 0.0), ("damping", 0.0)];
+    let with = |more: &[(&'static str, f64)]| -> Vec<(&'static str, f64)> {
+        let mut set = base.to_vec();
+        set.extend_from_slice(more);
+        set
+    };
+    let begins = |set: &[(&str, f64)]| {
+        let out = mono_through(&click, &[("builtin:reverb", set)], 0.0);
+        let peak = out.left.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+        let first = out.left.iter().position(|sample| sample.abs() > peak * 1e-3).unwrap();
+        (first - at) as f64 / SR * 1000.0
+    };
+    // Live's room and hall both sound from their pre-delay on: a fifth of
+    // what the room returns is back within 20 ms. Before format 7 this
+    // one waited for its shortest line, 30 ms and more.
+    let (now, then) = (begins(&with(&[])), begins(&with(&[("legacy", 2.0)])));
+    assert!((19.9..21.0).contains(&now), "it begins {now:.2} ms after the click");
+    assert!(then > 45.0, "before format 7 it began after {then:.1} ms");
+
+    // The same sound on both sides comes back with its sides under its
+    // middle: 2.2 and 2.4 dB under in Live's two. Before format 7 the two
+    // were level, which the bench heard as 2 to 3 dB too wide.
+    let signal: Vec<f32> = noise(4 * SR as usize, 0x0BAD_5EED).iter().map(|sample| sample * 0.25).collect();
+    let sides_under = |set: &[(&str, f64)]| {
+        let out = mono_through(&signal, &[("builtin:reverb", set)], 0.0);
+        let window = frames(2.0..4.0);
+        let (left, right) = (&out.left[window.clone()], &out.right[window]);
+        let middle: Vec<f32> = left.iter().zip(right).map(|(l, r)| l + r).collect();
+        let sides: Vec<f32> = left.iter().zip(right).map(|(l, r)| l - r).collect();
+        db(f64::from(rms(&middle)) / f64::from(rms(&sides)))
+    };
+    let (own, doubled, then) =
+        (sides_under(&with(&[])), sides_under(&with(&[("width", 2.0)])), sides_under(&with(&[("legacy", 2.0)])));
+    println!("sides under the middle: {own:.1} dB; at width 2 {doubled:.1} dB; before format 7 {then:.1} dB");
+    assert!((own - 2.3).abs() < 0.7, "{own:.2} dB");
+    assert!((own - doubled - 6.0).abs() < 0.3, "{doubled:.2} dB at width 2");
+    assert!(then.abs() < 1.2, "{then:.2} dB before");
 }
 
 #[test]
@@ -672,6 +755,60 @@ fn a_reverb_filters_what_goes_into_it_and_is_as_wide_as_it_is_set() {
 }
 
 // ---- chorus and tremolo ----------------------------------------------------
+
+#[test]
+fn an_echo_returns_whole_what_lies_between_its_cuts() {
+    // Ableton Live's Delay with its filter round 1.8 kHz, as the bench's
+    // second song has it: Trill's cuts at 318 Hz and 10.2 kHz. A burst of
+    // a tone on both sides, and its repeats half a second apart.
+    let echo = |legacy: f64| {
+        [
+            ("sync", 0.0),
+            ("time_ms", 500.0),
+            ("ping_pong", 1.0),
+            ("feedback", 0.45),
+            ("mix", 1.0),
+            ("low_cut", 318.2),
+            ("high_cut", 10_182.3),
+            ("legacy", legacy),
+        ]
+    };
+    // The level of the first repeat against one side of what went in, and
+    // of the third (the next on the same side) against the first.
+    let repeats = |hz: f64, legacy: f64| {
+        let mut signal = tones(&[hz], 0.25, 0.2);
+        signal.extend(vec![0.0f32; 2 * SR as usize]);
+        let out = mono_through(&signal, &[("builtin:delay", &echo(legacy))], 0.0);
+        let first = amplitude(&out.left[frames(0.55..0.65)], hz);
+        let second = amplitude(&out.right[frames(1.05..1.15)], hz);
+        let third = amplitude(&out.left[frames(1.55..1.65)], hz);
+        assert!((db(second / first)).abs() < 0.02, "a pair is one level");
+        (db(first / 0.25), db(third / first))
+    };
+    // Between the cuts nothing is lost: the two sides together at equal
+    // power (3.0 dB over one of them, which is 3.0 dB under their sum:
+    // Live's first pair was measured 3.1 dB under it), and each pair after
+    // it the feedback under the last (6.9 dB at 0.45; Live's 7.0 dB).
+    let (first, round) = repeats(1000.0, 0.0);
+    println!("1 kHz: the first repeat {first:+.2} dB of one side, each pair after it {round:+.2} dB");
+    assert!((first - 3.01).abs() < 0.06, "{first:.2} dB");
+    assert!((round + 6.94).abs() < 0.06, "{round:.2} dB");
+    // Before format 7 the cuts were 6 dB an octave and took 0.6 dB of
+    // that tone on the way in and again every time round, which is what
+    // left the echo 0.8 dB under Live's with Live's own sends going in.
+    let (first_then, round_then) = repeats(1000.0, 2.0);
+    println!("       before format 7 {first_then:+.2} dB and {round_then:+.2} dB");
+    assert!((first - first_then - 0.6).abs() < 0.08, "{first_then:.2} dB");
+    assert!((round - round_then - 0.6).abs() < 0.08, "{round_then:.2} dB");
+    // Outside them they fall 12 dB an octave: two octaves under the low
+    // cut, 24 dB down (Live's was 22.4 dB down there), where the old cut
+    // left it 12 dB down.
+    let (low, _) = repeats(80.0, 0.0);
+    let (low_then, _) = repeats(80.0, 2.0);
+    println!("80 Hz: {:+.1} dB against 1 kHz, before {:+.1} dB", low - first, low_then - first_then);
+    assert!((low - first + 24.0).abs() < 1.0, "{:.1} dB", low - first);
+    assert!((low_then - first_then + 12.3).abs() < 1.0, "{:.1} dB", low_then - first_then);
+}
 
 #[test]
 fn a_chorus_is_as_wide_as_its_width() {

@@ -195,6 +195,7 @@ impl Session {
             tags: tags.iter().map(|tag| tag.trim().to_string()).filter(|tag| !tag.is_empty()).collect(),
             params,
             state: device.state.clone(),
+            format: Some(trill_core::project::FORMAT_VERSION),
         };
         let saved = self.saved.save(preset).map_err(SessionError::Io)?;
         let reference = saved.info.reference();
