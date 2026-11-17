@@ -107,6 +107,21 @@ fn tempo_of(beats: &[f64]) -> (f64, f64, bool) {
     (60.0 / mean, drift, centre.len() as f64 >= 0.85 * intervals.len() as f64 && drift < 0.02)
 }
 
+/// The tempo of beats that lie where they were heard. Beats on hits are
+/// the tempo to the sample, and the few that found no hit (past the last
+/// one, in a gap) are not: where most beat lengths agree to a fiftieth,
+/// those are the tempo.
+fn agreed_tempo(beats: &[f64]) -> f64 {
+    let intervals: Vec<f64> = beats.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    let period = median(&intervals);
+    let close: Vec<f64> = intervals.iter().copied().filter(|interval| (interval - period).abs() < 0.02 * period).collect();
+    if close.len() * 2 >= intervals.len() && !close.is_empty() {
+        60.0 * close.len() as f64 / close.iter().sum::<f64>()
+    } else {
+        tempo_of(beats).0
+    }
+}
+
 impl Grid {
     /// The grid of a recording `seconds` long from the beats and downbeats
     /// a tracker found. It runs to both ends of the audio, continuing the
@@ -202,6 +217,18 @@ impl Grid {
         }
     }
 
+    /// This grid with its tempo taken again from its beats as they now
+    /// lie. A tracker says where the beats are to a hundredth of a second;
+    /// once they have been moved onto the hits they belong to, their
+    /// lengths say the tempo of a short loop far better.
+    pub fn measured(mut self) -> Self {
+        if self.beats.len() >= 4 {
+            let (_, drift, steady) = tempo_of(&self.beats);
+            (self.bpm, self.drift, self.steady) = (round_to(agreed_tempo(&self.beats), 2), round_to(drift, 4), steady);
+        }
+        self
+    }
+
     /// This grid reread: see [`Correction`]. Loops, parts and chords follow
     /// from the grid and are to be worked out again from the result.
     pub fn corrected(&self, correction: Correction) -> Self {
@@ -231,7 +258,7 @@ impl Grid {
             Correction::BeatsPerBar(count) => per_bar = usize::from(count.clamp(2, 12)),
         }
         first %= per_bar;
-        let (bpm, ..) = tempo_of(&beats);
+        let bpm = agreed_tempo(&beats);
         Self {
             bars: (first..beats.len()).step_by(per_bar).collect(),
             beats: beats.iter().map(|&time| round_to(time, 5)).collect(),

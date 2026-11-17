@@ -250,6 +250,7 @@ pub fn hear(recording: &Recording, options: &Options) -> Heard {
             .iter()
             .map(|time| (time * 1e5).round() / 1e5)
             .collect();
+        grid = grid.measured();
     }
     for &correction in &options.corrections {
         grid = grid.corrected(correction);
