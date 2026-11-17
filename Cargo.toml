@@ -13,6 +13,7 @@ trill-assistant = { path = "crates/trill-assistant" }
 trill-core = { path = "crates/trill-core" }
 trill-dsp = { path = "crates/trill-dsp" }
 trill-engine = { path = "crates/trill-engine" }
+trill-fetch = { path = "crates/trill-fetch" }
 trill-library = { path = "crates/trill-library" }
 trill-listen = { path = "crates/trill-listen" }
 trill-plugins = { path = "crates/trill-plugins" }

@@ -4727,6 +4727,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "trill-fetch"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "log",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "windows",
+]
+
+[[package]]
 name = "trill-library"
 version = "0.1.0"
 dependencies = [
@@ -4867,10 +4881,10 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "trill-core",
  "trill-dsp",
+ "trill-fetch",
  "trill-listen",
  "trill-media",
  "windows",

@@ -19,8 +19,9 @@
 //! - [`lyrics`] puts words where they are sung, by the loudness of the vocal.
 //! - [`room`] says how much memory there is and how much a process took.
 //! - [`link`] finds the programs that are not Trill's own.
-//! - [`setup`] is what a study needs that Trill does not ship: the parts a
-//!   user fetches, each pinned, and the timed test of what runs the models.
+//! - [`setup`] is what a study needs that Trill does not ship: its parts
+//!   as a list for `trill-fetch`, which fetches them when the user asks,
+//!   and the timed test of what runs the models.
 
 pub mod desk;
 pub mod helper;

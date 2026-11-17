@@ -18,6 +18,8 @@
 
 use crate::lyrics::Lyrics;
 use crate::models::Transcript;
+pub use trill_fetch::{partial_of, write_json, write_whole};
+
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -212,30 +214,6 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
 
-/// Writes `value` to `path` whole or not at all.
-pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    let text = serde_json::to_string(value).map_err(|error| error.to_string())?;
-    write_whole(path, text.as_bytes())
-}
-
-/// Writes `bytes` under another name and gives the file its own once it is whole.
-pub fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let said = |error: std::io::Error| format!("{}: {error}", path.display());
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(said)?;
-    }
-    let partial = partial_of(path);
-    std::fs::write(&partial, bytes).map_err(said)?;
-    std::fs::rename(&partial, path).map_err(said)
-}
-
-/// The name a file is written under until it is whole.
-pub fn partial_of(path: &Path) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".partial");
-    path.with_file_name(name)
-}
-
 impl StudyFolder {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
@@ -313,21 +291,7 @@ impl StudyFolder {
 
     /// The room the study takes on disk, in bytes.
     pub fn size(&self) -> u64 {
-        fn of(folder: &Path) -> u64 {
-            std::fs::read_dir(folder)
-                .map(|entries| {
-                    entries
-                        .filter_map(Result::ok)
-                        .map(|entry| match entry.metadata() {
-                            Ok(metadata) if metadata.is_dir() => of(&entry.path()),
-                            Ok(metadata) => metadata.len(),
-                            Err(_) => 0,
-                        })
-                        .sum()
-                })
-                .unwrap_or(0)
-        }
-        of(&self.path)
+        trill_fetch::folder_size(&self.path)
     }
 
     /// Removes the stems and keeps what was found in them: a third of a

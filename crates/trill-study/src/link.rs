@@ -3,44 +3,12 @@
 //! does not read itself, and the program that fetches a recording from a
 //! link.
 
+pub use trill_fetch::find_program;
+
 use crate::store::StudyFolder;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-
-/// Where the program `name` is, if it is installed where programs are
-/// looked for: the folders of `PATH`.
-pub fn find_program(name: &str) -> Option<PathBuf> {
-    let endings: &[&str] = if cfg!(windows) { &["exe", "cmd", "bat"] } else { &[""] };
-    let folders = std::env::var_os("PATH")?;
-    std::env::split_paths(&folders)
-        .flat_map(|folder| {
-            endings.iter().map(move |ending| {
-                if ending.is_empty() { folder.join(name) } else { folder.join(format!("{name}.{ending}")) }
-            })
-        })
-        .find(|path| path.is_file())
-}
-
-#[cfg(windows)]
-pub(crate) fn hide_console(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-pub(crate) fn hide_console(_command: &mut Command) {}
-
-/// The last line a program wrote to its standard error, which is where
-/// they say what went wrong.
-pub(crate) fn last_line(stderr: &[u8]) -> String {
-    String::from_utf8_lossy(stderr)
-        .lines()
-        .map(str::trim)
-        .rfind(|line| !line.is_empty())
-        .unwrap_or("it did not say why")
-        .to_owned()
-}
+use trill_fetch::{hide_console, last_line};
 
 /// Has `ffmpeg` write the audio of `from` as a WAV file at `to`, and
 /// answers with `to`.
@@ -177,16 +145,4 @@ pub fn fetch(
     };
     progress(1.0);
     Ok(Fetched { path, title, by })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_program_that_is_not_installed_is_not_found_and_the_last_line_is_what_went_wrong() {
-        assert_eq!(find_program("a-program-nobody-has-installed"), None);
-        assert_eq!(last_line(b"warming up\r\n\r\nERROR: no such thing\r\n\r\n"), "ERROR: no such thing");
-        assert_eq!(last_line(b""), "it did not say why");
-    }
 }

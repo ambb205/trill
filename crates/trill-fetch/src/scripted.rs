@@ -1,11 +1,11 @@
 //! A fetcher for tests: files come from its own shelf and from nowhere
 //! else, so that the whole of a fetch (going on from what had come, the
-//! checksum, the unpacking) is run with nothing asked of the network.
+//! checksum, the unpacking) is run with nothing asked of a network.
 //!
 //! It can be told to go wrong the ways a connection does: to bring a file
 //! slowly, and to be lost part of the way.
 
-use super::{Ended, Fetched, Fetcher, Keep, Part};
+use crate::{Ended, Fetched, Fetcher, Keep, Part};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -87,35 +87,26 @@ impl Fetcher for Shelf {
     }
 }
 
-fn kept_for_good(text: String) -> &'static str {
-    Box::leak(text.into_boxed_str())
-}
-
-/// A part made up for a test, with its files put on `shelf`: each is
-/// kept under its own name, pinned to what it is. (What it is made of is
-/// never freed, which a test can afford.)
-pub fn part(shelf: &Shelf, id: &'static str, name: &'static str, files: &[(&str, Vec<u8>)]) -> Part {
-    let fetched: Vec<Fetched> = files
+/// A part made up for a test, with its files put on `shelf`: each is kept
+/// at its own path, pinned to what it is.
+pub fn part(shelf: &Shelf, id: &str, name: &str, files: &[(&str, Vec<u8>)]) -> Part {
+    let files = files
         .iter()
         .map(|(file, bytes)| {
-            let url = kept_for_good(format!("https://shelf.test/{id}/{file}"));
-            shelf.put(url, bytes.clone());
-            let sum: String = Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect();
-            Fetched {
-                url,
-                sha256: kept_for_good(sum),
-                size: bytes.len() as u64,
-                keep: Keep::As(kept_for_good((*file).to_owned())),
-            }
+            let url = format!("https://shelf.test/{id}/{file}");
+            shelf.put(&url, bytes.clone());
+            let sha256 = Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect();
+            Fetched { url, sha256, size: bytes.len() as u64, keep: Keep::As((*file).to_owned()) }
         })
         .collect();
     Part {
-        id,
-        name,
-        what: "A part made up for a test.",
-        licence: "Nobody's: it was made up for a test.",
-        from: "shelf.test",
-        needs: &[],
-        files: Box::leak(fetched.into_boxed_slice()),
+        id: id.to_owned(),
+        name: name.to_owned(),
+        what: "A part made up for a test.".to_owned(),
+        licence: "Nobody's: it was made up for a test.".to_owned(),
+        credit: String::new(),
+        from: "shelf.test".to_owned(),
+        needs: Vec::new(),
+        files,
     }
 }

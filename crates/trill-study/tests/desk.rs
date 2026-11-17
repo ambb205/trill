@@ -10,24 +10,22 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
+use trill_fetch::{Fetches, List, Nothing};
 use trill_listen::Correction;
 use trill_study::models::real::Provider;
 use trill_study::models::scripted::Script;
 use trill_study::run::Programs;
-use trill_study::setup::{Nothing, Setup, SetupOptions};
+use trill_study::setup::{self, Setup};
 use trill_study::store::{Source, Stage, StageState, State, StudyOptions};
 use trill_study::{Desk, DeskOptions};
 
 const LONG: Duration = Duration::from_secs(120);
 
 fn desk_with(root: &Path, script: Option<Script>, programs: Programs, free: Option<fn() -> Option<u64>>) -> Desk {
-    let setup = Setup::new(SetupOptions {
-        folder: root.join("models"),
-        parts: Vec::new(),
-        fetcher: Arc::new(Nothing),
-        stand_in: script,
-        programs: Some(programs),
-    });
+    // With nothing published: no part is here, and none can be fetched.
+    let fetches = Fetches::new(Arc::new(Nothing));
+    fetches.add(List { parts: Vec::new(), ..setup::list(root.join("models")) }).unwrap();
+    let setup = Setup::over(Arc::new(fetches), script, Some(programs));
     Desk::new(DeskOptions { studies: root.join("studies"), setup: Arc::new(setup), program: program(), free })
 }
 

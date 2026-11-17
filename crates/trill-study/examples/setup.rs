@@ -15,8 +15,8 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use trill_study::room;
-use trill_study::setup::{Ended, PartState, Setup, provider_name};
+use trill_fetch::{Ended, PartState, said};
+use trill_study::setup::{Setup, provider_name};
 
 fn main() -> Result<(), String> {
     trill_study::helper::run_if_requested();
@@ -27,17 +27,20 @@ fn main() -> Result<(), String> {
     let setup = Setup::real(PathBuf::from(folder));
     match what.as_str() {
         "status" => {
-            for status in setup.status() {
-                println!(
-                    "{:<16} {:<9} {:>9} of {:>9}  {:>9} on disk  {}",
-                    status.part.id,
-                    format!("{:?}", status.state).to_lowercase(),
-                    room::said(status.got),
-                    room::said(status.part.size()),
-                    room::said(status.on_disk),
-                    status.part.name
-                );
-                println!("                 {}", status.part.licence);
+            for list in setup.fetches().status() {
+                println!("{} ({})", list.title, list.folder.display());
+                for status in list.parts {
+                    println!(
+                        "  {:<16} {:<9} {:>9} of {:>9}  {:>9} on disk  {}",
+                        status.part.id,
+                        format!("{:?}", status.state).to_lowercase(),
+                        said(status.got),
+                        said(status.part.size()),
+                        said(status.on_disk),
+                        status.part.name
+                    );
+                    println!("                   {}", status.part.licence);
+                }
             }
             match setup.machine() {
                 Some(machine) => println!(
@@ -52,9 +55,9 @@ fn main() -> Result<(), String> {
             let id = arguments.get(2).ok_or("fetch which part?")?;
             let begun = std::time::Instant::now();
             let mut last = (PartState::Missing, 0u64);
-            let ended = setup.fetch_now(id, &AtomicBool::new(false), &mut |state, got| {
+            let ended = setup.fetches().fetch_now(id, &AtomicBool::new(false), &mut |state, got| {
                 if state != last.0 || got >= last.1 + (32 << 20) {
-                    println!("  {:?} {}", state, room::said(got));
+                    println!("  {:?} {}", state, said(got));
                     last = (state, got);
                 }
             });
@@ -66,7 +69,7 @@ fn main() -> Result<(), String> {
         }
         "remove" => {
             let id = arguments.get(2).ok_or("remove which part?")?;
-            println!("{} freed", room::said(setup.remove(id)?));
+            println!("{} freed", said(setup.fetches().remove(id)?));
         }
         "test" => {
             let program = std::env::current_exe().map_err(|error| error.to_string())?;
@@ -84,10 +87,12 @@ fn main() -> Result<(), String> {
                         timed.device,
                         checked.seconds_a_minute,
                         checked.ready_seconds,
-                        room::said(timed.peak),
+                        said(timed.peak),
                         checked.sum
                     ),
-                    (None, why) => println!("{:<44} did not run: {}", timed.device, why.as_deref().unwrap_or("it did not say")),
+                    (None, why) => {
+                        println!("{:<44} did not run: {}", timed.device, why.as_deref().unwrap_or("it did not say"))
+                    }
                 }
             }
             println!("chosen: {}", provider_name(machine.chosen));

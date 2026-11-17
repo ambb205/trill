@@ -15,6 +15,7 @@ path = "src/bin/trill-study-job.rs"
 [dependencies]
 trill-core.workspace = true
 trill-dsp.workspace = true
+trill-fetch.workspace = true
 trill-listen.workspace = true
 trill-media.workspace = true
 log.workspace = true
@@ -27,18 +28,15 @@ serde_json.workspace = true
 # is run. Pinned, because the binding is a release candidate and what it
 # asks of the library is what the setup's parts were measured with.
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "api-24"] }
-# Checksums of what the setup fetches, and reading the archives it comes
-# in. Both are in the tree already, through other crates.
-sha2 = "0.11"
+# The transcriber tells a phrase it is stuck on by how well it packs. In
+# the tree already, through other crates.
 flate2 = "1"
 
 [target.'cfg(windows)'.dependencies]
-# How much memory the machine has left, how much a process that studies
-# has taken, and the room on a disk before a part is fetched onto it. The
-# same crate and version the engine brings in.
+# How much memory the machine has left, and how much a process that
+# studies has taken. The same crate and version the engine brings in.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
-    "Win32_Storage_FileSystem",
     "Win32_System_ProcessStatus",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",

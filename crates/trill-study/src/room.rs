@@ -41,26 +41,6 @@ pub fn free() -> Option<u64> {
     None
 }
 
-/// The room that is free on the disk `folder` is on (or will be, once it
-/// is made), in bytes. `None` where the machine cannot be asked.
-pub fn disk_free(folder: &std::path::Path) -> Option<u64> {
-    #[cfg(windows)]
-    {
-        use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-        use windows::core::HSTRING;
-        let there = folder.ancestors().find(|folder| folder.is_dir())?;
-        let mut free = 0u64;
-        // SAFETY: the name is a string that ends, and the number is the one the call fills in.
-        unsafe { GetDiskFreeSpaceExW(&HSTRING::from(there.as_os_str()), Some(&mut free), None, None).ok()? };
-        Some(free)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = folder;
-        None
-    }
-}
-
 /// What a process holds.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Held {
@@ -97,14 +77,7 @@ pub fn held_by(pid: u32) -> Option<Held> {
     }
 }
 
-/// A number of bytes as people say it: `3.4 GB`, `512 MB`.
-pub fn said(bytes: u64) -> String {
-    if bytes >= 1 << 30 {
-        format!("{:.1} GB", bytes as f64 / (1u64 << 30) as f64)
-    } else {
-        format!("{:.0} MB", bytes as f64 / (1u64 << 20) as f64)
-    }
-}
+pub use trill_fetch::said;
 
 #[cfg(test)]
 mod tests {
@@ -125,8 +98,5 @@ mod tests {
         let own = held_by(std::process::id()).expect("this process is there");
         assert!(own.now > 0 && own.peak >= own.now, "{own:?}");
         assert_eq!(held_by(u32::MAX - 7), None);
-        // A folder that is not there yet is on the disk its nearest folder is on.
-        let here = std::env::temp_dir();
-        assert!(disk_free(&here.join("not").join("made").join("yet")).expect("Windows can be asked") > 0);
     }
 }

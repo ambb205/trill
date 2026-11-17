@@ -1,0 +1,25 @@
+[package]
+name = "trill-fetch"
+description = "What Trill fetches when its user asks: parts that others publish, each pinned by a checksum, brought by the system's own curl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+log.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Checksums of what is fetched, and reading the archives it comes in. Both
+# are in the tree already, through other crates.
+sha2 = "0.11"
+flate2 = "1"
+
+[target.'cfg(windows)'.dependencies]
+# The room on a disk before something is fetched onto it. The same crate
+# and version the engine brings in.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "3"
