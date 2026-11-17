@@ -127,10 +127,13 @@ impl Transform {
     }
 }
 
-/// Runs one chunk of exactly [`SEGMENT`] frames through every graph and
-/// answers with its stems, `[source][channel]`.
+/// Runs one chunk of exactly [`SEGMENT`] frames through a graph and
+/// answers with its stems, `[source][channel]`: all of them, or `only`
+/// the one a graph of the best model was tuned for (the others are left
+/// silent).
 fn chunk(
-    sessions: &mut [Session],
+    session: &mut Session,
+    only: Option<usize>,
     transforms: &mut [Transform],
     left: &[f32],
     right: &[f32],
@@ -153,9 +156,8 @@ fn chunk(
     mix.extend_from_slice(left);
     mix.extend_from_slice(right);
 
-    let single = sessions.len() == 1;
     let mut stems: Vec<[Vec<f32>; 2]> = (0..SOURCES.len()).map(|_| [vec![0.0; SEGMENT], vec![0.0; SEGMENT]]).collect();
-    for (model, session) in sessions.iter_mut().enumerate() {
+    {
         let outputs = session
             .run(ort::inputs![
                 "mix" => tensor(&[1, 2, SEGMENT], mix.clone(), 2 * SEGMENT)?,
@@ -173,8 +175,7 @@ fn chunk(
                 "the model that splits answered in a shape that is not its own ({shape:?}): is its file the one the setup fetched?"
             ));
         }
-        // Of four graphs, each gives the stem it was tuned for.
-        let wanted: Vec<usize> = if single { (0..SOURCES.len()).collect() } else { vec![model] };
+        let wanted: Vec<usize> = only.map_or_else(|| (0..SOURCES.len()).collect(), |source| vec![source]);
         let mut jobs: Vec<(usize, usize, &mut Vec<f32>)> = Vec::new();
         for (source, stem) in stems.iter_mut().enumerate().filter(|(source, _)| wanted.contains(source)) {
             for (channel, out) in stem.iter_mut().enumerate() {
@@ -198,13 +199,19 @@ fn chunk(
 }
 
 /// Splits `mix` into its stems with one graph, or with the four of the
-/// best model in the order drums, bass, other, vocals.
-pub fn separate(sessions: &mut [Session], mix: &Sound, progress: Progress) -> Result<Vec<Stem>, String> {
-    if sessions.len() != 1 && sessions.len() != SOURCES.len() {
-        return Err(format!(
-            "{} models were handed to split a recording: it takes one, or the four of the best",
-            sessions.len()
-        ));
+/// best model in the order drums, bass, other, vocals. `make` makes the
+/// graph of that number ready. Of the four, each gives the stem it was
+/// tuned for, and they are made ready and let go of one after another:
+/// the recording is gone through four times, and a card holds one model
+/// at a time, where four at once were measured to take twice the memory.
+pub fn separate(
+    graphs: usize,
+    make: &mut dyn FnMut(usize) -> Result<Session, String>,
+    mix: &Sound,
+    progress: Progress,
+) -> Result<Vec<Stem>, String> {
+    if graphs != 1 && graphs != SOURCES.len() {
+        return Err(format!("{graphs} models were handed to split a recording: it takes one, or the four of the best"));
     }
     let length = mix.frames();
     if length == 0 {
@@ -230,31 +237,40 @@ pub fn separate(sessions: &mut [Session], mix: &Sound, progress: Progress) -> Re
     let mut out: Vec<[Vec<f32>; 2]> = (0..SOURCES.len()).map(|_| [vec![0.0; length], vec![0.0; length]]).collect();
     let mut total = vec![0.0f32; length];
     let chunks = length.div_ceil(stride);
-    for (number, offset) in (0..length).step_by(stride).enumerate() {
-        let own = SEGMENT.min(length - offset);
-        // A short last chunk is centered in real audio and padded with silence.
-        let start = offset as isize - ((SEGMENT - own) / 2) as isize;
-        let mut piece = [vec![0.0f32; SEGMENT], vec![0.0f32; SEGMENT]];
-        for (slots, source) in piece.iter_mut().zip([&left, &right]) {
-            for (index, slot) in slots.iter_mut().enumerate() {
-                if let Some(&sample) = usize::try_from(start + index as isize).ok().and_then(|at| source.get(at)) {
-                    *slot = sample;
+    for pass in 0..graphs {
+        let only = (graphs > 1).then_some(pass);
+        let mut session = make(pass)?;
+        for (number, offset) in (0..length).step_by(stride).enumerate() {
+            let own = SEGMENT.min(length - offset);
+            // A short last chunk is centered in real audio and padded with silence.
+            let start = offset as isize - ((SEGMENT - own) / 2) as isize;
+            let mut piece = [vec![0.0f32; SEGMENT], vec![0.0f32; SEGMENT]];
+            for (slots, source) in piece.iter_mut().zip([&left, &right]) {
+                for (index, slot) in slots.iter_mut().enumerate() {
+                    if let Some(&sample) = usize::try_from(start + index as isize).ok().and_then(|at| source.get(at)) {
+                        *slot = sample;
+                    }
                 }
             }
-        }
-        let stems = chunk(sessions, &mut transforms, &piece[0], &piece[1])?;
-        let trim = (SEGMENT - own) / 2;
-        for (stem, out) in stems.iter().zip(&mut out) {
-            for (channel, out) in out.iter_mut().enumerate() {
+            let stems = chunk(&mut session, only, &mut transforms, &piece[0], &piece[1])?;
+            let trim = (SEGMENT - own) / 2;
+            for (source, (stem, out)) in stems.iter().zip(&mut out).enumerate() {
+                if only.is_some_and(|wanted| wanted != source) {
+                    continue;
+                }
+                for (channel, out) in out.iter_mut().enumerate() {
+                    for index in 0..own {
+                        out[offset + index] += weight[index] * stem[channel][trim + index];
+                    }
+                }
+            }
+            if pass == 0 {
                 for index in 0..own {
-                    out[offset + index] += weight[index] * stem[channel][trim + index];
+                    total[offset + index] += weight[index];
                 }
             }
+            progress((pass * chunks + number + 1) as f32 / (graphs * chunks) as f32);
         }
-        for index in 0..own {
-            total[offset + index] += weight[index];
-        }
-        progress((number + 1) as f32 / chunks as f32);
     }
     let back = |channel: &[f32]| -> Vec<f32> {
         channel.iter().zip(&total).map(|(&v, &w)| (f64::from(v / w) * deviation + mean) as f32).collect()

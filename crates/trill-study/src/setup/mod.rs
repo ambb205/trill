@@ -23,7 +23,7 @@ pub mod catalogue;
 use crate::helper::{self, Checked, Job, Order, Outcome, Said};
 use crate::models::Which;
 use crate::models::real::{
-    self, ANY_CARD, BEATS, NVIDIA, Provider, RUNTIME, STEMS, STEMS_BEST, WORDS, WORDS_PROCESSOR,
+    self, ANY_CARD, BEATS, NVIDIA, Provider, RUNTIME, STEMS, STEMS_BEST, VOICE, WORDS, WORDS_PROCESSOR,
 };
 use crate::models::scripted::Script;
 use crate::room;
@@ -233,6 +233,7 @@ impl Setup {
         wanted.push(if options.stems == StemChoice::Best { STEMS_BEST } else { STEMS });
         wanted.push(BEATS);
         if options.words {
+            wanted.push(VOICE);
             wanted.push(if provider == Provider::Processor { WORDS_PROCESSOR } else { WORDS });
         }
         wanted

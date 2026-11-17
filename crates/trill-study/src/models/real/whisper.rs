@@ -449,16 +449,19 @@ impl Whisper {
             .collect()
     }
 
-    /// The words sung in `vocal`, one channel at 44.1 kHz.
+    /// The words sung in `vocal`, one channel at 44.1 kHz. `sung` is where
+    /// someone sings, in seconds, as a model heard it; without one, it is
+    /// taken to be wherever the vocal is loud.
     pub fn transcribe(
         &mut self,
         vocal: &[f32],
+        sung: Option<Vec<(f64, f64)>>,
         language: Option<&str>,
         progress: Progress,
     ) -> Result<Transcript, String> {
         // Only what is sung: stretches of the vocal, laid end to end, with
         // where each came from.
-        let stretches = Envelope::new(vocal).sung_stretches(0.7, 0.3);
+        let stretches = sung.unwrap_or_else(|| Envelope::new(vocal).sung_stretches(0.7, 0.3));
         let speech = resample(vocal, RATE, MODEL_RATE);
         let mut stream: Vec<f32> = Vec::new();
         // For each stretch: where it begins in the stream, and where in the vocal.

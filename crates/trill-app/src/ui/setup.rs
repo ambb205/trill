@@ -41,7 +41,7 @@ const WIDTH: f32 = 700.0;
 const ROW: f32 = 24.0;
 const GAP: f32 = 6.0;
 /// More parts than this scroll.
-const MAX_ROWS: usize = 9;
+const MAX_ROWS: usize = 10;
 /// How often what is shown is read again while the panel is open, in
 /// seconds: slower while nothing is on its way.
 const READ_EVERY: f64 = 1.0;

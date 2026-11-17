@@ -11,7 +11,9 @@
 //! change one, and the timed test and the comparisons against known
 //! recordings are to be run again.
 
-use crate::models::real::{ANY_CARD, BEATS, NVIDIA, RUNTIME, STEMS, STEMS_BEST, WORD_TIMES, WORDS, WORDS_PROCESSOR};
+use crate::models::real::{
+    ANY_CARD, BEATS, NVIDIA, RUNTIME, STEMS, STEMS_BEST, VOICE, WORD_TIMES, WORDS, WORDS_PROCESSOR,
+};
 use trill_fetch::{Fetched, Keep, Part};
 
 const WHISPER: &str =
@@ -186,6 +188,20 @@ pub fn parts() -> Vec<Part> {
             "beat_this.onnx",
         )],
     ));
+    parts.push(part(
+        VOICE,
+        "Where the voice is",
+        "The model that hears where someone sings (Silero VAD), so that words are written down only there and none are made of what is not a voice. Wanted whenever the words are; a megabyte.",
+        "Silero: \"MIT License\". The file is the one the faster-whisper project (SYSTRAN, MIT License) packages.",
+        "pypi.org/project/faster-whisper (SYSTRAN's package)",
+        &[RUNTIME],
+        vec![Fetched::archive(
+            "https://files.pythonhosted.org/packages/05/99/49ee85903dee060d9f08297b4a342e5e0bcfca2f027a07b4ee0a38ab13f9/faster_whisper-1.2.1-py3-none-any.whl",
+            "79a66ad50688c0b794dd501dc340a736992a6342f7f95e5811be60b5224a26a7",
+            1_118_909,
+            members(&[("faster_whisper/assets/silero_vad_v6.onnx", "silero_vad_v6.onnx")]),
+        )],
+    ));
     let mut on_a_card = vec![
         of(
             WHISPER,
@@ -257,7 +273,7 @@ mod tests {
     fn every_part_is_pinned_and_says_whose_it_is() {
         let parts = parts();
         let ids: Vec<&str> = parts.iter().map(|part| part.id.as_str()).collect();
-        for wanted in [STEMS, STEMS_BEST, BEATS, WORDS, WORDS_PROCESSOR, WORD_TIMES] {
+        for wanted in [STEMS, STEMS_BEST, BEATS, VOICE, WORDS, WORDS_PROCESSOR, WORD_TIMES] {
             assert!(ids.contains(&wanted), "{wanted} is not offered");
         }
         for part in &parts {

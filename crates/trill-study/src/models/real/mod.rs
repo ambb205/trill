@@ -9,7 +9,8 @@
 //!
 //! - [`demucs`] splits a recording into stems (Hybrid Transformer Demucs).
 //! - [`beat`] finds beats and downbeats (Beat This).
-//! - [`whisper`] writes down the words (Whisper), and
+//! - [`voice`] hears where someone sings (Silero VAD), which is all that
+//! - [`whisper`] is handed to write down the words (Whisper), and
 //! - [`align`] places each word (a CTC model and the best path through
 //!   the letters).
 //!
@@ -21,6 +22,7 @@
 pub mod align;
 pub mod beat;
 pub mod demucs;
+pub mod voice;
 pub mod whisper;
 
 use super::{Models, Progress, Transcript};
@@ -40,6 +42,7 @@ pub const NVIDIA: &str = "nvidia";
 pub const STEMS: &str = "stems";
 pub const STEMS_BEST: &str = "stems-best";
 pub const BEATS: &str = "beats";
+pub const VOICE: &str = "voice";
 pub const WORDS: &str = "words";
 pub const WORDS_PROCESSOR: &str = "words-processor";
 pub const WORD_TIMES: &str = "word-times";
@@ -235,6 +238,16 @@ impl OnnxModels {
         builder.commit_from_file(file).map_err(|error| cannot(error.to_string()))
     }
 
+    /// The model in `file`, made ready on the processor whatever runs the
+    /// others: for one that is too small to be worth a card.
+    pub(crate) fn session_on_processor(&self, file: &Path) -> Result<Session, String> {
+        let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let cannot = |error: String| format!("the model {name} could not be made ready on the processor: {error}");
+        let builder = Session::builder(&self.env).map_err(|error| cannot(error.to_string()))?;
+        let mut builder = builder.with_intra_threads(1).map_err(|error| cannot(error.to_string()))?;
+        builder.commit_from_file(file).map_err(|error| cannot(error.to_string()))
+    }
+
     fn file(&self, folder: &str, name: &str, what: &str) -> Result<PathBuf, String> {
         part(&self.setup.parts, folder, name, what)
     }
@@ -293,8 +306,8 @@ impl Models for OnnxModels {
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         };
-        let mut sessions = files.iter().map(|file| self.session(file)).collect::<Result<Vec<_>, _>>()?;
-        demucs::separate(&mut sessions, mix, progress)
+        // Each made ready when its turn comes, and let go of after it.
+        demucs::separate(files.len(), &mut |graph| self.session(&files[graph]), mix, progress)
     }
 
     fn beats(&mut self, mix: &[f32], progress: Progress) -> Result<TrackedBeats, String> {
@@ -309,10 +322,22 @@ impl Models for OnnxModels {
         } else {
             (WORDS, "fp16", "the model that writes down the words")
         };
+        // What the transcriber is handed is where a model hears a voice.
+        // Where that part was not fetched, it is where the vocal is loud.
+        let detector = self.setup.parts.join(VOICE).join("silero_vad_v6.onnx");
+        let sung = match detector.is_file() {
+            true => {
+                let mut session = self.session_on_processor(&detector)?;
+                let heard = trill_listen::signal::resample(vocal, trill_listen::RATE, voice::RATE);
+                let likely = voice::likelihoods(&mut session, &heard)?;
+                Some(voice::stretches(&likely, heard.len(), voice::Rule::default()))
+            }
+            false => None,
+        };
         let encoder = self.session(&self.file(folder, &format!("encoder_model_{kind}.onnx"), what)?)?;
         let decoder = self.session(&self.file(folder, &format!("decoder_model_{kind}.onnx"), what)?)?;
         let mut whisper = whisper::Whisper::new(encoder, decoder, &self.setup.parts.join(folder))?;
-        whisper.transcribe(vocal, language, progress)
+        whisper.transcribe(vocal, sung, language, progress)
     }
 
     fn word_times(&mut self, vocal: &[f32], words: &mut [Word], progress: Progress) -> Result<bool, String> {
