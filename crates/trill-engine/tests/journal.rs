@@ -215,9 +215,10 @@ fn a_request_of_the_assistants_is_one_undo_and_is_taken_back_as_one_step_of_the_
         PlanItem { text: "Turn the bass down".into(), state: PlanState::Pending },
     ]);
     let group = session.begin_group();
-    for (tool, label) in
-        [("create_track", "Added the track \u{201C}Drums\u{201D}"), ("update_track", "Changed the volume of \u{201C}Bass\u{201D}")]
-    {
+    for (tool, label) in [
+        ("create_track", "Added the track \u{201C}Drums\u{201D}"),
+        ("update_track", "Changed the volume of \u{201C}Bass\u{201D}"),
+    ] {
         let call = session.begin_call(Author::Assistant, tool, label).unwrap();
         {
             let _acting = acting(call);
@@ -471,7 +472,8 @@ fn large(session: &mut Session) -> (Vec<TrackId>, Vec<ClipId>, Vec<DeviceId>) {
             for index in 0..40 {
                 let track = p.add_track(format!("Track {index}"));
                 tracks.push(track);
-                for (uri, name) in [("builtin:polysynth", "Poly Synth"), ("builtin:eq", "EQ"), ("builtin:reverb", "Reverb")]
+                for (uri, name) in
+                    [("builtin:polysynth", "Poly Synth"), ("builtin:eq", "EQ"), ("builtin:reverb", "Reverb")]
                 {
                     devices.push(p.add_device(ChainRef::Track(track), uri, name, None)?);
                 }
@@ -481,7 +483,8 @@ fn large(session: &mut Session) -> (Vec<TrackId>, Vec<ClipId>, Vec<DeviceId>) {
                 }
                 for part in 0..10 {
                     let clip = p.add_midi_clip(track, format!("Part {part}"), part as f64 * 16.0, 16.0)?;
-                    let notes: Vec<Note> = (0..50).map(|step| note_at(step as f64 * 0.25, 36 + (step % 48) as u8)).collect();
+                    let notes: Vec<Note> =
+                        (0..50).map(|step| note_at(step as f64 * 0.25, 36 + (step % 48) as u8)).collect();
                     p.clip_mut(clip)?.add_notes(&notes)?;
                     clips.push(clip);
                 }
@@ -501,7 +504,13 @@ fn large(session: &mut Session) -> (Vec<TrackId>, Vec<ClipId>, Vec<DeviceId>) {
 #[test]
 #[ignore = "a measurement: prints what recording a step costs on a large project"]
 fn what_recording_a_step_costs_an_edit_on_a_large_project() {
-    fn edits(session: &mut Session, tracks: &[TrackId], clips: &[ClipId], devices: &[DeviceId], rounds: usize) -> Duration {
+    fn edits(
+        session: &mut Session,
+        tracks: &[TrackId],
+        clips: &[ClipId],
+        devices: &[DeviceId],
+        rounds: usize,
+    ) -> Duration {
         let started = Instant::now();
         for round in 0..rounds {
             let track = tracks[round % tracks.len()];

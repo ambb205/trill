@@ -11,6 +11,10 @@
 //! The HTTP server has a second door for the assistant that works beside
 //! the user in the window ([`HttpServer::assistant_url`]): the same tools,
 //! held to the limits described in [`guard`].
+//!
+//! Every call that comes through either is entered in the session's
+//! journal under what it did, in words ([`words`]): by the name the client
+//! gave, or as the assistant's for the second door.
 
 mod guard;
 mod hearing;
@@ -21,7 +25,9 @@ mod music;
 mod requests;
 mod server;
 mod sounds;
+mod story;
 mod view;
+pub mod words;
 
 pub use server::TrillServer;
 

@@ -286,7 +286,11 @@ impl Mark {
     /// The mark of this edit and `later`, the next one, together: `None`
     /// unless the later one went to the same entry right after this one.
     pub fn through(self, later: Mark) -> Option<Mark> {
-        (self.seq == later.seq && self.to == later.from).then_some(Mark { seq: self.seq, from: self.from, to: later.to })
+        (self.seq == later.seq && self.to == later.from).then_some(Mark {
+            seq: self.seq,
+            from: self.from,
+            to: later.to,
+        })
     }
 }
 
@@ -737,7 +741,10 @@ impl Journal {
             entry.open = None;
         }
         let calls = std::mem::take(&mut self.calls);
-        OpenCalls { calls: calls.into_iter().map(|call| OpenCall { entries: 0, ..call }).collect(), last: self.last_call }
+        OpenCalls {
+            calls: calls.into_iter().map(|call| OpenCall { entries: 0, ..call }).collect(),
+            last: self.last_call,
+        }
     }
 
     /// Takes on calls that were opened in the journal of the song this

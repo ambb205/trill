@@ -222,6 +222,14 @@ impl Session {
         replace(path, &journal.to_text(conversation)).map_err(|error| io_error(path, error))
     }
 
+    /// How many bytes the journal takes written down: what the story adds
+    /// to the song it began with, and the whole of it. `None` while none
+    /// is kept.
+    pub fn journal_size(&mut self) -> Option<(usize, usize)> {
+        let journal = self.story.journal.as_mut()?;
+        Some((journal.story_bytes(), journal.bytes()))
+    }
+
     /// What to write to bring a copy of the journal up to date that holds
     /// what `written` says: for the safety copy of a project with unsaved
     /// changes. [`Writing::Nothing`] while no journal is kept.
