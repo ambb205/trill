@@ -76,6 +76,7 @@ mod response;
 mod sample_panels;
 mod shortcuts;
 mod snapshot;
+mod sound_presets;
 mod sounds;
 mod stage;
 mod state;

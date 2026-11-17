@@ -40,10 +40,11 @@ pub use instruments::InstrumentKnowledge;
 pub use live::LiveSender;
 pub use processor::Processor;
 pub use render::{RenderError, RenderJob, RenderOptions, RenderReport, Rendered, Watch};
-pub use saved::{Saved, SavedPresets};
+pub use saved::{Saved, SavedPresets, SavedSound};
 pub use session::{
-    MAX_COUNT_IN_BARS, ParamState, ProbeTarget, RecordState, RecordStatus, SampleFile, Session, SessionError,
-    SilentInstrument, TakeClip, TransportStatus, file_facts,
+    Added, Given, ListedSound, MAX_COUNT_IN_BARS, ParamState, ProbeTarget, RecordState, RecordStatus, SampleFile,
+    SavedAsSound, Session, SessionError, SilentInstrument, TakeClip, TransportStatus, file_facts, listed_sounds,
+    sound_after,
 };
 pub use sources::AudioSources;
 

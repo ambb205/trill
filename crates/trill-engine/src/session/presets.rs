@@ -25,12 +25,14 @@
 //! that was sent. Either way it comes to a [`PresetInfo`] and goes through
 //! the same door from there.
 
-use super::{Session, SessionError, preset_values};
+use super::{Session, SessionError};
 use crate::ready::Plugins;
 use crate::saved::{Saved, SavedPresets};
 use std::sync::Arc;
 use trill_core::device::PresetLoadError;
-use trill_core::presets::{PresetFile, PresetInfo, PresetList, PresetLookup, PresetRef, PresetStatus, SavedPreset};
+use trill_core::presets::{
+    Brought, PresetFile, PresetInfo, PresetList, PresetLookup, PresetRef, PresetStatus, SavedPreset, SoundDevice,
+};
 use trill_core::{DeviceId, EditError};
 
 /// The most presets an error names, as what there is or what is near:
@@ -109,36 +111,12 @@ impl Session {
     /// a few hundredths of a second, for one that brings samples as long
     /// as those take to read, and with an error after half a minute from
     /// a plugin that does not answer at all.
+    ///
+    /// A preset that is a sound also makes the effects it brings, behind
+    /// the device, in place of the ones an earlier sound brought there:
+    /// see [`Session::give_preset`], which says what was made.
     pub fn load_preset(&mut self, id: DeviceId, preset: &str) -> Result<PresetInfo, SessionError> {
-        let uri = self.project.device(id)?.uri.clone();
-        let (info, saved) = self.wanted_preset(&uri, preset)?;
-        if let Some(saved) = saved {
-            self.load_saved_preset(id, &info, saved)?;
-            return Ok(info);
-        }
-        let descriptors = self.factory.descriptors();
-        let descriptor = descriptors.iter().find(|d| d.uri == uri);
-        let values = descriptor.and_then(|d| preset_values(d, &info));
-        let state = descriptor.and_then(|d| super::preset_state(d, &info));
-        match (values, state) {
-            // A preset that brings a state: the device is made again from
-            // it, as it is from a saved preset's.
-            (Some(values), Some(state)) => self.edit(|project| {
-                let device = project.device_mut(id)?;
-                device.params = values.into_iter().collect();
-                device.state = Some(state);
-                device.preset = Some(info.reference());
-                Ok(())
-            })?,
-            (Some(values), None) => self.edit_scoped(super::Scope::ParamsOnly, |project| {
-                let device = project.device_mut(id)?;
-                device.params = values.into_iter().collect();
-                device.preset = Some(info.reference());
-                Ok(())
-            })?,
-            (None, _) => self.load_plugin_preset(id, &info)?,
-        }
-        Ok(info)
+        self.give_preset(id, preset).map(|given| given.preset)
     }
 
     /// The presets that were saved, of every device type: where they are
@@ -208,6 +186,7 @@ impl Session {
             params,
             state: device.state.clone(),
             format: Some(trill_core::project::FORMAT_VERSION),
+            after: None,
         };
         let saved = self.saved.save(preset).map_err(SessionError::Io)?;
         let reference = saved.info.reference();
@@ -240,7 +219,15 @@ impl Session {
     /// its state become the preset's, as one undo step. A device with a
     /// state of its own is created again from the preset's, which is how
     /// a plugin takes a state on whole; the song keeps playing meanwhile.
-    fn load_saved_preset(&mut self, id: DeviceId, info: &PresetInfo, saved: SavedPreset) -> Result<(), SessionError> {
+    /// With `after`, the effects of a sound are made behind it in the same
+    /// step ([`Project::bring_after`](trill_core::Project::bring_after)).
+    pub(super) fn load_saved_preset(
+        &mut self,
+        id: DeviceId,
+        info: &PresetInfo,
+        saved: SavedPreset,
+        after: Option<&[SoundDevice]>,
+    ) -> Result<Brought, SessionError> {
         let name = self.project.device(id)?.name.clone();
         let meta = self.bank.devices.get(&id).ok_or(EditError::DeviceNotFound(id))?;
         if let Some(error) = &meta.error {
@@ -251,12 +238,15 @@ impl Session {
         self.absorb_editor_edits();
         self.capture_state_of(id);
         let revision = self.revision;
-        self.edit(|project| {
+        let brought = self.edit(|project| {
             let device = project.device_mut(id)?;
             device.params = saved.params;
             device.state = saved.state;
             device.preset = Some(info.reference());
-            Ok(())
+            match after {
+                Some(after) => project.bring_after(id, &info.reference(), after),
+                None => Ok(Brought::default()),
+            }
         })?;
         if let Some(reason) = self.bank.devices.get(&id).and_then(|meta| meta.error.clone()) {
             if self.revision != revision {
@@ -267,7 +257,7 @@ impl Session {
                 info.name
             )));
         }
-        Ok(())
+        Ok(brought)
     }
 
     /// What `wanted` asks for of the device type `uri`: one of the type's
@@ -366,7 +356,7 @@ impl Session {
 
     /// Has a plugin that is already in the project load one of its
     /// presets, as an undo step. See the module documentation.
-    fn load_plugin_preset(&mut self, id: DeviceId, preset: &PresetInfo) -> Result<(), SessionError> {
+    pub(super) fn load_plugin_preset(&mut self, id: DeviceId, preset: &PresetInfo) -> Result<(), SessionError> {
         let name = self.project.device(id)?.name.clone();
         let meta = self.bank.devices.get(&id).ok_or(EditError::DeviceNotFound(id))?;
         if let Some(error) = &meta.error {
