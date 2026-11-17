@@ -128,7 +128,8 @@ impl DeviceController for Controller {
         let (loaded, pool) = (self.loaded.as_ref()?, self.pool.as_ref()?);
         let (ready, of) = loaded.settled();
         let held = pool.held();
-        Some(Reading { ready, of, unready_notes: held.unready_notes, short_notes: held.short_notes })
+        let unreadable = loaded.unreadable();
+        Some(Reading { ready, of, unreadable, unready_notes: held.unready_notes, short_notes: held.short_notes })
     }
 
     fn missing_files(&mut self) -> Vec<(String, String)> {

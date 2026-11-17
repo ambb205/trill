@@ -234,9 +234,13 @@ pub struct SampledInstrument {
 /// How far a device is with reading what it plays from the disk.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Reading {
-    /// How many of its recordings can be played, and how many it has.
+    /// How many of its recordings were read (or tried and found
+    /// unreadable), and how many it has.
     pub ready: usize,
     pub of: usize,
+    /// How many of those that were tried are files there, and not audio
+    /// that can be read: their notes are silent.
+    pub unreadable: usize,
     /// Notes that did not sound because their recording had not been read
     /// yet, and notes that were cut short because the rest of it had not
     /// been read in time, since the program started.

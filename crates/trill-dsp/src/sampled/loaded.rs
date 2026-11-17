@@ -311,6 +311,20 @@ impl Loaded {
         (self.recordings.iter().filter(|recording| recording.is_settled()).count(), self.recordings.len())
     }
 
+    /// How many of the recordings that were tried are files that cannot
+    /// be read as audio.
+    pub fn unreadable(&self) -> usize {
+        self.recordings.iter().filter(|recording| recording.problem().is_some()).count()
+    }
+
+    /// Why the first recording that cannot be read cannot, with its name:
+    /// a sentence for whoever asks what is wrong.
+    pub fn unreadable_why(&self) -> Option<String> {
+        let (index, recording) =
+            self.recordings.iter().enumerate().find(|(_, recording)| recording.problem().is_some())?;
+        Some(format!("'{}': {}", self.instrument.recordings[index], recording.problem().unwrap_or_default()))
+    }
+
     /// The recordings there is no file for: the slot each is in, and where
     /// it was looked for.
     pub fn missing_files(&self) -> Vec<(String, String)> {

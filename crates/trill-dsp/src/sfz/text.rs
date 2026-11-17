@@ -1,6 +1,8 @@
 //! The text of an SFZ file, taken apart: headers and `name=value` pairs,
 //! with comments gone, `#define`d names filled in and `#include`d files in
-//! their place.
+//! their place. A name may also be defined by the bank file some makers
+//! put beside their instruments (`bank_defines`): the one thing here that
+//! looks at a folder, and not only at the files it is handed.
 //!
 //! The format has no quoting. A value runs to the next `name=`, to the next
 //! header, or to the end of its line, so a path may have spaces in it.
@@ -45,9 +47,74 @@ pub struct Text {
 pub fn tokens(root: &Path, read: &dyn Fn(&Path) -> Result<String, String>) -> Result<Text, String> {
     let source = read(root)?;
     let mut text = Text { files: vec![root.to_path_buf()], ..Text::default() };
-    let mut defines = BTreeMap::new();
+    let mut defines = bank_defines(root, read, &mut text);
     file(&source, root, root, read, &mut defines, &mut text, 0);
     Ok(text)
+}
+
+/// What a maker's bank file defines before the instrument is read. Sets
+/// made for the ARIA engine say where they keep their recordings in a
+/// `*.bank.xml` beside their programs (`<Define name="$sample_dir"
+/// value="../Samples"/>`), and an instrument of such a set that uses the
+/// name without defining it names no file that is there. The bank files
+/// in the instrument's folder and in the one above it are read; what the
+/// instrument defines itself comes after, and wins.
+fn bank_defines(
+    root: &Path,
+    read: &dyn Fn(&Path) -> Result<String, String>,
+    text: &mut Text,
+) -> BTreeMap<String, String> {
+    let mut defines = BTreeMap::new();
+    let beside = root.parent();
+    for folder in [beside, beside.and_then(Path::parent)].into_iter().flatten() {
+        let Ok(listing) = std::fs::read_dir(folder) else { continue };
+        let mut banks: Vec<PathBuf> = listing
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+                name.to_ascii_lowercase().ends_with(".bank.xml")
+            })
+            .collect();
+        banks.sort();
+        for bank in banks {
+            let Ok(source) = read(&bank) else { continue };
+            let found = defined_in(&source);
+            if found.is_empty() {
+                continue;
+            }
+            for (name, value) in found {
+                defines.entry(name).or_insert(value);
+            }
+            text.files.push(bank);
+        }
+    }
+    defines
+}
+
+/// The `<Define name="$name" value="value"/>` elements of a bank file, as
+/// `(name, value)` without the `$`.
+fn defined_in(source: &str) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let mut rest = source;
+    while let Some(at) = rest.find("<Define") {
+        let after = &rest[at + "<Define".len()..];
+        let end = after.find('>').unwrap_or(after.len());
+        let element = &after[..end];
+        let attribute = |name: &str| {
+            let from = element.find(&format!("{name}=\""))? + name.len() + 2;
+            let length = element[from..].find('"')?;
+            Some(&element[from..from + length])
+        };
+        if let (Some(name), Some(value)) = (attribute("name"), attribute("value"))
+            && let Some(name) = name.strip_prefix('$')
+            && !name.is_empty()
+        {
+            found.push((name.to_string(), value.to_string()));
+        }
+        rest = &after[end..];
+    }
+    found
 }
 
 fn file(
@@ -349,5 +416,55 @@ mod tests {
         // Words that are in the way are passed over without a word; what is broken is said.
         assert_eq!(text.problems.len(), 3, "{:?}", text.problems);
         assert!(text.problems[0].contains("is a header that never closes"));
+    }
+
+    #[test]
+    fn a_name_the_maker_s_bank_file_defines_is_filled_in_and_the_instrument_s_own_wins() {
+        let bank = "<?xml version=\"1.0\" ?>\n<AriaBank id=\"1\" name=\"Set\">\n\t<Define name=\"$sample_dir\" \
+                    value=\"../Samples\"/>\n  <Define value=\"8\" name=\"$voices\" />\n<Define name=\"plain\" \
+                    value=\"x\"/>\n<AriaProgram name=\"Set\"><AriaElement path=\"Programs/main.sfz\"/></AriaProgram>\n\
+                    </AriaBank>\n";
+        assert_eq!(
+            defined_in(bank),
+            [("sample_dir".to_string(), "../Samples".to_string()), ("voices".to_string(), "8".to_string())]
+        );
+        assert!(defined_in("<AriaBank><Define name=\"$broken\"").is_empty());
+
+        // On a disk, as a set lies: the bank beside the folder of its programs.
+        let folder = tempfile::tempdir().unwrap();
+        let programs = folder.path().join("Set").join("Programs");
+        std::fs::create_dir_all(&programs).unwrap();
+        let bank_file = folder.path().join("Set").join("Set.bank.xml");
+        std::fs::write(&bank_file, bank).unwrap();
+        std::fs::write(folder.path().join("Set").join("notes.xml"), "<Define name=\"$sample_dir\" value=\"no\"/>")
+            .unwrap();
+        let main = programs.join("main.sfz");
+        std::fs::write(&main, "<control> default_path=$sample_dir/\n<region> sample=a.wav polyphony=$voices").unwrap();
+        let own = programs.join("own.sfz");
+        std::fs::write(&own, "#define $sample_dir Mine\n<control> default_path=$sample_dir/\n<region> sample=a.wav")
+            .unwrap();
+        let read = |path: &Path| std::fs::read_to_string(path).map_err(|error| error.to_string());
+
+        let text = tokens(&main, &read).unwrap();
+        assert_eq!(
+            pairs(&text),
+            [
+                ("<>", "control"),
+                ("default_path", "../Samples/"),
+                ("<>", "region"),
+                ("sample", "a.wav"),
+                ("polyphony", "8")
+            ]
+        );
+        assert_eq!(text.files, [main.clone(), bank_file.clone()], "the bank is one of the files it is made of");
+        assert!(text.problems.is_empty(), "{:?}", text.problems);
+        // What the instrument defines itself is what it means.
+        let text = tokens(&own, &read).unwrap();
+        assert!(pairs(&text).contains(&("default_path", "Mine/")), "{:?}", pairs(&text));
+        // A set without a bank is read as it always was, and a name nobody defined stays as it is written.
+        std::fs::remove_file(&bank_file).unwrap();
+        let text = tokens(&main, &read).unwrap();
+        assert!(pairs(&text).contains(&("default_path", "$sample_dir/")), "{:?}", pairs(&text));
+        assert_eq!(text.files, [main]);
     }
 }

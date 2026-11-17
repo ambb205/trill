@@ -204,6 +204,16 @@ pub(super) fn instrument(ui: &mut Ui, cx: &mut Cx, body: &Body, column: Rect, pa
                 "Notes whose recording is not read yet are silent \u{00B7} a render waits for what it plays",
             );
         }
+        (Some(_), None, None) if reading.is_some_and(|reading| reading.unreadable > 0) => {
+            let unreadable = reading.map_or(0, |reading| reading.unreadable);
+            let words = format!("{unreadable} of its recordings could not be read");
+            state.widget_info(|| WidgetInfo::labeled(Role::Label, true, words.clone()));
+            text::paint(&painter, status, Align2::LEFT_CENTER, theme.text.micro, &words, theme.warn);
+            cx.hint(
+                &state,
+                "Their files are there and are not audio this reads \u{00B7} the notes that play them are silent",
+            );
+        }
         (Some(said), None, None) => match &said.unsupported {
             Some(unsupported) => {
                 let words = "Not everything its file asks for is done";

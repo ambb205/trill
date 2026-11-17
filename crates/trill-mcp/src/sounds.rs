@@ -495,6 +495,13 @@ pub(crate) fn instrument_into(out: &mut Value, session: &Session, device: Device
                 reading.ready, reading.of
             ));
         }
+        if reading.unreadable > 0 {
+            instrument["unreadable"] = json!(format!(
+                "{} of its {} recordings are files that could not be read as audio: the notes that play them are \
+                 silent. The others play.",
+                reading.unreadable, reading.of
+            ));
+        }
         if reading.unready_notes + reading.short_notes > 0 {
             instrument["played_short"] = json!(format!(
                 "Played live since the program started, {} notes were silent because their recording had not \
