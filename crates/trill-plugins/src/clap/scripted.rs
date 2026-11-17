@@ -871,6 +871,23 @@ impl<'a, const KIND: u8> PluginAudioProcessor<'a, Shared<'a>, MainThread<'a, KIN
             shared.set(SEEN_BEATS, transport.song_pos_beats.to_float());
             shared.set(SEEN_SECONDS, transport.song_pos_seconds.to_float());
             shared.set(SEEN_PLAYING, f64::from(transport.flags.contains(TransportFlags::IS_PLAYING)));
+            use crate::transport::written::{self, Block, Format};
+            let looping = transport.flags.contains(TransportFlags::IS_LOOP_ACTIVE);
+            written::down(Format::Clap, shared.serial, || Block {
+                frames,
+                playing: transport.flags.contains(TransportFlags::IS_PLAYING),
+                tempo: transport.tempo,
+                signature: (transport.time_signature_numerator.into(), transport.time_signature_denominator.into()),
+                beats: transport.song_pos_beats.to_float(),
+                seconds: transport.song_pos_seconds.to_float(),
+                samples: None,
+                bar_start: transport.bar_start.to_float(),
+                bar: u32::try_from(transport.bar_number).ok(),
+                looping: looping.then(|| (transport.loop_start_beats.to_float(), transport.loop_end_beats.to_float())),
+                loop_seconds: looping
+                    .then(|| (transport.loop_start_seconds.to_float(), transport.loop_end_seconds.to_float())),
+                steady: process.steady_time.map_or(-1, |time| time as i64),
+            });
         }
         if self.blocks == 1 {
             self.host.request_callback();

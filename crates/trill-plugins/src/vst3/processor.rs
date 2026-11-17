@@ -126,6 +126,7 @@ impl Vst3Processor {
             time_signature: Default::default(),
             playing: false,
             position_beats: 0.0,
+            song: Default::default(),
             loop_range: None,
         };
         let set_all =

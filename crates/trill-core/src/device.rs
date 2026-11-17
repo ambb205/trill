@@ -194,6 +194,14 @@ pub struct DeviceDescriptor {
 }
 
 /// Transport state handed to devices for each block.
+///
+/// A block lies in one tempo and one time signature. Where either changes
+/// inside a song the engine ends the block there, and it takes a tempo
+/// that glides in steps of a few hundred frames, each at the one tempo
+/// that carries the song from where the glide has it at the step's first
+/// frame to where it has it at the first frame of the next. So the song
+/// moves evenly through a block, at `tempo`, and the next block begins
+/// where this one ends.
 #[derive(Copy, Clone, Debug)]
 pub struct ProcessInfo {
     pub sample_rate: f64,
@@ -202,8 +210,66 @@ pub struct ProcessInfo {
     pub playing: bool,
     /// Song position at the first sample of the block.
     pub position_beats: f64,
+    /// Where that is in the song's time and among its bars.
+    pub song: SongTime,
     /// `(start, end)` in beats while the transport is looping.
     pub loop_range: Option<(f64, f64)>,
+}
+
+/// Where a block begins in the song's time and among its bars: what the
+/// song's tempos and time signatures, with every change of them on the
+/// way, make of [`ProcessInfo::position_beats`].
+///
+/// Only in a song of one tempo is the time `beats * 60 / tempo`, and only
+/// in one of a single time signature do the bars divide the beats evenly.
+/// A device that tells someone else the time or the bar (a host of
+/// plugins) reads them here and works nothing out from the block's tempo.
+///
+/// The default is the start of a song.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct SongTime {
+    /// Seconds from the start of the song. From the engine this counts
+    /// the frames the song has played: it lies on a whole frame, and for
+    /// as long as the song plays on without being moved it goes on by
+    /// exactly a block's length from one block to the next, whatever the
+    /// tempo does meanwhile.
+    pub seconds: f64,
+    /// The bar the block begins in, counted from 0 at the start of the
+    /// song.
+    pub bar: u32,
+    /// The beat that bar began at.
+    pub bar_start: f64,
+    /// The loop in seconds, as [`ProcessInfo::loop_range`] is in beats,
+    /// while the transport is looping.
+    pub loop_seconds: Option<(f64, f64)>,
+}
+
+impl SongTime {
+    /// Where `beat` is in a song that has one tempo and one time
+    /// signature from beginning to end.
+    pub fn steady(beat: f64, tempo: f64, signature: TimeSignature, loop_range: Option<(f64, f64)>) -> Self {
+        let seconds = |beat: f64| beat * 60.0 / tempo;
+        let per_bar = signature.beats_per_bar();
+        let bar = (beat / per_bar).floor().max(0.0);
+        Self {
+            seconds: seconds(beat),
+            bar: bar as u32,
+            bar_start: bar * per_bar,
+            loop_seconds: loop_range.map(|(start, end)| (seconds(start), seconds(end))),
+        }
+    }
+}
+
+impl ProcessInfo {
+    /// The block as it is in a song that has had its tempo and its time
+    /// signature from the start: its time and its bar worked out from
+    /// where it is. A block made by hand that is not at the start of a
+    /// song is one of these; the engine's are filled in from the song's
+    /// maps.
+    pub fn steady(mut self) -> Self {
+        self.song = SongTime::steady(self.position_beats, self.tempo, self.time_signature, self.loop_range);
+        self
+    }
 }
 
 /// The most events the engine passes to one `process` call. Hosts of
@@ -933,6 +999,32 @@ impl DeviceFactory for CompositeFactory {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_block_made_by_hand_is_in_a_song_of_one_tempo_and_one_time_signature() {
+        use super::{ProcessInfo, SongTime};
+        use crate::time::TimeSignature;
+        let block = ProcessInfo {
+            sample_rate: 48_000.0,
+            tempo: 90.0,
+            time_signature: TimeSignature::new(6, 8).unwrap(),
+            playing: true,
+            position_beats: 12.5,
+            song: SongTime::default(),
+            loop_range: Some((3.0, 9.0)),
+        };
+        assert_eq!(block.song, SongTime { seconds: 0.0, bar: 0, bar_start: 0.0, loop_seconds: None });
+        // 12.5 beats at 90: eight and a third seconds. A bar of 6/8 is
+        // three beats, so this is the fifth bar, which began at beat 12.
+        let song = block.steady().song;
+        assert!((song.seconds - 25.0 / 3.0).abs() < 1e-12);
+        assert_eq!((song.bar, song.bar_start), (4, 12.0));
+        assert_eq!(song.loop_seconds, Some((2.0, 6.0)));
+        // Before the song begins there is no bar before the first.
+        let before = ProcessInfo { position_beats: -2.0, ..block }.steady().song;
+        assert_eq!((before.bar, before.bar_start), (0, 0.0));
+        assert!(before.seconds < 0.0);
+    }
+
     use super::*;
 
     fn param(unit: &str, kind: ParamKind) -> ParamInfo {

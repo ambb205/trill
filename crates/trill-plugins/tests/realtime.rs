@@ -124,8 +124,10 @@ fn drive(factory: &dyn DeviceFactory, uri: &str) {
                 time_signature: Default::default(),
                 playing: block % 8 != 7,
                 position_beats: block as f64 * 512.0 / 24_000.0,
+                song: Default::default(),
                 loop_range: (block % 4 == 3).then_some((0.0, 8.0)),
-            };
+            }
+            .steady();
             // The very first block also starts the plugin.
             instance.processor.set_param(block % params, first.min);
             instance.processor.set_param((block * 7) % params, first.max);
@@ -164,6 +166,7 @@ fn drive(factory: &dyn DeviceFactory, uri: &str) {
         time_signature: Default::default(),
         playing: true,
         position_beats: 0.0,
+        song: Default::default(),
         loop_range: None,
     };
     let patience = std::time::Instant::now() + PRESET_PATIENCE;

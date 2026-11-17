@@ -63,6 +63,7 @@ fn playing() -> ProcessInfo {
         time_signature: Default::default(),
         playing: true,
         position_beats: 0.0,
+        song: Default::default(),
         loop_range: None,
     }
 }
@@ -451,8 +452,10 @@ fn the_plugin_is_told_where_the_song_is() {
         time_signature: Default::default(),
         playing: true,
         position_beats: 12.5,
+        song: Default::default(),
         loop_range: Some((8.0, 16.0)),
-    };
+    }
+    .steady();
     let (mut left, mut right) = (vec![0.0f32; BLOCK], vec![0.0f32; BLOCK]);
     instance.processor.process(&info, &[], &mut left, &mut right);
     let context = seen(&mut instance).context.expect("a process context");
@@ -462,13 +465,32 @@ fn the_plugin_is_told_where_the_song_is() {
     assert_eq!((context.sampleRate, context.continousTimeSamples), (SR, 0));
     assert!(context.state & kPlaying as u32 != 0);
 
-    info.playing = false;
-    info.position_beats = 3.0;
+    info = ProcessInfo { playing: false, position_beats: 3.0, ..info }.steady();
     instance.processor.process(&info, &[], &mut left, &mut right);
     let context = seen(&mut instance).context.expect("a process context");
     assert!(context.state & kPlaying as u32 == 0);
     assert_eq!(context.projectTimeMusic, 3.0);
     assert_eq!(context.continousTimeSamples, BLOCK as i64, "the clock counts frames");
+}
+
+/// The scripted plugin as [`crate::transport_tests`] stages it.
+fn stage(factory: &Vst3Factory) -> crate::transport_tests::Stage<'_> {
+    crate::transport_tests::Stage {
+        format: crate::transport::written::Format::Vst3,
+        factory,
+        uri: scripted::uri(kind::IMPULSE),
+        serial,
+    }
+}
+
+#[test]
+fn the_plugin_is_told_the_songs_time_and_bars_through_changes_of_tempo_and_meter_whatever_the_buffer_size() {
+    crate::transport_tests::a_plugin_is_told_the_songs_time_and_bars_whatever_the_buffer_size(&stage(&factory()));
+}
+
+#[test]
+fn the_plugin_is_told_where_the_song_went_when_it_loops_or_is_moved() {
+    crate::transport_tests::a_plugin_is_told_where_the_song_went_when_it_loops_or_is_moved(&stage(&factory()));
 }
 
 #[test]

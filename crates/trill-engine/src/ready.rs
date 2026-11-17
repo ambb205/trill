@@ -521,6 +521,7 @@ impl<'a> Stand<'a> {
             time_signature: TimeSignature::default(),
             playing: false,
             position_beats: 0.0,
+            song: Default::default(),
             loop_range: None,
         };
         Self { devices, info, left: vec![0.0; BLOCK], right: vec![0.0; BLOCK], noise: 0.0 }

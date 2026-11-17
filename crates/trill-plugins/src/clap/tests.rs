@@ -51,6 +51,7 @@ fn playing() -> ProcessInfo {
         time_signature: Default::default(),
         playing: true,
         position_beats: 0.0,
+        song: Default::default(),
         loop_range: None,
     }
 }
@@ -308,8 +309,10 @@ fn the_plugin_is_told_where_the_song_is() {
         time_signature: Default::default(),
         playing: true,
         position_beats: 12.5,
+        song: Default::default(),
         loop_range: None,
-    };
+    }
+    .steady();
     let (mut left, mut right) = (vec![0.0f32; BLOCK], vec![0.0f32; BLOCK]);
     instance.processor.process(&info, &[], &mut left, &mut right);
     assert_eq!(value(&mut instance, scripted::SEEN_TEMPO), 90.0);
@@ -318,12 +321,31 @@ fn the_plugin_is_told_where_the_song_is() {
     assert_eq!(value(&mut instance, scripted::SEEN_PLAYING), 1.0);
     assert_eq!(value(&mut instance, scripted::SEEN_STEADY_TIME), 0.0);
 
-    info.playing = false;
-    info.position_beats = 3.0;
+    info = ProcessInfo { playing: false, position_beats: 3.0, ..info }.steady();
     instance.processor.process(&info, &[], &mut left, &mut right);
     assert_eq!(value(&mut instance, scripted::SEEN_PLAYING), 0.0);
     assert_eq!(value(&mut instance, scripted::SEEN_BEATS), 3.0);
     assert_eq!(value(&mut instance, scripted::SEEN_STEADY_TIME), BLOCK as f64, "the clock counts frames");
+}
+
+/// The scripted plugin as [`crate::transport_tests`] stages it.
+fn stage(factory: &ClapFactory) -> crate::transport_tests::Stage<'_> {
+    crate::transport_tests::Stage {
+        format: crate::transport::written::Format::Clap,
+        factory,
+        uri: uri(kind::IMPULSE),
+        serial: |instance| value(instance, scripted::SERIAL) as u64,
+    }
+}
+
+#[test]
+fn the_plugin_is_told_the_songs_time_and_bars_through_changes_of_tempo_and_meter_whatever_the_buffer_size() {
+    crate::transport_tests::a_plugin_is_told_the_songs_time_and_bars_whatever_the_buffer_size(&stage(&factory()));
+}
+
+#[test]
+fn the_plugin_is_told_where_the_song_went_when_it_loops_or_is_moved() {
+    crate::transport_tests::a_plugin_is_told_where_the_song_went_when_it_loops_or_is_moved(&stage(&factory()));
 }
 
 // ---- model values and state ----------------------------------------------

@@ -10,7 +10,7 @@ use crate::graph::{AudioData, Bus, Chain, DeviceSlot, Graph, MAX_BLOCK, RegionAu
 use crate::live::{Captured, LiveTarget, TrackSet};
 use crate::monitor::{Beats, Monitor};
 use trill_core::controllers::{CONTROLLER_KINDS, ControllerKind};
-use trill_core::device::{Event, EventKind, KeyInput, MAX_EVENTS_PER_BLOCK, ProcessInfo};
+use trill_core::device::{Event, EventKind, KeyInput, MAX_EVENTS_PER_BLOCK, ProcessInfo, SongTime};
 use trill_core::project::MIN_VOLUME_DB;
 use trill_core::{DeviceId, MeterMap, TempoMap, TrackId};
 use trill_dsp::util::{db_to_gain, pan_gains};
@@ -254,6 +254,22 @@ impl Processor {
     /// tempo from the origin.
     fn position_after(&self, ahead: u64) -> f64 {
         self.graph.tempo_map.beat_after(self.origin_beat, (self.since_origin + ahead) as f64, self.sample_rate)
+    }
+
+    /// Where the block that begins at `beat` is in the song's time and
+    /// among its bars. The time is the frames the song has played: where
+    /// it was put, to the nearest frame, and those counted since. So it
+    /// goes on by a block's length with every block, through every change
+    /// of tempo, and is the tempo map's time for `beat` to within a frame.
+    fn song_time(&self, beat: f64) -> SongTime {
+        let (tempo, meter) = (&self.graph.tempo_map, &self.graph.meter_map);
+        let bar = meter.bar_at(beat);
+        SongTime {
+            seconds: (self.origin_frames.round() + self.since_origin as f64) / self.sample_rate,
+            bar: bar.index,
+            bar_start: bar.start,
+            loop_seconds: self.graph.loop_region.map(|(start, end)| (tempo.seconds_at(start), tempo.seconds_at(end))),
+        }
     }
 
     /// Begins the stretch of even movement that the frame now due is the
@@ -693,6 +709,7 @@ impl Processor {
             time_signature: signature,
             playing: self.playing,
             position_beats: start_beat,
+            song: self.song_time(start_beat),
             loop_range: self.graph.loop_region,
         };
         let flush = std::mem::replace(&mut self.flush, Flush::Nothing);

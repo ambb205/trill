@@ -13,7 +13,7 @@ use rig::{FRAMES_PER_BEAT, Rig, SR};
 use std::sync::{Arc, Mutex};
 use trill_core::device::{
     CompositeFactory, DeviceCategory, DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance, DeviceProcessor,
-    Event, EventKind, ProcessInfo, Purpose,
+    Event, EventKind, ProcessInfo, Purpose, SongTime,
 };
 use trill_core::project::{AutomationPoint, AutomationTarget, Segment, WarpMode};
 use trill_core::{ChainRef, Device, Note, Project, TimeSignature, TrackId};
@@ -33,6 +33,8 @@ struct Told {
     tempo: f64,
     signature: TimeSignature,
     beat: f64,
+    /// Where that is in the song's time and among its bars.
+    song: SongTime,
 }
 
 /// An instrument that answers every note with one sample, at the frame the
@@ -61,6 +63,7 @@ impl DeviceProcessor for Ticker {
                 tempo: info.tempo,
                 signature: info.time_signature,
                 beat: info.position_beats,
+                song: info.song,
             });
             self.frame += left.len();
         }
@@ -229,6 +232,14 @@ fn a_device_is_told_the_tempo_and_the_time_signature_as_they_pass() {
             let wanted = map.beat_after(0.0, block.frame as f64, SR);
             let near = if map.is_ramping_at(wanted) { 5e-6 } else { 1e-9 };
             assert!((block.beat - wanted).abs() < near, "frame {}: beat {} for {wanted}", block.frame, block.beat);
+            // The time is the frames the song has played, exactly, which
+            // is the map's time for the beat; and the bar is the one the
+            // song is in, counted through every time signature it had.
+            assert_eq!(block.song.seconds, block.frame as f64 / SR, "at beat {}", block.beat);
+            assert!((block.song.seconds - map.seconds_at(block.beat)).abs() < 1e-5, "at beat {}", block.beat);
+            let bar = bars.bar_at(block.beat);
+            assert_eq!((block.song.bar, block.song.bar_start), (bar.index, bar.start), "at beat {}", block.beat);
+            assert_eq!(block.song.loop_seconds, None);
             // The time signature is the one the block starts in, and a
             // block does not reach into the next one by more than a frame.
             assert_eq!(block.signature, bars.signature_at(block.beat), "at beat {}", block.beat);

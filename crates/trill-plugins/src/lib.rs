@@ -74,6 +74,9 @@ pub mod scan;
 mod signal;
 #[cfg(test)]
 mod test_support;
+mod transport;
+#[cfg(test)]
+mod transport_tests;
 mod vendor;
 pub mod vst3;
 

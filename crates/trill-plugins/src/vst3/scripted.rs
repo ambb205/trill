@@ -1468,6 +1468,25 @@ impl<const ROLE: u8> IAudioProcessorTrait for Object<ROLE> {
                 seen.context = data.processContext.as_ref().copied();
                 note_thread(&mut seen.audio_threads);
             });
+            if let Some(context) = data.processContext.as_ref() {
+                use crate::transport::written::{self, Block, Format};
+                use vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_ as flags;
+                let has = |flag| context.state & flag as u32 != 0;
+                written::down(Format::Vst3, serial, || Block {
+                    frames,
+                    playing: has(flags::kPlaying),
+                    tempo: context.tempo,
+                    signature: (context.timeSigNumerator as u32, context.timeSigDenominator as u32),
+                    beats: context.projectTimeMusic,
+                    seconds: context.projectTimeSamples as f64 / context.sampleRate,
+                    samples: Some(context.projectTimeSamples),
+                    bar_start: context.barPositionMusic,
+                    bar: None,
+                    looping: has(flags::kCycleActive).then_some((context.cycleStartMusic, context.cycleEndMusic)),
+                    loop_seconds: None,
+                    steady: context.continousTimeSamples,
+                });
+            }
             if self.kind == kind::FAILS_PROCESS && blocks >= 3 {
                 return kInternalError;
             }
