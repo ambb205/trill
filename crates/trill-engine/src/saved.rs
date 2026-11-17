@@ -14,6 +14,11 @@
 //!
 //! [`WithSaved`] puts the store in front of a device factory, so that
 //! whoever asks for a device type's presets gets the saved ones too.
+//!
+//! A preset's file is a preset wherever it lies: one that was sent by
+//! someone else, or copied from another machine, is read from where it is
+//! ([`SavedPresets::read_file`]) and given to a device without becoming
+//! one of the user's own.
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -28,6 +33,11 @@ use trill_core::presets::{PresetInfo, PresetList, SavedPreset, short_id};
 const EXTENSION: &str = "trillpreset";
 /// What the name of the file with a preset's state adds to its own.
 const STATE_SUFFIX: &str = "-state";
+/// The largest preset file, and the largest file of a preset's state, that
+/// is read from somewhere other than the store's own folder: a preset's
+/// text is a few kilobytes, a plugin's state at most some megabytes.
+const MAX_PRESET_TEXT: u64 = 64 * 1024 * 1024;
+const MAX_PRESET_STATE: u64 = 256 * 1024 * 1024;
 
 /// The presets that were saved, of every device type. See the module
 /// documentation.
@@ -168,6 +178,29 @@ impl SavedPresets {
         Ok(Some(preset))
     }
 
+    /// Whether `file` is named as a saved preset's file is.
+    pub fn is_preset_file(file: &Path) -> bool {
+        file.extension().is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case(EXTENSION))
+    }
+
+    /// The preset in the file at `file`, wherever that lies: whole, with
+    /// the state that is kept in a file beside it. The file is one this
+    /// program wrote when a preset was saved, here or on another machine;
+    /// it is only read. An error is the end of a sentence about the file.
+    pub fn read_file(file: &Path) -> Result<SavedPreset, String> {
+        let text = read_bounded(file, MAX_PRESET_TEXT)?;
+        let text = String::from_utf8(text).map_err(|_| "it is not a saved preset (it is not text)".to_string())?;
+        let mut preset =
+            SavedPreset::from_json(&text).map_err(|reason| format!("it is not a saved preset ({reason})"))?;
+        let state = state_file(file);
+        if state.is_file() {
+            let bytes = read_bounded(&state, MAX_PRESET_STATE)
+                .map_err(|reason| format!("the file with its state, '{}', is no good: {reason}", state.display()))?;
+            preset.state = Some(bytes);
+        }
+        Ok(preset)
+    }
+
     /// Removes the preset the device type `uri` has saved under `name`,
     /// and says whether there was one.
     pub fn delete(&self, uri: &str, name: &str) -> bool {
@@ -184,6 +217,26 @@ impl SavedPresets {
         }
         removed
     }
+}
+
+/// The file at `file`, whole, if it is no larger than `most`; or what to
+/// say of it.
+fn read_bounded(file: &Path, most: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let cannot = |error: std::io::Error| match error.kind() {
+        std::io::ErrorKind::NotFound => "there is no such file".to_string(),
+        _ => format!("it cannot be read ({error})"),
+    };
+    let found = std::fs::metadata(file).map_err(cannot)?;
+    if !found.is_file() {
+        return Err("it is a folder, not a file".to_string());
+    }
+    if found.len() > most {
+        return Err(format!("it is too large to be a preset ({} MB)", found.len() / (1024 * 1024)));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(file).map_err(cannot)?.take(most).read_to_end(&mut bytes).map_err(cannot)?;
+    Ok(bytes)
 }
 
 /// Whether two paths lead to one file.
@@ -415,6 +468,14 @@ impl DeviceFactory for WithSaved {
 
     fn plays_drums(&self, uri: &str) -> bool {
         self.inner.plays_drums(uri)
+    }
+
+    fn preset_file(&self, uri: &str, file: &Path, within: Option<&str>) -> Option<Result<PresetInfo, String>> {
+        self.inner.preset_file(uri, file, within)
+    }
+
+    fn preset_file_type(&self, file: &Path) -> Option<String> {
+        self.inner.preset_file_type(file)
     }
 }
 

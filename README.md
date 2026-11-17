@@ -35,9 +35,9 @@ asked for:
 
 ```sh
 cargo test -p trill-plugins -- --include-ignored    # against the CLAP and VST3 plugins installed here (minutes)
-cargo test -p trill-mcp --test presets -- --include-ignored --nocapture    # an assistant's pass over Surge XT's presets, an amplifier's, and a kit, a guitar tone and a patch of their makers'
+cargo test -p trill-mcp --test presets -- --include-ignored --nocapture    # an assistant's pass over Surge XT's presets, an amplifier's, a kit, a guitar tone and a patch of their makers', and a bought preset found among the samples
 cargo test -p trill-plugins --test sounds -- --include-ignored --nocapture --test-threads 1    # what installed plugins say of their parameters, channels and presets
-cargo test -p trill-plugins --test vendor -- --include-ignored --nocapture --test-threads 1    # the makers' own presets of Serum 2, the Ample guitars, Superior Drummer 3 and the Archetypes: listed, loaded, and heard to differ
+cargo test -p trill-plugins --test vendor -- --include-ignored --nocapture --test-threads 1    # the makers' own presets of Serum 2, the Ample guitars, Superior Drummer 3 and the Archetypes: listed, loaded by name and by a file's path, and heard to differ
 cargo test -p trill-mcp --test controllers -- --include-ignored --nocapture    # a SWAM saxophone and Surge XT played from the controller curves of clips
 cargo test -p trill-mcp --test hearing -- --include-ignored --nocapture    # renders and probes of Superior Drummer 3, a SWAM saxophone and an Ample bass
 cargo test -p trill-mcp --test instruments -- --include-ignored --nocapture    # what Trill ships about the Ample guitars and bass and Superior Drummer 3, checked on the plugins themselves
@@ -220,6 +220,18 @@ device is marked as loading meanwhile. It also says
 when an Ample preset switches the instrument's automatic legato on, as nearly all of them do: notes that ring over
 each other are then hammered on unasked, until the parameter "Auto Legato" is set to 0. A folder or a product that
 is not there is simply no presets.
+
+**A preset from a file, anywhere**: presets that were bought or sent lie with the samples, not where a plugin's
+presets are listed from. Any place that takes a preset by name also takes the whole path of a preset file: a
+`.vstpreset` for any VST3 plugin (which is also the form a plugin's state has in another host's project), a file
+of the maker's own format where Trill reads it (`.SerumPreset`, an Ample instrument's preset, an Archetype's; for
+a file of many, such as Superior Drummer's kits, `path#name`), a file a CLAP plugin loads itself, or a
+`.trillpreset` that was saved on another machine. It goes through the same door as a preset by name: one undo
+step, the plugin checked to have taken it where that can be seen, and a sentence when the file is another
+plugin's, damaged or gone. In the window it is "Load preset file…" in a device's preset menu. Preset files in the
+sample library's folders are found by `search_presets` by their names, each with the device it is for and its
+path. The assistant in the window may be pointed at a preset file on any disk of this machine, and at none on a
+network share: opening one would sign the user in to whatever machine the path names.
 
 **Saved presets**: any device's sound can be kept under a name: a plugin's state with everything that was set in
 its own window, a built-in device's every parameter. That is how a plugin whose presets are neither told to the
@@ -473,7 +485,9 @@ them a page at a time and search them (`preset_query: "warm pad"`, `preset_categ
 for a sound ("warm pad", "808 sub") across every installed instrument at once and answers with the device and the
 preset to give `create_track`; the presets are read in the background the first time and remembered, and the reply
 says which are still being read. `list_devices` says how many presets a plugin has, where that is known. The
-presets a maker keeps in files of its own format (see "The makers' own presets") are among them. After a preset
+presets a maker keeps in files of its own format (see "The makers' own presets") are among them, and `preset`
+also takes the whole path of a preset file that lies anywhere (`search_presets` finds those of the sample library:
+an item with `file`). After a preset
 that sets the plugin reading samples, the reply has a `note` that says so. A plugin that lists none says so in a
 sentence: its presets are in its own window, and `save_preset` keeps what is chosen there.
 

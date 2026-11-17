@@ -37,6 +37,8 @@ const ROOT_ROOM: usize = 4096;
 pub(crate) const LIBRARY: &str = "DBName";
 /// The setting that joins notes nobody asked to be joined.
 const LEGATO: &str = "Auto Legato";
+/// What is said of a file that is not one of these documents.
+const NOT_A_DOCUMENT: &str = "it is not one of Ample Sound's documents of settings";
 /// What the plugin goes on doing when it is switched to other samples.
 const LIBRARY_NOTE: &str = "the plugin reads those samples in the background: for some seconds its notes are silent \
                             or cut short";
@@ -50,16 +52,25 @@ pub(crate) fn is_ours(id: &str) -> bool {
 /// user's documents is named as the plugin's file is (`AMH`), and so are
 /// its preset files (`.amhstate`).
 fn folders(plugin: &PluginRef, places: &VendorPlaces) -> Vec<(PathBuf, String)> {
-    let Some(code) = plugin.path.file_stem().map(|stem| stem.to_string_lossy().into_owned()) else { return Vec::new() };
-    if code.is_empty() || !code.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return Vec::new();
-    }
-    let extension = format!("{}state", code.to_lowercase());
+    let (Some(code), Some(extension)) = (code(plugin), extension(plugin)) else { return Vec::new() };
     places
         .documents
         .iter()
         .map(|documents| (documents.join("Ample Sound").join(&code).join("Presets4"), extension.clone()))
         .collect()
+}
+
+/// The letters an instrument's files and folders are named with: what
+/// the plugin's own file is called (`AMH`).
+fn code(plugin: &PluginRef) -> Option<String> {
+    let code = plugin.path.file_stem().map(|stem| stem.to_string_lossy().into_owned())?;
+    (!code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).then_some(code)
+}
+
+/// The extension an instrument's preset files have, in lower case and
+/// without the dot (`amhstate`).
+pub(crate) fn extension(plugin: &PluginRef) -> Option<String> {
+    code(plugin).map(|code| format!("{}state", code.to_lowercase()))
 }
 
 /// Lists the preset files in an instrument's folders: each by its file's
@@ -69,37 +80,44 @@ pub(crate) fn list(plugin: &PluginRef, places: &VendorPlaces, sink: &mut dyn Sin
     for (folder, extension) in folders(plugin, places) {
         let extensions = vec![extension];
         sink.watch(Watch { path: folder.clone(), extensions: extensions.clone() });
-        let mut batch = Vec::new();
-        for file in walk::files(&folder, &extensions) {
-            let Ok(start) = read_start(&file, ROOT_ROOM) else { continue };
-            let start = String::from_utf8_lossy(&start);
-            let Some(Ok(Tag::Start { name, attributes, .. })) = xml::tags(&start).next() else { continue };
-            if !name.ends_with("_STATE") {
-                continue;
-            }
-            let said = |wanted: &str| {
-                let found = attributes.iter().find(|attribute| attribute.name == wanted);
-                tidy(&found.map(|attribute| attribute.value()).unwrap_or_default(), NAME_LIMIT)
-            };
-            let stem = file.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
-            let tags = ["Type", "Dist", "Lib"].map(said).map(|tag| tag.to_lowercase());
-            let mut kinds: Vec<String> = Vec::new();
-            for tag in tags.into_iter().filter(|tag| !tag.is_empty()) {
-                if !kinds.contains(&tag) {
-                    kinds.push(tag);
-                }
-            }
-            batch.push(PresetInfo {
-                name: tidy(&stem, NAME_LIMIT),
-                category: said("Category"),
-                author: said("Author"),
-                tags: kinds,
-                locator: Locator::Vendor { format: super::Format::Ample, path: file, key: None }.to_text(),
-                ..PresetInfo::default()
-            });
-        }
+        let batch = walk::files(&folder, &extensions).iter().filter_map(|file| file_preset(file).ok()).collect();
         sink.presets(batch);
     }
+}
+
+/// The preset in the file at `file`, wherever that lies: by its file's
+/// name, with what its first line says of it. An error says why the file
+/// is not one of these instruments' presets, as the end of a sentence
+/// about it. Which instrument it is a preset of shows when it is loaded.
+pub(crate) fn file_preset(file: &Path) -> Result<PresetInfo, String> {
+    let start = read_start(file, ROOT_ROOM).map_err(|error| format!("it cannot be read ({error})"))?;
+    let start = String::from_utf8_lossy(&start);
+    let Some(Ok(Tag::Start { name, attributes, .. })) = xml::tags(&start).next() else {
+        return Err(NOT_A_DOCUMENT.to_string());
+    };
+    if !name.ends_with("_STATE") {
+        return Err(NOT_A_DOCUMENT.to_string());
+    }
+    let said = |wanted: &str| {
+        let found = attributes.iter().find(|attribute| attribute.name == wanted);
+        tidy(&found.map(|attribute| attribute.value()).unwrap_or_default(), NAME_LIMIT)
+    };
+    let stem = file.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
+    let tags = ["Type", "Dist", "Lib"].map(said).map(|tag| tag.to_lowercase());
+    let mut kinds: Vec<String> = Vec::new();
+    for tag in tags.into_iter().filter(|tag| !tag.is_empty()) {
+        if !kinds.contains(&tag) {
+            kinds.push(tag);
+        }
+    }
+    Ok(PresetInfo {
+        name: tidy(&stem, NAME_LIMIT),
+        category: said("Category"),
+        author: said("Author"),
+        tags: kinds,
+        locator: Locator::Vendor { format: super::Format::Ample, path: file.to_path_buf(), key: None }.to_text(),
+        ..PresetInfo::default()
+    })
 }
 
 /// One setting of a document, and where its value is written.
@@ -162,7 +180,7 @@ impl Document {
             }
         }
         if !document.kind.ends_with("_STATE") || document.settings.is_empty() {
-            return Err("it is not one of Ample Sound's documents of settings".to_string());
+            return Err(NOT_A_DOCUMENT.to_string());
         }
         Ok(document)
     }

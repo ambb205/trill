@@ -23,9 +23,11 @@
 //!
 //! *Loading* a preset is not here: it is done by the running plugin, and
 //! so by each format's controller, from the [`Locator`] a preset is listed
-//! with.
+//! with. A preset file that lies outside the folders that are listed is
+//! given a locator when it is asked for by its path ([`file`]).
 
 pub(crate) mod cache;
+pub(crate) mod file;
 pub(crate) mod store;
 pub(crate) mod walk;
 

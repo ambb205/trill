@@ -8,15 +8,16 @@ use super::{VST3_SCHEME, find_plugin_files, probe, standard_search_paths};
 use crate::main_thread::MainThread;
 use crate::plugin_thread::{self, CREATE_TIMEOUT, PluginThread, plugin_thread};
 use crate::presets::store::{PluginRef, PresetFormat, PresetStore};
+use crate::presets::{file, identify};
 use crate::scan::catalog::{Format, Inventory, Settings};
 use crate::scan::{self, ScanFailure, ScanMode, Scanner};
-use crate::vendor::VendorPlaces;
-use std::path::PathBuf;
+use crate::vendor::{self, VendorPlaces};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use trill_core::Device;
 use trill_core::device::{DeviceDescriptor, DeviceError, DeviceFactory, DeviceInstance, Purpose, split_uri};
-use trill_core::presets::PresetList;
+use trill_core::presets::{PresetInfo, PresetList};
 
 /// The VST3 sub-category that marks a plugin as an instrument.
 const INSTRUMENT_CATEGORY: &str = "Instrument";
@@ -134,6 +135,8 @@ struct Shared {
     /// Where a vendor's preset is made into a state: in the scanner
     /// process, like everything that reads files Trill did not write.
     scanner: Scanner,
+    /// What the preset files that were asked for by their paths hold.
+    files: file::Readings,
 }
 
 impl Vst3Factory {
@@ -149,7 +152,47 @@ impl Vst3Factory {
         let settings: Settings = config.into();
         let presets = PresetStore::new(&PRESETS, settings.preset_settings(folders, places), main.clone());
         let installed = Inventory::new(&FORMAT, settings, main.clone());
-        Ok(Self { shared: Arc::new(Shared { main, installed, presets, scanner }) })
+        let files = file::Readings::default();
+        Ok(Self { shared: Arc::new(Shared { main, installed, presets, scanner, files }) })
+    }
+
+    /// The preset that the file at `file` holds for `plugin`: see
+    /// [`DeviceFactory::preset_file`]. A `.vstpreset` file is any VST3
+    /// plugin's; a plugin whose maker's own format is read
+    /// ([`crate::vendor`]) also takes a file of that.
+    fn file_preset(&self, plugin: &PluginRef, file: &Path, within: Option<&str>) -> Result<PresetInfo, String> {
+        file::check(file)?;
+        // A file in one of the folders the plugin's presets are listed
+        // from is the preset the list has.
+        let listed = file::listed(self.shared.presets.known(plugin).as_ref(), file);
+        if !listed.is_empty() {
+            return file::choose(listed, within, file);
+        }
+        if super::presets::is_preset_file(file) {
+            let (class, preset) = super::presets::file_preset(file)?;
+            if ClassId::parse(&plugin.id) != Some(class) {
+                let catalog = self.shared.installed.scanned();
+                let whose = catalog.and_then(|catalog| catalog.plugin_ref(VST3_SCHEME, &class.to_string()));
+                return Err(match whose {
+                    Some(other) => format!("it is a preset of {}, not of {}", other.name, plugin.name),
+                    None => format!("it is a preset of another plugin (class {class}), not of {}", plugin.name),
+                });
+            }
+            return file::choose(identify(vec![preset]), within, file);
+        }
+        let Some(format) = vendor::Format::of(plugin) else {
+            return Err(format!("{} is given presets from .vstpreset files, and this is not one", plugin.name));
+        };
+        let scanner = &self.shared.scanner;
+        let read = self.shared.files.of(format.tag(), file, || vendor::child::file_presets(scanner, format, file));
+        // A file that is not named as the plugin's own are is most likely
+        // the wrong kind of file altogether: say which kinds there are.
+        let named_so = format.extension(plugin).is_some_and(|extension| file::has_extension(file, &extension));
+        let presets = read.map_err(|reason| match named_so {
+            true => reason,
+            false => format!("{reason}. {} takes {} or a .vstpreset file", plugin.name, format.file_kind()),
+        })?;
+        file::choose(presets, within, file)
     }
 
     /// The installed plugin `uri` names, as the plugin whose presets are
@@ -320,6 +363,29 @@ impl DeviceFactory for Vst3Factory {
             Some((VST3_SCHEME, class_id)) => self.shared.installed.catalog().plays_drums(class_id),
             _ => false,
         }
+    }
+
+    fn preset_file(&self, uri: &str, file: &Path, within: Option<&str>) -> Option<Result<PresetInfo, String>> {
+        Some(match self.preset_source(uri, true)? {
+            Ok(plugin) => self.file_preset(&plugin, file, within),
+            Err(_) => Err("the plugin is not installed".to_string()),
+        })
+    }
+
+    /// A `.vstpreset` file says in its first bytes which plugin it is
+    /// for. A file of a maker's own format is told by its extension where
+    /// the format has one of its own (`.SerumPreset`, `.amhstate`).
+    fn preset_file_type(&self, file: &Path) -> Option<String> {
+        let catalog = self.shared.installed.scanned()?;
+        if super::presets::is_preset_file(file) {
+            let (class, _) = super::presets::file_preset(file).ok()?;
+            return catalog.plugin_ref(VST3_SCHEME, &class.to_string()).map(|plugin| plugin.uri);
+        }
+        let extension = file::extension(file)?;
+        let named_so = |plugin: &PluginRef| {
+            vendor::Format::of(plugin).and_then(|format| format.extension(plugin)).as_deref() == Some(&extension)
+        };
+        catalog.plugin_refs(VST3_SCHEME).find(named_so).map(|plugin| plugin.uri)
     }
 }
 

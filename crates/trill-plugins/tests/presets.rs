@@ -384,3 +384,59 @@ fn surge_xt_as_a_vst3_lists_no_programs_and_takes_a_preset_file() {
     assert!(session.undo());
     assert!(rendered(&mut session).like(before));
 }
+
+/// A preset file of Surge XT's own, copied to where someone keeps the
+/// presets they bought, is loaded by its path: the plugin reads the file
+/// itself, as it reads the ones in its own folders.
+#[test]
+#[ignore = "needs the plugins installed on this machine; run with `cargo test -p trill-plugins -- --include-ignored`"]
+fn surge_xt_is_given_a_preset_file_that_lies_outside_its_folders() {
+    let factory = clap();
+    if !installed(&factory, SURGE) {
+        return;
+    }
+    let list = listed(&factory, SURGE);
+    let (mut session, track) = session(Box::new(factory.clone()));
+    let device = session.add_device(ChainRef::Track(track), SURGE, None, None).unwrap();
+    let before = rendered(&mut session);
+    let bought = scratch("bought");
+    let _ = std::fs::remove_dir_all(&bought);
+    std::fs::create_dir_all(&bought).unwrap();
+
+    // Copies of a few of its pads, until one is heard to differ from the
+    // patch it starts with.
+    let pads = search(&list, "", Some("factory presets/pads"));
+    let step = session.undo_step();
+    let mut found = None;
+    for preset in pads.iter().take(8) {
+        let source = trill_plugins::preset_file_of(preset).expect("a preset in a file");
+        let copy = bought.join(source.file_name().unwrap());
+        std::fs::copy(&source, &copy).unwrap();
+        let loaded = session.load_preset(device, &copy.to_string_lossy()).unwrap_or_else(|error| panic!("{error}"));
+        let after = rendered(&mut session);
+        eprintln!("{} by its path: {after:?} (it starts as {before:?})", copy.display());
+        assert_eq!(session.device_preset(device).map(|preset| preset.name.clone()), Some(loaded.name));
+        if !after.like(before) && after.peak > 1e-3 {
+            found = Some((copy, after));
+            break;
+        }
+    }
+    let (copy, after) = found.expect("one of the copied pads sounds different from the patch it starts with");
+    // By its path it is the sound it is by its name.
+    while session.undo_step() != step {
+        assert!(session.undo());
+    }
+    assert!(rendered(&mut session).like(before));
+    let name = copy.file_stem().unwrap().to_string_lossy().into_owned();
+    session.load_preset(device, &format!("Pads/{name}")).unwrap_or_else(|error| panic!("{error}"));
+    let by_name = rendered(&mut session);
+    assert!(by_name.like(after), "{by_name:?} by its name, {after:?} by the path of a copy");
+
+    // A file that is none of its presets is refused before the plugin is
+    // asked, by what kind of file it is.
+    let other = bought.join("Kick.wav");
+    std::fs::write(&other, b"RIFF").unwrap();
+    let error = session.load_preset(device, &other.to_string_lossy()).unwrap_err().to_string();
+    eprintln!("{error}");
+    assert!(error.contains("it is not a kind of file Surge XT keeps presets in"), "{error}");
+}
