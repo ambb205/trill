@@ -1,19 +1,19 @@
-//! Writes what the wavetable synth's presets sound like, for someone to
-//! listen to:
+//! Writes the wavetable synth's bank for someone to listen to:
 //!
 //! ```sh
 //! cargo run -p trill-app --example wavetable_listen -- target/wavetable-listening
 //! ```
 //!
-//! Every preset plays a phrase that suits it into a WAV file: the synth
-//! alone (no effect, no limiter), and for a preset that is a sound with
-//! effects a second time as it ships, through the chorus, delay or reverb
-//! it brings, which is what a track given the preset plays. Two short
-//! pieces use several of them together, mixed as a song is. `LIST.md` says
-//! which file is which.
+//! A file for each kind of sound (basses, leads, plucks, pads, keys, and
+//! the rest), in which every sound of the kind plays a short phrase that
+//! suits it, one after another, through the effects it brings: what a
+//! track plays that is given the sound. Four short pieces in different
+//! styles, made of the bank and the built-in drum kit and of nothing
+//! else. And `LIST.md`, which says when each sound begins in its file.
 //!
-//! Nobody has heard any of this: whoever wrote the presets and the phrases
-//! cannot. It is the same on every run and on every machine.
+//! The first sixteen sounds were heard by the owner. Nobody has heard the
+//! rest, nor the pieces: whoever wrote them cannot. It is the same on
+//! every run and on every machine.
 //!
 //! With a second path it also writes the small song the pictures of the
 //! synth's panel are made from (`render.sh wavetable`).
@@ -23,59 +23,58 @@
 //! taken of (`render.sh instrument-sound`), a song and a profile folder
 //! that holds one saved sound.
 
-use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 use trill_core::audio::AudioBuffer;
-use trill_core::device::DeviceFactory;
-use trill_core::presets::{PresetRef, SoundDevice, names_after};
+use trill_core::device::{DeviceFactory, Preset};
+use trill_core::presets::{PresetRef, names_after};
 use trill_core::project::{AutomationPoint, AutomationTarget};
-use trill_core::{ChainRef, DeviceId, Note, Project, TrackId, TrackKind};
+use trill_core::{ChainRef, DeviceId, Note, Project, TrackId};
 use trill_dsp::BuiltinFactory;
 use trill_engine::render::{RenderOptions, render};
 use trill_media::{WavFormat, write_wav};
 
 const SYNTH: &str = "builtin:wavetable";
+const DRUMS: &str = "builtin:drumkit";
+const RATE: u32 = 48_000;
 
 fn n(pitch: u8, start: f64, length: f64, velocity: u8) -> Note {
     Note { pitch, start, length, velocity }
 }
 
-/// What a preset of the synth sets, and the state it brings.
-fn preset(name: &str) -> (BTreeMap<String, f64>, Option<Vec<u8>>, String, String) {
-    let descriptors = BuiltinFactory.descriptors();
-    let synth = descriptors.iter().find(|descriptor| descriptor.uri == SYNTH).expect("the wavetable synth");
-    let preset = synth.presets.iter().find(|preset| preset.name == name).unwrap_or_else(|| panic!("no '{name}'"));
-    let values = preset.params.iter().cloned().collect();
-    (values, preset.state.clone(), preset.category.clone(), preset.description.clone())
+fn line(notes: &[(u8, f64, f64, u8)]) -> Vec<Note> {
+    notes.iter().map(|(pitch, start, length, velocity)| n(*pitch, *start, *length, *velocity)).collect()
 }
 
-/// The effects the synth's preset `name` brings behind it.
-fn brought(name: &str) -> Vec<SoundDevice> {
+/// The presets of a built-in device.
+fn presets_of(uri: &str) -> Vec<Preset> {
     let descriptors = BuiltinFactory.descriptors();
-    let synth = descriptors.iter().find(|descriptor| descriptor.uri == SYNTH).expect("the wavetable synth");
-    let preset = synth.presets.iter().find(|preset| preset.name == name).unwrap_or_else(|| panic!("no '{name}'"));
-    preset.after.clone().unwrap_or_default()
+    descriptors.into_iter().find(|descriptor| descriptor.uri == uri).expect("a built-in device").presets
 }
 
-/// Adds a track that plays `notes` on the synth's preset `name`, in a clip
-/// from the start of the song. Returns the track and the synth.
-fn part(project: &mut Project, name: &str, preset_name: &str, notes: &[Note], beats: f64) -> (TrackId, DeviceId) {
+fn preset(uri: &str, name: &str) -> Preset {
+    presets_of(uri).into_iter().find(|preset| preset.name == name).unwrap_or_else(|| panic!("no '{name}' of {uri}"))
+}
+
+/// Adds a track on the bank's sound `sound`, with the effects it brings
+/// behind the synth: what a track is that is given the sound.
+fn track_on(project: &mut Project, name: &str, sound: &str) -> (TrackId, DeviceId) {
+    let preset = preset(SYNTH, sound);
     let track = project.add_track(name);
-    let device = project.add_device(ChainRef::Track(track), SYNTH, preset_name, None).expect("a device");
-    let (values, state, ..) = preset(preset_name);
+    let device = project.add_device(ChainRef::Track(track), SYNTH, "Wavetable", None).expect("a device");
     let model = project.device_mut(device).expect("the device");
-    model.params = values;
-    model.state = state;
-    let clip = project.add_midi_clip(track, name, 0.0, beats).expect("a clip");
-    project.clip_mut(clip).expect("the clip").add_notes(notes).expect("notes");
+    model.params = preset.params.iter().cloned().collect();
+    model.state = preset.state.clone();
+    let reference = PresetRef { id: preset.name.clone(), name: preset.name.clone() };
+    model.preset = Some(reference.clone());
+    project.bring_after(device, &reference, preset.after.as_deref().unwrap_or_default()).expect("its effects");
     (track, device)
 }
 
-fn effect(project: &mut Project, chain: ChainRef, uri: &str, values: &[(&str, f64)]) {
-    let device = project.add_device(chain, uri, uri.trim_start_matches("builtin:"), None).expect("an effect");
-    let model = project.device_mut(device).expect("the effect");
-    model.params.extend(values.iter().map(|(id, value)| (id.to_string(), *value)));
+/// Puts `notes` on `track`, in a clip from `start` that is `beats` long.
+fn play(project: &mut Project, track: TrackId, start: f64, beats: f64, notes: &[Note]) {
+    let clip = project.add_midi_clip(track, "Part", start, beats).expect("a clip");
+    project.clip_mut(clip).expect("the clip").add_notes(notes).expect("notes");
 }
 
 fn draw(project: &mut Project, device: DeviceId, param: &str, points: &[(f64, f64)]) {
@@ -84,29 +83,33 @@ fn draw(project: &mut Project, device: DeviceId, param: &str, points: &[(f64, f6
     project.set_automation(target, points).expect("automation");
 }
 
+fn rendered(project: &Project, tail: f64) -> anyhow::Result<(Vec<f32>, Vec<f32>)> {
+    let options = RenderOptions { sample_rate: RATE, max_tail_seconds: tail, ..RenderOptions::default() };
+    let out = render(project, &BuiltinFactory, &options).map_err(|error| anyhow::anyhow!("{error}"))?;
+    anyhow::ensure!(out.problems.is_empty(), "{:?}", out.problems);
+    Ok((out.left, out.right))
+}
+
 /// The highest a file goes: one that would go higher is turned down to
-/// it, since a file cannot hold more than full scale.
+/// it as a whole, since a file cannot hold more than full scale.
 const CEILING: f32 = 0.891;
 
-/// Renders `project` and writes it to `path`. Returns its length in
-/// seconds and its peak as it was rendered, in dBFS, as words: with by
-/// how much the file was turned down, if it had to be.
-fn write(project: &Project, path: &Path) -> anyhow::Result<(f64, String)> {
-    let options = RenderOptions { sample_rate: 48_000, max_tail_seconds: 5.0, ..RenderOptions::default() };
-    let mut out = render(project, &BuiltinFactory, &options).map_err(|error| anyhow::anyhow!("{error}"))?;
-    anyhow::ensure!(out.problems.is_empty(), "{:?}", out.problems);
-    let peak = out.left.iter().chain(&out.right).fold(0.0f32, |peak, sample| peak.max(sample.abs()));
-    let seconds = out.left.len() as f64 / 48_000.0;
+/// Writes `left` and `right` to `path`. Returns the length in seconds and
+/// the peak as it was rendered, in dBFS, as words: with by how much the
+/// whole file was turned down, if it had to be.
+fn write(mut left: Vec<f32>, mut right: Vec<f32>, path: &Path) -> anyhow::Result<(f64, String)> {
+    let peak = left.iter().chain(&right).fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    let seconds = left.len() as f64 / f64::from(RATE);
     let db = |gain: f32| 20.0 * f64::from(gain.max(1e-9)).log10();
     let mut said = format!("{:.1} dBFS", db(peak));
     if peak > CEILING {
         let down = CEILING / peak;
-        for sample in out.left.iter_mut().chain(out.right.iter_mut()) {
+        for sample in left.iter_mut().chain(right.iter_mut()) {
             *sample *= down;
         }
-        said = format!("{said} as rendered; the file is {:.1} dB down from that, to fit", -db(down));
+        said = format!("{said} as rendered; the whole file is {:.1} dB down from that, to fit", -db(down));
     }
-    let buffer = AudioBuffer { sample_rate: 48_000.0, left: out.left, right: out.right };
+    let buffer = AudioBuffer { sample_rate: f64::from(RATE), left, right };
     write_wav(path, &buffer, WavFormat::Int24).map_err(|error| anyhow::anyhow!("{error}"))?;
     Ok((seconds, said))
 }
@@ -119,7 +122,11 @@ fn chord(name: &str) -> &'static [u8] {
         "G" => &[43, 50, 55, 59],
         "D" => &[50, 54, 57, 62],
         "Am" => &[45, 52, 57, 60],
+        "Dm" => &[50, 53, 57, 62],
         "F" => &[41, 48, 53, 57],
+        "Fm" => &[53, 56, 60, 65],
+        "Ab" => &[56, 60, 63, 68],
+        "Bbm" => &[58, 61, 65, 70],
         "Em9" => &[52, 59, 62, 67, 66],
         "Cmaj7" => &[48, 55, 59, 64],
         "Dm9" => &[50, 57, 60, 64, 65],
@@ -146,6 +153,18 @@ fn held(names: &[&str], each: f64, velocity: u8) -> Vec<Note> {
         .collect()
 }
 
+/// Every chord of `names` struck short at each of `at`, the beats of a
+/// stretch of `each` beats to the chord.
+fn stabs(names: &[&str], each: f64, at: &[f64], length: f64, velocity: u8) -> Vec<Note> {
+    let mut notes = Vec::new();
+    for (index, name) in names.iter().enumerate() {
+        for offset in at {
+            notes.extend(chord(name).iter().map(|pitch| n(*pitch, index as f64 * each + offset, length, velocity)));
+        }
+    }
+    notes
+}
+
 /// An arpeggio up and down each chord of `names`, `steps` notes of
 /// `length` beats to the chord, `octave` semitones up.
 fn arpeggio(names: &[&str], steps: usize, length: f64, octave: u8) -> Vec<Note> {
@@ -163,441 +182,568 @@ fn arpeggio(names: &[&str], steps: usize, length: f64, octave: u8) -> Vec<Note> 
     notes
 }
 
-/// The phrase a preset plays alone: its tempo, its notes, how many beats,
-/// what is drawn over it, and what it plays in words.
-struct Phrase {
-    tempo: f64,
+/// `notes` again from `after` beats on, `times` times in all.
+fn repeated(notes: &[Note], after: f64, times: usize) -> Vec<Note> {
+    (0..times)
+        .flat_map(|time| notes.iter().map(move |note| Note { start: note.start + time as f64 * after, ..*note }))
+        .collect()
+}
+
+// ---- every sound on a phrase that suits it -----------------------------------
+
+/// What a sound plays to be listened to, at 120 BPM: its notes, how many
+/// beats they take, and what they are in words.
+struct Suited {
     notes: Vec<Note>,
     beats: f64,
-    drawn: Vec<(&'static str, Vec<(f64, f64)>)>,
     plays: &'static str,
 }
 
-fn phrase(preset: &str) -> Phrase {
-    let line = |notes: &[(u8, f64, f64, u8)]| notes.iter().map(|(p, s, l, v)| n(*p, *s, *l, *v)).collect::<Vec<_>>();
-    let twice = |notes: Vec<Note>, bars: f64| {
-        let mut all = notes.clone();
-        all.extend(notes.iter().map(|note| Note { start: note.start + bars, ..*note }));
-        all
-    };
-    match preset {
-        "Solid Bass" => Phrase {
-            tempo: 120.0,
-            notes: twice(
-                line(&[
-                    (40, 0.0, 0.45, 110),
-                    (40, 0.5, 0.2, 80),
-                    (43, 1.0, 0.45, 100),
-                    (40, 1.5, 0.2, 85),
-                    (45, 2.0, 0.45, 110),
-                    (40, 2.5, 0.2, 80),
-                    (47, 3.0, 0.45, 105),
-                    (50, 3.5, 0.4, 95),
-                    (40, 4.0, 0.9, 115),
-                    (52, 5.0, 0.2, 90),
-                    (50, 5.5, 0.2, 85),
-                    (47, 6.0, 0.45, 100),
-                    (45, 6.5, 0.45, 95),
-                    (43, 7.0, 0.9, 105),
-                ]),
-                8.0,
-            ),
-            beats: 16.0,
-            drawn: vec![("macro1", vec![(0.0, 0.0), (8.0, 0.0), (16.0, 0.7)])],
-            plays: "a bass line in E minor, twice; the second time the Cutoff macro opens",
-        },
-        "Reese" => Phrase {
-            tempo: 120.0,
-            notes: line(&[
-                (28, 0.0, 4.0, 105),
-                (31, 3.9, 2.1, 100),
-                (33, 5.9, 2.1, 100),
-                (28, 8.0, 3.0, 110),
-                (26, 10.9, 1.1, 100),
-                (28, 12.0, 4.0, 105),
+fn suiting(sound: &Preset) -> Suited {
+    let of = |notes: Vec<Note>, beats: f64, plays: &'static str| Suited { notes, beats, plays };
+    let name = sound.name.as_str();
+    match (sound.category.as_str(), name) {
+        ("Bass", "808 Sub" | "Deep Sub") => of(
+            line(&[
+                (36, 0.0, 1.6, 110),
+                (36, 2.0, 0.6, 105),
+                (39, 2.5, 1.6, 105),
+                (34, 4.5, 1.6, 110),
+                (36, 6.5, 1.4, 110),
             ]),
-            beats: 16.0,
-            drawn: vec![("macro1", vec![(0.0, 0.0), (8.0, 0.1), (16.0, 0.6)])],
-            plays: "long low notes that slide into one another, the Cutoff macro opening in the second half",
-        },
-        "Acid Line" => {
-            let pitches = [40u8, 40, 52, 40, 43, 40, 52, 47, 40, 40, 50, 40, 45, 52, 40, 47];
-            let notes = (0..64)
+            8.0,
+            "long low notes, one of them sliding into the next",
+        ),
+        (
+            "Bass",
+            "Reese" | "Neuro Bass" | "Wobble Bass" | "Growl Bass" | "Vowel Bass" | "Metal Bass" | "Pulse Bass"
+            | "Saw Bass",
+        ) => of(line(&[(40, 0.0, 4.05, 105), (43, 4.0, 2.05, 105), (38, 6.0, 1.9, 105)]), 8.0, "long notes: E, G, D"),
+        ("Bass", "Rumble") => {
+            let notes =
+                (0..8).flat_map(|beat| [0.25, 0.5, 0.75].map(|at| n(28, f64::from(beat) + at, 0.2, 100))).collect();
+            of(notes, 8.0, "sixteenths on a low E between the beats, where a kick would be")
+        }
+        ("Bass", "Acid Line") => {
+            let pitches = [36, 36, 48, 36, 39, 36, 36, 46, 43, 36, 48, 36, 36, 39, 41, 36];
+            let notes = (0..32usize)
                 .map(|step| {
-                    let (accent, slide) = (step % 16 == 6 || step % 8 == 3, step % 16 == 2 || step % 16 == 13);
+                    let (accent, slide) = ([2, 7, 10].contains(&(step % 16)), [7, 14].contains(&(step % 16)));
                     let length = if slide { 0.32 } else { 0.2 };
-                    n(pitches[step % 16], step as f64 * 0.25, length, if accent { 127 } else { 84 })
+                    n(pitches[step % 16], step as f64 * 0.25, length, if accent { 122 } else { 84 })
                 })
                 .collect();
-            Phrase {
-                tempo: 126.0,
-                notes,
-                beats: 16.0,
-                drawn: vec![("macro1", vec![(0.0, 0.0), (16.0, 0.8)])],
-                plays: "sixteenths with accents and slides, the Squelch macro rising over four bars",
-            }
+            of(notes, 8.0, "sixteenths with accents and slides")
         }
-        "Growl Bass" => Phrase {
-            tempo: 140.0,
-            notes: line(&[
-                (28, 0.0, 3.9, 110),
-                (31, 4.0, 1.9, 105),
-                (30, 6.0, 1.9, 105),
-                (28, 8.0, 3.9, 110),
-                (35, 12.0, 1.9, 105),
-                (33, 14.0, 1.9, 105),
+        ("Bass", _) => of(
+            line(&[
+                (40, 0.0, 0.45, 110),
+                (40, 0.5, 0.2, 80),
+                (43, 1.0, 0.45, 100),
+                (40, 1.5, 0.2, 85),
+                (45, 2.0, 0.45, 110),
+                (40, 2.5, 0.2, 80),
+                (47, 3.0, 0.45, 105),
+                (50, 3.5, 0.4, 95),
+                (40, 4.0, 0.9, 115),
+                (52, 5.0, 0.2, 90),
+                (50, 5.5, 0.2, 85),
+                (47, 6.0, 0.45, 100),
+                (45, 6.5, 0.45, 95),
+                (43, 7.0, 0.9, 105),
             ]),
-            beats: 16.0,
-            drawn: vec![
-                ("macro1", vec![(0.0, 0.0), (8.0, 0.5), (16.0, 1.0)]),
-                ("macro4", vec![(0.0, 0.0), (16.0, 0.6)]),
-            ],
-            plays: "held notes at 140, the Wobble and Vowel macros rising",
-        },
-        "Deep Sub" => Phrase {
-            tempo: 140.0,
-            notes: twice(
-                line(&[
-                    (28, 0.0, 1.5, 115),
-                    (28, 2.5, 0.5, 100),
-                    (31, 3.0, 1.0, 105),
-                    (28, 4.0, 1.5, 115),
-                    (26, 6.5, 0.5, 100),
-                    (28, 7.0, 1.0, 110),
-                ]),
-                8.0,
-            ),
-            beats: 16.0,
-            drawn: vec![("macro1", vec![(0.0, 0.0), (8.0, 0.0), (8.01, 0.5), (16.0, 0.5)])],
-            plays: "an 808 pattern, twice; the second time with the Tone macro half up",
-        },
-        "Sync Lead" => Phrase {
-            tempo: 120.0,
-            notes: line(&[
-                (64, 0.0, 1.05, 105),
-                (67, 1.0, 0.55, 95),
-                (69, 1.5, 0.55, 95),
-                (71, 2.0, 1.4, 110),
-                (74, 3.5, 0.55, 100),
-                (76, 4.0, 1.9, 115),
-                (74, 6.0, 0.55, 95),
-                (71, 6.5, 0.55, 95),
-                (69, 7.0, 0.9, 100),
-                (67, 8.0, 1.05, 100),
-                (69, 9.0, 0.55, 95),
-                (71, 9.5, 0.55, 100),
-                (76, 10.0, 3.5, 115),
-                (79, 14.0, 0.5, 105),
-                (76, 14.5, 1.5, 110),
+            8.0,
+            "a bass line in E minor",
+        ),
+        ("Lead", _) => of(
+            line(&[
+                (72, 0.0, 1.05, 105),
+                (74, 1.0, 0.55, 95),
+                (76, 1.5, 1.05, 105),
+                (79, 2.5, 0.55, 100),
+                (76, 3.0, 1.05, 100),
+                (74, 4.0, 0.55, 95),
+                (72, 4.5, 0.55, 95),
+                (71, 5.0, 1.05, 100),
+                (67, 6.0, 1.9, 110),
             ]),
-            beats: 16.0,
-            drawn: vec![("macro1", vec![(0.0, 0.0), (8.0, 0.0), (16.0, 0.6)])],
-            plays: "a melody in E minor with a long note for the vibrato, the Rip macro rising in the second half",
-        },
-        "Anthem Saws" => Phrase {
-            tempo: 128.0,
-            notes: twice(held(&["Em", "C", "G", "D"], 4.0, 100), 16.0),
-            beats: 32.0,
-            drawn: vec![
-                ("macro1", vec![(0.0, 0.0), (16.0, 0.0), (32.0, 1.0)]),
-                ("macro2", vec![(0.0, 0.0), (16.0, 0.0), (32.0, 0.8)]),
-            ],
-            plays: "Em, C, G, D, a bar each, twice; the second time the Bright and Octave macros rise",
-        },
-        "Talk Lead" => Phrase {
-            tempo: 110.0,
-            notes: line(&[
-                (52, 0.0, 2.0, 105),
-                (55, 1.95, 1.0, 100),
-                (57, 2.95, 1.0, 100),
-                (59, 4.0, 2.9, 110),
-                (57, 7.0, 0.9, 100),
-                (55, 8.0, 2.0, 105),
-                (52, 10.0, 5.5, 105),
-            ]),
-            beats: 16.0,
-            drawn: vec![("macro1", vec![(0.0, 0.0), (4.0, 1.0), (8.0, 0.0), (12.0, 1.0), (16.0, 0.2)])],
-            plays: "a slow line, the Vowel macro going from 'oo' to 'ee' and back twice",
-        },
-        "Glass Pad" => Phrase {
-            tempo: 90.0,
-            notes: held(&["Em9", "Cmaj7"], 8.0, 85),
-            beats: 16.0,
-            drawn: vec![],
-            plays: "Em9 and Cmaj7, two bars each",
-        },
-        "PWM Strings" => Phrase {
-            tempo: 90.0,
-            notes: {
-                let mut notes = held(&["Am", "F"], 8.0, 90);
-                notes.extend(line(&[(72, 2.0, 2.0, 80), (76, 4.0, 3.9, 85), (72, 10.0, 2.0, 80), (69, 12.0, 3.9, 85)]));
-                notes
-            },
-            beats: 16.0,
-            drawn: vec![],
-            plays: "A minor and F, two bars each, with a line on top",
-        },
-        "Choir" => Phrase {
-            tempo: 80.0,
-            notes: held(&["C", "F"], 8.0, 85),
-            beats: 16.0,
-            drawn: vec![("macro1", vec![(0.0, 0.0), (16.0, 1.0)])],
-            plays: "C and F, two bars each, the Vowel macro going from 'ah' round to 'oo'",
-        },
-        "Glass Pluck" => Phrase {
-            tempo: 120.0,
-            notes: arpeggio(&["Em", "C", "G", "D"], 16, 0.25, 12),
-            beats: 16.0,
-            drawn: vec![],
-            plays: "sixteenth arpeggios over Em, C, G, D, with accents",
-        },
-        "String Pluck" => Phrase {
-            tempo: 100.0,
-            notes: arpeggio(&["Am", "F", "C", "G"], 8, 0.5, 0),
-            beats: 16.0,
-            drawn: vec![],
-            plays: "picked eighths over Am, F, C, G",
-        },
-        "Trance Pluck" => {
-            let pattern = [0.0, 0.75, 1.5, 2.5, 3.25];
-            let notes = ["Em", "C", "G", "D"]
+            8.0,
+            "a melody whose notes overlap, so that a sound that slides does",
+        ),
+        ("Pluck", "House Stab") => {
+            let keys = [57u8, 62, 64, 57];
+            let notes = keys
                 .iter()
                 .enumerate()
-                .flat_map(|(bar, name)| {
-                    pattern.iter().flat_map(move |at| {
-                        chord(name).iter().take(4).map(move |pitch| n(*pitch + 12, bar as f64 * 4.0 + at, 0.3, 100))
-                    })
+                .flat_map(|(bar, key)| [0.5, 1.5].map(|at| n(*key, bar as f64 * 2.0 + at, 0.25, 105)));
+            of(notes.collect(), 8.0, "one key at a time, off the beat: A, D, E, A")
+        }
+        ("Pluck", "Dub Chord") => of(
+            line(&[(57, 0.5, 0.3, 100), (57, 3.0, 0.3, 90), (62, 4.5, 0.3, 100), (55, 7.0, 0.3, 90)]),
+            8.0,
+            "one key at a time, far apart",
+        ),
+        ("Pluck", _) => of(arpeggio(&["Am", "F", "C", "G"], 8, 0.25, 12), 8.0, "sixteenth arpeggios over Am, F, C, G"),
+        ("Pad", _) => of(held(&["Am9", "Cmaj7"], 4.0, 85), 8.0, "Am9, then Cmaj7, two bars in all"),
+        ("Keys", "House Organ") => {
+            of(stabs(&["Am", "F", "C", "G"], 2.0, &[0.5, 1.5], 0.22, 100), 8.0, "chords off the beat: Am, F, C, G")
+        }
+        ("Keys", "Clav") => {
+            let on =
+                [true, false, true, true, false, true, false, true, true, false, true, false, true, true, false, true];
+            let notes = (0..32usize)
+                .filter(|step| on[step % 16])
+                .map(|step| {
+                    n([52, 64, 59, 62][step % 4], step as f64 * 0.25, 0.15, if step % 4 == 0 { 115 } else { 90 })
                 })
-                .collect::<Vec<_>>();
-            Phrase {
-                tempo: 132.0,
-                notes: twice(notes, 16.0),
-                beats: 32.0,
-                drawn: vec![("macro1", vec![(0.0, 0.0), (16.0, 0.0), (32.0, 0.9)])],
-                plays: "chord stabs over Em, C, G, D, twice; the second time the Cutoff macro opens",
-            }
+                .collect();
+            of(notes, 8.0, "sixteenth comping on E minor")
         }
-        "Tine Piano" | "FM Keys" => {
-            let mut notes = Vec::new();
-            for (bar, (name, velocity)) in [("Dm9", 62u8), ("G13", 84), ("Cmaj9", 70), ("Am9", 100)].iter().enumerate()
-            {
-                let start = bar as f64 * 4.0;
-                notes.extend(chord(name).iter().map(|pitch| n(*pitch, start, 2.4, *velocity)));
-                notes.extend(
-                    chord(name).iter().skip(1).map(|pitch| n(*pitch, start + 2.5, 1.2, velocity.saturating_sub(12))),
-                );
-            }
-            // A few notes on top, soft and hard, to hear what touch does.
-            notes.extend(line(&[
-                (76, 1.0, 0.9, 50),
-                (77, 5.0, 0.9, 80),
-                (79, 9.0, 0.9, 105),
-                (81, 13.0, 0.5, 125),
-                (79, 13.5, 2.0, 70),
-            ]));
-            Phrase {
-                tempo: 84.0,
-                notes,
-                beats: 16.0,
-                drawn: vec![],
-                plays: "Dm9, G13, Cmaj9, Am9, each struck harder than the last, with single notes soft to hard on top",
-            }
+        ("Keys", _) => {
+            let mut notes = held(&["Dm9", "G13"], 2.0, 88);
+            notes.extend(chord("Cmaj9").iter().map(|pitch| n(*pitch, 4.0, 3.8, 84)));
+            notes.extend(line(&[(76, 4.5, 0.45, 95), (79, 5.0, 0.45, 100), (81, 5.5, 0.9, 105)]));
+            of(notes, 8.0, "Dm9, G13, Cmaj9, with three notes on top")
         }
-        _ => Phrase { tempo: 120.0, notes: held(&["Em"], 4.0, 100), beats: 4.0, drawn: vec![], plays: "E minor" },
-    }
-}
-
-/// Makes the synth `device` the sound its preset `name` is: the effects
-/// the preset brings, behind it, as a track that is given the preset gets
-/// them (`Session::add_device`, which makes the same edit).
-fn as_it_ships(project: &mut Project, device: DeviceId, name: &str) {
-    let after = brought(name);
-    let sound = PresetRef { id: name.to_string(), name: name.to_string() };
-    project.bring_after(device, &sound, &after).expect("the sound's effects");
-}
-
-/// One preset on its phrase: the synth alone, or the sound as it ships.
-fn alone(name: &str, with_effects: bool) -> Project {
-    let phrase = phrase(name);
-    let mut project = Project::new(name);
-    // As it is: nothing after it, the master's limiter included.
-    project.master.devices.clear();
-    project.set_tempo(phrase.tempo).expect("a tempo");
-    let (_, device) = part(&mut project, name, name, &phrase.notes, phrase.beats);
-    for (param, points) in &phrase.drawn {
-        draw(&mut project, device, param, points);
-    }
-    if with_effects {
-        as_it_ships(&mut project, device, name);
-    }
-    project
-}
-
-fn drums(project: &mut Project, from_bar: usize, bars: usize) -> TrackId {
-    let track = project.add_track("Drums");
-    project.add_device(ChainRef::Track(track), "builtin:drumkit", "Drum Kit", None).expect("drums");
-    let mut notes = Vec::new();
-    for bar in from_bar..bars {
-        let start = bar as f64 * 4.0;
-        for beat in 0..4 {
-            notes.push(n(36, start + beat as f64, 0.25, 118));
-            notes.push(n(42, start + beat as f64 + 0.5, 0.2, 96));
-            notes.push(n(42, start + beat as f64 + 0.25, 0.1, 48));
-            notes.push(n(42, start + beat as f64 + 0.75, 0.1, 54));
+        ("Bell", "Marimba" | "Kalimba") => {
+            of(arpeggio(&["Am", "F", "C", "G"], 4, 0.5, 12), 8.0, "eighths over Am, F, C, G")
         }
-        notes.push(n(39, start + 1.0, 0.25, 104));
-        notes.push(n(39, start + 3.0, 0.25, 108));
-        notes.push(n(46, start + 3.5, 0.4, 84));
+        ("Bell", _) => of(
+            line(&[
+                (72, 0.0, 0.9, 100),
+                (76, 1.0, 0.9, 95),
+                (79, 2.0, 0.9, 105),
+                (84, 3.0, 0.9, 100),
+                (83, 4.0, 0.9, 95),
+                (79, 5.0, 0.9, 100),
+                (76, 6.0, 1.9, 105),
+            ]),
+            8.0,
+            "a melody in quarter notes",
+        ),
+        ("Strings", "Staccato Strings") => {
+            of(stabs(&["Am", "F", "C", "G"], 2.0, &[0.0, 0.5, 1.0, 1.5], 0.22, 100), 8.0, "eighths over Am, F, C, G")
+        }
+        ("Strings", _) => of(held(&["Am", "F"], 4.0, 85), 8.0, "Am, then F, two bars in all"),
+        ("Brass", "Brass Stab") => {
+            of(stabs(&["F", "G"], 4.0, &[0.0, 0.75, 1.5, 2.5, 3.5], 0.2, 108), 8.0, "stabs on F, then on G")
+        }
+        ("Brass", "Synth Brass") => {
+            let mut notes = stabs(&["F"], 2.0, &[0.0, 1.0], 0.4, 105);
+            notes.extend(chord("G").iter().map(|pitch| n(*pitch + 12, 2.0, 1.9, 105)));
+            notes.extend(chord("C").iter().map(|pitch| n(*pitch, 4.0, 3.5, 100)));
+            of(notes, 8.0, "two stabs, then held chords")
+        }
+        ("Brass", _) => of(held(&["F", "C"], 4.0, 85), 8.0, "F, then C, two bars in all"),
+        ("Texture", "Drone") => {
+            of(line(&[(36, 0.0, 15.5, 90), (43, 4.0, 11.5, 90)]), 16.0, "a low C, joined by the G over it")
+        }
+        ("Texture", "Wind") => of(line(&[(60, 0.0, 11.5, 90)]), 12.0, "one key held"),
+        ("Texture", "Swarm") => of(
+            line(&[(48, 0.0, 11.5, 90), (55, 0.0, 11.5, 90), (61, 4.0, 7.5, 90)]),
+            12.0,
+            "C and G, joined by a C sharp",
+        ),
+        ("Texture", "Shimmer") => of(held(&["Am9"], 12.0, 85), 12.0, "Am9 held for three bars"),
+        ("Texture", _) => of(held(&["Am", "F"], 4.0, 85), 8.0, "Am, then F, two bars in all"),
+        ("FX", "Riser" | "Pitch Riser") => {
+            of(line(&[(48, 0.0, 16.0, 100)]), 16.0, "one key held for four bars and cut off")
+        }
+        ("FX", "Fall" | "Sweep") => of(line(&[(48, 0.0, 8.0, 100)]), 8.0, "one key held for two bars"),
+        ("FX", "Impact") => of(line(&[(36, 0.0, 1.0, 110)]), 4.0, "one low key, once"),
+        ("FX", "Sub Drop") => of(line(&[(36, 0.0, 4.0, 110)]), 6.0, "one key, once"),
+        ("FX", "Siren") => of(line(&[(72, 0.0, 4.0, 100)]), 4.0, "one key held for a bar"),
+        _ => of(
+            line(&[(60, 0.0, 0.2, 110), (60, 1.0, 0.2, 110), (72, 1.5, 0.2, 110), (48, 2.5, 0.2, 110)]),
+            4.0,
+            "four short notes",
+        ),
     }
-    let clip = project.add_midi_clip(track, "Beat", 0.0, bars as f64 * 4.0).expect("a clip");
-    project.clip_mut(clip).expect("the clip").add_notes(&notes).expect("notes");
-    track
 }
 
-/// A room every part can be sent to.
-fn room(project: &mut Project, decay: f64) -> TrackId {
-    let room = project.add_track_of_kind("Room", TrackKind::Return);
-    effect(project, ChainRef::Track(room), "builtin:reverb", &[("decay", decay), ("mix", 1.0)]);
-    room
-}
-
-fn mix(project: &mut Project, track: TrackId, volume: f32, to_room: Option<(TrackId, f32)>) {
-    project.set_track_volume(track, volume).expect("a volume");
-    if let Some((room, level)) = to_room {
-        project.set_send(track, room, Some(level)).expect("a send");
+/// A sound's own range, read from the end of what it says of itself:
+/// `... Range E1 to G2`. The whole keyboard for one that does not say.
+fn range_of(sound: &Preset) -> (u8, u8) {
+    let key = |name: &str| -> Option<u8> {
+        let name = name.trim().trim_end_matches('.');
+        let split = name.find(|c: char| c == '-' || c.is_ascii_digit())?;
+        let (note, octave) = name.split_at(split);
+        let names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+        let semitone = names.iter().position(|n| *n == note)?;
+        let octave: i32 = octave.parse().ok()?;
+        u8::try_from((octave + 1) * 12 + semitone as i32).ok()
+    };
+    let Some((_, said)) = sound.description.rsplit_once("Range ") else { return (0, 127) };
+    let mut ends = said.split(" to ");
+    match (ends.next().and_then(key), ends.next().and_then(key)) {
+        (Some(low), Some(high)) => (low, high),
+        _ => (0, 127),
     }
 }
 
-/// Sixteen bars at 124: a pluck and a pad begin, the bass and the drums
-/// come in, chords of stacked saws open over the second half, a lead on
-/// top of it.
-fn night_drive() -> Project {
-    let mut project = Project::new("Night Drive");
-    project.set_tempo(124.0).expect("a tempo");
-    let bars = ["Em", "C", "G", "D"];
-    let song: Vec<&str> = bars.iter().cycle().take(16).copied().collect();
-    let room = room(&mut project, 2.6);
+/// One sound on its phrase, through its effects, with nothing on the
+/// master: an octave up or down from where the phrase is written, if that
+/// is what brings it into the keys the sound is for.
+fn alone(sound: &Preset) -> (Project, Suited) {
+    let mut suited = suiting(sound);
+    let (low, high) = range_of(sound);
+    let lowest = suited.notes.iter().map(|note| note.pitch).min().unwrap_or(60);
+    let highest = suited.notes.iter().map(|note| note.pitch).max().unwrap_or(60);
+    let shift: i16 = if lowest < low {
+        12
+    } else if highest > high {
+        -12
+    } else {
+        0
+    };
+    for note in &mut suited.notes {
+        note.pitch = (i16::from(note.pitch) + shift).clamp(0, 127) as u8;
+    }
+    let mut project = Project::new(&sound.name);
+    project.set_tempo(120.0).expect("a tempo");
+    let (track, _) = track_on(&mut project, &sound.name, &sound.name);
+    play(&mut project, track, 0.0, suited.beats, &suited.notes);
+    (project, suited)
+}
 
-    let (pad, _) = part(&mut project, "Pad", "Glass Pad", &held(&["Em9", "Cmaj7", "Em9", "Cmaj7"], 16.0, 80), 64.0);
-    mix(&mut project, pad, -13.0, Some((room, -8.0)));
-    let (arp, pluck) = part(&mut project, "Arp", "Glass Pluck", &arpeggio(&song, 16, 0.25, 12), 64.0);
-    effect(
-        &mut project,
-        ChainRef::Track(arp),
-        "builtin:delay",
-        &[("time_beats", 0.75), ("feedback", 0.4), ("mix", 0.2)],
-    );
-    draw(&mut project, pluck, "macro1", &[(0.0, 0.0), (32.0, 0.2), (64.0, 0.7)]);
-    mix(&mut project, arp, -11.0, Some((room, -10.0)));
+/// Every sound of `kinds`, one after another with a breath between, into
+/// `file`; and when each begins, into `list`.
+fn kinds_file(folder: &Path, file: &str, kinds: &[&str], list: &mut String) -> anyhow::Result<()> {
+    let gap = (0.6 * f64::from(RATE)) as usize;
+    let (mut left, mut right): (Vec<f32>, Vec<f32>) = (Vec::new(), Vec::new());
+    let mut rows = String::new();
+    for sound in presets_of(SYNTH).iter().filter(|sound| kinds.contains(&sound.category.as_str())) {
+        let (project, suited) = alone(sound);
+        let (l, r) = rendered(&project, 5.0)?;
+        let at = left.len() as f64 / f64::from(RATE);
+        let with = match names_after(sound.after.as_deref().unwrap_or_default()) {
+            names if names.is_empty() => "dry".to_string(),
+            names => format!("through its {}", names.join(" and ").to_lowercase()),
+        };
+        writeln!(
+            rows,
+            "| {}:{:04.1} | {} | {} | {}, {with} |",
+            at as u64 / 60,
+            at % 60.0,
+            sound.name,
+            sound.category,
+            suited.plays
+        )?;
+        left.extend(l);
+        right.extend(r);
+        left.extend(std::iter::repeat_n(0.0, gap));
+        right.extend(std::iter::repeat_n(0.0, gap));
+        println!("{file}: {}", sound.name);
+    }
+    let (seconds, peak) = write(left, right, &folder.join(file))?;
+    writeln!(
+        list,
+        "\n### `{file}`\n\n{} minutes {:02} seconds; its peak is {peak}.\n\n\
+         | Begins at | Sound | Kind | What it plays |\n|---|---|---|---|\n{rows}",
+        seconds as u64 / 60,
+        seconds as u64 % 60
+    )?;
+    Ok(())
+}
 
-    // The bass: the root of each bar's chord on the off-beats, from bar 5.
-    let roots = [40u8, 36, 43, 38];
-    let bass: Vec<Note> = (4..16)
+// ---- four pieces ---------------------------------------------------------------
+
+/// A song that is being put together of the bank's sounds and the
+/// built-in drum kit.
+struct Song {
+    project: Project,
+}
+
+impl Song {
+    fn new(name: &str, tempo: f64) -> Self {
+        let mut project = Project::new(name);
+        project.set_tempo(tempo).expect("a tempo");
+        // As a new song has it: a limiter on the master.
+        project.add_device(ChainRef::Master, "builtin:limiter", "Limiter", None).expect("a limiter");
+        Self { project }
+    }
+
+    /// A part on one of the bank's sounds, from the beat `start`, with its
+    /// track's fader at `fader` dB.
+    fn part(&mut self, name: &str, sound: &str, fader: f32, start: f64, beats: f64, notes: &[Note]) -> DeviceId {
+        let (track, device) = track_on(&mut self.project, name, sound);
+        self.project.set_track_volume(track, fader).expect("a fader");
+        play(&mut self.project, track, start, beats, notes);
+        device
+    }
+
+    /// The drum kit on one of its presets.
+    fn drums(&mut self, kit: &str, fader: f32, beats: f64, notes: &[Note]) {
+        let track = self.project.add_track("Drums");
+        let device = self.project.add_device(ChainRef::Track(track), DRUMS, "Drum Kit", None).expect("a drum kit");
+        self.project.device_mut(device).expect("the kit").params = preset(DRUMS, kit).params.into_iter().collect();
+        self.project.set_track_volume(track, fader).expect("a fader");
+        play(&mut self.project, track, 0.0, beats, notes);
+    }
+}
+
+const KICK: u8 = 36;
+const SNARE: u8 = 38;
+const CLAP: u8 = 39;
+const HAT: u8 = 42;
+const OPEN_HAT: u8 = 46;
+const CRASH: u8 = 49;
+
+/// Sixteen bars of house at 124: a stab, a round bass off the beat, a
+/// pad, a marimba, and a riser into the second half.
+fn house(kit: &str) -> Project {
+    let mut song = Song::new("House", 124.0);
+    let bars = 16.0 * 4.0;
+    // A minor, D minor, E minor, A minor: a bar each.
+    let (roots, stab_keys) = ([33u8, 38, 40, 33], [57u8, 62, 64, 57]);
+    let stab: Vec<Note> = (0..16usize)
+        .flat_map(|bar| [0.75, 1.5, 2.75, 3.5].map(|at| n(stab_keys[bar % 4], bar as f64 * 4.0 + at, 0.25, 104)))
+        .collect();
+    let stabs = song.part("Stab", "House Stab", -3.0, 0.0, bars, &stab);
+    draw(&mut song.project, stabs, "macro2", &[(0.0, 0.0), (16.0, 0.1), (32.0, 0.7), (32.01, 0.35), (64.0, 0.5)]);
+
+    let mut beat = Vec::new();
+    for bar in 0..16 {
+        let start = f64::from(bar) * 4.0;
+        // The kick drops out for the last bar before the second half.
+        if bar != 7 {
+            beat.extend((0..4).map(|quarter| n(KICK, start + f64::from(quarter), 0.25, 118)));
+        }
+        beat.extend((0..4).map(|quarter| n(HAT, start + f64::from(quarter) + 0.5, 0.2, 92)));
+        if bar >= 4 {
+            beat.extend([1.0, 3.0].map(|at| n(CLAP, start + at, 0.25, 106)));
+            beat.push(n(OPEN_HAT, start + 3.5, 0.4, 80));
+        }
+    }
+    beat.push(n(CRASH, 32.0, 1.0, 100));
+    song.drums(kit, -8.0, bars, &beat);
+
+    let bass: Vec<Note> = (4..16usize)
         .flat_map(|bar| {
-            (0..4).flat_map(move |beat| {
-                let start = bar as f64 * 4.0 + beat as f64;
-                [n(roots[bar % 4], start + 0.5, 0.4, 108), n(roots[bar % 4] + 12, start + 0.75, 0.2, 84)]
+            let (root, start) = (roots[bar % 4], bar as f64 * 4.0);
+            [(0.5, 0), (1.5, 0), (2.5, 0), (3.5, 12)].map(|(at, up)| n(root + up, start + at - 16.0, 0.4, 108))
+        })
+        .collect();
+    song.part("Bass", "House Bass", -3.5, 16.0, 48.0, &bass);
+    let pad: Vec<Note> = held(&["Am", "Dm", "Em", "Am"], 4.0, 78);
+    song.part("Pad", "Warm Pad", -13.0, 16.0, 48.0, &repeated(&pad, 16.0, 3));
+    let hook = line(&[
+        (69, 0.0, 0.4, 100),
+        (72, 0.75, 0.4, 92),
+        (76, 1.5, 0.4, 104),
+        (74, 2.5, 0.4, 92),
+        (72, 3.0, 0.4, 96),
+        (69, 4.0, 0.4, 100),
+        (74, 4.75, 0.4, 92),
+        (77, 5.5, 0.4, 104),
+        (76, 6.5, 0.9, 96),
+    ]);
+    song.part("Marimba", "Marimba", -7.0, 32.0, 32.0, &repeated(&hook, 8.0, 4));
+    song.part("Riser", "Riser", -18.0, 16.0, 16.0, &[n(48, 0.0, 16.0, 100)]);
+    song.part("Impact", "Impact", -9.0, 32.0, 8.0, &[n(36, 0.0, 1.0, 110)]);
+    song.project
+}
+
+/// Sixteen bars of drum and bass at 174: a dark pad and a bell, then a
+/// sub drop, a reese under a two-step beat, and a sine lead.
+fn drum_and_bass(kit: &str) -> Project {
+    let mut song = Song::new("Drum and Bass", 174.0);
+    let bars = 16.0 * 4.0;
+    // F minor, A flat, B flat minor, F minor: four bars each.
+    let chords = held(&["Fm", "Ab", "Bbm", "Fm"], 16.0, 76);
+    song.part("Pad", "Dark Pad", -12.0, 0.0, bars, &chords);
+    let bell =
+        line(&[(72, 0.0, 1.5, 96), (75, 2.0, 1.5, 90), (80, 4.0, 1.5, 100), (79, 6.0, 1.5, 90), (77, 8.0, 3.5, 96)]);
+    song.part("Bell", "Glass Bell", -9.0, 0.0, 32.0, &repeated(&bell, 16.0, 2));
+
+    let mut beat = Vec::new();
+    for bar in 0..16 {
+        let start = f64::from(bar) * 4.0;
+        beat.extend(
+            (0..8).map(|eighth| n(HAT, start + f64::from(eighth) * 0.5, 0.15, if eighth % 2 == 0 { 96 } else { 70 })),
+        );
+        if bar >= 4 {
+            beat.extend([n(KICK, start, 0.25, 120), n(KICK, start + 2.5, 0.25, 112)]);
+            beat.extend([n(SNARE, start + 1.0, 0.25, 116), n(SNARE, start + 3.0, 0.25, 118)]);
+            if bar % 4 == 3 {
+                beat.extend([n(SNARE, start + 3.5, 0.2, 84), n(SNARE, start + 3.75, 0.2, 96)]);
+            }
+        }
+    }
+    beat.push(n(CRASH, 16.0, 1.0, 100));
+    song.drums(kit, -5.0, bars, &beat);
+    song.part("Sub Drop", "Sub Drop", -14.0, 16.0, 8.0, &[n(41, 0.0, 4.0, 110)]);
+
+    // The reese: long notes that slide where they meet.
+    let roots = [29u8, 32, 34, 29];
+    let low: Vec<Note> = (0..6usize)
+        .map(|half| {
+            let root = roots[(half / 2 + 1) % 4];
+            n(if half % 2 == 1 { root + 3 } else { root }, half as f64 * 8.0, 8.05, 106)
+        })
+        .collect();
+    let reese = song.part("Reese", "Reese", -5.0, 16.0, 48.0, &low);
+    draw(&mut song.project, reese, "macro1", &[(16.0, 0.0), (48.0, 0.15), (64.0, 0.7)]);
+    let tune = line(&[
+        (77, 0.0, 2.05, 100),
+        (80, 2.0, 1.05, 96),
+        (84, 3.0, 3.05, 104),
+        (82, 6.0, 1.05, 96),
+        (80, 7.0, 1.05, 96),
+        (79, 8.0, 3.05, 100),
+        (77, 11.0, 4.0, 104),
+    ]);
+    song.part("Lead", "Sine Lead", -12.0, 32.0, 32.0, &repeated(&tune, 16.0, 2));
+    song.part("Fall", "Fall", -20.0, 48.0, 8.0, &[n(48, 0.0, 8.0, 100)]);
+    song.project
+}
+
+/// Sixteen bars of synthwave at 100: a bass in running eighths, an
+/// arpeggio, brass chords, and a square lead over the second half.
+fn synthwave(kit: &str) -> Project {
+    let mut song = Song::new("Synthwave", 100.0);
+    let bars = 16.0 * 4.0;
+    let names = ["Em", "C", "G", "D"];
+    let roots = [28u8, 36, 31, 38];
+    let bass: Vec<Note> = (0..16usize)
+        .flat_map(|bar| {
+            let root = roots[bar % 4];
+            (0..8).map(move |eighth| {
+                n(if eighth % 2 == 1 { root + 12 } else { root }, bar as f64 * 4.0 + f64::from(eighth) * 0.5, 0.4, 104)
             })
         })
         .collect();
-    let (bass, _) = part(&mut project, "Bass", "Solid Bass", &bass, 64.0);
-    mix(&mut project, bass, -6.0, None);
-    let beat = drums(&mut project, 4, 16);
-    mix(&mut project, beat, -5.0, None);
+    song.part("Bass", "Pluck Bass", -5.0, 0.0, bars, &bass);
+    let arp = arpeggio(&names, 16, 0.25, 12);
+    let arps = song.part("Arp", "Arp Pluck", -8.5, 0.0, bars, &repeated(&arp, 16.0, 4));
+    draw(&mut song.project, arps, "macro2", &[(0.0, 0.0), (32.0, 0.5), (64.0, 0.3)]);
 
-    let stabs: Vec<Note> = held(&song, 4.0, 96).into_iter().filter(|note| note.start >= 32.0).collect();
-    let (chords, saws) = part(&mut project, "Chords", "Anthem Saws", &stabs, 64.0);
-    draw(&mut project, saws, "macro1", &[(32.0, 0.0), (64.0, 1.0)]);
-    mix(&mut project, chords, -10.0, Some((room, -9.0)));
-
-    let melody = [
-        (76u8, 0.0, 1.5, 108u8),
-        (74, 1.5, 0.5, 96),
-        (71, 2.0, 2.0, 104),
-        (72, 4.0, 1.0, 100),
-        (76, 5.0, 1.0, 104),
-        (79, 6.0, 2.0, 112),
-        (78, 8.0, 1.5, 104),
-        (74, 9.5, 0.5, 96),
-        (71, 10.0, 2.0, 104),
-        (69, 12.0, 1.0, 100),
-        (71, 13.0, 1.0, 100),
-        (76, 14.0, 2.0, 112),
-    ];
-    let lead: Vec<Note> = melody.iter().map(|(p, s, l, v)| n(*p, 48.0 + s, *l + 0.05, *v)).collect();
-    let (lead, _) = part(&mut project, "Lead", "Sync Lead", &lead, 64.0);
-    effect(
-        &mut project,
-        ChainRef::Track(lead),
-        "builtin:delay",
-        &[("time_beats", 0.75), ("feedback", 0.3), ("mix", 0.16)],
-    );
-    mix(&mut project, lead, -9.0, Some((room, -9.0)));
-    project
-}
-
-/// Twelve bars at 84: an electric piano, strings under it, a sub, a
-/// plucked string with the tune, and a choir that comes in half way and
-/// changes its vowel.
-fn slow_glass() -> Project {
-    let mut project = Project::new("Slow Glass");
-    project.set_tempo(84.0).expect("a tempo");
-    let song: Vec<&str> = ["Dm9", "G13", "Cmaj9", "Am9"].iter().cycle().take(12).copied().collect();
-    let room = room(&mut project, 3.2);
-
-    let mut comping = Vec::new();
-    for (bar, name) in song.iter().enumerate() {
-        let start = bar as f64 * 4.0;
-        comping.extend(chord(name).iter().map(|pitch| n(*pitch, start, 2.3, 78)));
-        comping.extend(chord(name).iter().skip(1).map(|pitch| n(*pitch, start + 2.5, 1.3, 64)));
+    let mut beat = Vec::new();
+    for bar in 0..16 {
+        let start = f64::from(bar) * 4.0;
+        beat.extend([n(KICK, start, 0.25, 116), n(KICK, start + 2.0, 0.25, 112)]);
+        beat.extend(
+            (0..8).map(|eighth| n(HAT, start + f64::from(eighth) * 0.5, 0.15, if eighth % 2 == 0 { 90 } else { 68 })),
+        );
+        if bar >= 4 {
+            beat.extend([n(SNARE, start + 1.0, 0.3, 116), n(SNARE, start + 3.0, 0.3, 118)]);
+        }
     }
-    let (keys, _) = part(&mut project, "Keys", "Tine Piano", &comping, 48.0);
-    mix(&mut project, keys, -7.0, Some((room, -12.0)));
-    let (strings, _) = part(&mut project, "Strings", "PWM Strings", &held(&song, 4.0, 72), 48.0);
-    mix(&mut project, strings, -13.0, Some((room, -8.0)));
-    let roots = [38u8, 31, 36, 33];
-    let low: Vec<Note> = (0..12).map(|bar| n(roots[bar % 4], bar as f64 * 4.0, 3.6, 100)).collect();
-    let (sub, _) = part(&mut project, "Sub", "Deep Sub", &low, 48.0);
-    mix(&mut project, sub, -8.0, None);
-    let tune = [
-        (69u8, 0.5, 0.5, 96u8),
-        (72, 1.0, 0.5, 88),
-        (76, 1.5, 1.0, 104),
-        (74, 2.5, 0.5, 90),
-        (72, 3.0, 1.0, 96),
-        (71, 4.5, 0.5, 92),
-        (74, 5.0, 0.5, 88),
-        (77, 5.5, 1.0, 104),
-        (76, 6.5, 0.5, 90),
-        (74, 7.0, 1.0, 96),
-        (72, 8.5, 0.5, 92),
-        (76, 9.0, 0.5, 96),
-        (79, 9.5, 1.5, 108),
-        (76, 11.0, 1.0, 92),
-        (72, 12.5, 0.5, 90),
-        (71, 13.0, 0.5, 88),
-        (69, 13.5, 2.0, 100),
-    ];
-    let picked: Vec<Note> =
-        (0..3).flat_map(|pass| tune.iter().map(move |(p, s, l, v)| n(*p, pass as f64 * 16.0 + s, *l, *v))).collect();
-    let (pluck, _) = part(&mut project, "String", "String Pluck", &picked, 48.0);
-    mix(&mut project, pluck, -6.0, Some((room, -8.0)));
-    let voices: Vec<Note> = held(&song, 4.0, 76).into_iter().filter(|note| note.start >= 16.0).collect();
-    let (choir, singers) = part(&mut project, "Choir", "Choir", &voices, 48.0);
-    draw(&mut project, singers, "macro1", &[(16.0, 0.0), (32.0, 0.5), (48.0, 1.0)]);
-    mix(&mut project, choir, -13.0, Some((room, -6.0)));
-    project
+    beat.push(n(CRASH, 32.0, 1.0, 100));
+    song.drums(kit, -4.0, bars, &beat);
+    let brass = held(&names, 4.0, 88);
+    song.part("Brass", "Synth Brass", -8.5, 16.0, 48.0, &repeated(&brass, 16.0, 3));
+    song.part("Sweep", "Sweep", -21.0, 24.0, 8.0, &[n(48, 0.0, 8.0, 100)]);
+    let tune = line(&[
+        (76, 0.0, 1.5, 104),
+        (79, 1.5, 0.5, 96),
+        (83, 2.0, 2.0, 108),
+        (84, 4.0, 1.0, 100),
+        (83, 5.0, 1.0, 100),
+        (79, 6.0, 2.0, 104),
+        (78, 8.0, 1.5, 100),
+        (79, 9.5, 0.5, 96),
+        (83, 10.0, 2.0, 108),
+        (81, 12.0, 1.0, 100),
+        (78, 13.0, 1.0, 100),
+        (74, 14.0, 2.0, 104),
+    ]);
+    song.part("Lead", "Square Lead", -12.5, 32.0, 32.0, &repeated(&tune, 16.0, 2));
+    song.project
 }
 
-/// The song the pictures of the panel are made from: one preset with a
+/// Twelve bars of lo-fi at 80: dusty keys, an electric bass, a lazy beat,
+/// a tape lead and a thumb piano.
+fn lofi(kit: &str) -> Project {
+    let mut song = Song::new("Lo-fi", 80.0);
+    let bars = 12.0 * 4.0;
+    let names = ["Dm9", "G13", "Cmaj9", "Am9"];
+    let mut comping = Vec::new();
+    for bar in 0..12usize {
+        let (name, start) = (names[bar % 4], bar as f64 * 4.0);
+        comping.extend(chord(name).iter().map(|pitch| n(*pitch, start, 2.3, 76)));
+        comping.extend(chord(name).iter().skip(1).map(|pitch| n(*pitch, start + 2.58, 1.2, 62)));
+    }
+    song.part("Keys", "Dusty Keys", 0.0, 0.0, bars, &comping);
+    let roots = [38u8, 31, 36, 33];
+    let bass: Vec<Note> = (0..12usize)
+        .flat_map(|bar| {
+            let (root, start) = (roots[bar % 4], bar as f64 * 4.0);
+            [n(root, start, 1.4, 104), n(root, start + 2.58, 0.7, 92), n(root + 7, start + 3.5, 0.4, 88)]
+        })
+        .collect();
+    song.part("Bass", "Electric Bass", -5.0, 0.0, bars, &bass);
+
+    // A lazy beat: the off-beat hats come late.
+    let mut beat = Vec::new();
+    for bar in 0..12 {
+        let start = f64::from(bar) * 4.0;
+        beat.extend([n(KICK, start, 0.25, 110), n(KICK, start + 2.58, 0.25, 100)]);
+        beat.extend([n(SNARE, start + 1.0, 0.3, 104), n(SNARE, start + 3.0, 0.3, 106)]);
+        beat.extend((0..4).flat_map(|quarter| {
+            [n(HAT, start + f64::from(quarter), 0.15, 84), n(HAT, start + f64::from(quarter) + 0.58, 0.15, 60)]
+        }));
+    }
+    song.drums(kit, -5.0, bars, &beat);
+    let tune = line(&[
+        (69, 0.5, 0.5, 92),
+        (72, 1.0, 0.5, 86),
+        (76, 1.5, 1.0, 100),
+        (74, 2.58, 0.5, 86),
+        (72, 3.0, 1.0, 92),
+        (71, 4.5, 0.5, 90),
+        (74, 5.0, 0.5, 86),
+        (77, 5.5, 1.0, 100),
+        (76, 6.58, 0.5, 86),
+        (74, 7.0, 1.0, 92),
+        (72, 8.5, 0.5, 90),
+        (76, 9.0, 0.5, 92),
+        (79, 9.5, 1.5, 104),
+        (76, 11.0, 1.0, 88),
+        (72, 12.5, 0.5, 88),
+        (71, 13.0, 0.5, 86),
+        (69, 13.5, 2.0, 96),
+    ]);
+    song.part("Lead", "Tape Lead", -10.5, 16.0, 32.0, &repeated(&tune, 16.0, 2));
+    let thumb = arpeggio(&names, 8, 0.5, 24);
+    song.part("Kalimba", "Kalimba", -15.0, 32.0, 16.0, &thumb);
+    song.project
+}
+
+/// The drum kit's preset whose name has one of `wanted` in it, in that
+/// order of liking; its first, if it has none of them.
+fn kit(wanted: &[&str]) -> String {
+    let kits = presets_of(DRUMS);
+    let found = wanted.iter().find_map(|word| kits.iter().find(|kit| kit.name.to_lowercase().contains(word)));
+    found.or(kits.first()).map(|kit| kit.name.clone()).expect("the drum kit has a preset")
+}
+
+/// A piece's mix in numbers: how loud it is, what the limiter on the
+/// master took off, and each part's loudness as it leaves its fader.
+fn mixed(measured: &trill_engine::render::Measured) -> String {
+    let mut said = format!("the mix is at {:.1} LUFS", measured.stats.loudness_lufs);
+    if let Some(limiter) = measured.dynamics.iter().find(|device| device.track.is_none()) {
+        write!(said, ", and the limiter takes off {:.1} dB at the most", limiter.most_db).expect("a string");
+    }
+    let parts: Vec<String> =
+        measured.tracks.iter().map(|track| format!("{} {:.1}", track.name, track.loudness_lufs)).collect();
+    format!("{said}. Its parts, in LUFS: {}.", parts.join(", "))
+}
+
+// ---- pictures ------------------------------------------------------------------
+
+/// The song the pictures of the panel are made from: one sound with a
 /// table of its own on the second oscillator, playing a few notes.
 fn for_pictures() -> Project {
-    let mut project = alone("Sync Lead", false);
-    project.name = "Wavetable".into();
-    project.master = Project::new("").master;
-    let device = project.tracks[0].devices[0].id;
+    let mut project = Project::new("Wavetable");
+    project.set_tempo(120.0).expect("a tempo");
+    let lead = preset(SYNTH, "Sync Lead");
+    let track = project.add_track("Sync Lead");
+    let device = project.add_device(ChainRef::Track(track), SYNTH, "Sync Lead", None).expect("a device");
+    play(&mut project, track, 0.0, 8.0, &suiting(&lead).notes);
     let model = project.device_mut(device).expect("the synth");
-    let mut state = trill_dsp::wavetable::State::from_device_state(model.state.as_deref()).unwrap_or_default();
+    model.params = lead.params.iter().cloned().collect();
+    let mut state = trill_dsp::wavetable::State::from_device_state(lead.state.as_deref()).unwrap_or_default();
     let recipe = r#"{ "name": "Thin Reed", "size": 32,
         "frames": [ { "shape": "pulse", "width": 0.5 }, { "shape": "pulse", "width": 0.04, "tilt": -3 } ] }"#;
     state.osc2 = Some(trill_dsp::wavetable::TableSource::Recipe(serde_json::from_str(recipe).expect("a recipe")));
@@ -621,7 +767,7 @@ fn sound_pictures(folder: &Path) -> anyhow::Result<()> {
     }
     std::fs::create_dir_all(&profile)?;
     let factory = std::sync::Arc::new(BuiltinFactory);
-    let mut session = Session::new(factory, AudioBackend::Null { sample_rate: 48_000 }).map_err(failed)?;
+    let mut session = Session::new(factory, AudioBackend::Null { sample_rate: RATE }).map_err(failed)?;
     session.saved_presets().open(profile.join("saved-presets"));
 
     let keys = session.edit(|project| Ok(project.add_track("Warm Hall"))).map_err(failed)?;
@@ -659,70 +805,93 @@ fn main() -> anyhow::Result<()> {
     let folder = Path::new(&folder);
     std::fs::create_dir_all(folder)?;
 
-    let descriptors = BuiltinFactory.descriptors();
-    let synth = descriptors.iter().find(|descriptor| descriptor.uri == SYNTH).expect("the wavetable synth");
-    let mut list = String::from(
-        "# The wavetable synth, to listen to\n\n\
-         Nobody has heard these files: the presets and the phrases were written by someone who cannot hear, from \
-         how such sounds are made, and the presets were matched in level by measurement. A file is the synth \
-         alone, with no effect and no limiter after it, unless its name says otherwise. A preset that brings \
-         effects is a sound: its second file, \"(with effects)\", is that sound as it ships, which is what a track \
-         plays that is given the preset.\n\n\
+    let bank = presets_of(SYNTH);
+    let sounds = bank.iter().filter(|sound| !sound.category.is_empty()).count();
+    let mut list = format!(
+        "# The wavetable synth's bank, to listen to\n\n\
+         {sounds} sounds. The first sixteen (Solid Bass, Reese, Acid Line, Growl Bass, Deep Sub, Sync Lead, Anthem \
+         Saws, Talk Lead, Glass Pad, PWM Strings, Choir, Glass Pluck, String Pluck, Trance Pluck, Tine Piano, FM Keys) \
+         were heard and passed; their levels have moved by a few decibels since, so that each kind is at one level \
+         through its effects. **Nobody has heard the others, nor the four pieces**: they were written by someone who \
+         cannot hear, from how such sounds are made, and are held to what can be measured (level, room for a chord, \
+         every key, every macro, and where the sounds of a synth that is known to be good lie).\n\n\
          Made by `cargo run -p trill-app --example wavetable_listen -- <this folder>`; the same on every run.\n\n\
-         ## Each preset alone\n\n\
-         | File | Preset | Kind | What it plays | Seconds | Peak |\n|---|---|---|---|---|---|\n",
+         ## A file for each kind\n\n\
+         Every sound plays a short phrase that suits it at 120 BPM, through the effects it brings and with nothing \
+         else after it: what a track plays that is given the sound. The sounds of a file are at the levels they \
+         have against one another.\n"
     );
-    let mut said = String::new();
-    for (number, preset) in synth.presets.iter().filter(|preset| preset.name != "init").enumerate() {
-        let phrase = phrase(&preset.name);
-        let stem = format!("{:02} {}", number + 1, preset.name);
-        let file = format!("{stem}.wav");
-        let (seconds, peak) = write(&alone(&preset.name, false), &folder.join(&file))?;
-        writeln!(
-            list,
-            "| `{file}` | {} | {} | {} at {} BPM | {seconds:.0} | {peak} |",
-            preset.name, preset.category, phrase.plays, phrase.tempo
-        )?;
-        let after = brought(&preset.name);
-        if !after.is_empty() {
-            let file = format!("{stem} (with effects).wav");
-            let (seconds, peak) = write(&alone(&preset.name, true), &folder.join(&file))?;
-            let through = names_after(&after).join(" and ").to_lowercase();
-            writeln!(
-                list,
-                "| `{file}` | {} | {} | the same as it ships: through its {through} | {seconds:.0} | {peak} |",
-                preset.name, preset.category
-            )?;
-        }
-        writeln!(said, "- **{}** ({}): {}.", preset.name, preset.category, preset.description)?;
-        println!("{stem}");
-    }
+    kinds_file(folder, "1 Basses.wav", &["Bass"], &mut list)?;
+    kinds_file(folder, "2 Leads.wav", &["Lead"], &mut list)?;
+    kinds_file(folder, "3 Plucks.wav", &["Pluck"], &mut list)?;
+    kinds_file(folder, "4 Pads.wav", &["Pad"], &mut list)?;
+    kinds_file(folder, "5 Keys.wav", &["Keys"], &mut list)?;
+    kinds_file(folder, "6 The rest.wav", &["Bell", "Strings", "Brass", "Texture", "FX"], &mut list)?;
+
+    let (house_kit, tight, plain, dusty) =
+        (kit(&["909", "house"]), kit(&["tight", "punch", "909"]), kit(&["default"]), kit(&["lo", "soft"]));
     list.push_str(
-        "\n## Several together\n\n\
-         Mixed as a song is: track faders, a reverb every part is sent to, a delay on some, and the limiter a new \
-         song has on its master.\n\n| File | What it is | Seconds | Peak |\n|---|---|---|---|\n",
+        "\n## Four pieces\n\n\
+         Each is made of sounds of the bank, each with the effects it brings, and of the built-in drum kit: track \
+         faders, the limiter a new song has on its master, and nothing else.\n\n\
+         | File | What it is | Seconds | Peak |\n|---|---|---|---|\n",
     );
-    let pieces: [(&str, Project, &str); 2] = [
+    let pieces: [(&str, Project, String); 4] = [
         (
-            "Piece 1 Night Drive.wav",
-            night_drive(),
-            "124 BPM, sixteen bars in E minor. Glass Pluck and Glass Pad begin; Solid Bass and the built-in drum \
-             kit come in at bar 5; Anthem Saws play the chords from bar 9, their Bright macro opening; Sync Lead \
-             has the tune from bar 13",
+            "Piece 1 House.wav",
+            house(&house_kit),
+            format!(
+                "124 BPM, sixteen bars in A minor. House Stab and the drum kit ({house_kit}) begin; House Bass, Warm \
+                 Pad and a Riser come in at bar 5; an Impact and a Marimba at bar 9"
+            ),
         ),
         (
-            "Piece 2 Slow Glass.wav",
-            slow_glass(),
-            "84 BPM, twelve bars. Tine Piano plays the chords, PWM Strings hold them, Deep Sub has the roots, \
-             String Pluck the tune; Choir comes in at bar 5 and changes its vowel to the end",
+            "Piece 2 Drum and Bass.wav",
+            drum_and_bass(&tight),
+            format!(
+                "174 BPM, sixteen bars in F minor. Dark Pad and Glass Bell begin; a Sub Drop, a Reese and the beat \
+                 (the drum kit's {tight}) come in at bar 5; Sine Lead has the tune from bar 9, and a Fall sounds at \
+                 bar 13"
+            ),
+        ),
+        (
+            "Piece 3 Synthwave.wav",
+            synthwave(&plain),
+            format!(
+                "100 BPM, sixteen bars in E minor. Pluck Bass, Arp Pluck and the drum kit ({plain}) begin; Synth \
+                 Brass holds the chords from bar 5; a Sweep leads into bar 9, where Square Lead takes the tune"
+            ),
+        ),
+        (
+            "Piece 4 Lo-fi.wav",
+            lofi(&dusty),
+            format!(
+                "80 BPM, twelve bars. Dusty Keys, Electric Bass and the drum kit ({dusty}) begin; Tape Lead has the \
+                 tune from bar 5; a Kalimba joins for the last four bars"
+            ),
         ),
     ];
+    let mut mixes = String::new();
     for (file, project, what) in pieces {
-        let (seconds, peak) = write(&project, &folder.join(file))?;
+        let options = RenderOptions { sample_rate: RATE, max_tail_seconds: 6.0, ..RenderOptions::default() };
+        let out = render(&project, &BuiltinFactory, &options).map_err(|error| anyhow::anyhow!("{error}"))?;
+        anyhow::ensure!(out.problems.is_empty(), "{:?}", out.problems);
+        writeln!(mixes, "- `{file}`: {}", mixed(&out.measured))?;
+        let (seconds, peak) = write(out.left, out.right, &folder.join(file))?;
         writeln!(list, "| `{file}` | {what} | {seconds:.0} | {peak} |")?;
         println!("{file}");
     }
-    write!(list, "\n## What each preset says of itself\n\n{said}")?;
+    write!(
+        list,
+        "
+How each is mixed, as measured, since nobody has heard it (loudness over the whole piece, so a part that          plays for a few bars reads lower than it sounds while it plays):
+
+{mixes}"
+    )?;
+    list.push_str("\n## What each sound says of itself\n\n");
+    for sound in bank.iter().filter(|sound| !sound.category.is_empty()) {
+        writeln!(list, "- **{}** ({}): {}", sound.name, sound.category, sound.description)?;
+    }
     std::fs::write(folder.join("LIST.md"), list)?;
 
     if let Some(project) = arguments.next() {
