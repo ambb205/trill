@@ -4,7 +4,8 @@
 
 use super::arrangement::ops;
 use super::shortcuts::{self, Command};
-use super::state::{Clipboard, Cx, DetailTab};
+use super::files::Confirm;
+use super::state::{Clipboard, Cx, DetailTab, StoryAsk};
 use super::{arrangement, audio_settings, brand, files, recording, recovery, timeline};
 use eframe::egui::{self, Align2, Id, Rect, Sense, Ui, pos2, vec2};
 use trill_core::TimeSignature;
@@ -181,6 +182,19 @@ fn file_menu(ui: &mut Ui, cx: &mut Cx) {
     if item(ui, "Export WAV\u{2026}", Command::ExportWav, idle) {
         files::export_wav(ui.ctx(), cx);
     }
+    // How the song was made, as a file to hand on: by name, and without
+    // the conversation unless that is what is asked for.
+    trill_noir::menu_separator(ui, theme);
+    trill_noir::menu_heading(ui, theme, "Making of");
+    if MenuItem::new("Export\u{2026}").show(ui, theme).clicked() {
+        files::export_story(ui.ctx(), cx, false);
+    }
+    if MenuItem::new("Export with the conversation\u{2026}").show(ui, theme).clicked() {
+        files::export_story(ui.ctx(), cx, true);
+    }
+    if MenuItem::new("Watch one from a file\u{2026}").show(ui, theme).clicked() {
+        files::watch_story(ui.ctx(), cx);
+    }
     trill_noir::menu_separator(ui, theme);
     if item(ui, "Audio and MIDI\u{2026}", Command::AudioSettings, true) {
         audio_settings::open(cx);
@@ -295,6 +309,19 @@ fn view_menu(ui: &mut Ui, cx: &mut Cx) {
     let switch = keys(Command::ToggleKeyboard);
     if MenuItem::new("Computer keyboard").shortcut(&switch).checked(playing).show(ui, theme).clicked() {
         cx.keyboard.toggle();
+    }
+    // The making-of: the session played again, and the journal it is
+    // played from.
+    trill_noir::menu_separator(ui, theme);
+    if MenuItem::new("Making of").shortcut(&keys(Command::MakingOf)).show(ui, theme).clicked() {
+        cx.state.story = Some(StoryAsk::Watch);
+    }
+    let keeping = cx.with_session(|session| session.keeps_journal());
+    if MenuItem::new("Keep a journal").checked(keeping).show(ui, theme).clicked() {
+        files::keep_journal(cx, !keeping);
+    }
+    if MenuItem::new("Delete this song\u{2019}s journal\u{2026}").enabled(keeping).show(ui, theme).clicked() {
+        cx.jobs.confirm = Some(Confirm::DeleteJournal);
     }
     trill_noir::menu_separator(ui, theme);
     for (tab, label) in [(DetailTab::Clip, "Clip"), (DetailTab::Devices, "Devices"), (DetailTab::Mixer, "Mixer")] {

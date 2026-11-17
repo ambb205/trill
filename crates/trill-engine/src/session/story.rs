@@ -274,6 +274,28 @@ impl Session {
         }
     }
 
+    /// Enters the beginning of a reply that is still arriving, and says
+    /// which entry it is: see [`Journal::say_open`]. `None` while no
+    /// journal is kept.
+    pub fn say_open(&mut self, by: Author, text: &str) -> Option<u64> {
+        let at = self.story.now();
+        Some(self.story.journal.as_mut()?.say_open(at, by, text))
+    }
+
+    /// Adds to a reply that is still arriving.
+    pub fn say_more(&mut self, entry: u64, more: &str) {
+        if let Some(journal) = &mut self.story.journal {
+            journal.say_more(entry, more);
+        }
+    }
+
+    /// A reply has all arrived.
+    pub fn say_done(&mut self, entry: u64) {
+        if let Some(journal) = &mut self.story.journal {
+            journal.say_done(entry);
+        }
+    }
+
     /// Enters the assistant's plan as it stands.
     pub fn note_plan(&mut self, items: Vec<PlanItem>) {
         let at = self.story.now();

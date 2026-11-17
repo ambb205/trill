@@ -1,7 +1,7 @@
 //! Command-line options.
 
 use crate::audio_scene::AudioScene;
-use crate::ui::{AssistantOptions, AssistantScene, BrowserTab, DetailTab, KeyboardOptions, UiOptions};
+use crate::ui::{AssistantOptions, AssistantScene, BrowserTab, DetailTab, KeyboardOptions, MakingOfStart, UiOptions};
 use anyhow::{Context, anyhow, bail};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -44,6 +44,13 @@ Options:
   --assistant-scene <NAME>    Show a canned conversation in the assistant, for screenshots: ready, working,
                           answered, markdown, model, effort, song, song-done, limit, api-key, signed-out
                           or not-installed
+  --making-of             Start with the making-of of the song up: its session played again
+                          (Ctrl+Shift+M shows it)
+  --making-of-at <0..1>   Hold the making-of that far in instead of playing it: 0 is the beginning,
+                          1 the end
+  --making-of-scene       Put a canned session in place of the project, for screenshots: a short tune
+                          and the journal of how it was made
+  --watch <FILE.trillstory>   Start watching a making-of that was written out to a file
   --keyboard              Start with the computer keyboard playing notes (Ctrl+K switches it)
   --arm <TRACK NAME>      Arm this track at startup; may be given several times
   --record                Start recording on the armed tracks when the window opens (F9 does it)
@@ -97,6 +104,14 @@ pub struct Cli {
     pub assistant: bool,
     pub assistant_model: Option<String>,
     pub assistant_scene: Option<AssistantScene>,
+    /// Open the making-of of the song.
+    pub making_of: bool,
+    /// Hold it this far in, from 0 to 1, instead of playing it.
+    pub making_of_at: Option<f64>,
+    /// Put a canned session in place of the project.
+    pub making_of_scene: bool,
+    /// A making-of written out to a file, to watch.
+    pub watch: Option<PathBuf>,
     /// How the computer keyboard starts, when not as it was left.
     pub keyboard: KeyboardOptions,
     /// Names of tracks to arm at startup.
@@ -131,6 +146,17 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
         match arg.as_str() {
             "-h" | "--help" => return Ok(Parsed::Help),
             "--demo" => cli.demo = true,
+            "--making-of" => cli.making_of = true,
+            "--making-of-scene" => cli.making_of_scene = true,
+            "--making-of-at" => {
+                let text = value("how far in, from 0 to 1")?;
+                let at: f64 = text.parse().map_err(|_| anyhow!("--making-of-at '{text}' should be a number from 0 to 1"))?;
+                if !(0.0..=1.0).contains(&at) {
+                    bail!("--making-of-at '{text}' should be from 0 (the beginning) to 1 (the end)");
+                }
+                cli.making_of_at = Some(at);
+            }
+            "--watch" => cli.watch = Some(PathBuf::from(value("a .trillstory file")?)),
             "--play" => cli.play = true,
             "--null-audio" => cli.null_audio = true,
             "--real-audio" => cli.real_audio = true,
@@ -335,6 +361,14 @@ impl Cli {
             keyboard: self.keyboard.clone(),
             show_settings: self.settings,
             record: self.record,
+            making_of: (self.making_of || self.making_of_at.is_some()).then(|| match self.making_of_at {
+                Some(at) => MakingOfStart { at, playing: false },
+                // A picture is of one moment: the end, where the whole
+                // story is told, unless another is asked for.
+                None if self.screenshot.is_some() => MakingOfStart { at: 1.0, playing: false },
+                None => MakingOfStart::default(),
+            }),
+            watch: self.watch.clone(),
         }
     }
 

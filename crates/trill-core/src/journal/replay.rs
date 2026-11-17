@@ -135,15 +135,26 @@ struct Arriving {
     note: Option<(usize, Note)>,
 }
 
+/// The clips `change` adds to `before`, the song it is about to be
+/// applied to.
+fn added_clips(change: &Change, before: &Project) -> HashSet<ClipId> {
+    let clips = change.ops().iter().filter_map(|op| match op {
+        Op::Clip { clip, .. } if before.clip(clip.id).is_err() => Some(clip.id),
+        _ => None,
+    });
+    clips.collect()
+}
+
 /// What `change` wrote that is watched arriving: the clips it added and
-/// the notes it put, in the order they sound. `before` is the song it was
-/// applied to and `after` the song it made.
-fn arriving(change: &Change, before: &Project, after: &Project) -> Vec<Arriving> {
+/// the notes it put, in the order they sound. `added` are the clips that
+/// were not there before it ([`added_clips`]) and `after` the song it
+/// made.
+fn arriving(change: &Change, added: &HashSet<ClipId>, after: &Project) -> Vec<Arriving> {
     let mut items = Vec::new();
     let mut whole: HashSet<ClipId> = HashSet::new();
     for op in change.ops() {
         match op {
-            Op::Clip { clip, .. } if before.clip(clip.id).is_err() => {
+            Op::Clip { clip, .. } if added.contains(&clip.id) => {
                 let Ok(clip) = after.clip(clip.id) else { continue };
                 if !whole.insert(clip.id) {
                     continue;
@@ -245,7 +256,7 @@ impl Replay {
             let mut arrivals = 0;
             let lasts = match &entry.what {
                 What::Step(step) => {
-                    let before = song.clone();
+                    let added = added_clips(&step.change, &song);
                     if let Err(error) = step.change.apply(&mut song, States::Without) {
                         broken = Some((index, error.0));
                         break;
@@ -253,7 +264,7 @@ impl Replay {
                     if step.reverses.is_some() {
                         pace.reversal
                     } else {
-                        arrivals = arriving(&step.change, &before, &song).len();
+                        arrivals = arriving(&step.change, &added, &song).len();
                         // One thing is simply there; several are watched.
                         if arrivals < 2 {
                             arrivals = 0;
@@ -355,6 +366,7 @@ impl Replay {
             return Frame {
                 time,
                 song: &cursor.song,
+                version: cursor.version,
                 moment: None,
                 progress: 0.0,
                 focus: Focus::default(),
@@ -393,12 +405,13 @@ impl Replay {
         let song = cursor.staged.as_ref().map_or(&cursor.song, |(_, staged)| staged);
         let places = self.places_at(index);
         let focus = Focus::of(places, song);
-        Frame { time, song, moment: Some(index), progress, focus, arrived: &cursor.arrived }
+        Frame { time, song, version: cursor.version, moment: Some(index), progress, focus, arrived: &cursor.arrived }
     }
 
-    /// The places of the step at the moment numbered `index`, or of the
-    /// last step before it.
-    fn places_at(&self, index: usize) -> &[Place] {
+    /// Where the moment numbered `index` landed in the song: the places of
+    /// its step or, for an entry that changed nothing, of the last step
+    /// before it. This is where a view goes and a camera looks.
+    pub fn places_at(&self, index: usize) -> &[Place] {
         let steps = self.moments[..=index].iter().rev().filter_map(|moment| self.entry(moment).step());
         let steps = steps.filter(|step| !step.aside);
         steps.map(|step| step.places.as_slice()).find(|places| !places.is_empty()).unwrap_or(&[])
@@ -413,6 +426,10 @@ pub struct Frame<'c> {
     /// The song as it was: every step before, and of the step under way
     /// what has arrived. Without its devices' states.
     pub song: &'c Project,
+    /// A number that is another whenever the cursor's song is: a view
+    /// that drew the song at one version need not look at it again until
+    /// it sees the next.
+    pub version: u64,
     /// The moment under way, as numbered in [`Replay::moments`]; `None`
     /// before the first.
     pub moment: Option<usize>,
@@ -435,13 +452,15 @@ pub struct Cursor {
     /// `song` with only so many of those arrived, while not all have.
     staged: Option<(usize, Project)>,
     arrived: Vec<Arrived>,
+    /// Moves on whenever the song a frame shows is another.
+    version: u64,
 }
 
 impl Cursor {
     /// A cursor at the beginning of `replay`.
     pub fn new(replay: &Replay) -> Self {
         let song = replay.journal.base(States::Without).unwrap_or_else(|_| Project::new("Untitled"));
-        Self { applied: 0, song, arriving: Vec::new(), staged: None, arrived: Vec::new() }
+        Self { applied: 0, song, arriving: Vec::new(), staged: None, arrived: Vec::new(), version: 0 }
     }
 
     /// Makes `song` the song after `count` entries.
@@ -452,21 +471,23 @@ impl Cursor {
             return;
         }
         if count < self.applied {
+            let version = self.version;
             *self = Self::new(replay);
+            self.version = version;
         }
+        self.version += 1;
         self.staged = None;
         self.arriving.clear();
         for index in self.applied..count {
             let Some(step) = replay.journal.get(index).and_then(Entry::step) else { continue };
-            // Only the last step applied is watched arriving, and for that
-            // the song before it is needed once more.
+            // Only the last step applied is watched arriving.
             let watched = index + 1 == count && replay.moments[index].arrivals > 0;
-            let before = watched.then(|| self.song.clone());
+            let added = watched.then(|| added_clips(&step.change, &self.song));
             if step.change.apply(&mut self.song, States::Without).is_err() {
                 break;
             }
-            if let Some(before) = before {
-                self.arriving = arriving(&step.change, &before, &self.song);
+            if let Some(added) = added {
+                self.arriving = arriving(&step.change, &added, &self.song);
             }
         }
         self.applied = count;
@@ -475,12 +496,15 @@ impl Cursor {
     /// Makes the staged song the one with the first `shown` arrivals.
     fn stage(&mut self, shown: usize) {
         if shown >= self.arriving.len() {
-            self.staged = None;
+            if self.staged.take().is_some() {
+                self.version += 1;
+            }
             return;
         }
         if self.staged.as_ref().is_some_and(|(staged, _)| *staged == shown) {
             return;
         }
+        self.version += 1;
         let mut song = self.song.clone();
         let late = &self.arriving[shown..];
         // The clips that have not arrived go whole; of the others, the
@@ -673,6 +697,17 @@ mod tests {
         let fresh = replay.frame(early, &mut Cursor::new(&replay)).song.clone();
         assert_eq!(back, fresh);
         assert_eq!(replay.frame(early, &mut cursor).song, &fresh);
+
+        // The version moves when the song shown does, and only then.
+        let mut cursor = Cursor::new(&replay);
+        let mut seen = Vec::new();
+        for hundredth in 0..=100 {
+            let frame = replay.frame(at(hundredth as f64 / 100.0), &mut cursor);
+            seen.push((frame.version, frame.song.clip(clip).map_or(0, |clip| clip.notes().len() + 1)));
+        }
+        assert!(seen.windows(2).all(|pair| (pair[0].0 == pair[1].0) == (pair[0].1 == pair[1].1)), "{seen:?}");
+        let versions: HashSet<u64> = seen.iter().map(|(version, _)| *version).collect();
+        assert_eq!(versions.len(), 18, "the song before, and one more for each thing that arrives");
     }
 
     #[test]

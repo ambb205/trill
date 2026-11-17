@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use trill_core::device::ControllerSupport;
+use trill_core::device::{ControllerSupport, DeviceDescriptor, DeviceFactory};
 use trill_core::presets::PresetInfo;
 use trill_core::project::AutomationLane;
 use trill_core::{AutomationPoint, AutomationTarget, Beats, Clip, ClipId, DeviceId, Note, Project, Track, TrackId};
@@ -165,6 +165,64 @@ impl Snapshot {
             clip_notes: RefCell::default(),
             track_meters,
             master_meter: session.master_meter(),
+            project,
+        }
+    }
+
+    /// A snapshot of a song as it was, for playing a session again: the
+    /// song and what can be said of it without a session behind it.
+    /// Built-in devices have their parameters, with the values the song
+    /// holds; nothing is said of meters, editors, files or problems, which
+    /// belong to a song that is running. `revision` tells one such
+    /// snapshot from the next.
+    pub fn of_song(project: Project, revision: u64, descriptors: &[DeviceDescriptor], factory: &dyn DeviceFactory) -> Self {
+        let chains = || project.tracks.iter().map(|track| &track.devices).chain([&project.master.devices]);
+        let params = chains()
+            .flatten()
+            .map(|device| {
+                let known = descriptors.iter().find(|descriptor| descriptor.uri == device.uri);
+                let states = known.map(|descriptor| {
+                    let states = descriptor.params.iter().map(|info| ParamState {
+                        value: device.params.get(&info.id).copied().unwrap_or(info.default),
+                        info: info.clone(),
+                    });
+                    states.collect()
+                });
+                (device.id, Ok(states.unwrap_or_default()))
+            })
+            .collect();
+        let plays_drums = |track: &&Track| track.devices.iter().any(|device| factory.plays_drums(&device.uri));
+        let drum_instruments: HashSet<TrackId> = project.tracks.iter().filter(plays_drums).map(|track| track.id).collect();
+        let drum_tracks = project
+            .tracks
+            .iter()
+            .filter(|track| match track.profile.role {
+                Some(role) => role == trill_core::Role::Drums,
+                None => drum_instruments.contains(&track.id),
+            })
+            .map(|track| track.id)
+            .collect();
+        let mut params_tracks: Vec<TrackId> = project.tracks.iter().map(|track| track.id).collect();
+        params_tracks.sort_by_key(|track| track.0);
+        Self {
+            controller_support: HashMap::new(),
+            drum_tracks,
+            drum_instruments,
+            saved_presets: HashMap::new(),
+            revision,
+            can_undo: false,
+            can_redo: false,
+            modified: false,
+            path: None,
+            problems: Vec::new(),
+            clip_problems: HashMap::new(),
+            samples: HashMap::new(),
+            params_tracks,
+            params,
+            editors: Vec::new(),
+            clip_notes: RefCell::default(),
+            track_meters: Vec::new(),
+            master_meter: Arc::default(),
             project,
         }
     }
@@ -496,6 +554,39 @@ mod tests {
         let notes = after.clip_notes(clip_ref);
         assert_eq!((notes.notes.len(), notes.notes[0].start, notes.range), (1, 4.0, Some((60, 60))));
         assert!(Rc::ptr_eq(&notes, &after.clip_notes(clip_ref)));
+    }
+
+    #[test]
+    fn a_song_as_it_was_is_shown_without_a_session_behind_it() {
+        let mut project = Project::new("Then");
+        let lead = project.add_track("Lead");
+        let drums = project.add_track("Drums");
+        let hand = project.add_track("Hand drums");
+        let synth = project.add_device(ChainRef::Track(lead), "builtin:polysynth", "Poly Synth", None).unwrap();
+        project.device_mut(synth).unwrap().params.insert("cutoff".into(), 900.0);
+        project.add_device(ChainRef::Track(drums), "builtin:drumkit", "Drum Kit", None).unwrap();
+        let unknown = project.add_device(ChainRef::Master, "clap:not-installed", "Somebody's Plugin", None).unwrap();
+        let profile = trill_core::InstrumentProfile { role: Some(trill_core::Role::Drums), ..Default::default() };
+        project.set_track_profile(hand, profile).unwrap();
+        let clip = project.add_midi_clip(lead, "Riff", 4.0, 8.0).unwrap();
+
+        let descriptors = BuiltinFactory.descriptors();
+        let snapshot = Snapshot::of_song(project, 7, &descriptors, &BuiltinFactory);
+        assert_eq!((snapshot.revision, snapshot.can_undo, snapshot.modified), (7, false, false));
+        // A built-in device has its parameters, at the values the song has.
+        let cutoff = snapshot.param(synth, "cutoff").expect("the synth's parameters are known");
+        assert_eq!(cutoff.value, 900.0);
+        let resonance = snapshot.param(synth, "resonance").unwrap();
+        assert_eq!(resonance.value, resonance.info.default);
+        // A plugin's are its own to say, and it is not there to ask.
+        assert_eq!(snapshot.params[&unknown].as_ref().map(Vec::len), Ok(0));
+        // Drums are drums by their instrument, or because the track says so.
+        assert!(snapshot.plays_drums(drums) && snapshot.has_drum_instrument(drums));
+        assert!(snapshot.plays_drums(hand) && !snapshot.has_drum_instrument(hand));
+        assert!(!snapshot.plays_drums(lead));
+        assert!(snapshot.covers(&[lead, drums, hand]));
+        assert_eq!(snapshot.clip(clip).unwrap().1.name, "Riff");
+        assert!(snapshot.problems.is_empty() && snapshot.editors.is_empty());
     }
 
     #[test]

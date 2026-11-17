@@ -6,7 +6,7 @@
 //! reports back through a channel that [`Jobs::poll`] drains each frame; the
 //! UI thread never waits on any of it.
 
-use super::state::{Cx, UiState};
+use super::state::{Cx, StoryAsk, UiState};
 use super::toast::ToastKind;
 use super::{colors, widgets};
 use eframe::egui;
@@ -36,6 +36,11 @@ enum Event {
     /// The name of the MIDI file read and how many tracks it became.
     MidiImported(Result<(String, usize), String>),
     MidiExported(Result<PathBuf, String>),
+    /// The story of the song was written out, with or without the
+    /// conversation.
+    StoryExported(Result<(PathBuf, bool), String>),
+    /// A story written out to a file was chosen, to watch.
+    StoryPicked(PathBuf),
 }
 
 /// An action that would throw away unsaved changes and waits for the user
@@ -45,6 +50,9 @@ pub enum Confirm {
     New,
     Open,
     Quit,
+    /// Not about unsaved changes: the journal of the song is to be
+    /// deleted, which cannot be taken back.
+    DeleteJournal,
 }
 
 /// Background file work and its state.
@@ -128,6 +136,24 @@ impl Jobs {
                         Ok(path) => state.toasts.success(format!("Exported {}", file_name(&path))),
                         Err(error) => state.toasts.error(format!("Could not export MIDI: {error}")),
                     }
+                }
+                Event::StoryExported(result) => {
+                    self.dialog_open = false;
+                    match result {
+                        Ok((path, true)) => state.toasts.success(format!(
+                            "Wrote {}: how the song was made, with the conversation",
+                            file_name(&path)
+                        )),
+                        Ok((path, false)) => state.toasts.success(format!(
+                            "Wrote {}: how the song was made, without the conversation",
+                            file_name(&path)
+                        )),
+                        Err(error) => state.toasts.error(format!("Could not write the making-of: {error}")),
+                    }
+                }
+                Event::StoryPicked(path) => {
+                    self.dialog_open = false;
+                    state.story = Some(StoryAsk::WatchFile(path));
                 }
             }
         }
@@ -360,10 +386,31 @@ fn project_dialog(title: &str, current: Option<&Path>) -> rfd::AsyncFileDialog {
 /// carries out the answer.
 pub fn confirm_modal(ctx: &egui::Context, cx: &mut Cx) {
     let Some(confirm) = cx.jobs.confirm else { return };
+    if confirm == Confirm::DeleteJournal {
+        let body = format!(
+            "How \"{}\" was made, step by step, with what was said to the assistant on the way, will be gone for \
+             good. The song itself is not touched.",
+            cx.snap.project.name
+        );
+        let title = "Delete this song\u{2019}s journal?";
+        let Some(proceed) = widgets::question(ctx, cx.theme, "confirm-journal", title, &body, "Delete", "Cancel")
+        else {
+            return;
+        };
+        cx.jobs.confirm = None;
+        if proceed {
+            match cx.with_session(|session| session.delete_journal()) {
+                Ok(()) => cx.state.toasts.info("The journal is deleted. The story begins again from here."),
+                Err(error) => cx.state.toasts.error(format!("Could not delete the journal: {error}")),
+            }
+        }
+        return;
+    }
     let (verb, proceed) = match confirm {
         Confirm::New => ("starting a new project", "Discard and start new"),
         Confirm::Open => ("opening another project", "Discard and open"),
         Confirm::Quit => ("quitting", "Discard and quit"),
+        Confirm::DeleteJournal => return,
     };
 
     let body = format!("\"{}\" has changes that are not saved. They will be lost by {verb}.", cx.snap.project.name);
@@ -381,7 +428,72 @@ pub fn confirm_modal(ctx: &egui::Context, cx: &mut Cx) {
             cx.jobs.quit_confirmed = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        Confirm::DeleteJournal => {}
     }
+}
+
+/// Asks where to put the story of the song and writes it there: the song
+/// as it was when its journal began and every step since, to hand on and
+/// watch elsewhere. Without `conversation`, nothing that was said between
+/// the user and the assistant is in it.
+pub fn export_story(ctx: &egui::Context, cx: &mut Cx, conversation: bool) {
+    if std::mem::replace(&mut cx.jobs.dialog_open, true) {
+        return;
+    }
+    let session = cx.session.clone();
+    let ending = trill_engine::journal::EXPORT_ENDING;
+    let title = if conversation { "Export the making-of, with the conversation" } else { "Export the making-of" };
+    let mut dialog = rfd::AsyncFileDialog::new()
+        .set_title(title)
+        .add_filter("Trill making-of", &[ending])
+        .set_file_name(format!("{}.{ending}", file_stem_for(&cx.snap.project.name)));
+    if let Some(folder) = cx.snap.path.as_deref().and_then(Path::parent) {
+        dialog = dialog.set_directory(folder);
+    }
+    cx.jobs.spawn(ctx, move |report| {
+        report(match pollster::block_on(dialog.save_file()) {
+            Some(file) => {
+                let path = with_extension(file.path(), ending);
+                let written = session.lock().export_journal(&path, conversation);
+                Event::StoryExported(written.map(|()| (path, conversation)).map_err(|error| error.to_string()))
+            }
+            None => Event::DialogCancelled,
+        });
+    });
+}
+
+/// Asks for a making-of that was written out to a file, to watch.
+pub fn watch_story(ctx: &egui::Context, cx: &mut Cx) {
+    if std::mem::replace(&mut cx.jobs.dialog_open, true) {
+        return;
+    }
+    let ending = trill_engine::journal::EXPORT_ENDING;
+    let mut dialog =
+        rfd::AsyncFileDialog::new().set_title("Watch a making-of").add_filter("Trill making-of", &[ending]);
+    if let Some(folder) = cx.snap.path.as_deref().and_then(Path::parent) {
+        dialog = dialog.set_directory(folder);
+    }
+    cx.jobs.spawn(ctx, move |report| {
+        report(match pollster::block_on(dialog.pick_file()) {
+            Some(file) => Event::StoryPicked(file.path().to_path_buf()),
+            None => Event::DialogCancelled,
+        });
+    });
+}
+
+/// Keeps a journal of how songs are made from now on, or stops, and
+/// remembers the choice for the next run.
+pub fn keep_journal(cx: &mut Cx, keep: bool) {
+    cx.with_session(|session| session.set_journal_keeping(keep));
+    cx.sounds.quietly(move |runtime| {
+        runtime.update_settings(|settings| settings.journal.keep = keep).map_err(|error| error.to_string())
+    });
+    let said = if keep {
+        "A journal is kept from here on"
+    } else {
+        "No journal is kept from here on. What was written stays until it is deleted."
+    };
+    cx.state.toasts.info(said);
 }
 
 /// `path` with `extension` appended unless it already ends in it. Save

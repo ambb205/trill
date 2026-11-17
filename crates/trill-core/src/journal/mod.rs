@@ -186,6 +186,8 @@ enum Open {
     Call(u64),
     /// The drag that made it may go on.
     Gesture,
+    /// It is still being said.
+    Saying,
 }
 
 /// One entry of the story.
@@ -791,6 +793,46 @@ impl Journal {
     /// Enters what was said in the conversation.
     pub fn say(&mut self, at: u64, by: Author, text: impl Into<String>) -> u64 {
         self.push(at, by, What::Said { text: text.into() }, None)
+    }
+
+    /// Enters the beginning of something that is still being said: a
+    /// reply that arrives a few words at a time. It stands in the journal
+    /// where it began, and grows ([`Journal::say_more`]) until it is done
+    /// ([`Journal::say_done`]), whatever else is entered meanwhile.
+    pub fn say_open(&mut self, at: u64, by: Author, text: impl Into<String>) -> u64 {
+        self.push(at, by, What::Said { text: text.into() }, Some(Open::Saying))
+    }
+
+    /// Adds `more` to what the entry numbered `seq` says, if it is still
+    /// being said.
+    pub fn say_more(&mut self, seq: u64, more: &str) -> bool {
+        let entry = self.index_of(seq).and_then(|index| self.entries.get_mut(index));
+        match entry {
+            Some(Entry { what: What::Said { text }, open: Some(Open::Saying), .. }) => {
+                text.push_str(more);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// What the entry numbered `seq` says is all said. Words that came to
+    /// nothing but space leave no entry, if it is still the last.
+    pub fn say_done(&mut self, seq: u64) {
+        let Some(index) = self.index_of(seq) else { return };
+        let Some(entry) = self.entries.get_mut(index) else { return };
+        if entry.open != Some(Open::Saying) {
+            return;
+        }
+        entry.open = None;
+        if let What::Said { text } = &mut entry.what {
+            let kept = text.trim_end().len();
+            text.truncate(kept);
+            if text.is_empty() && index + 1 == self.entries.len() {
+                self.entries.pop_back();
+                self.next_seq -= 1;
+            }
+        }
     }
 
     /// Enters the assistant's plan as it stands.
@@ -1411,6 +1453,37 @@ mod tests {
         );
         assert!(journal.get(6).unwrap().is_conversation() && journal.get(7).unwrap().is_conversation());
         assert!(!journal.get(9).unwrap().is_conversation() && !journal.get(0).unwrap().is_conversation());
+    }
+
+    #[test]
+    fn a_reply_stands_where_it_began_however_long_it_takes_to_say() {
+        let mut song = Project::new("Song");
+        let mut journal = Journal::begin(&song, 0);
+        journal.say(1, Author::Person, "Add a bass track.");
+        let reply = journal.say_open(2, Author::Assistant, "I'll add");
+        assert!(journal.say_more(reply, " a track"));
+        // The call it announces is made before the last of it has arrived.
+        let call = journal.begin_call(Author::Assistant, "create_track", "Added the track \u{201C}Bass\u{201D}");
+        step(&mut journal, &mut song, Who::Call(call), |p| p.add_track("Bass"));
+        journal.end_call(3, call, Outcome::default());
+        assert!(journal.say_more(reply, " for the bass.  "));
+        // Until it is done it may still grow, and is not written.
+        assert!(!journal.to_text(true).contains("I'll add"));
+        journal.say_done(reply);
+        assert!(!journal.say_more(reply, " And more."), "what is said is said");
+        assert_eq!(
+            labels(&journal),
+            ["Add a bass track.", "I'll add a track for the bass.", "Added the track \u{201C}Bass\u{201D}"]
+        );
+        assert!(journal.to_text(true).contains("I'll add a track for the bass."));
+
+        // Words that came to nothing leave nothing.
+        let empty = journal.say_open(4, Author::Assistant, "  ");
+        journal.say_done(empty);
+        assert_eq!((journal.len(), journal.next_seq()), (3, 4));
+        // What was said by hand is not a reply that can grow.
+        let said = journal.say(5, Author::Person, "Thanks");
+        assert!(!journal.say_more(said, "!"));
     }
 
     #[test]
