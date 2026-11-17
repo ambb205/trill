@@ -12,7 +12,9 @@ pub const VELOCITY_CENTRE: f32 = 75.0;
 
 /// The description of a sample player's velocity sensitivity, which says
 /// the law to whoever sets it.
-pub const VELOCITY_SENS_NAME: &str = "Velocity Sensitivity (0 = every hit at the volume; 1 = 0.4 dB a step of velocity, up from the volume above velocity 75 and down below it, so a hard hit is louder than the volume says: +10 dB at 100, +21 dB at 127, -12 dB at 45; 0.5 is half of that in dB)";
+pub const VELOCITY_SENS_NAME: &str = "Velocity Sensitivity (0 = every hit at the volume; 1 = 0.4 dB a step of \
+velocity, up from the volume above velocity 75 and down below it, so a hard hit is louder than the volume says: \
++10 dB at 100, +21 dB at 127, -12 dB at 45; 0.5 is half of that in dB)";
 
 /// The gain of a note of `velocity` (0..=1) on a sample player whose
 /// sensitivity is `sens`: [`VELOCITY_DB_PER_STEP`] times the sensitivity

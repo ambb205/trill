@@ -52,7 +52,14 @@ define_params!(P, PARAMS, [
     FmAmount => float("fm_amount", "FM Amount (osc 2 modulates osc 1)", 0.0, 1.0, 0.0, ""),
     FmEnv => float("fm_env", "FM Follows Filter Envelope", 0.0, 1.0, 0.0, ""),
     SubLevel => float("sub_level", "Sub Oscillator Level", 0.0, 1.0, 0.0, ""),
-    NoiseLevel => float("noise_level", "Noise Level (white noise; at 1 it peaks 13 dB under an oscillator)", 0.0, 1.0, 0.0, ""),
+    NoiseLevel => float(
+        "noise_level",
+        "Noise Level (white noise; at 1 it peaks 13 dB under an oscillator)",
+        0.0,
+        1.0,
+        0.0,
+        ""
+    ),
     Unison => int("unison", "Unison Voices", 1, MAX_UNISON as i32, 1, ""),
     UnisonDetune => float("unison_detune", "Unison Detune", 0.0, 100.0, 20.0, "cents"),
     UnisonSpread => float("unison_spread", "Unison Stereo Spread", 0.0, 1.0, 0.7, ""),
@@ -93,7 +100,14 @@ define_params!(P, PARAMS, [
         0.0,
         "st"
     ),
-    PitchDecay => float("pitch_decay", "Pitch Envelope Time (to a thousandth of the way from the note)", 0.001, 5.0, 0.05, "s"),
+    PitchDecay => float(
+        "pitch_decay",
+        "Pitch Envelope Time (to a thousandth of the way from the note)",
+        0.001,
+        5.0,
+        0.05,
+        "s"
+    ),
     BendRange => float(
         "bend_range",
         "Pitch Wheel Range (how far the wheel bends, each way; the track's instrument profile takes it from here)",

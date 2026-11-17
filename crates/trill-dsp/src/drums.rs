@@ -12,7 +12,7 @@
 use crate::define_params;
 use crate::level::ChannelLevel;
 use crate::params::{ParamValues, PresetDef, float};
-use crate::util::{OnePole, Rng, Svf, db_to_gain, decay_coef, pan_gains};
+use crate::util::{OnePole, Rng, SILENT_DB, Svf, decay_coef, level_gain, pan_gains};
 use std::f32::consts::TAU;
 use trill_core::device::{DeviceProcessor, Event, EventKind, ProcessInfo};
 
@@ -36,7 +36,7 @@ define_params!(P, PARAMS, [
     TomLevel => float("tom_level", "Tom Level", 0.0, 2.0, 1.0, ""),
     CymbalLevel => float("cymbal_level", "Cymbal Level", 0.0, 2.0, 1.0, ""),
     PercLevel => float("perc_level", "Percussion Level", 0.0, 2.0, 1.0, ""),
-    Volume => float("volume", "Volume", -48.0, 12.0, 0.0, "dB"),
+    Volume => float("volume", "Volume (silent at -70)", SILENT_DB as f64, 12.0, 0.0, "dB"),
 ]);
 
 pub const DESCRIPTION: &str = "Synthesized drum machine on the General MIDI map: 36 kick, 37 rim, 38 snare, \
@@ -651,7 +651,7 @@ impl DrumKit {
             p.get(P::CymbalLevel as usize),
             p.get(P::PercLevel as usize),
         ];
-        c.volume = db_to_gain(p.get(P::Volume as usize));
+        c.volume = level_gain(p.get(P::Volume as usize));
 
         self.kick.filter.set(2200.0, 1.0, sr);
         self.snare.highpass.set(1600.0, 0.6, sr);
@@ -903,6 +903,7 @@ mod tests {
     use super::*;
     use crate::fft::RealFft;
     use crate::testing::{peak, rms, run};
+    use crate::util::db_to_gain;
     use std::ops::Range;
 
     /// Four seconds of the kit after one hit of `pitch`, in mono.

@@ -171,9 +171,23 @@ mod saturator {
     const SHAPES: &[&str] = &["soft", "hard", "tube", "sine"];
 
     define_params!(P, PARAMS, [
-        Drive => float("drive", "Drive (gain into the curve; a signal that peaks at 0 dB after it reaches the curve's ceiling)", 0.0, 36.0, 6.0, "dB"),
+        Drive => float(
+            "drive",
+            "Drive (gain into the curve; a signal that peaks at 0 dB after it reaches the curve's ceiling)",
+            0.0,
+            36.0,
+            6.0,
+            "dB"
+        ),
         Shape => choice("shape", "Shape", SHAPES, 0),
-        Output => float("output", "Output (gain after the curve, which never exceeds 0 dB before it)", -24.0, 12.0, 0.0, "dB"),
+        Output => float(
+            "output",
+            "Output (gain after the curve, which never exceeds 0 dB before it)",
+            -24.0,
+            12.0,
+            0.0,
+            "dB"
+        ),
         Mix => float("mix", "Mix", 0.0, 1.0, 1.0, ""),
         Legacy => boolean(
             "legacy",
