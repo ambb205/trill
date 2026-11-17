@@ -32,7 +32,8 @@ use trill_engine::{AudioBackend, Session};
 use trill_stage::export::{self, FilmRequest, SongFilm};
 use trill_stage::film::{Audio, Filmer, Progress, Shoot};
 use trill_stage::making::Making;
-use trill_stage::{Format, Song, Sound};
+use trill_stage::voice::Waves;
+use trill_stage::{Format, Score, Song, Sound};
 
 struct Asked {
     song: PathBuf,
@@ -179,7 +180,8 @@ fn run() -> Result<(), String> {
     if let Some(path) = &asked.film {
         film_whole(&asked, path, shoot)?;
     }
-    let song = Song::of(&project);
+    // With the recordings it plays, as a film of it has them.
+    let song = Song::from(Score::read(&project).with_voices(Waves::default().voiced(&project)));
     let sound = match (&asked.audio, asked.own_sound) {
         (Some(path), _) => {
             let (left, right, rate) = read_wav(path)?;

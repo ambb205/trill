@@ -557,9 +557,8 @@ fn lane(
         }
         if strips && rect.width() > 22.0 {
             // The name stays in view while the clip's start has gone by.
-            // It begins far enough in that the playhead, standing on the
-            // clip's first beat at a cut, does not stand on its first letter.
-            let text_left = (rect.left().max(field.left()) + 9.0).min(rect.right() - 14.0);
+            let home = rect.left().max(field.left()) + 9.0;
+            let text_left = name_left(home, playing.then(|| axis.x(beat)), rect.right());
             let room = Rect::from_min_max(pos2(text_left, title.top()), pos2(title.right() - 3.0, title.bottom()));
             text::paint(&clipped, room, Align2::LEFT_CENTER, theme.text.micro, &clip.name, theme.on_accent);
         }
@@ -607,6 +606,15 @@ fn lane(
             lit.add_colored_rect(bar.expand(0.5), fade(color, glow));
         }
     }
+}
+
+/// Where a clip's name begins: at `home`, just inside the clip, until the
+/// playhead of a clip that is playing comes to it, and from then on just
+/// ahead of the playhead, as far as the clip's `right` end lets it. A line
+/// through its letters would cut them: at a cut that lands on the clip's
+/// first beat, and for as long as the playhead took to cross them.
+fn name_left(home: f32, playhead: Option<f32>, right: f32) -> f32 {
+    home.max(playhead.map_or(home, |x| x + 7.0)).min(right - 14.0)
 }
 
 /// Seconds the outline of a recording stays lit behind the playhead.
@@ -1521,6 +1529,18 @@ mod tests {
         assert_eq!(position_text(3.0, TimeSignature::new(6, 8).unwrap()), "2. 1. 1");
         assert_eq!(clock_text(0.0), "0:00.0");
         assert_eq!(clock_text(67.46), "1:07.4");
+    }
+
+    #[test]
+    fn a_playing_clips_name_keeps_ahead_of_the_playhead_and_inside_its_clip() {
+        // A clip from 100 to 400 across, its name at home nine in.
+        let at = |playhead: Option<f32>| name_left(109.0, playhead, 400.0);
+        assert_eq!(at(None), 109.0, "a clip that is not playing");
+        assert_eq!(at(Some(100.0)), 109.0, "at a cut on its first beat the name is clear of the line already");
+        // The line never stands on a letter: the name leaves as it arrives…
+        assert_eq!((at(Some(102.0)), at(Some(103.0)), at(Some(180.0))), (109.0, 110.0, 187.0));
+        // …and is held by the clip's end, which the playhead then leaves with it.
+        assert_eq!(at(Some(395.0)), 386.0);
     }
 
     #[test]
