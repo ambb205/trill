@@ -347,6 +347,14 @@ that quick and true:
   `transport` tell a model, so that neither presses play into half a kit unawares.
   `cargo run -p trill-plugins --example loading -- "vst3:<class id>" --preset "<kit>"` watches an installed
   sampler load, key by key, beside the program's memory, reads and processor time.
+- *A render does not go on without an instrument.* If a plugin never answers any of the notes it is to play
+  for as long as it is waited for, the render is refused before its first sample: nothing is measured, no file
+  is written, and the refusal names the track, says what its notes say of why (their range, or that they are
+  keyswitches) and what to do. A mix without one of its instruments is not the song, and a line in a reply
+  that otherwise looks like a success is easily missed. A track that is muted is left out on purpose, and a
+  silence the track itself explains (its notes are keyswitches of its instrument, or outside its range) is
+  no refusal. While the plugins' own thread is behind with other work (a song's plugins being let go of, each
+  taking its time), a plugin that has not had its turn to load is waited for and not given up on.
 - *A render measures everything as it goes*, without keeping a stem per track: the mix (peak, true peak, LUFS,
   stereo correlation, spectral balance), every track after its fader in the same terms, the loudness of every
   section between the markers (or of bar ranges), and how many dB each built-in compressor and limiter took
@@ -355,7 +363,16 @@ that quick and true:
 - *A render makes only what is heard.* A track that is muted, or left out by a solo or by `tracks`, is not put
   into the render at all: its devices are not created and its plugins are not waited for. Hearing one track of
   a song with many plugins costs what that track costs. (What plays live keeps every track running, so that a
-  track is there the moment it is unmuted.)
+  track is there the moment it is unmuted.) What feeds a track that is heard is made with it: the members of a
+  group, and the tracks whose sends reach a soloed return.
+- *A return can be heard alone.* Soloing a return, in the window or by naming it in `tracks`, gives the return
+  as the whole song feeds it: every track's send still reaches it, a group's too, while the tracks themselves
+  and the other returns are not heard. (Soloing a track or a group keeps the returns open, so that it is heard
+  with its reverb.) Each of these opens and closes over ten milliseconds, whatever the buffer size, so a solo
+  changed while the song plays makes no click; a send that an envelope is moving goes on moving meanwhile, and
+  what is heard is the two multiplied.
+- *A render runs at the rate it is asked for.* `measure` and `render` take `sample_rate`; left out, they run at
+  the engine's rate, which is 48 kHz when there is no audio device. The reply says which it was.
 - *One render writes every stem.* Asked to, a render writes parts of the song to files of their own as it
   goes (`render` with `stems`; "Export WAV and stems" in the window): every track as it leaves its fader and
   pan, what goes into each track's effects (its instrument alone), every group, every return fed by every

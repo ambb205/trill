@@ -533,6 +533,98 @@ fn a_fader_moved_while_the_song_plays_gets_there_without_a_step() {
     assert_eq!(peak(&left[3 * BEAT + 600..]), 0.0, "muted, ten milliseconds on");
 }
 
+/// Plays `first` for `swap_at` frames and `second` from there on, in
+/// buffers of `block` frames cut so that the change falls on the same
+/// frame whatever their size: an edit that arrives at one moment of the
+/// song.
+fn played_across_a_change(first: &Project, second: &Project, swap_at: usize, block: usize) -> (Vec<f32>, Vec<f32>) {
+    let (mut bank, mut meters, audio) = (DeviceBank::default(), Meters::default(), AudioSources::default());
+    let mut compile = |project: &Project| {
+        Compiler {
+            factory: &BuiltinFactory,
+            bank: &mut bank,
+            meters: &mut meters,
+            audio: &audio,
+            stand_ins: None,
+            sample_rate: SR,
+            purpose: Purpose::Playing,
+        }
+        .compile(project, false)
+        .0
+    };
+    let mut processor = Processor::new(SR);
+    drop(processor.swap_graph(compile(first)));
+    processor.play();
+    let (mut left, mut right) = (vec![0.0f32; 2 * swap_at], vec![0.0f32; 2 * swap_at]);
+    for half in 0..2 {
+        if half == 1 {
+            drop(processor.swap_graph(compile(second)));
+        }
+        let range = half * swap_at..(half + 1) * swap_at;
+        for (l, r) in left[range.clone()].chunks_mut(block).zip(right[range].chunks_mut(block)) {
+            processor.process(l, r);
+        }
+    }
+    (left, right)
+}
+
+#[test]
+fn a_solo_that_changes_over_a_send_that_moves_makes_no_step_at_any_buffer_size() {
+    // A tone that is heard itself and through a return, its send swelling
+    // all the while along its envelope.
+    let mut project = Project::new("t");
+    let track = sine_track(&mut project, "Lead", 8.0);
+    let echo = project.add_track_of_kind("Echo", TrackKind::Return);
+    let send = AutomationTarget::Send { track, to: echo };
+    project.set_automation(send, vec![point(0.0, -24.0), point(8.0, 0.0)]).unwrap();
+    // Soloed, the return is heard alone, as the track feeds it. Muted, the
+    // track is not heard and feeds nothing.
+    let mut soloed = project.clone();
+    soloed.track_mut(echo).unwrap().solo = true;
+    let mut muted = project.clone();
+    muted.track_mut(track).unwrap().mute = true;
+    // The change comes four beats in, on a frame that is no buffer's edge
+    // for most of these sizes and not where the wave crosses nothing.
+    let swap_at = 4 * BEAT + 173;
+    let plain = plain_sine(8.0);
+    let steady = largest_step(&plain[BEAT..2 * BEAT]);
+
+    for (name, before, after) in [
+        ("soloing the return", &project, &soloed),
+        ("letting go of the solo", &soloed, &project),
+        ("muting the track", &project, &muted),
+        ("unmuting the track", &muted, &project),
+    ] {
+        let reference = played_across_a_change(before, after, swap_at, 512);
+        // No step: from one sample to the next it never moves by more
+        // than the track and its return together do anyway.
+        let around = largest_step(&reference.0[swap_at - 960..swap_at + 1920]);
+        assert!(around <= 2.0 * steady * 1.02, "{name}: a step of {around}, where {steady} a part is usual");
+        // The gate is through in ten milliseconds, and the send has gone on
+        // along its envelope meanwhile: a little later the level is the
+        // envelope's alone (with the track's own, where that is heard).
+        let at = 5.0;
+        let level = gain_db(&reference.0, &plain, at);
+        let sent = Travel::FADER.between(-24.0, 0.0, at / 8.0);
+        let both = 20.0 * (1.0 + 10f64.powf(sent / 20.0)).log10();
+        let wanted = match name {
+            "soloing the return" => sent,
+            "muting the track" => f64::NEG_INFINITY,
+            _ => both,
+        };
+        if wanted.is_finite() {
+            assert!((level - wanted).abs() < 0.05, "{name}: {level} dB at beat {at}, for {wanted}");
+        } else {
+            assert_eq!(peak(&reference.0[swap_at + 600..]), 0.0, "{name}: nothing is heard ten milliseconds on");
+        }
+        // And it is the same samples however the buffers fall.
+        for block in [480, 441, 37, 1024] {
+            let other = played_across_a_change(before, after, swap_at, block);
+            assert!(other == reference, "{name}: buffers of {block} frames produced different audio");
+        }
+    }
+}
+
 #[test]
 fn a_lane_of_thousands_of_points_plays_the_curve_it_follows() {
     // As a compressor worked out on paper is drawn: 7,332 points on one

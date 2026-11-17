@@ -3,7 +3,7 @@
 //! and hands it over; the audio thread swaps it in and carries the running
 //! state (device instances, sounding notes, fader positions) across.
 
-use crate::glide::Glide;
+use crate::glide::{Gate, Glide};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use trill_core::controllers::{CONTROLLER_KINDS, ControllerKind, ControllerLane};
@@ -109,10 +109,12 @@ pub(crate) struct ParamAutomation {
     pub last: f64,
 }
 
-/// A copy of a track's faded signal for a return track.
+/// A copy of a track's faded signal that goes to a return track. What it
+/// carries is its level, where its envelope has it or where it was set by
+/// hand, times how far mute and solo leave it open.
 pub(crate) struct SendNode {
-    /// The return's bus, and the return itself: by it the gain the send
-    /// has reached is found again in the graph that takes over.
+    /// The return's bus, and the return itself: by it what the send has
+    /// come to is found again in the graph that takes over.
     pub bus: usize,
     pub to: TrackId,
     /// The level set by hand, as a gain; nothing where the send is its
@@ -120,8 +122,14 @@ pub(crate) struct SendNode {
     pub gain: f32,
     /// The envelope that moves it, in dB, which then is what counts.
     pub automation: Option<Envelope>,
-    /// Where the gain has got to: see [`Glide`].
+    /// Whether the send carries anything: shut, because the return is not
+    /// heard, or the track is not and the return does not take every
+    /// track's send.
+    pub open: bool,
+    /// Where the level has got to: see [`Glide`].
     pub glide: Glide<1>,
+    /// How far open it is: see [`Gate`].
+    pub gate: Gate,
 }
 
 #[derive(Default)]
@@ -188,6 +196,11 @@ pub(crate) struct TrackState {
     pub active_count: usize,
     /// Where the fader and the pan have the two sides: see [`Glide`].
     pub fader: Glide<2>,
+    /// How much of the track's sound passes at all, and how much of that
+    /// goes on to its output: what mute and solo open and shut, each a
+    /// [`Gate`].
+    pub passes: Gate,
+    pub out: Gate,
     /// The keys held by hand on this track, a bit per pitch: through a
     /// keyboard or [`Session::note_on`](crate::Session::note_on).
     pub live_held: u128,
@@ -226,6 +239,8 @@ impl Default for TrackState {
             active_until: [-1.0; 128],
             active_count: 0,
             fader: Glide::default(),
+            passes: Gate::default(),
+            out: Gate::default(),
             live_held: 0,
             routed_held: 0,
             live: [f32::NAN; CONTROLLER_KINDS],
@@ -316,13 +331,18 @@ pub(crate) struct TrackNode {
     pub chain: Chain,
     pub volume_db: f32,
     pub pan: f32,
-    /// Mute and solo, already resolved.
-    pub audible: bool,
-    /// The track is not heard, because others are soloed, but the group it
-    /// plays through is listened to by a device and is not heard either:
-    /// the track goes on playing into its group, so that the device hears
-    /// what it would in the whole mix, and into nothing else.
-    pub feeds_key: bool,
+    /// Mute and solo, already resolved: whether the track's own sound is
+    /// wanted in the mix. A render listens to the tracks that are.
+    pub heard: bool,
+    /// Whether the track passes sound at all: on to its output, or into a
+    /// send. One that does not is faded to nothing.
+    pub passes: bool,
+    /// Whether what it passes goes on to its output, the master or its
+    /// group. A track that only feeds a soloed return through a send
+    /// passes sound and does not. A track that is not heard but plays
+    /// through a group whose sound is wanted all the same (it sends to a
+    /// soloed return, or a device listens to it) does.
+    pub to_output: bool,
     pub volume_automation: Option<Envelope>,
     pub pan_automation: Option<Envelope>,
     pub meter: Arc<Meter>,
@@ -455,11 +475,14 @@ impl Graph {
             if let Some(previous) = old.tracks.iter_mut().find(|t| t.id == track.id) {
                 std::mem::swap(&mut track.state, &mut previous.state);
                 track.state.lanes_changed = true;
-                // A send goes on from the gain it had; one the track did
-                // not have before comes up from nothing.
+                // A send goes on from where it was, level and gate, so that
+                // one which a solo opens or shuts does so without a step.
+                // One the track did not have before comes up from nothing.
                 for send in &mut track.sends {
-                    let before = previous.sends.iter().find(|before| before.to == send.to);
-                    send.glide = before.map_or(Glide::from([0.0]), |before| before.glide);
+                    match previous.sends.iter().find(|before| before.to == send.to) {
+                        Some(before) => (send.glide, send.gate) = (before.glide, before.gate),
+                        None => send.gate = Gate::shut(),
+                    }
                 }
             }
             if track.fresh_devices {

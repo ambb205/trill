@@ -270,6 +270,12 @@ impl DeviceFactory for Vst3Factory {
         self.create_for(device, sample_rate, max_block, Purpose::Playing)
     }
 
+    /// Whether the plugin main thread is behind: every plugin of every
+    /// format waits for its turn on it.
+    fn busy(&self) -> bool {
+        self.shared.main.behind()
+    }
+
     fn create_for(
         &self,
         device: &Device,

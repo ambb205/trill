@@ -5,7 +5,7 @@
 //! exactly what you heard.
 
 use crate::engine::RecordPhase;
-use crate::glide::{DECLICK_SECONDS, Glide, STEP, Span};
+use crate::glide::{DECLICK_SECONDS, STEP, Span, gated};
 use crate::graph::{AudioData, Bus, Chain, DeviceSlot, Graph, MAX_BLOCK, RegionAudio, TrackNode, TrackState};
 use crate::live::{Captured, LiveTarget, TrackSet};
 use crate::monitor::{Beats, Monitor};
@@ -143,6 +143,8 @@ pub struct Processor {
     /// Room for a block of gains that move: a fader's two sides, or a send.
     gain_left: Vec<f32>,
     gain_right: Vec<f32>,
+    /// Room for how far a gate is open over a block, while it moves.
+    shares: Vec<f32>,
     /// How many frames an abrupt change of a gain is spread over.
     declick: u32,
     /// The audition voice and the metronome, heard but never rendered.
@@ -181,6 +183,7 @@ impl Processor {
             mix_right: vec![0.0; MAX_BLOCK],
             gain_left: vec![0.0; MAX_BLOCK],
             gain_right: vec![0.0; MAX_BLOCK],
+            shares: vec![0.0; MAX_BLOCK],
             declick: (DECLICK_SECONDS * sample_rate).round().max(1.0) as u32,
             monitor: Monitor::new(sample_rate),
             output_latency: 0.0,
@@ -752,11 +755,11 @@ impl Processor {
             }
 
             // Where the fader and the pan have the two sides at a position
-            // of the song, with the track open: where their envelopes have
-            // them, or where they were set by hand.
+            // of the song: where their envelopes have them, or where they
+            // were set by hand.
             let (volume, pan) = (&track.volume_automation, &track.pan_automation);
-            let (audible, volume_db, pan_set) = (track.audible, track.volume_db, track.pan);
-            let open = |beat: f64| {
+            let (volume_db, pan_set) = (track.volume_db, track.pan);
+            let sides = |beat: f64| {
                 let level = volume.as_ref().map_or(volume_db, |envelope| envelope.value_at(beat) as f32);
                 if level <= MIN_VOLUME_DB {
                     return [0.0, 0.0];
@@ -767,51 +770,47 @@ impl Processor {
                 [gain * pan_left, gain * pan_right]
             };
             let moving = volume.is_some() || pan.is_some();
+            let shares = &mut self.shares[..frames];
             let mut gains = [&mut self.gain_left[..frames], &mut self.gain_right[..frames]];
-            // Not heard, but its group is listened to: it plays into the
-            // group at its fader, and what follows hears nothing of it.
-            if track.feeds_key
-                && let Some(bus) = track.output_bus.and_then(|bus| buses.get_mut(bus))
-            {
-                // Where its envelopes have the fader, frame by frame, and
-                // nothing carried over: it is not this that anyone hears.
-                match Glide::default().fill(&span, moving, declick, frames, &mut gains, open) {
-                    Some([open_left, open_right]) => {
-                        add_scaled(left, &mut bus.left[..frames], open_left);
-                        add_scaled(right, &mut bus.right[..frames], open_right);
-                    }
-                    None => {
-                        add_scaled_by(left, &mut bus.left[..frames], gains[0]);
-                        add_scaled_by(right, &mut bus.right[..frames], gains[1]);
-                    }
-                }
-            }
-            let sides = |beat: f64| if audible { open(beat) } else { [0.0, 0.0] };
+            let state = &mut track.state;
+            let flat = state.fader.fill(&span, moving, declick, frames, &mut gains, sides);
+            // A track that passes no sound, on to its output or into a
+            // send, is shut: mute and solo work a gate on what the fader
+            // leaves, so that neither makes a step when the other moves.
+            let flat = gated(flat, state.passes.fill(track.passes, declick, shares), shares, &mut gains);
             // Fade in place, so the output and every send carry the same
             // post-fader signal.
-            let (peak_left, peak_right) =
-                match track.state.fader.fill(&span, moving, declick, frames, &mut gains, sides) {
-                    Some([gain_left, gain_right]) => (scale(left, gain_left), scale(right, gain_right)),
-                    None => (scale_by(left, gains[0]), scale_by(right, gains[1])),
-                };
+            let (peak_left, peak_right) = match flat {
+                Some([gain_left, gain_right]) => (scale(left, gain_left), scale(right, gain_right)),
+                None => (scale_by(left, gains[0]), scale_by(right, gains[1])),
+            };
             track.meter.record(peak_left, peak_right);
             if let Some(tap) = &mut track.tap {
                 tap.push(left, right);
             }
 
-            match track.output_bus.and_then(|bus| buses.get_mut(bus)) {
-                Some(bus) => {
-                    add_scaled(left, &mut bus.left[..frames], 1.0);
-                    add_scaled(right, &mut bus.right[..frames], 1.0);
+            // What goes on to the output, and what goes to each return,
+            // are opened and closed by mute and solo apart from each other:
+            // a track that feeds a soloed return is not heard itself.
+            let (out_left, out_right) = match track.output_bus.and_then(|bus| buses.get_mut(bus)) {
+                Some(bus) => (&mut bus.left[..frames], &mut bus.right[..frames]),
+                None => (&mut *mix_left, &mut *mix_right),
+            };
+            match state.out.fill(track.to_output, declick, shares) {
+                Some(share) if share == 0.0 => {}
+                Some(share) => {
+                    add_scaled(left, out_left, share);
+                    add_scaled(right, out_right, share);
                 }
                 None => {
-                    add_scaled(left, mix_left, 1.0);
-                    add_scaled(right, mix_right, 1.0);
+                    add_scaled_by(left, out_left, shares);
+                    add_scaled_by(right, out_right, shares);
                 }
             }
             for send in &mut track.sends {
-                // Where the send is at a position of the song: where its
-                // envelope has it, or where it was set by hand.
+                // What the send carries: its level at a position of the
+                // song, where its envelope has it or where it was set by
+                // hand, times how far mute and solo leave it open.
                 let (automation, set) = (&send.automation, send.gain);
                 let level = |beat: f64| match automation {
                     Some(envelope) => {
@@ -822,8 +821,10 @@ impl Processor {
                 };
                 let mut gains = [&mut self.gain_left[..frames]];
                 let flat = send.glide.fill(&span, automation.is_some(), declick, frames, &mut gains, level);
+                let flat = gated(flat, send.gate.fill(send.open, declick, shares), shares, &mut gains);
                 let Some(bus) = buses.get_mut(send.bus) else { continue };
                 match flat {
+                    Some([gain]) if gain == 0.0 => {}
                     Some([gain]) => {
                         add_scaled(left, &mut bus.left[..frames], gain);
                         add_scaled(right, &mut bus.right[..frames], gain);
@@ -1489,8 +1490,9 @@ mod tests {
             chain: Chain::default(),
             volume_db: 0.0,
             pan: 0.0,
-            audible: true,
-            feeds_key: false,
+            heard: true,
+            passes: true,
+            to_output: true,
             volume_automation: None,
             pan_automation: None,
             meter: Arc::new(Meter::default()),

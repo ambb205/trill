@@ -9,11 +9,18 @@
 //! render is what was played.
 //!
 //! What no envelope accounts for is smoothed here as well. When the gain is
-//! suddenly somewhere else (a fader moved by hand, a track muted, the song
-//! jumping to where the envelope is at another level), the difference is
-//! kept and let go of evenly over a few milliseconds, so that nothing
-//! clicks. A change the envelope itself makes from one reading to the next
-//! is the envelope's: a step written into it is a step, a reading wide.
+//! suddenly somewhere else (a fader moved by hand, the song jumping to
+//! where the envelope is at another level), the difference is kept and let
+//! go of evenly over a few milliseconds, so that nothing clicks. A change
+//! the envelope itself makes from one reading to the next is the
+//! envelope's: a step written into it is a step, a reading wide.
+//!
+//! What mute and solo open and shut (a track's sound, its way on to its
+//! output, each of its sends) is a [`Gate`]: a share of the gain, from
+//! nothing to all of it, that goes from one to the other over the same few
+//! milliseconds. The gain that is heard is the two multiplied, so neither
+//! an envelope that moves nor a solo that changes makes a step, and each
+//! goes on with its own business while the other does.
 //!
 //! Nothing in here allocates.
 
@@ -54,6 +61,85 @@ impl Span {
     }
 }
 
+/// How far something is open that mute and solo open and shut: nothing of
+/// it, all of it, or on the way from one to the other, a frame at a time
+/// over [`DECLICK_SECONDS`]. Counted in frames, so it is the same however
+/// the blocks fall.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Gate {
+    /// The share that passed at the last frame played, 0 to 1; not a
+    /// number before the first block, which starts where the gate stands.
+    share: f32,
+}
+
+impl Default for Gate {
+    fn default() -> Self {
+        Self { share: f32::NAN }
+    }
+}
+
+impl Gate {
+    /// A gate that has been shut: one that is to be open comes up from
+    /// nothing.
+    pub fn shut() -> Self {
+        Self { share: 0.0 }
+    }
+
+    /// Works out the share that passes over a block as long as `shares`,
+    /// with the gate to be `open` or shut. Returns it if it is the same
+    /// throughout, which it is but for a few milliseconds after a change;
+    /// otherwise it is in `shares`, frame by frame. `declick` is how many
+    /// frames the way from shut to open takes.
+    pub fn fill(&mut self, open: bool, declick: u32, shares: &mut [f32]) -> Option<f32> {
+        let target = if open { 1.0 } else { 0.0 };
+        if self.share.is_nan() || self.share == target {
+            self.share = target;
+            return Some(target);
+        }
+        let step = 1.0 / declick.max(1) as f32;
+        let mut share = self.share;
+        for out in shares.iter_mut() {
+            share = if open { (share + step).min(1.0) } else { (share - step).max(0.0) };
+            *out = share;
+        }
+        self.share = share;
+        None
+    }
+}
+
+/// The gains of a block as a [`Glide`] left them (`flat`, or frame by frame
+/// in `gains`), times the share a [`Gate`] lets pass (`share`, or frame by
+/// frame in `shares`, which is as long as the block). Returns them if they
+/// are the same throughout the block; otherwise they are in `gains`.
+pub(crate) fn gated<const N: usize>(
+    flat: Option<[f32; N]>,
+    share: Option<f32>,
+    shares: &[f32],
+    gains: &mut [&mut [f32]; N],
+) -> Option<[f32; N]> {
+    match (flat, share) {
+        // Nearly always: a gate that stands open leaves every gain the
+        // number it was, to the bit.
+        (Some(flat), Some(share)) => Some(flat.map(|gain| gain * share)),
+        (None, Some(share)) => {
+            if share != 1.0 {
+                for out in gains.iter_mut() {
+                    out[..shares.len()].iter_mut().for_each(|gain| *gain *= share);
+                }
+            }
+            None
+        }
+        (flat, None) => {
+            for (channel, out) in gains.iter_mut().enumerate() {
+                for (gain, share) in out.iter_mut().zip(shares) {
+                    *gain = flat.map_or(*gain, |flat| flat[channel]) * share;
+                }
+            }
+            None
+        }
+    }
+}
+
 /// `N` gains that move together (the two sides of a fader with its pan, or
 /// one alone), and what it takes to carry them from one block to the next.
 #[derive(Copy, Clone, Debug)]
@@ -79,6 +165,7 @@ impl<const N: usize> Default for Glide<N> {
 
 impl<const N: usize> Glide<N> {
     /// Gains that have been at `gains`: the next block goes on from there.
+    #[cfg(test)]
     pub fn from(gains: [f32; N]) -> Self {
         Self { expected: gains, offset: [0.0; N], left: 0, primed: true }
     }
@@ -313,6 +400,69 @@ mod tests {
         let gains = run(&mut glide, 0, 600, 64, false, &|_| 0.5);
         assert_eq!((gains[0], gains[599]), (0.0, 0.5));
         assert!(gains.windows(2).all(|pair| pair[1] >= pair[0]));
+    }
+
+    /// Runs a gate over `total` frames in blocks of `block`.
+    fn gate(gate: &mut Gate, open: bool, total: usize, block: usize) -> Vec<f32> {
+        let mut out = Vec::with_capacity(total);
+        let mut shares = vec![0.0f32; block];
+        while out.len() < total {
+            let frames = block.min(total - out.len());
+            match gate.fill(open, DECLICK, &mut shares[..frames]) {
+                Some(share) => out.extend(std::iter::repeat_n(share, frames)),
+                None => out.extend_from_slice(&shares[..frames]),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_gate_opens_and_shuts_evenly_and_the_same_however_the_blocks_fall() {
+        // The first block starts where the gate stands.
+        let mut standing = Gate::default();
+        assert_eq!(gate(&mut standing, true, 64, 64), [1.0; 64]);
+        let closing = gate(&mut standing, false, 600, 64);
+        assert!(closing[0] < 1.0 && closing[0] > 0.99, "it moves from the first frame, by a step");
+        assert!(closing.windows(2).all(|pair| pair[1] <= pair[0] && pair[0] - pair[1] < 1.01 / DECLICK as f32));
+        assert!((closing[DECLICK as usize / 2 - 1] - 0.5).abs() < 1e-3, "half shut half way");
+        assert_eq!(&closing[DECLICK as usize..], &vec![0.0; 600 - DECLICK as usize][..], "and then it is shut");
+        // Turned round before it has shut, it goes back from where it is.
+        let mut turned = Gate::default();
+        gate(&mut turned, true, 1, 1);
+        let down = gate(&mut turned, false, 120, 37);
+        let up = gate(&mut turned, true, 600, 37);
+        assert!((down[119] - 0.75).abs() < 1e-3 && up[0] > down[119] && up[119] == 1.0, "{} {}", down[119], up[0]);
+        // Whatever the blocks.
+        for block in [1, 7, 480, 512] {
+            let mut other = Gate::default();
+            gate(&mut other, true, 64, block);
+            assert!(gate(&mut other, false, 600, block) == closing, "blocks of {block}");
+        }
+        // One that was shut comes up from nothing.
+        let opening = gate(&mut Gate::shut(), true, 600, 64);
+        assert!(opening[0] > 0.0 && opening[0] < 0.01 && opening[599] == 1.0);
+    }
+
+    #[test]
+    fn a_gain_and_its_gate_are_multiplied_frame_by_frame() {
+        let (mut left, mut right) = (vec![0.0f32; 4], vec![0.0f32; 4]);
+        let shares = [1.0, 0.5, 0.25, 0.0];
+        // An open gate leaves a gain the number it was.
+        let mut gains = [&mut left[..], &mut right[..]];
+        assert_eq!(gated(Some([0.3, 0.7]), Some(1.0), &shares, &mut gains), Some([0.3, 0.7]));
+        assert_eq!(gated(Some([0.3, 0.7]), Some(0.0), &shares, &mut gains), Some([0.0, 0.0]));
+        // A gate on its way takes a gain that stands still with it.
+        assert_eq!(gated(Some([0.4, 0.8]), None, &shares, &mut gains), None);
+        assert_eq!((&left[..], &right[..]), (&[0.4, 0.2, 0.1, 0.0][..], &[0.8, 0.4, 0.2, 0.0][..]));
+        // And one that moves: each frame its own product.
+        left.copy_from_slice(&[1.0, 2.0, 3.0, 4.0]);
+        right.copy_from_slice(&[4.0, 3.0, 2.0, 1.0]);
+        let mut gains = [&mut left[..], &mut right[..]];
+        assert_eq!(gated(None, None, &shares, &mut gains), None);
+        assert_eq!((&left[..], &right[..]), (&[1.0, 1.0, 0.75, 0.0][..], &[4.0, 1.5, 0.5, 0.0][..]));
+        let mut gains = [&mut left[..], &mut right[..]];
+        assert_eq!(gated(None, Some(0.5), &shares, &mut gains), None);
+        assert_eq!(&left[..], &[0.5, 0.5, 0.375, 0.0]);
     }
 
     #[test]
