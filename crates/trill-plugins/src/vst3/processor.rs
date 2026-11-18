@@ -170,8 +170,10 @@ impl Vst3Processor {
         self.stop();
         let instance = self.instance;
         let block = u32::try_from(max_block).unwrap_or(u32::MAX);
-        let result =
-            self.main.call(REACTIVATE_TIMEOUT, move |thread| thread.vst3.reactivate(instance, sample_rate, block));
+        let asked = std::time::Instant::now();
+        let result = self.main.call(REACTIVATE_TIMEOUT, move |thread| {
+            thread.vst3.reactivate(instance, (sample_rate, block), asked.elapsed())
+        });
         let result = match result {
             Ok(Ok(latency)) => {
                 self.latency = latency;

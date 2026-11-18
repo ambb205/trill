@@ -935,6 +935,71 @@ async fn a_plugin_that_was_just_made_is_marked_as_loading_where_a_model_looks() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_song_that_is_opened_is_there_at_once_and_says_how_far_its_devices_are() {
+    // A song of a plugin and a built-in synth, saved by a server whose
+    // plugins are there as soon as they are asked for.
+    let folder = tempfile::tempdir().unwrap();
+    let file = folder.path().join("song.trill").display().to_string();
+    {
+        let fixture = connect(ScriptedFactory::new()).await;
+        track(&fixture.client, "Bass", BASS).await;
+        track(&fixture.client, "Keys", "builtin:polysynth").await;
+        ok(&fixture.client, "save_project", json!({ "path": file })).await;
+    }
+    // Opened by one whose plugins take most of a second to make.
+    let making = Duration::from_millis(800);
+    let fixture = connect(ScriptedFactory::loading(Loading { making, ..Loading::default() })).await;
+    let client = &fixture.client;
+    let began = Instant::now();
+    let opened = ok(client, "load_project", json!({ "path": file })).await;
+    assert!(began.elapsed() < making, "the reply waited for the plugin: {:?}", began.elapsed());
+
+    // The reply is the whole song, and says what of it is not there yet.
+    let tracks = opened["tracks"].as_array().unwrap_or_else(|| panic!("{opened}"));
+    assert_eq!(tracks.iter().map(|track| track["name"].as_str().unwrap()).collect::<Vec<_>>(), ["Bass", "Keys"]);
+    let (bass, keys) = (&tracks[0]["devices"][0], &tracks[1]["devices"][0]);
+    assert_eq!((&bass["not_made_yet"], &bass["loading"]), (&json!(true), &json!(true)), "{opened}");
+    assert!(keys.get("not_made_yet").is_none() && keys.get("loading").is_none(), "{opened}");
+    let device = bass["id"].as_u64().unwrap();
+    let said = opened["loading"].as_str().unwrap_or_else(|| panic!("{opened}"));
+    assert!(said.contains("just opened") && said.contains("2 of 3 devices"), "{said}");
+    assert!(said.contains(&format!("Not made yet: Scripted Bass (device {device})")), "{said}");
+    assert!(said.contains("Ask get_project again") && said.contains("probe, measure and render wait"), "{said}");
+
+    // The device says so itself, and what cannot be asked of it yet is
+    // refused in a sentence. The rest of the song is there to work on.
+    let shown = ok(client, "get_device", json!({ "device": device })).await;
+    assert!(shown["not_made_yet"].as_str().is_some_and(|said| said.contains("Ask again")), "{shown}");
+    let refused = call(client, "update_device", json!({ "device": device, "params": { "level": 0.5 } })).await;
+    let refused = refused.unwrap_err();
+    assert!(refused.contains("Scripted Bass is still being made") && refused.contains("Ask again"), "{refused}");
+    let keys_track = tracks[1]["id"].as_u64().unwrap();
+    clip(client, keys_track, 0.0, 4.0, json!([[60, 0, 1]])).await;
+    let playing = ok(client, "transport", json!({ "action": "play" })).await;
+    assert!(playing["loading"].as_str().is_some_and(|said| said.contains("still being made")), "{playing}");
+    ok(client, "transport", json!({ "action": "stop" })).await;
+
+    // It arrives without anyone asking for it, and the song says so by
+    // no longer saying anything of it.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let project = loop {
+        let project = ok(client, "get_project", json!({})).await;
+        let waiting = project["loading"].as_str().is_some_and(|said| said.contains("just opened"));
+        if !waiting {
+            break project;
+        }
+        assert!(Instant::now() < deadline, "the plugin never arrived: {project}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(project["tracks"][0]["devices"][0].get("not_made_yet").is_none(), "{project}");
+    assert!(ok(client, "get_device", json!({ "device": device })).await.get("not_made_yet").is_none());
+    // Opening and arriving were no edits: there is nothing to undo but the clip.
+    let session = fixture.session.lock();
+    assert!(session.problems().is_empty(), "{:?}", session.problems());
+    assert!(!session.is_coming(trill_core::DeviceId(device)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_tools_and_the_instructions_say_how_to_hear() {
     let fixture = connect(ScriptedFactory::new()).await;
     let tools = fixture.client.list_all_tools().await.unwrap();

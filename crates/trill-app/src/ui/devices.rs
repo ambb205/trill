@@ -305,6 +305,13 @@ fn panel(ui: &mut Ui, cx: &mut Cx, device: &Device, rect: Rect, accent: Color32)
         pos2(rect.right() - BODY_PADDING, rect.bottom() - BODY_BOTTOM),
     );
     match cx.snap.params.get(&device.id) {
+        // Not there yet: its panel says so, in place of parameters it
+        // has not got.
+        _ if super::opening::of_device(cx.live, device.id).is_some() => {
+            let words = super::opening::device_words(cx.live, device);
+            let galley = painter.layout(words, FontId::proportional(12.0), theme.ink_dim, body.width().min(420.0));
+            painter.galley(body.min, galley, theme.ink_dim);
+        }
         Some(Ok(params)) => {
             let body_of = Body { device, params, accent, dimmed: !device.enabled, id };
             match device_layouts::layout_for(&device.uri) {
@@ -349,9 +356,12 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
     let dot = pos2(header.left() + BODY_PADDING, header.center().y);
     // A plugin that is still reading what it plays: its notes may not
     // sound yet.
-    let loading = cx.live.loading.contains(&device_id);
+    // One of a song that was just opened and is not made yet says that
+    // instead.
+    let coming = super::opening::of_device(cx.live, device_id);
+    let loading = coming.is_none() && cx.live.loading.contains(&device_id);
     if device.enabled {
-        let lit = if loading { theme.signal } else { theme.ok };
+        let lit = if loading || coming.is_some() { theme.signal } else { theme.ok };
         paint::dot(&painter, dot, theme.metric.dot, if response.hovered() { theme.ink } else { lit });
     } else {
         paint::hollow_dot(&painter, dot, theme.metric.dot, if response.hovered() { theme.ink } else { quiet });
@@ -500,6 +510,17 @@ fn panel_header(ui: &mut Ui, cx: &mut Cx, device: &Device, header: Rect, id: Id,
             cx.state.toasts.info(format!("{what} the preset \u{201C}{}\u{201D} of {}", saved.info.name, device.name));
         }
         return;
+    }
+    if let Some(coming) = coming {
+        // Said ahead of the name, as what a plugin reads is.
+        let word = coming.word();
+        let width = text::width(&painter, theme.text.micro, word).ceil();
+        let rect = Rect::from_min_size(name.min, vec2(width.min(name.width()), name.height()));
+        let response = ui.interact(rect, id.with("coming"), Sense::hover());
+        response.widget_info(|| WidgetInfo::labeled(Role::Label, true, format!("{word} {}", device.name)));
+        cx.hint(&response, super::opening::device_words(cx.live, device));
+        text::paint(&painter, rect, Align2::LEFT_CENTER, theme.text.micro, word, theme.signal);
+        name.min.x = (rect.right() + 6.0).min(name.max.x);
     }
     if loading {
         // Said ahead of the name, where it is seen however narrow the

@@ -229,6 +229,9 @@ impl Session {
         if applied.reset {
             // The audio thread starts from nothing: every device is made
             // anew at the new rate, and it is told again what it knew.
+            // (Here and now: what was still on its way for a song that was
+            // just opened was being made for the rate before.)
+            self.forget_opening();
             self.bank.devices.clear();
             self.stand_ins = StandIns::default();
             self.compile_and_swap();

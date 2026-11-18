@@ -255,6 +255,12 @@ impl DeviceFactory for ClapFactory {
         self.known(uri).map(|known| known.path)
     }
 
+    /// A plugin loads its file and takes its state on, for a second or
+    /// for many: a song is not to wait for it.
+    fn takes_time(&self, uri: &str) -> bool {
+        matches!(split_uri(uri), Some((CLAP_SCHEME, _)))
+    }
+
     /// In turn with the other instances of its module, unless more is
     /// known of the plugin: see [`crate::beside`].
     fn beside(&self, uri: &str) -> trill_core::device::Beside {

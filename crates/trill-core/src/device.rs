@@ -905,6 +905,19 @@ pub trait DeviceFactory: Send + Sync {
         false
     }
 
+    /// Whether a device of this factory takes long enough to make that a
+    /// song should not wait for it: a hosted plugin loads its file, takes
+    /// its state on and may read what it plays from the disk, for a second
+    /// or for many. A session that opens a song has the song there first
+    /// and makes such devices after, one by one, away from whoever is
+    /// using the song. False for a device that is made in no time, and for
+    /// one that is not this factory's. A factory that hands the work to
+    /// another must hand this on too.
+    fn takes_time(&self, uri: &str) -> bool {
+        let _ = uri;
+        false
+    }
+
     /// What a device of this factory may be run beside when a render uses
     /// more than one thread: see [`Beside`]. Anything, for a device that
     /// is not this factory's. A factory that hands the work to another
@@ -1061,6 +1074,10 @@ impl<T: DeviceFactory + ?Sized> DeviceFactory for std::sync::Arc<T> {
         (**self).busy()
     }
 
+    fn takes_time(&self, uri: &str) -> bool {
+        (**self).takes_time(uri)
+    }
+
     fn beside(&self, uri: &str) -> Beside {
         (**self).beside(uri)
     }
@@ -1133,6 +1150,10 @@ impl DeviceFactory for CompositeFactory {
 
     fn busy(&self) -> bool {
         self.factories.iter().any(|factory| factory.busy())
+    }
+
+    fn takes_time(&self, uri: &str) -> bool {
+        self.factories.iter().any(|factory| factory.takes_time(uri))
     }
 
     fn beside(&self, uri: &str) -> Beside {

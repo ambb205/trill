@@ -51,6 +51,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
         (true, 1) => row.status(theme.info, "1 plugin"),
         (true, count) => row.status(theme.info, &format!("{count} plugins")),
     }
+    // A song that was just opened: how far its devices are.
+    if let Some(words) = super::opening::status_words(row.cx) {
+        row.status(theme.info, &words);
+    }
     match row.cx.live.preparing {
         0 => {}
         1 => row.status(theme.info, "Preparing 1 warped clip\u{2026}"),

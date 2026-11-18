@@ -117,6 +117,14 @@ Gain": "-6 dB"}`. It also says which channels the device takes and gives. Where 
 settings that no parameter reaches, `get_device` counts them (`settings_count`), `query` finds them by name beside
 the parameters, and `update_device` sets them: `"settings": {"M-Fret Sound": 1}`.
 
+`load_project` answers with the whole song at once, and the song's plugins are made after it, one at a time
+([the engine](engine.md) has how long that takes). Until all are there the reply and `get_project` carry a
+`loading` note that says how far they are ("12 of 38 devices: Archetype Tim Henson X on Lead") and which are
+not made yet, and each such device is marked `not_made_yet`. The song can be read and edited meanwhile; what is
+asked of a device that is not there (a parameter, a preset, its window) is refused in a sentence that says to
+ask again, `transport` says so when play is pressed, and `probe`, `measure` and `render` make their own devices
+and wait for them as always. The note is gone when every device is there.
+
 Every call is entered in the session's journal as it is made, under what it did in words and by the name the
 client gave: `get_journal` lists them, `search: "chorus"` finds the step where the chorus was written, `after`
 lists what changed since, and `get_song_at` shows the song as it was there. Undoing takes nothing out: a step

@@ -167,6 +167,10 @@ impl Pump {
         // owned by another thread is touched. Dispatching runs the window
         // procedures registered on this thread, plugins' among them, which
         // is exactly the main-thread context they expect.
+        // What the round took is said where it kept the thread from its
+        // jobs for long: that is time of the plugins' own, on the thread
+        // the next plugin is waiting to be made on.
+        let (began, mut served, mut longest) = (Instant::now(), 0, Duration::ZERO);
         unsafe {
             let mut message: MSG = std::mem::zeroed();
             for _ in 0..MAX_MESSAGES {
@@ -180,10 +184,14 @@ impl Pump {
                 if message.hwnd == self.window {
                     continue;
                 }
+                let before = Instant::now();
                 TranslateMessage(&message);
                 DispatchMessageW(&message);
+                served += 1;
+                longest = longest.max(before.elapsed());
             }
         }
+        crate::making::windows_served(began.elapsed(), served, longest);
     }
 
     /// Starts or stops the timer that keeps idle processing going while

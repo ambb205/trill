@@ -345,6 +345,15 @@ impl TrillApp {
                 // picture: how long ago a device was made is not part of
                 // what the window looks like.)
                 self.live.loading = if self.options.screenshot.is_some() { Vec::new() } else { session.loading() };
+                // How far a song that was just opened is with its devices:
+                // the session's own count, or a scene's made-up one.
+                let arriving = match self.options.opening_scene {
+                    Some(scene) => scene.of(&self.snapshot.project),
+                    None => session.arriving(),
+                };
+                self.live.arriving_words =
+                    arriving.as_ref().map(|arriving| arriving.words(session.project())).unwrap_or_default();
+                self.live.arriving = arriving;
                 // How far the sampled instruments on show are with reading
                 // their recordings. (Not in a picture, for the same reason.)
                 self.live.update_reading(&self.snapshot, &session, self.options.screenshot.is_none());
@@ -430,7 +439,9 @@ impl TrillApp {
     fn tell_selection(&mut self) {
         // Not while a stream is being opened: the session is busy with
         // that, and the next look at it (`sync`) catches up.
-        if self.told_selection == Some(self.state.selected_track) || self.settings.is_applying() {
+        // Nor while a song is being opened: whoever opens it has it.
+        let busy = self.settings.is_applying() || self.jobs.opening().is_some();
+        if self.told_selection == Some(self.state.selected_track) || busy {
             return;
         }
         self.session.lock().set_selected_track(self.state.selected_track);
@@ -922,13 +933,22 @@ impl TrillApp {
         if let Some(scene) = self.options.setup_scene.take() {
             self.setup.show(scene);
         }
+        // A picture of a song whose file is being read: no file is.
+        if let Some(file) = self.options.opening_scene.and_then(super::OpeningScene::file)
+            && self.jobs.opening().is_none()
+        {
+            self.jobs.show_opening(file);
+        }
         let open_credits = std::mem::take(&mut self.options.show_credits);
         let open_load = std::mem::take(&mut self.options.show_load);
         let mut cx = self.cx();
         if film_asked.is_some() {
             filming::open_on(&ctx, &mut cx, film_asked);
         }
-        for command in commands {
+        // While a song is being opened the session is with whoever opens
+        // it: a key that asked something of it would wait for that.
+        let reading = cx.jobs.opening().is_some();
+        for command in commands.into_iter().filter(|_| !reading) {
             run_command(&ctx, &mut cx, command);
         }
         if open_settings {
@@ -1047,6 +1067,9 @@ impl TrillApp {
         // Clear of the assistant's panel: its Send and Stop are in that corner.
         let aside = if cx.assistant.is_open() { cx.assistant.width() } else { 0.0 };
         let corner = ctx.content_rect().right_bottom() - egui::vec2(12.0 + aside, status_bar::HEIGHT + 10.0);
+        // A song that is being opened, and how far its devices are: under
+        // whatever else is said in that corner.
+        let corner = super::opening::plate(&ctx, &mut cx, corner);
         cx.state.toasts.show(&ctx, cx.theme, corner);
         // What the views changed (the selection, who has the keyboard)
         // stops the notes it must before the frame is over.
@@ -1190,6 +1213,19 @@ impl TrillApp {
     #[cfg(test)]
     pub fn export_to(&mut self, ctx: &egui::Context, path: std::path::PathBuf, stems: bool) {
         files::export_to(ctx, &mut self.cx(), path, stems);
+    }
+
+    /// Opens the song at `path`: what choosing it in the system's dialog
+    /// leads to.
+    #[cfg(test)]
+    pub fn open_file(&mut self, ctx: &egui::Context, path: std::path::PathBuf) {
+        files::open_file(ctx, &mut self.cx(), path);
+    }
+
+    /// The song that is being opened, if one is.
+    #[cfg(test)]
+    pub fn opening(&self) -> Option<&std::path::Path> {
+        self.jobs.opening()
     }
 
     /// Makes the film the panel describes at `path`: what choosing a place

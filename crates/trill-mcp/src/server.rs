@@ -1252,7 +1252,12 @@ impl TrillServer {
         let reply = (|| {
             let project = session.project();
             let model = project.device(id).map_err(|error| explain(project, error))?;
-            let states = session.device_params(id).map_err(|error| explain(project, error))?;
+            // One that is not made yet has no parameters to list, and says
+            // so below in place of them.
+            let states = match session.is_coming(id) {
+                true => Vec::new(),
+                false => session.device_params(id).map_err(|error| explain(project, error))?,
+            };
             let mut out = device_json(model);
             out["enabled"] = json!(model.enabled);
             sidechain_into(&mut out, project, model);
@@ -1262,6 +1267,12 @@ impl TrillServer {
             }
             if session.loading().contains(&id) {
                 out["loading"] = json!(true);
+            }
+            if session.is_coming(id) {
+                out["not_made_yet"] = json!(
+                    "The song was just opened and this device has not been made yet: its parameters are listed \
+                     when it is there. Ask again in a few seconds; get_project says how far the song's devices are."
+                );
             }
             out["chain"] = match project.device_chain(id).map_err(|e| e.to_string())? {
                 ChainRef::Master => json!("master"),
@@ -2803,7 +2814,11 @@ impl TrillServer {
         finish(reply)
     }
 
-    /// Open a project file, replacing the current project. Unsaved changes are lost.
+    /// Open a project file, replacing the current project. Unsaved changes are lost. The reply is the whole song at
+    /// once: its tracks, clips and mixer. Its plugins are made after that, one at a time, which takes a second or
+    /// more for each: until all are there the reply and get_project have a `loading` note that says how far they
+    /// are and which are not made yet, and such a device is marked `not_made_yet`. Read and edit the song meanwhile;
+    /// ask get_project again before you set a parameter or a preset on a device that was not there.
     #[tool(annotations(title = "Load project", destructive_hint = true))]
     fn load_project(&self, Parameters(request): Parameters<LoadProjectRequest>) -> CallToolResult {
         let mut session = self.session.lock();

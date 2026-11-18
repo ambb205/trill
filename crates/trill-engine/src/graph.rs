@@ -637,6 +637,10 @@ pub struct Graph {
     /// thread while the graph plays, where it can use more than one:
     /// see [`Graph::spread`].
     pub(crate) rounds: Option<Box<crate::spread::Rounds>>,
+    /// Whether this is the graph of another song than the one before it:
+    /// one that was opened, or begun. It takes over nothing that was
+    /// playing ([`Graph::adopt`]).
+    pub(crate) another_song: bool,
 }
 
 impl Graph {
@@ -658,6 +662,7 @@ impl Graph {
             loop_region: None,
             moves_params: false,
             rounds: None,
+            another_song: false,
         }
     }
 
@@ -707,16 +712,26 @@ impl Graph {
 
     /// Moves running state out of `old` into `self`. Realtime-safe: only
     /// pointer moves and small copies, no allocation.
+    ///
+    /// The graph of another song takes over no device and no track's
+    /// state. Ids begin again in every song, so a device or a track of the
+    /// song before may have the number of one of this song's that is
+    /// nothing like it; and a place that is kept empty for a device which
+    /// is still being made (`session/opening.rs`) would otherwise be given
+    /// the device of the song before that had its number, to play this
+    /// song's notes until its own arrived.
     pub(crate) fn adopt(&mut self, old: &mut Graph) {
+        let same_song = !self.another_song;
         for slot in self.slots_mut() {
-            if slot.processor.is_none()
+            if same_song
+                && slot.processor.is_none()
                 && let Some(previous) = old.slots_mut().find(|s| s.id == slot.id)
             {
                 slot.processor = previous.processor.take();
             }
         }
         for track in &mut self.tracks {
-            if let Some(previous) = old.tracks.iter_mut().find(|t| t.id == track.id) {
+            if same_song && let Some(previous) = old.tracks.iter_mut().find(|t| t.id == track.id) {
                 std::mem::swap(&mut track.state, &mut previous.state);
                 track.state.lanes_changed = true;
                 // A send goes on from where it was, level and gate, so that

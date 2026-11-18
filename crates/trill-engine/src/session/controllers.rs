@@ -154,7 +154,10 @@ impl Session {
             return None;
         }
         let device = self.instrument_device(track)?;
-        let failed = self.bank.devices.get(&device.id).is_none_or(|meta| meta.error.is_some());
+        // One that failed has its own sentence, and so has one that is
+        // still being made for a song that was just opened
+        // ([`Session::arriving`]): neither is waiting for expression.
+        let failed = self.bank.devices.get(&device.id).is_none_or(|meta| meta.error.is_some() || meta.coming);
         (!failed).then(|| SilentInstrument {
             device: device.id,
             name: device.name.clone(),

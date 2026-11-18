@@ -194,8 +194,11 @@ fn header(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, number: 
     // where the track is looked at when its clips play and nothing is
     // heard.
     let mark = Rect::from_min_max(pos2(name_rect.right() - 14.0, name_rect.top()), name_rect.max);
-    if track.kind == TrackKind::Normal
-        && crate::ui::controller_lane::silent_mark(ui, cx, mark, id.with("silent-instrument"), track)
+    // A device of a song that was just opened that is not there yet is
+    // marked in the same place: the track is silent, or dry, until it is.
+    if crate::ui::opening::track_mark(ui, cx, mark, id.with("device-coming"), track)
+        || (track.kind == TrackKind::Normal
+            && crate::ui::controller_lane::silent_mark(ui, cx, mark, id.with("silent-instrument"), track))
     {
         name_rect.max.x = mark.left() - 2.0;
     }

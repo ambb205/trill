@@ -26,6 +26,10 @@ use trill_core::project::{AudioContent, WarpMode};
 use trill_dsp::stretch::{MAX_TIME_RATIO, MIN_TIME_RATIO, StretchMode, StretchOptions};
 use trill_media::{FileStamp, MediaCache};
 
+/// How many recordings of a song that is opened are read at once: each
+/// holds its file twice over while it is converted to the device's rate.
+const READ_AT_ONCE: usize = 4;
+
 /// The decoded files and stretched copies that graphs draw on. Cloning is
 /// cheap and gives a handle to the same caches, which is how an offline
 /// render shares what the session has already prepared.
@@ -67,6 +71,41 @@ impl AudioSources {
     /// The cache files are decoded through.
     pub fn media(&self) -> &Arc<MediaCache> {
         &self.media
+    }
+
+    /// Reads the recordings `project` plays, several at a time, so that
+    /// the compile that follows finds them read: a song that is opened
+    /// would otherwise wait for one after the other, a fifth of a second
+    /// for every four minutes of recording. What was read is returned to
+    /// be held until that compile is done, because the cache lets go of
+    /// what is more than it may keep. A file that cannot be read is left
+    /// to the compile, which says so.
+    pub(crate) fn read_ahead(&self, project: &trill_core::Project, sample_rate: f64) -> Vec<Arc<AudioBuffer>> {
+        let mut files: Vec<&str> = Vec::new();
+        for clip in project.tracks.iter().flat_map(|track| &track.clips).filter(|clip| !clip.muted) {
+            if let trill_core::project::ClipContent::Audio(content) = &clip.content
+                && !files.contains(&content.path.as_str())
+            {
+                files.push(&content.path);
+            }
+        }
+        let threads = std::thread::available_parallelism().map_or(1, usize::from).min(READ_AT_ONCE).min(files.len());
+        if threads < 2 {
+            return Vec::new();
+        }
+        let (next, read) = (std::sync::atomic::AtomicUsize::new(0), parking_lot::Mutex::new(Vec::new()));
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|| {
+                    while let Some(file) = files.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
+                        if let Ok(audio) = self.media.audio_at_rate(Path::new(file), sample_rate) {
+                            read.lock().push(audio);
+                        }
+                    }
+                });
+            }
+        });
+        read.into_inner()
     }
 
     /// The audio `content` plays in a graph running at `sample_rate` in a

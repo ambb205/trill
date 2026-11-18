@@ -13,7 +13,9 @@ use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use trill_core::device::{DeviceController, DeviceFactory, DeviceWarning, ParamInfo, Purpose};
+use trill_core::device::{
+    DeviceController, DeviceError, DeviceFactory, DeviceInstance, DeviceWarning, ParamInfo, Purpose,
+};
 use trill_core::project::{AudioContent, AutomationTarget, Clip, ClipContent};
 use trill_core::{ClipId, Device, DeviceId, Project, TempoMap, Track, TrackId, TrackKind};
 use trill_dsp::util::db_to_gain;
@@ -69,6 +71,12 @@ pub struct DeviceMeta {
     /// which it was made for. When the model then has it the other way,
     /// the device is created again.
     pub made_keyed: Option<bool>,
+    /// The device is not there yet: it is being made away from here, for a
+    /// song that was opened a moment ago ([`DeviceBank::later`]). Its place
+    /// in the graph is empty until it arrives, as that of a device that
+    /// could not be made is for good: an instrument is silent, and an
+    /// effect lets what comes into it through.
+    pub coming: bool,
 }
 
 /// The devices that exist in the running graph.
@@ -79,6 +87,17 @@ pub struct DeviceBank {
     /// loading what they play: told of every plugin that is made to be
     /// heard live.
     pub loads: Arc<LoadWatch>,
+    /// Set while a song that was just opened is compiled for the first
+    /// time: a device that takes time to make
+    /// ([`DeviceFactory::takes_time`]) is not made where the compiler
+    /// stands. Its place is kept ([`DeviceMeta::coming`]), and whoever set
+    /// this has it made elsewhere and hands it in ([`DeviceBank::arrived`]).
+    pub later: bool,
+    /// Devices that were made elsewhere, or could not be: the next compile
+    /// puts each in its place. Only for a device whose place is kept, and
+    /// that is still the device it was made as: whoever puts one here has
+    /// seen to that.
+    pub arrived: HashMap<DeviceId, Result<DeviceInstance, DeviceError>>,
 }
 
 /// Track meters, kept across compiles so readers hold stable handles.
@@ -122,6 +141,23 @@ pub enum Problem {
 }
 
 impl DeviceMeta {
+    /// What is known of `device` while it is being made elsewhere: what
+    /// the model says of it, and nothing of its own yet.
+    fn kept_for(device: &Device) -> Self {
+        Self {
+            uri: device.uri.clone(),
+            params: Vec::new(),
+            controller: None,
+            applied_state: device.state.clone(),
+            settling: None,
+            error: None,
+            warnings: Vec::new(),
+            takes_key: false,
+            made_keyed: None,
+            coming: true,
+        }
+    }
+
     /// Whether the device is a plugin that was created from the state
     /// `held` so recently that it may not have taken it on yet.
     pub fn is_settling_into(&self, held: Option<&Vec<u8>>) -> bool {
@@ -156,6 +192,19 @@ pub struct Compiler<'a> {
     pub purpose: Purpose,
 }
 
+/// The log target under which what took time is said: see
+/// `session/opening.rs`, and the plugin host's `making`.
+const MAKING: &str = "trill::making";
+
+/// Says, for whoever measures what opening a song takes, that something
+/// the compile waited for since `asked` took long enough to count.
+fn said_if_slow(asked: Instant, what: impl FnOnce() -> String) {
+    let took = asked.elapsed();
+    if took >= Duration::from_millis(2) {
+        log::debug!(target: MAKING, "{} after {:.0} ms", what(), took.as_secs_f64() * 1e3);
+    }
+}
+
 impl Compiler<'_> {
     /// Builds a graph for `project`. Devices already in the bank are left
     /// for the audio thread to carry over; new ones are created here.
@@ -163,6 +212,7 @@ impl Compiler<'_> {
         // A reference is a track with a rule of its own for when it is
         // heard: it comes to a mute and a solo here, and nothing further
         // on knows that there are references.
+        let began = Instant::now();
         let heard = project.as_heard(self.purpose == Purpose::Rendering);
         let project: &Project = &heard;
         let mut problems = Vec::new();
@@ -205,7 +255,9 @@ impl Compiler<'_> {
                 let last = pieces.len() - 1;
                 let mut said = false;
                 for (index, piece) in pieces.iter().enumerate() {
+                    let asked = Instant::now();
                     let found = self.audio.clip_audio(content, piece.tempo, self.sample_rate, !live, &mut held);
+                    said_if_slow(asked, || format!("the audio of '{}' was on hand", content.path));
                     let found = match found {
                         Ok(found) => found,
                         Err(reason) => {
@@ -335,7 +387,14 @@ impl Compiler<'_> {
             meter_map: project.meter_map(),
             loop_region: (looping && region.enabled).then_some((region.start, region.end)),
             rounds: None,
+            another_song: false,
         };
+        log::debug!(
+            target: MAKING,
+            "the song was compiled in {:.0} ms: {} tracks",
+            began.elapsed().as_secs_f64() * 1e3,
+            graph.tracks.len()
+        );
         (Box::new(graph), problems)
     }
 
@@ -356,6 +415,45 @@ impl Compiler<'_> {
         Chain { devices: slots, automation }
     }
 
+    /// Takes a device that was made, or the reason it could not be, into
+    /// the bank as `device`, and returns what goes into the graph for it.
+    fn install(
+        &mut self,
+        device: &Device,
+        made: Result<DeviceInstance, DeviceError>,
+    ) -> Option<Box<dyn trill_core::device::DeviceProcessor>> {
+        match made {
+            Ok(instance) => {
+                if self.purpose == Purpose::Playing && Plugins::is_plugin(&device.uri) {
+                    self.bank.loads.began(device.id);
+                }
+                self.bank.devices.insert(
+                    device.id,
+                    DeviceMeta {
+                        uri: device.uri.clone(),
+                        params: instance.params,
+                        controller: instance.controller.map(Mutex::new),
+                        applied_state: device.state.clone(),
+                        settling: device.state.as_ref().map(|_| Instant::now() + SETTLING),
+                        error: None,
+                        warnings: self.factory.warnings(device),
+                        takes_key: instance.processor.takes_key(),
+                        made_keyed: instance.processor.key_is_set_when_made().then_some(device.sidechain.is_some()),
+                        coming: false,
+                    },
+                );
+                Some(instance.processor)
+            }
+            Err(error) => {
+                self.bank.devices.insert(
+                    device.id,
+                    DeviceMeta { error: Some(error.to_string()), coming: false, ..DeviceMeta::kept_for(device) },
+                );
+                None
+            }
+        }
+    }
+
     fn slot(&mut self, device: &Device, keys: &[TrackId], problems: &mut Vec<Problem>) -> DeviceSlot {
         let running = self.bank.devices.get(&device.id).is_some_and(|meta| {
             meta.uri == device.uri
@@ -366,52 +464,26 @@ impl Compiler<'_> {
                 // sample is back), it is created afresh to pick that up.
                 && (meta.warnings.is_empty() || meta.warnings == self.factory.warnings(device))
         });
-        let processor = if running {
+        let processor = if let Some(made) = self.bank.arrived.remove(&device.id) {
+            // Made away from here while its place was kept.
+            self.install(device, made)
+        } else if running {
+            None
+        } else if self.bank.later && self.purpose == Purpose::Playing && self.factory.takes_time(&device.uri) {
+            // The song is there first, and this comes after: its place is
+            // kept as one that is like the model says, and has nothing in
+            // it.
+            self.bank.devices.insert(device.id, DeviceMeta::kept_for(device));
             None
         } else {
             // A render in a process of its own says which device it is
             // making: a plugin that takes the process down as it is made
             // is then known by name.
             crate::apart::stage(crate::apart::Stage::Making(device.id));
-            match self.factory.create_for(device, self.sample_rate, MAX_BLOCK, self.purpose) {
-                Ok(instance) => {
-                    if self.purpose == Purpose::Playing && Plugins::is_plugin(&device.uri) {
-                        self.bank.loads.began(device.id);
-                    }
-                    self.bank.devices.insert(
-                        device.id,
-                        DeviceMeta {
-                            uri: device.uri.clone(),
-                            params: instance.params,
-                            controller: instance.controller.map(Mutex::new),
-                            applied_state: device.state.clone(),
-                            settling: device.state.as_ref().map(|_| Instant::now() + SETTLING),
-                            error: None,
-                            warnings: self.factory.warnings(device),
-                            takes_key: instance.processor.takes_key(),
-                            made_keyed: instance.processor.key_is_set_when_made().then_some(device.sidechain.is_some()),
-                        },
-                    );
-                    Some(instance.processor)
-                }
-                Err(error) => {
-                    self.bank.devices.insert(
-                        device.id,
-                        DeviceMeta {
-                            uri: device.uri.clone(),
-                            params: Vec::new(),
-                            controller: None,
-                            applied_state: device.state.clone(),
-                            settling: None,
-                            error: Some(error.to_string()),
-                            warnings: Vec::new(),
-                            takes_key: false,
-                            made_keyed: None,
-                        },
-                    );
-                    None
-                }
-            }
+            let asked = Instant::now();
+            let made = self.factory.create_for(device, self.sample_rate, MAX_BLOCK, self.purpose);
+            said_if_slow(asked, || format!("{} ({}) was made, where the song stands", device.name, device.uri));
+            self.install(device, made)
         };
         // Reported on every compile, not only the one that found them: the
         // problems of a project are those of its current graph.

@@ -116,6 +116,7 @@ impl Session {
     /// the device, in place of the ones an earlier sound brought there:
     /// see [`Session::give_preset`], which says what was made.
     pub fn load_preset(&mut self, id: DeviceId, preset: &str) -> Result<PresetInfo, SessionError> {
+        self.there(id)?;
         self.give_preset(id, preset).map(|given| given.preset)
     }
 
@@ -463,6 +464,7 @@ impl Session {
     /// name that is no setting is an error that says which names come
     /// near, and the device is as it was.
     pub fn set_device_settings(&mut self, id: DeviceId, values: &[(String, String)]) -> Result<(), SessionError> {
+        self.there(id)?;
         let name = self.project.device(id)?.name.clone();
         let meta = self.bank.devices.get(&id).ok_or(EditError::DeviceNotFound(id))?;
         if let Some(error) = &meta.error {

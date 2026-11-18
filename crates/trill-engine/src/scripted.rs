@@ -123,6 +123,14 @@ pub struct Loading {
     /// first when it is made, and a reset does not take it back there: a
     /// sampled instrument's takes, going round.
     pub takes: u32,
+    /// How long making one of its devices takes: `create` does not come
+    /// back sooner. Devices that take any time say so
+    /// ([`DeviceFactory::takes_time`]), and a session that opens a song
+    /// makes them after the song is there.
+    pub making: Duration,
+    /// The amplifier cannot be made: its `create` fails, after however
+    /// long making takes.
+    pub fails: bool,
     /// The instruments the factory hands out keep one thing between them,
     /// as the instances of some plugins do: a count of the notes any of
     /// them has sounded, by which the next note of any of them is given
@@ -188,6 +196,9 @@ struct Shared {
 pub struct ScriptedFactory {
     loading: Loading,
     made: Arc<Mutex<Vec<(String, Purpose)>>>,
+    /// What was made to be played and what of it was let go of, in order:
+    /// see [`ScriptedFactory::story`].
+    story: Arc<Mutex<Vec<String>>>,
     /// Until when the host is behind with other work.
     behind_until: Arc<Mutex<Option<Instant>>>,
     shared: Arc<Shared>,
@@ -208,6 +219,13 @@ impl ScriptedFactory {
     /// in order.
     pub fn made(&self) -> Vec<(String, Purpose)> {
         self.made.lock().clone()
+    }
+
+    /// The instruments that were made to be played and the ones of them
+    /// that were let go of, in the order it happened: `made <uri>` and
+    /// `gone <uri>`.
+    pub fn story(&self) -> Vec<String> {
+        self.story.lock().clone()
     }
 
     /// Whether two instruments that keep something between them
@@ -262,6 +280,13 @@ impl DeviceFactory for ScriptedFactory {
             AMP => Kind::Amp,
             _ => return Err(DeviceError::Unknown(device.uri.clone())),
         };
+        if !self.loading.making.is_zero() {
+            std::thread::sleep(self.loading.making);
+        }
+        if self.loading.fails && kind == Kind::Amp {
+            let reason = "the scripted amplifier was told that it cannot be made".to_string();
+            return Err(DeviceError::LoadFailed { uri: device.uri.clone(), reason });
+        }
         self.made.lock().push((device.uri.clone(), purpose));
         // What holds the host up holds the instrument up: it is as if it
         // were made when that is over.
@@ -300,8 +325,14 @@ impl DeviceFactory for ScriptedFactory {
                 }
             });
         }
+        // What is made to be played says so, and says when it goes.
+        let gone = (purpose == Purpose::Playing).then(|| {
+            self.story.lock().push(format!("made {}", device.uri));
+            (device.uri.clone(), self.story.clone())
+        });
         let processor = Instrument {
             _samples: samples,
+            gone,
             kind,
             sample_rate,
             ready: (!self.loading.never).then(|| born + self.loading.first),
@@ -332,6 +363,10 @@ impl DeviceFactory for ScriptedFactory {
                 random: self.loading.random && kind == Kind::Bass,
             })),
         })
+    }
+
+    fn takes_time(&self, uri: &str) -> bool {
+        !self.loading.making.is_zero() && matches!(uri, BASS | DRUMS | AMP)
     }
 
     fn busy(&self) -> bool {
@@ -490,6 +525,9 @@ enum Kind {
 
 impl Drop for Instrument {
     fn drop(&mut self) {
+        if let Some((uri, story)) = &self.gone {
+            story.lock().push(format!("gone {uri}"));
+        }
         if self.dies == Some(Dies::LetGo) {
             die();
         }
@@ -565,6 +603,9 @@ struct Voice {
 struct Instrument {
     /// What it has "loaded": memory that is let go of with it.
     _samples: Arc<Mutex<Vec<Vec<u8>>>>,
+    /// Where it says that it is gone, with its URI, if it was made to be
+    /// played.
+    gone: Option<(String, Arc<Mutex<Vec<String>>>)>,
     kind: Kind,
     sample_rate: f64,
     /// When notes are first answered, and notes from middle C up; `None`

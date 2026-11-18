@@ -1056,7 +1056,8 @@ fn a_plugin_that_is_kept_hears_from_its_work_before_it_is_taken_down_however_bus
     let patience = scripted::SETTING_UP * 3;
     let made = move |thread: &mut PluginThread| {
         let (path, _) = thread.vst3.preload("kept and heard", scripted::factory());
-        let created = thread.vst3.create(sets_up_behind(path)).unwrap_or_else(|error| panic!("{error}"));
+        let created =
+            thread.vst3.create(sets_up_behind(path), Duration::ZERO).unwrap_or_else(|error| panic!("{error}"));
         let serial = serial_of(&created);
         thread.vst3.destroy(created.id, Some(created.audio), true);
         serial
@@ -1107,7 +1108,7 @@ fn plugins_that_are_being_kept_go_with_the_plugin_thread() {
     let mut thread = Vst3Thread::new();
     let (path, _) = thread.preload("kept", scripted::factory());
     let made = Instant::now();
-    let created = thread.create(sets_up_behind(path)).unwrap_or_else(|error| panic!("{error}"));
+    let created = thread.create(sets_up_behind(path), Duration::ZERO).unwrap_or_else(|error| panic!("{error}"));
     let serial = serial_of(&created);
     thread.destroy(created.id, Some(created.audio), true);
     assert_eq!(scripted::lifecycle(serial).last(), Some(&"activate"), "kept as it was");

@@ -37,6 +37,24 @@ transposition. The sampler shows its sample and the drum rack its sixteen pads.
 
 ![The sound browser, waveforms on audio clips and an audio clip in the Clip tab](images/sounds-browser.png)
 
+## Opening a song
+
+**A song is on the screen at once, and its plugins come after.** From the moment a file is chosen the window
+says which song it is opening: the song before is dimmed, under a plate with the file's name. A tenth of a
+second later (a second, for a song of many long recordings) the song is there: its tracks, clips, names and
+mixer, with every built-in device playing. Its plugins take as long to make as they take, one at a time, and the
+window is alive meanwhile: the song can be scrolled, selected, edited, saved and played.
+
+While plugins are arriving, one line says how far the whole is, "Loading 12 of 38 devices: Archetype Tim Henson
+X on Lead", on a plate with a bar in the corner where the window's messages go, and in the status bar. A track
+that waits for a device has a dot on its header (filled for the one that is being made right now), and the
+panel of a device that is not there says so in place of parameters it has not got yet. Play is never refused: a
+track whose instrument is not there is silent until it is, an effect lets through what comes into it, and
+starting the song says so once. A plugin that cannot be made is a problem of the song, in a sentence, and the
+rest of the song is there. Closing the window in the middle waits for the one plugin in hand and for nothing
+else; choosing another song lets go of everything that was on its way for the first.
+[The engine](engine.md) has what opening a song of nineteen plugins takes, plugin by plugin.
+
 ## Playing and recording
 
 **Playing and recording**: every MIDI keyboard that is plugged in plays the armed tracks (or the selected one)
