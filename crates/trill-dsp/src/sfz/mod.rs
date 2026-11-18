@@ -21,8 +21,9 @@
 //!   `off_mode`, `off_time`, `polyphony`, `note_polyphony`, `sustain_sw`,
 //!   `sustain_cc`.
 //! * What no key sounds, and a controller sets off by coming into a span:
-//!   `on_loccN`, `on_hiccN` (and `on_lohdccN`, `on_hihdccN`), with
-//!   `lokey=-1` for "no key". The noise of a pedal going down and of its
+//!   `on_loccN`, `on_hiccN` (and `on_lohdccN`, `on_hihdccN`), with "no
+//!   key" written as `key=-1`, `lokey=-1` or a span of keys that holds none
+//!   (`lokey=127 hikey=0`). The noise of a pedal going down and of its
 //!   coming up.
 //! * Its pitch: `tune`, `transpose`, `pitch_keytrack`, `pitch_veltrack`,
 //!   `pitch_random`, `bend_up`, `bend_down`, `tune_onccN`.
@@ -444,7 +445,10 @@ impl Reader {
         if region.tremolo.is_some_and(|wave| wave.rate <= 0.0 || (wave.depth == 0.0 && !deepened(Moved::Tremolo))) {
             region.tremolo = None;
         }
-        if region.keys.0 > region.keys.1 || region.velocities.0 > region.velocities.1 {
+        // A span of keys that holds none is another way of writing that no key plays it: such a
+        // region is kept where a controller sets it off.
+        let no_key = region.keys.0 > region.keys.1 && region.set_off.is_none();
+        if no_key || region.velocities.0 > region.velocities.1 {
             return;
         }
         self.instrument.regions.push(region);

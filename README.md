@@ -316,8 +316,8 @@ too. What a file asks for that it does not do
 is not passed over: loading the instrument says so in a sentence, naming each thing and what a listener
 misses for it ("It asks for 1 thing this player does not do, so it will not sound quite as in its maker's
 player. Not heard: equalisers of its own (eq1_gain). Everything else plays."), and the instrument plays. Of the
-3,400 SFZ files of the 94 freely published sets it was tried on, 898 were instruments (the rest are parts that
-others include), and 686 of those asked for nothing it does not do.
+3,251 SFZ files of the 93 freely published sets it was tried on, 2,672 are instruments (the rest are parts that
+others include), and 2,416 of those ask for nothing it does not do.
 Not done: the equalizer and effect sections, envelopes with any number of stages (`egN_`), a second filter,
 the shape of an envelope's curves, waves the player is asked to make (`sample=*sine`), sostenuto. A recording that is there and is not audio it can read is counted and said, in the
 panel and over MCP; plain WAV files with a longer format chunk than usual, which a whole library is written
@@ -1003,8 +1003,10 @@ that says which file. A set is removed by the button that fetched it. Nothing is
 pressed, and the assistant in the window cannot fetch at all.
 
 Every set of the catalogue was fetched once this way, one after the other (119 sets, 26 GB, 31 minutes on the
-machine it was built on), and each arrived whole and as it was read. A set under a folder deeper than Windows'
-260 letters arrives and plays; a stopped fetch was gone on with on sets of both kinds.
+machine it was built on), and each arrived whole and as it was read; the starter selection asked for with the
+panel's own button came in 103 seconds, and every instrument of it was found by the library and played. A set
+under a folder deeper than Windows' 260 letters arrives and plays, and a fetch that was stopped was asked for
+again on a set of each kind.
 
 A model asks `instrument_catalogue` what there is (by kind, by words, one set with its licence) and which of it
 is in the sound library already, and fetches a set with `setup` when the user asks for it by name (a client of

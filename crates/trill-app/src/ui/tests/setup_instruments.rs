@@ -474,20 +474,22 @@ fn the_starter_selection_is_fetched_from_the_panel_and_played() {
             assert!(here.contains_key(&instrument.text), "{} {} is not in the library", set.id, instrument.name);
         }
     }
-    // Each instrument of the starter selection on a track, a note played, and heard.
+    // Each instrument of the starter selection on a track, played, and heard.
     harness.key(Modifiers::NONE, Key::Escape);
     for (set, instrument) in catalogue.instruments().filter(|(_, instrument)| instrument.is_starter()) {
         let file = here[&instrument.text].display().to_string();
+        // A dozen keys over its range: a kit has drums on few of its keys.
         let (low, high) = instrument.range.unwrap_or((48, 72));
-        let key = low + (high - low) / 2;
+        let span = u32::from(high - low);
+        let mut keys: Vec<u8> = (0..12u32).map(|step| low + (span * step / 11) as u8).collect();
+        keys.dedup();
         let track = {
             let mut session = harness.session.lock();
             let track = session.edit(|project| Ok(project.add_track(&instrument.name))).unwrap();
             session.add_device(ChainRef::Track(track), "builtin:sampled", Some(&file), None).unwrap();
             session
                 .edit(|project| {
-                    let clip = project.add_midi_clip(track, "c", 0.0, 4.0)?;
-                    let keys = [low + (high - low) / 4, key, low + (high - low) / 4 * 3];
+                    let clip = project.add_midi_clip(track, "c", 0.0, keys.len() as f64 + 1.0)?;
                     let notes: Vec<Note> = keys
                         .iter()
                         .enumerate()

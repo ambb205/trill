@@ -531,11 +531,12 @@ fn a_filter_a_vibrato_and_controllers_do_what_the_instrument_says() {
 /// The peaks of `heard` over stretches of `window` frames.
 #[test]
 fn a_controller_coming_into_its_span_sets_off_a_sound_once_and_no_key_does() {
-    // A note, the noise of the pedal going down (one of two, by lot) and the noise of its coming up.
+    // A note, the noise of the pedal going down (one of two, by lot) and the noise of its coming up. That no
+    // key plays them is written as files write it: a key under the lowest, and a span of keys that holds none.
     let sfz = "<global> amp_veltrack=0 pitch_keytrack=0 loop_mode=one_shot\n<region> sample=note.wav key=60\n\
                <group> lokey=-1 hikey=-1 on_locc64=127 on_hicc64=127 locc64=127 hicc64=127\n\
                <region> sample=down.wav lorand=0 hirand=0.5 <region> sample=down.wav lorand=0.5 hirand=1 volume=-12\n\
-               <group> key=-1 on_locc64=0 on_hicc64=0 <region> sample=up.wav";
+               <group> lokey=127 hikey=0 on_locc64=0 on_hicc64=0 <region> sample=up.wav";
     let files = [("note.wav", level(4_800, 0.5)), ("down.wav", level(2_400, 0.25)), ("up.wav", level(1_200, 0.125))];
     let pedal = |position: f32| control(64, position);
     let quieter = 0.25 * 10f32.powf(-12.0 / 20.0);
@@ -1005,12 +1006,15 @@ fn a_group_has_only_so_many_voices_and_the_pedal_is_the_controller_the_instrumen
 #[test]
 fn a_region_that_no_key_plays_is_left_out_unless_a_controller_sets_it_off() {
     let sfz = "<region> sample=note.wav lokey=40 hikey=80\n<region> sample=pedal.wav key=-1 on_locc64=126 on_hicc64=127\n\
-               <region> sample=pedal.wav lokey=-1 hikey=-1\n<region> sample=pedal.wav on_locc64=1 lokey=0 hikey=127";
+               <region> sample=pedal.wav lokey=-1 hikey=-1\n<region> sample=pedal.wav on_locc64=1 lokey=0 hikey=127\n\
+               <region> sample=pedal.wav lokey=127 hikey=0 on_locc64=65 on_hicc64=127\n\
+               <region> sample=pedal.wav lokey=127 hikey=0";
     let (_, source) = made(sfz, &[("note.wav", level(100, 0.1)), ("pedal.wav", level(100, 0.9))], Purpose::Rendering);
     let loaded = source.load(Some(&State::new(FILE).to_bytes())).unwrap().unwrap();
-    // The one that neither a key nor a controller would sound is left out; the two the pedal sets off are kept.
-    assert_eq!(loaded.instrument.regions.len(), 3);
-    assert_eq!(loaded.set_off, [1, 2]);
+    // The ones that neither a key nor a controller would sound are left out; the three the pedal sets off
+    // are kept, the one whose span of keys holds none among them.
+    assert_eq!(loaded.instrument.regions.len(), 4);
+    assert_eq!(loaded.set_off, [1, 2, 3]);
     // They lie on no key, whatever keys their regions name: the instrument's range is its notes'.
     assert_eq!(loaded.summary.range, Some((40, 80)));
     assert!(loaded.down.iter().all(|regions| regions.iter().all(|index| *index == 0)));

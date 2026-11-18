@@ -7,7 +7,7 @@
 //! cargo run -p trill-engine --example sampled -- about <file.sfz>
 //! cargo run -p trill-engine --example sampled -- load <file.sfz>
 //! cargo run -p trill-engine --example sampled -- measure <file.sfz>
-//! cargo run -p trill-engine --example sampled -- play <file.sfz> <piano|keys|strings|bass|drums> <out.wav>
+//! cargo run -p trill-engine --example sampled -- play <file.sfz> <piano|keys|strings|bass|drums|pedal> <out.wav>
 //! cargo run -p trill-engine --example sampled -- facts <folder> <out.jsonl>
 //! cargo run -p trill-engine --example sampled -- tour <list.txt> <out.wav>
 //! ```
@@ -24,7 +24,9 @@
 //! * `play` renders a phrase that suits the kind of instrument to a WAV
 //!   file, for listening. Several files joined by `|` are played together,
 //!   each the notes of the phrase that lie in its range: the sections of
-//!   a string orchestra.
+//!   a string orchestra. `pedal` plays no key: the sustain pedal goes down
+//!   and comes up twice, for the noise an instrument has for it (one that
+//!   has none comes out silent, and that is said).
 //! * `facts` writes a line of JSON for every instrument under a folder:
 //!   what its file says, the files it is made of, what it asks for that
 //!   the player does not do, what `measure` finds, and how loud a few
@@ -955,9 +957,16 @@ fn phrase(
             }
             Ok((notes, curves, keys.len() as f64 * 0.75 + 1.0))
         }
+        "pedal" => {
+            // No key at all: the sustain pedal goes down and comes up, twice. What is heard is what the
+            // instrument has for the pedal itself.
+            let pedal = vec![(0.0, 0.0), (1.0, 127.0), (3.0, 0.0), (5.0, 127.0), (7.0, 0.0)];
+            curves.push((ControllerKind::SUSTAIN, pedal));
+            Ok((notes, curves, 9.0))
+        }
         other => Err(format!(
-            "'{other}' is no phrase: piano, keys, strings, bass, drums, or short-keys, short-line, short-chords, \
-             short-bass, short-drums, each"
+            "'{other}' is no phrase: piano, keys, strings, bass, drums, pedal, or short-keys, short-line, \
+             short-chords, short-bass, short-drums, each"
         )),
     }
 }
