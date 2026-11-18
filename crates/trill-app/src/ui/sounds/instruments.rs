@@ -38,6 +38,16 @@ pub struct Shelf {
     pub(super) rows: Arc<Vec<InstrumentRow>>,
 }
 
+/// What the song owes for the sampled instruments it plays, as it was
+/// at one revision of the song.
+#[derive(Default)]
+pub struct Credits {
+    /// The revision `owed` was worked out at; `None` before the first answer.
+    pub(super) revision: Option<u64>,
+    pub(super) in_flight: bool,
+    pub(super) owed: Option<Arc<trill_catalogue::Owed>>,
+}
+
 /// Whether the file at `path` is an instrument, by its name.
 pub fn is_instrument(path: &Path) -> bool {
     trill_dsp::sfz::is_sfz(path)

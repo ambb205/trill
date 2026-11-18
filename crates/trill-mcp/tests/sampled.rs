@@ -343,3 +343,85 @@ async fn recordings_and_an_instrument_that_moved_are_listed_as_missing_and_relin
     let back = ok(client, "measure", json!({ "tracks": [track] })).await;
     assert!(back["missing_files"].is_null() && peak_of(&back, track) > -30.0, "{back}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_reads_what_instruments_are_to_be_had_and_what_a_song_owes_and_fetches_nothing() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let instructions = client.peer_info().and_then(|info| info.instructions.clone()).unwrap_or_default();
+    for word in ["instrument_catalogue", "song_credits", "a set is fetched by the user"] {
+        assert!(instructions.contains(word), "the instructions should say '{word}'");
+    }
+
+    // What there is, counted: by kind, by licence, and what is offered first. None of it is here.
+    let all = ok(client, "instrument_catalogue", json!({})).await;
+    assert!(all["sets"].as_u64().unwrap() >= 60 && all["instruments"].as_u64().unwrap() >= 300, "{all}");
+    assert_eq!(all["here"], 0, "{all}");
+    for kind in ["piano", "electric-piano", "strings", "bass", "drum-kit", "guitar"] {
+        assert!(all["by_kind"][kind]["put_forward"].as_u64().unwrap() > 0, "{kind}: {all}");
+    }
+    assert_eq!(all["by_licence"]["CC0-1.0"]["credit_asked"], false, "{all}");
+    assert_eq!(all["by_licence"]["CC-BY-4.0"]["credit_asked"], true, "{all}");
+    assert!(all["starter"]["sets"].as_array().unwrap().len() >= 6, "{all}");
+    assert!(all.to_string().len() < 4_000, "the counts are a short reply: {} characters", all.to_string().len());
+
+    // A search lists instruments, what is offered first before the rest, a page at a time.
+    let pianos = ok(client, "instrument_catalogue", json!({ "kind": "piano", "limit": 2 })).await;
+    let listed = pianos["instruments"].as_array().unwrap();
+    assert_eq!(listed.len(), 2, "{pianos}");
+    assert_eq!(listed[0]["starter"], true, "{pianos}");
+    assert!(pianos["more"].as_str().unwrap().contains("offset 2 lists the next"), "{pianos}");
+    for instrument in listed {
+        assert!(instrument["what"].as_str().unwrap().len() >= 12 && instrument["size"].is_string(), "{instrument}");
+        assert!(instrument.get("here").is_none() && instrument.get("measured_against_it").is_none(), "{instrument}");
+    }
+    // What something measured speaks against is left out until it is asked for, and then says what.
+    let put_forward = ok(client, "instrument_catalogue", json!({ "kind": "woodwind", "limit": 200 })).await;
+    let with_marked =
+        ok(client, "instrument_catalogue", json!({ "kind": "woodwind", "include_marked": true, "limit": 200 })).await;
+    assert!(with_marked["found"].as_u64().unwrap() > put_forward["found"].as_u64().unwrap(), "{with_marked}");
+    let marked: Vec<&Value> = with_marked["instruments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|instrument| instrument.get("measured_against_it").is_some())
+        .collect();
+    assert!(!marked.is_empty() && marked.iter().all(|instrument| instrument.get("starter").is_none()), "{with_marked}");
+
+    // One set: its licence as its maker wrote it, where it was read, whom to name, how it is fetched.
+    let credited = ok(client, "instrument_catalogue", json!({ "query": "salamander" })).await;
+    assert_eq!(credited["instruments"][0]["credit_asked"], true, "{credited}");
+    let set = credited["instruments"][0]["set"].as_str().unwrap().to_string();
+    let whole = ok(client, "instrument_catalogue", json!({ "set": set })).await;
+    assert_eq!(whole["licence"]["id"], "CC-BY-3.0", "{whole}");
+    assert!(whole["licence"]["says"].as_str().unwrap().contains("Attribution 3.0 Unported"), "{whole}");
+    assert!(whole["licence"]["read_at"].as_str().unwrap().starts_with("https://"), "{whole}");
+    assert!(whole["credit"].as_str().unwrap().contains("Alexander Holm"), "{whole}");
+    assert_eq!(whole["version"].as_str().unwrap().len(), 40, "{whole}");
+    assert!(whole["fetching"].as_str().unwrap().contains("This tool fetches nothing"), "{whole}");
+    let free = ok(client, "instrument_catalogue", json!({ "public_domain": true, "query": "salamander" })).await;
+    assert_eq!(free["found"], 0, "an attribution set is not among what asks for nothing: {free}");
+
+    // A mistake names what there is.
+    let error = call(client, "instrument_catalogue", json!({ "kind": "fiddles" })).await.unwrap_err();
+    assert!(error.contains("the kinds are piano, electric-piano, organ"), "{error}");
+    let error = call(client, "instrument_catalogue", json!({ "set": "salamandr" })).await.unwrap_err();
+    assert!(error.contains("there is no set 'salamandr'") && error.contains("Some there are:"), "{error}");
+
+    // A song that plays no sampled instrument owes nothing for one.
+    let owed = ok(client, "song_credits", json!({})).await;
+    assert_eq!((&owed["owed"], &owed["text"]), (&json!([]), &json!("")), "{owed}");
+    assert!(owed["next"].as_str().unwrap().contains("plays no sampled instrument"), "{owed}");
+    // One whose instrument the catalogue does not know is told that its terms are its own, and nothing is made up.
+    let library = fixture.folder.path().join("Library");
+    let upright = upright(&library);
+    ok(client, "create_track", json!({ "name": "Keys", "instrument": SAMPLED, "preset": text(&upright) })).await;
+    let owed = ok(client, "song_credits", json!({})).await;
+    assert_eq!(owed["owed"], json!([]), "{owed}");
+    assert_eq!(owed["not_in_the_catalogue"], json!(["Upright.sfz, on Keys"]), "{owed}");
+    assert!(owed["not_in_the_catalogue_note"].as_str().unwrap().contains("their own licence does"), "{owed}");
+    assert!(owed.get("nothing_owed_for").is_none(), "{owed}");
+    // Nothing was fetched, and the library is as it was: nothing of the catalogue is here.
+    let all = ok(client, "instrument_catalogue", json!({})).await;
+    assert_eq!(all["here"], 0, "{all}");
+}

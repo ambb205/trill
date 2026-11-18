@@ -209,7 +209,12 @@ pub(crate) fn open(path: &Path) -> Result<Box<dyn FormatReader>, MediaError> {
             if let Some(extension) = path.extension().and_then(|extension| extension.to_str()) {
                 hint.with_extension(extension);
             }
-            Box::new(file)
+            // A plain WAV whose description is in a longer chunk than the
+            // reader takes is shown to it as the file it stands for.
+            match crate::wav_plain::odd(&mut file).map_err(io_error)? {
+                Some((described, start, len)) => Box::new(crate::wav_plain::Plain::new(file, described, start, len)),
+                None => Box::new(file),
+            }
         }
         // A WAV wrapped around an Ogg Vorbis stream: read the stream.
         Embedded::Stream { start, len } => {

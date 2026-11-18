@@ -26,6 +26,7 @@ mod peaks;
 mod resample;
 mod stream;
 mod wav;
+mod wav_plain;
 mod wav_vorbis;
 
 pub use cache::{CacheStats, FileStamp, MediaCache};

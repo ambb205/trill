@@ -243,3 +243,37 @@ fn what_a_sampled_instrument_cannot_take_is_refused_and_what_is_wrong_with_one_i
     assert!(problems[0].contains("gone.wav"), "{problems:?}");
     assert!(harness.is_on_screen(&problems[0]), "the panel says it");
 }
+
+#[test]
+fn the_credits_say_what_the_song_owes_and_whom_trill_names_for_what_it_offers() {
+    let (mut harness, _shelf, _) = with_shelf();
+    // File, Credits: a song that plays no sampled instrument owes nothing for one.
+    harness.click_label("File");
+    harness.click_label("Credits\u{2026}");
+    harness.settle_work();
+    harness.idle(3);
+    assert!(harness.app.state().credits_open);
+    assert!(harness.is_on_screen("This song plays no sampled instrument, so nothing is owed for one."));
+    assert!(!harness.is_on_screen("Copy the lines"), "there is no line to copy");
+    // Under it, what Trill is made of in that respect: every maker who asks to be named for a set it offers.
+    let offered = trill_catalogue::Catalogue::shipped().credits();
+    assert!(!offered.is_empty());
+    for credit in &offered {
+        assert!(harness.is_on_screen(&credit.line), "the credits do not show: {}", credit.line);
+    }
+    assert!(harness.is_on_screen("Trill ships no recordings."), "it says what it does not ship");
+    harness.key(Modifiers::NONE, Key::Escape);
+    harness.idle(2);
+    assert!(!harness.app.state().credits_open, "Escape closes it");
+
+    // An instrument of the user's own is not of the catalogue: its terms are its own, and no line is made up.
+    harness.drop_row("Small Piano", harness.header(0, 120.0, 20.0));
+    assert_eq!(harness.instrument_of(0).uri, SAMPLED);
+    harness.click_label("File");
+    harness.click_label("Credits\u{2026}");
+    harness.settle_work();
+    harness.idle(3);
+    assert!(harness.is_on_screen("No maker asks to be named for what this song plays."));
+    assert!(harness.is_on_screen("Not of Trill's catalogue, their own terms apply: Small Piano.sfz, on Keys"));
+    assert!(!harness.is_on_screen("Copy the lines"));
+}

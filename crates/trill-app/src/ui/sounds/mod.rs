@@ -144,6 +144,11 @@ pub enum Done {
         generation: u64,
         rows: Vec<InstrumentRow>,
     },
+    /// What the song owed for its sampled instruments at a revision.
+    Owed {
+        revision: u64,
+        owed: Box<trill_catalogue::Owed>,
+    },
     /// A dialog was answered: with a folder for the library, with a file
     /// for a sampler or a pad, or with where a clip's file is now. `None`
     /// when it was dismissed.
@@ -288,6 +293,8 @@ pub struct Sounds {
     pub pending: Vec<PendingDrop>,
     /// The library's sampled instruments, for the browser's Devices tab.
     instruments: instruments::Shelf,
+    /// What the song owes for its sampled instruments, for the credits.
+    credits: instruments::Credits,
     /// The files the song names that are not on disk, and what was found.
     pub missing: MissingFiles,
     next_drop: u64,
@@ -305,6 +312,7 @@ impl Sounds {
             search: Search::default(),
             pending: Vec::new(),
             instruments: instruments::Shelf::default(),
+            credits: instruments::Credits::default(),
             missing: MissingFiles::default(),
             next_drop: 0,
             dialog_open: false,
@@ -341,6 +349,7 @@ impl Sounds {
             || self.preview.loading.is_some()
             || self.missing.looking
             || self.instruments.in_flight
+            || self.credits.in_flight
             || self.runtime.library.scan_status().is_scanning()
     }
 
@@ -399,6 +408,11 @@ impl Sounds {
                     self.instruments.in_flight = false;
                     self.instruments.generation = Some(generation);
                     self.instruments.rows = Arc::new(rows);
+                }
+                Done::Owed { revision, owed } => {
+                    self.credits.in_flight = false;
+                    self.credits.revision = Some(revision);
+                    self.credits.owed = Some(Arc::new(*owed));
                 }
                 Done::Cleared(result) | Done::Quiet(result) => {
                     if let Err(reason) = result {
@@ -588,6 +602,19 @@ impl Sounds {
             });
         }
         self.instruments.rows.clone()
+    }
+
+    /// What the song owes for the sampled instruments it plays, as of
+    /// `revision` of it. Worked out on a worker, since it reads the
+    /// instruments' files: until the answer for this revision is there,
+    /// this is the answer for an earlier one, or `None` the first time.
+    pub fn owed(&mut self, revision: u64) -> Option<Arc<trill_catalogue::Owed>> {
+        if self.credits.revision != Some(revision) && !self.credits.in_flight {
+            self.credits.in_flight = true;
+            let runtime = self.runtime.clone();
+            self.work.spawn(Priority::Urgent, move || Done::Owed { revision, owed: Box::new(runtime.owed()) });
+        }
+        self.credits.owed.clone()
     }
 
     /// Takes the file off a sampler (`note` is `None`) or off a pad.

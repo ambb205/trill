@@ -212,6 +212,12 @@ impl Instruments {
 }
 
 impl Loaded {
+    /// Every file the instrument's text was read from: its own, and the
+    /// ones that includes.
+    pub fn text_files(&self) -> Vec<&Path> {
+        self.texts.iter().map(|(path, _)| path.as_path()).collect()
+    }
+
     /// Whether the recordings that were there when the instrument was
     /// read still are, as far as a few of them from all over it say:
     /// enough to notice a folder that was moved, without asking after
@@ -303,6 +309,20 @@ impl Loaded {
     /// unreadable, and how many there are.
     pub fn settled(&self) -> (usize, usize) {
         (self.recordings.iter().filter(|recording| recording.is_settled()).count(), self.recordings.len())
+    }
+
+    /// How many of the recordings that were tried are files that cannot
+    /// be read as audio.
+    pub fn unreadable(&self) -> usize {
+        self.recordings.iter().filter(|recording| recording.problem().is_some()).count()
+    }
+
+    /// Why the first recording that cannot be read cannot, with its name:
+    /// a sentence for whoever asks what is wrong.
+    pub fn unreadable_why(&self) -> Option<String> {
+        let (index, recording) =
+            self.recordings.iter().enumerate().find(|(_, recording)| recording.problem().is_some())?;
+        Some(format!("'{}': {}", self.instrument.recordings[index], recording.problem().unwrap_or_default()))
     }
 
     /// The recordings there is no file for: the slot each is in, and where
