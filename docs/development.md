@@ -46,10 +46,14 @@ cargo test -p trill-runtime --test instruments a_fetch_that_is_stopped -- --igno
 cargo test -p trill-runtime --test instruments a_set_kept_under_a_deep_folder -- --ignored --nocapture    # two small sets fetched into a folder deeper than 260 letters, checked and played (36 MB)
 cargo test -p trill-app the_starter_selection_is_fetched_from_the_panel -- --ignored --nocapture    # the starter selection asked for with the Setup panel's own button on the catalogue that is built in: fetched, checked, found by the library, on a track, played (1.8 GB)
 cargo run -p trill-fetch --example many -- <a list of addresses> <a folder>    # how long many small files take one at a time, on one connection and several at once: what the engine's count was chosen by
+cargo run -p trill-runtime --example keeps_up -- SONG.trill    # whether the machine keeps up with a song: it is played in real time, with its installed plugins, against a device that makes no sound, and the example says how much of the audio thread's time went (on average and for the worst buffer), how many buffers came late, on how many threads it was made, and what each track cost, playing and standing still (`--threads 1` is the callback alone, `--buffer 128` a small device, `built-in` in place of a file a song of built-in devices made there; as long as the song lasts, and it loads the song's plugins, so look at the free memory first)
 ```
 
 Run the `trill-plugins` ones after touching plugin hosting, the `trill-media` one after touching audio decoding,
-and the two `machine` ones after touching the audio device or MIDI port code. Everything else about devices is tested without any: the engine plays through a
+and the two `machine` ones after touching the audio device or MIDI port code. Run `keeps_up` on a song with plugins
+after touching what an audio thread runs or how a block is handed from one thread to another, and hold what it prints
+beside the numbers in [the engine's page](engine.md): that a real song is played in time is checked there and nowhere
+else. Everything else about devices is tested without any: the engine plays through a
 scripted host whose audio thread is the test itself (`trill_engine::host::scripted`), so a device can be unplugged,
 refuse a format or stop answering, and a recorded note can be checked to the sample.
 

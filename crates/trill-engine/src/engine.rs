@@ -21,6 +21,8 @@ use crate::host::{
 use crate::live::{Captured, LiveInput, LiveSender, LiveTarget, TrackSet};
 use crate::processor::{Processor, Taken};
 use crate::queue::Queue;
+use crate::spread::Workers;
+use crate::team::{Team, TeamStats, Watch};
 use std::cell::UnsafeCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -48,6 +50,46 @@ const CALLBACK_FRAMES: usize = 8192;
 /// The rate the engine runs at before a device has had its say, and with no
 /// device at all.
 const FALLBACK_SAMPLE_RATE: u32 = 48_000;
+/// The variable that says how many threads a song that plays may be made
+/// on, for finding out what that does: 1 is the audio callback alone.
+pub const PLAY_THREADS_ENV: &str = "TRILL_PLAY_THREADS";
+
+/// How many threads a song that plays may be made on unless somebody says
+/// otherwise: half the machine's processors, the audio callback's own
+/// among them, and eight at the most. Half, because the threads are at
+/// the priority the system keeps for audio, and what is left has to draw
+/// the window and run whatever else the machine is doing; and because the
+/// second half of the processors a machine counts are mostly the first
+/// half again. [`PLAY_THREADS_ENV`] in the environment says another
+/// number.
+pub fn usual_play_threads() -> usize {
+    let asked = std::env::var(PLAY_THREADS_ENV).ok().and_then(|text| text.trim().parse::<usize>().ok());
+    let usual = || std::thread::available_parallelism().map_or(1, |count| count.get() / 2).clamp(1, 8);
+    asked.unwrap_or_else(usual).max(1)
+}
+
+/// How the audio thread has kept up since that was last asked
+/// ([`Engine::take_load`]).
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct Load {
+    /// How many buffers the device asked for.
+    pub callbacks: u64,
+    /// How many of them took longer to make than they last: each is a
+    /// gap in what is heard.
+    pub late: u64,
+    /// The share of the time there was that making them took, over all of
+    /// them and for the worst one: 1 is all of it.
+    pub mean: f32,
+    pub worst: f32,
+    /// How many blocks were made on more than one thread.
+    pub spread_blocks: u64,
+    /// How many threads make the blocks now, the callback's among them.
+    pub threads: usize,
+    /// How many the song could use at the most, and how many it may have.
+    pub allowed: usize,
+    /// What the threads beside the callback's did, where there are any.
+    pub team: Option<TeamStats>,
+}
 
 /// How long the engine waits for things that should not take long, before
 /// it stops waiting and does the next best thing. The defaults suit real
@@ -198,6 +240,12 @@ pub(crate) enum Message {
     ReleaseLive,
     /// Lets go of every note that sounds, played by hand or by the song.
     ReleaseEverything,
+    /// The threads the song that plays may be made on beside the
+    /// callback's, or none.
+    Team(Option<Box<Team>>),
+    /// The share of a block's time above which a song that plays is
+    /// spread: see [`Processor::spread_from`].
+    SpreadFrom(f64),
     /// Starts the take numbered `take` on `tracks`, after `count_in_beats`
     /// of count-in if the song is not already playing.
     Record {
@@ -211,6 +259,9 @@ pub(crate) enum Message {
 pub(crate) enum Garbage {
     Graph(Box<Graph>),
     Audio(Arc<AudioData>),
+    /// Threads the song is no longer made on: sent home, and waited for,
+    /// by whoever collects this.
+    Team(Box<Team>),
 }
 
 /// Whether a take is being recorded, as the audio thread has it.
@@ -244,6 +295,21 @@ struct Shared {
     /// New notes that were not sounded: there was no room, or they came
     /// too late.
     live_skipped: AtomicU32,
+    /// The song that plays would be spread over more threads if it had
+    /// any: see [`Processor::wants_threads`].
+    wants_threads: AtomicBool,
+    /// How many threads make the blocks now.
+    threads: AtomicU32,
+    /// Since [`Engine::take_load`] was last asked: the buffers counted,
+    /// those that took longer than they last, the time making them took
+    /// and the time they last (nanoseconds), the worst share (the bits of
+    /// an `f32`) and the blocks that were spread.
+    counted: AtomicU64,
+    late: AtomicU64,
+    busy_ns: AtomicU64,
+    given_ns: AtomicU64,
+    worst: AtomicU32,
+    spread: AtomicU64,
 }
 
 /// Everything the audio callback works with.
@@ -285,6 +351,13 @@ impl Realtime {
                 Message::LiveTargets(tracks) => self.processor.set_live_targets(tracks),
                 Message::ReleaseLive => self.processor.release_live(),
                 Message::ReleaseEverything => self.processor.release_everything(),
+                Message::Team(team) => {
+                    // The ones it had are sent home elsewhere: that waits.
+                    if let Some(before) = self.processor.play_over(team) {
+                        let _ = self.garbage.push(Garbage::Team(before));
+                    }
+                }
+                Message::SpreadFrom(share) => self.processor.spread_from(share),
                 Message::Record { take, tracks, count_in_beats } => {
                     self.processor.record(take, tracks, count_in_beats);
                 }
@@ -349,6 +422,7 @@ impl Realtime {
         if catch_unwind(AssertUnwindSafe(|| processor.process(left, right))).is_err() {
             left.fill(0.0);
             right.fill(0.0);
+            processor.after_fault();
             self.shared.faults.fetch_add(1, Ordering::Relaxed);
         }
         // Last line of defense before the hardware: no NaNs, no over-range
@@ -379,10 +453,22 @@ impl Realtime {
         shared.recording.store(self.processor.record_phase() as u8, Ordering::Relaxed);
         shared.latency_frames.store(timing.latency_frames, Ordering::Relaxed);
         shared.callbacks.fetch_add(1, Ordering::Relaxed);
+        shared.wants_threads.store(self.processor.wants_threads(), Ordering::Relaxed);
+        shared.threads.store(self.processor.threads() as u32, Ordering::Relaxed);
+        shared.spread.fetch_add(self.processor.take_spread_blocks(), Ordering::Relaxed);
         let available = total as f64 / self.processor.sample_rate();
         if available > 0.0 {
-            let load = (started.elapsed().as_secs_f64() / available) as f32;
+            let took = started.elapsed().as_secs_f64();
+            let load = (took / available) as f32;
             shared.load.store(load.to_bits(), Ordering::Relaxed);
+            shared.counted.fetch_add(1, Ordering::Relaxed);
+            shared.busy_ns.fetch_add((took * 1e9) as u64, Ordering::Relaxed);
+            shared.given_ns.fetch_add((available * 1e9) as u64, Ordering::Relaxed);
+            // The bits of a float that is not negative are in its order.
+            shared.worst.fetch_max(load.max(0.0).to_bits(), Ordering::Relaxed);
+            if load > 1.0 {
+                shared.late.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -620,6 +706,12 @@ pub struct Engine {
     last_retry: Instant,
     /// The answer, when it comes, to whether that device is back.
     lookup: Option<mpsc::Receiver<bool>>,
+    /// How many threads a song that plays may be made on, the callback's
+    /// among them; how many the graph that plays can use; and the ones
+    /// that were made for it, as seen from here.
+    play_threads: usize,
+    can_use: usize,
+    team: Option<(usize, Watch)>,
 }
 
 /// The controller's ends of a fresh set of queues, and the seat holding
@@ -703,6 +795,9 @@ impl Engine {
             retrying: false,
             last_retry: now,
             lookup: None,
+            play_threads: usual_play_threads(),
+            can_use: 1,
+            team: None,
         };
         engine.open(setup.silent_fallback)?;
         Ok(engine)
@@ -741,6 +836,83 @@ impl Engine {
     /// Fraction of the audio callback's time budget in use (1.0 = overload).
     pub fn load(&self) -> f32 {
         f32::from_bits(self.shared.load.load(Ordering::Relaxed))
+    }
+
+    /// How the audio thread has kept up since this was last asked: see
+    /// [`Load`].
+    pub fn take_load(&mut self) -> Load {
+        let shared = &self.shared;
+        let take = |count: &AtomicU64| count.swap(0, Ordering::Relaxed);
+        let (busy, given) = (take(&shared.busy_ns), take(&shared.given_ns));
+        Load {
+            callbacks: take(&shared.counted),
+            late: take(&shared.late),
+            mean: if given == 0 { 0.0 } else { (busy as f64 / given as f64) as f32 },
+            worst: f32::from_bits(shared.worst.swap(0, Ordering::Relaxed)),
+            spread_blocks: take(&shared.spread),
+            threads: shared.threads.load(Ordering::Relaxed).max(1) as usize,
+            allowed: self.play_threads.min(self.can_use).max(1),
+            team: self.team.as_ref().map(|(_, watch)| watch.take()),
+        }
+    }
+
+    /// How many threads a song that plays may be made on, the audio
+    /// callback's among them.
+    pub fn play_threads(&self) -> usize {
+        self.play_threads
+    }
+
+    /// Says how many threads a song that plays may be made on, the audio
+    /// callback's among them: [`usual_play_threads`] where nobody says.
+    /// One has the callback make everything, as it did before there were
+    /// others. More are started when a song first needs them
+    /// ([`Engine::tend_threads`]), and no sooner.
+    pub(crate) fn set_play_threads(&mut self, threads: usize) {
+        let threads = threads.max(1);
+        if threads == self.play_threads {
+            return;
+        }
+        self.play_threads = threads;
+        // The ones there are go home; the right number comes when it is
+        // next needed.
+        if self.team.take().is_some() {
+            self.send(Message::Team(None));
+        }
+    }
+
+    /// Says how many threads the graph that was last handed over can use:
+    /// see [`Graph::spread`].
+    pub(crate) fn can_use(&mut self, threads: usize) {
+        self.can_use = threads.max(1);
+    }
+
+    /// Gives the song that plays the threads it is asking for, if it is
+    /// and may have them. Cheap while there is nothing to do; call it a
+    /// few times a second. Threads are started here and nowhere else:
+    /// never by the audio thread, and not before a song has taken long
+    /// enough to make that spreading it is worth while
+    /// ([`Processor::spread_from`]), so that a small song never has any.
+    pub(crate) fn tend_threads(&mut self) {
+        let wanted = self.play_threads.min(self.can_use);
+        let has = self.team.as_ref().map_or(0, |(threads, _)| *threads);
+        // A song that has threads has needed them, and gets more when it
+        // has come to have more to make at once.
+        let needed = self.shared.wants_threads.load(Ordering::Relaxed) || has > 0;
+        if !needed || wanted < 2 || has >= wanted - 1 {
+            return;
+        }
+        let team = Box::new(Team::new(wanted - 1));
+        let (made, watch) = (team.len(), team.watch());
+        if made > 0 && self.send(Message::Team(Some(team))) {
+            log::info!("the song is made on {} threads from here on", made + 1);
+            self.team = Some((made, watch));
+        }
+    }
+
+    /// Sets the share of a block's time above which a song that plays is
+    /// spread over its threads: see [`Processor::spread_from`].
+    pub(crate) fn spread_from(&mut self, share: f64) {
+        self.send(Message::SpreadFrom(share));
     }
 
     /// Whether a sound is being auditioned, as of the last audio callback.
@@ -826,6 +998,8 @@ impl Engine {
                     drop(graph);
                 }
                 Garbage::Audio(audio) => drop(audio),
+                // Its threads are told to go home and waited for.
+                Garbage::Team(team) => drop(team),
             }
         }
     }
@@ -1012,6 +1186,8 @@ impl Engine {
         self.shared = core.shared;
         self.seat = core.seat;
         self.swaps_in_flight = 0;
+        // The threads it was made on stay with what is stuck.
+        self.team = None;
     }
 
     /// Closes the stream and opens one as the configuration asks, or the

@@ -1,14 +1,15 @@
 //! The threads a render uses beside its own.
 //!
-//! While a song plays, one thread makes all of it: the audio thread, which
-//! has a speaker to keep up with and may not wait for anything. A render
-//! has nothing to keep up with and a whole machine to use, so it may hand
-//! the tracks of a block that do not feed one another to several threads
-//! at once ([`crate::processor`] says which those are). This is what it
-//! hands them to: a few threads that are made once for a render, sleep
-//! until there is work, do it, and say so.
+//! A render has no speaker to keep up with and a whole machine to use, so
+//! it hands the tracks of a block that do not feed one another to several
+//! threads at once ([`crate::spread`] says which those are). This is what
+//! it hands them to: a few threads that are made once for a render, sleep
+//! on a lock until there is work, do it, and say so; and the thread that
+//! asked sleeps on that lock until they have.
 //!
-//! Nothing here is used while a song plays.
+//! Nothing here is used while a song plays. A song that plays is spread
+//! too, over threads that may do none of that: they are
+//! [`crate::team`]'s.
 
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
@@ -32,8 +33,6 @@ struct Shared {
 struct State {
     /// The work at hand.
     task: Option<Task>,
-    /// Counts the tasks, so that a thread takes each of them once.
-    round: u64,
     /// How many more threads may take up the task at hand.
     places: usize,
     /// How many have taken it up and not finished.
@@ -46,15 +45,37 @@ struct State {
     waited: Duration,
 }
 
-/// What every thread of the crew is to run. The pointer is to something on
-/// the stack of [`Crew::all`], which does not return while a thread may
-/// still follow it.
+/// What every thread of the crew is to run, told which of the threads it
+/// is: the caller's is 0, the crew's count from 1. The pointer is to
+/// something on the stack of [`Crew::all`], which does not return while a
+/// thread may still follow it.
 #[derive(Copy, Clone)]
-struct Task(*const (dyn Fn() + Sync));
+struct Task(*const (dyn Fn(usize) + Sync));
 
 // It is handed to other threads, and what it points to may be called from
 // several at once: that is what `Sync` on the closure says.
 unsafe impl Send for Task {}
+
+impl crate::spread::Workers for Crew {
+    fn len(&self) -> usize {
+        Crew::len(self)
+    }
+
+    fn all(&self, helpers: usize, work: &(dyn Fn(usize) + Sync)) {
+        Crew::all(self, helpers, work)
+    }
+
+    /// One more thread may come to the task at hand, and one that sleeps
+    /// is woken for it. From inside the work of [`Crew::all`].
+    fn more(&self) {
+        let mut state = self.shared.state.lock();
+        if state.task.is_some() {
+            state.places += 1;
+            drop(state);
+            self.shared.work.notify_one();
+        }
+    }
+}
 
 impl Crew {
     /// A crew of `threads` threads, each of which does `settle` once
@@ -64,7 +85,6 @@ impl Crew {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 task: None,
-                round: 0,
                 places: 0,
                 at_work: 0,
                 panicked: false,
@@ -79,7 +99,7 @@ impl Crew {
                 let shared = shared.clone();
                 let run = move || {
                     let _kept = settle();
-                    shared.serve();
+                    shared.serve(index + 1);
                 };
                 // A machine that has no thread to spare renders with the
                 // ones it gave.
@@ -107,22 +127,21 @@ impl Crew {
     /// once, each taking a share of what there is to do until nothing is
     /// left; a thread that wakes late finds nothing, and is not waited
     /// for once the caller has come back.
-    pub fn all(&self, helpers: usize, work: &(dyn Fn() + Sync)) {
-        let helpers = helpers.min(self.threads.len());
-        if helpers == 0 {
-            return work();
+    pub fn all(&self, helpers: usize, work: &(dyn Fn(usize) + Sync)) {
+        if self.threads.is_empty() {
+            return work(0);
         }
+        let helpers = helpers.min(self.threads.len());
         // The crew's threads outlive this call, and the borrow in `work`
         // does not: they are given a pointer, and the guard below sees to
         // it that none of them follows it once this function has returned
         // or unwound.
         let task = Task(unsafe {
-            std::mem::transmute::<*const (dyn Fn() + Sync + '_), *const (dyn Fn() + Sync + 'static)>(work)
+            std::mem::transmute::<*const (dyn Fn(usize) + Sync + '_), *const (dyn Fn(usize) + Sync + 'static)>(work)
         });
         {
             let mut state = self.shared.state.lock();
             state.task = Some(task);
-            state.round += 1;
             state.places = helpers;
             state.panicked = false;
         }
@@ -130,19 +149,23 @@ impl Crew {
             self.shared.work.notify_one();
         }
         let over = Over(&self.shared);
-        work();
+        work(0);
         drop(over);
         assert!(!self.shared.state.lock().panicked, "a thread of the render panicked");
     }
 }
 
-/// Ends a task when it is dropped: nobody else may take it up, and those
-/// who have are waited for.
+/// Ends a task when it is dropped: those who have taken it up are waited
+/// for, with whoever they call in for what becomes ready meanwhile
+/// ([`Workers::more`](crate::spread::Workers::more)), and after that
+/// nobody may take it up.
 struct Over<'a>(&'a Shared);
 
 impl Drop for Over<'_> {
     fn drop(&mut self) {
         let mut state = self.0.state.lock();
+        // The places nobody came for: a thread that wakes late finds
+        // nothing.
         state.places = 0;
         if state.at_work > 0 {
             let since = Instant::now();
@@ -151,30 +174,33 @@ impl Drop for Over<'_> {
             }
             state.waited += since.elapsed();
         }
+        state.places = 0;
         state.task = None;
     }
 }
 
 impl Shared {
-    /// What a thread of the crew does until it is sent home.
-    fn serve(&self) {
-        let mut seen = 0;
+    /// What a thread of the crew does until it is sent home: `me` is its
+    /// place among the crew's threads, from 1.
+    fn serve(&self, me: usize) {
         let mut state = self.state.lock();
         loop {
-            while !state.quit && (state.places == 0 || state.round == seen) {
+            // A place is there with a task, or not at all. A thread may
+            // come back to the task it has left: for what has become
+            // ready since.
+            while !state.quit && (state.places == 0 || state.task.is_none()) {
                 self.work.wait(&mut state);
             }
             if state.quit {
                 return;
             }
             let Some(task) = state.task else { continue };
-            seen = state.round;
             state.places -= 1;
             state.at_work += 1;
             drop(state);
             // While `at_work` counts this thread, `Crew::all` has not
             // returned, and what the pointer leads to is there.
-            let came_back = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { (*task.0)() }));
+            let came_back = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { (*task.0)(me) }));
             state = self.state.lock();
             state.panicked |= came_back.is_err();
             state.at_work -= 1;
@@ -206,7 +232,7 @@ mod tests {
         for round in 0..200 {
             let shares: Vec<AtomicUsize> = (0..17).map(|_| AtomicUsize::new(0)).collect();
             let next = AtomicUsize::new(0);
-            let work = || {
+            let work = |_: usize| {
                 while let Some(share) = shares.get(next.fetch_add(1, Ordering::Relaxed)) {
                     share.fetch_add(1, Ordering::Relaxed);
                 }
@@ -226,7 +252,7 @@ mod tests {
         // Work that only ends once two threads besides the caller are in
         // it at the same time.
         let (inside, settled) = (AtomicUsize::new(0), AtomicUsize::new(0));
-        let work = || {
+        let work = |_: usize| {
             settled.fetch_add(usize::from(SETTLED.get()), Ordering::SeqCst);
             inside.fetch_add(1, Ordering::SeqCst);
             let begun = std::time::Instant::now();
@@ -243,7 +269,7 @@ mod tests {
     fn a_panic_on_a_thread_of_the_crew_is_the_callers_once_everyone_is_back() {
         let crew = Crew::new(1, || ());
         let caller = std::thread::current().id();
-        let work = || {
+        let work = |_: usize| {
             if std::thread::current().id() != caller {
                 panic!("on purpose");
             }
@@ -254,7 +280,7 @@ mod tests {
         assert!(came_back.is_err());
         // And the crew still works.
         let done = AtomicUsize::new(0);
-        crew.all(1, &|| {
+        crew.all(1, &|_| {
             done.fetch_add(1, Ordering::SeqCst);
         });
         assert!(done.load(Ordering::SeqCst) >= 1);

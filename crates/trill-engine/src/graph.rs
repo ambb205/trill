@@ -5,7 +5,7 @@
 
 use crate::glide::{Gate, Glide};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use trill_core::controllers::{CONTROLLER_KINDS, ControllerKind, ControllerLane};
 use trill_core::device::{DeviceProcessor, EventKind};
 use trill_core::project::{AutomationLane, AutomationPoint, envelope_value};
@@ -246,6 +246,38 @@ pub struct Meter {
     /// For how many frames the track has been given notes that nothing
     /// answered: see [`Meter::unanswered_frames`].
     unanswered: AtomicU32,
+    /// What making its blocks took since that was last asked
+    /// ([`Meter::take_cost`]): how many blocks, of how many frames, in how
+    /// many nanoseconds, and how long the longest of them took.
+    cost_blocks: AtomicU64,
+    cost_frames: AtomicU64,
+    cost_nanos: AtomicU64,
+    cost_longest: AtomicU64,
+}
+
+/// What making the blocks of a track (or of the master) took over some
+/// time: see [`Meter::take_cost`].
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct Cost {
+    pub blocks: u64,
+    pub frames: u64,
+    pub nanos: u64,
+    /// How long the one block took that took longest, in nanoseconds.
+    /// (Blocks are of any length, down to a frame: as a share of its own
+    /// time a short one says nothing.)
+    pub longest: u64,
+}
+
+impl Cost {
+    /// The share of one processor's time it took, with the song running at
+    /// `sample_rate`: 1 is a whole processor. Nothing where no block was
+    /// made.
+    pub fn share(&self, sample_rate: f64) -> f64 {
+        match self.frames {
+            0 => 0.0,
+            frames => self.nanos as f64 * sample_rate / (frames as f64 * 1e9),
+        }
+    }
 }
 
 impl Meter {
@@ -268,6 +300,25 @@ impl Meter {
     /// Returns the peak without resetting it.
     pub fn peek(&self) -> (f32, f32) {
         (f32::from_bits(self.left.load(Ordering::Relaxed)), f32::from_bits(self.right.load(Ordering::Relaxed)))
+    }
+
+    /// Puts on record that a block of `frames` frames took `nanos` to
+    /// make. By whichever thread made it: one at a time.
+    pub(crate) fn cost(&self, nanos: u64, frames: usize) {
+        self.cost_blocks.fetch_add(1, Ordering::Relaxed);
+        self.cost_frames.fetch_add(frames as u64, Ordering::Relaxed);
+        self.cost_nanos.fetch_add(nanos, Ordering::Relaxed);
+        self.cost_longest.fetch_max(nanos, Ordering::Relaxed);
+    }
+
+    /// What making the blocks took since the previous call.
+    pub fn take_cost(&self) -> Cost {
+        Cost {
+            blocks: self.cost_blocks.swap(0, Ordering::Relaxed),
+            frames: self.cost_frames.swap(0, Ordering::Relaxed),
+            nanos: self.cost_nanos.swap(0, Ordering::Relaxed),
+            longest: self.cost_longest.swap(0, Ordering::Relaxed),
+        }
     }
 
     pub(crate) fn set_unanswered(&self, frames: u32) {
@@ -560,6 +611,10 @@ pub struct Graph {
     /// graph plays, blocks end on a grid of the song's own, so that a
     /// parameter is moved at the same frames whatever the buffer size.
     pub(crate) moves_params: bool,
+    /// What it takes to make the blocks of the tracks on more than one
+    /// thread while the graph plays, where it can use more than one:
+    /// see [`Graph::spread`].
+    pub(crate) rounds: Option<Box<crate::spread::Rounds>>,
 }
 
 impl Graph {
@@ -580,7 +635,34 @@ impl Graph {
             meter_map: MeterMap::constant(TimeSignature::default()),
             loop_region: None,
             moves_params: false,
+            rounds: None,
         }
+    }
+
+    /// Works out how the blocks of this graph's tracks can be made on more
+    /// than one thread while it plays, and keeps it with the graph: which
+    /// tracks at once, and room for each. `factory` says what each device
+    /// may be run beside, as it does for a render: the instances of a
+    /// plugin in turn unless it was measured to keep nothing between
+    /// them. Returns how many threads the graph can use; one, and nothing
+    /// is kept, where every track waits for another or a device is not to
+    /// be run beside anything.
+    ///
+    /// Off the audio thread, before the graph is handed over: this
+    /// allocates. A processor that plays the graph spreads it where it was
+    /// given a team and the song is worth spreading
+    /// ([`crate::Processor::play_over`]).
+    pub fn spread(&mut self, project: &trill_core::Project, factory: &dyn trill_core::device::DeviceFactory) -> usize {
+        self.rounds = None;
+        if !crate::spread::company(self, project, factory, (false, true)).is_empty() {
+            return 1;
+        }
+        let rounds = crate::spread::Rounds::of(&self.tracks);
+        let width = rounds.width();
+        if width >= 2 {
+            self.rounds = Some(Box::new(rounds));
+        }
+        width.max(1)
     }
 
     fn slots_mut(&mut self) -> impl Iterator<Item = &mut DeviceSlot> {
@@ -626,5 +708,8 @@ impl Graph {
             }
         }
         self.master.fader = old.master.fader;
+        if let (Some(rounds), Some(used)) = (&mut self.rounds, &mut old.rounds) {
+            rounds.adopt(used);
+        }
     }
 }

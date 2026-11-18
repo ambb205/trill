@@ -915,7 +915,7 @@ fn render_from(
     // How many threads make it: as many as it was given and can use,
     // unless a device of it is not to be run beside anything. The plugins
     // are rehearsed on them too.
-    let alone = spread::company(&mut graph, project, factory, options.trusting);
+    let alone = spread::company(&mut graph, project, factory, (options.trusting, false));
     let given = options.threads.unwrap_or_else(usual_threads).max(1);
     let threads = if alone.is_empty() { given } else { 1 };
     let patience = (options.patience, threads);

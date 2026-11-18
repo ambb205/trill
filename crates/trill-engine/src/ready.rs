@@ -1480,7 +1480,7 @@ fn each<'a>(waits: &mut [Wait<'a>], crew: Option<&(Crew, Vec<Vec<usize>>)>, work
     let lists: Vec<Mutex<Vec<&mut Wait<'a>>>> =
         lists.iter().map(|list| Mutex::new(list.iter().filter_map(|at| places[*at].take()).collect())).collect();
     let next = AtomicUsize::new(0);
-    let all = || {
+    let all = |_: usize| {
         while let Some(list) = lists.get(next.fetch_add(1, Ordering::Relaxed)) {
             list.lock().iter_mut().for_each(|wait| work(wait));
         }

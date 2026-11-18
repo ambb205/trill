@@ -13,6 +13,7 @@
 //!   can be made to vanish, refuse a format or stop answering, and whose
 //!   audio thread is the test itself.
 
+pub mod priority;
 pub mod scripted;
 mod system;
 #[cfg(windows)]
@@ -220,15 +221,29 @@ pub trait AudioHost: Send + Sync {
 /// No audio hardware. The engine runs at real-time pace all the same.
 pub struct NullHost {
     sample_rate: u32,
+    block_frames: usize,
+    audio_priority: bool,
 }
 
 /// The name [`NullHost`]'s stream reports as its device.
 pub(crate) const NULL_DEVICE: &str = "none";
 const NULL_BLOCK_FRAMES: usize = 512;
+/// How far behind its clock the stream may fall before it stops trying to
+/// catch up.
+const NULL_CATCH_UP: Duration = Duration::from_millis(100);
 
 impl NullHost {
     pub fn new(sample_rate: u32) -> Self {
-        Self { sample_rate: sample_rate.max(1) }
+        Self { sample_rate: sample_rate.max(1), block_frames: NULL_BLOCK_FRAMES, audio_priority: false }
+    }
+
+    /// A host that asks for `block_frames` frames at a time where nothing
+    /// else is asked of it, as a device of that period would, and whose
+    /// thread runs at the priority the system keeps for audio, as a
+    /// device's does. For measuring whether a song is played in time
+    /// without a device to play it on.
+    pub fn like_a_device(sample_rate: u32, block_frames: usize) -> Self {
+        Self { sample_rate: sample_rate.max(1), block_frames: block_frames.clamp(16, 8192), audio_priority: true }
     }
 }
 
@@ -244,21 +259,26 @@ impl AudioHost for NullHost {
         _on_failure: FailureCallback,
     ) -> Result<OpenStream, OpenError> {
         let sample_rate = request.sample_rate.unwrap_or(self.sample_rate).max(1);
+        let block_frames = request.buffer_size.map_or(self.block_frames, |frames| (frames as usize).clamp(16, 8192));
+        let audio_priority = self.audio_priority;
         let quit = Arc::new(AtomicBool::new(false));
         let stop = quit.clone();
         let thread = std::thread::Builder::new()
             .name("audio-null".into())
             .spawn(move || {
-                let period = Duration::from_secs_f64(NULL_BLOCK_FRAMES as f64 / sample_rate as f64);
+                let _priority = audio_priority.then(priority::AudioPriority::raise);
+                let period = Duration::from_secs_f64(block_frames as f64 / sample_rate as f64);
                 let mut next = Instant::now();
                 while !stop.load(Ordering::Relaxed) {
                     let timing = Timing { now_ns: now_ns(), latency_frames: 0 };
-                    renderer.render(NULL_BLOCK_FRAMES, timing, &mut |_, _| {});
+                    renderer.render(block_frames, timing, &mut |_, _| {});
                     next += period;
                     let now = Instant::now();
                     if next > now {
                         std::thread::sleep(next - now);
-                    } else {
+                    } else if now - next > NULL_CATCH_UP {
+                        // Too far behind to catch up: what a device would
+                        // have dropped is let go of.
                         next = now;
                     }
                 }
@@ -268,7 +288,7 @@ impl AudioHost for NullHost {
             device: NULL_DEVICE.into(),
             sample_rate,
             channels: 2,
-            buffer_frames: NULL_BLOCK_FRAMES as u32,
+            buffer_frames: block_frames as u32,
             latency_frames: 0,
             exclusive: false,
         };

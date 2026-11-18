@@ -99,6 +99,81 @@ a glide. The grid, snapping, the bar numbers and the position are counted throug
 counts a clip's bars as the song has them under it, and the tempo and the time signature in the top bar are
 those the song has where it is.
 
+**A song that plays uses the cores the machine has.** One thread plays a small song, as it always did: while
+making its tracks takes less than half the time its buffers last (measured over a quarter of a second), nothing
+is handed to another thread and the song is played exactly as before. A song that needs more is spread. The
+tracks that do not feed one another are made at once, on a few threads beside the audio device's own, and added
+up by the device's thread in the order one thread would have added them: what is played is the same samples on
+any number of threads and at any buffer size (`trill-engine/tests/cores.rs` holds that to the bit, through keys
+played by hand, a take being recorded, the metronome, an edit arriving while it plays, the loop and a jump). A
+track waits for what feeds it, as in a render: a group for its members, a return for the tracks that send to it,
+a track for the one its compressor listens to. The instances of a plugin that keep something between them take
+turns in the order of the song, also as in a render (below), and what comes after them on a track (the amplifier
+behind a sampled guitar) is taken up by whichever thread is free the moment the turn is over. A song is spread
+at once when a single buffer takes four fifths of its time, goes back to one thread when it has played for a
+quarter of a second at under a quarter, and stays as it is while it stands still, so that it starts on the
+threads it needed when it last played.
+
+*How many threads.* Half as many as the machine has processors, eight at the most, and never more than the
+song has tracks to make at once; `TRILL_PLAY_THREADS` in the environment says another number, and 1 leaves
+everything to the device's thread. The threads are made when a song first comes near to needing them, off the
+audio thread, and sleep between buffers.
+
+*What those threads may do.* They are audio threads like the device's own. None of them allocates or takes a
+lock; work is handed across in atomics; the device's thread makes tracks itself like the others, never sleeps
+on them (it looks again until they are done, and takes what has become ready meanwhile), and wakes them
+without waiting for anything. All of them run in the class Windows keeps for audio ("Pro Audio"). So does the
+device's thread in shared mode, which until now ran at the priority of any other thread of the program, because
+the library that opens the device raises it only when it is built to (the exclusive mode's thread was always
+raised). A device that fails costs the buffer it failed in, on whichever thread, and what was played by hand in
+that buffer is let go of, so that the key it failed on is not played to it again with every buffer after.
+
+*What was measured*, on a machine of eight cores (sixteen processors) that other work kept between a tenth and
+a third busy, with `cargo run -p trill-runtime --example keeps_up`, which plays a song in real time against a
+device that makes no sound. The song is one of nineteen plugins on sixteen tracks: seven sampled guitars, each
+through an amplifier, a sampled bass, a drum kit, two synthesizers and a reverb; 191 seconds at 48 kHz. Load is
+the share of a buffer's time that making it took; a buffer that takes more than its time is late, and heard.
+
+| The device asks for | On one thread | Spread (eight threads) |
+|---|---|---|
+| 480 frames (10 ms, the shared device) | 115.7 % on average, 292 % at the worst, 10,569 of 16,345 buffers late | 36.6 % on average, 74 % at the worst, none of 19,306 late (34.2 % and 37.7 % on two other runs, none late) |
+| 128 frames (2.7 ms) | 113.9 % on average, 282 % at the worst, 40,416 of 62,367 late | 38.9 % on average, 117 % at the worst, 2 of 72,396 late (37.5 % and 1 late on another run) |
+| 64 frames (1.3 ms) | 119.4 % on average, 581 % at the worst, 84,489 of 120,615 late | 40.9 % on average, 100 of 144,798 late |
+
+The buffers that still come late at the small sizes are the plugins' own: single blocks of the sampled
+instruments took 2 to 6.5 ms on one thread at 64 frames, and a synthesizer's 1.5 ms, where a buffer lasts 1.3 ms
+(spread, the longest were 6 to 17 ms; whether the system held a thread up in those was not found out).
+
+On four threads the song took 38.1 % at 480 frames, so the last four buy little: with eight, each track costs
+a fifth to a third more than it does alone (139 to 154 % of one processor for all of them, against 115 %; 121 %
+with four), presumably because they share the cores' caches and, with other work on the machine, the cores
+themselves. Standing still the song cost one thread 75 to 102 % of its time, since an amplifier costs as much
+on silence as on a guitar, and costs 17 to 23 % spread.
+
+*What sets the limit now* is the longest thing that cannot be divided: the one track that costs most (here a
+synthesizer at a quarter of a processor), with the returns and the master after it. The instruments that take
+turns are not it in this song: its two chains are three sampled guitars each, some 2 % of a processor an
+instrument, and the amplifiers behind them go on beside each other. A song with eight instances of one such
+instrument would wait for all eight before its last amplifier. Handing work across costs little beside that: a
+thread that was asleep is at its work 10 to 15 microseconds after it is called on average (a few hundred at the
+latest), and the device's thread, with nothing left to do itself, waits for the others some 200 microseconds a
+round.
+
+*A small song is left alone*, because every thread more that a buffer waits for is one more that the system
+may hold up in the middle of a track. A song of built-in devices (fourteen tracks, forty-eight devices, which
+one thread plays in 13 % of its time) was played at three buffer sizes on one thread, as it comes, and spread
+by force:
+
+| The device asks for | On one thread | As it comes | Spread by force |
+|---|---|---|---|
+| 64 frames | 14.5 % on average, 38 % at the worst | 14.7 %, 40 % | 6.5 %, 36 % |
+| 128 frames | 14.2 %, 28 % | 14.2 %, 40 % | 5.9 %, 17 % |
+| 480 frames | 13.1 %, 30 % | 13.0 %, 22 % | 5.0 %, 10 % |
+
+No buffer was late in these nine runs, and as it comes the song stayed on one thread throughout. Spread by
+force it takes less than half the time; on another such run at 64 frames one buffer of 15,005 took longer than
+it lasts, which none did on one thread.
+
 **Hearing without ears.** Whoever cannot listen (a script, an assistant) measures instead, and a few things make
 that quick and true:
 
@@ -146,7 +221,7 @@ that quick and true:
   section between the markers (or of bar ranges), and how many dB each built-in compressor and limiter took
   off, at the most and typically. It can be made without writing a file, and with only some tracks heard,
   the song's mute and solo left alone.
-- *A render uses the machine.* While a song plays one thread makes every block, a track at a time. A render
+- *A render uses the machine.* It has no speaker to keep up with, so it is spread whatever it costs. A render
   hands the tracks that do not feed one another to several threads (half as many as the machine has
   processors, eight at the most, unless `threads` or `TRILL_RENDER_THREADS` in the environment says another
   number), and then adds them up, by one thread, in the order one thread would have: the mix, every stem and
@@ -156,9 +231,10 @@ that quick and true:
   instances of one plugin share its module, and some modules keep things for all their instances: run at
   once, the instruments of Ample Sound give other samples than run one after the other. So the instances
   of one plugin are run in turn and in the order of the song, beside everything else, unless the plugin
-  was measured to give the same samples either way. Only those devices take turns: what comes after them
-  on a track (the amplifier behind a sampled guitar, which costs many times what the guitar does) goes on
-  beside the other tracks as soon as its track has had its turn. (`trill-plugins/src/beside.rs` lists
+  was measured to give the same samples either way. Only those devices take turns, and only where a song
+  has more than one of a plugin: what comes after them on a track (the amplifier behind a sampled guitar,
+  which costs many times what the guitar does) goes on beside everything else as soon as its track has had
+  its turn. (`trill-plugins/src/beside.rs` lists
   what was measured, and
   `cargo run -p trill-plugins --example beside` measures an installed plugin, or all of them, each in a
   process of its own). A plugin that is listed as one not to run beside anything leaves the render on one

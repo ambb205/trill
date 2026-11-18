@@ -16,7 +16,8 @@
 //! It never reads a file, waits or frees anything. It asks for a start
 //! ([`Recording::start`]: a load of a pointer), asks whether the whole is
 //! there ([`Recording::whole_if_there`]: a lock that is tried and never
-//! waited for, and one count going up) and says that it wants it
+//! waited for, which any number of audio threads have at once, and one
+//! count going up) and says that it wants it
 //! ([`Pool::want`]: two numbers). The workers look for what is wanted
 //! every couple of milliseconds while anything plays.
 //!
@@ -34,7 +35,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock, Weak};
 use std::time::Duration;
 use trill_core::audio::{AudioLoader, FileLoop};
 
@@ -134,8 +135,11 @@ pub struct Recording {
     /// The start, once it has been read, or why it cannot be.
     start: OnceLock<Result<(Facts, Arc<Audio>), String>>,
     /// The whole of a recording that is longer than its start, while that
-    /// is in memory.
-    whole: Mutex<Option<Arc<Audio>>>,
+    /// is in memory. Read by any number of threads at once: a song that
+    /// plays is made on several, and two of them may come by the same
+    /// recording in the same instant; only whoever puts it there or takes
+    /// it away keeps them out.
+    whole: RwLock<Option<Arc<Audio>>>,
     /// A note is sounding it and waits for the whole.
     wanted: AtomicBool,
     /// When it was last played, by the pool's count of notes.
@@ -173,10 +177,11 @@ impl Recording {
     }
 
     /// The whole recording, if it is in memory and nobody is putting it
-    /// there or taking it away this instant. Never waits.
+    /// there or taking it away this instant. Never waits, and is not kept
+    /// out by another thread that asks the same at the same time.
     #[inline]
     pub fn whole_if_there(&self) -> Option<Arc<Audio>> {
-        self.whole.try_lock().ok().and_then(|whole| whole.clone())
+        self.whole.try_read().ok().and_then(|whole| whole.clone())
     }
 }
 
@@ -319,7 +324,7 @@ impl Pool {
         let recording = Arc::new(Recording {
             path: path.to_string(),
             start: OnceLock::new(),
-            whole: Mutex::new(None),
+            whole: RwLock::new(None),
             wanted: AtomicBool::new(false),
             used: AtomicU64::new(0),
             reading: Mutex::new(()),
@@ -365,11 +370,11 @@ impl Pool {
             return Some(start.clone());
         }
         let _reading = lock(&recording.reading);
-        if let Some(whole) = lock(&recording.whole).clone() {
+        if let Some(whole) = read(&recording.whole).clone() {
             return Some(whole);
         }
         let whole = Arc::new(read_whole(self.shared.loader.as_ref(), &recording.path, facts.frames).ok()?);
-        *lock(&recording.whole) = Some(whole.clone());
+        *write(&recording.whole) = Some(whole.clone());
         self.shared.held.fetch_add(whole.bytes(), Ordering::Relaxed);
         self.shared.trim(&recording.path);
         Some(whole)
@@ -461,6 +466,14 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 impl Shared {
     /// The recording a note waits for the whole of, if there is one.
     fn next_wanted(&self) -> Option<Arc<Recording>> {
@@ -484,13 +497,13 @@ impl Shared {
             return;
         }
         let _reading = lock(&recording.reading);
-        if lock(&recording.whole).is_some() {
+        if read(&recording.whole).is_some() {
             return;
         }
         let Ok(whole) = read_whole(self.loader.as_ref(), &recording.path, facts.frames) else { return };
         let whole = Arc::new(whole);
         self.held.fetch_add(whole.bytes(), Ordering::Relaxed);
-        *lock(&recording.whole) = Some(whole);
+        *write(&recording.whole) = Some(whole);
         self.trim(&recording.path);
     }
 
@@ -505,7 +518,7 @@ impl Shared {
                 if recording.path == keep {
                     continue;
                 }
-                let idle = lock(&recording.whole).as_ref().is_some_and(|whole| Arc::strong_count(whole) == 1);
+                let idle = read(&recording.whole).as_ref().is_some_and(|whole| Arc::strong_count(whole) == 1);
                 let older = oldest
                     .is_none_or(|found| recording.used.load(Ordering::Relaxed) < found.used.load(Ordering::Relaxed));
                 if idle && older {
@@ -513,7 +526,7 @@ impl Shared {
                 }
             }
             let Some(recording) = oldest else { return };
-            let mut whole = lock(&recording.whole);
+            let mut whole = write(&recording.whole);
             // With the lock held no voice can take it, and none has it if
             // the pool is its one holder.
             if whole.as_ref().is_some_and(|audio| Arc::strong_count(audio) == 1)

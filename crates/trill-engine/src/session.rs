@@ -22,6 +22,7 @@ use trill_dsp::{SampleRef, StateError, drumrack, sampler};
 use trill_media::MediaCache;
 
 mod controllers;
+mod cores;
 mod editors;
 mod files;
 mod instruments;
@@ -38,6 +39,7 @@ pub use sounds::{Added, Given, ListedSound, SavedAsSound, listed_sounds, sound_a
 pub use wavetable::{TableReport, factory_tables};
 
 pub use controllers::SilentInstrument;
+pub use cores::{Costs, TrackCost};
 pub use files::file_facts;
 pub use playing::{MAX_COUNT_IN_BARS, RecordState, RecordStatus};
 pub use probing::ProbeTarget;
@@ -1014,6 +1016,7 @@ impl Session {
     /// ([`Session::audio_revision`]).
     pub fn housekeeping(&mut self) {
         self.engine.collect_garbage();
+        self.engine.tend_threads();
         self.tend_audio();
         self.recover_lost_messages();
         self.tend_take();
@@ -1080,6 +1083,14 @@ impl Session {
         }
         .compile(&self.project, true);
         self.problems = problems;
+        // Which of its tracks can be made at once, for when the song is
+        // more than one thread plays in time.
+        let mut graph = graph;
+        let can_use = match self.engine.play_threads() {
+            1 => 1,
+            _ => graph.spread(&self.project, self.factory.as_ref()),
+        };
+        self.engine.can_use(can_use);
         self.engine.swap(graph);
     }
 
