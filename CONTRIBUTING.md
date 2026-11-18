@@ -7,7 +7,7 @@ reachable over MCP.
 ## Before you send a change
 
 ```sh
-cargo test --workspace                    # about 2,650 tests; needs nothing installed
+cargo test --workspace                    # about 2,700 tests; needs nothing installed
 cargo clippy --workspace --all-targets    # must be clean
 cargo fmt --all -- --check                # rustfmt.toml: 120 columns
 ```
@@ -23,8 +23,9 @@ conventions that are particular to this repository. The ones that decide most re
 
 - **An edit is a method on `Project` first**, with tests in `trill-core`; then an MCP tool; then the window. An
   edit that exists only in the window cannot be reached by an AI.
-- **The audio thread never allocates, locks or waits.** `tests/realtime.rs` in `trill-engine` and
-  `trill-plugins` enforce it: extend them when you touch what the audio thread runs.
+- **The threads that play a song never allocate, take a lock, or sleep on anything another thread can hold.**
+  `tests/realtime.rs` in `trill-engine` and `trill-plugins` enforce it on every one of them: extend them when you
+  touch what an audio thread runs.
 - **A song saved before must sound as it did.** A change to how a built-in device sounds comes with a file of
   the older format in `trill-engine/tests/old_songs.rs`.
 - **A failure is a sentence, not a crash.** A device that vanishes, a plugin that refuses, a file that is gone:

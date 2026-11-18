@@ -10,9 +10,10 @@ so an assistant can write, arrange, mix and render a song, and measure what it m
 
 Three goals decide every trade-off:
 
-- **It does not crash or stall.** The audio thread never allocates, locks or waits. Plugins are scanned, and
-  songs with plugins are rendered, in separate processes. Unsaved work is copied to a safe place every twenty
-  seconds and offered back the next time the program starts.
+- **It does not crash or stall.** The threads that play a song never allocate or take a lock, and a song is
+  played on as many processor cores as it needs. Plugins are scanned, and songs with plugins are rendered, in
+  separate processes. Unsaved work is copied to a safe place every twenty seconds and offered back the next
+  time the program starts.
 - **It hosts your plugins.** CLAP and VST3, with their presets and their own editor windows.
 - **An AI can drive all of it.** Every edit has one implementation, which the window and the MCP server share.
 
@@ -141,7 +142,7 @@ owes the makers of the sampled instruments it plays.
 ## Development
 
 ```sh
-cargo test --workspace                    # about 2,650 tests; needs nothing installed
+cargo test --workspace                    # about 2,700 tests; needs nothing installed
 cargo clippy --workspace --all-targets    # must be clean
 cargo fmt --all -- --check
 ```

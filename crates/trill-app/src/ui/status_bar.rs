@@ -267,8 +267,8 @@ mod tests {
 
     #[test]
     fn the_output_name_loses_its_rate_suffix_only() {
-        assert_eq!(without_rate("Speakers (Schiit Unison Modius E) (48000 Hz)"), "Speakers (Schiit Unison Modius E)");
-        assert_eq!(without_rate("Speakers (Schiit Unison Modius E)"), "Speakers (Schiit Unison Modius E)");
+        assert_eq!(without_rate("Speakers (USB Audio Device) (48000 Hz)"), "Speakers (USB Audio Device)");
+        assert_eq!(without_rate("Speakers (USB Audio Device)"), "Speakers (USB Audio Device)");
         assert_eq!(without_rate("none (null backend)"), "none (null backend)");
         assert_eq!(without_rate("Line Out"), "Line Out");
     }
