@@ -69,6 +69,7 @@ Options:
   --study-bars <A-B>      Select these bars of it across its lanes; --study-lanes <drums,bass> keeps the
                           selection to those stems, --study-close looks at it close, and
                           --study-list <loops|hits|lines|notes> says what is listed beside the lanes
+  --study-take <WHAT,..>  Take these of it into the song once it is open: reference, tempo, parts, key, kit
   --study-dialog          Start with the dialog that asks for a recording to study open
   --setup-scene <NAME>    Show a made-up machine in that panel, for screenshots: fresh, fetching
                           or machine
@@ -233,6 +234,20 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
                 cli.study_shown.lanes = value("stems such as drums,bass")?.split(',').map(str::to_owned).collect();
             }
             "--study-close" => cli.study_shown.close = true,
+            "--study-take" => {
+                for what in value("what to take, such as reference,tempo")?.split(',') {
+                    cli.study_shown.take.push(match what {
+                        "reference" => crate::ui::StudyWhole::Reference,
+                        "tempo" => crate::ui::StudyWhole::Tempo,
+                        "parts" => crate::ui::StudyWhole::Parts,
+                        "key" => crate::ui::StudyWhole::Key,
+                        "kit" => crate::ui::StudyWhole::Kit,
+                        other => {
+                            bail!("'{other}' is not something to take of a study (reference, tempo, parts, key or kit)")
+                        }
+                    });
+                }
+            }
             "--study-list" => {
                 cli.study_shown.side = Some(match value("a list")?.as_str() {
                     "loops" => crate::ui::StudySide::Loops,

@@ -184,6 +184,8 @@ pub struct Question {
     /// Only the stems go.
     pub stems: bool,
     pub used: Vec<UsedBy>,
+    /// Set where the question is about the stems of every study: their ids.
+    pub all: Vec<String>,
 }
 
 /// The dialog that asks for a recording to study.
@@ -219,6 +221,8 @@ enum Done {
     Words(String, Result<Lyrics, String>),
     /// A study that the song has a reference of, read to be drawn along it.
     Known(String, Result<Box<Open>, String>),
+    /// What gathering the song's files came to, said as a toast: it is asked for from the menu.
+    Gathered(Result<String, String>),
     /// Something was taken into the song: the clip to show, if it made one.
     Taken(Result<Option<trill_core::ClipId>, String>),
 }
@@ -485,10 +489,14 @@ fn took_in(ctx: &egui::Context, cx: &mut Cx, done: Done) {
                             ..View::default()
                         };
                     }
-                    if let Some(shown) = studies.shown.take() {
-                        arrange(&mut studies.view, &opened, &shown);
+                    let shown = studies.shown.take();
+                    if let Some(shown) = &shown {
+                        arrange(&mut studies.view, &opened, shown);
                     }
                     studies.open = Some(Arc::from(opened));
+                    for what in shown.into_iter().flat_map(|shown| shown.take) {
+                        take(ctx, cx, what);
+                    }
                 }
                 Err(why) => studies.last = Some((why, true)),
             }
@@ -566,6 +574,13 @@ fn took_in(ctx: &egui::Context, cx: &mut Cx, done: Done) {
                 Err(why) => studies.last = Some((why, true)),
             }
         }
+        Done::Gathered(gathered) => {
+            studies.working = studies.working.saturating_sub(1);
+            match gathered {
+                Ok(words) => cx.state.toasts.success(words),
+                Err(why) => cx.state.toasts.error(why),
+            }
+        }
         Done::Known(id, known) => {
             studies.known.insert(id, known.ok().map(Arc::from));
         }
@@ -591,6 +606,8 @@ pub struct Shown {
     pub side: Option<Side>,
     /// Looked at close: a few bars around the selection.
     pub close: bool,
+    /// What is taken of it as a whole once it is open.
+    pub take: Vec<Whole>,
 }
 
 /// Lays the view out as `shown` asks.
@@ -692,7 +709,37 @@ pub fn resume(ctx: &egui::Context, cx: &mut Cx, id: String) {
 pub fn ask_to_remove(ctx: &egui::Context, cx: &mut Cx, id: String, title: String, stems: bool) {
     cx.studies.working += 1;
     cx.studies.spawn(ctx, &cx.sounds.runtime, move |runtime, report| {
-        let asked = runtime.study_used_by(&id, stems).map(|used| Question { id, title, stems, used });
+        let asked = runtime.study_used_by(&id, stems).map(|used| Question { id, title, stems, used, all: Vec::new() });
+        report(Done::Asked(asked));
+    });
+}
+
+/// Asks to drop the stems of every study that is done: Setup's way of
+/// making room. The question names every song that plays any of them.
+pub fn ask_to_drop_every_stem(ctx: &egui::Context, cx: &mut Cx) {
+    cx.studies.working += 1;
+    cx.studies.spawn(ctx, &cx.sounds.runtime, move |runtime, report| {
+        let asked = (|| {
+            let done: Vec<String> = runtime
+                .studies()?
+                .list()
+                .into_iter()
+                .filter(|report| report.study.state == State::Done)
+                .map(|report| report.study.id)
+                .collect();
+            let mut used: Vec<UsedBy> = Vec::new();
+            for id in &done {
+                for song in runtime.study_used_by(id, true)? {
+                    match used.iter_mut().find(|known| known.path == song.path && known.open == song.open) {
+                        Some(known) => known.places += song.places,
+                        None => used.push(song),
+                    }
+                }
+            }
+            let title =
+                if done.len() == 1 { "the one study".to_owned() } else { format!("all {} studies", done.len()) };
+            Ok(Question { id: String::new(), title, stems: true, used, all: done })
+        })();
         report(Done::Asked(asked));
     });
 }
@@ -705,10 +752,24 @@ pub fn remove(ctx: &egui::Context, cx: &mut Cx, question: Question) {
     }
     // Its lanes are read again once the stems are gone: they then say so.
     let reopen = cx.studies.open.as_ref().is_some_and(|open| open.id == question.id);
+    let was_open = cx.studies.open.as_ref().map(|open| open.id.clone());
     cx.studies.working += 1;
     cx.studies.last = None;
     cx.studies.spawn(ctx, &cx.sounds.runtime, move |runtime, report| {
-        let removed = if question.stems {
+        let removed = if !question.all.is_empty() {
+            let mut freed = 0;
+            let dropped: Result<(), String> = question.all.iter().try_for_each(|id| {
+                freed += runtime.drop_study_stems(id)?;
+                Ok(())
+            });
+            dropped.map(|()| {
+                format!(
+                    "The stems of {} are gone ({} MB); what was found in them is kept.",
+                    question.title,
+                    freed >> 20
+                )
+            })
+        } else if question.stems {
             runtime.drop_study_stems(&question.id).map(|freed| {
                 format!(
                     "The stems of {} are gone ({} MB); what was found in them is kept.",
@@ -724,8 +785,12 @@ pub fn remove(ctx: &egui::Context, cx: &mut Cx, question: Question) {
         };
         let gone = removed.is_ok();
         report(Done::Said(removed));
-        if reopen && question.stems && gone {
-            report(Done::Opened(read(runtime, &question.id)));
+        let open_again = match (&question.all[..], reopen) {
+            ([], true) if question.stems => Some(question.id.clone()),
+            (all, _) => was_open.filter(|open| all.contains(open)),
+        };
+        if let Some(id) = open_again.filter(|_| gone) {
+            report(Done::Opened(read(runtime, &id)));
         }
     });
 }
@@ -948,6 +1013,22 @@ pub fn take(ctx: &egui::Context, cx: &mut Cx, what: Whole) {
                 .map_err(|error| error.to_string())?;
             Ok(format!("The song is said to be in {}.", key.name()))
         }
+    });
+}
+
+/// Gives the open song what it plays of studies in a folder beside it.
+pub fn gather(ctx: &egui::Context, cx: &mut Cx) {
+    cx.studies.working += 1;
+    cx.studies.spawn(ctx, &cx.sounds.runtime, |runtime, report| {
+        let gathered = runtime.gather_from_studies().map(|gathered| match gathered.files {
+            0 => "The song plays nothing out of a study.".to_owned(),
+            files => format!(
+                "{files} files, {} MB, are in {} and the song plays them from there: save the song.",
+                gathered.bytes >> 20,
+                gathered.folder.display()
+            ),
+        });
+        report(Done::Gathered(gathered));
     });
 }
 

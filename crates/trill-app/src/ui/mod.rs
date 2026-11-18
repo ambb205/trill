@@ -103,7 +103,7 @@ pub use making_of::Start as MakingOfStart;
 pub use making_of::scene::play as play_making_of_scene;
 pub use setup_scene::SetupScene;
 pub use state::{BrowserTab, DetailTab};
-pub use study::{Shown as StudyShown, Side as StudySide};
+pub use study::{Shown as StudyShown, Side as StudySide, Whole as StudyWhole};
 
 use anyhow::anyhow;
 use eframe::egui;

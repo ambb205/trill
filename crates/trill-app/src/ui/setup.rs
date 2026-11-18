@@ -973,6 +973,19 @@ fn machine(ui: &mut Ui, ctx: &egui::Context, cx: &mut Cx) {
         heading(ui, theme, "Studies", &words);
         let moves = "Keep studies in another folder, and move the ones there are: a song's stems are a couple of hundred megabytes";
         kept_line(ui, ctx, cx, Kept::Studies, &folder, moves);
+        if count > 0 {
+            // Most of what a study takes is its stems, and what was found in them does not need them.
+            let (row, response) = ui.allocate_exact_size(vec2(WIDTH, ROW), Sense::hover());
+            let words = "Stems are most of that: dropped, what was found in them is kept";
+            response.widget_info(|| WidgetInfo::labeled(Role::Label, true, words));
+            text::paint(ui.painter(), row, Align2::LEFT_CENTER, theme.text.body, words, theme.ink_dim);
+            let busy = cx.setup.working > 0;
+            let about = "Removes the stems of every study, after saying which songs play them; the studies stay";
+            if row_button(ui, cx, row, "Drop stems\u{2026}", "Drop the stems of every study", busy, about) {
+                crate::ui::study::ask_to_drop_every_stem(ctx, cx);
+                cx.setup.stale = true;
+            }
+        }
     }
 }
 

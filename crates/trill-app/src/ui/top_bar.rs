@@ -228,6 +228,16 @@ fn file_menu(ui: &mut Ui, cx: &mut Cx) {
     }
     // What Trill does not ship: the models that take a recording apart,
     // and whatever else is fetched when it is asked for.
+    if MenuItem::new("Study a recording\u{2026}").show(ui, theme).clicked() {
+        cx.studies.dialog.open = true;
+    }
+    if MenuItem::new("Gather what the song plays of studies")
+        .detail("Into a folder beside the song, cut to what it uses: for another machine")
+        .show(ui, theme)
+        .clicked()
+    {
+        crate::ui::study::gather(ui.ctx(), cx);
+    }
     if item(ui, "Setup\u{2026}", Command::Setup, true) {
         setup::open(ui.ctx(), cx);
     }

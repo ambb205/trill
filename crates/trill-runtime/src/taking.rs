@@ -31,8 +31,11 @@ pub const CUTS: &str = "cuts";
 const DRIFT_SECONDS: f64 = 0.012;
 /// How far a bar line of the song may come to lie from the recording's
 /// when its tempo is taken, in seconds: bars that agree to within this are
-/// one tempo.
+/// one tempo. A recording that holds its tempo is given more: what moves
+/// its bar lines by a few hundredths of a second is whoever found them, and
+/// a song is not handed a new tempo every few bars for that.
 const TEMPO_SECONDS: f64 = 0.003;
+const TEMPO_SECONDS_STEADY: f64 = 0.03;
 /// A stretch that begins and ends this near to beats of the recording is
 /// taken to be whole beats long.
 const ON_A_BEAT: f64 = 0.02;
@@ -1160,12 +1163,13 @@ fn laid_tempo(project: &mut Project, heard: &Heard, at: Beats) -> Result<TakenTe
     }
     let per_bar = grid.beats_per_bar.max(1) as f64;
     // Runs of bars that one tempo keeps to within a few milliseconds of the recording.
+    let within = if grid.steady { TEMPO_SECONDS_STEADY } else { TEMPO_SECONDS };
     let mut runs: Vec<(usize, usize)> = Vec::new();
     let mut begin = 0;
     for end in 2..lines.len() {
         let even =
             |index: usize| lines[begin] + (index - begin) as f64 / (end - begin) as f64 * (lines[end] - lines[begin]);
-        if (begin + 1..end).any(|index| (even(index) - lines[index]).abs() > TEMPO_SECONDS) {
+        if (begin + 1..end).any(|index| (even(index) - lines[index]).abs() > within) {
             runs.push((begin, end - 1));
             begin = end - 1;
         }
@@ -1257,6 +1261,20 @@ mod tests {
         project.add_midi_clip(track, "long", 0.0, 64.0).unwrap();
         let taken = laid_tempo(&mut project, &moving, 8.0).unwrap();
         assert_eq!((taken.bars, taken.tempos), (4, 2));
+        // A recording that holds its tempo, its bar lines found a hundredth of a second out here and there,
+        // is one tempo: nobody plays a song that changes its tempo every other bar by a hundredth of a beat.
+        let jitter = [0.0, 0.008, -0.006, 0.004, -0.009, 0.007, 0.0, -0.005, 0.0];
+        let found: Vec<f64> = (0..=32)
+            .map(|beat| f64::from(beat) * 0.5 + if beat % 4 == 0 { jitter[beat as usize / 4] } else { 0.0 })
+            .collect();
+        let held = heard(found, 4);
+        let mut song = Project::new("t");
+        let one = laid_tempo(&mut song, &held, 0.0).unwrap();
+        assert_eq!((one.bars, one.tempos), (8, 1));
+        assert!((song.tempo - 120.0).abs() < 0.05 && song.tempo_changes.is_empty(), "{}", song.tempo);
+        // Held to the millisecond, as a recording that wanders is, every bar is its own.
+        let wandering = Heard { grid: Grid { steady: false, ..held.grid.clone() }, ..held.clone() };
+        assert!(laid_tempo(&mut Project::new("t"), &wandering, 0.0).unwrap().tempos > 4);
         assert!((taken.slowest - 100.0).abs() < 1e-6 && (taken.fastest - 120.0).abs() < 1e-6);
         let map = project.tempo_map();
         assert!((map.tempo_at(0.0) - 120.0).abs() < 1e-9 && (map.tempo_at(17.0) - 100.0).abs() < 1e-6);

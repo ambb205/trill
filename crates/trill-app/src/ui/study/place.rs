@@ -353,7 +353,13 @@ fn paragraph(ui: &mut Ui, cx: &Cx, color: egui::Color32, words: &str) {
 /// The question before a study goes, or its stems: which songs play it.
 fn ask(ctx: &egui::Context, cx: &Cx, question: &Question) -> Option<bool> {
     let what = if question.stems { "the stems of" } else { "" };
-    let mut body = if question.stems {
+    let mut body = if !question.all.is_empty() {
+        format!(
+            "The stems of {} are removed; everything that was found in them is kept, and studying a recording \
+             again makes its stems again.",
+            question.title
+        )
+    } else if question.stems {
         format!(
             "The stems of {} are removed, a couple of hundred megabytes; everything that was found in them is kept, \
              and studying the recording again makes them again.",
