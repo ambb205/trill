@@ -66,23 +66,41 @@ fn whisper_words() -> Vec<Fetched> {
 pub fn parts() -> Vec<Part> {
     let mut parts = Vec::new();
     if cfg!(all(windows, target_arch = "x86_64")) {
-        parts.push(part(
-            RUNTIME,
-            "The models' runtime",
-            "ONNX Runtime 1.32.0, which runs every model: on the processor by itself, on a graphics card with one of the two parts below. Nothing can be studied without it.",
-            "Microsoft: MIT License.",
-            "github.com/microsoft/onnxruntime (its release)",
-            &[],
-            vec![Fetched::archive(
-                "https://github.com/microsoft/onnxruntime/releases/download/v1.32.0/onnxruntime-win-x64-1.32.0.zip",
-                "aaa1d04fcf86bd31e84b90bc0cbde80e632bd0720dcc5d8ba05c4fe45c09d127",
-                96_945_131,
+        parts.push(Part {
+            // Microsoft's package of the same build for NuGet: its two libraries are the
+            // release's, byte for byte (compared on 2026-11-18, the day after the repository
+            // and every release in it stopped answering). Twice as much to fetch, for the
+            // other systems' libraries that lie beside them.
+            elsewhere: vec![vec![Fetched::archive(
+                "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.32.0/microsoft.ml.onnxruntime.1.32.0.nupkg",
+                "a9150bc2992cbbb6722070da9910e1ffa989a8bfc67bdd5bb8e745ca755641db",
+                184_391_411,
                 members(&[
-                    ("onnxruntime-win-x64-1.32.0/lib/onnxruntime.dll", "onnxruntime.dll"),
-                    ("onnxruntime-win-x64-1.32.0/lib/onnxruntime_providers_shared.dll", "onnxruntime_providers_shared.dll"),
+                    ("runtimes/win-x64/native/onnxruntime.dll", "onnxruntime.dll"),
+                    ("runtimes/win-x64/native/onnxruntime_providers_shared.dll", "onnxruntime_providers_shared.dll"),
                 ]),
-            )],
-        ));
+            )]],
+            ..part(
+                RUNTIME,
+                "The models' runtime",
+                "ONNX Runtime 1.32.0, which runs every model: on the processor by itself, on a graphics card with one of the two parts below. Nothing can be studied without it.",
+                "Microsoft: MIT License.",
+                "github.com/microsoft/onnxruntime (its release), or nuget.org (Microsoft's package Microsoft.ML.OnnxRuntime) where that does not answer",
+                &[],
+                vec![Fetched::archive(
+                    "https://github.com/microsoft/onnxruntime/releases/download/v1.32.0/onnxruntime-win-x64-1.32.0.zip",
+                    "aaa1d04fcf86bd31e84b90bc0cbde80e632bd0720dcc5d8ba05c4fe45c09d127",
+                    96_945_131,
+                    members(&[
+                        ("onnxruntime-win-x64-1.32.0/lib/onnxruntime.dll", "onnxruntime.dll"),
+                        (
+                            "onnxruntime-win-x64-1.32.0/lib/onnxruntime_providers_shared.dll",
+                            "onnxruntime_providers_shared.dll",
+                        ),
+                    ]),
+                )],
+            )
+        });
         parts.push(part(
             ANY_CARD,
             "For a graphics card of any make",
@@ -280,22 +298,28 @@ mod tests {
         for part in &parts {
             assert!(!part.files.is_empty() && part.size() > 0, "{}", part.id);
             assert!(part.licence.len() > 20 && part.from.contains('.') && part.what.ends_with('.'), "{}", part.id);
-            for file in &part.files {
+            // The other places a part is published are pinned like the first.
+            assert!(part.elsewhere.iter().all(|files| !files.is_empty()), "{}", part.id);
+            for file in part.files.iter().chain(part.elsewhere.iter().flatten()) {
                 assert!(file.url.starts_with("https://"), "{}", file.url);
                 assert!(
                     file.sha256.len() == 64 && file.sha256.chars().all(|letter| letter.is_ascii_hexdigit()),
                     "{}",
                     file.url
                 );
-                // Pinned to a version: a release, a commit, or a file named by its hash.
+                // Pinned to a version: a release, a commit, a file named by its hash, or a
+                // package of one version (which its registry never replaces).
                 assert!(
                     file.url.contains("/releases/download/")
                         || file.url.contains("/resolve/") && !file.url.contains("/resolve/main/")
-                        || file.url.contains("files.pythonhosted.org/packages/"),
+                        || file.url.contains("files.pythonhosted.org/packages/")
+                        || file.url.contains("api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.32.0/"),
                     "{} floats",
                     file.url
                 );
             }
+            // The runtime is published in a second place, since the first stopped answering once.
+            assert!(part.id != RUNTIME || !part.elsewhere.is_empty(), "the runtime is published in one place only");
             for needed in &part.needs {
                 assert!(
                     cfg!(not(windows)) || ids.contains(&needed.as_str()),
