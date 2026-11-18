@@ -102,9 +102,10 @@ fn factory() -> Builtins {
 /// by a controller, takes in turn and at random, loops with and without a
 /// crossfade, sounds for a key coming up, a filter with an envelope, a
 /// vibrato on the wheel, switches, groups that silence one another, slow
-/// waves that move the pitch, the level, the filter and one another, and
-/// the controllers a note has of its own, which choose what sounds and
-/// move where it begins.
+/// waves that move the pitch, the level, the filter and one another, the
+/// controllers a note has of its own, which choose what sounds and move
+/// where it begins, and the noise of the pedal going down and coming up,
+/// which the pedal sets off and no key.
 const BUSY: &str = "<control> set_cc1=20\n<global> sw_lokey=24 sw_hikey=26 sw_default=24 ampeg_release=0.3\n\
     <master> lokey=27 hikey=60\n\
     <group> sw_last=24 lovel=1 hivel=70 loop_mode=loop_sustain loop_start=20000 loop_end=30000 loop_crossfade=0.02\n\
@@ -124,7 +125,10 @@ const BUSY: &str = "<control> set_cc1=20\n<global> sw_lokey=24 sw_hikey=26 sw_de
     <master> lokey=61 hikey=96 loop_mode=one_shot\n\
     <region> sample=long_4.wav pitch_keycenter=72 group=1 off_by=2 note_polyphony=2\n\
     <region> sample=tone.wav key=62 group=2 off_mode=normal\n\
-    <master> trigger=release lokey=27 hikey=60 rt_decay=3\n<region> sample=long_5.wav pitch_keycenter=50 volume=-12";
+    <master> trigger=release lokey=27 hikey=60 rt_decay=3\n<region> sample=long_5.wav pitch_keycenter=50 volume=-12\n\
+    <master> lokey=-1 hikey=-1 volume=-20 on_locc64=127 on_hicc64=127 locc64=127 hicc64=127\n\
+    <region> sample=tone.wav lorand=0 hirand=0.5 <region> sample=tone.wav lorand=0.5 hirand=1 tune=30\n\
+    <master> key=-1 volume=-20 on_locc64=0 on_hicc64=0 <region> sample=tone.wav";
 
 fn model(uri: &str) -> Device {
     let mut project = Project::new("t");

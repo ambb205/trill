@@ -71,8 +71,8 @@ Options:
                           --study-list <loops|hits|lines|notes> says what is listed beside the lanes
   --study-take <WHAT,..>  Take these of it into the song once it is open: reference, tempo, parts, key, kit
   --study-dialog          Start with the dialog that asks for a recording to study open
-  --setup-scene <NAME>    Show a made-up machine in that panel, for screenshots: fresh, fetching
-                          or machine
+  --setup-scene <NAME>    Show a made-up machine in that panel, for screenshots: fresh, fetching,
+                          machine, instruments, instruments-fetching or instruments-search
   --hold <KEYS>           Hold these keys of it down, for screenshots: adg is a C major chord, and
                           zzat a kick and a hat two octaves down
   --screenshot <PATH.png> Render the window to a PNG and exit (implies --null-audio)

@@ -2,8 +2,17 @@
 //! happens on Trill's side of a fetch, and what a song owes for the ones
 //! it plays.
 //!
-//! Trill fetches nothing here. A set comes into a folder some other way
-//! (the program's fetching, or someone who had the files), and then:
+//! The catalogue's sets are a list of the engine that fetches
+//! (`trill-fetch`, [`fetch_list`]): a part for each set, fetched from
+//! where its maker publishes it when the user asks, into a folder of the
+//! user's choosing, each set in a folder named by its id. Several are
+//! asked for at once by what they are ([`Ask`]: the starter selection,
+//! everything, a kind), and wait their turn. A set that has arrived is
+//! made the library's by the list's own hook; one that was removed is no
+//! longer listed there.
+//!
+//! A set may also come into a folder some other way (someone who had the
+//! files), and then:
 //!
 //! * [`Runtime::set_arrived`] is told the folder. It checks that what is
 //!   there is the set that was read, all of it, and only then makes the
@@ -22,17 +31,163 @@
 //! checksum of its file, wherever it was put ([`Runtime::catalogue_here`]).
 
 use crate::Runtime;
+use crate::settings::SettingsFile;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 use trill_catalogue::check::{below, file_sum};
-use trill_catalogue::{Catalogue, Fetch, Owed, Set};
-use trill_library::{EntryKind, Query};
+use trill_catalogue::{Catalogue, Fetch, Kind, Owed, Set};
+use trill_fetch::{Asked, Change, Fetched, Hook, Keep, List, Part};
+use trill_library::{EntryKind, Library, Query};
 
 /// What a folder a set is being copied into is called until it is whole.
 const ARRIVING: &str = ".arriving";
+/// The list of the catalogue's sets in the engine that fetches, and the
+/// folder in the program's data folder they are kept in unless the user
+/// chose another.
+pub const INSTRUMENTS: &str = "instruments";
+pub const SETS_FOLDER: &str = "instrument-sets";
+
+/// Which sets are asked for at once.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ask {
+    /// The starter selection: the best of each kind that was found.
+    Starter,
+    /// Every set of the catalogue.
+    Everything,
+    /// Every set with an instrument of this kind that is put forward.
+    Kind(Kind),
+    /// These sets, by their ids.
+    Sets(Vec<String>),
+}
+
+impl Ask {
+    /// The sets it means, smallest first: so that there is soon something to play.
+    pub fn sets<'a>(&self, catalogue: &'a Catalogue) -> Vec<&'a Set> {
+        let mut sets: Vec<&Set> = match self {
+            Ask::Starter => catalogue.starter(),
+            Ask::Everything => catalogue.sets.iter().collect(),
+            Ask::Kind(kind) => catalogue
+                .sets
+                .iter()
+                .filter(|set| set.instruments.iter().any(|one| one.kind == *kind && one.is_put_forward()))
+                .collect(),
+            Ask::Sets(ids) => catalogue.sets.iter().filter(|set| ids.contains(&set.id)).collect(),
+        };
+        sets.sort_by_key(|set| set.fetched_bytes());
+        sets
+    }
+}
+
+/// A set as a part for the engine that fetches: what it is, its licence
+/// in its maker's words with where that was read, whom to name, and the
+/// files it is fetched as, pinned as the catalogue pins them.
+pub fn part_of(set: &Set) -> Part {
+    let keep = |under: &str| Keep::Tree { under: under.to_owned(), sum: set.tree() };
+    let files = match &set.fetch {
+        // Its source makes the archive when it is asked for: its size is an
+        // estimate, and what it unpacks to decides.
+        Fetch::Archive { url, under, .. } => {
+            vec![Fetched::archive(url, "", set.fetched_bytes(), keep(under)).unpacking_to(set.bytes)]
+        }
+        Fetch::Files { base, files } => {
+            files.iter().map(|file| Fetched::file_below(base, &file.path, &file.sha256, file.size)).collect()
+        }
+    };
+    // Whoever else keeps it keeps one archive, pinned by its own bytes and by what it unpacks to.
+    let elsewhere = set
+        .mirrors
+        .iter()
+        .map(|mirror| {
+            vec![
+                Fetched::archive(&mirror.url, &mirror.sha256, mirror.bytes, keep(&mirror.under))
+                    .unpacking_to(set.bytes),
+            ]
+        })
+        .collect();
+    let count = set.instruments.len();
+    Part {
+        id: set.id.clone(),
+        name: set.name.clone(),
+        what: format!("{} {count} instrument{}.", set.about, if count == 1 { "" } else { "s" }),
+        licence: format!(
+            "{}. \u{201C}{}\u{201D} Read at {} on {}.",
+            set.licence.name(),
+            set.licence_says,
+            set.licence_at,
+            set.read
+        ),
+        credit: set.credit.clone().unwrap_or_default(),
+        from: format!("{}, at {} (as it was at {})", set.by, set.from, &set.version[..set.version.len().min(12)]),
+        needs: Vec::new(),
+        files,
+        elsewhere,
+    }
+}
+
+/// The catalogue as a list for the engine that fetches, kept in `folder`.
+pub fn fetch_list(catalogue: &Catalogue, folder: PathBuf, changed: Option<Hook>) -> List {
+    List {
+        id: INSTRUMENTS.to_owned(),
+        title: "Instruments".to_owned(),
+        about: "Sampled instruments that others publish under licences that let anyone use them and hand them on. \
+                Trill ships none of them and hosts none: each set comes from where its maker publishes it when you \
+                ask for it, and is checked against what it was when its licence was read."
+            .to_owned(),
+        folder,
+        parts: catalogue.sets.iter().map(part_of).collect(),
+        changed,
+    }
+}
+
+/// Makes the folder `folder` lies in a folder of the library, unless it
+/// lies in one already, and has the library look. Answers with the folder
+/// that was added.
+fn into_library(library: &Library, settings: &Mutex<SettingsFile>, folder: &Path) -> Option<PathBuf> {
+    let folder = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
+    let inside = library.roots().iter().any(|root| folder.starts_with(root));
+    let added = match (inside, folder.parent()) {
+        (true, _) | (false, None) => {
+            library.rescan();
+            None
+        }
+        (false, Some(parent)) => {
+            // The folder the sets are kept in, so that the next set to
+            // arrive there is in the library too.
+            if !library.add_root(parent) {
+                library.rescan();
+            }
+            Some(parent.to_path_buf())
+        }
+    };
+    if let Err(error) = settings.lock().save_library_changes(library) {
+        log::warn!("the library's folders could not be saved: {error}");
+    }
+    added
+}
+
+/// A set is gone from `folder`: the library looks again. The folder it
+/// lay in stops being a folder of the library once nothing is left in it
+/// (sets that were moved elsewhere, or all removed).
+fn out_of_library(library: &Library, settings: &Mutex<SettingsFile>, folder: &Path) {
+    let folder = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
+    let emptied = folder.parent().filter(|parent| {
+        library.roots().iter().any(|root| root == parent)
+            && std::fs::read_dir(parent).map_or(true, |mut entries| entries.next().is_none())
+    });
+    match emptied {
+        Some(parent) => {
+            library.remove_root(parent);
+        }
+        None => library.rescan(),
+    }
+    if let Err(error) = settings.lock().save_library_changes(library) {
+        log::warn!("the library's folders could not be saved: {error}");
+    }
+}
 
 /// A set that has arrived and is in the library.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,9 +260,54 @@ fn files_below(folder: &Path) -> Result<Vec<String>, String> {
 }
 
 impl Runtime {
-    /// The catalogue that is built into the program.
-    pub fn catalogue(&self) -> &'static Catalogue {
-        Catalogue::shipped()
+    /// The catalogue of instruments: the one that is built into the
+    /// program, unless this runtime was handed another.
+    pub fn catalogue(&self) -> &Catalogue {
+        match &self.catalogue {
+            Some(own) => own,
+            None => Catalogue::shipped(),
+        }
+    }
+
+    /// Adds the catalogue's sets to what the engine that fetches offers
+    /// (see the notes at the top), kept in the program's own folder unless
+    /// the user chose another. A set that arrives is made the library's;
+    /// one that is removed is no longer listed there. Nothing where this
+    /// run keeps nothing, or where they are offered already.
+    pub(crate) fn offer_instruments(&self) {
+        let Some(studies) = &self.studying else { return };
+        if self.fetches().is_ok_and(|fetches| fetches.list_ids().iter().any(|id| id == INSTRUMENTS)) {
+            return;
+        }
+        let default = studies.data().join(SETS_FOLDER);
+        let (library, settings) = (self.library.clone(), self.settings.clone());
+        let hook: Hook = Arc::new(move |change, _, folder| match change {
+            Change::Arrived => drop(into_library(&library, &settings, folder)),
+            Change::Removed => out_of_library(&library, &settings, folder),
+        });
+        if let Err(why) = self.add_fetch_list(fetch_list(self.catalogue(), default, Some(hook))) {
+            log::warn!("the catalogue's instruments are not offered: {why}");
+        }
+    }
+
+    /// Asks for several sets at once: the ones that are not here wait
+    /// their turn and are fetched one after the other, smallest first.
+    /// Refused as a whole when the disk has not the room for them.
+    /// Answers at once; `Runtime::fetches` says how each goes, and
+    /// [`Self::stop_instruments`] stops them all.
+    pub fn ask_for_instruments(&self, ask: &Ask) -> Result<Asked, String> {
+        let ids: Vec<String> = ask.sets(self.catalogue()).into_iter().map(|set| set.id.clone()).collect();
+        if ids.is_empty() {
+            return Err("that asks for no set of the catalogue".to_owned());
+        }
+        self.fetches()?.fetch_many(&ids)
+    }
+
+    /// Stops every set that is being fetched or waits to be, and answers
+    /// with how many that was. What came of the one on its way is kept,
+    /// and asking again goes on from there.
+    pub fn stop_instruments(&self) -> Result<usize, String> {
+        Ok(self.fetches()?.stop_all(Some(INSTRUMENTS)))
     }
 
     /// A set has arrived in `folder`: checks that it is the set that was
@@ -120,33 +320,18 @@ impl Runtime {
     pub fn set_arrived(&self, set: &Set, folder: &Path) -> Result<Arrived, String> {
         let whole = set.check(folder)?;
         let folder = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
-        let inside = self.library.roots().iter().any(|root| folder.starts_with(root));
-        let library_folder = match (inside, folder.parent()) {
-            (true, _) => {
-                self.library.rescan();
-                None
-            }
-            (false, Some(parent)) => {
-                // The folder the sets are kept in, so that the next set to
-                // arrive there is in the library too.
-                if !self.library.add_root(parent) {
-                    self.library.rescan();
-                }
-                Some(parent.to_path_buf())
-            }
-            (false, None) => return Err(format!("{} is not in a folder", folder.display())),
-        };
-        if let Err(error) = self.save_library_changes() {
-            log::warn!("the library's folders could not be saved: {error}");
+        if folder.parent().is_none() {
+            return Err(format!("{} is not in a folder", folder.display()));
         }
+        let library_folder = into_library(&self.library, &self.settings, &folder);
         let instruments = set.instruments.iter().map(|instrument| below(&folder, &instrument.file)).collect();
         Ok(Arrived { set: set.id.clone(), folder, files: whole.files, bytes: whole.bytes, instruments, library_folder })
     }
 
-    /// A set was removed from the folder it was kept in: the library
-    /// looks again, and no longer lists it.
-    pub fn set_removed(&self) {
-        self.library.rescan();
+    /// A set was removed from `folder`: the library looks again, and no
+    /// longer lists it.
+    pub fn set_removed(&self, folder: &Path) {
+        out_of_library(&self.library, &self.settings, folder);
     }
 
     /// Brings a set whose files are in `from` (as its maker lays them

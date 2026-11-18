@@ -1,0 +1,24 @@
+# The starter selection: what is offered first, ticked. A line a set: its id, and a pattern on the
+# (lower-cased) path of the instruments in it that are put first. The set is fetched whole.
+#
+# A grand piano: the one that measures best on every count (16 layers of loudness, 714 MB).
+salamander-grand-piano .
+# Electric pianos: an electric grand and a Pianet. (The Wurlitzer of the set is marked noisy.)
+greg-sullivan-e-pianos cp80|pianet
+# Strings: the violins, violas and cellos of a chamber orchestra, held and with every way of playing on keys.
+vsco-2-ce-violins violinens-ks|violinenssusvib\.sfz
+vsco-2-ce-violas violaens-ks|violaenssusvib\.sfz
+vsco-2-ce-cellos celloens-ks|celloenssusvib\.sfz
+# An acoustic bass (plucked) that is also the orchestra's double bass (bowed).
+vsco-2-ce-contrabass contrabasspizz|contrabasssusvb\.sfz
+# An electric bass.
+swagbass ^swagbass(_clean)?\.sfz
+# A drum kit.
+muldjordkit-freepats .
+# Guitars: a nylon-string, and an electric with a clean, round tone.
+spanish-classical-guitar .
+electric-guitar-fsbs-jazz jazz bridge 2
+# An organ.
+vsco-2-ce-organ organloud\.sfz|organquiet\.sfz
+# Hand percussion.
+world-percussion .

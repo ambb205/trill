@@ -22,6 +22,7 @@ files = 668
 archive = "https://github.com/sfzinstruments/SalamanderGrandPiano/archive/3382bf9496bba2486f5ab0de55a264d1dfc38404.zip"
 under = "SalamanderGrandPiano-3382bf9496bba2486f5ab0de55a264d1dfc38404/"
 sum = "fcf5b194a5e19057f006138f7ec852c0b1354e12d65c8250546f9cdb5cbddb82"
+archive_bytes = 748522601
 
 [[set.instrument]]
 file = "Salamander Grand Piano V3.sfz"
@@ -32,14 +33,14 @@ words = "Grand piano in sixteen layers of loudness, with hammer noises and the r
 range = [21, 108]
 layers = 16
 takes = 1
-recordings = 637
-bytes = 746594157
+recordings = 641
+bytes = 748397030
 ways = ["Natural", "Retuned"]
-noise = [78.9, 59.1]
+noise = [81.5, 58.7]
 tuning = [9.4, 3.1, 22.1]
 evenness = [0.8, 3.1]
 level = -17.2
-misses = "It asks for 2 things this player does not do, so it will not sound quite as in its maker's player. Not heard: sounds that moving a controller sets off (the noise of a pedal) (on_hicc64, on_locc64). Everything else plays."
+marks = ["starter"]
 
 
 [[set]]
@@ -60,6 +61,7 @@ files = 312
 archive = "https://github.com/sfzinstruments/BengtNilsson.HeadroomPiano/archive/2a7df3f7252227a3484202c1d61bc1bfe352a971.zip"
 under = "BengtNilsson.HeadroomPiano-2a7df3f7252227a3484202c1d61bc1bfe352a971/"
 sum = "efc06f231fc0133b8d6e55fdc9cf89aca43512b2e8ab720a13c289eacb74fa1f"
+archive_bytes = 140565416
 
 [[set.instrument]]
 file = "Headroom Piano (NoFX).sfz"
@@ -76,7 +78,6 @@ noise = [56.2, 42.0]
 tuning = [14.5, 3.7, 22.7]
 evenness = [2.6, 5.0]
 level = -22.8
-marks = ["starter"]
 
 [[set.instrument]]
 file = "Headroom Piano.sfz"
@@ -145,6 +146,7 @@ files = 1337
 archive = "https://github.com/sfzinstruments/Osiris_Piano/archive/18c6afccb60cff458edbf7c394571783e074e1e9.zip"
 under = "Osiris_Piano-18c6afccb60cff458edbf7c394571783e074e1e9/"
 sum = "54124adcbc47a571e64c0443ffab251d1a8c4ef2d42c4b7ff646890d36760f9d"
+archive_bytes = 458698206
 
 [[set.instrument]]
 file = "Programs/01-natural.sfz"
@@ -198,6 +200,7 @@ files = 443
 archive = "https://github.com/sfzinstruments/karoryfer.scarypiano/archive/46305e8cb71239bfa861fbe8487dd12b8d8de40c.zip"
 under = "karoryfer.scarypiano-46305e8cb71239bfa861fbe8487dd12b8d8de40c/"
 sum = "bdb901f0d30a40b0f8b05d2c3564b17e0a17b0142bf2d33288c7eebffaa46996"
+archive_bytes = 357645099
 
 [[set.instrument]]
 file = "Programs/Scarypiano.sfz"
@@ -233,6 +236,7 @@ files = 74
 archive = "https://github.com/freepats/upright-piano-KW/archive/570f6c60ed2eff67accad3b85d5b452e57a3ad28.zip"
 under = "upright-piano-KW-570f6c60ed2eff67accad3b85d5b452e57a3ad28/"
 sum = "86a54f0ae4b3774aaf0ebe15f6ce293c21c49fd6e0ea84d21376579d615f4a13"
+archive_bytes = 32426929
 
 [[set.instrument]]
 file = "UprightPianoKW-20220221.sfz"
@@ -268,6 +272,7 @@ files = 106
 archive = "https://github.com/freepats/old-piano-FB/archive/9707673c65d8a52d7b374af807384005564a89f2.zip"
 under = "old-piano-FB-9707673c65d8a52d7b374af807384005564a89f2/"
 sum = "ef8899a98cc17fcc05bc240c84f2a37c7b6673193619b4952f031286ed665398"
+archive_bytes = 40279277
 
 [[set.instrument]]
 file = "PianoFB 20200401.sfz"
@@ -320,6 +325,7 @@ files = 178
 archive = "https://github.com/sfzinstruments/GregSullivan.E-Pianos/archive/8c3e581acda3594b553948ff0222d4f84a698376.zip"
 under = "GregSullivan.E-Pianos-8c3e581acda3594b553948ff0222d4f84a698376/"
 sum = "bf9524dfddf3c9ac0045f6da5f0c323e19a678fc317b8a83396d8d5f65af245e"
+archive_bytes = 19263422
 
 [[set.instrument]]
 file = "CP80/CP80.sfz"
@@ -390,6 +396,7 @@ files = 39
 archive = "https://github.com/freepats/fm-piano1/archive/89a92d10b47aea841597408f5cf2e9c8164ecb00.zip"
 under = "fm-piano1-89a92d10b47aea841597408f5cf2e9c8164ecb00/"
 sum = "a2da628d13a5b6d086c413e77ec04842156fb7e4fc8be6134e9b270d2080d0e9"
+archive_bytes = 24957760
 
 [[set.instrument]]
 file = "FM-Piano1 20190916.sfz"
@@ -425,6 +432,7 @@ files = 15
 archive = "https://github.com/freepats/fm-piano2/archive/2e1241f5db3ff6b938b1645a2f2f82f7e510c708.zip"
 under = "fm-piano2-2e1241f5db3ff6b938b1645a2f2f82f7e510c708/"
 sum = "42287aac64d17f8f103b09d9df78af14beff69d3dc2cbf3741521d14b6a07746"
+archive_bytes = 9092921
 
 [[set.instrument]]
 file = "FM-Piano2 20161112.sfz"
@@ -460,6 +468,7 @@ files = 38
 archive = "https://github.com/freepats/button-accordion-HN/archive/d70d16456fd99305d1c24c612b205ab38846eb0f.zip"
 under = "button-accordion-HN-d70d16456fd99305d1c24c612b205ab38846eb0f/"
 sum = "9e0a7ef770ef7c79f10b2b854e6a57dbd713fc9f9812fef612dd8d3b112045a9"
+archive_bytes = 5057851
 
 [[set.instrument]]
 file = "PRESET Button Accordion HN tuned.sfz"
@@ -495,6 +504,7 @@ files = 428
 archive = "https://github.com/sfzinstruments/karoryfer.caveman-cosmonaut/archive/9de9bcfcbc6d2b20bea5c1116cd07a310febc339.zip"
 under = "karoryfer.caveman-cosmonaut-9de9bcfcbc6d2b20bea5c1116cd07a310febc339/"
 sum = "228f17d9bb9eaf520d197697b5bd2f0f5a8f88da9fec60246ab95eced7040f9b"
+archive_bytes = 97597168
 
 [[set.instrument]]
 file = "Programs/main.sfz"
@@ -531,6 +541,7 @@ files = 56
 archive = "https://github.com/freepats/spanish-classical-guitar/archive/6f4eb1b092acc88f5448cea1a0001bd07b971af8.zip"
 under = "spanish-classical-guitar-6f4eb1b092acc88f5448cea1a0001bd07b971af8/"
 sum = "4d22aea1b65276f222a75bc6837f45ba782ca8053a976dfb0d76aa32dd27e834"
+archive_bytes = 4949654
 
 [[set.instrument]]
 file = "SpanishClassicalGuitar-20190618.sfz"
@@ -567,6 +578,7 @@ files = 140
 archive = "https://github.com/freepats/electric-guitar-FSBS-clean/archive/192cf0d9bf2c4ba6ead8e3524ba3f78818e4fe91.zip"
 under = "electric-guitar-FSBS-clean-192cf0d9bf2c4ba6ead8e3524ba3f78818e4fe91/"
 sum = "c9cb74b53f1b662cc4219497982fb246629c85dfe4fbf7435007e449d608ba49"
+archive_bytes = 128254247
 
 [[set.instrument]]
 file = "EGuitarFSBS-clean bridge 20260807.sfz"
@@ -618,6 +630,7 @@ files = 140
 archive = "https://github.com/freepats/electric-guitar-FSBS-jazz/archive/9a5430a220725ee26f272f62de1381de8da982ed.zip"
 under = "electric-guitar-FSBS-jazz-9a5430a220725ee26f272f62de1381de8da982ed/"
 sum = "0a97419291442930326d6a5099cc96b2609c760fe27c66141f4c804379f18848"
+archive_bytes = 68461526
 
 [[set.instrument]]
 file = "EGuitarFSBS-jazz bridge 20260807.sfz"
@@ -670,6 +683,7 @@ files = 126
 archive = "https://github.com/freepats/electric-guitar-FSBS-direct/archive/4c1d54601836c3e1a262b0bb0f3dea0c0a881ad3.zip"
 under = "electric-guitar-FSBS-direct-4c1d54601836c3e1a262b0bb0f3dea0c0a881ad3/"
 sum = "fe23991a80afb4b87e41daa3d84e29a4b577a1eaed08311041b501e0da8b5efa"
+archive_bytes = 274277910
 
 [[set.instrument]]
 file = "EGuitarFSBS-direct bridge 20220911.sfz"
@@ -705,6 +719,7 @@ files = 126
 archive = "https://github.com/freepats/electric-guitar-FSBS-dist1/archive/bbae17f0ad16f5edd7ec22178d181f3e3f6696fa.zip"
 under = "electric-guitar-FSBS-dist1-bbae17f0ad16f5edd7ec22178d181f3e3f6696fa/"
 sum = "714ec371487c6f50b9ae870397bb8827946edeaf59e09d89c18ea714e69aab8b"
+archive_bytes = 314367450
 
 [[set.instrument]]
 file = "EGuitarFSBS-dist1 bridge 20220911.sfz"
@@ -740,6 +755,7 @@ files = 126
 archive = "https://github.com/freepats/electric-guitar-FSBS-dist2/archive/21261b8bcb02d1cbf52dc02f1b1636df52d4a947.zip"
 under = "electric-guitar-FSBS-dist2-21261b8bcb02d1cbf52dc02f1b1636df52d4a947/"
 sum = "68d9af37cb0ef2f51f14f40f9f81107b331f4f3e7e2fee22c453dd5eac7e5d05"
+archive_bytes = 135769715
 
 [[set.instrument]]
 file = "EGuitarFSBS-dist2 bridge 20220911.sfz"
@@ -775,6 +791,7 @@ files = 331
 archive = "https://github.com/sfzinstruments/karoryfer.emilyguitar/archive/b4920dc662fd9cad6dcaccdeecffdd91c8725d8c.zip"
 under = "karoryfer.emilyguitar-b4920dc662fd9cad6dcaccdeecffdd91c8725d8c/"
 sum = "6e4da67499dc7c4c34a2c50de5efdd03055f9135510f65a3318c4b61a4a95f63"
+archive_bytes = 103511075
 
 [[set.instrument]]
 file = "emily_basic.sfz"
@@ -894,6 +911,7 @@ files = 871
 archive = "https://github.com/sfzinstruments/karoryfer.shinyguitar/archive/57243cca85277dbcc120ce17c6178032f93c80f3.zip"
 under = "karoryfer.shinyguitar-57243cca85277dbcc120ce17c6178032f93c80f3/"
 sum = "3b8149525939e8fd729fac7cb608b779dabf9f9fa58bec2dd5d961ed264a6588"
+archive_bytes = 368449333
 
 [[set.instrument]]
 file = "Programs/main.sfz"
@@ -1136,6 +1154,7 @@ files = 18
 archive = "https://github.com/freepats/ukulele1/archive/86d345f6f7b79a106ace98eca0da19b087786dba.zip"
 under = "ukulele1-86d345f6f7b79a106ace98eca0da19b087786dba/"
 sum = "bf972945ed2dcceae22a16fe84a7ad676fd6c0d399bcc1573abc21f042855c44"
+archive_bytes = 2409190
 
 [[set.instrument]]
 file = "Ukulele 20260811.sfz"
@@ -1171,6 +1190,7 @@ files = 66
 archive = "https://github.com/sfzinstruments/ganjo/archive/ccff5cd5cd3b513873a48994c07724d9d3c39e1c.zip"
 under = "ganjo-ccff5cd5cd3b513873a48994c07724d9d3c39e1c/"
 sum = "1fb02b27d656928d2c757bc17d8dda49147a9be50e8091d96e927b50aa6e3534"
+archive_bytes = 24320939
 
 [[set.instrument]]
 file = "ganjo.sfz"
@@ -1207,6 +1227,7 @@ files = 587
 archive = "https://github.com/sfzinstruments/karoryfer.meatbass/archive/ac9e859564bda286ab5ec672d00ff1aa2fef2895.zip"
 under = "karoryfer.meatbass-ac9e859564bda286ab5ec672d00ff1aa2fef2895/"
 sum = "e453e7368c228a14addf293b41334b0ee2027eb8b66feca4d6292f2a940137b9"
+archive_bytes = 255476765
 
 [[set.instrument]]
 file = "Programs/01_arco_modwheel.sfz"
@@ -1392,6 +1413,7 @@ files = 715
 archive = "https://github.com/sfzinstruments/karoryfer.sneakybass/archive/cc1a67e5c913678b85eaad1a3b5cb180d3be3e2d.zip"
 under = "karoryfer.sneakybass-cc1a67e5c913678b85eaad1a3b5cb180d3be3e2d/"
 sum = "ba783e65bda9c207ed7d2112be74d1bf3dbf427df3e00589cc6ae79c1c900b43"
+archive_bytes = 340538426
 
 [[set.instrument]]
 file = "Programs/01-sneakybass_keyswitch.sfz"
@@ -1506,6 +1528,7 @@ files = 406
 archive = "https://github.com/sfzinstruments/dsmolken.double-bass/archive/c2985eb647109d2a8f30a70071e3e163339d7396.zip"
 under = "dsmolken.double-bass-c2985eb647109d2a8f30a70071e3e163339d7396/"
 sum = "e1e919bc524dd09f72ec25769e95b5c10282bd9f79f1ed98d4aea5152b0e454b"
+archive_bytes = 265268655
 
 [[set.instrument]]
 file = "d_smolken_rubner_bass_arco.sfz"
@@ -1574,6 +1597,7 @@ files = 389
 archive = "https://github.com/sfzinstruments/karoryfer.growlybass/archive/4f483268fc66b5a6d5781d421c0d11b8d08d3fc6.zip"
 under = "karoryfer.growlybass-4f483268fc66b5a6d5781d421c0d11b8d08d3fc6/"
 sum = "9c5d3196720ddf0e1e3afec6eb9abfb39175189c24045578e00dae5e6f1f6c88"
+archive_bytes = 167493692
 
 [[set.instrument]]
 file = "growlybass_angry.sfz"
@@ -1705,6 +1729,7 @@ files = 432
 archive = "https://github.com/sfzinstruments/karoryfer.fashionbass/archive/0703973b300a6bacb837602be9b588ab64732a72.zip"
 under = "karoryfer.fashionbass-0703973b300a6bacb837602be9b588ab64732a72/"
 sum = "4f64172d138692eaf8930b8d24efe7a96ab5ea24043b9e6bf191dd200a2a4a41"
+archive_bytes = 316375164
 
 [[set.instrument]]
 file = "fashionbass.sfz"
@@ -1788,6 +1813,7 @@ files = 348
 archive = "https://github.com/sfzinstruments/karoryfer.swagbass/archive/9d10fcae71af1975988ddecd5af1c95d372c7355.zip"
 under = "karoryfer.swagbass-9d10fcae71af1975988ddecd5af1c95d372c7355/"
 sum = "d7edfeb882c249e8589ff54739a109459af312d8642c93762fc91ee5bada1765"
+archive_bytes = 144613909
 
 [[set.instrument]]
 file = "swagbass.sfz"
@@ -1889,6 +1915,7 @@ files = 781
 archive = "https://github.com/sfzinstruments/karoryfer.pastabass/archive/90135cd026db5d4fa0fe538240b4203f085f5244.zip"
 under = "karoryfer.pastabass-90135cd026db5d4fa0fe538240b4203f085f5244/"
 sum = "620c32cf56603f0774e91b4ddd984e1c1545c98540dc88f589226ee4e886ba7e"
+archive_bytes = 315105569
 
 [[set.instrument]]
 file = "combo_platter.sfz"
@@ -2121,6 +2148,7 @@ files = 481
 archive = "https://github.com/sfzinstruments/karoryfer.big-little-bass/archive/4e92bdf54dcd2d6cfad968cc90542d5461c9b9fc.zip"
 under = "karoryfer.big-little-bass-4e92bdf54dcd2d6cfad968cc90542d5461c9b9fc/"
 sum = "b3ffc8412353383e7a40cdade051b61d028af73281bf68c11db1ee58933e83be"
+archive_bytes = 263619505
 
 [[set.instrument]]
 file = "Programs/01-big_little_pluck.sfz"
@@ -2174,6 +2202,7 @@ files = 2312
 archive = "https://github.com/sfzinstruments/karoryfer.black-and-blue-basses/archive/6e7d674cdb41be7a54dbccb15472401ad01099b9.zip"
 under = "karoryfer.black-and-blue-basses-6e7d674cdb41be7a54dbccb15472401ad01099b9/"
 sum = "a8082c1b68ddd88e74001ea549762453bd9260a758d7210d67250b262d27b39c"
+archive_bytes = 1009055691
 
 [[set.instrument]]
 file = "Programs/01-darkblack_keysw.sfz"
@@ -2380,6 +2409,7 @@ files = 403
 archive = "https://github.com/sfzinstruments/karoryfer.ergo/archive/c3232f03608e07e4e274c8ad9a1a4c32885f75c4.zip"
 under = "karoryfer.ergo-c3232f03608e07e4e274c8ad9a1a4c32885f75c4/"
 sum = "57f8afff139756ea1b48992884aec81742bd438724789af29a9c7ad7a1d570a8"
+archive_bytes = 200771780
 
 [[set.instrument]]
 file = "ergo_arco.sfz"
@@ -2431,6 +2461,7 @@ files = 576
 archive = "https://github.com/sfzinstruments/Karoryfer.HorsePulse/archive/6f4749d54512d762098ca726a3cbd13444562904.zip"
 under = "Karoryfer.HorsePulse-6f4749d54512d762098ca726a3cbd13444562904/"
 sum = "6f44515bf4b22c7e11f9bab964769f1e379c4ddd25b82547493ac20d32cde125"
+archive_bytes = 142945988
 
 [[set.instrument]]
 file = "Programs/01-keyswitch.sfz"
@@ -2584,6 +2615,7 @@ files = 29
 archive = "https://github.com/freepats/electric-bass-YR/archive/8dcb7ea9116f417273ef8c030d15e7b3aa654301.zip"
 under = "electric-bass-YR-8dcb7ea9116f417273ef8c030d15e7b3aa654301/"
 sum = "e3aacedd5e904edb0d8c835c7dd56ff9ffdb1b7f2af9800d7fd93f4e5a296f40"
+archive_bytes = 6078666
 
 [[set.instrument]]
 file = "FingerBassYR 20190930.sfz"
@@ -2634,6 +2666,7 @@ files = 535
 archive = "https://github.com/sfzinstruments/karoryfer-bigcat.cello/archive/6fd75fbfc1dbb3109bf26220ba1adea46188a18b.zip"
 under = "karoryfer-bigcat.cello-6fd75fbfc1dbb3109bf26220ba1adea46188a18b/"
 sum = "e8588664dbb7b9de624dff725ddc14ba3b871ac01a30895f33aaa0198cf090eb"
+archive_bytes = 132656905
 
 [[set.instrument]]
 file = "Programs/01- Bowed (velocity layer).sfz"
@@ -2704,6 +2737,7 @@ files = 192
 archive = "https://github.com/sfzinstruments/aliexpress-erhu/archive/6615047b2fd06126877483e97b8bb4af9d00b080.zip"
 under = "aliexpress-erhu-6615047b2fd06126877483e97b8bb4af9d00b080/"
 sum = "2d8d2710450a2d85508ca5cf5bce0e674736ed5d1216403e84b00b3161a98e4c"
+archive_bytes = 81622720
 
 [[set.instrument]]
 file = "Programs/01-erhu_keyswitch.sfz"
@@ -2810,6 +2844,7 @@ files = 318
 archive = "https://github.com/sfzinstruments/karoryfer.string-cyborgs/archive/f2238b3e36ae64c6383356221dc89c9c476c7b11.zip"
 under = "karoryfer.string-cyborgs-f2238b3e36ae64c6383356221dc89c9c476c7b11/"
 sum = "33c2beb415ae50f164a9d4699983a67f66e473799b6396d9f344e2d2195ca6d5"
+archive_bytes = 63799780
 
 [[set.instrument]]
 file = "Programs/Blackheart.sfz"
@@ -2881,6 +2916,7 @@ files = 162
 archive = "https://github.com/sfzinstruments/Ixox.Flute/archive/0cc54468bb0d2d9b32921958585caad65ba8df21.zip"
 under = "Ixox.Flute-0cc54468bb0d2d9b32921958585caad65ba8df21/"
 sum = "36c668635f9af7e93382b362fa28036d26e469c0754f8ceef4c443e14ba406a2"
+archive_bytes = 9538321
 
 [[set.instrument]]
 file = "Ixox Flute.sfz"
@@ -2919,6 +2955,7 @@ files = 785
 archive = "https://github.com/sfzinstruments/MTG.SoloSax/archive/b494d256549b3d088fdec176ce82867f8a1f58b2.zip"
 under = "MTG.SoloSax-b494d256549b3d088fdec176ce82867f8a1f58b2/"
 sum = "52debbf1ce99f8621137acbe9d648a8d477dba021314c5524be83d4105513ece"
+archive_bytes = 105062187
 
 [[set.instrument]]
 file = "MTG Solo Saxophones/MTG Alto Sax (NL).sfz"
@@ -3074,6 +3111,7 @@ files = 302
 archive = "https://github.com/sfzinstruments/karoryfer.weresax/archive/a4d756b21d2a573aca0d840cce7e71ba5effd4c6.zip"
 under = "karoryfer.weresax-a4d756b21d2a573aca0d840cce7e71ba5effd4c6/"
 sum = "695bf07dee8c2ece4d002071120cfff74d3c40406210a2008714fc0f6ce04c3e"
+archive_bytes = 197596366
 
 [[set.instrument]]
 file = "Programs/Sax.sfz"
@@ -3161,6 +3199,7 @@ files = 831
 archive = "https://github.com/sfzinstruments/karoryfer.bear-sax/archive/7abb3c652525a15dfac80e1b5dfbba9964ee568f.zip"
 under = "karoryfer.bear-sax-7abb3c652525a15dfac80e1b5dfbba9964ee568f/"
 sum = "652485e73be2350bb5bcb360ddc2d2a17fa8b6b4c9dc2046b23ec3db8ec0ec95"
+archive_bytes = 130145224
 
 [[set.instrument]]
 file = "Programs/1-solo-mono.sfz"
@@ -3286,6 +3325,7 @@ files = 1552
 archive = "https://github.com/sfzinstruments/karoryfer.war-tuba/archive/5b62dd6ef6b00281bb734769e44a63f5e013018a.zip"
 under = "karoryfer.war-tuba-5b62dd6ef6b00281bb734769e44a63f5e013018a/"
 sum = "081122954437ecd8a3752d49a013955a6b52fbe1715fa20df99e15ec25d6a435"
+archive_bytes = 109291440
 
 [[set.instrument]]
 file = "Programs/1-solo-legato.sfz"
@@ -3436,6 +3476,7 @@ files = 17
 archive = "https://github.com/freepats/ocarina1/archive/241bdfde388624d9ea598ac183c3e50071c89924.zip"
 under = "ocarina1-241bdfde388624d9ea598ac183c3e50071c89924/"
 sum = "f6d24a9c63a84629272552ec26ecb4b027cfb39a0347d0eec831139ed799819f"
+archive_bytes = 4368189
 
 [[set.instrument]]
 file = "Ocarina 20241002.sfz"
@@ -3471,6 +3512,7 @@ files = 45
 archive = "https://github.com/freepats/bagpipe/archive/496f2f6e82f226d650e270c0f0ad5febbebec249.zip"
 under = "bagpipe-496f2f6e82f226d650e270c0f0ad5febbebec249/"
 sum = "2f6e7d3d60fef2ab84c9231fe68c5f6b6d784c2c6c956d416e303f483d65608b"
+archive_bytes = 21550089
 
 [[set.instrument]]
 file = "Bagpipe 20260806.sfz"
@@ -3522,6 +3564,7 @@ files = 468
 archive = "https://github.com/sfzinstruments/karoryfer.squidpipes/archive/b258528c8f49d6389ec2b4ec04a8b10013169dd9.zip"
 under = "karoryfer.squidpipes-b258528c8f49d6389ec2b4ec04a8b10013169dd9/"
 sum = "b95df909d0f038eb5c50386941bc2b70072eda81c85325862030c75aec5e7154"
+archive_bytes = 44219853
 
 [[set.instrument]]
 file = "Programs/01-squidpipes.sfz"
@@ -3593,6 +3636,7 @@ files = 59
 archive = "https://github.com/sfzinstruments/karoryfer.cowsynth/archive/5a5b5afc2dabbe54cf9d75ab64711ce01862b42c.zip"
 under = "karoryfer.cowsynth-5a5b5afc2dabbe54cf9d75ab64711ce01862b42c/"
 sum = "f27e276d2809f45c3edf5fc642a42552105fe0f90dfbe29b26cbcbde3bb0ed2a"
+archive_bytes = 14079321
 
 [[set.instrument]]
 file = "cowsynth_asthmatic_organ.sfz"
@@ -3899,6 +3943,7 @@ files = 759
 archive = "https://github.com/sfzinstruments/legato_vocal_tutorial/archive/fac6461ee4c7f498b23246eced644616fa58d2ec.zip"
 under = "legato_vocal_tutorial-fac6461ee4c7f498b23246eced644616fa58d2ec/"
 sum = "db67725b82da4fc7bfb2c5262bf896d9dc9f2510eba6a356aa009cfef98afcb3"
+archive_bytes = 163809042
 
 [[set.instrument]]
 file = "Programs/01-no_legato_polyphonic_only_no_vibrato_a.sfz"
@@ -3986,6 +4031,7 @@ files = 277
 archive = "https://github.com/sfzinstruments/karoryfer.272-merry-orks/archive/a437e2c02014e02710a104a6692193eab8672d0a.zip"
 under = "karoryfer.272-merry-orks-a437e2c02014e02710a104a6692193eab8672d0a/"
 sum = "91f0f85376b5bada968eb1bbb78979a3746d9ce381aa2f384405e2bf1d12b40e"
+archive_bytes = 40465846
 
 [[set.instrument]]
 file = "ork_dialogue.sfz"
@@ -4052,6 +4098,7 @@ files = 378
 archive = "https://github.com/sfzinstruments/jlearman.SteelDrum/archive/dc15a36ad69a43b0d240fcbd0cc78fbc61b2b47e.zip"
 under = "jlearman.SteelDrum-dc15a36ad69a43b0d240fcbd0cc78fbc61b2b47e/"
 sum = "9feef3b75edd86ac6477576d2452c6d27dd63b0658731a1ed5875c056b3828d0"
+archive_bytes = 39763772
 
 [[set.instrument]]
 file = "jSteelDrum-noxfade.sfz"
@@ -4105,6 +4152,7 @@ files = 55
 archive = "https://github.com/freepats/hang-D-minor/archive/fdeca2ec981ab374607f250bccb1452b531ac13a.zip"
 under = "hang-D-minor-fdeca2ec981ab374607f250bccb1452b531ac13a/"
 sum = "1c25407ddfdd0670d9f6f63728e60d51b004a71ac8ea490ea0edb9a9364f6ccb"
+archive_bytes = 13496874
 
 [[set.instrument]]
 file = "Hang-D-minor 20220330.sfz"
@@ -4141,6 +4189,7 @@ files = 33
 archive = "https://github.com/freepats/tubular-bells1/archive/7809b71545dab785a424280c67642a4b8c7b1cdd.zip"
 under = "tubular-bells1-7809b71545dab785a424280c67642a4b8c7b1cdd/"
 sum = "b4d253fc08fc15ddfccd9fe02b1cef63aac74eaef3494b84ba95b05b9975b9c7"
+archive_bytes = 16287387
 
 [[set.instrument]]
 file = "TubularBells 20241130.sfz"
@@ -4194,6 +4243,7 @@ files = 160
 archive = "https://github.com/freepats/glass/archive/8b2fd2c0dfc334b6c16eaac418c8e73020be1105.zip"
 under = "glass-8b2fd2c0dfc334b6c16eaac418c8e73020be1105/"
 sum = "ab2d0eea88ec812adbc923337aa2f8f212cb580254cc399bf658eb6a8a290107"
+archive_bytes = 10616626
 
 [[set.instrument]]
 file = "Glass-20191227.sfz"
@@ -4230,6 +4280,7 @@ files = 276
 archive = "https://github.com/sfzinstruments/cithara-barbarica/archive/a47c10dc4a26538a8a56d31d3436488138292ca2.zip"
 under = "cithara-barbarica-a47c10dc4a26538a8a56d31d3436488138292ca2/"
 sum = "c84a5e18fa990e8281560692387e8cf4a3a392c8cb5654124fac71735466d5a9"
+archive_bytes = 176613895
 
 [[set.instrument]]
 file = "Programs/01-cithara_barbarica_keyswitch.sfz"
@@ -4370,6 +4421,7 @@ files = 219
 archive = "https://github.com/sfzinstruments/hungarian_zither/archive/973d9445ba890661a4f4cd8e417d36134fb5f337.zip"
 under = "hungarian_zither-973d9445ba890661a4f4cd8e417d36134fb5f337/"
 sum = "cac2a08f0b9bf511cdcc602a3bb91981276fee7e3e0605c43ddebfb19564b518"
+archive_bytes = 176666953
 
 [[set.instrument]]
 file = "Programs/hungarian_zither.sfz"
@@ -4424,6 +4476,7 @@ files = 373
 archive = "https://github.com/freepats/muldjordkit/archive/719fe72bc6693b94f1229674e202881145ab44ed.zip"
 under = "muldjordkit-719fe72bc6693b94f1229674e202881145ab44ed/"
 sum = "be8f74a34022496e8b1a1e67b9c52c1fcf133cf022d555e6cb06e539bdebeefa"
+archive_bytes = 165168878
 
 [[set.instrument]]
 file = "MuldjordKit 20201018.sfz"
@@ -4460,6 +4513,7 @@ files = 4185
 archive = "https://github.com/sfzinstruments/DrumGizmo.MuldjordKit/archive/fc165714974aa843125ce88597f341b31376e1d5.zip"
 under = "DrumGizmo.MuldjordKit-fc165714974aa843125ce88597f341b31376e1d5/"
 sum = "984502faf021ae2112bef759d4c0f2afb715e49a474134a64c8f90bacf33ab8f"
+archive_bytes = 346255411
 
 [[set.instrument]]
 file = "DrumGizmo/MuldjordKit/Stereo/DrumGizmo MuldjordKit.sfz"
@@ -4475,7 +4529,7 @@ recordings = 4048
 bytes = 347136351
 noise = [74.9, 58.9]
 level = -13.2
-misses = "It asks for 5 things this player does not do, so it will not sound quite as in its maker's player. Not heard: what its maker's player makes up as controllers beyond the ones here (how fast a key came up, how far a note is from the one before) (hicc130, locc130, on_hicc130, on_locc130); settings this player does not know (phase). Everything else plays."
+misses = "It asks for 1 thing this player does not do, so it will not sound quite as in its maker's player. Not heard: settings this player does not know (phase). Everything else plays."
 note = "Tuning and evenness are not given: its keys are different sounds, not pitches of one."
 
 
@@ -4497,6 +4551,7 @@ files = 6245
 archive = "https://github.com/sfzinstruments/DrumGizmo.DRSKit/archive/b01448990a31f722542f1812e56159a97a6a2a82.zip"
 under = "DrumGizmo.DRSKit-b01448990a31f722542f1812e56159a97a6a2a82/"
 sum = "30e065518cd50091e18c3507b63d84c152078d9ba530dfd101e228bb6036a376"
+archive_bytes = 755269776
 
 [[set.instrument]]
 file = "DrumGizmo/DRSKit/Stereo/DrumGizmo DRSKit (N).sfz"
@@ -4513,7 +4568,7 @@ bytes = 577801395
 ways = ["Notes", "E-Drums"]
 noise = [76.3, 55.1]
 level = -14.0
-misses = "It asks for 5 things this player does not do, so it will not sound quite as in its maker's player. Not heard: settings this player does not know (1seq_position); what its maker's player makes up as controllers beyond the ones here (how fast a key came up, how far a note is from the one before) (hicc130, locc130, on_hicc130, on_locc130). Everything else plays."
+misses = "It asks for 1 thing this player does not do, so it will not sound quite as in its maker's player. Not heard: settings this player does not know (1seq_position). Everything else plays."
 note = "Tuning and evenness are not given: its keys are different sounds, not pitches of one. 1 of the 26 keys that were played one by one said nothing."
 
 [[set.instrument]]
@@ -4531,7 +4586,7 @@ bytes = 159981699
 ways = ["Notes", "E-Drums"]
 noise = [60.8, 39.2]
 level = -20.7
-misses = "It asks for 5 things this player does not do, so it will not sound quite as in its maker's player. Not heard: settings this player does not know (1seq_position); what its maker's player makes up as controllers beyond the ones here (how fast a key came up, how far a note is from the one before) (hicc130, locc130, on_hicc130, on_locc130). Everything else plays."
+misses = "It asks for 1 thing this player does not do, so it will not sound quite as in its maker's player. Not heard: settings this player does not know (1seq_position). Everything else plays."
 note = "Tuning and evenness are not given: its keys are different sounds, not pitches of one. 9 of the 23 keys that were played one by one said nothing."
 
 [[set.instrument]]
@@ -4549,7 +4604,7 @@ bytes = 699577809
 ways = ["Notes", "E-Drums:N", "E-Drums:W"]
 noise = [71.4, 50.1]
 level = -14.0
-misses = "It asks for 5 things this player does not do, so it will not sound quite as in its maker's player. Not heard: settings this player does not know (1seq_position); what its maker's player makes up as controllers beyond the ones here (how fast a key came up, how far a note is from the one before) (hicc130, locc130, on_hicc130, on_locc130). Everything else plays."
+misses = "It asks for 1 thing this player does not do, so it will not sound quite as in its maker's player. Not heard: settings this player does not know (1seq_position). Everything else plays."
 note = "Tuning and evenness are not given: its keys are different sounds, not pitches of one. 1 of the 36 keys that were played one by one said nothing."
 
 
@@ -4571,6 +4626,7 @@ files = 4288
 archive = "https://github.com/sfzinstruments/WilkinsonAudio.NakedDrums/archive/407732a548606ac715ad8f3fbac63d9f4df77c0d.zip"
 under = "WilkinsonAudio.NakedDrums-407732a548606ac715ad8f3fbac63d9f4df77c0d/"
 sum = "a2ce4aa106b3c6152021a30cb87ff1266b8bb109a15510adcb9eea87f4a5a815"
+archive_bytes = 1283095413
 
 [[set.instrument]]
 file = "Wilkinson Audio/Naked Drums/Stereo/Naked Drums CR.sfz"
@@ -4586,7 +4642,7 @@ bytes = 529303077
 ways = ["Non-Var Hats", "Variable Hats"]
 noise = [83.7, 58.8]
 level = -16.2
-misses = "It asks for 5 things this player does not do, so it will not sound quite as in its maker's player. Not heard: what its maker's player makes up as controllers beyond the ones here (how fast a key came up, how far a note is from the one before) (hicc130, locc130, on_hicc130, on_locc130); conditions on which recording sounds (the pitch wheel, the pressure, the tempo, a file's own root note) (sw_vel). Everything else plays."
+misses = "It asks for 1 thing this player does not do, so it will not sound quite as in its maker's player. Not heard: conditions on which recording sounds (the pitch wheel, the pressure, the tempo, a file's own root note) (sw_vel). Everything else plays."
 note = "Tuning and evenness are not given: its keys are different sounds, not pitches of one. 1 of the 25 keys that were played one by one said nothing."
 
 [[set.instrument]]
@@ -4603,7 +4659,7 @@ bytes = 794094852
 ways = ["Non-Var Hats", "Variable Hats"]
 noise = [81.9, 51.4]
 level = -16.2
-misses = "It asks for 5 things this player does not do, so it will not sound quite as in its maker's player. Not heard: what its maker's player makes up as controllers beyond the ones here (how fast a key came up, how far a note is from the one before) (hicc130, locc130, on_hicc130, on_locc130); conditions on which recording sounds (the pitch wheel, the pressure, the tempo, a file's own root note) (sw_vel). Everything else plays."
+misses = "It asks for 1 thing this player does not do, so it will not sound quite as in its maker's player. Not heard: conditions on which recording sounds (the pitch wheel, the pressure, the tempo, a file's own root note) (sw_vel). Everything else plays."
 note = "Tuning and evenness are not given: its keys are different sounds, not pitches of one. 1 of the 25 keys that were played one by one said nothing."
 
 [[set.instrument]]
@@ -4620,7 +4676,7 @@ bytes = 1081594002
 ways = ["Non-Var Hats", "Variable Hats"]
 noise = [79.1, 54.6]
 level = -16.2
-misses = "It asks for 5 things this player does not do, so it will not sound quite as in its maker's player. Not heard: what its maker's player makes up as controllers beyond the ones here (how fast a key came up, how far a note is from the one before) (hicc130, locc130, on_hicc130, on_locc130); conditions on which recording sounds (the pitch wheel, the pressure, the tempo, a file's own root note) (sw_vel). Everything else plays."
+misses = "It asks for 1 thing this player does not do, so it will not sound quite as in its maker's player. Not heard: conditions on which recording sounds (the pitch wheel, the pressure, the tempo, a file's own root note) (sw_vel). Everything else plays."
 note = "Tuning and evenness are not given: its keys are different sounds, not pitches of one. 1 of the 25 keys that were played one by one said nothing."
 
 [[set.instrument]]
@@ -4637,7 +4693,7 @@ bytes = 391083152
 ways = ["Non-Var Hats", "Variable Hats"]
 noise = [89.6, 64.2]
 level = -16.2
-misses = "It asks for 5 things this player does not do, so it will not sound quite as in its maker's player. Not heard: what its maker's player makes up as controllers beyond the ones here (how fast a key came up, how far a note is from the one before) (hicc130, locc130, on_hicc130, on_locc130); conditions on which recording sounds (the pitch wheel, the pressure, the tempo, a file's own root note) (sw_vel). Everything else plays."
+misses = "It asks for 1 thing this player does not do, so it will not sound quite as in its maker's player. Not heard: conditions on which recording sounds (the pitch wheel, the pressure, the tempo, a file's own root note) (sw_vel). Everything else plays."
 note = "Tuning and evenness are not given: its keys are different sounds, not pitches of one. 1 of the 25 keys that were played one by one said nothing."
 
 [[set.instrument]]
@@ -4654,7 +4710,7 @@ bytes = 1284737543
 ways = ["Non-Var Hats", "Variable Hats"]
 noise = [78.5, 54.9]
 level = -16.2
-misses = "It asks for 5 things this player does not do, so it will not sound quite as in its maker's player. Not heard: what its maker's player makes up as controllers beyond the ones here (how fast a key came up, how far a note is from the one before) (hicc130, locc130, on_hicc130, on_locc130); conditions on which recording sounds (the pitch wheel, the pressure, the tempo, a file's own root note) (sw_vel). Everything else plays."
+misses = "It asks for 1 thing this player does not do, so it will not sound quite as in its maker's player. Not heard: conditions on which recording sounds (the pitch wheel, the pressure, the tempo, a file's own root note) (sw_vel). Everything else plays."
 note = "Tuning and evenness are not given: its keys are different sounds, not pitches of one. 1 of the 25 keys that were played one by one said nothing."
 
 [[set.instrument]]
@@ -4671,7 +4727,7 @@ bytes = 358474127
 ways = ["Non-Var Hats", "Variable Hats"]
 noise = [89.7, 62.4]
 level = -15.9
-misses = "It asks for 5 things this player does not do, so it will not sound quite as in its maker's player. Not heard: what its maker's player makes up as controllers beyond the ones here (how fast a key came up, how far a note is from the one before) (hicc130, locc130, on_hicc130, on_locc130); conditions on which recording sounds (the pitch wheel, the pressure, the tempo, a file's own root note) (sw_vel). Everything else plays."
+misses = "It asks for 1 thing this player does not do, so it will not sound quite as in its maker's player. Not heard: conditions on which recording sounds (the pitch wheel, the pressure, the tempo, a file's own root note) (sw_vel). Everything else plays."
 note = "Tuning and evenness are not given: its keys are different sounds, not pitches of one."
 
 [[set.instrument]]
@@ -4688,7 +4744,7 @@ bytes = 563381720
 ways = ["Non-Var Hats", "Variable Hats"]
 noise = [82.7, 59.1]
 level = -16.2
-misses = "It asks for 5 things this player does not do, so it will not sound quite as in its maker's player. Not heard: what its maker's player makes up as controllers beyond the ones here (how fast a key came up, how far a note is from the one before) (hicc130, locc130, on_hicc130, on_locc130); conditions on which recording sounds (the pitch wheel, the pressure, the tempo, a file's own root note) (sw_vel). Everything else plays."
+misses = "It asks for 1 thing this player does not do, so it will not sound quite as in its maker's player. Not heard: conditions on which recording sounds (the pitch wheel, the pressure, the tempo, a file's own root note) (sw_vel). Everything else plays."
 note = "Tuning and evenness are not given: its keys are different sounds, not pitches of one."
 
 
@@ -4709,6 +4765,7 @@ files = 4872
 archive = "https://github.com/sfzinstruments/karoryfer.big-rusty-drums/archive/f07ce00df34a46b6b08375be56fe116cf15782bc.zip"
 under = "karoryfer.big-rusty-drums-f07ce00df34a46b6b08375be56fe116cf15782bc/"
 sum = "4345a0914e2189e94b8ae5430b85499a844369c27ee7656e3f82852b8512039d"
+archive_bytes = 619428922
 
 [[set.instrument]]
 file = "Programs/01-full.sfz"
@@ -4859,6 +4916,7 @@ files = 5103
 archive = "https://github.com/sfzinstruments/karoryfer.swirly-drums/archive/c40dafe0011cb2e54c0c220ff0fa308a11fc60f5.zip"
 under = "karoryfer.swirly-drums-c40dafe0011cb2e54c0c220ff0fa308a11fc60f5/"
 sum = "2fd76a1c7486feecfbccd0ef5ea705f52ed353ed8826c6757cf1f1f3b0bc9970"
+archive_bytes = 861594706
 
 [[set.instrument]]
 file = "Programs/Basic_kit.sfz"
@@ -5020,6 +5078,7 @@ files = 6372
 archive = "https://github.com/sfzinstruments/karoryfer.unruly-drums/archive/9bf75c2a1392f190cd1c264645653629f0b3a097.zip"
 under = "karoryfer.unruly-drums-9bf75c2a1392f190cd1c264645653629f0b3a097/"
 sum = "089ba4292cf321186e52d84fd942d8222dc0f59c5b0248e6f75cabc85c751ce7"
+archive_bytes = 676699626
 
 [[set.instrument]]
 file = "Programs/01-kit-sticks.sfz"
@@ -5218,6 +5277,7 @@ files = 1834
 archive = "https://github.com/sfzinstruments/karoryfer.gogodze-phu-vol-ii/archive/69a0274cdc39c99c3098cde1bc3789690de86d62.zip"
 under = "karoryfer.gogodze-phu-vol-ii-69a0274cdc39c99c3098cde1bc3789690de86d62/"
 sum = "f0434f13b787eecb92dd6a33470699896b49b1a53983383a9a6c2916687f6553"
+archive_bytes = 137241993
 
 [[set.instrument]]
 file = "Programs/Hat.sfz"
@@ -5393,6 +5453,7 @@ files = 5358
 archive = "https://github.com/sfzinstruments/virtuosity_drums/archive/9f04cf9a734527edfbb0a4eee1f674e45bbf71bc.zip"
 under = "virtuosity_drums-9f04cf9a734527edfbb0a4eee1f674e45bbf71bc/"
 sum = "6bf2f3ce241ffc382a8025e57a26c400321ae926d0ba078e358ea400a75fd3c7"
+archive_bytes = 1226781472
 
 [[set.instrument]]
 file = "Programs/01-basic-kit.sfz"
@@ -5533,6 +5594,7 @@ files = 29
 archive = "https://github.com/freepats/synthesizer-percussion/archive/39bbabce8e0e10aa259d5d94fca329f668733185.zip"
 under = "synthesizer-percussion-39bbabce8e0e10aa259d5d94fca329f668733185/"
 sum = "302e696e49456b1f6db62fe6b0c4712f775a405b1bd81fc88542f476fdc30b92"
+archive_bytes = 1665976
 
 [[set.instrument]]
 file = "SynthesizerPercussion-20220718.sfz"
@@ -5567,6 +5629,7 @@ files = 4058
 archive = "https://github.com/sfzinstruments/karoryfer.frankensnare/archive/9151c2d79fcbb73c65d63f78918d4ba7abc91a81.zip"
 under = "karoryfer.frankensnare-9151c2d79fcbb73c65d63f78918d4ba7abc91a81/"
 sum = "0cf9177c00377b596fe0f150008db374b8c0f2d27021dc6142e7c05d55eedc95"
+archive_bytes = 365997097
 
 [[set.instrument]]
 file = "Programs/01-frankensnare.sfz"
@@ -6083,6 +6146,7 @@ files = 786
 archive = "https://github.com/sfzinstruments/Karoryfer.TheHatWithThePhat/archive/afa76f2c9c88e2e27d72a0c2216b1eae3c47b835.zip"
 under = "Karoryfer.TheHatWithThePhat-afa76f2c9c88e2e27d72a0c2216b1eae3c47b835/"
 sum = "6d4d48f87351b5b8d7d43c315d7020fc2eae91164e7fd7168e7571e94ae2f906"
+archive_bytes = 665714889
 
 [[set.instrument]]
 file = "Programs/01-complete.sfz"
@@ -6132,6 +6196,7 @@ files = 580
 archive = "https://github.com/sfzinstruments/karoryfer.gogodze-phu-vol-i/archive/7452f62060cd3a468c78bc361d96a4dfb30879c9.zip"
 under = "karoryfer.gogodze-phu-vol-i-7452f62060cd3a468c78bc361d96a4dfb30879c9/"
 sum = "74459bde9ad33246e9f05606c00bd21bbf760903229a287741ce6e6ea41d8c9e"
+archive_bytes = 30952329
 
 [[set.instrument]]
 file = "Programs/Bobobo.sfz"
@@ -6181,6 +6246,7 @@ files = 233
 archive = "https://github.com/sfzinstruments/body_percussion/archive/4ac9d8966679c648b62fa10a188179e186b97f24.zip"
 under = "body_percussion-4ac9d8966679c648b62fa10a188179e186b97f24/"
 sum = "c3bccea3e4e7f9d6a90d2c96013edafa356d48bfdc521c49a59e5cffff2d5ee7"
+archive_bytes = 39120945
 
 [[set.instrument]]
 file = "Programs/body.sfz"
@@ -6216,6 +6282,7 @@ files = 254
 archive = "https://github.com/sfzinstruments/kinwie.dim-cabasa/archive/016457e51a3e6558ab49676789260b54ff52ff1b.zip"
 under = "kinwie.dim-cabasa-016457e51a3e6558ab49676789260b54ff52ff1b/"
 sum = "fad37372c56a177d2cee19d539551aad197c8fd40e8bda205b76720577c5f4ac"
+archive_bytes = 10825373
 
 [[set.instrument]]
 file = "Dim Cabasa.sfz"
@@ -6249,6 +6316,7 @@ files = 24
 archive = "https://github.com/freepats/timpani/archive/21e505407fc6c43bdaa801ce57ff6a3a16dbe8b0.zip"
 under = "timpani-21e505407fc6c43bdaa801ce57ff6a3a16dbe8b0/"
 sum = "bd55f1ff78e0a8843e37b77313287b819207772286b97c8d6bb248e2b5923d26"
+archive_bytes = 9385456
 
 [[set.instrument]]
 file = "Timpani 20240809.sfz"
@@ -6283,6 +6351,7 @@ files = 244
 archive = "https://github.com/freepats/world-percussion/archive/e54eb2912a0d6d4444ab205d52f778e27da0fc96.zip"
 under = "world-percussion-e54eb2912a0d6d4444ab205d52f778e27da0fc96/"
 sum = "6fe3dd8ea2a493199822b4630ef7988777e780b5f6616a02744cb03008a9cdee"
+archive_bytes = 7048515
 
 [[set.instrument]]
 file = "WorldPercussion 20200905.sfz"
@@ -6318,6 +6387,7 @@ files = 178
 archive = "https://github.com/sfzinstruments/zamenhof_stickmusterstuch_error/archive/338133ee7fe6a429576c0dea3edfa1b9270201b6.zip"
 under = "zamenhof_stickmusterstuch_error-338133ee7fe6a429576c0dea3edfa1b9270201b6/"
 sum = "681ed006c26287584733ceff81bd352012a81e0efceed303bf02af32ec27844d"
+archive_bytes = 78585276
 
 [[set.instrument]]
 file = "Zamenhof Stickmusterstuch Error Eins.sfz"
@@ -6365,6 +6435,7 @@ files = 14
 archive = "https://github.com/freepats/lately-bass/archive/e27530dec05161ec3b661e86f4feb2065e0675aa.zip"
 under = "lately-bass-e27530dec05161ec3b661e86f4feb2065e0675aa/"
 sum = "3b66776e9f9d84024d4332dfc3397f18f0ef8619710f26779f60f5e31b12f965"
+archive_bytes = 2822876
 
 [[set.instrument]]
 file = "LatelyBass 20240409.sfz"
@@ -6400,6 +6471,7 @@ files = 18
 archive = "https://github.com/freepats/synth-bass-1/archive/17095d4d23e960b0566489dc506cc858e3b50e0b.zip"
 under = "synth-bass-1-17095d4d23e960b0566489dc506cc858e3b50e0b/"
 sum = "1f3588172c8dc26eb7f06e0363b6393e6469c4063385c821a2c01ad8271acc23"
+archive_bytes = 812644
 
 [[set.instrument]]
 file = "SynthBass1 20190723.sfz"
@@ -6435,6 +6507,7 @@ files = 12
 archive = "https://github.com/freepats/synth-bass-2/archive/66e5cee74977d2b7804ce9820c1667e7aaf3737f.zip"
 under = "synth-bass-2-66e5cee74977d2b7804ce9820c1667e7aaf3737f/"
 sum = "24b941a7dfd1fa171a8dfda10e2fcbe061e1417d6a301c5baa6234ad9b010b81"
+archive_bytes = 2687493
 
 [[set.instrument]]
 file = "SynthBass2 20210405.sfz"
@@ -6470,6 +6543,7 @@ files = 21
 archive = "https://github.com/freepats/synth-bass-lead/archive/426f32da700c42a4071b5061ee3bb2fc92de0680.zip"
 under = "synth-bass-lead-426f32da700c42a4071b5061ee3bb2fc92de0680/"
 sum = "a8fb4a3d58a872adec59fa58f5997601dcc18814ea99332cf91c8510d827a145"
+archive_bytes = 4006389
 
 [[set.instrument]]
 file = "SynthBassLead 20200522.sfz"
@@ -6505,6 +6579,7 @@ files = 15
 archive = "https://github.com/freepats/synth-brass-1/archive/a2d2111daae3e45761c5cabd480f4c60258bd645.zip"
 under = "synth-brass-1-a2d2111daae3e45761c5cabd480f4c60258bd645/"
 sum = "d534707be67dc391b1fbe20ca6e4df8ee210de6802e9cc764a87587cae674825"
+archive_bytes = 2834170
 
 [[set.instrument]]
 file = "SynthBrass1 20210426.sfz"
@@ -6540,6 +6615,7 @@ files = 13
 archive = "https://github.com/freepats/synth-brass-2/archive/d62f2c8af4553fb3282cb7509ac5dbc2c429937b.zip"
 under = "synth-brass-2-d62f2c8af4553fb3282cb7509ac5dbc2c429937b/"
 sum = "0cddc61b7108c7f3e78b4607731921a6ee6ad3af0fe75848ad2008723abbcced"
+archive_bytes = 1985933
 
 [[set.instrument]]
 file = "SynthBrass2 20240610.sfz"
@@ -6575,6 +6651,7 @@ files = 19
 archive = "https://github.com/freepats/synth-calliope/archive/b2a14048eeb82c8e6745a94221f1d559e22e2700.zip"
 under = "synth-calliope-b2a14048eeb82c8e6745a94221f1d559e22e2700/"
 sum = "17b782ea2e4758570c8c89efc7b37453338384fc479b9bfe1314ef8bb060701b"
+archive_bytes = 3681405
 
 [[set.instrument]]
 file = "SynthCalliope 20200512.sfz"
@@ -6610,6 +6687,7 @@ files = 22
 archive = "https://github.com/freepats/synth-square/archive/6d204b085af42f023770a3add2eeea9f9dbc5f14.zip"
 under = "synth-square-6d204b085af42f023770a3add2eeea9f9dbc5f14/"
 sum = "ecfcb664880bd69059ea6873edaef8a701e6a206e24677f7f5710691a3cb4b78"
+archive_bytes = 7284071
 
 [[set.instrument]]
 file = "SynthSquare 20200512.sfz"
@@ -6645,6 +6723,7 @@ files = 18
 archive = "https://github.com/freepats/synth-fifths/archive/7ee6901252a818c257c387bdf89a0a52cc5cb3fc.zip"
 under = "synth-fifths-7ee6901252a818c257c387bdf89a0a52cc5cb3fc/"
 sum = "eb5680117b40551ddec16c301ae8c5bc067de5aab1f68fc8b64ef9c9f803d5e1"
+archive_bytes = 7938229
 
 [[set.instrument]]
 file = "SynthFifths 20200519.sfz"
@@ -6680,6 +6759,7 @@ files = 15
 archive = "https://github.com/freepats/synth-strings-1/archive/c0ecbfd69cc242703c6342fcb3a7ffe8cd493ec7.zip"
 under = "synth-strings-1-c0ecbfd69cc242703c6342fcb3a7ffe8cd493ec7/"
 sum = "cfdcefa2ee9abee54db74273bff2f951bacce75ee5032f7d60ea3180f327993a"
+archive_bytes = 3818774
 
 [[set.instrument]]
 file = "SynthStrings1 20200528.sfz"
@@ -6715,6 +6795,7 @@ files = 21
 archive = "https://github.com/freepats/synth-strings-2/archive/1f4f3ba29bcbbb182fa9843f3e3acb463155e9aa.zip"
 under = "synth-strings-2-1f4f3ba29bcbbb182fa9843f3e3acb463155e9aa/"
 sum = "c7bd03d089f155d2dc83c5181430f3acba1d2a30edf8168f7cd826432c1fb6c4"
+archive_bytes = 5709867
 
 [[set.instrument]]
 file = "SynthStrings2 20200528.sfz"
@@ -6750,6 +6831,7 @@ files = 35
 archive = "https://github.com/freepats/synth-pad-bowed/archive/1646e448ff4cfa966496af3e07a68d7778c85d58.zip"
 under = "synth-pad-bowed-1646e448ff4cfa966496af3e07a68d7778c85d58/"
 sum = "ebb96860423364183157ecde1ae36d9d313449f122c5146a157f1609bd42930c"
+archive_bytes = 11920406
 
 [[set.instrument]]
 file = "SynthPadBowed 20190719.sfz"
@@ -6785,6 +6867,7 @@ files = 15
 archive = "https://github.com/freepats/synth-pad-choir/archive/b801f7fc3eee44f575cd480750aea4f6a16a07a9.zip"
 under = "synth-pad-choir-b801f7fc3eee44f575cd480750aea4f6a16a07a9/"
 sum = "3f6fbf10621eb5da0a2de1b0de67496aebabe5892baa42a0b8016a420ad546fc"
+archive_bytes = 6821392
 
 [[set.instrument]]
 file = "SynthPadChoir 20200516.sfz"
@@ -6820,6 +6903,7 @@ files = 19
 archive = "https://github.com/freepats/new-age/archive/f277fa2463180f2aee6f481c3d08644533f3ce98.zip"
 under = "new-age-f277fa2463180f2aee6f481c3d08644533f3ce98/"
 sum = "9fc6be6448999cda9014cf5ed45b32f3560857d049c9179e0a82aee571ba348a"
+archive_bytes = 4486640
 
 [[set.instrument]]
 file = "NewAge 20190730.sfz"
@@ -6855,6 +6939,7 @@ files = 16
 archive = "https://github.com/freepats/sweep-pad/archive/ed3e294fcec8c3ea3ec84471f8c7a75bc09eba04.zip"
 under = "sweep-pad-ed3e294fcec8c3ea3ec84471f8c7a75bc09eba04/"
 sum = "8f9f89ce9593fcdd410633098640fa7da1b9c165713c8e2d8e231a4001e255cf"
+archive_bytes = 2997108
 
 [[set.instrument]]
 file = "SweepPad 20190813.sfz"
@@ -6890,6 +6975,7 @@ files = 14
 archive = "https://github.com/freepats/synth-crystal/archive/5db4d88550f124cfd26ffe6bd283befe3a35313f.zip"
 under = "synth-crystal-5db4d88550f124cfd26ffe6bd283befe3a35313f/"
 sum = "5c7bab046e0d62e1c2f8d8538c9350a96e424b98f57599bbaa9be6be9e2baae5"
+archive_bytes = 2641451
 
 [[set.instrument]]
 file = "SynthCrystal 20190812.sfz"
@@ -6925,6 +7011,7 @@ files = 21
 archive = "https://github.com/freepats/synth-goblins/archive/f6034596936ddb8f94832106a6d13c19d7ac07ea.zip"
 under = "synth-goblins-f6034596936ddb8f94832106a6d13c19d7ac07ea/"
 sum = "dec2c87a662aa11437a956c0fb4047ebe5e4e0d9f9390a2e305d59ec22e93c06"
+archive_bytes = 11002687
 
 [[set.instrument]]
 file = "SynthGoblins 20200612.sfz"
@@ -6960,6 +7047,7 @@ files = 24
 archive = "https://github.com/freepats/synth-scifi/archive/b630598bd2832bcf69a8d8ff7cc61f90f2b51421.zip"
 under = "synth-scifi-b630598bd2832bcf69a8d8ff7cc61f90f2b51421/"
 sum = "50eddd54a3f0d9c306528d9c7fe7cbf38d9b123a0138090dff4e97a65ab8496f"
+archive_bytes = 13916572
 
 [[set.instrument]]
 file = "SynthSciFi 20200517.sfz"
@@ -6995,6 +7083,7 @@ files = 18
 archive = "https://github.com/freepats/synth-soundtrack/archive/ecfc6372bf5ece4183b81ced3380758d60bcb4d9.zip"
 under = "synth-soundtrack-ecfc6372bf5ece4183b81ced3380758d60bcb4d9/"
 sum = "34f74b3c5c45964e64e2ee5c407af9770787769db749b7f6ec228675cc370bf9"
+archive_bytes = 10335643
 
 [[set.instrument]]
 file = "SynthSoundtrack 20200521.sfz"
@@ -7162,6 +7251,7 @@ ways = ["C2 Sustain", "C#2 Tremolo", "D2 Spiccato", "D#2 Pizzicato"]
 tuning = [-0.2, 1.7, -3.6]
 evenness = [2.6, 5.0]
 level = -9.0
+marks = ["starter"]
 note = "Noise is not given: its notes are held or looped, and such a note never falls quiet."
 
 [[set.instrument]]
@@ -7226,6 +7316,7 @@ bytes = 71702776
 tuning = [-0.2, 1.7, -3.6]
 evenness = [2.6, 5.0]
 level = -9.0
+marks = ["starter"]
 note = "Noise is not given: its notes are held or looped, and such a note never falls quiet."
 
 [[set.instrument]]
@@ -8504,8 +8595,8 @@ licence_says = "This collection is under a Creative Commons 0 license."
 from = "https://github.com/sgossner/VCSL/tree/sfz"
 version = "dfcf4a4918771eee884b96ad4493de82ef84daf6"
 read = "2026-11-17"
-bytes = 651737949
-files = 276
+bytes = 660233933
+files = 284
 [set.fetch]
 base = "https://raw.githubusercontent.com/sgossner/VCSL/dfcf4a4918771eee884b96ad4493de82ef84daf6/"
 list = "vcsl-upright-pianos"
@@ -8519,13 +8610,12 @@ words = "Upright Piano, Knight. Two upright pianos, a Knight and a Yamaha. A par
 range = [21, 109]
 layers = 2
 takes = 1
-recordings = 135
-bytes = 411267714
-noise = [58.5, 39.8]
+recordings = 143
+bytes = 419763698
+noise = [57.2, 39.9]
 tuning = [-0.6, 1.0, -5.4]
 evenness = [1.6, 4.7]
 level = -8.8
-misses = "It asks for 2 things this player does not do, so it will not sound quite as in its maker's player. Not heard: sounds that moving a controller sets off (the noise of a pedal) (on_hicc64, on_locc64). Everything else plays."
 
 [[set.instrument]]
 file = "Chordophones/Zithers/Upright Piano, Yamaha.sfz"

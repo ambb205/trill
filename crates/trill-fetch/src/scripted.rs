@@ -29,6 +29,8 @@ pub struct Shelf {
     slow: Mutex<Duration>,
     /// The next fetch is lost after so many bytes.
     cut: Mutex<Option<u64>>,
+    /// How many files were asked for together, each time several were.
+    together: Mutex<Vec<usize>>,
 }
 
 impl Shelf {
@@ -53,6 +55,16 @@ impl Shelf {
     /// Loses the connection of the next fetch once `bytes` of the file are there.
     pub fn cut_after(&self, bytes: u64) {
         *self.cut.lock() = Some(bytes);
+    }
+
+    /// How many files were asked for together, each time several were.
+    pub fn together(&self) -> Vec<usize> {
+        self.together.lock().clone()
+    }
+
+    /// Takes what is at `url` off the shelf: it is not published any more.
+    pub fn take(&self, url: &str) {
+        self.files.lock().remove(url);
     }
 }
 
@@ -85,6 +97,22 @@ impl Fetcher for Shelf {
         }
         Ok(())
     }
+
+    fn fetch_many(
+        &self,
+        files: &[(String, std::path::PathBuf)],
+        _beside: &Path,
+        stop: &AtomicBool,
+        got: &mut dyn FnMut(u64),
+    ) -> Result<(), Ended> {
+        self.together.lock().push(files.len());
+        let mut before = 0u64;
+        for (url, to) in files {
+            self.fetch(url, to, stop, &mut |bytes| got(before + bytes))?;
+            before += std::fs::metadata(to).map_or(0, |metadata| metadata.len());
+        }
+        Ok(())
+    }
 }
 
 /// A part made up for a test, with its files put on `shelf`: each is kept
@@ -96,7 +124,7 @@ pub fn part(shelf: &Shelf, id: &str, name: &str, files: &[(&str, Vec<u8>)]) -> P
             let url = format!("https://shelf.test/{id}/{file}");
             shelf.put(&url, bytes.clone());
             let sha256 = Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect();
-            Fetched { url, sha256, size: bytes.len() as u64, keep: Keep::As((*file).to_owned()) }
+            Fetched { url, sha256, size: bytes.len() as u64, keep: Keep::As((*file).to_owned()), unpacked: 0 }
         })
         .collect();
     Part {
@@ -108,5 +136,6 @@ pub fn part(shelf: &Shelf, id: &str, name: &str, files: &[(&str, Vec<u8>)]) -> P
         from: "shelf.test".to_owned(),
         needs: Vec::new(),
         files,
+        elsewhere: Vec::new(),
     }
 }

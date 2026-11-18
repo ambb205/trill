@@ -265,8 +265,10 @@ pub enum Fetch {
     /// As one archive (a zip), of which everything below `under` is the
     /// set. The archive is made by its source each time it is asked for,
     /// so it is pinned by what it unpacks to: `sum` is the
-    /// [`check::tree_sum`] of the set's files.
-    Archive { url: String, under: String, sum: String },
+    /// [`check::tree_sum`] of the set's files. `bytes` is what the archive
+    /// took the day it was fetched and checked, which is an estimate of
+    /// what it takes the next time (0 where it was never fetched so).
+    Archive { url: String, under: String, sum: String, bytes: u64 },
     /// File by file: each of `files` is at `base` followed by its path
     /// (with the characters an address cannot hold written as `%XX`),
     /// and is pinned by its own checksum.
@@ -383,6 +385,27 @@ impl Set {
     /// is the best of its kind.
     pub fn is_starter(&self) -> bool {
         self.instruments.iter().any(Instrument::is_starter)
+    }
+
+    /// The checksum of what it is on a disk, whichever way it came there
+    /// ([`check::tree_sum`]): what an archive of it kept anywhere has to
+    /// unpack to.
+    pub fn tree(&self) -> String {
+        match &self.fetch {
+            Fetch::Archive { sum, .. } => sum.clone(),
+            Fetch::Files { files, .. } => {
+                check::tree_sum_of(files.iter().map(|file| (file.path.as_str(), file.sha256.as_str())))
+            }
+        }
+    }
+
+    /// What is fetched for it, in bytes: an estimate for an archive its
+    /// source makes when it is asked for.
+    pub fn fetched_bytes(&self) -> u64 {
+        match &self.fetch {
+            Fetch::Archive { bytes, .. } if *bytes > 0 => *bytes,
+            _ => self.bytes,
+        }
     }
 
     /// The kinds of its instruments, each once.
@@ -520,6 +543,9 @@ struct WrittenFetch {
     under: Option<String>,
     #[serde(default)]
     sum: Option<String>,
+    /// What the archive took when it was fetched and checked.
+    #[serde(default)]
+    archive_bytes: Option<u64>,
     #[serde(default)]
     base: Option<String>,
     /// The name of a list in `files.toml`.
@@ -718,13 +744,27 @@ impl Catalogue {
                 return Err(wrong("its licence asks that its maker be named, and it has no credit line".into()));
             }
             let fetch = match set.fetch {
-                WrittenFetch { archive: Some(url), under: Some(under), sum: Some(sum), base: None, list: None } => {
+                WrittenFetch {
+                    archive: Some(url),
+                    under: Some(under),
+                    sum: Some(sum),
+                    archive_bytes,
+                    base: None,
+                    list: None,
+                } => {
                     if !url.starts_with("https://") || !is_sha256(&sum) || !(under.is_empty() || under.ends_with('/')) {
                         return Err(wrong("its archive, what it is under or its checksum cannot be one".into()));
                     }
-                    Fetch::Archive { url, under, sum }
+                    Fetch::Archive { url, under, sum, bytes: archive_bytes.unwrap_or(0) }
                 }
-                WrittenFetch { archive: None, under: None, sum: None, base: Some(base), list: Some(list) } => {
+                WrittenFetch {
+                    archive: None,
+                    under: None,
+                    sum: None,
+                    archive_bytes: None,
+                    base: Some(base),
+                    list: Some(list),
+                } => {
                     if !base.starts_with("https://") || !base.ends_with('/') {
                         return Err(wrong("the address its files are below is not one".into()));
                     }

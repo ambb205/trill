@@ -1,10 +1,10 @@
 //! What it takes to pin a set, and whether a folder holds one.
 //!
 //! ```sh
-//! cargo run -p trill-catalogue --example pin -- sum FOLDER      # what a set's entry is written from
-//! cargo run -p trill-catalogue --example pin -- files FOLDER    # a line a file, for a set fetched file by file
-//! cargo run -p trill-catalogue --example pin -- check SET FOLDER   # is FOLDER that set of the catalogue?
-//! cargo run -p trill-catalogue --example pin -- list            # the sets, with their sizes and how they are fetched
+//! cargo run -p trill-catalogue --example sets -- sum FOLDER      # what a set's entry is written from
+//! cargo run -p trill-catalogue --example sets -- files FOLDER    # a line a file, for a set fetched file by file
+//! cargo run -p trill-catalogue --example sets -- check SET FOLDER   # is FOLDER that set of the catalogue?
+//! cargo run -p trill-catalogue --example sets -- list            # the sets, with their sizes and how they are fetched
 //! ```
 //!
 //! `sum` prints the folder's tree checksum (what `fetch.sum` holds for a

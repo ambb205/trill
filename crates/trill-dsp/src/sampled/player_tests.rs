@@ -529,6 +529,64 @@ fn a_filter_a_vibrato_and_controllers_do_what_the_instrument_says() {
 }
 
 /// The peaks of `heard` over stretches of `window` frames.
+#[test]
+fn a_controller_coming_into_its_span_sets_off_a_sound_once_and_no_key_does() {
+    // A note, the noise of the pedal going down (one of two, by lot) and the noise of its coming up. That no
+    // key plays them is written as files write it: a key under the lowest, and a span of keys that holds none.
+    let sfz = "<global> amp_veltrack=0 pitch_keytrack=0 loop_mode=one_shot\n<region> sample=note.wav key=60\n\
+               <group> lokey=-1 hikey=-1 on_locc64=127 on_hicc64=127 locc64=127 hicc64=127\n\
+               <region> sample=down.wav lorand=0 hirand=0.5 <region> sample=down.wav lorand=0.5 hirand=1 volume=-12\n\
+               <group> lokey=127 hikey=0 on_locc64=0 on_hicc64=0 <region> sample=up.wav";
+    let files = [("note.wav", level(4_800, 0.5)), ("down.wav", level(2_400, 0.25)), ("up.wav", level(1_200, 0.125))];
+    let pedal = |position: f32| control(64, position);
+    let quieter = 0.25 * 10f32.powf(-12.0 / 20.0);
+    let events = [
+        // Put where it is already: it has not come into anything.
+        (0, pedal(0.0)),
+        // All the way down: its noise, once.
+        (4_800, pedal(1.0)),
+        // Held, and said again: nothing. Half way up: out of one span, and not into the other.
+        (9_600, pedal(1.0)),
+        (12_000, pedal(0.5)),
+        // All the way up: the noise of its coming up.
+        (14_400, pedal(0.0)),
+        // A key that has a note plays its note and nothing else; one that has none plays nothing.
+        (19_200, on(60, 100)),
+        (26_400, on(30, 100)),
+    ];
+    let mut player = rendered(sfz, &files);
+    let heard = play(&mut player, 256, 30_000, &events);
+    assert_eq!(peak(&heard[..4_800]), 0.0, "nothing is set off by a controller that stays where it was");
+    let down = heard[5_000];
+    assert!((down - 0.25).abs() < 1e-6 || (down - quieter).abs() < 1e-6, "one of the two, by lot: {down}");
+    assert!((heard[7_100] - down).abs() < 1e-6, "to its end, whatever the pedal does");
+    assert_eq!(peak(&heard[7_300..14_400]), 0.0, "once: not while it is held, nor on its way up");
+    assert!((heard[14_500] - 0.125).abs() < 1e-6 && (heard[15_500] - 0.125).abs() < 1e-6, "{}", heard[14_500]);
+    assert_eq!(peak(&heard[15_700..19_200]), 0.0);
+    assert!((heard[19_300] - 0.5).abs() < 1e-6, "a key plays its note, and no pedal's noise: {}", heard[19_300]);
+    assert_eq!(peak(&heard[24_100..]), 0.0, "a key with no note plays nothing");
+
+    // The same song is the same samples, whatever the size of the blocks it is made in.
+    let mut again = rendered(sfz, &files);
+    assert!(play(&mut again, 97, 30_000, &events) == heard);
+    // Which of the two it is is a matter of where in the song the pedal goes down, and of nothing else.
+    let mut lots = std::collections::BTreeSet::new();
+    for press in 0..12usize {
+        let mut player = rendered(sfz, &files);
+        let heard = play_from(&mut player, press * 7_919, 256, 1_000, &[(100, pedal(1.0))]).0;
+        lots.insert((heard[500] * 1_000.0).round() as i32);
+    }
+    assert_eq!(lots.into_iter().collect::<Vec<_>>(), [63, 250], "both are taken, over a dozen places");
+
+    // What the instrument says of itself has the pedal among its controllers, and no box for its noise.
+    let (player, source) = made(sfz, &files, Purpose::Rendering);
+    drop(player);
+    let loaded = source.load(Some(&State::new(FILE).to_bytes())).unwrap().unwrap();
+    assert_eq!(loaded.set_off, [1, 2, 3]);
+    assert_eq!(loaded.boxes().len(), 1, "what a controller sets off lies on no key");
+    assert!(loaded.summary.controllers.iter().any(|(number, _)| *number == 64));
+}
+
 fn peaks(heard: &[f32], window: usize) -> Vec<f32> {
     heard.chunks(window).filter(|chunk| chunk.len() == window).map(peak).collect()
 }
@@ -946,16 +1004,20 @@ fn a_group_has_only_so_many_voices_and_the_pedal_is_the_controller_the_instrumen
 }
 
 #[test]
-fn a_region_that_no_key_plays_is_left_out_and_said() {
+fn a_region_that_no_key_plays_is_left_out_unless_a_controller_sets_it_off() {
     let sfz = "<region> sample=note.wav lokey=40 hikey=80\n<region> sample=pedal.wav key=-1 on_locc64=126 on_hicc64=127\n\
-               <region> sample=pedal.wav lokey=-1 hikey=-1\n<region> sample=pedal.wav on_locc64=1 lokey=0 hikey=127";
+               <region> sample=pedal.wav lokey=-1 hikey=-1\n<region> sample=pedal.wav on_locc64=1 lokey=0 hikey=127\n\
+               <region> sample=pedal.wav lokey=127 hikey=0 on_locc64=65 on_hicc64=127\n\
+               <region> sample=pedal.wav lokey=127 hikey=0";
     let (_, source) = made(sfz, &[("note.wav", level(100, 0.1)), ("pedal.wav", level(100, 0.9))], Purpose::Rendering);
     let loaded = source.load(Some(&State::new(FILE).to_bytes())).unwrap().unwrap();
-    assert_eq!(loaded.instrument.regions.len(), 1);
+    // The ones that neither a key nor a controller would sound are left out; the three the pedal sets off
+    // are kept, the one whose span of keys holds none among them.
+    assert_eq!(loaded.instrument.regions.len(), 4);
+    assert_eq!(loaded.set_off, [1, 2, 3]);
+    // They lie on no key, whatever keys their regions name: the instrument's range is its notes'.
     assert_eq!(loaded.summary.range, Some((40, 80)));
-    let sentence = loaded.unsupported().unwrap();
-    assert!(
-        sentence.contains("sounds that moving a controller sets off (the noise of a pedal) (on_hicc64, on_locc64)"),
-        "{sentence}"
-    );
+    assert!(loaded.down.iter().all(|regions| regions.iter().all(|index| *index == 0)));
+    assert!(loaded.up.iter().all(Vec::is_empty));
+    assert_eq!(loaded.unsupported(), None, "nothing of it is left undone");
 }
