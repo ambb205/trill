@@ -21,6 +21,7 @@ mod load;
 mod making_of;
 mod missing;
 mod mixer;
+mod opening;
 mod perf;
 mod recording;
 mod recovery;
@@ -69,6 +70,10 @@ struct Harness {
     switches: Vec<(String, bool)>,
     /// What the app last put on the system clipboard.
     clipboard: Option<String>,
+    /// Someone else has the session for as long as this is set, and a
+    /// frame is run without looking at it: the window never waits for the
+    /// session, and here the harness does not either.
+    session_is_held: bool,
 }
 
 impl Harness {
@@ -95,6 +100,7 @@ impl Harness {
             values: Vec::new(),
             switches: Vec::new(),
             clipboard: None,
+            session_is_held: false,
         };
         // Widgets are hit-tested against where they were on the previous
         // frame, so the layout has to exist before any input arrives.
@@ -137,7 +143,8 @@ impl Harness {
         // test's next click must land on what the session holds now, so
         // here the window is given the time to catch up.
         let mut tries = 0;
-        while self.app.snapshot().revision != self.session.lock().revision() && tries < 10_000 {
+        while !self.session_is_held && self.app.snapshot().revision != self.session.lock().revision() && tries < 10_000
+        {
             std::thread::yield_now();
             self.app.tick(&self.ctx);
             tries += 1;

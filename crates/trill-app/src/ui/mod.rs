@@ -72,6 +72,7 @@ mod load;
 mod making_of;
 mod missing;
 mod mixer;
+mod opening;
 mod piano_roll;
 mod recording;
 mod recovery;
@@ -104,6 +105,7 @@ pub use keyboard::Options as KeyboardOptions;
 pub use load::LoadScene;
 pub use making_of::Start as MakingOfStart;
 pub use making_of::scene::play as play_making_of_scene;
+pub use opening::OpeningScene;
 pub use setup_scene::SetupScene;
 pub use state::{BrowserTab, DetailTab};
 pub use study::{Shown as StudyShown, Side as StudySide, Whole as StudyWhole};
@@ -191,6 +193,9 @@ pub struct UiOptions {
     /// Show a made-up load in place of the machine's own: for a picture
     /// or a test.
     pub load_scene: Option<LoadScene>,
+    /// Show a song in the middle of being opened, made up: for a picture
+    /// or a test.
+    pub opening_scene: Option<OpeningScene>,
     /// Start a take on the armed tracks as soon as the window opens.
     pub record: bool,
     /// Open on the stage.
@@ -234,6 +239,7 @@ impl Default for UiOptions {
             show_credits: false,
             show_load: false,
             load_scene: None,
+            opening_scene: None,
             record: false,
             stage: false,
             making_of: None,

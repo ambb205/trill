@@ -213,6 +213,77 @@ No buffer was late in these nine runs, and as it comes the song stayed on one th
 force it takes less than half the time; on another such run at 64 frames one buffer of 15,005 took longer than
 it lasts, which none did on one thread.
 
+**A song that is opened is there at once, and its devices come after.** Reading a song's file takes
+milliseconds; making its plugins takes as long as each takes to load its file, take its state on and read what
+it plays, one after the other on the one thread plugins are made on. Until now the session made them where it
+stood, and everyone who wanted the song waited for all of them: the window, which showed the song before with
+not a word, a model, the session's own chores. Now the song is compiled with the devices that take time left
+out and their places kept: its tracks, clips and mixer are there, and every built-in device plays. A thread of
+the session's own makes the others one by one in the order of the song, with nobody waiting, and each is put in
+its place when it has arrived. That is no edit: the song is not changed, and its history and its journal know
+nothing of it.
+
+*Until a device is there* its place is empty: an instrument is silent, and an effect lets through what comes
+into it. Play is never refused, and both front ends say what is missing ([the window](window.md);
+`loading` and `not_made_yet` for a model, in [AI and MCP](ai-and-mcp.md)). The device keeps the state the file
+gave it, which is what a save, a safety copy and a render take: a song saved in the middle is the whole song,
+and a render, a measurement or a probe in the middle makes its own devices as it always does. What cannot be
+done to a device that is not there (a parameter, a preset, its window) is refused in a sentence. A device is
+put in only as the one it was made as: one that was removed meanwhile, or made anew because an edit gave it
+another state, is let go of, and so is everything that was on its way for a song when another is opened or
+begun. One that cannot be made is a problem of the song in a sentence, as before. A song named on the command
+line, one opened by a model and one brought back from a safety copy all take this way.
+
+*What goes with the song before* (its plugins, each a wait on the same thread) is taken down after the new
+song's devices are made, by that same thread and with nobody waiting; before, the session's chores did it with
+the session held, right after the song was open. The other order was measured and is worse: with the song
+before taken down first, the song below opened over itself had all its devices after 22.7 s in place of 15.7 s,
+because sampled instruments that share what they have read with the instances before them read it again, and it
+did not leave more memory free while it opened.
+
+*What was measured*, on the machine above, with `cargo run -p trill-runtime --example opens`, which opens a song
+against a device that makes no sound and says when the song was there, when each device arrived, and what each
+step of each plugin's making took. The song is the one of nineteen plugins above (38 devices on 16 tracks).
+
+| | Made where the song is opened (before) | The song first (now) |
+|---|---|---|
+| The song is there (and the window has it to show) | after 16.5 s | after 0.09 s |
+| Its first plugin | after 16.5 s | after 1.9 s |
+| All nineteen | after 16.5 s | after 16.9 s (18.3 s on a run with the machine busier) |
+| No plugin still reading what it plays | after 20.7 s | after 20.9 s |
+
+The makings themselves are the plugins' own time and are as long as they were: 14.9 s in the plugins' code,
+and 1.4 s more that one maker's amplifiers spend on what they post to themselves after each is made (0.14 s
+after the first, 0.43 s after the sixth: it grows with how many of them there are). What is the host's is the
+tenth of a second the song takes, a second activation of each plugin that has values of the song's to start
+from (0.14 s for all of them), and handing each over (some 0.3 s). Nothing is read or scanned twice: a plugin's
+file is loaded once, and a second instance of it takes none of that time.
+
+| Plugin (its first instance, then the others) | Made in | Of which |
+|---|---|---|
+| A drum kit | 1.8 s | its state 1.7 s (it reads its kit) |
+| A sampled bass | 1.4 s | the instance 0.4 s, its state 1.0 s |
+| A sampled guitar (three kinds, eight instances) | 1.5 to 1.9 s the first of a kind, 0.45 to 0.7 s the others | the instance, nearly all of it |
+| An amplifier (six instances) | 1.0 to 1.3 s, then 0.05 to 0.07 s | its file 0.3 to 0.4 s and the instance 0.5 to 0.6 s the first time |
+| Another amplifier, of the same maker | 2.3 to 3.0 s | its file 0.3 s, the instance 0.5 s, its state 1.5 to 2.1 s |
+| A synthesizer (two instances) | 0.44 s, then 0.16 s | its file 0.3 s the first time |
+| A reverb | 0.02 s | |
+
+Opened over itself, with its own nineteen plugins to take down, the song was there after 0.1 s and whole after
+15.7 s (its plugins' files were loaded already); taking the others down took 3.8 s more, after that, with
+nobody waiting (a drum kit 1.1 s, a sampled instrument 0.15 to 0.34 s each). While the amplifiers of the song
+before are still there, each new one costs their maker's own work 0.46 to 0.86 s in place of 0.14 to 0.43 s:
+3.9 s over the song in place of 1.4 s. They are kept for a quarter of a minute because taking one down young
+takes the program down ([plugins](plugins-and-presets.md)), so that is theirs too.
+
+*A long song without plugins* was never the plugins' wait and is nearly all recordings. One of 57 tracks and
+183 built-in devices, 36,864 notes in 1,536 clips and eight recordings of four minutes at another rate than the
+device's opened in 1.56 s: 0.02 s for its file of 6 MB, 0.04 s for everything else, and 1.5 s for the
+recordings, read and brought to the device's rate one after the other. They are now read four at a time, ahead
+of the compile, and the song opens in 0.87 s. With four more tracks of a sampled grand piano it opens in
+0.98 s: a sampled instrument is made in 2 to 32 ms and reads its recordings on threads of its own, and none was
+still reading after 1.2 s.
+
 **Hearing without ears.** Whoever cannot listen (a script, an assistant) measures instead, and a few things make
 that quick and true:
 

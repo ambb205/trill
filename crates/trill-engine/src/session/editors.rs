@@ -24,6 +24,7 @@ impl Session {
     /// as `options` say. If it is open already, the window is brought to
     /// the front instead.
     pub fn open_device_editor(&mut self, id: DeviceId, options: &EditorOptions) -> Result<(), SessionError> {
+        self.there(id)?;
         self.project.device(id)?;
         let meta = self.bank.devices.get(&id).ok_or(EditError::DeviceNotFound(id))?;
         if let Some(error) = &meta.error {

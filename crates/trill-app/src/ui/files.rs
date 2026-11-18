@@ -29,6 +29,9 @@ const MELODIC_INSTRUMENT: &str = "builtin:polysynth";
 enum Event {
     /// A dialog was dismissed without choosing anything.
     DialogCancelled,
+    /// A file was chosen and is being opened: said before the session is
+    /// asked, which the window cannot look at until it has the song.
+    Opening(PathBuf),
     Loaded(Result<PathBuf, String>),
     Saved(Result<PathBuf, String>),
     /// The export dialog was answered and rendering has begun.
@@ -75,6 +78,9 @@ pub struct Jobs {
     dialog_open: bool,
     /// The file being rendered, while an export runs.
     exporting: Option<PathBuf>,
+    /// The song that is being opened, from when it was chosen until the
+    /// session has it: see [`super::opening`].
+    opening: Option<PathBuf>,
     pub confirm: Option<Confirm>,
     /// Set once the user chose to quit despite unsaved changes.
     pub quit_confirmed: bool,
@@ -83,7 +89,15 @@ pub struct Jobs {
 impl Default for Jobs {
     fn default() -> Self {
         let (sender, receiver) = channel();
-        Self { sender, receiver, dialog_open: false, exporting: None, confirm: None, quit_confirmed: false }
+        Self {
+            sender,
+            receiver,
+            dialog_open: false,
+            exporting: None,
+            opening: None,
+            confirm: None,
+            quit_confirmed: false,
+        }
     }
 }
 
@@ -93,6 +107,18 @@ impl Jobs {
         self.exporting.as_deref()
     }
 
+    /// The song that is being opened right now, if one is: chosen, and
+    /// not yet in the session.
+    pub fn opening(&self) -> Option<&Path> {
+        self.opening.as_deref()
+    }
+
+    /// Has the window say that `file` is being opened, without one being:
+    /// for a picture.
+    pub fn show_opening(&mut self, file: PathBuf) {
+        self.opening = Some(file);
+    }
+
     /// Applies what helper threads have reported since the last frame.
     /// Returns true if the open project was replaced by one from a file.
     pub fn poll(&mut self, state: &mut UiState) -> bool {
@@ -100,8 +126,13 @@ impl Jobs {
         while let Ok(event) = self.receiver.try_recv() {
             match event {
                 Event::DialogCancelled => self.dialog_open = false,
+                Event::Opening(path) => {
+                    self.dialog_open = false;
+                    self.opening = Some(path);
+                }
                 Event::Loaded(result) => {
                     self.dialog_open = false;
+                    self.opening = None;
                     match result {
                         Ok(path) => {
                             replaced = true;
@@ -236,10 +267,25 @@ fn open_dialog(ctx: &egui::Context, cx: &mut Cx) {
     let session = cx.session.clone();
     let dialog = project_dialog("Open project", cx.snap.path.as_deref());
     cx.jobs.spawn(ctx, move |report| {
-        report(match pollster::block_on(dialog.pick_file()) {
-            Some(file) => Event::Loaded(load(&session, file.path())),
-            None => Event::DialogCancelled,
-        });
+        let Some(file) = pollster::block_on(dialog.pick_file()) else {
+            report(Event::DialogCancelled);
+            return;
+        };
+        // Said first: from the next frame the window says which song is
+        // being opened, while this thread has the session.
+        report(Event::Opening(file.path().to_path_buf()));
+        report(Event::Loaded(load(&session, file.path())));
+    });
+}
+
+/// Opens the song at `path`, without asking which: what the system's
+/// dialog leads to once it is answered.
+#[cfg(test)]
+pub fn open_file(ctx: &egui::Context, cx: &mut Cx, path: PathBuf) {
+    let session = cx.session.clone();
+    cx.jobs.spawn(ctx, move |report| {
+        report(Event::Opening(path.clone()));
+        report(Event::Loaded(load(&session, &path)));
     });
 }
 

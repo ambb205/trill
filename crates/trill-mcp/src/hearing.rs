@@ -82,7 +82,9 @@ silent to the end they say which, because a key that plays nothing and a sample 
 same. If a plugin never answers ANY of the notes it is to play, nothing is measured or rendered and the call \
 fails, naming the track and what its notes say: a mix without one of its instruments is not the song. Ask again \
 if it was loading; otherwise fix the track, or mute it to hear the rest. The plugin the user hears is not waited for: get_project and get_device mark it `loading` while it reads, \
-and transport says so when you press play too early.";
+and transport says so when you press play too early. A song that was just opened is there at once and its plugins \
+are made after it, one at a time: `loading` says how far they are, and a device marked `not_made_yet` is silent \
+and takes no parameter or preset until it is there.";
 
 /// The sample rates a render can be asked to run at.
 const RENDER_RATES: std::ops::RangeInclusive<u32> = 8_000..=384_000;

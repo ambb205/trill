@@ -433,6 +433,8 @@ fn transport_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, left: f32, compact: bool
     cx.hint(&response, "Play \u{00B7} Space");
     if response.clicked() {
         cx.with_session(|session| session.play());
+        // A song whose devices are still being made says so.
+        super::opening::played(cx);
     }
     let response =
         trill_noir::icon_button(ui, theme, button(&mut x), id.with("stop"), Icon::Stop, false, theme.ink_dim);
@@ -697,6 +699,11 @@ pub fn stop_or_rewind(cx: &mut Cx) {
 pub fn toggle_play(cx: &mut Cx) {
     let rolling = cx.live.playing || cx.live.take.is_some();
     cx.with_session(|session| if rolling { session.stop() } else { session.play() });
+    if !rolling {
+        // Played while its devices are still being made, a song is not
+        // all there: said, so that a silent track is no riddle.
+        super::opening::played(cx);
+    }
 }
 
 pub fn toggle_loop(cx: &mut Cx) {

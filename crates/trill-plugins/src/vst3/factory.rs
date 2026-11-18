@@ -315,6 +315,12 @@ impl DeviceFactory for Vst3Factory {
         crate::repeats::of(uri)
     }
 
+    /// A plugin loads its file and takes its state on, for a second or
+    /// for many: a song is not to wait for it.
+    fn takes_time(&self, uri: &str) -> bool {
+        matches!(split_uri(uri), Some((VST3_SCHEME, _)))
+    }
+
     /// In turn with the other instances of its module, unless more is
     /// known of the plugin: see [`crate::beside`].
     fn beside(&self, uri: &str) -> Beside {
@@ -449,10 +455,14 @@ impl DeviceFactory for Vst3Factory {
 /// Creates an instance on the plugin main thread, giving up after
 /// `timeout`. An instance that arrives after that is destroyed.
 fn instantiate(main: &MainThread<PluginThread>, request: CreateRequest, timeout: Duration) -> Result<Created, String> {
+    // How long the plugin thread had other things to do first (plugins
+    // being made or taken down ahead of this one) is said with what the
+    // making itself took: see `crate::making`.
+    let asked = std::time::Instant::now();
     plugin_thread::instantiate(
         main,
         timeout,
-        move |thread| thread.vst3.create(request),
+        move |thread| thread.vst3.create(request, asked.elapsed()),
         |thread, created: Created| thread.vst3.destroy(created.id, Some(created.audio), true),
     )
 }

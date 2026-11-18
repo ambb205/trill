@@ -160,6 +160,9 @@ pub enum Silence {
     NoOutput,
     /// The instrument, by name, is given the notes and puts nothing out.
     Unanswered(String),
+    /// The instrument, by name, is one of a song that was just opened and
+    /// has not been made yet.
+    Coming(String),
 }
 
 impl Silence {
@@ -185,6 +188,7 @@ impl Silence {
             Silence::Soloed(name) => about(name, " is silenced by a solo"),
             Silence::NoOutput => (None, "No audio output \u{00B7} nothing will be heard".to_owned()),
             Silence::Unanswered(name) => about(name, " is given notes and makes no sound"),
+            Silence::Coming(name) => about(name, " is still being made"),
         }
     }
 
@@ -201,6 +205,7 @@ impl Silence {
             Silence::Group(_) | Silence::Return(_) => Some("select a track with an instrument"),
             Silence::Soloed(_) => Some("solo this track too, or end the solo"),
             Silence::Unanswered(_) => Some("it may have no sound loaded, or its expression or volume is at nothing"),
+            Silence::Coming(_) => Some("the song was just opened; it plays when it is there"),
             _ => None,
         }
     }
@@ -776,6 +781,11 @@ fn unheard(cx: &Cx, track: &Track) -> Option<Silence> {
 /// The instrument of `track` was given notes and has put nothing out, as
 /// far as the engine has heard: said in the strip, where the player looks.
 fn unanswered(cx: &Cx, track: &Track) -> Option<Silence> {
+    // One that is not made yet has not been given anything.
+    let coming = track.devices.first().filter(|device| crate::ui::opening::of_device(cx.live, device.id).is_some());
+    if let Some(device) = coming {
+        return Some(Silence::Coming(device.name.clone()));
+    }
     cx.live.silent_instrument(track.id).map(|silent| Silence::Unanswered(silent.name.clone()))
 }
 
@@ -1129,6 +1139,7 @@ mod tests {
             Silence::Soloed(name()),
             Silence::NoOutput,
             Silence::Unanswered(name()),
+            Silence::Coming(name()),
         ];
         for reason in reasons {
             assert!(reason.text().len() > 10, "{reason:?}");

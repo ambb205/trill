@@ -34,7 +34,11 @@ impl Session {
     /// sound. This looks at the program and never waits; a window asks it
     /// every frame.
     pub fn loading(&self) -> Vec<DeviceId> {
-        let mut loading = self.bank.loads.loading();
+        // The devices of a song that was just opened that have not been
+        // made yet, first: in the order of the song.
+        let mut loading: Vec<DeviceId> =
+            self.project.devices().map(|device| device.id).filter(|id| self.is_coming(*id)).collect();
+        loading.extend(self.bank.loads.loading().into_iter().filter(|id| !self.is_coming(*id)));
         let mut reading: Vec<DeviceId> = self
             .bank
             .devices

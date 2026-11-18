@@ -268,25 +268,49 @@ pub fn chain_json(session: &Session, devices: &[Device]) -> Vec<Value> {
         if loading.contains(&device.id) {
             out["loading"] = json!(true);
         }
+        // One of a song that was just opened that has not been made yet.
+        if session.is_coming(device.id) {
+            out["not_made_yet"] = json!(true);
+        }
         out
     });
     listed.collect()
 }
 
-/// What to say of the plugins that are still loading what they play, if
-/// any are: which, and what that means for playing them live.
+/// What to say of the devices that are not ready to be played, if any
+/// are: the ones of a song that was just opened that are still being made
+/// (how far the whole is, which, and what cannot be asked of them yet),
+/// and the plugins that are still loading what they play; and what either
+/// means for playing them live.
 pub fn loading_note(session: &Session) -> Option<String> {
     let project = session.project();
     let named =
         |id: &trill_core::DeviceId| project.device(*id).ok().map(|device| format!("{} (device {})", device.name, id.0));
-    let names: Vec<String> = session.loading().iter().filter_map(named).collect();
-    (!names.is_empty()).then(|| {
-        format!(
-            "Still loading what they play: {}. Played live now their notes may be silent; get_project shows when \
-             they have done. probe, measure and render wait for them by themselves.",
+    let arriving = session.arriving();
+    let coming: &[trill_core::DeviceId] = arriving.as_ref().map_or(&[], |arriving| &arriving.coming);
+    let reading: Vec<String> = session.loading().iter().filter(|id| !coming.contains(id)).filter_map(named).collect();
+    let mut said = Vec::new();
+    if let Some(arriving) = &arriving {
+        let names: Vec<String> = arriving.coming.iter().filter_map(named).collect();
+        said.push(format!(
+            "The song was just opened and its devices are still being made, one at a time: {}. Not made yet: {}. \
+             Until a device is there its track may be silent played live (an effect lets through what comes into \
+             it), it lists no parameters, a drum plugin has not said what is on its keys, and it takes no \
+             parameter, preset or editor. Everything else of the song can be read and edited now. Ask get_project \
+             again in a few seconds: this note is gone when every device is there.",
+            arriving.words(project),
             names.join(", ")
-        )
-    })
+        ));
+    }
+    if !reading.is_empty() {
+        said.push(format!(
+            "Still loading what they play: {}. Played live now their notes may be silent; get_project shows when \
+             they have done.",
+            reading.join(", ")
+        ));
+    }
+    (!said.is_empty())
+        .then(|| format!("{} probe, measure and render wait for what they play by themselves.", said.join(" ")))
 }
 
 pub fn track_json(track: &Track, bars: &MeterMap, include_notes: bool) -> Value {

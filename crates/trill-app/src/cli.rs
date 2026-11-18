@@ -111,6 +111,8 @@ pub struct Cli {
     pub credits: bool,
     /// Open with the playback load up, showing a made-up load.
     pub load: Option<crate::ui::LoadScene>,
+    /// Show the song in the middle of being opened, made up.
+    pub opening: Option<crate::ui::OpeningScene>,
     /// What to search the sound library for.
     pub search: Option<String>,
     /// Name of a sound to select in the browser.
@@ -299,6 +301,15 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
                     scene.with_context(|| format!("unknown load '{name}' (expected one of {})", known.join(", ")))?,
                 );
             }
+            "--opening" => {
+                let name = value("the name of a scene")?;
+                let known: Vec<&str> = crate::ui::OpeningScene::ALL.iter().map(|(name, _)| *name).collect();
+                let scene = crate::ui::OpeningScene::named(&name);
+                cli.opening = Some(
+                    scene
+                        .with_context(|| format!("unknown opening '{name}' (expected one of {})", known.join(", ")))?,
+                );
+            }
             "--search" => cli.search = Some(value("what to search for")?),
             "--sound" => cli.sound = Some(value("the name of a sound")?),
             "--editor" => cli.editor = Some(value("the name of a device")?),
@@ -467,6 +478,7 @@ impl Cli {
             show_credits: self.credits,
             show_load: self.load.is_some(),
             load_scene: self.load,
+            opening_scene: self.opening,
             record: self.record,
             stage: self.stage,
             making_of: (self.making_of || self.making_of_at.is_some()).then(|| match self.making_of_at {

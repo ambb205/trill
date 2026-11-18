@@ -26,6 +26,7 @@ mod cores;
 mod editors;
 mod files;
 mod instruments;
+mod opening;
 mod params;
 mod playing;
 mod presets;
@@ -41,6 +42,7 @@ pub use wavetable::{TableReport, factory_tables};
 pub use controllers::SilentInstrument;
 pub use cores::{Costs, KeepingUp, Shortfall, TrackCost};
 pub use files::file_facts;
+pub use opening::{Arriving, Made};
 pub use playing::{MAX_COUNT_IN_BARS, RecordState, RecordStatus};
 pub use probing::ProbeTarget;
 pub use take::TakeClip;
@@ -175,6 +177,13 @@ pub struct Session {
     story: story::Keeping,
     /// What is kept of how the song is played: see [`cores`].
     cores: cores::Watch,
+    /// The next graph is of another song than the one that plays: it is
+    /// to take over nothing of it (`Graph::adopt`).
+    another_song: bool,
+    /// The devices of the song that was opened last that are still being
+    /// made: see [`opening`]. (After the engine, which goes first: what it
+    /// retires on its way is taken down by this one's thread.)
+    opening: opening::Opening,
     /// What was written down about the files the song plays when it was
     /// last saved or opened; see `session/files.rs`.
     files: trill_core::FileTable,
@@ -244,6 +253,8 @@ impl Session {
             playing: playing::Playing::new(),
             story: story::Keeping::new(),
             cores: cores::Watch::default(),
+            another_song: false,
+            opening: opening::Opening::new(),
             files: trill_core::FileTable::default(),
         };
         session.replace_project(Self::blank_project("Untitled"));
@@ -362,12 +373,16 @@ impl Session {
     }
 
     /// The parameters of a device in the project, with current values.
+    /// Not known of a device of a song that was just opened until it has
+    /// been made ([`Session::arriving`]): that is said, in place of a list
+    /// with nothing in it.
     pub fn device_params(&self, id: DeviceId) -> Result<Vec<ParamState>, SessionError> {
         let device = self.project.device(id)?;
         let meta = self.bank.devices.get(&id).ok_or(EditError::DeviceNotFound(id))?;
         if let Some(error) = &meta.error {
             return Err(SessionError::Device(format!("{id} is unavailable: {error}")));
         }
+        self.there(id)?;
         // A plugin keeps its own values (from its saved state, or changed in
         // its editor); ask it. Values set through the session are in the
         // model and win, since the plugin only takes them on at its next
@@ -706,6 +721,7 @@ impl Session {
     /// same as [`Session::load_preset`], which also says which preset it
     /// came to.
     pub fn apply_preset(&mut self, id: DeviceId, preset: &str) -> Result<(), SessionError> {
+        self.there(id)?;
         self.load_preset(id, preset).map(|_| ())
     }
 
@@ -813,6 +829,7 @@ impl Session {
 
     /// Sets parameters by id, in plain units. Values are clamped to range.
     pub fn set_device_params(&mut self, id: DeviceId, values: &[(String, f64)]) -> Result<(), SessionError> {
+        self.there(id)?;
         let states = self.device_params(id)?;
         let mut resolved = Vec::with_capacity(values.len());
         for (key, value) in values {
@@ -946,11 +963,18 @@ impl Session {
     }
 
     pub fn load(&mut self, path: &Path) -> Result<(), SessionError> {
+        let began = Instant::now();
         let json = std::fs::read_to_string(path).map_err(|e| io_error(path, e))?;
         // A file that is beside the song, where the song says it was when
         // it was saved, is the one it plays: see `session/files.rs`.
         let (project, files) = self.read_project(&json, Some(path))?;
         let project = self.with_known_instruments(project);
+        log::debug!(
+            target: "trill::making",
+            "the song's file was read in {:.0} ms: {:.1} MB",
+            began.elapsed().as_secs_f64() * 1e3,
+            json.len() as f64 / 1e6
+        );
         self.replace_project(project);
         self.files = files;
         self.path = Some(path.to_path_buf());
@@ -1019,6 +1043,7 @@ impl Session {
     /// ([`Session::audio_revision`]).
     pub fn housekeeping(&mut self) {
         self.engine.collect_garbage();
+        self.tend_opening();
         self.engine.tend_threads();
         self.look(false);
         self.tend_audio();
@@ -1061,7 +1086,18 @@ impl Session {
         self.bank.devices.clear();
         self.stand_ins = StandIns::default();
         self.forget_load();
+        // The song is there first. What takes time to make comes after,
+        // made away from here: see `opening`.
+        self.forget_opening();
+        self.another_song = true;
+        self.bank.later = !self.opening.all_at_once;
+        // Its recordings are read several at a time, ahead of the compile
+        // that would read them one after the other.
+        let read = self.audio.read_ahead(&self.project, self.engine.sample_rate());
         self.compile_and_swap();
+        drop(read);
+        self.bank.later = false;
+        self.ask_for_what_is_coming();
         // Track ids restart too: what was armed or selected was the old
         // project's.
         self.send_live_targets();
@@ -1091,6 +1127,7 @@ impl Session {
         // Which of its tracks can be made at once, for when the song is
         // more than one thread plays in time.
         let mut graph = graph;
+        graph.another_song = std::mem::take(&mut self.another_song);
         let can_use = match self.engine.play_threads() {
             1 => 1,
             _ => graph.spread(&self.project, self.factory.as_ref()),

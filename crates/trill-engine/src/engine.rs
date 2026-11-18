@@ -786,6 +786,9 @@ pub struct Engine {
     info: StreamInfo,
     /// Graphs sent to the audio thread and not yet returned.
     swaps_in_flight: usize,
+    /// Who takes the graphs the audio thread retires, if not whoever
+    /// collects them: see [`Engine::retire_through`].
+    retire: Option<Box<dyn Fn(Box<Graph>) + Send>>,
     /// Set when a message could not be sent; see [`Engine::send`].
     messages_lost: bool,
     host: Arc<dyn AudioHost>,
@@ -887,6 +890,7 @@ impl Engine {
                 latency_frames: 0,
             },
             swaps_in_flight: 0,
+            retire: None,
             messages_lost: false,
             host: setup.host,
             null: Arc::new(NullHost::new(FALLBACK_SAMPLE_RATE)),
@@ -1122,14 +1126,27 @@ impl Engine {
         self.host.now_ns()
     }
 
+    /// Has the graphs the audio thread retires handed to `take` from here
+    /// on, in place of being freed by whoever collects them: a graph holds
+    /// the devices that went with it, and a plugin among them is taken
+    /// down on its own thread, which is waited for.
+    pub(crate) fn retire_through(&mut self, take: Box<dyn Fn(Box<Graph>) + Send>) {
+        self.retire = Some(take);
+    }
+
     /// Frees graphs the audio thread has retired. Cheap; call it often.
     pub fn collect_garbage(&mut self) {
-        // Dropping here, on the caller's thread, is the whole point.
+        // Dropping here, on the caller's thread and not the audio thread's,
+        // is the whole point; or handing on to whoever takes them
+        // ([`Engine::retire_through`]).
         while let Ok(garbage) = self.garbage.pop() {
             match garbage {
                 Garbage::Graph(graph) => {
                     self.swaps_in_flight = self.swaps_in_flight.saturating_sub(1);
-                    drop(graph);
+                    match &self.retire {
+                        Some(take) => take(graph),
+                        None => drop(graph),
+                    }
                 }
                 Garbage::Audio(audio) => drop(audio),
                 // Its threads are told to go home and waited for.

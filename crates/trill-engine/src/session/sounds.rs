@@ -171,6 +171,7 @@ impl Session {
     /// sound brought behind it go, and the sound's own are made there (see
     /// the module documentation). One undo step, whatever was made.
     pub fn give_preset(&mut self, id: DeviceId, preset: &str) -> Result<Given, SessionError> {
+        self.there(id)?;
         let uri = self.project.device(id)?.uri.clone();
         let (info, saved) = self.wanted_preset(&uri, preset)?;
         let descriptors = self.factory.descriptors();

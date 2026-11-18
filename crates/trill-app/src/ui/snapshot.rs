@@ -432,6 +432,11 @@ pub struct Live {
     /// The plugins that seem to be loading what they play: made or given
     /// another sound lately, with the program still reading.
     pub loading: Vec<DeviceId>,
+    /// How far the song that was opened is with its devices, while any of
+    /// them is still being made, and the line that says so: see
+    /// [`super::opening`].
+    pub arriving: Option<trill_engine::Arriving>,
+    pub arriving_words: String,
     /// How far each Sampled Instrument on show is with reading its
     /// recordings from the disk; a device that has nothing to read, or
     /// that was busy when asked, is not in it.

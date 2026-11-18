@@ -193,6 +193,16 @@ shot load-calm "$song" --load calm
 shot load-short "$song" --load short
 shot graphite-load-short "$song" --load short --theme graphite
 
+# A song that is being opened, made up: its file being read, with the song
+# before dimmed under the plate that says which; then the song there and its
+# devices arriving, with the line that says how far they are, the mark on
+# each track that waits for one, and the panel of a device that is not there.
+shot opening-reading "$song" --opening reading
+shot opening-arriving "$song" --opening arriving --select Lead
+shot opening-arriving-devices "$song" --opening arriving --select Lead --tab devices
+shot opening-arriving-waiting "$song" --opening arriving --select Arp --tab devices
+shot graphite-opening-arriving "$song" --opening arriving --select Lead --tab devices --theme graphite
+
 # Missing files: the same song after its pack was moved. The line in the
 # status bar and the clips marked, with the library pointed at where the
 # pack is now; the list it opens, with what was found for each file and one

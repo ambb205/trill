@@ -564,7 +564,10 @@ impl ThreadState for Vst3Thread {
         }
         let now = Instant::now();
         if let Some(place) = self.leaving.iter().position(|(due, _)| *due <= now) {
-            drop(self.leaving.remove(place));
+            let (_, instance) = self.leaving.remove(place);
+            let name = instance.name.clone();
+            drop(instance);
+            crate::making::taken_down(&name, now.elapsed());
         }
     }
 }
@@ -616,28 +619,38 @@ impl Vst3Thread {
     /// Loads, instantiates and activates a plugin, restoring `state`. The
     /// model's parameter values are resolved but not applied: they reach
     /// the plugin through its processor.
-    pub(crate) fn create(&mut self, request: CreateRequest) -> Result<Created, String> {
+    pub(crate) fn create(&mut self, request: CreateRequest, waited: std::time::Duration) -> Result<Created, String> {
+        // What each step takes is said when all are done: which of the
+        // time is the plugin's own, and which went before it began.
+        let mut steps = crate::making::Steps::begun(waited);
         let module = module(&mut self.modules, &self.host, &request.path)?;
+        steps.done("its file");
         let mut instance = Instance::new(module, &self.host, request.class, &request.name)?;
         instance.offline = request.offline;
         instance.attach_controller(module, &self.host);
+        steps.done("the instance");
         instance.restore(request.state.as_deref())?;
+        steps.done("its state");
 
         let buses = instance.negotiate_buses(request.key_bus);
         let takes_notes = instance.enable_notes();
         instance.setup(request.sample_rate, request.max_block)?;
+        steps.done("setting up");
 
         let table = instance.controller.as_ref().map(|controller| params::read(&controller.edit, &request.name));
         let table = table.unwrap_or_default();
         let mut listed = table.listed;
         let silencing = instance.controller.as_ref().map(|controller| params::silencing_params(&controller.edit));
         let midi = instance.controller.as_ref().map(|controller| params::midi_params(&controller.edit));
+        steps.done("its parameters");
         let latency = instance.activate()?;
         if let Some(controller) = &instance.controller {
             // Only now are the values settled: some plugins fill in their
             // parameters while activating.
             params::read_baseline(&controller.edit, &mut listed);
         }
+        steps.done("activating");
+        steps.say(&request.name);
 
         let links = Arc::new(ParamLinks::new(table.ids));
         instance.handler.connect(links.clone());
@@ -683,17 +696,37 @@ impl Vst3Thread {
             instance.close_editor();
             log::debug!("[{}] is kept until the plugin thread has had time for it", instance.name);
             self.leaving.push((instance.settled + patience, instance));
+            return;
         }
+        // Taken down here and now, on the thread every plugin waits for.
+        let (name, began) = (instance.name.clone(), std::time::Instant::now());
+        drop(instance);
+        crate::making::taken_down(&name, began.elapsed());
     }
 
     /// Re-activates an instance, whose audio half has stopped processing,
     /// for a sample rate and block size. Returns its latency. On failure
     /// the instance stays deactivated.
-    pub(crate) fn reactivate(&mut self, id: InstanceId, sample_rate: f64, max_block: u32) -> Result<u32, String> {
+    ///
+    /// `waited` is how long the caller waited for this thread: said with
+    /// what the steps took ([`crate::making`]), because a plugin that is
+    /// made with values of the song's is activated a second time.
+    pub(crate) fn reactivate(
+        &mut self,
+        id: InstanceId,
+        (sample_rate, max_block): (f64, u32),
+        waited: std::time::Duration,
+    ) -> Result<u32, String> {
+        let mut steps = crate::making::Steps::begun(waited);
         let instance = self.instances.get_mut(&id).ok_or("the plugin instance no longer exists")?;
         instance.deactivate();
+        steps.done("deactivating");
         instance.setup(sample_rate, max_block)?;
-        instance.activate()
+        steps.done("setting up");
+        let latency = instance.activate();
+        steps.done("activating");
+        steps.say_of(&instance.name, "activated again");
+        latency
     }
 
     /// The plugin's complete state, or `None` if it has none to give.

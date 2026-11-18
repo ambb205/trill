@@ -68,6 +68,7 @@ mod exclusive;
 #[cfg(test)]
 mod key_tests;
 mod main_thread;
+pub mod making;
 mod notes;
 mod param_text;
 mod plugin_host;

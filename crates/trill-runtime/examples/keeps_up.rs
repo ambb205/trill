@@ -282,6 +282,9 @@ fn run(options: &Options) -> Result<(), String> {
         } else {
             session.load(&options.song).map_err(|error| format!("{}: {error}", options.song.display()))?;
         }
+        // Its devices come after the song: until they are all there, for
+        // three minutes at the most.
+        session.wait_until_opened(Duration::from_secs(180));
         // From here the audio thread has the song.
         let open_at = Instant::now();
         let _ = session.take_load();
