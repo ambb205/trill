@@ -306,6 +306,16 @@ study_on study-dialog "$song" --browse studies --study-dialog
 study_on graphite-study-workspace "$song" --browse studies --study-list hits --theme graphite
 study_on min-window-study "$song" --size 1024x640 --study-bars 3-4
 shot min-window-setup "$song" --setup-scene fetching --size 1024x640
+# Its tab of instruments: the catalogue as it is first met (by kind, the
+# pianos opened, a set read with its licence); the starter selection on its
+# way, as one thing with its Stop; the catalogue narrowed by a search, on a
+# set with an instrument that is not put forward; the other theme; the
+# smallest window.
+shot setup-instruments --setup-scene instruments
+shot setup-instruments-fetching "$song" --select Lead --setup-scene instruments-fetching
+shot setup-instruments-search "$song" --select Lead --setup-scene instruments-search
+shot graphite-setup-instruments "$song" --select Lead --setup-scene instruments --theme graphite
+shot min-window-setup-instruments "$song" --setup-scene instruments-fetching --size 1024x640
 
 # Staged for the last pictures, in a folder git ignores: two projects that
 # their program did not live to save, in a profile folder of their own (so

@@ -8,8 +8,12 @@
 //! fetched and nothing is timed; a button pressed in a scene says that
 //! this run keeps nothing.
 
+use super::setup_instruments::Instruments;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use trill_catalogue::{Catalogue, Kind};
 use trill_fetch::{ListStatus, PartState, PartStatus};
+use trill_runtime::Ask;
 use trill_study::helper::Checked;
 use trill_study::models::real::Provider;
 use trill_study::setup::{Found, Machine, Timed, list};
@@ -24,6 +28,15 @@ pub enum SetupScene {
     Fetching,
     /// Everything here and the models timed: the tab of the machine.
     Machine,
+    /// The catalogue of instruments as it is first met: nothing fetched,
+    /// the pianos opened, one set read.
+    Instruments,
+    /// The starter selection on its way: sets that are here, one being
+    /// fetched, the rest waiting, and one that could not be fetched.
+    InstrumentsFetching,
+    /// The catalogue narrowed by a search, on a set with instruments that
+    /// are not put forward.
+    InstrumentsSearch,
 }
 
 /// What a scene shows.
@@ -38,6 +51,10 @@ pub struct Staged {
     pub on_machine: bool,
     /// The part whose details are shown.
     pub selected: &'static str,
+    /// What the tab of the instruments shows, where the scene is of it.
+    pub instruments: Option<Instruments>,
+    /// The instruments of the catalogue that are in the library.
+    pub here: HashMap<String, PathBuf>,
 }
 
 fn timed(provider: Provider, device: &str, seconds: f64, ready: f64, megabytes: u64) -> Timed {
@@ -56,8 +73,14 @@ fn timed(provider: Provider, device: &str, seconds: f64, ready: f64, megabytes: 
 }
 
 impl SetupScene {
-    pub const ALL: [(&'static str, SetupScene); 3] =
-        [("fresh", SetupScene::Fresh), ("fetching", SetupScene::Fetching), ("machine", SetupScene::Machine)];
+    pub const ALL: [(&'static str, SetupScene); 6] = [
+        ("fresh", SetupScene::Fresh),
+        ("fetching", SetupScene::Fetching),
+        ("machine", SetupScene::Machine),
+        ("instruments", SetupScene::Instruments),
+        ("instruments-fetching", SetupScene::InstrumentsFetching),
+        ("instruments-search", SetupScene::InstrumentsSearch),
+    ];
 
     pub fn named(name: &str) -> Option<Self> {
         Self::ALL.iter().find(|(known, _)| *known == name).map(|(_, scene)| *scene)
@@ -74,7 +97,8 @@ impl SetupScene {
         // What each part is doing, by its id: here, or so many hundredths of it fetched.
         let state_of = |id: &str| -> (PartState, f64, Option<&'static str>) {
             match (self, id) {
-                (SetupScene::Fresh, _) => (PartState::Missing, 0.0, None),
+                (SetupScene::Fresh | SetupScene::Instruments, _) => (PartState::Missing, 0.0, None),
+                (SetupScene::InstrumentsFetching | SetupScene::InstrumentsSearch, _) => (PartState::Ready, 1.0, None),
                 (SetupScene::Machine, "stems-best") => (PartState::Missing, 0.0, None),
                 (SetupScene::Machine, _) => (PartState::Ready, 1.0, None),
                 (SetupScene::Fetching, "runtime" | "any-card" | "beats") => (PartState::Ready, 1.0, None),
@@ -98,7 +122,7 @@ impl SetupScene {
                 let got = (part.size() as f64 * share) as u64;
                 PartStatus {
                     folder: published.folder.join(&part.id),
-                    part: part.clone(),
+                    part: part.clone().into(),
                     state,
                     got,
                     on_disk: got,
@@ -106,13 +130,83 @@ impl SetupScene {
                 }
             })
             .collect();
-        let lists = vec![ListStatus {
+        let mut lists = vec![ListStatus {
             id: published.id,
             title: published.title,
             about: published.about,
             folder: published.folder,
             parts,
         }];
+        // The catalogue of instruments, as it is really published: every set with its real words.
+        let catalogue = Catalogue::shipped();
+        let sets = trill_runtime::fetch_list(catalogue, folder.join(trill_runtime::SETS_FOLDER), None);
+        let starter: Vec<&str> = Ask::Starter.sets(catalogue).into_iter().map(|set| set.id.as_str()).collect();
+        let place = |id: &str| starter.iter().position(|known| *known == id);
+        let set_state = |id: &str| -> (PartState, f64, Option<&'static str>) {
+            match (self, place(id), id) {
+                (SetupScene::InstrumentsFetching, Some(0..=4), _) => (PartState::Ready, 1.0, None),
+                (SetupScene::InstrumentsFetching, Some(5), _) => (PartState::Fetching, 0.37, None),
+                (SetupScene::InstrumentsFetching, Some(_), _) => (PartState::Waiting, 0.0, None),
+                (SetupScene::InstrumentsFetching, None, "ixox-flute") => (PartState::Ready, 1.0, None),
+                (SetupScene::InstrumentsFetching, None, "jsteeldrum") => (
+                    PartState::Missing,
+                    0.0,
+                    Some(
+                        "c4c4d2a1b3f5.zip could not be fetched from github.com: Failed to connect to github.com port 443 after 21044 ms: Could not connect to server. Its source makes it anew each time it is asked for, so fetching it again begins again",
+                    ),
+                ),
+                (SetupScene::InstrumentsSearch | SetupScene::Machine, Some(_), _) => (PartState::Ready, 1.0, None),
+                _ => (PartState::Missing, 0.0, None),
+            }
+        };
+        let mut here = HashMap::new();
+        let set_parts = sets
+            .parts
+            .iter()
+            .map(|part| {
+                let (state, share, error) = set_state(&part.id);
+                let got = (part.size() as f64 * share) as u64;
+                let on_disk = if state == PartState::Ready { part.room() } else { got };
+                if state == PartState::Ready
+                    && let Some(set) = catalogue.set(&part.id)
+                {
+                    for instrument in &set.instruments {
+                        let file = instrument.file.replace('/', std::path::MAIN_SEPARATOR_STR);
+                        here.insert(instrument.text.clone(), sets.folder.join(&part.id).join(file));
+                    }
+                }
+                PartStatus {
+                    folder: sets.folder.join(&part.id),
+                    part: part.clone().into(),
+                    state,
+                    got,
+                    on_disk,
+                    error: error.map(str::to_owned),
+                }
+            })
+            .collect();
+        lists.push(ListStatus {
+            id: sets.id,
+            title: sets.title,
+            about: sets.about,
+            folder: sets.folder,
+            parts: set_parts,
+        });
+        let chosen = |set: &str, kinds: &[Kind], search: &str, asked: bool| Instruments {
+            search: search.to_owned(),
+            open_kinds: kinds.iter().copied().collect(),
+            open_sets: [set.to_owned()].into_iter().collect(),
+            selected: Some(set.to_owned()),
+            asked: asked.then(|| ("Starter".to_owned(), starter.iter().map(|id| (*id).to_owned()).collect())),
+        };
+        let instruments = match self {
+            SetupScene::Instruments => Some(chosen("salamander-grand-piano", &[Kind::Piano], "", false)),
+            SetupScene::InstrumentsFetching => {
+                Some(chosen(starter.get(5).copied().unwrap_or("swagbass"), &[Kind::Strings], "", true))
+            }
+            SetupScene::InstrumentsSearch => Some(chosen("greg-sullivan-e-pianos", &[], "electric piano", false)),
+            _ => None,
+        };
         let nvidia = Provider::Nvidia;
         let machine = (self == SetupScene::Machine).then(|| Machine {
             tested: 0,
@@ -175,6 +269,8 @@ impl SetupScene {
                 SetupScene::Fetching => "stems",
                 _ => "runtime",
             },
+            instruments,
+            here,
         }
     }
 }
@@ -194,7 +290,32 @@ mod tests {
             assert!(stems.part.licence.starts_with("Unclear."), "{}", stems.part.licence);
             assert!(parts.iter().any(|status| status.part.id == staged.selected));
             let here = parts.iter().filter(|status| status.state == PartState::Ready).count();
+            // The catalogue of instruments is there in every scene, as it is in the program.
+            let sets = &staged.lists[1];
+            assert_eq!((sets.id.as_str(), sets.parts.len()), ("instruments", Catalogue::shipped().sets.len()));
+            let sets_here = sets.parts.iter().filter(|status| status.state == PartState::Ready).count();
             match scene {
+                SetupScene::Instruments => {
+                    let view = staged.instruments.as_ref().expect("the scene is of the instruments");
+                    assert!(sets_here == 0 && staged.here.is_empty() && view.asked.is_none());
+                    assert!(sets.parts.iter().any(|status| Some(&status.part.id) == view.selected.as_ref()));
+                }
+                SetupScene::InstrumentsFetching => {
+                    let view = staged.instruments.as_ref().expect("the scene is of the instruments");
+                    let asked = &view.asked.as_ref().expect("the starter selection was asked for").1;
+                    let going = |state: PartState| sets.parts.iter().filter(|status| status.state == state).count();
+                    assert_eq!(
+                        (going(PartState::Fetching), sets_here),
+                        (1, 6),
+                        "one on its way, five and one more here"
+                    );
+                    assert_eq!(going(PartState::Waiting), asked.len() - 6);
+                    assert!(sets.parts.iter().any(|status| status.error.is_some()) && !staged.here.is_empty());
+                }
+                SetupScene::InstrumentsSearch => {
+                    let view = staged.instruments.as_ref().expect("the scene is of the instruments");
+                    assert!(!view.search.is_empty() && sets_here > 0);
+                }
                 SetupScene::Fresh => assert!(here == 0 && staged.untested && staged.machine.is_none()),
                 SetupScene::Fetching => {
                     assert_eq!(stems.state, PartState::Fetching);

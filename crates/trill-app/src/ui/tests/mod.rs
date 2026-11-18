@@ -25,6 +25,7 @@ mod recording;
 mod recovery;
 mod ruler;
 mod setup;
+mod setup_instruments;
 mod sound_presets;
 mod sounds;
 mod stage;

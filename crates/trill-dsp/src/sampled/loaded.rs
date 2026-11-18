@@ -170,6 +170,8 @@ pub struct Loaded {
     /// its coming up may.
     pub(crate) down: Vec<Vec<u32>>,
     pub(crate) up: Vec<Vec<u32>>,
+    /// The regions no key sounds: a controller sets them off.
+    pub(crate) set_off: Vec<u32>,
     /// Every file its text was read from, with what each was then.
     texts: Vec<(PathBuf, Option<u64>)>,
     overrides: BTreeMap<String, String>,
@@ -276,8 +278,12 @@ impl Loaded {
             }
         }
         let recordings = paths.iter().map(|path| pool.recording(path)).collect();
-        let (mut down, mut up) = (vec![Vec::new(); 128], vec![Vec::new(); 128]);
+        let (mut down, mut up, mut set_off) = (vec![Vec::new(); 128], vec![Vec::new(); 128], Vec::new());
         for (index, region) in instrument.regions.iter().enumerate() {
+            if region.trigger == Trigger::Controller {
+                set_off.push(index as u32);
+                continue;
+            }
             let list = if region.on_key_down() { &mut down } else { &mut up };
             for key in region.keys.0.min(127)..=region.keys.1.min(127) {
                 list[usize::from(key)].push(index as u32);
@@ -294,6 +300,7 @@ impl Loaded {
             bytes,
             down,
             up,
+            set_off,
             texts: files
                 .into_iter()
                 .map(|path| {
@@ -479,7 +486,8 @@ impl Loaded {
         self.instrument
             .regions
             .iter()
-            .filter(|region| region.recording.is_some())
+            // What a controller sets off lies on no key.
+            .filter(|region| region.recording.is_some() && region.trigger != Trigger::Controller)
             .map(|region| SampledRegion {
                 keys: region.keys,
                 velocities: region.velocities,

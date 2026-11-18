@@ -20,6 +20,11 @@
 //!   `sw_label`, `sw_down`, `sw_up`, `sw_previous`, `group`, `off_by`,
 //!   `off_mode`, `off_time`, `polyphony`, `note_polyphony`, `sustain_sw`,
 //!   `sustain_cc`.
+//! * What no key sounds, and a controller sets off by coming into a span:
+//!   `on_loccN`, `on_hiccN` (and `on_lohdccN`, `on_hihdccN`), with "no
+//!   key" written as `key=-1`, `lokey=-1` or a span of keys that holds none
+//!   (`lokey=127 hikey=0`). The noise of a pedal going down and of its
+//!   coming up.
 //! * Its pitch: `tune`, `transpose`, `pitch_keytrack`, `pitch_veltrack`,
 //!   `pitch_random`, `bend_up`, `bend_down`, `tune_onccN`.
 //! * Its level and place: `volume` (and `global_volume`, `master_volume`,
@@ -71,8 +76,13 @@
 //! file is read: whether a region sounds at all (`loccN`, `hiccN`), and
 //! its level, place and tuning (`amplitude_onccN`, `volume_onccN`,
 //! `pan_onccN`, `tune_onccN`).
-//! A region that only a controller sets off (`on_loccN`) or that no key
-//! plays (`key=-1`) is left out, and said.
+//! Controller 130 is the pressure on one key after it went down. Nothing
+//! in a song here carries that, so it stands at rest: a region that asks
+//! for it to be up is left out (a cymbal that is choked by leaning on its
+//! pad is choked by its choke key, or not), and one that it would set off
+//! is never set off. Neither is counted: nothing a song could do is
+//! missed. A region that no key plays (`key=-1`) and no controller sets
+//! off is left out.
 //!
 //! Everything else is counted, by name, with what a listener misses for
 //! it ([`crate::sampled::Unsupported`]): the instrument still plays.
@@ -355,6 +365,7 @@ impl Reader {
             label,
             curve,
             mut disabled,
+            no_key,
             filter_envelope,
             filter_depth,
             tune,
@@ -365,6 +376,8 @@ impl Reader {
         } = building;
         region.tune = tune + 100.0 * transpose;
         region.volume += volumes.iter().sum::<f32>();
+        // No key plays it: it is left out, unless a controller sets it off.
+        disabled |= no_key && region.set_off.is_none();
         // What the controllers that stand where the file put them come to.
         for (stem, controller, amount) in &stood {
             let position = self.standing.get(controller).copied().unwrap_or(0.0);
@@ -432,7 +445,10 @@ impl Reader {
         if region.tremolo.is_some_and(|wave| wave.rate <= 0.0 || (wave.depth == 0.0 && !deepened(Moved::Tremolo))) {
             region.tremolo = None;
         }
-        if region.keys.0 > region.keys.1 || region.velocities.0 > region.velocities.1 {
+        // A span of keys that holds none is another way of writing that no key plays it: such a
+        // region is kept where a controller sets it off.
+        let no_key = region.keys.0 > region.keys.1 && region.set_off.is_none();
+        if no_key || region.velocities.0 > region.velocities.1 {
             return;
         }
         self.instrument.regions.push(region);
@@ -447,10 +463,12 @@ impl Reader {
         let whole = |value: f32| value.max(0.0).round() as u32;
         match name {
             "sample" => building.sample = Some(value.to_string()),
-            // A key under the keyboard is no key: nothing plays it.
-            "lokey" | "hikey" if number.is_some_and(|key| key < 0.0) => building.disabled = true,
+            // A key under the keyboard is no key: nothing plays it, unless
+            // a controller sets the region off.
+            "lokey" | "hikey" if number.is_some_and(|key| key < 0.0) => building.no_key = true,
             "lokey" => region.keys.0 = key.unwrap_or(0),
             "hikey" => region.keys.1 = key.unwrap_or(127),
+            "key" if number.is_some_and(|key| key < 0.0) => building.no_key = true,
             "key" => match key {
                 Some(key) => {
                     region.keys = (key, key);
@@ -611,11 +629,39 @@ impl Reader {
             // Every controller is smoothed here, the same for all, and so
             // is the wheel.
             _ if name.contains("_smoothcc") || name.contains("_stepcc") || name == "bend_smooth" => {}
-            // A region that a controller sets off, not a key: it is left
-            // out, since nothing here would set it off, and said.
-            _ if name.starts_with("on_locc") || name.starts_with("on_hicc") => {
-                building.disabled = true;
-                return false;
+            // A region that a controller sets off, not a key.
+            _ if name.starts_with("on_lo") || name.starts_with("on_hi") => {
+                let (low, rest) = match name.strip_prefix("on_lo") {
+                    Some(rest) => (true, rest),
+                    None => (false, &name["on_hi".len()..]),
+                };
+                let (fine, digits) = match rest.strip_prefix("hdcc") {
+                    Some(digits) => (true, digits),
+                    None => (false, rest.strip_prefix("cc").unwrap_or("")),
+                };
+                let at = if fine { amount * 127.0 } else { amount };
+                match digits.parse::<u32>() {
+                    Ok(controller) if controller < 128 => {
+                        let span = region.set_off.get_or_insert((controller as u8, 0.0, 127.0));
+                        if u32::from(span.0) != controller {
+                            // Two controllers for one region: only one sets it off here.
+                            return false;
+                        }
+                        if low {
+                            span.1 = at;
+                        } else {
+                            span.2 = at;
+                        }
+                        region.trigger = Trigger::Controller;
+                    }
+                    // The pressure on one key: nothing here moves it, so
+                    // what it would set off is never set off.
+                    Ok(note::KEY_PRESSURE) => building.disabled = true,
+                    _ => {
+                        building.disabled = true;
+                        return false;
+                    }
+                }
             }
             _ if name.starts_with("lfo") && name.as_bytes().get(3).is_some_and(u8::is_ascii_digit) => {
                 return wave_pair(building, name, amount, value);
@@ -673,9 +719,10 @@ impl Reader {
             }
             return true;
         }
-        if STANDING.contains(&number) {
-            // One that stands where the file put it: what it does is
-            // worked out when the region is whole.
+        if STANDING.contains(&number) || number == note::KEY_PRESSURE {
+            // One that stands where the file put it (and the pressure on
+            // one key, which nothing here moves: it stands at rest): what
+            // it does is worked out when the region is whole.
             let stem = match canonical(stem).as_str() {
                 "locc" | "hicc" | "amplitude_oncc" | "volume_oncc" | "pan_oncc" | "tune_oncc" => canonical(stem),
                 "lohdcc" | "hihdcc" => canonical(stem).replace("hd", ""),
@@ -783,6 +830,8 @@ struct Building {
     curve: Vec<(u8, f32)>,
     /// It says of itself that it does not play.
     disabled: bool,
+    /// Its keys are under the keyboard: no key plays it.
+    no_key: bool,
     tune: f32,
     transpose: f32,
     filter_envelope: Envelope,
@@ -1214,7 +1263,7 @@ mod tests {
              <region> sample=room.wav locc201=1 amplitude_oncc201=100\n\
              <region> sample=overhead.wav lohdcc202=0.5 amplitude_oncc202=100 tune_oncc202=50 tune=10\n\
              <region> sample=never.wav amplitude_oncc203=100 hicc200=10\n\
-             <region> sample=moved.wav cutoff_oncc200=1200 amplitude_oncc130=100",
+             <region> sample=moved.wav cutoff_oncc200=1200 amplitude_oncc129=100",
         )
         .unwrap();
         let named: Vec<&str> =
@@ -1227,7 +1276,39 @@ mod tests {
         assert!(kit.regions.iter().all(|region| region.controls.is_empty() && region.when.is_empty()));
         // What else is asked of one is said; so is a controller that is a player's own.
         let said: Vec<&str> = kit.unsupported.iter().map(|un| un.name.as_str()).collect();
-        assert_eq!(said, ["amplitude_oncc130", "cutoff_oncc200"]);
+        assert_eq!(said, ["amplitude_oncc129", "cutoff_oncc200"]);
+    }
+
+    #[test]
+    fn what_a_controller_sets_off_is_read_with_its_span_and_the_pressure_on_a_key_stands_at_rest() {
+        // A piano with the noise of its pedal, and a cymbal that a drummer chokes by leaning on its pad.
+        let piano = read_text(
+            "<region> sample=note.wav key=60\n\
+             <group> lokey=-1 hikey=-1 volume=-20 group=1 on_locc64=127 on_hicc64=127 locc64=127 hicc64=127\n\
+             <region> sample=down1.wav lorand=0 hirand=0.5 <region> sample=down2.wav lorand=0.5 hirand=1\n\
+             <group> key=-1 pitch_keycenter=48 on_lohdcc64=0 on_hihdcc64=0.25 <region> sample=up.wav\n\
+             <group> key=-1 <region> sample=nothing-plays-this.wav\n\
+             <group> key=49 group=2 <region> sample=*silence locc130=127 hicc130=127 on_locc130=127 on_hicc130=127\n\
+             <region> sample=crash.wav key=49 off_by=2 locc130=0 hicc130=126\n\
+             <region> sample=choked.wav key=49 locc130=64",
+        )
+        .unwrap();
+        let named: Vec<&str> =
+            piano.regions.iter().map(|region| piano.recordings[region.recording.unwrap() as usize].as_str()).collect();
+        assert_eq!(named, ["note.wav", "down1.wav", "down2.wav", "up.wav", "crash.wav"]);
+        let [note, down, _, up, crash] = piano.regions.as_slice() else { panic!() };
+        assert_eq!((note.trigger, note.set_off), (Trigger::Attack, None));
+        // The pedal coming all the way down sets its noise off, wherever the keys are.
+        assert_eq!((down.trigger, down.set_off, down.volume), (Trigger::Controller, Some((64, 127.0, 127.0)), -20.0));
+        assert_eq!((down.when.as_slice(), down.random), (&[(64u8, 127.0f32, 127.0f32)][..], (0.0, 0.5)));
+        // In hundredths of its travel, too; and on the key its recording was made on.
+        assert_eq!((up.set_off, up.root), (Some((64, 0.0, 31.75)), 48));
+        // The pressure on a key stands at rest: the cymbal plays, at its own level, and nothing is said.
+        assert_eq!((crash.keys, crash.off_by, crash.amplitude), ((49, 49), Some(2), 1.0));
+        assert!(crash.when.is_empty() && crash.controls.is_empty());
+        assert!(piano.unsupported.is_empty(), "{:?}", piano.unsupported);
+        // The pedal is one of the controllers it listens to.
+        assert!(piano.summary().controllers.iter().any(|(number, _)| *number == 64));
     }
 
     #[test]
@@ -1326,7 +1407,7 @@ mod tests {
             "<control> hint_ram_based=1 set_cc140=1\n<global> eq1_gain=3 eq1_freq=80 eg01_time1=4 lfo01_pitch=10\n\
              <effect> type=reverb\n<midi> x=1\n\
              <group> key=36 loop_mode=one_shot off_by=2 group=1 off_mode=time off_time=0.2 cutoff2=500\n\
-             <region> sample=kick.wav on_locc64=1 cutoff=900 fil_type=lpf_2p fil_veltrack=1200 fileg_depth=2400 fileg_decay=0.1\n\
+             <region> sample=kick.wav on_locc129=1 cutoff=900 fil_type=lpf_2p fil_veltrack=1200 fileg_depth=2400 fileg_decay=0.1\n\
              <region> sample=*sine key=40\n<region> sample=*silence key=41 group=2\n\
              <region> sample=snare.wav key=38 direction=reverse trigger=whenever gain_cc7=-6 amplitude_cc11=100",
         )
@@ -1339,7 +1420,7 @@ mod tests {
             ("<effect>", 1),
             ("<midi>", 1),
             ("cutoff2", 4),
-            ("on_locc64", 1),
+            ("on_locc129", 1),
             ("sample=*sine", 1),
             ("direction", 1),
             ("trigger", 1),
@@ -1352,7 +1433,7 @@ mod tests {
         assert!(effects.miss.contains("effects of its own"));
         assert!(kit.unsupported.iter().find(|un| un.name == "eq1_gain").unwrap().miss.contains("equalisers"));
         // And what it does do is all there.
-        // A region that a controller would set off is left out: nothing here sets it off.
+        // A region that a controller of a player's own would set off is left out: nothing here moves it.
         let [silence, snare] = kit.regions.as_slice() else { panic!("{}", kit.regions.len()) };
         let kick = read_text(
             "<group> key=36 off_by=2 group=1 off_mode=time off_time=0.2\n\

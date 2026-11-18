@@ -26,6 +26,9 @@ pub enum Trigger {
     First,
     /// A key going down while another is held.
     Legato,
+    /// No key: a controller coming into a span ([`Region::set_off`]). The
+    /// noise of a pedal going down, and of its coming up.
+    Controller,
 }
 
 /// How a region's recording is played through.
@@ -164,6 +167,10 @@ impl Moved {
 /// MIDI, by the numbers the format's makers gave them. A note's own are
 /// fixed when it begins.
 pub mod note {
+    /// The pressure on one key after it went down (polyphonic aftertouch),
+    /// as the numbering of one maker's player has it. Nothing in a song
+    /// here carries it: it is read as at rest.
+    pub const KEY_PRESSURE: u32 = 130;
     /// How hard the key was struck, 0..=1.
     pub const VELOCITY: u8 = 131;
     /// Which key, as a share of the keyboard: key 127 is 1.
@@ -544,6 +551,9 @@ pub struct Region {
     /// which, counted from 1, of how many.
     pub turn: (u16, u16),
     pub trigger: Trigger,
+    /// The controller that sets it off, and the span (0..=127) it has to
+    /// come into, where no key does ([`Trigger::Controller`]).
+    pub set_off: Option<(u8, f32, f32)>,
     /// dB a second by which a release sound is quieter for every second
     /// its note was held.
     pub release_decay: f32,
@@ -619,6 +629,7 @@ impl Default for Region {
             random: (0.0, 1.0),
             turn: (1, 1),
             trigger: Trigger::Attack,
+            set_off: None,
             release_decay: 0.0,
             switched: Switched::default(),
             when: Vec::new(),
@@ -798,6 +809,7 @@ impl Instrument {
         let mut used: Vec<u8> = Vec::new();
         for region in &self.regions {
             used.extend(region.when.iter().map(|(controller, _, _)| *controller));
+            used.extend(region.set_off.map(|(controller, _, _)| controller));
             used.extend(region.controls.iter().map(|control| control.controller));
             used.extend(region.fade_controllers.iter().map(|(controller, _)| *controller));
             used.extend(region.envelope.by_controller.iter().map(|(_, controller, _, _)| *controller));

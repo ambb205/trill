@@ -1,0 +1,16 @@
+# Not in the starter selection, and played in the listening files beside what is: the alternatives a
+# listener may prefer. A line a set, as in starter.txt.
+headroom-piano ^headroom piano \(nofx\)
+upright-piano-kw .
+greg-sullivan-e-pianos wurlitzer
+vsco-2-ce-solo-violin sviolinvib\.sfz
+smolken-double-bass pizz
+meatbass pizz_basic
+electric-bass-yr finger
+pastabass ^linguine\.sfz
+muldjordkit ^drumgizmo/muldjordkit/stereo
+drskit drskit\.sfz$
+naked-drums naked drums\.sfz$
+electric-guitar-fsbs-clean clean bridge 2
+shinyguitar main
+vcsl-organs pipe organ - loud\.sfz

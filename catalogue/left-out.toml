@@ -157,7 +157,7 @@ says = "No licence; \"Not all recordings were done in house (but all are free us
 name = "VCSL: Psaltery, bowed and plucked"
 from = "https://github.com/sgossner/VCSL/tree/sfz/Chordophones/Zithers"
 reason = "form"
-says = "Its four instrument files are in the sfz branch of the library and the recordings they name (\"Psaltery, Bowed and Plucked/...\") are not: there is nothing to play. The library is under a Creative Commons 0 license."
+says = "Its four instrument files are in the sfz branch of the library, and the recordings they name (\"Psaltery, Bowed and Plucked/...\") are not where the files say: that folder lies inside another instrument's (\"Harpsichord, Italian\"), so nothing plays. The library is under a Creative Commons 0 license."
 
 [[left_out]]
 name = "FreePats instruments published only as 7z or tar archives"

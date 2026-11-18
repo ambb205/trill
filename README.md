@@ -29,7 +29,7 @@ Development builds are optimized (see `[profile.dev]`), because unoptimized audi
 
 ### Building and testing
 
-`cargo test --workspace` runs about 2,630 tests in a few minutes. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 2,650 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -64,7 +64,11 @@ cargo test -p trill-stage --test drawn -- --ignored    # what the graphics card 
 cargo test -p trill-mcp --test mcp a_film_is_made -- --ignored --nocapture    # a film of a song and of its making over MCP, kept in the assistant's working folder (a graphics card)
 cargo test -p trill-app a_film_is_made_from_the_window -- --ignored --nocapture    # a film from the window's panel, watched as it is made, and one stopped (a graphics card)
 cargo test -p trill-dsp --test real_sfz -- --ignored --nocapture    # the SFZ reader on the files a synth installed here keeps: their text only, counted (TRILL_SFZ_FOLDER names another folder)
-cargo test -p trill-runtime --test instruments -- --ignored --nocapture    # fetches five small sets of the catalogue of instruments from where they are published (84 MB, by the system's curl), and checks, unpacks, finds and plays them (TRILL_CATALOGUE_SETS names others)
+cargo test -p trill-runtime --test instruments the_catalogue -- --ignored --nocapture    # fetches five small sets of the catalogue of instruments from where they are published (84 MB, by the system's curl) through the program's own fetching, and checks each twice, finds it in the library, plays it and removes it (TRILL_CATALOGUE_SETS names others by id, or `starter`, or `all`: every set, one at a time, 26 GB and half an hour; TRILL_CATALOGUE_REPORT names a file for a line a set, which a later run goes on from)
+cargo test -p trill-runtime --test instruments a_fetch_that_is_stopped -- --ignored --nocapture    # a set that comes as one archive and one that comes file by file, each stopped in the middle and asked for again, with where each went on from (350 MB)
+cargo test -p trill-runtime --test instruments a_set_kept_under_a_deep_folder -- --ignored --nocapture    # two small sets fetched into a folder deeper than 260 letters, checked and played (36 MB)
+cargo test -p trill-app the_starter_selection_is_fetched_from_the_panel -- --ignored --nocapture    # the starter selection asked for with the Setup panel's own button on the catalogue that is built in: fetched, checked, found by the library, on a track, played (1.8 GB)
+cargo run -p trill-fetch --example many -- <a list of addresses> <a folder>    # how long many small files take one at a time, on one connection and several at once: what the engine's count was chosen by
 ```
 
 Run the first two after touching plugin hosting or audio decoding, and the last two after touching the audio
@@ -303,18 +307,19 @@ a WAV file carries), an envelope and a filter for each region, vibrato and tremo
 groups that silence one another, layers that fade into one another by velocity, by key and by a controller,
 controllers read along the instrument's own curves, keyswitches, the controllers a note has of its own (how hard
 it was struck, its key, a number drawn for it, every other note), numbered slow waves that move the pitch, the
-level, the filter and one another, where in a recording a note begins by a controller, and the controllers only
-a maker's own window moves, which stand where the file puts them (a kit's microphones at their maker's mix). A
-set made for the ARIA engine may name its folder of recordings in a bank file beside its programs: that is read
+level, the filter and one another, where in a recording a note begins by a controller, the sounds no key plays
+and a controller sets off by coming into a span (the noise of a pedal going down and coming up: once each time,
+at a place in the song like any note), and the controllers only a maker's own window moves, which stand where
+the file puts them (a kit's microphones at their maker's mix; the pressure on a single key, which nothing here
+moves, at rest). A set made for the ARIA engine may name its folder of recordings in a bank file beside its programs: that is read
 too. What a file asks for that it does not do
 is not passed over: loading the instrument says so in a sentence, naming each thing and what a listener
 misses for it ("It asks for 1 thing this player does not do, so it will not sound quite as in its maker's
 player. Not heard: equalisers of its own (eq1_gain). Everything else plays."), and the instrument plays. Of the
-3,400 SFZ files of the 94 freely published sets it was tried on, 898 were instruments (the rest are parts that
-others include), and 686 of those asked for nothing it does not do.
+3,251 SFZ files of the 93 freely published sets it was tried on, 2,672 are instruments (the rest are parts that
+others include), and 2,416 of those ask for nothing it does not do.
 Not done: the equalizer and effect sections, envelopes with any number of stages (`egN_`), a second filter,
-regions that a controller sets off, the shape of an envelope's curves, waves the player is asked to make
-(`sample=*sine`), sostenuto. A recording that is there and is not audio it can read is counted and said, in the
+the shape of an envelope's curves, waves the player is asked to make (`sample=*sine`), sostenuto. A recording that is there and is not audio it can read is counted and said, in the
 panel and over MCP; plain WAV files with a longer format chunk than usual, which a whole library is written
 with, are read.
 
@@ -1024,19 +1029,44 @@ its keys lie from equal temperament, how its level steps from key to key, and, i
 what its file asks for that the player does not do. A mark is a rule on those figures (`catalogue/README.md`
 states each): 27 instruments are marked out of tune, uneven, noisy or silent as they load, and are offered
 without being put forward. The figures are measurements; nobody has chosen by ear yet. A starter selection of
-1.1 GB is marked for offering first: a grand piano, two electric pianos, the violins and cellos of a chamber
-orchestra, a double bass plucked and bowed, an electric bass, a drum kit, a nylon-string and an electric guitar,
-a pipe organ and hand percussion.
+1.8 GB in twelve sets is marked for offering first: a grand piano, two electric pianos, the violins, violas and
+cellos of a chamber orchestra, a double bass plucked and bowed, an electric bass, a drum kit, a nylon-string and
+an electric guitar, a pipe organ and hand percussion.
+
+**File, Setup, Instruments** is where a set is fetched. The catalogue is shown by kind, each kind opening to its
+sets and a set to its instruments, with a field that narrows all of it to a word. A set's row says its size, its
+licence and whether it is here; chosen, it shows everything there is to read before it is fetched: who made it,
+its licence in its maker's words and where that was read, the line its maker asks to be named by, the version
+it is pinned to and what it is checked against, and each instrument with what was measured against it where
+something was (such an instrument comes with its set, and is not put forward). Over the catalogue stand the two
+things most people ask for, each with its size on the button: **Starter** and **Everything**; a kind is fetched
+alone from its own row, and a set by its own button. What was asked for at once is fetched one set after the
+other, the smallest first, and is shown as one line with how many of its sets are here, how much has come and
+one Stop. What was whole when it was stopped is kept and asking again goes on: a set that is published file by
+file from the file it had reached, a set that comes as one archive from its beginning, because its source makes
+that archive anew each time it is asked for. The room a set takes, as its archive and unpacked both, is asked
+of the disk before it starts, and what was asked for at once is refused as a whole where there is not the room.
+The sets are kept in a folder of Trill's own, or in the folder Move names (one of the sound library's from then
+on), each in a folder of its own; a set that arrives is checked against what the catalogue pins, by what it
+unpacks to or file by file, before the library is told of it, and one that is not what was read is a sentence
+that says which file. A set is removed by the button that fetched it. Nothing is fetched until a button is
+pressed, and the assistant in the window cannot fetch at all.
+
+Every set of the catalogue was fetched once this way, one after the other (119 sets, 26 GB, 31 minutes on the
+machine it was built on), and each arrived whole and as it was read; the starter selection asked for with the
+panel's own button came in 103 seconds, and every instrument of it was found by the library and played. A set
+under a folder deeper than Windows' 260 letters arrives and plays, and a fetch that was stopped was asked for
+again on a set of each kind.
 
 A model asks `instrument_catalogue` what there is (by kind, by words, one set with its licence) and which of it
-is in the sound library already; it cannot fetch, and is told to say which set a song wants and how large it is.
+is in the sound library already, and fetches a set with `setup` when the user asks for it by name (a client of
+the user's own; the assistant's endpoint refuses), having said its size and its licence.
 An instrument of the catalogue that is in the sound library, however it came there, is known again by its file
-wherever it lies. What the fetching is to call when a set arrives is built and tested (`Runtime::set_arrived`):
-the set is checked whole against the catalogue before the library is told of it, and one that is not all there,
-or is not what was read, is a sentence that says which. Where a maker asks to be named, Trill does it: File, Credits and the `song_credits` tool give, for the instruments the
+wherever it lies. Where a maker asks to be named, Trill does it: File, Credits and the `song_credits` tool give, for the instruments the
 open song plays, the lines to put where the song is released, and `catalogue/CREDITS.md` is the list for the
-sets Trill offers. Choosing and fetching sets from the window is not built here: it waits for the setup panel,
-whose fetching these are to use.
+sets Trill offers. The catalogue is written by the scripts in `crates/trill-catalogue/make` (its `README.md` has
+the steps: what was read of each set, the pinned commits fetched, each instrument measured through the player),
+which nothing runs but a person.
 
 A sampled instrument of the library is one row among the devices, with its size. Drag it onto a track and it is
 what the track plays through, below the tracks for a track of its own, or double-click it; an `.sfz` file dragged
@@ -1114,8 +1144,8 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Presets | `search_presets` (one search across the presets of every installed instrument and the saved ones), `save_preset` (keeps a device's sound under a name), `save_sound` (keeps a track's instrument and the effects after it as one sound, which is then a preset of the instrument), `edit_preset` (renames what was saved, or changes its description and tags), `delete_preset` (for good; the in-app assistant is refused it) |
 | Clips | `create_clip`, `create_audio_clip`, `update_clip`, `split_clip`, `duplicate_clip`, `delete_clip` |
 | Sounds | `search_sounds` (sounds, or with `kind: "instrument"` the sampled instruments, each with what it is), `library` (its folders, and `move_folder` for one that went elsewhere), `preview_sound`, `set_sample` |
-| Studying | `study` (takes a recording apart with models on this machine and keeps it: start with a file, a clip or, for a client of the user's own, a link; report with the stage it is at; stop; take up again; list; delete and drop its stems, each after saying which songs play them; gather what the open song plays of studies beside it), `take_from_study` (a stretch of its stems or one of its loops as audio that follows the song's tempo and, where asked, its key; a sung line or word as that stretch of the vocal; a single hit onto a lane, a pad or a sampler; a kit as a drum rack; a part as notes on an instrument track, a groove by the kit's own drum names; its parts as markers; its tempo bar by bar; its key; the recording as a reference track), `setup` (every part there is to fetch with its size, licence and source, which are here, fetch, stop and remove one, what runs the models and the test that times it, the programs that were found; the assistant in the window reads it and fetches nothing) |
-| Instruments to be had | `instrument_catalogue` (the sampled instruments others publish that may be used and handed on: counted by kind and licence, searched by words or kind, or one set with its licence as its maker wrote it; says which are in the library already; fetches nothing), `song_credits` (what the open song owes the makers of the sampled instruments it plays: the lines to put where it is released) |
+| Studying | `study` (takes a recording apart with models on this machine and keeps it: start with a file, a clip or, for a client of the user's own, a link; report with the stage it is at; stop; take up again; list; delete and drop its stems, each after saying which songs play them; gather what the open song plays of studies beside it), `take_from_study` (a stretch of its stems or one of its loops as audio that follows the song's tempo and, where asked, its key; a sung line or word as that stretch of the vocal; a single hit onto a lane, a pad or a sampler; a kit as a drum rack; a part as notes on an instrument track, a groove by the kit's own drum names; its parts as markers; its tempo bar by bar; its key; the recording as a reference track), `setup` (every part there is to fetch with its size, licence and source, which are here, fetch, stop and remove one; a list as long as the catalogue of instruments is counted, and read a page at a time when it is asked for by name; what runs the models and the test that times it, the programs that were found; the assistant in the window reads it and fetches nothing) |
+| Instruments to be had | `instrument_catalogue` (the sampled instruments others publish that may be used and handed on: counted by kind and licence, searched by words or kind, or one set with its licence as its maker wrote it; says which are in the library already, and how a set is fetched with `setup` when the user asks for it; fetches nothing itself), `song_credits` (what the open song owes the makers of the sampled instruments it plays: the lines to put where it is released) |
 | Listening | `listen` (what is in an audio file of the library, of the user's or of a clip, or what a `study` found in a recording's stems, with the words line by line and each word's bar and beat, or of one `stem` of it: tempo and bars, key, tuning, and on request its chords, parts, loops, single hits, groove, bass and melody in the recording's own bars, paged; corrections to its beat grid), `transcribe` (its bass line, melody, groove or chords as MIDI on its own beats: into a file, or into the song on a new track in one undo step) |
 | Wavetables | `describe_wavetable` (the tables of `builtin:wavetable` that ship, any of them or a recipe of your own shown frame by frame in numbers; changes nothing), `set_wavetable` (gives an oscillator a table that ships, one made from a recipe, or one read from an audio file; names the macros) |
 | Missing files | `missing_files` (what the song names that is not on disk, where it is used, and what was found with how sure it is), `relink_files` (what is sure, or more on request, or a folder or files named by hand: one undo step) |
@@ -1211,9 +1241,11 @@ crates/
   trill-engine    Realtime engine, offline renderer, analysis, and the Session.
   trill-library   The sound library (scanning, indexing, searching sample folders) and the settings file.
   trill-fetch     What is fetched when the user asks: parts that others publish, pinned by checksum, brought by the
-                  system's own curl, in lists that any crate hands it.
+                  system's own curl, in lists that any crate hands it: one at a time or many asked for at once,
+                  a part of many small files several at a time, the room asked of the disk first.
   trill-catalogue The sampled instruments others publish that Trill may hand on, read from the text in
-                  `catalogue/`: licences, pins, what was measured, what a song owes. Fetches nothing.
+                  `catalogue/`: licences, pins, what was measured, what a song owes. Fetches nothing; `make/`
+                  is the scripts the catalogue is written by.
   trill-listen    What is heard in a recording without a model: beats and bars, tuning, key and chords, parts,
                   loops, single hits, notes, and MIDI of them.
   trill-study     A recording taken apart: its stems, beats and words found by models (ONNX Runtime, loaded when
@@ -1274,11 +1306,10 @@ General MIDI, not from what the plugin says is on its keys; over MCP every tool 
 notes drawn by hand in the window (the tools write them; a note that is drawn is a plain key), kits of drum
 plugins other than Superior Drummer 3 (none of the others on the machine says what is on its keys in a state
 Trill reads),
-for the sampled instrument: choosing and fetching the catalogue's sets from the window (the catalogue, the
-checking of what arrived and the credits are there; the fetching is the setup panel's, which is not in this
-build), the four share-alike sets and the eleven instruments published only as 7z or tar archives (listed, not
-offered), anyone's ears on which instruments are the best of their kind (the starter selection is by
-measurement),
+for the sampled instrument: the four share-alike sets and the eleven instruments published only as 7z or tar
+archives (listed, not offered), anyone's ears on which instruments are the best of their kind (the starter
+selection is by measurement), an archive gone on with from the middle (the sources make theirs anew each time),
+a set that changed at its source taken as the newer one (it is a sentence; the pin is moved by hand),
 the parts of SFZ named above as not done, formats other than SFZ, a drum kit's microphones as separate levels
 (a kit that brings several is played as its file mixes them), taking the instrument out of a device in the window
 (another takes its place, or the device is removed), and the time to a first note from a disk that has not
