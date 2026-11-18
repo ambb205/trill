@@ -98,7 +98,7 @@ impl SetupScene {
                 let got = (part.size() as f64 * share) as u64;
                 PartStatus {
                     folder: published.folder.join(&part.id),
-                    part: part.clone(),
+                    part: part.clone().into(),
                     state,
                     got,
                     on_disk: got,

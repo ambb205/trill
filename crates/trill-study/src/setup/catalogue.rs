@@ -33,6 +33,7 @@ fn part(id: &str, name: &str, what: &str, licence: &str, from: &str, needs: &[&s
         from: from.to_owned(),
         needs: needs.iter().map(|id| (*id).to_owned()).collect(),
         files,
+        elsewhere: Vec::new(),
     }
 }
 

@@ -122,7 +122,7 @@ fn the_catalogue_that_is_built_in_reads_and_keeps_its_own_rules() {
         // Pinned to a version, and fetched from where that version lies.
         assert_eq!(set.version.len(), 40, "{}: a commit", set.id);
         match &set.fetch {
-            Fetch::Archive { url, under, sum } => {
+            Fetch::Archive { url, under, sum, .. } => {
                 assert!(url.contains(&set.version) && under.contains(&set.version), "{}", set.id);
                 assert_eq!(sum.len(), 64);
             }

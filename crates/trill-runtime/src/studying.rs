@@ -65,6 +65,8 @@ pub(crate) struct Studies {
     /// Where the parts of each list are kept when the settings do not
     /// say: the place its owner gave it.
     defaults: Mutex<HashMap<String, PathBuf>>,
+    /// The program's own folder for what it keeps.
+    data: PathBuf,
 }
 
 impl Studies {
@@ -98,7 +100,12 @@ impl Studies {
             free: studying.free,
         });
         let defaults = Mutex::new([(MODELS.to_owned(), default_parts)].into_iter().collect());
-        Some(Self { fetches, desk, default_studies, defaults })
+        Some(Self { fetches, desk, default_studies, defaults, data })
+    }
+
+    /// The program's own folder for what it keeps.
+    pub fn data(&self) -> &Path {
+        &self.data
     }
 }
 
@@ -158,13 +165,16 @@ impl Runtime {
         self.studying.as_ref().map(|studies| &studies.fetches).ok_or_else(|| NOT_KEPT.to_owned())
     }
 
-    /// Has this program start itself a second time to study, and fetch
-    /// with the system's `curl`, as a program does that has called
+    /// Has this program start itself a second time to study, fetch with
+    /// the system's `curl`, and offer the instruments of the catalogue
+    /// that is built in, as a program does that has called
     /// [`crate::jobs::run_as_job_if_requested`] first thing. A runtime
-    /// that was not told so studies nothing and fetches nothing.
+    /// that was not told so studies nothing, fetches nothing and offers
+    /// only what it was handed.
     pub fn study_and_fetch_as_usual(&self) {
         let Some(studies) = &self.studying else { return };
         studies.fetches.fetch_by(Arc::new(Curl));
+        self.offer_instruments();
         match std::env::current_exe() {
             Ok(program) => studies.desk.study_by(program),
             Err(error) => log::warn!("nothing can be studied: this program's own file cannot be found ({error})"),
@@ -230,7 +240,7 @@ impl Runtime {
             .into_iter()
             .filter(|list| list.id == id)
             .flat_map(|list| list.parts)
-            .map(|status| status.part.id)
+            .map(|status| status.part.id.clone())
             .collect();
         if id == MODELS {
             // What the timed test found is kept beside the parts it was run on.

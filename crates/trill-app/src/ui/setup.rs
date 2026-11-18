@@ -991,7 +991,8 @@ mod tests {
                 needs: vec!["runtime".into()],
                 files: vec![Fetched::file("https://example.org/stems.onnx", sum, 200 << 20, "stems.onnx")],
                 ..Part::default()
-            },
+            }
+            .into(),
             folder: PathBuf::from("models/stems"),
             state,
             got,
@@ -1018,7 +1019,7 @@ mod tests {
     #[test]
     fn a_list_says_how_much_of_it_is_here_and_a_part_what_it_lacks() {
         let runtime = PartStatus {
-            part: Part { id: "runtime".into(), name: "The models' runtime".into(), ..Part::default() },
+            part: Part { id: "runtime".into(), name: "The models' runtime".into(), ..Part::default() }.into(),
             ..status(PartState::Missing, 0, None)
         };
         let list = ListStatus {

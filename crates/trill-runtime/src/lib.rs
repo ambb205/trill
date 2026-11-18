@@ -65,7 +65,7 @@ mod settings;
 mod sounds;
 mod studying;
 
-pub use instruments::Arrived;
+pub use instruments::{Arrived, Ask, INSTRUMENTS, SETS_FOLDER, fetch_list, part_of};
 pub use jobs::{Jobs, Program};
 pub use listening::{LONGEST_SECONDS, ListenError};
 pub use midi::MidiInputInfo;
@@ -145,6 +145,9 @@ pub struct Parts {
     /// Studies with scripted models and a shelf to fetch from, in place
     /// of the real ones.
     pub studying: Studying,
+    /// A catalogue of instruments in place of the one that is built in:
+    /// a test's own, whose sets are on its shelf.
+    pub catalogue: Option<trill_catalogue::Catalogue>,
 }
 
 /// The audio stream: what was asked for and what is.
@@ -203,6 +206,8 @@ pub struct Runtime {
     /// The checksums of the instrument files that were read: how one on a
     /// disk is known for one of the catalogue's.
     instruments: instruments::Known,
+    /// A catalogue of instruments in place of the one that is built in.
+    catalogue: Option<Arc<trill_catalogue::Catalogue>>,
     plugins: Option<PluginHost>,
     settings: Arc<Mutex<SettingsFile>>,
     copies: Arc<Mutex<SafetyCopies>>,
@@ -322,7 +327,7 @@ impl Runtime {
         let copies = Arc::new(Mutex::new(copies));
         let settings = Arc::new(Mutex::new(settings));
         let housekeeper = Housekeeper::start(session.clone(), library.clone(), settings.clone(), copies.clone())?;
-        Ok(Self {
+        let runtime = Self {
             _housekeeper: housekeeper,
             midi,
             session,
@@ -331,11 +336,18 @@ impl Runtime {
             listening: listening::Listening::default(),
             studying,
             instruments: instruments::Known::default(),
+            catalogue: parts.catalogue.map(Arc::new),
             plugins,
             settings,
             copies,
             audio_host,
-        })
+        };
+        // A catalogue that was handed in is offered at once, beside the parts of studies. The one
+        // that is built in is offered when the program says it is one, as fetching is.
+        if runtime.catalogue.is_some() {
+            runtime.offer_instruments();
+        }
+        Ok(runtime)
     }
 
     // ---- the audio device ----------------------------------------------
