@@ -413,3 +413,91 @@ fn the_dialog_asks_for_a_file_or_a_link_and_says_why_nothing_was_studied() {
     harness.idle(2);
     assert!(!harness.app.studies().dialog.open);
 }
+
+/// The window's test program, started again as the process that studies:
+/// this is the one test it is then told to run. Run as a test like any
+/// other it has nothing to do.
+#[test]
+fn this_program_studies_when_it_is_started_for_that() {
+    trill_study::helper::run_if_requested();
+}
+
+/// The window on a runtime that can study: by this test program, started again.
+fn studying(options: UiOptions, slow: f64) -> (Harness, tempfile::TempDir) {
+    trill_study::helper::serve_by_test("ui::tests::study::this_program_studies_when_it_is_started_for_that");
+    let folder = tempfile::tempdir().unwrap();
+    recording(&folder.path().join("refs").join("small song.wav"));
+    let studying = Studying {
+        stand_in: Some(Script { seconds: slow, ..script() }),
+        programs: Some(Programs::default()),
+        program: Some(std::env::current_exe().unwrap()),
+        ..Studying::default()
+    };
+    let storage = Storage::At { settings: folder.path().join("config").join("settings.json"), library_index: None };
+    let runtime_options = RuntimeOptions { audio: AudioBackend::Null { sample_rate: 48_000 }, plugins: None, storage };
+    let runtime = Arc::new(Runtime::start_custom(runtime_options, Parts { studying, ..Parts::default() }).unwrap());
+    (Harness::on(runtime, options, |_| {}), folder)
+}
+
+#[test]
+fn a_recording_is_studied_from_the_dialog_stopped_taken_up_and_opens_when_it_is_done() {
+    let options = UiOptions { browser_tab: Some(BrowserTab::Studies), ..UiOptions::default() };
+    let (mut harness, folder) = studying(options, 0.5);
+    let recorded = folder.path().join("refs").join("small song.wav");
+    harness.click_label("Study a recording");
+    harness.idle(3);
+    harness.click_label("A file, or a link to a recording");
+    harness.type_text(&recorded.display().to_string());
+    harness.click_label("Study");
+    // The dialog goes, and the study is listed with the stage it is at.
+    harness.wait_until("the study to be listed", |harness| !harness.app.studies().list().is_empty());
+    assert!(!harness.app.studies().dialog.open);
+    harness.wait_until("a stage to be said", |harness| harness.app.studies().list()[0].at.is_some());
+    harness.idle(2);
+    let said = |harness: &Harness| {
+        harness.labels.iter().map(|(text, _)| text.clone()).find(|text| text.starts_with("small song: "))
+    };
+    let at = said(&harness).unwrap();
+    assert!(at.contains(" %"), "{at}");
+    // Stopped: every stage that had finished is kept, and it says it can be taken up.
+    let row = harness.all_labeled("small song: ")[0].center();
+    harness.click(row);
+    harness.click_label("Stop the study");
+    harness.wait_until("the study to stop", |harness| {
+        harness.app.studies().list()[0].study.state == trill_study::State::Stopped
+    });
+    harness.idle(3);
+    assert_eq!(said(&harness).unwrap(), "small song: Stopped: it can be taken up where it was");
+    // Taken up, it goes on to its end, and opens in the workspace by itself.
+    harness.click_label("Take the study up again");
+    harness.wait_until("the study to open", |harness| harness.app.studies().open().is_some());
+    harness.settle_study();
+    assert_eq!(harness.app.state().detail_tab, DetailTab::Study);
+    assert!(harness.is_on_screen("Study: small song") && harness.is_on_screen("Mute drums"));
+    assert_eq!(harness.app.studies().list()[0].study.state, trill_study::State::Done);
+}
+
+#[test]
+fn the_timed_test_is_run_from_the_setup_panel_and_says_what_it_chose() {
+    let (mut harness, _folder) = studying(UiOptions::default(), 0.0);
+    harness.key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Comma);
+    harness.wait_until("the panel to read", |harness| !harness.app.setup().is_busy());
+    harness.idle(3);
+    harness.click_label("This machine");
+    harness.idle(3);
+    assert!(harness.is_on_screen("Run the timed test"));
+    harness.click_label("Run the timed test");
+    harness.wait_until("the timed test", |harness| !harness.app.setup().is_busy());
+    harness.idle(4);
+    harness.wait_until("the panel to read again", |harness| !harness.app.setup().is_busy());
+    harness.idle(3);
+    // What ran the models, how fast, and that the test is what chose it.
+    let chosen =
+        harness.labels.iter().map(|(text, _)| text.clone()).find(|text| text.contains("chosen by the timed test"));
+    assert!(chosen.is_some(), "{:?}", harness.labels.iter().map(|(text, _)| text).collect::<Vec<_>>());
+    assert!(
+        harness.app.setup().last().is_none_or(|said| !said.contains("could not")),
+        "{:?}",
+        harness.app.setup().last()
+    );
+}
