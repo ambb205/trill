@@ -44,6 +44,7 @@ pub fn start(cx: &mut Cx, paths: Vec<PathBuf>, seconds: Option<f64>, tempo: Opti
         pointer: None,
         target: None,
         refusal: None,
+        study: None,
     });
 }
 
@@ -91,6 +92,8 @@ pub fn begin(ctx: &egui::Context, cx: &mut Cx) {
     let waiting = cx.state.system_drop.is_some();
     let Some(drag) = &mut cx.state.sound_drag else { return };
     drag.pointer = match drag.source {
+        // In a window of its own the workspace has the pointer: where that is in this one.
+        DragSource::Study => crate::ui::study::window::pointer_here(ctx).or(latest),
         DragSource::Browser => latest,
         // After the drop the pointer reports again as soon as it moves.
         DragSource::System => system_pointer(ctx).or(latest.filter(|_| waiting && pointer_reported)),
@@ -126,6 +129,7 @@ fn system_drag(paths: Vec<PathBuf>) -> SoundDrag {
         pointer: None,
         target: None,
         refusal: None,
+        study: None,
     }
 }
 
@@ -137,8 +141,8 @@ pub fn end(ctx: &egui::Context, cx: &mut Cx) {
     };
     hint(cx, &drag);
     match drag.source {
-        DragSource::Browser => {
-            if ctx.input(|input| input.pointer.primary_down()) {
+        DragSource::Browser | DragSource::Study => {
+            if crate::ui::study::window::held(ctx) {
                 ctx.set_cursor_icon(if drag.target.is_some() { CursorIcon::Copy } else { CursorIcon::Grabbing });
                 floating_label(ctx, cx, &drag);
                 // The ghost follows the pointer.
@@ -147,7 +151,10 @@ pub fn end(ctx: &egui::Context, cx: &mut Cx) {
             }
             cx.state.sound_drag = None;
             if let Some(target) = drag.target.clone() {
-                land(cx, drag, target);
+                match drag.study.clone() {
+                    Some(study) => crate::ui::study::land(ctx, cx, study, target),
+                    None => land(cx, drag, target),
+                }
             }
         }
         DragSource::System => {
@@ -173,7 +180,7 @@ pub fn end(ctx: &egui::Context, cx: &mut Cx) {
 /// Returns whether there was one. Files another program is dragging are
 /// that program's to let go of.
 pub fn cancel(cx: &mut Cx) -> bool {
-    let dragging = cx.state.sound_drag.as_ref().is_some_and(|drag| drag.source == DragSource::Browser);
+    let dragging = cx.state.sound_drag.as_ref().is_some_and(|drag| drag.source != DragSource::System);
     if dragging {
         cx.state.sound_drag = None;
     }

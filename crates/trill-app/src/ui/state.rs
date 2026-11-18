@@ -35,6 +35,8 @@ pub enum DetailTab {
     Devices,
     /// A channel strip for every track.
     Mixer,
+    /// A study of a recording, laid out: see `study::view`.
+    Study,
 }
 
 /// Which pane keyboard commands such as Delete apply to: the one the user
@@ -422,6 +424,8 @@ pub enum BrowserTab {
     Devices,
     /// The sound library.
     Sounds,
+    /// The recordings that were studied.
+    Studies,
 }
 
 /// Whether the browser lists one-shots, loops or both.
@@ -564,6 +568,8 @@ pub enum DragSource {
     Browser,
     /// Files dragged in from another program.
     System,
+    /// Something of a study, picked up in its workspace.
+    Study,
 }
 
 /// Sounds being dragged towards the song.
@@ -590,11 +596,16 @@ pub struct SoundDrag {
     pub target: Option<DropTarget>,
     /// Why it cannot be dropped where the pointer is, for the hint.
     pub refusal: Option<&'static str>,
+    /// What of a study it is, where it is not a file: see `study::StudyDrag`.
+    pub study: Option<super::study::StudyDrag>,
 }
 
 impl SoundDrag {
     /// The length in beats the first clip would have on a track.
     pub fn beats(&self, project_tempo: f64, fallback: Beats) -> Beats {
+        if let Some(beats) = self.study.as_ref().and_then(|study| study.beats()) {
+            return beats;
+        }
         match self.seconds {
             Some(seconds) => super::sounds::dropped_length(seconds, self.tags, self.tempo, project_tempo),
             None => fallback,
@@ -612,6 +623,14 @@ impl SoundDrag {
     /// take the thing dragged refuses it with a reason
     /// ([`DropTarget::for_drag`]).
     pub fn offer(&mut self, target: DropTarget) {
+        // What comes from a study says itself where it can go.
+        if let Some(study) = &self.study {
+            match study.takes(&target) {
+                Ok(()) => (self.target, self.refusal) = (Some(target), None),
+                Err(refusal) => (self.target, self.refusal) = (None, Some(refusal)),
+            }
+            return;
+        }
         match target.for_drag(self.is_instrument()) {
             Ok(target) => {
                 self.target = Some(target);
@@ -1116,6 +1135,8 @@ pub struct Cx<'a> {
     pub filming: &'a mut Filming,
     /// The Setup panel: what is fetched when asked, and what runs the models.
     pub setup: &'a mut Setup,
+    /// Studies: the one in the workspace, the list, what is asked of them.
+    pub studies: &'a mut super::study::Studies,
 }
 
 impl Cx<'_> {

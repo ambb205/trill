@@ -423,10 +423,16 @@ impl Processor {
         }
     }
 
-    /// Starts auditioning a sound over the song. Returns the buffer that was
-    /// being auditioned before, to be freed off the audio thread.
-    pub fn start_audition(&mut self, audio: std::sync::Arc<AudioData>, gain: f32) -> Option<std::sync::Arc<AudioData>> {
-        self.monitor.start_audition(audio, gain)
+    /// Starts auditioning a sound over the song: once through, or with
+    /// `round` again and again. Returns the buffer that was being
+    /// auditioned before, to be freed off the audio thread.
+    pub fn start_audition(
+        &mut self,
+        audio: std::sync::Arc<AudioData>,
+        gain: f32,
+        round: Option<crate::monitor::Round>,
+    ) -> Option<std::sync::Arc<AudioData>> {
+        self.monitor.start_audition(audio, gain, round)
     }
 
     pub fn stop_audition(&mut self) {
@@ -927,6 +933,7 @@ impl Processor {
             count: 4.0 / signature.denominator as f64,
             counts_per_bar: signature.numerator as u32,
             until,
+            song: start_beat,
         };
         match self.recording.filter(|recording| recording.count_in > 0) {
             // A count-in clicks whether or not the metronome is on, on the

@@ -195,4 +195,29 @@ impl Runtime {
             .map_err(|error| error.to_string())?;
         Ok(gathered)
     }
+
+    /// Puts a word of a study right by hand: what it says, not where it
+    /// is. `line` and `word` are counted from 0. The line's text is its
+    /// words again, and the study keeps it: the transcriber is not asked a
+    /// second time. Answers with the words as they are now.
+    pub fn correct_word(&self, id: &str, line: usize, word: usize, text: &str) -> Result<trill_study::Lyrics, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("a word has to say something: type what is sung there".to_owned());
+        }
+        let folder = self.studies()?.studies().folder(id);
+        let mut lyrics = folder.lyrics().ok_or_else(|| format!("the study {id} wrote down no words"))?;
+        let Some(sung) = lyrics.lines.get_mut(line) else {
+            return Err(format!("the study {id} has {} lines", lyrics.lines.len()));
+        };
+        let Some(found) = sung.words.get_mut(word) else {
+            return Err(format!("that line has {} words", sung.words.len()));
+        };
+        text.clone_into(&mut found.text);
+        // Put right by a person: as sure as it gets.
+        found.p = 1.0;
+        sung.text = sung.words.iter().map(|word| word.text.trim()).collect::<Vec<_>>().join(" ");
+        folder.write_lyrics(&lyrics)?;
+        Ok(lyrics)
+    }
 }

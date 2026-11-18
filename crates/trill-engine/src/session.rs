@@ -858,7 +858,20 @@ impl Session {
     /// being auditioned.
     pub fn audition(&mut self, audio: Arc<trill_core::audio::AudioBuffer>, gain_db: f32) {
         self.engine.collect_garbage();
-        self.engine.send(Message::Audition { audio, gain: 10f32.powf(gain_db / 20.0) });
+        self.engine.send(Message::Audition { audio, gain: 10f32.powf(gain_db / 20.0), round: None });
+    }
+
+    /// Plays a sound over the song round and round, until
+    /// [`Session::stop_audition`] or another audition. With `beats` it
+    /// keeps time with the song while the song plays: one round lasts that
+    /// many beats, and is read from where the song is, so that a loop
+    /// that was made to the song's tempo is heard in its place in the bar.
+    /// While the song stands still, and with `None`, it goes round at its
+    /// own length.
+    pub fn audition_round(&mut self, audio: Arc<trill_core::audio::AudioBuffer>, gain_db: f32, beats: Option<f64>) {
+        self.engine.collect_garbage();
+        let round = Some(crate::monitor::Round { beats });
+        self.engine.send(Message::Audition { audio, gain: 10f32.powf(gain_db / 20.0), round });
     }
 
     pub fn stop_audition(&mut self) {

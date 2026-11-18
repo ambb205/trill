@@ -359,7 +359,12 @@ fn view_menu(ui: &mut Ui, cx: &mut Cx) {
         cx.jobs.confirm = Some(Confirm::DeleteJournal);
     }
     trill_noir::menu_separator(ui, theme);
-    for (tab, label) in [(DetailTab::Clip, "Clip"), (DetailTab::Devices, "Devices"), (DetailTab::Mixer, "Mixer")] {
+    for (tab, label) in [
+        (DetailTab::Clip, "Clip"),
+        (DetailTab::Devices, "Devices"),
+        (DetailTab::Mixer, "Mixer"),
+        (DetailTab::Study, "Study"),
+    ] {
         if MenuItem::new(label).checked(cx.state.detail_tab == tab).show(ui, theme).clicked() {
             cx.state.detail_tab = tab;
         }

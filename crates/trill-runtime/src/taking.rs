@@ -137,6 +137,17 @@ pub struct StretchPlan {
     pub notes: Vec<String>,
 }
 
+/// A stretch as it would sound in the song, to be played round before it
+/// is taken: see [`Runtime::hear_stretch`].
+#[derive(Clone, Debug)]
+pub struct Sounding {
+    pub audio: std::sync::Arc<trill_core::audio::AudioBuffer>,
+    /// The beats of the song one round lasts, where it follows the song:
+    /// what keeps it in step while the song plays. `None` as recorded.
+    pub beats: Option<Beats>,
+    pub plan: StretchPlan,
+}
+
 /// What came of taking a stretch.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Taken {
@@ -582,6 +593,65 @@ impl Runtime {
         let partial = file.with_extension("partial.wav");
         trill_media::write_wav(&partial, &sum, WavFormat::Float32).map_err(|error| error.to_string())?;
         std::fs::rename(&partial, file).map_err(|error| format!("{}: {error}", file.display()))
+    }
+
+    /// A stretch as it would sound in the song if it were taken now: made
+    /// by the plan that taking it follows, played by the code that plays
+    /// the song (a song of nothing but its clips, rendered), at the tempo
+    /// the song has at `take.at`. What is heard is what would be taken.
+    /// Changes nothing in the song; several stems are cut into their file
+    /// here, which is the one taking them then plays.
+    pub fn hear_stretch(&self, studied: &Studied, take: &TakeStretch) -> Result<Sounding, String> {
+        let plan = self.plan_stretch(studied, take)?;
+        if let Some(cut) = &plan.cut {
+            self.make_cut(&plan.file, cut)?;
+        }
+        let (tempo, rate, factory) = {
+            let session = self.session.lock();
+            let tempo = session.project().tempo_map().tempo_at(take.at);
+            (tempo, session.audio_info().sample_rate, session.factory())
+        };
+        let mut song = Project::new("heard");
+        song.set_tempo(tempo).map_err(|error| error.to_string())?;
+        let track = song.add_track(plan.name.clone());
+        for piece in &plan.pieces {
+            let content = AudioContent {
+                path: plan.file.display().to_string(),
+                offset_seconds: piece.offset_seconds,
+                gain_db: 0.0,
+                fade_in: 0.0,
+                fade_out: 0.0,
+                warp: plan.warp,
+                source_tempo: piece.source_tempo,
+                transpose: plan.semitones,
+            };
+            song.add_audio_clip(track, plan.name.clone(), piece.start, piece.length, content)
+                .map_err(|error| error.to_string())?;
+        }
+        let options = trill_engine::render::RenderOptions {
+            sample_rate: rate.round().max(8_000.0) as u32,
+            end_beat: Some(plan.length),
+            max_tail_seconds: 0.0,
+            ..trill_engine::render::RenderOptions::default()
+        };
+        let rendered = trill_engine::render::render(&song, &*factory, &options).map_err(|error| error.to_string())?;
+        let mut audio = trill_core::audio::AudioBuffer {
+            sample_rate: f64::from(rendered.sample_rate),
+            left: rendered.left,
+            right: rendered.right,
+        };
+        // A round begins and ends in nothing, over a few milliseconds: no click where it comes round.
+        let frames = audio.frames();
+        let edge = ((audio.sample_rate * 0.003) as usize).min(frames / 2);
+        for index in 0..edge {
+            let gain = index as f32 / edge as f32;
+            for channel in [&mut audio.left, &mut audio.right] {
+                channel[index] *= gain;
+                channel[frames - 1 - index] *= gain;
+            }
+        }
+        let beats = (!take.as_recorded).then_some(plan.length);
+        Ok(Sounding { audio: std::sync::Arc::new(audio), beats, plan })
     }
 
     /// Puts a stretch of a study into the song as audio: one undo step.
