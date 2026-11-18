@@ -877,6 +877,75 @@ pub struct Marker {
     pub name: String,
 }
 
+/// The key a song says it is in. Nothing in the song follows it: it is
+/// what a sound brought from elsewhere is moved to, and what whoever
+/// writes for the song reads.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SongKey {
+    /// Pitch class of the tonic, C = 0 up to B = 11.
+    pub tonic: u8,
+    pub minor: bool,
+}
+
+impl SongKey {
+    const MAJOR: [&str; 12] = ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
+    const MINOR: [&str; 12] = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "G#", "A", "Bb", "B"];
+
+    pub fn new(tonic: u8, minor: bool) -> Self {
+        Self { tonic: tonic % 12, minor }
+    }
+
+    /// `F# minor`, `Eb major`.
+    pub fn name(self) -> String {
+        let tonic = usize::from(self.tonic % 12);
+        if self.minor { format!("{} minor", Self::MINOR[tonic]) } else { format!("{} major", Self::MAJOR[tonic]) }
+    }
+
+    /// Reads `F#m`, `F# minor`, `Gb min`, `Eb`, `Eb major`, `ebmaj`.
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        let mut letters = text.chars();
+        let letter = letters.next()?.to_ascii_uppercase();
+        let natural = match letter {
+            'C' => 0i32,
+            'D' => 2,
+            'E' => 4,
+            'F' => 5,
+            'G' => 7,
+            'A' => 9,
+            'B' => 11,
+            _ => return None,
+        };
+        let rest = letters.as_str();
+        let (shift, rest) = match rest.chars().next() {
+            Some('#') | Some('♯') => (1, &rest[rest.chars().next()?.len_utf8()..]),
+            Some('b') | Some('♭') => (-1, &rest[rest.chars().next()?.len_utf8()..]),
+            _ => (0, rest),
+        };
+        let minor = match rest.trim().to_ascii_lowercase().as_str() {
+            "" | "maj" | "major" => false,
+            "m" | "min" | "minor" => true,
+            _ => return None,
+        };
+        Some(Self::new((natural + shift).rem_euclid(12) as u8, minor))
+    }
+
+    /// The tonic of the major key with the same notes: its own for a
+    /// major key, three semitones up for a minor one.
+    fn notes_of(self) -> i32 {
+        i32::from(self.tonic % 12) + if self.minor { 3 } else { 0 }
+    }
+
+    /// How many semitones a sound in `other` is moved by to have this
+    /// key's notes, the shorter way: -6 to 6. A minor key and the major
+    /// key three semitones above it have the same notes, and a sound in
+    /// either is left where it is for the other.
+    pub fn semitones_from(self, other: SongKey) -> i32 {
+        let up = (self.notes_of() - other.notes_of()).rem_euclid(12);
+        if up > 6 { up - 12 } else { up }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     #[serde(default = "format_version_default")]
@@ -886,6 +955,10 @@ pub struct Project {
     pub tempo: f64,
     /// The time signature the song begins in.
     pub time_signature: TimeSignature,
+    /// The key the song says it is in, where it says. A file saved before
+    /// songs said has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<SongKey>,
     /// Where the tempo changes after the start: in order of their beats,
     /// and at one beat at most a glide that arrives there followed by a
     /// tempo that takes over. Read through [`Project::tempo_map`].
@@ -951,6 +1024,7 @@ impl Project {
             name: name.into(),
             tempo: 120.0,
             time_signature: TimeSignature::default(),
+            key: None,
             tempo_changes: Vec::new(),
             meter_changes: Vec::new(),
             loop_region: LoopRegion { enabled: false, start: 0.0, end: 16.0 },
@@ -1802,6 +1876,11 @@ impl Project {
             self.set_meter_changes(changes)?;
         }
         Ok(())
+    }
+
+    /// Says what key the song is in, or with `None` that it does not say.
+    pub fn set_key(&mut self, key: Option<SongKey>) {
+        self.key = key.map(|key| SongKey::new(key.tonic, key.minor));
     }
 
     // ---- markers -------------------------------------------------------

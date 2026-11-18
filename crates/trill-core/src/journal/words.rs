@@ -366,6 +366,7 @@ pub fn describe(before: &Project, after: &Project, change: &Change) -> String {
                     (before.name != after.name, "name"),
                     (before.tempo != after.tempo, "tempo"),
                     (before.time_signature != after.time_signature, "time signature"),
+                    (before.key != after.key, "key"),
                     (before.tempo_changes != after.tempo_changes, "tempo along the song"),
                     (before.meter_changes != after.meter_changes, "time signature along the song"),
                     (before.loop_region != after.loop_region, "loop"),
@@ -378,6 +379,10 @@ pub fn describe(before: &Project, after: &Project, change: &Change) -> String {
                 said.push(match changed.as_slice() {
                     ["tempo"] => format!("Set the tempo to {} BPM", after.tempo),
                     ["time signature"] => format!("Set the time signature to {}", signature(after.time_signature)),
+                    ["key"] => match after.key {
+                        Some(key) => format!("Said the song is in {}", key.name()),
+                        None => "Took back what key the song is in".to_owned(),
+                    },
                     ["tempo along the song"] => tempo_change(before, after),
                     ["time signature along the song"] => meter_change(before, after),
                     ["name"] => format!("Renamed the project to {}", quoted(&after.name)),

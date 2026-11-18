@@ -221,6 +221,7 @@ fn same_song(a: &Project, b: &Project) -> bool {
         name,
         tempo,
         time_signature,
+        key,
         tempo_changes,
         meter_changes,
         loop_region,
@@ -235,6 +236,7 @@ fn same_song(a: &Project, b: &Project) -> bool {
         && *name == b.name
         && *tempo == b.tempo
         && *time_signature == b.time_signature
+        && *key == b.key
         && *tempo_changes == b.tempo_changes
         && *meter_changes == b.meter_changes
         && *loop_region == b.loop_region
@@ -248,6 +250,7 @@ fn song_of(project: &Project) -> Project {
         name,
         tempo,
         time_signature,
+        key,
         tempo_changes,
         meter_changes,
         loop_region,
@@ -263,6 +266,7 @@ fn song_of(project: &Project) -> Project {
         name: name.clone(),
         tempo: *tempo,
         time_signature: *time_signature,
+        key: *key,
         tempo_changes: tempo_changes.clone(),
         meter_changes: meter_changes.clone(),
         loop_region: *loop_region,
@@ -281,6 +285,7 @@ fn set_song(project: &mut Project, song: &Project) {
         name,
         tempo,
         time_signature,
+        key,
         tempo_changes,
         meter_changes,
         loop_region,
@@ -295,6 +300,7 @@ fn set_song(project: &mut Project, song: &Project) {
     project.name.clone_from(name);
     project.tempo = *tempo;
     project.time_signature = *time_signature;
+    project.key = *key;
     project.tempo_changes.clone_from(tempo_changes);
     project.meter_changes.clone_from(meter_changes);
     project.loop_region = *loop_region;

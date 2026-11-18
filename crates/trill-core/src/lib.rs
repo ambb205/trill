@@ -31,7 +31,7 @@ pub use instrument::{
 };
 pub use project::{
     AutomationLane, AutomationPoint, AutomationTarget, ChainRef, Clip, Device, EditError, LoopRegion, Marker, Master,
-    Note, Project, Reference, Segment, Send, Track, TrackKind, WarpMode,
+    Note, Project, Reference, Segment, Send, SongKey, Track, TrackKind, WarpMode,
 };
 pub use tempo::{Bar, MeterChange, MeterMap, TempoChange, TempoMap};
 pub use time::{Beats, TimeSignature};
