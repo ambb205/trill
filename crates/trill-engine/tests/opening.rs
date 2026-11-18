@@ -209,40 +209,65 @@ fn edits_while_devices_are_on_their_way_land_as_they_would_on_a_song_that_is_who
         .unwrap();
     assert!(session.is_modified() && session.can_undo());
     assert!(session.undo());
-    // A device that is there takes a preset and a value; one that is not
-    // says so, and is not changed.
+    // A device that is there takes a value; one that is not says so, and
+    // is not changed.
     session.set_device_params(song.reverb, &[("mix".to_string(), 0.5)]).unwrap();
-    let refused = session.give_preset(song.bass, "up").unwrap_err().to_string();
-    assert!(refused.contains("is still being made") && refused.contains("Ask again when it is there"), "{refused}");
     let refused = session.set_device_params(song.amp, &[("gain".to_string(), 1.0)]).unwrap_err().to_string();
-    assert!(refused.contains("is still being made"), "{refused}");
-    // One that is on its way is removed, and one is added: made where it
-    // is asked for, as ever.
+    assert!(refused.contains("is still being made") && refused.contains("Ask again when it is there"), "{refused}");
+    // A preset of its own, given to one that is not there to load it: the
+    // song says what it is to start from, and it arrives as that preset,
+    // whatever it was being made as.
+    session.give_preset(song.bass, "up").unwrap();
+    let bass = session.project().device(song.bass).unwrap().clone();
+    assert_eq!(bass.from_preset.as_ref().map(|preset| preset.id.as_str()), Some("up"));
+    assert_eq!((bass.preset.map(|preset| preset.id), bass.state), (Some("up".to_string()), None));
+    // One that is on its way is removed, and one is added: it comes after
+    // the song has it, like the others.
     session.edit(|project| project.remove_device(song.drums).map(|_| ())).unwrap();
     let added = session.add_device(ChainRef::Track(song.keys_track), DRUMS, None, None).unwrap();
-    assert!(session.device_presets(added).is_ok() && !session.loading().contains(&song.drums));
-    assert_eq!(session.arriving().map(|arriving| arriving.of), Some(6));
+    assert!(session.is_coming(added) && !session.loading().contains(&song.drums));
+    assert_eq!(session.arriving().map(|arriving| (arriving.of, arriving.coming.len())), Some((6, 3)));
 
     assert!(session.wait_until_opened(PATIENCE));
-    // The two that were waited for arrived; the one that was removed did
-    // not come back with them.
+    // The three that were waited for arrived; the one that was removed
+    // did not come back with them, and was not made for nothing.
     assert!(session.project().device(song.drums).is_err());
-    assert_eq!(session.made_since_opening().iter().map(|made| made.device).collect::<Vec<_>>(), [song.bass, song.amp]);
+    let mut made: Vec<DeviceId> = session.made_since_opening().iter().map(|made| made.device).collect();
+    made.sort();
+    let mut waited = [song.bass, song.amp, added];
+    waited.sort();
+    assert_eq!(made, waited);
     assert!(session.problems().is_empty(), "{:?}", session.problems());
-    assert_eq!(session.device_preset(song.bass).map(|preset| preset.id.as_str()), Some("soft"));
-    // Now that it is there, it takes the preset.
-    session.give_preset(song.bass, "up").unwrap();
-    assert_eq!(session.device_preset(song.bass).map(|preset| preset.id.as_str()), Some("up"));
+    // The bass is on the preset it was given, and the song has the state
+    // it came to with it in place of the preset to load: the state a bass
+    // has that was given the preset where it stood.
+    let state_of_up = {
+        let mut session = crate::session(&ScriptedFactory::new());
+        let track = session.edit(|project| Ok(project.add_track("Bass"))).unwrap();
+        let bass = session.add_device(ChainRef::Track(track), BASS, Some("up"), None).unwrap();
+        let file = Path::new(env!("CARGO_TARGET_TMPDIR")).join("opening").join("state of up.trill");
+        session.save(&file).unwrap();
+        session.project().device(bass).unwrap().state.clone()
+    };
+    assert!(state_of_up.is_some());
+    session.snapshot_json();
+    let bass = session.project().device(song.bass).unwrap().clone();
+    assert_eq!((bass.from_preset, bass.preset.map(|preset| preset.id)), (None, Some("up".to_string())));
+    assert_eq!(bass.state, state_of_up, "the bass did not arrive as the preset it was given");
+    let story = scripted.story();
+    assert_eq!(story.iter().filter(|line| **line == format!("made {DRUMS}")).count(), 1, "{story:?}");
     // Undo takes the edits back one by one, and none of them was a device
-    // arriving: the removed drums are there again, made where they are
-    // asked for.
+    // arriving: the removed drums are in the song again, and come after.
     let mut steps = 0;
     while session.undo() {
         steps += 1;
     }
-    assert_eq!(steps, 4, "the preset, the added drums, the removed drums and the reverb's value");
+    assert_eq!(steps, 4, "the added drums, the removed drums, the preset and the reverb's value");
     assert!(session.project().device(song.drums).is_ok() && session.project().device(added).is_err());
+    assert_eq!(session.device_preset(song.bass).map(|preset| preset.id.as_str()), Some("soft"));
+    assert!(session.wait_until_opened(PATIENCE));
     assert!(session.arriving().is_none() && session.problems().is_empty());
+    assert!(!session.is_coming(song.drums) && !session.is_coming(song.bass));
 }
 
 #[test]

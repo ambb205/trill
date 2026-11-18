@@ -158,6 +158,9 @@ pub struct UiOptions {
     pub select_sound: Option<String>,
     /// Render a few frames, save the window to this PNG and exit.
     pub screenshot: Option<PathBuf>,
+    /// With a screenshot: take it this long after the window opens,
+    /// whatever is still on its way then.
+    pub screenshot_after: Option<Duration>,
     /// Start playback as soon as the window opens.
     pub autoplay: bool,
     /// Close the window by itself after this long.
@@ -222,6 +225,7 @@ impl Default for UiOptions {
             sound_search: None,
             select_sound: None,
             screenshot: None,
+            screenshot_after: None,
             autoplay: false,
             exit_after: None,
             open_editor: None,

@@ -92,6 +92,9 @@ impl Session {
         }
         let device = self.instrument_of(track)?;
         let controller = self.bank.devices.get(&device.id)?.controller.as_ref()?;
+        // Answered on the thread plugins are made on: after the making in
+        // hand, and before another is begun.
+        let _held = self.hold_makings();
         let sounds = controller.lock().key_sounds()?;
         (!sounds.is_empty()).then(|| kit::drum_map(&sounds))
     }

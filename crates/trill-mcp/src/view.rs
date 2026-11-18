@@ -277,6 +277,20 @@ pub fn chain_json(session: &Session, devices: &[Device]) -> Vec<Value> {
     listed.collect()
 }
 
+/// Says in a reply about a device that was just added that it is not
+/// made yet, where it is not: a plugin comes after the song has it.
+pub fn not_made_yet_into(out: &mut Value, session: &Session, device: trill_core::DeviceId) {
+    if session.is_coming(device) {
+        out["not_made_yet"] = json!(
+            "The song has the device, and it is being made now, away from the song: a plugin takes a second or \
+             more, and ten where nothing has read it lately. Go on writing: notes, clips and the mix need nothing \
+             of it, and a preset given to it meanwhile is what it arrives as. A tool that needs the device itself \
+             (update_device for its parameters, its window, what a drum kit has on its keys) waits for it; \
+             get_project has a `loading` note until it is there."
+        );
+    }
+}
+
 /// What to say of the devices that are not ready to be played, if any
 /// are: the ones of a song that was just opened that are still being made
 /// (how far the whole is, which, and what cannot be asked of them yet),
@@ -293,11 +307,12 @@ pub fn loading_note(session: &Session) -> Option<String> {
     if let Some(arriving) = &arriving {
         let names: Vec<String> = arriving.coming.iter().filter_map(named).collect();
         said.push(format!(
-            "The song was just opened and its devices are still being made, one at a time: {}. Not made yet: {}. \
+            "Devices of the song are still being made, one at a time, away from the song: {}. Not made yet: {}. \
              Until a device is there its track may be silent played live (an effect lets through what comes into \
-             it), it lists no parameters, a drum plugin has not said what is on its keys, and it takes no \
-             parameter, preset or editor. Everything else of the song can be read and edited now. Ask get_project \
-             again in a few seconds: this note is gone when every device is there.",
+             it), it lists no parameters, and a drum plugin has not said what is on its keys. Everything else of \
+             the song can be read and edited now, a preset given to such a device is what it arrives as, and a \
+             tool that needs the device itself waits for it. This note is gone from get_project when every device \
+             is there.",
             arriving.words(project),
             names.join(", ")
         ));

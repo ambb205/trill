@@ -163,6 +163,7 @@ impl Session {
                     params: Default::default(),
                     state: None,
                     preset: None,
+                    from_preset: None,
                     sidechain: None,
                 };
                 let mut to_load = None;

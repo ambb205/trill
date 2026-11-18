@@ -117,13 +117,18 @@ Gain": "-6 dB"}`. It also says which channels the device takes and gives. Where 
 settings that no parameter reaches, `get_device` counts them (`settings_count`), `query` finds them by name beside
 the parameters, and `update_device` sets them: `"settings": {"M-Fret Sound": 1}`.
 
-`load_project` answers with the whole song at once, and the song's plugins are made after it, one at a time
-([the engine](engine.md) has how long that takes). Until all are there the reply and `get_project` carry a
-`loading` note that says how far they are ("12 of 38 devices: Archetype Tim Henson X on Lead") and which are
-not made yet, and each such device is marked `not_made_yet`. The song can be read and edited meanwhile; what is
-asked of a device that is not there (a parameter, a preset, its window) is refused in a sentence that says to
-ask again, `transport` says so when play is pressed, and `probe`, `measure` and `render` make their own devices
-and wait for them as always. The note is gone when every device is there.
+A plugin comes after the song has it, whatever brought it: `load_project` answers with the whole song at once,
+and `create_track` and `add_device` with the track and the device, and the plugins are made after that, one at
+a time ([the engine](engine.md) has how long that takes: a second or two each, and up to fourteen for a
+sampled instrument nothing has read lately). Until a device is there it is marked `not_made_yet`, in the reply
+that brought it and in `get_project` and `get_device`, and `get_project` and `transport` carry a `loading` note
+that says how far the song's devices are ("12 of 38 devices: Archetype Tim Henson X on Lead") and which are not
+made yet. A model does not wait for it: the song can be read and edited meanwhile, a preset given to such a
+device is what it arrives as, and a tool that needs the device itself waits for it, up to a minute
+(`update_device` and `add_device` for parameters, `show_device_editor`, and the tools that write or read notes
+by what the instrument says is on its keys). `probe`, `measure` and `render` make their own devices and wait
+for them as always. A device that cannot be made, or does not load the preset it was added with, is a problem
+of the song in a sentence (`get_project`), where it used to be a call that failed.
 
 Every call is entered in the session's journal as it is made, under what it did in words and by the name the
 client gave: `get_journal` lists them, `search: "chorus"` finds the step where the chorus was written, `after`

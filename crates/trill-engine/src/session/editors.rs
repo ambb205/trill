@@ -30,6 +30,9 @@ impl Session {
         if let Some(error) = &meta.error {
             return Err(SessionError::Device(format!("{id} is unavailable: {error}")));
         }
+        // Answered on the thread plugins are made on: after the making in
+        // hand, and before another is begun.
+        let _held = self.hold_makings();
         let opened = match &meta.controller {
             Some(controller) => controller.lock().open_editor(options),
             None => Err(EditorError::NoEditor),
@@ -62,6 +65,9 @@ impl Session {
     /// The pixels of a device's open editor, as it is drawn right now.
     pub fn capture_device_editor(&mut self, id: DeviceId) -> Option<EditorImage> {
         let controller = self.bank.devices.get(&id)?.controller.as_ref()?;
+        // Answered on the thread plugins are made on: after the making in
+        // hand, and before another is begun.
+        let _held = self.hold_makings();
         controller.lock().capture_editor()
     }
 

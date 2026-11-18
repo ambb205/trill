@@ -63,6 +63,38 @@ const UNASKED_PRESETS: usize = 24;
 /// How long a tool waits for a plugin's presets to be read before it
 /// answers with what there is.
 const PRESET_WAIT: Duration = Duration::from_secs(20);
+
+/// How long a tool waits for a device that is still being made before it
+/// goes on without it, and says so.
+const DEVICE_WAIT: Duration = Duration::from_secs(60);
+
+/// The tools that wait for a device they name, or for the devices of a
+/// track or a clip they name, where one is still being made: they ask the
+/// device something (its parameters, its window), or what a track's notes
+/// mean, which the instrument says (the drums of the kit it has loaded).
+/// The others answer at once; what they say of such a device is that it is
+/// not made yet.
+const WAITS_FOR_DEVICES: &[&str] = &[
+    "update_device",
+    "show_device_editor",
+    "save_preset",
+    "save_sound",
+    "set_sample",
+    "describe_wavetable",
+    "set_wavetable",
+    "set_automation",
+    "create_clip",
+    "update_clip",
+    "add_notes",
+    "set_notes",
+    "remove_notes",
+    "transform_notes",
+    "get_notes",
+    "play_notes",
+    "get_instrument_profile",
+    "set_instrument_profile",
+    "take_from_study",
+];
 /// A device with more parameters than this is shown by those that were
 /// moved from their defaults, unless more is asked for.
 const MANY_PARAMS: usize = 64;
@@ -601,6 +633,53 @@ impl TrillServer {
         Ok(())
     }
 
+    /// Waits, with the session free, until `waiting` says of it that there
+    /// is nothing to wait for any more, or [`DEVICE_WAIT`] has passed: for
+    /// a device that is being made, which the session's chores put in its
+    /// place when it has arrived.
+    async fn wait_while(&self, waiting: impl Fn(&Session) -> bool) {
+        let deadline = std::time::Instant::now() + DEVICE_WAIT;
+        while waiting(&self.session.lock()) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Waits for the device `device` where it is still being made.
+    pub(crate) async fn await_device(&self, device: DeviceId) {
+        self.wait_while(|session| session.is_coming(device)).await;
+    }
+
+    /// Before a tool of [`WAITS_FOR_DEVICES`] runs: waits for the devices
+    /// its arguments lead to, where any is still being made.
+    async fn await_devices_of(&self, tool: &str, input: &Value) {
+        if !WAITS_FOR_DEVICES.contains(&tool) {
+            return;
+        }
+        let id = |key: &str| input.get(key).and_then(Value::as_u64);
+        let aimed = input.get("target").and_then(|target| target.get("device")).and_then(Value::as_u64);
+        let (device, track, clip) = (id("device").or(aimed), id("track"), id("clip"));
+        if device.is_none() && track.is_none() && clip.is_none() {
+            return;
+        }
+        self.wait_while(|session| {
+            let project = session.project();
+            let of_clip = clip.and_then(|clip| {
+                project
+                    .tracks
+                    .iter()
+                    .find(|track| track.clips.iter().any(|held| held.id.0 == clip))
+                    .map(|track| track.id)
+            });
+            let on_track = |track: TrackId| {
+                project.track(track).is_ok_and(|track| track.devices.iter().any(|device| session.is_coming(device.id)))
+            };
+            device.is_some_and(|device| session.is_coming(DeviceId(device)))
+                || track.is_some_and(|track| on_track(TrackId(track)))
+                || of_clip.is_some_and(on_track)
+        })
+        .await;
+    }
+
     /// Waits for the running scan, up to what the caller asked for, off
     /// the async threads.
     async fn wait_for_scan(&self, wait_seconds: Option<f64>) {
@@ -992,6 +1071,7 @@ impl TrillServer {
                         crate::sounds::given_into(&mut out, &session, added.given.as_ref());
                         crate::sounds::preset_note_into(&mut out, &mut session, device);
                         crate::sounds::instrument_into(&mut out, &session, device);
+                        crate::view::not_made_yet_into(&mut out, &session, device);
                     }
                     Err(error) => {
                         session.undo();
@@ -1187,14 +1267,27 @@ impl TrillServer {
         if let Err(refusal) = self.ready_presets(Some(&request.uri), &request.preset).await {
             return finish(Err(format!("{refusal} The device was not added.")));
         }
-        let mut session = self.session.lock();
-        let reply = (|| {
-            let chain = request.track.map_or(ChainRef::Master, |track| ChainRef::Track(TrackId(track)));
+        let chain = request.track.map_or(ChainRef::Master, |track| ChainRef::Track(TrackId(track)));
+        let (before, added) = {
+            let mut session = self.session.lock();
             let before = session.undo_step();
             let added = session
                 .add_given(chain, &request.uri, request.preset.as_deref(), request.index)
-                .map_err(|error| preset_hint(explain(session.project(), error), &request.uri))?;
-            let device = added.device;
+                .map_err(|error| preset_hint(explain(session.project(), error), &request.uri));
+            (before, added)
+        };
+        let added = match added {
+            Ok(added) => added,
+            Err(error) => return finish(Err(error)),
+        };
+        let device = added.device;
+        if request.params.is_some() {
+            // The song has the device; where it is still being made, its
+            // parameters are set when it is there.
+            self.await_device(device).await;
+        }
+        let mut session = self.session.lock();
+        let reply = (|| {
             let rest: Result<(), String> = (|| {
                 if let Some(params) = &request.params {
                     set_params(&mut session, device, params)?;
@@ -1219,6 +1312,7 @@ impl TrillServer {
             crate::sounds::given_into(&mut out, &session, added.given.as_ref());
             crate::sounds::preset_note_into(&mut out, &mut session, device);
             crate::sounds::instrument_into(&mut out, &session, device);
+            crate::view::not_made_yet_into(&mut out, &session, device);
             Ok(out)
         })();
         finish(reply)
@@ -1270,8 +1364,8 @@ impl TrillServer {
             }
             if session.is_coming(id) {
                 out["not_made_yet"] = json!(
-                    "The song was just opened and this device has not been made yet: its parameters are listed \
-                     when it is there. Ask again in a few seconds; get_project says how far the song's devices are."
+                    "The song has this device, and it is still being made: its parameters are listed when it is \
+                     there. Ask again in a few seconds; get_project says how far the song's devices are."
                 );
             }
             out["chain"] = match project.device_chain(id).map_err(|e| e.to_string())? {
@@ -2816,9 +2910,10 @@ impl TrillServer {
 
     /// Open a project file, replacing the current project. Unsaved changes are lost. The reply is the whole song at
     /// once: its tracks, clips and mixer. Its plugins are made after that, one at a time, which takes a second or
-    /// more for each: until all are there the reply and get_project have a `loading` note that says how far they
-    /// are and which are not made yet, and such a device is marked `not_made_yet`. Read and edit the song meanwhile;
-    /// ask get_project again before you set a parameter or a preset on a device that was not there.
+    /// more for each (ten, for a sampled instrument nothing has read lately): until all are there the reply and
+    /// get_project have a `loading` note that says how far they are and which are not made yet, and such a device is
+    /// marked `not_made_yet`. Read and edit the song meanwhile; a tool that needs a device that is not there waits
+    /// for it by itself.
     #[tool(annotations(title = "Load project", destructive_hint = true))]
     fn load_project(&self, Parameters(request): Parameters<LoadProjectRequest>) -> CallToolResult {
         let mut session = self.session.lock();
@@ -3342,6 +3437,9 @@ impl ServerHandler for TrillServer {
     ) -> Result<CallToolResponse, ErrorData> {
         let tool = request.name.to_string();
         let input = Value::Object(request.arguments.clone().unwrap_or_default());
+        // A tool that asks something of a device that is still being made
+        // waits for it here, with the session free.
+        self.await_devices_of(&tool, &input).await;
         let call = {
             let by = self.author(&context);
             let mut session = self.session.lock();

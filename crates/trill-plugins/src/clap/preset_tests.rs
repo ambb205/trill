@@ -5,7 +5,7 @@
 use super::ClapFactory;
 use super::scripted::{self, GAIN, kind};
 use crate::presets::Locator;
-use crate::test_support::eventually;
+use crate::test_support::{eventually, there};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use trill_core::device::{
@@ -325,11 +325,13 @@ Snare=0.375",
     // Through a session: one undo step.
     let (mut session, track) = session(&factory);
     let device = session.add_device(ChainRef::Track(track), &uri(kind::PRESETS), None, None).unwrap();
+    there(&mut session);
     let step = session.undo_step();
     assert_eq!(session.load_preset(device, &bought.to_string_lossy()).unwrap().name, "Bought Lead");
     assert_eq!(live_gain(&mut session, device), 0.125);
     assert_eq!(preset_name(&session, device).as_deref(), Some("Bought Lead"));
     assert!(session.undo());
+    there(&mut session);
     assert_eq!((session.undo_step(), preset_name(&session, device)), (step, None));
     let within = format!("{}#Kick", bank.display());
     assert_eq!(session.load_preset(device, &within).unwrap().name, "Bought");
@@ -390,6 +392,7 @@ fn the_session_lists_loads_undoes_and_saves_a_plugins_presets() {
     // device's.
     assert_eq!(session.presets(&uri).len(), 10);
     let device = session.add_device(ChainRef::Track(track), &uri, Some("Pads/Warm"), None).unwrap();
+    there(&mut session);
     assert_eq!(session.device_presets(device).unwrap().len(), 10);
     assert_eq!(preset_name(&session, device).as_deref(), Some("Warm"));
     assert_eq!(rendered(&mut session), 0.75);
@@ -400,9 +403,11 @@ fn the_session_lists_loads_undoes_and_saves_a_plugins_presets() {
     assert_eq!((loaded.name.as_str(), loaded.category.as_str()), ("Air", "Factory/Pads/Soft"));
     assert_eq!(rendered(&mut session), 0.25);
     assert!(session.undo());
+    there(&mut session);
     assert_eq!(session.undo_step(), step);
     assert_eq!((rendered(&mut session), preset_name(&session, device).as_deref()), (0.75, Some("Warm")));
     assert!(session.redo());
+    there(&mut session);
     assert_eq!((rendered(&mut session), preset_name(&session, device).as_deref()), (0.25, Some("Air")));
 
     // A preset that does not load: said, and nothing changes.
@@ -410,9 +415,21 @@ fn the_session_lists_loads_undoes_and_saves_a_plugins_presets() {
     assert!(error.contains("did not load the preset 'Rotten'") && error.contains("the patch is rotten"), "{error}");
     assert!(error.contains("The device is as it was"), "{error}");
     assert_eq!((rendered(&mut session), preset_name(&session, device).as_deref()), (0.25, Some("Air")));
-    let error = session.add_device(ChainRef::Track(track), &uri, Some("Rotten"), None).unwrap_err().to_string();
-    assert!(error.contains("the patch is rotten"), "{error}");
-    assert_eq!(session.project().track(track).unwrap().devices.len(), 1, "nothing was added");
+    // Added with such a preset: the song has the device at once, and when
+    // it has been made, that it did not load what it was to start from is
+    // a problem of the song, in a sentence. Taken back, nothing is left.
+    let rotten = session.add_device(ChainRef::Track(track), &uri, Some("Rotten"), None).unwrap();
+    there(&mut session);
+    let problems: Vec<String> = session.problems().iter().map(ToString::to_string).collect();
+    let said = |problem: &String| {
+        problem.contains("did not load the preset 'Rotten' it was to start from")
+            && problem.contains("the patch is rotten")
+    };
+    assert!(problems.len() == 1 && said(&problems[0]), "{problems:?}");
+    assert!(session.undo());
+    there(&mut session);
+    assert!(session.project().device(rotten).is_err() && session.problems().is_empty());
+    assert_eq!(session.project().track(track).unwrap().devices.len(), 1, "nothing is left of it");
 
     // What is saved is what was loaded, and it comes back from the file.
     let folder = std::env::temp_dir().join(format!("trill-clap-preset-save-{}", std::process::id()));
@@ -420,6 +437,7 @@ fn the_session_lists_loads_undoes_and_saves_a_plugins_presets() {
     session.save(&path).unwrap();
     session.new_project();
     session.load(&path).unwrap();
+    there(&mut session);
     assert_eq!((rendered(&mut session), preset_name(&session, device).as_deref()), (0.25, Some("Air")));
     std::fs::remove_dir_all(&folder).ok();
 }
@@ -432,6 +450,7 @@ fn values_set_with_a_preset_go_on_top_of_it_even_when_it_arrives_late() {
     // The engine is processing the plugin, so the preset arrives with a
     // block, a moment after the plugin said yes to it.
     let device = session.add_device(ChainRef::Track(track), &uri(kind::LATE_PRESETS), Some("Bass"), None).unwrap();
+    there(&mut session);
     session.set_device_params(device, &[(GAIN.to_string(), 0.875)]).unwrap();
     // Had the value reached the plugin before the preset did, the preset
     // would have overwritten it, for good.
@@ -441,6 +460,7 @@ fn values_set_with_a_preset_go_on_top_of_it_even_when_it_arrives_late() {
     // Undone, the value is the preset's again: in the running plugin,
     // and in what a render makes of the project.
     assert!(session.undo());
+    there(&mut session);
     assert!(eventually(WAIT, || live_gain(&mut session, device) == 0.5), "{}", live_gain(&mut session, device));
     assert_eq!(rendered(&mut session), 0.5);
 }

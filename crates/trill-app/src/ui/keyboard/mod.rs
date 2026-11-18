@@ -160,8 +160,7 @@ pub enum Silence {
     NoOutput,
     /// The instrument, by name, is given the notes and puts nothing out.
     Unanswered(String),
-    /// The instrument, by name, is one of a song that was just opened and
-    /// has not been made yet.
+    /// The instrument, by name, is in the song and has not been made yet.
     Coming(String),
 }
 
@@ -205,7 +204,7 @@ impl Silence {
             Silence::Group(_) | Silence::Return(_) => Some("select a track with an instrument"),
             Silence::Soloed(_) => Some("solo this track too, or end the solo"),
             Silence::Unanswered(_) => Some("it may have no sound loaded, or its expression or volume is at nothing"),
-            Silence::Coming(_) => Some("the song was just opened; it plays when it is there"),
+            Silence::Coming(_) => Some("plugins are made one at a time; it plays when it is there"),
             _ => None,
         }
     }

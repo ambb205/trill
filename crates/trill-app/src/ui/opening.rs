@@ -1,7 +1,10 @@
-//! A song that is being opened, as the window says it.
+//! A song that is being opened, and devices that are being made, as the
+//! window says them.
 //!
 //! Two things take time when a song is opened, and the window says each
-//! where it happens.
+//! where it happens. The second of them is the same whatever brings a
+//! plugin: a song that was opened, a device dropped on a track, an undo,
+//! the audio device at another sample rate.
 //!
 //! **Its file is read**, by a helper thread that has the session for as
 //! long as that takes: tens of milliseconds, or a second for a song of
@@ -11,8 +14,8 @@
 //! ([`Jobs::opening`](super::files::Jobs::opening)). Nothing is asked of
 //! the session meanwhile: a key or a click that did would wait for it.
 //!
-//! **Its devices are made**, the plugins one at a time, after the song is
-//! on the screen ([`Session::arriving`](trill_engine::Session::arriving)).
+//! **Its devices are made**, the plugins one at a time, after the song
+//! has them ([`Session::arriving`](trill_engine::Session::arriving)).
 //! The window is alive meanwhile: the song can be scrolled, selected,
 //! edited and played. One line says how far the whole is ("12 of 38
 //! devices: Archetype Tim Henson X on Lead"), on a plate with a bar in
@@ -41,7 +44,7 @@ use trill_noir::{paint, text};
 
 /// The plate that says how far the devices are, and the gap between it
 /// and what is said above it.
-const PLATE: egui::Vec2 = vec2(404.0, 46.0);
+const PLATE: egui::Vec2 = vec2(404.0, 64.0);
 const PLATE_GAP: f32 = 6.0;
 /// The plate that says which file is being opened.
 const READING: egui::Vec2 = vec2(420.0, 78.0);
@@ -105,8 +108,8 @@ impl Coming {
     }
 }
 
-/// Whether `device` is one of a song that was just opened that is not
-/// there yet, and if so whether its turn has come.
+/// Whether `device` is one that the song has and that is not there yet,
+/// and if so whether its turn has come.
 pub fn of_device(live: &Live, device: DeviceId) -> Option<Coming> {
     let arriving = live.arriving.as_ref()?;
     arriving.coming.contains(&device).then(|| match arriving.now == Some(device) {
@@ -122,14 +125,15 @@ pub fn device_words(live: &Live, device: &Device) -> String {
     let counted = counted.unwrap_or_default();
     match of_device(live, device.id) {
         Some(Coming::Making) => format!(
-            "{} is being made right now. The song was just opened and its plugins are made one at a time: {counted} \
-             devices are there. Until it is, an instrument is silent and an effect lets through what comes into it.",
+            "{} is being made right now. The song has it, and plugins are made one at a time, away from the song: \
+             {counted} devices are there. Until it is, an instrument is silent and an effect lets through what \
+             comes into it.",
             device.name
         ),
         _ => format!(
-            "{} is waiting for its turn. The song was just opened and its plugins are made one at a time, in the \
-             order of the song: {counted} devices are there. Until it is, an instrument is silent and an effect \
-             lets through what comes into it.",
+            "{} is waiting for its turn. The song has it, and plugins are made one at a time, away from the song, \
+             in the order they were asked for: {counted} devices are there. Until it is, an instrument is silent \
+             and an effect lets through what comes into it.",
             device.name
         ),
     }
@@ -263,12 +267,16 @@ fn arriving(ctx: &egui::Context, cx: &mut Cx, corner: egui::Pos2) -> egui::Pos2 
         painter.rect_filled(plate, 0.0, theme.raised);
         paint::frame(painter, plate, theme.hairline);
         let inner = plate.shrink2(vec2(12.0, 8.0));
-        let line = Rect::from_min_size(inner.min, vec2(inner.width(), 16.0));
-        let after = paint::dot(painter, line.left_center(), theme.metric.dot, theme.signal) + 6.0;
-        let after = after
-            + text::paint(painter, line.with_min_x(after), Align2::LEFT_CENTER, theme.text.caps, "Loading", theme.ink)
-            + 8.0;
-        text::paint_name(painter, line.with_min_x(after), Align2::LEFT_CENTER, theme.text.body, words, theme.ink_dim);
+        // How many, and under it which: a plugin's name and its track's
+        // are long, and have a line of their own.
+        let (counted, which) = words.split_once(": ").unwrap_or((words, ""));
+        let line = |index: f32| Rect::from_min_size(inner.min + vec2(0.0, index * 18.0), vec2(inner.width(), 16.0));
+        let after = paint::dot(painter, line(0.0).left_center(), theme.metric.dot, theme.signal) + 6.0;
+        let first = line(0.0).with_min_x(after);
+        let after =
+            after + text::paint(painter, first, Align2::LEFT_CENTER, theme.text.caps, "Loading", theme.ink) + 8.0;
+        text::paint(painter, line(0.0).with_min_x(after), Align2::LEFT_CENTER, theme.text.body, counted, theme.ink);
+        text::paint_name(painter, line(1.0), Align2::LEFT_CENTER, theme.text.body, which, theme.ink_dim);
         // How many are there, of how many.
         let track = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 4.0), inner.max);
         painter.rect_filled(track, 0.0, theme.well);

@@ -24,9 +24,12 @@
 //!                       is there, as it was before devices came after
 //! --profile <folder>    where the program keeps what it keeps. Default:
 //!                       `target/opens`. Never the user's own.
-//! --down-first          with `--after`: takes the plugins of the song before down
-//!                       ahead of making this song's, in place of after
 //! --no-plugins          the built-in devices only
+//! --add <name>          when the song is whole, gives it one more track with the
+//!                       device of that name (as `list_devices` has it, or the
+//!                       beginning of it), and says how long the edit had the
+//!                       session and when the device was there. `empty` in place of
+//!                       a file is a song with nothing in it, for adding to
 //! --sampled <file.sfz>  with `long`: four more tracks, each playing this
 //!                       sampled instrument
 //! ```
@@ -80,7 +83,52 @@ struct Options {
     profile: PathBuf,
     plugins: bool,
     sampled: Option<PathBuf>,
-    down_first: bool,
+    add: Vec<String>,
+}
+
+/// The word that stands for a song with nothing in it.
+const EMPTY: &str = "empty";
+
+/// Gives the song one more track with the device called `name`, as an
+/// edit does, and says what that took: how long the edit had the session,
+/// and when the device was there.
+fn add(runtime: &Runtime, name: &str) -> Result<(), String> {
+    let mark = SAID.lock().map(|said| said.len()).unwrap_or(0);
+    let wanted = name.to_lowercase();
+    let descriptors = runtime.session.lock().factory().descriptors();
+    let found = descriptors.iter().find(|descriptor| descriptor.name.to_lowercase().starts_with(&wanted));
+    let descriptor = found.ok_or(format!("there is no device called '{name}'"))?;
+    let began = Instant::now();
+    let device = {
+        let mut session = runtime.session.lock();
+        let track =
+            session.edit(|project| Ok(project.add_track(descriptor.name.clone()))).map_err(|e| e.to_string())?;
+        session.add_device(ChainRef::Track(track), &descriptor.uri, None, None).map_err(|error| error.to_string())?
+    };
+    let held = began.elapsed();
+    // Until it is there: looked at fifty times a second, for two minutes
+    // at the most.
+    for _ in 0..6_000 {
+        if !runtime.session.lock().is_coming(device) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    println!(
+        "added '{}': the edit had the session for {:.0} ms, and the device was there {:.2} s after it was asked for",
+        descriptor.name,
+        seconds(held) * 1e3,
+        seconds(began.elapsed())
+    );
+    for problem in runtime.session.lock().problems() {
+        println!("  problem: {problem}");
+    }
+    let said: Vec<(Instant, String)> =
+        SAID.lock().map(|said| said[mark.min(said.len())..].to_vec()).unwrap_or_default();
+    for (at, line) in said.iter().filter(|(_, line)| line.contains("made in") && !line.contains("away from")) {
+        println!("  {:6.2} s  {line}", seconds(at.saturating_duration_since(began)));
+    }
+    Ok(())
 }
 
 /// The word that stands for the song made here: see the top of the file.
@@ -211,7 +259,7 @@ fn make_long(options: &Options) -> Result<PathBuf, String> {
 
 fn parse(arguments: &[String]) -> Result<Options, String> {
     let [song, rest @ ..] = arguments else {
-        return Err("usage: opens <song.trill>|long [--after <song.trill>] [--at-once] [--profile <folder>] \
+        return Err("usage: opens <song.trill>|long|empty [--after <song.trill>] [--at-once] [--add <name>] [--profile <folder>] \
                     [--no-plugins] [--sampled <file.sfz>]"
             .to_string());
     };
@@ -222,19 +270,19 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         profile: PathBuf::from("target").join("opens"),
         plugins: true,
         sampled: None,
-        down_first: false,
+        add: Vec::new(),
     };
     let mut rest = rest.iter();
     while let Some(name) = rest.next() {
         match name.as_str() {
             "--at-once" => options.at_once = true,
-            "--down-first" => options.down_first = true,
             "--no-plugins" => options.plugins = false,
-            "--after" | "--profile" | "--sampled" => {
+            "--after" | "--profile" | "--sampled" | "--add" => {
                 let value = rest.next().ok_or(format!("{name} needs a value"))?;
                 match name.as_str() {
                     "--after" => options.after = Some(value.into()),
                     "--sampled" => options.sampled = Some(value.into()),
+                    "--add" => options.add.push(value.clone()),
                     _ => options.profile = value.into(),
                 }
             }
@@ -274,14 +322,37 @@ fn open(runtime: &Runtime, song: &Path, quietly: bool) -> Result<(), String> {
         runtime.session.lock().project().tracks.len()
     );
     // Its devices as they arrive: looked at fifty times a second, for
-    // three minutes at the most.
+    // three minutes at the most. Each look is also what a window's is: it
+    // has the session for as long as it takes to ask every device that is
+    // there for its parameters, which a window does of the devices it
+    // shows whenever the song has changed. How long the longest look held
+    // the session is how long a window would have stood still.
     let mut said = 0;
     let mut first = None;
+    let (mut looks, mut slow, mut longest) = (0u32, 0u32, Duration::ZERO);
+    let mut copied = None;
     for _ in 0..9_000 {
+        let looked = Instant::now();
         let (made, arriving): (Vec<_>, _) = {
             let session = runtime.session.lock();
+            let devices: Vec<_> = session.project().devices().map(|device| device.id).collect();
+            for device in devices {
+                let _ = session.device_params(device);
+            }
             (session.made_since_opening().to_vec(), session.arriving())
         };
+        let look = looked.elapsed();
+        looks += 1;
+        slow += u32::from(look >= Duration::from_millis(50));
+        longest = longest.max(look);
+        // Once, when half of what was to come is there: what a safety
+        // copy of the song takes in the middle.
+        let half = arriving.as_ref().is_some_and(|arriving| made.len() >= arriving.coming.len() && !made.is_empty());
+        if half && copied.is_none() {
+            let began = Instant::now();
+            let text = runtime.session.lock().snapshot_json();
+            copied = Some((began.elapsed(), made.len(), text.len()));
+        }
         for made in &made[said.min(made.len())..] {
             first.get_or_insert(made.there_after);
             println!(
@@ -317,6 +388,18 @@ fn open(runtime: &Runtime, song: &Path, quietly: bool) -> Result<(), String> {
     }
     for problem in problems {
         println!("  problem: {problem}");
+    }
+    println!(
+        "looked at as a window looks, {looks} times: the longest look had the session for {:.0} ms, and {slow} had \
+         it for 50 ms or more",
+        seconds(longest) * 1e3
+    );
+    if let Some((took, there, bytes)) = copied {
+        println!(
+            "a copy of the song written out with {there} of them there took {:.0} ms ({:.1} MB)",
+            seconds(took) * 1e3,
+            bytes as f64 / 1e6
+        );
     }
     // Until none of them is still reading what it plays: three minutes at
     // the most.
@@ -361,11 +444,23 @@ fn run(options: &Options) -> Result<(), String> {
     let parts = Parts { audio: Some(Arc::new(device)), ..Parts::default() };
     let runtime = Runtime::start_custom(runtime_options, parts).map_err(|error| error.to_string())?;
     runtime.session.lock().open_all_at_once(options.at_once);
-    runtime.session.lock().take_down_before_making(options.down_first);
     if let Some(first) = &options.after {
         open(&runtime, first, true)?;
     }
-    open(&runtime, song, false)
+    if options.song.as_os_str() != EMPTY {
+        open(&runtime, song, false)?;
+    }
+    for name in &options.add {
+        // With nothing being made or taken down any more.
+        for _ in 0..6_000 {
+            if !runtime.session.lock().making_devices() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        add(&runtime, name)?;
+    }
+    Ok(())
 }
 
 fn main() -> ExitCode {

@@ -124,12 +124,20 @@ impl Session {
     /// long. Playback carries on if the sample rate is the same. If the
     /// rate changes, every device is created again from the project at the
     /// new rate: playback stops, tails are cut, and the plugin editors
-    /// that were open close.
+    /// that were open close. The devices that take time to make come
+    /// after, as when the song was opened ([`Session::arriving`]): the
+    /// song stands with what is made in no time until they are there, and
+    /// play is there to be pressed meanwhile.
     pub fn set_audio_config(&mut self, config: AudioConfig) {
         self.before_audio_change();
         let position = self.engine.position();
+        // What the stream that goes leaves behind is taken down after the
+        // devices of the one that comes are made: the thread that does
+        // both begins nothing until they are asked for.
+        let held = self.hold_makings();
         let applied = self.engine.apply(config);
         self.after_audio_change(applied, position);
+        drop(held);
     }
 
     /// A number that changes whenever the audio stream does: when
@@ -228,11 +236,11 @@ impl Session {
         self.audio.media().set_loader_rate(Some(self.engine.sample_rate()));
         if applied.reset {
             // The audio thread starts from nothing: every device is made
-            // anew at the new rate, and it is told again what it knew.
-            // (Here and now: what was still on its way for a song that was
-            // just opened was being made for the rate before.)
+            // anew at the new rate, and it is told again what it knew. The
+            // ones that take time come after, as when the song was opened,
+            // and what was on its way for the rate before is let go of.
             self.forget_opening();
-            self.bank.devices.clear();
+            self.forget_devices();
             self.stand_ins = StandIns::default();
             self.compile_and_swap();
             self.engine.send(Message::Seek(position));
@@ -266,8 +274,10 @@ impl Session {
         }
         self.before_audio_change();
         let position = self.engine.position();
+        let held = self.hold_makings();
         let applied = self.engine.reopen();
         self.after_audio_change(applied, position);
+        drop(held);
         if let Some(reason) = reason {
             self.engine.note_failure(&format!("{reason} ({was})"));
         }

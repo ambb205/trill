@@ -79,6 +79,12 @@ Options:
   --screenshot <PATH.png> Render the window to a PNG and exit (implies --null-audio)
   --real-audio            With --screenshot: open this machine's audio output and MIDI inputs
                           all the same, to see the window on real hardware (nothing is played)
+  --real-plugins          With --screenshot and --profile: host the plugins installed here all
+                          the same, to see the window on a real song (their scan is kept in the
+                          profile's folder; nothing is heard)
+  --screenshot-after <S>  With --screenshot: take the picture this many seconds after the window
+                          opens, whatever is still on its way then: a song in the middle of
+                          being opened
   --exit-after <SECONDS>  Close the window by itself after this long
   -h, --help              Show this help
 ";
@@ -167,6 +173,12 @@ pub struct Cli {
     pub screenshot: Option<PathBuf>,
     /// With a screenshot: open the machine's own devices all the same.
     pub real_audio: bool,
+    /// With a screenshot and a profile: host the installed plugins all
+    /// the same.
+    pub real_plugins: bool,
+    /// With a screenshot: when to take it, in place of as soon as the
+    /// window has settled.
+    pub screenshot_after: Option<Duration>,
     pub exit_after: Option<Duration>,
 }
 
@@ -200,6 +212,15 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
             "--play" => cli.play = true,
             "--null-audio" => cli.null_audio = true,
             "--real-audio" => cli.real_audio = true,
+            "--real-plugins" => cli.real_plugins = true,
+            "--screenshot-after" => {
+                let text = value("a number of seconds")?;
+                let seconds: f64 = text.parse().with_context(|| format!("'{text}' is not a number of seconds"))?;
+                if !seconds.is_finite() || seconds < 0.0 {
+                    bail!("--screenshot-after must be zero or more seconds");
+                }
+                cli.screenshot_after = Some(Duration::from_secs_f64(seconds));
+            }
             "--no-plugins" => cli.no_plugins = true,
             "--no-mcp" => cli.no_mcp = true,
             "--no-browser" => cli.no_browser = true,
@@ -402,9 +423,13 @@ impl Cli {
     }
 
     /// Whether to host third-party plugins. Screenshots show only what
-    /// ships with the app, so they look the same on every machine.
+    /// ships with the app, so they look the same on every machine; one
+    /// that is asked to show this machine's plugins does, where it has a
+    /// profile of its own to keep their scan in, and never with the
+    /// user's.
     pub fn plugins_enabled(&self) -> bool {
-        !self.no_plugins && self.screenshot.is_none()
+        let pictured = self.screenshot.is_some();
+        !self.no_plugins && (!pictured || (self.real_plugins && self.profile.is_some()))
     }
 
     /// How to start the session and everything around it. Plugins are
@@ -454,6 +479,7 @@ impl Cli {
             sound_search: self.search.clone(),
             select_sound: self.sound.clone(),
             screenshot: self.screenshot.clone(),
+            screenshot_after: self.screenshot_after,
             autoplay: self.play,
             exit_after: self.exit_after,
             open_editor: self.editor.clone(),
@@ -786,6 +812,19 @@ mod tests {
         assert_eq!(run(&["--screenshot", "out.png", "--real-audio", "--null-audio"]).unwrap().audio_backend(), null);
         assert_eq!(run(&["--real-audio"]).unwrap().audio_backend(), AudioBackend::Auto, "without a picture, as ever");
         assert!(USAGE.contains("--real-audio"));
+    }
+
+    #[test]
+    fn a_picture_shows_this_machines_plugins_only_when_asked_and_with_a_profile_of_its_own() {
+        let shot = run(&["--screenshot", "out.png", "--real-plugins"]).unwrap();
+        assert!(!shot.plugins_enabled(), "never with the user's own settings");
+        let arguments =
+            ["--screenshot", "out.png", "--real-plugins", "--profile", "scratch", "--screenshot-after", "6"];
+        let shot = run(&arguments).unwrap();
+        assert!(shot.plugins_enabled());
+        assert_eq!(shot.ui_options().screenshot_after, Some(Duration::from_secs(6)));
+        assert!(run(&["--screenshot-after", "soon"]).is_err());
+        assert!(USAGE.contains("--real-plugins") && USAGE.contains("--screenshot-after"));
     }
 
     #[test]

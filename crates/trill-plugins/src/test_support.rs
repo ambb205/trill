@@ -40,6 +40,12 @@ impl Drop for TestDir {
 
 /// Polls `condition` until it holds or `limit` passes; returns whether it
 /// came to hold.
+/// Waits until every device the session is making for its song is there:
+/// a plugin comes after the song has it.
+pub(crate) fn there(session: &mut trill_engine::Session) {
+    assert!(session.wait_until_opened(std::time::Duration::from_secs(30)), "the plugin never arrived");
+}
+
 pub(crate) fn eventually(limit: std::time::Duration, mut condition: impl FnMut() -> bool) -> bool {
     let deadline = std::time::Instant::now() + limit;
     loop {

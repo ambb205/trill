@@ -1412,10 +1412,17 @@ impl Engine {
         let format = stream.format;
         let realtime = claim.realtime();
         if reset || realtime.processor.sample_rate() != format.sample_rate as f64 {
-            // The old processor goes here, on the controller's thread, with
-            // its graph and every device in it.
+            // The old processor goes here, on the controller's thread. Its
+            // graph, with every device in it, goes to whoever takes what is
+            // retired: plugins are let go of on a thread of their own, and
+            // waited for.
             let mut processor = Processor::new(format.sample_rate as f64);
             processor.set_capture(realtime.processor.set_capture(None));
+            let old = realtime.processor.swap_graph(Box::new(Graph::empty()));
+            match &self.retire {
+                Some(take) => take(old),
+                None => drop(old),
+            }
             realtime.processor = processor;
             reset = true;
         }

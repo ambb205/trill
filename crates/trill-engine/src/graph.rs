@@ -178,6 +178,10 @@ pub(crate) struct DeviceSlot {
     /// ([`trill_core::device::Beside::InTurn`]). Nothing for a device that
     /// may be run beside anything, and in a graph that is played.
     pub turn: Option<u32>,
+    /// Whether the device is one that takes time to make
+    /// ([`trill_core::device::DeviceFactory::takes_time`]), and so to take
+    /// down: a plugin, which is let go of on its own thread and waited for.
+    pub slow: bool,
 }
 
 /// An envelope as the audio thread plays it: its points, and what the
@@ -697,6 +701,15 @@ impl Graph {
             .iter_mut()
             .flat_map(|track| track.chain.devices.iter_mut())
             .chain(self.master.chain.devices.iter_mut())
+    }
+
+    /// Whether the graph holds a device that takes time to take down: one
+    /// that is freed where nobody waits for it. (Of a graph that was
+    /// retired: the devices that went with it, and not the ones the graph
+    /// after it took over.)
+    pub(crate) fn holds_slow(&self) -> bool {
+        let chains = self.tracks.iter().map(|track| &track.chain).chain(std::iter::once(&self.master.chain));
+        chains.flat_map(|chain| &chain.devices).any(|slot| slot.slow && slot.processor.is_some())
     }
 
     /// Whether the graph comes with devices of its own: ones that were made

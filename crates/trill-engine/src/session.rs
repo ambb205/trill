@@ -224,8 +224,12 @@ impl Session {
         media: Arc<MediaCache>,
         setup: AudioSetup,
     ) -> Result<Self, SessionError> {
-        let engine = Engine::start_with(setup)?;
+        let mut engine = Engine::start_with(setup)?;
         media.set_loader_rate(Some(engine.sample_rate()));
+        // What the audio thread retires with a plugin in it is taken down
+        // away from the session, from the first graph on.
+        let opening = opening::Opening::new();
+        engine.retire_through(opening.retiring());
         let saved = Arc::new(SavedPresets::default());
         let factory: Arc<dyn DeviceFactory> = Arc::new(WithSaved::new(factory, saved.clone()));
         let mut session = Self {
@@ -254,7 +258,7 @@ impl Session {
             story: story::Keeping::new(),
             cores: cores::Watch::default(),
             another_song: false,
-            opening: opening::Opening::new(),
+            opening,
             files: trill_core::FileTable::default(),
         };
         session.replace_project(Self::blank_project("Untitled"));
@@ -386,8 +390,21 @@ impl Session {
         // A plugin keeps its own values (from its saved state, or changed in
         // its editor); ask it. Values set through the session are in the
         // model and win, since the plugin only takes them on at its next
-        // audio block.
-        let live = meta.controller.as_ref().and_then(|controller| controller.lock().param_values());
+        // audio block. Not while a plugin is being made or taken down:
+        // the question would be answered when that is done, and whoever
+        // asks (a window, with every change to the song) would stand
+        // still until then. What it said last serves meanwhile.
+        let live = match &meta.controller {
+            Some(_) if self.making_devices() => meta.reported.lock().clone(),
+            Some(controller) => {
+                let said = controller.lock().param_values();
+                if said.is_some() {
+                    meta.reported.lock().clone_from(&said);
+                }
+                said
+            }
+            None => None,
+        };
         Ok(meta
             .params
             .iter()
@@ -657,6 +674,8 @@ impl Session {
         let after = preset.as_ref().and_then(|info| sounds::after_of(Some(&descriptor), info, saved.as_ref()));
         let (after, without) = sounds::makeable(&descriptors, after);
 
+        let later = self.comes_later(uri);
+
         // The effects of a sound that do not start are taken out again,
         // which is to be part of the one step.
         let own_gesture = self.gesture.is_none() && after.as_ref().is_some_and(|after| !after.is_empty());
@@ -678,6 +697,12 @@ impl Session {
                 if let Some(state) = preset_state(&descriptor, info) {
                     device.state = Some(state);
                 }
+            } else if let (Some(info), true) = (&preset, later) {
+                // A preset only the device can load, of a device that is
+                // made after the song has it: the song says what it is to
+                // start from, and whoever makes it has it load that.
+                device.preset = Some(info.reference());
+                device.from_preset = Some(info.clone());
             }
             if let Some((track, profile)) = profile {
                 project.set_track_profile(track, profile)?;
@@ -700,7 +725,9 @@ impl Session {
 
         let failure = self.bank.devices.get(&id).and_then(|meta| meta.error.clone()).map(SessionError::Device);
         let failure = failure.or_else(|| match (&preset, &values, &saved) {
-            (Some(info), None, None) => self.start_from_preset(id, info).err(),
+            // (One that is made after the song has it loads its preset
+            // when it is made.)
+            (Some(info), None, None) if !later => self.start_from_preset(id, info).err(),
             _ => None,
         });
         if let Some(error) = failure {
@@ -721,7 +748,6 @@ impl Session {
     /// same as [`Session::load_preset`], which also says which preset it
     /// came to.
     pub fn apply_preset(&mut self, id: DeviceId, preset: &str) -> Result<(), SessionError> {
-        self.there(id)?;
         self.load_preset(id, preset).map(|_| ())
     }
 
@@ -730,7 +756,12 @@ impl Session {
     /// one undo step.
     pub fn set_device_state(&mut self, id: DeviceId, state: Option<Vec<u8>>) -> Result<(), SessionError> {
         self.edit(|project| {
-            project.device_mut(id)?.state = state;
+            let device = project.device_mut(id)?;
+            if state.is_some() {
+                // It is that state: nothing is to be loaded on top of it.
+                device.from_preset = None;
+            }
+            device.state = state;
             Ok(())
         })?;
         match self.bank.devices.get(&id).and_then(|meta| meta.error.clone()) {
@@ -1083,21 +1114,18 @@ impl Session {
         self.redo.clear();
         // Ids restart in every project; nothing running may be mistaken for
         // a device or a clip of the new one.
-        self.bank.devices.clear();
+        self.forget_devices();
         self.stand_ins = StandIns::default();
         self.forget_load();
         // The song is there first. What takes time to make comes after,
         // made away from here: see `opening`.
         self.forget_opening();
         self.another_song = true;
-        self.bank.later = !self.opening.all_at_once;
         // Its recordings are read several at a time, ahead of the compile
         // that would read them one after the other.
         let read = self.audio.read_ahead(&self.project, self.engine.sample_rate());
         self.compile_and_swap();
         drop(read);
-        self.bank.later = false;
-        self.ask_for_what_is_coming();
         // Track ids restart too: what was armed or selected was the old
         // project's.
         self.send_live_targets();
@@ -1108,8 +1136,24 @@ impl Session {
         self.saved_revision = self.revision;
     }
 
+    /// Forgets every device there is a record of: the song they were
+    /// made for is gone, or they are all to be made anew. The records of
+    /// plugins are let go of where plugins are taken down.
+    fn forget_devices(&mut self) {
+        let behind =
+            |record: &crate::compile::DeviceMeta| record.controller.is_some() && self.factory.takes_time(&record.uri);
+        let (slow, quick): (Vec<_>, Vec<_>) = self.bank.devices.drain().map(|(_, record)| record).partition(behind);
+        drop(quick);
+        if !slow.is_empty() {
+            self.let_go_of(slow);
+        }
+    }
+
     fn compile_and_swap(&mut self) {
         let sample_rate = self.engine.sample_rate();
+        // A device that takes time to make is made after the song has it,
+        // away from here: see `opening`.
+        self.bank.later = self.comes_later_at_all();
         // Read before compiling: a stretch that ends while the compile runs
         // may be too late for it, and must still count as news afterwards.
         self.stretches_seen = self.audio.finished();
@@ -1136,6 +1180,9 @@ impl Session {
         // Ahead of the graph, so that the two arrive together.
         self.engine.tend_threads();
         self.engine.swap(graph);
+        // What the compile let go of, and what it kept a place for.
+        self.let_go_of_records();
+        self.ask_for_what_is_coming();
     }
 
     /// Brings the engine in line with the project after it changed from
@@ -1202,6 +1249,7 @@ impl Session {
     /// `leaving` then restores them as they were at this moment, with
     /// whatever was done in their editors.
     fn keep_leaving_state(&mut self, leaving: &mut Project) {
+        let _held = self.hold_makings();
         let parting: Vec<DeviceId> = leaving
             .devices()
             .filter(|device| self.project.device(device.id).map_or(true, |now| now.state != device.state))
@@ -1222,6 +1270,9 @@ impl Session {
     /// What the running plugin behind a device says its state is.
     fn live_state(&self, id: DeviceId) -> Option<Vec<u8>> {
         let controller = self.bank.devices.get(&id)?.controller.as_ref()?;
+        // The plugin answers on the thread plugins are made on: after the
+        // making that may be under way, and before another is begun.
+        let _held = self.hold_makings();
         controller.lock().save_state()
     }
 
@@ -1249,6 +1300,7 @@ impl Session {
                 && device.state == *stale
             {
                 device.state = Some(captured.to_vec());
+                device.from_preset = None;
             }
         }
     }
@@ -1257,6 +1309,10 @@ impl Session {
     /// bookkeeping, not an edit: it creates no undo step, and the history
     /// is corrected along with the present ([`Session::correct_history`]).
     fn capture_device_state(&mut self) {
+        // Every plugin is asked, on the thread plugins are made on: that
+        // thread begins no making until all have answered, so that this
+        // waits for the one making in hand and not for one a plugin.
+        let _held = self.hold_makings();
         let ids: Vec<DeviceId> = self.project.devices().map(|d| d.id).collect();
         for id in ids {
             self.capture_state_of(id);
@@ -1272,6 +1328,8 @@ impl Session {
             return;
         }
         let stale = device.state.replace(captured.clone());
+        // With its state in the song, what it was to start from is in it.
+        device.from_preset = None;
         if let Some(meta) = self.bank.devices.get_mut(&id) {
             meta.applied_state = Some(captured.clone());
         }

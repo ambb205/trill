@@ -77,6 +77,10 @@ pub struct DeviceMeta {
     /// could not be made is for good: an instrument is silent, and an
     /// effect lets what comes into it through.
     pub coming: bool,
+    /// What a plugin last said its parameter values are. Asking takes the
+    /// thread plugins are made on, so while one is being made nobody asks:
+    /// whoever wants the values meanwhile has these.
+    pub reported: Mutex<Option<Vec<f64>>>,
 }
 
 /// The devices that exist in the running graph.
@@ -87,12 +91,17 @@ pub struct DeviceBank {
     /// loading what they play: told of every plugin that is made to be
     /// heard live.
     pub loads: Arc<LoadWatch>,
-    /// Set while a song that was just opened is compiled for the first
-    /// time: a device that takes time to make
+    /// Set by a session that plays: a device that takes time to make
     /// ([`DeviceFactory::takes_time`]) is not made where the compiler
     /// stands. Its place is kept ([`DeviceMeta::coming`]), and whoever set
     /// this has it made elsewhere and hands it in ([`DeviceBank::arrived`]).
     pub later: bool,
+    /// What the compiles since it was last emptied let go of that has a
+    /// plugin behind it: the records of devices that left the song or were
+    /// made anew. Letting go of one may be waited for, so whoever compiles
+    /// with the session held takes them from here and frees them
+    /// elsewhere.
+    pub gone: Vec<DeviceMeta>,
     /// Devices that were made elsewhere, or could not be: the next compile
     /// puts each in its place. Only for a device whose place is kept, and
     /// that is still the device it was made as: whoever puts one here has
@@ -155,6 +164,7 @@ impl DeviceMeta {
             takes_key: false,
             made_keyed: None,
             coming: true,
+            reported: Mutex::new(None),
         }
     }
 
@@ -363,10 +373,12 @@ impl Compiler<'_> {
         };
 
         let live_devices: HashSet<DeviceId> = project.devices().map(|device| device.id).collect();
-        for gone in self.bank.devices.keys().filter(|id| !live_devices.contains(id)) {
-            self.bank.loads.gone(*gone);
+        let gone: Vec<DeviceId> = self.bank.devices.keys().filter(|id| !live_devices.contains(id)).copied().collect();
+        for gone in gone {
+            self.bank.loads.gone(gone);
+            let record = self.bank.devices.remove(&gone);
+            self.let_go_of(record);
         }
-        self.bank.devices.retain(|id, _| live_devices.contains(id));
         let live_tracks: HashSet<TrackId> = project.tracks.iter().map(|track| track.id).collect();
         self.meters.tracks.retain(|id, _| live_tracks.contains(id));
         if let Some(stand_ins) = self.stand_ins.as_deref_mut() {
@@ -427,7 +439,7 @@ impl Compiler<'_> {
                 if self.purpose == Purpose::Playing && Plugins::is_plugin(&device.uri) {
                     self.bank.loads.began(device.id);
                 }
-                self.bank.devices.insert(
+                let before = self.bank.devices.insert(
                     device.id,
                     DeviceMeta {
                         uri: device.uri.clone(),
@@ -440,15 +452,18 @@ impl Compiler<'_> {
                         takes_key: instance.processor.takes_key(),
                         made_keyed: instance.processor.key_is_set_when_made().then_some(device.sidechain.is_some()),
                         coming: false,
+                        reported: Mutex::new(None),
                     },
                 );
+                self.let_go_of(before);
                 Some(instance.processor)
             }
             Err(error) => {
-                self.bank.devices.insert(
+                let before = self.bank.devices.insert(
                     device.id,
                     DeviceMeta { error: Some(error.to_string()), coming: false, ..DeviceMeta::kept_for(device) },
                 );
+                self.let_go_of(before);
                 None
             }
         }
@@ -472,8 +487,11 @@ impl Compiler<'_> {
         } else if self.bank.later && self.purpose == Purpose::Playing && self.factory.takes_time(&device.uri) {
             // The song is there first, and this comes after: its place is
             // kept as one that is like the model says, and has nothing in
-            // it.
-            self.bank.devices.insert(device.id, DeviceMeta::kept_for(device));
+            // it. (Or what was running in it until now, where the device
+            // is made anew: the graph takes that over until its successor
+            // arrives.)
+            let before = self.bank.devices.insert(device.id, DeviceMeta::kept_for(device));
+            self.let_go_of(before);
             None
         } else {
             // A render in a process of its own says which device it is
@@ -481,7 +499,7 @@ impl Compiler<'_> {
             // is then known by name.
             crate::apart::stage(crate::apart::Stage::Making(device.id));
             let asked = Instant::now();
-            let made = self.factory.create_for(device, self.sample_rate, MAX_BLOCK, self.purpose);
+            let made = make(self.factory, device, self.sample_rate, self.purpose);
             said_if_slow(asked, || format!("{} ({}) was made, where the song stands", device.name, device.uri));
             self.install(device, made)
         };
@@ -500,7 +518,76 @@ impl Compiler<'_> {
         // that is played before it.
         let listens = self.bank.devices.get(&device.id).is_some_and(|meta| meta.takes_key);
         let key = device.sidechain.filter(|_| listens).and_then(|track| keys.iter().position(|key| *key == track));
-        DeviceSlot { id: device.id, processor, enabled: device.enabled, key, turn: None }
+        let slow = self.factory.takes_time(&device.uri);
+        DeviceSlot { id: device.id, processor, enabled: device.enabled, key, turn: None, slow }
+    }
+}
+
+/// How a device that was just given the preset it is to start from is run
+/// before it is handed on: so many blocks of so many frames of silence.
+const SETTLING_BLOCKS: usize = 2;
+const SETTLING_FRAMES: usize = 64;
+
+/// Makes `device` as the song has it: by the factory, and then, where the
+/// song says that it is to start from a preset of its own which only the
+/// device can load ([`Device::from_preset`]), with that preset loaded and
+/// the values the song has set since on top of it. Whoever makes a device
+/// from the song makes it through here, so that the device a render plays
+/// and the one that arrives in the session are the same.
+pub(crate) fn make(
+    factory: &dyn DeviceFactory,
+    device: &Device,
+    sample_rate: f64,
+    purpose: Purpose,
+) -> Result<DeviceInstance, DeviceError> {
+    let mut instance = factory.create_for(device, sample_rate, MAX_BLOCK, purpose)?;
+    // A device with a state is that state: the preset is in it.
+    let Some(preset) = device.from_preset.as_ref().filter(|_| device.state.is_none()) else { return Ok(instance) };
+    let loaded = match instance.controller.as_mut() {
+        Some(controller) => controller.load_preset(preset).map_err(|error| error.to_string()),
+        None => Err("it has no presets of its own to load".to_string()),
+    };
+    if let Err(reason) = loaded {
+        let reason = format!("it did not load the preset '{}' it was to start from: {reason}", preset.name);
+        return Err(DeviceError::LoadFailed { uri: device.uri.clone(), reason });
+    }
+    // A plugin may say yes to a preset and take it on with its next
+    // block. So it is run for a moment, on silence, as it is when it is
+    // given a preset while it plays: what is set on it after this goes on
+    // top of the preset, and what it is asked it answers as the preset.
+    let stopped = trill_core::device::ProcessInfo {
+        sample_rate,
+        tempo: 120.0,
+        time_signature: Default::default(),
+        playing: false,
+        position_beats: 0.0,
+        song: Default::default(),
+        loop_range: None,
+    };
+    let (mut left, mut right) = ([0.0f32; SETTLING_FRAMES], [0.0f32; SETTLING_FRAMES]);
+    for _ in 0..SETTLING_BLOCKS {
+        left.fill(0.0);
+        right.fill(0.0);
+        instance.processor.process(&stopped, &[], &mut left, &mut right);
+    }
+    for (index, info) in instance.params.iter().enumerate() {
+        if let Some(value) = device.params.get(&info.id) {
+            instance.processor.set_param(index, *value);
+        }
+    }
+    Ok(instance)
+}
+
+impl Compiler<'_> {
+    /// Lets go of the record of a device that has left the song, or was
+    /// made anew. Where the device is one that takes time and was there,
+    /// its record has a plugin behind it and is kept to be freed away
+    /// from the compile; any other goes here and now, as it always did.
+    fn let_go_of(&mut self, record: Option<DeviceMeta>) {
+        let behind = |record: &DeviceMeta| record.controller.is_some() && self.factory.takes_time(&record.uri);
+        if let Some(record) = record.filter(behind) {
+            self.bank.gone.push(record);
+        }
     }
 }
 

@@ -116,7 +116,6 @@ impl Session {
     /// the device, in place of the ones an earlier sound brought there:
     /// see [`Session::give_preset`], which says what was made.
     pub fn load_preset(&mut self, id: DeviceId, preset: &str) -> Result<PresetInfo, SessionError> {
-        self.there(id)?;
         self.give_preset(id, preset).map(|given| given.preset)
     }
 
@@ -278,6 +277,7 @@ impl Session {
             device.params = saved.params;
             device.state = saved.state;
             device.preset = Some(info.reference());
+            device.from_preset = None;
             match after {
                 Some(after) => project.bring_after(id, &info.reference(), after),
                 None => Ok(Brought::default()),
@@ -397,6 +397,20 @@ impl Session {
         if let Some(error) = &meta.error {
             return Err(SessionError::Device(format!("{id} is unavailable: {error}")));
         }
+        if meta.coming {
+            // It is not there to load anything yet: the song says what it
+            // is to start from, and it is made with that preset loaded.
+            // What it was to be before is no longer made, or is let go of
+            // when it arrives.
+            return self.edit(|project| {
+                let device = project.device_mut(id)?;
+                device.state = None;
+                device.params.clear();
+                device.preset = Some(preset.reference());
+                device.from_preset = Some(preset.clone());
+                Ok(())
+            });
+        }
         // What was done in the plugin's editor until now belongs to the
         // time before the preset, and so does the state it is in.
         self.absorb_editor_edits();
@@ -417,6 +431,9 @@ impl Session {
         device.state = None;
         device.params.clear();
         device.preset = Some(preset.reference());
+        // It has loaded it itself: nothing is left for whoever makes it
+        // from the song to load, once its state is in the song.
+        device.from_preset = None;
         // The running plugin has made the change itself: there is nothing
         // to bring the engine in line with.
         self.make_step(before);
@@ -452,6 +469,9 @@ impl Session {
         self.project.device(id)?;
         let meta = self.bank.devices.get(&id).ok_or(EditError::DeviceNotFound(id))?;
         let Some(controller) = &meta.controller else { return Ok(Vec::new()) };
+        // Answered on the thread plugins are made on: after the making in
+        // hand, and before another is begun.
+        let _held = self.hold_makings();
         let mut settings = controller.lock().settings().unwrap_or_default();
         // What has a parameter is set as a parameter.
         settings.retain(|(name, _)| !meta.params.iter().any(|param| param.name == *name));
@@ -473,6 +493,9 @@ impl Session {
         self.absorb_editor_edits();
         self.capture_state_of(id);
         let before = self.project.clone();
+        // Answered on the thread plugins are made on: after the making in
+        // hand, and before another is begun.
+        let _held = self.hold_makings();
         let asked = match self.bank.devices.get(&id).and_then(|meta| meta.controller.as_ref()) {
             Some(controller) => controller.lock().set_settings(values),
             None => Err(PresetLoadError::Unsupported),
@@ -498,6 +521,9 @@ impl Session {
     fn ask_to_load(&self, id: DeviceId, preset: &PresetInfo) -> Result<(), PresetLoadError> {
         match self.bank.devices.get(&id).and_then(|meta| meta.controller.as_ref()) {
             Some(controller) => {
+                // Loaded on the thread plugins are made on: after the
+                // making in hand, and before another is begun.
+                let _held = self.hold_makings();
                 let loaded = controller.lock().load_preset(preset);
                 // A sampler goes on to read the preset's samples.
                 if loaded.is_ok() && self.project.device(id).is_ok_and(|device| Plugins::is_plugin(&device.uri)) {

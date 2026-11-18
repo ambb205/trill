@@ -9,7 +9,7 @@ use super::state::{self, PluginState};
 use super::{Vst3Config, Vst3Factory};
 use crate::presets::Locator;
 use crate::scan::Scanner;
-use crate::test_support::{TestDir, eventually};
+use crate::test_support::{TestDir, eventually, there};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -348,6 +348,7 @@ fn the_session_lists_loads_undoes_and_saves_programs_and_preset_files() {
     // A program to start from. The engine is processing the plugin, so
     // the program arrives with a block.
     let device = session.add_device(ChainRef::Track(track), &uri, Some("Loud"), None).unwrap();
+    there(&mut session);
     assert_eq!(session.device_presets(device).unwrap().len(), 4);
     assert!(eventually(WAIT, || rendered(&mut session) == 1.5), "{}", rendered(&mut session));
     assert_eq!(preset_name(&session, device).as_deref(), Some("Loud"));
@@ -357,9 +358,11 @@ fn the_session_lists_loads_undoes_and_saves_programs_and_preset_files() {
     session.load_preset(device, "Mine").unwrap();
     assert_eq!((rendered(&mut session), preset_name(&session, device).as_deref()), (0.8, Some("Mine")));
     assert!(session.undo());
+    there(&mut session);
     assert_eq!(session.undo_step(), step);
     assert_eq!((rendered(&mut session), preset_name(&session, device).as_deref()), (1.5, Some("Loud")));
     assert!(session.redo());
+    there(&mut session);
     assert_eq!(rendered(&mut session), 0.8);
 
     // Another program on top, and a value on top of that.
@@ -368,6 +371,7 @@ fn the_session_lists_loads_undoes_and_saves_programs_and_preset_files() {
     session.set_device_params(device, &[(GAIN.to_string(), 0.3)]).unwrap();
     assert_eq!(rendered(&mut session), 0.6);
     assert!(session.undo());
+    there(&mut session);
     assert!(eventually(WAIT, || rendered(&mut session) == 0.25), "{}", rendered(&mut session));
 
     // A preset that does not load: said, and nothing changes.
@@ -381,6 +385,7 @@ fn the_session_lists_loads_undoes_and_saves_programs_and_preset_files() {
     session.save(&path).unwrap();
     session.new_project();
     session.load(&path).unwrap();
+    there(&mut session);
     assert_eq!((rendered(&mut session), preset_name(&session, device).as_deref()), (0.25, Some("Quiet")));
 }
 
@@ -418,11 +423,13 @@ fn a_preset_file_outside_the_preset_folders_is_loaded_by_its_path() {
     // Through a session: one undo step, like a preset by name.
     let (mut session, track) = session(&rig);
     let device = session.add_device(ChainRef::Track(track), &uri, None, None).unwrap();
+    there(&mut session);
     let step = session.undo_step();
     let loaded = session.load_preset(device, &bought.to_string_lossy()).unwrap();
     assert_eq!(loaded.name, "Bought Lead");
     assert_eq!(session.device_preset(device).map(|preset| preset.name.as_str()), Some("Bought Lead"));
     assert!(session.undo());
+    there(&mut session);
     assert_eq!((session.undo_step(), session.device_preset(device)), (step, None));
     let error = session.load_preset(device, &theirs.to_string_lossy()).unwrap_err().to_string();
     assert!(error.ends_with(&format!("as a preset: it is a preset of {other}, not of {this}")), "{error}");

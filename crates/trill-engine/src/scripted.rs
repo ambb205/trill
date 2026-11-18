@@ -131,6 +131,16 @@ pub struct Loading {
     /// The amplifier cannot be made: its `create` fails, after however
     /// long making takes.
     pub fails: bool,
+    /// How long letting go of one of its instruments takes: dropping it
+    /// does not come back sooner.
+    pub leaving: Duration,
+    /// Its devices are made, asked and let go of on one thread, as a
+    /// plugin's are: a making, a question to an instrument (its state, its
+    /// values) and a taking down each wait for whichever of them is under
+    /// way. How long anything waited at the longest is said
+    /// ([`ScriptedFactory::longest_wait`]) by what it was: `state`,
+    /// `values`.
+    pub one_thread: bool,
     /// The instruments the factory hands out keep one thing between them,
     /// as the instances of some plugins do: a count of the notes any of
     /// them has sounded, by which the next note of any of them is given
@@ -202,6 +212,29 @@ pub struct ScriptedFactory {
     /// Until when the host is behind with other work.
     behind_until: Arc<Mutex<Option<Instant>>>,
     shared: Arc<Shared>,
+    /// The one thread everything of its devices is done on, where there is
+    /// one ([`Loading::one_thread`]), and how long a question waited for
+    /// it at the longest, by what was asked.
+    thread: Arc<Mutex<()>>,
+    waits: Arc<Mutex<Vec<(&'static str, Duration)>>>,
+}
+
+/// The one thread a factory's devices are made and asked on, for a
+/// controller or an instrument that has to wait its turn on it.
+#[derive(Clone)]
+struct OneThread {
+    thread: Arc<Mutex<()>>,
+    waits: Arc<Mutex<Vec<(&'static str, Duration)>>>,
+}
+
+impl OneThread {
+    /// Waits for the thread, as `what`, and does `work` on it.
+    fn on<T>(&self, what: &'static str, work: impl FnOnce() -> T) -> T {
+        let asked = Instant::now();
+        let _turn = self.thread.lock();
+        self.waits.lock().push((what, asked.elapsed()));
+        work()
+    }
 }
 
 impl ScriptedFactory {
@@ -226,6 +259,19 @@ impl ScriptedFactory {
     /// `gone <uri>`.
     pub fn story(&self) -> Vec<String> {
         self.story.lock().clone()
+    }
+
+    /// How long anything asked as `what` (`state`, `values`) waited at
+    /// the longest for the one thread the devices are made on
+    /// ([`Loading::one_thread`]), and how often it was asked.
+    pub fn longest_wait(&self, what: &str) -> (Duration, usize) {
+        let waits = self.waits.lock();
+        let asked = waits.iter().filter(|(asked, _)| *asked == what);
+        (asked.clone().map(|(_, waited)| *waited).max().unwrap_or_default(), asked.count())
+    }
+
+    fn one_thread(&self) -> Option<OneThread> {
+        self.loading.one_thread.then(|| OneThread { thread: self.thread.clone(), waits: self.waits.clone() })
     }
 
     /// Whether two instruments that keep something between them
@@ -281,7 +327,10 @@ impl DeviceFactory for ScriptedFactory {
             _ => return Err(DeviceError::Unknown(device.uri.clone())),
         };
         if !self.loading.making.is_zero() {
-            std::thread::sleep(self.loading.making);
+            match self.one_thread() {
+                Some(thread) => thread.on("making", || std::thread::sleep(self.loading.making)),
+                None => std::thread::sleep(self.loading.making),
+            }
         }
         if self.loading.fails && kind == Kind::Amp {
             let reason = "the scripted amplifier was told that it cannot be made".to_string();
@@ -333,6 +382,8 @@ impl DeviceFactory for ScriptedFactory {
         let processor = Instrument {
             _samples: samples,
             gone,
+            leaving: self.loading.leaving,
+            thread: self.one_thread(),
             kind,
             sample_rate,
             ready: (!self.loading.never).then(|| born + self.loading.first),
@@ -361,6 +412,7 @@ impl DeviceFactory for ScriptedFactory {
                 patch,
                 changes_after: self.loading.changes_after,
                 random: self.loading.random && kind == Kind::Bass,
+                thread: self.one_thread(),
             })),
         })
     }
@@ -473,15 +525,32 @@ struct Controller {
     changes_after: Duration,
     /// The instrument draws at random, and has a setting that stops it.
     random: bool,
+    /// The one thread it is asked on, if its factory has one.
+    thread: Option<OneThread>,
 }
 
 impl DeviceController for Controller {
     fn save_state(&mut self) -> Option<Vec<u8>> {
-        let mut state = self.patch.name.lock().clone();
-        if self.patch.in_turn.load(Ordering::Relaxed) {
-            state.push_str(IN_TURN);
+        let state = || {
+            let mut state = self.patch.name.lock().clone();
+            if self.patch.in_turn.load(Ordering::Relaxed) {
+                state.push_str(IN_TURN);
+            }
+            Some(state.into_bytes())
+        };
+        match &self.thread {
+            Some(thread) => thread.on("state", state),
+            None => state(),
         }
-        Some(state.into_bytes())
+    }
+
+    /// It has no parameters, and still answers on its thread, as a plugin
+    /// does that has hundreds.
+    fn param_values(&mut self) -> Option<Vec<f64>> {
+        match &self.thread {
+            Some(thread) => thread.on("values", || Some(Vec::new())),
+            None => Some(Vec::new()),
+        }
     }
 
     fn settings(&mut self) -> Option<Vec<(String, String)>> {
@@ -525,6 +594,12 @@ enum Kind {
 
 impl Drop for Instrument {
     fn drop(&mut self) {
+        if !self.leaving.is_zero() {
+            match &self.thread {
+                Some(thread) => thread.on("leaving", || std::thread::sleep(self.leaving)),
+                None => std::thread::sleep(self.leaving),
+            }
+        }
         if let Some((uri, story)) = &self.gone {
             story.lock().push(format!("gone {uri}"));
         }
@@ -601,6 +676,10 @@ struct Voice {
 }
 
 struct Instrument {
+    /// How long letting go of it takes, and the one thread that happens
+    /// on, if its factory has one.
+    leaving: Duration,
+    thread: Option<OneThread>,
     /// What it has "loaded": memory that is let go of with it.
     _samples: Arc<Mutex<Vec<Vec<u8>>>>,
     /// Where it says that it is gone, with its URI, if it was made to be
