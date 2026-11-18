@@ -267,7 +267,8 @@ fn run(options: &Options) -> Result<(), String> {
     }
 
     let began = Instant::now();
-    let (seconds, rate, open_at) = {
+    let made_here = options.song.as_os_str() == BUILT_IN;
+    {
         let mut session = runtime.session.lock();
         if let Some(threads) = options.threads {
             session.set_play_threads(Some(threads));
@@ -276,15 +277,23 @@ fn run(options: &Options) -> Result<(), String> {
             session.spread_from(0.0);
         }
         session.count_cycles(options.whose_time);
-        let made_here = options.song.as_os_str() == BUILT_IN;
         if made_here {
             built_in(&mut session)?;
         } else {
             session.load(&options.song).map_err(|error| format!("{}: {error}", options.song.display()))?;
         }
-        // Its devices come after the song: until they are all there, for
-        // three minutes at the most.
-        session.wait_until_opened(Duration::from_secs(180));
+    }
+    // Its devices come after the song: until they are all there, looked at
+    // fifty times a second for three minutes at the most, with the session
+    // left to its chores in between as a front end leaves it.
+    for _ in 0..9_000 {
+        if runtime.session.lock().arriving().is_none() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let (seconds, rate, open_at) = {
+        let mut session = runtime.session.lock();
         // From here the audio thread has the song.
         let open_at = Instant::now();
         let _ = session.take_load();
