@@ -270,22 +270,17 @@ fn done(studied: &Studied) -> Result<&Heard, String> {
     }
 }
 
-/// The beat of the recording's grid that starts its first bar.
-pub fn first_bar(heard: &Heard) -> f64 {
-    heard.grid.bars.first().copied().unwrap_or(0) as f64
-}
-
 /// The bar a time of the recording lies in, counted from 1 at its first
-/// bar line, as the tools count them.
+/// bar line, as the tools and the workspace count them: the grid's own
+/// numbering ([`trill_listen::Grid::place`]), in which a bar is as long as
+/// it was found.
 pub fn bar_of(heard: &Heard, seconds: f64) -> i64 {
-    let per_bar = heard.grid.beats_per_bar.max(1) as f64;
-    ((heard.grid.beat_at(seconds) - first_bar(heard) + 1e-6) / per_bar).floor() as i64 + 1
+    heard.grid.place(seconds).0 + 1
 }
 
 /// The start of bar `bar` of the recording (from 1), in seconds.
 pub fn bar_start(heard: &Heard, bar: i64) -> f64 {
-    let per_bar = heard.grid.beats_per_bar.max(1) as f64;
-    heard.grid.seconds_at(first_bar(heard) + (bar - 1) as f64 * per_bar)
+    heard.grid.bar_start(bar - 1)
 }
 
 /// The bar lines of the recording around a stretch: the one at or before
@@ -293,12 +288,11 @@ pub fn bar_start(heard: &Heard, bar: i64) -> f64 {
 /// keeps its place in the bar when it is put on a bar of the song.
 pub fn whole_bars(heard: &Heard, from: f64, to: f64) -> (f64, f64) {
     let grid = &heard.grid;
-    let per_bar = grid.beats_per_bar.max(1) as f64;
-    let first = first_bar(heard);
-    let down = |beat: f64| first + ((beat - first + 1e-3) / per_bar).floor() * per_bar;
-    let up = |beat: f64| first + ((beat - first - 1e-3) / per_bar).ceil() * per_bar;
-    let start = grid.seconds_at(down(grid.beat_at(from))).max(0.0);
-    let end = grid.seconds_at(up(grid.beat_at(to))).min(heard.seconds.max(to));
+    // A hair inside each end, so that a stretch that is whole bars already stays as it is.
+    let first = grid.place(from + 1e-3).0;
+    let last = grid.place((to - 1e-3).max(from)).0;
+    let start = grid.bar_start(first).max(0.0);
+    let end = grid.bar_start(last + 1).min(heard.seconds.max(to));
     (start, end.max(start))
 }
 
@@ -960,14 +954,9 @@ impl Runtime {
         if heard.parts.is_empty() {
             return Err(format!("no parts were found in the study {study}"));
         }
-        let per_bar = heard.grid.beats_per_bar.max(1) as f64;
-        let bars = &heard.grid.bars;
-        let first = bars.first().copied().unwrap_or(0) as f64;
-        // The beat of the recording a bar begins on: as it was found, or counted on past the last that was.
-        let begins = |bar: usize| match bars.get(bar) {
-            Some(beat) => *beat as f64 - first,
-            None => bars.last().map_or(0.0, |last| *last as f64 - first) + (bar + 1 - bars.len()) as f64 * per_bar,
-        };
+        // The beat of the recording a part's first bar begins on, from its first bar line.
+        let grid = &heard.grid;
+        let begins = |bar: usize| grid.bar_beat(bar as i64) - grid.bar_beat(0);
         let markers: Vec<(Beats, String)> = heard
             .parts
             .iter()
@@ -1014,7 +1003,7 @@ impl Runtime {
             self.make_cut(&file, cut)?;
         }
         let title = studied.report.study.title.clone();
-        let line = heard.grid.seconds_at(first_bar(heard)).max(0.0);
+        let line = heard.grid.bar_start(0).max(0.0);
         let mut said = Vec::new();
         let mut session = self.session.lock();
         let (track, clip, tempo) = session
@@ -1175,11 +1164,7 @@ fn laid_tempo(project: &mut Project, heard: &Heard, at: Beats) -> Result<TakenTe
     let per_bar = grid.beats_per_bar.max(1) as f64;
     // Each bar line as a beat of the recording: a bar is as many beats long as were found in it, which is
     // not always what the recording mostly has (a bar of two in a song of fours, a pick-up).
-    let mut counted: Vec<f64> = grid.bars.iter().map(|index| *index as f64).collect();
-    while counted.len() < lines.len() {
-        counted.push(counted.last().copied().unwrap_or(0.0) + per_bar);
-    }
-    counted.truncate(lines.len());
+    let counted: Vec<f64> = (0..lines.len()).map(|bar| grid.bar_beat(bar as i64)).collect();
     let song = |line: usize| at + counted[line] - counted[0];
     // Runs of bars that one tempo keeps to within a few milliseconds of the recording.
     let within = if grid.steady { TEMPO_SECONDS_STEADY } else { TEMPO_SECONDS };

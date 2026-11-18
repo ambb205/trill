@@ -33,6 +33,11 @@ struct Fixture {
 }
 
 async fn connect() -> Fixture {
+    connect_with(Script::default()).await
+}
+
+/// The server on scripted models that do as `script` says, singing the usual words.
+async fn connect_with(script: Script) -> Fixture {
     let folder = tempfile::tempdir().unwrap();
     let storage = Storage::At {
         settings: folder.path().join("config").join("settings.json"),
@@ -41,7 +46,7 @@ async fn connect() -> Fixture {
     let options = RuntimeOptions { audio: AudioBackend::Null { sample_rate: 48_000 }, plugins: None, storage };
     let words = ["one", "two", "three", "four"].map(String::from).to_vec();
     let studying = Studying {
-        stand_in: Some(Script { words, ..Script::default() }),
+        stand_in: Some(Script { words, ..script }),
         // This crate's own program, which studies when it is started for that.
         program: Some(PathBuf::from(env!("CARGO_BIN_EXE_trill-mcp"))),
         ..Studying::default()
@@ -579,4 +584,93 @@ async fn a_study_that_songs_play_says_which_before_it_goes_and_a_song_gathers_wh
     assert_eq!(ok(client, "missing_files", json!({})).await["missing"], 0);
     assert_eq!(ok(client, "study", json!({ "action": "delete", "study": id })).await["removed"], id);
     assert!(!study_folder.exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recording_with_a_short_bar_has_one_numbering_of_its_bars_wherever_it_is_asked_after() {
+    // The beat model finds one bar two beats long among bars of four, as a real one does at some transitions.
+    let fixture = connect_with(Script { short_bar: Some(2), ..Script::default() }).await;
+    let client = &fixture.client;
+    let (id, _) = studied(&fixture).await;
+
+    // listen lists every bar line; the short bar says how many beats it holds, and lasts that long.
+    let listed = ok(client, "listen", json!({ "study": id, "show": ["bars"], "limit": 60 })).await;
+    let bars = listed["bars"]["items"].as_array().unwrap().clone();
+    let short = bars.iter().position(|bar| bar.get("beats").is_some()).expect("a bar of another length");
+    assert_eq!(bars[short]["beats"], 2.0, "{}", bars[short]);
+    assert_eq!(bars.iter().filter(|bar| bar.get("beats").is_some()).count(), 1, "{listed}");
+    let number = bars[short]["bar"].as_i64().unwrap();
+    assert_eq!(number, short as i64 + 1, "bars are numbered as they are listed");
+    let at = |index: usize| bars[index]["at_seconds"].as_f64().unwrap();
+    assert!((at(short + 1) - at(short) - 1.2).abs() < 0.02, "two beats at 100 beats a minute");
+    assert!((at(short) - at(short - 1) - 2.4).abs() < 0.02 && (at(short + 2) - at(short + 1) - 2.4).abs() < 0.02);
+    // Its tempo is its own beats over its own length: no faster for being short.
+    assert!((bars[short]["bpm"].as_f64().unwrap() - 100.0).abs() < 1.0, "{}", bars[short]);
+
+    // What is placed by bar and beat is placed in those bars: the hits of the short bar are on its two beats,
+    // and the bar after it has its four.
+    let groove = ok(client, "listen", json!({ "study": id, "show": ["groove"], "limit": 60 })).await;
+    let hits_of = |bar: i64| -> Vec<f64> {
+        let items = groove["groove"]["items"].as_array().unwrap();
+        let found = items.iter().find(|item| item["bar"] == bar).unwrap_or_else(|| panic!("no bar {bar} in {groove}"));
+        let mut beats: Vec<f64> = ["kick", "snare", "hat"]
+            .iter()
+            .flat_map(|drum| found[*drum].as_array().unwrap().iter().map(|beat| beat.as_f64().unwrap()))
+            .collect();
+        beats.sort_by(f64::total_cmp);
+        beats
+    };
+    assert_eq!(hits_of(number), [1.0, 1.5, 2.0, 2.5]);
+    assert_eq!(hits_of(number + 1), [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]);
+
+    // take_from_study names the same bars: the short bar is two beats of the song, from where listen has it.
+    ok(client, "set_project", json!({ "tempo": 120.0 })).await;
+    let taken = ok(
+        client,
+        "take_from_study",
+        json!({ "study": id, "what": "stretch", "stems": ["drums"], "from_bar": number, "to_bar": number, "at_bar": 20 }),
+    )
+    .await;
+    assert_eq!(taken["beats"], 2.0, "{taken}");
+    let project = ok(client, "get_project", json!({})).await;
+    let offset = |reply: &Value| clip_of(&project, &reply["clip_ids"][0]).0["offset_seconds"].as_f64().unwrap();
+    assert!((offset(&taken) - at(short)).abs() < 1e-3, "{taken}");
+    let after = ok(
+        client,
+        "take_from_study",
+        json!({ "study": id, "what": "stretch", "stems": ["drums"], "from_bar": number + 1, "to_bar": number + 1,
+                "at_bar": 30 }),
+    )
+    .await;
+    assert_eq!(after["beats"], 4.0, "{after}");
+    let project = ok(client, "get_project", json!({})).await;
+    let offset = clip_of(&project, &after["clip_ids"][0]).0["offset_seconds"].as_f64().unwrap();
+    assert!((offset - at(short + 1)).abs() < 1e-3, "{after}");
+    assert_eq!(after["name"], format!("Drums bar {} (small song)", number + 1));
+
+    // Its tempo taken into the song from bar 1: the song's bar of that number is the short one, at the same
+    // tempo, and the bars after it are where the recording's are.
+    ok(client, "new_project", json!({})).await;
+    let tempo = ok(client, "take_from_study", json!({ "study": id, "what": "tempo" })).await;
+    assert_eq!((&tempo["tempos"], &tempo["bars_of_another_length"]), (&json!(1), &json!(1)), "{tempo}");
+    let map = ok(client, "get_tempo_map", json!({})).await;
+    let signatures = map["time_signature"].as_array().unwrap();
+    let signed: Vec<(i64, &str)> = signatures
+        .iter()
+        .map(|change| (change["bar"].as_i64().unwrap(), change["time_signature"].as_str().unwrap()))
+        .collect();
+    assert_eq!(signed, [(1, "4/4"), (number, "2/4"), (number + 1, "4/4")], "{map}");
+    // A bar of the song lasts what that bar of the recording lasts.
+    let begins = |bar: i64| signatures.iter().find(|change| change["bar"] == bar).unwrap()["seconds"].as_f64().unwrap();
+    assert!((begins(number + 1) - begins(number) - (at(short + 1) - at(short))).abs() < 0.02, "{map}");
+    assert!((begins(number) - (at(short) - at(0))).abs() < 0.03, "{map}");
+
+    // And its parts as markers stand on the bars listen gives them.
+    let parts = ok(client, "listen", json!({ "study": id, "show": ["parts"] })).await;
+    let markers = ok(client, "take_from_study", json!({ "study": id, "what": "parts" })).await;
+    let listed: Vec<i64> =
+        parts["parts"]["items"].as_array().unwrap().iter().map(|part| part["bar"].as_i64().unwrap()).collect();
+    let marked: Vec<i64> =
+        markers["markers"].as_array().unwrap().iter().map(|marker| marker["bar"].as_i64().unwrap()).collect();
+    assert_eq!(marked, listed, "{parts} {markers}");
 }

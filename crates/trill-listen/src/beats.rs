@@ -279,6 +279,64 @@ impl Grid {
         }
     }
 
+    /// The beat of the grid that bar `bar` begins on, bars counted from 0
+    /// at the first bar line. A bar is as long as it was found: `bars`
+    /// says where each begins, and a bar is not always `beats_per_bar`
+    /// beats (a bar of two in a song of fours). Before the first line and
+    /// past the last, bars are counted on at `beats_per_bar`.
+    ///
+    /// This, with [`Grid::bar_of_beat`], is the one numbering of a
+    /// recording's bars: whatever names a bar of a recording, or says
+    /// which bar a moment lies in, asks here.
+    pub fn bar_beat(&self, bar: i64) -> f64 {
+        let per_bar = self.beats_per_bar.max(1) as f64;
+        let (Some(&first), Some(&last)) = (self.bars.first(), self.bars.last()) else {
+            return bar as f64 * per_bar;
+        };
+        let lines = self.bars.len() as i64;
+        if bar < 0 {
+            first as f64 + bar as f64 * per_bar
+        } else if bar >= lines {
+            last as f64 + (bar - (lines - 1)) as f64 * per_bar
+        } else {
+            self.bars[bar as usize] as f64
+        }
+    }
+
+    /// The bar a beat of the grid lies in, counted as [`Grid::bar_beat`]
+    /// counts: negative before the first bar line.
+    pub fn bar_of_beat(&self, beat: f64) -> i64 {
+        let per_bar = self.beats_per_bar.max(1) as f64;
+        let (Some(&first), Some(&last)) = (self.bars.first(), self.bars.last()) else {
+            return (beat / per_bar).floor() as i64;
+        };
+        if beat < first as f64 {
+            ((beat - first as f64) / per_bar).floor() as i64
+        } else if beat >= last as f64 {
+            self.bars.len() as i64 - 1 + ((beat - last as f64) / per_bar).floor() as i64
+        } else {
+            self.bars.partition_point(|&line| line as f64 <= beat) as i64 - 1
+        }
+    }
+
+    /// How many beats long bar `bar` is.
+    pub fn bar_length(&self, bar: i64) -> f64 {
+        self.bar_beat(bar + 1) - self.bar_beat(bar)
+    }
+
+    /// When bar `bar` begins, in seconds of the recording.
+    pub fn bar_start(&self, bar: i64) -> f64 {
+        self.seconds_at(self.bar_beat(bar))
+    }
+
+    /// The bar a moment of the recording lies in, from 0, and how many
+    /// beats into that bar it is. A hair before a line counts as on it.
+    pub fn place(&self, seconds: f64) -> (i64, f64) {
+        let beat = self.beat_at(seconds) + 1e-6;
+        let bar = self.bar_of_beat(beat);
+        (bar, beat - self.bar_beat(bar))
+    }
+
     /// The start of every bar in seconds, closed off with the end of the
     /// last when the recording, `seconds` long, lasts that long.
     pub fn bar_times(&self, seconds: f64) -> Vec<f64> {
@@ -614,6 +672,37 @@ mod tests {
         assert_eq!(grid.tracker, Tracker::Model);
         // Three beats are no grid.
         assert!(Grid::build(&[0.0, 0.5, 1.0], &[], 2.0, None, Tracker::Onsets).beats.is_empty());
+    }
+
+    #[test]
+    fn a_bar_is_as_long_as_it_was_found_and_every_way_of_counting_bars_agrees() {
+        // Beats every half second from 1 s on. The tracker found a bar of two among bars of four: lines at
+        // 1, 3, 5, 6, 8 and 10 seconds.
+        let beats: Vec<f64> = (0..20).map(|index| 1.0 + index as f64 * 0.5).collect();
+        let grid = Grid::build(&beats, &[1.0, 3.0, 5.0, 6.0, 8.0, 10.0], 11.0, None, Tracker::Model);
+        assert_eq!(grid.beats_per_bar, 4, "what most of its bars hold");
+        let starts: Vec<f64> = (0..6).map(|bar| grid.bar_start(bar)).collect();
+        assert_eq!(starts, [1.0, 3.0, 5.0, 6.0, 8.0, 10.0]);
+        assert_eq!(grid.bar_times(11.0)[..6], starts[..], "the list of lines is the same lines");
+        let lengths: Vec<f64> = (0..5).map(|bar| grid.bar_length(bar)).collect();
+        assert_eq!(lengths, [4.0, 4.0, 2.0, 4.0, 4.0]);
+        // A moment is in the bar whose line is the last at or before it, so many beats in.
+        let (bar, beat) = grid.place(5.5);
+        assert!(bar == 2 && (beat - 1.0).abs() < 1e-5, "{bar} {beat}");
+        assert_eq!(grid.place(6.0).0, 3, "the bar after the short one begins where the short one ends");
+        assert_eq!(grid.place(7.99).0, 3);
+        assert_eq!(grid.place(2.999_999_9).0, 1, "a hair before a line is on it");
+        // Counting there and back is the same bar, for every beat of the grid and past both its ends.
+        for bar in -3..9 {
+            assert_eq!(grid.bar_of_beat(grid.bar_beat(bar)), bar);
+            assert_eq!(grid.bar_of_beat(grid.bar_beat(bar + 1) - 0.25), bar);
+        }
+        // Before the first line and past the last, bars are counted on at what most bars hold.
+        assert_eq!((grid.bar_beat(-1), grid.bar_beat(0)), (-2.0, 2.0));
+        assert_eq!(grid.bar_length(7), 4.0);
+        // No grid at all is counted at four beats to a bar, two beats a second.
+        let none = Grid { beats_per_bar: 4, ..Grid::default() };
+        assert_eq!((none.bar_start(2), none.place(4.5).0), (4.0, 2));
     }
 
     #[test]

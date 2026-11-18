@@ -34,6 +34,11 @@ pub struct Script {
     /// How long each model takes, in seconds, on top of its work.
     #[serde(default)]
     pub seconds: f64,
+    /// A bar the beat model "finds" two beats long, counted from 0 at the
+    /// first downbeat it tracks: every downbeat after it comes two beats
+    /// sooner. What a real model does at some transitions.
+    #[serde(default)]
+    pub short_bar: Option<usize>,
 }
 
 pub struct ScriptedModels {
@@ -119,7 +124,22 @@ impl Models for ScriptedModels {
     /// The beats the pulse of the onsets gives, handed on as a model's.
     fn beats(&mut self, mix: &[f32], progress: Progress) -> Result<TrackedBeats, String> {
         self.begin(Stage::Beats, progress)?;
-        let (beats, downbeats) = trill_listen::beats::track(mix, mix);
+        let (beats, mut downbeats) = trill_listen::beats::track(mix, mix);
+        if let Some(short) = self.script.short_bar {
+            // The downbeats as beats, and every one after the short bar two beats sooner.
+            let nearest = |time: f64| {
+                (0..beats.len()).min_by(|&a, &b| (beats[a] - time).abs().total_cmp(&(beats[b] - time).abs()))
+            };
+            let moved: Vec<f64> = downbeats
+                .iter()
+                .enumerate()
+                .filter_map(|(bar, &time)| {
+                    let index = nearest(time)?;
+                    beats.get(if bar > short { index.checked_sub(2)? } else { index }).copied()
+                })
+                .collect();
+            downbeats = moved;
+        }
         Ok(TrackedBeats { beats, downbeats })
     }
 

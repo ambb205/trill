@@ -75,10 +75,11 @@ impl Open {
         found.unwrap_or(seconds).clamp(0.0, self.seconds)
     }
 
-    /// The bar a moment lies in, from 1, and `None` before the first line.
+    /// The bar a moment lies in, from 1 as the ruler numbers them, and
+    /// `None` before the first line: the grid's own numbering.
     pub fn bar_at(&self, seconds: f64) -> Option<usize> {
-        let after = self.bars.partition_point(|line| *line <= seconds + 1e-6);
-        (after > 0 && after < self.bars.len().max(1)).then_some(after)
+        let bar = self.heard.grid.place(seconds).0;
+        usize::try_from(bar).ok().map(|bar| bar + 1)
     }
 }
 
