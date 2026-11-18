@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use trill_catalogue::{Catalogue, Fetch, Instrument, Kind, Licence, Mark, Search, Set};
 use trill_core::pitch::pitch_name;
-use trill_fetch::{ListStatus, PartState, PartStatus, said};
+use trill_fetch::{ListStatus, PartState, PartStatus, said_closely};
 use trill_noir::{TextStyle, Theme, Variant, paint, text};
 use trill_runtime::Ask;
 
@@ -170,9 +170,9 @@ pub(super) fn ask_words(name: &str, sets: &[&Set], status: &HashMap<&str, &PartS
     } else if left == 0 && going > 0 {
         (format!("{name} \u{00B7} on its way"), true)
     } else if left < all {
-        (format!("{name} \u{00B7} {} left", said(left)), false)
+        (format!("{name} \u{00B7} {} left", said_closely(left)), false)
     } else {
-        (format!("{name} \u{00B7} {}", said(all)), false)
+        (format!("{name} \u{00B7} {}", said_closely(all)), false)
     };
     AskWords { label, idle, sets: sets.len(), here }
 }
@@ -224,8 +224,8 @@ pub(super) fn whole(list: &ListStatus, asked: Option<&(String, Vec<String>)>) ->
         words: format!(
             "{name}{here} of {} sets here \u{00B7} {} of {} \u{00B7} {what}",
             parts.len(),
-            said(come),
-            said(all)
+            said_closely(come),
+            said_closely(all)
         ),
         share: come as f32 / all.max(1) as f32,
     })
@@ -239,7 +239,7 @@ fn asked_words(name: &str, asked: &trill_fetch::Asked) -> String {
         (count, _) => format!(
             "{name}: {count} set{} asked for, {}. They are fetched one after the other, the smallest first.",
             plural(count),
-            said(asked.bytes)
+            said_closely(asked.bytes)
         ),
     }
 }
@@ -326,7 +326,7 @@ pub(super) fn body(ui: &mut Ui, ctx: &egui::Context, cx: &mut Cx, list: &ListSta
     let ready = list.parts.iter().filter(|status| status.state == PartState::Ready).count();
     let on_disk: u64 = list.parts.iter().map(|status| status.on_disk).sum();
     let (asks, response) = ui.allocate_exact_size(vec2(WIDTH, theme.metric.control), Sense::hover());
-    let count = format!("{ready} of {} sets here \u{00B7} {} on disk", list.parts.len(), said(on_disk));
+    let count = format!("{ready} of {} sets here \u{00B7} {} on disk", list.parts.len(), said_closely(on_disk));
     response.widget_info(|| WidgetInfo::labeled(Role::Label, true, &count));
     let layout = Layout::left_to_right(Align::Center);
     let mut cell = ui.new_child(UiBuilder::new().id_salt("instrument-asks").max_rect(asks).layout(layout));
@@ -460,7 +460,7 @@ pub(super) fn body(ui: &mut Ui, ctx: &egui::Context, cx: &mut Cx, list: &ListSta
                         plural(kind.sets.len()),
                         kind.instruments,
                         plural(kind.instruments),
-                        said(bytes)
+                        said_closely(bytes)
                     );
                     if ready > 0 {
                         facts.push_str(&format!(" \u{00B7} {ready} here"));
@@ -501,7 +501,7 @@ pub(super) fn body(ui: &mut Ui, ctx: &egui::Context, cx: &mut Cx, list: &ListSta
                 Row::Set(set) => {
                     let part = status.get(set.id.as_str()).copied();
                     let (state, wrong) = set_state(set, part, &here);
-                    let size = said(set.fetched_bytes());
+                    let size = said_closely(set.fetched_bytes());
                     let licence = licence_short(set.licence);
                     let chosen = selected.as_deref() == Some(set.id.as_str());
                     let spoken = format!("{} \u{00B7} {size} \u{00B7} {licence} \u{00B7} {state}", set.name);
@@ -660,7 +660,7 @@ fn detail(
 ) {
     let theme = cx.theme;
     let (state, _) = set_state(set, status, here);
-    heading(ui, theme, &set.name, &format!("{} \u{00B7} {state}", said(set.fetched_bytes())));
+    heading(ui, theme, &set.name, &format!("{} \u{00B7} {state}", said_closely(set.fetched_bytes())));
     paragraph(ui, theme, theme.ink, &set.about, WIDTH);
     ui.add_space(8.0);
     fact(ui, theme, "By", &set.by, theme.ink);
@@ -736,13 +736,13 @@ fn detail(
     let (foot, response) = ui.allocate_exact_size(vec2(WIDTH, theme.metric.control), Sense::hover());
     let going = status.state.is_going();
     let note = match (status.state, going) {
-        (PartState::Ready, _) => format!("{} on disk, in {}", said(status.on_disk), status.folder.display()),
-        (_, true) => format!("{} of {} have come", said(status.got), said(set.fetched_bytes())),
+        (PartState::Ready, _) => format!("{} on disk, in {}", said_closely(status.on_disk), status.folder.display()),
+        (_, true) => format!("{} of {} have come", said_closely(status.got), said_closely(set.fetched_bytes())),
         _ if status.got > 0 => {
             format!(
                 "{} of {} are here already: fetching goes on from there",
-                said(status.got),
-                said(set.fetched_bytes())
+                said_closely(status.got),
+                said_closely(set.fetched_bytes())
             )
         }
         _ => "Nothing is fetched until you press Fetch".to_owned(),
@@ -768,9 +768,9 @@ fn detail(
         _ => {
             let left = set.fetched_bytes().saturating_sub(status.got);
             let label = if status.got > 0 {
-                format!("Go on \u{00B7} {}", said(left))
+                format!("Go on \u{00B7} {}", said_closely(left))
             } else {
-                format!("Fetch \u{00B7} {}", said(left))
+                format!("Fetch \u{00B7} {}", said_closely(left))
             };
             if trill_noir::button(&mut cell, theme, &label, Variant::Primary).clicked() {
                 setup::fetch(ctx, cx, set.id.clone());
@@ -834,7 +834,7 @@ mod tests {
         let fresh = ask_words("Starter", &starter, &none);
         assert_eq!(
             (fresh.label.clone(), fresh.idle, fresh.here),
-            (format!("Starter \u{00B7} {}", said(all)), false, 0)
+            (format!("Starter \u{00B7} {}", said_closely(all)), false, 0)
         );
         // The smallest of them is here, and the next is on its way.
         let statuses: Vec<PartStatus> = starter
@@ -851,7 +851,7 @@ mod tests {
         let partly = ask_words("Starter", &starter, &by_id);
         assert_eq!(
             (partly.label.clone(), partly.idle, partly.here),
-            (format!("Starter \u{00B7} {} left", said(left)), false, 1)
+            (format!("Starter \u{00B7} {} left", said_closely(left)), false, 1)
         );
         // As one thing: how many are here, how much has come, which is on its way.
         let list = ListStatus {
@@ -869,8 +869,8 @@ mod tests {
             format!(
                 "Starter: 1 of {} sets here \u{00B7} {} of {} \u{00B7} Fetching {}",
                 starter.len(),
-                said(come),
-                said(all),
+                said_closely(come),
+                said_closely(all),
                 starter[1].name
             )
         );

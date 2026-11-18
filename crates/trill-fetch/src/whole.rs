@@ -34,13 +34,17 @@ pub fn length(path: &Path) -> u64 {
     std::fs::metadata(path).map_or(0, |metadata| metadata.len())
 }
 
-/// A number of bytes as people say it: `3.4 GB`, `512 MB`, and `80 KB` for
-/// what would otherwise be said to be nothing.
+/// A number of bytes as people say it, and what is under half a megabyte
+/// in kilobytes (`80 KB`) where [`said`] would call it nothing: for a list
+/// whose parts may be that small.
+pub fn said_closely(bytes: u64) -> String {
+    if bytes > 0 && bytes < 1 << 19 { format!("{} KB", bytes.div_ceil(1 << 10)) } else { said(bytes) }
+}
+
+/// A number of bytes as people say it: `3.4 GB`, `512 MB`.
 pub fn said(bytes: u64) -> String {
     if bytes >= 1 << 30 {
         format!("{:.1} GB", bytes as f64 / (1u64 << 30) as f64)
-    } else if bytes > 0 && bytes < 1 << 19 {
-        format!("{} KB", bytes.div_ceil(1 << 10))
     } else {
         format!("{:.0} MB", bytes as f64 / (1u64 << 20) as f64)
     }
@@ -116,11 +120,10 @@ mod tests {
         assert_eq!(partial_of(Path::new("a/model.onnx")), Path::new("a/model.onnx.partial"));
         assert_eq!((length(&path), length(&folder.path().join("gone"))), (7, 0));
         assert_eq!((said(3 << 30), said(512 << 20)), ("3.0 GB".to_owned(), "512 MB".to_owned()));
-        // What is small is not said to be nothing, and nothing is.
-        assert_eq!(
-            (said(79_744), said(600 << 10), said(0)),
-            ("78 KB".to_owned(), "1 MB".to_owned(), "0 MB".to_owned())
-        );
+        // Said closely, what is small is not said to be nothing; nothing is.
+        let closely = [said_closely(79_744), said_closely(600 << 10), said_closely(0), said_closely(3 << 30)];
+        assert_eq!(closely, ["78 KB", "1 MB", "0 MB", "3.0 GB"]);
+        assert_eq!(said(79_744), "0 MB");
     }
 
     #[test]

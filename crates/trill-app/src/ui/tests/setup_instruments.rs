@@ -16,7 +16,7 @@ use trill_catalogue::check::{address, file_sum, tree_sum};
 use trill_catalogue::{Catalogue, Fetch, Kind, Set};
 use trill_engine::AudioBackend;
 use trill_fetch::scripted::Shelf;
-use trill_fetch::{PartState, said};
+use trill_fetch::{PartState, said_closely};
 use trill_library::{EntryKind, Query};
 use trill_runtime::{Ask, INSTRUMENTS, Parts, SETS_FOLDER, Storage, Studying};
 use trill_study::models::scripted::Script;
@@ -258,13 +258,13 @@ impl Harness {
 fn the_catalogue_is_shown_by_kind_with_whose_each_set_is_and_only_what_is_asked_for_is_fetched() {
     let Fixture { mut harness, shelf, catalogue, folder } = fixture();
     let grand = catalogue.set("small-grand").unwrap();
-    let size = said(grand.fetched_bytes());
+    let size = said_closely(grand.fetched_bytes());
     harness.open_instruments();
     // The two asks with what they take, and the catalogue by kind: nothing is opened, nothing is here.
     let starter: u64 = Ask::Starter.sets(&catalogue).iter().map(|set| set.fetched_bytes()).sum();
     let all: u64 = catalogue.sets.iter().map(|set| set.fetched_bytes()).sum();
-    assert!(harness.is_on_screen(&format!("Starter {DOT} {}", said(starter))));
-    assert!(harness.is_on_screen(&format!("Everything {DOT} {}", said(all))));
+    assert!(harness.is_on_screen(&format!("Starter {DOT} {}", said_closely(starter))));
+    assert!(harness.is_on_screen(&format!("Everything {DOT} {}", said_closely(all))));
     assert!(harness.is_on_screen(&format!("Pianos {DOT} 1 set {DOT} 1 instrument {DOT} {size}")));
     assert!(harness.is_on_screen(&format!("Strings {DOT} 1 set {DOT} 2 instruments")));
     assert!(harness.is_on_screen(&format!("Drum kits {DOT} 1 set {DOT} 1 instrument")));
@@ -341,8 +341,9 @@ fn a_search_narrows_the_catalogue_and_what_is_not_put_forward_says_what_was_meas
     assert!(strings.is_starter() && !strings.instruments[1].is_put_forward());
 
     // Fetched by its own button, file by file: the one that is not put forward comes with its set.
-    harness.click_label(&format!("Fetch {DOT} {}", said(strings.fetched_bytes())));
-    harness.wait_to_see(&format!("Chamber Strings {DOT} {} {DOT} CC0 {DOT} Here", said(strings.fetched_bytes())));
+    harness.click_label(&format!("Fetch {DOT} {}", said_closely(strings.fetched_bytes())));
+    harness
+        .wait_to_see(&format!("Chamber Strings {DOT} {} {DOT} CC0 {DOT} Here", said_closely(strings.fetched_bytes())));
     assert_eq!(shelf.asked().len(), 5);
     assert_eq!(harness.library_instruments(), ["Violas", "Violins"]);
 
@@ -364,7 +365,7 @@ fn the_starter_selection_is_asked_for_as_one_thing_stopped_gone_on_with_and_play
 
     // Asked for at once, slowly: the whole of it is one line with one Stop.
     shelf.slow(Duration::from_millis(30));
-    harness.click_label(&format!("Starter {DOT} {}", said(all)));
+    harness.click_label(&format!("Starter {DOT} {}", said_closely(all)));
     harness.wait_until("the starter selection to be on its way", |harness| {
         harness.is_on_screen("Starter: 0 of 2 sets here") || harness.is_on_screen("Starter: 1 of 2 sets here")
     });
@@ -443,7 +444,7 @@ fn the_starter_selection_is_fetched_from_the_panel_and_played() {
     let all: u64 = starter.iter().map(|set| set.fetched_bytes()).sum();
     harness.open_instruments();
     let began = Instant::now();
-    harness.click_label(&format!("Starter {DOT} {}", said(all)));
+    harness.click_label(&format!("Starter {DOT} {}", said_closely(all)));
     // Minutes: watched as the panel shows it, a look a second.
     let mut said_last = String::new();
     for _ in 0..3_600 {
@@ -465,7 +466,7 @@ fn the_starter_selection_is_fetched_from_the_panel_and_played() {
     }
     harness.settle_instruments();
     assert!(harness.is_on_screen(&format!("Starter {DOT} here")), "the panel says all of it is here");
-    println!("the starter selection, {}, was fetched in {:.0} s", said(all), began.elapsed().as_secs_f64());
+    println!("the starter selection, {}, was fetched in {:.0} s", said_closely(all), began.elapsed().as_secs_f64());
     // Every instrument of every set is in the library, known for the catalogue's by its file.
     assert!(harness.runtime.library.wait_until_idle(Duration::from_secs(600)));
     let here = harness.runtime.catalogue_here();

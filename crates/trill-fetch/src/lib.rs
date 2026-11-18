@@ -52,7 +52,9 @@ pub mod scripted;
 pub mod whole;
 pub mod zip;
 
-pub use whole::{disk_free, find_program, hide_console, last_line, partial_of, said, write_json, write_whole};
+pub use whole::{
+    disk_free, find_program, hide_console, last_line, partial_of, said, said_closely, write_json, write_whole,
+};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
