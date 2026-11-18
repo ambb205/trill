@@ -233,6 +233,7 @@ fn surge_xt_loads_a_preset_while_it_plays_and_the_project_keeps_it() {
     let list = listed(&factory, SURGE);
     let (mut session, track) = session(Box::new(factory.clone()));
     let device = session.add_device(ChainRef::Track(track), SURGE, None, None).unwrap();
+    assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
     assert_eq!(session.device_presets(device).unwrap().len(), list.len());
     let before = rendered(&mut session);
     assert!(before.peak > 1e-3, "the patch Surge starts with is heard: {before:?}");
@@ -255,6 +256,7 @@ fn surge_xt_loads_a_preset_while_it_plays_and_the_project_keeps_it() {
     // is the one from before.
     while session.undo_step() != step {
         assert!(session.undo());
+        assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
     }
     assert!(rendered(&mut session).like(before), "{:?} after undo, {before:?} before", rendered(&mut session));
     assert_eq!(session.device_preset(device), None);
@@ -262,6 +264,7 @@ fn surge_xt_loads_a_preset_while_it_plays_and_the_project_keeps_it() {
     // Started from a preset, by its name and category, in one step.
     let second =
         session.add_device(ChainRef::Track(track), SURGE, Some(&preset.path()), None).unwrap_or_else(|e| panic!("{e}"));
+    assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
     session.edit(|project| project.remove_device(device).map(|_| ())).unwrap();
     let started_from = rendered(&mut session);
     assert!(started_from.like(after), "{started_from:?} added with the preset, {after:?} loaded into it");
@@ -275,6 +278,7 @@ fn surge_xt_loads_a_preset_while_it_plays_and_the_project_keeps_it() {
     drop(session);
     let (mut reopened, _) = self::session(Box::new(factory));
     reopened.load(&path).unwrap();
+    assert!(reopened.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
     let loaded = rendered(&mut reopened);
     assert!(loaded.like(after), "{loaded:?} from the file, {after:?} when it was saved");
     assert!(!loaded.like(before));
@@ -302,6 +306,7 @@ fn js80p_lists_its_programs_and_switches_between_them() {
 
     let (mut session, track) = session(Box::new(factory.clone()));
     let device = session.add_device(ChainRef::Track(track), JS80P, None, None).unwrap();
+    assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
     let before = rendered(&mut session);
     assert!(before.peak > 1e-3, "{before:?}");
     let step = session.undo_step();
@@ -318,6 +323,7 @@ fn js80p_lists_its_programs_and_switches_between_them() {
 
     while session.undo_step() != step {
         assert!(session.undo());
+        assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
     }
     assert!(rendered(&mut session).like(before));
 
@@ -336,6 +342,7 @@ fn js80p_lists_its_programs_and_switches_between_them() {
     drop(session);
     let (mut reopened, _) = self::session(Box::new(factory));
     reopened.load(&path).unwrap();
+    assert!(reopened.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
     assert!(rendered(&mut reopened).like(after));
     assert_eq!(reopened.device_preset(device).map(|preset| preset.name.as_str()), Some("Kept"));
 }
@@ -358,6 +365,7 @@ fn surge_xt_as_a_vst3_lists_no_programs_and_takes_a_preset_file() {
     // made from a state Surge saved loads like any other.
     let (mut session, track) = session(Box::new(factory.clone()));
     let device = session.add_device(ChainRef::Track(track), SURGE_VST3, None, None).unwrap();
+    assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
     let before = rendered(&mut session);
     let volume = session
         .device_params(device)
@@ -371,6 +379,7 @@ fn surge_xt_as_a_vst3_lists_no_programs_and_takes_a_preset_file() {
     assert!(quiet.rms < before.rms * 0.5, "{quiet:?} with the volume down, {before:?} before");
     let state = session.render_job().project.device(device).unwrap().state.clone().expect("Surge saves state");
     assert!(session.undo());
+    assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
 
     let descriptor = factory.descriptors().into_iter().find(|descriptor| descriptor.uri == SURGE_VST3).unwrap();
     let folder = presets.join(&descriptor.vendor).join(&descriptor.name);
@@ -382,6 +391,7 @@ fn surge_xt_as_a_vst3_lists_no_programs_and_takes_a_preset_file() {
     let loaded = rendered(&mut session);
     assert!(loaded.rms < before.rms * 0.5, "{loaded:?} from the preset file, {before:?} before");
     assert!(session.undo());
+    assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
     assert!(rendered(&mut session).like(before));
 }
 
@@ -398,6 +408,7 @@ fn surge_xt_is_given_a_preset_file_that_lies_outside_its_folders() {
     let list = listed(&factory, SURGE);
     let (mut session, track) = session(Box::new(factory.clone()));
     let device = session.add_device(ChainRef::Track(track), SURGE, None, None).unwrap();
+    assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
     let before = rendered(&mut session);
     let bought = scratch("bought");
     let _ = std::fs::remove_dir_all(&bought);
@@ -425,6 +436,7 @@ fn surge_xt_is_given_a_preset_file_that_lies_outside_its_folders() {
     // By its path it is the sound it is by its name.
     while session.undo_step() != step {
         assert!(session.undo());
+        assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
     }
     assert!(rendered(&mut session).like(before));
     let name = copy.file_stem().unwrap().to_string_lossy().into_owned();

@@ -876,6 +876,7 @@ fn a_session_hosts_a_plugin_and_shuts_down_cleanly() {
         let sounding = |limit| eventually(limit, || meter.take().0 > 0.01);
 
         let device = session.add_device(ChainRef::Track(track), &uri, None, None).unwrap();
+        assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
         assert!(session.problems().is_empty(), "{:?}", session.problems());
         let params = session.device_params(device).unwrap();
         let level = params.iter().find(|param| param.info.name == name).expect("the level parameter");
@@ -899,6 +900,7 @@ fn a_session_hosts_a_plugin_and_shuts_down_cleanly() {
         assert!(meter.take().0 < 1e-4, "the removed plugin is still audible");
 
         assert!(session.undo());
+        assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
         let restored = session.project().device(device).expect("undo brings the device back");
         assert!(restored.state.as_ref().is_some_and(|state| !state.is_empty()), "no state was captured on removal");
         assert!(session.problems().is_empty(), "{:?}", session.problems());
@@ -913,6 +915,7 @@ fn a_session_hosts_a_plugin_and_shuts_down_cleanly() {
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains(&uri) && saved.contains("\"state\""), "the saved project lacks the plugin's state");
         session.load(&path).unwrap();
+        assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
         assert!(session.problems().is_empty(), "{:?}", session.problems());
         let _ = std::fs::remove_file(&path);
         session.play();
@@ -962,6 +965,7 @@ fn clap_and_vst3_instances_coexist_in_one_session() {
             session.add_device(ChainRef::Track(tracks[0]), &clap_uri, None, None).unwrap(),
             session.add_device(ChainRef::Track(tracks[1]), &vst3_uri, None, None).unwrap(),
         ];
+        assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
         assert!(session.problems().is_empty(), "{:?}", session.problems());
         for device in devices {
             assert!(!session.device_params(device).unwrap().is_empty());
@@ -978,6 +982,7 @@ fn clap_and_vst3_instances_coexist_in_one_session() {
         let path = scratch(&format!("coexist-{}.json", std::process::id()));
         session.save(&path).unwrap();
         session.load(&path).unwrap();
+        assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
         let _ = std::fs::remove_file(&path);
         assert!(session.problems().is_empty(), "{:?}", session.problems());
         let plugin_states: Vec<bool> = session
@@ -1001,6 +1006,7 @@ fn clap_and_vst3_instances_coexist_in_one_session() {
         meter.take();
         assert!(eventually(Duration::from_secs(10), || meter.take().0 > 0.01), "{clap_uri} stopped with {vst3_uri}");
         assert!(session.undo());
+        assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
         assert!(session.problems().is_empty(), "{:?}", session.problems());
 
         session.stop();
