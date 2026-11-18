@@ -962,29 +962,27 @@ async fn a_song_that_is_opened_is_there_at_once_and_says_how_far_its_devices_are
     assert!(keys.get("not_made_yet").is_none() && keys.get("loading").is_none(), "{opened}");
     let device = bass["id"].as_u64().unwrap();
     let said = opened["loading"].as_str().unwrap_or_else(|| panic!("{opened}"));
-    assert!(said.contains("just opened") && said.contains("2 of 3 devices"), "{said}");
+    assert!(said.contains("still being made, one at a time") && said.contains("2 of 3 devices"), "{said}");
     assert!(said.contains(&format!("Not made yet: Scripted Bass (device {device})")), "{said}");
-    assert!(said.contains("Ask get_project again") && said.contains("probe, measure and render wait"), "{said}");
+    assert!(said.contains("gone from get_project") && said.contains("probe, measure and render wait"), "{said}");
 
-    // The device says so itself, and what cannot be asked of it yet is
-    // refused in a sentence. The rest of the song is there to work on.
+    // The device says so itself. The rest of the song is there to work
+    // on, and play is not refused.
     let shown = ok(client, "get_device", json!({ "device": device })).await;
     assert!(shown["not_made_yet"].as_str().is_some_and(|said| said.contains("Ask again")), "{shown}");
-    let refused = call(client, "update_device", json!({ "device": device, "params": { "level": 0.5 } })).await;
-    let refused = refused.unwrap_err();
-    assert!(refused.contains("Scripted Bass is still being made") && refused.contains("Ask again"), "{refused}");
     let keys_track = tracks[1]["id"].as_u64().unwrap();
     clip(client, keys_track, 0.0, 4.0, json!([[60, 0, 1]])).await;
     let playing = ok(client, "transport", json!({ "action": "play" })).await;
     assert!(playing["loading"].as_str().is_some_and(|said| said.contains("still being made")), "{playing}");
     ok(client, "transport", json!({ "action": "stop" })).await;
+    assert!(began.elapsed() < making, "the song was not there to work on: {:?}", began.elapsed());
 
     // It arrives without anyone asking for it, and the song says so by
     // no longer saying anything of it.
     let deadline = Instant::now() + Duration::from_secs(20);
     let project = loop {
         let project = ok(client, "get_project", json!({})).await;
-        let waiting = project["loading"].as_str().is_some_and(|said| said.contains("just opened"));
+        let waiting = project["loading"].as_str().is_some_and(|said| said.contains("still being made, one"));
         if !waiting {
             break project;
         }
@@ -997,6 +995,67 @@ async fn a_song_that_is_opened_is_there_at_once_and_says_how_far_its_devices_are
     let session = fixture.session.lock();
     assert!(session.problems().is_empty(), "{:?}", session.problems());
     assert!(!session.is_coming(trill_core::DeviceId(device)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_that_a_tool_adds_is_in_the_song_at_once_and_a_tool_that_needs_it_waits_for_it() {
+    // Plugins that take most of a second to make.
+    let making = Duration::from_millis(800);
+    let fixture = connect(ScriptedFactory::loading(Loading { making, ..Loading::default() })).await;
+    let client = &fixture.client;
+    let began = Instant::now();
+    let made = ok(client, "create_track", json!({ "name": "Bass", "instrument": BASS, "preset": "up" })).await;
+    assert!(began.elapsed() < making / 2, "the reply waited for the plugin: {:?}", began.elapsed());
+    // The song has the track and its instrument, on its preset; the reply
+    // says that the instrument itself is still being made, and what that
+    // means for what comes next.
+    let (bass_track, bass) = (made["track_id"].as_u64().unwrap(), made["instrument_device_id"].as_u64().unwrap());
+    assert_eq!(made["preset"], "Octave up", "{made}");
+    let said = made["not_made_yet"].as_str().unwrap_or_else(|| panic!("{made}"));
+    assert!(said.contains("being made now") && said.contains("is what it arrives as"), "{said}");
+    assert!(said.contains("waits for it"), "{said}");
+    let project = ok(client, "get_project", json!({})).await;
+    assert_eq!(project["tracks"][0]["devices"][0]["not_made_yet"], true, "{project}");
+    assert!(project["loading"].as_str().is_some_and(|said| said.contains("1 of 2 devices")), "{project}");
+    // Another preset given meanwhile lands at once too, and is what the
+    // device arrives as.
+    ok(client, "update_track", json!({ "track": bass_track, "name": "Low" })).await;
+    assert!(began.elapsed() < making, "an edit beside it waited: {:?}", began.elapsed());
+
+    // A tool that needs the device waits for it by itself: a parameter's
+    // text, here, and what its notes mean.
+    let given = ok(client, "update_device", json!({ "device": bass, "preset": "soft" })).await;
+    assert!(began.elapsed() >= making, "the tool did not wait for the device: {:?}", began.elapsed());
+    assert_eq!(given["preset"], "Soft", "{given}");
+    let shown = ok(client, "get_device", json!({ "device": bass })).await;
+    assert!(shown.get("not_made_yet").is_none(), "{shown}");
+    let project = ok(client, "get_project", json!({})).await;
+    assert!(project["tracks"][0]["devices"][0].get("not_made_yet").is_none(), "{project}");
+
+    // A device added with values for its parameters: the song has it at
+    // once, and the values are set when it is there, in the one call.
+    let began = Instant::now();
+    let added = ok(client, "add_device", json!({ "track": bass_track, "uri": DRUMS })).await;
+    assert!(began.elapsed() < making / 2, "{:?}", began.elapsed());
+    assert!(added["not_made_yet"].as_str().is_some(), "{added}");
+    let drums = added["device_id"].as_u64().unwrap();
+    // Taken back before it is there, and brought again: one undo each.
+    let undone = ok(client, "history", json!({ "action": "undo" })).await;
+    assert_eq!(undone["steps_applied"], 1, "{undone}");
+    assert!(call(client, "get_device", json!({ "device": drums })).await.is_err());
+    ok(client, "history", json!({ "action": "redo" })).await;
+    let shown = ok(client, "get_device", json!({ "device": drums })).await;
+    assert!(shown["not_made_yet"].as_str().is_some(), "{shown}");
+    // A save in the middle is the whole song.
+    let folder = tempfile::tempdir().unwrap();
+    let file = folder.path().join("song.trill").display().to_string();
+    ok(client, "save_project", json!({ "path": file })).await;
+    let saved = std::fs::read_to_string(&file).unwrap();
+    assert!(saved.contains(DRUMS) && saved.contains(BASS), "the file is not the whole song");
+
+    let session = fixture.session.lock();
+    assert!(session.problems().is_empty(), "{:?}", session.problems());
+    assert_eq!(session.device_preset(trill_core::DeviceId(bass)).map(|preset| preset.id.as_str()), Some("soft"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -235,6 +235,56 @@ fn a_window_closed_in_the_middle_lets_go_of_what_was_being_made() {
     assert!(began.elapsed() < MAKING * 3, "closing waited for more than the device in hand: {:?}", began.elapsed());
 }
 
+#[test]
+fn a_plugin_added_in_the_window_is_in_the_song_at_once_and_the_window_goes_on_answering() {
+    let scripted = slow();
+    let mut harness = Harness::on(runtime(&scripted), UiOptions::default(), |session| {
+        two_tracks(session);
+    });
+    let one = harness.app.snapshot().project.tracks[0].id;
+    harness.app.state_mut().select_track(one);
+    harness.app.state_mut().detail_tab = DetailTab::Devices;
+    // (Searched for, which brings its row up from the end of the list.)
+    harness.app.state_mut().browser.search = "Scripted Ba".into();
+    harness.idle(3);
+
+    // Double-clicked in the browser: the song has it before the frame is
+    // over, and the frame is not the time a plugin takes to make.
+    harness.click_label("Scripted Bass");
+    harness.idle(30);
+    let began = Instant::now();
+    harness.double_click_label("Scripted Bass");
+    harness.idle(2);
+    assert!(began.elapsed() < MAKING, "the window stood still for the plugin: {:?}", began.elapsed());
+    let devices: Vec<String> = harness.project().tracks[0].devices.iter().map(|device| device.uri.clone()).collect();
+    let said: Vec<String> = harness.app.state().toasts.texts().iter().map(|text| text.to_string()).collect();
+    assert_eq!(devices, [BASS], "the window said: {said:?}");
+    // It says so where it is shown, and how far the whole is.
+    assert!(harness.is_on_screen("Being made Scripted Bass") || harness.is_on_screen("Waiting Scripted Bass"));
+    assert!(harness.is_on_screen("One: Scripted Bass is not there yet"));
+    assert!(harness.is_on_screen("Loading devices: 1 of 2 devices"));
+    // One undo takes it back, before it is there; redo brings it again.
+    harness.key(Modifiers::COMMAND, Key::Z);
+    harness.idle(2);
+    assert!(harness.project().tracks[0].devices.is_empty());
+    assert!(!harness.is_on_screen("One: Scripted Bass is not there yet"));
+    harness.key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+    harness.idle(2);
+    assert_eq!(harness.project().tracks[0].devices.len(), 1);
+
+    harness.wait_until("the plugin", |harness| {
+        harness.app.live().arriving.is_none() && harness.session.lock().arriving().is_none()
+    });
+    harness.idle(3);
+    for gone in ["Loading devices:", "One: Scripted Bass is not there yet", "Being made Scripted Bass"] {
+        assert!(!harness.is_on_screen(gone), "still on the screen: {gone}");
+    }
+    let session = harness.session.lock();
+    assert!(session.problems().is_empty(), "{:?}", session.problems());
+    let bass = session.project().tracks[0].devices[0].id;
+    assert!(!session.is_coming(bass));
+}
+
 /// A window on four tracks with an instrument each, in the middle of a
 /// made-up opening.
 fn in_the_middle(scene: OpeningScene) -> Harness {

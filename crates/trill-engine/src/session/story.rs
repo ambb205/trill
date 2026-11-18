@@ -404,10 +404,16 @@ impl Session {
     /// and not shown as a step; kept so that the song as it was can be
     /// rebuilt as it was.
     pub(super) fn note_device(&mut self, id: DeviceId, state_changed: bool) {
+        self.note_device_as(id, state_changed, "changed in its own window");
+    }
+
+    /// [`Session::note_device`], for something else a device came to on
+    /// its own: `what` it did, after its name.
+    pub(super) fn note_device_as(&mut self, id: DeviceId, state_changed: bool, what: &str) {
         let at = self.story.now();
         let Some(journal) = &mut self.story.journal else { return };
         let (Ok(device), Ok(chain)) = (self.project.device(id), self.project.device_chain(id)) else { return };
-        let label = format!("{} changed in its own window", quoted(&device.name));
+        let label = format!("{} {what}", quoted(&device.name));
         journal.note_device(at, chain, device, state_changed, &label);
     }
 

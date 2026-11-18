@@ -674,6 +674,12 @@ impl TrillApp {
                 self.busy_at_frame = self.frames;
             }
             let settled = self.frames >= self.busy_at_frame + SCREENSHOT_SETTLE_FRAMES;
+            // A picture of one moment is taken at that moment, with
+            // whatever is still on its way.
+            let (settled, settle) = match self.options.screenshot_after {
+                Some(moment) => (true, moment),
+                None => (settled, settle),
+            };
             match &self.capture {
                 Capture::NotRequested if settled && elapsed >= settle => {
                     let outcome = Arc::new(Mutex::new(None));

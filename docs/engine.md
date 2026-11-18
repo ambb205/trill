@@ -213,61 +213,92 @@ No buffer was late in these nine runs, and as it comes the song stayed on one th
 force it takes less than half the time; on another such run at 64 frames one buffer of 15,005 took longer than
 it lasts, which none did on one thread.
 
-**A song that is opened is there at once, and its devices come after.** Reading a song's file takes
-milliseconds; making its plugins takes as long as each takes to load its file, take its state on and read what
-it plays, one after the other on the one thread plugins are made on. Until now the session made them where it
-stood, and everyone who wanted the song waited for all of them: the window, which showed the song before with
-not a word, a model, the session's own chores. Now the song is compiled with the devices that take time left
-out and their places kept: its tracks, clips and mixer are there, and every built-in device plays. A thread of
-the session's own makes the others one by one in the order of the song, with nobody waiting, and each is put in
-its place when it has arrived. That is no edit: the song is not changed, and its history and its journal know
-nothing of it.
+**A plugin comes after the song has it.** Reading a song's file takes milliseconds, and so does an edit; making
+a plugin takes as long as it takes to load its file, take its state on and read what it plays, on the one thread
+plugins are made on. Until now the session made plugins where it stood, and everyone who wanted the song waited
+for them: the window, which showed the song before with not a word when a song was opened and did not answer
+when a plugin was dropped on a track, a model, the session's own chores. Now, whatever brings a plugin (a song
+that is opened or begun, a device added, a sound or a preset given, a track duplicated, an undo or a redo, the
+audio device at another sample rate), the song has it at once and it is made after: the song is compiled with
+its place kept, a thread of the session's own makes such devices one by one in the order they were asked for,
+with nobody waiting, and each is put in its place when it has arrived. The edit is the step of the history it
+always was; the device arriving is none, and the journal knows nothing of it.
 
 *Until a device is there* its place is empty: an instrument is silent, and an effect lets through what comes
-into it. Play is never refused, and both front ends say what is missing ([the window](window.md);
-`loading` and `not_made_yet` for a model, in [AI and MCP](ai-and-mcp.md)). The device keeps the state the file
-gave it, which is what a save, a safety copy and a render take: a song saved in the middle is the whole song,
-and a render, a measurement or a probe in the middle makes its own devices as it always does. What cannot be
-done to a device that is not there (a parameter, a preset, its window) is refused in a sentence. A device is
-put in only as the one it was made as: one that was removed meanwhile, or made anew because an edit gave it
-another state, is let go of, and so is everything that was on its way for a song when another is opened or
-begun. One that cannot be made is a problem of the song in a sentence, as before. A song named on the command
-line, one opened by a model and one brought back from a safety copy all take this way.
+into it. (A device that is made anew in a song that plays, because it was given another state, goes on as it
+was until its successor is there.) Play is never refused, and both front ends say what is missing
+([the window](window.md); `loading` and `not_made_yet` for a model, in [AI and MCP](ai-and-mcp.md)). The song
+says everything of the device that is needed to make it, which is what a save, a safety copy and a render take:
+a song saved in the middle is the whole song, and a render, a measurement or a probe in the middle makes its
+own devices as it always does. That holds for a preset too: one that only the plugin can load, given before
+the plugin is there, is in the song as what the device is to start from, whoever makes the device has it load
+that, and the device arrives as that preset; the state it came to takes its place in the song when plugins'
+states are next taken (a save does). What cannot be done to a device that is not there (a parameter, its
+window) is refused in a sentence. A device is put in only as the one it was made as: one that was removed
+meanwhile, or that the song has in another state by then, is let go of, and so is everything that was on its
+way for a song when another is opened. One that cannot be made, or does not load the preset it was to start
+from, is a problem of the song in a sentence; it used to be an edit that failed, and is now a device in the
+song that says why it is not there, which an undo takes away.
 
-*What goes with the song before* (its plugins, each a wait on the same thread) is taken down after the new
-song's devices are made, by that same thread and with nobody waiting; before, the session's chores did it with
-the session held, right after the song was open. The other order was measured and is worse: with the song
-before taken down first, the song below opened over itself had all its devices after 22.7 s in place of 15.7 s,
-because sampled instruments that share what they have read with the instances before them read it again, and it
-did not leave more memory free while it opened.
+*What leaves is taken down the same way*, by the same thread, after what there is to make and with nobody
+waiting: the plugins of a song that was open before, of a device that was removed or a track that was deleted,
+of a stream at another rate. Before, the session's chores did it with the session held. The other order was
+measured and is worse: with the song before taken down first, the song below opened over itself had all its
+devices after 22.7 s in place of 15.7 s, because sampled instruments that share what they have read with the
+instances before them read it again, and it did not leave more memory free while it opened.
+
+*The audio device at another sample rate* has every device made anew, since nothing of the rate before can go
+on playing. The stream is there at once with what is made in no time, the song stands where it was, stopped,
+and its plugins come after as when it was opened, with the same line; play is there to be pressed meanwhile.
+Before, the change waited for all of them (as long as opening the song), with the session held.
+
+*Nobody asks a plugin anything while one is being made*, where the answer can wait. A question to a plugin
+(what are your parameters at, what is your state) is answered on the thread plugins are made on, so one asked
+during a making is answered when the making is done. A window asks for the parameters of the devices it shows
+whenever the song has changed, and the song changes with every device that arrives: measured as a window
+looks, on the song below, the longest of those looks had the session for 6.1 s, in which a window stands
+still. Now a device's values are those it last said while anything is being made or taken down, and that look
+takes 46 ms at the longest of 1,807. What cannot wait holds the thread back from beginning another making
+until it is answered, so that it waits for the one in hand and not for one a plugin: the states of all the
+plugins that are there, for a save (4.2 s in the middle of a load from a cold disk, where the plugin in hand
+was a sampled guitar that takes fourteen), a preset, a plugin's window. The safety copy, which nobody asked
+for, is put off until nothing is being made.
 
 *What was measured*, on the machine above, with `cargo run -p trill-runtime --example opens`, which opens a song
-against a device that makes no sound and says when the song was there, when each device arrived, and what each
-step of each plugin's making took. The song is the one of nineteen plugins above (38 devices on 16 tracks).
+against a device that makes no sound and says when the song was there, when each device arrived, what each step
+of each plugin's making took, and how long a window that looked at it meanwhile had to wait. The song is the
+one of nineteen plugins above (38 devices on 16 tracks). How long its plugins take depends on whether anything
+has read their files lately: the same song, the same day, takes two and a half times as long from a disk that
+has not.
 
 | | Made where the song is opened (before) | The song first (now) |
 |---|---|---|
-| The song is there (and the window has it to show) | after 16.5 s | after 0.09 s |
-| Its first plugin | after 16.5 s | after 1.9 s |
-| All nineteen | after 16.5 s | after 16.9 s (18.3 s on a run with the machine busier) |
-| No plugin still reading what it plays | after 20.7 s | after 20.9 s |
+| The song is there (and the window has it to show) | after 16.5 s; 36.3 s from a cold disk | after 0.09 s; 0.10 s cold |
+| Its first plugin | with the song | after 1.9 s; 2.3 s cold |
+| All nineteen | with the song | after 16.9 to 18.3 s; 41.6 and 42.5 s on two cold runs |
+| No plugin still reading what it plays | after 20.7 s | after 20.9 s; 45.6 and 46.5 s cold |
 
-The makings themselves are the plugins' own time and are as long as they were: 14.9 s in the plugins' code,
-and 1.4 s more that one maker's amplifiers spend on what they post to themselves after each is made (0.14 s
-after the first, 0.43 s after the sixth: it grows with how many of them there are). What is the host's is the
-tenth of a second the song takes, a second activation of each plugin that has values of the song's to start
-from (0.14 s for all of them), and handing each over (some 0.3 s). Nothing is read or scanned twice: a plugin's
-file is loaded once, and a second instance of it takes none of that time.
+The makings themselves are the plugins' own time and are as long as they were: 14.9 s in the plugins' code on a
+warm run, and 1.4 s more that one maker's amplifiers spend on what they post to themselves after each is made
+(0.14 s after the first, 0.43 s after the sixth: it grows with how many of them there are). What is the host's
+is the tenth of a second the song takes, a second activation of each plugin that has values of the song's to
+start from (0.14 s for all of them), and handing each over (some 0.3 s). Nothing is read or scanned twice: a
+plugin's file is loaded once, and a second instance of it takes none of that time.
 
-| Plugin (its first instance, then the others) | Made in | Of which |
-|---|---|---|
-| A drum kit | 1.8 s | its state 1.7 s (it reads its kit) |
-| A sampled bass | 1.4 s | the instance 0.4 s, its state 1.0 s |
-| A sampled guitar (three kinds, eight instances) | 1.5 to 1.9 s the first of a kind, 0.45 to 0.7 s the others | the instance, nearly all of it |
-| An amplifier (six instances) | 1.0 to 1.3 s, then 0.05 to 0.07 s | its file 0.3 to 0.4 s and the instance 0.5 to 0.6 s the first time |
-| Another amplifier, of the same maker | 2.3 to 3.0 s | its file 0.3 s, the instance 0.5 s, its state 1.5 to 2.1 s |
-| A synthesizer (two instances) | 0.44 s, then 0.16 s | its file 0.3 s the first time |
-| A reverb | 0.02 s | |
+| Plugin (its first instance, then the others) | Made in | From a cold disk | Of which |
+|---|---|---|---|
+| A drum kit | 1.8 s | 2.2 s | its state (it reads its kit) |
+| A sampled bass | 1.4 s | 6.9 and 7.5 s | the instance 0.4 s (4.1 to 4.5 s cold), its state 1.0 s (2.8 to 3.0 s) |
+| A sampled guitar (three kinds, eight instances) | 1.5 to 1.9 s the first of a kind, 0.45 to 0.7 s the others | 13.1 and 13.9 s the first, 3.8 to 4.2 s the first of the other two kinds, the others as warm | the instance, nearly all of it (11.3 s of the 13.9) |
+| An amplifier (six instances) | 1.0 to 1.3 s, then 0.05 to 0.07 s | 1.6 s, then the same | its file 0.3 to 0.4 s and the instance 0.5 to 0.6 s the first time |
+| Another amplifier, of the same maker | 2.3 to 3.0 s | 2.9 and 4.1 s | its file 0.3 s, the instance 0.5 s, its state 1.5 to 2.1 s |
+| A synthesizer (two instances) | 0.44 s, then 0.16 s | 0.5 s, then 0.45 s | its file 0.3 s the first time |
+| A reverb | 0.02 s | 0.05 s | |
+
+*An edit that brings a plugin.* A sampled guitar added to that song, its files warm: the edit had the session
+for 1.6 s before, which is the making, and has it for 3 ms now, with the guitar there 1.9 s after it was asked
+for. From a cold disk the same guitar is the 13.9 s of the table: that is how long a window did not answer
+when it was dropped on a track, and it is now how long the track says that its instrument is being made.
 
 Opened over itself, with its own nineteen plugins to take down, the song was there after 0.1 s and whole after
 15.7 s (its plugins' files were loaded already); taking the others down took 3.8 s more, after that, with

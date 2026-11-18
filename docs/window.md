@@ -37,13 +37,16 @@ transposition. The sampler shows its sample and the drum rack its sixteen pads.
 
 ![The sound browser, waveforms on audio clips and an audio clip in the Clip tab](images/sounds-browser.png)
 
-## Opening a song
+## Opening a song, and plugins that come after
 
 **A song is on the screen at once, and its plugins come after.** From the moment a file is chosen the window
 says which song it is opening: the song before is dimmed, under a plate with the file's name. A tenth of a
 second later (a second, for a song of many long recordings) the song is there: its tracks, clips, names and
 mixer, with every built-in device playing. Its plugins take as long to make as they take, one at a time, and the
-window is alive meanwhile: the song can be scrolled, selected, edited, saved and played.
+window is alive meanwhile: the song can be scrolled, selected, edited, saved and played. For a song of nineteen
+plugins that is seventeen seconds when their files have been read lately and forty-two when they have not (a
+sampled guitar that takes two seconds takes fourteen from a cold disk): how long is the plugins' own, and
+what the window does is say how far they are.
 
 While plugins are arriving, one line says how far the whole is, "Loading 12 of 38 devices: Archetype Tim Henson
 X on Lead", on a plate with a bar in the corner where the window's messages go, and in the status bar. A track
@@ -53,7 +56,15 @@ track whose instrument is not there is silent until it is, an effect lets throug
 starting the song says so once. A plugin that cannot be made is a problem of the song, in a sentence, and the
 rest of the song is there. Closing the window in the middle waits for the one plugin in hand and for nothing
 else; choosing another song lets go of everything that was on its way for the first.
-[The engine](engine.md) has what opening a song of nineteen plugins takes, plugin by plugin.
+
+**The same holds whatever brings a plugin.** A plugin dropped on a track, a sound that brings one, a track
+duplicated, an undo that brings one back: the song has it at once, with its step in the history, the window
+goes on answering, and the plugin arrives with the same line and the same dot. A preset given to it meanwhile
+is what it arrives as. Changing the audio device's sample rate makes every plugin anew, since nothing of the
+rate before can go on playing: the song stands, stopped, with its built-in devices, its plugins come after as
+when it was opened, and play is there to be pressed. A save in the middle is the whole song, and waits for the
+one plugin that is being made at that moment and for no other.
+[The engine](engine.md) has what all of it takes, plugin by plugin, warm and cold.
 
 ## Playing and recording
 

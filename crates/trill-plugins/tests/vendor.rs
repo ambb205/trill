@@ -453,7 +453,9 @@ fn an_archetypes_presets_are_listed_and_a_loaded_one_is_heard() {
         let (track, amp): (TrackId, DeviceId) = {
             let track = session.edit(|project| Ok(project.add_track("Guitar"))).unwrap();
             session.add_device(ChainRef::Track(track), "builtin:polysynth", Some("pluck"), None).unwrap();
-            (track, session.add_device(ChainRef::Track(track), &amplifier.uri, None, None).unwrap())
+            let amp = session.add_device(ChainRef::Track(track), &amplifier.uri, None, None).unwrap();
+            assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
+            (track, amp)
         };
         let target = ProbeTarget::Track { track, effects: true };
         let keys = [40, 52, 64];
@@ -539,6 +541,7 @@ fn an_ample_instruments_automatic_legato_joins_notes_that_ring_over_each_other_u
         let mut session = session(&factory);
         let track = session.edit(|project| Ok(project.add_track("Guitar"))).unwrap();
         let device = session.add_device(ChainRef::Track(track), uri, None, None).unwrap();
+        assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
         let params = session.device_params(device).unwrap();
         let index = params.iter().position(|param| param.info.name == "Auto Legato").expect("a parameter of that name");
         let id = params[index].info.id.clone();
@@ -605,7 +608,9 @@ fn copied(preset: &trill_core::presets::PresetInfo) -> PathBuf {
 fn amplified(session: &mut Session, uri: &str) -> (TrackId, DeviceId) {
     let track = session.edit(|project| Ok(project.add_track("Guitar"))).unwrap();
     session.add_device(ChainRef::Track(track), "builtin:polysynth", Some("pluck"), None).unwrap();
-    (track, session.add_device(ChainRef::Track(track), uri, None, None).unwrap())
+    let amp = session.add_device(ChainRef::Track(track), uri, None, None).unwrap();
+    assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
+    (track, amp)
 }
 
 /// A synth's patch and the guitars' tones, each as a file kept somewhere
@@ -646,6 +651,7 @@ fn a_makers_preset_file_kept_elsewhere_is_loaded_by_its_path_and_heard() {
         // it then has is what another host would save as a .vstpreset: that
         // file, loaded by its path, is heard to be the preset too.
         let device = session.add_device(ChainRef::Master, &uri, None, None).unwrap();
+        assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
         let step = session.undo_step();
         let loaded = session.load_preset(device, &copy.to_string_lossy()).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(loaded.name, preset.name);
@@ -661,6 +667,7 @@ fn a_makers_preset_file_kept_elsewhere_is_loaded_by_its_path_and_heard() {
         said("by the path of a .vstpreset", &again);
         heard_to_differ(&saved.to_string_lossy(), &default, &again);
         assert!(session.undo());
+        assert!(session.wait_until_opened(std::time::Duration::from_secs(180)), "the plugin never arrived");
         assert_eq!((session.undo_step(), session.device_preset(device)), (step, None));
     }
 }

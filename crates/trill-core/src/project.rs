@@ -9,7 +9,7 @@ use crate::controllers::{self, ControllerCurve, ControllerKind, ControllerLane, 
 use crate::ids::{ClipId, DeviceId, TrackId};
 use crate::instrument::InstrumentProfile;
 use crate::midi_file::{MidiFile, MidiTrack};
-use crate::presets::PresetRef;
+use crate::presets::{PresetInfo, PresetRef};
 use crate::tempo::{MeterChange, MeterMap, SAME_BEAT, TempoChange, TempoMap};
 use crate::time::{Beats, TimeSignature};
 use crate::travel::Travel;
@@ -640,6 +640,15 @@ pub struct Device {
     /// whatever has been changed about it since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<PresetRef>,
+    /// A preset of its own that the device is to load when it is made,
+    /// where the song holds no state for it yet: a plugin that was given
+    /// one of its presets before it was there to load it. Whoever makes
+    /// the device from the song has it load this, so that a save, a render
+    /// and the device that arrives all have the preset; it goes when the
+    /// state the device came to is in [`state`](Self::state). Nearly
+    /// always `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_preset: Option<PresetInfo>,
     /// The track the device listens to in place of its own input: the key
     /// of a compressor, such as the kick a bass is ducked to. It is that
     /// track as it leaves its devices, ahead of its fader and its mute, so
@@ -2099,6 +2108,7 @@ impl Project {
                 params: BTreeMap::new(),
                 state: None,
                 preset: None,
+                from_preset: None,
                 sidechain: None,
             },
         );

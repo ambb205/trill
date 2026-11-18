@@ -21,7 +21,6 @@
 //! the sound it began with still loaded.
 
 use crate::analysis::{Analyzer, level_db};
-use crate::graph::MAX_BLOCK;
 use crate::ready::{OPENING_NOTES, Opening, OpeningNote, Plugins, Stand, Wait, device_signature, signature, wait_for};
 use std::sync::Arc;
 use std::time::Duration;
@@ -292,7 +291,7 @@ impl ProbeJob {
                 // A probe in a process of its own says which device it is
                 // making, as a render does.
                 crate::apart::stage(crate::apart::Stage::Making(device.id));
-                let made = self.factory.create_for(device, sample_rate, MAX_BLOCK, Purpose::Rendering);
+                let made = crate::compile::make(self.factory.as_ref(), device, sample_rate, Purpose::Rendering);
                 made.map_err(|error| failed(error.to_string()))
             };
             let mut instance = make(device)?;

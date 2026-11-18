@@ -266,7 +266,10 @@ pub(crate) fn refresh(session: &SharedSession, copies: &parking_lot::Mutex<Safet
         let mut session = session.lock();
         if !session.is_modified() {
             None
-        } else if copied == Some(session.revision()) {
+        } else if copied == Some(session.revision()) || session.making_devices() {
+            // (Or a plugin is being made: taking the copy asks every plugin
+            // for its state, which would wait for that one. The copy there
+            // is stands until the next look.)
             drop(session);
             // Nothing to write: what the journal's file holds is as it was.
             copies.lock().give_journal(written);

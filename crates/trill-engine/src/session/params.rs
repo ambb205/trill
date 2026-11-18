@@ -25,6 +25,9 @@ impl Session {
     pub fn device_param_texts(&self, id: DeviceId, values: &[(usize, f64)]) -> Result<Vec<String>, SessionError> {
         self.project.device(id)?;
         let meta = self.bank.devices.get(&id).ok_or(EditError::DeviceNotFound(id))?;
+        // Answered on the thread plugins are made on: after the making in
+        // hand, and before another is begun.
+        let _held = self.hold_makings();
         let own = match &meta.controller {
             Some(controller) => controller.lock().param_texts(values),
             None => vec![None; values.len()],
@@ -49,6 +52,9 @@ impl Session {
         self.project.device(id)?;
         let meta = self.bank.devices.get(&id).ok_or(EditError::DeviceNotFound(id))?;
         let Some(info) = meta.params.get(index) else { return Ok(None) };
+        // Answered on the thread plugins are made on: after the making in
+        // hand, and before another is begun.
+        let _held = self.hold_makings();
         let own = meta.controller.as_ref().and_then(|controller| controller.lock().param_value(index, text));
         let value = own.or_else(|| info.parse(text));
         Ok(value.filter(|value| value.is_finite() && (info.min..=info.max).contains(value)))

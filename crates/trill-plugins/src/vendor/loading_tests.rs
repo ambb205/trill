@@ -8,7 +8,7 @@
 //! vendor's is read. The real plugins are in `tests/vendor.rs`.
 
 use super::{VendorPlaces, ample, archetype, serum, superior, xfer};
-use crate::test_support::TestDir;
+use crate::test_support::{TestDir, there};
 use crate::vst3::class_id::ClassId;
 use crate::vst3::scripted::{self, kind};
 use crate::vst3::state::{self, PluginState};
@@ -287,6 +287,7 @@ fn a_session_loads_a_vendors_preset_as_one_undo_step() {
     let mut session = Session::new(Arc::new(factory), AudioBackend::Null { sample_rate: 48_000 }).unwrap();
     // The plugin as it comes: its master volume at 0.9.
     let device = session.add_device(ChainRef::Master, &uri, None, None).unwrap();
+    there(&mut session);
     let volume = |session: &mut Session| {
         session.snapshot_json();
         let blob = session.project().device(device).unwrap().state.clone().unwrap();
@@ -304,8 +305,10 @@ fn a_session_loads_a_vendors_preset_as_one_undo_step() {
     );
     assert_eq!(volume(&mut session), "0.3");
     assert!(session.undo());
+    there(&mut session);
     assert_eq!((volume(&mut session), session.device_preset(device)), ("0.9".to_string(), None));
     assert!(session.redo());
+    there(&mut session);
     assert_eq!(volume(&mut session), "0.3");
 
     // One the plugin will not take: a sentence that names the preset, and
@@ -320,9 +323,21 @@ fn a_session_loads_a_vendors_preset_as_one_undo_step() {
     assert_eq!(session.device_preset(device).map(|preset| preset.name.as_str()), Some("Quiet"));
     // A device is added with one, or not at all.
     let second = session.add_device(ChainRef::Master, &uri, Some("Quiet"), None).unwrap();
+    there(&mut session);
     assert_eq!(session.device_preset(second).map(|preset| preset.name.as_str()), Some("Quiet"));
+    // One added with a preset the plugin refuses is in the song, and that
+    // it did not load what it was to start from is said when it has been
+    // made; taken back, nothing is left of it.
     let devices = session.project().devices().count();
-    assert!(session.add_device(ChainRef::Master, &uri, Some("Refused"), None).is_err());
+    let before = session.problems().len();
+    let refused = session.add_device(ChainRef::Master, &uri, Some("Refused"), None).unwrap();
+    there(&mut session);
+    let problems: Vec<String> = session.problems().iter().map(ToString::to_string).collect();
+    let said = problems.iter().filter(|problem| problem.contains("did not load the preset 'Refused'")).count();
+    assert!(problems.len() == before + 1 && said == 1, "{problems:?}");
+    assert!(session.undo());
+    there(&mut session);
+    assert!(session.project().device(refused).is_err() && session.problems().len() == before);
     assert_eq!(session.project().devices().count(), devices);
 }
 
@@ -333,6 +348,7 @@ fn a_setting_no_parameter_reaches_is_set_in_the_running_plugin_as_an_undo_step()
     let factory = CompositeFactory::new(vec![Box::new(rig.factory.clone())]);
     let mut session = Session::new(Arc::new(factory), AudioBackend::Null { sample_rate: 48_000 }).unwrap();
     let device = session.add_device(ChainRef::Master, &uri, None, None).unwrap();
+    there(&mut session);
     let legato = |session: &Session| {
         let settings = session.device_settings(device).unwrap();
         settings.into_iter().find(|(name, _)| name == "Auto Legato").map(|(_, value)| value)
@@ -349,8 +365,10 @@ fn a_setting_no_parameter_reaches_is_set_in_the_running_plugin_as_an_undo_step()
     assert_ne!(session.undo_step(), step);
     assert_eq!(session.take_preset_note(device), None);
     assert!(session.undo());
+    there(&mut session);
     assert_eq!(legato(&session).as_deref(), Some("1"));
     assert!(session.redo());
+    there(&mut session);
     assert_eq!(legato(&session).as_deref(), Some("0"));
 
     // A name that is no setting, and a set of samples that is not here:
@@ -367,6 +385,7 @@ fn a_setting_no_parameter_reaches_is_set_in_the_running_plugin_as_an_undo_step()
     assert_eq!((legato(&session).as_deref(), session.undo_step()), (Some("0"), step));
     // A plugin whose state is not a list of named settings has none.
     let synth = session.add_device(ChainRef::Master, &scripted::uri(kind::KEEPS_SERUM), None, None).unwrap();
+    there(&mut session);
     assert!(session.device_settings(synth).unwrap().is_empty());
     let error = session.set_device_settings(synth, &[("x".to_string(), "1".to_string())]).unwrap_err().to_string();
     assert!(error.contains("this plugin's state has no settings that are set by name"), "{error}");
@@ -606,6 +625,7 @@ fn a_session_gives_a_device_a_preset_file_as_one_undo_step() {
     let factory = CompositeFactory::new(vec![Box::new(rig.factory.clone())]);
     let mut session = Session::new(Arc::new(factory), AudioBackend::Null { sample_rate: 48_000 }).unwrap();
     let device = session.add_device(ChainRef::Master, &uri, None, None).unwrap();
+    there(&mut session);
     let volume = |session: &mut Session, device| {
         session.snapshot_json();
         let blob = session.project().device(device).unwrap().state.clone().unwrap();
@@ -618,8 +638,10 @@ fn a_session_gives_a_device_a_preset_file_as_one_undo_step() {
     assert_eq!((loaded.path().as_str(), volume(&mut session, device).as_str()), ("Metal/Quiet", "0.3"));
     assert_eq!(session.device_preset(device).map(|preset| preset.name.as_str()), Some("Quiet"));
     assert!(session.undo());
+    there(&mut session);
     assert_eq!((volume(&mut session, device), session.device_preset(device)), ("0.9".to_string(), None));
     assert!(session.redo());
+    there(&mut session);
     assert_eq!(volume(&mut session, device), "0.3");
 
     // One the plugin will not take, and a file that is no preset of it:
@@ -640,8 +662,17 @@ fn a_session_gives_a_device_a_preset_file_as_one_undo_step() {
 
     // A device is added with one, or not at all.
     let second = session.add_device(ChainRef::Master, &uri, Some(&quiet), None).unwrap();
+    there(&mut session);
     assert_eq!(volume(&mut session, second), "0.3");
     let devices = session.project().devices().count();
-    assert!(session.add_device(ChainRef::Master, &uri, Some(&refused), None).is_err());
+    let before = session.problems().len();
+    let unloaded = session.add_device(ChainRef::Master, &uri, Some(&refused), None).unwrap();
+    there(&mut session);
+    let problems: Vec<String> = session.problems().iter().map(ToString::to_string).collect();
+    let said = problems.iter().filter(|problem| problem.contains("did not load the preset")).count();
+    assert!(problems.len() == before + 1 && said == 1, "{problems:?}");
+    assert!(session.undo());
+    there(&mut session);
+    assert!(session.project().device(unloaded).is_err() && session.problems().len() == before);
     assert_eq!(session.project().devices().count(), devices);
 }
