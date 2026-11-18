@@ -4,8 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Trill is an open-source digital audio workstation in Rust (GPL-3.0-or-later), developed on Windows. Three goals
 decide every trade-off: it does not crash or stall, it hosts CLAP and VST3 plugins, and everything it can do is
-reachable over MCP so an AI can write and mix a song. `README.md` lists the features and what is not built yet;
-this file is the map, so that a task needs only the files it touches.
+reachable over MCP so an AI can write and mix a song. `README.md` is the front page (what Trill is,
+how to build it and how to use it) and stays short; `docs/` describes the features, a page a topic, and
+`docs/status.md` what is not built yet; this file is the map, so that a task needs only the files it touches.
 
 ## Commands
 
@@ -33,7 +34,7 @@ cargo run -p trill-catalogue --example sets -- list              # the sets of t
 - The default test run needs nothing installed and reads nothing of the user's. Tests that need this machine
   (installed plugins, audio devices, MIDI ports, a signed-in Claude Code, a graphics card, ffmpeg, the models a
   study runs) are `#[ignore]`d
-  with the command that runs them; `README.md`, "Building and testing", lists them. Run the plugin ones after
+  with the command that runs them; `docs/development.md`, "Building and testing", lists them. Run the plugin ones after
   touching `trill-plugins`, `cargo test -p trill-stage --test drawn -- --ignored` after touching `trill-stage`'s
   `gpu/` or `film.rs`, and `trill-study`'s `tests/magpie.rs` after touching what its real models are fed or what
   is made of their answers (`models/real/`, `lyrics.rs`).
@@ -276,7 +277,7 @@ on the samples.
   six minutes a group of them at a time (`AT_ONCE_SECONDS`), because each holds the recording several times over
   while it listens: the same answer either way. Both front ends ask `Runtime::hear`, which decodes through the
   media cache and keeps what was heard: never on the thread that draws. Its tests build their own audio; `tests/magpie.rs` (opt-in) holds it to what
-  Magpie found in the recordings it took apart, and its numbers are in `README.md`: run it after touching the
+  Magpie found in the recordings it took apart, and its numbers are in `docs/sounds-and-studies.md`: run it after touching the
   crate, on the machine that has them. What is heard in one sound must say so where a mix makes it unsure (the
   `listen` tool's `heard_as`).
 - **Something a model finds in a recording** (a stage of a study): a method on `Models`
@@ -334,6 +335,12 @@ on the samples.
 - **Something that changes the song without being an edit** (a state a plugin came to in its own window):
   enter it in the journal as an aside (`Session::note_device`), or the song the journal leads to drifts from the
   song that is open.
+- **Something a user should know of** (a feature, a limit, a number that was measured): the page of its topic
+  in `docs/` (`window.md`, `instruments-and-effects.md`, `plugins-and-presets.md`, `writing-music.md`,
+  `sounds-and-studies.md`, `files.md`, `engine.md`, `ai-and-mcp.md`, `making-of-and-film.md`), a tool in the
+  table of `ai-and-mcp.md`, an opt-in test in `development.md`, and what is not built in `status.md`. The
+  README is the front page for someone who has never seen Trill: it gains a line only for something a
+  newcomer needs to start, and never a paragraph of reference.
 - **Something the window remembers:** `Settings` (`trill-library/src/settings.rs`) has fixed fields; state that
   belongs to one part of the window lives in its own file beside it (`browser.json`, `assistant.json`,
   `keyboard.json`).
@@ -483,7 +490,7 @@ on the samples.
   micro labels, the signal orange used sparingly, nothing below 10 px. Extend the kit instead of styling in place.
 - **Pictures are not kept.** `render.sh <word>` renders the few pictures that show a change into
   `target/screenshots` (off-screen, taking no focus); look at them and leave them there. Never run it for every
-  picture as routine. Only the README's five, in `docs/images`, are tracked (`render.sh readme`, on purpose): four
+  picture as routine. Only the five the README and `docs/` show, in `docs/images`, are tracked (`render.sh readme`, on purpose): four
   of the window and one of the stage, which the film example draws. Films and their stills go under `target/`.
 - **The assistant keeps five rules**, written at the top of `trill-assistant/src/lib.rs`: it never touches
   credentials, never signs anyone in, never bundles or modifies the CLI, never promises usage limits, and is

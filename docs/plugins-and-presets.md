@@ -1,0 +1,102 @@
+# Plugins, presets and sounds
+
+**Plugins**: installed CLAP and VST3 plugins appear beside the built-in devices as `clap:<plugin id>` and
+`vst3:<class id>`. Their state is saved in the project, and their parameters are automatable and reachable over
+MCP like any other device's. A plugin's own editor opens in a window (Windows only so far), from the Editor button
+on its panel or at the end of its chip in the mixer, and what is changed there flows back into the project.
+
+A plugin's presets are listed, searched and loaded like a built-in device's. They are found the way each format
+provides: a CLAP plugin's through its preset-discovery providers, a VST3 plugin's as the `.vstpreset` files in the
+standard preset folders and the programs of its program lists. A big synth has thousands, so they are read in the
+background, in the scanner process, and remembered until the plugin or its preset folders change. Loading one is
+done by the running plugin, as its own preset browser would, while the song plays; it is one undo step, and what
+it comes to is saved with the project. (A program list that is only numbered slots, "Prog 1" to "Prog 128", is not
+listed: there is no sound to choose by a number.)
+`cargo run -p trill-plugins --example presets -- "clap:Surge XT" warm pad` shows what an installed plugin offers.
+
+**The makers' own presets**: most sampled instruments and amplifiers tell a host of no presets at all, and keep
+them as files of a format of their own for the browser in their window. For the plugins it knows by their ids,
+Trill reads those files where the maker's installer put them and lists them with the rest:
+
+| Plugin | Its presets |
+|---|---|
+| Serum 2 | the patches in `Documents/Xfer/Serum 2 Presets`: a JSON header and zstd-compressed CBOR |
+| Ample Sound's guitars and basses | the tones in `Documents/Ample Sound/<instrument>/Presets4`: XML documents |
+| Superior Drummer 3 | the factory kits of each installed sound library: one text file of them |
+| Neural DSP's Archetypes | the presets in the shared `Neural DSP/<plugin>` folder: trees in JUCE's binary form |
+
+Loading one builds the state the plugin would save with that preset in it and hands it to the running plugin.
+Trill then asks the plugin for its state again and looks for the preset's settings in it, so a preset the plugin
+did not take (a damaged file, a version this reader does not know, a plugin that refuses) is a sentence that names
+it, and the device keeps the sound it had. The files are read in the scanner process, in bounded sizes, and nothing
+is ever written to a maker's folder. Where a preset makes the plugin read samples for a while (a drum kit, a
+guitar's other set of samples) the reply says so; a probe, a measurement and a render wait for it, and the
+device is marked as loading meanwhile. It also says
+when an Ample preset switches the instrument's automatic legato on, as nearly all of them do: notes that ring over
+each other are then hammered on unasked, until the parameter "Auto Legato" is set to 0. A folder or a product that
+is not there is simply no presets.
+
+**A preset from a file, anywhere**: presets that were bought or sent lie with the samples, not where a plugin's
+presets are listed from. Any place that takes a preset by name also takes the whole path of a preset file: a
+`.vstpreset` for any VST3 plugin (which is also the form a plugin's state has in another host's project), a file
+of the maker's own format where Trill reads it (`.SerumPreset`, an Ample instrument's preset, an Archetype's; for
+a file of many, such as Superior Drummer's kits, `path#name`), a file a CLAP plugin loads itself, or a
+`.trillpreset` that was saved on another machine. It goes through the same door as a preset by name: one undo
+step, the plugin checked to have taken it where that can be seen, and a sentence when the file is another
+plugin's, damaged or gone. In the window it is "Load preset file…" in a device's preset menu. Preset files in the
+sample library's folders are found by `search_presets` by their names, each with the device it is for and its
+path. The assistant in the window may be pointed at a preset file on any disk of this machine, and at none on a
+network share: opening one would sign the user in to whatever machine the path names.
+
+**Saved presets**: any device's sound can be kept under a name: a plugin's state with everything that was set in
+its own window, a built-in device's every parameter. That is how a plugin whose presets are neither told to the
+host nor in files that Trill reads gets presets a host can list: choose a sound in the plugin's window once, then
+"Save preset…" in the preset menu of its panel, or `save_preset` over MCP. A saved
+preset is listed with the device type's own, under "Saved", in every song, and is given to a device like any
+other. They are small files in `saved-presets` beside the settings file, one folder per device type. What was
+saved is renamed and described, and deleted: in the window from its row in the browser or from the preset menu
+of a device that is on it, over MCP with `edit_preset` and `delete_preset`. A rename keeps everything the preset
+holds and takes the open song's devices with it, as one undo step. Deleting asks first, because the file is not
+in the undo history; the in-app assistant is refused it, since its panel cannot ask.
+
+**Sounds**: a sound is often more than one device: a guitar and its amplifier, a synth with its chorus and
+reverb. A track's instrument and every effect after it can be kept as one thing, in their order, each with all a
+project keeps of it (a plugin's state, a sample player's files, every parameter): "Save sound…" in the preset
+menu of the track's instrument, which asks for a name, a description and tags, or `save_sound` over MCP. A sound is a preset of its instrument that says what
+follows, so it is listed, searched and given like any preset: `create_track`, `add_device` and `update_device`
+take it as `preset`, and `search_presets` says what each brings. A built-in instrument's own preset may be one,
+which is how the wavetable synth's pads come with their chorus and reverb. Giving one makes the instrument and
+its effects in one undo step, and the reply says which devices were made. On a track that has a chain already,
+the device takes the sound on in place; the effects the sound before it had brought go, and the new ones are
+made directly behind the device; an effect that was added otherwise, or was given a preset of its own since,
+stays, behind them. A sound that names a plugin this machine has not got, or one that does not start, is made
+without it, and the reply says which. What a sound does not hold belongs to a song: the fader, the pan, sends
+and groups, automation, and the track a device listens to, which saving says where the track has one. The file
+is its instrument's `.trillpreset` with the state of each device beside it; a preset of one device is what it
+always was. The files a sound's devices name (a sampler's sample, a table read from a file) are the song's files
+once it is on a track: listed when they are missing, and relinked. In the window the browser lists the sounds
+after the built-in devices: the ones that were saved, each with its instrument and how many effects come with it,
+then a row for each kind of the sounds the built-in instruments bring, which opens. A double-click makes one
+the sound of the track that is shown, dragging one onto a track does the same there, and dropped below the tracks
+it gets a track of its own. On the installed plugins, on demand: an Ample guitar through Archetype Tim Henson,
+saved in one song and given to a track of another, renders to the same samples in both.
+
+**Reading a plugin**: a plugin's parameters are numbers from 0 to 1 whose meaning only the plugin knows, so each
+is shown with the text the plugin itself displays for it ("-6.0 dB", "Dynamic 57", "On"), and can be set by that
+text: where the plugin converts text to a value its answer is checked against what it then shows, and where it
+does not, the value is found among what it shows. Every device says what channels it takes and gives; a device
+with one input channel is handed left and right mixed, and is marked in the chain. (A plugin that takes a stereo
+pair may still be mono inside: a guitar amplifier is, and widens the sound with a doubler of its own.)
+`cargo run -p trill-plugins --example inspect -- "vst3:<plugin name>" mic` shows an installed plugin's channels
+and the parameters with that word in their name, as the plugin shows them.
+
+Some of what a plugin can do has no parameter: an Ample guitar's saved state is a document of some 480 named
+settings, and about 250 of them (its effects, pedals, amplifier and strummer) are not among the 226 parameters it
+shows a host.
+Those are found by name and set through the state, as one undo step, with the values the plugin itself writes.
+
+The same example is where reading another maker's presets begins. With `--state <folder> --files` it says what
+the plugin's state is (text, a document, a container that is known, or bytes that give nothing away), writes the
+state out to look at, and lists the files that look like presets in the maker's folders; `--file <path>` says
+what one of those files is, in the same words. When both are the same kind of thing, a preset can be made into a
+state.

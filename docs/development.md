@@ -1,0 +1,110 @@
+# Building, testing and architecture
+
+[`CLAUDE.md`](../CLAUDE.md) at the root of the repository is the map of the code: what lives in which crate,
+where a change goes, and the conventions that are particular to Trill. It is written for AI coding agents and
+reads as well for people.
+
+## Building and testing
+
+`cargo test --workspace` runs about 2,650 tests in a few minutes. It needs nothing installed and touches nothing
+outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
+asked for:
+
+```sh
+cargo test -p trill-plugins -- --include-ignored    # against the CLAP and VST3 plugins installed here (minutes)
+cargo test -p trill-mcp --test presets -- --include-ignored --nocapture    # an assistant's pass over Surge XT's presets, an amplifier's, a kit, a guitar tone and a patch of their makers', and a bought preset found among the samples
+cargo test -p trill-plugins --test sounds -- --include-ignored --nocapture --test-threads 1    # what installed plugins say of their parameters, channels and presets
+cargo test -p trill-plugins --test key -- --include-ignored --nocapture --test-threads 1    # Surge XT playing what its device listens to, and its effect, as a vocoder, shaping a bass by a muted kick, in both formats
+cargo test -p trill-plugins --test tempo -- --include-ignored --nocapture --test-threads 1    # Serum 2's arpeggiator through two changes of tempo: every step heard where the song's tempo map has its beat
+cargo test -p trill-plugins --test lifetimes -- --include-ignored --nocapture    # plugin instances made and dropped beside one that stays, an attempt to a process: counts the crashes, and says where each was and what the machine had of memory; half an hour, and no attempt is started on a machine short of memory
+cargo test -p trill-plugins --test vendor -- --include-ignored --nocapture --test-threads 1    # the makers' own presets of Serum 2, the Ample guitars, Superior Drummer 3 and the Archetypes: listed, loaded by name and by a file's path, and heard to differ
+cargo test -p trill-mcp --test controllers -- --include-ignored --nocapture    # a SWAM saxophone and Surge XT played from the controller curves of clips
+cargo test -p trill-mcp --test hearing -- --include-ignored --nocapture    # renders and probes of Superior Drummer 3, a SWAM saxophone and an Ample bass; the Ample instruments rendered again to the same samples; a song of installed plugins on one processor and on several
+cargo test -p trill-mcp --test instruments -- --include-ignored --nocapture --test-threads 1    # what Trill ships about the Ample guitars and bass and Superior Drummer 3, checked on the plugins themselves: a drum asked for by name and heard on two kits, a slide, a scoop, a harmonic and a bend written by name and heard
+cargo test -p trill-app a_modelled_saxophone -- --include-ignored --nocapture    # the same saxophone typed on the computer keyboard, through the window's own code (no window opens)
+cargo test -p trill-mcp --test wavetable against_the_installed -- --ignored --nocapture    # a sawtooth on the wavetable synth beside Serum 2's and Surge XT's as they come: what of each is not on a harmonic, its pitch and its level (a measurement)
+cargo test -p trill-mcp --test wavetable the_filters_against -- --ignored --nocapture    # the wavetable synth's low-pass filters beside Surge XT's at the same settings: where each is 3 dB down, how high its peak stands, how steeply it falls (a measurement)
+cargo test -p trill-mcp --test hearing a_guitar_through_its_amplifier -- --include-ignored --nocapture    # an Ample guitar through Archetype Tim Henson, saved as one sound in a song and given to a track of another: the same samples in both
+cargo test -p trill-dsp --lib share_of_a_core -- --ignored --nocapture    # what the wavetable synth costs, from one voice to thirty-two notes of sixteen copies (a measurement; run it alone)
+cargo test -p trill-engine --test bank measured -- --ignored --nocapture    # every number of every sound of the wavetable synth's bank, and the volume that would put each at its kind's level
+cargo test -p trill-mcp --test bank serum -- --ignored --nocapture    # Serum 2's factory presets measured by kind on the notes the bank is measured on: the ranges the bank is held to (minutes; it loads the plugin about a hundred times, so check free memory first)
+cargo test -p trill-media -- --include-ignored      # decoding audio files found in this machine's usual folders
+TRILL_MAGPIE_PROJECTS=<...>/data/projects cargo test -p trill-listen --test magpie -- --ignored --nocapture --test-threads 1    # what Trill hears in recordings that Magpie took apart, against what Magpie found in them (the author's Magpie project and its saved projects; minutes)
+TRILL_MAGPIE_PROJECTS=<...>/data/projects TRILL_STUDY_PARTS=<the fetched parts> TRILL_STUDY_ON=nvidia cargo test -p trill-study --test magpie -- --ignored --nocapture --test-threads 1    # those recordings studied with the real models (stems, beats, words and their times) against what Magpie found; needs the parts File, Setup fetches, and runs a graphics card for a minute a recording (processor, card, card2 or nvidia)
+TRILL_TEST_PLUGIN_WINDOWS=1 cargo test -p trill-plugins --test editor_windows -- --test-threads=1   # opens windows
+TRILL_TEST_CLAUDE=1 cargo test -p trill-assistant --test real_cli    # talks to an installed, signed-in Claude Code
+TRILL_TEST_CLAUDE=1 cargo test -p trill-app live_ -- --test-threads=1    # ...through the assistant's panel (seven messages)
+cargo test -p trill-engine --test machine -- --include-ignored --nocapture     # opens this machine's audio outputs (silence only) and prints their latency
+cargo test -p trill-runtime --test machine -- --include-ignored --nocapture    # lists and opens this machine's MIDI inputs
+cargo test -p trill-engine --test journal what_recording_a_step_costs -- --ignored --nocapture    # what keeping the journal costs an edit on a large project (a measurement; run it alone)
+cargo test -p trill-stage --test drawn -- --ignored    # what the graphics card makes of the stage, and a film as a file (a graphics card; two of them ffmpeg)
+cargo test -p trill-mcp --test mcp a_film_is_made -- --ignored --nocapture    # a film of a song and of its making over MCP, kept in the assistant's working folder (a graphics card)
+cargo test -p trill-app a_film_is_made_from_the_window -- --ignored --nocapture    # a film from the window's panel, watched as it is made, and one stopped (a graphics card)
+cargo test -p trill-dsp --test real_sfz -- --ignored --nocapture    # the SFZ reader on the files a synth installed here keeps: their text only, counted (TRILL_SFZ_FOLDER names another folder)
+cargo test -p trill-runtime --test instruments the_catalogue -- --ignored --nocapture    # fetches five small sets of the catalogue of instruments from where they are published (84 MB, by the system's curl) through the program's own fetching, and checks each twice, finds it in the library, plays it and removes it (TRILL_CATALOGUE_SETS names others by id, or `starter`, or `all`: every set, one at a time, 26 GB and half an hour; TRILL_CATALOGUE_REPORT names a file for a line a set, which a later run goes on from)
+cargo test -p trill-runtime --test instruments a_fetch_that_is_stopped -- --ignored --nocapture    # a set that comes as one archive and one that comes file by file, each stopped in the middle and asked for again, with where each went on from (350 MB)
+cargo test -p trill-runtime --test instruments a_set_kept_under_a_deep_folder -- --ignored --nocapture    # two small sets fetched into a folder deeper than 260 letters, checked and played (36 MB)
+cargo test -p trill-app the_starter_selection_is_fetched_from_the_panel -- --ignored --nocapture    # the starter selection asked for with the Setup panel's own button on the catalogue that is built in: fetched, checked, found by the library, on a track, played (1.8 GB)
+cargo run -p trill-fetch --example many -- <a list of addresses> <a folder>    # how long many small files take one at a time, on one connection and several at once: what the engine's count was chosen by
+```
+
+Run the `trill-plugins` ones after touching plugin hosting, the `trill-media` one after touching audio decoding,
+and the two `machine` ones after touching the audio device or MIDI port code. Everything else about devices is tested without any: the engine plays through a
+scripted host whose audio thread is the test itself (`trill_engine::host::scripted`), so a device can be unplugged,
+refuse a format or stop answering, and a recorded note can be checked to the sample.
+
+The build is set up to be quick to repeat: code that only runs while building (procedural macros, build scripts)
+is not optimized, debug information is limited to file and line (`CARGO_PROFILE_DEV_DEBUG=full` for a debugging
+session), and on Windows the linker is the one that ships with Rust (`.cargo/config.toml`). Everything from
+scratch, tests included, takes about four minutes on a 16-core machine; after an edit, seconds.
+
+Working in a second checkout (`git worktree add`)? `sh scripts/warm-worktree.sh` there copies the libraries the
+first one has already built, and the first build compiles only Trill's own crates: a minute and a half.
+
+## Architecture
+
+```
+crates/
+  trill-core      Project model, edit operations, the device API, and the journal of a session with its replay.
+                  No audio or UI dependencies.
+  trill-dsp       Built-in instruments and effects, and offline time-stretching.
+  trill-media     Audio file decoding and caching, waveform overviews, sample-rate conversion, WAV writing.
+  trill-engine    Realtime engine, offline renderer, analysis, and the Session.
+  trill-library   The sound library (scanning, indexing, searching sample folders) and the settings file.
+  trill-fetch     What is fetched when the user asks: parts that others publish, pinned by checksum, brought by the
+                  system's own curl, in lists that any crate hands it: one at a time or many asked for at once,
+                  a part of many small files several at a time, the room asked of the disk first.
+  trill-catalogue The sampled instruments others publish that Trill may hand on, read from the text in
+                  `catalogue/`: licences, pins, what was measured, what a song owes. Fetches nothing; `make/`
+                  is the scripts the catalogue is written by.
+  trill-listen    What is heard in a recording without a model: beats and bars, tuning, key and chords, parts,
+                  loops, single hits, notes, and MIDI of them.
+  trill-study     A recording taken apart: its stems, beats and words found by models (ONNX Runtime, loaded when
+                  a study runs and never linked) in a process of its own, the study that is kept, and the setup.
+  trill-plugins   Plugin hosting: scanning and preset discovery in a child process, the plugin main thread, CLAP
+                  and VST3, and the readers of the presets some makers keep in files of their own.
+  trill-runtime   What both programs share, built once: session, media cache, library, settings, housekeeping,
+                  safety copies of unsaved work.
+  trill-theory    Music theory for writing parts: chords, scales, voicings, rhythms, grooves, ornaments,
+                  articulations, analysis.
+  trill-mcp       MCP server (library) and the headless `trill-mcp` binary.
+  trill-assistant Back end of the in-app assistant: runs the user's own Claude Code, kept to Trill's tools, a plan and the web.
+  trill-noir      The GUI kit: theme, widgets and painting.
+  trill-stage     The stage: the song's own interface filmed. The director, the camera, what lights when, the
+                  passes on the graphics card, and a film as a file (frames to ffmpeg, with the song's own sound).
+  trill-app       The desktop application (`trill`).
+```
+
+Three ideas hold it together:
+
+1. **One front door.** `Session` owns the project, its undo history and the engine. The GUI and the MCP server are
+   both thin clients of it, so there is exactly one implementation of every edit and the two can never disagree.
+2. **The audio thread only plays.** Edits happen off the audio thread. After each one the project is compiled into
+   an immutable render graph and handed over through a lock-free queue; the audio thread swaps it in between
+   blocks, carries running devices and sounding notes across, and sends the old graph back to be freed elsewhere.
+3. **Everything is a device.** Built-in instruments, effects and hosted plugins implement one small trait
+   (`DeviceProcessor`), so the engine does not know or care which it is driving.
+
+The same `Processor` runs realtime playback and offline rendering. The tests rely on that: they render projects
+and assert on the audio (note onsets to the sample, identical output for any buffer size, identical output while
+the graph is swapped on every block). The GUI is tested headlessly with simulated input against a real session.
