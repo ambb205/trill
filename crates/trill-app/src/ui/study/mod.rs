@@ -15,6 +15,7 @@
 //! song is taken by `trill_runtime::taking`, which the tools use too; and
 //! what is heard before anything is taken is made by the same plan.
 
+pub mod along;
 pub mod place;
 pub mod view;
 pub mod window;
@@ -216,6 +217,8 @@ enum Done {
     Picked(Option<PathBuf>),
     /// The words of the open study, after one was put right.
     Words(String, Result<Lyrics, String>),
+    /// A study that the song has a reference of, read to be drawn along it.
+    Known(String, Result<Box<Open>, String>),
     /// Something was taken into the song: the clip to show, if it made one.
     Taken(Result<Option<trill_core::ClipId>, String>),
 }
@@ -247,6 +250,9 @@ pub struct Studies {
     pub apart: bool,
     /// How the study that is being opened is to be shown.
     pub shown: Option<Shown>,
+    /// The studies the song has references of, as they were read; `None`
+    /// for one that is being read, or that could not be.
+    known: std::collections::HashMap<String, Option<Arc<Open>>>,
     sender: Sender<Done>,
     receiver: Receiver<Done>,
 }
@@ -273,6 +279,7 @@ impl Default for Studies {
             last: None,
             apart: false,
             shown: None,
+            known: std::collections::HashMap::new(),
             sender,
             receiver,
         }
@@ -293,6 +300,18 @@ impl Studies {
     /// The study that is open in the workspace.
     pub fn open(&self) -> Option<&Arc<Open>> {
         self.open.as_ref()
+    }
+
+    /// The study `id` as it was read, for drawing what it found along a
+    /// clip of its recording: the one that is open, or one the song has a
+    /// reference of. `None` until it has been read.
+    pub fn of(&self, id: &str) -> Option<&Arc<Open>> {
+        self.open.as_ref().filter(|open| open.id == id).or_else(|| self.known.get(id)?.as_ref())
+    }
+
+    /// Forgets what was read of the study `id`: it has changed.
+    fn forget(&mut self, id: &str) {
+        self.known.remove(id);
     }
 
     /// The study that is being read to be opened.
@@ -397,6 +416,21 @@ pub fn poll(ctx: &egui::Context, cx: &mut Cx, shown: bool) {
     while let Ok(done) = cx.studies.receiver.try_recv() {
         took_in(ctx, cx, done);
     }
+    // The studies the song has references of are read once, to be drawn along them.
+    let references: Vec<String> = cx
+        .snap
+        .project
+        .tracks
+        .iter()
+        .filter_map(|track| track.reference.as_ref()?.study.clone())
+        .filter(|id| !cx.studies.known.contains_key(id) && cx.studies.open.as_ref().is_none_or(|open| &open.id != id))
+        .collect();
+    for id in references {
+        cx.studies.known.insert(id.clone(), None);
+        cx.studies.spawn(ctx, &cx.sounds.runtime, move |runtime, report| {
+            report(Done::Known(id.clone(), read(runtime, &id)));
+        });
+    }
     if !shown {
         return;
     }
@@ -440,6 +474,7 @@ fn took_in(ctx: &egui::Context, cx: &mut Cx, done: Done) {
             studies.opening = None;
             match opened {
                 Ok(opened) => {
+                    studies.forget(&opened.id);
                     let same = studies.open.as_ref().is_some_and(|open| open.id == opened.id);
                     if !same {
                         studies.view = View {
@@ -508,6 +543,7 @@ fn took_in(ctx: &egui::Context, cx: &mut Cx, done: Done) {
         }
         Done::Words(id, words) => {
             studies.working = studies.working.saturating_sub(1);
+            studies.forget(&id);
             match words {
                 Ok(lyrics) => {
                     if let Some(open) = studies.open.as_ref().filter(|open| open.id == id) {
@@ -529,6 +565,9 @@ fn took_in(ctx: &egui::Context, cx: &mut Cx, done: Done) {
                 }
                 Err(why) => studies.last = Some((why, true)),
             }
+        }
+        Done::Known(id, known) => {
+            studies.known.insert(id, known.ok().map(Arc::from));
         }
         Done::Taken(taken) => {
             studies.working = studies.working.saturating_sub(1);

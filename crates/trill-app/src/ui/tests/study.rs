@@ -501,3 +501,44 @@ fn the_timed_test_is_run_from_the_setup_panel_and_says_what_it_chose() {
         harness.app.setup().last()
     );
 }
+
+#[test]
+fn the_recording_is_put_beside_the_song_as_a_reference_and_what_it_is_as_a_whole_is_taken() {
+    let Fixture { mut harness, id, folder: _kept } = opened(|session| {
+        session.edit(|project| project.set_tempo(120.0)).unwrap();
+    });
+    harness.click_label("NOTES");
+    harness.idle(2);
+    // The recording beside the song: a track that is a reference, of this study, not listened to.
+    harness.click_label("Take the recording as a reference");
+    harness.wait_until("the reference", |harness| harness.project().has_references());
+    harness.settle_study();
+    let project = harness.project();
+    let track = &project.tracks[0];
+    assert_eq!(track.name, "Reference: small song");
+    assert_eq!(track.reference, Some(trill_core::Reference { study: Some(id), listening: false }));
+    assert_eq!(project.length_beats(), 0.0, "it is no part of the song's length");
+    // Its header listens in place of soloing, and says what it is.
+    assert!(harness.is_on_screen("Listen to Reference: small song"));
+    assert!(!harness.is_on_screen("Solo Reference: small song") && !harness.is_on_screen("Mute Reference: small song"));
+    harness.click_label("Listen to Reference: small song");
+    harness.idle(3);
+    assert!(harness.project().tracks[0].reference.as_ref().unwrap().listening);
+    assert!(harness.is_on("Listen to Reference: small song"));
+
+    // Its tempo, bar by bar; its parts as markers; its key; its kit.
+    harness.click_label("Take the tempo");
+    harness.wait_until("the tempo", |harness| (harness.project().tempo - 100.0).abs() < 0.5);
+    harness.click_label("Take the parts");
+    harness.wait_until("the markers", |harness| !harness.project().markers.is_empty());
+    harness.click_label("Take the key");
+    harness.wait_until("the key", |harness| harness.project().key.is_some());
+    harness.click_label("Take a kit");
+    harness.wait_until("the kit", |harness| harness.project().tracks.len() == 2);
+    harness.settle_study();
+    let project = harness.project();
+    assert_eq!(project.tracks[1].devices[0].uri, "builtin:drumrack");
+    assert!(harness.app.studies().last().is_some_and(|(said, wrong)| !wrong && said.starts_with("A drum rack of ")));
+    // The song says its key now, and the workspace can move what it takes to it.
+    assert!(!harness.is_on("To the song's key"));
+}

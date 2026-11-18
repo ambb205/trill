@@ -81,7 +81,7 @@ fn clock(seconds: f64) -> String {
 }
 
 /// The color of a part by its letter: parts that sound alike share one.
-fn part_color(theme: &Theme, label: &str) -> Color32 {
+pub(super) fn part_color(theme: &Theme, label: &str) -> Color32 {
     let index = label.bytes().next().map_or(0, |letter| usize::from(letter.saturating_sub(b'A')));
     theme.track_hue(index * 3 + 1)
 }
