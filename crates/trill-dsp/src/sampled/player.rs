@@ -36,7 +36,8 @@
 //! needs ([`trill_core::device::Purpose::Rendering`]).
 
 use super::loaded::Loaded;
-use super::model::{FilterKind, LoopMode, Moved, OffMode, Region, Stage, Trigger, along};
+use super::model::note::Own;
+use super::model::{FilterKind, LoopMode, MAX_WAVES, Moved, OffMode, Region, Stage, Swung, Trigger, along};
 use super::pool::{Audio, Pool};
 use super::read::{Kernel, kernel_for, read, read_mapped};
 use crate::define_params;
@@ -390,6 +391,21 @@ struct Voice {
     tone: Option<Tone>,
     /// Seconds it has sounded, for what begins late.
     seconds: f32,
+    /// The controllers the note has of its own, as they were when it began.
+    own: Own,
+    /// A number of the note's own, for what is drawn by lot while it sounds.
+    seed: u64,
+    /// Where each of the region's slow waves is.
+    waves: [Turning; MAX_WAVES],
+}
+
+/// One slow wave of a voice: how far round it is, how many times it has
+/// been round, and what it came to when last worked out.
+#[derive(Copy, Clone, Default)]
+struct Turning {
+    phase: f32,
+    rounds: u32,
+    out: f32,
 }
 
 impl Voice {
@@ -430,6 +446,9 @@ impl Voice {
             fade: FadeOut::idle(),
             tone: None,
             seconds: 0.0,
+            own: Own { velocity: 0.0, key: 0.0, random: 0.0, random_either_way: 0.0, alternate: 0.0 },
+            seed: 0,
+            waves: [Turning { phase: 0.0, rounds: 0, out: 0.0 }; MAX_WAVES],
         }
     }
 
@@ -525,7 +544,8 @@ impl Voice {
         let region = &moment.loaded.instrument.regions[self.region as usize];
         let sample_rate = moment.sample_rate;
         let curves = &moment.loaded.instrument.curves;
-        let controller = |number: u8| moment.controllers[usize::from(number)];
+        let own = self.own;
+        let controller = |number: u8| own.or(moment.controllers, number);
 
         // The pitch: the wheel, controllers, vibrato.
         let (up, down) = match moment.derived.bend {
@@ -534,6 +554,7 @@ impl Voice {
         };
         let mut cents = if moment.wheel >= 0.0 { moment.wheel * up } else { -moment.wheel * down };
         let (mut vibrato, mut tremolo, mut volume, mut share, mut pan, mut cutoff) = (0.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+        let (mut ring, mut opened) = (0.0, 0.0);
         let mut width = region.width;
         for control in &region.controls {
             let position = along(curves, control.curve, controller(control.controller));
@@ -546,8 +567,62 @@ impl Voice {
                 Moved::Vibrato => vibrato += control.depth * position,
                 Moved::Tremolo => tremolo += control.depth * position,
                 Moved::Width => width += control.depth / 100.0 * position,
+                Moved::Resonance => ring += control.depth * position,
+                Moved::FilterEnvelope => opened += control.depth * position,
                 // Read once, when the note began.
-                Moved::Dynamics => {}
+                Moved::Dynamics | Moved::Offset | Moved::Delay => {}
+            }
+        }
+        // The numbered slow waves, each a step further round. What one
+        // does to the rate of another is taken from where that one was a
+        // step ago.
+        if !region.waves.is_empty() {
+            let step = moment.frames as f32 / sample_rate;
+            let before = self.waves;
+            for (index, wave) in region.waves.iter().enumerate().take(MAX_WAVES) {
+                let (mut rate, mut delay, mut fade, mut begun) = (0.0, 0.0, 0.0, 0.0);
+                let mut moves = [0.0f32; 4];
+                let amount = |swing: &super::model::Swing| match swing.controller {
+                    Some(number) => swing.amount * along(curves, swing.curve, controller(number)),
+                    None => swing.amount,
+                };
+                for swing in &wave.swings {
+                    match swing.swung {
+                        Swung::Rate => rate += amount(swing),
+                        Swung::Delay => delay += amount(swing),
+                        Swung::Fade => fade += amount(swing),
+                        Swung::Phase => begun += amount(swing),
+                        Swung::Pitch => moves[0] += amount(swing),
+                        Swung::Volume => moves[1] += amount(swing),
+                        Swung::Cutoff => moves[2] += amount(swing),
+                        Swung::Pan => moves[3] += amount(swing),
+                        Swung::RateOf(_) => {}
+                    }
+                }
+                for (other, turning) in region.waves.iter().zip(&before).take(MAX_WAVES) {
+                    for swing in other.swings.iter().filter(|swing| swing.swung == Swung::RateOf(wave.number)) {
+                        rate += turning.out * amount(swing);
+                    }
+                }
+                let turning = &mut self.waves[index];
+                let since = self.seconds - delay;
+                turning.out = if since < 0.0 {
+                    0.0
+                } else {
+                    let arrived = if fade > 0.0 { (since / fade).min(1.0) } else { 1.0 };
+                    arrived * wave.wave.at(turning.phase + begun, turning.rounds, self.seed ^ u64::from(wave.number))
+                };
+                if since >= 0.0 {
+                    turning.phase += rate.max(0.0) * step;
+                    if turning.phase >= 1.0 {
+                        turning.rounds = turning.rounds.wrapping_add(turning.phase as u32);
+                        turning.phase -= turning.phase.floor();
+                    }
+                }
+                cents += turning.out * moves[0];
+                volume += turning.out * moves[1];
+                cutoff += turning.out * moves[2];
+                pan += turning.out * moves[3] / 100.0;
             }
         }
         let wave = |wobble: &super::model::Wobble, seconds: f32| {
@@ -621,7 +696,8 @@ impl Voice {
         }
 
         if let (Some(tone), Some(filter)) = (&mut self.tone, &region.filter) {
-            let cents = tone.cents + cutoff + tone.depth * tone.envelope.level;
+            let cents = tone.cents + cutoff + (tone.depth + opened) * tone.envelope.level;
+            tone.q = std::f32::consts::FRAC_1_SQRT_2 * db_to_gain((filter.resonance + ring).clamp(0.0, 40.0));
             tone.set(filter.cutoff * 2f32.powf(cents / 1_200.0), sample_rate);
         }
         self.seconds += moment.frames as f32 / sample_rate;
@@ -717,6 +793,8 @@ pub struct Player {
     frame: u64,
     notes: u64,
     clock: u64,
+    /// What a note's own controller that is 0 and 1 by turns comes to next.
+    alternate: bool,
 }
 
 impl Player {
@@ -767,6 +845,7 @@ impl Player {
             frame: 0,
             notes: 0,
             clock: 0,
+            alternate: false,
         }
     }
 
@@ -794,13 +873,13 @@ impl Player {
     /// Whether `region` is to sound for a note of `velocity`: by how hard
     /// it is struck, where the controllers are, the switches, its turn
     /// and its share of the note's `chance`.
-    fn sounds(&mut self, region: &Region, index: usize, key: u8, velocity: f32, chance: f32) -> bool {
-        let struck = (velocity * 127.0).round().clamp(0.0, 127.0) as u8;
+    fn sounds(&mut self, region: &Region, index: usize, key: u8, own: &Own, chance: f32) -> bool {
+        let struck = (own.velocity * 127.0).round().clamp(0.0, 127.0) as u8;
         if !(region.velocities.0..=region.velocities.1).contains(&struck) {
             return false;
         }
         for (number, low, high) in &region.when {
-            let position = self.put[usize::from(*number)] * 127.0;
+            let position = own.or(&self.put, *number) * 127.0;
             if position < low - 0.5 || position > high + 0.5 {
                 return false;
             }
@@ -838,10 +917,20 @@ impl Player {
     /// Starts a voice on `region` for `key`. `gain` is what the moment
     /// adds to the level (a release sound grows quieter the longer its
     /// note was held), `seed` the note's own number.
-    fn start(&mut self, loaded: &Loaded, index: usize, key: u8, velocity: f32, gain: f32, seed: u64) {
+    fn start(&mut self, loaded: &Loaded, index: usize, key: u8, note: &Own, gain: f32, seed: u64) {
         let region = &loaded.instrument.regions[index];
         let sample_rate = self.sample_rate as f32;
+        let velocity = note.velocity;
         let own = seed ^ (index as u64 + 1).wrapping_mul(0xD6E8_FEB8_6659_FD93);
+        // The controllers as they stand now, each along its curve: the
+        // note's own, and the ones that were put.
+        let (put, curves, note) = (self.put, &loaded.instrument.curves, *note);
+        let controller = |number: u8, curve: u16| along(curves, curve, note.or(&put, number));
+        // What controllers add when a note begins.
+        let at_the_start = |moved: Moved| -> f32 {
+            let controls = region.controls.iter().filter(|control| control.moved == moved);
+            controls.map(|control| control.depth * controller(control.controller, control.curve)).sum()
+        };
         // Voices this one silences: the groups it turns off, and its own
         // key's where the instrument allows only so many.
         if region.group != 0 {
@@ -912,7 +1001,8 @@ impl Player {
         }
 
         let frames = facts.frames;
-        let offset = region.offset as usize + (region.offset_random as f32 * chance(own, 1)) as usize;
+        let offset = region.offset as f32 + region.offset_random as f32 * chance(own, 1) + at_the_start(Moved::Offset);
+        let offset = offset.max(0.0) as usize;
         let end = region.end.map_or(frames, |end| (end as usize + 1).min(frames));
         if offset >= end {
             return;
@@ -947,9 +1037,6 @@ impl Player {
         let level = region.volume
             + region.level_by_key * (f32::from(key) - f32::from(region.level_centre))
             + region.level_random * (chance(own, 3) * 2.0 - 1.0);
-        let put = self.put;
-        let curves = &loaded.instrument.curves;
-        let controller = |number: u8, curve: u16| along(curves, curve, put[usize::from(number)]);
         // How much the velocity decides: what the region says, moved by
         // the controllers the instrument has for that.
         let track = region
@@ -966,7 +1053,7 @@ impl Player {
             * by_velocity
             * region.fade_keys.gain(f32::from(key), region.key_curve)
             * region.fade_velocities.gain(velocity * 127.0, region.velocity_fade_curve);
-        let delay = region.delay + region.delay_random * chance(own, 4);
+        let delay = (region.delay + region.delay_random * chance(own, 4) + at_the_start(Moved::Delay)).max(0.0);
         let tone = region.filter.as_ref().map(|filter| {
             let (envelope, depth) = match &filter.envelope {
                 Some((envelope, depth)) => (Shape::of(envelope, velocity, controller, sample_rate, 0.0), *depth),
@@ -1025,7 +1112,23 @@ impl Player {
             fade: FadeOut::idle(),
             tone,
             seconds: 0.0,
+            own: note,
+            seed: own,
+            waves: [Turning::default(); MAX_WAVES],
         };
+    }
+
+    /// The controllers a note that begins now has of its own.
+    fn own(&mut self, key: u8, velocity: f32, seed: u64) -> Own {
+        let alternate = self.alternate;
+        self.alternate = !alternate;
+        Own {
+            velocity,
+            key: f32::from(key) / 127.0,
+            random: chance(seed, 5),
+            random_either_way: chance(seed, 6) * 2.0 - 1.0,
+            alternate: f32::from(u8::from(alternate)),
+        }
     }
 
     fn note_on(&mut self, loaded: &Loaded, key: u8, velocity: f32, place: u64) {
@@ -1042,11 +1145,12 @@ impl Player {
         self.pedal.key_down(key);
         let seed = place.rotate_left(8) ^ u64::from(key);
         let number = chance(seed, 0);
+        let own = self.own(key, velocity, seed);
         for at in 0..loaded.down[usize::from(key)].len() {
             let index = loaded.down[usize::from(key)][at] as usize;
             let region = &loaded.instrument.regions[index];
-            if self.sounds(region, index, key, velocity, number) {
-                self.start(loaded, index, key, velocity, 1.0, seed);
+            if self.sounds(region, index, key, &own, number) {
+                self.start(loaded, index, key, &own, 1.0, seed);
             }
         }
         self.down |= 1 << key;
@@ -1070,12 +1174,24 @@ impl Player {
         let held = self.frame.saturating_sub(self.since[usize::from(key)]) as f32 / self.sample_rate as f32;
         let seed = place.rotate_left(8) ^ u64::from(key) ^ 0x05EE_D0FF_5EED_u64;
         let number = chance(seed, 0);
+        // The sound of a key coming up is of the note that went down:
+        // struck as hard, and on the same side of what goes by turns.
+        let own = Own {
+            alternate: f32::from(u8::from(!self.alternate)),
+            ..Own {
+                velocity,
+                key: f32::from(key) / 127.0,
+                random: chance(seed, 5),
+                random_either_way: chance(seed, 6) * 2.0 - 1.0,
+                alternate: 0.0,
+            }
+        };
         for at in 0..loaded.up[usize::from(key)].len() {
             let index = loaded.up[usize::from(key)][at] as usize;
             let region = &loaded.instrument.regions[index];
-            if region.trigger == trigger && self.sounds(region, index, key, velocity, number) {
+            if region.trigger == trigger && self.sounds(region, index, key, &own, number) {
                 let gain = db_to_gain(-region.release_decay * held);
-                self.start(loaded, index, key, velocity, gain, seed);
+                self.start(loaded, index, key, &own, gain, seed);
             }
         }
     }
@@ -1253,8 +1369,9 @@ impl DeviceProcessor for Player {
         self.previous = None;
         self.controllers = self.put;
         // The takes are counted from here: where a song played from its
-        // start and a render of it both begin.
+        // start and a render of it both begin. So is what goes by turns.
         self.turns.iter_mut().for_each(|turn| *turn = 0);
+        self.alternate = false;
         for voice in &mut self.voices {
             voice.stop();
         }

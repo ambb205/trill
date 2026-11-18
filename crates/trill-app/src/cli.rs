@@ -32,6 +32,7 @@ Options:
   --browse <devices|sounds>   What the browser lists first (default: as it was left)
   --library <FOLDER>      Add a folder of sounds to the library; may be given several times
   --missing-files         Open with the list of the song's missing files up
+  --credits               Open with the credits up: what the song owes for its sampled instruments
   --search <TEXT>         Search the sound library for this at startup
   --sound <NAME>          Select the sound with this name in the browser
   --editor <DEVICE NAME>  Open this plugin's own window at startup
@@ -99,6 +100,8 @@ pub struct Cli {
     pub library: Vec<PathBuf>,
     /// Open with the list of missing files up.
     pub missing_files: bool,
+    /// Open with the credits up.
+    pub credits: bool,
     /// What to search the sound library for.
     pub search: Option<String>,
     /// Name of a sound to select in the browser.
@@ -237,6 +240,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
             "--also-select" => cli.also_select.push(value("a clip name")?),
             "--library" => cli.library.push(PathBuf::from(value("a folder")?)),
             "--missing-files" => cli.missing_files = true,
+            "--credits" => cli.credits = true,
             "--search" => cli.search = Some(value("what to search for")?),
             "--sound" => cli.sound = Some(value("the name of a sound")?),
             "--editor" => cli.editor = Some(value("the name of a device")?),
@@ -397,6 +401,7 @@ impl Cli {
             setup_scene: self.setup_scene,
             show_film: self.film,
             show_missing: self.missing_files,
+            show_credits: self.credits,
             record: self.record,
             stage: self.stage,
             making_of: (self.making_of || self.making_of_at.is_some()).then(|| match self.making_of_at {

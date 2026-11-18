@@ -17,3 +17,4 @@ thiserror.workspace = true
 # reading and writing audio files in the examples.
 trill-engine.workspace = true
 trill-media.workspace = true
+tempfile = "3"

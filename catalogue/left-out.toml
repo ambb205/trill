@@ -1,0 +1,167 @@
+# What was found and is not offered, with its terms as they were read on 2026-11-17.
+# share-alike is listed apart for the owner to decide on; see catalogue/README.md.
+
+format = 1
+
+[[left_out]]
+name = "SamsSonor"
+from = "https://github.com/sfzinstruments/SamsSonor"
+reason = "share-alike"
+says = "This work is licensed under a Creative Commons Attribution-ShareAlike 4.0 International License. (README.md; its LICENSE is \"Attribution-ShareAlike 4.0 International\")"
+
+[[left_out]]
+name = "FSS Steel-String Acoustic Guitar (FreePats)"
+from = "https://freepats.zenvoid.org/Guitar/steel-acoustic-guitar.html"
+reason = "share-alike"
+says = "GNU General Public License version 3 or later, with a special exception."
+
+[[left_out]]
+name = "FS Kay 5-String Banjo"
+from = "https://github.com/sfzinstruments/FlameStudios.Kay5StringBanjo"
+reason = "share-alike"
+says = "This sample is released under the GNU GPL license. (LICENSE.txt)"
+
+[[left_out]]
+name = "FreePats General MIDI set"
+from = "https://freepats.zenvoid.org/SoundSets/general-midi.html"
+reason = "share-alike"
+says = "GNU General Public License version 3 or later, with a special exception."
+
+[[left_out]]
+name = "jRhodes3d"
+from = "https://github.com/sfzinstruments/jlearman.jRhodes3d"
+reason = "non-commercial"
+says = "License for samples: CC BY-NC (LICENSE). Its maker offers a licence for commercial products on request."
+
+[[left_out]]
+name = "jRhodes3c"
+from = "https://github.com/sfzinstruments/jlearman.jRhodes3c"
+reason = "non-commercial"
+says = "To distribute the samples themselves, such as in an application, software instrument, or as a sample set, the jRhodes samples are licensed under CC BY-NC-SA 4.0. (LICENSE)"
+
+[[left_out]]
+name = "Project16 Rickenbacker 4001"
+from = "https://github.com/sfzinstruments/Project16Rickenbacker4001"
+reason = "non-commercial"
+says = "License: Attribution-NonCommercial-ShareAlike 3.0 Unported (CC BY-NC-SA 3.0), modified (README.md)"
+
+[[left_out]]
+name = "G-Town Church Sampling Project"
+from = "https://github.com/sfzinstruments/GTownChurchSamplingProject"
+reason = "non-commercial"
+says = "The G-Town Church Sampling Project is licensed under the Creative Commons Sampling Plus 1.0 license: ... To perform, display, and distribute copies of this whole work for noncommercial purposes (README.md)"
+
+[[left_out]]
+name = "Starbirth Kudu Shofar"
+from = "https://github.com/sfzinstruments/Starbirth.KuduShofar"
+reason = "own-terms"
+says = "You may use them in any way you wish to make music either for your own use, or commercially, but you MAY NOT sell the samples, or include them in a compilation for samples for sale. (README.md)"
+
+[[left_out]]
+name = "SM Drums"
+from = "https://github.com/sfzinstruments/SMDrums"
+reason = "unclear"
+says = "No licence file and no terms in the repository; the collection's index page says only \"License | Public Domain\", which is not a statement by its maker."
+
+[[left_out]]
+name = "Splendid Grand Piano"
+from = "https://github.com/sfzinstruments/SplendidGrandPiano"
+reason = "unclear"
+says = "No licence file; the README says \"This samples set was released as public domain in early 2000 by Akai company\", a packager's account with nothing from Akai to bear it out."
+
+[[left_out]]
+name = "Maestro Concert Grand Piano"
+from = "https://github.com/sfzinstruments/MatsHelgesson.MaestroConcertGrandPiano"
+reason = "unclear"
+says = "No licence file; \"published with the permission of the author on May 16, 2020 via e-mail\", which says who may publish it there and not what anyone else may do."
+
+[[left_out]]
+name = "Discord SFZ General MIDI Bank"
+from = "https://github.com/sfzinstruments/Discord-SFZ-GM-Bank"
+reason = "unclear"
+says = "\"Each instrument is licensed by its creator. The creator's license terms can be found in the .sfz file for the instrument.\" Some files carry none, one misstates its source's terms, and most of the bank is placeholders: not read instrument by instrument."
+
+[[left_out]]
+name = "Ethan Winer's Soundfonts"
+from = "https://github.com/sfzinstruments/EthanWiner.Soundfonts"
+reason = "unclear"
+says = "No licence file; \"available freely since a long time\", which is not a licence."
+
+[[left_out]]
+name = "Clavecin"
+from = "https://github.com/sfzinstruments/Clavecin"
+reason = "unclear"
+says = "No licence and no terms: a conversion of a GigaSampler file, with nothing said of what may be done with it."
+
+[[left_out]]
+name = "Damien's Funky Guitar"
+from = "https://github.com/sfzinstruments/DamiensFunkyGuitar"
+reason = "unclear"
+says = "No licence and no terms."
+
+[[left_out]]
+name = "Kastendieck Steel Drum"
+from = "https://github.com/sfzinstruments/Kastendieck.SteelDrum"
+reason = "unclear"
+says = "No licence and no terms."
+
+[[left_out]]
+name = "Krumhorn"
+from = "https://github.com/sfzinstruments/Krumhorn"
+reason = "unclear"
+says = "No licence and no terms; \"sampled from an Ensoniq EPS\"."
+
+[[left_out]]
+name = "Orgue Eglise"
+from = "https://github.com/sfzinstruments/OrgueEglise"
+reason = "unclear"
+says = "No licence and no terms."
+
+[[left_out]]
+name = "Ovation Guitar"
+from = "https://github.com/sfzinstruments/OvationGuitar"
+reason = "unclear"
+says = "No licence and no terms."
+
+[[left_out]]
+name = "Picked Lapharp"
+from = "https://github.com/sfzinstruments/PickedLapharp"
+reason = "unclear"
+says = "No licence and no terms."
+
+[[left_out]]
+name = "Terkelsen's Mandolin"
+from = "https://github.com/sfzinstruments/Terkelsen.Mandolin"
+reason = "unclear"
+says = "No licence and no terms."
+
+[[left_out]]
+name = "Terkelsen's Marimba"
+from = "https://github.com/sfzinstruments/Terkelsen.Marimba"
+reason = "unclear"
+says = "No licence and no terms."
+
+[[left_out]]
+name = "TicTokMen Moogdrums 1"
+from = "https://github.com/sfzinstruments/TicTokMen.Moogdrums1"
+reason = "unclear"
+says = "No licence and no terms."
+
+[[left_out]]
+name = "TicTokMen Retro Drums 1"
+from = "https://github.com/sfzinstruments/TicTokMen.RetroDrums1"
+reason = "unclear"
+says = "No licence; \"Not all recordings were done in house (but all are free use licenses)\", which names none."
+
+[[left_out]]
+name = "VCSL: Psaltery, bowed and plucked"
+from = "https://github.com/sgossner/VCSL/tree/sfz/Chordophones/Zithers"
+reason = "form"
+says = "Its four instrument files are in the sfz branch of the library and the recordings they name (\"Psaltery, Bowed and Plucked/...\") are not: there is nothing to play. The library is under a Creative Commons 0 license."
+
+[[left_out]]
+name = "FreePats instruments published only as 7z or tar archives"
+from = "https://freepats.zenvoid.org/"
+reason = "form"
+says = "Eleven CC0 instruments of the FreePats project have no repository to fetch a pinned version from, only archives in forms Trill does not unpack (7z, tar.xz, tar.bz2): Xylophone, Concert Harp, Tenor Saxophone, Clarinet, Wooden Recorder, Kalimba, Jaw Harp, Church Organ Emulation, Drawbar Organ Emulation, Percussive Organ Emulation and Rock Organ Emulation. Their licence passes (\"Published under the terms of the Creative Commons CC0 1.0 public domain dedication.\"); only the fetching is missing."
+

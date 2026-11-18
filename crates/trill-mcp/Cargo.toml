@@ -14,6 +14,7 @@ path = "src/main.rs"
 trill-core.workspace = true
 trill-dsp.workspace = true
 trill-engine.workspace = true
+trill-catalogue.workspace = true
 trill-fetch.workspace = true
 trill-library.workspace = true
 trill-listen.workspace = true

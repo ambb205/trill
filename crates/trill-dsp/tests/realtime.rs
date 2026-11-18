@@ -101,17 +101,25 @@ fn factory() -> Builtins {
 /// An instrument that does a little of everything: layers by velocity and
 /// by a controller, takes in turn and at random, loops with and without a
 /// crossfade, sounds for a key coming up, a filter with an envelope, a
-/// vibrato on the wheel, switches, and groups that silence one another.
+/// vibrato on the wheel, switches, groups that silence one another, slow
+/// waves that move the pitch, the level, the filter and one another, and
+/// the controllers a note has of its own, which choose what sounds and
+/// move where it begins.
 const BUSY: &str = "<control> set_cc1=20\n<global> sw_lokey=24 sw_hikey=26 sw_default=24 ampeg_release=0.3\n\
     <master> lokey=27 hikey=60\n\
     <group> sw_last=24 lovel=1 hivel=70 loop_mode=loop_sustain loop_start=20000 loop_end=30000 loop_crossfade=0.02\n\
     <region> sample=long_0.wav pitch_keycenter=40 xfout_locc1=30 xfout_hicc1=90 pitchlfo_freq=5 pitchlfo_depth_oncc1=40\n\
+    lfo01_freq=2 lfo01_freq_oncc1=6 lfo01_pitch_oncc1=30 lfo01_phase_oncc135=1 lfo02_freq=0.3 lfo02_wave=-1\n\
+    lfo02_freq_lfo01=2 lfo03_freq=3 lfo03_volume=2 lfo03_pan=40 lfo03_delay=0.05 lfo03_fade_oncc1=0.2\n\
     <region> sample=long_1.wav pitch_keycenter=45 xfin_locc1=30 xfin_hicc1=90 cutoff=900 fileg_depth=3600 fileg_decay=0.2\n\
+    resonance_cc74=9 fileg_depth_oncc131=1200 lfo01_freq=4 lfo01_cutoff=600 amplitude_oncc133=100\n\
     <group> sw_last=24 lovel=71 hivel=127 seq_length=2 loop_mode=loop_continuous loop_start=20000 loop_end=64999\n\
     <region> sample=long_2.wav pitch_keycenter=50 seq_position=1 cutoff_cc74=2400 cutoff=2000 fil_type=hpf_1p\n\
     <region> sample=long_3.wav pitch_keycenter=50 seq_position=2 amplfo_freq=4 amplfo_depth=3\n\
     <group> sw_last=25 offset=18000 offset_random=500 delay_random=0.01 pitch_random=20 amp_random=2\n\
-    <region> sample=long_4.wav pitch_keycenter=48 lorand=0 hirand=0.5\n\
+    offset_oncc131=600 delay_oncc136=0.004 volume_oncc136=2\n\
+    <region> sample=long_4.wav pitch_keycenter=48 lorand=0 hirand=0.5 locc137=0 hicc137=63\n\
+    <region> sample=long_4.wav pitch_keycenter=48 lorand=0 hirand=0.5 locc137=64 hicc137=127 tune=7\n\
     <region> sample=long_5.wav pitch_keycenter=48 lorand=0.5 hirand=1 end=40000\n\
     <master> lokey=61 hikey=96 loop_mode=one_shot\n\
     <region> sample=long_4.wav pitch_keycenter=72 group=1 off_by=2 note_polyphony=2\n\

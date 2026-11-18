@@ -6,7 +6,9 @@ use super::arrangement::ops;
 use super::files::Confirm;
 use super::shortcuts::{self, Command};
 use super::state::{Clipboard, Cx, DetailTab, StoryAsk};
-use super::{arrangement, audio_settings, brand, files, filming, missing, recording, recovery, setup, timeline};
+use super::{
+    arrangement, audio_settings, brand, credits, files, filming, missing, recording, recovery, setup, timeline,
+};
 use eframe::egui::{self, Align2, Id, Rect, Sense, Ui, pos2, vec2};
 use trill_core::TimeSignature;
 use trill_core::project::{MAX_TEMPO, MIN_TEMPO};
@@ -173,6 +175,11 @@ fn file_menu(ui: &mut Ui, cx: &mut Cx) {
     let count = if gone > 0 { gone.to_string() } else { String::new() };
     if MenuItem::new("Missing files\u{2026}").shortcut(&count).show(ui, theme).clicked() {
         missing::open(cx);
+    }
+    // What the song owes the makers of the sampled instruments it plays,
+    // and whom Trill names for the ones it offers.
+    if MenuItem::new("Credits\u{2026}").show(ui, theme).clicked() {
+        credits::open(cx);
     }
     trill_noir::menu_separator(ui, theme);
     if item(ui, "Save", Command::Save, true) {
