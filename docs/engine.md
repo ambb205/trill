@@ -136,13 +136,15 @@ the share of a buffer's time that making it took; a buffer that takes more than 
 
 | The device asks for | On one thread | Spread (eight threads) |
 |---|---|---|
-| 480 frames (10 ms, the shared device) | 115.7 % on average, 292 % at the worst, 10,569 of 16,345 buffers late | 36.6 % on average, 74 % at the worst, none of 19,306 late (34.2 % and 37.7 % on two other runs, none late) |
+| 480 frames (10 ms, the shared device) | 115.7 % on average, 292 % at the worst, 10,569 of 16,345 buffers late | 36.6 % on average, 74 % at the worst, none of 19,306 late (34.2 %, 36.6 % and 37.7 % on three other runs; one buffer late in the four, of 77,225) |
 | 128 frames (2.7 ms) | 113.9 % on average, 282 % at the worst, 40,416 of 62,367 late | 38.9 % on average, 117 % at the worst, 2 of 72,396 late (37.5 % and 1 late on another run) |
 | 64 frames (1.3 ms) | 119.4 % on average, 581 % at the worst, 84,489 of 120,615 late | 40.9 % on average, 100 of 144,798 late |
 
-The buffers that still come late at the small sizes are the plugins' own: single blocks of the sampled
-instruments took 2 to 6.5 ms on one thread at 64 frames, and a synthesizer's 1.5 ms, where a buffer lasts 1.3 ms
-(spread, the longest were 6 to 17 ms; whether the system held a thread up in those was not found out).
+The buffers that still come late are single blocks of one track that take many times what they usually do:
+on one thread at 64 frames blocks of the sampled instruments took 2 to 6.5 ms, and a synthesizer's 1.5 ms, where
+a buffer lasts 1.3 ms. Spread, the longest were 6 to 17 ms at 64 frames and 5 to 15 ms at 480, once in a play of
+the song or less (the one late buffer at 480 frames was a guitar's block of 11.6 ms). Whether those are the
+plugins' own or the system holding a thread up in the middle of a track was not found out.
 
 On four threads the song took 38.1 % at 480 frames, so the last four buy little: with eight, each track costs
 a fifth to a third more than it does alone (139 to 154 % of one processor for all of them, against 115 %; 121 %
