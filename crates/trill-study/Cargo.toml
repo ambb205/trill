@@ -1,0 +1,46 @@
+[package]
+name = "trill-study"
+description = "A recording taken apart: its stems, beats and words found by models in a process of its own, the study that is kept of it, and the setup of the models"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Does a study's run for a program that cannot be started a second time (a
+# test): `trill` and `trill-mcp` start themselves.
+[[bin]]
+name = "trill-study-job"
+path = "src/bin/trill-study-job.rs"
+
+[dependencies]
+trill-core.workspace = true
+trill-dsp.workspace = true
+trill-fetch.workspace = true
+trill-listen.workspace = true
+trill-media.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The models' runtime, ONNX Runtime, by its Rust binding. Nothing of the
+# runtime itself is linked or fetched when Trill is built: the library is
+# one of the parts a user fetches in the setup, and is loaded when a study
+# is run. Pinned, because the binding is a release candidate and what it
+# asks of the library is what the setup's parts were measured with.
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "api-24"] }
+# The transcriber tells a phrase it is stuck on by how well it packs. In
+# the tree already, through other crates.
+flate2 = "1"
+
+[target.'cfg(windows)'.dependencies]
+# How much memory the machine has left, and how much a process that
+# studies has taken. The same crate and version the engine brings in.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3"

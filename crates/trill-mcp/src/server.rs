@@ -440,6 +440,7 @@ impl TrillServer {
             + Self::film_router()
             + Self::files_router()
             + Self::listening_router()
+            + Self::studying_router()
             + Self::wavetable_router()
     }
 
@@ -3310,9 +3311,10 @@ impl ServerHandler for TrillServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
                 crate::sounds::INSTRUCTIONS,
                 crate::listening::INSTRUCTIONS,
+                crate::studying::INSTRUCTIONS,
                 crate::wavetable::INSTRUCTIONS,
                 crate::files::INSTRUCTIONS,
                 crate::music::INSTRUCTIONS,

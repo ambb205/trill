@@ -126,6 +126,7 @@ pub(super) fn on_stage(
         devices: vec![Box::new(ProbeFactory(heard.clone()))],
         audio: Some(Arc::new(host.clone())),
         midi: Some(Box::new(midi.clone())),
+        ..Parts::default()
     };
     let runtime = Runtime::start_custom(RuntimeOptions { storage, ..RuntimeOptions::hermetic() }, parts).unwrap();
     let mut harness = Harness::on(Arc::new(runtime), options, setup);
@@ -940,6 +941,7 @@ fn a_modelled_saxophone_sounds_when_it_is_simply_typed_on() {
         devices: plugins.factories(),
         audio: Some(Arc::new(host.clone())),
         midi: Some(Box::new(ScriptedMidi::new())),
+        ..Parts::default()
     };
     let runtime = Runtime::start_custom(RuntimeOptions::hermetic(), parts).unwrap();
     let mut sax = None;

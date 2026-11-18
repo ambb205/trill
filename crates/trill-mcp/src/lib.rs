@@ -29,6 +29,7 @@ mod requests;
 mod server;
 mod sounds;
 mod story;
+mod studying;
 mod view;
 mod wavetable;
 pub mod words;

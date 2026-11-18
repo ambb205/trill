@@ -273,6 +273,15 @@ shot audio-settings-fallback "$song" --select Lead --settings --audio-scene fall
 shot audio-settings-none --settings --audio-scene none
 shot graphite-audio-settings "$song" --select Lead --settings --audio-scene studio --theme graphite
 
+# Setup: what Trill fetches when asked, and what runs the models, on a
+# made-up machine (the parts are the ones really published; nothing is
+# fetched for a picture).
+shot setup-fresh --setup-scene fresh
+shot setup-fetching "$song" --select Lead --setup-scene fetching
+shot setup-machine "$song" --select Lead --setup-scene machine
+shot graphite-setup-fetching "$song" --select Lead --setup-scene fetching --theme graphite
+shot min-window-setup "$song" --setup-scene fetching --size 1024x640
+
 # Staged for the last pictures, in a folder git ignores: two projects that
 # their program did not live to save, in a profile folder of their own (so
 # the offer shows nobody's real work, and nothing of the user's is read),

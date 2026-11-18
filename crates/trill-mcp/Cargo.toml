@@ -14,11 +14,13 @@ path = "src/main.rs"
 trill-core.workspace = true
 trill-dsp.workspace = true
 trill-engine.workspace = true
+trill-fetch.workspace = true
 trill-library.workspace = true
 trill-listen.workspace = true
 trill-plugins.workspace = true
 trill-runtime.workspace = true
 trill-stage.workspace = true
+trill-study.workspace = true
 trill-theory.workspace = true
 anyhow.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }

@@ -1,7 +1,9 @@
 //! Command-line options.
 
 use crate::audio_scene::AudioScene;
-use crate::ui::{AssistantOptions, AssistantScene, BrowserTab, DetailTab, KeyboardOptions, MakingOfStart, UiOptions};
+use crate::ui::{
+    AssistantOptions, AssistantScene, BrowserTab, DetailTab, KeyboardOptions, MakingOfStart, SetupScene, UiOptions,
+};
 use anyhow::{Context, anyhow, bail};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -60,6 +62,10 @@ Options:
   --settings              Start with the Audio and MIDI panel open (Ctrl+, shows it)
   --audio-scene <NAME>    Show made-up audio and MIDI devices in that panel, for screenshots:
                           studio, fallback or none
+  --setup                 Start with the Setup panel open: what Trill fetches when asked, and what
+                          runs the models (Ctrl+Shift+, shows it)
+  --setup-scene <NAME>    Show a made-up machine in that panel, for screenshots: fresh, fetching
+                          or machine
   --hold <KEYS>           Hold these keys of it down, for screenshots: adg is a C major chord, and
                           zzat a kick and a hat two octaves down
   --screenshot <PATH.png> Render the window to a PNG and exit (implies --null-audio)
@@ -131,6 +137,10 @@ pub struct Cli {
     pub settings: bool,
     /// Made-up audio and MIDI devices to show in it.
     pub audio_scene: Option<AudioScene>,
+    /// Open the Setup panel.
+    pub setup: bool,
+    /// A made-up machine to show in it.
+    pub setup_scene: Option<SetupScene>,
     /// The controller the lane under the piano roll's notes shows first;
     /// `None` for velocity.
     pub lane: Option<ControllerKind>,
@@ -196,6 +206,16 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
                 cli.audio_scene = Some(
                     scene.with_context(|| format!("unknown scene '{name}' (expected one of {})", known.join(", ")))?,
                 );
+            }
+            "--setup" => cli.setup = true,
+            "--setup-scene" => {
+                let name = value("the name of a scene")?;
+                let known: Vec<&str> = SetupScene::ALL.iter().map(|(name, _)| *name).collect();
+                let scene = SetupScene::named(&name);
+                cli.setup_scene = Some(
+                    scene.with_context(|| format!("unknown scene '{name}' (expected one of {})", known.join(", ")))?,
+                );
+                cli.setup = true;
             }
             "--hold" => {
                 let keys = value("the keys to hold")?;
@@ -373,6 +393,8 @@ impl Cli {
             },
             keyboard: self.keyboard.clone(),
             show_settings: self.settings,
+            show_setup: self.setup,
+            setup_scene: self.setup_scene,
             show_film: self.film,
             show_missing: self.missing_files,
             record: self.record,

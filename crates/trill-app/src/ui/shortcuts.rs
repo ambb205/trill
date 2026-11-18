@@ -69,6 +69,7 @@ pub enum Command {
     /// Starts a take, or ends the one being recorded.
     Record,
     AudioSettings,
+    Setup,
     ShowShortcuts,
 }
 
@@ -157,6 +158,7 @@ pub const BINDINGS: &[Binding] = &[
     bind(Command::ExportWav, CTRL_SHIFT, Key::E, When::Always, Section::File, "Export the song as WAV"),
     bind(Command::ExportFilm, CTRL_SHIFT, Key::F, When::Always, Section::File, "Export a film of the song"),
     bind(Command::AudioSettings, CTRL, Key::Comma, When::Always, Section::File, "Audio and MIDI settings"),
+    bind(Command::Setup, CTRL_SHIFT, Key::Comma, When::Always, Section::File, "Setup: what Trill fetches when asked"),
     bind(Command::Undo, CTRL, Key::Z, When::NotTyping, Section::Edit, "Undo"),
     bind(Command::Redo, CTRL_SHIFT, Key::Z, When::NotTyping, Section::Edit, "Redo"),
     bind(Command::Redo, CTRL, Key::Y, When::NotTyping, Section::Edit, "Redo"),

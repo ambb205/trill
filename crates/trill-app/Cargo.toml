@@ -15,6 +15,7 @@ trill-assistant.workspace = true
 trill-core.workspace = true
 trill-dsp.workspace = true
 trill-engine.workspace = true
+trill-fetch.workspace = true
 trill-library.workspace = true
 trill-mcp.workspace = true
 trill-media.workspace = true
@@ -22,6 +23,7 @@ trill-noir.workspace = true
 trill-plugins.workspace = true
 trill-runtime.workspace = true
 trill-stage.workspace = true
+trill-study.workspace = true
 
 anyhow.workspace = true
 log.workspace = true

@@ -37,6 +37,9 @@ fn main() -> anyhow::Result<()> {
     };
     let runtime = Arc::new(started.context("could not start Trill")?);
     runtime.do_jobs_as_usual();
+    // And this is a program that may start itself to study a recording,
+    // and fetch what the user asks it to with the system's curl.
+    runtime.study_and_fetch_as_usual();
     if let Some(scene) = cli.audio_scene {
         scene.stage(&runtime);
     }

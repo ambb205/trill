@@ -13,6 +13,7 @@
 //! that caveat.
 
 use crate::server::{Reply, TrillServer, explain, finish, import_parts};
+use crate::studying::{not_done, study_view};
 use crate::view::round;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -22,9 +23,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use trill_core::ClipId;
 use trill_listen::harmony::note_name;
 use trill_listen::{Correction, Heard, HitKind, MidiPart};
+use trill_runtime::Studied;
 
 /// Appended to the server's instructions.
 pub(crate) const INSTRUCTIONS: &str = "\
@@ -81,6 +84,9 @@ pub enum ListenShow {
     Melody,
     /// Every bar line: its time in seconds and the tempo of its bar.
     Bars,
+    /// Of a study: the words that are sung, line by line, each line with where it starts and how long it is, and
+    /// every word of it as [bar, beat, word].
+    Words,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -90,8 +96,15 @@ pub struct ListenRequest {
     pub path: Option<String>,
     /// Or an audio clip of the song, by its id: the file it plays is listened to, from its start.
     pub clip: Option<u64>,
+    /// Or a study, by its id (the study tool makes one): what was found in the recording's stems, which is right
+    /// of a whole mix where listening to the file is a sketch, and has the words.
+    pub study: Option<String>,
+    /// Of a study: only the loops and single hits of this stem ("vocals", "drums", "bass", "other"), with the
+    /// stem's file and the bars it plays in.
+    pub stem: Option<String>,
     /// What to list beside the summary: any of "chords", "parts", "loops", "one_shots", "groove", "bass",
-    /// "melody", "bars". Leave it out for the summary alone, which says how many of each there are.
+    /// "melody", "bars", and of a study "words". Leave it out for the summary alone, which says how many of each
+    /// there are.
     #[serde(default)]
     pub show: Vec<ListenShow>,
     /// Only what lies from this bar of the recording on (1 is its first bar line).
@@ -103,7 +116,8 @@ pub struct ListenRequest {
     /// How many items each list holds (default 40, at most 200).
     pub limit: Option<usize>,
     /// Corrections to the beat grid, made in this order: "half", "double", "rotate" (the bar starts one beat
-    /// later), "bar3" to "bar12" (beats in a bar).
+    /// later), "bar3" to "bar12" (beats in a bar). Given for a study they are kept with it, and everything is
+    /// heard again over the corrected grid (some seconds); "none" takes them off again.
     #[serde(default)]
     pub grid: Vec<String>,
 }
@@ -128,6 +142,8 @@ pub struct TranscribeRequest {
     pub path: Option<String>,
     /// Or an audio clip of the song, by its id.
     pub clip: Option<u64>,
+    /// Or a study, by its id: what was heard in its stems.
+    pub study: Option<String>,
     /// What to write: "bass", "melody", "groove" or "chords".
     pub part: TranscribePart,
     /// The first bar of the recording to write (1 is its first bar line, and the default): it becomes beat 0.
@@ -212,10 +228,18 @@ fn corrections(texts: &[String]) -> Result<Vec<Correction>, String> {
         .collect()
 }
 
+/// What a request listens to.
+enum Sound {
+    /// An audio file, by its path.
+    File(String),
+    /// A study, by its id.
+    Study(String),
+}
+
 /// What the whole of a reply says first.
-fn summary(path: &str, heard: &Heard) -> Value {
+fn summary(heard: &Heard) -> Value {
     let grid = &heard.grid;
-    let mut out = json!({ "file": path, "seconds": round(heard.seconds) });
+    let mut out = json!({ "seconds": round(heard.seconds) });
     if grid.beats.is_empty() {
         out["tempo"] = Value::Null;
         out["note"] = json!(
@@ -257,8 +281,63 @@ fn summary(path: &str, heard: &Heard) -> Value {
     out
 }
 
+/// What a reply says of a study before what was heard in it, and of the
+/// stem that was asked for.
+fn of_study(out: &mut Value, heard: &Heard, studied: &Studied, stem: Option<&str>) -> Result<(), String> {
+    let view = study_view(&studied.report, &studied.folder);
+    for key in ["study", "title", "of", "by", "stems", "grid", "ran_on"] {
+        if let Some(value) = view.get(key) {
+            out[key] = value.clone();
+        }
+    }
+    let lines = studied.lyrics.as_ref().map_or(0, |lyrics| lyrics.lines.len());
+    out["found"]["words"] = json!(lines);
+    if let Some(lyrics) = studied.lyrics.as_ref().filter(|lyrics| !lyrics.lines.is_empty()) {
+        out["words"] = json!({
+            "lines": lines,
+            "language": lyrics.language,
+            "each_word_placed": lyrics.placed,
+        });
+    }
+    out["heard_as"] = json!(format!(
+        "the stems a model split the recording into ({}): the groove is the drums', the bass line the bass's, the melody and the words the voice's",
+        heard.stems.join(", ")
+    ));
+    let Some(stem) = stem else { return Ok(()) };
+    if !heard.stems.iter().any(|name| name == stem) {
+        return Err(format!("the study has no stem '{stem}'. Stems: {}", heard.stems.join(", ")));
+    }
+    // The bars it plays in: where it is within 25 dB of its loudest (a level is 45 dB to the
+    // one), which what bleeds into a stem from the others is not; gaps of under two seconds closed.
+    let counted = Counted::new(heard);
+    let mut plays: Vec<(f64, f64)> = Vec::new();
+    for (index, level) in
+        heard.activity.iter().filter(|(name, _)| name == stem).flat_map(|(_, levels)| levels).enumerate()
+    {
+        let at = index as f64 * 0.1;
+        if *level < 0.45 {
+            continue;
+        }
+        match plays.last_mut() {
+            Some(last) if at - last.1 < 2.0 => last.1 = at + 0.1,
+            _ => plays.push((at, at + 0.1)),
+        }
+    }
+    let mut about = json!({ "name": stem, "path": studied.folder.stem(stem).display().to_string() });
+    if !heard.grid.beats.is_empty() {
+        about["plays_in_bars"] = plays
+            .iter()
+            .map(|&(from, to)| json!([counted.place(from).0, counted.place((to - 0.05).max(from)).0]))
+            .collect();
+    }
+    out["stem"] = about;
+    Ok(())
+}
+
 /// The lists a caller asked for, each to its page.
-fn lists(out: &mut Value, heard: &Heard, request: &ListenRequest) {
+fn lists(out: &mut Value, heard: &Heard, studied: Option<&Studied>, request: &ListenRequest) {
+    let stem = request.stem.as_deref().filter(|_| studied.is_some());
+    let drum = |kind: HitKind| kind != HitKind::Bass;
     let counted = Counted::new(heard);
     let (start, end) = counted.stretch(request.from_bar, request.to_bar);
     // What ends on the stretch's first bar line, to a millisecond, is not in it.
@@ -312,6 +391,7 @@ fn lists(out: &mut Value, heard: &Heard, request: &ListenRequest) {
                     .loops
                     .iter()
                     .filter(|found| inside(found.start, found.end))
+                    .filter(|found| stem.is_none_or(|stem| found.stems.len() == 1 && found.stems[0] == stem))
                     .map(|found| {
                         let mut item = json!({
                             "id": found.id,
@@ -340,6 +420,12 @@ fn lists(out: &mut Value, heard: &Heard, request: &ListenRequest) {
                     .one_shots
                     .iter()
                     .filter(|shot| inside(shot.start, shot.end))
+                    .filter(|shot| match stem {
+                        None => true,
+                        Some("drums") => drum(shot.kind),
+                        Some("bass") => !drum(shot.kind),
+                        Some(_) => false,
+                    })
                     .map(|shot| {
                         let mut item = json!({
                             "id": shot.id,
@@ -382,6 +468,36 @@ fn lists(out: &mut Value, heard: &Heard, request: &ListenRequest) {
                     })
                     .collect();
                 ("bars", items)
+            }
+            ListenShow::Words => {
+                let Some(lyrics) = studied.and_then(|studied| studied.lyrics.as_ref()) else {
+                    out["words"] = json!(match studied {
+                        Some(_) => "this study wrote down no words: none were asked for, or nobody sings",
+                        None => "the words are written down by a study (the study tool), which splits the voice from the rest first: listen with its `study`",
+                    });
+                    continue;
+                };
+                let items = lyrics
+                    .lines
+                    .iter()
+                    .filter(|line| inside(line.start, line.end))
+                    .map(|line| {
+                        let words: Vec<Value> = line
+                            .words
+                            .iter()
+                            .map(|word| {
+                                if heard.grid.beats.is_empty() {
+                                    json!([round(word.start), word.text])
+                                } else {
+                                    let (bar, beat) = counted.place(word.start);
+                                    json!([bar, beat, word.text])
+                                }
+                            })
+                            .collect();
+                        with(placed(line.start), json!({ "beats": counted.beats_between(line.start, line.end), "text": line.text, "words": words }))
+                    })
+                    .collect();
+                ("lines", items)
             }
         };
         out[name] = page(items, offset, limit);
@@ -431,36 +547,74 @@ fn groove_by_bar(heard: &Heard, counted: &Counted<'_>, start: f64, end: f64) -> 
 }
 
 impl TrillServer {
-    /// The file a request names, by its path or as the file of an audio clip.
-    fn sound_of(&self, path: Option<&str>, clip: Option<u64>) -> Result<String, String> {
-        match (path.filter(|path| !path.trim().is_empty()), clip) {
-            (Some(path), None) => Ok(path.to_owned()),
-            (None, Some(clip)) => {
+    /// What a request listens to: a file by its path, the file of an audio clip, or a study.
+    fn sound_of(&self, path: Option<&str>, clip: Option<u64>, study: Option<&str>) -> Result<Sound, String> {
+        let study = study.map(str::trim).filter(|study| !study.is_empty());
+        match (path.filter(|path| !path.trim().is_empty()), clip, study) {
+            (Some(path), None, None) => Ok(Sound::File(path.to_owned())),
+            (None, Some(clip), None) => {
                 let session = self.session.lock();
                 let project = session.project();
                 let found = project.clip(ClipId(clip)).map_err(|error| explain(project, error))?;
-                found.audio().map(|audio| audio.path.clone()).ok_or_else(|| {
+                found.audio().map(|audio| Sound::File(audio.path.clone())).ok_or_else(|| {
                     format!(
                         "clip {clip} ({}) holds notes, not audio: there is no recording in it to listen to",
                         found.name
                     )
                 })
             }
-            (Some(_), Some(_)) => Err("give `path` or `clip`, not both".to_owned()),
-            (None, None) => {
-                Err("say what to listen to: `path` (an audio file) or `clip` (an audio clip of the song)".to_owned())
-            }
+            (None, None, Some(study)) => Ok(Sound::Study(study.to_owned())),
+            (None, None, None) => Err(
+                "say what to listen to: `path` (an audio file), `clip` (an audio clip of the song) or `study` (a study's id)"
+                    .to_owned(),
+            ),
+            _ => Err("give one of `path`, `clip` and `study`, not more".to_owned()),
         }
     }
 
-    /// Listens to a file off the threads that serve the other calls.
-    async fn heard(&self, path: &str, grid: &[String]) -> Result<Arc<Heard>, String> {
-        let corrections = corrections(grid)?;
+    /// Listens to a file, or reads a study, off the threads that serve the
+    /// other calls. Corrections given for a study are kept with it, and it
+    /// is heard again over them first.
+    async fn heard(&self, sound: &Sound, grid: &[String]) -> Result<(Arc<Heard>, Option<Studied>), String> {
         let runtime = self.runtime.clone();
-        let file = PathBuf::from(path);
-        tokio::task::spawn_blocking(move || runtime.hear(&file, &corrections).map_err(|error| error.to_string()))
-            .await
-            .map_err(|error| format!("listening stopped: {error}"))?
+        match sound {
+            Sound::File(path) => {
+                let corrections = corrections(grid)?;
+                let file = PathBuf::from(path);
+                let heard = tokio::task::spawn_blocking(move || {
+                    runtime.hear(&file, &corrections).map_err(|error| error.to_string())
+                })
+                .await
+                .map_err(|error| format!("listening stopped: {error}"))??;
+                Ok((heard, None))
+            }
+            Sound::Study(id) => {
+                let wanted = match grid {
+                    [] => None,
+                    [none] if none.trim() == "none" => Some(Vec::new()),
+                    grid => Some(corrections(grid)?),
+                };
+                let id = id.clone();
+                tokio::task::spawn_blocking(move || {
+                    let desk = runtime.studies()?;
+                    if let Some(wanted) = wanted
+                        && desk.report(&id)?.study.corrections != wanted
+                    {
+                        desk.correct(&id, wanted)?;
+                        desk.wait(&id, Duration::from_secs(300))?;
+                    }
+                    let studied = runtime.study(&id)?;
+                    match studied.heard.clone() {
+                        Some(heard) if studied.report.study.state == trill_study::State::Done => {
+                            Ok((heard, Some(studied)))
+                        }
+                        _ => Err(not_done(&studied.report)),
+                    }
+                })
+                .await
+                .map_err(|error| format!("reading the study stopped: {error}"))?
+            }
+        }
     }
 
     async fn transcribed(&self, request: TranscribeRequest) -> Reply {
@@ -470,8 +624,8 @@ impl TrillServer {
                     .to_owned(),
             );
         }
-        let path = self.sound_of(request.path.as_deref(), request.clip)?;
-        let heard = self.heard(&path, &request.grid).await?;
+        let sound = self.sound_of(request.path.as_deref(), request.clip, request.study.as_deref())?;
+        let (heard, _) = self.heard(&sound, &request.grid).await?;
         let counted = Counted::new(&heard);
         // From the first bar line, so that the recording's bars are the file's.
         let from_bar = request.from_bar.or((!heard.grid.beats.is_empty()).then_some(1));
@@ -525,14 +679,25 @@ impl TrillServer {
     /// Say what is in an audio file, without changing anything and without a model: its tempo and bars, key,
     /// tuning, and how many chords, parts, loops, single hits and notes were found; and, with `show`, those
     /// lists themselves, placed in the recording's own bars. Use it to read a reference, or to learn the tempo
-    /// and key of a sound whose name does not say.
+    /// and key of a sound whose name does not say. Given a `study` it reads what a study found in the
+    /// recording's stems, with the words.
     #[tool(annotations(title = "Listen to a sound", read_only_hint = true))]
     async fn listen(&self, Parameters(request): Parameters<ListenRequest>) -> CallToolResult {
         let reply = async {
-            let path = self.sound_of(request.path.as_deref(), request.clip)?;
-            let heard = self.heard(&path, &request.grid).await?;
-            let mut out = summary(&path, &heard);
-            lists(&mut out, &heard, &request);
+            let sound = self.sound_of(request.path.as_deref(), request.clip, request.study.as_deref())?;
+            let (heard, studied) = self.heard(&sound, &request.grid).await?;
+            let mut out = summary(&heard);
+            match (&sound, &studied) {
+                (Sound::File(path), _) => {
+                    if request.stem.is_some() {
+                        return Err("`stem` is of a study: a file is listened to as one sound".to_owned());
+                    }
+                    out["file"] = json!(path);
+                }
+                (Sound::Study(_), Some(studied)) => of_study(&mut out, &heard, studied, request.stem.as_deref())?,
+                (Sound::Study(_), None) => {}
+            }
+            lists(&mut out, &heard, studied.as_ref(), &request);
             Ok(out)
         }
         .await;

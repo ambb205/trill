@@ -367,7 +367,10 @@ async fn what_cannot_be_listened_to_is_said_in_a_sentence() {
     let path = save(&fixture.folder.path().join("drums.wav"), drums());
 
     let neither = call(&fixture.client, "listen", json!({})).await.unwrap_err();
-    assert_eq!(neither, "say what to listen to: `path` (an audio file) or `clip` (an audio clip of the song)");
+    assert_eq!(
+        neither,
+        "say what to listen to: `path` (an audio file), `clip` (an audio clip of the song) or `study` (a study's id)"
+    );
     let gone = call(
         &fixture.client,
         "listen",

@@ -28,7 +28,8 @@
 //! clip's MIDI controllers with the same gestures. [`keyboard`]
 //! is the computer keyboard played as an instrument, [`recording`] the
 //! window's part in arming tracks and recording takes, and
-//! [`audio_settings`] the Audio and MIDI panel.
+//! [`audio_settings`] the Audio and MIDI panel, [`setup`] the panel of
+//! what Trill fetches when asked and of what runs the models.
 //! [`device_layouts`] says how each built-in device arranges its
 //! parameters, [`sample_panels`] draws what the sampler and the drum rack
 //! play, and [`displays`] draws the devices' small curves from the math in
@@ -74,6 +75,8 @@ mod recording;
 mod recovery;
 mod response;
 mod sample_panels;
+mod setup;
+mod setup_scene;
 mod shortcuts;
 mod snapshot;
 mod sound_presets;
@@ -96,6 +99,7 @@ pub use assistant::{Options as AssistantOptions, Scene as AssistantScene};
 pub use keyboard::Options as KeyboardOptions;
 pub use making_of::Start as MakingOfStart;
 pub use making_of::scene::play as play_making_of_scene;
+pub use setup_scene::SetupScene;
 pub use state::{BrowserTab, DetailTab};
 
 use anyhow::anyhow;
@@ -160,6 +164,10 @@ pub struct UiOptions {
     pub keyboard: KeyboardOptions,
     /// Open with the Audio and MIDI panel up.
     pub show_settings: bool,
+    /// Open with the Setup panel up.
+    pub show_setup: bool,
+    /// A made-up machine to show in it, in place of this one.
+    pub setup_scene: Option<SetupScene>,
     /// Open with the film panel up.
     pub show_film: bool,
     /// Open with the list of missing files up.
@@ -197,6 +205,8 @@ impl Default for UiOptions {
             assistant: AssistantOptions::default(),
             keyboard: KeyboardOptions::default(),
             show_settings: false,
+            show_setup: false,
+            setup_scene: None,
             show_film: false,
             show_missing: false,
             record: false,

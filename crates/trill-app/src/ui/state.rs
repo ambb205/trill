@@ -8,6 +8,7 @@ use super::files::Jobs;
 use super::filming::Filming;
 use super::keyboard::Keyboard;
 use super::recovery::Recovery;
+use super::setup::Setup;
 use super::snapshot::{Live, Snapshot};
 use super::sounds::{DropTarget, Sounds};
 use super::timeline::{Glide, GridChoice, PitchView, Snap, TimeView};
@@ -1109,6 +1110,8 @@ pub struct Cx<'a> {
     pub settings: &'a mut Settings,
     /// The film panel, and the film being made if one is.
     pub filming: &'a mut Filming,
+    /// The Setup panel: what is fetched when asked, and what runs the models.
+    pub setup: &'a mut Setup,
 }
 
 impl Cx<'_> {
