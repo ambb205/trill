@@ -101,13 +101,80 @@ fn change_rect(ui: &Ui, cx: &Cx, geometry: &Geometry, change: &Change) -> (Rect,
     (rect, left + 3.0 + number + 6.0)
 }
 
-/// The change whose words at the foot of the ruler are at `position`.
+/// How much of a change the foot of the ruler says: as much as there is
+/// room for before the next change, and never a word cut short. A real
+/// recording's tempo in a song is many changes close together.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Said {
+    /// The bar's number and what changes.
+    Whole,
+    /// What changes: the bar's number is the ruler's own to give.
+    Change,
+    /// Its line alone. What it is is said when the pointer is on it.
+    Mark,
+}
+
+/// A change as the foot of the ruler shows it.
+#[derive(Copy, Clone, Debug)]
+struct Laid {
+    change: Change,
+    /// What of it is drawn, and so what catches the pointer.
+    rect: Rect,
+    said: Said,
+    /// Where what changes begins.
+    said_at: f32,
+}
+
+/// How much of a change is said in `room` points, where all of it takes
+/// `whole` and what changes alone `change`.
+fn said_in(room: f32, whole: f32, change: f32) -> Said {
+    if whole <= room {
+        Said::Whole
+    } else if change <= room {
+        Said::Change
+    } else {
+        Said::Mark
+    }
+}
+
+/// Every change up to `last_beat` as the ruler shows it, in order.
+fn laid_changes(ui: &Ui, cx: &Cx, geometry: &Geometry, last_beat: Beats) -> Vec<Laid> {
+    let style = trill_noir::TextStyle { tracking: 0.4, ..cx.theme.text.micro };
+    let found: Vec<Change> = changes(&cx.snap.project).into_iter().filter(|change| change.beat <= last_beat).collect();
+    let top = geometry.ruler.bottom() - TIME_STRIP + 1.0;
+    (0..found.len())
+        .map(|index| {
+            let change = found[index];
+            let (whole, said_at) = change_rect(ui, cx, geometry, &change);
+            let left = whole.left();
+            let room = found.get(index + 1).map_or(f32::INFINITY, |next| geometry.x(next.beat).round() - 3.0 - left);
+            let alone = 3.0 + text::width(ui.painter(), style, &change.said()) + 5.0;
+            let said = said_in(room, whole.width(), alone);
+            let width = match said {
+                Said::Whole => whole.width(),
+                Said::Change => alone,
+                // The line, and a little to each side to catch the pointer.
+                Said::Mark => 7.0_f32.min(room.max(3.0)),
+            };
+            let said_at = if said == Said::Change { left + 3.0 } else { said_at };
+            Laid {
+                change,
+                rect: Rect::from_min_size(pos2(left - 2.0, top), vec2(width + 2.0, TIME_STRIP - 2.0)),
+                said,
+                said_at,
+            }
+        })
+        .collect()
+}
+
+/// The change whose words, or whose line, at the foot of the ruler are at
+/// `position`.
 fn change_at(ui: &Ui, cx: &Cx, geometry: &Geometry, position: Pos2) -> Option<Change> {
     if strip_at(geometry, position.y) != Strip::Time {
         return None;
     }
-    let found = changes(&cx.snap.project).into_iter().rev();
-    found.into_iter().find(|change| change_rect(ui, cx, geometry, change).0.contains(position))
+    let laid = laid_changes(ui, cx, geometry, f64::INFINITY);
+    laid.into_iter().rev().find(|laid| laid.rect.contains(position)).map(|laid| laid.change)
 }
 
 /// Which strip of the ruler a position is in.
@@ -160,16 +227,37 @@ fn marker_rect(geometry: &Geometry, marker: &Marker, name_width: f32) -> Rect {
     Rect::from_min_size(pos2(left, top), vec2(MARKER_FLAG + 3.0 + name_width + 4.0, MARKER_STRIP))
 }
 
-/// The marker whose flag or name is at `position`, by index. Later markers
-/// are drawn over earlier ones, so they are found first.
+/// Whether a marker's name is written beside its flag: only where the
+/// whole of it has room before the next marker's flag. A name is never cut
+/// short and never written over another: the pointer says the ones that
+/// are left out.
+fn names_shown(ui: &Ui, cx: &Cx, geometry: &Geometry) -> Vec<bool> {
+    let style = marker_style(cx);
+    let markers = &cx.snap.project.markers;
+    (0..markers.len())
+        .map(|index| {
+            let left = geometry.x(markers[index].beat).round();
+            // The next flag that stands to the right of this one.
+            let next = markers[index + 1..].iter().map(|next| geometry.x(next.beat).round()).find(|x| *x > left);
+            let name = text::width(ui.painter(), style, &markers[index].name);
+            next.is_none_or(|next| left + MARKER_FLAG + 3.0 + name + 4.0 <= next - 2.0)
+        })
+        .collect()
+}
+
+/// The marker whose flag, or whose name where it is written, is at
+/// `position`, by index. Later markers are drawn over earlier ones, so
+/// they are found first.
 fn marker_at(ui: &Ui, cx: &Cx, geometry: &Geometry, position: Pos2) -> Option<usize> {
     if strip_at(geometry, position.y) != Strip::Markers {
         return None;
     }
     let style = marker_style(cx);
+    let shown = names_shown(ui, cx, geometry);
     let markers = cx.snap.project.markers.iter().enumerate().rev();
-    let hit = |(_, marker): &(usize, &Marker)| {
-        marker_rect(geometry, marker, text::width(ui.painter(), style, &marker.name)).contains(position)
+    let hit = |(index, marker): &(usize, &Marker)| {
+        let name = if shown[*index] { text::width(ui.painter(), style, &marker.name) } else { -4.0 };
+        marker_rect(geometry, marker, name).contains(position)
     };
     markers.into_iter().find(hit).map(|(index, _)| index)
 }
@@ -195,26 +283,37 @@ fn interact(ui: &Ui, cx: &mut Cx, geometry: &Geometry, response: &Response) {
     if cx.state.arrangement.drag.is_none()
         && let Some(pointer) = response.hover_pos()
     {
-        let hint = match (strip_at(geometry, pointer.y), loop_hit(region, geometry, pointer)) {
+        // A marker and a change are named by the pointer: where they stand close, that is the only place
+        // the ruler has room to say them.
+        let bars = &geometry.meter;
+        let on_marker = marker_at(ui, cx, geometry, pointer).and_then(|index| cx.snap.project.markers.get(index));
+        let on_change = change_at(ui, cx, geometry, pointer);
+        let hint: String = match (strip_at(geometry, pointer.y), loop_hit(region, geometry, pointer)) {
             (_, Some(LoopHit::Start | LoopHit::End)) => {
                 ui.set_cursor_icon(CursorIcon::ResizeHorizontal);
-                "Drag to move this end of the loop \u{00B7} L switches looping on and off"
+                "Drag to move this end of the loop \u{00B7} L switches looping on and off".to_owned()
             }
             (_, Some(LoopHit::Body)) => {
                 ui.set_cursor_icon(CursorIcon::Grab);
-                "Drag to move the loop \u{00B7} L switches looping on and off"
+                "Drag to move the loop \u{00B7} L switches looping on and off".to_owned()
             }
-            (Strip::Loop, None) => "Drag to draw the loop region here",
-            (Strip::Markers, _) if marker_at(ui, cx, geometry, pointer).is_some() => {
-                "Click to go to this marker \u{00B7} drag to move it \u{00B7} double-click to rename \u{00B7} right-click for more"
-            }
-            (Strip::Markers, _) => "Double-click to add a marker \u{00B7} M adds one at the edit cursor",
-            (Strip::Time, _) if change_at(ui, cx, geometry, pointer).is_some() => {
-                "Double-click to type another \u{00B7} drag to move it \u{00B7} right-click to remove it or make the tempo glide"
-            }
-            (Strip::Time, _) => {
-                "Click to move the edit cursor \u{00B7} drag to select time \u{00B7} right-click to set the tempo or the time signature here"
-            }
+            (Strip::Loop, None) => "Drag to draw the loop region here".to_owned(),
+            (Strip::Markers, _) => match on_marker {
+                Some(marker) => format!(
+                    "{} at bar {} \u{00B7} click to go to it \u{00B7} drag to move it \u{00B7} double-click to rename \u{00B7} right-click for more",
+                    marker.name,
+                    timeline::format_bar_beat(marker.beat, bars)
+                ),
+                None => "Double-click to add a marker \u{00B7} M adds one at the edit cursor".to_owned(),
+            },
+            (Strip::Time, _) => match on_change {
+                Some(change) => format!(
+                    "At bar {}: {} \u{00B7} double-click to type another \u{00B7} drag to move it \u{00B7} right-click to remove it or make the tempo glide",
+                    timeline::format_bar_beat(change.beat, bars),
+                    change.said()
+                ),
+                None => "Click to move the edit cursor \u{00B7} drag to select time \u{00B7} right-click to set the tempo or the time signature here".to_owned(),
+            },
         };
         cx.state.hint.set(hint);
     }
@@ -554,20 +653,21 @@ fn paint(ui: &Ui, cx: &Cx, geometry: &Geometry) {
     // and what changes are said together, and no other number is put
     // under them.
     let editing = cx.state.arrangement.editing_change.as_ref().map(|edit| edit.target.beat());
-    let changing: Vec<(Change, Rect, f32)> = changes(&cx.snap.project)
+    let changing: Vec<Laid> = laid_changes(ui, cx, geometry, last_beat)
         .into_iter()
-        .filter(|change| change.beat <= last_beat)
-        .map(|change| {
-            let (rect, said_at) = change_rect(ui, cx, geometry, &change);
-            (change, rect, said_at)
-        })
-        .filter(|(_, rect, _)| rect.right() >= ruler.left())
+        .filter(|laid| laid.rect.right() >= ruler.left())
         .collect();
     let label_step = timeline::grid_step(geometry.time.pixels_per_beat, signature, LABEL_MIN_PIXELS).max(tick_step);
     let style = trill_noir::TextStyle { tracking: 0.4, ..theme.text.micro };
     timeline::for_each_grid_line(first_beat, last_beat, bars, label_step, |beat, _| {
         let x = geometry.x(beat).round();
-        if changing.iter().any(|(_, rect, _)| x + 34.0 > rect.left() && x < rect.right()) {
+        // A change that says its own bar stands for the number; one that says less leaves the number to
+        // be written, where it has room beside what the change does say.
+        let taken = |laid: &Laid| match laid.said {
+            Said::Whole | Said::Change => x + 34.0 > laid.rect.left() && x < laid.rect.right(),
+            Said::Mark => x + 34.0 > laid.rect.left() + 2.0 && x < laid.rect.left() + 2.0,
+        };
+        if changing.iter().any(taken) {
             return;
         }
         let room = Rect::from_min_max(pos2(x + 4.0, time_top + 1.0), ruler.max);
@@ -580,22 +680,24 @@ fn paint(ui: &Ui, cx: &Cx, geometry: &Geometry) {
             theme.ink_faint,
         );
     });
-    for (index, (change, rect, said_at)) in changing.iter().enumerate() {
+    for laid in &changing {
+        let change = &laid.change;
         let x = geometry.x(change.beat).round();
         paint::vline(&painter, x, time_top..=ruler.bottom(), theme.signal);
-        // Zoomed far out, one change's words give way where the next begin.
-        let room = changing.get(index + 1).map_or(ruler.right(), |(_, next, _)| next.left() - 4.0);
-        let painter = painter.with_clip_rect(Rect::from_min_max(pos2(x, time_top), pos2(room.max(x), ruler.bottom())));
-        let number = Rect::from_min_max(pos2(x + 4.0, time_top + 1.0), ruler.max);
         let place = timeline::format_bar_beat(change.beat, bars);
-        text::paint(&painter, number, Align2::LEFT_CENTER, style, &place, theme.ink_faint);
-        if editing.is_none_or(|editing| (editing - change.beat).abs() > 1e-6) {
-            let said = Rect::from_min_max(pos2(*said_at, time_top + 1.0), ruler.max);
+        let typing = editing.is_some_and(|editing| (editing - change.beat).abs() <= 1e-6);
+        // As much of it as has room before the next: its bar and what changes, what changes, or its line.
+        if laid.said == Said::Whole {
+            let number = Rect::from_min_max(pos2(x + 4.0, time_top + 1.0), ruler.max);
+            text::paint(&painter, number, Align2::LEFT_CENTER, style, &place, theme.ink_faint);
+        }
+        if laid.said != Said::Mark && !typing {
+            let said = Rect::from_min_max(pos2(laid.said_at, time_top + 1.0), ruler.max);
             text::paint(&painter, said, Align2::LEFT_CENTER, style, &change.said(), theme.ink);
         }
-        // Said to a screen reader, and to a test, as it is shown.
+        // Said to a screen reader, and to a test, in full whatever is shown.
         let response =
-            ui.interact(*rect, ui.scope_id().with(("change", ChangeTarget::at(change.beat, true))), Sense::hover());
+            ui.interact(laid.rect, ui.scope_id().with(("change", ChangeTarget::at(change.beat, true))), Sense::hover());
         let label = format!("At bar {place}: {}", change.said());
         response.widget_info(|| eframe::egui::WidgetInfo::labeled(eframe::egui::Role::Label, true, &label));
     }
@@ -603,6 +705,7 @@ fn paint(ui: &Ui, cx: &Cx, geometry: &Geometry) {
     // Markers: a flag on a short staff, and the name beside it.
     let renaming = view.renaming_marker.as_ref().map(|edit| edit.target);
     let marker_style = marker_style(cx);
+    let named = names_shown(ui, cx, geometry);
     for (index, marker) in cx.snap.project.markers.iter().enumerate() {
         if marker.beat < first_beat - 64.0 || marker.beat > last_beat {
             continue;
@@ -612,7 +715,8 @@ fn paint(ui: &Ui, cx: &Cx, geometry: &Geometry) {
         paint::vline(&painter, x, top..=ruler.bottom(), theme.ink_dim);
         let flag = vec![pos2(x, top + 2.0), pos2(x + MARKER_FLAG, top + 5.5), pos2(x, top + 9.0)];
         painter.add(Shape::convex_polygon(flag, theme.ink_dim, Stroke::NONE));
-        if renaming != Some(index) {
+        // Its name whole, or not at all: the pointer says a name that has no room.
+        if renaming != Some(index) && named[index] {
             let room = Rect::from_min_max(pos2(x + MARKER_FLAG + 3.0, top), pos2(ruler.right(), top + MARKER_STRIP));
             text::paint(&painter, room, Align2::LEFT_CENTER, marker_style, &marker.name, theme.ink_dim);
         }
@@ -634,6 +738,17 @@ fn paint(ui: &Ui, cx: &Cx, geometry: &Geometry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_change_says_as_much_as_it_has_room_for_and_never_half_a_word() {
+        // All of it takes 70 points, what changes alone 30.
+        assert_eq!(said_in(f32::INFINITY, 70.0, 30.0), Said::Whole);
+        assert_eq!(said_in(70.0, 70.0, 30.0), Said::Whole);
+        assert_eq!(said_in(69.0, 70.0, 30.0), Said::Change);
+        assert_eq!(said_in(30.0, 70.0, 30.0), Said::Change);
+        assert_eq!(said_in(29.0, 70.0, 30.0), Said::Mark);
+        assert_eq!(said_in(0.0, 70.0, 30.0), Said::Mark);
+    }
     use crate::ui::DetailTab;
     use crate::ui::arrangement::rows::Rows;
     use crate::ui::state::UiState;
