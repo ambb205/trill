@@ -751,7 +751,11 @@ fn status_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, least: f32) -> f32 {
     }
 
     let load = cx.live.cpu_load.clamp(0.0, 9.99);
+    // A song that is more than the machine plays in time says so here
+    // too, whatever the last buffer happened to take.
+    let short = cx.live.keeping.short.as_ref().map(|short| short.sentence());
     let color = match load {
+        _ if short.is_some() => theme.signal,
         load if load >= 0.85 => theme.signal,
         load if load >= 0.6 => theme.warn,
         _ => theme.data,
@@ -775,8 +779,20 @@ fn status_group(ui: &mut Ui, cx: &mut Cx, bar: Rect, least: f32) -> f32 {
     text::paint(&painter, label, Align2::LEFT_CENTER, theme.text.micro, "CPU", theme.ink_faint);
 
     let group = Rect::from_min_max(pos2(label.left(), bar.top()), pos2(right, bar.bottom()));
-    let response = ui.interact(group, Id::unique("cpu-load"), Sense::hover());
-    cx.hint(&response, "Share of the audio thread\u{2019}s time budget in use");
+    // The readout is a button: it opens what each track costs.
+    let response = ui.interact(group, Id::unique("cpu-load"), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Playback load"));
+    if response.hovered() {
+        painter.rect_filled(group.expand2(vec2(4.0, 0.0)), 0.0, theme.hover);
+    }
+    match short {
+        Some(sentence) => cx.hint(&response, sentence),
+        None => cx
+            .hint(&response, "Share of the audio thread\u{2019}s time in use \u{00B7} click for what each track costs"),
+    }
+    if response.clicked() {
+        super::load::open(cx);
+    }
 
     // The computer keyboard's switch, on the transport's side of the
     // readouts. What it plays is shown in a strip of its own while on.

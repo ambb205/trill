@@ -64,6 +64,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
         let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         row.status(theme.info, &format!("Filming {name} \u{00B7} {how_far}"));
     }
+    // A song that is more than the machine plays in time: one line for as
+    // long as it is, which opens what each track costs.
+    let short_item = row.short(ui);
     // Files the song names that are not on disk: one line for all of
     // them, which opens the list.
     let missing_item = row.missing(ui);
@@ -84,6 +87,15 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     cx.hint(&response, about);
     if response.clicked() {
         audio_settings::open(cx);
+    }
+    if let Some(response) = short_item {
+        cx.hint(
+            &response,
+            "Buffers are coming late, each a gap in what is heard \u{00B7} click for what each track costs",
+        );
+        if response.clicked() {
+            super::load::open(cx);
+        }
     }
     if let Some(response) = missing_item {
         cx.hint(
@@ -131,6 +143,25 @@ impl Row<'_, '_> {
         // A long device name gives way before it pushes the rest out.
         let room = self.rest().with_max_x(self.x + 300.0);
         self.x += text::paint(self.painter, room, Align2::LEFT_CENTER, style, value, theme.ink_dim) + GAP;
+    }
+
+    /// That the song is more than the machine plays in time, in the signal
+    /// color: a button that opens the playback load. `None` while it is
+    /// played in time.
+    fn short(&mut self, ui: &Ui) -> Option<egui::Response> {
+        let words = super::load::status_words(&self.cx.live.keeping)?;
+        let theme = self.cx.theme;
+        let start = self.x;
+        self.x = paint::dot(self.painter, pos2(self.x, self.bar.center().y), theme.metric.dot, theme.signal) + 5.0;
+        self.x += text::paint(self.painter, self.rest(), Align2::LEFT_CENTER, theme.text.micro, &words, theme.signal);
+        let item = Rect::from_min_max(pos2(start - 4.0, self.bar.top()), pos2(self.x + 4.0, self.bar.bottom()));
+        self.x += GAP;
+        let response = ui.interact(item, ui.scope_id().with("falling-short"), Sense::click());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, words.clone()));
+        if response.hovered() {
+            self.painter.rect_filled(item, 0.0, theme.hover);
+        }
+        Some(response)
     }
 
     /// What the song is missing, in the warning color: a button that

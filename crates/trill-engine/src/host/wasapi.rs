@@ -404,12 +404,11 @@ pub(super) fn open_exclusive(
             if opened.send(Ok(format)).is_err() {
                 return;
             }
-            let priority = super::priority::AudioPriority::raise();
-            if !priority.granted() {
+            // (Given up when this thread ends.)
+            if !super::priority::AudioPriority::raise_for_good() {
                 log::warn!("the audio thread was not given audio priority; expect drop-outs under load");
             }
             run(&device, renderer, &on_failure, &stop);
-            drop(priority);
         })
         .map_err(|error| OpenError::Failed(format!("cannot start a thread: {error}")))?;
 

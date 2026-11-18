@@ -31,6 +31,9 @@ windows = { version = "0.62", features = [
     # How much memory the process holds: plugins that load samples show in it.
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
+    # How much of its processor a thread has had, for telling a block that
+    # took long to compute from a thread the system held up.
+    "Win32_System_WindowsProgramming",
     # For a process that renders for another: how much memory the machine
     # has left before one is started, and, in it, which module a fault was
     # in, said on its way down.

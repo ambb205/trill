@@ -185,6 +185,13 @@ shot graphite-sampled-instrument "$keys" --browse devices --library "$pack" --se
 # instruments it plays, here two of the pack that Trill's catalogue does not
 # know, and the makers Trill names for the sets it offers.
 shot credits "$keys" --browse devices --library "$pack" --credits
+# The playback load (a click on CPU in the top bar): how the machine keeps
+# up with the song as it plays and what each track costs, on a load that is
+# made up: one the machine plays with room to spare, and one that is more
+# than it plays in time, with its line in the status bar and its notice.
+shot load-calm "$song" --load calm
+shot load-short "$song" --load short
+shot graphite-load-short "$song" --load short --theme graphite
 
 # Missing files: the same song after its pack was moved. The line in the
 # status bar and the clips marked, with the library pointed at where the

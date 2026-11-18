@@ -450,6 +450,7 @@ impl TrillServer {
             + Self::taking_router()
             + Self::wavetable_router()
             + Self::catalogue_router()
+            + Self::playing_router()
     }
 
     /// The names of the tools the server offers.
@@ -2451,6 +2452,9 @@ impl TrillServer {
                     if let Some(note) = crate::view::loading_note(&session) {
                         out["loading"] = json!(note);
                     }
+                    if let Some(note) = crate::playing::falling_short_note(&session) {
+                        out["falling_short"] = json!(note);
+                    }
                     out
                 }
                 TransportAction::Stop => {
@@ -3355,7 +3359,7 @@ impl ServerHandler for TrillServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("trill", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+                "{INSTRUCTIONS}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
                 crate::sounds::INSTRUCTIONS,
                 crate::catalogue::INSTRUCTIONS,
                 crate::listening::INSTRUCTIONS,
@@ -3365,6 +3369,7 @@ impl ServerHandler for TrillServer {
                 crate::music::INSTRUCTIONS,
                 crate::instruments::INSTRUCTIONS,
                 crate::hearing::INSTRUCTIONS,
+                crate::playing::INSTRUCTIONS,
                 crate::story::INSTRUCTIONS,
                 crate::film::INSTRUCTIONS
             ))

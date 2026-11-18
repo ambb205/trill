@@ -19,7 +19,7 @@ mod system;
 #[cfg(windows)]
 mod wasapi;
 
-pub use crate::clock::now_ns;
+pub use crate::clock::{now_ns, thread_cycles};
 pub use crate::engine::Renderer;
 pub use system::SystemHost;
 
@@ -266,7 +266,9 @@ impl AudioHost for NullHost {
         let thread = std::thread::Builder::new()
             .name("audio-null".into())
             .spawn(move || {
-                let _priority = audio_priority.then(priority::AudioPriority::raise);
+                if audio_priority {
+                    priority::AudioPriority::raise_for_good();
+                }
                 let period = Duration::from_secs_f64(block_frames as f64 / sample_rate as f64);
                 let mut next = Instant::now();
                 while !stop.load(Ordering::Relaxed) {

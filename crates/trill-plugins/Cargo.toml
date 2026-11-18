@@ -9,6 +9,11 @@ license.workspace = true
 [dependencies]
 trill-core.workspace = true
 clack-host = "0.2.0"
+# The CLAP structs themselves, which clack is built on (so this builds
+# nothing more): a plugin's input buffers are filled in by hand, because
+# clack 0.2 writes a port's constant mask by the port's place among the
+# ports and not by its channels.
+clap-sys = "0.5.0"
 clack-extensions = { version = "0.2.0", features = [
     "clack-host",
     "audio-ports",

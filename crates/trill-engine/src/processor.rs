@@ -24,6 +24,7 @@
 //! reports go through queues that have one end), every [`mix`], the
 //! master and the monitor.
 
+use crate::clock::thread_cycles;
 use crate::engine::RecordPhase;
 use crate::glide::{DECLICK_SECONDS, STEP, Span, gated};
 use crate::graph::{
@@ -210,7 +211,18 @@ pub struct Processor {
     /// there is a team and the graph can use one; the share of a block's
     /// time above which they are; and how much of it the tracks have
     /// taken of late.
+    /// Whether the cycles a thread runs over each track's block are counted
+    /// beside the clock: see [`Processor::count_cycles`].
+    cycles: bool,
     spreading: bool,
+    /// Nothing is known yet of what the song costs to play: devices came
+    /// with its graph that have not been through a quarter of a second of
+    /// playing. Until that is known the song is spread wherever it can be
+    /// (there is a team, and the graph says what can be made at once), so
+    /// that the first buffers of a song that needs its threads are made on
+    /// them; a song that does not is back on one thread a quarter of a
+    /// second into its first play.
+    unknown: bool,
     spread_above: f64,
     weight: f64,
     /// What the tracks have taken to make, and how long the buffers they
@@ -267,7 +279,9 @@ impl Processor {
             room: Room::new(),
             spread: None,
             team: None,
+            cycles: false,
             spreading: false,
+            unknown: false,
             spread_above: SPREAD_ABOVE,
             weight: 0.0,
             window: (0.0, 0.0),
@@ -382,6 +396,9 @@ impl Processor {
             self.chase = true;
             self.take_back = true;
             self.jumped(self.position(), false);
+            // What the song costs is measured anew from here: a quarter
+            // of a second that is all playing.
+            self.window = (0.0, 0.0);
         }
     }
 
@@ -406,6 +423,7 @@ impl Processor {
         }
         self.playing = false;
         self.flush = Flush::Everything;
+        self.window = (0.0, 0.0);
     }
 
     /// Forgets what its devices have measured so far (how far each has
@@ -663,6 +681,12 @@ impl Processor {
             self.spread = None;
         }
         let position = self.position();
+        // Devices that come with the graph have never been run here: what
+        // the song costs with them is not known.
+        if new.brings_devices() {
+            self.unknown = true;
+            self.window = (0.0, 0.0);
+        }
         new.adopt(&mut self.graph);
         if new.rounds.is_none() {
             self.spreading = false;
@@ -710,6 +734,16 @@ impl Processor {
         }
     }
 
+    /// Has the cycles a thread runs over each track's block counted beside
+    /// the clock's time, for the longest block of each
+    /// ([`crate::graph::Cost::longest_ran`]): what tells a block that took
+    /// long to work out from a thread the system kept from working. It
+    /// asks the system twice a track and block, so it is for measuring and
+    /// off otherwise.
+    pub fn count_cycles(&mut self, on: bool) {
+        self.cycles = on;
+    }
+
     /// Whether the song that plays would be spread if it had threads to be
     /// spread over: it takes long enough to make, it can be made in
     /// parts, and nobody has given it any.
@@ -723,7 +757,7 @@ impl Processor {
     /// How many threads make the blocks of the song that plays right now,
     /// this one among them.
     pub fn threads(&self) -> usize {
-        match (self.spreading, &self.team, &self.graph.rounds) {
+        match (self.spreading || self.unknown, &self.team, &self.graph.rounds) {
             (true, Some(team), Some(rounds)) => (team.len() + 1).min(rounds.width()),
             _ => 1,
         }
@@ -861,6 +895,11 @@ impl Processor {
                     self.spreading = false;
                 }
             }
+            // (The quarter of a second began when the song was started, or
+            // later: all of it was playing.)
+            if self.playing {
+                self.unknown = false;
+            }
         }
 
         // What was placed in this call has been played; anything placed
@@ -959,6 +998,7 @@ impl Processor {
             param_beat,
             declick,
             sample_rate: self.sample_rate,
+            cycles: self.cycles,
         };
         let mut hand = Hand {
             live: &self.live,
@@ -981,7 +1021,9 @@ impl Processor {
                 prelude(track, &common, room, &mut hand);
             }
             rounds.block(&*crew, tracks, buses, keys, &common, mix_left, mix_right)
-        } else if let (true, Some(team), Some(rounds)) = (self.spreading, self.team.as_deref(), rounds.as_deref_mut()) {
+        } else if let (true, Some(team), Some(rounds)) =
+            (self.spreading || self.unknown, self.team.as_deref(), rounds.as_deref_mut())
+        {
             for (track, room) in tracks.iter_mut().zip(rounds.rooms_mut()) {
                 prelude(track, &common, room, &mut hand);
             }
@@ -993,6 +1035,7 @@ impl Processor {
             for track in tracks.iter_mut() {
                 prelude(track, &common, room, &mut hand);
                 let began = Instant::now();
+                let ran = common.cycles.then(thread_cycles);
                 // A group or return starts from what was fed to its bus;
                 // every track that feeds it has already run.
                 sound(track, &common, buses, room);
@@ -1004,6 +1047,7 @@ impl Processor {
                 let listened = track.key_out.and_then(|key| keys.get_mut(key));
                 finish(track, &common, room, listened);
                 room.spent = began.elapsed().as_nanos() as u64;
+                room.ran = ran.map_or(0, |ran| thread_cycles().saturating_sub(ran));
                 made += tally(track, &common, room);
                 mix(track, &common, room, buses, mix_left, mix_right);
             }
@@ -1033,7 +1077,7 @@ impl Processor {
         out_left.copy_from_slice(mix_left);
         out_right.copy_from_slice(mix_right);
         master.meter.record(peak_left, peak_right);
-        master.meter.cost(master_began.elapsed().as_nanos() as u64, frames);
+        master.meter.cost(master_began.elapsed().as_nanos() as u64, 0, frames);
 
         // The metronome counts the time signature the block is in, in
         // bars that begin where that signature took over.
@@ -1085,6 +1129,9 @@ pub(crate) struct Common<'a> {
     /// How many frames an abrupt change of a gain is spread over.
     declick: u32,
     sample_rate: f64,
+    /// The cycles each thread runs over a track's block are counted
+    /// beside the clock's time: see [`Processor::count_cycles`].
+    pub cycles: bool,
 }
 
 impl Common<'_> {
@@ -1113,8 +1160,10 @@ pub(crate) struct Room {
     /// [`prelude`] for [`sound`].
     unordered: bool,
     /// How long the track's block has taken to make so far, in
-    /// nanoseconds, by whoever made it.
+    /// nanoseconds, by whoever made it; and the cycles they ran in that
+    /// time, where those are counted.
     pub spent: u64,
+    pub ran: u64,
 }
 
 impl Room {
@@ -1129,6 +1178,7 @@ impl Room {
             shares: vec![0.0; MAX_BLOCK],
             unordered: false,
             spent: 0,
+            ran: 0,
         }
     }
 }
@@ -1165,7 +1215,7 @@ pub(crate) struct Hand<'a> {
 /// afterwards: what was played and the reports go through queues that
 /// have one end.
 pub(crate) fn prelude(track: &mut TrackNode, common: &Common, room: &mut Room, hand: &mut Hand) {
-    room.spent = 0;
+    (room.spent, room.ran) = (0, 0);
     room.events.clear();
     release_notes(track, common.flush, &mut room.events);
     let events = &mut room.events;
@@ -1283,7 +1333,7 @@ pub(crate) fn finish(track: &mut TrackNode, common: &Common, room: &mut Room, li
 /// Puts on record what the track's block took to make, and returns it in
 /// nanoseconds.
 pub(crate) fn tally(track: &TrackNode, common: &Common, room: &Room) -> u64 {
-    track.meter.cost(room.spent, common.controls.frames);
+    track.meter.cost(room.spent, room.ran, common.controls.frames);
     room.spent
 }
 

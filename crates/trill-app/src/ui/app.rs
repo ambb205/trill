@@ -325,6 +325,18 @@ impl TrillApp {
                 // while it was taken is not part of what the window looks like.
                 let load = if self.options.screenshot.is_some() { 0.0 } else { session.audio_load() };
                 self.live.set_cpu_load(load);
+                // What each track costs and whether the song is played in
+                // time: the session's own count, a scene's made-up one, or
+                // none in a picture, for the same reason.
+                self.live.keeping = match (self.options.load_scene, self.options.screenshot.is_some()) {
+                    (Some(scene), _) => scene.of(&self.snapshot.project),
+                    (None, true) => trill_engine::KeepingUp::default(),
+                    (None, false) => session.keeping_up(),
+                };
+                if let Some(scene) = self.options.load_scene {
+                    // The top bar shows what the scene has.
+                    self.live.cpu_load = scene.of(&self.snapshot.project).load.mean;
+                }
                 self.live.audio_faults = session.audio_faults();
                 self.live.preparing = session.preparing();
                 self.live.update_editors(&self.snapshot, &session);
@@ -911,6 +923,7 @@ impl TrillApp {
             self.setup.show(scene);
         }
         let open_credits = std::mem::take(&mut self.options.show_credits);
+        let open_load = std::mem::take(&mut self.options.show_load);
         let mut cx = self.cx();
         if film_asked.is_some() {
             filming::open_on(&ctx, &mut cx, film_asked);
@@ -937,6 +950,11 @@ impl TrillApp {
         if open_credits {
             credits::open(&mut cx);
         }
+        if open_load {
+            super::load::open(&mut cx);
+        }
+        // Said once when the song begins to be more than the machine plays.
+        super::load::notice(&mut cx);
         if let Some(name) = open_editor {
             editors::open_named(&mut cx, &name);
         }
@@ -1025,6 +1043,7 @@ impl TrillApp {
         filming::modal(&ctx, &mut cx);
         shortcuts::window(&ctx, &mut cx);
         credits::window(&ctx, &mut cx);
+        super::load::window(&ctx, &mut cx);
         // Clear of the assistant's panel: its Send and Stop are in that corner.
         let aside = if cx.assistant.is_open() { cx.assistant.width() } else { 0.0 };
         let corner = ctx.content_rect().right_bottom() - egui::vec2(12.0 + aside, status_bar::HEIGHT + 10.0);
@@ -1390,6 +1409,8 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
                 cx.state.shortcuts_open = false;
             } else if cx.state.credits_open {
                 cx.state.credits_open = false;
+            } else if cx.state.load_open {
+                cx.state.load_open = false;
             } else if cx.settings.is_open() {
                 audio_settings::toggle(cx);
             } else if cx.setup.is_open() {

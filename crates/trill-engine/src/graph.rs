@@ -253,6 +253,8 @@ pub struct Meter {
     cost_frames: AtomicU64,
     cost_nanos: AtomicU64,
     cost_longest: AtomicU64,
+    /// The cycles the thread that made that longest block ran in it.
+    cost_longest_ran: AtomicU64,
 }
 
 /// What making the blocks of a track (or of the master) took over some
@@ -266,9 +268,24 @@ pub struct Cost {
     /// (Blocks are of any length, down to a frame: as a share of its own
     /// time a short one says nothing.)
     pub longest: u64,
+    /// How many of its processor's cycles the thread that made that block
+    /// ran while it did ([`crate::host::thread_cycles`]): far fewer than
+    /// the clock's time comes to where the thread was kept from its work.
+    /// Nothing unless that is being counted ([`crate::Session::count_cycles`]).
+    pub longest_ran: u64,
 }
 
 impl Cost {
+    /// Adds what `later` counted to this.
+    pub fn add(&mut self, later: &Cost) {
+        self.blocks += later.blocks;
+        self.frames += later.frames;
+        self.nanos += later.nanos;
+        if later.longest > self.longest {
+            (self.longest, self.longest_ran) = (later.longest, later.longest_ran);
+        }
+    }
+
     /// The share of one processor's time it took, with the song running at
     /// `sample_rate`: 1 is a whole processor. Nothing where no block was
     /// made.
@@ -304,11 +321,15 @@ impl Meter {
 
     /// Puts on record that a block of `frames` frames took `nanos` to
     /// make. By whichever thread made it: one at a time.
-    pub(crate) fn cost(&self, nanos: u64, frames: usize) {
+    pub(crate) fn cost(&self, nanos: u64, cycles: u64, frames: usize) {
         self.cost_blocks.fetch_add(1, Ordering::Relaxed);
         self.cost_frames.fetch_add(frames as u64, Ordering::Relaxed);
         self.cost_nanos.fetch_add(nanos, Ordering::Relaxed);
-        self.cost_longest.fetch_max(nanos, Ordering::Relaxed);
+        // (One writer at a time: whoever makes the track's block.)
+        if nanos > self.cost_longest.load(Ordering::Relaxed) {
+            self.cost_longest.store(nanos, Ordering::Relaxed);
+            self.cost_longest_ran.store(cycles, Ordering::Relaxed);
+        }
     }
 
     /// What making the blocks took since the previous call.
@@ -318,6 +339,7 @@ impl Meter {
             frames: self.cost_frames.swap(0, Ordering::Relaxed),
             nanos: self.cost_nanos.swap(0, Ordering::Relaxed),
             longest: self.cost_longest.swap(0, Ordering::Relaxed),
+            longest_ran: self.cost_longest_ran.swap(0, Ordering::Relaxed),
         }
     }
 
@@ -670,6 +692,13 @@ impl Graph {
             .iter_mut()
             .flat_map(|track| track.chain.devices.iter_mut())
             .chain(self.master.chain.devices.iter_mut())
+    }
+
+    /// Whether the graph comes with devices of its own: ones that were made
+    /// for it and have not played. (Before [`Graph::adopt`], which hands it
+    /// the ones that were playing.)
+    pub(crate) fn brings_devices(&mut self) -> bool {
+        self.slots_mut().any(|slot| slot.processor.is_some())
     }
 
     pub(crate) fn processor_mut(&mut self, id: DeviceId) -> Option<&mut Box<dyn DeviceProcessor>> {

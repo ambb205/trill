@@ -116,8 +116,18 @@ threads it needed when it last played.
 
 *How many threads.* Half as many as the machine has processors, eight at the most, and never more than the
 song has tracks to make at once; `TRILL_PLAY_THREADS` in the environment says another number, and 1 leaves
-everything to the device's thread. The threads are made when a song first comes near to needing them, off the
-audio thread, and sleep between buffers.
+everything to the device's thread. The threads sleep between buffers, and are made off the audio thread: with
+the first song that has anything to make at once, where a device is playing, so that they are there before a
+note of it is heard.
+
+*The first seconds.* What a song costs is only known once it has played. So a song that has just been opened,
+or been given a device it had not got, is spread from its first buffer, and a quarter of a second of playing
+decides: one that a single thread plays with time to spare goes back to it. Before this the threads were made
+when a song had shown that it needed them, and the song of nineteen plugins below was first spread 214 ms after
+it was open, with 10 to 12 of the twenty-odd buffers before that late, standing still or with play pressed at
+once. Now its first buffer is made on its threads: none of the 211 buffers of its first two seconds was late
+through the system's device with play pressed at once, and one or two (at 101 and 102 % of their time) on two
+other tries, which is plugins doing something for the first time.
 
 *What those threads may do.* They are audio threads like the device's own. None of them allocates or takes a
 lock; work is handed across in atomics; the device's thread makes tracks itself like the others, never sleeps
@@ -125,8 +135,18 @@ on them (it looks again until they are done, and takes what has become ready mea
 without waiting for anything. All of them run in the class Windows keeps for audio ("Pro Audio"). So does the
 device's thread in shared mode, which until now ran at the priority of any other thread of the program, because
 the library that opens the device raises it only when it is built to (the exclusive mode's thread was always
-raised). A device that fails costs the buffer it failed in, on whichever thread, and what was played by hand in
-that buffer is let go of, so that the key it failed on is not played to it again with every buffer after.
+raised). On the machine this was written on that thread was at the system's priority 0, an ordinary thread's,
+before it asked, and was granted the audio class when it did. A device that fails costs the buffer it failed
+in, on whichever thread, and what was played by hand in that buffer is let go of, so that the key it failed on
+is not played to it again with every buffer after.
+
+*Falling short is a sentence.* When five or more buffers come late within ten seconds, the song is said to be
+more than this machine plays in time: once, in words, with how many buffers came late, that an export is not
+affected, which tracks cost most and what helps (switching off or removing devices; muting a track does not
+help, because its devices go on running). The window shows it as a notice, a line in its status bar and the
+head of its Playback load panel ([the window](window.md)); `transport` and `playback_load` say it to a model.
+It is one thing for as long as it holds and ten seconds after, and a new one only when the song has kept up for
+a minute in between. What each track costs can be asked at any time, in the same two places.
 
 *What was measured*, on a machine of eight cores (sixteen processors) that other work kept between a tenth and
 a third busy, with `cargo run -p trill-runtime --example keeps_up`, which plays a song in real time against a
@@ -138,19 +158,34 @@ the share of a buffer's time that making it took; a buffer that takes more than 
 |---|---|---|
 | 480 frames (10 ms, the shared device) | 115.7 % on average, 292 % at the worst, 10,569 of 16,345 buffers late | 36.6 % on average, 74 % at the worst, none of 19,306 late (34.2 %, 36.6 % and 37.7 % on three other runs; one buffer late in the four, of 77,225) |
 | 128 frames (2.7 ms) | 113.9 % on average, 282 % at the worst, 40,416 of 62,367 late | 38.9 % on average, 117 % at the worst, 2 of 72,396 late (37.5 % and 1 late on another run) |
-| 64 frames (1.3 ms) | 119.4 % on average, 581 % at the worst, 84,489 of 120,615 late | 40.9 % on average, 100 of 144,798 late |
+| 64 frames (1.3 ms) | 119.4 % on average, 581 % at the worst, 84,489 of 120,615 late | 40.9 % on average, 100 of 144,798 late (41.7 % and 47 late on another run) |
 
-The buffers that still come late are single blocks of one track that take many times what they usually do:
-on one thread at 64 frames blocks of the sampled instruments took 2 to 6.5 ms, and a synthesizer's 1.5 ms, where
-a buffer lasts 1.3 ms. Spread, the longest were 6 to 17 ms at 64 frames and 5 to 15 ms at 480, once in a play of
-the song or less (the one late buffer at 480 frames was a guitar's block of 11.6 ms). Whether those are the
-plugins' own or the system holding a thread up in the middle of a track was not found out.
+*Through the device itself* (`--device`: the system's default output, shared with the other programs, handed
+silence and asked for nothing) the same song took 35.7 % on average and 74 % at the worst, with none of 19,306
+buffers late, on a machine a fifth busy: what the stand-in says. That device (USB, 48 kHz) asked for exactly 480
+frames every time, never more than 11.2 ms after it had last asked, and what it plays is heard 21.6 ms later.
+
+*The buffers that still come late* are single blocks of one track that take many times what they usually do,
+and there are two kinds of them. `--whose-time` holds the clock's time for a block against the cycles its thread
+ran in it:
+
+- *A plugin working.* A synthesizer's longest block took 3.3 to 3.8 ms of its thread's own running, and an
+  amplifier's and a drum kit's about 3 ms, at any buffer size. In a buffer of 10 ms that fits. One of 2.7 ms or
+  1.3 ms it makes late by itself, and no number of threads changes that.
+- *A thread kept from its work.* The longest block of a run at 64 frames was a sampled guitar's track: 5.19 ms
+  on the clock, of which its thread ran 0.19 ms. Every block of 5 to 17 ms that was seen (the one late buffer at
+  480 frames was such a track's block of 11.6 ms) was on a track with a sampled instrument of one maker, on one
+  thread as on eight, and never on a synthesizer's track, whose long blocks its thread ran from end to end. That
+  points to the instrument waiting inside its own call (for a recording to come from the disk, or for a thread
+  of its own) and not to the system taking audio threads off their processors, which would not choose its
+  tracks; it was not proved, since the system does not say why a thread was not running.
 
 On four threads the song took 38.1 % at 480 frames, so the last four buy little: with eight, each track costs
 a fifth to a third more than it does alone (139 to 154 % of one processor for all of them, against 115 %; 121 %
 with four), presumably because they share the cores' caches and, with other work on the machine, the cores
 themselves. Standing still the song cost one thread 75 to 102 % of its time, since an amplifier costs as much
-on silence as on a guitar, and costs 17 to 23 % spread.
+on silence as on a guitar ([plugins](plugins-and-presets.md) has what was measured of that), and costs 17 to
+23 % spread.
 
 *What sets the limit now* is the longest thing that cannot be divided: the one track that costs most (here a
 synthesizer at a quarter of a processor), with the returns and the master after it. The instruments that take

@@ -24,11 +24,23 @@ const SETTLE_CALLBACKS: u32 = 12;
 
 /// The machine's audio devices.
 #[derive(Default)]
-pub struct SystemHost;
+pub struct SystemHost {
+    /// See [`SystemHost::unheard`].
+    unheard: bool,
+}
 
 impl SystemHost {
     pub fn new() -> Self {
-        Self
+        Self { unheard: false }
+    }
+
+    /// The machine's devices, played silence: every buffer a device asks
+    /// for is made as it would be, and nothing of it is handed on. For
+    /// measuring whether a song is played in time on the device its user
+    /// plays through, without their hearing it. Such a host opens a device
+    /// shared with the other programs and never takes it from them.
+    pub fn unheard() -> Self {
+        Self { unheard: true }
     }
 }
 
@@ -143,10 +155,16 @@ impl AudioHost for SystemHost {
                 Named { name, device, is_default: true }
             }
         };
+        if request.exclusive && self.unheard {
+            return Err(OpenError::Refused(format!(
+                "'{}' is only measured on here, and is not taken from the programs that play through it",
+                found.name
+            )));
+        }
         if request.exclusive {
             return open_exclusive(&found, request, renderer, on_failure);
         }
-        open_shared(&found, request, renderer, on_failure)
+        open_shared(&found, request, renderer, on_failure, self.unheard)
     }
 }
 
@@ -181,6 +199,7 @@ fn open_shared(
     request: &StreamRequest,
     renderer: Renderer,
     on_failure: FailureCallback,
+    unheard: bool,
 ) -> Result<OpenStream, OpenError> {
     let device = &found.device;
     let failed = |error: cpal::Error| match error.kind() {
@@ -229,6 +248,7 @@ fn open_shared(
         frames_per_second: rate as f64,
         latency: None,
         measured: measured.clone(),
+        unheard,
     };
     let lost = on_failure.clone();
     let on_error = move |error: cpal::Error| match error.kind() {
@@ -304,6 +324,8 @@ struct Callback {
     /// its own clock, and a take must not wobble with that.
     latency: Option<f64>,
     measured: Arc<Measured>,
+    /// What is made is not handed on: the device is given silence.
+    unheard: bool,
 }
 
 impl Callback {
@@ -343,10 +365,13 @@ impl Callback {
 
         let timing = Timing { now_ns: now_ns(), latency_frames };
         let mut written = 0;
+        let unheard = self.unheard;
         self.renderer.render(frames, timing, &mut |left, right| {
             let out = &mut data[written * channels..(written + left.len()) * channels];
             for (index, frame) in out.chunks_exact_mut(channels).enumerate() {
-                if channels == 1 {
+                if unheard {
+                    frame.fill(T::from_sample(0.0));
+                } else if channels == 1 {
                     frame[0] = T::from_sample((left[index] + right[index]) * 0.5);
                 } else {
                     frame[0] = T::from_sample(left[index]);

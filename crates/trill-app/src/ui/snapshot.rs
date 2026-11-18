@@ -409,6 +409,10 @@ pub struct Live {
     pub position: f64,
     /// Smoothed fraction of the audio thread's time budget in use.
     pub cpu_load: f32,
+    /// What the audio threads made of the song over the last ten seconds:
+    /// how they kept up, what each track cost, and whether the song is
+    /// more than the machine plays in time.
+    pub keeping: trill_engine::KeepingUp,
     /// Audio callbacks that panicked and were replaced by silence.
     pub audio_faults: u32,
     /// How many warped clips play a stand-in while their stretched audio

@@ -44,8 +44,8 @@ pub use processor::Processor;
 pub use render::{RenderError, RenderJob, RenderOptions, RenderReport, Rendered, Watch};
 pub use saved::{Change as PresetChange, Saved, SavedPresets, SavedSound};
 pub use session::{
-    Added, Costs, Given, ListedSound, MAX_COUNT_IN_BARS, ParamState, ProbeTarget, RecordState, RecordStatus,
-    SampleFile, SavedAsSound, Session, SessionError, SilentInstrument, TakeClip, TrackCost, TransportStatus,
+    Added, Costs, Given, KeepingUp, ListedSound, MAX_COUNT_IN_BARS, ParamState, ProbeTarget, RecordState, RecordStatus,
+    SampleFile, SavedAsSound, Session, SessionError, Shortfall, SilentInstrument, TakeClip, TrackCost, TransportStatus,
     file_facts, listed_sounds, sound_after,
 };
 pub use sources::AudioSources;

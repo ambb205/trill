@@ -5,6 +5,13 @@
 //! what each track cost. For finding out whether a song of some size is
 //! played in time on a machine, before somebody hears that it is not.
 //!
+//! The device is a stand-in that asks for buffers as a real one does, or,
+//! with `--device`, the system's own default output, opened as any
+//! program shares it and handed silence: what the song would have sounded
+//! like is made and thrown away. Nothing is asked of that device (no
+//! rate, no buffer size, never for this program alone), because whoever
+//! sits at the machine may be listening to something else on it.
+//!
 //! ```text
 //! cargo run -p trill-runtime --example keeps_up -- <song.trill> [options]
 //! cargo run -p trill-runtime --example keeps_up -- built-in [options]
@@ -19,14 +26,22 @@
 //! --profile <folder>  where the program keeps what it keeps (settings, the list of
 //!                     plugins it found). Default: `target/keeps-up`. Never the
 //!                     user's own.
-//! --buffer <frames>   how many frames the device asks for at a time (default 480,
+//! --device            the system's default output, shared and handed silence, in
+//!                     place of the stand-in (and then neither of the next two)
+//! --buffer <frames>   how many frames the stand-in asks for at a time (default 480,
 //!                     which is what a shared device of Windows asks for at 48 kHz)
-//! --rate <hz>         the rate the device runs at (default 48000)
+//! --rate <hz>         the rate the stand-in runs at (default 48000)
 //! --threads <n>       how many threads the song may be made on; 1 is the audio
 //!                     callback alone (default: what suits the machine)
 //! --always            spread every block from the first, whatever it costs
 //! --from <beat>       where the song is started (default 0)
 //! --seconds <s>       how long it is played (default: to its end)
+//! --play-at-once      starts the song the moment it is open, for two seconds, to
+//!                     see what its first buffers come to; then goes on as usual
+//! --whose-time        for the longest block of each track, says how much of the time
+//!                     on the clock the thread that made it was running: the rest it
+//!                     was kept from its work (by the system, or waiting inside a
+//!                     device)
 //! --no-plugins        the built-in devices only
 //! --no-device-lanes   leaves out the lines that move devices' parameters, here and
 //!                     for this run only: with them a song's blocks end every 256
@@ -44,7 +59,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use trill_core::project::{AutomationLane, AutomationPoint, AutomationTarget};
 use trill_core::{ChainRef, Note, TrackKind};
-use trill_engine::host::NullHost;
+use trill_engine::host::{AudioHost, NullHost, SystemHost};
 use trill_engine::{AudioBackend, Session};
 use trill_plugins::Scanner;
 use trill_runtime::{Parts, Runtime, RuntimeOptions, Storage};
@@ -52,8 +67,11 @@ use trill_runtime::{Parts, Runtime, RuntimeOptions, Storage};
 struct Options {
     song: PathBuf,
     profile: PathBuf,
-    buffer: usize,
-    rate: u32,
+    device: bool,
+    buffer: Option<usize>,
+    rate: Option<u32>,
+    at_once: bool,
+    whose_time: bool,
     threads: Option<usize>,
     always: bool,
     from: f64,
@@ -64,15 +82,19 @@ struct Options {
 
 fn parse(arguments: &[String]) -> Result<Options, String> {
     let [song, rest @ ..] = arguments else {
-        return Err("usage: keeps_up <song.trill> [--profile <folder>] [--buffer <frames>] [--rate <hz>] \
-                    [--threads <n>] [--always] [--from <beat>] [--seconds <s>] [--no-plugins] [--no-device-lanes]"
+        return Err("usage: keeps_up <song.trill> [--profile <folder>] [--device] [--buffer <frames>] [--rate <hz>] \
+                    [--threads <n>] [--always] [--from <beat>] [--seconds <s>] [--play-at-once] [--no-plugins] \
+                    [--no-device-lanes]"
             .to_string());
     };
     let mut options = Options {
         song: song.into(),
         profile: PathBuf::from("target").join("keeps-up"),
-        buffer: 480,
-        rate: 48_000,
+        device: false,
+        buffer: None,
+        rate: None,
+        at_once: false,
+        whose_time: false,
         threads: None,
         always: false,
         from: 0.0,
@@ -84,6 +106,9 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     while let Some(name) = rest.next() {
         match name.as_str() {
             "--always" => options.always = true,
+            "--device" => options.device = true,
+            "--play-at-once" => options.at_once = true,
+            "--whose-time" => options.whose_time = true,
             "--no-plugins" => options.plugins = false,
             "--no-device-lanes" => options.device_lanes = false,
             _ => {
@@ -91,8 +116,8 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 let number = || value.parse::<f64>().map_err(|_| format!("{name} takes a number, not '{value}'"));
                 match name.as_str() {
                     "--profile" => options.profile = value.into(),
-                    "--buffer" => options.buffer = number()? as usize,
-                    "--rate" => options.rate = number()? as u32,
+                    "--buffer" => options.buffer = Some(number()? as usize),
+                    "--rate" => options.rate = Some(number()? as u32),
                     "--threads" => options.threads = Some((number()? as usize).max(1)),
                     "--from" => options.from = number()?,
                     "--seconds" => options.seconds = Some(number()?),
@@ -100,6 +125,12 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                 }
             }
         }
+    }
+    if options.device && (options.buffer.is_some() || options.rate.is_some()) {
+        return Err(
+            "with --device nothing is asked of the device: it runs at the rate and the buffer the system has it at"
+                .to_string(),
+        );
     }
     Ok(options)
 }
@@ -199,31 +230,64 @@ fn run(options: &Options) -> Result<(), String> {
         settings: options.profile.join("settings.json"),
         library_index: Some(options.profile.join("library-index.json")),
     };
+    let stand_in_rate = options.rate.unwrap_or(48_000);
     let runtime_options = RuntimeOptions {
-        audio: AudioBackend::Null { sample_rate: options.rate },
+        // (No MIDI port is opened for a runtime that says it has no device.)
+        audio: AudioBackend::Null { sample_rate: stand_in_rate },
         plugins: options.plugins.then_some(Scanner::CurrentExecutable),
         storage,
     };
-    // A device that asks as a real one does, at the priority a real one
-    // has, and plays nothing.
-    let device = NullHost::like_a_device(options.rate, options.buffer);
-    let parts = Parts { audio: Some(Arc::new(device)), ..Parts::default() };
+    let device: Arc<dyn AudioHost> = match options.device {
+        // The system's default output as programs share it, given silence.
+        // The profile is this run's own and asks nothing of it.
+        true => Arc::new(SystemHost::unheard()),
+        // A device that asks as a real one does, at the priority a real
+        // one has, and plays nothing.
+        false => Arc::new(NullHost::like_a_device(stand_in_rate, options.buffer.unwrap_or(480))),
+    };
+    let parts = Parts { audio: Some(device), ..Parts::default() };
     let runtime = Runtime::start_custom(runtime_options, parts).map_err(|error| error.to_string())?;
+    if options.device {
+        let info = runtime.session.lock().audio_info().clone();
+        let Some(name) = info.device.clone() else {
+            return Err(format!("the system's device could not be opened: {}", info.warning.unwrap_or_default()));
+        };
+        println!(
+            "the device: '{name}', shared, {} Hz, {} frames a buffer as it was opened ({:.1} ms), heard {:.1} ms after\
+             {}",
+            info.sample_rate,
+            info.buffer_frames,
+            info.buffer_ms(),
+            info.latency_ms(),
+            info.warning.map(|warning| format!("; {warning}")).unwrap_or_default()
+        );
+        if info.exclusive {
+            return Err("the device was opened for this program alone, which this never asks for".to_string());
+        }
+    }
 
     let began = Instant::now();
-    let (seconds, rate) = {
+    let (seconds, rate, open_at) = {
         let mut session = runtime.session.lock();
+        if let Some(threads) = options.threads {
+            session.set_play_threads(Some(threads));
+        }
+        if options.always {
+            session.spread_from(0.0);
+        }
+        session.count_cycles(options.whose_time);
         let made_here = options.song.as_os_str() == BUILT_IN;
         if made_here {
             built_in(&mut session)?;
         } else {
             session.load(&options.song).map_err(|error| format!("{}: {error}", options.song.display()))?;
         }
-        if let Some(threads) = options.threads {
-            session.set_play_threads(Some(threads));
-        }
-        if options.always {
-            session.spread_from(0.0);
+        // From here the audio thread has the song.
+        let open_at = Instant::now();
+        let _ = session.take_load();
+        if options.at_once {
+            session.seek(options.from);
+            session.play();
         }
         if !options.device_lanes {
             // In the song as it is held here, which is never written.
@@ -258,8 +322,41 @@ fn run(options: &Options) -> Result<(), String> {
         }
         // The song made here goes round: for half a minute, then.
         let all = if made_here { 30.0 } else { whole + 2.0 };
-        (options.seconds.unwrap_or(all), info.sample_rate)
+        (options.seconds.unwrap_or(all), info.sample_rate, open_at)
     };
+
+    // The first two seconds with the song: how long until its blocks are
+    // spread, if they come to be, and what the buffers before that came
+    // to. Looked at every five milliseconds, four hundred times.
+    let (mut buffers, mut late, mut worst) = (0u64, 0u64, 0.0f32);
+    let mut spread_at = None;
+    for _ in 0..400 {
+        std::thread::sleep(Duration::from_millis(5));
+        let load = runtime.session.lock().take_load();
+        if spread_at.is_none() && load.spread_blocks > 0 {
+            spread_at = Some((open_at.elapsed().as_secs_f64(), buffers, late));
+        }
+        buffers += load.callbacks;
+        late += load.late;
+        worst = worst.max(load.worst);
+    }
+    let how = if options.at_once { "playing from the moment it was open" } else { "standing still" };
+    match spread_at {
+        Some((after, before, late_before)) => println!(
+            "the first two seconds, {how}: its blocks were first spread {:.0} ms after it was open (to within 5 ms), \
+             {late_before} of the {before} buffers before that came late; {late} of {buffers} in the two seconds, {:.0} % \
+             for the worst",
+            after * 1e3,
+            worst * 100.0
+        ),
+        None => println!(
+            "the first two seconds, {how}: never spread; {late} of {buffers} buffers came late, {:.0} % for the worst",
+            worst * 100.0
+        ),
+    }
+    if options.at_once {
+        runtime.session.lock().stop();
+    }
 
     // Until its plugins have read what they play: a song that is started
     // into a kit that is half there is not the song.
@@ -302,6 +399,10 @@ fn run(options: &Options) -> Result<(), String> {
         (0u64, 0u64, 0.0f64, 0.0f32, 0.0, 0u64);
     let (mut threads, mut allowed, mut team) = (1, 1, None::<trill_engine::team::TeamStats>);
     let mut late_seconds = 0;
+    // What the device asked for and what its thread is.
+    let (mut smallest, mut largest, mut gap, mut class, mut level, mut before) =
+        (u32::MAX, 0u32, 0u64, None, None, None);
+    let mut frames = 0u64;
     while started.elapsed().as_secs_f64() < seconds {
         std::thread::sleep(Duration::from_secs(1));
         let load = runtime.session.lock().take_load();
@@ -314,6 +415,13 @@ fn run(options: &Options) -> Result<(), String> {
             (worst, worst_at) = (load.worst, started.elapsed().as_secs_f64());
         }
         (threads, allowed) = (threads.max(load.threads), load.allowed);
+        if load.smallest_frames > 0 {
+            smallest = smallest.min(load.smallest_frames);
+        }
+        largest = largest.max(load.largest_frames);
+        frames += load.frames;
+        gap = gap.max(load.longest_gap_ns);
+        (class, level, before) = (load.audio_class, load.thread_level, load.thread_level_before);
         if let Some(now) = load.team {
             let all = team.get_or_insert_with(Default::default);
             let (rounds, joined, woken) = (all.rounds + now.rounds, all.joined + now.joined, all.woken + now.woken);
@@ -348,6 +456,20 @@ fn run(options: &Options) -> Result<(), String> {
         "made on up to {threads} thread(s) of the {allowed} it may have and can use; {spread} blocks were spread over \
          more than one; {faults} buffer(s) were lost to a device that failed"
     );
+    println!(
+        "the device asked for {} to {largest} frames at a time ({:.0} on average), and let {:.1} ms pass between two \
+         buffers at the longest; its thread is {}, at priority {} by the system's numbers (at {} before Trill asked)",
+        if smallest == u32::MAX { 0 } else { smallest },
+        frames as f64 / callbacks.max(1) as f64,
+        gap as f64 / 1e6,
+        match class {
+            Some(true) => "in the system's audio class",
+            Some(false) => "NOT in the system's audio class, which was asked for and refused",
+            None => "as its host has it: the audio class was never asked for",
+        },
+        level.map_or("unknown".to_string(), |level| level.to_string()),
+        before.map_or("unknown".to_string(), |level| level.to_string())
+    );
     if let Some(team) = team.filter(|team| team.rounds > 0) {
         println!(
             "the threads beside the callback's: work was handed out {} times and they took it up {} times; {} of those \
@@ -363,9 +485,29 @@ fn run(options: &Options) -> Result<(), String> {
             team.waited_worst_us
         );
     }
+    // How many cycles a processor runs in a nanosecond, where blocks' own
+    // cycles were counted: from this thread kept busy, five times, the
+    // most of them (a thread that was held up meanwhile comes to less).
+    let cycles_per_ns = options.whose_time.then(|| {
+        let mut most = 0.0f64;
+        for _ in 0..5 {
+            let (began, before) = (Instant::now(), trill_engine::host::thread_cycles());
+            let mut spun = 0u64;
+            while began.elapsed() < Duration::from_millis(20) {
+                spun = std::hint::black_box(spun.wrapping_add(1));
+            }
+            let cycles = trill_engine::host::thread_cycles().saturating_sub(before);
+            most = most.max(cycles as f64 / began.elapsed().as_nanos() as f64);
+        }
+        most
+    });
+    let ran_ms = |cost: &trill_engine::Cost| {
+        cycles_per_ns.filter(|rate| *rate > 0.0).map(|rate| cost.longest_ran as f64 / rate / 1e6)
+    };
     println!(
         "what each part took: the share of one processor on average / how long its longest block took / its share \
-         while the song stood still"
+         while the song stood still{}",
+        if options.whose_time { " / how long the thread that made that longest block was running in it" } else { "" }
     );
     let mut tracks = costs.tracks;
     tracks.sort_by_key(|track| std::cmp::Reverse(track.cost.nanos));
@@ -378,11 +520,12 @@ fn run(options: &Options) -> Result<(), String> {
         sum += share;
         sum_still += standing;
         println!(
-            "  {:5.1} % / {:6.2} ms / {:5.1} %  {}",
+            "  {:5.1} % / {:6.2} ms / {:5.1} %  {}{}",
             share * 100.0,
             track.cost.longest as f64 / 1e6,
             standing * 100.0,
-            track.name
+            track.name,
+            ran_ms(&track.cost).map(|ran| format!("  / ran {ran:.2} ms")).unwrap_or_default()
         );
     }
     println!(
@@ -392,6 +535,19 @@ fn run(options: &Options) -> Result<(), String> {
         still.master.share(rate) * 100.0
     );
     println!("  {:5.1} %             / {:5.1} %  all the tracks together", sum * 100.0, sum_still * 100.0);
+    // Whose time the longest block of all was.
+    if let Some(worst) = tracks.iter().max_by_key(|track| track.cost.longest)
+        && let Some(ran) = ran_ms(&worst.cost)
+    {
+        let took = worst.cost.longest as f64 / 1e6;
+        println!(
+            "the longest block of the run was one of '{}': {took:.2} ms on the clock, of which the thread that made it \
+             was running {ran:.2} ms ({:.0} %); for the other {:.2} ms it was kept from its work",
+            worst.name,
+            ran / took.max(1e-9) * 100.0,
+            (took - ran).max(0.0)
+        );
+    }
     Ok(())
 }
 

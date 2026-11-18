@@ -8,7 +8,7 @@
 //! (the SDK's own hosting code passes buffers, others pass none), and a
 //! plugin that writes to a bus it was told is off must find memory there.
 
-use crate::signal::PortChannels;
+use crate::signal::{PortChannels, all_channels, is_silence};
 use std::ptr::null_mut;
 use vst3::Steinberg::Vst::{AudioBusBuffers, AudioBusBuffers__type0};
 use vst3::Steinberg::int32;
@@ -33,6 +33,8 @@ pub(crate) struct BusBuffers {
     inputs: bool,
     /// The side bus that holds a key in this block, and so is not silent.
     keyed: Option<usize>,
+    /// What was loaded into the main bus for this block is silence.
+    main_silent: bool,
 }
 
 // SAFETY: the raw pointers (those in `pointers`, and those to `pointers` in
@@ -55,6 +57,7 @@ impl BusBuffers {
             buses: vec![empty; layout.len()],
             inputs,
             keyed: None,
+            main_silent: false,
         }
     }
 
@@ -83,6 +86,7 @@ impl BusBuffers {
     pub(crate) fn load(&mut self, left: &[f32], right: &[f32]) {
         self.channels.load(left, right);
         self.keyed = None;
+        self.main_silent = is_silence(left) && is_silence(right);
     }
 
     /// Fills the input bus `bus` for the block that was just loaded from a
@@ -111,20 +115,20 @@ impl BusBuffers {
             }
             bus.numChannels = pointers.len() as int32;
             // One bit per channel that holds nothing but silence: all of a
-            // side bus the host feeds nothing into. A plugin sets the bits
-            // of its outputs itself.
-            let silent = self.inputs && index > 0 && self.keyed != Some(index);
+            // side bus the host feeds nothing into, and all of the main
+            // bus in a block in which the device is fed nothing, so that a
+            // plugin which rests on silence can. A plugin sets the bits of
+            // its outputs itself.
+            let silent = match index {
+                0 => self.inputs && self.main_silent,
+                _ => self.inputs && self.keyed != Some(index),
+            };
             bus.silenceFlags = if silent { all_channels(pointers.len()) } else { 0 };
             let channels = if pointers.is_empty() { null_mut() } else { pointers.as_mut_ptr() };
             bus.__field0 = AudioBusBuffers__type0 { channelBuffers32: channels };
         }
         if self.buses.is_empty() { null_mut() } else { self.buses.as_mut_ptr() }
     }
-}
-
-/// A silence-flag mask with the bit of each of `count` channels set.
-fn all_channels(count: usize) -> u64 {
-    if count >= 64 { u64::MAX } else { (1 << count) - 1 }
 }
 
 #[cfg(test)]
@@ -171,6 +175,27 @@ mod tests {
         );
         // SAFETY: `buses` has four entries; the last has no channels.
         assert!(unsafe { (*buses.add(3)).__field0.channelBuffers32 }.is_null());
+    }
+
+    #[test]
+    fn a_main_bus_that_is_fed_nothing_is_flagged_silent_for_that_block_only() {
+        let mut inputs = BusBuffers::inputs(&[2, 2], 8);
+        inputs.load(&[0.0; 4], &[0.0, -0.0, 0.0, 0.0]);
+        let flags = |buses: *mut AudioBusBuffers| -> Vec<u64> { read(buses, 2, 4).iter().map(|bus| bus.0).collect() };
+        let buses = inputs.prepare();
+        assert_eq!(flags(buses), [0b11, 0b11]);
+        // One sample on one side is sound.
+        inputs.load(&[0.0; 4], &[0.0, 0.0, 1e-9, 0.0]);
+        let buses = inputs.prepare();
+        assert_eq!(flags(buses), [0, 0b11]);
+        inputs.load(&[0.0; 4], &[0.0; 4]);
+        inputs.load_key(1, &[0.5; 4], &[0.5; 4]);
+        let buses = inputs.prepare();
+        assert_eq!(flags(buses), [0b11, 0], "the key is sound, what it shapes is not");
+        // What a plugin gives is the plugin's to flag.
+        let mut outputs = BusBuffers::outputs(&[2], 8);
+        outputs.load(&[0.0; 4], &[0.0; 4]);
+        assert_eq!(read(outputs.prepare(), 1, 4)[0].0, 0);
     }
 
     #[test]
