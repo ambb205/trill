@@ -484,6 +484,12 @@ fn tempo_json(taken: &taking::TakenTempo) -> Value {
         "to_beat": round(taken.to),
         "beats_per_bar": taken.beats_per_bar,
     });
+    if taken.odd_bars > 0 {
+        out["bars_of_another_length"] = json!(taken.odd_bars);
+        out["note"] = json!(
+            "some bars of the recording are not as long as the rest: each has its own time signature in the song, so that the song's bar lines are the recording's (get_tempo_map lists them)"
+        );
+    }
     if taken.tempos == 1 {
         out["bpm"] = json!(round(taken.slowest));
     } else {

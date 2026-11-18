@@ -244,6 +244,10 @@ pub struct TakenTempo {
     pub from: Beats,
     pub to: Beats,
     pub beats_per_bar: usize,
+    /// How many of its bars are not that long: each is given its own
+    /// time signature in the song, so that the bar lines stay the
+    /// recording's.
+    pub odd_bars: usize,
 }
 
 /// What came of putting a recording beside the song.
@@ -957,6 +961,13 @@ impl Runtime {
             return Err(format!("no parts were found in the study {study}"));
         }
         let per_bar = heard.grid.beats_per_bar.max(1) as f64;
+        let bars = &heard.grid.bars;
+        let first = bars.first().copied().unwrap_or(0) as f64;
+        // The beat of the recording a bar begins on: as it was found, or counted on past the last that was.
+        let begins = |bar: usize| match bars.get(bar) {
+            Some(beat) => *beat as f64 - first,
+            None => bars.last().map_or(0.0, |last| *last as f64 - first) + (bar + 1 - bars.len()) as f64 * per_bar,
+        };
         let markers: Vec<(Beats, String)> = heard
             .parts
             .iter()
@@ -965,7 +976,7 @@ impl Runtime {
                     [] => String::new(),
                     without => format!(" (no {})", without.join(", ")),
                 };
-                (at + part.bar as f64 * per_bar, format!("{}{without}", part.label))
+                (at + begins(part.bar), format!("{}{without}", part.label))
             })
             .collect();
         let mut session = self.session.lock();
@@ -1162,13 +1173,23 @@ fn laid_tempo(project: &mut Project, heard: &Heard, at: Beats) -> Result<TakenTe
         return invalid(format!("{at} is not a beat of the song"));
     }
     let per_bar = grid.beats_per_bar.max(1) as f64;
+    // Each bar line as a beat of the recording: a bar is as many beats long as were found in it, which is
+    // not always what the recording mostly has (a bar of two in a song of fours, a pick-up).
+    let mut counted: Vec<f64> = grid.bars.iter().map(|index| *index as f64).collect();
+    while counted.len() < lines.len() {
+        counted.push(counted.last().copied().unwrap_or(0.0) + per_bar);
+    }
+    counted.truncate(lines.len());
+    let song = |line: usize| at + counted[line] - counted[0];
     // Runs of bars that one tempo keeps to within a few milliseconds of the recording.
     let within = if grid.steady { TEMPO_SECONDS_STEADY } else { TEMPO_SECONDS };
     let mut runs: Vec<(usize, usize)> = Vec::new();
     let mut begin = 0;
     for end in 2..lines.len() {
-        let even =
-            |index: usize| lines[begin] + (index - begin) as f64 / (end - begin) as f64 * (lines[end] - lines[begin]);
+        let even = |index: usize| {
+            let share = (counted[index] - counted[begin]) / (counted[end] - counted[begin]);
+            lines[begin] + share * (lines[end] - lines[begin])
+        };
         if (begin + 1..end).any(|index| (even(index) - lines[index]).abs() > within) {
             runs.push((begin, end - 1));
             begin = end - 1;
@@ -1176,10 +1197,11 @@ fn laid_tempo(project: &mut Project, heard: &Heard, at: Beats) -> Result<TakenTe
     }
     runs.push((begin, lines.len() - 1));
     let bars = lines.len() - 1;
-    let (from, to) = (at, at + bars as f64 * per_bar);
+    let (from, to) = (at, song(bars));
     let after = project.tempo_map().tempo_at(to);
+    let meter_after = project.meter_map().signature_at(to);
     let tempo_of = |(first, last): (usize, usize)| {
-        ((last - first) as f64 * per_bar * 60.0 / (lines[last] - lines[first]))
+        ((counted[last] - counted[first]) * 60.0 / (lines[last] - lines[first]))
             .clamp(trill_core::project::MIN_TEMPO, trill_core::project::MAX_TEMPO)
     };
     let mut changes: Vec<TempoChange> = project
@@ -1193,7 +1215,7 @@ fn laid_tempo(project: &mut Project, heard: &Heard, at: Beats) -> Result<TakenTe
     for run in &runs {
         let tempo = tempo_of(*run);
         (slowest, fastest) = (slowest.min(tempo), fastest.max(tempo));
-        let beat = at + run.0 as f64 * per_bar;
+        let beat = song(run.0);
         if beat <= trill_core::tempo::SAME_BEAT {
             first_tempo = Some(tempo);
         } else {
@@ -1207,14 +1229,35 @@ fn laid_tempo(project: &mut Project, heard: &Heard, at: Beats) -> Result<TakenTe
         project.set_tempo(tempo)?;
     }
     project.set_tempo_changes(changes)?;
-    // The recording's bars are the song's only in its own time signature.
-    let numerator = grid.beats_per_bar.clamp(1, 32) as u8;
-    if project.meter_map().signature_at(at).numerator != numerator
-        || project.meter_map().signature_at(at).denominator != 4
-    {
-        project.set_time_signature_at(at, numerator, 4)?;
+    // The recording's bars are the song's only in its own time signature: each bar as long as it was found.
+    let mut meters: Vec<trill_core::tempo::MeterChange> = project
+        .meter_changes
+        .iter()
+        .filter(|change| change.beat < from - 1e-9 || change.beat > to + 1e-9)
+        .cloned()
+        .collect();
+    let mut current = project.meter_map().signature_before(from.max(1e-6));
+    let mut odd_bars = 0;
+    for bar in 0..bars {
+        let beats = (counted[bar + 1] - counted[bar]).round().clamp(1.0, 32.0) as u8;
+        if f64::from(beats) != per_bar {
+            odd_bars += 1;
+        }
+        let signature = trill_core::TimeSignature { numerator: beats, denominator: 4 };
+        if signature != current {
+            current = signature;
+            if song(bar) <= trill_core::tempo::SAME_BEAT {
+                project.set_time_signature(beats, 4)?;
+            } else {
+                meters.push(trill_core::tempo::MeterChange { beat: song(bar), signature });
+            }
+        }
     }
-    Ok(TakenTempo { bars, tempos: runs.len(), slowest, fastest, from, to, beats_per_bar: grid.beats_per_bar })
+    if current != meter_after && project.length_shown() > to {
+        meters.push(trill_core::tempo::MeterChange { beat: to, signature: meter_after });
+    }
+    project.set_meter_changes(meters)?;
+    Ok(TakenTempo { bars, tempos: runs.len(), slowest, fastest, from, to, beats_per_bar: grid.beats_per_bar, odd_bars })
 }
 
 #[cfg(test)]
@@ -1305,6 +1348,24 @@ mod tests {
         let (notes, lacking) = on_kit(&trill_core::InstrumentProfile::default(), groove.clone());
         assert_eq!(notes, groove);
         assert!(lacking.is_empty());
+    }
+
+    #[test]
+    fn a_bar_that_is_shorter_than_the_rest_is_a_short_bar_of_the_song_at_the_same_tempo() {
+        // Beats every half second; the third bar was found two beats long.
+        let beats: Vec<f64> = (0..=18).map(|beat| f64::from(beat) * 0.5).collect();
+        let mut found = heard(beats, 4);
+        found.grid.bars = vec![0, 4, 8, 10, 14, 18];
+        let mut project = Project::new("t");
+        let taken = laid_tempo(&mut project, &found, 0.0).unwrap();
+        assert_eq!((taken.bars, taken.tempos, taken.odd_bars), (5, 1, 1));
+        assert!((project.tempo - 120.0).abs() < 1e-6 && project.tempo_changes.is_empty(), "no faster for a short bar");
+        // Two bars of four, one of two, and fours again: the song's bar lines are the recording's.
+        let meter = project.meter_map();
+        let starts: Vec<f64> = (0..5).map(|bar| meter.bar_start(bar)).collect();
+        assert_eq!(starts, [0.0, 4.0, 8.0, 10.0, 14.0]);
+        assert_eq!(meter.signature_at(8.5).numerator, 2);
+        assert_eq!(meter.signature_at(10.0).numerator, 4);
     }
 
     #[test]
