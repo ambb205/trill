@@ -206,8 +206,11 @@ on the samples.
   earlier sound brought behind the device go (each carries a mark, `PresetRef::brought_by`, and loses it when
   it is given a preset of its own), the new ones are made directly behind the device, and what was put on the
   chain otherwise stays behind them. Giving is the session's (`add_given`, `give_preset`, `give_track` in
-  `session/sounds.rs`): one undo step, and a device this machine has not got, or that does not start, is left
-  out and said (`Given::without`), never left in the song as a problem. A sound holds each device's type,
+  `session/sounds.rs`): one undo step, and a device this machine has not got, or that is found not to start
+  within the step, is left out and said (`Given::without`), never left in the song as a problem. A plugin is
+  made after the step (below, "A device that takes time to make comes after the song has it"), so one that
+  then does not start, or does not load what it was to start from, stays in the song with its sentence in
+  `Session::problems`, as one added by itself does: undo takes it out. A sound holds each device's type,
   values, state and whether it is on. It does not hold what belongs to one song (the track a device listens to,
   sends, the fader, automation, what the track's notes mean), and saving says what it left out. Each device of
   a saved sound is read by the format the sound was saved in, as a saved preset is (`formats::keep_complete`).

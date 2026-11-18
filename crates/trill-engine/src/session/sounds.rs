@@ -22,11 +22,16 @@
 //!
 //! # What a machine has not got
 //!
-//! A sound may name a plugin that is not installed here, or one that does
-//! not start. The rest of the sound is made without it, and
-//! [`Given::without`] says which device that was and why. Only the first
-//! device has to be there: without it there is nothing to give the sound
-//! to.
+//! A sound may name a plugin that is not installed here, or a device that
+//! is found not to start within the step. The rest of the sound is made
+//! without it, and [`Given::without`] says which device that was and why.
+//! Only the first device has to be there: without it there is nothing to
+//! give the sound to.
+//!
+//! A plugin is made after the step, away from the session
+//! (`session/opening.rs`). One that then does not start is not taken out
+//! behind the user's back: it stays in the song with its sentence among
+//! the session's problems, and undo removes it with the rest of the step.
 
 use super::{Scope, Session, SessionError};
 use crate::saved::{MAX_AFTER, Saved, SavedPresets};
