@@ -26,7 +26,7 @@ cargo run -p trill-app --example wavetable_listen -- target/wavetable-listening 
 cargo run -p trill-engine --example sampled -- about FILE.sfz   # what a sampled instrument is; also survey, load, measure, play, facts and tour (see the example)
 cargo run -p trill-study --example setup -- target/study-parts status              # what a study's models are, and which were fetched there (fetch PART and test are the other words)
 cargo run -p trill-study --example models -- target/study-parts nvidia study SONG.wav target/studies   # a recording studied with the real models, stage by stage, with what it took
-cargo run -p trill-catalogue --example pin -- list              # the sets of the catalogue of instruments; also sum, files and check (see the example)
+cargo run -p trill-catalogue --example sets -- list              # the sets of the catalogue of instruments; also sum, files and check (see the example)
 ```
 
 - The default test run needs nothing installed and reads nothing of the user's. Tests that need this machine

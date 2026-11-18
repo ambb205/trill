@@ -210,7 +210,7 @@ they need and gives the steps: fetch the pinned commits, measure every instrumen
 and then prove through the program's own fetching that what a user gets is what was read. Nothing in the program
 runs them, and no test does.
 
-Two tools for looking at one set by hand: `cargo run -p trill-catalogue --example pin -- sum FOLDER` prints a
+Two tools for looking at one set by hand: `cargo run -p trill-catalogue --example sets -- sum FOLDER` prints a
 folder's tree checksum, its files and bytes, and the checksum of every `.sfz` file in it;
 `… -- check SET FOLDER` checks a folder against the catalogue's entry.
 
