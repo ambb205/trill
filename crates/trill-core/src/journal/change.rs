@@ -303,8 +303,24 @@ fn set_song(project: &mut Project, song: &Project) {
 
 /// Whether two tracks have the same settings of their own.
 fn same_track(a: &Track, b: &Track) -> bool {
-    let Track { id, name, kind, group, sends, color, volume_db, pan, mute, solo, devices: _, clips: _, profile } = a;
+    let Track {
+        id,
+        name,
+        kind,
+        group,
+        sends,
+        color,
+        volume_db,
+        pan,
+        mute,
+        solo,
+        devices: _,
+        clips: _,
+        profile,
+        reference,
+    } = a;
     *id == b.id
+        && *reference == b.reference
         && *name == b.name
         && *kind == b.kind
         && *group == b.group
@@ -319,8 +335,22 @@ fn same_track(a: &Track, b: &Track) -> bool {
 
 /// A track's own settings: the track with nothing on it.
 fn track_of(track: &Track) -> Track {
-    let Track { id, name, kind, group, sends, color, volume_db, pan, mute, solo, devices: _, clips: _, profile } =
-        track;
+    let Track {
+        id,
+        name,
+        kind,
+        group,
+        sends,
+        color,
+        volume_db,
+        pan,
+        mute,
+        solo,
+        devices: _,
+        clips: _,
+        profile,
+        reference,
+    } = track;
     Track {
         id: *id,
         name: name.clone(),
@@ -335,6 +365,7 @@ fn track_of(track: &Track) -> Track {
         devices: Vec::new(),
         clips: Vec::new(),
         profile: profile.clone(),
+        reference: reference.clone(),
     }
 }
 

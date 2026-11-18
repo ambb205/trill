@@ -56,6 +56,18 @@ fn track_change(was: &Track, now: &Track) -> String {
     if was.name != now.name {
         return format!("Renamed {} to {}", quoted(&was.name), quoted(&now.name));
     }
+    // A reference is listened to or made, which is said as what it is.
+    match (&was.reference, &now.reference) {
+        (None, Some(_)) => return format!("Made {} a reference", quoted(&now.name)),
+        (Some(_), None) => return format!("Made {} a track of the song again", quoted(&now.name)),
+        (Some(before), Some(after)) if before.listening != after.listening => {
+            return match after.listening {
+                true => format!("Listened to the reference {}", quoted(&now.name)),
+                false => format!("Went back from the reference {} to the song", quoted(&now.name)),
+            };
+        }
+        _ => {}
+    }
     let mut changed = Vec::new();
     for (differs, what) in [
         (was.volume_db != now.volume_db, "volume"),

@@ -238,7 +238,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     if !view.framed && track_count > 0 {
         // Open a project showing all of it, or a few bars of a new one.
         view.framed = true;
-        view.time = fit_song(cx.snap.project.length_beats(), signature, area.width() - HEADER_WIDTH);
+        view.time = fit_song(cx.snap.project.length_shown(), signature, area.width() - HEADER_WIDTH);
     }
     if let Some(glide) = view.glide {
         let (time, arrived) = glide.at(now);
@@ -449,7 +449,7 @@ pub fn zoom_to_selection(ctx: &egui::Context, cx: &mut Cx) {
 /// Zooms out to the whole song: `Shift+Z`.
 pub fn zoom_to_song(ctx: &egui::Context, cx: &mut Cx) {
     let project = &cx.snap.project;
-    let time = fit_song(project.length_beats(), project.time_signature, cx.state.arrangement.lanes_width);
+    let time = fit_song(project.length_shown(), project.time_signature, cx.state.arrangement.lanes_width);
     let now = ctx.input(|input| input.time);
     cx.state.arrangement.glide_to(time, now);
 }

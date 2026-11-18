@@ -608,6 +608,27 @@ pub struct Send {
     pub level_db: f32,
 }
 
+/// What makes a track a reference: a recording kept beside the song to
+/// hold the song against, not a part of it.
+///
+/// A reference is silent unless it is listened to, and while it is, it is
+/// heard in place of the song, as a soloed track is. It is never in a
+/// render or in a stem, listened to or not: see [`Project::as_heard`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reference {
+    /// The study the recording is of, by its id, where it is of one:
+    /// whoever shows the track finds its parts, chords and words there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub study: Option<String>,
+    /// Whether it is being listened to.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub listening: bool,
+}
+
+fn is_false(flag: &bool) -> bool {
+    !*flag
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub id: TrackId,
@@ -636,6 +657,11 @@ pub struct Track {
     /// and then left out of the file.
     #[serde(default, skip_serializing_if = "InstrumentProfile::is_empty")]
     pub profile: InstrumentProfile,
+    /// Set for a track that is a reference: a recording beside the song,
+    /// silent unless listened to and never rendered. A file saved before
+    /// there were any has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<Reference>,
 }
 
 impl Track {
@@ -1138,8 +1164,17 @@ impl Project {
         Ok(())
     }
 
-    /// End of the last clip, in beats.
+    /// End of the song's last clip, in beats. A reference is beside the
+    /// song and no part of its length: a recording that goes on after the
+    /// song has ended makes no render longer.
     pub fn length_beats(&self) -> Beats {
+        let of_the_song = self.tracks.iter().filter(|track| track.reference.is_none());
+        of_the_song.flat_map(|track| track.clips.iter()).map(Clip::end).fold(0.0, f64::max)
+    }
+
+    /// End of the last clip there is, a reference's too: how far there is
+    /// something to show and to play.
+    pub fn length_shown(&self) -> Beats {
         self.tracks.iter().flat_map(|track| track.clips.iter()).map(Clip::end).fold(0.0, f64::max)
     }
 
@@ -1167,8 +1202,74 @@ impl Project {
             devices: Vec::new(),
             clips: Vec::new(),
             profile: InstrumentProfile::default(),
+            reference: None,
         });
         id
+    }
+
+    /// Makes a track a reference (see [`Reference`]), or with `None` an
+    /// ordinary track again. Only a track that holds clips can be one, and
+    /// not one that anything else plays through, sends to or listens to:
+    /// a reference is beside the song and feeds nothing in it.
+    pub fn set_reference(&mut self, id: TrackId, reference: Option<Reference>) -> Result<(), EditError> {
+        self.holds_clips(id)?;
+        if reference.is_some() {
+            let track = self.track(id)?;
+            let sends =
+                |lane: &AutomationLane| matches!(lane.target, AutomationTarget::Send { track, .. } if track == id);
+            if track.group.is_some() || !track.sends.is_empty() || self.automation.iter().any(sends) {
+                return invalid(format!(
+                    "{id} plays through a group or sends to a return: a reference is beside the song and feeds nothing in it"
+                ));
+            }
+            if self.devices().any(|device| device.sidechain == Some(id)) {
+                return invalid(format!("a device listens to {id}: a reference feeds nothing in the song"));
+            }
+        }
+        self.track_mut(id)?.reference = reference;
+        Ok(())
+    }
+
+    /// Listens to a reference, or stops: while one is listened to it is
+    /// heard in place of the song. One is listened to at a time: listening
+    /// to another leaves the one before.
+    pub fn listen_to_reference(&mut self, id: TrackId, listening: bool) -> Result<(), EditError> {
+        if self.track(id)?.reference.is_none() {
+            return invalid(format!(
+                "{id} is not a reference: there is nothing of it to listen to apart from the song"
+            ));
+        }
+        for track in &mut self.tracks {
+            if let Some(reference) = &mut track.reference {
+                reference.listening = listening && track.id == id;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether any track is a reference.
+    pub fn has_references(&self) -> bool {
+        self.tracks.iter().any(|track| track.reference.is_some())
+    }
+
+    /// The song as it is heard, with what makes a track a reference turned
+    /// into the mute and solo it comes to, which is all that whoever plays
+    /// or renders the song then has to know. Played: a reference is muted
+    /// unless it is listened to, and one that is listened to is soloed.
+    /// Rendered: every reference is muted and none is soloed, so that a
+    /// render is of the song whatever is being listened to.
+    pub fn as_heard(&self, rendering: bool) -> std::borrow::Cow<'_, Project> {
+        if !self.has_references() {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut heard = self.clone();
+        for track in &mut heard.tracks {
+            if let Some(reference) = &track.reference {
+                let listening = reference.listening && !rendering;
+                (track.mute, track.solo) = (!listening || track.mute, listening);
+            }
+        }
+        std::borrow::Cow::Owned(heard)
     }
 
     pub fn remove_track(&mut self, id: TrackId) -> Result<Track, EditError> {
@@ -1201,6 +1302,9 @@ impl Project {
         {
             return invalid(format!("{group} is not a group track"));
         }
+        if group.is_some() {
+            self.of_the_song(id)?;
+        }
         let before = std::mem::replace(&mut self.track_mut(id)?.group, group);
         if let Some(group) = group
             && let Err(error) = self.no_loop(format!("putting {id} in {group}"))
@@ -1211,8 +1315,18 @@ impl Project {
         Ok(())
     }
 
+    /// Refuses a track that is a reference where it would come to feed
+    /// something in the song.
+    fn of_the_song(&self, id: TrackId) -> Result<(), EditError> {
+        match self.track(id)?.reference {
+            Some(_) => invalid(format!("{id} is a reference: a reference is beside the song and feeds nothing in it")),
+            None => Ok(()),
+        }
+    }
+
     /// Whether `id` may send to `to`: any track but a return, to a return.
     fn can_send(&self, id: TrackId, to: TrackId) -> Result<(), EditError> {
+        self.of_the_song(id)?;
         if self.track(id)?.kind == TrackKind::Return {
             return invalid(format!("{id} is a return track; returns cannot send to returns"));
         }
@@ -1829,7 +1943,7 @@ impl Project {
     pub fn set_sidechain(&mut self, id: DeviceId, track: Option<TrackId>) -> Result<(), EditError> {
         let chain = self.device_chain(id)?;
         if let Some(track) = track {
-            self.track(track)?;
+            self.of_the_song(track)?;
             if chain == ChainRef::Track(track) {
                 return invalid(format!(
                     "{id} is on {track} itself: without a sidechain it already listens to what comes into it"
@@ -1850,7 +1964,9 @@ impl Project {
     /// members of a group, the tracks that send to a return (by a send set
     /// by hand or by one that is its envelope, switched on or not), and the
     /// tracks its devices listen to. In the order of the track list,
-    /// without repeats.
+    /// without repeats. A reference is never among them, and nothing feeds
+    /// one: the edits refuse it a group, a send and a listener, so that it
+    /// can be left out of a render without anything in the song changing.
     pub fn feeds(&self, track: TrackId) -> Vec<TrackId> {
         let Ok(node) = self.track(track) else { return Vec::new() };
         let keys: Vec<TrackId> = node.devices.iter().filter_map(|device| device.sidechain).collect();
