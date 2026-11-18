@@ -319,6 +319,10 @@ impl Callback {
     where
         T: cpal::SizedSample + cpal::FromSample<f32>,
     {
+        // The library that calls this leaves its thread at the priority of
+        // any other. The first buffer puts it where audio belongs; from
+        // then on this is a look at a thread-local.
+        super::priority::AudioPriority::raise_for_good();
         let channels = self.channels;
         let frames = data.len() / channels;
         let stamp = info.timestamp();

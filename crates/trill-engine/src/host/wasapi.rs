@@ -32,11 +32,8 @@ use windows::Win32::Media::Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
-use windows::Win32::System::Threading::{
-    AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, CreateEventW, GetCurrentThread, SetThreadPriority,
-    THREAD_PRIORITY_TIME_CRITICAL, WaitForSingleObject,
-};
-use windows::core::{HSTRING, w};
+use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use windows::core::HSTRING;
 
 /// The buffer asked for when the user names none: about 5 ms, short enough
 /// to play on and long enough for an ordinary machine to keep up with.
@@ -278,24 +275,6 @@ fn open(endpoint: &str, name: &str, request: &StreamRequest) -> Result<Device, O
     }
 }
 
-/// Raises this thread to the priority the system keeps for audio. Returns
-/// the handle to give that up again with, if the system granted it.
-fn raise_priority() -> Option<HANDLE> {
-    let mut task = 0u32;
-    // SAFETY: both calls act on the calling thread only; `task` is a live
-    // local the system writes an index to.
-    unsafe {
-        match AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task) {
-            Ok(handle) => Some(handle),
-            Err(error) => {
-                log::warn!("the audio thread was not given audio priority ({error}); expect drop-outs under load");
-                let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-                None
-            }
-        }
-    }
-}
-
 /// Fills the device's buffers until told to stop or the device fails.
 fn run(device: &Device, mut renderer: Renderer, on_failure: &FailureCallback, quit: &AtomicBool) {
     let frames = device.buffer_frames;
@@ -425,12 +404,12 @@ pub(super) fn open_exclusive(
             if opened.send(Ok(format)).is_err() {
                 return;
             }
-            let priority = raise_priority();
-            run(&device, renderer, &on_failure, &stop);
-            if let Some(priority) = priority {
-                // SAFETY: the handle is the one this thread was given.
-                let _ = unsafe { AvRevertMmThreadCharacteristics(priority) };
+            let priority = super::priority::AudioPriority::raise();
+            if !priority.granted() {
+                log::warn!("the audio thread was not given audio priority; expect drop-outs under load");
             }
+            run(&device, renderer, &on_failure, &stop);
+            drop(priority);
         })
         .map_err(|error| OpenError::Failed(format!("cannot start a thread: {error}")))?;
 

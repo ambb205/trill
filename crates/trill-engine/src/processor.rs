@@ -4,16 +4,25 @@
 //! processor drives realtime playback and offline rendering, so a bounce is
 //! exactly what you heard.
 //!
-//! A block is made a track at a time, in the order the graph has them:
-//! each track begins from what was fed to it ([`begin`]), is told where
-//! its controllers are ([`say_controllers`]), plays its notes and audio
-//! through its devices ([`play`]: [`gather`], [`through`], [`answer`]), is
-//! brought to where its fader has it ([`fade`]) and is added to where it
-//! goes ([`mix`]). While a song plays
-//! one thread does all of that, track after track. A render may hand the
-//! tracks that do not feed one another to several threads at once
-//! ([`crate::spread`]): the same steps, on the same numbers, added up in
-//! the same order, so that the samples are the same.
+//! A block is made a track at a time, in the order the graph has them.
+//! Each track is told what there is to tell it before its own notes
+//! ([`prelude`]: what the block lets go of, what a hand played, where its
+//! controllers are), begins from what was fed to it and plays its notes
+//! and audio ([`sound`]) through its devices ([`through`]), is listened
+//! to and brought to where its fader has it ([`finish`]), and is added to
+//! where it goes ([`mix`]).
+//!
+//! One thread can do all of that, track after track, and for a small song
+//! it does. The tracks that do not feed one another can also be made at
+//! once ([`crate::spread`]): by a render on the threads it was given, and
+//! by a song that plays on the [`Team`] it was given, once making its
+//! tracks takes a share of the block's time that is worth handing across
+//! ([`Processor::spread_from`]). Either way they are the same steps on the
+//! same numbers, added up in the same order by the one thread that asked,
+//! so that the samples are the same. What only the thread that asked may
+//! do stays with it: every [`prelude`] (the hand's events and a take's
+//! reports go through queues that have one end), every [`mix`], the
+//! master and the monitor.
 
 use crate::engine::RecordPhase;
 use crate::glide::{DECLICK_SECONDS, STEP, Span, gated};
@@ -22,7 +31,9 @@ use crate::graph::{
 };
 use crate::live::{Captured, LiveTarget, TrackSet};
 use crate::monitor::{Beats, Monitor};
-use crate::spread::Spread;
+use crate::spread::{Spread, Workers};
+use crate::team::Team;
+use std::time::Instant;
 use trill_core::controllers::{CONTROLLER_KINDS, ControllerKind};
 use trill_core::device::{Event, EventKind, KeyInput, MAX_EVENTS_PER_BLOCK, ProcessInfo, SongTime};
 use trill_core::project::MIN_VOLUME_DB;
@@ -44,6 +55,33 @@ const CONTROL_STEP: u64 = STEP;
 /// counted like [`CONTROL_STEP`]: the parameter moves at the same frames
 /// whatever the buffer size, and in a render.
 const PARAM_STEP: u64 = 256;
+/// The share of the time its buffers last that making a song's tracks
+/// must take, all of them together and over a quarter of a second
+/// ([`WINDOW_NS`]), before a song that plays is spread over its team:
+/// half. Below it one thread has the buffers made with half their time to
+/// spare, as it always did, and is as even as one thread is: with every
+/// thread more that a buffer waits for, it is more likely that the system
+/// takes one of them off its processor in the middle of a track (one or
+/// two buffers in fifteen thousand of 64 frames were measured late so, of
+/// a song that one thread plays in a seventh of its time).
+pub const SPREAD_ABOVE: f64 = 0.5;
+/// The part of that share under which a song that is playing goes back to
+/// one thread. (One that stands still stays as it is: it is as cheap
+/// either way, and when it is started it is on the threads it needed when
+/// it last played.)
+const SPREAD_BELOW: f64 = 0.5;
+/// The share of one buffer's time that making its tracks takes for the
+/// song to be spread from the next buffer on, without waiting for the
+/// quarter of a second to be over: that buffer was as good as late.
+const URGENT: f64 = 0.8;
+/// Over how long what the tracks took is added up before it is held
+/// against [`SPREAD_ABOVE`], in nanoseconds: one buffer that the system
+/// held up says nothing of the song.
+const WINDOW_NS: f64 = 0.25e9;
+/// How long the most a buffer's tracks took is remembered at half its
+/// weight, in nanoseconds. By that the threads are asked for, ahead of the
+/// song being spread over them ([`Processor::wants_threads`]).
+const WEIGHT_HALVES_NS: f64 = 2e9;
 /// The most events a track's controllers add to one block. One that finds
 /// no room is told a step later.
 const CONTROL_LIMIT: usize = 768;
@@ -165,6 +203,25 @@ pub struct Processor {
     /// The threads a render makes its blocks on, if it was given any: see
     /// [`Processor::spread_over`]. Never while a song plays.
     spread: Option<Box<Spread>>,
+    /// The threads a song that plays may be made on beside this one, if it
+    /// was given any: see [`Processor::play_over`].
+    team: Option<Box<Team>>,
+    /// Whether the blocks of the song that plays are being spread, where
+    /// there is a team and the graph can use one; the share of a block's
+    /// time above which they are; and how much of it the tracks have
+    /// taken of late.
+    spreading: bool,
+    spread_above: f64,
+    weight: f64,
+    /// What the tracks have taken to make, and how long the buffers they
+    /// were made for last, since the two were last held against each
+    /// other: both in nanoseconds. See [`WINDOW_NS`].
+    window: (f64, f64),
+    /// What the tracks of the blocks of this call have taken to make so
+    /// far, in nanoseconds, added up over whoever made them.
+    made_ns: u64,
+    /// How many blocks were spread since that was last asked.
+    spread_blocks: u64,
     /// Set when the song starts or jumps: the next block says where every
     /// controller is at its first frame.
     chase: bool,
@@ -209,6 +266,13 @@ impl Processor {
             live_targets: TrackSet::default(),
             room: Room::new(),
             spread: None,
+            team: None,
+            spreading: false,
+            spread_above: SPREAD_ABOVE,
+            weight: 0.0,
+            window: (0.0, 0.0),
+            made_ns: 0,
+            spread_blocks: 0,
             chase: true,
             take_back: false,
             mix_left: vec![0.0; MAX_BLOCK],
@@ -359,6 +423,17 @@ impl Processor {
     /// Lets go of every note that sounds, played by hand or by the song,
     /// at the start of the next block.
     pub(crate) fn release_everything(&mut self) {
+        self.flush = Flush::Everything;
+    }
+
+    /// Puts things right after a block that a device went down over
+    /// (`process` did not come back from it): what was played by hand for
+    /// that call is let go of, so that the key a device fails on is not
+    /// played to it again with every block from then on, and everything
+    /// that sounds is released, because what would have ended a note may
+    /// be among what was lost.
+    pub(crate) fn after_fault(&mut self) {
+        self.live.clear();
         self.flush = Flush::Everything;
     }
 
@@ -589,6 +664,9 @@ impl Processor {
         }
         let position = self.position();
         new.adopt(&mut self.graph);
+        if new.rounds.is_none() {
+            self.spreading = false;
+        }
         let tempo_changed = new.tempo_map != self.graph.tempo_map;
         let old = std::mem::replace(&mut self.graph, new);
         if tempo_changed {
@@ -608,6 +686,53 @@ impl Processor {
     pub fn spread_over(&mut self, threads: usize) -> usize {
         self.spread = Spread::new(&self.graph, threads).map(Box::new);
         self.spread.as_ref().map_or(1, |spread| spread.threads())
+    }
+
+    /// Gives the song that plays the threads it may be made on beside
+    /// this one, or takes them away, and returns the ones it had: they are
+    /// to be let go of off the audio thread. A block is spread over them
+    /// where the graph says what can be made at once ([`Graph::rounds`])
+    /// and making its tracks is worth handing across
+    /// ([`Processor::spread_from`]); the samples are the ones this thread
+    /// alone makes.
+    pub fn play_over(&mut self, team: Option<Box<Team>>) -> Option<Box<Team>> {
+        std::mem::replace(&mut self.team, team)
+    }
+
+    /// Sets the share of a block's own time that making the tracks must
+    /// take before a song that plays is spread over its team:
+    /// [`SPREAD_ABOVE`] unless told otherwise. Nothing spreads every block
+    /// from the first, which is how to hear that it makes no difference.
+    pub fn spread_from(&mut self, share: f64) {
+        self.spread_above = share.max(0.0);
+        if share <= 0.0 {
+            self.spreading = true;
+        }
+    }
+
+    /// Whether the song that plays would be spread if it had threads to be
+    /// spread over: it takes long enough to make, it can be made in
+    /// parts, and nobody has given it any.
+    pub fn wants_threads(&self) -> bool {
+        // Asked for at half of what the song is spread at, and by the most
+        // a buffer took of late: so that they are there when it is.
+        let may_soon = self.weight > self.spread_above * SPREAD_BELOW;
+        (self.spreading || may_soon) && self.team.is_none() && self.graph.rounds.is_some()
+    }
+
+    /// How many threads make the blocks of the song that plays right now,
+    /// this one among them.
+    pub fn threads(&self) -> usize {
+        match (self.spreading, &self.team, &self.graph.rounds) {
+            (true, Some(team), Some(rounds)) => (team.len() + 1).min(rounds.width()),
+            _ => 1,
+        }
+    }
+
+    /// How many blocks were spread over more than one thread since this
+    /// was last asked.
+    pub fn take_spread_blocks(&mut self) -> u64 {
+        std::mem::take(&mut self.spread_blocks)
     }
 
     /// How long this thread has waited for the others a render was spread
@@ -709,6 +834,35 @@ impl Processor {
             }
         }
 
+        // How much of the time this call covers its tracks took to make,
+        // added up over whoever made them, with what it was of late fading
+        // behind it: by that a song that plays is spread, and gathered
+        // again. (Over the call and not block by block: a block may be a
+        // frame long, and what devices cost to be called at all says
+        // nothing of the song.)
+        let call_ns = total as f64 * 1e9 / self.sample_rate;
+        let made_ns = std::mem::take(&mut self.made_ns) as f64;
+        let share = if call_ns > 0.0 { made_ns / call_ns } else { 0.0 };
+        self.weight = share.max(self.weight * 0.5f64.powf(call_ns / WEIGHT_HALVES_NS));
+        self.window = (self.window.0 + made_ns, self.window.1 + call_ns);
+        let always = self.spread_above <= 0.0;
+        if self.graph.rounds.is_none() {
+            self.spreading = false;
+        } else if always || share > URGENT {
+            self.spreading = true;
+        }
+        if self.window.1 >= WINDOW_NS {
+            let level = self.window.0 / self.window.1;
+            self.window = (0.0, 0.0);
+            if self.graph.rounds.is_some() && !always {
+                if level > self.spread_above {
+                    self.spreading = true;
+                } else if level < self.spread_above * SPREAD_BELOW && self.playing {
+                    self.spreading = false;
+                }
+            }
+        }
+
         // What was placed in this call has been played; anything placed
         // beyond it waits for the next.
         let played = total as u32;
@@ -776,7 +930,7 @@ impl Processor {
         mix_left.fill(0.0);
         mix_right.fill(0.0);
 
-        let Graph { tracks, buses, keys, master, tempo_map, meter_map, .. } = &mut *self.graph;
+        let Graph { tracks, buses, keys, master, tempo_map, meter_map, rounds, .. } = &mut *self.graph;
         let (tempo_map, meter_map): (&TempoMap, &MeterMap) = (tempo_map, meter_map);
         for bus in buses.iter_mut() {
             bus.left[..frames].fill(0.0);
@@ -806,103 +960,59 @@ impl Processor {
             declick,
             sample_rate: self.sample_rate,
         };
-        // A render that was given threads makes the tracks that do not
-        // feed one another at once. Nothing is played by hand into a
-        // render; if anything were, the block would be made here.
-        let spread = self.spread.as_mut().filter(|_| !has_live && !standing_due);
-        if let Some(spread) = spread {
-            spread.block(tracks, buses, keys, &common, mix_left, mix_right);
+        let mut hand = Hand {
+            live: &self.live,
+            targets: &self.live_targets,
+            capture: &mut self.capture,
+            flush: &mut self.flush,
+            heard,
+            block,
+            has_live,
+            standing_due,
+        };
+        // Who makes the tracks. A render that was given threads has its
+        // own. A song that plays has its team, where the graph says what
+        // can be made at once and making it has been taking long enough to
+        // be worth handing across. Otherwise this thread makes them one
+        // after the other. What the three make is the same.
+        let made_ns = if let Some(spread) = self.spread.as_mut() {
+            let Spread { crew, rounds } = &mut **spread;
+            for (track, room) in tracks.iter_mut().zip(rounds.rooms_mut()) {
+                prelude(track, &common, room, &mut hand);
+            }
+            rounds.block(&*crew, tracks, buses, keys, &common, mix_left, mix_right)
+        } else if let (true, Some(team), Some(rounds)) = (self.spreading, self.team.as_deref(), rounds.as_deref_mut()) {
+            for (track, room) in tracks.iter_mut().zip(rounds.rooms_mut()) {
+                prelude(track, &common, room, &mut hand);
+            }
+            self.spread_blocks += 1;
+            rounds.block(team, tracks, buses, keys, &common, mix_left, mix_right)
         } else {
             let room = &mut self.room;
+            let mut made = 0;
             for track in tracks.iter_mut() {
+                prelude(track, &common, room, &mut hand);
+                let began = Instant::now();
                 // A group or return starts from what was fed to its bus;
                 // every track that feeds it has already run.
-                begin(track, &common, buses, room);
-                let events = &mut room.events;
-                let recorded = heard.as_ref().filter(|heard| heard.tracks.contains(track.id));
-                let mut by_hand = false;
-                if std::mem::take(&mut track.state.release_routed) {
-                    by_hand = true;
-                    let id = track.id;
-                    release_routed(track, events, |kind| {
-                        if let (Some(heard), Some(capture)) = (recorded, &mut self.capture) {
-                            let (beat, pass) = heard.at(0, 0.0);
-                            let _ = capture.push(Captured::Event { track: id, kind, beat, pass });
-                        }
-                    });
-                }
-                if has_live {
-                    for event in self.live.iter().filter(|event| block.contains(&event.offset)) {
-                        let routed = event.target == LiveTarget::Routed;
-                        let plays = match event.target {
-                            LiveTarget::Routed => self.live_targets.contains(track.id),
-                            LiveTarget::Track(id) => id == track.id,
-                        };
-                        if !plays {
-                            continue;
-                        }
-                        if events.len() >= EVENT_CAPACITY {
-                            // Cannot happen: fewer live events are held than a
-                            // device takes in a block. If it ever does, the
-                            // event may have been the end of a note.
-                            self.flush = Flush::Everything;
-                            continue;
-                        }
-                        // A key the keyboard does not hold here has nothing to
-                        // let go of: it went down before this track was one it
-                        // plays, or the note was ended for it already.
-                        if let (true, EventKind::NoteOff { pitch }) = (routed, event.kind)
-                            && track.state.routed_held & (1 << pitch.min(127)) == 0
-                        {
-                            continue;
-                        }
-                        by_hand = true;
-                        let offset = event.offset - block.start;
-                        // A key that switches, pressed by hand: what the
-                        // instrument is on is the hand's doing now.
-                        if let EventKind::NoteOn { pitch, .. } = event.kind
-                            && track.switch_keys & (1 << pitch.min(127)) != 0
-                        {
-                            track.state.latched = UNKNOWN;
-                        }
-                        track.state.played(event.kind, routed);
-                        events.push(Event { offset, kind: event.kind });
-                        let keeps = matches!(event.kind, EventKind::NoteOn { .. } | EventKind::NoteOff { .. })
-                            || ControllerKind::of_event(event.kind).is_some();
-                        if let (true, Some(heard), Some(capture)) = (keeps, recorded, &mut self.capture) {
-                            let (beat, pass) = heard.at(offset, event.early);
-                            let _ = capture.push(Captured::Event { track: track.id, kind: event.kind, beat, pass });
-                        }
-                    }
-                }
-                // The song's controllers, after whatever the hand did in this
-                // block (which makes a controller the hand's) and before the
-                // song's notes, so that a note begins at the level meant for it.
-                let moved = say_controllers(track, &common, room);
-                if let (true, Some(heard), Some(capture)) = (standing_due, recorded, &mut self.capture) {
-                    // Where the hand has left the controllers is how the take
-                    // begins: an instrument that was given its expression
-                    // before the take needs it to play the take back.
-                    for (index, value) in track.state.live.iter().enumerate().filter(|(_, value)| !value.is_nan()) {
-                        let Some(kind) = ControllerKind::from_index(index) else { continue };
-                        if kind.rest().is_none_or(|rest| rest as f32 != *value) {
-                            let report = Captured::Standing { track: track.id, kind, value: *value, pass: heard.pass };
-                            let _ = capture.push(report);
-                        }
-                    }
-                }
-                play(track, &common, room, by_hand || moved, keys);
-                // What the devices that listen to this track hear of it: as it
-                // leaves its own devices, whatever its fader and its mute say.
-                if let Some(key) = track.key_out.and_then(|key| keys.get_mut(key)) {
-                    key.left[..frames].copy_from_slice(&room.left[..frames]);
-                    key.right[..frames].copy_from_slice(&room.right[..frames]);
-                }
-                fade(track, &common, room);
+                sound(track, &common, buses, room);
+                let devices = track.chain.devices.len();
+                through(track, &common, room, keys, 0..devices);
+                // What the devices that listen to this track hear of it:
+                // as it leaves its own devices, whatever its fader and its
+                // mute say.
+                let listened = track.key_out.and_then(|key| keys.get_mut(key));
+                finish(track, &common, room, listened);
+                room.spent = began.elapsed().as_nanos() as u64;
+                made += tally(track, &common, room);
                 mix(track, &common, room, buses, mix_left, mix_right);
             }
-        }
+            made
+        };
 
+        self.made_ns += made_ns;
+
+        let master_began = Instant::now();
         if let Some(tap) = &mut master.tap {
             tap.push(mix_left, mix_right);
         }
@@ -923,6 +1033,7 @@ impl Processor {
         out_left.copy_from_slice(mix_left);
         out_right.copy_from_slice(mix_right);
         master.meter.record(peak_left, peak_right);
+        master.meter.cost(master_began.elapsed().as_nanos() as u64, frames);
 
         // The metronome counts the time signature the block is in, in
         // bars that begin where that signature took over.
@@ -997,6 +1108,13 @@ pub(crate) struct Room {
     gain_right: Vec<f32>,
     /// Room for how far a gate is open over a block, while it moves.
     shares: Vec<f32>,
+    /// Whether what the track has been told so far in the block (by hand,
+    /// or by the song's controllers) is not in order of time: said by
+    /// [`prelude`] for [`sound`].
+    unordered: bool,
+    /// How long the track's block has taken to make so far, in
+    /// nanoseconds, by whoever made it.
+    pub spent: u64,
 }
 
 impl Room {
@@ -1009,14 +1127,128 @@ impl Room {
             gain_left: vec![0.0; MAX_BLOCK],
             gain_right: vec![0.0; MAX_BLOCK],
             shares: vec![0.0; MAX_BLOCK],
+            unordered: false,
+            spent: 0,
         }
     }
 }
 
-/// A track's block begins: with what was fed to its bus, if it is a group
-/// or a return (every track that feeds it has been added to it), and with
-/// the notes that the block lets go of.
-pub(crate) fn begin(track: &mut TrackNode, common: &Common, buses: &[Bus], room: &mut Room) {
+/// What a hand did in a block, and where a take's events are reported:
+/// what [`prelude`] reads beside the track. All of it belongs to the
+/// thread that asked for the block.
+pub(crate) struct Hand<'a> {
+    /// What was played by hand since the last callback.
+    live: &'a [LiveEvent],
+    /// The tracks a keyboard plays.
+    targets: &'a TrackSet,
+    /// Where what is recorded goes.
+    capture: &'a mut Option<rtrb::Producer<Captured>>,
+    /// Set to have the next block let go of everything: an event that may
+    /// have ended a note found no room.
+    flush: &'a mut Flush,
+    /// Where a take's events are written, while one is recorded.
+    heard: Option<Heard>,
+    /// The frames of the callback that the block covers.
+    block: std::ops::Range<u32>,
+    /// Whether anything was played by hand in those frames.
+    has_live: bool,
+    /// The take has just started rolling: where the hand has left each
+    /// controller is reported as how it begins.
+    standing_due: bool,
+}
+
+/// What a track is told in the block ahead of its own notes, into `room`:
+/// the notes that the block lets go of, what a hand played on it, and
+/// where its controllers are. What is played while a take is recorded is
+/// reported here. Always by the thread that asked for the block, track
+/// after track in the order of the graph, whoever makes the tracks
+/// afterwards: what was played and the reports go through queues that
+/// have one end.
+pub(crate) fn prelude(track: &mut TrackNode, common: &Common, room: &mut Room, hand: &mut Hand) {
+    room.spent = 0;
+    room.events.clear();
+    release_notes(track, common.flush, &mut room.events);
+    let events = &mut room.events;
+    let recorded = hand.heard.as_ref().filter(|heard| heard.tracks.contains(track.id));
+    let mut by_hand = false;
+    if std::mem::take(&mut track.state.release_routed) {
+        by_hand = true;
+        let id = track.id;
+        release_routed(track, events, |kind| {
+            if let (Some(heard), Some(capture)) = (recorded, &mut *hand.capture) {
+                let (beat, pass) = heard.at(0, 0.0);
+                let _ = capture.push(Captured::Event { track: id, kind, beat, pass });
+            }
+        });
+    }
+    if hand.has_live {
+        for event in hand.live.iter().filter(|event| hand.block.contains(&event.offset)) {
+            let routed = event.target == LiveTarget::Routed;
+            let plays = match event.target {
+                LiveTarget::Routed => hand.targets.contains(track.id),
+                LiveTarget::Track(id) => id == track.id,
+            };
+            if !plays {
+                continue;
+            }
+            if events.len() >= EVENT_CAPACITY {
+                // Cannot happen: fewer live events are held than a
+                // device takes in a block. If it ever does, the
+                // event may have been the end of a note.
+                *hand.flush = Flush::Everything;
+                continue;
+            }
+            // A key the keyboard does not hold here has nothing to
+            // let go of: it went down before this track was one it
+            // plays, or the note was ended for it already.
+            if let (true, EventKind::NoteOff { pitch }) = (routed, event.kind)
+                && track.state.routed_held & (1 << pitch.min(127)) == 0
+            {
+                continue;
+            }
+            by_hand = true;
+            let offset = event.offset - hand.block.start;
+            // A key that switches, pressed by hand: what the
+            // instrument is on is the hand's doing now.
+            if let EventKind::NoteOn { pitch, .. } = event.kind
+                && track.switch_keys & (1 << pitch.min(127)) != 0
+            {
+                track.state.latched = UNKNOWN;
+            }
+            track.state.played(event.kind, routed);
+            events.push(Event { offset, kind: event.kind });
+            let keeps = matches!(event.kind, EventKind::NoteOn { .. } | EventKind::NoteOff { .. })
+                || ControllerKind::of_event(event.kind).is_some();
+            if let (true, Some(heard), Some(capture)) = (keeps, recorded, &mut *hand.capture) {
+                let (beat, pass) = heard.at(offset, event.early);
+                let _ = capture.push(Captured::Event { track: track.id, kind: event.kind, beat, pass });
+            }
+        }
+    }
+    // The song's controllers, after whatever the hand did in this block
+    // (which makes a controller the hand's) and before the song's notes,
+    // so that a note begins at the level meant for it.
+    let moved = say_controllers(track, common, room);
+    if let (true, Some(heard), Some(capture)) = (hand.standing_due, recorded, &mut *hand.capture) {
+        // Where the hand has left the controllers is how the take
+        // begins: an instrument that was given its expression before the
+        // take needs it to play the take back.
+        for (index, value) in track.state.live.iter().enumerate().filter(|(_, value)| !value.is_nan()) {
+            let Some(kind) = ControllerKind::from_index(index) else { continue };
+            if kind.rest().is_none_or(|rest| rest as f32 != *value) {
+                let report = Captured::Standing { track: track.id, kind, value: *value, pass: heard.pass };
+                let _ = capture.push(report);
+            }
+        }
+    }
+    room.unordered = by_hand || moved;
+}
+
+/// A track's block begins to sound: from what was fed to its bus, if it
+/// is a group or a return (every track that feeds it has been added to
+/// it), with its own notes after what [`prelude`] left it and its audio
+/// ([`gather`]).
+pub(crate) fn sound(track: &mut TrackNode, common: &Common, buses: &[Bus], room: &mut Room) {
     let frames = common.controls.frames;
     let (left, right) = (&mut room.left[..frames], &mut room.right[..frames]);
     match track.input_bus.and_then(|bus| buses.get(bus)) {
@@ -1029,8 +1261,30 @@ pub(crate) fn begin(track: &mut TrackNode, common: &Common, buses: &[Bus], room:
             right.fill(0.0);
         }
     }
-    room.events.clear();
-    release_notes(track, common.flush, &mut room.events);
+    let unordered = room.unordered;
+    gather(track, common, room, unordered);
+}
+
+/// What is left of a track's block once its devices have all run: it is
+/// noticed whether they answered their notes, `listened` takes what the
+/// devices that listen to this track hear of it (as it leaves its own
+/// devices, whatever its fader and its mute say), and it is brought to
+/// where its fader has it.
+pub(crate) fn finish(track: &mut TrackNode, common: &Common, room: &mut Room, listened: Option<&mut Bus>) {
+    let frames = common.controls.frames;
+    answer(track, common, room);
+    if let Some(listened) = listened {
+        listened.left[..frames].copy_from_slice(&room.left[..frames]);
+        listened.right[..frames].copy_from_slice(&room.right[..frames]);
+    }
+    fade(track, common, room);
+}
+
+/// Puts on record what the track's block took to make, and returns it in
+/// nanoseconds.
+pub(crate) fn tally(track: &TrackNode, common: &Common, room: &Room) -> u64 {
+    track.meter.cost(room.spent, common.controls.frames);
+    room.spent
 }
 
 /// Adds the song's controllers to what a track is told in the block, and
@@ -1041,22 +1295,10 @@ pub(crate) fn say_controllers(track: &mut TrackNode, common: &Common, room: &mut
     room.events.len() > before
 }
 
-/// A track's notes and audio, through its devices: what it sounds like
-/// ahead of its fader, left in `room`. `unordered` says that what the
-/// track has been told so far (by hand, or by the song's controllers) is
-/// not in order of time. A device that listens to another track is handed
-/// what `keys` holds of it.
-pub(crate) fn play(track: &mut TrackNode, common: &Common, room: &mut Room, unordered: bool, keys: &[Bus]) {
-    gather(track, common, room, unordered);
-    let devices = track.chain.devices.len();
-    through(track, common, room, keys, 0..devices);
-    answer(track, common, room);
-}
-
 /// What a track's devices are given in the block, into `room`: its notes
 /// after what it has been told so far, all of it in order of time, and
 /// its audio; and their parameters are put where their envelopes have
-/// them. The first part of [`play`].
+/// them. The second part of [`sound`].
 pub(crate) fn gather(track: &mut TrackNode, common: &Common, room: &mut Room, unordered: bool) {
     let ControlBlock { playing, start_beat, beats_per_frame, frames, .. } = common.controls;
     let Room { left, right, events, sorted, .. } = room;
@@ -1125,7 +1367,7 @@ pub(crate) fn through(
 }
 
 /// Notices whether a track's devices have answered the notes they were
-/// given, once they have all run: the last part of [`play`].
+/// given, once they have all run: the first part of [`finish`].
 pub(crate) fn answer(track: &mut TrackNode, common: &Common, room: &mut Room) {
     let frames = common.controls.frames;
     listen_for_an_answer(track, &room.left[..frames], &room.right[..frames]);

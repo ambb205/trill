@@ -30,6 +30,9 @@ pub const FRAMES_PER_BEAT: f64 = 24_000.0;
 pub const BUFFER: usize = 480;
 pub const LATENCY: f64 = 1_440.0;
 pub const PROBE_URI: &str = "test:probe";
+/// The key a probe panics over when it goes down, in a rig that was told
+/// its probes fail ([`ProbeLog::fail`]): a device that fails.
+pub const PANIC_KEY: u8 = 1;
 
 /// Something a probe was told to play: by which device, at which frame of
 /// that device's life, and where the song was at the start of that block.
@@ -49,6 +52,8 @@ pub struct ProbeLog {
     /// How many frames probes have processed, all told. With one probe in
     /// the project this is that probe's clock.
     pub frames: AtomicU64,
+    /// The probes go down over [`PANIC_KEY`].
+    pub fail: std::sync::atomic::AtomicBool,
 }
 
 impl ProbeLog {
@@ -75,6 +80,10 @@ impl DeviceProcessor for Probe {
     fn set_param(&mut self, _index: usize, _value: f64) {}
 
     fn process(&mut self, _info: &ProcessInfo, events: &[Event], left: &mut [f32], _right: &mut [f32]) {
+        let fails = |event: &Event| matches!(event.kind, EventKind::NoteOn { pitch: PANIC_KEY, .. });
+        if self.log.fail.load(Ordering::Relaxed) && events.iter().any(fails) {
+            panic!("a probe was played the key it fails on, on purpose");
+        }
         if !events.is_empty() {
             let mut seen = self.log.seen.lock();
             for event in events {

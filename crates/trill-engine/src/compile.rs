@@ -334,6 +334,7 @@ impl Compiler<'_> {
             tempo_map,
             meter_map: project.meter_map(),
             loop_region: (looping && region.enabled).then_some((region.start, region.end)),
+            rounds: None,
         };
         (Box::new(graph), problems)
     }

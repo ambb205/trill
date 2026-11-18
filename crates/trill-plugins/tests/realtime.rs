@@ -159,6 +159,48 @@ fn drive(factory: &dyn DeviceFactory, uri: &str) {
     assert_eq!(calls, 0, "{uri}: the host used the allocator on the audio thread");
     assert!(left.iter().chain(&right).all(|sample| sample.is_finite()), "{uri}");
 
+    // A song that plays is made on more than one thread: a device is
+    // processed by one of them at a time, and not by the same one from one
+    // block to the next. Two threads take the blocks in turn here, neither
+    // is the one the plugin was made on, and neither may allocate.
+    let steady = ProcessInfo {
+        sample_rate: 48_000.0,
+        tempo: 120.0,
+        time_signature: Default::default(),
+        playing: true,
+        position_beats: 0.0,
+        song: Default::default(),
+        loop_range: None,
+    };
+    let turn = std::sync::atomic::AtomicUsize::new(0);
+    let blocks = 48;
+    let hopped = {
+        let taken = std::sync::Mutex::new((&mut instance.processor, &mut left, &mut right));
+        let take_turns = |mine: usize| {
+            allocator_calls(|| {
+                for block in (mine..blocks).step_by(2) {
+                    while turn.load(std::sync::atomic::Ordering::Acquire) != block {
+                        std::hint::spin_loop();
+                    }
+                    let mut held = taken.lock().unwrap();
+                    let (processor, left, right) = &mut *held;
+                    left.fill(0.1);
+                    right.fill(-0.1);
+                    processor.set_param(block % params, first.max);
+                    processor.process(&steady, &events[block % events.len()], left, right);
+                    drop(held);
+                    turn.store(block + 1, std::sync::atomic::Ordering::Release);
+                }
+            })
+        };
+        std::thread::scope(|scope| {
+            let (one, other) = (scope.spawn(|| take_turns(0)), scope.spawn(|| take_turns(1)));
+            (one.join().expect("a thread that plays the plugin"), other.join().expect("the other one"))
+        })
+    };
+    assert_eq!(hopped, (0, 0), "{uri}: the host used the allocator on a thread a block was handed to");
+    assert!(left.iter().chain(&right).all(|sample| sample.is_finite()), "{uri}");
+
     // A preset loaded while the plugin plays: asked for on another
     // thread, as the session does, and taken on by the plugin under the
     // audio thread's feet. Whatever of that passes through the host's

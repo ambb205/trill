@@ -41,7 +41,13 @@ use trill_engine::{AudioSources, Processor};
 thread_local! {
     static WATCHING: Cell<bool> = const { Cell::new(false) };
     static CALLS: Cell<usize> = const { Cell::new(0) };
+    /// Set by a thread that a song is spread over: every call it makes
+    /// from then on is counted, whoever is watching.
+    static ON_A_TEAM: Cell<bool> = const { Cell::new(false) };
 }
+
+/// The calls made by the threads a song is spread over, all told.
+static TEAM_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 struct CountingAllocator;
 
@@ -51,6 +57,11 @@ fn count() {
     let _ = WATCHING.try_with(|watching| {
         if watching.get() {
             let _ = CALLS.try_with(|calls| calls.set(calls.get() + 1));
+        }
+    });
+    let _ = ON_A_TEAM.try_with(|on_a_team| {
+        if on_a_team.get() {
+            TEAM_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     });
 }
@@ -346,6 +357,133 @@ fn starting_and_coming_round_after_a_key_that_switches_never_touches_the_allocat
     assert!(level > 0.01, "the part should be sounding: {level}");
     assert_eq!(calls, 0, "{calls} allocator calls while keys that switch were pressed again");
     drop(retired);
+}
+
+#[test]
+fn a_song_spread_over_several_threads_touches_the_allocator_on_none_of_them() {
+    use std::sync::atomic::Ordering;
+    use trill_core::project::{AutomationPoint, AutomationTarget};
+    use trill_core::{ChainRef, Note, TrackKind};
+    use trill_engine::team::Team;
+
+    // Six tracks that can be made at once (audio that is warped, synths
+    // that are played and moved), a group of two of them, a return that
+    // all of them feed, and a compressor that listens to another track:
+    // every kind of round a block has.
+    let folder = folder();
+    let tone = write_wav(&file(&folder, "tone.wav"), SR, &sine(330.0, SR, 4.0, 0.4));
+    let (mut project, audio) = audio_project(120.0);
+    add_clip(&mut project, audio, &tone, 0.0, 8.0);
+    let room = project.add_track_of_kind("Room", TrackKind::Return);
+    project.add_device(ChainRef::Track(room), "builtin:reverb", "Reverb", None).unwrap();
+    let band = project.add_track_of_kind("Band", TrackKind::Group);
+    project.add_device(ChainRef::Track(band), "builtin:eq", "EQ", None).unwrap();
+    let mut synths = Vec::new();
+    for index in 0..5u8 {
+        let track = project.add_track(format!("Synth {index}"));
+        project.add_device(ChainRef::Track(track), "builtin:polysynth", "Synth", None).unwrap();
+        let filter = project.add_device(ChainRef::Track(track), "builtin:filter", "Filter", None).unwrap();
+        let clip = project.add_midi_clip(track, "clip", 0.0, 8.0).unwrap();
+        let notes: Vec<Note> = (0..16)
+            .map(|step| Note {
+                pitch: 48 + index * 4 + step % 5,
+                start: f64::from(step) * 0.5,
+                length: 0.4,
+                velocity: 100,
+            })
+            .collect();
+        project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
+        project.set_send(track, room, Some(-12.0)).unwrap();
+        if index < 2 {
+            project.set_track_group(track, Some(band)).unwrap();
+        }
+        if index == 3 {
+            let cutoff = AutomationTarget::DeviceParam { device: filter, param: "cutoff".into() };
+            let line = vec![AutomationPoint::new(0.0, 300.0), AutomationPoint::new(8.0, 5000.0)];
+            project.set_automation(cutoff, line).unwrap();
+        }
+        synths.push(track);
+    }
+    let duck = project.add_device(ChainRef::Track(synths[4]), "builtin:compressor", "Duck", None).unwrap();
+    project.set_sidechain(duck, Some(synths[0])).unwrap();
+    project.set_loop(true, 1.0, 7.0).unwrap();
+
+    let mut controller = Controller {
+        bank: DeviceBank::default(),
+        meters: Meters::default(),
+        stand_ins: StandIns::default(),
+        audio: AudioSources::default(),
+    };
+    // The synths are said to keep something between them: they take
+    // turns, in the order of the song, and what comes after each (its
+    // filter, the compressor) is called out to whoever is free when its
+    // turn is over.
+    struct InTurn;
+    impl trill_core::device::DeviceFactory for InTurn {
+        fn descriptors(&self) -> Vec<trill_core::device::DeviceDescriptor> {
+            BuiltinFactory.descriptors()
+        }
+        fn create(
+            &self,
+            device: &trill_core::Device,
+            sample_rate: f64,
+            max_block: usize,
+        ) -> Result<trill_core::device::DeviceInstance, trill_core::device::DeviceError> {
+            BuiltinFactory.create(device, sample_rate, max_block)
+        }
+        fn beside(&self, uri: &str) -> trill_core::device::Beside {
+            match uri {
+                "builtin:polysynth" => trill_core::device::Beside::InTurn("synths".to_string()),
+                _ => trill_core::device::Beside::Anything,
+            }
+        }
+    }
+    let spread = |controller: &mut Controller, project: &Project| {
+        let mut graph = controller.compile_prepared(project);
+        assert!(graph.spread(project, &InTurn) >= 4, "the song can be made on several threads");
+        graph
+    };
+    let mut processor = Processor::new(SR);
+    let mut retired = Vec::with_capacity(8);
+    retired.push(processor.swap_graph(spread(&mut controller, &project)));
+    // Three threads beside this one, each of which counts whatever it
+    // asks of the allocator from the moment it exists.
+    assert!(processor.play_over(Some(Box::new(Team::settled(3, || ON_A_TEAM.set(true))))).is_none());
+    processor.spread_from(0.0);
+    processor.play();
+    let (mut left, mut right) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+    // Once without watching, to fault in pages.
+    play(&mut processor, &mut left, &mut right, 4_096);
+
+    // What an edit arrives as while the song plays: a track more.
+    let extra = project.add_track("Extra");
+    project.add_device(ChainRef::Track(extra), "builtin:polysynth", "Synth", None).unwrap();
+    let mut next = Some(spread(&mut controller, &project));
+    let before = TEAM_CALLS.load(Ordering::Relaxed);
+    let mut level = 0.0;
+    let calls = allocator_calls(|| {
+        // Round the loop, with keys played by hand on two of the tracks.
+        level = play(&mut processor, &mut left, &mut right, 3 * SR as usize);
+        for (track, pitch) in [(synths[1], 72), (synths[2], 76)] {
+            processor.live_event(track, trill_core::device::EventKind::NoteOn { pitch, velocity: 0.8 });
+        }
+        play(&mut processor, &mut left, &mut right, 2 * SR as usize);
+        retired.push(processor.swap_graph(next.take().expect("a graph to swap in")));
+        play(&mut processor, &mut left, &mut right, 2 * SR as usize);
+        processor.seek(2.25);
+        play(&mut processor, &mut left, &mut right, 4_096);
+        processor.stop();
+        play(&mut processor, &mut left, &mut right, 2_048);
+        processor.play();
+        play(&mut processor, &mut left, &mut right, 4_096);
+    });
+    assert!(level > 0.05, "the song should be sounding: {level}");
+    assert_eq!(calls, 0, "{calls} allocator calls on the thread that asked for the blocks");
+    let on_the_team = TEAM_CALLS.load(Ordering::Relaxed) - before;
+    assert_eq!(on_the_team, 0, "{on_the_team} allocator calls on the threads the song is spread over");
+    assert_eq!(processor.threads(), 4);
+    assert!(processor.take_spread_blocks() > 500, "the blocks were spread");
+    assert_eq!(retired.len(), 2);
 }
 
 #[test]
