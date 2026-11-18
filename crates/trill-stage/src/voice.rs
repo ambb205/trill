@@ -136,17 +136,24 @@ pub fn voiced(project: &Project, mut wave: impl FnMut(&str) -> Option<Arc<Wave>>
         for clip in track.clips.iter().filter(|clip| !clip.muted) {
             let Some(audio) = clip.audio() else { continue };
             let Some(wave) = wave(&audio.path) else { continue };
-            spans.push(Voiced {
-                start: clip.start,
-                end: clip.end(),
-                wave,
-                enters: audio.offset_seconds,
-                pace: match audio.followed_tempo() {
-                    Some(recorded) => Pace::Beat(60.0 / recorded),
-                    None => Pace::Time(1.0),
-                },
-                gain: 10f32.powf(audio.gain_db / 20.0),
-            });
+            // A clip that plays round is its stretch again for each round: a span each, from the loop's start.
+            let comes_round = audio.rounds(&project.tempo_map(), clip.start, clip.start, clip.end());
+            let again = audio.round().map_or(audio.offset_seconds, |round| round.start_seconds);
+            let mut from = clip.start;
+            for (index, to) in comes_round.into_iter().chain([clip.end()]).enumerate() {
+                spans.push(Voiced {
+                    start: from,
+                    end: to,
+                    wave: wave.clone(),
+                    enters: if index == 0 { audio.offset_seconds } else { again },
+                    pace: match audio.followed_tempo() {
+                        Some(recorded) => Pace::Beat(60.0 / recorded),
+                        None => Pace::Time(1.0),
+                    },
+                    gain: 10f32.powf(audio.gain_db / 20.0),
+                });
+                from = to;
+            }
         }
         if let Some((path, root)) = sampler_of(track)
             && let Some(wave) = wave(&path)

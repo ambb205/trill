@@ -137,7 +137,7 @@ impl Runtime {
             return Ok(gathered);
         }
         // What each place is to play instead: a clip its own cut and where in it it begins, a sample its copy.
-        let mut clips: Vec<(ClipId, String, f64)> = Vec::new();
+        let mut clips: Vec<(ClipId, String, f64, f64)> = Vec::new();
         let mut relinks: Vec<Relink> = Vec::new();
         let mut written: Vec<PathBuf> = Vec::new();
         for used in &uses {
@@ -149,19 +149,26 @@ impl Runtime {
             let named = named.trim_end_matches(".wav").to_owned();
             match (&used.place, used.reach_seconds) {
                 (FilePlace::Clip(clip), Some(reach)) => {
-                    let offset = {
+                    let (offset, looped_from) = {
                         let session = self.session.lock();
                         let found = session.project().clip(*clip).map_err(|error| error.to_string())?;
-                        found.audio().map_or(0.0, |audio| audio.offset_seconds)
+                        let audio = found.audio();
+                        (
+                            audio.map_or(0.0, |audio| audio.offset_seconds),
+                            audio.and_then(|audio| audio.round()).map(|round| round.start_seconds),
+                        )
                     };
                     let seconds =
                         self.sound_facts(&from).map_err(|error| format!("{}: {error}", from.display()))?.seconds;
-                    let (start, end) = ((offset - HANDLE_SECONDS).max(0.0), (reach + HANDLE_SECONDS).min(seconds));
+                    // A clip that plays round uses its loop, wherever in it it begins.
+                    let first = looped_from.map_or(offset, |from| from.min(offset));
+                    let (start, end) = ((first - HANDLE_SECONDS).max(0.0), (reach + HANDLE_SECONDS).min(seconds));
                     let file = folder.join(format!("{named} {:.3}-{:.3}.wav", start, end));
                     if !file.is_file() {
                         self.make_cut(&file, &Cut { stems: vec![from], from: start, to: end, hit: false })?;
                     }
-                    clips.push((*clip, file.display().to_string(), offset - start));
+                    // Where the clip begins in its cut, and how far the cut begins into the recording.
+                    clips.push((*clip, file.display().to_string(), offset - start, start));
                     written.push(file);
                 }
                 (place, _) => {
@@ -183,10 +190,14 @@ impl Runtime {
         let mut session = self.session.lock();
         session
             .edit(|project| {
-                for (clip, path, offset) in &clips {
+                for (clip, path, offset, cut_from) in &clips {
                     if let ClipContent::Audio(audio) = &mut project.clip_mut(*clip)?.content {
                         audio.path.clone_from(path);
                         audio.offset_seconds = *offset;
+                        // What it plays round is where it was in the recording, counted in the cut.
+                        if let Some(looped) = &mut audio.looped {
+                            looped.start_seconds -= cut_from;
+                        }
                     }
                 }
                 project.relink(&relinks, &SampleFiles)?;

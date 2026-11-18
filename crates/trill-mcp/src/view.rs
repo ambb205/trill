@@ -120,6 +120,13 @@ pub fn clip_json(clip: &Clip, bars: &MeterMap, include_notes: bool) -> Value {
             if audio.transpose != 0.0 {
                 fields.insert("transpose".into(), json!(round(audio.transpose)));
             }
+            if let Some(looped) = audio.round() {
+                // The stretch of the recording it plays round, and how many beats a round lasts where it follows the song.
+                fields.insert("loop_seconds".into(), json!([round(looped.start_seconds), round(looped.end_seconds())]));
+                if let Some(tempo) = audio.followed_tempo() {
+                    fields.insert("loop_length".into(), json!(round(looped.seconds * tempo / 60.0)));
+                }
+            }
         }
     }
     out

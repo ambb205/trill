@@ -309,7 +309,9 @@ pub struct UpdateClipRequest {
     pub fade_in: Option<f64>,
     /// Fade-out length in beats (audio clips).
     pub fade_out: Option<f64>,
-    /// New loop length in beats; 0 removes the loop.
+    /// New loop length in beats; 0 removes the loop. A notes clip repeats its first `loop_length` beats of notes.
+    /// An audio clip plays round the stretch of its recording that its first `loop_length` beats cover: set
+    /// it, then make the clip longer (`length`), and the stretch repeats, in time with the song.
     pub loop_length: Option<f64>,
     pub muted: Option<bool>,
     /// Move the clip to this track.

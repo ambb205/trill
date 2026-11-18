@@ -191,7 +191,20 @@ async fn stretches_of_a_study_become_clips_that_lie_on_the_songs_bars() {
     assert_eq!(ok(client, "get_project", json!({})).await["tracks"].as_array().unwrap().len(), 0);
     ok(client, "history", json!({ "action": "redo" })).await;
 
-    // Laid end to end three times on the track that is there, moved up two semitones.
+    // The clip plays its two bars round: drawn out, it repeats them.
+    assert_eq!((&clip["loop_length"], &clip["loop_seconds"][0]), (&json!(8.0), &clip["offset_seconds"]), "{clip}");
+    ok(client, "update_clip", json!({ "clip": taken["clip_ids"][0], "length": 24.0 })).await;
+    // And an audio clip is given a loop as a notes clip is: by how many of its beats repeat.
+    ok(client, "update_clip", json!({ "clip": taken["clip_ids"][0], "loop_length": 4.0 })).await;
+    let project = ok(client, "get_project", json!({})).await;
+    let (drawn, _) = clip_of(&project, &taken["clip_ids"][0]);
+    assert_eq!((&drawn["length"], &drawn["loop_length"]), (&json!(24.0), &json!(4.0)), "{drawn}");
+    ok(client, "update_clip", json!({ "clip": taken["clip_ids"][0], "loop_length": 0.0 })).await;
+    let project = ok(client, "get_project", json!({})).await;
+    assert!(clip_of(&project, &taken["clip_ids"][0]).0.get("loop_length").is_none());
+
+    // Three rounds of a bar of the bass on the track that is there, moved up two semitones: one clip that
+    // plays the bar round, three bars long.
     let track_id = taken["track_id"].clone();
     let thrice = ok(
         client,
@@ -200,18 +213,13 @@ async fn stretches_of_a_study_become_clips_that_lie_on_the_songs_bars() {
                 "at_bar": 9, "times": 3, "semitones": 2 }),
     )
     .await;
-    assert_eq!((thrice["clip_ids"].as_array().unwrap().len(), &thrice["warp"]), (3, &json!("tonal")));
-    assert_eq!((&thrice["semitones"], &thrice["track_id"]), (&json!(2.0), &track_id));
+    assert_eq!((thrice["clip_ids"].as_array().unwrap().len(), &thrice["warp"]), (1, &json!("tonal")));
+    assert_eq!((&thrice["semitones"], &thrice["track_id"], &thrice["times"]), (&json!(2.0), &track_id, &json!(3)));
     assert!(thrice["said"][0].as_str().unwrap().starts_with("the pitch is moved by the stretcher"), "{thrice}");
     let project = ok(client, "get_project", json!({})).await;
-    let starts: Vec<f64> = thrice["clip_ids"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|clip| clip_of(&project, clip).0["start"].as_f64().unwrap())
-        .collect();
-    assert_eq!(starts, [32.0, 36.0, 40.0]);
-    assert_eq!(clip_of(&project, &thrice["clip_ids"][0]).0["transpose"], 2.0);
+    let (round, _) = clip_of(&project, &thrice["clip_ids"][0]);
+    assert_eq!((&round["start"], &round["length"], &round["loop_length"]), (&json!(32.0), &json!(12.0), &json!(4.0)));
+    assert_eq!(round["transpose"], 2.0);
 
     // Two stems together are one sound: cut into a file in the study's own folder, which the clip plays
     // from its start.

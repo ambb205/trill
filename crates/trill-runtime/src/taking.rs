@@ -79,7 +79,8 @@ pub struct TakeStretch {
     /// the song.
     pub as_recorded: bool,
     pub pitch: Pitch,
-    /// How many times it is laid end to end; at least once.
+    /// How many times over it lasts: it plays round, and one clip is that
+    /// many rounds long. At least once.
     pub times: u32,
 }
 
@@ -625,6 +626,7 @@ impl Runtime {
                 warp: plan.warp,
                 source_tempo: piece.source_tempo,
                 transpose: plan.semitones,
+                looped: None,
             };
             song.add_audio_clip(track, plan.name.clone(), piece.start, piece.length, content)
                 .map_err(|error| error.to_string())?;
@@ -670,9 +672,18 @@ impl Runtime {
                     Lane::Track(track) => track,
                     Lane::New => project.add_track(plan.name.clone()),
                 };
+                // A stretch that is one clip plays round: so many times over now, and again when its end
+                // is drawn out. One that had to be laid in several clips, each with its own tempo, is laid
+                // end to end that many times.
+                let rounds = plan.pieces.len() == 1;
                 let mut clips = Vec::new();
-                for round in 0..times {
+                for round in 0..if rounds { 1 } else { times } {
                     for piece in &plan.pieces {
+                        let seconds = match piece.source_tempo {
+                            Some(tempo) => piece.length * 60.0 / tempo,
+                            // As recorded: what its length covers at the tempo the song has there.
+                            None => project.tempo_map().seconds_over(take.at, piece.length),
+                        };
                         let content = AudioContent {
                             path: plan.file.display().to_string(),
                             offset_seconds: piece.offset_seconds,
@@ -682,9 +693,12 @@ impl Runtime {
                             warp: plan.warp,
                             source_tempo: piece.source_tempo,
                             transpose: plan.semitones,
+                            looped: rounds
+                                .then_some(trill_core::AudioLoop { start_seconds: piece.offset_seconds, seconds }),
                         };
                         let start = take.at + f64::from(round) * plan.length + piece.start;
-                        clips.push(project.add_audio_clip(track, plan.name.clone(), start, piece.length, content)?);
+                        let length = if rounds { piece.length * f64::from(times) } else { piece.length };
+                        clips.push(project.add_audio_clip(track, plan.name.clone(), start, length, content)?);
                     }
                 }
                 Ok((track, clips))
@@ -749,6 +763,7 @@ impl Runtime {
                     warp: WarpMode::Off,
                     source_tempo: None,
                     transpose: 0.0,
+                    looped: None,
                 };
                 let (track, clip) = session
                     .edit(|project| {
@@ -1024,6 +1039,7 @@ impl Runtime {
                     warp: WarpMode::Off,
                     source_tempo: Some(heard.grid.bpm).filter(|bpm| *bpm > 0.0),
                     transpose: 0.0,
+                    looped: None,
                 };
                 let track = project.add_track(format!("Reference: {title}"));
                 let clip = project.add_audio_clip(track, title.clone(), start, length.max(0.01), content)?;
@@ -1376,6 +1392,7 @@ mod tests {
             warp,
             source_tempo,
             transpose: 0.0,
+            looped: None,
         };
         let warped = project.add_audio_clip(track, "w", 8.0, 16.0, content(WarpMode::Tonal, Some(120.0))).unwrap();
         let plain = project.add_audio_clip(track, "p", 32.0, 16.0, content(WarpMode::Off, None)).unwrap();

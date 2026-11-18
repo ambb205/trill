@@ -218,8 +218,7 @@ impl Compiler<'_> {
                     wanted.extend(found.key);
                     // Where in the recording the piece begins, and from
                     // there where beat 0 of the song would fall in it.
-                    let within =
-                        content.offset_seconds + content.seconds_over(&tempo_map, clip.start, piece.start - clip.start);
+                    let within = piece.within;
                     let region_audio = RegionAudio {
                         origin: within * found.frames_per_second
                             - tempo_map.frames_at(piece.start, self.sample_rate) * found.step,
@@ -432,13 +431,16 @@ impl Compiler<'_> {
     }
 }
 
-/// A stretch of a clip of audio under one tempo.
+/// A stretch of a clip of audio under one tempo, and in one round of its
+/// loop where it plays round.
 struct Piece {
     start: f64,
     end: f64,
     /// The tempo the stretch is played at: the song's there, or for a
     /// stretch of a tempo that glides, the one tempo that takes as long.
     tempo: f64,
+    /// Where in the recording it begins, in seconds.
+    within: f64,
 }
 
 /// How far a clip that follows a gliding tempo may be from its beat. It
@@ -478,26 +480,50 @@ fn seam_beats(tempo: f64) -> f64 {
 /// tempo and the tempo changes under it.
 fn pieces(content: &AudioContent, clip: &Clip, map: &TempoMap) -> Vec<Piece> {
     let (start, end) = (clip.start, clip.end());
+    // Where in the recording a stretch that begins at `beat` begins: for a clip that does not play round,
+    // its offset and what the beats since cover.
+    let within = |beat: f64| content.offset_seconds + content.seconds_over(map, start, beat - start);
     let follows = content.followed_tempo().is_some();
     let steady = map.next_change(start).is_none_or(|change| change >= end) && !map.is_ramping_at(start);
+    let mut pieces = Vec::new();
     if !follows || steady {
         // Read at the tempo where it starts, which for a clip that does
         // not follow the tempo decides nothing.
-        return vec![Piece { start, end, tempo: map.tempo_at(start) }];
+        pieces.push(Piece { start, end, tempo: map.tempo_at(start), within: within(start) });
+    } else {
+        let mut from = start;
+        while from < end {
+            let change = map.next_change(from).unwrap_or(f64::INFINITY);
+            let gliding = map.is_ramping_at(from);
+            let to = if gliding { change.min(from + glide_piece_beats(map, from)) } else { change }.min(end);
+            // A sliver at the end of the clip goes with the piece before it.
+            let to = if end - to < 1e-6 { end } else { to };
+            let tempo = if gliding { (to - from) * 60.0 / map.seconds_between(from, to) } else { map.tempo_at(from) };
+            pieces.push(Piece { start: from, end: to, tempo, within: within(from) });
+            from = to;
+        }
     }
-    let mut pieces = Vec::new();
-    let mut from = start;
-    while from < end {
-        let change = map.next_change(from).unwrap_or(f64::INFINITY);
-        let gliding = map.is_ramping_at(from);
-        let to = if gliding { change.min(from + glide_piece_beats(map, from)) } else { change }.min(end);
-        // A sliver at the end of the clip goes with the piece before it.
-        let to = if end - to < 1e-6 { end } else { to };
-        let tempo = if gliding { (to - from) * 60.0 / map.seconds_between(from, to) } else { map.tempo_at(from) };
-        pieces.push(Piece { start: from, end: to, tempo });
-        from = to;
+    let Some(round) = content.round() else { return pieces };
+    // A clip that plays round is cut again wherever it comes round: each round a piece that begins at
+    // the start of the loop, joined to the one before it as pieces are where the tempo changes.
+    let comes_round = content.rounds(map, start, start, end);
+    let mut cut = Vec::with_capacity(pieces.len() + comes_round.len());
+    for piece in pieces {
+        let mut from = piece.start;
+        let inside = comes_round.iter().copied().filter(|beat| *beat > piece.start + 1e-6 && *beat < piece.end - 1e-6);
+        for beat in inside {
+            cut.push(Piece { start: from, end: beat, tempo: piece.tempo, within: content.wrapped(within(from)) });
+            from = beat;
+        }
+        cut.push(Piece { start: from, end: piece.end, tempo: piece.tempo, within: content.wrapped(within(from)) });
     }
-    pieces
+    // A piece that begins where the clip comes round begins at the loop's start, to the frame.
+    for piece in &mut cut {
+        if comes_round.iter().any(|beat| (*beat - piece.start).abs() <= 1e-9) {
+            piece.within = round.start_seconds;
+        }
+    }
+    cut
 }
 
 /// Finds the clips that carry straight on from another (the halves of a

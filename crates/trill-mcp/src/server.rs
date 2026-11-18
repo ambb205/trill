@@ -1565,7 +1565,14 @@ impl TrillServer {
                     clip.muted = muted;
                 }
                 if let Some(loop_length) = request.loop_length {
-                    clip.set_loop_length((loop_length > 0.0).then_some(loop_length))?;
+                    let map = project.tempo_map();
+                    let found = project.clip(id)?;
+                    // An audio clip plays round the stretch of its recording that so many beats of it
+                    // cover from where it begins; a notes clip its first so many beats of notes.
+                    match found.audio().map(|audio| audio.played(&map, found.start, loop_length)) {
+                        Some(played) => project.set_audio_loop(id, (loop_length > 0.0).then_some(played))?,
+                        None => project.clip_mut(id)?.set_loop_length((loop_length > 0.0).then_some(loop_length))?,
+                    }
                 }
                 if let Some(track) = request.track {
                     let start = project.clip(id)?.start;

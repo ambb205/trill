@@ -91,7 +91,8 @@ pub struct TakeRequest {
     pub at_bar: Option<u32>,
     /// Or as a beat of the song, counted from 0.
     pub at: Option<f64>,
-    /// How many times a stretch or a loop is laid end to end (default 1).
+    /// How many rounds a stretch or a loop lasts (default 1). It is one clip that plays the stretch round: made
+    /// longer later (update_clip with `length`), it goes on repeating.
     pub times: Option<u32>,
     /// true leaves a stretch at the recording's own speed, untouched: its bars are the song's only where the
     /// song has the recording's tempo. Default false: it follows the song's tempo, a beat for a beat.

@@ -174,6 +174,22 @@ fn the_workspace_lays_a_study_out_and_a_stretch_is_selected_heard_and_sent_to_th
     assert_eq!((clip.start, clip.length, audio.warp), (0.0, 8.0, trill_core::project::WarpMode::Beats));
     assert!((audio.offset_seconds - bars[2]).abs() < 1e-9 && (audio.source_tempo.unwrap() - 100.0).abs() < 0.5);
     assert_eq!(harness.undo_depth(), steps + 1);
+    // It plays its two bars round: drawn out in the arrangement, it repeats them. The Clip tab says so, and
+    // its Loop switch lets it play on through the recording instead.
+    let looped = audio.looped.expect("a stretch taken from a study plays round");
+    assert!((looped.start_seconds - bars[2]).abs() < 1e-9 && (looped.seconds - (bars[4] - bars[2])).abs() < 1e-6);
+    harness.click(harness.lane(2.0, 0));
+    harness.app.state_mut().detail_tab = DetailTab::Clip;
+    harness.idle(3);
+    assert!(harness.is_on("Loop the clip"));
+    harness.click_label("Loop the clip");
+    harness.idle(2);
+    assert!(harness.project().tracks[0].clips[0].audio().unwrap().looped.is_none());
+    harness.click_label("Loop the clip");
+    harness.idle(2);
+    assert_eq!(harness.project().tracks[0].clips[0].audio().unwrap().looped, Some(looped));
+    harness.app.state_mut().detail_tab = DetailTab::Study;
+    harness.idle(3);
 
     // As recorded, and with the bass soloed: what is heard is what is taken.
     harness.click_label("As recorded");

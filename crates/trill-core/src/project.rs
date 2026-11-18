@@ -55,6 +55,9 @@ pub const MAX_TRANSPOSE: f64 = 24.0;
 /// Shortest loop a clip repeats, so a tiny loop length cannot explode into
 /// millions of notes.
 pub const MIN_LOOP_BEATS: Beats = 1.0 / 64.0;
+/// Shortest stretch of a recording an audio clip plays round, in seconds,
+/// so that a tiny one cannot explode into millions of pieces.
+pub const MIN_LOOP_SECONDS: f64 = 0.01;
 
 const TRACK_COLORS: [u32; 10] =
     [0xF2994A, 0x56CCF2, 0xBB6BD9, 0x6FCF97, 0xEB5757, 0xF2C94C, 0x2D9CDB, 0x9B51E0, 0x27AE60, 0xE27AB0];
@@ -213,6 +216,16 @@ impl WarpMode {
 /// reached, so both keep playing exactly what they played. Fades are
 /// lengths on the timeline, in beats, applied to what comes out: warping a
 /// clip does not move them.
+///
+/// # A clip that plays round
+///
+/// With [`AudioContent::looped`] set, the clip plays that stretch of the
+/// recording again and again for as long as it lasts, as a notes clip
+/// plays its loop: drawing its end out repeats it, and drawing its start
+/// out comes round from the stretch's end. `offset_seconds` is then where
+/// in the stretch the clip begins. Where it comes round, the two ends
+/// are faded into one another over the click guard, as two pieces of a
+/// clip are where the tempo changes under it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AudioContent {
     /// Path of the audio file on disk.
@@ -241,9 +254,86 @@ pub struct AudioContent {
     /// tie pitch to speed and ignore it.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub transpose: f64,
+    /// The stretch of the recording the clip plays round, if it does. A
+    /// file saved before clips could has none, and plays on through the
+    /// recording as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub looped: Option<AudioLoop>,
+}
+
+/// A stretch of a recording that an audio clip plays round: where it
+/// begins and how long it is, in seconds of the recording.
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AudioLoop {
+    pub start_seconds: f64,
+    pub seconds: f64,
+}
+
+impl AudioLoop {
+    /// Where the stretch ends, in seconds of the recording.
+    pub fn end_seconds(&self) -> f64 {
+        self.start_seconds + self.seconds
+    }
 }
 
 impl AudioContent {
+    /// The stretch the clip plays round, if it loops: never shorter than
+    /// [`MIN_LOOP_SECONDS`].
+    pub fn round(&self) -> Option<AudioLoop> {
+        self.looped.map(|looped| AudioLoop { seconds: looped.seconds.max(MIN_LOOP_SECONDS), ..looped })
+    }
+
+    /// A place in the recording, in seconds, brought round into the
+    /// stretch the clip loops; as it is for a clip that does not. A place
+    /// that is a hair short of the stretch's end is its start: the two
+    /// are the same moment of the loop, and sums of lengths come out a
+    /// hair either way.
+    pub fn wrapped(&self, seconds: f64) -> f64 {
+        match self.round() {
+            Some(round) => {
+                let into = (seconds - round.start_seconds).rem_euclid(round.seconds);
+                round.start_seconds + if round.seconds - into < 1e-7 { 0.0 } else { into }
+            }
+            None => seconds,
+        }
+    }
+
+    /// Where in its recording, in seconds, a clip that starts at
+    /// `clip_start` is at `beat` of a song whose tempo is `map`: its
+    /// offset, then what the beats since cover, brought round where the
+    /// clip loops. This is what puts a waveform under a clip.
+    pub fn second_at(&self, map: &TempoMap, clip_start: Beats, beat: Beats) -> f64 {
+        self.wrapped(self.offset_seconds + self.seconds_over(map, clip_start, beat - clip_start))
+    }
+
+    /// The beats of the song, after `from` and before `to`, at which a
+    /// clip that starts at `clip_start` comes round to the start of its
+    /// loop. None for a clip that does not loop.
+    pub fn rounds(&self, map: &TempoMap, clip_start: Beats, from: Beats, to: Beats) -> Vec<Beats> {
+        let Some(round) = self.round() else { return Vec::new() };
+        // How much of the recording is played before it first comes round.
+        let first = round.end_seconds() - self.wrapped(self.offset_seconds);
+        let mut rounds = Vec::new();
+        let mut count = 0.0;
+        loop {
+            let beat = clip_start + self.beats_over(map, clip_start, first + count * round.seconds);
+            if beat >= to - 1e-9 || !beat.is_finite() || rounds.len() >= 100_000 {
+                return rounds;
+            }
+            if beat > from + 1e-9 {
+                rounds.push(beat);
+            }
+            count += 1.0;
+        }
+    }
+
+    /// The stretch of the recording a clip of this content, `length` beats
+    /// long from `clip_start`, plays once through: what looping it as it
+    /// stands would repeat.
+    pub fn played(&self, map: &TempoMap, clip_start: Beats, length: Beats) -> AudioLoop {
+        AudioLoop { start_seconds: self.offset_seconds, seconds: self.seconds_over(map, clip_start, length) }
+    }
+
     /// The whole file at unity gain, unwarped, without fades.
     pub fn new(path: impl Into<String>) -> Self {
         Self { path: path.into(), ..Self::default() }
@@ -340,7 +430,9 @@ impl ClipContent {
                 };
             }
             ClipContent::Audio(audio) => {
-                audio.offset_seconds = (audio.offset_seconds + audio.seconds_over(map, at, beats)).max(0.0);
+                let moved = audio.offset_seconds + audio.seconds_over(map, at, beats);
+                // A clip that plays round comes round; any other has nothing before its first sample.
+                audio.offset_seconds = if audio.looped.is_some() { audio.wrapped(moved) } else { moved.max(0.0) };
             }
         }
     }
@@ -1690,6 +1782,9 @@ impl Project {
                     advance = -midi.start_offset;
                 }
             }
+            ClipContent::Audio(audio) if audio.looped.is_some() => {
+                // A clip that plays round has its loop's end before its start.
+            }
             ClipContent::Audio(audio) => {
                 // An audio file has nothing before its first sample.
                 delta = delta.max(audio.beats_over(&map, clip.start, -audio.offset_seconds));
@@ -1777,6 +1872,51 @@ impl Project {
                 Ok(())
             }
             ClipContent::Midi(_) => invalid(format!("{id} is a MIDI clip; only audio clips can be warped")),
+        }
+    }
+
+    /// Has an audio clip play a stretch of its recording round, or with
+    /// `None` play on through the recording. The clip keeps its place and
+    /// its length: what repeats under it is what changes. Where the clip
+    /// began outside the stretch, it begins at the stretch's start.
+    pub fn set_audio_loop(&mut self, id: ClipId, looped: Option<AudioLoop>) -> Result<(), EditError> {
+        if let Some(looped) = looped {
+            let whole = looped.start_seconds.is_finite() && looped.seconds.is_finite();
+            if !whole || looped.start_seconds < 0.0 || looped.seconds < MIN_LOOP_SECONDS {
+                return invalid(format!(
+                    "a loop of {} s from {} s: it starts at 0 or later in the recording and is at least {MIN_LOOP_SECONDS} s long",
+                    looped.seconds, looped.start_seconds
+                ));
+            }
+        }
+        match &mut self.clip_mut(id)?.content {
+            ClipContent::Audio(audio) => {
+                audio.looped = looped;
+                if let Some(looped) = looped {
+                    let inside = (looped.start_seconds..looped.end_seconds()).contains(&audio.offset_seconds);
+                    if !inside {
+                        audio.offset_seconds = looped.start_seconds;
+                    }
+                }
+                Ok(())
+            }
+            ClipContent::Midi(_) => invalid(format!("{id} is a MIDI clip: its loop is set in beats (its loop length)")),
+        }
+    }
+
+    /// Has a clip repeat what it plays now when its end is drawn out, or
+    /// stop repeating: an audio clip the stretch of the recording under
+    /// it, a notes clip its notes over its length.
+    pub fn loop_clip(&mut self, id: ClipId, on: bool) -> Result<(), EditError> {
+        let map = self.tempo_map();
+        let clip = self.clip_mut(id)?;
+        let (start, length) = (clip.start, clip.length);
+        match &mut clip.content {
+            ClipContent::Audio(audio) => {
+                let played = audio.played(&map, start, length);
+                self.set_audio_loop(id, on.then_some(played))
+            }
+            ClipContent::Midi(_) => clip.set_loop_length(on.then_some(length)),
         }
     }
 
@@ -2987,6 +3127,55 @@ mod tests {
         let json = project.to_json();
         assert!(json.contains("\"warp\": \"tonal\"") && json.contains("\"source_tempo\": 87.5"), "{json}");
         assert_eq!(Project::from_json(&json).unwrap(), project);
+    }
+
+    #[test]
+    fn an_audio_clip_that_plays_round_comes_round_when_it_is_drawn_out_trimmed_and_split() {
+        let mut project = Project::new("t");
+        project.set_tempo(120.0).unwrap();
+        let track = project.add_track("Audio");
+        // A clip of two beats from one second into its recording: at 120, one second of it.
+        let content = AudioContent { offset_seconds: 1.0, ..AudioContent::new("loop.wav") };
+        let clip = project.add_audio_clip(track, "loop", 4.0, 2.0, content).unwrap();
+        let map = project.tempo_map();
+        // Looped as it stands, what repeats is the stretch under it; and a file that never said so has none.
+        assert!(!serde_json::to_string(&project).unwrap().contains("looped"));
+        project.loop_clip(clip, true).unwrap();
+        let looped = project.clip(clip).unwrap().audio().unwrap().looped.unwrap();
+        assert_eq!((looped.start_seconds, looped.seconds), (1.0, 1.0));
+        // Drawn out to eight beats it comes round every two, and is at the same place in each round.
+        project.set_clip_span(clip, 4.0, 8.0).unwrap();
+        let found = project.clip(clip).unwrap().clone();
+        let audio = found.audio().unwrap();
+        assert_eq!(audio.rounds(&map, 4.0, 4.0, 12.0), [6.0, 8.0, 10.0]);
+        for (beat, second) in [(4.0, 1.0), (5.0, 1.5), (6.0, 1.0), (7.5, 1.75), (11.0, 1.5)] {
+            assert!((audio.second_at(&map, 4.0, beat) - second).abs() < 1e-9, "beat {beat}");
+        }
+        // Its start drawn out by a beat comes round from the loop's end; drawn in again it is where it was.
+        project.trim_clip_start(clip, 3.0).unwrap();
+        let earlier = project.clip(clip).unwrap().audio().unwrap().clone();
+        assert!((earlier.offset_seconds - 1.5).abs() < 1e-9 && project.clip(clip).unwrap().start == 3.0);
+        project.trim_clip_start(clip, 4.0).unwrap();
+        assert!((project.clip(clip).unwrap().audio().unwrap().offset_seconds - 1.0).abs() < 1e-9);
+        // Split in the middle of a round, the second half goes on from there, round the same loop.
+        let second = project.split_clip(clip, 9.0).unwrap();
+        let half = project.clip(second).unwrap().audio().unwrap().clone();
+        assert!((half.offset_seconds - 1.5).abs() < 1e-9 && half.looped == Some(looped));
+        assert_eq!(half.rounds(&map, 9.0, 9.0, 12.0), [10.0]);
+        // It reaches the end of its loop in its file and no further, however long it is.
+        let reach = project.files(&crate::files::NoDeviceFiles)[0].reach_seconds;
+        assert_eq!(reach, Some(2.0));
+        // Not looping any more, it plays on through the recording from where it begins.
+        project.loop_clip(clip, false).unwrap();
+        let plain = project.clip(clip).unwrap().audio().unwrap().clone();
+        assert!(plain.looped.is_none() && plain.rounds(&map, 4.0, 4.0, 9.0).is_empty());
+        assert!((plain.second_at(&map, 4.0, 8.0) - 3.0).abs() < 1e-9);
+        // A loop that is no stretch at all is refused, and a notes clip's loop is set in beats.
+        assert!(project.set_audio_loop(clip, Some(AudioLoop { start_seconds: 1.0, seconds: 0.0 })).is_err());
+        let notes = project.add_midi_clip(track, "notes", 20.0, 4.0).unwrap();
+        assert!(project.set_audio_loop(notes, None).is_err());
+        project.loop_clip(notes, true).unwrap();
+        assert_eq!(project.clip(notes).unwrap().midi().unwrap().loop_length, Some(4.0));
     }
 
     #[test]
