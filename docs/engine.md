@@ -156,13 +156,13 @@ the share of a buffer's time that making it took; a buffer that takes more than 
 
 | The device asks for | On one thread | Spread (eight threads) |
 |---|---|---|
-| 480 frames (10 ms, the shared device) | 115.7 % on average, 292 % at the worst, 10,569 of 16,345 buffers late | 36.6 % on average, 74 % at the worst, none of 19,306 late (34.2 %, 36.6 % and 37.7 % on three other runs; one buffer late in the four, of 77,225) |
+| 480 frames (10 ms, the shared device) | 115.7 % on average, 292 % at the worst, 10,569 of 16,345 buffers late | 34 to 38 % on average over eight plays, 74 to 146 % at the worst; six plays with no buffer late, one with 1 of 19,306 and one with 12, in nine of its seconds |
 | 128 frames (2.7 ms) | 113.9 % on average, 282 % at the worst, 40,416 of 62,367 late | 38.9 % on average, 117 % at the worst, 2 of 72,396 late (37.5 % and 1 late on another run) |
 | 64 frames (1.3 ms) | 119.4 % on average, 581 % at the worst, 84,489 of 120,615 late | 40.9 % on average, 100 of 144,798 late (41.7 % and 47 late on another run) |
 
 *Through the device itself* (`--device`: the system's default output, shared with the other programs, handed
-silence and asked for nothing) the same song took 35.7 % on average and 74 % at the worst, with none of 19,306
-buffers late, on a machine a fifth busy: what the stand-in says. That device (USB, 48 kHz) asked for exactly 480
+silence and asked for nothing) the same song took 35.7 % and 37.1 % on average on two plays, 74 % and 99 % at
+the worst, with none of 19,306 buffers late in either, on a machine a fifth busy: what the stand-in says. That device (USB, 48 kHz) asked for exactly 480
 frames every time, never more than 11.2 ms after it had last asked, and what it plays is heard 21.6 ms later.
 
 *The buffers that still come late* are single blocks of one track that take many times what they usually do,
@@ -175,7 +175,9 @@ ran in it:
 - *A thread kept from its work.* The longest block of a run at 64 frames was a sampled guitar's track: 5.19 ms
   on the clock, of which its thread ran 0.19 ms. Every block of 5 to 17 ms that was seen (the one late buffer at
   480 frames was such a track's block of 11.6 ms) was on a track with a sampled instrument of one maker, on one
-  thread as on eight, and never on a synthesizer's track, whose long blocks its thread ran from end to end. That
+  thread as on eight, and never on a synthesizer's track, whose long blocks its thread ran from end to end. In
+  the one play at 480 frames that had twelve late buffers, all eight tracks with such an instrument had a block
+  of 5 to 12 ms, and the synthesizers' and the drum kit's had what they always have. That
   points to the instrument waiting inside its own call (for a recording to come from the disk, or for a thread
   of its own) and not to the system taking audio threads off their processors, which would not choose its
   tracks; it was not proved, since the system does not say why a thread was not running.
