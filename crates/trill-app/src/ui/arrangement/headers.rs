@@ -180,6 +180,7 @@ fn header(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, number: 
     }
     let mut name_rect = Rect::from_min_max(index_rect.right_top(), pos2(chip(-2.0).left() - 6.0, name_row.bottom()));
     let badge = match track.kind {
+        TrackKind::Normal if track.reference.is_some() => Some("Reference"),
         TrackKind::Normal => None,
         TrackKind::Group => Some("Group"),
         TrackKind::Return => Some("Return"),
@@ -226,30 +227,43 @@ fn header(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, number: 
         automation::toggle_lanes(cx, LaneOwner::Track(track.id));
     }
 
-    let (mute_name, solo_name) = (format!("Mute {}", track.name), format!("Solo {}", track.name));
-    let mute = Chip::new("M", track.mute).accent(theme.warn).quiet(quiet).named(&mute_name);
-    let response = trill_noir::chip(ui, theme, chip(-1.0), id.with("mute"), &mute);
-    cx.hint(&response, "Mute this track");
-    if response.clicked() {
-        let (track_id, mute) = (track.id, !track.mute);
-        cx.edit(|project| {
-            project.track_mut(track_id)?.mute = mute;
-            Ok(())
-        });
+    if let Some(reference) = &track.reference {
+        // A reference is beside the song: it is not muted or soloed, it is listened to.
+        let name = format!("Listen to {}", track.name);
+        let listen = Chip::new("L", reference.listening).accent(theme.signal).quiet(quiet).named(&name);
+        let response = trill_noir::chip(ui, theme, chip(0.0), id.with("listen"), &listen);
+        cx.hint(&response, "Listen to the reference in place of the song; it is silent otherwise, and in no render");
+        if response.clicked() {
+            let (track_id, listening) = (track.id, !reference.listening);
+            cx.edit(|project| project.listen_to_reference(track_id, listening));
+        }
     }
-    let solo = Chip::new("S", track.solo).accent(theme.info).quiet(quiet).named(&solo_name);
-    let response = trill_noir::chip(ui, theme, chip(0.0), id.with("solo"), &solo);
-    cx.hint(&response, "Solo: hear only the soloed tracks");
-    if response.clicked() {
-        let (track_id, solo) = (track.id, !track.solo);
-        cx.edit(|project| {
-            project.track_mut(track_id)?.solo = solo;
-            Ok(())
-        });
-    }
-    if recording::armable(cx, track) {
-        let name = format!("Arm {}", track.name);
-        recording::arm_chip(ui, cx, track, chip(1.0), id.with("arm"), quiet, &name);
+    if track.reference.is_none() {
+        let (mute_name, solo_name) = (format!("Mute {}", track.name), format!("Solo {}", track.name));
+        let mute = Chip::new("M", track.mute).accent(theme.warn).quiet(quiet).named(&mute_name);
+        let response = trill_noir::chip(ui, theme, chip(-1.0), id.with("mute"), &mute);
+        cx.hint(&response, "Mute this track");
+        if response.clicked() {
+            let (track_id, mute) = (track.id, !track.mute);
+            cx.edit(|project| {
+                project.track_mut(track_id)?.mute = mute;
+                Ok(())
+            });
+        }
+        let solo = Chip::new("S", track.solo).accent(theme.info).quiet(quiet).named(&solo_name);
+        let response = trill_noir::chip(ui, theme, chip(0.0), id.with("solo"), &solo);
+        cx.hint(&response, "Solo: hear only the soloed tracks");
+        if response.clicked() {
+            let (track_id, solo) = (track.id, !track.solo);
+            cx.edit(|project| {
+                project.track_mut(track_id)?.solo = solo;
+                Ok(())
+            });
+        }
+        if recording::armable(cx, track) {
+            let name = format!("Arm {}", track.name);
+            recording::arm_chip(ui, cx, track, chip(1.0), id.with("arm"), quiet, &name);
+        }
     }
 
     if two_rows {
@@ -270,7 +284,9 @@ fn header(ui: &mut Ui, cx: &mut Cx, geometry: &Geometry, track: &Track, number: 
         // allows. The mixer always shows them all.
         let step = theme.metric.bar + theme.metric.gap;
         let returns = snapshot.project.tracks.iter().filter(|other| other.kind == TrackKind::Return);
-        for (index, target) in returns.filter(|_| track.kind != TrackKind::Return).enumerate() {
+        // A reference sends nowhere: it is beside the song.
+        let sends = track.kind != TrackKind::Return && track.reference.is_none();
+        for (index, target) in returns.filter(|_| sends).enumerate() {
             let top = controls_top + (index + 1) as f32 * step;
             if top + theme.metric.bar > rect.bottom() - 5.0 {
                 break;
@@ -534,6 +550,13 @@ fn track_menu(ui: &mut Ui, cx: &mut Cx, track: &Track) {
         automation::toggle_lanes(cx, LaneOwner::Track(id));
     }
     if track.kind == TrackKind::Normal {
+        // A recording to hold the song against, and a track of the song again.
+        let is = track.reference.is_some();
+        let detail = "A recording beside the song: silent unless listened to, and in no render";
+        if MenuItem::new("A reference").checked(is).detail(detail).show(ui, theme).clicked() {
+            let reference = (!is).then(trill_core::Reference::default);
+            cx.edit(|project| project.set_reference(id, reference));
+        }
         let drums = snapshot.plays_drums(id);
         let detail = "Its notes are drums, named in the piano roll and written by name, not pitches";
         if MenuItem::new("Plays drums").checked(drums).detail(detail).show(ui, theme).clicked() {

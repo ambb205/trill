@@ -36,6 +36,10 @@ pub struct SetProjectRequest {
     pub loop_region: Option<LoopInput>,
     /// Master volume in dB (at most 6).
     pub master_volume_db: Option<f32>,
+    /// The key the song says it is in: "F# minor", "Eb major", "Am", "C"; "none" takes it back. Nothing in the
+    /// song follows it: it is what a sound taken from a study is moved to (take_from_study with
+    /// `to_song_key`), and what you write the song's notes in.
+    pub key: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, Default, Deserialize, JsonSchema)]
@@ -101,6 +105,13 @@ pub struct UpdateTrackRequest {
     /// Arm the track: what is played live (a MIDI keyboard, play_notes) goes to the armed tracks, and
     /// `transport` with action "record" records them. Not part of the project file; not an undo step.
     pub armed: Option<bool>,
+    /// true makes the track a reference: a recording beside the song to hold the song against, silent unless
+    /// listened to and in no render, stem or film. false makes it a track of the song again. Only a track
+    /// that holds clips and feeds nothing (no group, no send, no device listening to it) can be one.
+    pub reference: Option<bool>,
+    /// For a reference: true listens to it, which is heard in place of the song while the song plays, as a
+    /// solo is; false goes back to the song. One reference is listened to at a time.
+    pub listening: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

@@ -117,14 +117,23 @@ fn paint_rows(ui: &Ui, cx: &Cx, geometry: &Geometry, hovered: Option<ClipId>) {
             // Clips are sorted by start, so those follow directly.
             let later = track.clips[index + 1..].iter().take_while(|later| later.start <= clip.start);
             let covered_until = later.map(Clip::end).fold(clip.start, f64::max);
+            // A reference steps back until it is listened to.
+            let unheard = track.reference.as_ref().is_some_and(|reference| !reference.listening);
             let look = ClipLook {
                 color,
-                ghosted: clip.muted || track.mute,
+                ghosted: clip.muted || track.mute || unheard,
                 name_from: geometry.x(covered_until).round(),
                 handles: hovered == Some(clip.id) || cx.state.is_clip_selected(clip.id),
                 renaming: renaming == Some(clip.id),
             };
             clips::paint_clip(&painter, cx, &mut notes, rect, geometry, clip, look);
+            // What its study found, along a reference: its parts, its chords, its words.
+            let studied = track.reference.as_ref().and_then(|reference| cx.studies.of(reference.study.as_deref()?));
+            if let Some(open) = studied {
+                let content = Rect::from_min_max(pos2(rect.left(), clips::title_rect(rect).bottom()), rect.max);
+                let x_of = |beat: f64| geometry.x(beat);
+                crate::ui::study::along::paint(&painter, cx, content.intersect(lanes), clip, open, &x_of);
+            }
         }
     }
     painter.add(Shape::mesh(notes));
@@ -638,7 +647,8 @@ fn sound_drop(ui: &Ui, cx: &mut Cx, geometry: &Geometry) {
             }
         }
         None => {
-            let count = drag.paths.len();
+            // What comes from a study is no file, and makes one track.
+            let count = drag.paths.len().max(1);
             let colors = dragging::new_track_colors(cx, count);
             let color = colors::track_color(theme, colors[0]);
             // The band says a track will appear; the ghost, where on it.

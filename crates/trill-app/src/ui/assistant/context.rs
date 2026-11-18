@@ -167,6 +167,7 @@ pub fn describe(project: &Project, state: &UiState, live: &Live) -> Context {
             DetailTab::Clip => "the Clip tab (the shown clip in the piano roll, or its audio)",
             DetailTab::Devices => "the Devices tab (the device chain of the selected track)",
             DetailTab::Mixer => "the Mixer tab (a channel strip for every track)",
+            DetailTab::Study => "the Study tab (a recording taken apart, laid out)",
         }
     ));
 

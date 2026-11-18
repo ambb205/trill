@@ -26,7 +26,13 @@ fn desk_with(root: &Path, script: Option<Script>, programs: Programs, free: Opti
     let fetches = Fetches::new(Arc::new(Nothing));
     fetches.add(List { parts: Vec::new(), ..setup::list(root.join("models")) }).unwrap();
     let setup = Setup::over(Arc::new(fetches), script, Some(programs));
-    Desk::new(DeskOptions { studies: root.join("studies"), setup: Arc::new(setup), program: Some(program()), free })
+    Desk::new(DeskOptions {
+        studies: root.join("studies"),
+        setup: Arc::new(setup),
+        program: Some(program()),
+        free,
+        turn: Some(root.join("turn")),
+    })
 }
 
 fn desk(root: &Path, script: Script) -> Desk {
@@ -309,4 +315,56 @@ fn the_timed_test_runs_what_there_is_and_keeps_what_it_chose() {
     let broken = setup.test(&root.path().join("no such program"), &AtomicBool::new(false), &mut |_, _| {}).unwrap();
     assert!(broken.results[0].error.as_deref().is_some_and(|why| why.contains("could not be started")), "{broken:?}");
     assert_eq!(broken.chosen, Provider::Processor);
+}
+
+#[test]
+fn two_programs_on_one_machine_study_one_at_a_time() {
+    // Two desks, as two programs have them, each with studies of its own, and one turn between them.
+    let root = tempfile::tempdir().unwrap();
+    let (here, there) = (root.path().join("here"), root.path().join("there"));
+    let desk_of = |folder: &Path| {
+        let fetches = Fetches::new(Arc::new(Nothing));
+        fetches.add(List { parts: Vec::new(), ..setup::list(folder.join("models")) }).unwrap();
+        let script = Script { seconds: 0.4, ..script() };
+        let setup = Setup::over(Arc::new(fetches), Some(script), Some(Programs::default()));
+        Desk::new(DeskOptions {
+            studies: folder.join("studies"),
+            setup: Arc::new(setup),
+            program: Some(program()),
+            free: None,
+            turn: Some(root.path().join("turn")),
+        })
+    };
+    let (first, second) = (desk_of(&here), desk_of(&there));
+    let a = first.start(song(root.path()), StudyOptions::default(), None).unwrap();
+    // The first has the turn before the second asks.
+    let began = std::time::Instant::now();
+    while first.report(&a.id).unwrap().at.is_none() {
+        assert!(began.elapsed() < LONG, "the first study never began");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let b = second.start(song(root.path()), StudyOptions::default(), None).unwrap();
+    // While the first runs, the second waits and says for what; it has not begun a stage.
+    let mut waited = false;
+    loop {
+        let (one, other) = (first.report(&a.id).unwrap(), second.report(&b.id).unwrap());
+        if one.study.state == State::Done {
+            break;
+        }
+        if other.behind_another {
+            waited = true;
+            assert!(other.at.is_none() && other.study.stages.iter().all(|stage| stage.state == StageState::Pending));
+        }
+        assert!(began.elapsed() < LONG, "the first study never ended");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(waited, "the second study never waited for the first");
+    let done = second.wait(&b.id, LONG).unwrap();
+    assert_eq!(done.study.state, State::Done, "{:?}", done.study.error);
+    assert!(!done.behind_another && !root.path().join("turn").exists(), "the turn is given back");
+
+    // A turn left by a program that is gone is taken over.
+    std::fs::write(root.path().join("turn"), "4294967294").unwrap();
+    let c = first.start(song(root.path()), StudyOptions::default(), None).unwrap();
+    assert_eq!(first.wait(&c.id, LONG).unwrap().study.state, State::Done);
 }

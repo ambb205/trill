@@ -441,6 +441,7 @@ impl TrillServer {
             + Self::files_router()
             + Self::listening_router()
             + Self::studying_router()
+            + Self::taking_router()
             + Self::wavetable_router()
             + Self::catalogue_router()
     }
@@ -705,6 +706,15 @@ impl TrillServer {
         let mut session = self.session.lock();
         let reply = (|| {
             let signature = request.time_signature.as_deref().map(parse_time_signature).transpose()?;
+            let key = match request.key.as_deref().map(str::trim) {
+                None => None,
+                Some("none" | "") => Some(None),
+                Some(text) => Some(Some(trill_core::SongKey::parse(text).ok_or_else(|| {
+                    format!(
+                        "'{text}' is not a key: say it like \"F# minor\", \"Eb major\", \"Am\" or \"C\", or \"none\""
+                    )
+                })?)),
+            };
             edit(&mut session, |project| {
                 if let Some(name) = &request.name {
                     project.name = name.clone();
@@ -721,6 +731,9 @@ impl TrillServer {
                 if let Some(volume) = request.master_volume_db {
                     project.set_master_volume(volume)?;
                 }
+                if let Some(key) = key {
+                    project.set_key(key);
+                }
                 Ok(())
             })?;
             let project = session.project();
@@ -732,6 +745,9 @@ impl TrillServer {
                 "loop": { "enabled": project.loop_region.enabled, "start": project.loop_region.start, "end": project.loop_region.end },
                 "master_volume_db": project.master.volume_db,
             });
+            if let Some(key) = project.key {
+                out["key"] = json!(key.name());
+            }
             if !project.tempo_changes.is_empty() || !project.meter_changes.is_empty() {
                 out["note"] = json!(
                     "These are the tempo and the time signature the song begins with; it changes them further on \
@@ -983,7 +999,8 @@ impl TrillServer {
     }
 
     /// Change a track's name, volume, pan, mute, solo or position in the track list, route it through a
-    /// group, or send it to a return track.
+    /// group, or send it to a return track; make it a reference or a track of the song again, and listen to
+    /// a reference.
     #[tool(annotations(title = "Update track"))]
     fn update_track(&self, Parameters(request): Parameters<UpdateTrackRequest>) -> CallToolResult {
         let mut session = self.session.lock();
@@ -1003,6 +1020,16 @@ impl TrillServer {
             }
             if let Some(send) = &request.send {
                 project.set_send(id, TrackId(send.to), send.level_db)?;
+            }
+            match request.reference {
+                Some(true) if project.track(id)?.reference.is_none() => {
+                    project.set_reference(id, Some(trill_core::Reference::default()))?;
+                }
+                Some(false) => project.set_reference(id, None)?,
+                _ => {}
+            }
+            if let Some(listening) = request.listening {
+                project.listen_to_reference(id, listening)?;
             }
             let track = project.track_mut(id)?;
             if let Some(name) = &request.name {
@@ -2753,6 +2780,7 @@ impl TrillServer {
                 (None, None) => return Err("this project has never been saved; give a `path`".to_string()),
             };
             session.save(&path).map_err(|error| error.to_string())?;
+            self.runtime.song_is_at(&path);
             Ok(json!({ "saved": path.display().to_string() }))
         })();
         finish(reply)
@@ -2763,7 +2791,9 @@ impl TrillServer {
     fn load_project(&self, Parameters(request): Parameters<LoadProjectRequest>) -> CallToolResult {
         let mut session = self.session.lock();
         let reply = self.may_replace_project(&session).and_then(|()| {
-            session.load(Path::new(&request.path)).map(|()| project_json(&session, false)).map_err(|e| e.to_string())
+            session.load(Path::new(&request.path)).map_err(|e| e.to_string())?;
+            self.runtime.song_is_at(Path::new(&request.path));
+            Ok(project_json(&session, false))
         });
         finish(reply)
     }

@@ -56,6 +56,18 @@ fn track_change(was: &Track, now: &Track) -> String {
     if was.name != now.name {
         return format!("Renamed {} to {}", quoted(&was.name), quoted(&now.name));
     }
+    // A reference is listened to or made, which is said as what it is.
+    match (&was.reference, &now.reference) {
+        (None, Some(_)) => return format!("Made {} a reference", quoted(&now.name)),
+        (Some(_), None) => return format!("Made {} a track of the song again", quoted(&now.name)),
+        (Some(before), Some(after)) if before.listening != after.listening => {
+            return match after.listening {
+                true => format!("Listened to the reference {}", quoted(&now.name)),
+                false => format!("Went back from the reference {} to the song", quoted(&now.name)),
+            };
+        }
+        _ => {}
+    }
     let mut changed = Vec::new();
     for (differs, what) in [
         (was.volume_db != now.volume_db, "volume"),
@@ -354,6 +366,7 @@ pub fn describe(before: &Project, after: &Project, change: &Change) -> String {
                     (before.name != after.name, "name"),
                     (before.tempo != after.tempo, "tempo"),
                     (before.time_signature != after.time_signature, "time signature"),
+                    (before.key != after.key, "key"),
                     (before.tempo_changes != after.tempo_changes, "tempo along the song"),
                     (before.meter_changes != after.meter_changes, "time signature along the song"),
                     (before.loop_region != after.loop_region, "loop"),
@@ -366,6 +379,10 @@ pub fn describe(before: &Project, after: &Project, change: &Change) -> String {
                 said.push(match changed.as_slice() {
                     ["tempo"] => format!("Set the tempo to {} BPM", after.tempo),
                     ["time signature"] => format!("Set the time signature to {}", signature(after.time_signature)),
+                    ["key"] => match after.key {
+                        Some(key) => format!("Said the song is in {}", key.name()),
+                        None => "Took back what key the song is in".to_owned(),
+                    },
                     ["tempo along the song"] => tempo_change(before, after),
                     ["time signature along the song"] => meter_change(before, after),
                     ["name"] => format!("Renamed the project to {}", quoted(&after.name)),

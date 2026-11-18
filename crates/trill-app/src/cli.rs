@@ -65,6 +65,12 @@ Options:
                           studio, fallback or none
   --setup                 Start with the Setup panel open: what Trill fetches when asked, and what
                           runs the models (Ctrl+Shift+, shows it)
+  --study <ID>            Start with this study open in the workspace along the bottom (the Study tab).
+  --study-bars <A-B>      Select these bars of it across its lanes; --study-lanes <drums,bass> keeps the
+                          selection to those stems, --study-close looks at it close, and
+                          --study-list <loops|hits|lines|notes> says what is listed beside the lanes
+  --study-take <WHAT,..>  Take these of it into the song once it is open: reference, tempo, parts, key, kit
+  --study-dialog          Start with the dialog that asks for a recording to study open
   --setup-scene <NAME>    Show a made-up machine in that panel, for screenshots: fresh, fetching,
                           machine, instruments, instruments-fetching or instruments-search
   --hold <KEYS>           Hold these keys of it down, for screenshots: adg is a C major chord, and
@@ -144,6 +150,12 @@ pub struct Cli {
     pub setup: bool,
     /// A made-up machine to show in it.
     pub setup_scene: Option<SetupScene>,
+    /// A study to open in the workspace, by its id.
+    pub study: Option<String>,
+    /// How it is shown.
+    pub study_shown: crate::ui::StudyShown,
+    /// Open the dialog that asks for a recording to study.
+    pub study_dialog: bool,
     /// The controller the lane under the piano roll's notes shows first;
     /// `None` for velocity.
     pub lane: Option<ControllerKind>,
@@ -211,6 +223,41 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
                 );
             }
             "--setup" => cli.setup = true,
+            "--study" => cli.study = Some(value("the id of a study")?),
+            "--study-bars" => {
+                let text = value("bars such as 17-24")?;
+                let bars =
+                    text.split_once('-').and_then(|(first, last)| Some((first.parse().ok()?, last.parse().ok()?)));
+                cli.study_shown.bars = Some(bars.with_context(|| format!("'{text}' is not bars such as 17-24"))?);
+            }
+            "--study-lanes" => {
+                cli.study_shown.lanes = value("stems such as drums,bass")?.split(',').map(str::to_owned).collect();
+            }
+            "--study-close" => cli.study_shown.close = true,
+            "--study-take" => {
+                for what in value("what to take, such as reference,tempo")?.split(',') {
+                    cli.study_shown.take.push(match what {
+                        "reference" => crate::ui::StudyWhole::Reference,
+                        "tempo" => crate::ui::StudyWhole::Tempo,
+                        "parts" => crate::ui::StudyWhole::Parts,
+                        "key" => crate::ui::StudyWhole::Key,
+                        "kit" => crate::ui::StudyWhole::Kit,
+                        other => {
+                            bail!("'{other}' is not something to take of a study (reference, tempo, parts, key or kit)")
+                        }
+                    });
+                }
+            }
+            "--study-list" => {
+                cli.study_shown.side = Some(match value("a list")?.as_str() {
+                    "loops" => crate::ui::StudySide::Loops,
+                    "hits" => crate::ui::StudySide::Hits,
+                    "lines" => crate::ui::StudySide::Words,
+                    "notes" => crate::ui::StudySide::Notes,
+                    other => bail!("there is no list '{other}' beside a study (expected loops, hits, lines or notes)"),
+                });
+            }
+            "--study-dialog" => cli.study_dialog = true,
             "--setup-scene" => {
                 let name = value("the name of a scene")?;
                 let known: Vec<&str> = SetupScene::ALL.iter().map(|(name, _)| *name).collect();
@@ -249,7 +296,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
                 cli.browse = Some(match value("what to list")?.as_str() {
                     "devices" => BrowserTab::Devices,
                     "sounds" => BrowserTab::Sounds,
-                    other => bail!("the browser cannot list '{other}' (expected 'devices' or 'sounds')"),
+                    "studies" => BrowserTab::Studies,
+                    other => bail!("the browser cannot list '{other}' (expected 'devices', 'sounds' or 'studies')"),
                 })
             }
             "--mcp-port" => {
@@ -261,7 +309,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
                     "clip" => DetailTab::Clip,
                     "devices" => DetailTab::Devices,
                     "mixer" => DetailTab::Mixer,
-                    other => bail!("unknown tab '{other}' (expected 'clip', 'devices' or 'mixer')"),
+                    "study" => DetailTab::Study,
+                    other => bail!("unknown tab '{other}' (expected 'clip', 'devices', 'mixer' or 'study')"),
                 }
             }
             "--select" => cli.select = Some(value("a clip name")?),
@@ -399,6 +448,9 @@ impl Cli {
             show_settings: self.settings,
             show_setup: self.setup,
             setup_scene: self.setup_scene,
+            study: self.study.clone(),
+            study_shown: self.study.as_ref().map(|_| self.study_shown.clone()),
+            show_study_dialog: self.study_dialog,
             show_film: self.film,
             show_missing: self.missing_files,
             show_credits: self.credits,

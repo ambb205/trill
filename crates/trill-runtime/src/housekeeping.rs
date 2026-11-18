@@ -41,6 +41,10 @@ impl Housekeeper {
             .spawn(move || {
                 let (stopped, wake) = &*signal;
                 let mut tick = 0u32;
+                // Where the song was last seen to live: a song that comes to
+                // live somewhere (saved, opened) is remembered among the
+                // songs Trill knows, whichever front end did it.
+                let mut lived: Option<std::path::PathBuf> = None;
                 loop {
                     {
                         let mut stopped = stopped.lock();
@@ -51,12 +55,19 @@ impl Housekeeper {
                             return;
                         }
                     }
-                    {
+                    let lives = {
                         let mut session = session.lock();
                         session.housekeeping();
                         // What the user did in plugin windows since the
                         // last round: the project and every view follow.
                         session.absorb_editor_edits();
+                        session.path().map(std::path::Path::to_path_buf)
+                    };
+                    if lives != lived {
+                        if let Some(path) = &lives {
+                            remember_song(&library, &settings, path);
+                        }
+                        lived = lives;
                     }
                     tick = tick.wrapping_add(1);
                     if tick.is_multiple_of(SETTINGS_EVERY) {
@@ -80,6 +91,18 @@ impl Drop for Housekeeper {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+/// Puts a song at the front of the songs Trill knows: the ones it saved or
+/// opened lately. A failure is logged; there is nobody here to tell.
+pub(crate) fn remember_song(library: &Library, settings: &Mutex<SettingsFile>, path: &std::path::Path) {
+    let mut settings = settings.lock();
+    if settings.current().recent_projects.first().map(std::path::PathBuf::as_path) == Some(path) {
+        return;
+    }
+    if let Err(error) = settings.update(library, |settings| settings.add_recent_project(path)) {
+        log::warn!("{error}");
     }
 }
 

@@ -36,6 +36,18 @@ pub(crate) struct Beats {
     /// Where the next time signature takes over, counted as `start` is;
     /// infinite if none does. A bar begins there whatever the count is at.
     pub until: f64,
+    /// The block's first frame as a beat of the song, counted from its start.
+    pub song: f64,
+}
+
+/// How a sound that is auditioned round goes round.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Round {
+    /// How many beats of the song one round lasts, for a sound that keeps
+    /// time with the song while the song plays: it is then read from where
+    /// the song is, and stays in step whatever the tempo does. `None`
+    /// goes round at the sound's own length, song or no song.
+    pub beats: Option<f64>,
 }
 
 struct Audition {
@@ -48,6 +60,10 @@ struct Audition {
     /// Current fade level, moving toward 1 while playing and 0 once released.
     fade: f32,
     released: bool,
+    /// Set for a sound that goes round until it is stopped.
+    round: Option<Round>,
+    /// Whether the last block was read from where the song was.
+    in_step: bool,
 }
 
 pub(crate) struct Monitor {
@@ -78,11 +94,21 @@ impl Monitor {
         }
     }
 
-    /// Starts auditioning `audio` from its beginning. Returns the buffer that
+    /// Starts auditioning `audio` from its beginning: once through, or with
+    /// `round` again and again until it is stopped. Returns the buffer that
     /// was playing before, which the caller must free off the audio thread.
-    pub fn start_audition(&mut self, audio: Arc<AudioData>, gain: f32) -> Option<Arc<AudioData>> {
+    pub fn start_audition(&mut self, audio: Arc<AudioData>, gain: f32, round: Option<Round>) -> Option<Arc<AudioData>> {
         let step = if self.sample_rate > 0.0 { audio.sample_rate / self.sample_rate } else { 1.0 };
-        let previous = self.audition.replace(Audition { audio, position: 0.0, step, gain, fade: 0.0, released: false });
+        let previous = self.audition.replace(Audition {
+            audio,
+            position: 0.0,
+            step,
+            gain,
+            fade: 0.0,
+            released: false,
+            round,
+            in_step: false,
+        });
         previous.map(|audition| audition.audio)
     }
 
@@ -112,7 +138,8 @@ impl Monitor {
     /// transport is running or counting in; `count_in` makes it click with
     /// the metronome switched off.
     pub fn mix(&mut self, left: &mut [f32], right: &mut [f32], beats: Option<Beats>, count_in: bool) {
-        self.mix_audition(left, right);
+        // A count-in is not the song playing: a sound in step with the song waits for the song.
+        self.mix_audition(left, right, beats.filter(|_| !count_in));
         match beats.filter(|_| self.metronome || count_in) {
             Some(beats) => self.mix_clicks(left, right, beats),
             // Let a click that has started ring out after a stop.
@@ -120,10 +147,54 @@ impl Monitor {
         }
     }
 
-    fn mix_audition(&mut self, left: &mut [f32], right: &mut [f32]) {
+    fn mix_audition(&mut self, left: &mut [f32], right: &mut [f32], song: Option<Beats>) {
         let Some(audition) = &mut self.audition else { return };
         let audio = &audition.audio;
         let frames = audio.frames();
+        if let Some(round) = audition.round {
+            if frames < 2 {
+                audition.released = true;
+                audition.fade = 0.0;
+                return;
+            }
+            let own = if self.sample_rate > 0.0 { audio.sample_rate / self.sample_rate } else { 1.0 };
+            match (round.beats.filter(|beats| *beats > 0.0), song) {
+                // In step with the song: where the song is says where in the round this block begins.
+                (Some(beats), Some(song)) => {
+                    let place = (song.song / beats).rem_euclid(1.0) * frames as f64;
+                    let step = song.per_frame / beats * frames as f64;
+                    // Taken up, or let go of by a jump of the song: in again from nothing, without a click.
+                    let apart = (place - audition.position).abs();
+                    if !audition.in_step || apart.min(frames as f64 - apart) > 4.0 * step.max(1.0) {
+                        audition.fade = 0.0;
+                    }
+                    (audition.position, audition.step, audition.in_step) = (place, step, true);
+                }
+                _ => (audition.step, audition.in_step) = (own, false),
+            }
+            let length = frames as f64;
+            for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+                if audition.released {
+                    audition.fade -= self.fade_out_step;
+                    if audition.fade <= 0.0 {
+                        audition.fade = 0.0;
+                        break;
+                    }
+                } else {
+                    audition.fade = (audition.fade + self.fade_in_step).min(1.0);
+                }
+                let position = audition.position.rem_euclid(length);
+                let index = (position as usize).min(frames - 1);
+                // The last frame leads back into the first.
+                let next = if index + 1 == frames { 0 } else { index + 1 };
+                let fraction = (position - index as f64) as f32;
+                let level = audition.gain * audition.fade;
+                *l += (audio.left[index] + (audio.left[next] - audio.left[index]) * fraction) * level;
+                *r += (audio.right[index] + (audio.right[next] - audio.right[index]) * fraction) * level;
+                audition.position = position + audition.step;
+            }
+            return;
+        }
         for (l, r) in left.iter_mut().zip(right.iter_mut()) {
             let index = audition.position as usize;
             if index + 1 >= frames {
@@ -239,6 +310,7 @@ mod tests {
             monitor.mix(&mut left[done..done + n], &mut right[done..done + n], beats, false);
             if let Some(b) = &mut beats {
                 b.start += n as f64 * b.per_frame;
+                b.song += n as f64 * b.per_frame;
             }
             done += n;
         }
@@ -257,7 +329,7 @@ mod tests {
     fn an_audition_plays_in_tune_at_any_file_rate_and_ends() {
         let mut monitor = Monitor::new(SR);
         // A 44.1 kHz file through a 48 kHz engine must still sound at 440 Hz.
-        assert!(monitor.start_audition(sine(440.0, 0.5, 44_100.0), 0.5).is_none());
+        assert!(monitor.start_audition(sine(440.0, 0.5, 44_100.0), 0.5, None).is_none());
         assert!(monitor.is_auditioning());
         let out = run(&mut monitor, 48_000, None);
         assert!((peak(&out[4_800..19_200]) - 0.5).abs() < 0.01);
@@ -269,14 +341,74 @@ mod tests {
         assert!(monitor.take_finished().is_none());
     }
 
+    /// A second of sound whose every frame says where in the second it is: a ramp from 0 to 1.
+    fn ramp() -> Arc<AudioData> {
+        let samples: Vec<f32> = (0..SR as usize).map(|frame| frame as f32 / SR as f32).collect();
+        Arc::new(AudioData { sample_rate: SR, left: samples.clone(), right: samples })
+    }
+
+    #[test]
+    fn a_sound_auditioned_round_goes_round_until_it_is_stopped() {
+        let mut monitor = Monitor::new(SR);
+        monitor.start_audition(sine(440.0, 0.25, SR), 0.5, Some(Round { beats: None }));
+        // A quarter of a second of sound, heard for two seconds without a gap or a click at the seam.
+        let out = run(&mut monitor, 96_000, None);
+        assert!(monitor.is_auditioning());
+        assert!((crossings_per_second(&out[4_800..]) - 440.0).abs() < 2.0);
+        for window in out[4_800..].chunks(2_400) {
+            assert!((peak(window) - 0.5).abs() < 0.01, "a hole in the round");
+        }
+        let steps = out[4_800..].windows(2).map(|pair| (pair[1] - pair[0]).abs()).fold(0.0f32, f32::max);
+        assert!(steps < 0.04, "a click where it comes round: {steps}");
+        monitor.stop_audition();
+        let tail = run(&mut monitor, 4_800, None);
+        assert_eq!(peak(&tail[480..]), 0.0);
+        assert!(monitor.take_finished().is_some());
+    }
+
+    #[test]
+    fn a_round_that_keeps_time_is_read_from_where_the_song_is() {
+        // One second of ramp stands for two beats. The song plays at 120: the round is as long as the sound.
+        let playing = |song: f64, tempo: f64| Beats {
+            start: 0.0,
+            per_frame: tempo / (60.0 * SR),
+            count: 1.0,
+            counts_per_bar: 4,
+            until: f64::INFINITY,
+            song,
+        };
+        let mut monitor = Monitor::new(SR);
+        monitor.start_audition(ramp(), 1.0, Some(Round { beats: Some(2.0) }));
+        // The song is half a beat into a round: so is what is heard, a quarter of the way up the ramp.
+        let out = run(&mut monitor, 24_000, Some(playing(8.5, 120.0)));
+        assert!((out[12_000] - 0.5).abs() < 1e-3, "{}", out[12_000]);
+        assert!((out[23_999] - 0.75).abs() < 1e-3, "{}", out[23_999]);
+        // At half the tempo the same round takes twice as long, and is still where the song is.
+        let mut monitor = Monitor::new(SR);
+        monitor.start_audition(ramp(), 1.0, Some(Round { beats: Some(2.0) }));
+        let out = run(&mut monitor, 48_000, Some(playing(0.0, 60.0)));
+        assert!((out[24_000] - 0.25).abs() < 1e-3 && (out[47_999] - 0.5).abs() < 1e-3, "{}", out[24_000]);
+        // While the song stands still it goes round at its own length.
+        let mut monitor = Monitor::new(SR);
+        monitor.start_audition(ramp(), 1.0, Some(Round { beats: Some(2.0) }));
+        let out = run(&mut monitor, 72_000, None);
+        assert!((out[24_000] - 0.5).abs() < 1e-3 && (out[71_999] - 0.5).abs() < 1e-3);
+        // A count-in is not the song playing.
+        let mut monitor = Monitor::new(SR);
+        monitor.start_audition(ramp(), 1.0, Some(Round { beats: Some(2.0) }));
+        let (mut left, mut right) = (vec![0.0f32; 480], vec![0.0f32; 480]);
+        monitor.mix(&mut left, &mut right, Some(playing(1.0, 120.0)), true);
+        assert!(left[479] < 0.02, "it was read from the count-in: {}", left[479]);
+    }
+
     #[test]
     fn stopping_and_replacing_an_audition_hand_buffers_back() {
         let mut monitor = Monitor::new(SR);
         let first = sine(220.0, 2.0, SR);
-        monitor.start_audition(first.clone(), 1.0);
+        monitor.start_audition(first.clone(), 1.0, None);
         run(&mut monitor, 4_800, None);
 
-        let replaced = monitor.start_audition(sine(330.0, 2.0, SR), 1.0).expect("the old buffer comes back");
+        let replaced = monitor.start_audition(sine(330.0, 2.0, SR), 1.0, None).expect("the old buffer comes back");
         assert!(Arc::ptr_eq(&replaced, &first));
 
         run(&mut monitor, 4_800, None);
@@ -295,6 +427,7 @@ mod tests {
             count,
             counts_per_bar,
             until: f64::INFINITY,
+            song: 0.0,
         };
 
         // 4/4 at 120 BPM: a click every 24000 frames, the first accented.

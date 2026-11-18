@@ -80,6 +80,7 @@ pub struct TrillApp {
     /// The film panel, and the film being made if one is.
     filming: Filming,
     setup: Setup,
+    studies: super::study::Studies,
     /// The song filmed as it plays, shown in place of the panes.
     stage: StageView,
     /// Whether the window had the whole screen before the stage took it:
@@ -258,6 +259,7 @@ impl TrillApp {
             settings: Settings::default(),
             filming: Filming::default(),
             setup: Setup::default(),
+            studies: super::study::Studies::default(),
             stage: StageView::new(),
             screen_before: None,
             film_asked: None,
@@ -406,6 +408,7 @@ impl TrillApp {
             settings: &mut self.settings,
             filming: &mut self.filming,
             setup: &mut self.setup,
+            studies: &mut self.studies,
         }
     }
 
@@ -642,7 +645,8 @@ impl TrillApp {
             let arriving = self.sounds.is_waiting()
                 || self.live.preparing > 0
                 || self.settings.is_waiting()
-                || self.setup.is_waiting();
+                || self.setup.is_waiting()
+                || self.studies.is_waiting();
             if arriving && elapsed < SCREENSHOT_PATIENCE {
                 self.busy_at_frame = self.frames;
             }
@@ -756,6 +760,7 @@ impl TrillApp {
             settings,
             filming,
             setup,
+            studies,
             film_asked,
             ..
         } = self;
@@ -831,6 +836,7 @@ impl TrillApp {
                     settings,
                     filming,
                     setup,
+                    studies,
                 };
                 if arrangement {
                     arrangement::show(ui, &mut cx);
@@ -898,6 +904,9 @@ impl TrillApp {
         }
         let open_missing = std::mem::take(&mut self.options.show_missing);
         let open_setup = std::mem::take(&mut self.options.show_setup);
+        let open_study = self.options.study.take();
+        let open_shown = self.options.study_shown.take();
+        let open_dialog = std::mem::take(&mut self.options.show_study_dialog);
         if let Some(scene) = self.options.setup_scene.take() {
             self.setup.show(scene);
         }
@@ -914,6 +923,13 @@ impl TrillApp {
         }
         if open_setup {
             setup::open(&ctx, &mut cx);
+        }
+        if let Some(study) = open_study {
+            cx.studies.shown = open_shown;
+            super::study::open(&ctx, &mut cx, &study);
+        }
+        if open_dialog {
+            cx.studies.dialog.open = true;
         }
         if open_missing {
             missing::open(&mut cx);
@@ -1004,6 +1020,8 @@ impl TrillApp {
         missing::modal(&ctx, &mut cx);
         audio_settings::modal(&ctx, &mut cx);
         setup::modal(&ctx, &mut cx);
+        super::study::place::modal(&ctx, &mut cx);
+        super::study::window::show(&ctx, &mut cx);
         filming::modal(&ctx, &mut cx);
         shortcuts::window(&ctx, &mut cx);
         credits::window(&ctx, &mut cx);
@@ -1134,6 +1152,11 @@ impl TrillApp {
     #[cfg(test)]
     pub fn setup(&self) -> &Setup {
         &self.setup
+    }
+
+    #[cfg(test)]
+    pub fn studies(&self) -> &super::study::Studies {
+        &self.studies
     }
 
     /// Keeps studies, or the parts of a list, in `folder`: what choosing a
@@ -1371,6 +1394,8 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
                 audio_settings::toggle(cx);
             } else if cx.setup.is_open() {
                 setup::close(cx);
+            } else if cx.studies.dialog.open {
+                cx.studies.dialog.open = false;
             } else if cx.filming.is_open() {
                 filming::close(cx);
             } else if dragging::cancel(cx) || sound_presets::cancel(cx) {

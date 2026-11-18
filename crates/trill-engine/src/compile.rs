@@ -160,6 +160,11 @@ impl Compiler<'_> {
     /// Builds a graph for `project`. Devices already in the bank are left
     /// for the audio thread to carry over; new ones are created here.
     pub fn compile(&mut self, project: &Project, looping: bool) -> (Box<Graph>, Vec<Problem>) {
+        // A reference is a track with a rule of its own for when it is
+        // heard: it comes to a mute and a solo here, and nothing further
+        // on knows that there are references.
+        let heard = project.as_heard(self.purpose == Purpose::Rendering);
+        let project: &Project = &heard;
         let mut problems = Vec::new();
         let routing = Routing::of(project);
         let tempo_map = project.tempo_map();
@@ -728,7 +733,9 @@ impl Routing {
 
 /// The tracks a render of `project` makes: see [`Routing::needed`].
 pub(crate) fn needed(project: &Project) -> HashSet<TrackId> {
-    Routing::of(project).needed(project)
+    // A render is of the song: never of a reference beside it.
+    let project = project.as_heard(true);
+    Routing::of(&project).needed(&project)
 }
 
 /// How one track feeds another.

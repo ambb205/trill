@@ -24,6 +24,7 @@ trill-noir.workspace = true
 trill-plugins.workspace = true
 trill-runtime.workspace = true
 trill-stage.workspace = true
+trill-listen.workspace = true
 trill-study.workspace = true
 
 anyhow.workspace = true

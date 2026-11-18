@@ -221,6 +221,7 @@ fn same_song(a: &Project, b: &Project) -> bool {
         name,
         tempo,
         time_signature,
+        key,
         tempo_changes,
         meter_changes,
         loop_region,
@@ -235,6 +236,7 @@ fn same_song(a: &Project, b: &Project) -> bool {
         && *name == b.name
         && *tempo == b.tempo
         && *time_signature == b.time_signature
+        && *key == b.key
         && *tempo_changes == b.tempo_changes
         && *meter_changes == b.meter_changes
         && *loop_region == b.loop_region
@@ -248,6 +250,7 @@ fn song_of(project: &Project) -> Project {
         name,
         tempo,
         time_signature,
+        key,
         tempo_changes,
         meter_changes,
         loop_region,
@@ -263,6 +266,7 @@ fn song_of(project: &Project) -> Project {
         name: name.clone(),
         tempo: *tempo,
         time_signature: *time_signature,
+        key: *key,
         tempo_changes: tempo_changes.clone(),
         meter_changes: meter_changes.clone(),
         loop_region: *loop_region,
@@ -281,6 +285,7 @@ fn set_song(project: &mut Project, song: &Project) {
         name,
         tempo,
         time_signature,
+        key,
         tempo_changes,
         meter_changes,
         loop_region,
@@ -295,6 +300,7 @@ fn set_song(project: &mut Project, song: &Project) {
     project.name.clone_from(name);
     project.tempo = *tempo;
     project.time_signature = *time_signature;
+    project.key = *key;
     project.tempo_changes.clone_from(tempo_changes);
     project.meter_changes.clone_from(meter_changes);
     project.loop_region = *loop_region;
@@ -303,8 +309,24 @@ fn set_song(project: &mut Project, song: &Project) {
 
 /// Whether two tracks have the same settings of their own.
 fn same_track(a: &Track, b: &Track) -> bool {
-    let Track { id, name, kind, group, sends, color, volume_db, pan, mute, solo, devices: _, clips: _, profile } = a;
+    let Track {
+        id,
+        name,
+        kind,
+        group,
+        sends,
+        color,
+        volume_db,
+        pan,
+        mute,
+        solo,
+        devices: _,
+        clips: _,
+        profile,
+        reference,
+    } = a;
     *id == b.id
+        && *reference == b.reference
         && *name == b.name
         && *kind == b.kind
         && *group == b.group
@@ -319,8 +341,22 @@ fn same_track(a: &Track, b: &Track) -> bool {
 
 /// A track's own settings: the track with nothing on it.
 fn track_of(track: &Track) -> Track {
-    let Track { id, name, kind, group, sends, color, volume_db, pan, mute, solo, devices: _, clips: _, profile } =
-        track;
+    let Track {
+        id,
+        name,
+        kind,
+        group,
+        sends,
+        color,
+        volume_db,
+        pan,
+        mute,
+        solo,
+        devices: _,
+        clips: _,
+        profile,
+        reference,
+    } = track;
     Track {
         id: *id,
         name: name.clone(),
@@ -335,6 +371,7 @@ fn track_of(track: &Track) -> Track {
         devices: Vec::new(),
         clips: Vec::new(),
         profile: profile.clone(),
+        reference: reference.clone(),
     }
 }
 
