@@ -42,6 +42,26 @@ pub struct DeskOptions {
     pub program: Option<PathBuf>,
     /// The memory that is free, in place of asking the machine: for tests.
     pub free: Option<fn() -> Option<u64>>,
+    /// The file that whoever studies on this machine holds while it does:
+    /// every program that names the same file takes its turn with the
+    /// others, so that the window and a server do not each run the models.
+    /// `None` takes turns with nobody.
+    pub turn: Option<PathBuf>,
+}
+
+/// The machine's turn, held: the file is there while this is, and names
+/// the process that holds it.
+struct Turn(PathBuf);
+
+/// The turns this process holds now, by their files: a file that names
+/// this process and is not among them was left by an earlier one.
+static HELD: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        HELD.lock().retain(|held| held != &self.0);
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// A study as it is now.
@@ -52,6 +72,9 @@ pub struct Report {
     pub at: Option<(Stage, f32)>,
     /// The room it takes on disk, in bytes.
     pub size: u64,
+    /// Set while it waits for a study that another program on this
+    /// machine is running: one is studied at a time, whoever asks.
+    pub behind_another: bool,
 }
 
 struct Running {
@@ -59,6 +82,8 @@ struct Running {
     stop: Arc<AtomicBool>,
     stage: Option<Stage>,
     share: f32,
+    /// Whether it waits for another program's study to end.
+    behind_another: bool,
 }
 
 struct Turns {
@@ -74,6 +99,7 @@ struct Shared {
     setup: Arc<Setup>,
     program: Mutex<Option<PathBuf>>,
     free: fn() -> Option<u64>,
+    turn: Option<PathBuf>,
     turns: Mutex<Turns>,
     changed: Condvar,
 }
@@ -134,9 +160,66 @@ impl Shared {
         Ok((models, limit))
     }
 
+    /// Takes the machine's turn, waiting while another program holds it.
+    /// `None` when the study was stopped, or the desk closed, while it
+    /// waited. A turn left behind by a program that is gone is taken over.
+    fn machine_turn(&self, stop: &AtomicBool) -> Option<Option<Turn>> {
+        let Some(file) = &self.turn else { return Some(None) };
+        if let Some(parent) = file.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        loop {
+            let made = std::fs::OpenOptions::new().write(true).create_new(true).open(file);
+            match made {
+                Ok(mut made) => {
+                    use std::io::Write;
+                    let _ = made.write_all(std::process::id().to_string().as_bytes());
+                    HELD.lock().push(file.clone());
+                    if let Some(running) = self.turns.lock().running.as_mut() {
+                        running.behind_another = false;
+                    }
+                    return Some(Some(Turn(file.clone())));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let holder = std::fs::read_to_string(file).ok().and_then(|pid| pid.trim().parse::<u32>().ok());
+                    let alive = holder.is_some_and(|pid| match pid == std::process::id() {
+                        true => HELD.lock().contains(file),
+                        false => room::held_by(pid).is_some(),
+                    });
+                    if !alive {
+                        // Made a moment ago and not yet filled in, or left by a program that ended.
+                        let fresh = holder.is_none()
+                            && std::fs::metadata(file)
+                                .and_then(|file| file.modified())
+                                .ok()
+                                .and_then(|written| written.elapsed().ok())
+                                .is_some_and(|age| age < Duration::from_secs(2));
+                        if !fresh {
+                            let _ = std::fs::remove_file(file);
+                            continue;
+                        }
+                    }
+                    if let Some(running) = self.turns.lock().running.as_mut() {
+                        running.behind_another = alive;
+                    }
+                }
+                // A folder that cannot be written to is no reason not to study.
+                Err(error) => {
+                    log::warn!("{}: {error}: studying without taking turns", file.display());
+                    return Some(None);
+                }
+            }
+            if stop.load(Ordering::Relaxed) || self.turns.lock().closing {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
     /// One study's turn: its run in a process of its own, attended to its end.
     fn run(&self, id: &str, stop: &AtomicBool) {
         let Ok((folder, study)) = self.studies().open(id) else { return };
+        let Some(_turn) = self.machine_turn(stop) else { return mark(&folder, State::Stopped, None) };
         let (models, limit) = match self.refused(&study) {
             Ok(ready) => ready,
             Err(why) => return mark(&folder, State::Failed, Some(why)),
@@ -179,7 +262,13 @@ impl Shared {
                     return;
                 };
                 let stop = Arc::new(AtomicBool::new(false));
-                turns.running = Some(Running { id: id.clone(), stop: stop.clone(), stage: None, share: 0.0 });
+                turns.running = Some(Running {
+                    id: id.clone(),
+                    stop: stop.clone(),
+                    stage: None,
+                    share: 0.0,
+                    behind_another: false,
+                });
                 (id, stop)
             };
             self.changed.notify_all();
@@ -213,13 +302,13 @@ impl Shared {
     /// A study as it is: one that its folder says is running, and that
     /// nothing is running, was left so by a program that ended.
     fn as_it_is(&self, folder: &StudyFolder, mut study: Study) -> Report {
-        let at = {
+        let (at, behind_another) = {
             let turns = self.turns.lock();
-            turns
-                .running
-                .as_ref()
-                .filter(|running| running.id == study.id)
-                .and_then(|running| Some((running.stage?, running.share)))
+            let running = turns.running.as_ref().filter(|running| running.id == study.id);
+            (
+                running.and_then(|running| Some((running.stage?, running.share))),
+                running.is_some_and(|running| running.behind_another),
+            )
         };
         if matches!(study.state, State::Running | State::Waiting) && !self.ours(&study.id) {
             let elsewhere = std::fs::read_to_string(folder.path.join(ATTENDED_BY))
@@ -235,7 +324,7 @@ impl Shared {
                 }
             }
         }
-        Report { size: folder.size(), study, at }
+        Report { size: folder.size(), study, at, behind_another }
     }
 }
 
@@ -246,6 +335,7 @@ impl Desk {
                 setup: options.setup,
                 program: Mutex::new(options.program),
                 free: options.free.unwrap_or(room::free),
+                turn: options.turn,
                 turns: Mutex::new(Turns {
                     root: options.studies,
                     waiting: VecDeque::new(),

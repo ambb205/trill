@@ -540,6 +540,8 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
                 Some("start") => about("Starting", "Started", &format!("a study of {recording}")),
                 Some("stop") => about("Stopping", "Stopped", "a study"),
                 Some("delete") => about("Removing", "Removed", "a study"),
+                Some("drop_stems") => about("Dropping", "Dropped", "the stems of a study"),
+                Some("gather") => about("Gathering", "Gathered", "what the song plays of studies beside it"),
                 Some("list") => about("Looking at", "Looked at", "the studies"),
                 _ => about("Checking", "Checked", "on a study"),
             }

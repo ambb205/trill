@@ -493,3 +493,90 @@ async fn notes_parts_tempo_and_a_reference_of_a_study_are_taken_into_the_song() 
     ok(client, "history", json!({ "action": "undo" })).await;
     assert_eq!(ok(client, "get_project", json!({})).await["tempo"], 120.0);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_study_that_songs_play_says_which_before_it_goes_and_a_song_gathers_what_it_plays() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let (id, _) = studied(&fixture).await;
+    let study_folder = fixture.folder.path().join("config").join("studies").join(&id);
+    let songs = fixture.folder.path().join("songs");
+    std::fs::create_dir_all(&songs).unwrap();
+
+    // A song that plays a stem and a hit cut from one, saved.
+    let stretch = ok(
+        client,
+        "take_from_study",
+        json!({ "study": id, "what": "stretch", "stems": ["drums"], "from_bar": 3, "to_bar": 4, "at_bar": 2 }),
+    )
+    .await;
+    let hit =
+        ok(client, "take_from_study", json!({ "study": id, "what": "one_shot", "id": "hat-1", "new_sampler": true }))
+            .await;
+    // A file of a study is a file of the song like any other: it is listed, and found missing when it is gone.
+    assert_eq!(ok(client, "missing_files", json!({})).await["missing"], 0);
+    let first = songs.join("first.trill").display().to_string();
+    ok(client, "save_project", json!({ "path": first })).await;
+
+    // Asked to go, the study says who plays it, and stays. Its stems likewise: the clip plays one.
+    let refused = fails(client, "study", json!({ "action": "delete", "study": id })).await;
+    assert!(
+        refused.starts_with(&format!(
+            "files of the study {id} (small song) are played by the song that is open (first.trill, 2 places)"
+        )),
+        "{refused}"
+    );
+    assert!(refused.contains("Nothing was removed") && refused.contains("`confirm`"), "{refused}");
+    let refused = fails(client, "study", json!({ "action": "drop_stems", "study": id })).await;
+    assert!(
+        refused.starts_with(&format!(
+            "the stems of the study {id} (small song) are played by the song that is open (first.trill, 1 place)"
+        )),
+        "{refused}"
+    );
+    assert!(study_folder.join("stems").join("drums.wav").is_file());
+    // A song that is not open is known by where it was saved.
+    ok(client, "new_project", json!({})).await;
+    let refused = fails(client, "study", json!({ "action": "delete", "study": id })).await;
+    assert!(refused.contains(&format!("are played by {first} (2 places)")), "{refused}");
+
+    // Gathered: what the song plays of the study lies in a folder beside it, cut to what it uses.
+    ok(client, "load_project", json!({ "path": first })).await;
+    let gathered = ok(client, "study", json!({ "action": "gather" })).await;
+    assert_eq!((&gathered["gathered"], &gathered["clips"], &gathered["samples"]), (&json!(2), &json!(1), &json!(1)));
+    let beside = songs.join("first files");
+    assert_eq!(gathered["folder"], beside.display().to_string());
+    let project = ok(client, "get_project", json!({})).await;
+    let (clip, _) = clip_of(&project, &stretch["clip_ids"][0]);
+    let cut = PathBuf::from(clip["path"].as_str().unwrap());
+    assert!(cut.starts_with(&beside) && cut.is_file(), "{clip}");
+    // Two bars at 100 beats a minute are 4.8 seconds, with a second to spare on each side.
+    let seconds = trill_media::probe(&cut).unwrap().seconds().unwrap();
+    assert!((seconds - 6.8).abs() < 0.01 && clip["offset_seconds"] == 1.0, "{seconds} {clip}");
+    let sampler = ok(client, "get_device", json!({ "device": hit["device_id"] })).await;
+    assert!(PathBuf::from(sampler["samples"][0]["path"].as_str().unwrap()).starts_with(&beside), "{sampler}");
+    // One undo step; and done again it writes nothing new.
+    ok(client, "history", json!({ "action": "undo" })).await;
+    let before = ok(client, "get_project", json!({})).await;
+    assert_eq!(clip_of(&before, &stretch["clip_ids"][0]).0["path"], stretch["file"]);
+    ok(client, "history", json!({ "action": "redo" })).await;
+    ok(client, "save_project", json!({})).await;
+    assert_eq!(ok(client, "study", json!({ "action": "gather" })).await["gathered"], 0);
+
+    // Now nothing plays the study: its stems are dropped and what was found is kept, and then it goes.
+    let dropped = ok(client, "study", json!({ "action": "drop_stems", "study": id })).await;
+    assert!(dropped["freed_mb"].as_u64().unwrap() >= 5, "{dropped}");
+    assert!(!study_folder.join("stems").exists() && study_folder.join("heard.json").is_file());
+    assert_eq!(ok(client, "listen", json!({ "study": id })).await["found"]["words"], 4);
+    // A stretch of a stem that is gone is a sentence that says what to do.
+    let gone =
+        fails(client, "take_from_study", json!({ "study": id, "what": "stretch", "stems": ["drums"], "from_bar": 1 }))
+            .await;
+    assert!(
+        gone.contains("is not there: its stems were dropped") && gone.contains("Studying the recording again"),
+        "{gone}"
+    );
+    assert_eq!(ok(client, "missing_files", json!({})).await["missing"], 0);
+    assert_eq!(ok(client, "study", json!({ "action": "delete", "study": id })).await["removed"], id);
+    assert!(!study_folder.exists());
+}

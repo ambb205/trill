@@ -36,6 +36,8 @@ use trill_study::{Desk, DeskOptions, Lyrics, Report, StudyFolder};
 /// they are made with are kept in unless the settings say otherwise.
 pub const STUDIES_FOLDER: &str = "studies";
 pub const MODELS_FOLDER: &str = "models";
+/// The file a program holds while it studies: see `DeskOptions::turn`.
+const TURN: &str = "trill-studying.turn";
 
 /// What [`crate::Parts`] can hand in place of the real thing for studies.
 /// Everything left out is as a runtime has it by itself.
@@ -90,12 +92,19 @@ impl Studies {
         if let Err(why) = fetches.add(list) {
             log::warn!("the parts of studies are not offered: {why}");
         }
+        // One study at a time on the machine, whichever program asks and wherever it keeps its studies:
+        // the real models take turns over one file. Scripted ones, which cost nothing, over one of their own.
+        let turn = match studying.stand_in {
+            None => std::env::temp_dir().join(TURN),
+            Some(_) => data.join(TURN),
+        };
         let setup = Arc::new(Setup::over(fetches.clone(), studying.stand_in, studying.programs));
         let desk = Desk::new(DeskOptions {
             studies: settings.studies.folder.clone().unwrap_or_else(|| default_studies.clone()),
             setup,
             program: studying.program,
             free: studying.free,
+            turn: Some(turn),
         });
         let defaults = Mutex::new([(MODELS.to_owned(), default_parts)].into_iter().collect());
         Some(Self { fetches, desk, default_studies, defaults })

@@ -2780,6 +2780,7 @@ impl TrillServer {
                 (None, None) => return Err("this project has never been saved; give a `path`".to_string()),
             };
             session.save(&path).map_err(|error| error.to_string())?;
+            self.runtime.song_is_at(&path);
             Ok(json!({ "saved": path.display().to_string() }))
         })();
         finish(reply)
@@ -2790,7 +2791,9 @@ impl TrillServer {
     fn load_project(&self, Parameters(request): Parameters<LoadProjectRequest>) -> CallToolResult {
         let mut session = self.session.lock();
         let reply = self.may_replace_project(&session).and_then(|()| {
-            session.load(Path::new(&request.path)).map(|()| project_json(&session, false)).map_err(|e| e.to_string())
+            session.load(Path::new(&request.path)).map_err(|e| e.to_string())?;
+            self.runtime.song_is_at(Path::new(&request.path));
+            Ok(project_json(&session, false))
         });
         finish(reply)
     }
