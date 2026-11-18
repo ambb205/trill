@@ -1030,6 +1030,32 @@ fn a_parameter_bar_sets_values_by_click_and_by_drag() {
 }
 
 #[test]
+fn a_tape_stop_is_slowed_stopped_and_let_go_from_its_panel() {
+    let mut device = None;
+    let mut harness = Harness::new(devices_tab(), |session| {
+        let track = session.edit(|project| Ok(project.add_track("FX"))).unwrap();
+        device = Some(session.add_device(ChainRef::Track(track), "builtin:tapestop", None, None).unwrap());
+    });
+    let device = device.unwrap();
+    let speed = |harness: &Harness| {
+        let params = harness.session.lock().device_params(device).unwrap();
+        params.iter().find(|param| param.info.id == "speed").unwrap().value
+    };
+    assert_eq!(speed(&harness), 1.0, "as it comes it is out of the sound");
+    // The speeds worth trying by hand are chips; the bar under them is
+    // the same speed, anywhere between.
+    for (chip, set) in [("0.5", 0.5), ("0", 0.0), ("0.25", 0.25), ("1", 1.0)] {
+        harness.click_label(chip);
+        assert_eq!(speed(&harness), set, "the chip {chip}");
+    }
+    let before = harness.undo_depth();
+    let at = harness.first_panel_bar(0, 224.0, 0.75);
+    harness.click(at);
+    assert!((speed(&harness) - 0.75).abs() < 0.01, "clicked three quarters of the way along: {}", speed(&harness));
+    assert_eq!(harness.undo_depth(), before + 1);
+}
+
+#[test]
 fn a_compressor_is_given_a_track_to_listen_to_from_its_panel() {
     let (mut device, mut kick) = (None, None);
     let mut harness = Harness::new(devices_tab(), |session| {

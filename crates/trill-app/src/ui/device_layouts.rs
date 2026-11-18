@@ -134,7 +134,7 @@ const FILTER_WITH_OFF: f32 = 178.0;
 /// The saturator's column: room for its four curves in a row, and for its
 /// name over them.
 const FOUR_CURVES: f32 = 186.0;
-/// The pitch shifter's column: room for its name.
+/// The pitch shifter's column, and the tape stop's: room for its name.
 const SHIFTER_WIDTH: f32 = 224.0;
 /// A column of the wavetable synth's matrix: a slot's source, destination
 /// and amount on one line.
@@ -982,6 +982,19 @@ pub static LAYOUTS: &[Layout] = &[
                 ),
                 section("Output", &[p("mix", "Mix")]),
             ],
+        }],
+    },
+    Layout {
+        uri: "builtin:tapestop",
+        columns: &[Column {
+            width: SHIFTER_WIDTH,
+            sections: &[section(
+                "Tape",
+                &[
+                    p("speed", "Speed"),
+                    Row::Picks { id: "speed", picks: &[("0", 0.0), ("0.25", 0.25), ("0.5", 0.5), ("1", 1.0)] },
+                ],
+            )],
         }],
     },
 ];

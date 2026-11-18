@@ -232,6 +232,13 @@ fn playing_envelopes_never_touches_the_allocator() {
         .unwrap();
     let gain = AutomationTarget::DeviceParam { device: utility, param: "gain".into() };
     project.write_automation(gain, dips, trill_core::Travel::GAIN).unwrap();
+    // A tape stop on the same track: slowed to a stop, set going again and
+    // let go, so that its reader comes in, reads between frames, stands
+    // still and hands the sound back while the allocator is watched.
+    let tape = project.add_device(ChainRef::Track(track), "builtin:tapestop", "Tape Stop", None).unwrap();
+    let speed = AutomationTarget::DeviceParam { device: tape, param: "speed".into() };
+    let spin = vec![held(0.0, 1.0), point(1.0, 1.0), held(1.75, 0.0), point(2.0, 0.0), point(2.5, 0.6), held(3.0, 1.0)];
+    project.set_automation(speed, spin).unwrap();
     // Round a loop, so that every envelope jumps and is glided to.
     project.set_loop(true, 0.5, 3.5).unwrap();
 
