@@ -1278,6 +1278,267 @@ fn a_chord_melts_two_octaves_down_in_a_beat_where_the_pitch_shifter_is_drawn_to(
     }
 }
 
+// ---- tape stop -------------------------------------------------------------
+
+/// A tape stop's speed drawn over the song: points of (beat, speed, whether
+/// it stays there until the next point).
+fn spin(song: &mut Song, tape: DeviceId, points: &[(f64, f64, bool)]) {
+    use trill_core::project::{AutomationPoint, AutomationTarget, Segment};
+    let target = AutomationTarget::DeviceParam { device: tape, param: "speed".to_string() };
+    let points = points
+        .iter()
+        .map(|(beat, speed, stays)| AutomationPoint {
+            shape: if *stays { Segment::Hold } else { Segment::Linear },
+            ..AutomationPoint::new(*beat, *speed)
+        })
+        .collect();
+    song.project.set_automation(target, points).unwrap();
+}
+
+/// A track that plays `signal` through a tape stop whose speed is drawn
+/// through `points`, rendered.
+fn through_tape(signal: &[f32], points: &[(f64, f64, bool)]) -> Rendered {
+    let mut song = Song::new();
+    let (_, devices) = song.track("Tape", signal, signal, &[("builtin:tapestop", &[])]);
+    spin(&mut song, devices[0], points);
+    song.render(0.0)
+}
+
+/// An envelope reaches a device every 256 frames and the device goes to
+/// each value over the next 256: the speed it plays at is the line as it
+/// was drawn 256 frames before.
+const BEHIND_THE_LINE: f64 = 256.0 / SR;
+/// And its reader comes in 8 frames behind what comes in, so that there is
+/// sound on both sides of the place it reads.
+const SEATED: f64 = 8.0 / SR;
+
+#[test]
+fn a_tape_stop_at_full_speed_is_not_in_the_sound_and_one_that_is_held_is_silence() {
+    let tone = tones(&[440.0], 0.5, 4.0);
+    let dry = mono_through(&tone, &[], 0.0);
+    // As it comes it is the track, to the bit.
+    let idle = mono_through(&tone, &[("builtin:tapestop", &[])], 0.0);
+    assert!(idle.left == dry.left && idle.right == dry.right, "a tape stop at full speed is heard");
+
+    // A stop over one beat from beat 2, held for two beats, and the sound
+    // back at beat 5.
+    let (begins, stopped, back) = (1.0, 1.5, 2.5);
+    let out = through_tape(&tone, &[(0.0, 1.0, true), (2.0, 1.0, false), (3.0, 0.0, true), (5.0, 1.0, false)]);
+    let until = frames(0.0..begins).end;
+    assert!(out.left[..until] == dry.left[..until], "it is heard before the stop begins");
+    // The level does not move as the reader takes over, nor until the tone
+    // is far down: a fortieth of a second at a time, to where it plays at
+    // four tenths of the speed.
+    let level = |out: &Rendered, middle: f64| rms_db(&out.left[frames(middle - 0.0125..middle + 0.0125)]);
+    for step in 0..=15 {
+        let middle = begins - 0.02 + 0.02 * f64::from(step);
+        let moved = level(&out, middle) - level(&dry, begins - 0.1);
+        assert!(moved.abs() < 0.4, "{middle} s: the level is {moved:+.2} dB from the tone's");
+    }
+    // Held at a stop it is silence: not something very quiet.
+    let held = frames(stopped + 0.02..back - 0.001);
+    assert_eq!((peak(&out.left[held.clone()]), peak(&out.right[held])), (0.0, 0.0));
+    // And when the speed is put back, the track is back within a fiftieth
+    // of a second, to the bit: not late, and with nothing left over.
+    let after = frames(back + 0.02..3.9);
+    assert!(out.left[after.clone()] == dry.left[after.clone()] && out.right[after.clone()] == dry.right[after]);
+    // Neither end is a click. The steepest the tone itself gets from one
+    // frame to the next is 0.029; coming back from silence within 5 ms adds
+    // a tenth to that, and nothing anywhere is steeper.
+    let own = largest_step(&dry.left[frames(0.5..3.5)]);
+    let steepest = largest_step(&out.left);
+    println!("the steepest step: {steepest:.4}, the tone's own {own:.4}");
+    assert!(steepest < own * 1.15, "{steepest} against the tone's own {own}");
+}
+
+#[test]
+fn a_tone_through_a_tape_stop_is_one_falling_tone_with_nothing_beside_it() {
+    // A stop drawn over four beats (two seconds) from beat 2: the pitch is
+    // the speed's, all the way down.
+    let tone = tones(&[1000.0], 0.4, 4.0);
+    let out = through_tape(&tone, &[(0.0, 1.0, true), (2.0, 1.0, false), (6.0, 0.0, true)]);
+    println!("seconds into the stop   speed drawn   heard (Hz)   off by (semitones)");
+    for into in [0.1, 0.3, 0.5, 0.7, 0.9, 1.1, 1.3, 1.5, 1.6] {
+        let drawn = 1.0 - (into - BEHIND_THE_LINE) / 2.0;
+        let middle = 1.0 + into;
+        let heard = zero_crossing_hz(&out.left[frames(middle - 0.015..middle + 0.015)], SR);
+        let off = 12.0 * (heard / (1000.0 * drawn)).log2();
+        println!("        {into:>4.1}             {drawn:>5.3}      {heard:>7.1}        {off:>+5.2}");
+        assert!(off.abs() < 0.05, "{into} s into the stop: {heard:.1} Hz where the speed is {drawn:.3}");
+    }
+
+    // Slowed to half speed and left there, it is the tone an octave down,
+    // as loud as it was, and what else there is in a second of it is 70 dB
+    // under it: no grain, nothing read twice, nothing folded back.
+    let tone = tones(&[1000.0], 0.4, 5.0);
+    let out = through_tape(&tone, &[(0.0, 1.0, true), (2.0, 1.0, false), (3.0, 0.5, true)]);
+    let second = &out.left[frames(2.0..3.0)];
+    let octave = amplitude(second, 500.0);
+    let beside = (power(second) - octave * octave / 2.0).max(1e-20).sqrt();
+    println!(
+        "at half speed: {:+.3} dB of the tone at 500 Hz, and {:.1} dB beside it",
+        db(octave / 0.4),
+        db(beside / (octave * std::f64::consts::FRAC_1_SQRT_2))
+    );
+    assert!(db(octave / 0.4).abs() < 0.02, "{}", db(octave / 0.4));
+    assert!(db(beside / (octave * std::f64::consts::FRAC_1_SQRT_2)) < -70.0);
+    assert!(amplitude(second, 1000.0) < 0.4 * 1e-4, "the tone is still heard where it was");
+}
+
+#[test]
+fn a_chord_through_a_tape_stop_keeps_its_notes_as_far_apart_as_they_were() {
+    // A major chord, 4 : 5 : 6, slowed to half speed and then to a quarter.
+    let chord = tones(&[400.0, 500.0, 600.0], 0.15, 8.0);
+    let points = [(0.0, 1.0, true), (2.0, 1.0, false), (3.0, 0.5, true), (8.0, 0.5, false), (9.0, 0.25, true)];
+    let out = through_tape(&chord, &points);
+    println!("speed   each note against what it was (dB)   where the notes were (dB under them)");
+    for (speed, second) in [(0.5, frames(2.5..3.5)), (0.25, frames(5.5..6.5))] {
+        let heard = &out.left[second];
+        let notes: Vec<f64> = [400.0, 500.0, 600.0].iter().map(|hz| db(amplitude(heard, hz * speed) / 0.15)).collect();
+        let left_over = [400.0, 500.0, 600.0].iter().map(|hz| amplitude(heard, *hz)).fold(0.0, f64::max);
+        println!("{speed:>5}   {notes:+.3?}   {:.1}", db(left_over / 0.15));
+        // Each note at the speed's share of its pitch, so 4 : 5 : 6 still,
+        // and each as loud as it was: the lowest of them, at 100 Hz, has
+        // lost 0.04 dB to the cut under 30 Hz.
+        assert!(notes.iter().all(|level| level.abs() < 0.1), "at {speed}: {notes:?}");
+        assert!(db(left_over / 0.15) < -70.0, "at {speed}: {:.1} dB left where the chord was", db(left_over / 0.15));
+        // And nothing else: the three notes are all of it.
+        let all = power(heard);
+        let three: f64 = [400.0, 500.0, 600.0].iter().map(|hz| amplitude(heard, hz * speed).powi(2) / 2.0).sum();
+        let beside = db(((all - three).max(1e-20) / three).sqrt());
+        println!("        and {beside:.1} dB beside the three of them");
+        assert!(beside < -70.0, "at {speed}: {beside:.1} dB beside the chord");
+    }
+}
+
+/// The mean of the squares of `samples`: their power, worked out finely
+/// enough to take one sound out of it and see what is left 100 dB down.
+fn power(samples: &[f32]) -> f64 {
+    samples.iter().map(|sample| f64::from(*sample).powi(2)).sum::<f64>() / samples.len().max(1) as f64
+}
+
+/// Where a click written at `at` seconds comes out of a straight stop that
+/// begins at `begins` and takes `takes` seconds, if the tape gets to it.
+fn played_at(at: f64, begins: f64, takes: f64) -> Option<f64> {
+    let begins = begins + BEHIND_THE_LINE;
+    let into = at - begins + SEATED;
+    // The reader has played `u - u * u / (2 * takes)` of the sound `u`
+    // seconds into the stop, and half of `takes` when it stands still.
+    (into < takes / 2.0).then(|| begins + takes * (1.0 - (1.0 - 2.0 * into / takes).sqrt()))
+}
+
+#[test]
+fn a_tape_stop_plays_every_moment_once_and_slower_and_slower() {
+    // A click every 40 ms, into a stop drawn over two seconds from beat 2.
+    let (begins, takes, every) = (1.0, 2.0, 0.04);
+    let mut clicks = vec![0.0f32; 5 * SR as usize];
+    let written: Vec<f64> = (0..100).map(|index| 0.5 + every * f64::from(index)).collect();
+    for at in &written {
+        clicks[(at * SR).round() as usize] = 0.5;
+    }
+    let points = [(0.0, 1.0, true), (2.0, 1.0, false), (6.0, 0.0, true), (8.0, 1.0, false)];
+    let out = through_tape(&clicks, &points);
+    let heard = click_times(&out.left, SR, 0.15);
+
+    // Before the stop they are where they were written.
+    let before: Vec<f64> = heard.iter().copied().filter(|at| *at < begins).collect();
+    let on_time: Vec<f64> = written.iter().copied().filter(|at| *at < begins).collect();
+    assert_eq!(before.len(), on_time.len());
+    assert!(before.iter().zip(&on_time).all(|(heard, written)| (heard - written).abs() < 1e-4));
+
+    // Through the stop, down to three tenths of the speed (under a tenth
+    // the level falls away): each click the tape gets to is heard once,
+    // where a tape that slows evenly plays it, and no other is.
+    let low = begins + takes * 0.7;
+    let expected: Vec<f64> = written
+        .iter()
+        .filter(|at| **at >= begins)
+        .filter_map(|at| played_at(*at, begins, takes))
+        .filter(|at| *at < low)
+        .collect();
+    let through: Vec<f64> = heard.iter().copied().filter(|at| (begins..low).contains(at)).collect();
+    println!("clicks heard through the stop: {} (written to be: {})", through.len(), expected.len());
+    assert_eq!(through.len(), expected.len(), "{through:?} against {expected:?}");
+    let mut furthest = 0.0f64;
+    for (heard, expected) in through.iter().zip(&expected) {
+        furthest = furthest.max((heard - expected).abs());
+    }
+    println!("the furthest of them from where a tape plays it: {:.3} ms", furthest * 1000.0);
+    assert!(furthest < 0.0002, "{furthest}");
+    // Further and further apart, never nearer: nothing is read again.
+    let gaps: Vec<f64> = through.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    assert!(gaps.windows(2).all(|pair| pair[1] > pair[0]), "{gaps:?}");
+    assert!(gaps[0] > every && *gaps.last().unwrap() > 2.5 * every);
+
+    // Half of what came in during the stop was never reached; when the
+    // speed is put back (beat 8) the clicks are where they were written
+    // again, in time with the song.
+    let back = 4.0;
+    let after: Vec<f64> = heard.iter().copied().filter(|at| *at > back + 0.02).collect();
+    let on_time: Vec<f64> = written.iter().copied().filter(|at| *at > back + 0.02).collect();
+    assert!(!on_time.is_empty() && after.len() == on_time.len());
+    assert!(after.iter().zip(&on_time).all(|(heard, written)| (heard - written).abs() < 1e-4));
+    assert!(heard.iter().all(|at| !(begins + takes + 0.05..back).contains(at)), "something is heard at the stop");
+}
+
+#[test]
+fn a_tape_set_going_again_plays_what_comes_in_then_and_joins_the_song_at_full_speed() {
+    // Stopped from the start; from beat 4 the speed is drawn up to one over
+    // two beats (a second). A tone, a click while the tape stands still and
+    // one a tenth of a second after it is set going. (Beat 4 is a frame an
+    // envelope is read on, so the tape is set going exactly 256 frames
+    // after the line leaves nought.)
+    let (begins, takes) = (2.0, 1.0);
+    let mut signal = tones(&[880.0], 0.25, 5.0);
+    for at in [0.5, begins + 0.1] {
+        signal[(at * SR) as usize] += 0.7;
+    }
+    let dry = mono_through(&signal, &[], 0.0);
+    let out = through_tape(&signal, &[(0.0, 0.0, true), (4.0, 0.0, false), (6.0, 1.0, true)]);
+    // Nothing while it stands still: the first click is never heard.
+    assert_eq!(peak(&out.left[..frames(0.0..begins).end]), 0.0);
+    // Then the tone rises with the speed: an octave down half way.
+    for into in [0.3, 0.5, 0.7, 0.9] {
+        let drawn = (into - BEHIND_THE_LINE) / takes;
+        let middle = begins + into;
+        let heard = zero_crossing_hz(&out.left[frames(middle - 0.012..middle + 0.012)], SR);
+        let off = 12.0 * (heard / (880.0 * drawn)).log2();
+        assert!(off.abs() < 0.1, "{into} s into the start: {heard:.1} Hz where the speed is {drawn:.3}");
+    }
+    // It began from what came in when it was set going: the second click,
+    // 0.1 s in, is played where a tape that gathers speed evenly has got
+    // to it (the root of twice that, 0.447 s in), and once.
+    let clicks: Vec<f64> = click_times(&out.left, SR, 0.45).into_iter().filter(|at| *at < begins + takes).collect();
+    let expected = begins + BEHIND_THE_LINE + (2.0 * takes * (0.1 - BEHIND_THE_LINE + SEATED)).sqrt();
+    assert_eq!(clicks.len(), 1, "{clicks:?}");
+    assert!((clicks[0] - expected).abs() < 0.0005, "the click at {:.4} s, a tape has it at {expected:.4} s", clicks[0]);
+    // At full speed it is half a second behind, and lets that go: from a
+    // fiftieth of a second on the track is as it comes in, to the bit.
+    let joined = frames(begins + takes + 0.02..4.9);
+    assert!(out.left[joined.clone()] == dry.left[joined.clone()], "it stays late, or is not the track");
+    assert!(largest_step(&out.left[frames(begins + takes - 0.05..begins + takes + 0.05)]) < 0.25 * 0.2);
+}
+
+#[test]
+fn a_tape_that_falls_twenty_seconds_behind_fades_to_silence_until_it_is_let_catch_up() {
+    // Half speed from the first frame: it falls a second behind every two.
+    let tone = tones(&[440.0], 0.3, 46.0);
+    let dry = mono_through(&tone, &[], 0.0);
+    let out = through_tape(&tone, &[(0.0, 0.5, true), (88.0, 1.0, true)]);
+    // An octave down from the start, as loud as the tone.
+    let second = &out.left[frames(1.0..2.0)];
+    assert!(db(amplitude(second, 220.0) / 0.3).abs() < 0.05, "{}", db(amplitude(second, 220.0) / 0.3));
+    // So for 40 seconds, less the 5 ms it takes to let the sound go; then
+    // nothing, until the speed is one again at beat 88 (44 s).
+    assert!(db(amplitude(&out.left[frames(38.9..39.9)], 220.0) / 0.3).abs() < 0.05);
+    assert!(rms_db(&out.left[frames(39.97..39.98)]) > -20.0);
+    let silent = frames(40.01..43.99);
+    assert_eq!((peak(&out.left[silent.clone()]), peak(&out.right[silent])), (0.0, 0.0));
+    assert!(largest_step(&out.left[frames(39.9..40.1)]) < 0.3 * 0.05, "letting go is a click");
+    let after = frames(44.02..45.9);
+    assert!(out.left[after.clone()] == dry.left[after]);
+}
+
 // ---- saturator -------------------------------------------------------------
 
 #[test]

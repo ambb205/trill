@@ -14,6 +14,10 @@ Only Windows has been run so far.
 - ASIO (see [Playing and latency](window.md#playing-and-latency)).
 - Warp markers.
 - Plugin delay compensation.
+- A tape start that arrives in step with the song. The tape stop set going again plays what comes in from that
+  moment and, once at full speed, skips what it fell behind by (half the length of a straight start). To arrive
+  in step it would have to read the song half a start ahead of itself: a device is given no sound before it is
+  played, and one that held the track back to make room would be late whenever it was idle.
 - Playing on more than one core. A render makes the tracks that do not feed one another on several threads; the
   audio thread that plays is one.
 - "Collect all and save": copying every file a song plays into a folder beside it. The song already says where

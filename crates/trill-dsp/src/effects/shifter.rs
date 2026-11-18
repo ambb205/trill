@@ -26,7 +26,8 @@ use trill_core::device::{DeviceProcessor, Event, ProcessInfo};
 define_params!(P, PARAMS, [
     Pitch => float(
         "pitch",
-        "Pitch (semitones up or down. It can be moved while it plays: a line from 0 to -24 over a beat is a dive)",
+        "Pitch (semitones up or down, the sound's length kept. It can be moved while it plays; for a sound that \
+         slows down and sinks, use builtin:tapestop)",
         -24.0,
         24.0,
         0.0,
@@ -46,10 +47,14 @@ define_params!(P, PARAMS, [
 ]);
 
 pub const DESCRIPTION: &str = "Pitch shifter: moves the pitch of any sound, a recorded or sampled part as well as a \
-synth, up or down by as much as two octaves, keeping its length. `pitch` and `mix` can be automated: with `mix` \
-opened at a stop and `pitch` drawn from 0 down to -24 over a beat, a held chord melts away. At a pitch of 0 it is \
-its input, half a `window` late. Shifted far, a sound takes on a grain of its own; for a part that is to stay in \
-tune by a few semitones, transposing its notes or its clip is cleaner.";
+synth, up or down by as much as two octaves, keeping its length: the part stays in time and only its pitch moves. \
+It is for an octave or a harmony beside a part (`mix` 0.5), for a recording that has to be a few semitones \
+higher or lower, for a detune, and for a pitch that moves while the rhythm stays (`pitch` and `mix` can be \
+automated). It keeps the length by playing the sound in overlapping pieces a `window` long, so a sound shifted far \
+takes on a grain of its own, most of all a chord or a distorted sound moved an octave or more. It is not a tape \
+stop: for a sound that slows down and sinks to a stop, pitch and speed together, use `builtin:tapestop`, which \
+plays the sound once, slower and slower. At a pitch of 0 it is its input, half a `window` late. For a part that is \
+to stay in tune by a few semitones, transposing its notes or its clip is cleaner.";
 
 const MAX_WINDOW_MS: f32 = 200.0;
 /// How far from where it would land a reader may jump to, to land where

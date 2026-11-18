@@ -530,6 +530,56 @@ fn automation_plays_the_same_at_any_buffer_size_and_in_a_render() {
 }
 
 #[test]
+fn a_tape_stop_is_the_same_samples_at_any_buffer_size_in_a_render_and_on_any_number_of_threads() {
+    // Two tracks, each through a tape stop of its own: slowed to a stop,
+    // set going again, slowed a little and let go.
+    let mut project = Project::new("t");
+    for name in ["One", "Two"] {
+        let track = sine_track(&mut project, name, 8.0);
+        let tape = project.add_device(ChainRef::Track(track), "builtin:tapestop", "Tape Stop", None).unwrap();
+        let bent = AutomationPoint { beat: 5.0, value: 0.4, shape: Segment::Curve(0.5) };
+        let line = vec![
+            held(0.0, 1.0),
+            point(1.0, 1.0),
+            held(2.5, 0.0),
+            point(3.0, 0.0),
+            point(4.0, 1.0),
+            point(4.5, 1.0),
+            bent,
+            held(6.0, 0.9),
+            point(6.5, 1.0),
+        ];
+        project.set_automation(AutomationTarget::DeviceParam { device: tape, param: "speed".into() }, line).unwrap();
+    }
+    let first = project.tracks[0].id;
+    project.set_track_pan(first, -0.6).unwrap();
+
+    let reference = played(&project, 512, false);
+    assert!(rms(&reference.0) > 0.01 && reference.0 != reference.1);
+    // It is heard: at beat 2.9 the tape stands still.
+    assert_eq!(peak(&reference.0[29 * BEAT / 10..3 * BEAT - 64]), 0.0);
+    for block in [480, 441, 37, 1, 4096] {
+        assert!(played(&project, block, false) == reference, "buffers of {block} frames produced different audio");
+    }
+    let render_on = |threads: Option<usize>| {
+        let options =
+            RenderOptions { sample_rate: SR as u32, max_tail_seconds: 0.5, threads, ..RenderOptions::default() };
+        let out = render(&project, &BuiltinFactory, &options).unwrap();
+        assert!(out.problems.is_empty(), "{:?}", out.problems);
+        (out.left[..8 * BEAT].to_vec(), out.right[..8 * BEAT].to_vec())
+    };
+    for threads in [Some(1), None, Some(2), Some(64)] {
+        assert!(render_on(threads) == reference, "a render on {threads:?} threads differs from playback");
+    }
+    // Round a loop, where every envelope jumps.
+    project.set_loop(true, 1.0, 6.5).unwrap();
+    let looped = played(&project, 512, true);
+    for block in [480, 37, 4096] {
+        assert!(played(&project, block, true) == looped, "looping, buffers of {block} frames produced different audio");
+    }
+}
+
+#[test]
 fn a_filter_sweep_is_rendered_as_it_is_played() {
     // The built-in filter reads its cutoff every sixteen frames, counted
     // from the start of the block it is handed, so it is held to this at

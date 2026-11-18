@@ -34,7 +34,7 @@ mod testing;
 pub use level::{controller_support, is_instrument};
 pub use loading::{SampleRef, StateError};
 
-use effects::{compressor, delay, dynamics, eq, modulation, reverb, shifter, utility};
+use effects::{compressor, delay, dynamics, eq, modulation, reverb, shifter, tape, utility};
 use loading::{SampleController, SampleSource, SampleStore};
 use params::{ParamDef, PresetDef};
 use std::sync::Arc;
@@ -214,6 +214,7 @@ static BUILTINS: &[Builtin] = &[
     }),
     effect("pump", "Pump", modulation::PUMP_DESCRIPTION, modulation::PUMP_PARAMS, || Box::new(modulation::Pump::new())),
     effect("shifter", "Pitch Shifter", shifter::DESCRIPTION, shifter::PARAMS, || Box::new(shifter::Shifter::new())),
+    effect("tapestop", "Tape Stop", tape::DESCRIPTION, tape::PARAMS, || Box::new(tape::TapeStop::new())),
     effect("saturator", "Saturator", utility::SATURATOR_DESCRIPTION, utility::SATURATOR_PARAMS, || {
         Box::new(utility::Saturator::new())
     }),

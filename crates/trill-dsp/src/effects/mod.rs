@@ -7,4 +7,5 @@ pub mod eq;
 pub mod modulation;
 pub mod reverb;
 pub mod shifter;
+pub mod tape;
 pub mod utility;

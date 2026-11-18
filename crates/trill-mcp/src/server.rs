@@ -116,7 +116,7 @@ the phrases from the notes and writes an expression curve that rises into the hi
 notes and breathes between phrases. set_controllers writes or adjusts a curve point by point (a pedal, a pitch \
 bend, vibrato on the mod wheel). measure names any track that had notes and made no sound.
 4. Shape the sound: add_device for effects (reverb, delay, eq, compressor, filter, chorus, tremolo, saturator, \
-pitch shifter...), update_device for parameters, set_automation for movement such as filter sweeps, fades and a \
+pitch shifter, tape stop...), update_device for parameters, set_automation for movement such as filter sweeps, fades and a \
 send opened for one note (a delay throw), update_track for the mix. describe_device says what each parameter does \
 and in what unit. Two points are enough for a fade or a sweep: the line between them follows the control's travel \
 (a fader or a gain as Ableton Live's move for a level, pitch for a frequency), so it does not need to be laid out \
@@ -172,8 +172,14 @@ room, and write rolls, accents and ghost notes with velocity.
 into builtin:saturator on `sine` so that it is heard on small speakers. Noise for a riser or a splash: `osc_level` \
 0, `noise_level` 1, `noise_width` 1, through the synth's band-pass with `cutoff` and `volume` automated. The \
 saturator does not turn down what it drives: more drive is louder, up to the curve's ceiling; trim with `output`.
-- builtin:shifter changes the pitch of any sound, recorded and sampled parts too. Its `pitch` and `mix` can be \
-automated: `mix` opened at a stop and `pitch` drawn from 0 to -24 over a beat makes a held chord melt away.
+- A tape stop (a part, or the whole song, slowing down and sinking to a stop; a record winding down; a power-down \
+into a break): builtin:tapestop on the track, or on the master for the whole song, with its `speed` automated: 1 \
+held until the stop begins, a line down to 0 over one or two beats, 0 held through the silence, and back to 1 where \
+the sound returns. Pitch and speed fall together and nothing is repeated. To make the song itself slower and keep \
+its pitch, change the tempo (set_tempo with `ramp`).
+- builtin:shifter changes the pitch of any sound and keeps its length, recorded and sampled parts too: an octave \
+or a harmony beside a part, a recording moved a few semitones. It is not for a slow-down: shifted far, and most of \
+all on chords and distorted sounds, it is grainy.
 - A built-in synth's or sampler's `bend_range` is how far its pitch wheel bends; bends written for the track \
 follow it, so set it before writing a wide bend or a dive as a pitch_bend curve.
 - Give sections contrast: add and remove parts, automate filters and volume, change the drum pattern.

@@ -198,6 +198,10 @@ async fn tools_are_listed_with_schemas() {
     assert!(schema_of("set_automation").contains("\"send\"") && schema_of("set_automation").contains("travel"));
     assert!(schema_of("get_automation").contains("offset") && schema_of("get_automation").contains("limit"));
     assert!(instructions.contains("throw") && instructions.contains("control's travel"), "{instructions}");
+    // A slow-down is the tape stop's, and the pitch shifter is said not to be one.
+    for word in ["builtin:tapestop", "slowing down and sinking to a stop", "`speed` automated", "not for a slow-down"] {
+        assert!(instructions.contains(word), "the instructions should mention {word}");
+    }
     // And how the song was made: the journal, and the song as it was.
     for word in ["get_journal", "get_song_at", "takes nothing out of the journal", "never in the project file"] {
         assert!(instructions.contains(word), "the instructions should mention {word}");
@@ -2278,4 +2282,54 @@ async fn a_film_is_made_with_the_songs_own_sound_and_kept_in_the_working_folder(
     println!("{making}");
     assert_eq!(making["of"], "making_of");
     assert!(making["frames"].as_u64().unwrap() > 100, "{making}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_asked_for_a_tape_stop_finds_the_device_and_draws_its_speed() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    // What the two devices say of themselves is what sends a slow-down to
+    // the right one: the tape stop in the words it is asked for in, and the
+    // pitch shifter by naming the tape stop.
+    let tape = ok(client, "describe_device", json!({ "uri": "builtin:tapestop" })).await;
+    let said = tape["description"].as_str().unwrap();
+    for word in ["the song slows to a stop", "tape stop", "record winding down", "on the master", "silence"] {
+        assert!(said.contains(word), "the tape stop should say '{word}': {said}");
+    }
+    assert!(tape.to_string().contains("speed"), "{tape}");
+    let shifter = ok(client, "describe_device", json!({ "uri": "builtin:shifter" })).await;
+    let said = shifter["description"].as_str().unwrap();
+    assert!(said.contains("not a tape stop") && said.contains("builtin:tapestop"), "{said}");
+
+    // A held note, slowed to a stop over two beats, held there, and back.
+    let track = ok(client, "create_track", json!({ "name": "Pad", "instrument": "builtin:polysynth" })).await;
+    let track = track["track_id"].as_u64().unwrap();
+    ok(client, "create_clip", json!({ "track": track, "start": 0, "length": 8, "notes": [[57, 0, 8, 100]] })).await;
+    let device = ok(client, "add_device", json!({ "track": track, "uri": "builtin:tapestop" })).await;
+    let device = device["device_id"].as_u64().unwrap();
+    let drawn = ok(
+        client,
+        "set_automation",
+        json!({
+            "target": { "type": "device_param", "device": device, "param": "speed" },
+            "points": [[0, 1, "hold"], [2, 1], [4, 0, "hold"], [6, 1]],
+        }),
+    )
+    .await;
+    assert_eq!(drawn["point_count"], 4, "{drawn}");
+    let sections = json!([
+        { "name": "before", "start": 0.5, "end": 2.0 },
+        { "name": "stopped", "start": 4.25, "end": 5.75 },
+        { "name": "back", "start": 6.25, "end": 7.75 },
+    ]);
+    let heard =
+        ok(client, "measure", json!({ "start": 0, "end": 8, "sections": sections, "max_tail_seconds": 0.1 })).await;
+    let level = |name: &str| {
+        let section = heard["sections"].as_array().unwrap().iter().find(|section| section["name"] == name).unwrap();
+        section["peak_db"].as_f64().unwrap()
+    };
+    // At a stop it is silence, and when the speed is put back the note is
+    // as loud as it was.
+    assert!(level("stopped") <= -119.0, "{heard}");
+    assert!(level("before") > -40.0 && (level("back") - level("before")).abs() < 1.0, "{heard}");
 }

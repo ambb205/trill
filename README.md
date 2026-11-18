@@ -24,7 +24,7 @@ Trill is an early build and has only been run on Windows. [Status](docs/status.m
   time-signature changes, MIDI recording, WAV and stem export.
   ([The window](docs/window.md), [the engine](docs/engine.md))
 - **Built-in instruments and effects**: a poly synth, a wavetable synth with a bank of 82 sounds, a drum machine,
-  a sampler, a drum rack, a player for sampled instruments in SFZ format, and twelve effects.
+  a sampler, a drum rack, a player for sampled instruments in SFZ format, and thirteen effects.
   ([Instruments and effects](docs/instruments-and-effects.md))
 - **Your plugins**: CLAP and VST3 instruments and effects, with presets listed and searched like the built-in
   ones. ([Plugins, presets and sounds](docs/plugins-and-presets.md))

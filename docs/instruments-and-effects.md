@@ -142,7 +142,8 @@ fader, a send and a Utility's gain, is silence at its lowest value (-70 dB), so 
 | `builtin:chorus` | Stereo chorus with a width. |
 | `builtin:tremolo` | Tremolo and auto-pan: sine, triangle or square, free or in time with the song, the two sides together or taking turns. |
 | `builtin:pump` | Ducking locked to the grid, for when there is no kick to listen to. |
-| `builtin:shifter` | Pitch shifter: any sound up or down by as much as two octaves, its length kept. Pitch and mix can be automated: a chord drawn two octaves down over a beat melts away. |
+| `builtin:shifter` | Pitch shifter: any sound up or down by as much as two octaves, its length kept, for an octave or a harmony beside a part or a recording moved a few semitones. It plays the sound in overlapping pieces, so a chord shifted far is grainy: it is not a slow-down. |
+| `builtin:tapestop` | Tape stop: the sound slowed as a tape or a record is when it is stopped, pitch and speed together, every moment played once. One control, `speed`, made to be drawn: a line from 1 to 0 is a stop, 0 is silence, back at 1 the sound is as it comes in again, to the sample. A line from 0 to 1 is a tape starting. It can fall 20 s behind the song. |
 | `builtin:saturator` | Waveshaping distortion on four curves: soft, hard, tube, and a quarter of a sine that is flat above its ceiling (the overtones that make a sine bass heard on small speakers). It does not turn down what it drives. |
 | `builtin:utility` | Gain down to silence, pan and width. A gain that an envelope draws is followed in straight lines, 256 frames behind the drawing: a stop is a stop. |
 
@@ -160,7 +161,9 @@ given a track to listen to or has it taken away.
 
 What these devices do is held to numbers by renders (`trill-engine/tests/effects.rs`): the cuts to a Butterworth
 filter of their order, the compressor to what it takes off a signal of known crest, the delay to its first
-repeats, the pitch shifter to the line its pitch is drawn along, and the reverb, the makeup, the steep filter
+repeats, the pitch shifter to the line its pitch is drawn along, the tape stop to what a tape that slows evenly
+plays and when (a tone's pitch within 0.03 semitones of the speed drawn, a click within a tenth of a millisecond,
+nothing beside a tone or a chord down to 70 dB under it, silence at a stop), and the reverb, the makeup, the steep filter
 and the saturator's sine curve to what Ableton Live's were measured to do on two songs. The instruments are held
 the same way (`tests/instruments.rs`): the sampler's levels to what Live's Simpler plays at five velocities, a
 sine on the synth to the level of Live's Operator at the same volume setting, its pitch envelope and its noise
