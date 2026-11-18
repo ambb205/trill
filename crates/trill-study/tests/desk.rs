@@ -281,6 +281,24 @@ fn a_link_is_fetched_by_the_program_installed_for_it_and_studied() {
         )
     );
     assert!(desk.studies().folder(&long.id).kept_source().is_none());
+
+    // A program that fetches and is old says so where it failed: that is most often why a site
+    // refused it, and all the site says is that it is forbidden. (The stand-in is as old as the
+    // name of its file says.)
+    let old = root.path().join(format!("fetcher-of-2001.01.01{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(program(), &old).unwrap();
+    let programs = Programs { ffmpeg: Some(PathBuf::from("ffmpeg-is-not-asked")), fetcher: Some(old) };
+    let aged = tempfile::tempdir().unwrap();
+    let desk = desk_with(aged.path(), Some(script()), programs, None);
+    let gone = desk
+        .start(Source::Link { url: "https://recordings.test/gone".into(), by: None }, StudyOptions::default(), None)
+        .unwrap();
+    assert_eq!(
+        desk.wait(&gone.id, LONG).unwrap().study.error.as_deref(),
+        Some(
+            "Fetching the recording failed: the recording behind https://recordings.test/gone could not be fetched: [generic] Unable to download webpage: HTTP Error 404: Not Found. The program that fetches is old (yt-dlp 2001.01.01), and sites change what they ask of one more often than that: update it (the way it was installed, or with yt-dlp -U), then take the study up again"
+        )
+    );
 }
 
 #[test]

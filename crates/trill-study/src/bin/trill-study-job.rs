@@ -36,9 +36,23 @@ fn stand_in_fetcher(arguments: &[String]) -> Option<ExitCode> {
     Some(ExitCode::SUCCESS)
 }
 
+/// Asked which version it is, as the program that fetches a link is where
+/// it failed, the stand-in says the one its own file is named for
+/// (`fetcher-of-2001.01.01`): a test copies it under the name it wants.
+/// Under its own name it has none to say.
+fn stand_in_version(arguments: &[String]) -> Option<ExitCode> {
+    if arguments != ["--version"] {
+        return None;
+    }
+    let name = std::env::current_exe().ok()?.file_name()?.to_string_lossy().into_owned();
+    println!("{}", name.trim_end_matches(".exe").split_once("-of-")?.1);
+    Some(ExitCode::SUCCESS)
+}
+
 fn main() -> ExitCode {
     trill_study::helper::run_if_requested();
-    if let Some(ended) = stand_in_fetcher(&std::env::args().skip(1).collect::<Vec<_>>()) {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(ended) = stand_in_version(&arguments).or_else(|| stand_in_fetcher(&arguments)) {
         return ended;
     }
     eprintln!("trill-study-job studies for a Trill that starts it, and does nothing when it is started by hand.");

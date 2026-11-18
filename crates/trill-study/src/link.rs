@@ -135,8 +135,17 @@ pub fn fetch(
     }
     if !status.is_ok_and(|status| status.success()) {
         let said = last_line(&complaints);
+        // What a site says to a program it no longer knows is no more than "forbidden": where
+        // the program is old, that is most often why, and the sentence says so.
+        let old = old_version(fetcher)
+            .map(|version| {
+                format!(
+                    ". The program that fetches is old (yt-dlp {version}), and sites change what they ask of one more often than that: update it (the way it was installed, or with yt-dlp -U), then take the study up again"
+                )
+            })
+            .unwrap_or_default();
         return Err(format!(
-            "the recording behind {url} could not be fetched: {}",
+            "the recording behind {url} could not be fetched: {}{old}",
             said.trim_start_matches("ERROR:").trim()
         ));
     }
@@ -145,4 +154,59 @@ pub fn fetch(
     };
     progress(1.0);
     Ok(Fetched { path, title, by })
+}
+
+/// From how many days on the program that fetches is old: its own
+/// warning comes at the same age.
+const OLD_DAYS: i64 = 90;
+
+/// The version the program that fetches says it is, where that is old
+/// today. Asked only once a fetch has failed.
+fn old_version(fetcher: &Path) -> Option<String> {
+    let mut command = Command::new(fetcher);
+    command.arg("--version").stdin(Stdio::null()).stderr(Stdio::null()).env_remove(crate::helper::ENV);
+    hide_console(&mut command);
+    let output = command.output().ok().filter(|output| output.status.success())?;
+    let version = String::from_utf8_lossy(&output.stdout).lines().next()?.trim().to_owned();
+    let today = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() / 86_400;
+    (days_old(&version, i64::try_from(today).ok()?)? > OLD_DAYS).then_some(version)
+}
+
+/// The days since 1970 of a day of the calendar.
+fn day_number(year: i64, month: i64, day: i64) -> i64 {
+    // The year begins in March, so that the day a leap year adds is its last.
+    let year = if month <= 2 { year - 1 } else { year };
+    let (era, of_era) = (year.div_euclid(400), year.rem_euclid(400));
+    let of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    era * 146_097 + of_era * 365 + of_era / 4 - of_era / 100 + of_year - 719_468
+}
+
+/// How many days old a version is on the day `today` (in days since
+/// 1970), where it is named for its day as yt-dlp's are (`2025.10.22`; a
+/// build between two releases has more after that).
+fn days_old(version: &str, today: i64) -> Option<i64> {
+    let mut numbers = version.trim().split('.').map(|number| number.parse::<i64>().ok());
+    let (year, month, day) = (numbers.next()??, numbers.next()??, numbers.next()??);
+    ((2000..3000).contains(&year) && (1..=12).contains(&month) && (1..=31).contains(&day))
+        .then(|| today - day_number(year, month, day))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_version_named_for_its_day_says_how_old_it_is() {
+        assert_eq!((day_number(1970, 1, 1), day_number(2000, 3, 1), day_number(2026, 11, 18)), (0, 11_017, 20_775));
+        let today = day_number(2026, 11, 18);
+        assert_eq!(days_old("2026.11.18", today), Some(0));
+        assert_eq!(days_old("2025.10.22", today), Some(392));
+        // Through the end of a February with a 29th, and of a build between two releases.
+        assert_eq!(days_old("2024.02.28", day_number(2024, 3, 1)), Some(2));
+        assert_eq!(days_old(" 2026.10.26.232815\n", today), Some(23));
+        // What is not named for a day says nothing, and neither does a day there is not.
+        for version in ["", "7.1", "v2.4.1", "N-118193-g1234", "2026.13.01", "2026.00.10", "12.10.22"] {
+            assert_eq!(days_old(version, today), None, "{version}");
+        }
+    }
 }
