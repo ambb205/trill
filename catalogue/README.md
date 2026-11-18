@@ -74,11 +74,14 @@ licence's address, so that it can stand alone wherever it is pasted.
 archive = "https://github.com/<owner>/<repository>/archive/<version>.zip"
 under = "<repository>-<version>/"     # what in the archive is the set: everything below this
 sum = "<the tree checksum of the set's files>"
+archive_bytes = 123456789             # what the archive took the day it was fetched and checked: an estimate
 ```
 
 Such an archive is made by its source each time it is asked for, so its own bytes and its exact size cannot be
 pinned: two fetches of the same commit may differ as files and unpack to the same thing. What it unpacks to is
-pinned instead. The **tree checksum** of a folder is the SHA-256 of one line for each file below it,
+pinned instead, and `archive_bytes` is only what the program shows and asks the disk for. For the same reason
+such an archive is never gone on with from the middle: a fetch of it that was stopped begins again (measured:
+its source does not go on from the middle either). A set that is fetched file by file is gone on with. The **tree checksum** of a folder is the SHA-256 of one line for each file below it,
 
 ```
 <the file's SHA-256 in hexadecimal><two spaces><its path, with forward slashes><a line feed>
@@ -192,25 +195,23 @@ figure of an instrument that is played with vibrato, or whose low notes are shor
 
 ### The starter selection
 
-About a gigabyte that is offered first, ticked: the best of each kind a song commonly needs (a grand piano, an
-electric piano, strings, an acoustic and an electric bass, a drum kit, a guitar, an organ, and so on). It is the
-sets that hold an instrument marked `starter`: a set is fetched whole. "Everything" is the other choice.
+What is offered first, ticked: the best of each kind a song commonly needs (a grand piano, electric pianos, the
+string sections of an orchestra, an acoustic and an electric bass, a drum kit, guitars, an organ, hand
+percussion), 1.8 GB in twelve sets. It is the sets that hold an instrument marked `starter`: a set is fetched
+whole. "Everything" is the other choice. Which instruments are in it is written down in
+`crates/trill-catalogue/make/starter.txt`; it was chosen by what was measured, and nobody has chosen by ear.
 
 ## Adding a set, or bringing one up to date
 
-1. Read its licence where it is published, at the commit you will pin. If it does not pass, it goes in
-   `left-out.toml` with the sentence that decides it. If it is not clear, it is out.
-2. Fetch that commit into a folder under `target/` (never into the repository, and never into a sound library that
-   is in use).
-3. `cargo run -p trill-catalogue --example pin -- sum FOLDER` prints the tree checksum, the files and the bytes,
-   and the checksum of every `.sfz` file (`text`); `… -- files FOLDER` prints the lines of a list for
-   `files.toml`.
-4. `cargo run -p trill-engine --example sampled -- facts FOLDER OUT.jsonl` measures and plays every instrument in
-   it. Write the entries from that: the figures as they are, the marks by the table above, `misses` from `says`.
-5. `cargo test -p trill-catalogue` reads the catalogue and holds it to its rules;
-   `cargo run -p trill-catalogue --example pin -- check SET FOLDER` checks the folder against the new entry; and
-   `cargo test -p trill-runtime --test instruments -- --ignored --nocapture` fetches a few small sets from where
-   they are published and checks, unpacks, finds and plays them (it uses the network, and is not part of the
-   default run).
+The catalogue is written by the scripts in `crates/trill-catalogue/make/`, from what a person read and wrote down
+there (which commit each set is pinned to, what it is, whom to name, what was left out and why), from the sets as
+they are published and from what the player makes of them. `crates/trill-catalogue/make/README.md` says what
+they need and gives the steps: fetch the pinned commits, measure every instrument through the player, build,
+and then prove through the program's own fetching that what a user gets is what was read. Nothing in the program
+runs them, and no test does.
+
+Two tools for looking at one set by hand: `cargo run -p trill-catalogue --example pin -- sum FOLDER` prints a
+folder's tree checksum, its files and bytes, and the checksum of every `.sfz` file in it;
+`… -- check SET FOLDER` checks a folder against the catalogue's entry.
 
 When a set changed at its source, do not move the pin without reading it again: its licence file first.

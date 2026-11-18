@@ -1294,12 +1294,11 @@ impl Fetches {
                         .filter(|rest| !rest.is_empty() && *rest != KEPT)
                         .map(str::to_owned)
                 })
-                .map_err(|ended| {
+                .inspect_err(|ended| {
                     // An archive that cannot be read to its end did not all come: it is begun again.
-                    if matches!(&ended, Ended::Failed(_)) && guessed {
+                    if matches!(ended, Ended::Failed(_)) && guessed {
                         let _ = std::fs::remove_file(&partial);
                     }
-                    ended
                 })?;
                 if written.is_empty() {
                     return Err(Went::Failed(format!(

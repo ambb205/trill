@@ -147,10 +147,10 @@ fn the_catalogue_that_is_built_in_reads_and_keeps_its_own_rules() {
             assert!(!instrument.is_starter() || instrument.is_put_forward(), "{} {}", set.id, instrument.file);
         }
     }
-    // What is fetched first is about a gigabyte, and has one of each kind a song commonly needs.
+    // What is fetched first is under two gigabytes, and has one of each kind a song commonly needs.
     let starter = catalogue.starter();
     let bytes: u64 = starter.iter().map(|set| set.bytes).sum();
-    assert!((600 << 20..=1400 << 20).contains(&bytes), "the starter selection is {} MB", bytes >> 20);
+    assert!((1200u64 << 20..=2200 << 20).contains(&bytes), "the starter selection is {} MB", bytes >> 20);
     let kinds: Vec<Kind> =
         catalogue.instruments().filter(|(_, instrument)| instrument.is_starter()).map(|(_, i)| i.kind).collect();
     for kind in [Kind::Piano, Kind::ElectricPiano, Kind::Strings, Kind::Bass, Kind::DrumKit, Kind::Guitar, Kind::Organ]

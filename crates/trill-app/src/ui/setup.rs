@@ -5,14 +5,17 @@
 //! recording is made with; whatever another part of the program has added
 //! to the same engine), and one for the machine: the timed test of what
 //! runs the models, the programs Trill found installed, and where studies
-//! are kept.
+//! are kept. The catalogue of sampled instruments is a list like any
+//! other to the engine, and more than a hundred parts to a person: its
+//! tab is its own (`setup_instruments.rs`), by kind, with a search.
 //!
 //! Three rules shape it.
 //!
 //! **Nothing is fetched that was not read first.** A part is fetched by a
 //! button that stands under its size, its licence in the words of its
-//! source, who asks to be credited and where it comes from. There is no
-//! "fetch everything", and nothing here fetches by itself.
+//! source, who asks to be credited and where it comes from. Nothing here
+//! fetches by itself; where many are asked for at once (the instruments),
+//! the button says how much that is.
 //!
 //! **Nothing here waits on a disk, a network or a model.** What the panel
 //! shows is read by a helper thread a few times a second while it is open,
@@ -23,6 +26,7 @@
 //! fetched says why and what to do under its own name, for as long as it
 //! is so; a card that could not run the models says so in its row.
 
+use super::setup_instruments::{self, Instruments};
 use super::state::Cx;
 use eframe::egui::{self, Align, Align2, Id, Layout, Rect, Role, Sense, Ui, UiBuilder, WidgetInfo, pos2, vec2};
 use std::collections::HashMap;
@@ -36,10 +40,10 @@ use trill_runtime::Runtime;
 use trill_study::models::real::Provider;
 use trill_study::setup::{Found, Machine, Timed, provider_name};
 
-const WIDTH: f32 = 700.0;
+pub(super) const WIDTH: f32 = 700.0;
 /// Height of a part in a list, and of a row of the machine's.
-const ROW: f32 = 24.0;
-const GAP: f32 = 6.0;
+pub(super) const ROW: f32 = 24.0;
+pub(super) const GAP: f32 = 6.0;
 /// More parts than this scroll.
 const MAX_ROWS: usize = 10;
 /// How often what is shown is read again while the panel is open, in
@@ -83,6 +87,9 @@ struct Shown {
     can_test: bool,
     /// Why there is nothing to show, where nothing is kept.
     unavailable: Option<String>,
+    /// The instruments of the catalogue that are in the sound library, by
+    /// the checksum of their file: where each is.
+    here: Arc<HashMap<String, PathBuf>>,
 }
 
 /// The panel and what it is waiting for.
@@ -97,6 +104,8 @@ pub struct Setup {
     read_at: f64,
     /// The part whose details are shown, for each list.
     selected: HashMap<String, String>,
+    /// What the tab of the instruments keeps: what is opened, what is searched for.
+    pub(super) instruments: Instruments,
     programs: Vec<Found>,
     studies: Option<(PathBuf, usize, u64)>,
     looking: bool,
@@ -127,6 +136,7 @@ impl Default for Setup {
             reading: false,
             read_at: f64::NEG_INFINITY,
             selected: HashMap::new(),
+            instruments: Instruments::default(),
             programs: Vec::new(),
             studies: None,
             looking: false,
@@ -155,6 +165,18 @@ impl Setup {
         self.open && (!self.read || self.looking)
     }
 
+    /// True while something that was asked for has not been answered yet:
+    /// the buttons that ask for more wait for it.
+    pub(super) fn is_working(&self) -> bool {
+        self.working > 0
+    }
+
+    /// The instruments of the catalogue that are in the sound library, by
+    /// the checksum of their file.
+    pub(super) fn here(&self) -> Arc<HashMap<String, PathBuf>> {
+        self.shown.here.clone()
+    }
+
     /// True while something that was asked for is being done.
     #[cfg(test)]
     pub fn is_busy(&self) -> bool {
@@ -170,9 +192,17 @@ impl Setup {
     /// Shows a made-up machine in place of this one, for pictures.
     pub fn show(&mut self, scene: super::setup_scene::SetupScene) {
         let staged = scene.staged();
-        self.tab = if staged.on_machine { staged.lists.len() } else { 0 };
+        self.tab = match (staged.on_machine, &staged.instruments) {
+            (true, _) => staged.lists.len(),
+            // The tab of the instruments, where the scene is of them.
+            (false, Some(_)) => staged.lists.len() - 1,
+            (false, None) => 0,
+        };
         for list in &staged.lists {
             self.selected.insert(list.id.clone(), staged.selected.to_owned());
+        }
+        if let Some(view) = staged.instruments {
+            self.instruments = view;
         }
         self.shown = Shown {
             lists: staged.lists,
@@ -181,6 +211,7 @@ impl Setup {
             runs_on: staged.runs_on,
             can_test: true,
             unavailable: None,
+            here: Arc::new(staged.here),
         };
         (self.programs, self.studies) = (staged.programs, Some(staged.studies));
         (self.staged, self.read) = (true, true);
@@ -258,7 +289,7 @@ fn sentence(words: &str) -> String {
 
 /// A sentence that begins with a name that is spelled as it is (a file's):
 /// as it was said, with a full stop.
-fn stopped(words: &str) -> String {
+pub(super) fn stopped(words: &str) -> String {
     let words = words.trim();
     if words.ends_with(['.', '!', '?']) { words.to_owned() } else { format!("{words}.") }
 }
@@ -270,13 +301,20 @@ fn read(runtime: &Runtime) -> Shown {
         (Err(why), _) | (_, Err(why)) => return Shown { unavailable: Some(sentence(&why)), ..Shown::default() },
     };
     let setup = desk.setup();
+    let lists = fetches.status();
+    // Which of the catalogue's instruments are in the library, where its sets are offered.
+    let here = match lists.iter().any(|list| list.id == trill_runtime::INSTRUMENTS) {
+        true => Arc::new(runtime.catalogue_here()),
+        false => Arc::default(),
+    };
     Shown {
-        lists: fetches.status(),
+        lists,
         machine: setup.machine(),
         untested: setup.untested(),
         runs_on: provider_name(setup.provider()),
         can_test: desk.program().is_some(),
         unavailable: None,
+        here,
     }
 }
 
@@ -311,24 +349,28 @@ fn look(ctx: &egui::Context, cx: &mut Cx) {
 }
 
 /// Does something that ends in a sentence, on a thread of its own.
-fn act(ctx: &egui::Context, cx: &mut Cx, job: impl FnOnce(&Runtime) -> Result<String, String> + Send + 'static) {
+pub(super) fn act(
+    ctx: &egui::Context,
+    cx: &mut Cx,
+    job: impl FnOnce(&Runtime) -> Result<String, String> + Send + 'static,
+) {
     cx.setup.working += 1;
     cx.setup.last = None;
     cx.setup.spawn(ctx, &cx.sounds.runtime, |runtime, report| report(Done::Said(job(runtime))));
 }
 
-fn fetch(ctx: &egui::Context, cx: &mut Cx, part: String) {
+pub(super) fn fetch(ctx: &egui::Context, cx: &mut Cx, part: String) {
     act(ctx, cx, move |runtime| runtime.fetches()?.fetch(&part).map(|_| String::new()));
 }
 
-fn stop(ctx: &egui::Context, cx: &mut Cx, part: String) {
+pub(super) fn stop(ctx: &egui::Context, cx: &mut Cx, part: String) {
     act(ctx, cx, move |runtime| {
         let part = runtime.fetches()?.stop(&part)?;
         Ok(format!("What came of {} is kept: fetching it again goes on from there.", part.name))
     });
 }
 
-fn remove(ctx: &egui::Context, cx: &mut Cx, part: String) {
+pub(super) fn remove(ctx: &egui::Context, cx: &mut Cx, part: String) {
     act(ctx, cx, move |runtime| {
         let fetches = runtime.fetches()?;
         let name = fetches.part(&part)?.name;
@@ -410,7 +452,7 @@ fn test(ctx: &egui::Context, cx: &mut Cx) {
 // ---- what the panel says, as pure functions ------------------------------------
 
 /// What a part is doing, in a word or two, and whether that is a problem.
-fn state_words(status: &PartStatus) -> (String, bool) {
+pub(super) fn state_words(status: &PartStatus) -> (String, bool) {
     let percent = || (status.got as f64 * 100.0 / status.part.size().max(1) as f64).floor();
     match (status.state, &status.error) {
         (PartState::Ready, _) => ("Here".to_owned(), false),
@@ -489,7 +531,7 @@ fn capital(words: &str) -> String {
 // ---- the panel -----------------------------------------------------------------
 
 /// A caps heading over a rule, with what is said at its right end.
-fn heading(ui: &mut Ui, theme: &Theme, title: &str, right: &str) -> Rect {
+pub(super) fn heading(ui: &mut Ui, theme: &Theme, title: &str, right: &str) -> Rect {
     let (row, _) = ui.allocate_exact_size(vec2(WIDTH, 20.0), Sense::hover());
     text::paint(ui.painter(), row, Align2::LEFT_CENTER, theme.text.micro, title, theme.ink_faint);
     if !right.is_empty() {
@@ -501,7 +543,7 @@ fn heading(ui: &mut Ui, theme: &Theme, title: &str, right: &str) -> Rect {
 }
 
 /// A paragraph that wraps at `width`.
-fn paragraph(ui: &mut Ui, theme: &Theme, color: egui::Color32, words: &str, width: f32) {
+pub(super) fn paragraph(ui: &mut Ui, theme: &Theme, color: egui::Color32, words: &str, width: f32) {
     let style = TextStyle { size: 12.0, ..theme.text.body };
     let galley = prose::plain(ui, theme, style, color, words, width);
     let (rect, response) = ui.allocate_exact_size(vec2(WIDTH, galley.size().y), Sense::hover());
@@ -511,7 +553,7 @@ fn paragraph(ui: &mut Ui, theme: &Theme, color: egui::Color32, words: &str, widt
 }
 
 /// A label in small type and what it says beside it, on one line or wrapped under one another.
-fn fact(ui: &mut Ui, theme: &Theme, label: &str, words: &str, color: egui::Color32) {
+pub(super) fn fact(ui: &mut Ui, theme: &Theme, label: &str, words: &str, color: egui::Color32) {
     const LABEL: f32 = 88.0;
     let style = TextStyle { size: 12.0, ..theme.text.body };
     let galley = prose::plain(ui, theme, style, color, words, WIDTH - LABEL);
@@ -524,7 +566,15 @@ fn fact(ui: &mut Ui, theme: &Theme, label: &str, words: &str, color: egui::Color
 }
 
 /// A small button at the right end of `row`.
-fn row_button(ui: &mut Ui, cx: &mut Cx, row: Rect, label: &str, name: &str, dimmed: bool, hint: &str) -> bool {
+pub(super) fn row_button(
+    ui: &mut Ui,
+    cx: &mut Cx,
+    row: Rect,
+    label: &str,
+    name: &str,
+    dimmed: bool,
+    hint: &str,
+) -> bool {
     let theme = cx.theme;
     let chip = Chip::action(label).dimmed(dimmed).named(name);
     let width = chip.width(ui, theme);
@@ -538,7 +588,14 @@ fn row_button(ui: &mut Ui, cx: &mut Cx, row: Rect, label: &str, name: &str, dimm
 }
 
 /// Where something is kept, with the button that moves it.
-fn kept_line(ui: &mut Ui, ctx: &egui::Context, cx: &mut Cx, what: Kept, folder: &std::path::Path, moves: &str) {
+pub(super) fn kept_line(
+    ui: &mut Ui,
+    ctx: &egui::Context,
+    cx: &mut Cx,
+    what: Kept,
+    folder: &std::path::Path,
+    moves: &str,
+) {
     let theme = cx.theme;
     let (row, response) = ui.allocate_exact_size(vec2(WIDTH, ROW), Sense::hover());
     let path = folder.display().to_string();
@@ -632,6 +689,8 @@ pub fn modal(ctx: &egui::Context, cx: &mut Cx) {
         body.show(ui, |ui| {
             ui.set_width(WIDTH);
             match cx.setup.shown.lists.get(cx.setup.tab).cloned() {
+                // The catalogue of instruments is too many parts for a list: by kind, with a search.
+                Some(list) if list.id == trill_runtime::INSTRUMENTS => setup_instruments::body(ui, ctx, cx, &list),
                 Some(list) => parts(ui, ctx, cx, &list),
                 None => machine(ui, ctx, cx),
             }

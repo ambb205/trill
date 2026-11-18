@@ -274,7 +274,30 @@ fn part_view(status: &PartStatus) -> Value {
     out
 }
 
-fn list_view(list: &ListStatus, offset: usize, limit: usize) -> Value {
+/// A list with more parts than this is a catalogue: its parts are said in
+/// a line each, and only when the list is asked for by name.
+const SHORT_LIST: usize = 24;
+
+/// A part of a long list, in a line: what it is and whose is said by the
+/// tool that reads its catalogue.
+fn part_line(status: &PartStatus) -> Value {
+    let mut out = json!({
+        "part": status.part.id,
+        "name": status.part.name,
+        "size_mb": megabytes(status.part.size()),
+        "state": named(&status.state),
+    });
+    if status.state != PartState::Ready && status.got > 0 {
+        out["percent"] = json!((status.got as f64 * 100.0 / status.part.size().max(1) as f64).floor());
+    }
+    if let Some(error) = &status.error {
+        out["error"] = json!(error);
+    }
+    out
+}
+
+/// A list as a reply says it. `asked` is whether it was asked for by name.
+fn list_view(list: &ListStatus, offset: usize, limit: usize, asked: bool) -> Value {
     let total = list.parts.len();
     let mut out = json!({
         "list": list.id,
@@ -282,9 +305,35 @@ fn list_view(list: &ListStatus, offset: usize, limit: usize) -> Value {
         "about": list.about,
         "kept_in": list.folder.display().to_string(),
         "total": total,
-        "parts": list.parts.iter().skip(offset).take(limit).map(part_view).collect::<Vec<_>>(),
     });
-    if offset + limit < total {
+    if total <= SHORT_LIST {
+        out["parts"] = json!(list.parts.iter().skip(offset).take(limit).map(part_view).collect::<Vec<_>>());
+    } else {
+        // Too many to say each in full: how many are here, which are on their way or went wrong,
+        // and the rest a line each when the list is asked for.
+        let here = list.parts.iter().filter(|status| status.state == PartState::Ready).count();
+        out["here"] = json!(here);
+        out["on_disk_mb"] = json!(megabytes(list.parts.iter().map(|status| status.on_disk).sum()));
+        let moving: Vec<Value> = list
+            .parts
+            .iter()
+            .filter(|status| status.state.is_going() || status.error.is_some())
+            .take(limit)
+            .map(part_line)
+            .collect();
+        if !moving.is_empty() {
+            out["on_their_way_or_failed"] = json!(moving);
+        }
+        if asked {
+            out["parts"] = json!(list.parts.iter().skip(offset).take(limit).map(part_line).collect::<Vec<_>>());
+        } else {
+            out["parts"] = json!(format!(
+                "{total} parts: `list` \"{}\" says each in a line, a page at a time; what each is and whose, with its licence, is said by the tool that reads its catalogue (instrument_catalogue for instruments)",
+                list.id
+            ));
+        }
+    }
+    if out["parts"].is_array() && offset + limit < total {
         out["more"] = json!(offset + limit);
     }
     out
@@ -503,7 +552,7 @@ impl TrillServer {
                 let lists: Vec<Value> = status
                     .iter()
                     .filter(|list| request.list.as_ref().is_none_or(|wanted| list.id == *wanted))
-                    .map(|list| list_view(list, offset, limit))
+                    .map(|list| list_view(list, offset, limit, request.list.is_some()))
                     .collect();
                 let programs: Vec<Value> = tokio::task::spawn_blocking({
                     let setup = setup.clone();

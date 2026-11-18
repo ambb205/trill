@@ -65,8 +65,8 @@ Options:
                           studio, fallback or none
   --setup                 Start with the Setup panel open: what Trill fetches when asked, and what
                           runs the models (Ctrl+Shift+, shows it)
-  --setup-scene <NAME>    Show a made-up machine in that panel, for screenshots: fresh, fetching
-                          or machine
+  --setup-scene <NAME>    Show a made-up machine in that panel, for screenshots: fresh, fetching,
+                          machine, instruments, instruments-fetching or instruments-search
   --hold <KEYS>           Hold these keys of it down, for screenshots: adg is a C major chord, and
                           zzat a kick and a hat two octaves down
   --screenshot <PATH.png> Render the window to a PNG and exit (implies --null-audio)

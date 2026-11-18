@@ -297,9 +297,13 @@ fn the_sets_of_a_catalogue_are_asked_for_fetched_made_the_library_s_played_moved
     let asked = runtime.ask_for_instruments(&Ask::Starter).unwrap();
     assert_eq!(asked.queued, ["more-keys"]);
     wait_for(&runtime, "more-keys", PartState::Ready);
-    assert_eq!(runtime.library.roots(), [kept.clone()], "the folder the sets are kept in is the library's");
+    assert_eq!(
+        runtime.library.roots(),
+        std::slice::from_ref(&kept),
+        "the folder the sets are kept in is the library's"
+    );
     assert_eq!(instruments_of(&runtime), [kept.join("more-keys").join("Small Keys.sfz")]);
-    assert_eq!(runtime.settings().library.roots, [kept.clone()], "and the settings remember it");
+    assert_eq!(runtime.settings().library.roots, std::slice::from_ref(&kept), "and the settings remember it");
     assert_eq!(fetches.status_of("small-keys").unwrap().state, PartState::Missing, "only what was asked for");
 
     // Everything: what is here is left, the rest comes. Known for the catalogue's by their files.
@@ -342,7 +346,11 @@ fn the_sets_of_a_catalogue_are_asked_for_fetched_made_the_library_s_played_moved
     let elsewhere = std::path::absolute(folder.path().join("big disk").join("sets")).unwrap();
     let said = runtime.keep_list_in(INSTRUMENTS, Some(elsewhere.clone())).unwrap();
     assert!(said.ends_with("what was fetched before was moved there"), "{said}");
-    assert_eq!(runtime.library.roots(), [elsewhere.clone()], "the folder they were in is the library's no longer");
+    assert_eq!(
+        runtime.library.roots(),
+        std::slice::from_ref(&elsewhere),
+        "the folder they were in is the library's no longer"
+    );
     assert_eq!(instruments_of(&runtime).len(), 2);
     assert!(
         elsewhere.join("small-keys").join("Samples").join("low.wav").is_file() && !kept.join("small-keys").exists()
@@ -466,22 +474,33 @@ fn megabytes(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
 
-/// Plays one note of the instrument in the file `at`, and answers with its peak.
+/// Plays a dozen keys of the instrument in the file `at`, from one end of
+/// its range to the other, and answers with the peak of them: a key in
+/// the middle of an instrument may be one it has nothing on, and a kit
+/// has drums on few of its keys.
 fn peak_of(runtime: &Runtime, instrument: &trill_catalogue::Instrument, at: &Path) -> f32 {
-    let key = instrument.range.map_or(60, |(low, high)| low + (high - low) / 2);
+    let (low, high) = instrument.range.unwrap_or((48, 72));
+    let span = u32::from(high - low);
+    let mut keys: Vec<u8> = (0..12u32).map(|step| low + (span * step / 11) as u8).collect();
+    keys.dedup();
     let track = {
         let mut session = runtime.session.lock();
         let track = session.edit(|project| Ok(project.add_track(&instrument.name))).unwrap();
         session.add_device(ChainRef::Track(track), SAMPLED, Some(&at.display().to_string()), None).unwrap();
         session
             .edit(|project| {
-                let clip = project.add_midi_clip(track, "c", 0.0, 2.0)?;
-                project.clip_mut(clip)?.add_notes(&[trill_core::Note {
-                    pitch: key,
-                    start: 0.0,
-                    length: 1.0,
-                    velocity: 110,
-                }])
+                let clip = project.add_midi_clip(track, "c", 0.0, keys.len() as f64 + 1.0)?;
+                let notes: Vec<trill_core::Note> = keys
+                    .iter()
+                    .enumerate()
+                    .map(|(step, pitch)| trill_core::Note {
+                        pitch: *pitch,
+                        start: step as f64,
+                        length: 0.9,
+                        velocity: 110,
+                    })
+                    .collect();
+                project.clip_mut(clip)?.add_notes(&notes)
             })
             .unwrap();
         track

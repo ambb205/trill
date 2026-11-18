@@ -77,6 +77,7 @@ mod recovery;
 mod response;
 mod sample_panels;
 mod setup;
+mod setup_instruments;
 mod setup_scene;
 mod shortcuts;
 mod snapshot;

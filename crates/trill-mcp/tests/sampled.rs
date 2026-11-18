@@ -349,7 +349,7 @@ async fn an_agent_reads_what_instruments_are_to_be_had_and_what_a_song_owes_and_
     let fixture = connect().await;
     let client = &fixture.client;
     let instructions = client.peer_info().and_then(|info| info.instructions.clone()).unwrap_or_default();
-    for word in ["instrument_catalogue", "song_credits", "a set is fetched by the user"] {
+    for word in ["instrument_catalogue", "song_credits", "A set is fetched when the user asks for it"] {
         assert!(instructions.contains(word), "the instructions should say '{word}'");
     }
 
@@ -424,4 +424,110 @@ async fn an_agent_reads_what_instruments_are_to_be_had_and_what_a_song_owes_and_
     // Nothing was fetched, and the library is as it was: nothing of the catalogue is here.
     let all = ok(client, "instrument_catalogue", json!({})).await;
     assert_eq!(all["here"], 0, "{all}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_set_of_the_catalogue_is_fetched_with_setup_when_it_is_asked_for_and_is_then_here() {
+    use trill_catalogue::check::{address, file_sum};
+    use trill_fetch::scripted::Shelf;
+    use trill_runtime::{Parts, Studying};
+    // A catalogue of twenty-six sets, each a small upright published file by file under its own id. Each has
+    // a file of its own (a line says whose it is): an instrument is known again by its file's checksum.
+    let folder = tempfile::tempdir().unwrap();
+    let made = upright(&folder.path().join("made")).parent().unwrap().to_owned();
+    let paths =
+        ["Upright.sfz", "Samples/low soft.wav", "Samples/low hard.wav", "Samples/high.wav", "Samples/short.wav"];
+    let at = |path: &str| path.split('/').fold(made.clone(), |at, piece| at.join(piece));
+    let version = "0123456789abcdef0123456789abcdef01234567";
+    let shelf = Arc::new(Shelf::default());
+    let (mut entries, mut lists) = (String::from("format = 1\n"), String::from("format = 1\n[list]\n"));
+    for number in 0..26 {
+        let id = format!("upright-{number:02}");
+        let base = format!("https://example.org/{id}/raw/{version}/");
+        let own = folder.path().join("own").join(format!("{id}.sfz"));
+        std::fs::create_dir_all(own.parent().unwrap()).unwrap();
+        let mut text = std::fs::read(at("Upright.sfz")).unwrap();
+        text.extend_from_slice(format!("\n// {id}\n").as_bytes());
+        std::fs::write(&own, text).unwrap();
+        let file = |path: &str| if path == "Upright.sfz" { own.clone() } else { at(path) };
+        let (mut lines, mut bytes) = (String::new(), 0);
+        for path in paths {
+            let size = std::fs::metadata(file(path)).unwrap().len();
+            lines.push_str(&format!("{} {size} {path}\n", file_sum(&file(path)).unwrap()));
+            bytes += size;
+            shelf.put(&address(&base, path), std::fs::read(file(path)).unwrap());
+        }
+        lists.push_str(&format!("{id} = '''\n{lines}'''\n"));
+        entries.push_str(&format!(
+            "[[set]]\nid = \"{id}\"\nname = \"Upright {number}\"\nabout = \"A small upright, made up for a test.\"\n\
+             by = \"A. Maker\"\nlicence = \"CC0-1.0\"\nlicence_at = \"https://example.org/{id}/LICENSE\"\n\
+             licence_says = \"This collection is under a Creative Commons 0 license.\"\n\
+             from = \"https://example.org/{id}\"\nversion = \"{version}\"\nread = \"2026-11-17\"\nbytes = {bytes}\n\
+             files = 5\n[set.fetch]\nbase = \"{base}\"\nlist = \"{id}\"\n\
+             [[set.instrument]]\nfile = \"Upright.sfz\"\ntext = \"{}\"\nname = \"Upright {number}\"\nkind = \"piano\"\n\
+             words = \"A small upright piano, made up for a test\"\nrange = [36, 84]\nlayers = 2\ntakes = 1\n\
+             recordings = 4\nbytes = {bytes}\n",
+            file_sum(&own).unwrap(),
+        ));
+    }
+    let catalogue = trill_catalogue::Catalogue::read(&entries, &lists, "format = 1\n").unwrap();
+    let storage = Storage::At {
+        settings: folder.path().join("config").join("settings.json"),
+        library_index: Some(folder.path().join("cache").join("library-index.json")),
+    };
+    let options = RuntimeOptions { audio: AudioBackend::Null { sample_rate: 48_000 }, plugins: None, storage };
+    let studying = Studying { fetcher: Some(shelf.clone()), parts: Some(Vec::new()), ..Studying::default() };
+    let parts = Parts { studying, catalogue: Some(catalogue), ..Parts::default() };
+    let runtime = Arc::new(Runtime::start_custom(options, parts).unwrap());
+    let server = serve_http(runtime.clone(), "127.0.0.1:0".parse().unwrap()).unwrap();
+    let transport =
+        StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(server.url()));
+    let client = &ClientConfig::default().serve(transport).await.unwrap();
+
+    // What there is to fetch, said short: a catalogue is counted, and its tool says what each set is.
+    let report = ok(client, "setup", json!({ "action": "report" })).await;
+    let lists = report["lists"].as_array().unwrap();
+    let sets = lists.iter().find(|list| list["list"] == "instruments").expect("the catalogue's sets are offered");
+    assert_eq!((&sets["total"], &sets["here"]), (&json!(26), &json!(0)), "{sets}");
+    assert!(sets["parts"].as_str().unwrap().contains("instrument_catalogue"), "{sets}");
+    assert!(report.to_string().len() < 6_000, "the report stays short: {} characters", report.to_string().len());
+    // Asked for by name, a line each, a page at a time: no licence is said twenty-six times.
+    let page = ok(client, "setup", json!({ "action": "report", "list": "instruments", "limit": 3 })).await;
+    let rows = page["lists"][0]["parts"].as_array().unwrap();
+    assert_eq!((rows.len(), &page["lists"][0]["more"]), (3, &json!(3)), "{page}");
+    assert_eq!(rows[0], json!({ "part": "upright-00", "name": "Upright 0", "size_mb": 1, "state": "missing" }));
+    // The catalogue says how one is fetched, and fetches nothing.
+    let one = ok(client, "instrument_catalogue", json!({ "set": "upright-00" })).await;
+    assert!(one["fetching"].as_str().unwrap().contains("with setup, action \"fetch\""), "{one}");
+    assert!(shelf.asked().is_empty());
+
+    // Fetched with setup, by its id, it comes, is the library's, and the catalogue says it is here.
+    let fetched = ok(client, "setup", json!({ "action": "fetch", "part": "upright-00" })).await;
+    assert_eq!(fetched["part"], "upright-00", "{fetched}");
+    let mut state = json!(null);
+    for _ in 0..200 {
+        let page = ok(client, "setup", json!({ "action": "report", "list": "instruments", "limit": 1 })).await;
+        state = page["lists"][0]["parts"][0]["state"].clone();
+        if state == "ready" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(state, "ready");
+    assert_eq!(shelf.asked().len(), 5, "its five files, and nothing of the other sets");
+    assert!(runtime.library.wait_until_idle(std::time::Duration::from_secs(30)));
+    let found = ok(client, "search_sounds", json!({ "kind": "instrument" })).await;
+    assert_eq!(names(&found), ["Upright"], "{found}");
+    let here = ok(client, "instrument_catalogue", json!({ "here": true })).await;
+    assert_eq!(here["found"], 1, "{here}");
+    let kept = folder.path().join("config").join(trill_runtime::SETS_FOLDER).join("upright-00").join("Upright.sfz");
+    assert_eq!(
+        std::path::PathBuf::from(here["instruments"][0]["here"].as_str().unwrap()),
+        std::path::absolute(&kept).unwrap(),
+        "{here}"
+    );
+    // And it loads by that file.
+    let made =
+        ok(client, "create_track", json!({ "name": "Keys", "instrument": SAMPLED, "preset": text(&kept) })).await;
+    assert!(made.is_object(), "{made}");
 }

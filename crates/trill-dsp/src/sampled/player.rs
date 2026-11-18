@@ -1196,6 +1196,49 @@ impl Player {
         }
     }
 
+    /// The sounds `controller` sets off by coming to where it was put
+    /// from `was`: each region whose span it has come into, and was not
+    /// in. A pedal that is held, or moved about within the span, sets its
+    /// noise off once.
+    fn set_off(&mut self, loaded: &Loaded, controller: u8, was: f32, place: u64) {
+        if loaded.set_off.is_empty() {
+            return;
+        }
+        let now = self.put[usize::from(controller)];
+        let within = |position: f32, low: f32, high: f32| {
+            let position = position * 127.0;
+            position >= low - 0.5 && position <= high + 0.5
+        };
+        let seed = place.rotate_left(8) ^ u64::from(controller) ^ 0x000C_0FFE_E05E_70FF_u64;
+        let number = chance(seed, 0);
+        let mut counted = false;
+        for at in 0..loaded.set_off.len() {
+            let index = loaded.set_off[at] as usize;
+            let region = &loaded.instrument.regions[index];
+            let Some((by, low, high)) = region.set_off else { continue };
+            if by != controller || !within(now, low, high) || within(was, low, high) {
+                continue;
+            }
+            if !counted {
+                self.clock += 1;
+                counted = true;
+            }
+            // On the key its recording was made on, as loud as the file has it: how far the
+            // controller went says nothing of how hard anything was struck.
+            let key = region.root;
+            let own = Own {
+                velocity: 1.0,
+                key: f32::from(key) / 127.0,
+                random: chance(seed, 5),
+                random_either_way: chance(seed, 6) * 2.0 - 1.0,
+                alternate: 0.0,
+            };
+            if self.sounds(region, index, key, &own, number) {
+                self.start(loaded, index, key, &own, 1.0, seed);
+            }
+        }
+    }
+
     /// The note of `key` ends: the key is up and no pedal holds it.
     fn end_note(&mut self, loaded: &Loaded, key: u8, place: u64) {
         self.come_up(loaded, key, Trigger::Release, place);
@@ -1232,7 +1275,9 @@ impl Player {
                     return;
                 }
                 let number = controller.min(127);
+                let was = self.put[usize::from(number)];
                 self.put[usize::from(number)] = value.clamp(0.0, 1.0);
+                self.set_off(loaded, number, was, place);
                 let sounding = self.voices.iter().any(|voice| voice.active);
                 if !sounding {
                     self.controllers[usize::from(number)] = self.put[usize::from(number)];

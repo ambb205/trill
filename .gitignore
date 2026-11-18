@@ -14,3 +14,5 @@
 # Pictures of the window are rendered to target/screenshots and not kept;
 # the README's four are in docs/images. See screenshots/render.sh.
 /crates/trill-app/screenshots/*.png
+# What Python leaves beside the scripts it runs.
+__pycache__/
