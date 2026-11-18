@@ -48,9 +48,23 @@ to be answered when it ends); \"stop\" ends it and keeps every stage that had fi
 `study` takes it up there; \"list\" and \"delete\" are what they say.
 - When it is done, listen with `study` reads it: the same summary and lists as of a file, in the recording's own \
 bars, and `show` \"words\" for the lyrics line by line with the bar and beat of every word. `stem` keeps the loops \
-and single hits to those of one stem and says where that stem plays. Each stem is an audio file (its `path` is in \
-the report and in listen's reply) that create_audio_clip puts on a track. transcribe takes a `study` too. `grid` \
+and single hits to those of one stem and says where that stem plays. transcribe takes a `study` too. `grid` \
 corrections given to listen for a study are kept with it.
+- take_from_study puts what a study found into the song, each time as one undo step, by the bars, ids and line \
+numbers listen gives: `what` \"stretch\" (bars of one stem or of several, or of the whole recording) and \"loop\" \
+(one of its loops by id) become audio clips that follow the song's tempo, a beat of the recording for a beat of the \
+song, on a new track or on `track` at `at_bar`, `times` over; \"line\" and \"word\" are that stretch of the vocal, \
+named by its words; \"one_shot\" puts a single hit on a lane, on a pad of a drum rack or into a sampler that plays a \
+bass note by its own pitch; \"kit\" makes a drum rack of the cleanest hit of each drum; \"notes\" writes the bass \
+line, the melody, the chords or the groove on an instrument track (a groove asks that track's kit for its drums by \
+name); \"parts\" writes the recording's parts as markers; \"tempo\" lays the recording's tempo into the song bar by \
+bar, after which a stretch taken `as_recorded` lies on the song's bars untouched; \"key\" says the song is in the \
+recording's key; \"reference\" puts the recording beside the song on a track that is silent unless listened to \
+(update_track with `listening`) and is in no render. `to_song_key` moves a stretch to the key the song says it is \
+in (set_project with `key`), `semitones` by what you say: the stretcher does it, and beyond three or four semitones \
+a voice no longer sounds like itself. Drums are never moved for a key.
+- A clip taken from a study plays a file in the study's own folder: deleting the study, or dropping its stems, \
+leaves the song without it, and study says which songs use it before it does either.
 - The models are not part of Trill. setup with action \"report\" lists the parts there are (each with its size, \
 its licence in the words of its source, and where it comes from), which are here, what runs the models on this \
 machine and how fast, and the programs Trill found. A study that lacks a part says which. Fetch a part (setup, \
@@ -79,13 +93,22 @@ pub enum StudyAction {
     Stop,
     /// Every study there is, latest first.
     List,
-    /// Remove a study and everything in its folder.
+    /// Remove a study and everything in its folder. Where songs Trill knows play its files, it says which and
+    /// does nothing until asked again with `confirm`.
     Delete,
+    /// Remove a study's stems and keep everything that was found in them: a third of a megabyte in place of a
+    /// couple of hundred. Songs that play the stems are named first, as for delete; what was cut from them
+    /// for a song (single hits, several stems as one) stays.
+    DropStems,
+    /// Give the open song what it plays of studies in a folder of its own beside it (`<song> files`), each
+    /// clip's stretch cut out with a second to spare, and have it play them from there: for a song that is to
+    /// go to another machine, or to outlive its studies. The song has to be saved, and saved again after.
+    Gather,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct StudyRequest {
-    /// "start", "report", "stop", "list" or "delete".
+    /// "start", "report", "stop", "list", "delete", "drop_stems" or "gather".
     pub action: StudyAction,
     /// start: the whole path of an audio file to study (WAV, AIFF, FLAC, MP3, Ogg Vorbis; anything else where
     /// ffmpeg is installed), up to 15 minutes long.
@@ -109,6 +132,9 @@ pub struct StudyRequest {
     pub best_stems: Option<bool>,
     /// report: wait up to this many seconds for the study to end before answering (at most 900).
     pub wait_seconds: Option<f64>,
+    /// delete, drop_stems: true goes ahead although songs play the study's files. Only when the user has said
+    /// so, having been told which songs.
+    pub confirm: Option<bool>,
 }
 
 #[derive(Copy, Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -177,6 +203,11 @@ pub(crate) fn study_view(report: &Report, folder: &StudyFolder) -> Value {
     }
     if let Some((stage, share)) = report.at {
         out["at"] = json!({ "stage": named(&stage), "doing": stage.doing(), "percent": (share * 100.0).round() });
+    }
+    if report.behind_another {
+        out["waits_for"] = json!(
+            "a study that another program on this machine is running: one recording is studied at a time, whichever program asks"
+        );
     }
     if !study.stages.is_empty() {
         out["stages"] = study
@@ -471,13 +502,73 @@ impl TrillServer {
                     .collect();
                 Ok(json!({ "kept_in": desk.folder().display().to_string(), "studies": studies }))
             }
-            StudyAction::Delete => {
-                let id = request.study.ok_or_else(|| needs("to remove"))?;
+            StudyAction::Delete | StudyAction::DropStems => {
+                let stems = request.action == StudyAction::DropStems;
+                let id =
+                    request.study.ok_or_else(|| needs(if stems { "to drop the stems of" } else { "to remove" }))?;
+                let (confirmed, guarded) = (request.confirm.unwrap_or(false), self.is_guarded());
                 let runtime = self.runtime.clone();
-                let study = tokio::task::spawn_blocking(move || runtime.studies()?.delete(&id))
+                tokio::task::spawn_blocking(move || {
+                    let title = runtime.studies()?.report(&id)?.study.title;
+                    // Songs that play its files are named before anything goes.
+                    let used = runtime.study_used_by(&id, stems)?;
+                    if !used.is_empty() && guarded {
+                        return Err(format!(
+                            "songs play files of the study {id} ({title}), and removing them is not done from this \
+                             panel, which cannot ask: the user removes a study in the Studies place of the browser, \
+                             where they are told which songs"
+                        ));
+                    }
+                    if !used.is_empty() && !confirmed {
+                        let songs: Vec<String> = used
+                            .iter()
+                            .map(|song| {
+                                let places = if song.places == 1 { "1 place".to_owned() } else { format!("{} places", song.places) };
+                                match (&song.path, song.open) {
+                                    (Some(path), true) => {
+                                        let name = path.file_name().unwrap_or_default().to_string_lossy();
+                                        format!("the song that is open ({name}, {places})")
+                                    }
+                                    (None, true) => format!("the song that is open ({}, {places})", song.song),
+                                    (Some(path), false) => format!("{} ({places})", path.display()),
+                                    (None, false) => format!("{} ({places})", song.song),
+                                }
+                            })
+                            .collect();
+                        return Err(format!(
+                            "{} of the study {id} ({title}) {} played by {}. Nothing was removed. Tell the user; if they want it gone all the same, ask again with `confirm`: true, and those songs will be missing these files. action \"gather\" first gives the open song what it plays in a folder of its own.",
+                            if stems { "the stems" } else { "files" },
+                            "are",
+                            songs.join("; ")
+                        ));
+                    }
+                    if stems {
+                        let freed = runtime.drop_study_stems(&id)?;
+                        Ok(json!({ "dropped_stems_of": id, "title": title, "freed_mb": megabytes(freed) }))
+                    } else {
+                        let study = runtime.studies()?.delete(&id)?;
+                        Ok(json!({ "removed": study.id, "title": study.title }))
+                    }
+                })
+                .await
+                .map_err(|error| format!("removing stopped: {error}"))?
+            }
+            StudyAction::Gather => {
+                let runtime = self.runtime.clone();
+                let gathered = tokio::task::spawn_blocking(move || runtime.gather_from_studies())
                     .await
-                    .map_err(|error| format!("removing stopped: {error}"))??;
-                Ok(json!({ "removed": study.id, "title": study.title }))
+                    .map_err(|error| format!("gathering stopped: {error}"))??;
+                if gathered.files == 0 {
+                    return Ok(json!({ "gathered": 0, "note": "the song plays nothing out of a study" }));
+                }
+                Ok(json!({
+                    "gathered": gathered.files,
+                    "folder": gathered.folder.display().to_string(),
+                    "size_mb": megabytes(gathered.bytes),
+                    "clips": gathered.clips,
+                    "samples": gathered.samples,
+                    "next": "save the song: its file then says where these lie from its own folder, and the two move together",
+                }))
             }
         }
     }

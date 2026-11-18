@@ -175,7 +175,8 @@ fn the_machines_tab_says_what_runs_the_models_which_programs_were_found_and_wher
     let parts = folder.path().join("big disk").join("models");
     harness.app.keep_in(&harness.ctx, Kept::List("models".to_owned()), parts.clone());
     harness.settle_setup();
-    harness.click_label("Studies");
+    // The panel's own tab of that name: the browser behind it has a place called so too.
+    harness.click_last_label("Studies");
     harness.wait_for_label(&format!("Kept in {}", parts.display()));
     assert_eq!(harness.runtime.settings().fetched.get("models"), Some(&parts));
 }

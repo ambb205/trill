@@ -63,7 +63,9 @@ mod missing;
 mod recovery;
 mod settings;
 mod sounds;
+pub mod study_files;
 mod studying;
+pub mod taking;
 
 pub use instruments::Arrived;
 pub use jobs::{Jobs, Program};
@@ -551,6 +553,14 @@ impl Runtime {
     /// With [`Storage::Nowhere`] the change lasts as long as the runtime.
     pub fn update_settings(&self, change: impl FnOnce(&mut Settings)) -> Result<(), SaveError> {
         self.settings.lock().update(&self.library, change)
+    }
+
+    /// Remembers that a song lives at `path`, among the songs Trill knows
+    /// (the ones it saved or opened lately). The housekeeping thread does
+    /// this by itself within a moment of a save or a load; a front end that
+    /// is about to be asked about those songs says so at once.
+    pub fn song_is_at(&self, path: &std::path::Path) {
+        housekeeping::remember_song(&self.library, &self.settings, path);
     }
 
     /// Saves the library's folders, favorites and recently used files now

@@ -188,6 +188,7 @@ pub(crate) enum Message {
     Audition {
         audio: Arc<AudioData>,
         gain: f32,
+        round: Option<crate::monitor::Round>,
     },
     StopAudition,
     Metronome(bool),
@@ -274,8 +275,8 @@ impl Realtime {
                 Message::Seek(beat) => self.processor.seek(beat),
                 Message::Param { device, index, value } => self.processor.set_param(device, index, value),
                 Message::Panic => self.processor.panic(),
-                Message::Audition { audio, gain } => {
-                    if let Some(previous) = self.processor.start_audition(audio, gain) {
+                Message::Audition { audio, gain, round } => {
+                    if let Some(previous) = self.processor.start_audition(audio, gain, round) {
                         let _ = self.garbage.push(Garbage::Audio(previous));
                     }
                 }

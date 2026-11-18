@@ -295,6 +295,14 @@ pub fn track_json(track: &Track, bars: &MeterMap, include_notes: bool) -> Value 
     if !track.sends.is_empty() {
         out["sends"] = track.sends.iter().map(|send| json!({ "to": send.to, "level_db": send.level_db })).collect();
     }
+    if let Some(reference) = &track.reference {
+        // Beside the song: said so that its clips are not taken for a part of it.
+        let mut said = json!({ "listening": reference.listening, "rendered": false });
+        if let Some(study) = &reference.study {
+            said["study"] = json!(study);
+        }
+        out["reference"] = said;
+    }
     out
 }
 
@@ -625,6 +633,15 @@ pub fn project_json(session: &Session, include_notes: bool) -> Value {
         "unsaved_changes": session.is_modified(),
     });
     add_changes(project, &mut out);
+    if let Some(key) = project.key {
+        out["key"] = json!(key.name());
+    }
+    if project.has_references() {
+        out["references"] = json!(
+            "a track with `reference` is a recording beside the song: silent unless listened to, and in no render, \
+             stem or length of the song"
+        );
+    }
     if !project.markers.is_empty() {
         out["markers"] = project
             .markers

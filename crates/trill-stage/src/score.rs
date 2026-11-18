@@ -324,7 +324,9 @@ impl Score {
         let bar = project.time_signature.beats_per_bar();
         let mut hits = Hits::default();
         let mut parts = Vec::new();
-        for track in project.tracks.iter().filter(|track| track.kind == TrackKind::Normal) {
+        // A reference is beside the song: a film is of the song.
+        let of_the_song = |track: &&Track| track.kind == TrackKind::Normal && track.reference.is_none();
+        for track in project.tracks.iter().filter(of_the_song) {
             let drums = match track.profile.role {
                 Some(role) => role == Role::Drums,
                 None => drum_instrument(track),

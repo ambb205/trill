@@ -608,6 +608,27 @@ pub struct Send {
     pub level_db: f32,
 }
 
+/// What makes a track a reference: a recording kept beside the song to
+/// hold the song against, not a part of it.
+///
+/// A reference is silent unless it is listened to, and while it is, it is
+/// heard in place of the song, as a soloed track is. It is never in a
+/// render or in a stem, listened to or not: see [`Project::as_heard`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reference {
+    /// The study the recording is of, by its id, where it is of one:
+    /// whoever shows the track finds its parts, chords and words there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub study: Option<String>,
+    /// Whether it is being listened to.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub listening: bool,
+}
+
+fn is_false(flag: &bool) -> bool {
+    !*flag
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub id: TrackId,
@@ -636,6 +657,11 @@ pub struct Track {
     /// and then left out of the file.
     #[serde(default, skip_serializing_if = "InstrumentProfile::is_empty")]
     pub profile: InstrumentProfile,
+    /// Set for a track that is a reference: a recording beside the song,
+    /// silent unless listened to and never rendered. A file saved before
+    /// there were any has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<Reference>,
 }
 
 impl Track {
@@ -851,6 +877,75 @@ pub struct Marker {
     pub name: String,
 }
 
+/// The key a song says it is in. Nothing in the song follows it: it is
+/// what a sound brought from elsewhere is moved to, and what whoever
+/// writes for the song reads.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SongKey {
+    /// Pitch class of the tonic, C = 0 up to B = 11.
+    pub tonic: u8,
+    pub minor: bool,
+}
+
+impl SongKey {
+    const MAJOR: [&str; 12] = ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
+    const MINOR: [&str; 12] = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "G#", "A", "Bb", "B"];
+
+    pub fn new(tonic: u8, minor: bool) -> Self {
+        Self { tonic: tonic % 12, minor }
+    }
+
+    /// `F# minor`, `Eb major`.
+    pub fn name(self) -> String {
+        let tonic = usize::from(self.tonic % 12);
+        if self.minor { format!("{} minor", Self::MINOR[tonic]) } else { format!("{} major", Self::MAJOR[tonic]) }
+    }
+
+    /// Reads `F#m`, `F# minor`, `Gb min`, `Eb`, `Eb major`, `ebmaj`.
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        let mut letters = text.chars();
+        let letter = letters.next()?.to_ascii_uppercase();
+        let natural = match letter {
+            'C' => 0i32,
+            'D' => 2,
+            'E' => 4,
+            'F' => 5,
+            'G' => 7,
+            'A' => 9,
+            'B' => 11,
+            _ => return None,
+        };
+        let rest = letters.as_str();
+        let (shift, rest) = match rest.chars().next() {
+            Some('#') | Some('♯') => (1, &rest[rest.chars().next()?.len_utf8()..]),
+            Some('b') | Some('♭') => (-1, &rest[rest.chars().next()?.len_utf8()..]),
+            _ => (0, rest),
+        };
+        let minor = match rest.trim().to_ascii_lowercase().as_str() {
+            "" | "maj" | "major" => false,
+            "m" | "min" | "minor" => true,
+            _ => return None,
+        };
+        Some(Self::new((natural + shift).rem_euclid(12) as u8, minor))
+    }
+
+    /// The tonic of the major key with the same notes: its own for a
+    /// major key, three semitones up for a minor one.
+    fn notes_of(self) -> i32 {
+        i32::from(self.tonic % 12) + if self.minor { 3 } else { 0 }
+    }
+
+    /// How many semitones a sound in `other` is moved by to have this
+    /// key's notes, the shorter way: -6 to 6. A minor key and the major
+    /// key three semitones above it have the same notes, and a sound in
+    /// either is left where it is for the other.
+    pub fn semitones_from(self, other: SongKey) -> i32 {
+        let up = (self.notes_of() - other.notes_of()).rem_euclid(12);
+        if up > 6 { up - 12 } else { up }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     #[serde(default = "format_version_default")]
@@ -860,6 +955,10 @@ pub struct Project {
     pub tempo: f64,
     /// The time signature the song begins in.
     pub time_signature: TimeSignature,
+    /// The key the song says it is in, where it says. A file saved before
+    /// songs said has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<SongKey>,
     /// Where the tempo changes after the start: in order of their beats,
     /// and at one beat at most a glide that arrives there followed by a
     /// tempo that takes over. Read through [`Project::tempo_map`].
@@ -925,6 +1024,7 @@ impl Project {
             name: name.into(),
             tempo: 120.0,
             time_signature: TimeSignature::default(),
+            key: None,
             tempo_changes: Vec::new(),
             meter_changes: Vec::new(),
             loop_region: LoopRegion { enabled: false, start: 0.0, end: 16.0 },
@@ -1138,8 +1238,17 @@ impl Project {
         Ok(())
     }
 
-    /// End of the last clip, in beats.
+    /// End of the song's last clip, in beats. A reference is beside the
+    /// song and no part of its length: a recording that goes on after the
+    /// song has ended makes no render longer.
     pub fn length_beats(&self) -> Beats {
+        let of_the_song = self.tracks.iter().filter(|track| track.reference.is_none());
+        of_the_song.flat_map(|track| track.clips.iter()).map(Clip::end).fold(0.0, f64::max)
+    }
+
+    /// End of the last clip there is, a reference's too: how far there is
+    /// something to show and to play.
+    pub fn length_shown(&self) -> Beats {
         self.tracks.iter().flat_map(|track| track.clips.iter()).map(Clip::end).fold(0.0, f64::max)
     }
 
@@ -1167,8 +1276,74 @@ impl Project {
             devices: Vec::new(),
             clips: Vec::new(),
             profile: InstrumentProfile::default(),
+            reference: None,
         });
         id
+    }
+
+    /// Makes a track a reference (see [`Reference`]), or with `None` an
+    /// ordinary track again. Only a track that holds clips can be one, and
+    /// not one that anything else plays through, sends to or listens to:
+    /// a reference is beside the song and feeds nothing in it.
+    pub fn set_reference(&mut self, id: TrackId, reference: Option<Reference>) -> Result<(), EditError> {
+        self.holds_clips(id)?;
+        if reference.is_some() {
+            let track = self.track(id)?;
+            let sends =
+                |lane: &AutomationLane| matches!(lane.target, AutomationTarget::Send { track, .. } if track == id);
+            if track.group.is_some() || !track.sends.is_empty() || self.automation.iter().any(sends) {
+                return invalid(format!(
+                    "{id} plays through a group or sends to a return: a reference is beside the song and feeds nothing in it"
+                ));
+            }
+            if self.devices().any(|device| device.sidechain == Some(id)) {
+                return invalid(format!("a device listens to {id}: a reference feeds nothing in the song"));
+            }
+        }
+        self.track_mut(id)?.reference = reference;
+        Ok(())
+    }
+
+    /// Listens to a reference, or stops: while one is listened to it is
+    /// heard in place of the song. One is listened to at a time: listening
+    /// to another leaves the one before.
+    pub fn listen_to_reference(&mut self, id: TrackId, listening: bool) -> Result<(), EditError> {
+        if self.track(id)?.reference.is_none() {
+            return invalid(format!(
+                "{id} is not a reference: there is nothing of it to listen to apart from the song"
+            ));
+        }
+        for track in &mut self.tracks {
+            if let Some(reference) = &mut track.reference {
+                reference.listening = listening && track.id == id;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether any track is a reference.
+    pub fn has_references(&self) -> bool {
+        self.tracks.iter().any(|track| track.reference.is_some())
+    }
+
+    /// The song as it is heard, with what makes a track a reference turned
+    /// into the mute and solo it comes to, which is all that whoever plays
+    /// or renders the song then has to know. Played: a reference is muted
+    /// unless it is listened to, and one that is listened to is soloed.
+    /// Rendered: every reference is muted and none is soloed, so that a
+    /// render is of the song whatever is being listened to.
+    pub fn as_heard(&self, rendering: bool) -> std::borrow::Cow<'_, Project> {
+        if !self.has_references() {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut heard = self.clone();
+        for track in &mut heard.tracks {
+            if let Some(reference) = &track.reference {
+                let listening = reference.listening && !rendering;
+                (track.mute, track.solo) = (!listening || track.mute, listening);
+            }
+        }
+        std::borrow::Cow::Owned(heard)
     }
 
     pub fn remove_track(&mut self, id: TrackId) -> Result<Track, EditError> {
@@ -1201,6 +1376,9 @@ impl Project {
         {
             return invalid(format!("{group} is not a group track"));
         }
+        if group.is_some() {
+            self.of_the_song(id)?;
+        }
         let before = std::mem::replace(&mut self.track_mut(id)?.group, group);
         if let Some(group) = group
             && let Err(error) = self.no_loop(format!("putting {id} in {group}"))
@@ -1211,8 +1389,18 @@ impl Project {
         Ok(())
     }
 
+    /// Refuses a track that is a reference where it would come to feed
+    /// something in the song.
+    fn of_the_song(&self, id: TrackId) -> Result<(), EditError> {
+        match self.track(id)?.reference {
+            Some(_) => invalid(format!("{id} is a reference: a reference is beside the song and feeds nothing in it")),
+            None => Ok(()),
+        }
+    }
+
     /// Whether `id` may send to `to`: any track but a return, to a return.
     fn can_send(&self, id: TrackId, to: TrackId) -> Result<(), EditError> {
+        self.of_the_song(id)?;
         if self.track(id)?.kind == TrackKind::Return {
             return invalid(format!("{id} is a return track; returns cannot send to returns"));
         }
@@ -1690,6 +1878,11 @@ impl Project {
         Ok(())
     }
 
+    /// Says what key the song is in, or with `None` that it does not say.
+    pub fn set_key(&mut self, key: Option<SongKey>) {
+        self.key = key.map(|key| SongKey::new(key.tonic, key.minor));
+    }
+
     // ---- markers -------------------------------------------------------
 
     /// Adds a named position to the timeline and returns its index.
@@ -1829,7 +2022,7 @@ impl Project {
     pub fn set_sidechain(&mut self, id: DeviceId, track: Option<TrackId>) -> Result<(), EditError> {
         let chain = self.device_chain(id)?;
         if let Some(track) = track {
-            self.track(track)?;
+            self.of_the_song(track)?;
             if chain == ChainRef::Track(track) {
                 return invalid(format!(
                     "{id} is on {track} itself: without a sidechain it already listens to what comes into it"
@@ -1850,7 +2043,9 @@ impl Project {
     /// members of a group, the tracks that send to a return (by a send set
     /// by hand or by one that is its envelope, switched on or not), and the
     /// tracks its devices listen to. In the order of the track list,
-    /// without repeats.
+    /// without repeats. A reference is never among them, and nothing feeds
+    /// one: the edits refuse it a group, a send and a listener, so that it
+    /// can be left out of a render without anything in the song changing.
     pub fn feeds(&self, track: TrackId) -> Vec<TrackId> {
         let Ok(node) = self.track(track) else { return Vec::new() };
         let keys: Vec<TrackId> = node.devices.iter().filter_map(|device| device.sidechain).collect();

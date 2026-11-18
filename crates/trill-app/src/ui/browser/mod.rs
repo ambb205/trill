@@ -43,6 +43,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     for (tab, title, about) in [
         (BrowserTab::Devices, "Devices", "Instruments, effects and plugins to add, and their presets"),
         (BrowserTab::Sounds, "Sounds", "Your sample library: search it, hear it, drag it into the song"),
+        (BrowserTab::Studies, "Studies", "Recordings taken apart: their stems, bars, chords and words"),
     ] {
         let rect = Rect::from_min_size(pos2(left, header.top()), vec2(trill_noir::tab_width(ui, theme, title), HEADER));
         let active = cx.state.browser.tab == tab;
@@ -50,7 +51,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
         cx.hint(&response, about);
         if response.clicked() {
             cx.state.browser.tab = tab;
-            if tab == BrowserTab::Devices && cx.state.focus == FocusArea::Browser {
+            if tab != BrowserTab::Sounds && cx.state.focus == FocusArea::Browser {
                 cx.state.focus = FocusArea::Arrangement;
             }
         }
@@ -72,5 +73,6 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     match cx.state.browser.tab {
         BrowserTab::Devices => devices::show(&mut child, cx, body),
         BrowserTab::Sounds => sounds::show(&mut child, cx, body),
+        BrowserTab::Studies => crate::ui::study::place::show(&mut child, cx, body),
     }
 }

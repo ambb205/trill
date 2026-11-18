@@ -713,12 +713,17 @@ fn lead_in(graph: &Graph, start: f64) -> (f64, Vec<(TrackId, usize)>) {
 }
 
 /// `project` with only `tracks` to be heard: each of them soloed and
-/// unmuted, and no other track soloed.
+/// unmuted, and no other track soloed. A reference that is asked for by
+/// name is rendered as the track it is: that is how a mix is measured
+/// against it. It is in no render that does not name it.
 fn hearing_only(project: &Project, tracks: &[TrackId]) -> Project {
     let mut heard = project.clone();
     for track in &mut heard.tracks {
         track.solo = tracks.contains(&track.id);
         track.mute &= !track.solo;
+        if track.solo {
+            track.reference = None;
+        }
     }
     heard
 }

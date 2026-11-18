@@ -121,6 +121,20 @@ fn hide_console(command: &mut Command) {
 #[cfg(not(windows))]
 fn hide_console(_command: &mut Command) {}
 
+/// What a program that studies is started with besides the mark in its
+/// environment: nothing, for a program that calls [`run_if_requested`]
+/// first thing.
+static STARTED_WITH: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Has a test program study: it cannot call [`run_if_requested`] first
+/// thing, so it is started again to run the one test `test`, which does.
+/// Every process that studies is started so from then on. For a crate
+/// that builds no program of its own that could study (the window's
+/// tests), as `trill_engine::apart` has it for renders.
+pub fn serve_by_test(test: &str) {
+    *STARTED_WITH.lock() = ["--exact", test, "--nocapture", "--test-threads", "1"].map(str::to_owned).to_vec();
+}
+
 impl Job {
     /// Starts `program` as a process that studies, hands it `order`, and
     /// waits for it to say that it is one.
@@ -129,6 +143,7 @@ impl Job {
             format!("the process that studies ('{}') could not be started: {reason}", program.display())
         };
         let mut command = Command::new(program);
+        command.args(STARTED_WITH.lock().iter());
         command.env(ENV, "1").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         hide_console(&mut command);
         let mut process = command.spawn().map_err(|error| cannot(error.to_string()))?;

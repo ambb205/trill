@@ -28,6 +28,7 @@ mod setup;
 mod sound_presets;
 mod sounds;
 mod stage;
+mod study;
 mod tracks;
 mod wavetable;
 

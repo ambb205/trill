@@ -29,7 +29,7 @@ Development builds are optimized (see `[profile.dev]`), because unoptimized audi
 
 ### Building and testing
 
-`cargo test --workspace` runs about 2,600 tests in a few minutes. It needs nothing installed and touches nothing
+`cargo test --workspace` runs about 2,630 tests in a few minutes. It needs nothing installed and touches nothing
 outside the repository and the temporary folder. The tests that do need a particular machine are skipped unless
 asked for:
 
@@ -618,10 +618,60 @@ reading it again runs nothing. A stem is an audio file like any other, and goes 
   does what was fetched: about 60 MB for a minute of music, nearly all of it the four stems, which are kept as
   24-bit WAV. They are not packed: the one small FLAC encoder there is in Rust made 24-bit stems larger than
   they were. Every answer about a study and the Setup panel say what the studies take.
-- Over MCP today (`study`, `setup`, and `listen` or `transcribe` with a `study`). In the window there is Setup;
-  a study's own view (its stems as lanes under the recording's bars, with its parts, chords and words along
-  them) is not built yet, and a study keeps what that view will draw: the outline of each stem, the grid, the
-  parts, the chords and the words with their times.
+- **One study at a time on the machine**, whichever program asks: the window and a headless server take
+  turns over one file, and the one that waits says so.
+
+**A study in the window.** The Studies place of the browser lists every study, the ones being made with the
+stage they are at, a bar that fills, Stop and "take up again"; a failure is a sentence under the study's name.
+*Study a recording* (there, and in the File menu) asks for a file or a link in one field, and says whose a
+recording behind a link is before anything is fetched. A study that is done opens in the **Study tab** along the
+bottom: the whole recording small with its parts, then under the recording's own bars its parts, its chords and
+its words where they are sung, and its stems as lanes with mute and solo. Beside the lanes is what was found:
+loops best first (with whether a part plays alone there), single hits as pads, the sung lines, and the bass
+line, the melody, the chords and the groove as notes.
+
+- **A stretch is selected across the lanes**, its ends on bar lines, beats or wherever (Snap), and *played
+  round*: made by the plan that taking it follows and rendered by the code that plays the song, so what is
+  heard is what would be taken. It is heard in the song's tempo, in time with the song while the song plays,
+  and, where asked, in the key the song says it is in; *As recorded* hears and takes it untouched.
+- **It goes to the song** by being dragged onto a lane (or below the tracks for a new one), or with *To the
+  song* or Enter onto the selected track at the edit cursor. A loop, a line (named by its words) and a part as
+  notes are dragged from their lists the same way; a hit goes onto a lane, a pad of a drum rack or a sampler.
+  One undo step each.
+- **A window of its own** (the Window switch) shows the same workspace beside the song or on another screen,
+  and a drag crosses from it into the song: the window the button went down in keeps the pointer, and Trill
+  works out where that is in the other from where the two stand on the desktop. This is proved without a real
+  mouse (the test runs the two as one, and the arithmetic is tested by itself): if it misbehaves on a machine,
+  *To the song* and Enter do the same.
+- **What a stretch becomes** is an audio clip on the stem's own file that follows the song's tempo, a beat of
+  the recording for a beat of the song: transients kept for drums, sustained sound kept smooth for everything
+  else. Several stems together are added up into one file in the study's folder. A recording whose tempo moves
+  is laid in as many clips as keep every bar line within 12 ms, cut at bar lines; taking the study's tempo
+  into the song first keeps it in one, untouched. Moving it to another key is the stretcher's work: a voice's
+  formants move with the pitch, so a couple of semitones pass and beyond three or four a voice no longer sounds
+  like itself. Drums are never moved for a key. A clip is not yet a loop that repeats when it is drawn out:
+  drawn out it shows more of the recording; `times` (over MCP) lays a loop end to end.
+- **The grid can be read another way** (half, double, the bar a beat later, three, four or six beats to a
+  bar): what follows from it is heard again without a model. **A word can be put right** by double-clicking it
+  where it is sung; its time stays.
+- **As a whole** a study gives the song its tempo (bar by bar through the tempo map, a steady recording as one
+  tempo, a bar the model found shorter as a short bar with its own time signature; nothing in the song moves),
+  its parts as markers, its key, a drum rack of its cleanest hit of each drum, and the recording itself as a
+  **reference**.
+- **A reference track** is a recording beside the song: silent unless it is listened to (the L in its header,
+  where other tracks have mute and solo), heard in place of the song while it is, and in no render, stem, film
+  or length of the song, whatever is being listened to. Its study's parts, chords and words are drawn along its
+  clip. Any audio track can be made one from its menu. Measuring with only that track named measures the
+  recording itself, which is how a mix is held against it.
+- **A song says its key** (`set_project`, or taken from a study): nothing follows it, and it is what a sound
+  from a study is moved to.
+- **A study's files are the song's files.** A clip taken from a study plays a file in Trill's own folder, so it
+  is listed, found missing and relinked like any other. Removing a study, or dropping its stems to make room
+  (the Studies place, Setup, or the `study` tool), first says which of the songs Trill saved or opened play
+  them, and asks. *Gather what the song plays of studies* (File menu, or `study` with action "gather") cuts
+  what the open song uses, with a second to spare on each side, into a folder beside it and has the song play
+  it from there: for a song that goes to another machine. Trill has no general "collect all and save" yet.
+- Everything above is one tool for an assistant, `take_from_study`, over the same code the window uses.
 
 **Files that moved**: a song names its audio files by their paths, and a folder of samples that is moved or
 renamed leaves it with clips and pads that play nothing. Trill says so in one place (a line in the status bar and
@@ -1064,7 +1114,7 @@ start with `--library "some/folder/Night Shift" --browse sounds some/folder/nigh
 | Presets | `search_presets` (one search across the presets of every installed instrument and the saved ones), `save_preset` (keeps a device's sound under a name), `save_sound` (keeps a track's instrument and the effects after it as one sound, which is then a preset of the instrument), `edit_preset` (renames what was saved, or changes its description and tags), `delete_preset` (for good; the in-app assistant is refused it) |
 | Clips | `create_clip`, `create_audio_clip`, `update_clip`, `split_clip`, `duplicate_clip`, `delete_clip` |
 | Sounds | `search_sounds` (sounds, or with `kind: "instrument"` the sampled instruments, each with what it is), `library` (its folders, and `move_folder` for one that went elsewhere), `preview_sound`, `set_sample` |
-| Studying | `study` (takes a recording apart with models on this machine and keeps it: start with a file, a clip or, for a client of the user's own, a link; report with the stage it is at; stop; take up again; list; delete), `setup` (every part there is to fetch with its size, licence and source, which are here, fetch, stop and remove one, what runs the models and the test that times it, the programs that were found; the assistant in the window reads it and fetches nothing) |
+| Studying | `study` (takes a recording apart with models on this machine and keeps it: start with a file, a clip or, for a client of the user's own, a link; report with the stage it is at; stop; take up again; list; delete and drop its stems, each after saying which songs play them; gather what the open song plays of studies beside it), `take_from_study` (a stretch of its stems or one of its loops as audio that follows the song's tempo and, where asked, its key; a sung line or word as that stretch of the vocal; a single hit onto a lane, a pad or a sampler; a kit as a drum rack; a part as notes on an instrument track, a groove by the kit's own drum names; its parts as markers; its tempo bar by bar; its key; the recording as a reference track), `setup` (every part there is to fetch with its size, licence and source, which are here, fetch, stop and remove one, what runs the models and the test that times it, the programs that were found; the assistant in the window reads it and fetches nothing) |
 | Instruments to be had | `instrument_catalogue` (the sampled instruments others publish that may be used and handed on: counted by kind and licence, searched by words or kind, or one set with its licence as its maker wrote it; says which are in the library already; fetches nothing), `song_credits` (what the open song owes the makers of the sampled instruments it plays: the lines to put where it is released) |
 | Listening | `listen` (what is in an audio file of the library, of the user's or of a clip, or what a `study` found in a recording's stems, with the words line by line and each word's bar and beat, or of one `stem` of it: tempo and bars, key, tuning, and on request its chords, parts, loops, single hits, groove, bass and melody in the recording's own bars, paged; corrections to its beat grid), `transcribe` (its bass line, melody, groove or chords as MIDI on its own beats: into a file, or into the song on a new track in one undo step) |
 | Wavetables | `describe_wavetable` (the tables of `builtin:wavetable` that ship, any of them or a recipe of your own shown frame by frame in numbers; changes nothing), `set_wavetable` (gives an oscillator a table that ships, one made from a recipe, or one read from an audio file; names the macros) |
@@ -1233,10 +1283,10 @@ the parts of SFZ named above as not done, formats other than SFZ, a drum kit's m
 (a kit that brings several is played as its file mixes them), taking the instrument out of a device in the window
 (another takes its place, or the device is removed), and the time to a first note from a disk that has not
 read the files before,
-a place in the window for a study of a recording (over MCP only: its stems as lanes under the recording's
-bars with its parts, chords and words, auditioning and dragging what it found into the song, a reference to
-compare a mix with, and its beat grid as the song's tempo map), giving a link in the window (over MCP, to a
-client of the user's own), a study's models on anything but Windows (the models' own files are the same; the
+an audio clip that repeats when it is drawn out (a loop from a study is laid end to end instead), chords as
+something a song shows by itself (they are drawn along a reference, and written as notes), a general "collect
+all and save" (only what a song plays of studies is gathered), a drag between Trill's two windows tried with a
+real mouse, a study's models on anything but Windows (the models' own files are the same; the
 runtime and what drives a card are pinned for Windows alone), a transcriber as large as Magpie's, the six-stem
 model,
 for the wavetable synth: sounds tuned by ear (the owner has heard sixteen of its eighty-two; the others are held

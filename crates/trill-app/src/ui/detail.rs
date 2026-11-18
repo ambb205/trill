@@ -29,7 +29,12 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     // The tabs sit between the two rules, so the active one's underline
     // replaces the lower rule under it.
     let mut left = bar.left();
-    for (tab, title) in [(DetailTab::Clip, "Clip"), (DetailTab::Devices, "Devices"), (DetailTab::Mixer, "Mixer")] {
+    for (tab, title) in [
+        (DetailTab::Clip, "Clip"),
+        (DetailTab::Devices, "Devices"),
+        (DetailTab::Mixer, "Mixer"),
+        (DetailTab::Study, "Study"),
+    ] {
         let rect = Rect::from_min_size(
             pos2(left, bar.top() + 1.0),
             vec2(trill_noir::tab_width(ui, theme, title), TAB_BAR - 1.0),
@@ -40,6 +45,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
             DetailTab::Clip => "The selected clip and its notes",
             DetailTab::Devices => "The devices of the selected track, or of the master",
             DetailTab::Mixer => "A channel strip for every track, and the master\u{2019}s",
+            DetailTab::Study => "A recording taken apart: its stems under its own bars, and what was found in it",
         };
         cx.hint(&response, about);
         if response.clicked() {
@@ -61,6 +67,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
             },
             // The mixer shows every track; it has no one subject.
             DetailTab::Mixer => None,
+            DetailTab::Study => cx.studies.open().map(|open| (theme.ink, open.title.clone())),
         };
     if let Some((color, subject)) = subject {
         // A point to spare, so a width that rounds up does not cut the name.
@@ -89,6 +96,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
             DetailTab::Clip => piano_roll::show(ui, cx),
             DetailTab::Devices => devices::show(ui, cx),
             DetailTab::Mixer => mixer::show(ui, cx),
+            DetailTab::Study => super::study::view::show(ui, cx),
         }
     });
 }

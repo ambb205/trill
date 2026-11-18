@@ -67,6 +67,7 @@ impl Remembered {
             tab: match browser.tab {
                 BrowserTab::Devices => "devices",
                 BrowserTab::Sounds => "sounds",
+                BrowserTab::Studies => "studies",
             }
             .to_owned(),
             search: sounds.search.clone(),
@@ -97,7 +98,11 @@ impl Remembered {
     /// (a tag this version does not have, a volume out of range) is left
     /// at what the browser starts with.
     pub fn apply(&self, browser: &mut BrowserState) {
-        browser.tab = if self.tab == "sounds" { BrowserTab::Sounds } else { BrowserTab::Devices };
+        browser.tab = match self.tab.as_str() {
+            "sounds" => BrowserTab::Sounds,
+            "studies" => BrowserTab::Studies,
+            _ => BrowserTab::Devices,
+        };
         let sounds = &mut browser.sounds;
         sounds.search = self.search.clone();
         sounds.form = match self.form.as_str() {

@@ -284,6 +284,27 @@ shot setup-fresh --setup-scene fresh
 shot setup-fetching "$song" --select Lead --setup-scene fetching
 shot setup-machine "$song" --select Lead --setup-scene machine
 shot graphite-setup-fetching "$song" --select Lead --setup-scene fetching --theme graphite
+
+# A study of a recording: the workspace along the bottom, the Studies place
+# of the browser, a reference track. The recording is synthesized and
+# studied by the scripted models the tests use (see the example): nobody's
+# recording, and no model. It is kept in a folder git ignores, with the
+# profile the window is started on to find it.
+studied=$here/fixtures/study
+if making study-workspace study-selection study-reference study-dialog graphite-study-workspace min-window-study; then
+    study=$(cargo run -q -p trill-app --example study_fixtures -- "$studied")
+fi
+study_on() {
+    name=$1
+    shift
+    shot "$name" --profile "$studied/profile" --no-mcp --study "${study:-none}" "$@"
+}
+study_on study-workspace "$song" --browse studies
+study_on study-selection "$song" --no-browser --study-bars 5-6 --study-lanes drums,bass --study-close --study-list lines
+study_on study-reference --no-browser --study-take tempo,reference,parts --study-list notes
+study_on study-dialog "$song" --browse studies --study-dialog
+study_on graphite-study-workspace "$song" --browse studies --study-list hits --theme graphite
+study_on min-window-study "$song" --size 1024x640 --study-bars 3-4
 shot min-window-setup "$song" --setup-scene fetching --size 1024x640
 
 # Staged for the last pictures, in a folder git ignores: two projects that

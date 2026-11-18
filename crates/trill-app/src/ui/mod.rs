@@ -85,6 +85,7 @@ mod sounds;
 mod stage;
 mod state;
 mod status_bar;
+mod study;
 mod timeline;
 mod toast;
 mod top_bar;
@@ -102,6 +103,7 @@ pub use making_of::Start as MakingOfStart;
 pub use making_of::scene::play as play_making_of_scene;
 pub use setup_scene::SetupScene;
 pub use state::{BrowserTab, DetailTab};
+pub use study::{Shown as StudyShown, Side as StudySide, Whole as StudyWhole};
 
 use anyhow::anyhow;
 use eframe::egui;
@@ -169,6 +171,12 @@ pub struct UiOptions {
     pub show_setup: bool,
     /// A made-up machine to show in it, in place of this one.
     pub setup_scene: Option<SetupScene>,
+    /// A study to open in the workspace at startup, by its id.
+    pub study: Option<String>,
+    /// How it is shown: bars selected, the list beside the lanes.
+    pub study_shown: Option<StudyShown>,
+    /// Open with the dialog that asks for a recording to study up.
+    pub show_study_dialog: bool,
     /// Open with the film panel up.
     pub show_film: bool,
     /// Open with the list of missing files up.
@@ -210,6 +218,9 @@ impl Default for UiOptions {
             show_settings: false,
             show_setup: false,
             setup_scene: None,
+            study: None,
+            study_shown: None,
+            show_study_dialog: false,
             show_film: false,
             show_missing: false,
             show_credits: false,

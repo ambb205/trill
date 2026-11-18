@@ -119,13 +119,19 @@ impl Voiced {
     }
 }
 
+/// Whether a track's recordings are in a film: a muted track plays
+/// nothing, and a reference is beside the song.
+fn heard(track: &trill_core::Track) -> bool {
+    track.kind == TrackKind::Normal && !track.mute && track.reference.is_none()
+}
+
 /// What each track of `project` plays of recordings, where `wave` has the
 /// outline of a file: audio clips, and the notes of the built-in sampler.
 /// Muted clips and tracks play nothing; a file `wave` does not know is
 /// left out.
 pub fn voiced(project: &Project, mut wave: impl FnMut(&str) -> Option<Arc<Wave>>) -> Vec<(TrackId, Vec<Voiced>)> {
     let mut found = Vec::new();
-    for track in project.tracks.iter().filter(|track| track.kind == TrackKind::Normal && !track.mute) {
+    for track in project.tracks.iter().filter(|track| heard(track)) {
         let mut spans = Vec::new();
         for clip in track.clips.iter().filter(|clip| !clip.muted) {
             let Some(audio) = clip.audio() else { continue };
@@ -180,7 +186,7 @@ fn sampler_of(track: &Track) -> Option<(String, f64)> {
 /// through the built-in sampler. Reading their outlines is only worth a
 /// thread for a song that does.
 pub fn plays_recordings(project: &Project) -> bool {
-    let heard = project.tracks.iter().filter(|track| track.kind == TrackKind::Normal && !track.mute);
+    let heard = project.tracks.iter().filter(|track| heard(track));
     heard.into_iter().any(|track| track.clips.iter().any(|clip| clip.audio().is_some()) || sampler_of(track).is_some())
 }
 

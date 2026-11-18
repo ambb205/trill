@@ -4670,6 +4670,7 @@ dependencies = [
  "trill-engine",
  "trill-fetch",
  "trill-library",
+ "trill-listen",
  "trill-mcp",
  "trill-media",
  "trill-noir",
