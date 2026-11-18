@@ -33,6 +33,7 @@ Options:
   --library <FOLDER>      Add a folder of sounds to the library; may be given several times
   --missing-files         Open with the list of the song's missing files up
   --credits               Open with the credits up: what the song owes for its sampled instruments
+  --load SCENE            Open with the playback load up, on a made-up load (calm or short): for pictures
   --search <TEXT>         Search the sound library for this at startup
   --sound <NAME>          Select the sound with this name in the browser
   --editor <DEVICE NAME>  Open this plugin's own window at startup
@@ -108,6 +109,8 @@ pub struct Cli {
     pub missing_files: bool,
     /// Open with the credits up.
     pub credits: bool,
+    /// Open with the playback load up, showing a made-up load.
+    pub load: Option<crate::ui::LoadScene>,
     /// What to search the sound library for.
     pub search: Option<String>,
     /// Name of a sound to select in the browser.
@@ -288,6 +291,14 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
             "--library" => cli.library.push(PathBuf::from(value("a folder")?)),
             "--missing-files" => cli.missing_files = true,
             "--credits" => cli.credits = true,
+            "--load" => {
+                let name = value("the name of a scene")?;
+                let known: Vec<&str> = crate::ui::LoadScene::ALL.iter().map(|(name, _)| *name).collect();
+                let scene = crate::ui::LoadScene::named(&name);
+                cli.load = Some(
+                    scene.with_context(|| format!("unknown load '{name}' (expected one of {})", known.join(", ")))?,
+                );
+            }
             "--search" => cli.search = Some(value("what to search for")?),
             "--sound" => cli.sound = Some(value("the name of a sound")?),
             "--editor" => cli.editor = Some(value("the name of a device")?),
@@ -454,6 +465,8 @@ impl Cli {
             show_film: self.film,
             show_missing: self.missing_files,
             show_credits: self.credits,
+            show_load: self.load.is_some(),
+            load_scene: self.load,
             record: self.record,
             stage: self.stage,
             making_of: (self.making_of || self.making_of_at.is_some()).then(|| match self.making_of_at {

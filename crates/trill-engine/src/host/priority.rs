@@ -61,21 +61,59 @@ impl AudioPriority {
     }
 
     /// Raises the calling thread once and for as long as it lives: for a
-    /// thread that belongs to somebody else and is only ever met inside a
-    /// callback. The first call does it; every later one is a look at a
-    /// thread-local.
-    pub fn raise_for_good() {
-        thread_local! {
-            static RAISED: std::cell::RefCell<Option<AudioPriority>> = const { std::cell::RefCell::new(None) };
-        }
-        let _ = RAISED.try_with(|raised| {
-            if let Ok(mut raised) = raised.try_borrow_mut()
-                && raised.is_none()
-            {
-                *raised = Some(AudioPriority::raise());
-            }
+    /// thread that is only ever met inside a callback, and for one that
+    /// wants to be asked later what it was given. The first call does it;
+    /// every later one is a look at a thread-local. Returns whether the
+    /// system granted its audio class.
+    pub fn raise_for_good() -> bool {
+        let granted = RAISED.try_with(|raised| {
+            let Ok(mut raised) = raised.try_borrow_mut() else { return false };
+            let raise = || {
+                let before = AudioPriority::level_of_this_thread();
+                (AudioPriority::raise(), before)
+            };
+            raised.get_or_insert_with(raise).0.granted()
         });
+        granted.unwrap_or(false)
     }
+
+    /// What [`AudioPriority::raise_for_good`] came to on the calling
+    /// thread: whether the system granted its audio class. `None` on a
+    /// thread that never asked.
+    pub fn of_this_thread() -> Option<bool> {
+        let granted = RAISED.try_with(|raised| raised.try_borrow().ok()?.as_ref().map(|raised| raised.0.granted()));
+        granted.ok().flatten()
+    }
+
+    /// The priority the calling thread had before
+    /// [`AudioPriority::raise_for_good`] raised it: what whoever made the
+    /// thread had left it at.
+    pub fn level_before() -> Option<i32> {
+        let before = RAISED.try_with(|raised| raised.try_borrow().ok()?.as_ref().and_then(|raised| raised.1));
+        before.ok().flatten()
+    }
+
+    /// The priority the system says the calling thread has, by its own
+    /// numbers (on Windows 0 is an ordinary thread, 15 the most a thread
+    /// of an ordinary program is given by asking; a thread in the audio
+    /// class is moved by the system as it sees fit). `None` where the
+    /// system has no such number.
+    pub fn level_of_this_thread() -> Option<i32> {
+        #[cfg(windows)]
+        {
+            use windows::Win32::System::Threading::{GetCurrentThread, GetThreadPriority};
+            // SAFETY: asks of the calling thread only.
+            Some(unsafe { GetThreadPriority(GetCurrentThread()) })
+        }
+        #[cfg(not(windows))]
+        None
+    }
+}
+
+thread_local! {
+    /// What [`AudioPriority::raise_for_good`] got this thread, and the
+    /// priority it had before. Given up when the thread ends.
+    static RAISED: std::cell::RefCell<Option<(AudioPriority, Option<i32>)>> = const { std::cell::RefCell::new(None) };
 }
 
 impl Drop for AudioPriority {

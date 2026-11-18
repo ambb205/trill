@@ -589,6 +589,7 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
             (None, None) => about("Looking through", "Looked through", "the instruments to be had"),
         },
         "song_credits" => about("Working out", "Worked out", "what the song owes for its instruments"),
+        "playback_load" => about("Checking", "Checked", "how the machine keeps up with the song"),
         "listen" | "transcribe" => {
             // The sound by its file's name, or the clip that plays it by its own.
             let sound = match (call.text("path"), call.clip("clip")) {
@@ -789,6 +790,20 @@ pub fn heard(tool: &str, answer: &str) -> Option<String> {
             }
             if let Some(loudness) = answer.get("loudness_lufs").and_then(number) {
                 said.push(format!("{loudness} LUFS"));
+            }
+            Some(said.join(", "))
+        }
+        "playback_load" => {
+            // How much of its time the audio thread needs, and what came late.
+            let load = answer.get("load_percent").and_then(Value::as_f64)?;
+            let mut said = vec![format!("{load:.0} % of the audio thread's time")];
+            match answer.get("late_buffers").and_then(Value::as_u64) {
+                Some(0) | None => {}
+                Some(1) => said.push("1 buffer late".to_owned()),
+                Some(late) => said.push(format!("{late} buffers late")),
+            }
+            if let Some(threads) = answer.get("threads").and_then(Value::as_u64).filter(|threads| *threads > 1) {
+                said.push(format!("on {threads} threads"));
             }
             Some(said.join(", "))
         }

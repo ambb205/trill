@@ -13,6 +13,20 @@
 //! Each plugin format wraps these buffers in the structures its API passes
 //! to `process`.
 
+/// A mask with the bit of each of `count` channels set: every channel of
+/// a VST3 bus silent, or of a CLAP port constant.
+pub(crate) fn all_channels(count: usize) -> u64 {
+    if count >= 64 { u64::MAX } else { (1 << count) - 1 }
+}
+
+/// Whether a block holds nothing but silence: every sample is zero. What
+/// a host may tell a plugin of its input in either format (a VST3 bus's
+/// silence flags, a CLAP channel that is constant), so that a plugin
+/// which rests on silence can.
+pub(crate) fn is_silence(samples: &[f32]) -> bool {
+    samples.iter().all(|sample| *sample == 0.0)
+}
+
 /// The sample buffers for one direction (input or output) of a plugin.
 ///
 /// Inputs and outputs are always separate buffers: neither CLAP nor VST3

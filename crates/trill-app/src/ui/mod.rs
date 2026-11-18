@@ -68,6 +68,7 @@ mod files;
 mod filming;
 mod instrument_panel;
 mod keyboard;
+mod load;
 mod making_of;
 mod missing;
 mod mixer;
@@ -100,6 +101,7 @@ mod tests;
 
 pub use assistant::{Options as AssistantOptions, Scene as AssistantScene};
 pub use keyboard::Options as KeyboardOptions;
+pub use load::LoadScene;
 pub use making_of::Start as MakingOfStart;
 pub use making_of::scene::play as play_making_of_scene;
 pub use setup_scene::SetupScene;
@@ -184,6 +186,11 @@ pub struct UiOptions {
     pub show_missing: bool,
     /// Open with the credits up.
     pub show_credits: bool,
+    /// Open with the playback load up.
+    pub show_load: bool,
+    /// Show a made-up load in place of the machine's own: for a picture
+    /// or a test.
+    pub load_scene: Option<LoadScene>,
     /// Start a take on the armed tracks as soon as the window opens.
     pub record: bool,
     /// Open on the stage.
@@ -225,6 +232,8 @@ impl Default for UiOptions {
             show_film: false,
             show_missing: false,
             show_credits: false,
+            show_load: false,
+            load_scene: None,
             record: false,
             stage: false,
             making_of: None,

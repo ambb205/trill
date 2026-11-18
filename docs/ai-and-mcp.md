@@ -83,7 +83,7 @@ through which files are written only into the project's folder or `Documents/Tri
 | Instruments | `get_instrument_profile`, `set_instrument_profile` (what a track's notes mean to its instrument: drums or pitches, the drum map, keyswitches, range, octave, bend range; kept in the song and remembered for the plugin) |
 | Automation | `set_automation`, `get_automation`, `set_markers` |
 | Arrangement | `edit_time` (remove, repeat or open up a stretch of time on every track at once; copy one to another place, on every track or some, over what is there or making room) |
-| Playback | `transport` (play, stop, seek, record) |
+| Playback | `transport` (play, stop, seek, record; says when the song is more than the machine plays in time), `playback_load` (how the machine keeps up with the song as it plays live: the share of the audio thread's time in use, the buffers that came late, the threads it is made on, and what each track costs; nothing to do with a render) |
 | Film | `film_plan` (what a film would be, take by take, before any of it is made; costs nothing), `film` (makes it: the song or a stretch of it with its own sound, or how it was made, as an .mp4) |
 | Hearing | `probe` (what an instrument does: range, octave, keyswitches, drum map), `measure` (the mix, every track, every section, gain reduction; writes nothing), `render` (the same, and a WAV file; with `stems`, every track, group and return in files of their own from the same pass) |
 | Playing live | `play_notes`, `midi_inputs`, `audio` (device, sample rate, buffer size, latency) |

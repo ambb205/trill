@@ -54,6 +54,9 @@ pub struct ProbeLog {
     pub frames: AtomicU64,
     /// The probes go down over [`PANIC_KEY`].
     pub fail: std::sync::atomic::AtomicBool,
+    /// How long a probe takes over every block it is given, in
+    /// nanoseconds: a device that costs more than the machine has.
+    pub slow_ns: AtomicU64,
 }
 
 impl ProbeLog {
@@ -83,6 +86,10 @@ impl DeviceProcessor for Probe {
         let fails = |event: &Event| matches!(event.kind, EventKind::NoteOn { pitch: PANIC_KEY, .. });
         if self.log.fail.load(Ordering::Relaxed) && events.iter().any(fails) {
             panic!("a probe was played the key it fails on, on purpose");
+        }
+        match self.log.slow_ns.load(Ordering::Relaxed) {
+            0 => {}
+            slow => std::thread::sleep(Duration::from_nanos(slow)),
         }
         if !events.is_empty() {
             let mut seen = self.log.seen.lock();

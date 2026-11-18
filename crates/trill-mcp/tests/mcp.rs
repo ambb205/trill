@@ -131,6 +131,7 @@ async fn tools_are_listed_with_schemas() {
         "relink_files",
         "instrument_catalogue",
         "song_credits",
+        "playback_load",
         "listen",
         "transcribe",
         "study",
@@ -1781,6 +1782,47 @@ async fn an_agent_arms_a_track_plays_it_and_records_a_take() {
 /// The `name` of each item of a list in a reply.
 fn listed(list: &Value) -> Vec<&str> {
     list.as_array().unwrap().iter().map(|item| item["name"].as_str().unwrap()).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_asks_how_the_machine_keeps_up_and_what_each_track_costs() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let drums = ok(client, "create_track", json!({ "name": "Drums", "instrument": "builtin:drumkit" })).await;
+    let keys = ok(client, "create_track", json!({ "name": "Keys", "instrument": "builtin:polysynth" })).await;
+    ok(client, "transport", json!({ "action": "play" })).await;
+    // Until the stand-in for a device has asked for a few buffers: forty
+    // looks at the most.
+    let mut load = Value::Null;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        load = ok(client, "playback_load", json!({})).await;
+        if load["buffers"].as_u64().unwrap_or(0) >= 10 {
+            break;
+        }
+    }
+    assert!(load["buffers"].as_u64().unwrap() >= 10, "{load}");
+    assert!((0.0..100.0).contains(&load["load_percent"].as_f64().unwrap()), "{load}");
+    assert!(load["worst_buffer_percent"].as_f64().unwrap() >= load["load_percent"].as_f64().unwrap(), "{load}");
+    assert_eq!((load["buffer_frames"].as_u64(), load["sample_rate"].as_f64()), (Some(512), Some(48_000.0)), "{load}");
+    assert!(load["threads"].as_u64().unwrap() >= 1 && load["over_seconds"].as_f64().unwrap() > 0.0, "{load}");
+    // Both tracks are there, by id and by name, each with what it costs.
+    let tracks = load["tracks"].as_array().unwrap();
+    let cost_of = |id: &Value| tracks.iter().find(|track| track["track_id"] == *id).unwrap_or_else(|| panic!("{load}"));
+    assert_eq!(cost_of(&drums["track_id"])["name"], "Drums");
+    assert_eq!(cost_of(&keys["track_id"])["name"], "Keys");
+    assert!(tracks.iter().all(|track| track["percent_of_a_processor"].is_number()), "{load}");
+    assert!(tracks[0]["percent_of_a_processor"].as_f64() >= tracks[1]["percent_of_a_processor"].as_f64(), "{load}");
+    assert!(load["all_tracks_percent_of_a_processor"].is_number() && load["master_percent_of_a_processor"].is_number());
+    // The song is played in time, and nothing says otherwise.
+    assert!(load.get("falling_short").is_none(), "{load}");
+    let status = ok(client, "transport", json!({ "action": "status" })).await;
+    assert!(status.get("falling_short").is_none(), "{status}");
+    // The costliest alone, with the other one counted.
+    let one = ok(client, "playback_load", json!({ "limit": 1 })).await;
+    assert_eq!(one["tracks"].as_array().unwrap().len(), 1, "{one}");
+    assert_eq!(one["other_tracks"]["count"], 1, "{one}");
+    ok(client, "transport", json!({ "action": "stop" })).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

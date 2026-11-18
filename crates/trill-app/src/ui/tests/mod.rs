@@ -17,6 +17,7 @@ mod film;
 mod instruments;
 mod keyboard;
 mod keys;
+mod load;
 mod making_of;
 mod missing;
 mod mixer;

@@ -68,6 +68,27 @@ empty, a choice that fell back to something else: each is a sentence in the pane
 Below are the MIDI inputs, each with a switch, a lamp that lights when it sends, what is wrong with it if
 anything is, and a rescan. The status bar shows the device, rate, buffer and latency as they are at the moment.
 
+## Playback load
+
+**CPU in the top bar** is the share of each buffer's time that making it takes. A click on it opens what is
+behind the number: how the audio thread kept up over the last ten seconds (on average and for its worst buffer),
+how many buffers came late, on how many threads the song is made, the buffer the device asks for, and every
+track with the share of one processor it takes, the costliest first. A track costs what it costs whether or not
+it is muted or anything plays on it, because its devices run all the time; switching a device off or removing it
+is what takes its cost away, and the panel says so.
+
+**A song that is more than the machine plays in time is said so, once.** A buffer that takes longer to make than
+it lasts is a gap in what is heard. When five or more come late within ten seconds, a notice says that the song
+is more than this machine plays in time and that an export is not affected. It is one notice, not one a buffer:
+the next comes only when the song has kept up for a minute in between. For as long as it holds (and ten seconds
+after the last late buffer) the status bar has a line with the count, the CPU readout is in the signal colour,
+and the panel begins with the whole sentence: how many buffers came late, which tracks cost most, and what
+helps. One or two late buffers in a while are not that: every song has a plugin take its time over a block now
+and then.
+
+The same figures and the same sentence are what a model gets from `playback_load` and `transport`. A picture of
+the window shows no load of its own; `--load calm` and `--load short` open the panel on a made-up one.
+
 ## Playing from the computer keyboard
 
 **Play it from the keyboard you type on.** `Ctrl+K`, or the keyboard button in the top bar, turns the two middle

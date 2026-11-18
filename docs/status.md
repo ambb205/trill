@@ -18,10 +18,6 @@ Only Windows has been run so far.
   moment and, once at full speed, skips what it fell behind by (half the length of a straight start). To arrive
   in step it would have to read the song half a start ahead of itself: a device is given no sound before it is
   played, and one that held the track back to make room would be late whenever it was idle.
-- Saying that a song is more than the machine plays in time, and what each track costs, in the window and over
-  MCP. The engine counts both and the `keeps_up` example prints them; the window shows the load and no more.
-- A setting for how many threads a song that plays may be made on. It is half as many as the machine has
-  processors, eight at the most; `TRILL_PLAY_THREADS` in the environment says another number.
 - "Collect all and save": copying every file a song plays into a folder beside it. The song already says where
   its files are from its own folder and plays the ones beside it, so what is missing is the copying, a rule for
   two files of one name, and an edit that points the song at the copies. Only what a song plays of studies is

@@ -14,6 +14,7 @@
 //! stream after another renders from.
 
 use crate::graph::{AudioData, Graph};
+use crate::host::priority::AudioPriority;
 use crate::host::{
     AudioConfig, AudioDevices, AudioHost, FailureCallback, NULL_DEVICE, NullHost, OpenError, OpenStream, StreamFailure,
     StreamHandle, StreamRequest, SystemHost, Timing,
@@ -89,6 +90,58 @@ pub struct Load {
     pub allowed: usize,
     /// What the threads beside the callback's did, where there are any.
     pub team: Option<TeamStats>,
+    /// How many frames the device asked for in all, and the fewest and the
+    /// most at a time. A device that is shared with other programs does
+    /// not always ask for the same.
+    pub frames: u64,
+    pub smallest_frames: u32,
+    pub largest_frames: u32,
+    /// The longest the device let pass between asking for one buffer and
+    /// asking for the next, in nanoseconds.
+    pub longest_gap_ns: u64,
+    /// Whether the system has the callback's thread in its audio class
+    /// ([`AudioPriority`](crate::host::priority::AudioPriority)): `None`
+    /// where it was never asked for the thread (a host driven by hand).
+    pub audio_class: Option<bool>,
+    /// The priority the system says that thread has, by its own numbers,
+    /// and the one it had before Trill asked for the audio class.
+    pub thread_level: Option<i32>,
+    pub thread_level_before: Option<i32>,
+}
+
+impl Load {
+    /// Adds what `later` counted to this, for keeping count over longer
+    /// than the engine was asked at: what is counted adds up, what is a
+    /// most or a least stays one, and what says how things stand (the
+    /// threads, the thread's class) is as `later` has it.
+    pub fn add(&mut self, later: &Load) {
+        let frames = self.frames + later.frames;
+        if frames > 0 {
+            // (The time a buffer had is its frames: the mean of two means
+            // is theirs weighed by that.)
+            let weighed = f64::from(self.mean) * self.frames as f64 + f64::from(later.mean) * later.frames as f64;
+            self.mean = (weighed / frames as f64) as f32;
+        }
+        self.frames = frames;
+        self.callbacks += later.callbacks;
+        self.late += later.late;
+        self.worst = self.worst.max(later.worst);
+        self.spread_blocks += later.spread_blocks;
+        (self.threads, self.allowed) = (later.threads, later.allowed);
+        self.team = match (self.team, later.team) {
+            (Some(before), Some(after)) => Some(before.plus(&after)),
+            (before, after) => after.or(before),
+        };
+        self.smallest_frames = match (self.smallest_frames, later.smallest_frames) {
+            (0, least) | (least, 0) => least,
+            (one, other) => one.min(other),
+        };
+        self.largest_frames = self.largest_frames.max(later.largest_frames);
+        self.longest_gap_ns = self.longest_gap_ns.max(later.longest_gap_ns);
+        self.audio_class = later.audio_class.or(self.audio_class);
+        self.thread_level = later.thread_level.or(self.thread_level);
+        self.thread_level_before = later.thread_level_before.or(self.thread_level_before);
+    }
 }
 
 /// How long the engine waits for things that should not take long, before
@@ -246,6 +299,8 @@ pub(crate) enum Message {
     /// The share of a block's time above which a song that plays is
     /// spread: see [`Processor::spread_from`].
     SpreadFrom(f64),
+    /// Count the cycles threads run over each track's block, or stop.
+    CountCycles(bool),
     /// Starts the take numbered `take` on `tracks`, after `count_in_beats`
     /// of count-in if the song is not already playing.
     Record {
@@ -310,7 +365,24 @@ struct Shared {
     given_ns: AtomicU64,
     worst: AtomicU32,
     spread: AtomicU64,
+    /// Since then too: the frames asked for, the fewest and the most a
+    /// buffer had, and the longest time between two buffers.
+    frames: AtomicU64,
+    smallest: AtomicU32,
+    largest: AtomicU32,
+    longest_gap_ns: AtomicU64,
+    /// What the callback's thread is, as of the first buffer since: 0
+    /// where its audio class was never asked for, 1 where the system
+    /// refused it, 2 where it granted it; and the thread's priority by the
+    /// system's numbers, offset so that 0 says none was read.
+    audio_class: AtomicU32,
+    thread_level: AtomicU32,
+    thread_level_before: AtomicU32,
 }
+
+/// What is added to a thread's priority to keep it in [`Shared`], where 0
+/// says that none was read.
+const LEVEL_OFFSET: i32 = 1 << 16;
 
 /// Everything the audio callback works with.
 pub(crate) struct Realtime {
@@ -323,6 +395,8 @@ pub(crate) struct Realtime {
     shared: Arc<Shared>,
     left: Vec<f32>,
     right: Vec<f32>,
+    /// When the device last asked for a buffer.
+    asked: Option<Instant>,
 }
 
 impl Realtime {
@@ -358,6 +432,7 @@ impl Realtime {
                     }
                 }
                 Message::SpreadFrom(share) => self.processor.spread_from(share),
+                Message::CountCycles(on) => self.processor.count_cycles(on),
                 Message::Record { take, tracks, count_in_beats } => {
                     self.processor.record(take, tracks, count_in_beats);
                 }
@@ -435,6 +510,36 @@ impl Realtime {
     /// Renders `total` frames, handing them to `sink` a stretch at a time.
     fn fill(&mut self, total: usize, timing: Timing, sink: &mut dyn FnMut(&[f32], &[f32])) {
         let started = Instant::now();
+        {
+            let shared = &self.shared;
+            let frames = total.min(u32::MAX as usize) as u32;
+            shared.frames.fetch_add(total as u64, Ordering::Relaxed);
+            shared.largest.fetch_max(frames, Ordering::Relaxed);
+            // (Nothing asked for yet is 0, which no buffer is smaller than.)
+            let smallest = shared.smallest.load(Ordering::Relaxed);
+            if frames > 0 && (smallest == 0 || frames < smallest) {
+                shared.smallest.store(frames, Ordering::Relaxed);
+            }
+            if let Some(before) = self.asked.replace(started) {
+                let gap = started.saturating_duration_since(before).as_nanos() as u64;
+                shared.longest_gap_ns.fetch_max(gap, Ordering::Relaxed);
+            }
+            // What this thread is: a look at a thread-local with every
+            // buffer and, with the first since that was last asked, one
+            // call that asks the system about the calling thread.
+            let class = match AudioPriority::of_this_thread() {
+                None => 0,
+                Some(false) => 1,
+                Some(true) => 2,
+            };
+            shared.audio_class.store(class, Ordering::Relaxed);
+            if shared.counted.load(Ordering::Relaxed) == 0 {
+                let level = AudioPriority::level_of_this_thread().map_or(0, |level| (level + LEVEL_OFFSET) as u32);
+                shared.thread_level.store(level, Ordering::Relaxed);
+                let before = AudioPriority::level_before().map_or(0, |level| (level + LEVEL_OFFSET) as u32);
+                shared.thread_level_before.store(before, Ordering::Relaxed);
+            }
+        }
         self.apply_messages();
         self.processor.set_output_latency(timing.latency_frames);
         self.take_live_input(total, timing);
@@ -741,6 +846,7 @@ impl Core {
             shared: shared.clone(),
             left: vec![0.0; CALLBACK_FRAMES],
             right: vec![0.0; CALLBACK_FRAMES],
+            asked: None,
         };
         let seat = Arc::new(Seat {
             active: AtomicU64::new(generation),
@@ -853,6 +959,22 @@ impl Engine {
             threads: shared.threads.load(Ordering::Relaxed).max(1) as usize,
             allowed: self.play_threads.min(self.can_use).max(1),
             team: self.team.as_ref().map(|(_, watch)| watch.take()),
+            frames: take(&shared.frames),
+            smallest_frames: shared.smallest.swap(0, Ordering::Relaxed),
+            largest_frames: shared.largest.swap(0, Ordering::Relaxed),
+            longest_gap_ns: take(&shared.longest_gap_ns),
+            audio_class: match shared.audio_class.load(Ordering::Relaxed) {
+                0 => None,
+                class => Some(class == 2),
+            },
+            thread_level: match shared.thread_level.load(Ordering::Relaxed) {
+                0 => None,
+                level => Some(level as i32 - LEVEL_OFFSET),
+            },
+            thread_level_before: match shared.thread_level_before.load(Ordering::Relaxed) {
+                0 => None,
+                level => Some(level as i32 - LEVEL_OFFSET),
+            },
         }
     }
 
@@ -886,19 +1008,25 @@ impl Engine {
         self.can_use = threads.max(1);
     }
 
-    /// Gives the song that plays the threads it is asking for, if it is
-    /// and may have them. Cheap while there is nothing to do; call it a
-    /// few times a second. Threads are started here and nowhere else:
-    /// never by the audio thread, and not before a song has taken long
-    /// enough to make that spreading it is worth while
-    /// ([`Processor::spread_from`]), so that a small song never has any.
+    /// Gives the song that plays its threads, where it may have them and
+    /// can use them. Cheap while there is nothing to do: it is called with
+    /// every graph that is handed over and a few times a second. Threads
+    /// are started here and nowhere else, never by the audio thread.
+    ///
+    /// A stream whose own thread is an audio thread (a device's, which
+    /// asked the system for its audio class) has them as soon as its song
+    /// has anything to make at once, before a note of it is heard: what a
+    /// song costs is only known once it has played, and one that turns out
+    /// to need them has no buffer to spare for their being made. A stream
+    /// that is driven by hand, or runs with no device, has them when its
+    /// song asks ([`Processor::wants_threads`]).
     pub(crate) fn tend_threads(&mut self) {
-        let wanted = self.play_threads.min(self.can_use);
+        // All of them at once: the ones a song cannot use yet sleep.
+        let wanted = if self.can_use >= 2 { self.play_threads } else { 1 };
         let has = self.team.as_ref().map_or(0, |(threads, _)| *threads);
-        // A song that has threads has needed them, and gets more when it
-        // has come to have more to make at once.
-        let needed = self.shared.wants_threads.load(Ordering::Relaxed) || has > 0;
-        if !needed || wanted < 2 || has >= wanted - 1 {
+        let asked = self.shared.wants_threads.load(Ordering::Relaxed);
+        let at_once = self.shared.audio_class.load(Ordering::Relaxed) != 0;
+        if !(asked || at_once || has > 0) || wanted < 2 || has >= wanted - 1 {
             return;
         }
         let team = Box::new(Team::new(wanted - 1));
@@ -913,6 +1041,12 @@ impl Engine {
     /// spread over its threads: see [`Processor::spread_from`].
     pub(crate) fn spread_from(&mut self, share: f64) {
         self.send(Message::SpreadFrom(share));
+    }
+
+    /// Has the cycles threads run over each track's block counted, or
+    /// stops that: see [`Processor::count_cycles`].
+    pub(crate) fn count_cycles(&mut self, on: bool) {
+        self.send(Message::CountCycles(on));
     }
 
     /// Whether a sound is being auditioned, as of the last audio callback.

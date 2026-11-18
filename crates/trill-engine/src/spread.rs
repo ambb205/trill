@@ -63,6 +63,7 @@
 //! to the next a track is mostly made by the thread that made it last, on
 //! a processor that still has what its devices keep.
 
+use crate::clock::thread_cycles;
 use crate::crew::Crew;
 use crate::graph::{Bus, Graph, TrackNode};
 use crate::processor::{Common, DenormalGuard, Room, finish, mix, sound, tally, through};
@@ -428,6 +429,7 @@ impl Rounds {
                                 // having let go of the track.
                                 let Some((track, room, kept)) = (unsafe { places.at(*at) }) else { continue };
                                 let began = Instant::now();
+                                let ran = common.cycles.then(thread_cycles);
                                 sound(track, common, buses, room);
                                 let devices = track.chain.devices.len();
                                 let turn = if turns[*at] == 0 { devices } else { turns[*at].min(devices) };
@@ -436,6 +438,7 @@ impl Rounds {
                                     finish(track, common, room, kept.as_mut());
                                 }
                                 room.spent += began.elapsed().as_nanos() as u64;
+                                room.ran += ran.map_or(0, |ran| thread_cycles().saturating_sub(ran));
                                 if turn == devices {
                                     made.fetch_add(tally(track, common, room), Ordering::Relaxed);
                                 }
@@ -463,10 +466,12 @@ impl Rounds {
                     // one thread takes it from there.
                     let Some((track, room, kept)) = (unsafe { places.at(at) }) else { continue };
                     let began = Instant::now();
+                    let ran = common.cycles.then(thread_cycles);
                     let devices = track.chain.devices.len();
                     through(track, common, room, keys, turns[at].min(devices)..devices);
                     finish(track, common, room, kept.as_mut());
                     room.spent += began.elapsed().as_nanos() as u64;
+                    room.ran += ran.map_or(0, |ran| thread_cycles().saturating_sub(ran));
                     made.fetch_add(tally(track, common, room), Ordering::Relaxed);
                 };
                 if lists.len() < 2 && rest.is_empty() {

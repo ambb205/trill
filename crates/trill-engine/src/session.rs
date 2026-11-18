@@ -39,7 +39,7 @@ pub use sounds::{Added, Given, ListedSound, SavedAsSound, listed_sounds, sound_a
 pub use wavetable::{TableReport, factory_tables};
 
 pub use controllers::SilentInstrument;
-pub use cores::{Costs, TrackCost};
+pub use cores::{Costs, KeepingUp, Shortfall, TrackCost};
 pub use files::file_facts;
 pub use playing::{MAX_COUNT_IN_BARS, RecordState, RecordStatus};
 pub use probing::ProbeTarget;
@@ -173,6 +173,8 @@ pub struct Session {
     playing: playing::Playing,
     /// The journal of the open project: how it came to be.
     story: story::Keeping,
+    /// What is kept of how the song is played: see [`cores`].
+    cores: cores::Watch,
     /// What was written down about the files the song plays when it was
     /// last saved or opened; see `session/files.rs`.
     files: trill_core::FileTable,
@@ -241,6 +243,7 @@ impl Session {
             metronome: false,
             playing: playing::Playing::new(),
             story: story::Keeping::new(),
+            cores: cores::Watch::default(),
             files: trill_core::FileTable::default(),
         };
         session.replace_project(Self::blank_project("Untitled"));
@@ -1017,6 +1020,7 @@ impl Session {
     pub fn housekeeping(&mut self) {
         self.engine.collect_garbage();
         self.engine.tend_threads();
+        self.look(false);
         self.tend_audio();
         self.recover_lost_messages();
         self.tend_take();
@@ -1056,6 +1060,7 @@ impl Session {
         // a device or a clip of the new one.
         self.bank.devices.clear();
         self.stand_ins = StandIns::default();
+        self.forget_load();
         self.compile_and_swap();
         // Track ids restart too: what was armed or selected was the old
         // project's.
@@ -1091,6 +1096,8 @@ impl Session {
             _ => graph.spread(&self.project, self.factory.as_ref()),
         };
         self.engine.can_use(can_use);
+        // Ahead of the graph, so that the two arrive together.
+        self.engine.tend_threads();
         self.engine.swap(graph);
     }
 

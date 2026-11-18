@@ -499,6 +499,9 @@ pub fn transport_json(session: &Session) -> Value {
     if let Some(recording) = recording_json(session) {
         out["recording"] = recording;
     }
+    if let Some(note) = crate::playing::falling_short_note(session) {
+        out["falling_short"] = json!(note);
+    }
     out
 }
 

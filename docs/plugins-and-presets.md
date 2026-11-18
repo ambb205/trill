@@ -81,6 +81,22 @@ the sound of the track that is shown, dragging one onto a track does the same th
 it gets a track of its own. On the installed plugins, on demand: an Ample guitar through Archetype Tim Henson,
 saved in one song and given to a track of another, renders to the same samples in both.
 
+**What a plugin costs when nothing goes into it**: every device of a song runs all the time, so that a track
+is there the moment a note is played on it or it is unmuted. Trill tells a plugin of every block whose input is
+nothing but silence, in the way its format has for that (a VST3 bus's silence flags, a CLAP channel that is
+constant), and a plugin may take that as leave to rest. Whether it does is the plugin's own business, and the
+amplifiers that were measured do not: Archetype Tim Henson X took 8.9 % of a processor on noise, 8.6 to 8.8 % on
+silence it was told of and 8.8 % on silence it was not; Archetype Cory Wong X 12.6 %, 12.5 to 12.6 % and 13.2 %
+(blocks of 480 frames at 48 kHz, one instance alone; `cargo test -p trill-plugins --test silence -- --include-ignored
+--nocapture` measures any installed effect so). In a song of seven guitars through such amplifiers, the seven
+cost two thirds of a processor while the song stood still. A synthesizer rests by itself as a rule (Serum 2:
+0.4 % standing, 14 % playing), and a reverb that costs 0.3 % has nothing to save. One plugin was seen to act on
+the word: Surge XT's effect as a vocoder with nothing to listen to, which was never the same from one render to
+the next, came out silent or at another level than before. Trill does not stop running a plugin on its own
+account: some give another sound depending on how many blocks they were run, and none was
+found that asks for it. What a track costs is in the window's Playback load and in `playback_load`; switching a
+device off is what takes its cost away, and muting its track is not.
+
 **Reading a plugin**: a plugin's parameters are numbers from 0 to 1 whose meaning only the plugin knows, so each
 is shown with the text the plugin itself displays for it ("-6.0 dB", "Dynamic 57", "On"), and can be set by that
 text: where the plugin converts text to a value its answer is checked against what it then shows, and where it

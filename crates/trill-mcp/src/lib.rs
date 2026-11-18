@@ -26,6 +26,7 @@ mod instruments;
 mod listening;
 pub mod logging;
 mod music;
+mod playing;
 mod requests;
 mod server;
 mod sounds;

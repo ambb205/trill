@@ -763,6 +763,12 @@ pub struct UiState {
     /// Whether the credits are up: what the song owes for its sampled
     /// instruments, and the makers Trill names.
     pub credits_open: bool,
+    /// Whether the playback load is up: how the machine keeps up with the
+    /// song, and what each track costs.
+    pub load_open: bool,
+    /// Which time the song fell short was last said in a notice: see
+    /// `load::notice`.
+    pub load_said: Option<u64>,
     /// Whether the window shows the stage instead of its panes. Nothing
     /// else here changes while it does: leaving the stage puts the window
     /// back as it was.
@@ -845,6 +851,8 @@ impl UiState {
             copied_text: None,
             shortcuts_open: false,
             credits_open: false,
+            load_open: false,
+            load_said: None,
             stage_open: false,
             browser: BrowserState::new(),
             sound_drag: None,

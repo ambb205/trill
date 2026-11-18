@@ -146,6 +146,25 @@ pub struct TeamStats {
     pub waited_worst_us: f64,
 }
 
+impl TeamStats {
+    /// What a team did over the time of this and of `later` together.
+    pub fn plus(&self, later: &TeamStats) -> TeamStats {
+        let mean = |one: f64, of_one: u64, other: f64, of_other: u64| match of_one + of_other {
+            0 => 0.0,
+            both => (one * of_one as f64 + other * of_other as f64) / both as f64,
+        };
+        TeamStats {
+            rounds: self.rounds + later.rounds,
+            joined: self.joined + later.joined,
+            woken: self.woken + later.woken,
+            late_mean_us: mean(self.late_mean_us, self.woken, later.late_mean_us, later.woken),
+            late_worst_us: self.late_worst_us.max(later.late_worst_us),
+            waited_mean_us: mean(self.waited_mean_us, self.rounds, later.waited_mean_us, later.rounds),
+            waited_worst_us: self.waited_worst_us.max(later.waited_worst_us),
+        }
+    }
+}
+
 /// A look at a team from a thread that does not own it.
 #[derive(Clone)]
 pub struct Watch(Arc<Shared>);
