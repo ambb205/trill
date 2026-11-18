@@ -544,6 +544,29 @@ pub fn describe(tool: &str, input: &Value, project: &Project) -> Wording {
                 _ => about("Checking", "Checked", "on a study"),
             }
         }
+        "take_from_study" => {
+            let what = match call.text("what") {
+                Some("stretch") => "a stretch of a study's recording".to_owned(),
+                Some("loop") => "a loop of a study".to_owned(),
+                Some("line") => "a sung line of a study".to_owned(),
+                Some("word") => "a sung word of a study".to_owned(),
+                Some("one_shot") => "a single hit of a study".to_owned(),
+                Some("kit") => "a kit of a study's drums".to_owned(),
+                Some("notes") => match call.text("part") {
+                    Some("bass") => "the bass line of a study as notes".to_owned(),
+                    Some("melody") => "the melody of a study as notes".to_owned(),
+                    Some("groove") => "the drum groove of a study as notes".to_owned(),
+                    Some("chords") => "the chords of a study as notes".to_owned(),
+                    _ => "a part of a study as notes".to_owned(),
+                },
+                Some("parts") => "the parts of a study as markers".to_owned(),
+                Some("tempo") => "the tempo of a study into the song".to_owned(),
+                Some("key") => "the key of a study as the song's".to_owned(),
+                Some("reference") => "a study's recording as a reference".to_owned(),
+                _ => "something of a study".to_owned(),
+            };
+            about("Taking", "Took", &what)
+        }
         "setup" => {
             let part =
                 call.text("part").map_or_else(|| "a part".to_owned(), |part| format!("the part {}", quoted(part)));
@@ -682,6 +705,17 @@ pub fn of_call(tool: &str, input: &Value, answer: &str) -> Option<Place> {
         "import_midi" | "transcribe" => {
             let parts = answer.get("tracks").and_then(Value::as_array);
             Place::clips(parts.into_iter().flatten().filter_map(|part| part.get("clip_id")?.as_u64()))
+        }
+        "take_from_study" => {
+            let several = answer.get("clip_ids").and_then(Value::as_array);
+            let clips: Vec<u64> =
+                several.into_iter().flatten().filter_map(Value::as_u64).chain(answered("clip_id")).collect();
+            match (clips.is_empty(), answered("device_id"), answered("track_id")) {
+                (false, ..) => Place::clips(clips),
+                (true, Some(device), _) => Some(Place::device(device)),
+                (true, None, Some(track)) => Some(Place::track(track)),
+                (true, None, None) => None,
+            }
         }
 
         "set_automation" => {
@@ -830,6 +864,34 @@ pub fn heard(tool: &str, answer: &str) -> Option<String> {
                 ("waiting", _) => "waiting for its turn".to_owned(),
                 (state, _) => state.to_owned(),
             })
+        }
+        "take_from_study" => {
+            // What it came to in the song: how long, how many, at what tempo.
+            if let Some(beats) = answer.get("beats").and_then(number) {
+                let notes = answer.get("notes").and_then(Value::as_u64);
+                return Some(match notes {
+                    Some(1) => format!("1 note over {beats} beats"),
+                    Some(notes) => format!("{notes} notes over {beats} beats"),
+                    None => format!("{beats} beats"),
+                });
+            }
+            if let Some(pads) = answer.get("pads").and_then(Value::as_array) {
+                return Some(if pads.len() == 1 { "1 pad".to_owned() } else { format!("{} pads", pads.len()) });
+            }
+            if let Some(markers) = answer.get("markers").and_then(Value::as_array) {
+                return Some(match markers.len() {
+                    1 => "1 marker".to_owned(),
+                    count => format!("{count} markers"),
+                });
+            }
+            if let Some(bars) = answer.get("bars").and_then(Value::as_u64) {
+                let tempos = answer.get("tempos").and_then(Value::as_u64).unwrap_or(1);
+                return Some(match (tempos, answer.get("bpm").and_then(number)) {
+                    (1, Some(bpm)) => format!("{bars} bars at {bpm} bpm"),
+                    _ => format!("{bars} bars, {tempos} tempos"),
+                });
+            }
+            answer.get("key").and_then(Value::as_str).or(answer.get("label").and_then(Value::as_str)).map(str::to_owned)
         }
         "setup" => {
             // What runs the models, where the answer says.

@@ -48,9 +48,23 @@ to be answered when it ends); \"stop\" ends it and keeps every stage that had fi
 `study` takes it up there; \"list\" and \"delete\" are what they say.
 - When it is done, listen with `study` reads it: the same summary and lists as of a file, in the recording's own \
 bars, and `show` \"words\" for the lyrics line by line with the bar and beat of every word. `stem` keeps the loops \
-and single hits to those of one stem and says where that stem plays. Each stem is an audio file (its `path` is in \
-the report and in listen's reply) that create_audio_clip puts on a track. transcribe takes a `study` too. `grid` \
+and single hits to those of one stem and says where that stem plays. transcribe takes a `study` too. `grid` \
 corrections given to listen for a study are kept with it.
+- take_from_study puts what a study found into the song, each time as one undo step, by the bars, ids and line \
+numbers listen gives: `what` \"stretch\" (bars of one stem or of several, or of the whole recording) and \"loop\" \
+(one of its loops by id) become audio clips that follow the song's tempo, a beat of the recording for a beat of the \
+song, on a new track or on `track` at `at_bar`, `times` over; \"line\" and \"word\" are that stretch of the vocal, \
+named by its words; \"one_shot\" puts a single hit on a lane, on a pad of a drum rack or into a sampler that plays a \
+bass note by its own pitch; \"kit\" makes a drum rack of the cleanest hit of each drum; \"notes\" writes the bass \
+line, the melody, the chords or the groove on an instrument track (a groove asks that track's kit for its drums by \
+name); \"parts\" writes the recording's parts as markers; \"tempo\" lays the recording's tempo into the song bar by \
+bar, after which a stretch taken `as_recorded` lies on the song's bars untouched; \"key\" says the song is in the \
+recording's key; \"reference\" puts the recording beside the song on a track that is silent unless listened to \
+(update_track with `listening`) and is in no render. `to_song_key` moves a stretch to the key the song says it is \
+in (set_project with `key`), `semitones` by what you say: the stretcher does it, and beyond three or four semitones \
+a voice no longer sounds like itself. Drums are never moved for a key.
+- A clip taken from a study plays a file in the study's own folder: deleting the study, or dropping its stems, \
+leaves the song without it, and study says which songs use it before it does either.
 - The models are not part of Trill. setup with action \"report\" lists the parts there are (each with its size, \
 its licence in the words of its source, and where it comes from), which are here, what runs the models on this \
 machine and how fast, and the programs Trill found. A study that lacks a part says which. Fetch a part (setup, \

@@ -84,8 +84,8 @@ pub enum ListenShow {
     Melody,
     /// Every bar line: its time in seconds and the tempo of its bar.
     Bars,
-    /// Of a study: the words that are sung, line by line, each line with where it starts and how long it is, and
-    /// every word of it as [bar, beat, word].
+    /// Of a study: the words that are sung, line by line, each line with its number, where it starts and how
+    /// long it is, and every word of it as [bar, beat, word].
     Words,
 }
 
@@ -480,8 +480,9 @@ fn lists(out: &mut Value, heard: &Heard, studied: Option<&Studied>, request: &Li
                 let items = lyrics
                     .lines
                     .iter()
-                    .filter(|line| inside(line.start, line.end))
-                    .map(|line| {
+                    .enumerate()
+                    .filter(|(_, line)| inside(line.start, line.end))
+                    .map(|(index, line)| {
                         let words: Vec<Value> = line
                             .words
                             .iter()
@@ -494,7 +495,7 @@ fn lists(out: &mut Value, heard: &Heard, studied: Option<&Studied>, request: &Li
                                 }
                             })
                             .collect();
-                        with(placed(line.start), json!({ "beats": counted.beats_between(line.start, line.end), "text": line.text, "words": words }))
+                        with(placed(line.start), json!({ "line": index + 1, "beats": counted.beats_between(line.start, line.end), "text": line.text, "words": words }))
                     })
                     .collect();
                 ("lines", items)

@@ -64,6 +64,7 @@ mod recovery;
 mod settings;
 mod sounds;
 mod studying;
+pub mod taking;
 
 pub use instruments::Arrived;
 pub use jobs::{Jobs, Program};
