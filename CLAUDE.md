@@ -26,6 +26,7 @@ cargo run -p trill-app --example wavetable_listen -- target/wavetable-listening 
 cargo run -p trill-engine --example sampled -- about FILE.sfz   # what a sampled instrument is; also survey, load, measure, play, facts and tour (see the example)
 cargo run -p trill-study --example setup -- target/study-parts status              # what a study's models are, and which were fetched there (fetch PART and test are the other words)
 cargo run -p trill-study --example models -- target/study-parts nvidia study SONG.wav target/studies   # a recording studied with the real models, stage by stage, with what it took
+cargo run -p trill-runtime --example study_listen -- PROFILE STUDY target/study-listening   # what a study does to a song, to listen to: stems, loops at other tempos, a phrase at other pitches, the kit, notes beside their stems, and a list
 cargo run -p trill-catalogue --example sets -- list              # the sets of the catalogue of instruments; also sum, files and check (see the example)
 ```
 
@@ -293,10 +294,22 @@ on the samples.
   (`study::land`), and neither does anything of its own with a study. What can be heard first is planned first
   (`plan_stretch`) and played from the plan (`hear_stretch`: a song of nothing but the clips, rendered), so that
   what is heard is what is taken. A moment of a recording is found in the song through the clip that plays it
-  (`taking::beat_of`), never by multiplying by a tempo. The recording's beats are counted as they were found
-  (`grid.bars` are numbers into `grid.beats`): a bar is not always `beats_per_bar` long. Notes for a track that
+  (`taking::beat_of`), never by multiplying by a tempo. A recording's bars are one thing, and the grid says
+  what: `Grid::bar_beat`, `bar_of_beat`, `bar_start` and `place` (`trill-listen/src/beats.rs`) count each bar as
+  long as it was found (`grid.bars` are numbers into `grid.beats`: a bar is not always `beats_per_bar` long), and
+  `listen`, `take_from_study`, the workspace and the tempo taken into a song all ask them, never
+  `beats_per_bar` arithmetic of their own; `trill-mcp/tests/taking.rs` holds them to one numbering on a study
+  with a short bar (`Script::short_bar`). Notes for a track that
   is there go through the hook a front end hands (`Keyed`), which is how the server writes an instrument's
   keyswitches; a groove asks the track's kit for each drum by name (`on_kit`).
+- **An audio clip that plays round** (`AudioContent::looped`, an `AudioLoop` in seconds of the recording): the
+  clip plays that stretch again and again, `offset_seconds` being where in it the clip begins. Whatever asks
+  where a clip is in its recording asks `AudioContent::second_at` (and `rounds` for where it comes round), never
+  `offset + seconds_over` of its own, which runs on past the loop. In the compiler a round is one more kind of
+  piece (`pieces` in `compile.rs`), joined to the one before it by the seam pieces have where the tempo
+  changes; `trill-engine/tests/looped.rs` holds rounds to the sample and to the song's beats through a tempo
+  change. A clip without a loop is compiled exactly as before, and a file saved before has none. The edits are
+  `Project::set_audio_loop` and `loop_clip` (what the clip plays now becomes what repeats).
 - **A reference track** (`Track::reference`): beside the song, never part of it. Whoever plays or renders asks
   `Project::as_heard`, which turns it into the mute and solo it comes to (the compiler does, and
   `compile::needed`); whoever measures the song's length asks `length_beats`, which leaves it out

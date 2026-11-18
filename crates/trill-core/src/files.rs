@@ -145,7 +145,11 @@ impl Project {
                     path: audio.path.clone(),
                     track: Some(track.id),
                     name: clip.name.clone(),
-                    reach_seconds: Some(audio.offset_seconds + clip.length * audio.seconds_per_beat(self.tempo)),
+                    // A clip that plays round reaches the end of its loop and no further.
+                    reach_seconds: Some(match audio.round() {
+                        Some(round) => round.end_seconds(),
+                        None => audio.offset_seconds + clip.length * audio.seconds_per_beat(self.tempo),
+                    }),
                 });
             }
             of_devices(&track.devices, Some(track.id), &mut uses);

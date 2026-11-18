@@ -82,7 +82,8 @@ pub enum ListenShow {
     Bass,
     /// The notes of the sung or played melody, likewise.
     Melody,
-    /// Every bar line: its time in seconds and the tempo of its bar.
+    /// Every bar line: its time in seconds and the tempo of its bar, and for a bar that is not as long as the
+    /// rest how many beats it holds.
     Bars,
     /// Of a study: the words that are sung, line by line, each line with its number, where it starts and how
     /// long it is, and every word of it as [bar, beat, word].
@@ -164,29 +165,21 @@ pub struct TranscribeRequest {
     pub instrument: Option<String>,
 }
 
-/// Bars and beats of a recording, counted from 1 at its first bar line.
+/// Bars and beats of a recording, counted from 1 at its first bar line:
+/// the grid's own numbering, in which a bar is as long as it was found.
 struct Counted<'a> {
     heard: &'a Heard,
-    /// The beat of the grid that starts bar 1.
-    first: f64,
-    per_bar: f64,
 }
 
 impl<'a> Counted<'a> {
     fn new(heard: &'a Heard) -> Self {
-        Self {
-            first: heard.grid.bars.first().copied().unwrap_or(0) as f64,
-            per_bar: heard.grid.beats_per_bar.max(1) as f64,
-            heard,
-        }
+        Self { heard }
     }
 
     /// The bar a time lies in and its beat in that bar, both from 1.
     fn place(&self, seconds: f64) -> (i64, f64) {
-        // A hair past the line counts as on it.
-        let beats = self.heard.grid.beat_at(seconds) - self.first + 1e-6;
-        let bar = (beats / self.per_bar).floor();
-        (bar as i64 + 1, ((beats - bar * self.per_bar) * 100.0).round() / 100.0 + 1.0)
+        let (bar, beat) = self.heard.grid.place(seconds);
+        (bar + 1, (beat * 100.0).round() / 100.0 + 1.0)
     }
 
     fn beats_between(&self, start: f64, end: f64) -> f64 {
@@ -195,7 +188,12 @@ impl<'a> Counted<'a> {
 
     /// The seconds at which bar `bar` (from 1) starts.
     fn start_of(&self, bar: i64) -> f64 {
-        self.heard.grid.seconds_at(self.first + (bar - 1) as f64 * self.per_bar)
+        self.heard.grid.bar_start(bar - 1)
+    }
+
+    /// How many beats bar `bar` (from 1) holds.
+    fn beats_in(&self, bar: i64) -> f64 {
+        self.heard.grid.bar_length(bar - 1)
     }
 
     /// The stretch of the recording the caller asked for, in seconds.
@@ -460,11 +458,18 @@ fn lists(out: &mut Value, heard: &Heard, studied: Option<&Studied>, request: &Li
                     .enumerate()
                     .filter(|(_, pair)| inside(pair[0], pair[1]))
                     .map(|(index, pair)| {
-                        json!({
+                        // A bar's tempo is the beats it holds over what it lasts; one that holds another
+                        // number than the rest says how many.
+                        let beats = counted.beats_in(index as i64 + 1);
+                        let mut item = json!({
                             "bar": index + 1,
                             "at_seconds": round(pair[0]),
-                            "bpm": ((60.0 * counted.per_bar / (pair[1] - pair[0]).max(1e-9)) * 100.0).round() / 100.0,
-                        })
+                            "bpm": ((60.0 * beats / (pair[1] - pair[0]).max(1e-9)) * 100.0).round() / 100.0,
+                        });
+                        if beats != heard.grid.beats_per_bar as f64 {
+                            item["beats"] = json!(beats);
+                        }
+                        item
                     })
                     .collect();
                 ("bars", items)
@@ -525,8 +530,8 @@ fn groove_by_bar(heard: &Heard, counted: &Counted<'_>, start: f64, end: f64) -> 
         // To the sixteenth; one that rounds up to the next bar line is that bar's first.
         let mut beat = (beat * 4.0).round() / 4.0;
         let mut bar = bar;
-        if !heard.grid.beats.is_empty() && beat >= counted.per_bar + 1.0 {
-            beat -= counted.per_bar;
+        if !heard.grid.beats.is_empty() && beat >= counted.beats_in(bar) + 1.0 {
+            beat -= counted.beats_in(bar);
             bar += 1;
         }
         let drum = match note.kind {

@@ -30,8 +30,8 @@ pub use instrument::{
     SampledRegion,
 };
 pub use project::{
-    AutomationLane, AutomationPoint, AutomationTarget, ChainRef, Clip, Device, EditError, LoopRegion, Marker, Master,
-    Note, Project, Reference, Segment, Send, SongKey, Track, TrackKind, WarpMode,
+    AudioLoop, AutomationLane, AutomationPoint, AutomationTarget, ChainRef, Clip, Device, EditError, LoopRegion,
+    Marker, Master, Note, Project, Reference, Segment, Send, SongKey, Track, TrackKind, WarpMode,
 };
 pub use tempo::{Bar, MeterChange, MeterMap, TempoChange, TempoMap};
 pub use time::{Beats, TimeSignature};

@@ -402,7 +402,16 @@ pub fn hear(recording: &Recording, options: &Options) -> Heard {
             });
         }
     }
-    let found_loops = loops::find(&sources, &whole, &stems, &bar_times, per_bar, &parts);
+    let mut found_loops = loops::find(&sources, &whole, &stems, &bar_times, per_bar, &parts);
+    // A loop's own tempo is its beats over its length: where one of its bars was found shorter or longer
+    // than the rest, the beats it really has.
+    for found in &mut found_loops {
+        let beats = grid.bar_beat((found.bar + found.bars) as i64) - grid.bar_beat(found.bar as i64);
+        let seconds = found.end - found.start;
+        if beats != (found.bars * per_bar) as f64 && seconds > 0.0 {
+            found.bpm = (60.0 * beats / seconds * 100.0).round() / 100.0;
+        }
+    }
 
     let flats = harmony.as_ref().is_some_and(|harmony| harmony.key.key.uses_flats());
     let (mut one_shots, groove) = drum_part.unwrap_or_default();

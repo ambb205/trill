@@ -306,3 +306,35 @@ fn the_metronome_is_switched_by_its_button_and_by_k() {
     assert!(!harness.session.lock().metronome());
     assert_eq!(harness.undo_depth(), 1, "the metronome is not part of the song");
 }
+
+#[test]
+fn markers_and_changes_that_stand_close_are_named_by_the_pointer_and_not_written_over_one_another() {
+    let mut harness = Harness::new(UiOptions::default(), |session| {
+        session
+            .edit(|project| {
+                project.add_track("A");
+                // A name that has no room before the next marker's flag, a beat on.
+                project.add_marker(8.0, "The long way round to the chorus")?;
+                project.add_marker(9.0, "Next")?;
+                // A bar of two among bars of four, as a recording's tempo brings into a song.
+                project.set_time_signature_at(16.0, 2, 4)?;
+                project.set_time_signature_at(18.0, 4, 4)
+            })
+            .unwrap();
+    });
+    // Its flag says the name the strip has no room for, and the next marker is its own.
+    harness.move_to(harness.marker_strip(8.0) + vec2(3.0, 0.0));
+    harness.idle(2);
+    assert!(harness.hint().starts_with("The long way round to the chorus at bar 3 "), "{}", harness.hint());
+    harness.move_to(harness.marker_strip(9.0) + vec2(3.0, 0.0));
+    harness.idle(2);
+    assert!(harness.hint().starts_with("Next at bar 3.2 "), "{}", harness.hint());
+    // A click on the first flag goes there: what catches the pointer is what is drawn.
+    harness.click(harness.marker_strip(8.0) + vec2(3.0, 0.0));
+    assert_eq!(harness.app.state().arrangement.cursor, 8.0);
+    // A change is said in full to the pointer, and to a screen reader, however little of it is written.
+    harness.move_to(harness.ruler(16.0, false) + vec2(2.0, 0.0));
+    harness.idle(2);
+    assert!(harness.hint().starts_with("At bar 5: 2/4 "), "{}", harness.hint());
+    assert!(harness.is_on_screen("At bar 5: 2/4") && harness.is_on_screen("At bar 6: 4/4"));
+}

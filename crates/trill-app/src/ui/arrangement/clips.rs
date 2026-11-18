@@ -172,7 +172,7 @@ pub(super) fn paint_clip(
 /// the offset with it, so the picture stays put, and warping changes how
 /// much of the file a beat covers.
 pub(in crate::ui) fn file_second(clip: &Clip, audio: &AudioContent, tempo: &TempoMap, beat: Beats) -> f64 {
-    audio.offset_seconds + audio.seconds_over(tempo, clip.start, beat - clip.start)
+    audio.second_at(tempo, clip.start, beat)
 }
 
 /// Where the line of [`file_second`] bends between the timeline positions
@@ -247,30 +247,44 @@ fn paint_audio(
         }
     };
     let tempo = &cx.snap.project.tempo_map();
-    let second_at = |x: f32| file_second(clip, audio, tempo, geometry.beat(x));
     let area = content.shrink2(vec2(0.0, 2.0f32.min(content.height() / 6.0)));
     let mut mesh = Mesh::default();
     let gain = 10f32.powf(audio.gain_db / 20.0);
     // Drawn in the stretches through which a beat covers the same length
     // of the recording: one, unless the tempo changes under a clip that
     // keeps its own speed.
+    // And in the rounds of a clip that plays round: each begins at the start of its loop again.
+    let (from_beat, to_beat) = (geometry.beat(content.left()), geometry.beat(content.right()));
+    let rounds = audio.rounds(tempo, clip.start, from_beat, to_beat);
+    let mut inside = bends(audio, tempo, from_beat, to_beat);
+    inside.extend(rounds.iter().copied());
+    inside.sort_by(f64::total_cmp);
     let mut edges = vec![content.left()];
-    let inside = bends(audio, tempo, geometry.beat(content.left()), geometry.beat(content.right()));
     edges.extend(inside.into_iter().map(|beat| geometry.x(beat)));
     edges.push(content.right());
     for edge in edges.windows(2).filter(|edge| edge[1] > edge[0]) {
         let piece = Rect::from_x_y_ranges(edge[0]..=edge[1], area.y_range());
         let columns = trill_noir::waveform_columns(painter, piece.width());
-        let found = wave.columns(second_at(edge[0])..second_at(edge[1]), columns);
+        // From where the stretch begins in the recording, for as much of it as the stretch covers.
+        let (first, last) = (geometry.beat(edge[0]), geometry.beat(edge[1]));
+        let begins = file_second(clip, audio, tempo, first);
+        let found = wave.columns(begins..begins + audio.seconds_over(tempo, first, last - first), columns);
         let bands: Vec<(f32, f32)> = found.iter().map(|column| (column.mixed.min, column.mixed.max)).collect();
         trill_noir::waveform(&mut mesh, piece, &bands, gain, fade(ink, 0.9), paint::hair(painter));
     }
     painter.with_clip_rect(content).add(Shape::mesh(Arc::new(mesh)));
 
+    // Where a clip that plays round comes round, a hairline, as a notes clip has where its loop starts over.
+    for beat in &rounds {
+        let x = geometry.x(*beat).round();
+        if x > content.left() && x < content.right() {
+            paint::vline(painter, x, content.y_range(), fade(theme.ink_faint, 0.8));
+        }
+    }
     // Where the recording runs out before the clip does, a mark.
     let end = clip.start + audio.beats_over(tempo, clip.start, wave.seconds() - audio.offset_seconds);
     let x = geometry.x(end).round();
-    if end < clip.end() - 1e-6 && x > content.left() && x < content.right() {
+    if audio.looped.is_none() && end < clip.end() - 1e-6 && x > content.left() && x < content.right() {
         paint::vline(painter, x, content.y_range(), theme.ink_faint);
     }
     if cx.snap.clip_problems.contains_key(&clip.id) {

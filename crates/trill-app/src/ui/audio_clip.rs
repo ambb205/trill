@@ -342,6 +342,20 @@ fn toolbar(ui: &mut Ui, cx: &mut Cx, clip: &Clip, audio: &AudioContent, state: &
     }
     x = rect.right() + 16.0;
 
+    // Round and round: what the clip plays now becomes what repeats when its end is drawn out.
+    let looping = audio.looped.is_some();
+    let spec = Chip::new("Loop", looping).named("Loop the clip");
+    let rect = Rect::from_min_size(pos2(x, top), vec2(spec.width(ui, theme), chip));
+    let response = trill_noir::chip(ui, theme, rect, id.with("loop"), &spec);
+    cx.hint(
+        &response,
+        "Repeat the stretch the clip plays now: drawing its end out in the arrangement then plays it round",
+    );
+    if response.clicked() {
+        cx.edit(|project| project.loop_clip(clip_id, !looping));
+    }
+    x = rect.right() + 16.0;
+
     // What is going on with the clip, at the right.
     let room =
         if two_rows { status_room } else { Rect::from_min_max(pos2(x, top), pos2(bar.right() - 12.0, top + chip)) };
@@ -498,7 +512,11 @@ fn missing(ui: &mut Ui, cx: &mut Cx, clip: &Clip, audio: &AudioContent, reason: 
 
 /// The stretch of the file, in seconds, the clip plays at `tempo`.
 fn played(clip: &Clip, audio: &AudioContent, tempo: f64) -> (f64, f64) {
-    (audio.offset_seconds, audio.offset_seconds + clip.length * audio.seconds_per_beat(tempo))
+    // A clip that plays round plays its loop, however long it is drawn out.
+    match audio.round() {
+        Some(round) => (round.start_seconds, round.end_seconds()),
+        None => (audio.offset_seconds, audio.offset_seconds + clip.length * audio.seconds_per_beat(tempo)),
+    }
 }
 
 /// The seconds of the file to show for a clip that has just been opened:

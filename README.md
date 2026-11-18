@@ -654,8 +654,18 @@ line, the melody, the chords and the groove as notes.
   is laid in as many clips as keep every bar line within 12 ms, cut at bar lines; taking the study's tempo
   into the song first keeps it in one, untouched. Moving it to another key is the stretcher's work: a voice's
   formants move with the pitch, so a couple of semitones pass and beyond three or four a voice no longer sounds
-  like itself. Drums are never moved for a key. A clip is not yet a loop that repeats when it is drawn out:
-  drawn out it shows more of the recording; `times` (over MCP) lays a loop end to end.
+  like itself. Drums are never moved for a key.
+- **A stretch plays round.** An audio clip can play a stretch of its recording again and again, as a notes clip
+  plays its loop: drawn out in the arrangement it repeats, in time with the song and through its tempo changes,
+  each round faded into the next over a few milliseconds, and its start drawn out comes round from the loop's
+  end. A stretch or a loop taken from a study is such a clip (`times`, over MCP, says how many rounds long). Any
+  audio clip has the switch (Loop, in the Clip tab: what the clip plays now becomes what repeats), and
+  `update_clip` sets it with `loop_length` in beats, as for a notes clip. A file saved before clips could plays
+  as it did.
+- **A recording's bars are one thing.** Each bar is as long as it was found: a model that hears beats finds a
+  bar of two among bars of four at some transitions. `listen`, `take_from_study`, the workspace's ruler and the
+  tempo taken into a song all count the same bars, so bar 60 is the same place wherever it is named; `listen`
+  with show "bars" says of a bar that is not as long as the rest how many beats it holds.
 - **The grid can be read another way** (half, double, the bar a beat later, three, four or six beats to a
   bar): what follows from it is heard again without a model. **A word can be put right** by double-clicking it
   where it is sung; its time stays.
@@ -663,6 +673,9 @@ line, the melody, the chords and the groove as notes.
   tempo, a bar the model found shorter as a short bar with its own time signature; nothing in the song moves),
   its parts as markers, its key, a drum rack of its cleanest hit of each drum, and the recording itself as a
   **reference**.
+- **The ruler stays readable** where a recording's tempo has put many changes close together: a marker's name
+  is written whole or left out, a change of tempo or time signature says as much of itself as it has room for
+  (its bar and what changes, what changes, or its line alone), and the pointer says the rest in the status bar.
 - **A reference track** is a recording beside the song: silent unless it is listened to (the L in its header,
   where other tracks have mute and solo), heard in place of the song while it is, and in no render, stem, film
   or length of the song, whatever is being listened to. Its study's parts, chords and words are drawn along its
@@ -705,7 +718,8 @@ is then the song without those files and not a quieter mix), and looks for the f
   song and its samples can be moved or sent whole. The table is an addition to the file, not a new format: a
   build that does not know it reads the song as before, and a file without one means what it always meant.
 
-**Engine**: sample-accurate MIDI and audio clips, clip looping, non-destructive trimming and splitting, audio
+**Engine**: sample-accurate MIDI and audio clips, clip looping (notes, and an audio clip that plays a stretch of
+its recording round), non-destructive trimming and splitting, audio
 fades, automation of track and master volume, pan, sends and any device parameter with straight, held or curved
 segments (see below), MIDI controllers in clips (see below), group tracks and return tracks with sends, a metronome, sample-exact transport looping, mute/solo, undo/redo, offline rendering that is bit-identical to
 playback, and render analysis (see below).
@@ -1314,8 +1328,7 @@ the parts of SFZ named above as not done, formats other than SFZ, a drum kit's m
 (a kit that brings several is played as its file mixes them), taking the instrument out of a device in the window
 (another takes its place, or the device is removed), and the time to a first note from a disk that has not
 read the files before,
-an audio clip that repeats when it is drawn out (a loop from a study is laid end to end instead), chords as
-something a song shows by itself (they are drawn along a reference, and written as notes), a general "collect
+chords as something a song shows by itself (they are drawn along a reference, and written as notes), a general "collect
 all and save" (only what a song plays of studies is gathered), a drag between Trill's two windows tried with a
 real mouse, a study's models on anything but Windows (the models' own files are the same; the
 runtime and what drives a card are pinned for Windows alone), a transcriber as large as Magpie's, the six-stem

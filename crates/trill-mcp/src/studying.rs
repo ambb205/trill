@@ -53,7 +53,8 @@ corrections given to listen for a study are kept with it.
 - take_from_study puts what a study found into the song, each time as one undo step, by the bars, ids and line \
 numbers listen gives: `what` \"stretch\" (bars of one stem or of several, or of the whole recording) and \"loop\" \
 (one of its loops by id) become audio clips that follow the song's tempo, a beat of the recording for a beat of the \
-song, on a new track or on `track` at `at_bar`, `times` over; \"line\" and \"word\" are that stretch of the vocal, \
+song, on a new track or on `track` at `at_bar`, `times` rounds long (a stretch is a clip that plays round: made \
+longer, it repeats); \"line\" and \"word\" are that stretch of the vocal, \
 named by its words; \"one_shot\" puts a single hit on a lane, on a pad of a drum rack or into a sampler that plays a \
 bass note by its own pitch; \"kit\" makes a drum rack of the cleanest hit of each drum; \"notes\" writes the bass \
 line, the melody, the chords or the groove on an instrument track (a groove asks that track's kit for its drums by \
