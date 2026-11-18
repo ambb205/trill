@@ -386,5 +386,5 @@ fn ask(ctx: &egui::Context, cx: &Cx, question: &Question) -> Option<bool> {
         );
     }
     let title = format!("Remove {what} {}?", question.title).replace("  ", " ");
-    widgets::question(ctx, cx.theme, "study-remove", &title, &body, "Remove", "Keep")
+    widgets::question(ctx, cx.theme, "study-remove", &title, &body, "Yes, remove", "Keep")
 }

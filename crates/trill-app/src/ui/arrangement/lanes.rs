@@ -638,7 +638,8 @@ fn sound_drop(ui: &Ui, cx: &mut Cx, geometry: &Geometry) {
             }
         }
         None => {
-            let count = drag.paths.len();
+            // What comes from a study is no file, and makes one track.
+            let count = drag.paths.len().max(1);
             let colors = dragging::new_track_colors(cx, count);
             let color = colors::track_color(theme, colors[0]);
             // The band says a track will appear; the ghost, where on it.

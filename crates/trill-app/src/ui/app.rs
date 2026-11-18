@@ -1154,6 +1154,11 @@ impl TrillApp {
         &self.setup
     }
 
+    #[cfg(test)]
+    pub fn studies(&self) -> &super::study::Studies {
+        &self.studies
+    }
+
     /// Keeps studies, or the parts of a list, in `folder`: what choosing a
     /// folder in the system's dialog leads to.
     #[cfg(test)]

@@ -119,7 +119,7 @@ pub(super) fn sound_drop(ui: &Ui, cx: &mut Cx, area: Rect) {
     if !over {
         return;
     }
-    let count = cx.state.sound_drag.as_ref().map_or(1, |drag| drag.paths.len());
+    let count = cx.state.sound_drag.as_ref().map_or(1, |drag| drag.paths.len().max(1));
     let colors = dragging::new_track_colors(cx, count);
     if let Some(drag) = &mut cx.state.sound_drag {
         drag.offer(DropTarget::NewTrack { beat: 0.0, colors });

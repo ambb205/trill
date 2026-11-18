@@ -664,24 +664,31 @@ pub fn remove(ctx: &egui::Context, cx: &mut Cx, question: Question) {
         cx.studies.open = None;
         stop_sounding(cx);
     }
-    let reopen = cx.studies.open.as_ref().map(|open| open.id.clone()).filter(|id| *id == question.id);
-    act(ctx, cx, move |runtime| {
-        if question.stems {
-            let freed = runtime.drop_study_stems(&question.id)?;
-            Ok(format!(
-                "The stems of {} are gone ({} MB); what was found in them is kept.",
-                question.title,
-                freed / (1 << 20)
-            ))
+    // Its lanes are read again once the stems are gone: they then say so.
+    let reopen = cx.studies.open.as_ref().is_some_and(|open| open.id == question.id);
+    cx.studies.working += 1;
+    cx.studies.last = None;
+    cx.studies.spawn(ctx, &cx.sounds.runtime, move |runtime, report| {
+        let removed = if question.stems {
+            runtime.drop_study_stems(&question.id).map(|freed| {
+                format!(
+                    "The stems of {} are gone ({} MB); what was found in them is kept.",
+                    question.title,
+                    freed / (1 << 20)
+                )
+            })
         } else {
-            runtime.studies()?.delete(&question.id)?;
-            Ok(format!("{} is removed.", question.title))
+            runtime
+                .studies()
+                .and_then(|desk| desk.delete(&question.id))
+                .map(|_| format!("{} is removed.", question.title))
+        };
+        let gone = removed.is_ok();
+        report(Done::Said(removed));
+        if reopen && question.stems && gone {
+            report(Done::Opened(read(runtime, &question.id)));
         }
     });
-    if let Some(id) = reopen {
-        cx.studies.opening = None;
-        open(ctx, cx, &id);
-    }
 }
 
 /// Reads the grid of the open study another way, or with nothing the way

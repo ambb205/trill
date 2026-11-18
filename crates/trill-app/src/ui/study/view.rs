@@ -616,10 +616,13 @@ fn recording(ui: &mut Ui, cx: &mut Cx, open: &Arc<Open>, area: Rect) {
             .hint
             .set("Drag across the lanes to select a stretch \u{00B7} double-click for a bar \u{00B7} Ctrl+wheel zooms");
     }
+    // A drag is what it was where the button went down, not where the pointer has got to since.
+    let pressed = ui.input(|input| input.pointer.press_origin());
     if response.drag_started()
-        && let Some(at) = pointer
+        && let Some(at) = pressed.or(pointer)
     {
-        match over {
+        let picked_up = cx.studies.view.selection.clone().filter(|selection| inside(selection, at));
+        match picked_up {
             Some(_) => {
                 if let Some(take) = super::selected(cx) {
                     let beats = super::beats_of(cx, open, &take);
@@ -680,7 +683,7 @@ fn recording(ui: &mut Ui, cx: &mut Cx, open: &Arc<Open>, area: Rect) {
     }
     // Enter sends the selection to the song while the pointer is over the study.
     let entered = ui.rect_contains_pointer(area) && ui.input(|input| input.key_pressed(egui::Key::Enter));
-    if entered && cx.studies.view.word.is_none() && !ui.ctx().egui_wants_keyboard_input() {
+    if entered && cx.studies.view.word.is_none() && !ui.ctx().text_edit_focused() {
         super::to_the_song(&ctx, cx);
     }
 }
