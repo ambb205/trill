@@ -546,18 +546,28 @@ pub(crate) fn midi_params(controller: &ComPtr<IEditController>, channels: usize)
 /// A VST3 plugin is not sent MIDI controllers. One that understands them
 /// names a parameter for each, and the host sets that parameter instead.
 /// These two are how a host asks a plugin to fall silent.
-pub(crate) fn silencing_params(controller: &ComPtr<IEditController>) -> Vec<ParamID> {
+///
+/// They are asked for on each of the `channels` channels of the plugin's
+/// event bus, and each is returned with its channel, as a plugin counts
+/// them from 0: a plugin that keeps its channels apart is told on every
+/// channel a song spoke on. A parameter that stands for more than one
+/// channel is listed once, under the first of them.
+pub(crate) fn silencing_params(controller: &ComPtr<IEditController>, channels: usize) -> Vec<(u8, ParamID)> {
     let Some(mapping) = controller.cast::<IMidiMapping>() else { return Vec::new() };
-    [kCtrlAllSoundsOff, kCtrlAllNotesOff]
-        .into_iter()
-        .filter_map(|controller_number| {
+    let mut found: Vec<(u8, ParamID)> = Vec::new();
+    for channel in 0..channels.clamp(1, Channel::COUNT) {
+        for number in [kCtrlAllSoundsOff, kCtrlAllNotesOff] {
             let mut id: ParamID = 0;
             // SAFETY: `mapping` is an interface of the live edit
             // controller, used on the plugin main thread; `id` is a local.
-            let result = unsafe { mapping.getMidiControllerAssignment(0, 0, controller_number as CtrlNumber, &mut id) };
-            (result == kResultOk).then_some(id)
-        })
-        .collect()
+            let result =
+                unsafe { mapping.getMidiControllerAssignment(0, channel as i16, number as CtrlNumber, &mut id) };
+            if result == kResultOk && !found.iter().any(|(_, known)| *known == id) {
+                found.push((channel as u8, id));
+            }
+        }
+    }
+    found
 }
 
 #[cfg(test)]

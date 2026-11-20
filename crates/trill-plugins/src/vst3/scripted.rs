@@ -109,7 +109,8 @@ pub(crate) mod kind {
     /// value of a parameter it named for a MIDI controller. It names one
     /// for the pitch wheel, the pressure and the mod wheel on each of its
     /// channels ([`channel_param`](super::channel_param)), one for the
-    /// expression pedal on its first only, and none for the sustain pedal.
+    /// expression pedal on its first only, one for "all sound off" on
+    /// each, and none for the sustain pedal.
     pub(crate) const CHANNELS: u8 = 15;
 
     /// Plugins that keep whatever state they are handed and give it back,
@@ -164,6 +165,7 @@ fn of_channel_param(id: ParamID) -> Option<(crate::notes::Told, u8)> {
     let at = id.checked_sub(CHANNEL_PARAMS)?;
     let (channel, controller) = (at / NUMBERS_A_CHANNEL, at % NUMBERS_A_CHANNEL);
     let what = match controller {
+        120 => Told::AllSoundOff,
         128 => Told::Pressure,
         129 => Told::Wheel,
         _ => Told::Controller,
@@ -2075,7 +2077,11 @@ impl<const ROLE: u8> IMidiMappingTrait for Object<ROLE> {
         id: *mut ParamID,
     ) -> tresult {
         if self.kind == kind::CHANNELS && bus == 0 && (0..CHANNELS_ON_BUS as int16).contains(&channel) {
-            let named = matches!(controller, 1 | 128 | 129) || (controller == 11 && channel == 0);
+            // (Its first channel's "all sound off" is the one every scripted
+            // instrument names; each other channel has one of its own.)
+            let named = matches!(controller, 1 | 128 | 129)
+                || (controller == 11 && channel == 0)
+                || (controller == 120 && channel > 0);
             if named {
                 // SAFETY: the host passes its own `ParamID`.
                 unsafe { *id = channel_param(channel as u8, controller as u8) };

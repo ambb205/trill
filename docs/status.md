@@ -9,8 +9,14 @@ Only Windows has been run so far.
 
 - A session (clip-launching) view.
 - Audio recording. MIDI is recorded; audio is not.
-- Polyphonic aftertouch and MPE (per-note expression). A clip holds one curve per controller for the whole
-  channel.
+- Polyphonic aftertouch and MPE (per-note expression). A note has a MIDI channel and a clip a curve for each
+  controller on each channel, which is what an instrument that gives its channels meanings needs (an organ's
+  pedalboard, a guitar with a string to a channel); expression that belongs to one note among others of its
+  channel, and pressure on a single key, are not built.
+- A channel for what is played by hand. The computer keyboard, a MIDI port and a take are on the first channel,
+  whichever channel a keyboard sends on.
+- A MIDI file keeps the channels of a part that uses several; a part that is wholly on one channel comes in on
+  the first, so one written wholly on another does not come back on it.
 - ASIO (see [Playing and latency](window.md#playing-and-latency)).
 - Warp markers.
 - Plugin delay compensation.

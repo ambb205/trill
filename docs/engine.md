@@ -483,3 +483,20 @@ as a level. Three rules:
   while playing or loops round.
 - *The pedal* is recorded as a controller, and notes are as long as their keys were down: nothing is written
   twice, and half-pedalling survives.
+
+**By channel.** A note and a curve are each on one of sixteen MIDI channels, the first unless they say another,
+and whatever the engine remembers for a track it remembers by channel: which keys are down (the same key on two
+channels is two notes, and a key struck again while it sounds is let go of first on its own channel and nowhere
+else), where each controller stands, what is said again where a song starts in its middle, jumps or comes round
+(each channel's wheel, pressure and pedals on that channel, before the first note), and what is let go of where
+it stops. The lead-in of a render tells an instrument the same, and the wait before a render tries each note on
+the channel the part plays it on. The keys that choose how notes are played are keys on the first channel, and
+what is played by hand is on the first. Nothing of this is allocated while a song plays, and a song that uses
+channels is the same samples at any buffer size and on any number of threads, as any other
+(`trill-engine/tests/channels.rs`, and the part on three channels in `tests/cores.rs`).
+
+*MIDI files.* A file is written on the channels its notes and curves have, a drum part that says none on the
+tenth, as files have it. Read, a track whose notes are all on one channel comes in on the first: there the channel
+only said which instrument a part was for. A track that uses several keeps them, curves too. (A file of the kind
+that holds every part in one track is taken apart by channel, a part a channel, as it always was.) So a part
+that is wholly on another channel than the first comes back from a file on the first.

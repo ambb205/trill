@@ -22,6 +22,34 @@ a pitch-bend curve scaled to its bend range where it has not. Reading a song bac
 of the harmony and reads a bass at the octave it sounds. A part that lands outside the range, or on a keyswitch,
 says so when it is written.
 
+**MIDI channels.** A note is on one of sixteen channels, and a clip keeps a curve for each controller on each
+channel. Nearly every instrument plays all sixteen alike, and for those nothing ever says a channel: everything is
+on the first, a song that uses no other is written exactly as it was before notes had channels, and a song saved
+before plays to the bit as it did. A few instruments give their channels meanings of their own, and then the
+track's profile names them (`channels`). The Consort Organ plays its pedalboard from channel 2 and its manual from
+every other; the Consort Electric Guitar, while its own *String Channels* switch is on, has its strings on channels
+1 to 6 (and 7, on the body with a seventh), each with a pitch wheel of its own. The organ's names ship with Trill
+and are kept on the track. The guitar's are read from the plugin's switch whenever they are asked for, as a kit is,
+and kept nowhere in the song: switch it off and they are gone, and what was written stays on its channels.
+
+A part is written onto a channel by its name or its number (`channel: "pedalboard"`). A whole part goes there with
+the writing tools, and into a clip that already holds another channel's part it replaces only what its own channel
+had in those bars: a bass line onto the pedals of the clip that holds the manual's chords. A single note says its
+own (`{"pitch": "C2", "start": 0, "length": 4, "channel": 2}`). A curve is a channel's too, so the wheel of one
+string bends that string while the rest of the chord holds. Everything that moves, splits, loops, copies,
+quantizes or transposes notes keeps their channels; the same key at the same time on two channels is two notes,
+and each comes up on the channel it went down on. A reply says channels only where a clip uses another than the
+first, and a part written on another channel for an instrument that names none is told what that means: such an
+instrument may listen to the first only. What is played by hand (the computer keyboard, a MIDI port, a take) is on
+the first channel.
+
+Both were measured on the installed plugins, through the tools (`trill-mcp/tests/consort.rs`, opt-in). The
+organ's C3 on the manual and the same key on the pedalboard are two sounds: 355 crossings of zero a second
+against 173, and the pipe at the key's own pitch 7.6 dB quieter under the pedals. On the guitar, with a G held on
+the first string and a D on the second, the second channel's wheel all the way up puts the second string at
+64.08 (an E is 64) and leaves the first at 66.87 (a G is 67): in a render, in a song that plays, in a render that
+starts after the bend began (64.04 to 64.08), and in a song started there (64.05).
+
 **A kit says what is on its keys.** Two kits of one drum plugin do not keep their drums on the same keys: of the
 203 kits that came with Superior Drummer 3 on the machine this was written on, there are 37 different tables.
 Where a plugin's state says what hangs in each place and which keys strike it (Superior Drummer 3's does;
@@ -36,7 +64,8 @@ track's own map, then General MIDI.
 
 What is found out about a plugin is remembered for that plugin on this machine (`instruments`, beside the settings
 file) and given to the next track that plays it. Trill ships what was measured of a few: Ample Guitar PF, Metal
-Eclipse, Metal Hellrazer and Metal Ray5, Superior Drummer 3, and the SWAM winds and strings. A song opened from a
+Eclipse, Metal Hellrazer and Metal Ray5, Superior Drummer 3, the SWAM winds and strings, and the Consort Organ and
+Electric Guitar (what their MIDI channels are). A song opened from a
 file takes what is known where its tracks say nothing themselves. A probe says whether the instrument it played
 is known already, and names keys and ranges in the words `set_instrument_profile` takes, so that what one probe
 found is written down in one call.

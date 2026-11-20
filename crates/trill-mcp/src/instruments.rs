@@ -33,8 +33,8 @@ the articulations it can be asked for, its range, the octave it sounds at. A tra
 instrument: Trill ships it for some plugins and remembers what you taught it about others. A song that is \
 opened takes it too, for the tracks that say nothing themselves.
 - get_instrument_profile on a track is what to read before writing for it. For the instruments Trill knows \
-(the Ample guitars and bass, Superior Drummer 3, the SWAM winds and strings, and whatever was taught on this \
-machine) it is enough to write a part without probing anything.
+(the Ample guitars and bass, Superior Drummer 3, the SWAM winds and strings, the Consort Organ and Electric \
+Guitar, and whatever was taught on this machine) it is enough to write a part without probing anything.
 - A drum track's notes are drums, written by name: write_drums lanes, and drum names in create_clip and \
 add_notes. Which key a drum is on is the kit's business, and kits of one plugin differ: one hangs its china \
 where another has a crash, or has no splash at all. Where the plugin says what its kit has on its keys \

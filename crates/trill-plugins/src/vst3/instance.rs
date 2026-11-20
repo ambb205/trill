@@ -98,7 +98,7 @@ pub(crate) struct Created {
     /// Whether the plugin has an event bus to send notes to.
     pub takes_notes: bool,
     /// The parameters that stand for MIDI's "all sound off".
-    pub silencing: Vec<ParamID>,
+    pub silencing: Vec<(u8, ParamID)>,
     /// The parameters that stand for the pedal, the wheels and the other
     /// MIDI controllers.
     pub midi: params::MidiParams,
@@ -653,8 +653,9 @@ impl Vst3Thread {
         let table = instance.controller.as_ref().map(|controller| params::read(&controller.edit, &request.name));
         let table = table.unwrap_or_default();
         let mut listed = table.listed;
-        let silencing = instance.controller.as_ref().map(|controller| params::silencing_params(&controller.edit));
         let channels = instance.note_channels();
+        let silencing =
+            instance.controller.as_ref().map(|controller| params::silencing_params(&controller.edit, channels));
         let midi = instance.controller.as_ref().map(|controller| params::midi_params(&controller.edit, channels));
         steps.done("its parameters");
         let latency = instance.activate()?;

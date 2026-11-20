@@ -118,6 +118,11 @@ impl Session {
         if found.profile.names_channels() {
             return found.profile.channels.clone();
         }
+        // (This is asked of every track with every change to the song:
+        // nothing is looked up for a track that has no such instrument.)
+        if !found.devices.iter().any(|device| InstrumentKnowledge::channels_follow_a_setting(&device.uri)) {
+            return BTreeMap::new();
+        }
         let Some(device) = self.instrument_of(track) else { return BTreeMap::new() };
         if !InstrumentKnowledge::channels_follow_a_setting(&device.uri) {
             return BTreeMap::new();

@@ -339,7 +339,7 @@ async fn a_track_given_a_plugin_trill_knows_starts_out_knowing_its_keys() {
     assert_eq!((entry["source"].as_str(), entry["device"].as_str()), (Some("built_in"), Some("Superior Drummer 3")));
     let all = ok(client, "get_instrument_profile", json!({})).await;
     let listed = all["instruments"].as_array().unwrap();
-    assert_eq!(listed.len(), 15, "the entries Trill ships");
+    assert_eq!(listed.len(), 17, "the entries Trill ships");
     assert!(
         listed.iter().any(|known| known["uri"] == ECLIPSE && known["knows"].as_str().unwrap().contains("palm_mute"))
     );

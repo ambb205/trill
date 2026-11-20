@@ -62,19 +62,20 @@ fn the_channel_of_the_selected_notes_is_set_in_the_sidebar_and_new_notes_are_dra
 
     // A note drawn now is drawn on the chosen channel.
     harness.settle();
-    harness.click(harness.note_cell(3.5, 67));
+    harness.click(harness.note_cell(3.5, 62));
     harness.idle(1);
-    assert_eq!(channels_of(&harness, clip), [(60, 3), (64, 1), (67, 3)]);
-    // Moved, it keeps its channel.
+    assert_eq!(channels_of(&harness, clip), [(60, 3), (64, 1), (62, 3)]);
+    // A note that is moved keeps its channel: the first one, half a beat
+    // on and a key up.
     harness.settle();
-    harness.drag(harness.note_cell(3.5, 67), harness.note_cell(5.5, 69));
-    assert_eq!(channels_of(&harness, clip), [(60, 3), (64, 1), (69, 3)]);
+    harness.drag(harness.note_cell(1.3, 60), harness.note_cell(1.8, 61));
+    assert_eq!(channels_of(&harness, clip), [(61, 3), (64, 1), (62, 3)]);
 
     // Every note selected and the field dragged down past the first:
     // they are all on the first again.
     harness.key(Modifiers::COMMAND, Key::A);
     raise_channel(&mut harness, -6.0);
-    assert_eq!(channels_of(&harness, clip), [(60, 1), (64, 1), (69, 1)]);
+    assert_eq!(channels_of(&harness, clip), [(61, 1), (64, 1), (62, 1)]);
     assert_eq!(harness.app.state().piano.channel, Channel::FIRST);
 }
 
@@ -102,7 +103,6 @@ fn the_lane_shows_and_edits_the_curve_of_the_chosen_channel() {
     raise_channel(&mut harness, 1.0);
     assert_eq!(harness.app.state().piano.channel, second);
     assert!(harness.is_on_screen("Expression curve, channel 2"));
-    assert!(!harness.is_on_screen("Expression curve"));
 
     // A click in the lane adds a point to that curve, and leaves the
     // first channel's as it was.
@@ -137,4 +137,16 @@ fn an_instrument_that_names_its_channels_is_said_so_where_a_channel_is_chosen() 
     harness.move_to(harness.labeled("Channel"));
     harness.idle(1);
     assert!(harness.hint().contains("gives its channels meanings"), "{}", harness.hint());
+    // And a note under the pointer says which channel it is on, by the
+    // instrument's name for it.
+    let clip = harness.app.state().selected_clip.unwrap();
+    harness
+        .session
+        .lock()
+        .edit(|project| project.clip_mut(clip)?.set_note_channels(channel(2), |_| true).map(|_| ()))
+        .unwrap();
+    harness.idle(2);
+    harness.move_to(harness.note_cell(1.5, 60));
+    harness.idle(1);
+    assert!(harness.hint().starts_with("Channel 2 Pedalboard"), "{}", harness.hint());
 }

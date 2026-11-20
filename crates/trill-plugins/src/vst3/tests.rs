@@ -1182,11 +1182,20 @@ fn a_plugin_is_told_each_note_wheel_and_controller_on_the_channel_it_is_on() {
     let (left, _) = block(&mut instance, BLOCK, &[pedal(0.0)], 0.0);
     assert_eq!(heard(&left), [(0, Told::NoteOff, 2)]);
 
-    // A reset lets go of the keys that are down, each on its own channel.
+    // A reset lets go of the keys that are down, each on its own channel,
+    // and tells every channel anything was said on that all sound is off,
+    // through the parameter the plugin names for that on each: the first,
+    // the second and the sixth, and none of the others.
     block(&mut instance, BLOCK, &[Event::on(sixth, 0, down), Event::on(second, 1, down)], 0.0);
     instance.processor.reset();
     let (left, _) = block(&mut instance, BLOCK, &[], 0.0);
-    let told = [said(Told::AllSoundOff, 1), said(Told::NoteOff, 2), said(Told::NoteOff, 6)];
+    let told = [
+        said(Told::AllSoundOff, 2),
+        said(Told::AllSoundOff, 6),
+        said(Told::AllSoundOff, 1),
+        said(Told::NoteOff, 2),
+        said(Told::NoteOff, 6),
+    ];
     assert_eq!(left[0], told.iter().fold(0.0, |sum, sample| sum + sample));
     assert!(left[1..].iter().all(|sample| *sample == 0.0));
 }

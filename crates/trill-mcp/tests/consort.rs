@@ -39,8 +39,6 @@ const FOLDER: &str = r"C:\Program Files\Common Files\VST3\Consort";
 const ORGAN: &str = "vst3:ABCDEF019182FAEB436E73724F72676E";
 const GUITAR: &str = "vst3:ABCDEF019182FAEB436E7372456C4774";
 const RATE: f64 = 48_000.0;
-const HOW: &str = "needs the Consort plugins (VST3) installed; run with `cargo test -p trill-mcp --test consort -- \
-                   --include-ignored --nocapture --test-threads 1`";
 
 struct Fixture {
     client: Client,
@@ -609,5 +607,4 @@ async fn two_files_to_listen_to_are_written_through_the_tools() {
     let report = ok(client, "render", json!({ "path": wav.display().to_string(), "max_tail_seconds": 4 })).await;
     eprintln!("{}: {} s, peak {} dB", wav.display(), report["duration_seconds"], report["peak_db"]);
     assert!(report["peak_db"].as_f64().unwrap() > -40.0, "{report}");
-    let _ = HOW;
 }

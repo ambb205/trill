@@ -1119,6 +1119,28 @@ mod tests {
             did("write_chords", json!({ "clip": clip, "progression": "Am | F" }), p),
             "Wrote chords in \u{201C}Verse\u{201D}"
         );
+        // A MIDI channel is said where a call names one: by its number,
+        // or as its instrument calls it.
+        assert_eq!(
+            did("write_bass", json!({ "clip": clip, "progression": "Am | F", "channel": "pedalboard" }), p),
+            "Wrote a bass line in \u{201C}Verse\u{201D} on the pedalboard channel"
+        );
+        assert_eq!(
+            did("write_melody", json!({ "track": track, "phrase": "1 2 3", "channel": 3 }), p),
+            "Wrote a melody on \u{201C}Bass\u{201D} on channel 3"
+        );
+        assert_eq!(
+            did("add_notes", json!({ "clip": clip, "notes": [[60, 0, 1]], "channel": "String_2" }), p),
+            "Added 1 note to \u{201C}Verse\u{201D} on the string 2 channel"
+        );
+        assert_eq!(
+            did("set_controllers", json!({ "clip": clip, "channel": "2", "controllers": {} }), p),
+            "Shaped the controllers of \u{201C}Verse\u{201D} on channel 2"
+        );
+        assert_eq!(
+            did("transform_notes", json!({ "clip": clip, "highest": "B2", "to_channel": "pedalboard" }), p),
+            "Put the notes of \u{201C}Verse\u{201D} on the pedalboard channel"
+        );
         assert_eq!(
             did(
                 "set_automation",

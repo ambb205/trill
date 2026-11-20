@@ -46,9 +46,9 @@ pub(super) const DEFAULT_VELOCITY: u8 = 100;
 /// where channels are shown.
 const OTHER_CHANNEL: f32 = 0.5;
 /// The narrowest note, and the lowest row, that carries its channel's
-/// number.
+/// number: a row of the roll at its smallest still has room for a digit.
 const CHANNEL_MARK_WIDTH: f32 = 14.0;
-const CHANNEL_MARK_HEIGHT: f32 = 11.0;
+const CHANNEL_MARK_HEIGHT: f32 = 8.0;
 const DRUM_KIT: &str = "builtin:drumkit";
 const SIDEBAR_PADDING: f32 = 10.0;
 
@@ -437,6 +437,16 @@ fn shows_channels(cx: &Cx, track: TrackId, midi: &MidiContent) -> bool {
     midi.uses_channels() || cx.snap.channel_names(track).is_some()
 }
 
+/// The channels a clip uses, in few words: "1, 2", or "1\u{2013}6" for a run.
+fn channels_said(channels: &[Channel]) -> String {
+    let numbers: Vec<u8> = channels.iter().map(|channel| channel.number()).collect();
+    let run = numbers.len() > 2 && numbers.windows(2).all(|pair| pair[1] == pair[0] + 1);
+    match (run, numbers.first(), numbers.last()) {
+        (true, Some(first), Some(last)) => format!("{first}\u{2013}{last}"),
+        _ => numbers.iter().map(u8::to_string).collect::<Vec<String>>().join(", "),
+    }
+}
+
 /// Clip name, start, length and loop; the grid; the selected notes.
 fn sidebar(ui: &mut Ui, cx: &mut Cx, track: TrackId, clip: &Clip, rect: Rect) {
     let theme = cx.theme;
@@ -656,9 +666,8 @@ fn sidebar(ui: &mut Ui, cx: &mut Cx, track: TrackId, clip: &Clip, rect: Rect) {
     if foot.top() >= stack.top + 4.0 {
         let summary = match timeline::pitch_range(&midi.notes) {
             Some((low, high)) if shows_channels(cx, track, midi) => {
-                let on: Vec<String> = midi.channels().iter().map(Channel::to_string).collect();
                 let range = format!("{} \u{2013} {}", pitch_name(low), pitch_name(high));
-                format!("{} notes \u{00B7} {range} \u{00B7} ch {}", midi.notes.len(), on.join(", "))
+                format!("{} notes \u{00B7} {range} \u{00B7} ch {}", midi.notes.len(), channels_said(&midi.channels()))
             }
             Some((low, high)) => {
                 format!("{} notes \u{00B7} {} \u{2013} {}", midi.notes.len(), pitch_name(low), pitch_name(high))
@@ -1023,7 +1032,10 @@ fn paint_grid(ui: &Ui, cx: &Cx, geometry: &Geometry, color: Color32, clip: &Clip
     painter.add(Shape::mesh(bodies));
     for (body, channel) in marked {
         let inside = body.shrink2(vec2(3.0, 0.0)).intersect(grid);
-        text::paint(&painter, inside, Align2::LEFT_CENTER, theme.text.micro, &channel.to_string(), theme.bg);
+        // Dark on a note of the chosen channel, which is lit; light on the
+        // others, which stand back.
+        let ink = if channel == chosen { theme.bg } else { theme.ink };
+        text::paint(&painter, inside, Align2::LEFT_CENTER, theme.text.micro, &channel.to_string(), ink);
     }
     for outline in outlines {
         paint::frame(&painter, outline, theme.ink);
@@ -1387,10 +1399,22 @@ fn grid_interaction(
                 ui.set_cursor_icon(CursorIcon::ResizeHorizontal);
                 cx.state.hint.set("Drag to change the note\u{2019}s length \u{00B7} Alt for no snapping");
             }
-            Some(_) => cx
-                .state
-                .hint
-                .set("Drag to move \u{00B7} Shift-click adds to the selection \u{00B7} right-click deletes"),
+            Some((index, _)) => {
+                let moving = "Drag to move \u{00B7} Shift-click adds to the selection \u{00B7} right-click deletes";
+                // Where channels are anything to see, the note says which it is on.
+                let shown = clip.midi().is_some_and(|midi| shows_channels(cx, track.id, midi));
+                match notes.get(index).filter(|_| shown) {
+                    Some(note) => {
+                        let named = cx.snap.channel_names(track.id).and_then(|names| names.get(&note.channel));
+                        let channel = match named {
+                            Some(name) => format!("{} {name}", note.channel),
+                            None => note.channel.to_string(),
+                        };
+                        cx.state.hint.set(format!("Channel {channel} \u{00B7} {moving}"));
+                    }
+                    None => cx.state.hint.set(moving),
+                }
+            }
             None => {
                 cx.state.hint.set("Click to add a note \u{00B7} drag to select \u{00B7} scroll moves through the keys")
             }
@@ -1533,6 +1557,15 @@ mod tests {
 
     fn note(pitch: u8, start: Beats, length: Beats) -> Note {
         Note { pitch, start, length, velocity: 100, ..Default::default() }
+    }
+
+    #[test]
+    fn the_channels_of_a_clip_are_said_in_few_words() {
+        let channels = |numbers: &[u8]| -> Vec<Channel> { numbers.iter().filter_map(|n| Channel::new(*n)).collect() };
+        assert_eq!(channels_said(&channels(&[1])), "1");
+        assert_eq!(channels_said(&channels(&[1, 2])), "1, 2");
+        assert_eq!(channels_said(&channels(&[1, 2, 3, 4, 5, 6])), "1\u{2013}6");
+        assert_eq!(channels_said(&channels(&[1, 3, 10])), "1, 3, 10");
     }
 
     #[test]

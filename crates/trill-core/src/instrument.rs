@@ -822,8 +822,8 @@ mod tests {
 
         // A name that says nothing, says a number, or is said twice.
         let with = |names: &[(u8, &str)]| {
-            let mut profile = InstrumentProfile::default();
-            profile.channels = names.iter().map(|(number, name)| (channel(*number), name.to_string())).collect();
+            let channels = names.iter().map(|(number, name)| (channel(*number), name.to_string())).collect();
+            let profile = InstrumentProfile { channels, ..InstrumentProfile::default() };
             profile.validated().map_err(|error| error.to_string())
         };
         assert!(with(&[(2, "  ")]).unwrap_err().contains("channel 2 needs a name"));

@@ -172,6 +172,9 @@ pub(crate) struct BlockEvents {
     /// The sustain pedal of each channel, worked out here for a plugin
     /// that has no parameter for it.
     pedals: Pedals,
+    /// The channels the plugin was ever told anything on, a bit each: the
+    /// ones a silence has to reach.
+    spoken: u16,
     /// What the controllers of the block last filled set: parameter, frame
     /// and normalized value, in the order they were set. Never grows.
     controls: Vec<(ParamID, u32, f64)>,
@@ -186,6 +189,7 @@ impl BlockEvents {
             list: EventList::with_capacity(MAX_NOTE_EVENTS + MAX_SILENCE_EVENTS),
             midi,
             pedals: Pedals::default(),
+            spoken: 0,
             controls: Vec::with_capacity(MAX_CONTROL_POINTS),
         }
     }
@@ -194,6 +198,12 @@ impl BlockEvents {
     /// with the frame it was set at, for the block's parameter changes.
     pub(crate) fn controls(&self) -> &[(ParamID, u32, f64)] {
         &self.controls
+    }
+
+    /// The channels the plugin was ever told anything on, a bit each, as
+    /// the plugin counts them from 0.
+    pub(crate) fn spoken(&self) -> u16 {
+        self.spoken
     }
 
     /// The list to pass to `process`. It is the same one for every block.
@@ -226,7 +236,7 @@ impl BlockEvents {
         events: &[device::Event],
         (start, frames, total): (usize, usize, usize),
     ) -> bool {
-        let Self { takes_notes, held, silence, list, midi, pedals, controls } = self;
+        let Self { takes_notes, held, silence, list, midi, pedals, spoken, controls } = self;
         controls.clear();
         // Every value a controller took in the block is sent, at its frame:
         // a plugin follows a swell as the slope it is. Where there is no
@@ -235,8 +245,8 @@ impl BlockEvents {
         let mut set = |id: ParamID, time: u32, value: f64| {
             // The events come in the order of their frames, so one of this
             // parameter on this very frame is among the last that were set.
-            let latest = controls.iter().rev().take_while(|(_, at, _)| *at >= time);
-            let here = { latest }.position(|(known, ..)| *known == id).map(|back| controls.len() - 1 - back);
+            let mut latest = controls.iter().rev().take_while(|(_, at, _)| *at >= time);
+            let here = latest.position(|(known, ..)| *known == id).map(|back| controls.len() - 1 - back);
             match here {
                 Some(index) => controls[index].2 = value,
                 None if controls.len() < controls.capacity() => controls.push((id, time, value)),
@@ -267,6 +277,7 @@ impl BlockEvents {
                 // The channel the plugin has for it: everything below is
                 // kept by what the plugin was told.
                 let channel = midi.channel(channel);
+                *spoken |= 1 << channel.index();
                 match kind {
                     EventKind::NoteOn { pitch, velocity } => {
                         pedals.of(channel).key_down(pitch);
