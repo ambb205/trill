@@ -35,7 +35,8 @@ use crate::monitor::{Beats, Monitor};
 use crate::spread::{Spread, Workers};
 use crate::team::Team;
 use std::time::Instant;
-use trill_core::controllers::{CONTROLLER_KINDS, ControllerKind};
+use trill_core::Channel;
+use trill_core::controllers::{CONTROLLER_KINDS, ControllerKind, ControllerLane};
 use trill_core::device::{Event, EventKind, KeyInput, MAX_EVENTS_PER_BLOCK, ProcessInfo, SongTime};
 use trill_core::project::MIN_VOLUME_DB;
 use trill_core::{DeviceId, MeterMap, TempoMap, TrackId};
@@ -1266,7 +1267,7 @@ pub(crate) fn prelude(track: &mut TrackNode, common: &Common, room: &mut Room, h
                 track.state.latched = UNKNOWN;
             }
             track.state.played(event.kind, routed);
-            events.push(Event { offset, kind: event.kind });
+            events.push(Event::new(offset, event.kind));
             let keeps = matches!(event.kind, EventKind::NoteOn { .. } | EventKind::NoteOff { .. })
                 || ControllerKind::of_event(event.kind).is_some();
             if let (true, Some(heard), Some(capture)) = (keeps, recorded, &mut *hand.capture) {
@@ -1578,22 +1579,21 @@ fn release_notes(track: &mut TrackNode, flush: Flush, events: &mut Vec<Event>) {
     let state = &mut track.state;
     match flush {
         Flush::Nothing => {}
-        // The song's notes go; the keys held by hand stay down.
+        // The song's notes go, each on the channel it is on; the keys held
+        // by hand, which are on the first, stay down.
         Flush::Song if state.live_held != 0 => {
-            if state.active_count > 0 {
-                for pitch in 0..128usize {
-                    if state.active_until[pitch] >= 0.0 && state.live_held & (1 << pitch) == 0 {
-                        events.push(Event { offset: 0, kind: EventKind::NoteOff { pitch: pitch as u8 } });
-                    }
+            let held = state.live_held;
+            state.sounding.each(|channel, pitch| {
+                if !(channel.is_first() && held & (1 << pitch) != 0) {
+                    events.push(Event::on(channel, 0, EventKind::NoteOff { pitch }));
                 }
-            }
-            state.active_until = [-1.0; 128];
-            state.active_count = 0;
+            });
+            state.sounding.clear();
         }
+        // Every note of every channel.
         Flush::Song | Flush::Everything => {
-            events.push(Event { offset: 0, kind: EventKind::AllNotesOff });
-            state.active_until = [-1.0; 128];
-            state.active_count = 0;
+            events.push(Event::new(0, EventKind::AllNotesOff));
+            state.sounding.clear();
             state.forget_live();
         }
     }
@@ -1604,7 +1604,7 @@ fn release_notes(track: &mut TrackNode, flush: Flush, events: &mut Vec<Event>) {
 fn release_routed(track: &mut TrackNode, events: &mut Vec<Event>, mut released: impl FnMut(EventKind)) {
     let state = &mut track.state;
     let mut push = |kind: EventKind| {
-        events.push(Event { offset: 0, kind });
+        events.push(Event::new(0, kind));
         released(kind);
     };
     let held = std::mem::take(&mut state.routed_held);
@@ -1677,42 +1677,50 @@ fn collect_controllers(track: &mut TrackNode, block: &ControlBlock, events: &mut
     if std::mem::take(&mut state.resend) {
         // The instrument knows nothing: what the song said must be said
         // again, and first of all what the hand has set.
-        state.sent = [f32::NAN; CONTROLLER_KINDS];
+        state.sent.forget();
         for (index, value) in state.live.iter().enumerate().filter(|(_, value)| !value.is_nan()) {
             if let (Some(kind), true) = (ControllerKind::from_index(index), room(events)) {
-                events.push(Event { offset: 0, kind: kind.event(*value) });
+                events.push(Event::new(0, kind.event(*value)));
             }
         }
     }
     if std::mem::take(&mut state.lanes_changed) {
-        // A controller the song moved and has no curve for any more: what
-        // springs back goes to rest, so that no pedal stays down for a
-        // curve that was deleted; the rest stay where they were left.
-        for index in 0..CONTROLLER_KINDS {
-            let sent = state.sent[index];
-            if sent.is_nan() || controllers.iter().any(|lane| lane.kind.index() == index) {
-                continue;
-            }
-            state.sent[index] = f32::NAN;
-            let rest = ControllerKind::from_index(index).and_then(|kind| Some((kind, kind.rest()? as f32)));
-            if let Some((kind, rest)) = rest
-                && sent != rest
-                && state.live[index].is_nan()
-                && room(events)
-            {
-                events.push(Event { offset: 0, kind: kind.event(rest) });
+        // A controller the song moved and has no curve for any more, on
+        // any channel: what springs back goes to rest, so that no pedal
+        // stays down for a curve that was deleted; the rest stay where
+        // they were left.
+        for channel in Channel::all() {
+            for index in 0..CONTROLLER_KINDS {
+                let sent = state.sent.get(channel, index);
+                let has_lane = |lane: &ControllerLane| lane.channel == channel && lane.kind.index() == index;
+                if sent.is_nan() || controllers.iter().any(has_lane) {
+                    continue;
+                }
+                state.sent.set(channel, index, f32::NAN);
+                let rest = ControllerKind::from_index(index).and_then(|kind| Some((kind, kind.rest()? as f32)));
+                // (The hand's are on the first channel.)
+                let hands = channel.is_first() && !state.live[index].is_nan();
+                if let Some((kind, rest)) = rest
+                    && sent != rest
+                    && !hands
+                    && room(events)
+                {
+                    events.push(Event::on(channel, 0, kind.event(rest)));
+                }
             }
         }
     }
     if controllers.is_empty() {
         return;
     }
+    // What the hand has moved is on the first channel: the song's curves
+    // on the others are never anyone's but the song's.
     if block.take_back {
-        for lane in controllers.iter() {
+        for lane in controllers.iter().filter(|lane| lane.channel.is_first()) {
             let index = lane.kind.index();
             if !state.live[index].is_nan() {
                 state.live[index] = f32::NAN;
-                state.sent[index] = f32::NAN;
+                state.sent.set(Channel::FIRST, index, f32::NAN);
             }
         }
     }
@@ -1720,16 +1728,16 @@ fn collect_controllers(track: &mut TrackNode, block: &ControlBlock, events: &mut
     let mut tell = |offset: usize, beat: f64| {
         for lane in controllers.iter() {
             let index = lane.kind.index();
-            if !state.live[index].is_nan() {
+            if lane.channel.is_first() && !state.live[index].is_nan() {
                 continue;
             }
             let value = match lane.kind.rest() {
                 Some(rest) if !block.playing => rest as f32,
                 _ => lane.value_at(beat) as f32,
             };
-            if value != state.sent[index] && room(events) {
-                state.sent[index] = value;
-                events.push(Event { offset: offset as u32, kind: lane.kind.event(value) });
+            if value != state.sent.get(lane.channel, index) && room(events) {
+                state.sent.set(lane.channel, index, value);
+                events.push(Event::on(lane.channel, offset as u32, lane.kind.event(value)));
             }
         }
     };
@@ -1813,18 +1821,15 @@ fn chase_switches(track: &mut TrackNode, block: &ControlBlock, events: &mut Vec<
         }
         if !block.playing {
             let last = block.frames.saturating_sub(1) as u32;
-            events.push(Event { offset: 0, kind: EventKind::NoteOn { pitch, velocity } });
-            events.push(Event { offset: last, kind: EventKind::NoteOff { pitch } });
+            events.push(Event::new(0, EventKind::NoteOn { pitch, velocity }));
+            events.push(Event::new(last, EventKind::NoteOff { pitch }));
             continue;
         }
-        let key = usize::from(pitch.min(127));
-        if state.active_until[key] >= 0.0 {
-            events.push(Event { offset: 0, kind: EventKind::NoteOff { pitch } });
-        } else {
-            state.active_count += 1;
+        // (On the first channel, where the keys that switch are.)
+        if state.sounding.begin(Channel::FIRST, pitch, until) {
+            events.push(Event::new(0, EventKind::NoteOff { pitch }));
         }
-        state.active_until[key] = until;
-        events.push(Event { offset: 0, kind: EventKind::NoteOn { pitch, velocity } });
+        events.push(Event::new(0, EventKind::NoteOn { pitch, velocity }));
     }
 }
 
@@ -1844,7 +1849,7 @@ const TELL_AGAIN: u32 = 16_384;
 /// was stopped and started again.
 fn listen_for_an_answer(track: &mut TrackNode, left: &[f32], right: &[f32]) {
     let state = &mut track.state;
-    let sounding = state.active_count > 0 || state.live_held != 0;
+    let sounding = !state.sounding.is_empty() || state.live_held != 0;
     if sounding && !state.had_notes {
         // A phrase begins: what was heard before is no answer to it.
         state.answered = false;
@@ -1977,24 +1982,18 @@ fn collect_notes(
     let stay_keys = track.stay_keys;
     let state = &mut track.state;
 
-    // Notes from earlier blocks that end in this one.
+    // Notes from earlier blocks that end in this one: each key comes up on
+    // the channel it went down on.
     let release_ended = |state: &mut TrackState, events: &mut Vec<Event>| {
-        if state.active_count == 0 {
-            return;
-        }
-        for pitch in 0..128usize {
-            let end = state.active_until[pitch];
-            if end >= 0.0 && end < until {
-                events.push(Event { offset: offset_of(end), kind: EventKind::NoteOff { pitch: pitch as u8 } });
-                state.active_until[pitch] = -1.0;
-                state.active_count -= 1;
-            }
-        }
+        state.sounding.end_before(until, |channel, pitch, end| {
+            events.push(Event::on(channel, offset_of(end), EventKind::NoteOff { pitch }));
+        });
     };
     release_ended(state, events);
 
-    // Notes that start in this block. A pitch that is still sounding is
-    // released first, so repeated notes retrigger cleanly.
+    // Notes that start in this block. A key that is still sounding on the
+    // note's channel is released first, so repeated notes retrigger
+    // cleanly; the same key on another channel is another note and goes on.
     let first = track.notes.partition_point(|note| note.start < from);
     let mut started = false;
     for note in &track.notes[first..] {
@@ -2002,19 +2001,14 @@ fn collect_notes(
             break;
         }
         let offset = offset_of(note.start);
-        let pitch = note.pitch as usize;
-        if state.active_until[pitch] >= 0.0 {
-            events.push(Event { offset, kind: EventKind::NoteOff { pitch: note.pitch } });
-        } else {
-            state.active_count += 1;
+        let channel = note.channel;
+        if state.sounding.begin(channel, note.pitch, note.end) {
+            events.push(Event::on(channel, offset, EventKind::NoteOff { pitch: note.pitch }));
         }
-        state.active_until[pitch] = note.end;
-        events.push(Event {
-            offset,
-            kind: EventKind::NoteOn { pitch: note.pitch, velocity: note.velocity as f32 / 127.0 },
-        });
+        let velocity = note.velocity as f32 / 127.0;
+        events.push(Event::on(channel, offset, EventKind::NoteOn { pitch: note.pitch, velocity }));
         // A key that stays chosen is what the instrument is on from here.
-        if stay_keys & (1 << pitch) != 0 {
+        if channel.is_first() && stay_keys & (1 << note.pitch.min(127)) != 0 {
             state.latched = note.pitch;
         }
         started = true;
@@ -2220,7 +2214,9 @@ mod tests {
     fn track(notes: &[(f64, f64, u8)]) -> TrackNode {
         TrackNode {
             id: TrackId(1),
-            notes: notes.iter().map(|&(start, end, pitch)| NoteEvent { start, end, pitch, velocity: 127 }).collect(),
+            notes: (notes.iter())
+                .map(|&(start, end, pitch)| NoteEvent { start, end, pitch, velocity: 127, channel: Channel::FIRST })
+                .collect(),
             switches: Vec::new(),
             switch_keys: 0,
             stay_keys: 0,
@@ -2276,7 +2272,7 @@ mod tests {
             events_of(&mut track, 3),
             [(25, true, 60), (50, false, 60), (50, true, 60), (100, false, 60), (100, true, 60), (150, false, 60)]
         );
-        assert_eq!(track.state.active_count, 0);
+        assert_eq!(track.state.sounding.count(), 0);
     }
 
     #[test]
@@ -2292,6 +2288,6 @@ mod tests {
     fn overlapping_notes_on_one_pitch_leave_nothing_hanging() {
         let mut track = track(&[(0.0, 2.5, 60), (1.2, 1.4, 60)]);
         assert_eq!(events_of(&mut track, 3), [(0, true, 60), (120, false, 60), (120, true, 60), (140, false, 60)]);
-        assert_eq!(track.state.active_count, 0);
+        assert_eq!(track.state.sounding.count(), 0);
     }
 }

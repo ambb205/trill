@@ -11,7 +11,15 @@
 //! With it a drum name lands on the note this kit uses, an articulation is
 //! asked for by name instead of by a silent low note, and whoever reads the
 //! music back knows which notes are music.
+//!
+//! A few instruments give their MIDI channels meanings as well: an organ
+//! plays its pedalboard from the second, a guitar can have a string to a
+//! channel. The profile names those channels
+//! ([`InstrumentProfile::channels`]), and only then is a channel anything
+//! to choose: on every other instrument all sixteen are the one
+//! instrument, and a song for it says none.
 
+use crate::channel::Channel;
 use crate::device::PITCH_BEND_SEMITONES;
 use crate::pitch::{drum_name, drum_stand_in, name_key, parse_drum, pitch_name};
 use crate::project::EditError;
@@ -24,6 +32,8 @@ pub const MAX_BEND_SEMITONES: f64 = 96.0;
 pub const MAX_OCTAVES: i8 = 4;
 /// How many characters of free text a profile keeps.
 pub const MAX_NOTES_TEXT: usize = 2400;
+/// How many characters the name of a channel may have.
+pub const MAX_CHANNEL_NAME: usize = 40;
 
 /// Whether a track's notes are pitches or drums.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -157,6 +167,14 @@ pub struct InstrumentProfile {
     /// synths with legato do.
     #[serde(default, skip_serializing_if = "is_false")]
     pub slurs: bool,
+    /// What the instrument's MIDI channels are, where it gives them
+    /// meanings of their own, by the channel's number: an organ's
+    /// "Pedalboard" on 2, a guitar's "String 3" on 3. A channel that is
+    /// not named plays the instrument as the first does. Empty for nearly
+    /// every instrument, which takes all sixteen as one: a song for it
+    /// leaves everything on the first.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub channels: BTreeMap<Channel, String>,
     /// Anything else worth knowing when writing for it, in words.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
@@ -400,7 +418,52 @@ impl InstrumentProfile {
             return invalid(format!("the notes are longer than {MAX_NOTES_TEXT} characters"));
         }
         self.notes = self.notes.trim().to_string();
+        let mut named: Vec<String> = Vec::new();
+        for (channel, name) in &mut self.channels {
+            *name = name.split_whitespace().collect::<Vec<&str>>().join(" ");
+            if name.is_empty() || name.chars().count() > MAX_CHANNEL_NAME {
+                return invalid(format!(
+                    "channel {channel} needs a name of 1 to {MAX_CHANNEL_NAME} characters (\"Pedalboard\", \"String 3\")"
+                ));
+            }
+            // A name that is a number would be read as that channel.
+            if name.parse::<f64>().is_ok() {
+                return invalid(format!("'{name}' cannot be the name of channel {channel}: it is a number"));
+            }
+            let key = name_key(name);
+            if named.contains(&key) {
+                return invalid(format!("two channels are called '{name}'"));
+            }
+            named.push(key);
+        }
         Ok(self)
+    }
+
+    /// Whether the instrument gives its channels meanings of their own:
+    /// whether a channel is anything to choose when writing for it.
+    pub fn names_channels(&self) -> bool {
+        !self.channels.is_empty()
+    }
+
+    /// What the instrument calls `channel`, where it names it.
+    pub fn channel_name(&self, channel: Channel) -> Option<&str> {
+        self.channels.get(&channel).map(String::as_str)
+    }
+
+    /// The channel the instrument calls `name`, compared as names are
+    /// ("pedalboard" is "Pedalboard", "string_3" is "String 3").
+    pub fn named_channel(&self, name: &str) -> Option<Channel> {
+        let wanted = name_key(name);
+        self.channels.iter().find(|(_, known)| name_key(known) == wanted).map(|(channel, _)| *channel)
+    }
+
+    /// A channel as it is shown: its number, with what the instrument
+    /// calls it where it calls it anything ("2 Pedalboard").
+    pub fn channel_label(&self, channel: Channel) -> String {
+        match self.channel_name(channel) {
+            Some(name) => format!("{channel} {name}"),
+            None => channel.to_string(),
+        }
     }
 
     /// How far the pitch wheel bends, in semitones each way.
@@ -724,5 +787,47 @@ mod tests {
         assert!(!text.contains("role") && !text.contains("bend_range") && !text.contains("slurs"), "{text}");
         assert_eq!(serde_json::from_str::<InstrumentProfile>(&text).unwrap(), guitar);
         assert_eq!(serde_json::from_str::<InstrumentProfile>("{}").unwrap(), InstrumentProfile::default());
+    }
+
+    #[test]
+    fn an_instrument_names_the_channels_it_gives_meanings_to() {
+        let channel = |number: u8| Channel::new(number).unwrap();
+        let mut organ = InstrumentProfile::default();
+        assert!(!organ.names_channels());
+        organ.channels.insert(channel(2), "  Pedalboard ".to_string());
+        organ.channels.insert(channel(1), "Manual".to_string());
+        let organ = organ.validated().unwrap();
+        assert!(organ.names_channels() && !organ.is_empty());
+        assert_eq!(organ.channel_name(channel(2)), Some("Pedalboard"));
+        assert_eq!(organ.channel_name(channel(3)), None);
+        assert_eq!(
+            (organ.channel_label(channel(2)), organ.channel_label(channel(9))),
+            ("2 Pedalboard".into(), "9".into())
+        );
+        // Asked for by name as names are compared.
+        assert_eq!(organ.named_channel("pedalboard"), Some(channel(2)));
+        assert_eq!(organ.named_channel("MANUAL"), Some(channel(1)));
+        assert_eq!(organ.named_channel("swell"), None);
+        let mut guitar = InstrumentProfile::default();
+        guitar.channels.insert(channel(3), "String 3".to_string());
+        assert_eq!(guitar.named_channel("string_3"), Some(channel(3)));
+
+        // Written by the channel's number, read back the same, and left
+        // out of a profile that names none.
+        let json = serde_json::to_string(&organ).unwrap();
+        assert_eq!(json, r#"{"channels":{"1":"Manual","2":"Pedalboard"}}"#);
+        assert_eq!(serde_json::from_str::<InstrumentProfile>(&json).unwrap(), organ);
+        assert_eq!(serde_json::to_string(&InstrumentProfile::default()).unwrap(), "{}");
+        assert!(serde_json::from_str::<InstrumentProfile>(r#"{"channels":{"17":"Nowhere"}}"#).is_err());
+
+        // A name that says nothing, says a number, or is said twice.
+        let with = |names: &[(u8, &str)]| {
+            let mut profile = InstrumentProfile::default();
+            profile.channels = names.iter().map(|(number, name)| (channel(*number), name.to_string())).collect();
+            profile.validated().map_err(|error| error.to_string())
+        };
+        assert!(with(&[(2, "  ")]).unwrap_err().contains("channel 2 needs a name"));
+        assert!(with(&[(2, "3")]).unwrap_err().contains("it is a number"));
+        assert!(with(&[(1, "Great"), (2, "great")]).unwrap_err().contains("two channels"));
     }
 }

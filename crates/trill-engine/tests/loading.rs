@@ -38,8 +38,10 @@ fn song(instrument: &str, notes: &[(u8, f64)]) -> Project {
     let track = project.add_track("Part");
     project.add_device(ChainRef::Track(track), instrument, "Instrument", None).unwrap();
     let clip = project.add_midi_clip(track, "clip", 0.0, 8.0).unwrap();
-    let notes: Vec<Note> =
-        notes.iter().map(|(pitch, start)| Note { pitch: *pitch, start: *start, length: 0.5, velocity: 100 }).collect();
+    let notes: Vec<Note> = notes
+        .iter()
+        .map(|(pitch, start)| Note { pitch: *pitch, start: *start, length: 0.5, velocity: 100, ..Default::default() })
+        .collect();
     project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
     project
 }
@@ -215,7 +217,13 @@ fn a_front_end_can_ask_whether_one_device_is_ready() {
             let bass = project.add_device(ChainRef::Track(track), BASS, "Bass", None)?;
             let amp = project.add_device(ChainRef::Track(track), AMP, "Amp", None)?;
             let clip = project.add_midi_clip(track, "clip", 0.0, 4.0)?;
-            project.clip_mut(clip)?.add_notes(&[Note { pitch: 40, start: 0.0, length: 1.0, velocity: 100 }])?;
+            project.clip_mut(clip)?.add_notes(&[Note {
+                pitch: 40,
+                start: 0.0,
+                length: 1.0,
+                velocity: 100,
+                ..Default::default()
+            }])?;
             let other = project.add_track("Keys");
             let synth = project.add_device(ChainRef::Track(other), "builtin:polysynth", "Synth", None)?;
             Ok((bass, amp, synth))
@@ -343,7 +351,7 @@ fn an_effect_is_run_the_same_amount_before_every_render_however_long_its_instrum
     project.add_device(ChainRef::Track(lead), "builtin:polysynth", "Synth", None).unwrap();
     project.add_device(ChainRef::Track(lead), AMP, "Amp", None).unwrap();
     let clip = project.add_midi_clip(lead, "clip", 0.0, 8.0).unwrap();
-    let notes = [Note { pitch: 60, start: 0.0, length: 3.0, velocity: 100 }];
+    let notes = [Note { pitch: 60, start: 0.0, length: 3.0, velocity: 100, ..Default::default() }];
     project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
     let options = RenderOptions { sample_rate: SR, max_tail_seconds: 0.5, ..RenderOptions::default() };
     let render = |loading: Loading| {
@@ -383,7 +391,11 @@ fn a_render_does_not_go_on_without_an_instrument_that_never_answered_and_writes_
     let drums = project.add_track("Drums");
     project.add_device(ChainRef::Track(drums), DRUMS, "Kit", None).unwrap();
     let clip = project.add_midi_clip(drums, "clip", 0.0, 8.0).unwrap();
-    project.clip_mut(clip).unwrap().add_notes(&[Note { pitch: 77, start: 0.0, length: 0.5, velocity: 100 }]).unwrap();
+    project
+        .clip_mut(clip)
+        .unwrap()
+        .add_notes(&[Note { pitch: 77, start: 0.0, length: 0.5, velocity: 100, ..Default::default() }])
+        .unwrap();
     let folder = tempfile::tempdir().unwrap();
     let (mix, stems) = (folder.path().join("song.wav"), folder.path().join("song stems"));
     let options = RenderOptions {
@@ -477,7 +489,11 @@ fn an_instrument_that_only_plays_what_it_listens_to_is_lent_something_while_it_i
     let drums = project.add_track("Drums");
     project.add_device(ChainRef::Track(drums), DRUMS, "Kit", None).unwrap();
     let clip = project.add_midi_clip(drums, "clip", 0.0, 8.0).unwrap();
-    project.clip_mut(clip).unwrap().add_notes(&[Note { pitch: 38, start: 0.0, length: 0.5, velocity: 127 }]).unwrap();
+    project
+        .clip_mut(clip)
+        .unwrap()
+        .add_notes(&[Note { pitch: 38, start: 0.0, length: 0.5, velocity: 127, ..Default::default() }])
+        .unwrap();
     project.set_sidechain(device, Some(drums)).unwrap();
     let options = RenderOptions {
         sample_rate: SR,
@@ -571,7 +587,13 @@ fn with_switches(notes: &[(u8, f64, f64)]) -> Project {
     let clip = project.add_midi_clip(track, "clip", 0.0, 8.0).unwrap();
     let notes: Vec<Note> = notes
         .iter()
-        .map(|(pitch, start, length)| Note { pitch: *pitch, start: *start, length: *length, velocity: 100 })
+        .map(|(pitch, start, length)| Note {
+            pitch: *pitch,
+            start: *start,
+            length: *length,
+            velocity: 100,
+            ..Default::default()
+        })
         .collect();
     project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
     let profile = trill_core::InstrumentProfile {

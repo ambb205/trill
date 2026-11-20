@@ -643,6 +643,7 @@ mod tests {
                     start: f64::from(from + n) * 0.5,
                     length: 0.4,
                     velocity: 100,
+                    ..Default::default()
                 })
                 .collect()
         };

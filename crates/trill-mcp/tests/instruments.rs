@@ -36,13 +36,49 @@ const SAYS: &str = "vst3:D0000000000000000000000000000002";
 const SAMPLER: &str = "vst3:C0000000000000000000000000000001";
 const LEAD: &str = "builtin:polysynth";
 
-const PLUGINS: [(&str, &str); 5] = [
+/// The two instruments Trill ships channels for: an organ whose
+/// pedalboard is its second channel, and a guitar whose strings are its
+/// channels while its own switch has them so.
+const ORGAN: &str = "vst3:ABCDEF019182FAEB436E73724F72676E";
+const GUITAR: &str = "vst3:ABCDEF019182FAEB436E7372456C4774";
+
+const PLUGINS: [(&str, &str); 7] = [
     (ECLIPSE, "Ample Metal Eclipse"),
     (SUPERIOR, "Superior Drummer 3"),
     (KIT, "Kit"),
     (SAYS, "Kit That Says"),
     (SAMPLER, "Sampled Bass"),
+    (ORGAN, "Organ"),
+    (GUITAR, "Electric Guitar"),
 ];
+
+/// The two parameters of the guitar that say what its channels are, as
+/// the plugin lists them: a switch, and the choice of its body.
+fn guitar_params() -> Vec<trill_core::device::ParamInfo> {
+    use trill_core::device::{ParamInfo, ParamKind};
+    let bodies =
+        ["Three Single Coils", "Two Humbuckers", "Two Active Humbuckers", "Two Split Humbuckers", "Seven Strings"];
+    vec![
+        ParamInfo {
+            id: "1001".into(),
+            name: "String Channels".into(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.0,
+            unit: String::new(),
+            kind: ParamKind::Bool,
+        },
+        ParamInfo {
+            id: "1002".into(),
+            name: "Body".into(),
+            min: 0.0,
+            max: 4.0,
+            default: 1.0,
+            unit: String::new(),
+            kind: ParamKind::Enum(bodies.iter().map(|body| body.to_string()).collect()),
+        },
+    ]
+}
 
 /// Which kit the plugin that says has loaded: the test that uses it
 /// changes it, as a user does in the plugin's own window.
@@ -128,7 +164,8 @@ impl DeviceFactory for Plugins {
         }
         let controller: Option<Box<dyn trill_core::device::DeviceController>> =
             (device.uri == SAYS).then(|| Box::new(Says) as Box<dyn trill_core::device::DeviceController>);
-        Ok(DeviceInstance { processor: Box::new(Silent), params: Vec::new(), controller })
+        let params = if device.uri == GUITAR { guitar_params() } else { Vec::new() };
+        Ok(DeviceInstance { processor: Box::new(Silent), params, controller })
     }
 
     /// As a plugin's own categories say it: these call themselves drum
@@ -1604,4 +1641,209 @@ async fn a_slide_a_scoop_a_harmonic_and_a_bend_written_by_name_are_heard_on_the_
     // Bar 5, the bend: E3 as it is struck, F#3 (54) once it is up.
     eprintln!("bend: {} {}", said(heard(8.02)), said(heard(9.2)));
     assert!(near(heard(9.2), 54.0), "bent up a whole tone, which is how far this instrument's wheel goes");
+}
+
+// ---- channels --------------------------------------------------------------------------
+
+/// The channels of the notes of a clip, in the clip's order.
+async fn channels_of(client: &Client, clip: &Value) -> Vec<u64> {
+    let read = ok(client, "get_notes", json!({ "clip": clip })).await;
+    read["notes"].as_array().unwrap().iter().map(|note| note["channel"].as_u64().unwrap_or(1)).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_organs_pedalboard_is_its_second_channel_and_a_bass_line_is_written_onto_it() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let organ = track(client, "Organ", ORGAN).await;
+    // The shipped entry is given to the track with the instrument, and
+    // says what the channels are.
+    let said = ok(client, "get_instrument_profile", json!({ "track": organ })).await;
+    assert_eq!(said["known"], json!({ "source": "built_in", "same_as_track": true }), "{said}");
+    assert_eq!(said["profile"]["channels"], json!({ "1": "Manual", "2": "Pedalboard" }), "{said}");
+    assert_eq!(said["channels"]["names"], json!({ "1": "Manual", "2": "Pedalboard" }), "{said}");
+    assert!(said["channels"]["read_from"].as_str().unwrap().contains("kept in the song"), "{said}");
+    assert!(said["channels"]["write_on_one"].as_str().unwrap().contains("`channel`"), "{said}");
+    assert_eq!(shown(client, organ).await["channels"], json!({ "1": "Manual", "2": "Pedalboard" }));
+
+    // Chords on the manual, which says no channel, and a bass line onto
+    // the pedalboard of the same clip, by the channel's name.
+    let chords = ok(client, "write_chords", json!({ "track": organ, "progression": "C | F | G | C" })).await;
+    assert!(chords.get("channel").is_none() && chords.get("warnings").is_none(), "{chords}");
+    let clip = &chords["clip_id"];
+    let manual = channels_of(client, clip).await;
+    assert!(manual.len() >= 12 && manual.iter().all(|channel| *channel == 1));
+    let pedals =
+        ok(client, "write_bass", json!({ "clip": clip, "progression": "C | F | G | C", "channel": "pedalboard" }))
+            .await;
+    assert_eq!(pedals["channel"], "2 Pedalboard", "{pedals}");
+    assert!(pedals.get("warnings").is_none(), "{pedals}");
+    // Written beside the chords, not over them: only the notes of the
+    // part's own channel are replaced.
+    let all = channels_of(client, clip).await;
+    let on = |channel: u64| all.iter().filter(|on| **on == channel).count();
+    assert_eq!((on(1), on(2)), (manual.len(), 4), "{all:?}");
+    // Again, another way: the pedal line is replaced, and the chords stay.
+    let again = ok(
+        client,
+        "write_bass",
+        json!({ "clip": clip, "progression": "C | F | G | C", "style": "octaves", "channel": 2 }),
+    )
+    .await;
+    assert_eq!(again["channel"], "2 Pedalboard", "{again}");
+    let all = channels_of(client, clip).await;
+    assert_eq!(all.iter().filter(|on| **on == 1).count(), manual.len());
+    assert!(all.iter().filter(|on| **on == 2).count() > 4, "{all:?}");
+    // The clip says which channels it uses, and the notes of one channel
+    // are read, moved and removed by it.
+    let read = ok(client, "get_notes", json!({ "clip": clip })).await;
+    assert_eq!(read["channels"], json!([1, 2]), "{read}");
+    let moved = ok(client, "transform_notes", json!({ "clip": clip, "channel": "pedalboard", "transpose": 12 })).await;
+    assert_eq!(moved["changed"].as_u64(), Some(all.iter().filter(|on| **on == 2).count() as u64), "{moved}");
+    let gone = ok(client, "remove_notes", json!({ "clip": clip, "channel": 2 })).await;
+    assert_eq!(gone["note_count"].as_u64(), Some(manual.len() as u64), "{gone}");
+    assert!(ok(client, "get_notes", json!({ "clip": clip })).await.get("channels").is_none());
+    // The low notes of the manual put onto the pedals in one call.
+    let put = ok(client, "transform_notes", json!({ "clip": clip, "highest": "B3", "to_channel": "pedalboard" })).await;
+    assert!(put["changed"].as_u64().unwrap() > 0 && put["channels"] == json!([1, 2]), "{put}");
+    assert!(put.get("warning").is_none(), "{put}");
+
+    // A channel that is none, by number and by name.
+    let wrong = call(client, "add_notes", json!({ "clip": clip, "notes": [["C2", 0, 1]], "channel": 17 })).await;
+    assert!(wrong.unwrap_err().contains("numbered 1 to 16"));
+    let wrong = call(client, "add_notes", json!({ "clip": clip, "notes": [["C2", 0, 1]], "channel": "swell" })).await;
+    let error = wrong.unwrap_err();
+    assert!(error.contains("'swell' is not a channel") && error.contains("1 Manual, 2 Pedalboard"), "{error}");
+    let wrong = json!({ "pitch": "C2", "start": 0, "length": 1, "channel": "great" });
+    let error = call(client, "add_notes", json!({ "clip": clip, "notes": [wrong] })).await.unwrap_err();
+    assert!(error.starts_with("notes[0]:") && error.contains("'great' is not a channel"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_guitars_strings_are_its_channels_while_its_own_switch_has_them_so() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    let guitar = track(client, "Guitar", GUITAR).await;
+    // As it comes it names none: its entry says what its switch does.
+    let said = ok(client, "get_instrument_profile", json!({ "track": guitar })).await;
+    assert_eq!(said["known"], json!({ "source": "built_in", "same_as_track": true }), "{said}");
+    assert!(said.get("channels").is_none() && said["profile"].get("channels").is_none(), "{said}");
+    assert!(said["profile"]["notes"].as_str().unwrap().contains("String Channels"), "{said}");
+    assert!(shown(client, guitar).await.get("channels").is_none());
+    let device = said["instrument"]["device_id"].clone();
+
+    // Switched on: its strings are its channels, read from the instrument
+    // and kept nowhere in the song.
+    ok(client, "update_device", json!({ "device": device, "params": { "String Channels": "On" } })).await;
+    let said = ok(client, "get_instrument_profile", json!({ "track": guitar })).await;
+    let six =
+        json!({ "1": "String 1", "2": "String 2", "3": "String 3", "4": "String 4", "5": "String 5", "6": "String 6" });
+    assert_eq!(said["channels"]["names"], six, "{said}");
+    assert!(said["channels"]["read_from"].as_str().unwrap().contains("as it is set now"), "{said}");
+    assert!(said["profile"].get("channels").is_none(), "nothing of it is the track's own: {said}");
+    assert_eq!(shown(client, guitar).await["channels"], six);
+    // The body with a seventh string has a seventh channel.
+    ok(client, "update_device", json!({ "device": device, "params": { "Body": "Seven Strings" } })).await;
+    let said = ok(client, "get_instrument_profile", json!({ "track": guitar })).await;
+    assert_eq!(said["channels"]["names"]["7"], "String 7", "{said}");
+
+    // Notes on strings by name: one that says its own, the others the
+    // call's; and a wheel for one string alone.
+    let notes =
+        json!([{ "pitch": "G4", "start": 0, "length": 4, "channel": "string_1" }, ["D4", 0, 4], ["A3", 0, 4, 90]]);
+    let made = ok(
+        client,
+        "create_clip",
+        json!({
+            "track": guitar, "start": 0, "length": 4, "notes": notes, "channel": "String 2",
+            "controllers": { "pitch_bend": [[0, 0], [2, 1]] },
+        }),
+    )
+    .await;
+    assert_eq!(made["channels"], json!([1, 2]), "{made}");
+    assert!(made.get("warning").is_none(), "{made}");
+    let clip = &made["clip_id"];
+    assert_eq!(channels_of(client, clip).await, [2, 2, 1], "in the clip's order: by start, then pitch");
+    let curves = ok(client, "get_controllers", json!({ "clip": clip })).await;
+    assert_eq!(curves["controllers"][0]["channel"], 2, "the clip's curve went with the notes: {curves}");
+    // Another string's wheel beside it: a curve a controller a channel.
+    let bend = json!({ "pitch_bend": [[0, 0, "hold"], [1, -1, "hold"]] });
+    let set = ok(client, "set_controllers", json!({ "clip": clip, "channel": "string_1", "controllers": bend })).await;
+    let on: Vec<(String, u64)> = set["controllers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|curve| (curve["controller"].as_str().unwrap().to_string(), curve["channel"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(on, [("pitch_bend".to_string(), 1), ("pitch_bend".to_string(), 2)]);
+    let first = ok(client, "get_controllers", json!({ "clip": clip, "channel": 1 })).await;
+    assert_eq!(first["controllers"].as_array().unwrap().len(), 1, "{first}");
+    assert_eq!(first["controllers"][0]["points"], json!([[0.0, 0.0, "hold"], [1.0, -1.0, "hold"]]));
+    let none =
+        ok(client, "get_controllers", json!({ "clip": clip, "controller": "pitch_bend", "channel": "string_5" })).await;
+    assert!(none["note"].as_str().unwrap().contains("no pitch_bend curve on channel 5"), "{none}");
+
+    // Switched off again: the names are gone, and what was written stays
+    // on its channels. A channel is then nothing to choose, which is said.
+    ok(client, "update_device", json!({ "device": device, "params": { "String Channels": "Off" } })).await;
+    let said = ok(client, "get_instrument_profile", json!({ "track": guitar })).await;
+    assert!(said.get("channels").is_none(), "{said}");
+    assert_eq!(channels_of(client, clip).await, [2, 2, 1]);
+    let error =
+        call(client, "add_notes", json!({ "clip": clip, "notes": [["E4", 0, 1]], "channel": "string_1" })).await;
+    assert!(error.unwrap_err().contains("names none of its channels"));
+    let added = ok(client, "add_notes", json!({ "clip": clip, "notes": [["E4", 0, 1]], "channel": 3 })).await;
+    let warning = added["warning"].as_str().unwrap_or_default();
+    assert!(warning.contains("MIDI channel 3") && warning.contains("names none of its channels"), "{added}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_track_is_told_what_its_instruments_channels_are_and_an_ordinary_one_says_no_channel_at_all() {
+    let fixture = connect().await;
+    let client = &fixture.client;
+    // An instrument nothing is known about, taught its channels.
+    let sampler = track(client, "Split", SAMPLER).await;
+    let taught = ok(
+        client,
+        "set_instrument_profile",
+        json!({ "track": sampler, "channels": { "1": "Upper", "2": "Lower" }, "remember": false }),
+    )
+    .await;
+    assert_eq!(taught["profile"]["channels"], json!({ "1": "Upper", "2": "Lower" }), "{taught}");
+    assert_eq!(taught["channels"]["names"], json!({ "1": "Upper", "2": "Lower" }), "{taught}");
+    let made = ok(
+        client,
+        "create_clip",
+        json!({ "track": sampler, "start": 0, "length": 4, "notes": [["C2", 0, 4]], "channel": "lower" }),
+    )
+    .await;
+    assert_eq!(made["channels"], json!([2]), "{made}");
+    // A name taken away, and names that cannot be.
+    let fewer =
+        ok(client, "set_instrument_profile", json!({ "track": sampler, "channels": { "1": null }, "remember": false }))
+            .await;
+    assert_eq!(fewer["profile"]["channels"], json!({ "2": "Lower" }), "{fewer}");
+    let wrong =
+        call(client, "set_instrument_profile", json!({ "track": sampler, "channels": { "17": "Nowhere" } })).await;
+    assert!(wrong.unwrap_err().contains("'17' is not a MIDI channel"));
+    let wrong = call(client, "set_instrument_profile", json!({ "track": sampler, "channels": { "3": "  " } })).await;
+    assert!(wrong.unwrap_err().contains("channel 3 needs a name"));
+
+    // An ordinary instrument: nothing anywhere says a channel.
+    let lead = track(client, "Lead", LEAD).await;
+    let said = ok(client, "get_instrument_profile", json!({ "track": lead })).await;
+    assert!(said.get("channels").is_none() && shown(client, lead).await.get("channels").is_none(), "{said}");
+    let made =
+        ok(client, "create_clip", json!({ "track": lead, "start": 0, "length": 4, "notes": [["C4", 0, 1]] })).await;
+    assert!(made.get("channels").is_none() && made.get("warning").is_none(), "{made}");
+    let read = ok(client, "get_notes", json!({ "clip": made["clip_id"] })).await;
+    assert!(read.get("channels").is_none() && read["notes"][0].get("channel").is_none(), "{read}");
+    let curve =
+        ok(client, "set_controllers", json!({ "clip": made["clip_id"], "controllers": { "expression": [[0, 90]] } }))
+            .await;
+    assert!(curve["controllers"][0].get("channel").is_none(), "{curve}");
+    // Written on another channel all the same, it is said what that means.
+    let part = ok(client, "write_bass", json!({ "track": lead, "progression": "C | G", "channel": 5 })).await;
+    assert_eq!(part["channel"], "5", "{part}");
+    assert!(joined(&part, "warnings").contains("names none of its channels"), "{part}");
 }

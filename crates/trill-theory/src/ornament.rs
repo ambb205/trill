@@ -262,7 +262,10 @@ pub fn perform(tones: &[Tone], playing: &Playing) -> Result<Performance> {
         let base = match entry {
             Entry::Attack => {
                 wheel.rest(start);
-                out.notes.push((Note { pitch, start, length: end - start, velocity: velocity[index] }, how.clone()));
+                out.notes.push((
+                    Note { pitch, start, length: end - start, velocity: velocity[index], ..Default::default() },
+                    how.clone(),
+                ));
                 sounding = Some((out.notes.len() - 1, pitch));
                 0.0
             }

@@ -27,7 +27,7 @@ const MUTED: u8 = 25;
 const SLIDE: u8 = 27;
 
 fn note(pitch: u8, start: f64, length: f64) -> Note {
-    Note { pitch, start, length, velocity: 100 }
+    Note { pitch, start, length, velocity: 100, ..Default::default() }
 }
 
 /// A probe's track that knows its keys, with one clip of `notes`.

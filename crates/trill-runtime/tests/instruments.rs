@@ -179,6 +179,7 @@ fn a_set_handed_over_is_checked_brought_in_found_by_the_library_played_and_credi
                         start: 0.0,
                         length: 1.0,
                         velocity: 100,
+                        ..Default::default()
                     }])
                 })
                 .unwrap();
@@ -334,6 +335,7 @@ fn the_sets_of_a_catalogue_are_asked_for_fetched_made_the_library_s_played_moved
                     start: 0.0,
                     length: 1.0,
                     velocity: 100,
+                    ..Default::default()
                 }])
             })
             .unwrap();
@@ -498,6 +500,7 @@ fn peak_of(runtime: &Runtime, instrument: &trill_catalogue::Instrument, at: &Pat
                         start: step as f64,
                         length: 0.9,
                         velocity: 110,
+                        ..Default::default()
                     })
                     .collect();
                 project.clip_mut(clip)?.add_notes(&notes)

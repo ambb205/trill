@@ -83,7 +83,7 @@ fn song(stage: &Stage) -> (Project, TrackId, DeviceId) {
         let track = project.add_track(name);
         project.add_device(ChainRef::Track(track), stage.instrument.clone(), "Instrument", None).unwrap();
         let clip = project.add_midi_clip(track, "clip", 0.0, 4.0).unwrap();
-        let note = Note { pitch: 60, start: beat, length: 0.5, velocity: 127 };
+        let note = Note { pitch: 60, start: beat, length: 0.5, velocity: 127, ..Default::default() };
         project.clip_mut(clip).unwrap().add_notes(&[note]).unwrap();
         track
     };

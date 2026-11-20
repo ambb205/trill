@@ -87,7 +87,7 @@ fn the_device_and_buffer_change_under_a_running_song_without_losing_it() {
     let mut rig = Rig::with(two_devices(), AudioConfig::default(), Patience::default());
     let track = rig.probe_track("Keys");
     let clip = rig.session.edit(|project| project.add_midi_clip(track, "Part", 0.0, 16.0)).unwrap();
-    let note = Note { pitch: 60, start: 4.0, length: 1.0, velocity: 100 };
+    let note = Note { pitch: 60, start: 4.0, length: 1.0, velocity: 100, ..Default::default() };
     rig.session.edit(|project| project.clip_mut(clip)?.add_notes(&[note])).unwrap();
     rig.session.play();
     rig.run(100);
@@ -139,7 +139,7 @@ fn a_new_sample_rate_makes_the_devices_again_and_keeps_the_song() {
     let probe = rig.probe_track("Probe");
     let keys = rig.sine_track("Keys");
     let clip = rig.session.edit(|project| project.add_midi_clip(keys, "A", 0.0, 8.0)).unwrap();
-    let note = Note { pitch: 69, start: 4.0, length: 2.0, velocity: 100 };
+    let note = Note { pitch: 69, start: 4.0, length: 2.0, velocity: 100, ..Default::default() };
     rig.session.edit(|project| project.clip_mut(clip)?.add_notes(&[note])).unwrap();
     rig.session.set_metronome(true);
     rig.session.set_armed(probe, true).unwrap();

@@ -167,7 +167,7 @@ pub const KINDS: &[&str] = &["Bass", "Lead", "Pluck", "Pad", "Keys", "Bell", "St
 /// What a sound of `kind` is played: a line for one that plays
 /// `one_at_a_time`, and for a bass or a lead whatever it does.
 pub fn playing(kind: &str, one_at_a_time: bool) -> Playing {
-    let note = |pitch: u8, start: f64, length: f64| Note { pitch, start, length, velocity: 100 };
+    let note = |pitch: u8, start: f64, length: f64| Note { pitch, start, length, velocity: 100, ..Default::default() };
     let line = |pitches: &[u8], each: f64, length: f64| -> Vec<Note> {
         pitches.iter().enumerate().map(|(index, pitch)| note(*pitch, index as f64 * each, length)).collect()
     };

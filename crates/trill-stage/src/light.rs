@@ -72,7 +72,7 @@ mod tests {
     }
 
     fn note(velocity: u8) -> Note {
-        Note { pitch: 60, start: 4.0, length: 2.0, velocity }
+        Note { pitch: 60, start: 4.0, length: 2.0, velocity, ..Default::default() }
     }
 
     #[test]
@@ -135,7 +135,7 @@ mod tests {
         let across = strike(&[Hit { beat: 7.5, hard: 1.0 }], 8.5, &time, CRASH_FALL);
         assert!((across - (-0.375f64 / CRASH_FALL).exp() as f32).abs() < 1e-6, "{across}");
         // A note held across the change is held for the seconds it lasts.
-        let held = Note { pitch: 60, start: 7.0, length: 2.0, velocity: 127 };
+        let held = Note { pitch: 60, start: 7.0, length: 2.0, velocity: 127, ..Default::default() };
         let (at_end, after) = (glow(&held, 9.0, &time), glow(&held, 9.0 + 0.1 * 4.0, &time));
         assert!((at_end - (HELD + (1.0 - HELD) * (-0.75f64 / FLASH_FALL).exp() as f32)).abs() < 1e-6, "{at_end}");
         assert!(after < at_end * 0.4, "a tenth of a second after it ended: {after}");

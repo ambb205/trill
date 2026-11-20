@@ -38,7 +38,11 @@ fn sine_track(project: &mut Project, name: &str, beats: f64) -> TrackId {
         params.insert(key.to_string(), value);
     }
     let clip = project.add_midi_clip(track, "clip", 0.0, beats).unwrap();
-    project.clip_mut(clip).unwrap().add_notes(&[Note { pitch: 69, start: 0.0, length: beats, velocity: 100 }]).unwrap();
+    project
+        .clip_mut(clip)
+        .unwrap()
+        .add_notes(&[Note { pitch: 69, start: 0.0, length: beats, velocity: 100, ..Default::default() }])
+        .unwrap();
     track
 }
 
@@ -423,7 +427,13 @@ fn moving_everything(sweep: bool) -> Project {
     let utility = project.add_device(ChainRef::Track(track), "builtin:utility", "Utility", None).unwrap();
     let clip = project.add_midi_clip(track, "clip", 0.0, 8.0).unwrap();
     let notes: Vec<Note> = (0..16)
-        .map(|step| Note { pitch: 45 + (step % 7) as u8, start: step as f64 * 0.5, length: 0.45, velocity: 100 })
+        .map(|step| Note {
+            pitch: 45 + (step % 7) as u8,
+            start: step as f64 * 0.5,
+            length: 0.45,
+            velocity: 100,
+            ..Default::default()
+        })
         .collect();
     project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
     let echo = project.add_track_of_kind("Echo", TrackKind::Return);
@@ -841,6 +851,7 @@ fn a_song_of_many_points(points: bool) -> Project {
                 start: step as f64,
                 length: 0.9,
                 velocity: 90,
+                ..Default::default()
             })
             .collect();
         project.clip_mut(clip).unwrap().add_notes(&notes[..if index == 0 { 451 } else { 456 }]).unwrap();

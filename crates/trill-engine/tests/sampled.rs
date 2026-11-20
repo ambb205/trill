@@ -79,7 +79,7 @@ fn played(session: &mut Session, name: &str, instrument: &str, notes: &[Note]) -
 }
 
 fn note(pitch: u8, start: f64, length: f64, velocity: u8) -> Note {
-    Note { pitch, start, length, velocity }
+    Note { pitch, start, length, velocity, ..Default::default() }
 }
 
 fn wait_until(what: &str, done: impl Fn() -> bool) {

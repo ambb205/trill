@@ -10,7 +10,7 @@
 //! articulation is asked for by name, and analysis leaves keyswitches and
 //! drums out of the harmony.
 
-use crate::input::{NoteInput, parse_pitch_with, parse_played};
+use crate::input::{ChannelInput, Channels, NoteInput, parse_channel, parse_pitch_with, parse_played};
 use crate::server::{Reply, TrillServer, edit, explain, finish};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use trill_core::pitch::{parse_drum, pitch_name};
-use trill_core::{Articulation, ClipId, Drum, InstrumentProfile, Lasts, Note, Role, TrackId};
+use trill_core::{Articulation, Channel, ClipId, Drum, InstrumentProfile, Lasts, Note, Role, TrackId};
 use trill_engine::Session;
 use trill_engine::instruments::{InstrumentKnowledge, Known};
 
@@ -59,7 +59,21 @@ another note, where its range ends, that it sounds an octave down, how far it be
 set_instrument_profile once with all of it. It is kept in the song and remembered for that plugin in every \
 song. get_instrument_profile reads it back and, in `notes`, says what else there is to know before writing for \
 it: a setting of the plugin its keyswitches depend on, how far a hammer-on reaches, what was measured and what \
-was not.";
+was not.
+- MIDI channels are for an instrument that names its channels, and are left alone otherwise. Nearly every \
+instrument plays all sixteen channels alike: for those never give `channel`, and everything is on the first. A \
+few give their channels meanings of their own, and then get_instrument_profile lists them under `channels` \
+(get_project shows them on the track): an organ whose pedalboard is channel 2, a guitar whose strings are \
+channels 1 to 6 while its own \"String Channels\" setting is on. For such an instrument, and only for one, say \
+the channel by its name there or by its number: `channel` on write_chords, write_bass, write_arpeggio, \
+write_melody and write_drums puts the whole part on it (with `clip`, only that channel's notes in the bars \
+written are replaced, so a bass line goes onto the pedalboard of the clip that already holds the manual's \
+chords); `channel` on create_clip, add_notes and set_notes is for every note that says none; one note says its \
+own as {\"pitch\": \"C2\", \"start\": 0, \"length\": 4, \"channel\": \"pedalboard\"}. A controller curve is on a \
+channel too (`channel` on set_controllers and shape_dynamics): the pitch wheel of a channel bends that \
+channel's notes and no others, which is how one string of a chord bends while the others hold. transform_notes \
+puts notes on a channel with `to_channel`. Replies say channels only where a clip uses another than the first. \
+Do not use channels to tell parts apart, to layer sounds or to route anything: that is what tracks are for.";
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct GetInstrumentProfileRequest {
@@ -108,6 +122,12 @@ pub struct SetInstrumentProfileRequest {
     /// true if a note that starts while the one before still sounds is slurred into, with no new attack (wind
     /// models, monophonic synths with legato). A hammer-on in write_melody is then written as an overlap.
     pub slurs: Option<bool>,
+    /// What the instrument's MIDI channels are, where it gives them meanings of their own, by number:
+    /// {"2": "Pedalboard"} for an organ that plays its pedals from channel 2, {"1": "String 1", "2": "String 2"}
+    /// for a guitar with a string to a channel. Notes and controller curves can then be put on a channel by
+    /// that name. null removes a name. Say nothing here for an ordinary instrument, which plays every channel
+    /// alike.
+    pub channels: Option<BTreeMap<String, Value>>,
     /// Anything else worth knowing when writing for it, in a sentence or two ("silent without expression").
     pub notes: Option<String>,
     /// true: forget what the track said before and start from what you give now.
@@ -186,10 +206,47 @@ impl TrackKeys {
         parse_pitch_with(value, &|name| self.key(name), &self.expected())
     }
 
-    /// The notes with, in step with them, how each asks to be played.
-    pub(crate) fn played(&self, notes: &[NoteInput]) -> Result<(Vec<Note>, Vec<Option<String>>), String> {
-        parse_played(notes, &|name| self.key(name), &self.expected())
+    /// The notes with, in step with them, how each asks to be played. A
+    /// note that says no channel is on `unsaid`.
+    pub(crate) fn played(
+        &self,
+        notes: &[NoteInput],
+        unsaid: Channel,
+    ) -> Result<(Vec<Note>, Vec<Option<String>>), String> {
+        let channels = Channels { profile: &self.profile, unsaid };
+        parse_played(notes, &|name| self.key(name), &self.expected(), channels)
     }
+
+    /// The channel `input` asks for, by its number or by what the
+    /// track's instrument calls it: the first where nothing is asked.
+    pub(crate) fn channel(&self, input: Option<&ChannelInput>) -> Result<Channel, String> {
+        input.map_or(Ok(Channel::FIRST), |input| parse_channel(&input.0, &self.profile))
+    }
+
+    /// The channel `input` asks for, if it asks.
+    pub(crate) fn channel_asked(&self, input: Option<&ChannelInput>) -> Result<Option<Channel>, String> {
+        input.map(|input| parse_channel(&input.0, &self.profile)).transpose()
+    }
+
+    /// What there is to say of something written on `channel`: nothing
+    /// on the first, or where the instrument names its channels; a
+    /// warning on any other channel of an instrument that names none,
+    /// where a channel is not anything to choose.
+    pub(crate) fn channel_warning(&self, channel: Channel) -> Option<String> {
+        channel_warning(&self.profile, channel)
+    }
+}
+
+/// What there is to say of something written on `channel` for an
+/// instrument with `profile`: see [`TrackKeys::channel_warning`].
+pub(crate) fn channel_warning(profile: &InstrumentProfile, channel: Channel) -> Option<String> {
+    (!channel.is_first() && !profile.names_channels()).then(|| {
+        format!(
+            "This was written on MIDI channel {channel}, and this track's instrument names none of its channels: \
+             most instruments play every channel alike, and one that listens to the first only plays none of \
+             this. Use a channel only for an instrument whose get_instrument_profile lists `channels`."
+        )
+    })
 }
 
 /// Notes that say how they are played, as the clip they go into is to
@@ -308,6 +365,9 @@ pub(crate) fn profile_json(profile: &InstrumentProfile) -> Value {
     }
     if profile.slurs {
         out.insert("slurs".into(), json!(true));
+    }
+    if !profile.channels.is_empty() {
+        out.insert("channels".into(), json!(profile.channels));
     }
     if !profile.notes.is_empty() {
         out.insert("notes".into(), json!(profile.notes));
@@ -527,6 +587,16 @@ fn requested(request: &SetInstrumentProfileRequest, base: InstrumentProfile) -> 
     if let Some(slurs) = request.slurs {
         profile.slurs = slurs;
     }
+    for (number, name) in request.channels.iter().flatten() {
+        let channel = number.trim().parse::<u8>().ok().and_then(Channel::new).ok_or_else(|| {
+            format!("`channels`: '{number}' is not a MIDI channel; they are numbered 1 to 16, as in {{\"2\": \"Pedalboard\"}}")
+        })?;
+        match name {
+            Value::Null => drop(profile.channels.remove(&channel)),
+            Value::String(name) => drop(profile.channels.insert(channel, name.clone())),
+            other => return Err(format!("`channels`: channel {channel} should be given a name, got {other}")),
+        }
+    }
     if let Some(notes) = &request.notes {
         profile.notes = notes.clone();
     }
@@ -553,6 +623,10 @@ fn summary(profile: &InstrumentProfile) -> String {
     }
     if profile.slurs {
         parts.push("slurs overlapping notes".to_string());
+    }
+    if profile.names_channels() {
+        let names: Vec<String> = profile.channels.keys().map(|channel| profile.channel_label(*channel)).collect();
+        parts.push(format!("channels: {}", names.join(", ")));
     }
     parts.join("; ")
 }
@@ -651,6 +725,11 @@ pub(crate) fn describe_track(session: &Session, track: TrackId, out: &mut Value)
     }
     if profile.sounds_octaves != 0 {
         out["sounds_octaves"] = json!(profile.sounds_octaves);
+    }
+    // With what the instrument says of its channels as it is set now.
+    let channels = session.profile_of(track).channels;
+    if !channels.is_empty() {
+        out["channels"] = json!(channels);
     }
 }
 
@@ -810,6 +889,25 @@ fn track_reply(session: &Session, id: TrackId, profile: &InstrumentProfile) -> V
                      instrument that is loaded. What the track says itself (`profile`) is laid over it.",
         });
     }
+    // What the instrument's channels are: the track's own words, or what the instrument is set to now.
+    let whole = session.profile_of(id);
+    if whole.names_channels() {
+        let own = profile.names_channels();
+        out["channels"] = json!({
+            "names": whole.channels,
+            "read_from": if own {
+                "the track's profile, which is kept in the song"
+            } else {
+                "the instrument as it is set now: kept nowhere in the song, and it changes with the instrument's \
+                 own setting"
+            },
+            "write_on_one": "`channel` on create_clip, add_notes, set_notes and the write_ tools puts notes on a \
+                             channel, by its number or its name here; on one note of create_clip, add_notes or \
+                             set_notes as {\"pitch\": \"C2\", \"start\": 0, \"length\": 4, \"channel\": 2}; \
+                             `channel` on set_controllers and shape_dynamics puts a curve there; transform_notes \
+                             moves notes with `to_channel`. A channel that is not named plays as the first does.",
+        });
+    }
     let asked_by_name = !profile.articulations.is_empty()
         || sampled.as_ref().is_some_and(|said| !said.profile.articulations.is_empty());
     if !drums && asked_by_name {
@@ -884,6 +982,7 @@ fn write(session: &mut Session, request: &SetInstrumentProfileRequest) -> Reply 
             || request.offset_semitones.is_some()
             || request.bend_range.is_some()
             || request.slurs.is_some()
+            || request.channels.is_some()
             || request.notes.is_some();
         if others {
             return Err("`forget` takes back what was learned; give it alone, then say what is true in another call"

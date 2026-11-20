@@ -141,6 +141,9 @@ pub struct UiOptions {
     /// The MIDI controller the lane under the piano roll's notes shows
     /// first; `None` for velocity.
     pub lane: Option<trill_core::ControllerKind>,
+    /// The MIDI channel that is chosen in the piano roll at first: the
+    /// one new notes are drawn on and whose curve the lane shows.
+    pub channel: trill_core::Channel,
     /// Open with the shortcut reference up.
     pub show_shortcuts: bool,
     /// Address of the MCP server AI assistants can connect to, if it runs.
@@ -217,6 +220,7 @@ impl Default for UiOptions {
             also_select: Vec::new(),
             show_automation: false,
             lane: None,
+            channel: trill_core::Channel::FIRST,
             show_shortcuts: false,
             mcp_url: None,
             theme: theme_names()[0],

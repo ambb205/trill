@@ -143,11 +143,13 @@ pub(super) fn header(ui: &mut Ui, cx: &mut Cx, frame: &Frame, track: &Track, cli
         show_lane(cx, LaneShown::Velocity);
     }
 
+    // The lane is the chosen channel's: so is what its strip says a clip has.
+    let channel = cx.state.piano.channel;
     let mut chosen = None;
     for kind in offered(clip, shown) {
         let label = kind.label();
         let name = chip_name(LaneShown::Controller(kind));
-        let held = clip.controller(kind).is_some();
+        let held = clip.controller_on(channel, kind).is_some();
         let mut spec = Chip::new(&label, shown == LaneShown::Controller(kind)).named(&name).dimmed(unused(kind));
         if held {
             spec = spec.dot(frame.color);
@@ -175,15 +177,18 @@ pub(super) fn header(ui: &mut Ui, cx: &mut Cx, frame: &Frame, track: &Track, cli
     if let Some(kind) = chosen {
         show_lane(cx, LaneShown::Controller(kind));
     }
-    // Under the keys: what the lane's numbers are.
+    // Under the keys: what the lane's numbers are; or, for a curve that
+    // is not the first channel's, which channel's it is.
     let gutter = Rect::from_min_max(strip.min + vec2(6.0, 0.0), pos2(frame.grid_left - 4.0, strip.bottom()));
     let unit = match shown {
-        LaneShown::Velocity => "Vel",
-        LaneShown::Controller(ControllerKind::PitchBend) => "Bend",
-        LaneShown::Controller(kind) if kind.is_switch() => "Pedal",
-        LaneShown::Controller(_) => "0\u{2013}127",
+        LaneShown::Velocity => "Vel".to_owned(),
+        LaneShown::Controller(_) if !channel.is_first() => format!("Ch {channel}"),
+        LaneShown::Controller(ControllerKind::PitchBend) => "Bend".to_owned(),
+        LaneShown::Controller(kind) if kind.is_switch() => "Pedal".to_owned(),
+        LaneShown::Controller(_) => "0\u{2013}127".to_owned(),
     };
-    text::paint(&painter, gutter, Align2::LEFT_CENTER, theme.text.micro, unit, theme.ink_faint);
+    let ink = if channel.is_first() || shown == LaneShown::Velocity { theme.ink_faint } else { theme.ink_dim };
+    text::paint(&painter, gutter, Align2::LEFT_CENTER, theme.text.micro, &unit, ink);
     paint::vline_left_of(&painter, frame.grid_left, strip.y_range(), theme.hairline);
     silent_notice(ui, cx, frame, track, x + 26.0);
 }
@@ -207,6 +212,7 @@ fn choose(
     support: &ControllerSupport,
 ) -> Option<ControllerKind> {
     let theme = cx.theme;
+    let channel = cx.state.piano.channel;
     let mut chosen = None;
     egui::Popup::menu(button).gap(1.0).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
         ui.set_min_width(230.0);
@@ -238,7 +244,7 @@ fn choose(
                     continue;
                 }
                 listed += 1;
-                let held = clip.controller(kind).is_some();
+                let held = clip.controller_on(channel, kind).is_some();
                 let detail = match (held, support.responds_to(kind)) {
                     (true, _) => "In this clip".to_owned(),
                     (false, Some(false)) => "Not used by the instrument".to_owned(),
@@ -330,23 +336,27 @@ fn silent_notice(ui: &Ui, cx: &mut Cx, frame: &Frame, track: &Track, from: f32) 
 
 // ---- the curve ---------------------------------------------------------------
 
-/// Replaces `remove` with `add` in the clip's curve for `kind`, as one edit
-/// against the curve as it is right now.
+/// Replaces `remove` with `add` in the clip's curve for `kind` on the
+/// chosen channel, as one edit against the curve as it is right now.
 fn swap(cx: &mut Cx, clip: ClipId, kind: ControllerKind, remove: &[AutomationPoint], add: &[AutomationPoint]) -> bool {
+    let channel = cx.state.piano.channel;
     cx.edit(|project| {
         let clip = project.clip_mut(clip)?;
-        let now = clip.controller(kind).map(|curve| curve.points.clone()).unwrap_or_default();
-        clip.set_controller(kind, envelopes::replaced(&now, remove, add))
+        let now = clip.controller_on(channel, kind).map(|curve| curve.points.clone()).unwrap_or_default();
+        clip.set_controller_on(channel, kind, envelopes::replaced(&now, remove, add))
     })
     .is_some()
 }
 
-/// Writes a step of `value` over the grid cells from `first` to `last`.
+/// Writes a step of `value` over the grid cells from `first` to `last`,
+/// in the curve of the chosen channel.
 fn write_steps(cx: &mut Cx, clip: ClipId, kind: ControllerKind, cells: (Beats, Beats), grid: Beats, value: f64) {
+    let channel = cx.state.piano.channel;
     cx.edit(|project| {
         let clip = project.clip_mut(clip)?;
-        let now = clip.controller(kind).map(|curve| curve.points.clone()).unwrap_or_default();
-        clip.set_controller(kind, envelopes::drawn(&now, trill_core::Travel::Linear, cells.0, cells.1, grid, value))
+        let now = clip.controller_on(channel, kind).map(|curve| curve.points.clone()).unwrap_or_default();
+        let drawn = envelopes::drawn(&now, trill_core::Travel::Linear, cells.0, cells.1, grid, value);
+        clip.set_controller_on(channel, kind, drawn)
     });
 }
 
@@ -371,7 +381,8 @@ pub fn delete_selected(cx: &mut Cx) {
 /// Selects every point of the curve the lane shows: Ctrl+A.
 pub fn select_all(cx: &mut Cx) {
     let Some((clip, kind)) = shown_curve(cx) else { return };
-    let curve = cx.snap.clip(clip).and_then(|(_, clip)| clip.controller(kind));
+    let channel = cx.state.piano.channel;
+    let curve = cx.snap.clip(clip).and_then(|(_, clip)| clip.controller_on(channel, kind));
     cx.state.piano.lane_points = curve.map(|curve| curve.points.clone()).unwrap_or_default();
 }
 
@@ -382,7 +393,13 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, frame: &Frame, clip: &Clip, kind: C
     let rect = frame.curve_rect();
     let id = ui.scope_id().with("controller-lane");
     let response = ui.interact(rect, id, Sense::click_and_drag());
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Canvas, true, format!("{} curve", kind.label())));
+    // The curve of the chosen channel, which is said where it is not the first.
+    let channel = cx.state.piano.channel;
+    let named = match channel.is_first() {
+        true => format!("{} curve", kind.label()),
+        false => format!("{} curve, channel {channel}", kind.label()),
+    };
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Canvas, true, &named));
 
     let painter = ui.painter_at(lane);
     painter.rect_filled(lane, 0.0, theme.panel);
@@ -393,7 +410,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, frame: &Frame, clip: &Clip, kind: C
     // against.
     paint::hline(&painter, rect.x_range(), map.y_at(map.scale.default_position()).round(), theme.grid);
 
-    let curve = clip.controller(kind);
+    let curve = clip.controller_on(channel, kind);
     let points: &[AutomationPoint] = curve.map(|curve| curve.points.as_slice()).unwrap_or_default();
     match curve {
         Some(curve) => {
@@ -717,7 +734,8 @@ fn context_menu(
         trill_noir::menu_separator(ui, theme);
         let label = format!("Clear the {} curve", kind.label().to_lowercase());
         if MenuItem::new(&label).enabled(has_curve).show(ui, theme).clicked() {
-            cx.edit(|project| project.clip_mut(clip)?.set_controller(kind, Vec::new()));
+            let channel = cx.state.piano.channel;
+            cx.edit(|project| project.clip_mut(clip)?.set_controller_on(channel, kind, Vec::new()));
             cx.state.piano.lane_points.clear();
         }
     });

@@ -49,7 +49,7 @@ fn play(factory: &dyn DeviceFactory, device: &Device, pitch: u8, frames: usize) 
     let mut processor = factory.create(device, SR, 512).unwrap().processor;
     let (mut left, mut right) = (vec![0.0f32; frames], vec![0.0f32; frames]);
     for (index, (l, r)) in left.chunks_mut(512).zip(right.chunks_mut(512)).enumerate() {
-        let events = [Event { offset: 0, kind: EventKind::NoteOn { pitch, velocity: 1.0 } }];
+        let events = [Event::new(0, EventKind::NoteOn { pitch, velocity: 1.0 })];
         processor.process(&info(), if index == 0 { &events } else { &[] }, l, r);
     }
     left
@@ -164,7 +164,7 @@ fn playing_below_the_root_adds_no_images() {
 }
 
 fn note(pitch: u8, start: f64, length: f64) -> Note {
-    Note { pitch, start, length, velocity: 127 }
+    Note { pitch, start, length, velocity: 127, ..Default::default() }
 }
 
 fn options() -> RenderOptions {

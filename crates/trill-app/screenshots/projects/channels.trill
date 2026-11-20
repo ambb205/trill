@@ -1,0 +1,493 @@
+{
+  "format_version": 7,
+  "name": "Channels",
+  "tempo": 72.0,
+  "time_signature": {
+    "numerator": 4,
+    "denominator": 4
+  },
+  "loop_region": {
+    "enabled": false,
+    "start": 0.0,
+    "end": 16.0
+  },
+  "tracks": [
+    {
+      "id": 1,
+      "name": "Organ",
+      "color": 11032055,
+      "volume_db": -4.0,
+      "pan": 0.0,
+      "mute": false,
+      "solo": false,
+      "devices": [
+        {
+          "id": 2,
+          "uri": "builtin:polysynth",
+          "name": "Organ",
+          "enabled": true,
+          "params": {
+            "osc1_wave": 0.0,
+            "attack": 0.02,
+            "release": 0.25,
+            "sustain": 1.0
+          }
+        }
+      ],
+      "clips": [
+        {
+          "id": 3,
+          "name": "Chorale",
+          "start": 0.0,
+          "length": 16.0,
+          "muted": false,
+          "content": {
+            "type": "midi",
+            "notes": [
+              {
+                "pitch": 36,
+                "start": 0.0,
+                "length": 0.95,
+                "velocity": 90,
+                "channel": 2
+              },
+              {
+                "pitch": 60,
+                "start": 0.0,
+                "length": 3.9,
+                "velocity": 84
+              },
+              {
+                "pitch": 64,
+                "start": 0.0,
+                "length": 3.9,
+                "velocity": 84
+              },
+              {
+                "pitch": 67,
+                "start": 0.0,
+                "length": 3.9,
+                "velocity": 84
+              },
+              {
+                "pitch": 72,
+                "start": 0.0,
+                "length": 3.9,
+                "velocity": 84
+              },
+              {
+                "pitch": 76,
+                "start": 0.0,
+                "length": 1.95,
+                "velocity": 100
+              },
+              {
+                "pitch": 40,
+                "start": 1.0,
+                "length": 0.95,
+                "velocity": 90,
+                "channel": 2
+              },
+              {
+                "pitch": 43,
+                "start": 2.0,
+                "length": 0.95,
+                "velocity": 90,
+                "channel": 2
+              },
+              {
+                "pitch": 79,
+                "start": 2.0,
+                "length": 1.95,
+                "velocity": 100
+              },
+              {
+                "pitch": 40,
+                "start": 3.0,
+                "length": 0.95,
+                "velocity": 90,
+                "channel": 2
+              },
+              {
+                "pitch": 45,
+                "start": 4.0,
+                "length": 0.95,
+                "velocity": 90,
+                "channel": 2
+              },
+              {
+                "pitch": 60,
+                "start": 4.0,
+                "length": 3.9,
+                "velocity": 84
+              },
+              {
+                "pitch": 64,
+                "start": 4.0,
+                "length": 3.9,
+                "velocity": 84
+              },
+              {
+                "pitch": 69,
+                "start": 4.0,
+                "length": 3.9,
+                "velocity": 84
+              },
+              {
+                "pitch": 72,
+                "start": 4.0,
+                "length": 3.9,
+                "velocity": 84
+              },
+              {
+                "pitch": 81,
+                "start": 4.0,
+                "length": 2.95,
+                "velocity": 100
+              },
+              {
+                "pitch": 40,
+                "start": 5.0,
+                "length": 0.95,
+                "velocity": 90,
+                "channel": 2
+              },
+              {
+                "pitch": 45,
+                "start": 6.0,
+                "length": 0.95,
+                "velocity": 90,
+                "channel": 2
+              },
+              {
+                "pitch": 48,
+                "start": 7.0,
+                "length": 0.95,
+                "velocity": 90,
+                "channel": 2
+              },
+              {
+                "pitch": 79,
+                "start": 7.0,
+                "length": 0.95,
+                "velocity": 100
+              },
+              {
+                "pitch": 41,
+                "start": 8.0,
+                "length": 0.95,
+                "velocity": 90,
+                "channel": 2
+              },
+              {
+                "pitch": 60,
+                "start": 8.0,
+                "length": 3.9,
+                "velocity": 84
+              },
+              {
+                "pitch": 65,
+                "start": 8.0,
+                "length": 3.9,
+                "velocity": 84
+              },
+              {
+                "pitch": 69,
+                "start": 8.0,
+                "length": 3.9,
+                "velocity": 84
+              },
+              {
+                "pitch": 72,
+                "start": 8.0,
+                "length": 3.9,
+                "velocity": 84
+              },
+              {
+                "pitch": 77,
+                "start": 8.0,
+                "length": 1.95,
+                "velocity": 100
+              },
+              {
+                "pitch": 45,
+                "start": 9.0,
+                "length": 0.95,
+                "velocity": 90,
+                "channel": 2
+              },
+              {
+                "pitch": 48,
+                "start": 10.0,
+                "length": 0.95,
+                "velocity": 90,
+                "channel": 2
+              },
+              {
+                "pitch": 81,
+                "start": 10.0,
+                "length": 1.95,
+                "velocity": 100
+              },
+              {
+                "pitch": 45,
+                "start": 11.0,
+                "length": 0.95,
+                "velocity": 90,
+                "channel": 2
+              },
+              {
+                "pitch": 43,
+                "start": 12.0,
+                "length": 0.95,
+                "velocity": 90,
+                "channel": 2
+              },
+              {
+                "pitch": 59,
+                "start": 12.0,
+                "length": 3.9,
+                "velocity": 84
+              },
+              {
+                "pitch": 62,
+                "start": 12.0,
+                "length": 3.9,
+                "velocity": 84
+              },
+              {
+                "pitch": 67,
+                "start": 12.0,
+                "length": 3.9,
+                "velocity": 84
+              },
+              {
+                "pitch": 71,
+                "start": 12.0,
+                "length": 3.9,
+                "velocity": 84
+              },
+              {
+                "pitch": 79,
+                "start": 12.0,
+                "length": 1.45,
+                "velocity": 100
+              },
+              {
+                "pitch": 47,
+                "start": 13.0,
+                "length": 0.95,
+                "velocity": 90,
+                "channel": 2
+              },
+              {
+                "pitch": 77,
+                "start": 13.5,
+                "length": 0.45,
+                "velocity": 100
+              },
+              {
+                "pitch": 50,
+                "start": 14.0,
+                "length": 0.95,
+                "velocity": 90,
+                "channel": 2
+              },
+              {
+                "pitch": 74,
+                "start": 14.0,
+                "length": 1.95,
+                "velocity": 100
+              },
+              {
+                "pitch": 43,
+                "start": 15.0,
+                "length": 0.95,
+                "velocity": 90,
+                "channel": 2
+              }
+            ],
+            "controllers": [
+              {
+                "controller": 11,
+                "points": [
+                  {
+                    "beat": 0.0,
+                    "value": 0.55
+                  },
+                  {
+                    "beat": 8.0,
+                    "value": 0.9
+                  },
+                  {
+                    "beat": 16.0,
+                    "value": 0.65
+                  }
+                ]
+              },
+              {
+                "controller": 11,
+                "channel": 2,
+                "points": [
+                  {
+                    "beat": 0.0,
+                    "value": 0.4
+                  },
+                  {
+                    "beat": 4.0,
+                    "value": 0.75
+                  },
+                  {
+                    "beat": 12.0,
+                    "value": 0.75
+                  },
+                  {
+                    "beat": 16.0,
+                    "value": 0.5
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "profile": {
+        "channels": {
+          "1": "Manual",
+          "2": "Pedalboard"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "name": "Guitar",
+      "color": 15898954,
+      "volume_db": -6.0,
+      "pan": 0.0,
+      "mute": false,
+      "solo": false,
+      "devices": [
+        {
+          "id": 5,
+          "uri": "builtin:polysynth",
+          "name": "Guitar",
+          "enabled": true,
+          "params": {
+            "osc1_wave": 2.0,
+            "attack": 0.002,
+            "decay": 1.5,
+            "sustain": 0.2,
+            "release": 0.4
+          }
+        }
+      ],
+      "clips": [
+        {
+          "id": 6,
+          "name": "Em, one string bent",
+          "start": 16.0,
+          "length": 16.0,
+          "muted": false,
+          "content": {
+            "type": "midi",
+            "notes": [
+              {
+                "pitch": 40,
+                "start": 0.0,
+                "length": 15.5,
+                "velocity": 96,
+                "channel": 6
+              },
+              {
+                "pitch": 47,
+                "start": 0.06,
+                "length": 15.44,
+                "velocity": 96,
+                "channel": 5
+              },
+              {
+                "pitch": 52,
+                "start": 0.12,
+                "length": 15.38,
+                "velocity": 96,
+                "channel": 4
+              },
+              {
+                "pitch": 55,
+                "start": 0.18,
+                "length": 15.32,
+                "velocity": 96,
+                "channel": 3
+              },
+              {
+                "pitch": 59,
+                "start": 0.24,
+                "length": 15.26,
+                "velocity": 96,
+                "channel": 2
+              },
+              {
+                "pitch": 64,
+                "start": 0.3,
+                "length": 15.2,
+                "velocity": 96
+              }
+            ],
+            "controllers": [
+              {
+                "controller": "pitch_bend",
+                "channel": 3,
+                "points": [
+                  {
+                    "beat": 0.0,
+                    "value": 0.0
+                  },
+                  {
+                    "beat": 3.0,
+                    "value": 0.0
+                  },
+                  {
+                    "beat": 5.0,
+                    "value": 1.0
+                  },
+                  {
+                    "beat": 9.0,
+                    "value": 1.0
+                  },
+                  {
+                    "beat": 11.0,
+                    "value": 0.0
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "profile": {
+        "channels": {
+          "1": "String 1",
+          "2": "String 2",
+          "3": "String 3",
+          "4": "String 4",
+          "5": "String 5",
+          "6": "String 6"
+        }
+      }
+    }
+  ],
+  "master": {
+    "volume_db": 0.0,
+    "devices": [
+      {
+        "id": 7,
+        "uri": "builtin:limiter",
+        "name": "Limiter",
+        "enabled": true,
+        "params": {}
+      }
+    ]
+  },
+  "automation": [],
+  "next_id": 10
+}

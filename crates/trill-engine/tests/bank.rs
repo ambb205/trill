@@ -117,8 +117,10 @@ fn measure(preset: &Preset) -> Measured {
     let phrase = character(&left, &right, f64::from(RATE));
 
     // As full a chord as the kind is given, as hard as it can be struck.
-    let struck: Vec<Note> =
-        chord.iter().map(|pitch| Note { pitch: *pitch, start: 0.0, length: 4.0, velocity: 127 }).collect();
+    let struck: Vec<Note> = chord
+        .iter()
+        .map(|pitch| Note { pitch: *pitch, start: 0.0, length: 4.0, velocity: 127, ..Default::default() })
+        .collect();
     let project = song(preset, tempo, &struck, 4.0);
     let begun = Instant::now();
     let (left, right) = rendered(&project, 2.0);
@@ -126,7 +128,7 @@ fn measure(preset: &Preset) -> Measured {
     let cost = took / (left.len() as f64 / f64::from(RATE));
     let chord_peak_db = character(&left, &right, f64::from(RATE)).peak_db;
 
-    let one = [Note { pitch: single, start: 0.0, length: held, velocity: 100 }];
+    let one = [Note { pitch: single, start: 0.0, length: held, velocity: 100, ..Default::default() }];
     let (left, right) = rendered(&song(preset, tempo, &one, held + ring), 0.0);
     let off = (held * 60.0 / tempo * f64::from(RATE)) as usize;
     let note = onset(&left, &right, f64::from(RATE), 0, off.min(left.len()));

@@ -620,7 +620,7 @@ fn what_the_audio_thread_missed_while_it_was_away_it_is_told_again() {
     rig.session.release_live();
     // And the project is edited meanwhile.
     let clip = rig.session.edit(|project| project.add_midi_clip(track, "Late", 0.0, 4.0)).unwrap();
-    let note = Note { pitch: 72, start: 1.0, length: 1.0, velocity: 100 };
+    let note = Note { pitch: 72, start: 1.0, length: 1.0, velocity: 100, ..Default::default() };
     rig.session.edit(|project| project.clip_mut(clip)?.add_notes(&[note])).unwrap();
     let waited = started.elapsed();
     // Waited for once, briefly; not for two seconds, message after message.

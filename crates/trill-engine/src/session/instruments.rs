@@ -5,9 +5,12 @@
 use super::Session;
 use crate::instruments::InstrumentKnowledge;
 use crate::instruments::kit::{self, KitMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use trill_core::device::{BEND_RANGE_PARAM, DeviceCategory, DeviceDescriptor, PITCH_BEND_SEMITONES};
-use trill_core::{ChainRef, Device, DeviceId, InstrumentProfile, Project, Role, SampledInstrument, TrackId, TrackKind};
+use trill_core::{
+    ChainRef, Channel, Device, DeviceId, InstrumentProfile, Project, Role, SampledInstrument, TrackId, TrackKind,
+};
 
 impl Session {
     /// What is known about instruments by device type: where it is kept is
@@ -99,6 +102,32 @@ impl Session {
         (!sounds.is_empty()).then(|| kit::drum_map(&sounds))
     }
 
+    /// What the instrument of a track calls its MIDI channels, where it
+    /// gives them meanings of their own: what the track says
+    /// ([`InstrumentProfile::channels`]: an organ's pedalboard is on its
+    /// second channel whatever the organ is set to); or, where the track
+    /// says nothing and its instrument is one whose channels follow a
+    /// setting of its own (a guitar that has a string to a channel while
+    /// a switch of its is on, and not otherwise), what that setting has
+    /// them be now. That is read from the instrument each time it is
+    /// asked, as a kit is ([`kit_of`](Self::kit_of)), and kept nowhere in
+    /// the song. Empty for nearly every instrument, which plays all
+    /// sixteen channels alike; and for a plugin that has not arrived yet.
+    pub fn channel_names(&self, track: TrackId) -> BTreeMap<Channel, String> {
+        let Ok(found) = self.project.track(track) else { return BTreeMap::new() };
+        if found.profile.names_channels() {
+            return found.profile.channels.clone();
+        }
+        let Some(device) = self.instrument_of(track) else { return BTreeMap::new() };
+        if !InstrumentKnowledge::channels_follow_a_setting(&device.uri) {
+            return BTreeMap::new();
+        }
+        // Its values as it has them now, by the names it gives them.
+        let Ok(params) = self.device_params(device.id) else { return BTreeMap::new() };
+        let value = |name: &str| params.iter().find(|param| param.info.name == name).map(|param| param.value);
+        InstrumentKnowledge::channels_now(&device.uri, &value)
+    }
+
     /// What is known about the instrument a track plays through, for
     /// whoever writes for it: what the track says ([`Track::profile`]);
     /// where it says nothing of the pitch wheel, how far the instrument's
@@ -108,7 +137,9 @@ impl Session {
     /// the track does not (the range, whether the keys are drums, the
     /// ways of playing a key chooses, the wheel: read from the instrument
     /// that is loaded each time, and kept nowhere in the song;
-    /// [`sampled_of`](Self::sampled_of)); and on a
+    /// [`sampled_of`](Self::sampled_of)); where its instrument gives its
+    /// channels meanings as it is set now, what it calls them
+    /// ([`channel_names`](Self::channel_names)); and on a
     /// drum track whose instrument says what its kit has on its keys, the
     /// kit's drums by name in place of any other map
     /// ([`kit_of`](Self::kit_of)). The default for a track that is not
@@ -122,6 +153,9 @@ impl Session {
             // Two semitones is what a profile that says nothing means.
             profile.bend_range =
                 self.instrument_bend_range(track).filter(|range| *range != f64::from(PITCH_BEND_SEMITONES));
+        }
+        if profile.channels.is_empty() {
+            profile.channels = self.channel_names(track);
         }
         if let Some(sampled) = self.sampled_of(track) {
             let own = &sampled.profile;

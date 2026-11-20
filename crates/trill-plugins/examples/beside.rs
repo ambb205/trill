@@ -77,7 +77,13 @@ fn song(plugin: &DeviceDescriptor) -> Project {
         let clip = project.add_midi_clip(track, "clip", 0.0, BEATS).unwrap();
         let line = lines[index % lines.len()];
         let notes: Vec<Note> = (0..(BEATS * 2.0) as usize)
-            .map(|step| Note { pitch: line[step % line.len()], start: step as f64 * 0.5, length: 0.4, velocity: 100 })
+            .map(|step| Note {
+                pitch: line[step % line.len()],
+                start: step as f64 * 0.5,
+                length: 0.4,
+                velocity: 100,
+                ..Default::default()
+            })
             .collect();
         let clip = project.clip_mut(clip).unwrap();
         clip.add_notes(&notes).unwrap();
@@ -90,8 +96,9 @@ fn song(plugin: &DeviceDescriptor) -> Project {
         project.add_device(ChainRef::Track(track), "builtin:polysynth", "Synth", None).unwrap();
         project.add_device(ChainRef::Track(track), "builtin:eq", "EQ", None).unwrap();
         let clip = project.add_midi_clip(track, "clip", 0.0, BEATS).unwrap();
-        let notes: Vec<Note> =
-            (0..BEATS as usize).map(|beat| Note { pitch, start: beat as f64, length: 0.8, velocity: 90 }).collect();
+        let notes: Vec<Note> = (0..BEATS as usize)
+            .map(|beat| Note { pitch, start: beat as f64, length: 0.8, velocity: 90, ..Default::default() })
+            .collect();
         project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
         project.track_mut(track).unwrap().volume_db = -12.0;
     }

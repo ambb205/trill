@@ -280,7 +280,7 @@ mod tests {
     use trill_core::TrackId;
 
     fn note(pitch: u8, start: Beats) -> Note {
-        Note { pitch, start, length: 0.5, velocity: 96 }
+        Note { pitch, start, length: 0.5, velocity: 96, ..Default::default() }
     }
 
     /// A song with two tracks, a clip with notes on the first, and a synth

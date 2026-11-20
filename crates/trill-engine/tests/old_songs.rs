@@ -462,7 +462,7 @@ fn played() -> Vec<Note> {
         (48, 3.5, 0.4, 64),
     ]
     .into_iter()
-    .map(|(pitch, start, length, velocity)| Note { pitch, start, length, velocity })
+    .map(|(pitch, start, length, velocity)| Note { pitch, start, length, velocity, ..Default::default() })
     .collect()
 }
 
@@ -835,7 +835,11 @@ fn faded(volume: Travel, gain: Travel) -> Project {
     let synth: &[(&str, f64)] = &[("osc1_wave", 0.0), ("sustain", 1.0), ("release", 0.05), ("velocity_sens", 0.0)];
     let (lead, devices) = track(&mut project, "Lead", &[("builtin:polysynth", synth), ("builtin:utility", &[])]);
     let clip = project.add_midi_clip(lead, "clip", 0.0, 4.0).unwrap();
-    project.clip_mut(clip).unwrap().add_notes(&[Note { pitch: 57, start: 0.0, length: 4.0, velocity: 100 }]).unwrap();
+    project
+        .clip_mut(clip)
+        .unwrap()
+        .add_notes(&[Note { pitch: 57, start: 0.0, length: 4.0, velocity: 100, ..Default::default() }])
+        .unwrap();
     let points =
         |points: &[(f64, f64)]| points.iter().map(|(beat, value)| AutomationPoint::new(*beat, *value)).collect();
     let target = |device: DeviceId, param: &str| AutomationTarget::DeviceParam { device, param: param.to_string() };
@@ -938,8 +942,10 @@ fn held(project: &mut Project, synth: &[(&str, f64)], devices: &[(&str, &[(&str,
     all.extend_from_slice(devices);
     let (part, ids) = track(project, "Held", &all);
     let clip = project.add_midi_clip(part, "clip", 0.0, 4.0).unwrap();
-    let chord: Vec<Note> =
-        [57, 64, 69].into_iter().map(|pitch| Note { pitch, start: 0.0, length: 4.0, velocity: 100 }).collect();
+    let chord: Vec<Note> = [57, 64, 69]
+        .into_iter()
+        .map(|pitch| Note { pitch, start: 0.0, length: 4.0, velocity: 100, ..Default::default() })
+        .collect();
     project.clip_mut(clip).unwrap().add_notes(&chord).unwrap();
     ids
 }

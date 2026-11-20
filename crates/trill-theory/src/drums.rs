@@ -241,6 +241,7 @@ impl DrumPattern {
                     // Drums are one-shots; the length only has to be sane.
                     length: (hit.length * 0.9).clamp(MIN_LENGTH, 0.5),
                     velocity: hit.level.velocity(base),
+                    ..Default::default()
                 });
             }
         }
@@ -323,7 +324,7 @@ pub fn arrange(groove: &DrumPattern, fill: Option<&FillPlan>, bars: usize, bar_l
         let crash = bar + 1 < bars && !crashed && fill.crash.is_some();
         if let (true, Some(key)) = (crash, fill.crash) {
             let velocity = Level::Normal.velocity(usual_velocity("crash") * level);
-            notes.push(Note { pitch: key, start: end, length: 0.5, velocity });
+            notes.push(Note { pitch: key, start: end, length: 0.5, velocity, ..Default::default() });
         }
         fills.push(FillBar { bar: bar + 1, from: from - start, replaced, played, crash });
     }

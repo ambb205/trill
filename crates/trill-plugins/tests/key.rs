@@ -190,7 +190,7 @@ fn a_synth_that_plays_what_comes_into_it_plays_the_track_its_device_listens_to()
         project
             .clip_mut(clip)
             .unwrap()
-            .add_notes(&[Note { pitch: 60, start: 0.0, length: 8.0, velocity: 110 }])
+            .add_notes(&[Note { pitch: 60, start: 0.0, length: 8.0, velocity: 110, ..Default::default() }])
             .unwrap();
 
         let mut playing = Playing::new(devices.clone());
@@ -226,7 +226,7 @@ fn loudest_or_silent(session: &mut Session) -> f32 {
 }
 
 fn note(pitch: u8, start: f64) -> Note {
-    Note { pitch, start, length: 1.0, velocity: 110 }
+    Note { pitch, start, length: 1.0, velocity: 110, ..Default::default() }
 }
 
 #[test]

@@ -50,6 +50,7 @@ fn frame_cost_with_thousands_of_notes() {
                                 start: n as f64 * 0.0625,
                                 length: 0.0625,
                                 velocity: 40 + (n % 80) as u8,
+                                ..Default::default()
                             })
                             .collect();
                         project.clip_mut(clip)?.set_notes(notes)?;
@@ -84,6 +85,7 @@ fn heavy(session: &mut Session) -> Vec<AutomationTarget> {
                             start: n as f64 * 0.25,
                             length: 0.25,
                             velocity: 60 + (n * 4) as u8,
+                            ..Default::default()
                         })
                         .collect();
                     project.clip_mut(clip)?.set_notes(notes)?;

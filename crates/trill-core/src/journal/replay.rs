@@ -569,7 +569,7 @@ mod tests {
     const MINUTE: u64 = 60 * SECOND;
 
     fn note_at(start: f64, pitch: u8) -> Note {
-        Note { pitch, start, length: 0.25, velocity: 100 }
+        Note { pitch, start, length: 0.25, velocity: 100, ..Default::default() }
     }
 
     /// Records an edit at `at`.

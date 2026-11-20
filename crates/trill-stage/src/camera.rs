@@ -309,7 +309,13 @@ mod tests {
 
     fn notes(from: usize, to: usize, pitch: u8) -> Vec<Note> {
         (from * 4..to * 4)
-            .map(|beat| Note { pitch, start: (beat - from * 4) as f64, length: 0.5, velocity: 100 })
+            .map(|beat| Note {
+                pitch,
+                start: (beat - from * 4) as f64,
+                length: 0.5,
+                velocity: 100,
+                ..Default::default()
+            })
             .collect()
     }
 

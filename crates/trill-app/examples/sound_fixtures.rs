@@ -430,7 +430,8 @@ fn main() -> anyhow::Result<()> {
     let mut hits = Vec::new();
     for step in 0..32 {
         let start = f64::from(step) * 0.25;
-        let mut hit = |pitch: u8, velocity: u8| hits.push(Note { pitch, start, length: 0.25, velocity });
+        let mut hit =
+            |pitch: u8, velocity: u8| hits.push(Note { pitch, start, length: 0.25, velocity, ..Default::default() });
         if step % 8 == 0 || step % 16 == 10 {
             hit(36, 110);
         }
@@ -460,7 +461,7 @@ fn main() -> anyhow::Result<()> {
     let riff_notes: Vec<Note> =
         [(0.0, 57), (0.5, 60), (1.0, 64), (1.5, 60), (2.0, 55), (2.5, 59), (3.0, 62), (3.5, 59)]
             .into_iter()
-            .map(|(start, pitch)| Note { pitch, start, length: 0.45, velocity: 96 })
+            .map(|(start, pitch)| Note { pitch, start, length: 0.45, velocity: 96, ..Default::default() })
             .collect();
     project.clip_mut(riff)?.set_notes(riff_notes)?;
     project.clip_mut(riff)?.set_loop_length(Some(4.0))?;
@@ -482,7 +483,7 @@ fn main() -> anyhow::Result<()> {
     let glass_line = with_keys.add_midi_clip(glass_track, "Glass line", 0.0, 16.0)?;
     let line: Vec<Note> = [(0.0, 57, 70), (1.0, 64, 96), (2.0, 60, 84), (3.0, 67, 110), (4.0, 55, 66), (5.0, 62, 92)]
         .into_iter()
-        .map(|(start, pitch, velocity)| Note { pitch, start, length: 0.9, velocity })
+        .map(|(start, pitch, velocity)| Note { pitch, start, length: 0.9, velocity, ..Default::default() })
         .collect();
     with_keys.clip_mut(glass_line)?.set_notes(line)?;
     with_keys.clip_mut(glass_line)?.set_loop_length(Some(8.0))?;
@@ -491,10 +492,16 @@ fn main() -> anyhow::Result<()> {
     let beat: Vec<Note> = (0..16u8)
         .flat_map(|step| {
             let start = f64::from(step) * 0.5;
-            let hat = Note { pitch: 42, start, length: 0.25, velocity: if step % 2 == 0 { 96 } else { 62 } };
+            let hat = Note {
+                pitch: 42,
+                start,
+                length: 0.25,
+                velocity: if step % 2 == 0 { 96 } else { 62 },
+                ..Default::default()
+            };
             let drum = match step % 8 {
-                0 | 5 => Some(Note { pitch: 36, start, length: 0.25, velocity: 112 }),
-                2 | 6 => Some(Note { pitch: 38, start, length: 0.25, velocity: 104 }),
+                0 | 5 => Some(Note { pitch: 36, start, length: 0.25, velocity: 112, ..Default::default() }),
+                2 | 6 => Some(Note { pitch: 38, start, length: 0.25, velocity: 104, ..Default::default() }),
                 _ => None,
             };
             [Some(hat), drum].into_iter().flatten()

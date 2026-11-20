@@ -27,7 +27,7 @@ struct Scene<'a> {
 }
 
 fn note(pitch: u8, start: f64, length: f64, velocity: u8) -> Note {
-    Note { pitch, start, length, velocity }
+    Note { pitch, start, length, velocity, ..Default::default() }
 }
 
 impl Scene<'_> {

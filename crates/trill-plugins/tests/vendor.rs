@@ -295,8 +295,10 @@ fn session(factory: &Vst3Factory) -> Session {
 /// waited for until it is ready, and returns what each came to.
 fn probe(session: &mut Session, target: &ProbeTarget, pitches: &[u8]) -> Vec<Heard> {
     let job = session.probe_job(target).unwrap_or_else(|error| panic!("{target:?}: {error}"));
-    let notes: Vec<ProbeNote> =
-        pitches.iter().map(|pitch| ProbeNote { pitch: *pitch, velocity: 100, with: Vec::new() }).collect();
+    let notes: Vec<ProbeNote> = pitches
+        .iter()
+        .map(|pitch| ProbeNote { pitch: *pitch, velocity: 100, with: Vec::new(), ..Default::default() })
+        .collect();
     let options = ProbeOptions { patience: Duration::from_secs(90), ..ProbeOptions::default() };
     let started = Instant::now();
     let probed = job.run(&notes, &options).unwrap_or_else(|error| panic!("{target:?}: {error}"));
@@ -482,10 +484,16 @@ fn an_archetypes_presets_are_listed_and_a_loaded_one_is_heard() {
 fn second_note(session: &mut Session, track: TrackId, low: u8, interval: u8, switch: Option<u8>) -> (Vec<f32>, f64) {
     let (first_at, second_at) = (1.0, 3.0);
     let mut notes = vec![
-        Note { pitch: low, start: first_at, length: 4.0, velocity: 100 },
-        Note { pitch: low + interval, start: second_at, length: 2.0, velocity: 100 },
+        Note { pitch: low, start: first_at, length: 4.0, velocity: 100, ..Default::default() },
+        Note { pitch: low + interval, start: second_at, length: 2.0, velocity: 100, ..Default::default() },
     ];
-    notes.extend(switch.map(|key| Note { pitch: key, start: first_at - 0.03, length: 0.01, velocity: 100 }));
+    notes.extend(switch.map(|key| Note {
+        pitch: key,
+        start: first_at - 0.03,
+        length: 0.01,
+        velocity: 100,
+        ..Default::default()
+    }));
     session
         .edit(|project| {
             let clips: Vec<_> = project.track(track)?.clips.iter().map(|clip| clip.id).collect();

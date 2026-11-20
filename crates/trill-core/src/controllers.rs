@@ -29,6 +29,7 @@
 //! * A track none of whose clips has a curve for a controller says nothing
 //!   about it: the instrument keeps whatever it has.
 
+use crate::channel::Channel;
 use crate::device::{CONTROLLER_MOD_WHEEL, CONTROLLER_SUSTAIN, EventKind};
 use crate::project::{AutomationPoint, EditError, Segment, automation_value, envelope_value};
 use crate::time::Beats;
@@ -300,10 +301,18 @@ impl<'de> Deserialize<'de> for ControllerKind {
     }
 }
 
-/// The movement of one controller through a clip's content.
+/// The movement of one controller through a clip's content, on one MIDI
+/// channel.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ControllerCurve {
     pub controller: ControllerKind,
+    /// The channel the controller is moved on: the first unless the
+    /// instrument gives its channels meanings of their own (a guitar with
+    /// a string to a channel has a wheel for each). A clip has at most one
+    /// curve for a controller on a channel. A file saved before curves had
+    /// one says none, and neither does a curve on the first.
+    #[serde(default, skip_serializing_if = "Channel::is_first")]
+    pub channel: Channel,
     /// Sorted by beat; never empty. Beats are measured from where the
     /// clip's content begins, like the starts of its notes. Values are
     /// within [`ControllerKind::range`]. Two points on one beat are a step.
@@ -415,12 +424,14 @@ impl LaneSpan {
     }
 }
 
-/// One controller on one track over the whole song: what it is worth at
-/// every moment, by the rule in the module documentation. Evaluating it
-/// neither allocates nor waits, so the audio thread may.
+/// One controller on one channel of one track over the whole song: what
+/// it is worth at every moment, by the rule in the module documentation.
+/// Evaluating it neither allocates nor waits, so the audio thread may.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ControllerLane {
     pub kind: ControllerKind,
+    /// The channel the controller is moved on.
+    pub channel: Channel,
     /// In order, none overlapping another.
     pub spans: Vec<LaneSpan>,
     /// What the controller is worth before the first span.
@@ -453,9 +464,9 @@ pub(crate) struct LaneClip<'a> {
     pub curve: &'a ControllerCurve,
 }
 
-/// Builds the lane of `kind` from the clips that have a curve for it,
-/// given in the order they lie on the track.
-pub(crate) fn lane_of(kind: ControllerKind, clips: &[LaneClip<'_>]) -> ControllerLane {
+/// Builds the lane of `kind` on `channel` from the clips that have a curve
+/// for it there, given in the order they lie on the track.
+pub(crate) fn lane_of(kind: ControllerKind, channel: Channel, clips: &[LaneClip<'_>]) -> ControllerLane {
     let mut edges: Vec<Beats> = clips.iter().flat_map(|clip| [clip.start, clip.end]).collect();
     edges.sort_by(f64::total_cmp);
     edges.dedup();
@@ -503,7 +514,7 @@ pub(crate) fn lane_of(kind: ControllerKind, clips: &[LaneClip<'_>]) -> Controlle
         })
         .collect();
     let before = rest.unwrap_or_else(|| spans.first().map_or(0.0, |span| span.value_at(span.start)));
-    ControllerLane { kind, spans, before }
+    ControllerLane { kind, channel, spans, before }
 }
 
 /// Turns the reports of a controller in motion into the few breakpoints of
@@ -845,7 +856,7 @@ mod tests {
     }
 
     fn curve(controller: ControllerKind, points: &[AutomationPoint]) -> ControllerCurve {
-        ControllerCurve { controller, points: points.to_vec() }
+        ControllerCurve { controller, channel: Channel::FIRST, points: points.to_vec() }
     }
 
     fn clip(start: Beats, end: Beats, offset: Beats, period: Option<Beats>, curve: &ControllerCurve) -> LaneClip<'_> {
@@ -858,6 +869,7 @@ mod tests {
         let fall = curve(ControllerKind::EXPRESSION, &[point(0.0, 0.8), point(2.0, 0.4)]);
         let lane = lane_of(
             ControllerKind::EXPRESSION,
+            Channel::FIRST,
             &[clip(4.0, 8.0, 0.0, None, &swell), clip(12.0, 16.0, 0.0, None, &fall)],
         );
         let at = |beat: Beats| lane.value_at(beat);
@@ -872,7 +884,7 @@ mod tests {
     #[test]
     fn what_springs_back_returns_to_rest_where_no_clip_holds_it() {
         let bend = curve(ControllerKind::PitchBend, &[point(0.0, 0.0), point(4.0, 1.0)]);
-        let lane = lane_of(ControllerKind::PitchBend, &[clip(4.0, 8.0, 0.0, None, &bend)]);
+        let lane = lane_of(ControllerKind::PitchBend, Channel::FIRST, &[clip(4.0, 8.0, 0.0, None, &bend)]);
         assert_eq!((lane.value_at(0.0), lane.value_at(6.0)), (0.0, 0.5));
         assert!((lane.value_at(7.999) - 1.0).abs() < 1e-3);
         assert_eq!(
@@ -882,7 +894,7 @@ mod tests {
         );
 
         let pedal = curve(ControllerKind::SUSTAIN, &[held(0.0, 1.0)]);
-        let lane = lane_of(ControllerKind::SUSTAIN, &[clip(0.0, 4.0, 0.0, None, &pedal)]);
+        let lane = lane_of(ControllerKind::SUSTAIN, Channel::FIRST, &[clip(0.0, 4.0, 0.0, None, &pedal)]);
         assert_eq!((lane.value_at(3.9), lane.value_at(4.0)), (1.0, 0.0), "nor the pedal down");
 
         // And it is at rest until its curve's first point: a pedal that
@@ -893,7 +905,7 @@ mod tests {
             (0.0, 0.0, 1.0, 0.0)
         );
         assert_eq!(pedal.played(), [held(0.0, 0.0), held(2.0, 1.0), held(3.0, 0.0)]);
-        let lane = lane_of(ControllerKind::SUSTAIN, &[clip(8.0, 12.0, 0.0, Some(4.0), &pedal)]);
+        let lane = lane_of(ControllerKind::SUSTAIN, Channel::FIRST, &[clip(8.0, 12.0, 0.0, Some(4.0), &pedal)]);
         assert_eq!(
             (lane.value_at(8.0), lane.value_at(9.9), lane.value_at(10.0), lane.value_at(11.0)),
             (0.0, 0.0, 1.0, 0.0)
@@ -907,7 +919,7 @@ mod tests {
     fn a_lane_loops_and_starts_where_the_clip_does() {
         let ramp = curve(ControllerKind::MOD_WHEEL, &[point(0.0, 0.0), point(2.0, 1.0), point(6.0, 0.5)]);
         // A two-beat loop entered half a beat in, over five beats.
-        let lane = lane_of(ControllerKind::MOD_WHEEL, &[clip(10.0, 15.0, 0.5, Some(2.0), &ramp)]);
+        let lane = lane_of(ControllerKind::MOD_WHEEL, Channel::FIRST, &[clip(10.0, 15.0, 0.5, Some(2.0), &ramp)]);
         let at = |beat: Beats| lane.value_at(beat);
         assert_eq!((at(10.0), at(11.0)), (0.25, 0.75));
         assert_eq!((at(11.5), at(12.5), at(13.5)), (0.0, 0.5, 0.0), "it wraps round where the loop does");
@@ -916,11 +928,11 @@ mod tests {
 
         // A loop that ends exactly on its last beat leaves the controller
         // at the loop's end, not back at its start.
-        let lane = lane_of(ControllerKind::MOD_WHEEL, &[clip(0.0, 4.0, 0.0, Some(2.0), &ramp)]);
+        let lane = lane_of(ControllerKind::MOD_WHEEL, Channel::FIRST, &[clip(0.0, 4.0, 0.0, Some(2.0), &ramp)]);
         assert_eq!((lane.value_at(3.0), lane.value_at(4.0)), (0.5, 1.0));
 
         // Without a loop the offset simply slides the curve.
-        let lane = lane_of(ControllerKind::MOD_WHEEL, &[clip(0.0, 4.0, 1.0, None, &ramp)]);
+        let lane = lane_of(ControllerKind::MOD_WHEEL, Channel::FIRST, &[clip(0.0, 4.0, 1.0, None, &ramp)]);
         assert_eq!((lane.value_at(0.0), lane.value_at(1.0), lane.value_at(4.0)), (0.5, 1.0, 0.625));
     }
 
@@ -928,16 +940,22 @@ mod tests {
     fn where_clips_overlap_the_later_one_is_heard() {
         let low = curve(ControllerKind::EXPRESSION, &[point(0.0, 0.25)]);
         let high = curve(ControllerKind::EXPRESSION, &[point(0.0, 0.75)]);
-        let lane =
-            lane_of(ControllerKind::EXPRESSION, &[clip(0.0, 16.0, 0.0, None, &low), clip(4.0, 8.0, 0.0, None, &high)]);
+        let lane = lane_of(
+            ControllerKind::EXPRESSION,
+            Channel::FIRST,
+            &[clip(0.0, 16.0, 0.0, None, &low), clip(4.0, 8.0, 0.0, None, &high)],
+        );
         let at = |beat: Beats| lane.value_at(beat);
         assert_eq!((at(2.0), at(4.0), at(7.9), at(8.0), at(15.0)), (0.25, 0.75, 0.75, 0.25, 0.25));
         assert_eq!(lane.spans.len(), 3, "the long clip is heard again after the short one");
         // The piece after the overlap carries on from where the long clip
         // would have been.
         let ramp = curve(ControllerKind::EXPRESSION, &[point(0.0, 0.0), point(16.0, 1.0)]);
-        let lane =
-            lane_of(ControllerKind::EXPRESSION, &[clip(0.0, 16.0, 0.0, None, &ramp), clip(4.0, 8.0, 0.0, None, &high)]);
+        let lane = lane_of(
+            ControllerKind::EXPRESSION,
+            Channel::FIRST,
+            &[clip(0.0, 16.0, 0.0, None, &ramp), clip(4.0, 8.0, 0.0, None, &high)],
+        );
         assert_eq!((lane.value_at(2.0), lane.value_at(6.0), lane.value_at(12.0)), (0.125, 0.75, 0.75));
     }
 

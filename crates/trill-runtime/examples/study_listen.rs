@@ -254,7 +254,7 @@ fn main() -> Result<(), String> {
     let mut notes: Vec<Note> = Vec::new();
     let mut hit = |pitch: u8, start: f64, velocity: u8| {
         if has(pitch) {
-            notes.push(Note { pitch, start, length: 0.25, velocity });
+            notes.push(Note { pitch, start, length: 0.25, velocity, ..Default::default() });
         }
     };
     for beat in [0.0, 2.0] {

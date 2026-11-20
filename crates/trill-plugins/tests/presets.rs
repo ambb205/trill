@@ -90,7 +90,7 @@ fn session(plugins: Box<dyn DeviceFactory>) -> (Session, trill_core::TrackId) {
             let track = project.add_track("Lead");
             let clip = project.add_midi_clip(track, "clip", 0.0, 8.0)?;
             let notes: Vec<Note> = [(1.0, 60), (2.5, 64), (4.0, 67)]
-                .map(|(start, pitch)| Note { pitch, start, length: 1.2, velocity: 110 })
+                .map(|(start, pitch)| Note { pitch, start, length: 1.2, velocity: 110, ..Default::default() })
                 .into();
             project.clip_mut(clip)?.add_notes(&notes)?;
             project.set_loop(true, 0.0, 8.0)?;

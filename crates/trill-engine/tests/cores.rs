@@ -14,16 +14,16 @@ use rig::*;
 use std::sync::Arc;
 use trill_core::device::{CompositeFactory, DeviceFactory, EventKind, Purpose};
 use trill_core::project::{AutomationPoint, AutomationTarget};
-use trill_core::{ChainRef, DeviceId, Note, Project, TrackId, TrackKind};
+use trill_core::{ChainRef, Channel, ControllerKind, DeviceId, Note, Project, TrackId, TrackKind};
 use trill_dsp::BuiltinFactory;
 use trill_engine::compile::{Compiler, DeviceBank, Meters, StandIns};
 use trill_engine::graph::Graph;
-use trill_engine::scripted::{AMP, BASS, DRUMS, Loading, ScriptedFactory};
+use trill_engine::scripted::{AMP, BASS, DRUMS, Loading, STRINGS, ScriptedFactory};
 use trill_engine::team::Team;
 use trill_engine::{AudioSources, Processor};
 
 fn note(pitch: u8, start: f64, length: f64) -> Note {
-    Note { pitch, start, length, velocity: 100 }
+    Note { pitch, start, length, velocity: 100, ..Default::default() }
 }
 
 fn device(project: &mut Project, chain: ChainRef, uri: &str, params: &[(&str, f64)]) -> DeviceId {
@@ -50,9 +50,39 @@ fn busy(pitches: &[u8]) -> Vec<Note> {
     (0..32).map(|step| note(pitches[step % pitches.len()], step as f64 * 0.5, 0.4)).collect()
 }
 
+/// A part for an instrument that has a string to a MIDI channel: notes on
+/// three channels (one key on two of them at once), a wheel that moves on
+/// one, a pressure on another, and an expression and a pedal on a third.
+/// What the song remembers of keys and controllers it remembers by
+/// channel, on whichever thread a block of the track is made.
+fn strings(project: &mut Project) -> TrackId {
+    let channel = |number: u8| Channel::new(number).unwrap();
+    let notes: Vec<Note> = (0..16)
+        .flat_map(|beat| {
+            let start = f64::from(beat);
+            [
+                note(52, start, 0.9).on(channel(6)),
+                note(64, start + 0.25, 0.7).on(channel(2)),
+                note(64, start + 0.5, 0.4).on(channel(3)),
+            ]
+        })
+        .collect();
+    let track = part(project, "Strings", STRINGS, &notes);
+    let clip = project.track(track).unwrap().clips[0].id;
+    let clip = project.clip_mut(clip).unwrap();
+    let wheel = points(&[(0.0, 0.0), (3.0, 1.0), (5.0, -1.0), (16.0, 0.5)]);
+    clip.set_controller_on(channel(2), ControllerKind::PitchBend, wheel).unwrap();
+    clip.set_controller_on(channel(6), ControllerKind::Pressure, points(&[(0.0, 0.2), (16.0, 1.0)])).unwrap();
+    clip.set_controller_on(channel(3), ControllerKind::EXPRESSION, points(&[(0.0, 1.0), (16.0, 0.3)])).unwrap();
+    let pedal = points(&[(2.5, 1.0), (4.5, 0.0)]);
+    clip.set_controller_on(channel(3), ControllerKind::SUSTAIN, pedal).unwrap();
+    track
+}
+
 /// Two groups, three returns (one fed by a group), a compressor that
 /// listens to another track, a master that does, and faders, pans, sends
-/// and a device's parameter that move. Returns the track a hand plays.
+/// and a device's parameter that move; and a part on several MIDI
+/// channels. Returns the track a hand plays.
 fn song() -> (Project, TrackId) {
     let mut project = Project::new("cores");
     project.tempo = 132.0;
@@ -102,6 +132,9 @@ fn song() -> (Project, TrackId) {
     device(&mut project, ChainRef::Track(second), AMP, &[]);
     project.set_send(second, crush, Some(-12.0)).unwrap();
     project.track_mut(second).unwrap().pan = 0.4;
+
+    let strings = strings(&mut project);
+    project.set_send(strings, echo, Some(-12.0)).unwrap();
 
     project.set_send(keys, room, Some(-10.0)).unwrap();
     project.set_send(band, crush, Some(-18.0)).unwrap();

@@ -177,24 +177,24 @@ fn events(block: usize) -> Vec<Event> {
         } else {
             EventKind::NoteOn { pitch: pitch(step), velocity: 0.3 + 0.1 * step as f32 }
         };
-        events.push(Event { offset, kind });
+        events.push(Event::new(offset, kind));
     }
     // Drum notes too, so the drum devices are busy.
-    events.push(Event { offset: 3, kind: EventKind::NoteOn { pitch: 36 + (block % 16) as u8, velocity: 0.9 } });
+    events.push(Event::new(3, EventKind::NoteOn { pitch: 36 + (block % 16) as u8, velocity: 0.9 }));
     // The pedal down and up, the wheels moving, and now and then a key
     // that switches how an instrument is played.
     let control = |controller: u8, value: f32| EventKind::Control { controller, value };
     if block % 11 == 5 {
-        events.push(Event { offset: 40, kind: control(64, if block % 22 == 5 { 1.0 } else { 0.0 }) });
+        events.push(Event::new(40, control(64, if block % 22 == 5 { 1.0 } else { 0.0 })));
     }
-    events.push(Event { offset: 7, kind: control(1, ((block * 13) % 100) as f32 / 99.0) });
-    events.push(Event { offset: 9, kind: control(74, ((block * 7) % 50) as f32 / 49.0) });
-    events.push(Event { offset: 11, kind: EventKind::PitchBend { value: ((block * 29) % 200) as f32 / 100.0 - 1.0 } });
+    events.push(Event::new(7, control(1, ((block * 13) % 100) as f32 / 99.0)));
+    events.push(Event::new(9, control(74, ((block * 7) % 50) as f32 / 49.0)));
+    events.push(Event::new(11, EventKind::PitchBend { value: ((block * 29) % 200) as f32 / 100.0 - 1.0 }));
     if block % 17 == 2 {
-        events.push(Event { offset: 1, kind: EventKind::NoteOn { pitch: 24 + (block % 3) as u8, velocity: 0.5 } });
+        events.push(Event::new(1, EventKind::NoteOn { pitch: 24 + (block % 3) as u8, velocity: 0.5 }));
     }
     if block % 50 == 49 {
-        events.push(Event { offset: 100, kind: EventKind::AllNotesOff });
+        events.push(Event::new(100, EventKind::AllNotesOff));
     }
     events.sort_by_key(|event| event.offset);
     events

@@ -398,6 +398,19 @@ impl Instance {
         takes_notes
     }
 
+    /// How many MIDI channels the plugin's first event input has: one for
+    /// a plugin that has no such input or does not say.
+    fn note_channels(&self) -> usize {
+        let (media, direction) = (kEvent as MediaType, kInput as BusDirection);
+        if self.bus_count(media, direction) == 0 {
+            return 1;
+        }
+        let mut info = BusInfo { mediaType: media, direction, channelCount: 0, name: [0; 128], busType: 0, flags: 0 };
+        // SAFETY: the component is live; `info` is a local it fills in.
+        let described = unsafe { self.component.getBusInfo(media, direction, 0, &mut info) } == kResultOk;
+        if described { info.channelCount.clamp(1, trill_core::Channel::COUNT as int32) as usize } else { 1 }
+    }
+
     /// Tells the inactive plugin how it will be processed.
     fn setup(&mut self, sample_rate: f64, max_block: u32) -> Result<(), String> {
         if !(sample_rate.is_finite() && sample_rate > 0.0) {
@@ -641,7 +654,8 @@ impl Vst3Thread {
         let table = table.unwrap_or_default();
         let mut listed = table.listed;
         let silencing = instance.controller.as_ref().map(|controller| params::silencing_params(&controller.edit));
-        let midi = instance.controller.as_ref().map(|controller| params::midi_params(&controller.edit));
+        let channels = instance.note_channels();
+        let midi = instance.controller.as_ref().map(|controller| params::midi_params(&controller.edit, channels));
         steps.done("its parameters");
         let latency = instance.activate()?;
         if let Some(controller) = &instance.controller {
@@ -668,7 +682,7 @@ impl Vst3Thread {
             buses,
             takes_notes,
             silencing: silencing.unwrap_or_default(),
-            midi: midi.unwrap_or_default(),
+            midi: midi.unwrap_or_else(|| params::MidiParams::plain(channels)),
             links,
             editor: instance.editor_status.clone(),
             offline: request.offline,

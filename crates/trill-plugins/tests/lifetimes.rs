@@ -170,7 +170,7 @@ fn run(instance: &mut DeviceInstance, blocks: usize) {
     };
     for block in 0..blocks {
         let (mut left, mut right) = (vec![0.0; 512], vec![0.0; 512]);
-        let note = Event { offset: 0, kind: EventKind::NoteOn { pitch: 52, velocity: 0.8 } };
+        let note = Event::new(0, EventKind::NoteOn { pitch: 52, velocity: 0.8 });
         let events = if block == 0 { vec![note] } else { Vec::new() };
         instance.processor.process(&info, &events, &mut left, &mut right);
     }
@@ -200,8 +200,10 @@ fn copies(factory: &Vst3Factory, amplifier: &str) {
 /// lets it go: what the `probe` tool does.
 fn probe(session: &mut Session, target: &ProbeTarget) {
     let job = session.probe_job(target).unwrap_or_else(|error| panic!("{target:?}: {error}"));
-    let notes: Vec<ProbeNote> =
-        [52, 59, 64].iter().map(|pitch| ProbeNote { pitch: *pitch, velocity: 100, with: Vec::new() }).collect();
+    let notes: Vec<ProbeNote> = [52, 59, 64]
+        .iter()
+        .map(|pitch| ProbeNote { pitch: *pitch, velocity: 100, with: Vec::new(), ..Default::default() })
+        .collect();
     let options = ProbeOptions { patience: Duration::from_secs(90), ..ProbeOptions::default() };
     job.run(&notes, &options).unwrap_or_else(|error| panic!("{target:?}: {error}"));
 }
@@ -346,7 +348,7 @@ fn rendered(factory: &Vst3Factory, amplifier: &str) {
                 let track = project.add_track(name);
                 let clip = project.add_midi_clip(track, "riff", 0.0, 8.0)?;
                 let notes: Vec<Note> = [(0.0, 52), (2.0, 55), (4.0, 59)]
-                    .map(|(start, pitch)| Note { pitch, start, length: 1.5, velocity: 100 })
+                    .map(|(start, pitch)| Note { pitch, start, length: 1.5, velocity: 100, ..Default::default() })
                     .into();
                 project.clip_mut(clip)?.add_notes(&notes)?;
                 Ok(track)

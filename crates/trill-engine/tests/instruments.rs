@@ -35,7 +35,7 @@ fn beats(range: std::ops::Range<f64>) -> std::ops::Range<usize> {
 }
 
 fn note(pitch: u8, start: f64, length: f64, velocity: u8) -> Note {
-    Note { pitch, start, length, velocity }
+    Note { pitch, start, length, velocity, ..Default::default() }
 }
 
 /// A song of one track: an instrument and the notes it plays.

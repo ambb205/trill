@@ -45,7 +45,13 @@ fn part(project: &mut Project, name: &str, instrument: &str, pitches: &[u8]) -> 
     project.add_device(ChainRef::Track(track), instrument, name, None).unwrap();
     let clip = project.add_midi_clip(track, "clip", 0.0, 16.0).unwrap();
     let notes: Vec<Note> = (0..32)
-        .map(|step| Note { pitch: pitches[step % pitches.len()], start: step as f64 * 0.5, length: 0.4, velocity: 100 })
+        .map(|step| Note {
+            pitch: pitches[step % pitches.len()],
+            start: step as f64 * 0.5,
+            length: 0.4,
+            velocity: 100,
+            ..Default::default()
+        })
         .collect();
     project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
     track
@@ -176,8 +182,10 @@ fn a_song_without_plugins_is_rendered_here_whatever_a_process_could_do() {
     assert_eq!(jobs_done(&runtime), (0, 0));
     // And a probe of a built-in instrument.
     let job = runtime.session.lock().probe_job(&ProbeTarget::Device { uri: "builtin:polysynth".into(), preset: None });
-    let probed =
-        job.unwrap().run(&[ProbeNote { pitch: 60, velocity: 100, with: Vec::new() }], &ProbeOptions::default());
+    let probed = job.unwrap().run(
+        &[ProbeNote { pitch: 60, velocity: 100, with: Vec::new(), ..Default::default() }],
+        &ProbeOptions::default(),
+    );
     assert!(probed.unwrap().heard[0].sounded);
     assert_eq!(jobs_done(&runtime), (0, 0));
 }
@@ -321,7 +329,10 @@ fn a_job_the_machine_has_no_room_for_is_refused_in_a_sentence_and_not_begun() {
         "{said}"
     );
     let job = runtime.session.lock().probe_job(&ProbeTarget::Device { uri: BASS.into(), preset: None }).unwrap();
-    let refused = job.run(&[ProbeNote { pitch: 40, velocity: 100, with: Vec::new() }], &ProbeOptions::default());
+    let refused = job.run(
+        &[ProbeNote { pitch: 40, velocity: 100, with: Vec::new(), ..Default::default() }],
+        &ProbeOptions::default(),
+    );
     assert!(
         matches!(&refused, Err(ProbeError::Apart(said)) if said.starts_with("the probe was not started")),
         "{refused:?}"
@@ -337,8 +348,10 @@ fn a_job_the_machine_has_no_room_for_is_refused_in_a_sentence_and_not_begun() {
 
 #[test]
 fn probes_in_a_process_of_their_own_hear_what_they_hear_here_and_one_that_is_kept_is_replaced_after_a_fault() {
-    let notes: Vec<ProbeNote> =
-        [40u8, 45, 52].iter().map(|pitch| ProbeNote { pitch: *pitch, velocity: 100, with: Vec::new() }).collect();
+    let notes: Vec<ProbeNote> = [40u8, 45, 52]
+        .iter()
+        .map(|pitch| ProbeNote { pitch: *pitch, velocity: 100, with: Vec::new(), ..Default::default() })
+        .collect();
     let probe = |runtime: &Runtime, target: &ProbeTarget| {
         let job = runtime.session.lock().probe_job(target).unwrap();
         job.run(&notes, &ProbeOptions::default())

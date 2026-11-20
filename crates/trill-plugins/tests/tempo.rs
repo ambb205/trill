@@ -131,7 +131,13 @@ fn serum_2s_arpeggiator_plays_its_steps_on_the_songs_beats_through_changes_of_te
                 }
                 let track = project.add_track("Arpeggio");
                 let clip = project.add_midi_clip(track, "held", 0.0, ENDS)?;
-                project.clip_mut(clip)?.add_notes(&[Note { pitch: 48, start: 0.0, length: ENDS, velocity: 110 }])?;
+                project.clip_mut(clip)?.add_notes(&[Note {
+                    pitch: 48,
+                    start: 0.0,
+                    length: ENDS,
+                    velocity: 110,
+                    ..Default::default()
+                }])?;
                 Ok(track)
             })
             .and_then(|track| session.add_device(ChainRef::Track(track), SERUM_2, None, None))

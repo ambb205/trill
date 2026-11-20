@@ -57,7 +57,13 @@ fn song(session: &mut Session, riser: &str, kick: &str) -> DeviceId {
     session
         .edit(|project| {
             let clip = project.add_midi_clip(kit, "Beat", 4.0, 4.0)?;
-            project.clip_mut(clip)?.add_notes(&[Note { pitch: 36, start: 0.0, length: 0.5, velocity: 127 }])
+            project.clip_mut(clip)?.add_notes(&[Note {
+                pitch: 36,
+                start: 0.0,
+                length: 0.5,
+                velocity: 127,
+                ..Default::default()
+            }])
         })
         .unwrap();
     rack

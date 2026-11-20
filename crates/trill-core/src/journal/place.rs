@@ -330,7 +330,11 @@ mod tests {
         let drums = after.add_track("Drums");
         let beat = after.add_midi_clip(drums, "Beat", 0.0, 4.0).unwrap();
         after.set_track_volume(bass, -6.0).unwrap();
-        after.clip_mut(hook).unwrap().add_notes(&[Note { pitch: 60, start: 0.0, length: 1.0, velocity: 100 }]).unwrap();
+        after
+            .clip_mut(hook)
+            .unwrap()
+            .add_notes(&[Note { pitch: 60, start: 0.0, length: 1.0, velocity: 100, ..Default::default() }])
+            .unwrap();
         after.device_mut(synth).unwrap().params.insert("cutoff".into(), 900.0);
         after.device_mut(limiter).unwrap().enabled = false;
         let volume = AutomationTarget::TrackVolume { track: lead };

@@ -236,7 +236,7 @@ fn run(options: &Options) -> Result<(), String> {
         let slow = project.add_track("Slow to be ready");
         project.add_device(ChainRef::Track(slow), BASS, "Slow", None).map_err(|error| error.to_string())?;
         let clip = project.add_midi_clip(slow, "one note", options.from, 4.0).map_err(|error| error.to_string())?;
-        let note = Note { pitch: 40, start: 0.0, length: 0.5, velocity: 100 };
+        let note = Note { pitch: 40, start: 0.0, length: 0.5, velocity: 100, ..Default::default() };
         project.clip_mut(clip).and_then(|clip| clip.add_notes(&[note])).map_err(|error| error.to_string())?;
         project.track_mut(slow).map_err(|error| error.to_string())?.volume_db = -200.0;
     }

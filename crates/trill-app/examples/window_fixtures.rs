@@ -172,7 +172,13 @@ fn main() -> anyhow::Result<()> {
             let notes: Vec<Note> = [60, 63, 67, 70]
                 .iter()
                 .enumerate()
-                .map(|(index, pitch)| Note { pitch: *pitch, start: index as f64 * 2.0, length: 1.5, velocity: 96 })
+                .map(|(index, pitch)| Note {
+                    pitch: *pitch,
+                    start: index as f64 * 2.0,
+                    length: 1.5,
+                    velocity: 96,
+                    ..Default::default()
+                })
                 .collect();
             project.clip_mut(clip)?.add_notes(&notes)
         })?;

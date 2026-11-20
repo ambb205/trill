@@ -72,7 +72,7 @@ fn phrase(session: &mut Session, track: TrackId) {
     session
         .edit(|project| {
             let clip = project.add_midi_clip(track, "Phrase", 0.0, 4.0)?;
-            let note = |pitch, start| Note { pitch, start, length: 0.75, velocity: 100 };
+            let note = |pitch, start| Note { pitch, start, length: 0.75, velocity: 100, ..Default::default() };
             project.clip_mut(clip)?.add_notes(&[note(45, 0.0), note(52, 1.0), note(48, 2.0), note(45, 3.0)])
         })
         .unwrap();

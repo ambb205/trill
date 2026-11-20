@@ -119,7 +119,13 @@ fn renders_at_other_rates_than_the_engines_are_right_for_clips_and_samplers() {
     session
         .edit(|project| {
             let clip = project.add_midi_clip(sampler_track, "note", 4.0, 2.0)?;
-            project.clip_mut(clip)?.add_notes(&[Note { pitch: 60, start: 0.0, length: 2.0, velocity: 100 }])
+            project.clip_mut(clip)?.add_notes(&[Note {
+                pitch: 60,
+                start: 0.0,
+                length: 2.0,
+                velocity: 100,
+                ..Default::default()
+            }])
         })
         .unwrap();
     assert!(session.problems().is_empty(), "{:?}", session.problems());

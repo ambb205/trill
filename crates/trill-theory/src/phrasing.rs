@@ -302,7 +302,7 @@ mod tests {
     use trill_core::project::automation_value;
 
     fn note(pitch: u8, start: f64, length: f64) -> Note {
-        Note { pitch, start, length, velocity: 100 }
+        Note { pitch, start, length, velocity: 100, ..Default::default() }
     }
 
     fn at(shaped: &Shaped, beat: f64) -> f64 {

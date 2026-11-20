@@ -263,6 +263,10 @@ pub struct ProbeRequest {
     /// List every note by itself. Default false: runs of neighbouring notes that measure alike are one entry.
     #[serde(default)]
     pub detail: bool,
+    /// The MIDI channel the notes are played on, 1 to 16 or the instrument's name for one (default the first):
+    /// to hear what an instrument does on another channel, where it gives its channels meanings (an organ's
+    /// pedalboard). Keys held with the notes (`hold`, `keyswitches`) and `controllers` stay on the first.
+    pub channel: Option<crate::input::ChannelInput>,
 }
 
 // ---- measure and render ------------------------------------------------------------
@@ -1175,6 +1179,8 @@ struct Plan {
     velocities: Vec<u8>,
     /// The keys to try as keyswitches.
     switches: Vec<u8>,
+    /// The channel the notes are played on.
+    channel: trill_core::Channel,
     options: ProbeOptions,
     detail: bool,
     /// What had to be left out or cut short to fit one call.
@@ -1278,13 +1284,16 @@ impl Plan {
             controllers,
             ..ProbeOptions::default()
         };
-        Ok(Self { target, pitches, velocities, switches, options, detail: request.detail, remarks })
+        // The first channel, until whoever knows the instrument's names for its channels says another.
+        let channel = trill_core::Channel::FIRST;
+        Ok(Self { target, pitches, velocities, switches, channel, options, detail: request.detail, remarks })
     }
 
     /// The notes of a plain probe: every pitch at every velocity.
     fn notes(&self) -> Vec<ProbeNote> {
+        let channel = self.channel;
         let pitches = |velocity: u8| {
-            self.pitches.iter().map(move |pitch| ProbeNote { pitch: *pitch, velocity, with: Vec::new() })
+            self.pitches.iter().map(move |pitch| ProbeNote { pitch: *pitch, velocity, with: Vec::new(), channel })
         };
         self.velocities.iter().flat_map(|velocity| pitches(*velocity)).collect()
     }
@@ -1292,11 +1301,13 @@ impl Plan {
     /// The notes of a keyswitch probe: the notes plain, then for every
     /// key the notes with it held and the notes plain again.
     fn switch_notes(&self) -> Vec<ProbeNote> {
-        let velocity = self.velocities[0];
-        let plain = || self.pitches.iter().map(move |pitch| ProbeNote { pitch: *pitch, velocity, with: Vec::new() });
+        let (velocity, channel) = (self.velocities[0], self.channel);
+        let plain =
+            || self.pitches.iter().map(move |pitch| ProbeNote { pitch: *pitch, velocity, with: Vec::new(), channel });
         let mut notes: Vec<ProbeNote> = plain().collect();
         for key in &self.switches {
-            notes.extend(self.pitches.iter().map(|pitch| ProbeNote { pitch: *pitch, velocity, with: vec![*key] }));
+            let held = |pitch: &u8| ProbeNote { pitch: *pitch, velocity, with: vec![*key], channel };
+            notes.extend(self.pitches.iter().map(held));
             notes.extend(plain());
         }
         notes
@@ -1375,7 +1386,8 @@ impl TrillServer {
         }
         let (job, plan, about, kit) = {
             let mut session = self.session.lock();
-            let plan = match Plan::of(request, session.audio_info().sample_rate as u32) {
+            let asked_channel = request.channel.clone();
+            let mut plan = match Plan::of(request, session.audio_info().sample_rate as u32) {
                 Ok(plan) => plan,
                 Err(problem) => return finish(Err(problem)),
             };
@@ -1400,6 +1412,17 @@ impl TrillServer {
                 Some(track) => Some(session.profile_of(track)),
                 None => session.instruments().of(&job.devices[0].uri).map(|known| known.profile),
             };
+            // The channel the notes are played on, by what the instrument calls its channels.
+            if let Some(asked) = &asked_channel {
+                let names = kit.clone().unwrap_or_default();
+                plan.channel = match crate::input::parse_channel(&asked.0, &names) {
+                    Ok(channel) => channel,
+                    Err(problem) => return finish(Err(problem)),
+                };
+                if !plan.channel.is_first() {
+                    about["channel"] = json!(names.channel_label(plan.channel));
+                }
+            }
             // The track the instrument listens to, where it does.
             let key = job.devices[0].sidechain.and_then(|track| session.project().track(track).ok());
             if let Some(key) = key {
@@ -1720,7 +1743,7 @@ mod tests {
                 let clip = project.add_midi_clip(id, "c", start, 4.0).unwrap();
                 let notes: Vec<Note> = pitches
                     .iter()
-                    .map(|pitch| Note { pitch: *pitch, start: 0.0, length: 1.0, velocity: 100 })
+                    .map(|pitch| Note { pitch: *pitch, start: 0.0, length: 1.0, velocity: 100, ..Default::default() })
                     .collect();
                 project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
             }
@@ -1822,7 +1845,7 @@ mod tests {
     }
 
     fn heard(pitch: u8, sounding: Option<(f64, f64, f64)>) -> Heard {
-        let note = ProbeNote { pitch, velocity: 100, with: Vec::new() };
+        let note = ProbeNote { pitch, velocity: 100, with: Vec::new(), ..Default::default() };
         match sounding {
             None => Heard {
                 note,

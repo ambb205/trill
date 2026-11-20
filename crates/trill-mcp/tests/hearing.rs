@@ -1261,7 +1261,13 @@ async fn a_snare_on_the_first_sample_of_a_render_sounds_on_superior_drummer_3() 
     let hit_clip = project.add_midi_clip(drums, "Hits", 0.0, 8.0).unwrap();
     let notes: Vec<trill_core::Note> = hits
         .iter()
-        .map(|seconds| trill_core::Note { pitch: 38, start: seconds * 2.0, length: 0.25, velocity: 110 })
+        .map(|seconds| trill_core::Note {
+            pitch: 38,
+            start: seconds * 2.0,
+            length: 0.25,
+            velocity: 110,
+            ..Default::default()
+        })
         .collect();
     project.clip_mut(hit_clip).unwrap().add_notes(&notes).unwrap();
     // Eight seconds on: a crash and the ride, twice, three seconds apart.
@@ -1270,7 +1276,13 @@ async fn a_snare_on_the_first_sample_of_a_render_sounds_on_superior_drummer_3() 
     let cymbal_clip = project.add_midi_clip(drums, "Cymbals", 16.0, 16.0).unwrap();
     let cymbals: Vec<trill_core::Note> = [(49, 0.0), (51, 1.0), (49, 6.0), (51, 7.0)]
         .iter()
-        .map(|(pitch, start)| trill_core::Note { pitch: *pitch, start: *start, length: 0.25, velocity: 110 })
+        .map(|(pitch, start)| trill_core::Note {
+            pitch: *pitch,
+            start: *start,
+            length: 0.25,
+            velocity: 110,
+            ..Default::default()
+        })
         .collect();
     project.clip_mut(cymbal_clip).unwrap().add_notes(&cymbals).unwrap();
     let factory = trill_core::device::CompositeFactory::new(host.factories());

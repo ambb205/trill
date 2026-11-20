@@ -21,6 +21,12 @@
 //!
 //! * [`AMP`] is an effect: it passes what it is given at half its level.
 //!
+//! * [`STRINGS`] gives its MIDI channels meanings of their own, as a
+//!   guitar with a string to a channel does: each channel is a string
+//!   that plays its own notes as plain tones, bent by its own pitch wheel
+//!   and as loud as its own pressure and expression have it. It is ready
+//!   the moment it exists, whatever the factory's other instruments do.
+//!
 //! A factory made with [`ScriptedFactory::loading`] hands out instruments
 //! that are deaf for a while after they are created, on the machine's own
 //! clock, as a sampler is while it reads its samples: notes given to them
@@ -45,6 +51,9 @@ use trill_core::presets::{PresetInfo, PresetList};
 pub const BASS: &str = "scripted:bass";
 pub const DRUMS: &str = "scripted:drums";
 pub const AMP: &str = "scripted:amp";
+pub const STRINGS: &str = "scripted:strings";
+
+mod strings;
 
 /// The key that palm-mutes the bass while it is held: C0.
 pub const MUTE_KEY: u8 = 12;
@@ -306,6 +315,7 @@ impl DeviceFactory for ScriptedFactory {
             descriptor(BASS, "Scripted Bass", instrument, "A bass that sounds an octave below what is written"),
             descriptor(DRUMS, "Scripted Drums", instrument, "A kick, a snare, a hat and a crash"),
             descriptor(AMP, "Scripted Amp", effect, "Passes what it is given at half its level"),
+            descriptor(STRINGS, "Scripted Strings", instrument, "A string to a MIDI channel, each with its own wheel"),
         ]
     }
 
@@ -324,6 +334,11 @@ impl DeviceFactory for ScriptedFactory {
             BASS => Kind::Bass,
             DRUMS => Kind::Drums,
             AMP => Kind::Amp,
+            // Nothing of what the others are told to do: it is made at once.
+            STRINGS => {
+                self.made.lock().push((device.uri.clone(), purpose));
+                return Ok(strings::instance(sample_rate));
+            }
             _ => return Err(DeviceError::Unknown(device.uri.clone())),
         };
         if !self.loading.making.is_zero() {

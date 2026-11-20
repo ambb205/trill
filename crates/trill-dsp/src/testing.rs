@@ -67,7 +67,7 @@ pub fn run(
         let block_events: Vec<Event> = events
             .iter()
             .filter(|(frame, _)| (start..end).contains(frame))
-            .map(|(frame, kind)| Event { offset: (frame - start) as u32, kind: *kind })
+            .map(|(frame, kind)| Event::new((frame - start) as u32, *kind))
             .collect();
         device.process(&info, &block_events, &mut left[start..end], &mut right[start..end]);
         start = end;

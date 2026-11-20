@@ -65,7 +65,7 @@ fn play_from(
         let block_events: Vec<Event> = events
             .iter()
             .filter(|(frame, _)| (start..end).contains(frame))
-            .map(|(frame, kind)| Event { offset: (frame - start) as u32, kind: *kind })
+            .map(|(frame, kind)| Event::new((frame - start) as u32, *kind))
             .collect();
         device.process(&info, &block_events, &mut left[start..end], &mut right[start..end]);
         start = end;
@@ -1194,7 +1194,7 @@ fn every_macro_moves_its_sound_from_end_to_end_without_a_gap_a_click_or_a_jump()
                 let block: Vec<Event> = events
                     .iter()
                     .filter(|(frame, _)| (start..end).contains(frame))
-                    .map(|(frame, kind)| Event { offset: (frame - start) as u32, kind: *kind })
+                    .map(|(frame, kind)| Event::new((frame - start) as u32, *kind))
                     .collect();
                 synth.process(&info, &block, &mut left[start..end], &mut right[start..end]);
                 start = end;

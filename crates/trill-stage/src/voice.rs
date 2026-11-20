@@ -290,8 +290,8 @@ mod tests {
         project.device_mut(sampler).unwrap().state = Some(state);
         let clip = project.add_midi_clip(track, "shouts", 4.0, 8.0).unwrap();
         let notes = [
-            Note { pitch: 60, start: 0.0, length: 2.0, velocity: 127 },
-            Note { pitch: 72, start: 4.0, length: 2.0, velocity: 127 },
+            Note { pitch: 60, start: 0.0, length: 2.0, velocity: 127, ..Default::default() },
+            Note { pitch: 72, start: 4.0, length: 2.0, velocity: 127, ..Default::default() },
         ];
         project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
         let found = voiced(&project, |path| (path == "hey.wav").then(|| recording(0.8)));

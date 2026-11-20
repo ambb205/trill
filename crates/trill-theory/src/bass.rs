@@ -136,6 +136,7 @@ pub fn bass_line(progression: &Progression, line: &BassLine) -> Vec<Note> {
                 start: strike.start,
                 length: (strike.length * line.gate).max(MIN_LENGTH),
                 velocity: strike.level.velocity(velocity),
+                ..Default::default()
             });
         }
     }
@@ -193,6 +194,7 @@ fn walk(progression: &Progression, line: &BassLine) -> Vec<Note> {
                 start: *time,
                 length: ((until - time) * line.gate).max(MIN_LENGTH),
                 velocity: clamp_velocity(line.dynamics.at(*time, progression.signature)),
+                ..Default::default()
             });
         }
         root = next_root;

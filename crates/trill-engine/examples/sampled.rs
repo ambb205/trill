@@ -701,7 +701,7 @@ fn facts(folder: &Path, out: &Path) -> Result<(), String> {
 }
 
 fn note(pitch: u8, start: f64, length: f64, velocity: u8) -> Note {
-    Note { pitch, start, length, velocity }
+    Note { pitch, start, length, velocity, ..Default::default() }
 }
 
 /// Notes of a phrase that suits `kind`, at 96 BPM, with the controller

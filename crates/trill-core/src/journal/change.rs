@@ -143,15 +143,40 @@ pub enum States<'a> {
     Without,
 }
 
-/// A note as a journal writes it: pitch, start, length, velocity.
-type NoteCode = (u8, f64, f64, u8);
-
-fn code(note: &Note) -> NoteCode {
-    (note.pitch, note.start, note.length, note.velocity)
+/// A note as a journal writes it: pitch, start, length, velocity; and
+/// after them its channel, where that is not the first. A journal written
+/// before notes had channels has only the four.
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum NoteCode {
+    First(u8, f64, f64, u8),
+    On(u8, f64, f64, u8, crate::Channel),
 }
 
-fn note((pitch, start, length, velocity): NoteCode) -> Note {
-    Note { pitch, start, length, velocity }
+impl NoteCode {
+    /// The MIDI channel the note is on.
+    pub fn channel(&self) -> crate::Channel {
+        match self {
+            NoteCode::First(..) => crate::Channel::FIRST,
+            NoteCode::On(.., channel) => *channel,
+        }
+    }
+}
+
+fn code(note: &Note) -> NoteCode {
+    match note.channel.is_first() {
+        true => NoteCode::First(note.pitch, note.start, note.length, note.velocity),
+        false => NoteCode::On(note.pitch, note.start, note.length, note.velocity, note.channel),
+    }
+}
+
+fn note(code: NoteCode) -> Note {
+    match code {
+        NoteCode::First(pitch, start, length, velocity) => {
+            Note { pitch, start, length, velocity, channel: crate::Channel::FIRST }
+        }
+        NoteCode::On(pitch, start, length, velocity, channel) => Note { pitch, start, length, velocity, channel },
+    }
 }
 
 /// One part of a change. The parts of a change are applied in order.
@@ -893,7 +918,7 @@ mod tests {
     use crate::{ControllerKind, InstrumentProfile, Role};
 
     fn note_at(start: f64, pitch: u8) -> Note {
-        Note { pitch, start, length: 0.5, velocity: 96 }
+        Note { pitch, start, length: 0.5, velocity: 96, ..Default::default() }
     }
 
     /// Two tracks with a device and a clip each, one device with a state,
@@ -1127,5 +1152,34 @@ mod tests {
         let mut whole = bare.clone();
         with_states(&mut whole, &named, &blobs).unwrap();
         assert_eq!(whole, project);
+    }
+
+    #[test]
+    fn a_notes_channel_is_kept_and_a_journal_from_before_reads_as_the_first() {
+        let (project, _, [hook, _], _) = song();
+        let mut blobs = Blobs::default();
+        let second = crate::Channel::new(2).unwrap();
+        // Two notes put on another channel: a change of those notes, made
+        // again from what was kept.
+        let (project, change) = kept(&project, &mut blobs, |p| {
+            p.clip_mut(hook).unwrap().set_note_channels(second, |note| note.pitch < 50).unwrap();
+        });
+        assert!(matches!(change.ops(), [Op::Notes { cut: 2, put, .. }] if put.len() == 2), "{change:?}");
+        let text = serde_json::to_string(&change).unwrap();
+        assert!(text.contains("[48,0.0,0.5,96,2]"), "a note on another channel says it: {text}");
+        // A note on the first is written as it always was, and what a
+        // journal from before wrote is a note on the first.
+        let (_, change) =
+            kept(&project, &mut blobs, |p| p.clip_mut(hook).unwrap().add_notes(&[note_at(3.3, 70)]).unwrap());
+        let text = serde_json::to_string(&change).unwrap();
+        assert!(text.contains("[70,3.3,0.5,96]"), "{text}");
+        let read: Change = serde_json::from_str(&text).unwrap();
+        assert_eq!(read, change);
+        // And a curve on a channel is part of what the clip holds.
+        let (after, _) = kept(&project, &mut blobs, |p| {
+            let points = vec![crate::AutomationPoint::new(0.0, 0.0), crate::AutomationPoint::new(1.0, 1.0)];
+            p.clip_mut(hook).unwrap().set_controller_on(second, crate::ControllerKind::PitchBend, points).unwrap();
+        });
+        assert!(after.clip(hook).unwrap().controller_on(second, crate::ControllerKind::PitchBend).is_some());
     }
 }

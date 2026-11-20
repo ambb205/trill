@@ -25,7 +25,7 @@ mod known;
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use trill_core::{InstrumentProfile, KnownInstrument as Entry};
+use trill_core::{Channel, InstrumentProfile, KnownInstrument as Entry};
 
 /// The extension of a learned profile's file.
 const EXTENSION: &str = "json";
@@ -110,6 +110,24 @@ impl InstrumentKnowledge {
             });
         }
         Self::built_in(uri)
+    }
+
+    /// Whether what the channels of the device type `uri` mean follows a
+    /// setting of the instrument itself: a guitar that has a string to a
+    /// channel while a switch of its is on. What they are is then read
+    /// from the instrument ([`channels_now`](Self::channels_now)), and is
+    /// no part of the profile a track is given.
+    pub fn channels_follow_a_setting(uri: &str) -> bool {
+        known::channels_now(uri, &|_| None).is_some()
+    }
+
+    /// What the device type `uri` calls its MIDI channels as it is set
+    /// now, `value` being what one of its parameters is at, by the name
+    /// the instrument gives the parameter. Empty for an instrument that
+    /// is set to play every channel alike, and for a device type whose
+    /// channels follow no setting.
+    pub fn channels_now(uri: &str, value: &dyn Fn(&str) -> Option<f64>) -> BTreeMap<Channel, String> {
+        known::channels_now(uri, value).unwrap_or_default()
     }
 
     /// What ships with the program about the device type `uri`, whatever

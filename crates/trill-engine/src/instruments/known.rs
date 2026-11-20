@@ -9,8 +9,15 @@
 //! sounded), then write what was found as the others are written. The
 //! opt-in tests in `trill-mcp`, `tests/instruments.rs`, play some of these
 //! entries on the installed plugins.
+//!
+//! Two entries are about MIDI channels, which most instruments give no
+//! meaning: the Consort Organ, whose pedalboard is on the second, and the
+//! Consort Electric Guitar, whose channels are its strings while its own
+//! switch has them so ([`channels_now`]). The opt-in tests in `trill-mcp`,
+//! `tests/consort.rs`, measure both on the installed plugins.
 
-use trill_core::{Articulation, InstrumentProfile, Lasts, Role};
+use std::collections::BTreeMap;
+use trill_core::{Articulation, Channel, InstrumentProfile, Lasts, Role};
 
 /// Ample Sound's instruments share one layout: a run of keys under the
 /// range that sound nothing and choose how the notes after them are
@@ -70,9 +77,44 @@ const SWAM_INSTRUMENTS: &[(&str, &str, bool)] = &[
     ("vst3:565354536462337377616D20646F7562", "SWAM Double Bass 3", true),
 ];
 
+/// Two instruments of the Consort collection, by class id: the ones that
+/// give MIDI channels meanings of their own.
+const CONSORT_ORGAN: &str = "vst3:ABCDEF019182FAEB436E73724F72676E";
+const CONSORT_GUITAR: &str = "vst3:ABCDEF019182FAEB436E7372456C4774";
+/// The guitar's switch that gives every string a channel, and the choice
+/// of its body, the last of which has a seventh string: by the names the
+/// plugin gives its parameters.
+const GUITAR_STRING_CHANNELS: &str = "String Channels";
+const GUITAR_BODY: &str = "Body";
+const GUITAR_SEVEN_STRINGS: f64 = 4.0;
+
 /// The device types an entry ships for.
 pub(super) fn uris() -> impl Iterator<Item = &'static str> {
-    [PF, ECLIPSE, HELLRAZER, RAY5, SUPERIOR].into_iter().chain(SWAM_INSTRUMENTS.iter().map(|(uri, ..)| *uri))
+    [PF, ECLIPSE, HELLRAZER, RAY5, SUPERIOR, CONSORT_ORGAN, CONSORT_GUITAR]
+        .into_iter()
+        .chain(SWAM_INSTRUMENTS.iter().map(|(uri, ..)| *uri))
+}
+
+/// What an instrument whose channels follow a setting of its own calls
+/// them as it is set now: `value` is what one of its parameters is at, by
+/// the parameter's name, in the plain values a device lists (a switch is
+/// 0 or 1, a choice the place of what is chosen). An instrument that is
+/// set to play every channel alike names none. `None` for a device type
+/// whose channels follow no setting, which is every other one.
+///
+/// The Consort Electric Guitar: with its "String Channels" on, channels 1
+/// to 6 are its strings from the highest to the lowest, and channel 7 the
+/// seventh on the body that has one.
+pub(super) fn channels_now(uri: &str, value: &dyn Fn(&str) -> Option<f64>) -> Option<BTreeMap<Channel, String>> {
+    if uri != CONSORT_GUITAR {
+        return None;
+    }
+    if !value(GUITAR_STRING_CHANNELS).is_some_and(|on| on >= 0.5) {
+        return Some(BTreeMap::new());
+    }
+    let seven = value(GUITAR_BODY).is_some_and(|body| body.round() == GUITAR_SEVEN_STRINGS);
+    let strings = if seven { 7 } else { 6 };
+    Some((1..=strings).filter_map(|string| Some((Channel::new(string)?, format!("String {string}")))).collect())
 }
 
 /// What ships about the device type `uri`: its name and its profile.
@@ -83,6 +125,8 @@ pub(super) fn entry(uri: &str) -> Option<(&'static str, InstrumentProfile)> {
         HELLRAZER => ("Ample Metal Hellrazer", ample_metal_hellrazer()),
         RAY5 => ("Ample Metal Ray5", ample_metal_ray5()),
         SUPERIOR => ("Superior Drummer 3", superior_drummer_3()),
+        CONSORT_ORGAN => ("Consort Organ", consort_organ()),
+        CONSORT_GUITAR => ("Consort Electric Guitar", consort_guitar()),
         _ => {
             let (_, name, octave_down) = SWAM_INSTRUMENTS.iter().find(|(id, ..)| *id == uri)?;
             (*name, swam(*octave_down))
@@ -226,6 +270,53 @@ fn superior_drummer_3() -> InstrumentProfile {
     }
 }
 
+/// The Consort Organ: a modelled pipe organ with one manual and a
+/// pedalboard, each with stops of its own. Its channels are fixed: the
+/// second is the pedalboard and every other one the manual.
+fn consort_organ() -> InstrumentProfile {
+    let channels = [(1, "Manual"), (2, "Pedalboard")];
+    InstrumentProfile {
+        channels: channels
+            .into_iter()
+            .filter_map(|(number, name)| Some((Channel::new(number)?, name.to_string())))
+            .collect(),
+        notes: "A pipe organ with one manual of 61 keys (C2 to C7) and a pedalboard of 32 (C2 to G4), each with \
+                stops of its own. Notes on MIDI channel 2 play the pedalboard and its stops; notes on any other \
+                channel play the manual. Write the bass line on channel 2 (`channel: \"pedalboard\"` on write_bass, \
+                create_clip or add_notes) and everything else on the first, in one clip or two. A key beyond either \
+                keyboard is played an octave or more inside it. Which octave a key sounds at is the stops' doing: \
+                with a 16-foot stop drawn it sounds an octave under its key as well, which is what a pedal line \
+                is for. Its keys are not touch sensitive: how hard a note is hit is how suddenly its pipes speak, \
+                not how loud they are; the swell box is expression (controller 11), and the mod wheel is the \
+                tremulant. The sustain pedal holds keys down, which no organ has. Measured on the plugin: the \
+                same key on channel 1 and on channel 2 is two different sounds."
+            .to_string(),
+        ..InstrumentProfile::default()
+    }
+}
+
+/// The Consort Electric Guitar: a guitar modelled string by string. What
+/// its channels are follows its own "String Channels" switch
+/// ([`channels_now`]), so the profile a track is given names none.
+fn consort_guitar() -> InstrumentProfile {
+    InstrumentProfile {
+        notes: "An electric guitar modelled string by string. As it comes every MIDI channel is the one player, \
+                the hand chooses the strings, and a channel's pitch wheel bends every string that channel is \
+                playing. With its parameter \"String Channels\" on (update_device with params {\"String \
+                Channels\": \"On\"}), channels 1 to 6 are its strings, the first the highest and the sixth the \
+                lowest (channel 7 the seventh, on the body \"Seven Strings\"): a note on one of them is played on \
+                that string, at the fret it needs, and that channel's pitch wheel bends that string alone, so a \
+                chord holds while one string of it bends. get_instrument_profile then lists the strings under \
+                `channels`, and `channel: \"string_2\"` on a note or on set_controllers reaches one. A note on \
+                any other channel leaves the hand to choose its string. The pitch wheel bends two semitones each \
+                way as it comes (its \"Bend Range\"); channel pressure and the mod wheel are vibrato. Measured \
+                on the plugin with String Channels on: two notes held on two strings, and the wheel of one \
+                channel moved, is one string bent and the other where it was."
+            .to_string(),
+        ..InstrumentProfile::default()
+    }
+}
+
 fn swam(octave_down: bool) -> InstrumentProfile {
     InstrumentProfile {
         sounds_octaves: if octave_down { -1 } else { 0 },
@@ -242,7 +333,7 @@ mod tests {
     #[test]
     fn every_shipped_entry_is_a_valid_profile_under_a_plugin_id() {
         let all: Vec<&str> = uris().collect();
-        assert_eq!(all.len(), 15);
+        assert_eq!(all.len(), 17);
         for uri in &all {
             let (name, profile) = entry(uri).unwrap_or_else(|| panic!("{uri} has no entry"));
             assert!(!name.is_empty() && !profile.is_empty() && !profile.notes.is_empty(), "{uri}");
@@ -253,6 +344,37 @@ mod tests {
         }
         assert_eq!(entry("vst3:00000000000000000000000000000000"), None);
         assert_eq!(entry("builtin:polysynth"), None);
+    }
+
+    #[test]
+    fn the_organ_names_its_pedalboard_and_the_guitars_strings_follow_its_own_switch() {
+        let channel = |number: u8| Channel::new(number).unwrap();
+        let (_, organ) = entry(CONSORT_ORGAN).unwrap();
+        assert_eq!(organ.channel_name(channel(2)), Some("Pedalboard"));
+        assert_eq!(organ.named_channel("manual"), Some(channel(1)));
+        assert_eq!(organ.channels.len(), 2);
+        assert_eq!(channels_now(CONSORT_ORGAN, &|_| Some(1.0)), None, "its channels follow no setting");
+
+        // The guitar's entry names none: they are what its switch has them be.
+        let (_, guitar) = entry(CONSORT_GUITAR).unwrap();
+        assert!(!guitar.names_channels() && guitar.notes.contains("String Channels"));
+        let set = |on: f64, body: f64| {
+            let value = move |name: &str| match name {
+                "String Channels" => Some(on),
+                "Body" => Some(body),
+                _ => None,
+            };
+            channels_now(CONSORT_GUITAR, &value).unwrap()
+        };
+        assert!(set(0.0, 0.0).is_empty(), "off: every channel is the one player");
+        let six = set(1.0, 1.0);
+        assert_eq!(six.len(), 6);
+        assert_eq!((six[&channel(1)].as_str(), six[&channel(6)].as_str()), ("String 1", "String 6"));
+        let seven = set(1.0, 4.0);
+        assert_eq!((seven.len(), seven[&channel(7)].as_str()), (7, "String 7"));
+        // A plugin that has not said its values yet names none.
+        assert!(channels_now(CONSORT_GUITAR, &|_| None).unwrap().is_empty());
+        assert_eq!(channels_now(PF, &|_| Some(1.0)), None);
     }
 
     #[test]

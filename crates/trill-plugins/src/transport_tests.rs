@@ -79,7 +79,11 @@ fn changing(stage: &Stage) -> Project {
     let track = project.add_track("Lead");
     project.add_device(ChainRef::Track(track), stage.uri.clone(), "Plugin", None).unwrap();
     let clip = project.add_midi_clip(track, "clip", 0.0, 24.0).unwrap();
-    project.clip_mut(clip).unwrap().add_notes(&[Note { pitch: 60, start: 1.0, length: 1.0, velocity: 100 }]).unwrap();
+    project
+        .clip_mut(clip)
+        .unwrap()
+        .add_notes(&[Note { pitch: 60, start: 1.0, length: 1.0, velocity: 100, ..Default::default() }])
+        .unwrap();
     project
 }
 

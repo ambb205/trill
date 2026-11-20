@@ -1173,7 +1173,7 @@ mod tests {
     use crate::{ChainRef, ClipId, Note, TrackId};
 
     fn note_at(start: f64, pitch: u8) -> Note {
-        Note { pitch, start, length: 0.5, velocity: 96 }
+        Note { pitch, start, length: 0.5, velocity: 96, ..Default::default() }
     }
 
     /// Makes an edit and records it, returning where it went.
