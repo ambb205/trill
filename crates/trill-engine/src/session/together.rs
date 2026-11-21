@@ -597,7 +597,7 @@ impl Session {
             return None;
         }
         let before = self.rederive();
-        self.sync(&before, Scope::Everything);
+        self.sync(&before, Scope::Everything, crate::hand::is_by_hand());
         Some((before, Done::of(&taken.won)))
     }
 
@@ -719,7 +719,8 @@ impl Session {
             // something that was removed): there is nothing to play anew.
             return Ok(news);
         }
-        self.sync(&before, if only_params { Scope::ParamsOnly } else { Scope::Everything });
+        // (What another program did is nobody's hand here: it opens no input.)
+        self.sync(&before, if only_params { Scope::ParamsOnly } else { Scope::Everything }, false);
         self.revision += 1;
         self.record_of_another(by, &before);
         for (theirs, unseen) in recorded {
@@ -870,7 +871,7 @@ impl Session {
                 true => drop(self.rederive()),
                 false => self.hold_to_its_properties(),
             }
-            self.sync(&before, Scope::Everything);
+            self.sync(&before, Scope::Everything, false);
             self.revision += 1;
             self.record_of_another(by, &before);
             let doc = &self.doc;

@@ -64,6 +64,10 @@ giving an armed track its input, or switching its monitoring on. That is held in
 tool: nothing that comes in by the assistant's door opens the input, by any route (arming, a track's input or
 monitoring, an undo or a redo, opening or recovering a song, a duplicate, a paste, a sound, the measurement,
 `audio_inputs` with `listen`), and what comes to want the input that way is held or disarmed, with a sentence.
+That holds for the user's own undo and redo of a step the assistant made, too: a step knows whose it was, and
+one that was not the hand's, all of it, opens nothing by being brought back. What opens the input asks what a
+hand let for itself (whether it is needed, the take that begins, what the song is told is heard), so a change
+that forgot the rule would leave an armed track that records nothing, and not an open microphone.
 Once the user has armed a track it may record. It cannot change the device that is recorded from while an input
 is live, and it cannot remove recordings. A client the user connected themselves is the user's own hand and is
 not limited.

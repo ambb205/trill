@@ -13,11 +13,15 @@ Only Windows has been run so far.
 - An input and an output on two real clocks, measured. The engine follows the two clocks and its tests hold it
   to a click within half a millisecond over half an hour at 200 parts in a million; on hardware it has been run
   through a virtual cable only, whose two ends share one clock. See [the engine's page](engine.md).
-- Saying that an input and an output are one device. Where the system says so (an interface with its own
-  input and output), a frame of the input is a frame of the song, to the bit. Where it says nothing, as of a
-  built-in device or a virtual cable, Trill reads the input by its time stamps as it would a second clock: a
-  take then lands within a frame or two and is not a copy of what was heard to the bit. A user cannot yet say
-  "these two are one device"; a test can.
+- The first minute of an input and an output that are one device of which the system says nothing (a laptop's
+  own sound card, a virtual cable). They are read as two clocks until their time stamps have said, for a
+  minute, that they are one: a take in that minute lands within a frame or two of its place and is not the
+  device's frames to the bit, as every take after it is. Where the stamps scatter it takes longer, up to five
+  minutes of them. What the stamps said is kept while the program runs and not from one run to the next.
+- Dither, and one full scale both ways, at an exclusive output of 16 or 24 bits. What is played is rounded to
+  the device's steps without dither, at 32767 a full scale for 16 bits where what is recorded is read at 32768:
+  what was recorded from such a device and is played to it again is the same to the bit only under half of
+  full scale.
 - A device's own word that frames are missing, on a real device. What a device says of a buffer (its flag, its
   count of frames, a stamp it does not stand by) is taken as the tests' scripted devices say it; no real device
   was made to drop frames.

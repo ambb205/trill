@@ -2702,6 +2702,21 @@ async fn nothing_at_the_assistants_door_opens_the_microphone_by_any_route() {
     assert!(fixture.session.lock().armed().is_empty());
     chores(&fixture, &host);
 
+    // The user's own client takes back what the assistant did and brings
+    // it back. The step was not the user's: what it brings stays held.
+    let lead = ok(&door, "create_track", json!({ "name": "Lead" })).await["track_id"].as_u64().unwrap();
+    ok(&door, "track_input", json!({ "track": lead, "input": "1", "monitor": "always" })).await;
+    ok(hand, "history", json!({ "action": "undo" })).await;
+    let gone = ok(hand, "track_input", json!({ "track": lead })).await;
+    assert!(gone.get("input_held").is_none(), "nothing is held of a track that records a keyboard: {gone}");
+    ok(hand, "history", json!({ "action": "redo" })).await;
+    let back = ok(hand, "track_input", json!({ "track": lead })).await;
+    assert_eq!(back["input"]["monitor"], "always", "{back}");
+    assert!(back["input_held"].as_str().unwrap().contains("held and not heard"), "{back}");
+    assert_eq!(back["device_input"]["open"], false);
+    chores(&fixture, &host);
+    assert_eq!(opens(), 0, "the user's redo of the assistant's step opened the input");
+
     // Looking at the level, the measurement, and a take with nothing armed.
     let error = call(&door, "audio_inputs", json!({ "listen": true })).await.unwrap_err();
     assert!(error.contains("opens the microphone"), "{error}");

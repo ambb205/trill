@@ -368,7 +368,7 @@ impl Session {
             self.playing.armed.push(track);
         }
         // Whose hand it was is what lets the input be opened for it.
-        self.hold_to_the_hand(&|_| true);
+        self.hold_to_the_hand(&|_| true, crate::hand::is_by_hand());
         self.send_live_targets();
         // A track that records an input is heard through its devices
         // while it is armed, where it says so: the graph has that. And
@@ -756,6 +756,65 @@ mod tests {
 
     fn session() -> Session {
         Session::new(Arc::new(BuiltinFactory), AudioBackend::Null { sample_rate: 48_000 }).unwrap()
+    }
+
+    /// The rule that holds the microphone to the user's hand is kept by
+    /// one function, which every change to the song and every arming comes
+    /// by. This arms a track without coming by it, as a change that forgot
+    /// to would: what opens the input asks what a hand let all the same.
+    #[test]
+    fn a_track_armed_behind_the_rules_back_records_nothing_and_opens_no_input() {
+        use crate::host::scripted::{ScriptedHost, ScriptedInput};
+        use trill_core::{Monitoring, TrackInput};
+        let host = ScriptedHost::with_speakers();
+        host.add_input(ScriptedInput::new("Microphone"));
+        let setup = crate::AudioSetup::on(Arc::new(host.clone()), crate::AudioConfig::default());
+        let media = Arc::new(trill_media::MediaCache::default());
+        let mut session = Session::with_audio(Arc::new(BuiltinFactory), media, setup).unwrap();
+        session.set_count_in(0);
+        // The user's own thread, even: no hand *armed* the track.
+        let _hand = crate::hand::by_hand();
+        let voice = session.edit(|project| Ok(project.add_track("Voice"))).unwrap();
+        let heard_armed = TrackInput { channel: 1, stereo: false, monitor: Monitoring::Armed };
+        session.edit(|project| project.set_track_input(voice, Some(heard_armed))).unwrap();
+        let opens = || host.input_requests().len();
+
+        // Armed, and nobody was asked.
+        session.playing.armed.push(voice);
+        assert!(session.is_armed(voice));
+        assert!(!session.input_status().needed, "an armed track that no hand armed needs no input");
+        session.housekeeping();
+        host.advance(4_800);
+        session.housekeeping();
+        assert_eq!(opens(), 0, "the chores opened the input for it");
+        // The graph is told the same: its input is not heard through it.
+        session.compile_and_swap();
+        assert!(session.input_held(voice) && session.live_now().held.contains(&voice));
+        assert!(session.ready_input().is_ok() && opens() == 0);
+
+        // A take: nothing is recorded from the input, which is said, and
+        // nothing is opened for it.
+        session.record().unwrap();
+        host.advance(24_000);
+        session.housekeeping();
+        let said = session.take_input_note().expect("it is said");
+        assert!(
+            said.contains("nothing is recorded from the input on 'Voice'") && said.contains("arm button"),
+            "{said}"
+        );
+        assert!(session.growing_takes().is_empty(), "no file was begun");
+        session.stop();
+        assert!(session.last_recording().is_none_or(|recorded| recorded.takes.is_empty()));
+        assert!(session.project().track(voice).unwrap().takes.is_empty());
+        assert_eq!(opens(), 0, "the take opened the input");
+        assert!(host.capturing().is_none());
+
+        // Armed by hand, as it is meant to be: the same track records.
+        session.playing.armed.clear();
+        session.set_armed(voice, true).unwrap();
+        session.housekeeping();
+        assert_eq!(opens(), 1);
+        assert!(session.input_status().needed && !session.input_held(voice));
     }
 
     #[test]

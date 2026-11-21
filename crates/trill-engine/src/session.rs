@@ -126,6 +126,13 @@ struct Step {
     done: history::Done,
     /// What the step is in the journal.
     story: story::Story,
+    /// Whether the user's own hand made the step, all of it
+    /// ([`crate::hand`]). The hand's undo or redo of such a step is the
+    /// hand's doing; of any other step it is nobody's, and what the step
+    /// brings that wants the input stays held or disarmed, as it was
+    /// when the step was made. A step that several made (a group, a
+    /// gesture) is nobody's.
+    by_hand: bool,
 }
 
 /// A group between its [`Session::begin_group`] and [`Session::end_group`].
@@ -537,10 +544,11 @@ impl Session {
         // The group's steps become one that did what they all did, one
         // after the other. In the journal the one step is all of theirs.
         let story = story::Story::joined(self.undo[floor..].iter().map(|step| &step.story));
+        let by_hand = self.undo[floor..].iter().all(|step| step.by_hand);
         for later in self.undo.split_off(floor + 1) {
             self.undo[floor].done.and(later.done);
         }
-        self.undo[floor].story = story;
+        (self.undo[floor].story, self.undo[floor].by_hand) = (story, by_hand);
         let unchanged = self.undo[floor].done.is_nothing();
         if unchanged {
             self.undo.truncate(floor);
@@ -607,7 +615,7 @@ impl Session {
         } else {
             self.hold_to_its_properties();
         }
-        self.sync(&before, scope);
+        self.sync(&before, scope, crate::hand::is_by_hand());
         self.finish_step(before, done);
     }
 
@@ -641,6 +649,7 @@ impl Session {
             (Some(true), Some(step)) => {
                 step.done.and(done);
                 step.story.and(story);
+                step.by_hand &= crate::hand::is_by_hand();
             }
             _ => self.push_step(done, story),
         }
@@ -661,7 +670,7 @@ impl Session {
             open.floor = open.floor.min(depth);
         }
         let id = UndoStep(self.fresh_id());
-        self.undo.push(Step { id, done, story });
+        self.undo.push(Step { id, done, story, by_hand: crate::hand::is_by_hand() });
         if self.undo.len() > UNDO_LIMIT {
             // The oldest step goes, unless it is where an open group began:
             // that group must still be able to undo all the way back, so
@@ -696,16 +705,17 @@ impl Session {
         // kept as it is running: bringing the step back restores it so.
         let at_stake = Self::devices_at_stake(&last.done);
         self.keep_states_of(at_stake);
-        let Some(Step { id, done, story }) = self.undo.pop() else { return Turned::default() };
+        let Some(Step { id, done, story, by_hand }) = self.undo.pop() else { return Turned::default() };
         let (ops, theirs) = done.back(&self.doc, self.mine());
-        let leaving = self.turn(ops);
+        // The hand's own only if the step was: see `Step::by_hand`.
+        let leaving = self.turn(ops, by_hand && crate::hand::is_by_hand());
         let story = if self.retract_step(&story, true) {
             story::Story::default()
         } else {
             self.record_reversal(Reversal::Undo, &story, &leaving);
             Self::settled(story)
         };
-        self.redo.push(Step { id, done, story });
+        self.redo.push(Step { id, done, story, by_hand });
         self.revision += 1;
         Turned { done: true, theirs }
     }
@@ -720,24 +730,25 @@ impl Session {
         let Some(last) = self.redo.last() else { return Turned::default() };
         let at_stake = Self::devices_at_stake(&last.done);
         self.keep_states_of(at_stake);
-        let Some(Step { id, done, story }) = self.redo.pop() else { return Turned::default() };
+        let Some(Step { id, done, story, by_hand }) = self.redo.pop() else { return Turned::default() };
         let (ops, theirs) = done.again(&self.doc, self.mine());
-        let leaving = self.turn(ops);
+        // The hand's own only if the step was: see `Step::by_hand`.
+        let leaving = self.turn(ops, by_hand && crate::hand::is_by_hand());
         self.record_reversal(Reversal::Redo, &story, &leaving);
-        self.undo.push(Step { id, done, story });
+        self.undo.push(Step { id, done, story, by_hand });
         self.revision += 1;
         Turned { done: true, theirs }
     }
 
     /// Sets what taking a step back or bringing it back sets, and brings
     /// the engine in line. Returns the song as it was until then.
-    fn turn(&mut self, ops: Vec<Op>) -> Project {
+    fn turn(&mut self, ops: Vec<Op>, by_hand: bool) -> Project {
         if ops.is_empty() {
             return self.project.clone();
         }
         self.write(ops);
         let leaving = self.rederive();
-        self.sync(&leaving, Scope::Everything);
+        self.sync(&leaving, Scope::Everything, by_hand);
         leaving
     }
 
@@ -748,9 +759,9 @@ impl Session {
         let Some(last) = self.undo.last() else { return };
         let at_stake = Self::devices_at_stake(&last.done);
         self.keep_states_of(at_stake);
-        let Some(Step { done, story, .. }) = self.undo.pop() else { return };
+        let Some(Step { done, story, by_hand, .. }) = self.undo.pop() else { return };
         let (ops, _) = done.back(&self.doc, self.mine());
-        let leaving = self.turn(ops);
+        let leaving = self.turn(ops, by_hand && crate::hand::is_by_hand());
         if !self.retract_step(&story, false) {
             self.record_reversal(Reversal::Undo, &story, &leaving);
         }
@@ -1337,7 +1348,7 @@ impl Session {
         // hand says so again.
         self.disarm_all();
         self.forget_the_hand();
-        self.hold_to_the_hand(&|_| false);
+        self.hold_to_the_hand(&|_| false, false);
         // Its recordings are read several at a time, ahead of the compile
         // that would read them one after the other.
         let read = self.audio.read_ahead(&self.project, self.engine.sample_rate());
@@ -1412,14 +1423,16 @@ impl Session {
     }
 
     /// Brings the engine in line with the project after it changed from
-    /// `old`.
-    fn sync(&mut self, old: &Project, scope: Scope) {
+    /// `old`. `by_hand` says whether the change was the user's own hand's
+    /// doing: an edit of a thread that is the hand, or the hand's undo or
+    /// redo of a step that was the hand's.
+    fn sync(&mut self, old: &Project, scope: Scope, by_hand: bool) {
         if scope == Scope::Nothing {
             return;
         }
         // Before the graph is made: what came to want the input by this
         // change is let, held or disarmed by whose hand made it.
-        self.hold_to_the_hand(&|track| old.track(track).is_ok());
+        self.hold_to_the_hand(&|track| old.track(track).is_ok(), by_hand);
         if scope == Scope::Everything {
             self.compile_and_swap();
             // A track that is gone is no longer armed or played.

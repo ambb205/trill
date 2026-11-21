@@ -109,8 +109,10 @@ the device and record again. `Shift+F9` arms the selected track.
 
 *An input is opened by your own hand, at this window, in this song.* Three things open it for a track: arming
 the track as it then records an input, giving an armed track its input, and switching its monitoring on. Nothing
-else does. Not the assistant, and not an undo or a redo made for it; not a song that is opened, begun or
-recovered; not a track that is duplicated or pasted. Arming does not carry into another song, and a track that
+else does. Not the assistant, and not an undo or a redo of what it did, whoever presses the keys: taking back
+and bringing back a step the assistant made, or had a part in, opens nothing, and what the step brings stays
+held or disarmed as it was. Not a song that is opened, begun or recovered; not a track that is duplicated or
+pasted. Arming does not carry into another song, and a track that
 comes to be armed with an input in any other way is disarmed, with a line that says so. A song that says a track
 is *always* heard does not open the microphone by being opened either, your own songs included: the switch
 shows it as **held**, and one click lets it go. The assistant may record once you have armed the track yourself,
@@ -179,7 +181,11 @@ allows), and the page says whether it runs on the output's clock or on one of it
 case of a microphone on one device and headphones on another. That an input shares the output's clock is what
 the system says of the two, and Trill holds it against the input's own time stamps: where they say otherwise
 for a few seconds, the input is read as having a clock of its own from then on, without a step, and the page
-says that the system has it as part of the output's device and that its time stamps say otherwise.
+says that the system has it as part of the output's device and that its time stamps say otherwise. It goes the
+other way too, and nobody has to know what a clock is: of a laptop's own sound card, or a virtual cable, the
+system says nothing, so the input is read as a second clock at first; once its time stamps have said for a
+minute that it runs on the output's clock it is read so, frame for frame, between takes and never under one,
+and the page says that the stamps say so.
 
 *The round trip* is how long sound takes from the microphone back to the speaker: what the input says of
 itself, what handing the sound across to the engine's clock takes, and what the output says. A take is put where
