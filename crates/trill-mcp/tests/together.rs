@@ -54,11 +54,14 @@ async fn ok(client: &Client, tool: &'static str, arguments: Value) -> Value {
 async fn until(client: &Client, tool: &'static str, arguments: Value, what: &str, done: impl Fn(&Value) -> bool) -> Value {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let reply = ok(client, tool, arguments.clone()).await;
-        if done(&reply) {
-            return reply;
+        // (What is asked about may not be there yet: a refusal is "not yet".)
+        let reply = call(client, tool, arguments.clone()).await;
+        if let Ok(reply) = &reply
+            && done(reply)
+        {
+            return reply.clone();
         }
-        assert!(Instant::now() < deadline, "timed out waiting until {what}; the last reply was {reply}");
+        assert!(Instant::now() < deadline, "timed out waiting until {what}; the last reply was {reply:?}");
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }

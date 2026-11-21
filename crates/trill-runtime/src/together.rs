@@ -340,13 +340,17 @@ impl Driver {
                     (peer.person, peer.replica) = (Some(person), replica);
                     peer.synced = reply.is_some();
                 }
+                // Whoever came is in the song once they have it: said now
+                // where both had it already, and else when it is handed
+                // over.
+                match (joined, reply.is_some()) {
+                    (true, true) => self.say(format!("You are in the song with {name}.")),
+                    (true, false) => {}
+                    (false, _) => self.say(format!("{name} is here.")),
+                }
                 if let Some(reply) = reply {
                     self.net.say(link, &reply);
                 }
-                self.say(match joined {
-                    true => format!("You are in the song with {name}."),
-                    false => format!("{name} is here."),
-                });
                 // Who else is here, as far as this program knows.
                 let others: Vec<Presence> = self.people.iter().map(|(here, ..)| presence_of(here)).collect();
                 for presence in others {
@@ -380,6 +384,7 @@ impl Driver {
                         if let Some(peer) = self.peers.get_mut(&link) {
                             peer.synced = true;
                         }
+                        self.say(format!("You are in the song with {}.", self.name_of(link)));
                     }
                     Err(error) => {
                         let why = format!("the song that was handed over could not be opened: {error}");
@@ -514,6 +519,7 @@ impl Driver {
         let said = session.take_said();
         let (floors, replica) = (session.floors(), session.replica());
         let transport = session.transport();
+        let holding = session.holding();
         drop(session);
         if !said.is_empty() && self.peers.values().any(|peer| peer.synced) {
             let message = Message::Changes { said: thinned(said), floors, replica };
@@ -527,7 +533,7 @@ impl Driver {
         let mut presence = Presence::of(me);
         (presence.beat, presence.playing) = (transport.position_beats, transport.playing);
         (presence.tracks, presence.clips, presence.notes, presence.holding) =
-            (mine.tracks, mine.clips, mine.notes, mine.holding);
+            (mine.tracks, mine.clips, mine.notes, mine.holding.or(holding));
         let presence = presence.bounded();
         let due = match &self.presence_said {
             None => true,

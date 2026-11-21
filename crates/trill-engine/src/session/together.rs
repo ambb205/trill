@@ -612,6 +612,17 @@ impl Session {
         Ok(news)
     }
 
+    /// What this program's person has hold of right now, in words: the
+    /// first thing the drag that is under way set. For the others to see;
+    /// no part of the song.
+    pub fn holding(&self) -> Option<String> {
+        if self.gesture != Some(true) {
+            return None;
+        }
+        let record = self.undo.last()?.done.records.first()?;
+        Some(what(&self.doc, &record.key, &record.after))
+    }
+
     // ---- notices -----------------------------------------------------------
 
     /// What happened to one's own work because someone else was working

@@ -119,6 +119,10 @@ pub struct Cli {
     pub credits: bool,
     /// Open with the playback load up, showing a made-up load.
     pub load: Option<crate::ui::LoadScene>,
+    /// Show made-up company in the song: who is here and what they hold.
+    pub together: Option<crate::ui::TogetherScene>,
+    /// Open with the panel that shares the song up.
+    pub sharing: bool,
     /// Show the song in the middle of being opened, made up.
     pub opening: Option<crate::ui::OpeningScene>,
     /// What to search the sound library for.
@@ -333,6 +337,15 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Parsed> {
                     scene.with_context(|| format!("unknown load '{name}' (expected one of {})", known.join(", ")))?,
                 );
             }
+            "--together" => {
+                let name = value("the name of a scene")?;
+                let known: Vec<&str> = crate::ui::TogetherScene::ALL.iter().map(|(name, _)| *name).collect();
+                let scene = crate::ui::TogetherScene::named(&name);
+                cli.together = Some(
+                    scene.with_context(|| format!("unknown company '{name}' (expected one of {})", known.join(", ")))?,
+                );
+            }
+            "--sharing" => cli.sharing = true,
             "--opening" => {
                 let name = value("the name of a scene")?;
                 let known: Vec<&str> = crate::ui::OpeningScene::ALL.iter().map(|(name, _)| *name).collect();
@@ -516,6 +529,8 @@ impl Cli {
             show_credits: self.credits,
             show_load: self.load.is_some(),
             load_scene: self.load,
+            together_scene: self.together,
+            show_sharing: self.sharing,
             opening_scene: self.opening,
             record: self.record,
             stage: self.stage,

@@ -40,6 +40,8 @@ pub struct Snapshot {
     pub can_undo: bool,
     pub can_redo: bool,
     pub modified: bool,
+    /// Whether the song is one that others hold too, or have held.
+    pub shared: bool,
     pub path: Option<PathBuf>,
     /// Compile problems (plugins that failed to load, missing audio files).
     pub problems: Vec<String>,
@@ -201,6 +203,7 @@ impl Snapshot {
             can_undo: session.can_undo(),
             can_redo: session.can_redo(),
             modified: session.is_modified(),
+            shared: session.shared_song().is_some(),
             path: session.path().map(PathBuf::from),
             problems: session.problems().iter().map(ToString::to_string).collect(),
             clip_problems,
@@ -427,6 +430,9 @@ impl MeterState {
 /// Values that change without the project changing.
 #[derive(Default)]
 pub struct Live {
+    /// Who else has the song open and what they hold, and where one's own
+    /// work clashed with theirs: see [`super::together`].
+    pub together: super::together::Seen,
     pub playing: bool,
     pub metronome: bool,
     /// Song position in beats.

@@ -93,6 +93,7 @@ mod timeline;
 mod toast;
 mod top_bar;
 mod units;
+mod together;
 mod wavetable_panel;
 mod widgets;
 mod work;
@@ -109,6 +110,7 @@ pub use opening::OpeningScene;
 pub use setup_scene::SetupScene;
 pub use state::{BrowserTab, DetailTab};
 pub use study::{Shown as StudyShown, Side as StudySide, Whole as StudyWhole};
+pub use together::TogetherScene;
 
 use anyhow::anyhow;
 use eframe::egui;
@@ -199,6 +201,11 @@ pub struct UiOptions {
     /// Show a made-up load in place of the machine's own: for a picture
     /// or a test.
     pub load_scene: Option<LoadScene>,
+    /// Show made-up company in the song (who is here and what they hold)
+    /// in place of anyone who is: for a picture or a test.
+    pub together_scene: Option<TogetherScene>,
+    /// Open with the panel that shares the song up.
+    pub show_sharing: bool,
     /// Show a song in the middle of being opened, made up: for a picture
     /// or a test.
     pub opening_scene: Option<OpeningScene>,
@@ -247,6 +254,8 @@ impl Default for UiOptions {
             show_credits: false,
             show_load: false,
             load_scene: None,
+            together_scene: None,
+            show_sharing: false,
             opening_scene: None,
             record: false,
             stage: false,

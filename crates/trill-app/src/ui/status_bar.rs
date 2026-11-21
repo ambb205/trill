@@ -68,6 +68,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
         let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         row.status(theme.info, &format!("Filming {name} \u{00B7} {how_far}"));
     }
+    // Who else is in the song, while it is shared: a click opens the panel.
+    let together_item = super::together::status_item(ui, row.cx, &painter, row.x, bar).map(|(end, response)| {
+        row.x = end + GAP;
+        response
+    });
     // A song that is more than the machine plays in time: one line for as
     // long as it is, which opens what each track costs.
     let short_item = row.short(ui);
@@ -91,6 +96,12 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     cx.hint(&response, about);
     if response.clicked() {
         audio_settings::open(cx);
+    }
+    if let Some(response) = together_item {
+        cx.hint(&response, "Who is in this song with you \u{00B7} click for the invitation, and to leave");
+        if response.clicked() {
+            super::together::open_share(cx);
+        }
     }
     if let Some(response) = short_item {
         cx.hint(

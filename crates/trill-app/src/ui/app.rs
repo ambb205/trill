@@ -339,6 +339,10 @@ impl TrillApp {
                     self.live.cpu_load = scene.of(&self.snapshot.project).load.mean;
                 }
                 self.live.audio_faults = session.audio_faults();
+                // Where one's own work and someone else's clashed.
+                if self.live.together.notices != session.notices() {
+                    self.live.together.notices = session.notices().to_vec();
+                }
                 self.live.preparing = session.preparing();
                 self.live.update_editors(&self.snapshot, &session);
                 self.live.update_silent(&self.snapshot, &session);
@@ -400,6 +404,10 @@ impl TrillApp {
         }
 
         self.state.resolve_device(&self.snapshot.project);
+        // Who else is in the song, and what this window's person holds:
+        // the runtime's, not the session's.
+        let runtime = self.sounds.runtime.clone();
+        super::together::sync(&mut self.state, &mut self.live, &self.snapshot, &runtime, &self.options);
 
         // Meters are read through their own handles; no lock involved.
         let elapsed = now.duration_since(self.last_meter_update).as_secs_f32().min(0.25);
@@ -948,6 +956,7 @@ impl TrillApp {
         }
         let open_credits = std::mem::take(&mut self.options.show_credits);
         let open_load = std::mem::take(&mut self.options.show_load);
+        let open_sharing = std::mem::take(&mut self.options.show_sharing);
         let mut cx = self.cx();
         if film_asked.is_some() {
             filming::open_on(&ctx, &mut cx, film_asked);
@@ -979,6 +988,9 @@ impl TrillApp {
         }
         if open_load {
             super::load::open(&mut cx);
+        }
+        if open_sharing {
+            super::together::open_share(&mut cx);
         }
         // Said once when the song begins to be more than the machine plays.
         super::load::notice(&mut cx);
@@ -1071,9 +1083,13 @@ impl TrillApp {
         shortcuts::window(&ctx, &mut cx);
         credits::window(&ctx, &mut cx);
         super::load::window(&ctx, &mut cx);
+        super::together::window(&ctx, &mut cx);
         // Clear of the assistant's panel: its Send and Stop are in that corner.
         let aside = if cx.assistant.is_open() { cx.assistant.width() } else { 0.0 };
         let corner = ctx.content_rect().right_bottom() - egui::vec2(12.0 + aside, status_bar::HEIGHT + 10.0);
+        // Where one's own work and someone else's clashed: each a card
+        // that stays until it is answered, under what comes and goes.
+        let corner = egui::pos2(corner.x, super::together::notices(&ctx, &mut cx, corner));
         // A song that is being opened, and how far its devices are: under
         // whatever else is said in that corner.
         let corner = super::opening::plate(&ctx, &mut cx, corner);
@@ -1419,8 +1435,8 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
         Command::ExportWav => files::export_wav(ctx, cx),
         Command::ExportFilm if cx.filming.is_open() => filming::close(cx),
         Command::ExportFilm => filming::open(ctx, cx),
-        Command::Undo => drop(cx.with_session(|session| session.undo())),
-        Command::Redo => drop(cx.with_session(|session| session.redo())),
+        Command::Undo => undo(cx),
+        Command::Redo => redo(cx),
         Command::Cut if in_notes => piano_roll::cut_notes(cx),
         Command::Cut => ops::cut(cx),
         Command::Copy if in_notes => piano_roll::copy_notes(cx),
@@ -1454,6 +1470,8 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
                 cx.state.credits_open = false;
             } else if cx.state.load_open {
                 cx.state.load_open = false;
+            } else if cx.state.together.panel.is_some() {
+                cx.state.together.panel = None;
             } else if cx.settings.is_open() {
                 audio_settings::toggle(cx);
             } else if cx.setup.is_open() {
@@ -1514,6 +1532,24 @@ fn run_command(ctx: &egui::Context, cx: &mut Cx, command: Command) {
 }
 
 /// Takes `tool` up, or puts it away if it is the one in hand.
+/// Takes back the last step: this window's own, whoever else is in the
+/// song. What the step had set that someone else has set since stays
+/// theirs, and that is said.
+pub(super) fn undo(cx: &mut Cx) {
+    let turned = cx.with_session(|session| session.take_back());
+    if let Some(sentence) = turned.sentence() {
+        cx.state.toasts.info(sentence);
+    }
+}
+
+/// Brings back the step that was taken back last.
+pub(super) fn redo(cx: &mut Cx) {
+    let turned = cx.with_session(|session| session.bring_again());
+    if let Some(sentence) = turned.sentence() {
+        cx.state.toasts.info(sentence);
+    }
+}
+
 fn toggle_tool(cx: &mut Cx, tool: Tool) {
     let current = &mut cx.state.arrangement.tool;
     *current = if *current == tool { Tool::Pointer } else { tool };

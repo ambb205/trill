@@ -127,6 +127,8 @@ fn paint_rows(ui: &Ui, cx: &Cx, geometry: &Geometry, hovered: Option<ClipId>) {
                 renaming: renaming == Some(clip.id),
             };
             clips::paint_clip(&painter, cx, &mut notes, rect, geometry, clip, look);
+            // Someone else has it selected: their colour, and their name.
+            crate::ui::together::mark_clip(&painter, cx, rect.intersect(lanes), clip.id);
             // What its study found, along a reference: its parts, its chords, its words.
             let studied = track.reference.as_ref().and_then(|reference| cx.studies.of(reference.study.as_deref()?));
             if let Some(open) = studied {

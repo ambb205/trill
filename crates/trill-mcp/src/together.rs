@@ -200,20 +200,19 @@ impl TrillServer {
                         .to_owned());
                 };
                 let heard = self.runtime.said_together(0).last().map_or(0, |(number, _)| *number);
-                let before = self.runtime.together().connected;
                 self.runtime.join(invitation, request.replace_unsaved.unwrap_or(false))?;
-                // What came of it: a connection with the song in hand, or
-                // the sentence that says why not.
+                // What came of it: the song in hand with the other in it,
+                // or the sentence that says why not.
                 let until = Instant::now() + JOINING;
                 loop {
-                    let refusal = (self.runtime.said_together(heard).into_iter())
+                    let said = self.runtime.said_together(heard);
+                    let refusal = (said.iter())
                         .find(|(_, said)| said.starts_with("Not joined") || said.starts_with("No connection"));
                     if let Some((_, why)) = refusal {
-                        return Err(why);
+                        return Err(why.clone());
                     }
-                    let status = self.runtime.together();
-                    let same = self.session.lock().shared_song().is_some();
-                    if status.connected > before && !status.joining && same && !status.people.is_empty() {
+                    let joined = said.iter().any(|(_, said)| said.starts_with("You are in the song with"));
+                    if joined && !self.runtime.together().people.is_empty() {
                         return Ok(self.together_json());
                     }
                     if Instant::now() > until {
