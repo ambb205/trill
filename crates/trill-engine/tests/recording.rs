@@ -1687,7 +1687,11 @@ fn recordings_that_cannot_be_given_a_second_name_are_copied_away_from_the_sessio
         saved.track(voice).unwrap().takes.iter().map(|take| take.clip.audio().unwrap().path.clone()).collect();
     assert_eq!(in_file, [new_first.to_string_lossy(), new_second.to_string_lossy()], "the song's file says so too");
     assert!(rig.session.undo(), "the second take is undone");
-    assert_eq!(take_paths(&rig.session, voice), [new_first.clone()], "the state before names it where it is now");
+    assert_eq!(
+        take_paths(&rig.session, voice),
+        std::slice::from_ref(&new_first),
+        "the state before names it where it is now"
+    );
     assert!(rig.session.problems().is_empty(), "{:?}", rig.session.problems());
     assert!(!beside.join("Voice.coming").exists());
 }
@@ -1709,7 +1713,7 @@ fn a_take_that_is_still_being_recorded_when_the_song_is_first_saved_comes_beside
 
     // Ended: it is beside the song, and the song names it there.
     let beside = folder.path().join("songs").join("Early files").join("takes").join("Voice.wav");
-    assert_eq!(take_paths(&rig.session, voice), [beside.clone()]);
+    assert_eq!(take_paths(&rig.session, voice), std::slice::from_ref(&beside));
     assert!(beside.is_file());
     let audio = trill_media::MediaCache::default().audio(&beside).unwrap();
     assert!(audio.frames() >= 96_000, "all of it: {} frames", audio.frames());
@@ -1746,11 +1750,11 @@ fn the_recordings_of_an_unsaved_song_that_was_recovered_come_beside_it_at_its_fi
     rig.session.keep_unsaved_recordings_in(runs.join("this run"));
     rig.session.load_recovered(&copy, None).unwrap();
     let voice = rig.session.project().tracks[0].id;
-    assert_eq!(take_paths(&rig.session, voice), [first.clone()]);
+    assert_eq!(take_paths(&rig.session, voice), std::slice::from_ref(&first));
     let song = folder.path().join("songs").join("Back.trill");
     rig.session.save(&song).unwrap();
     let beside = folder.path().join("songs").join("Back files").join("takes").join("Voice.wav");
-    assert_eq!(take_paths(&rig.session, voice), [beside.clone()], "it came beside the song");
+    assert_eq!(take_paths(&rig.session, voice), std::slice::from_ref(&beside), "it came beside the song");
     assert!(beside.is_file() && !first.exists(), "and nothing is left in the folder of the run that is gone");
     assert!(std::fs::read_to_string(&song).unwrap().contains("Back files"));
 }

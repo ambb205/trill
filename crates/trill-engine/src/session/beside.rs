@@ -88,7 +88,7 @@ impl ComingBeside {
     /// song · 40 %".
     pub fn said(&self) -> String {
         let what = if self.files == 1 { "1 recording".to_string() } else { format!("{} recordings", self.files) };
-        let share = if self.total == 0 { 100 } else { (self.done * 100 / self.total).min(100) };
+        let share = (self.done * 100).checked_div(self.total).map_or(100, |share| share.min(100));
         format!("Bringing {what} beside the song \u{00B7} {share} %")
     }
 }
