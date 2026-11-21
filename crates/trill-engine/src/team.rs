@@ -512,7 +512,15 @@ mod tests {
                     for _ in 0..4 {
                         ready.fetch_add(1, Ordering::SeqCst);
                         team.more();
-                        std::thread::sleep(std::time::Duration::from_millis(2));
+                        // Busy until somebody has taken it: a moment, and
+                        // on a machine that has other work, as long as a
+                        // thread that slept takes to be given a processor.
+                        let waited = std::time::Instant::now();
+                        while ready.load(Ordering::SeqCst) > 0
+                            && waited.elapsed() < std::time::Duration::from_millis(250)
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
                     }
                 }
                 let take = |ready: usize| ready.checked_sub(1);
