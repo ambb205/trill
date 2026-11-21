@@ -193,7 +193,7 @@ fn of_two_moves_of_one_clip_the_later_holds_and_the_other_can_be_put_back() {
     let from_a = a.edit(|song| song.move_clip(verse, None, 8.0)).unwrap();
     let from_b = b.edit(|song| song.move_clip(verse, None, 16.0)).unwrap();
     assert_eq!(from_a.stamp.clock(), from_b.stamp.clock(), "made at the same moment");
-    meet(&mut a, &mut b, &[from_a.clone()], &[from_b]);
+    meet(&mut a, &mut b, std::slice::from_ref(&from_a), &[from_b]);
     assert_eq!(a.project.clip(verse).unwrap().start, 16.0, "the later: of two at one count, the higher number's");
     // The one whose move gave way puts it back with an ordinary edit,
     // which is later than both.
@@ -261,7 +261,7 @@ fn a_track_deleted_while_another_writes_notes_in_it_is_gone_and_comes_back_whole
     let from_a = a.edit(|song| song.remove_track(keys).map(drop)).unwrap();
     assert_eq!(from_a.ops, [Thing::Track(keys).set_alive(false)], "what went with it is not said: it goes with it");
     let from_b = b.edit(|song| song.clip_mut(verse)?.add_notes(&[note(72, 4.0)])).unwrap();
-    meet(&mut a, &mut b, &[from_a], &[from_b.clone()]);
+    meet(&mut a, &mut b, &[from_a], std::slice::from_ref(&from_b));
     assert!(a.project.track(keys).is_err() && a.project.clip(verse).is_err(), "the track is gone, for both");
     assert!(a.project.automation.is_empty(), "and its envelope with it");
     // The one who wrote in it is the one who can tell: their work is

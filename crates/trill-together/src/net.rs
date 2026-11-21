@@ -329,9 +329,8 @@ impl Net {
             let links = self.links.lock().unwrap();
             for link in to {
                 let Some(held) = links.get(link) else { continue };
-                if held.waiting.fetch_add(bytes.len(), Ordering::Relaxed) + bytes.len() > MAX_WAITING {
-                    behind.push(*link);
-                } else if held.say.send(bytes.clone()).is_err() {
+                let full = held.waiting.fetch_add(bytes.len(), Ordering::Relaxed) + bytes.len() > MAX_WAITING;
+                if full || held.say.send(bytes.clone()).is_err() {
                     behind.push(*link);
                 }
             }

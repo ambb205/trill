@@ -329,8 +329,9 @@ impl Session {
         // session held: each is looked at once that is over instead, and
         // its state said if it is not what the song has.
         if self.making_devices() {
-            let devices: Vec<DeviceId> = self.project.devices().map(|device| device.id).collect();
-            for device in devices {
+            let plugins = self.project.devices().filter(|device| self.factory.takes_time(&device.uri));
+            let plugins: Vec<DeviceId> = plugins.map(|device| device.id).collect();
+            for device in plugins {
                 self.watch(device);
             }
         } else {
@@ -625,18 +626,15 @@ impl Session {
             }
             only_params &= taken.won.iter().all(|part| part.op.is_param());
             for part in taken.won.iter().filter(|part| part.stamp == stamp) {
-                match part.op.key() {
-                    Some(key) => {
-                        if let Some((_, Some(was))) = over.iter().find(|(held, _)| *held == key)
-                            && *was != part.op
-                        {
-                            self.say_overridden(by, &key, was.clone(), &part.op);
-                        }
-                        if let Some(thing) = key.thing().filter(|thing| part.op == thing.set_alive(false)) {
-                            self.say_removed(by, &thing);
-                        }
+                if let Some(key) = part.op.key() {
+                    if let Some((_, Some(was))) = over.iter().find(|(held, _)| *held == key)
+                        && *was != part.op
+                    {
+                        self.say_overridden(by, &key, was.clone(), &part.op);
                     }
-                    None => {}
+                    if let Some(thing) = key.thing().filter(|thing| part.op == thing.set_alive(false)) {
+                        self.say_removed(by, &thing);
+                    }
                 }
             }
             let own = taken.won.into_iter().filter(|part| part.stamp == stamp).map(|part| part.op);

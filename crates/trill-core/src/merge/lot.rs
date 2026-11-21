@@ -15,7 +15,7 @@ impl Lot {
         Lot(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
     }
 
-    pub fn next(&mut self) -> u64 {
+    pub fn draw(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
@@ -23,7 +23,7 @@ impl Lot {
     }
 
     pub fn below(&mut self, limit: usize) -> usize {
-        (self.next() % limit.max(1) as u64) as usize
+        (self.draw() % limit.max(1) as u64) as usize
     }
 
     pub fn pick<'a, T>(&mut self, of: &'a [T]) -> Option<&'a T> {
@@ -161,6 +161,9 @@ pub fn song() -> Project {
     song
 }
 
+/// An edit that was drawn, to be made of a song.
+pub type Edit = Box<dyn FnOnce(&mut Project) -> Result<(), EditError>>;
+
 pub fn ids(project: &Project) -> (Vec<TrackId>, Vec<ClipId>, Vec<DeviceId>) {
     let tracks = project.tracks.iter().map(|track| track.id).collect();
     let clips = project.tracks.iter().flat_map(|track| &track.clips).map(|clip| clip.id).collect();
@@ -170,7 +173,7 @@ pub fn ids(project: &Project) -> (Vec<TrackId>, Vec<ClipId>, Vec<DeviceId>) {
 
 /// An edit drawn by lot from the model's edit methods, on whatever the
 /// song holds: some are refused, as edits are.
-pub fn any_edit(lot: &mut Lot, project: &Project) -> Box<dyn FnOnce(&mut Project) -> Result<(), EditError>> {
+pub fn any_edit(lot: &mut Lot, project: &Project) -> Edit {
     let (tracks, clips, devices) = ids(project);
     let track = lot.pick(&tracks).copied().unwrap_or(TrackId(1));
     let other = lot.pick(&tracks).copied().unwrap_or(TrackId(1));

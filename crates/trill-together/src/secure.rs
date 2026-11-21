@@ -204,9 +204,12 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
 
+    /// What one end of a connection came to.
+    type End = Result<(Sayer, Hearer), Broken>;
+
     /// Two ends of a connection on this machine, each made secure with
     /// its key on a thread of its own.
-    fn pair(ours: [u8; 32], theirs: [u8; 32]) -> (Result<(Sayer, Hearer), Broken>, Result<(Sayer, Hearer), Broken>) {
+    fn pair(ours: [u8; 32], theirs: [u8; 32]) -> (End, End) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let accepting = std::thread::spawn(move || secure(listener.accept().unwrap().0, &theirs, false));

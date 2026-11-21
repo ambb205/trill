@@ -460,7 +460,7 @@ mod tests {
         // And where there is no room between two, the row is laid out anew.
         assert_eq!(places(&[(1, Some(1.0)), (9, None), (2, Some(1.0))]), [1.0, 2.0, 3.0]);
         let mut tight = 1.0f64;
-        let mut order = vec![(1, Some(0.0)), (2, Some(tight))];
+        let mut order = [(1, Some(0.0)), (2, Some(tight))];
         for id in 3..2000 {
             let given = places(&[order[0], (id, None), order[1]]);
             if given == [1.0, 2.0, 3.0] {
