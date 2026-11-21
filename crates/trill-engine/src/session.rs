@@ -1351,6 +1351,10 @@ impl Session {
             let (Some(meta), Ok(previous)) = (self.bank.devices.get(&device.id), old.device(device.id)) else {
                 continue;
             };
+            if previous.state.is_some() && crate::compile::awaits_state(self.factory.as_ref(), device) {
+                // Its values are the preset's, once its state is there.
+                continue;
+            }
             for (index, info) in meta.params.iter().enumerate() {
                 let value = device.params.get(&info.id);
                 if value != previous.params.get(&info.id) {

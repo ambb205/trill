@@ -6,12 +6,15 @@
 //! which is what the wire does (`trill-together`, `trill-runtime`).
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use trill_core::device::{CompositeFactory, DeviceFactory};
 use trill_core::journal::Author;
 use trill_core::merge::lot::{Lot, any_edit, check, note};
 use trill_core::merge::{Change, Op, Said, Stamp, TrackOp, TrackSet};
 use trill_core::project::{AutomationPoint, AutomationTarget};
 use trill_core::{ChainRef, ClipId, DeviceId, Project, TrackId, TrackKind};
 use trill_dsp::BuiltinFactory;
+use trill_engine::scripted::{BASS, Loading, ScriptedFactory};
 use trill_engine::{AudioBackend, Session};
 
 fn session() -> Session {
@@ -74,6 +77,72 @@ fn track(session: &Session, name: &str) -> TrackId {
 fn clip(session: &Session, name: &str) -> ClipId {
     let clips = session.project().tracks.iter().flat_map(|track| &track.clips);
     clips.into_iter().find(|clip| clip.name == name).map(|clip| clip.id).expect("the clip is there")
+}
+
+/// A session whose plugins take a moment to make, as plugins do, and the
+/// factory that says how often one was made.
+fn with_plugins() -> (Session, ScriptedFactory) {
+    let scripted = ScriptedFactory::loading(Loading { making: Duration::from_millis(60), ..Loading::default() });
+    let factory: Arc<dyn DeviceFactory> =
+        Arc::new(CompositeFactory::new(vec![Box::new(BuiltinFactory), Box::new(scripted.clone())]));
+    let mut session = Session::new(factory, AudioBackend::Null { sample_rate: 48_000 }).unwrap();
+    session.hear_changes(true);
+    (session, scripted)
+}
+
+/// Does the session's chores until `done`.
+fn chores(session: &mut Session, what: &str, done: impl Fn(&Session) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        session.housekeeping();
+        if done(session) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "never came to it: {what}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_preset_a_plugin_loads_in_one_program_reaches_the_other_as_its_state_and_makes_the_plugin_there_once() {
+    let ((mut a, _), (mut b, made_in_b)) = (with_plugins(), with_plugins());
+    let track = a.edit(|song| Ok(song.add_track("Bass"))).unwrap();
+    let bass = a.add_device(ChainRef::Track(track), BASS, Some("up"), None).unwrap();
+    assert!(a.wait_until_opened(Duration::from_secs(20)));
+    // Sharing reads every plugin's state: whoever joins is handed the bass as it is running.
+    a.share();
+    let up = a.project().device(bass).unwrap().state.clone();
+    assert!(up.is_some() && a.project().device(bass).unwrap().from_preset.is_none());
+    b.take_song(&a.whole_song()).unwrap();
+    a.take_said();
+    chores(&mut b, "the bass is there", |b| b.arriving().is_none() && !b.making_devices());
+    assert_eq!(made_in_b.made().len(), 1, "{:?}", made_in_b.made());
+
+    // The bass loads another preset itself, in the first program: the song
+    // names it at once, and has no state until the plugin has been read.
+    a.load_preset(bass, "soft").unwrap();
+    assert!(a.project().device(bass).unwrap().state.is_none());
+    pass(&mut a, &mut b, "Ada");
+    chores(&mut b, "nothing is being made", |b| b.arriving().is_none() && !b.making_devices());
+    assert_eq!(b.project().device(bass).unwrap().preset.as_ref().map(|preset| preset.id.as_str()), Some("soft"));
+    assert_eq!(made_in_b.made().len(), 1, "what runs in the other goes on until the state is there");
+    assert!(b.problems().is_empty(), "{:?}", b.problems());
+
+    // The first program's chores read the state once it has stayed the
+    // same for a moment, and say it; the other makes its bass from it.
+    chores(&mut a, "the state was read back", |a| a.project().device(bass).is_ok_and(|device| device.state.is_some()));
+    let soft = a.project().device(bass).unwrap().state.clone();
+    assert!(soft != up);
+    assert_eq!(pass(&mut a, &mut b, "Ada"), 1);
+    chores(&mut b, "the bass is there again", |b| b.arriving().is_none() && !b.making_devices() && !b.is_coming(bass));
+    assert_eq!(b.project().device(bass).unwrap().state, soft);
+    assert_eq!(made_in_b.made().len(), 2, "made again once, from the state: {:?}", made_in_b.made());
+    // And what the other's plugin writes out is not news to the first.
+    chores(&mut b, "a moment passes", |_| true);
+    b.save(&std::env::temp_dir().join(format!("trill-together-{}-b.trill", std::process::id()))).unwrap();
+    assert_eq!(pass(&mut b, &mut a, "Ben"), 0, "the other said its own reading of the state");
+    let _ = std::fs::remove_file(std::env::temp_dir().join(format!("trill-together-{}-b.trill", std::process::id())));
+    meet(&mut a, &mut b);
 }
 
 #[test]

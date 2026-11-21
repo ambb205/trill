@@ -340,7 +340,8 @@ impl TrillApp {
                 }
                 self.live.audio_faults = session.audio_faults();
                 // Where one's own work and someone else's clashed.
-                if self.live.together.notices != session.notices() {
+                // (Made-up company has a made-up one.)
+                if self.options.together_scene.is_none() && self.live.together.notices != session.notices() {
                     self.live.together.notices = session.notices().to_vec();
                 }
                 self.live.preparing = session.preparing();

@@ -163,7 +163,10 @@ impl TogetherScene {
             notes: notes(1),
             holding: None,
         };
-        Seen { me: Some(me), invitation, joining: false, connected: 2, people: vec![jo, sam], notices: Vec::new() }
+        // And a clash to answer, in the words a real one has.
+        let text = "Jo set where the clip \u{201C}Lead\u{201D} starts at the same moment as you, and theirs is what the song has.";
+        let notices = vec![Notice::made_up(1, text, Some("Put mine back"))];
+        Seen { me: Some(me), invitation, joining: false, connected: 2, people: vec![jo, sam], notices }
     }
 }
 
@@ -172,9 +175,7 @@ impl TogetherScene {
 /// selected. Once a frame, without the session.
 pub fn sync(state: &mut UiState, live: &mut Live, snapshot: &Snapshot, runtime: &Runtime, options: &UiOptions) {
     if let Some(scene) = options.together_scene {
-        let notices = std::mem::take(&mut live.together.notices);
         live.together = scene.of(&snapshot.project);
-        live.together.notices = notices;
         return;
     }
     let status = runtime.together();

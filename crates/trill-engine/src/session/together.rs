@@ -76,6 +76,16 @@ enum About {
     Thing(Thing),
 }
 
+impl Notice {
+    /// A notice that is made up, for a picture or a test of what shows
+    /// one: `action` is what its button is called, and does nothing.
+    #[doc(hidden)]
+    pub fn made_up(id: u64, text: impl Into<String>, action: Option<&str>) -> Self {
+        let remedy = action.map(|label| Remedy { label: label.to_owned(), ops: Vec::new() });
+        Notice { id, text: text.into(), remedy, about: About::Thing(Thing::Marker(0)) }
+    }
+}
+
 /// What taking a step back or bringing it back came to.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Turned {

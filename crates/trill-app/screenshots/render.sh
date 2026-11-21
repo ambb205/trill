@@ -220,7 +220,7 @@ shot graphite-opening-arriving "$song" --opening arriving --select Lead --tab de
 # the piano roll; the panel that says who is here and what each holds; and a
 # song that is shared and that nobody has joined yet, with its invitation.
 shot together-two "$song" --together two --select Lead
-shot together-two-notes "$song" --together two --select Lead --size 1920x1080
+shot together-two-notes "$song" --together two --select "Pad chords" --size 1920x1080
 shot together-panel "$song" --together two --select Lead --sharing
 shot together-waiting "$song" --together waiting --select Lead --sharing
 shot graphite-together-panel "$song" --together two --select Lead --sharing --theme graphite

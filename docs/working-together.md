@@ -38,6 +38,10 @@ without it; its settings are carried untouched, and it sounds for whoever has it
 **Three people** need two connections: a program that is connected to two others passes on to each what it hears
 from the other.
 
+**Two windows on one computer**, to try it alone: the second Trill needs settings of its own, so start it with
+`trill --profile <a folder> --no-mcp` (the first window has the MCP server's port). Share in one with *This
+computer only*, join in the other.
+
 ## Who is here, and what they hold
 
 While the song is shared the status bar says who is here, each with a square in their colour; a click opens the
@@ -111,7 +115,9 @@ the plugin's whole state, once it has stayed the same for a second or two, and t
 of the plugin again from that state in the background while the old one keeps playing. A plugin does not always
 write out the bytes it was given, so a state is news only when the plugin was changed in your program: two
 programs do not make each other's plugins again for ever. When you share a song, every plugin's state is read
-once first, so that whoever joins is handed each plugin as it is running in your program.
+once first, so that whoever joins is handed each plugin as it is running in your program. A preset that a plugin
+loads itself is the same: the others see its name at once, their own copy goes on playing what it had, and it is
+made again once, when the state has been read.
 
 ## For an AI
 
@@ -169,6 +175,20 @@ sixth (7.3 MB): every note carries its id.
   fader or a parameter): 0.7 MB said. Each one's file grew by 1.7 MB, of which 0.8 MB is the song itself grown and
   0.8 MB is what a shared song keeps to merge again: when each property was last set, and the notes that were
   removed. A song that was never shared keeps none of that.
+
+**Two windows on a song with plugins**, both on one machine (a song of ten tracks and seven plugin instances:
+Superior Drummer 3, an Ample bass and guitar, an Archetype amplifier, two Serum 2 and a Valhalla reverb):
+
+- Sharing took 0.08 s, and the join was answered after 0.5 s with the song there to work in. The joiner's seven
+  plugins were all made 22 s later in one sitting and 58 s later in another, which is what opening the song from
+  a file took it in that sitting (55 s). Each window held 3.8 to 4.1 GB.
+- A fader, the tempo and a plugin's parameter set in one window were in the other within the time a tool takes
+  to look (46 ms for the parameter).
+- A preset given to Serum 2 in one window took the plugin 2.2 s to load; the other window's Serum went on
+  playing what it had, and was made again once, from the state, 3 to 5 s after. What the two then say of
+  themselves differs in 21 of 509 parameters' names and texts, and in the same 21 when the second window opens
+  the song the first saved: a plugin made from a state does not always describe itself as the one that loaded
+  the preset does.
 
 ## What is not built
 

@@ -149,6 +149,17 @@ pub enum Problem {
     AudioFile { clip: ClipId, path: String, reason: String },
 }
 
+/// Whether `device` is a plugin that loaded a preset itself, in a program
+/// that has not read its state back yet: the song names the preset and
+/// holds neither a state nor anything for the plugin to start from. In
+/// the program it happened in the running plugin is what the song means.
+/// In another one that holds the song the state follows, a moment later:
+/// what is running there is neither made again from nothing meanwhile nor
+/// set to the values the preset took away.
+pub(crate) fn awaits_state(factory: &dyn DeviceFactory, device: &Device) -> bool {
+    device.state.is_none() && device.preset.is_some() && device.from_preset.is_none() && factory.takes_time(&device.uri)
+}
+
 impl DeviceMeta {
     /// What is known of `device` while it is being made elsewhere: what
     /// the model says of it, and nothing of its own yet.
@@ -470,9 +481,12 @@ impl Compiler<'_> {
     }
 
     fn slot(&mut self, device: &Device, keys: &[TrackId], problems: &mut Vec<Problem>) -> DeviceSlot {
+        // A plugin whose state is on its way from the program it loaded
+        // a preset in goes on as it is until the state is there.
+        let awaited = awaits_state(self.factory, device);
         let running = self.bank.devices.get(&device.id).is_some_and(|meta| {
             meta.uri == device.uri
-                && meta.applied_state == device.state
+                && (meta.applied_state == device.state || (awaited && meta.applied_state.is_some()))
                 && meta.made_keyed.is_none_or(|keyed| keyed == device.sidechain.is_some())
                 // A device that came up short is looked at again on every
                 // compile. If what is wrong with it has changed (a missing
