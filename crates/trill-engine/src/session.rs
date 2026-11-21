@@ -1040,7 +1040,17 @@ impl Session {
         self.absorb_editor_edits();
         self.capture_device_state();
         let song = self.path.clone();
-        self.project_text(song.as_deref())
+        // A take that is being recorded is in the copy as far as it has
+        // been written: the program may not live to end it.
+        match self.with_take_so_far() {
+            Some(mut with_take) => {
+                std::mem::swap(&mut self.project, &mut with_take);
+                let text = self.project_text(song.as_deref());
+                std::mem::swap(&mut self.project, &mut with_take);
+                text
+            }
+            None => self.project_text(song.as_deref()),
+        }
     }
 
     /// Opens `copy`, a project file kept for safety, in place of a project

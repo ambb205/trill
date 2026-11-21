@@ -623,57 +623,14 @@ impl Session {
             (files.iter().map(|file| file.frames()).min().unwrap_or(0), self.engine.position())
         });
         let passes = passes(&audio, rolled, stopped);
-        let map = self.project.tempo_map();
         let tracks = audio.tracks.clone();
-        let mut landed: Vec<RecordedTake> = Vec::new();
-        let outcome = self.edit(|project| {
-            for (track, file) in tracks.iter().zip(&files) {
-                if project.track(*track).is_err() {
-                    continue;
-                }
-                let mut made: Vec<(ClipId, &Pass)> = Vec::new();
-                for pass in &passes {
-                    let number = project.track(*track)?.takes.len() + 1;
-                    let content = AudioContent {
-                        offset_seconds: (pass.at + shift) as f64 / rate,
-                        ..AudioContent::new(file.path().to_string_lossy())
-                    };
-                    let length = pass.end - pass.start;
-                    let take = project.add_take(*track, format!("Take {number}"), pass.start, length, content)?;
-                    made.push((take, pass));
-                }
-                // The track plays the first pass, which may begin before
-                // the loop does, and over it the last that ran the whole
-                // loop.
-                let whole = made.iter().skip(1).rev().find(|(_, pass)| pass.whole).map(|(take, _)| *take);
-                let mut chosen = Vec::new();
-                if let Some((first, _)) = made.first() {
-                    project.choose_take(*first)?;
-                    chosen.push(*first);
-                    if let Some(whole) = whole {
-                        project.choose_take(whole)?;
-                        chosen = vec![whole];
-                    }
-                }
-                for (take, pass) in made {
-                    landed.push(RecordedTake {
-                        track: *track,
-                        take,
-                        file: file.path().to_path_buf(),
-                        start_beat: pass.start,
-                        length_beats: pass.end - pass.start,
-                        seconds: map.seconds_between(pass.start, pass.end),
-                        chosen: chosen.contains(&take),
-                    });
-                }
+        let paths: Vec<PathBuf> = files.iter().map(|file| file.path().to_path_buf()).collect();
+        match self.edit(|project| put_takes(project, &tracks, &paths, &passes, shift, rate)) {
+            Ok(landed) => recorded.takes = landed,
+            Err(error) => {
+                log::error!("could not put what was recorded beside its track: {error}");
+                recorded.ended_early.get_or_insert(format!("the take could not be put beside its track: {error}"));
             }
-            Ok(())
-        });
-        if let Err(error) = outcome {
-            log::error!("could not put what was recorded beside its track: {error}");
-            recorded.ended_early.get_or_insert(format!("the take could not be put beside its track: {error}"));
-        } else {
-            recorded.takes = landed;
         }
         // The files are whole now, and may have been looked at while they
         // grew.
@@ -681,6 +638,39 @@ impl Session {
             self.audio.media().forget(file.path());
         }
         self.recording.last = Some(recorded);
+    }
+
+    /// The song with the take that is being recorded in it as far as it
+    /// has been written: what a copy kept for safety holds, so that a
+    /// program that dies in the middle of a take leaves a song that plays
+    /// what was sung. `None` while no audio is being recorded, or before
+    /// the song has begun to roll.
+    pub(super) fn with_take_so_far(&self) -> Option<Project> {
+        let audio = self.recording.take.as_ref()?;
+        let (rolled, writer) = (audio.rolled?, audio.writer.as_ref()?);
+        let rate = self.engine.sample_rate();
+        let shift = (i64::from(rolled.delay) + i64::from(rolled.latency) + audio.correction).max(0) as u64;
+        let paths: Vec<PathBuf> = writer.files().iter().map(|file| file.path().to_path_buf()).collect();
+        // How far the song had got when what is written was sung: by the
+        // frames of the pass that is under way, from where it began.
+        let written = writer.files().iter().map(|file| file.frames()).min()?;
+        let at = written.checked_sub(shift)?;
+        let (from, start) = match (audio.wraps.last(), audio.loop_region) {
+            (Some(at), Some((start, _))) => (*at, start),
+            _ => (rolled.at, rolled.beat),
+        };
+        let reached = self.project.tempo_map().beat_after(start, at.checked_sub(from)? as f64, rate);
+        let stopped = audio.stopped.filter(|(stopped, _)| *stopped <= at).unwrap_or((at, reached));
+        let mut project = self.project.clone();
+        put_takes(&mut project, &audio.tracks, &paths, &passes(audio, rolled, stopped), shift, rate).ok()?;
+        Some(project)
+    }
+
+    /// Whether audio is being recorded right now: a take is not saved
+    /// work until it has ended, and whoever keeps copies for safety
+    /// should look again.
+    pub(super) fn audio_is_rolling(&self) -> bool {
+        self.recording.take.as_ref().is_some_and(|audio| audio.rolled.is_some() && !audio.ended)
     }
 
     /// Drops a take's audio without putting it anywhere: the project it
@@ -1001,6 +991,61 @@ impl Session {
         }
         Ok(freed)
     }
+}
+
+/// Puts the takes a recording came to beside their tracks in `project`:
+/// each pass as a take, in a lane, where it was sung (`shift` frames after
+/// the frame that had been handed over as it began), and on the track the
+/// first pass, which may begin before the loop does, with the last pass
+/// that ran the whole loop over it. A track that is gone gets none.
+fn put_takes(
+    project: &mut Project,
+    tracks: &[TrackId],
+    files: &[PathBuf],
+    passes: &[Pass],
+    shift: u64,
+    rate: f64,
+) -> Result<Vec<RecordedTake>, trill_core::EditError> {
+    let map = project.tempo_map();
+    let mut landed = Vec::new();
+    for (track, file) in tracks.iter().zip(files) {
+        if project.track(*track).is_err() {
+            continue;
+        }
+        let mut made: Vec<(ClipId, &Pass)> = Vec::new();
+        for pass in passes {
+            let number = project.track(*track)?.takes.len() + 1;
+            let content = AudioContent {
+                offset_seconds: (pass.at + shift) as f64 / rate,
+                ..AudioContent::new(file.to_string_lossy())
+            };
+            let take =
+                project.add_take(*track, format!("Take {number}"), pass.start, pass.end - pass.start, content)?;
+            made.push((take, pass));
+        }
+        let whole = made.iter().skip(1).rev().find(|(_, pass)| pass.whole).map(|(take, _)| *take);
+        let mut chosen = Vec::new();
+        if let Some((first, _)) = made.first() {
+            project.choose_take(*first)?;
+            chosen.push(*first);
+            if let Some(whole) = whole {
+                project.choose_take(whole)?;
+                chosen = vec![whole];
+            }
+        }
+        for (take, pass) in made {
+            landed.push(RecordedTake {
+                track: *track,
+                take,
+                file: file.clone(),
+                start_beat: pass.start,
+                length_beats: pass.end - pass.start,
+                seconds: map.seconds_between(pass.start, pass.end),
+                chosen: chosen.contains(&take),
+            });
+        }
+    }
+    Ok(landed)
 }
 
 /// The folder beside `song` that holds what was recorded for it.

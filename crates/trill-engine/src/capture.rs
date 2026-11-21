@@ -132,11 +132,14 @@ pub(crate) struct Link {
     line_frame: AtomicU64,
     line_ns: AtomicU64,
     line_rate: AtomicU64,
-    /// Frames the device never handed over, which were written as silence;
-    /// and how often the line was begun anew because the device's clock
-    /// was nowhere near it.
+    /// Frames the device never handed over, which were written as silence
+    /// before the engine came to read them; and how often the line was
+    /// begun anew because the device's clock was nowhere near it.
     lost: AtomicU64,
     restarts: AtomicU32,
+    /// The first frame the engine has yet to read: what lies before it
+    /// was read, as what it was or as silence for what had not arrived.
+    unread: AtomicU64,
     /// The highest level each channel has had since it was last asked, as
     /// the bits of an `f32`, and how many of its samples were at full
     /// scale or over.
@@ -160,6 +163,7 @@ impl Link {
             line_rate: AtomicU64::new(0),
             lost: AtomicU64::new(0),
             restarts: AtomicU32::new(0),
+            unread: AtomicU64::new(0),
             peaks: (0..channels).map(|_| AtomicU32::new(0)).collect(),
             clipped: (0..channels).map(|_| AtomicU32::new(0)).collect(),
         }
@@ -198,15 +202,6 @@ impl Link {
         None
     }
 
-    /// The rate the device says it runs at.
-    pub fn rate(&self) -> f64 {
-        self.rate
-    }
-
-    pub fn channels(&self) -> usize {
-        self.channels
-    }
-
     /// The highest level each channel has had since this was last asked
     /// (1 is full scale), and whether any of its samples was at full scale
     /// or over.
@@ -214,12 +209,6 @@ impl Link {
         let peaks = self.peaks.iter().map(|peak| f32::from_bits(peak.swap(0, Ordering::Relaxed)));
         let clipped = self.clipped.iter().map(|count| count.swap(0, Ordering::Relaxed) > 0);
         peaks.zip(clipped).collect()
-    }
-
-    /// How many frames the device never handed over, and how often its
-    /// clock was begun anew.
-    pub fn lost(&self) -> (u64, u32) {
-        (self.lost.load(Ordering::Relaxed), self.restarts.load(Ordering::Relaxed))
     }
 }
 
@@ -266,8 +255,11 @@ impl Sink {
                         slot.store(0, Ordering::Relaxed);
                     }
                 }
+                // Those the engine has read already it counted itself, as
+                // frames that had not arrived.
+                let unread = link.unread.load(Ordering::Relaxed).max(self.written);
                 self.written += missing;
-                link.lost.fetch_add(missing, Ordering::Relaxed);
+                link.lost.fetch_add(self.written.saturating_sub(unread), Ordering::Relaxed);
             } else if ahead < -gap {
                 // The device's clock is nowhere near where it was: it is
                 // followed from here.
@@ -384,11 +376,11 @@ impl Kernel {
 /// How an input has done since it was opened; see [`Reader::health`].
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Health {
-    /// Frames the device never handed over. They are silence where they
-    /// would have been.
+    /// Frames the device never handed over, found out before the engine
+    /// came to read them. They are silence where they would have been.
     pub lost: u64,
-    /// Frames that had not arrived when the engine came to read them: the
-    /// same.
+    /// Frames that had not arrived when the engine came to read them,
+    /// late or never: the same.
     pub late: u64,
     /// How often the reading was put somewhere else at once, because the
     /// device's clock or the engine's had jumped.
@@ -472,10 +464,6 @@ impl Reader {
     /// read: what the reading needs to have arrived beyond its place.
     pub fn reach(input_rate: f64, engine_rate: f64) -> usize {
         Kernel::new(input_rate, engine_rate).taps / 2
-    }
-
-    pub fn link(&self) -> &Arc<Link> {
-        &self.link
     }
 
     /// How many of the engine's frames before it reads a frame the input
@@ -616,6 +604,7 @@ impl Reader {
         }
         self.place += frames as f64 * self.ratio;
         self.made += frames as u64;
+        self.link.unread.store(self.place.max(0.0) as u64, Ordering::Relaxed);
     }
 
     /// What [`Reader::take`] last read of `channel`: the block's frames.
@@ -625,10 +614,6 @@ impl Reader {
             true => &self.block[channel * MAX_BLOCK..(channel + 1) * MAX_BLOCK],
             false => &self.block[..0],
         }
-    }
-
-    pub fn channels(&self) -> usize {
-        self.link.channels
     }
 }
 
@@ -906,7 +891,7 @@ mod tests {
             reader.take(480);
             out.extend_from_slice(&reader.channel(0)[..480]);
         }
-        assert_eq!(link.lost().0, 4800);
+        assert_eq!(health(&link, &reader.counts()).lost, 4800);
         // After the gap the ramp is where it would have been: frame n of
         // the engine reads frame n - 2000 + 480 of the device's count.
         let reads = |made: usize| ((made as i64 + 480 - 2000).rem_euclid(1000)) as f32 / 1000.0;

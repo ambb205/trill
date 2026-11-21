@@ -90,6 +90,9 @@ pub(super) struct Playing {
     last_take: Vec<TakeClip>,
     /// Bumped whenever the audio stream changes.
     audio_revision: u64,
+    /// When the song was last said to have changed because audio is
+    /// being recorded.
+    audio_noted: Option<Instant>,
 }
 
 impl Playing {
@@ -372,7 +375,10 @@ impl Session {
     /// not be heard.
     pub fn live_tracks(&self) -> Vec<TrackId> {
         let normal = |track: &TrackId| self.project.track(*track).is_ok_and(|found| found.kind == TrackKind::Normal);
-        let armed: Vec<TrackId> = self.playing.armed.iter().copied().filter(normal).collect();
+        // An armed track that records an input of the audio device records
+        // that, and not what a keyboard plays.
+        let keyed = |track: &TrackId| self.project.track(*track).is_ok_and(|found| found.input.is_none());
+        let armed: Vec<TrackId> = self.playing.armed.iter().copied().filter(normal).filter(keyed).collect();
         if armed.is_empty() { self.playing.selected.filter(normal).into_iter().collect() } else { armed }
     }
 
@@ -476,7 +482,13 @@ impl Session {
         // In the journal, what is played is one step however often it is
         // written down while it is played.
         self.begin_run("Recorded a take");
-        let take = Take::new(id, &tracks, loop_region, bar, tempo).in_bars(meter).punched(punch);
+        // Notes are written on the tracks that record a keyboard.
+        let keyed: Vec<TrackId> = tracks
+            .iter()
+            .copied()
+            .filter(|track| self.project.track(*track).is_ok_and(|found| found.input.is_none()))
+            .collect();
+        let take = Take::new(id, &keyed, loop_region, bar, tempo).in_bars(meter).punched(punch);
         self.playing.take = Some(ActiveTake { take, group });
         self.playing.last_take.clear();
         self.engine.send(Message::Record {
@@ -535,6 +547,13 @@ impl Session {
             return;
         }
         self.read_take();
+        // Audio that is being recorded is work that is not saved yet, and
+        // more of it every moment: the song counts as changed, so that a
+        // copy kept for safety is made of it with the take in it.
+        if self.audio_is_rolling() && self.playing.audio_noted.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) {
+            self.playing.audio_noted = Some(Instant::now());
+            self.revision += 1;
+        }
         // The clips keep up with the song while nothing is played.
         let heard = self.engine.position() - self.latency_beats();
         if let Some(active) = &mut self.playing.take {
