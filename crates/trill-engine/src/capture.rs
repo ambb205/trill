@@ -362,6 +362,19 @@ impl LeastLate {
     }
 }
 
+/// The engine's end of an input, before a processor has been given it
+/// ([`Processor::hear`](crate::Processor::hear)).
+pub struct Source(pub(crate) Arc<Link>);
+
+/// Opens the way in for an input that runs at `rate` with `channels`
+/// channels, for whoever drives a processor by hand: what the input's
+/// side writes to ([`Sink::push`]), and what the processor is given. An
+/// engine does this itself when it opens a device.
+pub fn pair(rate: f64, channels: usize) -> (Sink, Source) {
+    let (sink, link) = link(rate, channels);
+    (sink, Source(link))
+}
+
 /// Opens the way in for an input device that runs at `rate` with
 /// `channels` channels: what its thread writes to, and what the engine
 /// reads.

@@ -987,3 +987,123 @@ fn thirty_minutes_from_an_input_whose_clock_is_slow_stay_in_place_and_in_tune() 
     );
     assert!(settled < 0.05, "{settled}");
 }
+
+/// A song with inputs that are heard through tracks of their own, each
+/// with an effect, beside synths that play: made on `threads` threads from
+/// its first block, played for a while and recorded. Returns what came
+/// out, and how many blocks were made on more than one thread.
+fn heard_on(threads: usize) -> (Vec<f32>, Vec<f32>, u64) {
+    use trill_core::Note;
+    let host = studio(ScriptedInput { ppm: 120.0, channels: 4, ..microphone() });
+    host.hear(Hears::Sound(Arc::new(|channel, seconds| {
+        (0.2 * (seconds * (900.0 + 700.0 * channel as f64)).sin()) as f32
+    })));
+    let (mut rig, _folder) = rig_on(host, AudioConfig::default());
+    rig.host.keep_output();
+    rig.session.set_play_threads(Some(threads));
+    rig.session.spread_from(0.0);
+    for (index, effect) in ["builtin:reverb", "builtin:eq", "builtin:filter"].iter().enumerate() {
+        let track = rig.session.edit(|project| Ok(project.add_track(format!("In {index}")))).unwrap();
+        let input = TrackInput { channel: index as u16 + 1, stereo: index == 2, monitor: Monitoring::Always };
+        rig.session.edit(|project| project.set_track_input(track, Some(input))).unwrap();
+        rig.session.add_device(ChainRef::Track(track), effect, None, None).unwrap();
+    }
+    for index in 0..2u8 {
+        let synth = rig.sine_track("Synth");
+        rig.session
+            .edit(|project| {
+                let clip = project.add_midi_clip(synth, "clip", 0.0, 8.0)?;
+                let notes: Vec<Note> = (0..8)
+                    .map(|step| Note {
+                        pitch: 50 + index * 5,
+                        start: f64::from(step),
+                        length: 0.5,
+                        velocity: 100,
+                        ..Default::default()
+                    })
+                    .collect();
+                project.clip_mut(clip)?.add_notes(&notes)
+            })
+            .unwrap();
+    }
+    // The input is opened and the threads are made by the session's own
+    // chores, a few buffers in.
+    rig.run(2);
+    rig.session.housekeeping();
+    rig.run(2);
+    rig.session.housekeeping();
+    assert!(rig.session.input_status().open.is_some());
+    rig.session.take_load();
+    rig.host.take_output();
+    rig.session.play();
+    rig.run(700);
+    let (left, right) = rig.host.take_output();
+    assert_eq!(rig.session.audio_faults(), 0);
+    (left, right, rig.session.take_load().spread_blocks)
+}
+
+#[test]
+fn a_song_with_inputs_that_are_heard_is_the_same_samples_on_one_thread_and_on_several() {
+    let (left, right, spread) = heard_on(1);
+    assert_eq!(spread, 0);
+    assert!(left.iter().any(|sample| sample.abs() > 0.05), "the inputs and the synths are heard");
+    assert!(left != right, "a pair is left and right");
+    for threads in [2, 4] {
+        let (also_left, also_right, spread) = heard_on(threads);
+        assert!(spread > 500, "{threads} threads: the song was spread over them ({spread} blocks)");
+        assert!(also_left == left && also_right == right, "{threads} threads: other samples");
+    }
+}
+
+/// How much of a buffer's time the callback takes, on average, for a song
+/// of eight tracks at 128 frames a buffer: each recording a channel of the
+/// input and letting it through, or (`plain`) neither.
+fn share_of_a_buffer(plain: bool) -> f64 {
+    let host = studio(ScriptedInput { channels: 8, ..microphone() });
+    host.hear(Hears::Sound(Arc::new(|channel, seconds| {
+        (0.2 * (seconds * (900.0 + 300.0 * channel as f64)).sin()) as f32
+    })));
+    let config = AudioConfig { exclusive: true, buffer_size: Some(128), ..AudioConfig::default() };
+    let (mut rig, _folder) = rig_on(host, config);
+    rig.session.set_play_threads(Some(1));
+    for index in 0..8u16 {
+        let track = rig.session.edit(|project| Ok(project.add_track(format!("In {index}")))).unwrap();
+        if !plain {
+            let input = TrackInput { channel: index + 1, stereo: false, monitor: Monitoring::Always };
+            rig.session.edit(|project| project.set_track_input(track, Some(input))).unwrap();
+            rig.session.set_armed(track, true).unwrap();
+        }
+    }
+    rig.session.housekeeping();
+    assert_eq!(rig.session.input_status().open.is_some(), !plain);
+    rig.run(400);
+    if !plain {
+        rig.session.record().unwrap();
+    } else {
+        rig.session.play();
+    }
+    rig.run(400);
+    rig.session.take_load();
+    // Three seconds of the song, in buffers of 128 frames.
+    rig.run(1125);
+    let load = rig.session.take_load();
+    rig.session.stop();
+    assert_eq!(load.smallest_frames, 128, "{load:?}");
+    f64::from(load.mean)
+}
+
+#[test]
+fn recording_eight_inputs_and_hearing_them_costs_a_small_share_of_a_buffer_of_128_frames() {
+    // Measured three times, the least of them: what else the machine is
+    // doing only ever adds.
+    let measure = |plain: bool| (0..3).map(|_| share_of_a_buffer(plain)).fold(f64::MAX, f64::min);
+    let (without, with) = (measure(true), measure(false));
+    let cost = (with - without).max(0.0);
+    println!(
+        "eight inputs recorded and heard at 128 frames: {:.2} % of a buffer's time ({:.1} microseconds), on {:.2} % for the song without them",
+        cost * 100.0,
+        cost * 128.0 / SR * 1e6,
+        without * 100.0
+    );
+    assert!(cost < 0.08, "eight inputs take {:.1} % of a buffer's time", cost * 100.0);
+}

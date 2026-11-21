@@ -815,3 +815,164 @@ fn the_counting_allocator_counts() {
     assert_eq!(calls, 2, "one allocation and one free");
     assert_eq!(allocator_calls(|| ()), 0);
 }
+
+#[test]
+fn inputs_that_are_heard_through_tracks_on_several_threads_touch_the_allocator_on_none_of_them() {
+    use std::sync::atomic::Ordering;
+    use trill_core::{ChainRef, Monitoring, Note, TrackInput};
+    use trill_engine::team::Team;
+
+    // Four tracks that each let a channel of the input through to an
+    // effect of their own, one of them a pair, and two synths beside them:
+    // six tracks that can be made at once, four of which read the input's
+    // frames for the block.
+    let mut project = Project::new("heard");
+    for index in 0..4u16 {
+        let track = project.add_track(format!("In {index}"));
+        let input = TrackInput { channel: index + 1, stereo: index == 3, monitor: Monitoring::Always };
+        project.set_track_input(track, Some(input)).unwrap();
+        let effect = ["builtin:reverb", "builtin:eq", "builtin:compressor", "builtin:filter"][index as usize];
+        project.add_device(ChainRef::Track(track), effect, "Effect", None).unwrap();
+    }
+    for index in 0..2u8 {
+        let track = project.add_track(format!("Synth {index}"));
+        project.add_device(ChainRef::Track(track), "builtin:polysynth", "Synth", None).unwrap();
+        let clip = project.add_midi_clip(track, "clip", 0.0, 8.0).unwrap();
+        let notes: Vec<Note> = (0..16)
+            .map(|step| Note {
+                pitch: 50 + index * 7,
+                start: f64::from(step) * 0.5,
+                length: 0.4,
+                velocity: 100,
+                ..Default::default()
+            })
+            .collect();
+        project.clip_mut(clip).unwrap().add_notes(&notes).unwrap();
+    }
+    project.set_loop(true, 0.0, 8.0).unwrap();
+    let mut controller = Controller {
+        bank: DeviceBank::default(),
+        meters: Meters::default(),
+        stand_ins: StandIns::default(),
+        audio: AudioSources::default(),
+    };
+    let mut graph = controller.compile_prepared(&project);
+    assert!(graph.spread(&project, &BuiltinFactory) >= 4, "the song can be made on several threads");
+    let mut processor = Processor::new(SR);
+    let _first = processor.swap_graph(graph);
+    assert!(processor.play_over(Some(Box::new(Team::settled(3, || ON_A_TEAM.set(true))))).is_none());
+    processor.spread_from(0.0);
+    // An input of five channels on a clock of its own, a little fast, in
+    // buffers that are not the processor's.
+    let (mut sink, source) = trill_engine::capture::pair(44_100.0, 5);
+    processor.hear(source, 3000, false);
+    processor.play();
+    let (mut left, mut right) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+    let mut handed = 0u64;
+    let mut made = 0u64;
+    let mut run = |processor: &mut Processor, buffers: usize| -> f32 {
+        let mut level = 0.0f32;
+        for _ in 0..buffers {
+            // What the input has handed over by the moment the buffer is
+            // asked for, at 44.1 kHz and 180 parts a million fast.
+            let now = made as f64 / SR;
+            while (handed + 441) as f64 / (44_100.0 * 1.00018) <= now {
+                let first = handed;
+                let heard_ns = (first as f64 / (44_100.0 * 1.00018) * 1e9) as u64;
+                sink.push(heard_ns, 441, |frame, channel| {
+                    let at = (first + frame as u64) as f32 * (0.01 + channel as f32 * 0.003);
+                    0.2 * at.sin()
+                });
+                handed += 441;
+            }
+            processor.begin_input((now * 1e9) as u64, 480);
+            processor.process(&mut left[..480], &mut right[..480]);
+            level = left[..480].iter().fold(level, |max, sample| max.max(sample.abs()));
+            made += 480;
+        }
+        level
+    };
+    // Once without watching, to fault in pages and let the clocks be
+    // told apart.
+    run(&mut processor, 300);
+    let before = TEAM_CALLS.load(Ordering::Relaxed);
+    let mut level = 0.0;
+    let calls = allocator_calls(|| {
+        level = run(&mut processor, 600);
+        processor.stop();
+        run(&mut processor, 20);
+        processor.play();
+        run(&mut processor, 100);
+    });
+    assert!(level > 0.05, "the inputs should be heard: {level}");
+    assert_eq!(calls, 0, "{calls} allocator calls on the thread that asked for the blocks and pushed the input");
+    let on_the_team = TEAM_CALLS.load(Ordering::Relaxed) - before;
+    assert_eq!(on_the_team, 0, "{on_the_team} allocator calls on the threads the song is spread over");
+    assert!(processor.take_spread_blocks() > 500, "the blocks were spread");
+}
+
+#[test]
+fn recording_an_input_and_hearing_it_never_touch_the_allocator() {
+    use std::sync::Arc;
+    use trill_core::{ChainRef, Monitoring, TrackInput};
+    use trill_engine::host::scripted::{Hears, ScriptedHost, ScriptedInput};
+
+    // The device's thread and the input's are this one, for a buffer:
+    // watched for exactly that long, the input's buffers with it.
+    let host = ScriptedHost::with_speakers();
+    host.add_input(ScriptedInput { ppm: 150.0, ..ScriptedInput::new("Microphone") });
+    host.hear(Hears::Sound(Arc::new(|channel, seconds| {
+        (0.3 * (seconds * 2000.0 * (channel + 1) as f64).sin()) as f32
+    })));
+    let mut rig = Rig::with(host, trill_engine::AudioConfig::default(), trill_engine::Patience::default());
+    let folder = folder();
+    rig.session.keep_unsaved_recordings_in(folder.path().join("takes"));
+    let limiter = rig.session.project().master.devices[0].id;
+    rig.session.edit(|project| project.remove_device(limiter).map(|_| ())).unwrap();
+    let voice = rig.session.edit(|project| Ok(project.add_track("Voice"))).unwrap();
+    let pair = TrackInput { channel: 1, stereo: true, monitor: Monitoring::Always };
+    rig.session.edit(|project| project.set_track_input(voice, Some(pair))).unwrap();
+    rig.session.add_device(ChainRef::Track(voice), "builtin:reverb", None, None).unwrap();
+    let guitar = rig.session.edit(|project| Ok(project.add_track("Guitar"))).unwrap();
+    let one = TrackInput { channel: 2, stereo: false, monitor: Monitoring::Armed };
+    rig.session.edit(|project| project.set_track_input(guitar, Some(one))).unwrap();
+    rig.sine_track("Keys");
+    rig.session.edit(|project| project.set_loop(true, 0.0, 2.0)).unwrap();
+    rig.session.set_armed(voice, true).unwrap();
+    rig.session.set_armed(guitar, true).unwrap();
+    rig.session.housekeeping();
+    assert!(rig.session.input_status().open.is_some());
+    rig.run(60);
+
+    let mut calls = 0;
+    let mut level = 0.0f32;
+    let mut watched = |rig: &mut Rig, buffers: usize| {
+        for _ in 0..buffers {
+            calls += allocator_calls(|| {
+                rig.host.advance(rig::BUFFER);
+            });
+            level = level.max(rig.session.master_meter().take().0);
+        }
+    };
+    // A bar of count-in, then four and a bit times round the loop, with
+    // the session's chores (which allocate freely) between buffers; a
+    // track disarmed and armed again on the way, and the take stopped.
+    rig.session.record().unwrap();
+    for step in 0..700 {
+        match step {
+            200 => rig.session.set_armed(guitar, false).unwrap(),
+            260 => rig.session.set_armed(guitar, true).unwrap(),
+            _ if step % 20 == 0 => rig.session.housekeeping(),
+            _ => {}
+        }
+        watched(&mut rig, 1);
+    }
+    rig.session.stop();
+    watched(&mut rig, 8);
+    assert_eq!(calls, 0, "{calls} allocator calls on the audio thread and the input's while recording and monitoring");
+    assert!(level > 0.05, "the input was heard: {level}");
+    assert_eq!(rig.session.audio_faults(), 0);
+    let recorded = rig.session.last_recording().expect("the take has ended").clone();
+    assert!(recorded.takes.len() >= 8, "four passes on two tracks: {recorded:?}");
+    assert_eq!(recorded.silent_frames, 0);
+}

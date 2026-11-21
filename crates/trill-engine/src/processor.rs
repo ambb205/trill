@@ -384,9 +384,20 @@ impl Processor {
         before
     }
 
+    /// Gives a processor that is driven by hand an input to hear: one
+    /// that is read `delay_frames` of the processor's frames after it was
+    /// heard, on the processor's own clock or (`one_clock`) on one they
+    /// share. Before each buffer the input's side has pushed what there
+    /// is and [`Processor::begin_input`] has been called. This allocates:
+    /// never while the processor plays.
+    pub fn hear(&mut self, source: crate::capture::Source, delay_frames: u32, one_clock: bool) {
+        let reader = InputReader::new(source.0, self.sample_rate, delay_frames, one_clock);
+        self.set_input(Some(Box::new(reader)));
+    }
+
     /// The device has asked for `frames` frames at `now_ns`: the input is
     /// told, which sets how fast it is read for them.
-    pub(crate) fn begin_input(&mut self, now_ns: u64, frames: usize) {
+    pub fn begin_input(&mut self, now_ns: u64, frames: usize) {
         if let Some(input) = &mut self.input {
             input.begin(now_ns, frames);
         }
